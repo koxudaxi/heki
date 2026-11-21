@@ -1,7 +1,8 @@
 //! Declared contracts that summaries depend on: the producers of `[[tool.heki.readonly-returns]]`
 //! (`MUT202`), the `[[tool.heki.invalidation]]` contracts (`MUT109`), whether any ownership
-//! contract is declared, and the names whose unresolved reads and calls the strict contracts
-//! count (`MUT206`, `MUT207`).
+//! contract is declared, the names whose unresolved reads and calls the strict contracts
+//! count (`MUT206`, `MUT207`), and what the effect boundaries forbid outside the project
+//! (`EFF201`).
 //!
 //! The rules layer implements [`Contracts`] from the configuration and hands it to
 //! [`crate::analyze_project_with`]; the index keeps it for incremental updates. Facts that depend
@@ -58,4 +59,21 @@ pub trait Contracts: Debug + Send + Sync {
     /// or class whose last name is `name`: a call of a method so named on an object of unknown
     /// class is an unresolved access (`MUT207`).
     fn unresolved_call(&self, name: &str) -> bool;
+
+    /// Whether an effect boundary forbids calling `symbol`, a function or class outside the
+    /// project (a `call-targets` entry names it, or `reads-environment` with the ecosystem
+    /// catalog): its calls are kept (`FileSummary::external_accesses`).
+    fn external_call(&self, symbol: &str) -> bool;
+
+    /// Whether some effect boundary forbids reading module attributes outside the project:
+    /// without one, no read is looked at.
+    fn reads_external(&self) -> bool;
+
+    /// Whether an effect boundary forbids reading `fqn`, an attribute of a module outside the
+    /// project (`sys.platform`).
+    fn external_read(&self, fqn: &str) -> bool;
+
+    /// Whether an effect boundary reports the imports that probe whether a module is installed
+    /// (`import-probes = "report"`).
+    fn import_probes(&self) -> bool;
 }

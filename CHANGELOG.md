@@ -27,6 +27,15 @@ release can change rules, configuration keys, diagnostics, and output formats.
 - `call-owners` takes `subclasses = false`: a class target then means constructing exactly the
   class, so raising a subclass of a guarded exception class is no `MUT204` report. `Class.method`
   targets keep covering overrides.
+- Effect boundaries check what a scope reads of the environment it runs in. `call-targets` name
+  functions and classes outside the project by their full dotted name (`os.getenv`,
+  `platform.*`), and `read-targets` module attributes (`sys.platform`, `os.environ`, also read
+  through `from sys import platform`); a dotted suffix or a leading glob still names project
+  functions only. The `forbid` token `reads-environment` forbids the calls and reads the
+  ecosystem catalog tags with the new `environment` key (`os.getenv`, `platform.system`,
+  `importlib.util.find_spec`, `importlib.metadata.version`, `os.environ`, `sys.version_info`,
+  ...), in one report per scope function, and with `import-probes = "report"` the imports inside
+  a `try` whose `except` clause names `ImportError` or `ModuleNotFoundError`.
 - `MUT206` (`unresolved-guarded-read`) and `MUT207` (`unresolved-guarded-call`): `read-owners`
   and `call-owners` contracts take `unresolved = "report"`, as `write-owners` does, and then
   report the reads of an attribute and the calls of a method named like a target on an object of

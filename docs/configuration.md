@@ -342,6 +342,12 @@ name = "pass-sort-base-classes"
 scopes = ["pkg.parser.passes.sort_base_classes"]
 allow-writes = ["DataModel.base_classes"]
 write-universe = ["DataModel.*", "DataModelFieldBase.*", "DataType.*"]
+
+[[tool.heki.effect-boundaries]]
+name = "portable-generation"
+scopes = ["pkg.generate.*"]
+forbid = ["reads-environment"]
+import-probes = "report"
 ```
 
 | Key | Default | Meaning |
@@ -350,12 +356,13 @@ write-universe = ["DataModel.*", "DataModelFieldBase.*", "DataType.*"]
 | `scopes` | `[]` | Modules, classes, or functions whose functions must stay inside the boundary; nested functions are included. |
 | `forbid` | `[]` | What the scope functions must not reach (tokens below). |
 | `write-targets` | `[]` | `Class.attr` targets of `writes-targets`, required with it. `Class.attr["key"]` names one entry, as in `write-owners`. |
-| `read-targets` | `[]` | `Class.attr` targets of `reads-targets`, required with it: reads as `read-owners` sees them, also inside property getters. A container entry is a configuration error. |
-| `call-targets` | `[]` | Functions, methods, or classes of `calls`, required with it, matched as the `targets` of `call-owners`. |
+| `read-targets` | `[]` | `Class.attr` targets of `reads-targets`, required with it: reads as `read-owners` sees them, also inside property getters. A container entry is a configuration error. An entry can also name an attribute of a module outside the project by its full name (`sys.platform`, `os.environ`, below). |
+| `call-targets` | `[]` | Functions, methods, or classes of `calls`, required with it, matched as the `targets` of `call-owners`. An entry can also name a function or class outside the project by its full name (`os.getenv`, `platform.*`, below). |
 | `write-universe` | `[]` | `Class.attr` entries: a reached write of one that `allow-writes` does not name is reported, once per written `Class.attr`. |
 | `allow-writes` | `[]` | `Class.attr` writes the boundary allows, exempt from `write-targets` too. Needs `write-universe`. |
 | `allowed-callees` | `[]` | Functions, classes, modules, or ecosystem symbols whose effects are allowed: paths through them are not followed, and calls of them are no `calls` violation. |
 | `fresh-objects` | `"allow"` | `"allow"` or `"report"`: whether a write that constructs the object it writes (as in `write-owners`) counts as a write of the boundary. |
+| `import-probes` | `"allow"` | `"allow"` or `"report"`: whether `reads-environment` also forbids an import probe, an `import` inside a `try` with an `except` clause naming `ImportError` or `ModuleNotFoundError`. `"report"` without `reads-environment` is a configuration error. |
 | `message` | none | The help of every report of the boundary. |
 
 | `forbid` token | Forbids |
@@ -366,6 +373,26 @@ write-universe = ["DataModel.*", "DataModelFieldBase.*", "DataType.*"]
 | `writes-targets` | writing a `write-targets` attribute |
 | `reads-targets` | reading a `read-targets` attribute |
 | `calls` | calling a `call-targets` function or class |
+| `reads-environment` | reading the environment the program runs in: calling or reading what the ecosystem catalog tags `environment` (below), and import probes with `import-probes = "report"` |
+
+Outside the project, `call-targets` and `read-targets` entries name symbols by their full dotted
+name, starting with the top-level module: `os.getenv` matches a call of `os.getenv` (also
+`from os import getenv`, `import os as o`), `platform.*` every function of `platform`, and
+`sys.platform` a read of `sys.platform` (also `from sys import platform`, or `import sys as s`
+and `s.platform`). A dotted suffix (`getenv`) or a leading glob (`*.getenv`) never names a symbol
+outside the project, so an entry for project functions keeps its meaning. Only a call or a read
+heki resolves counts: an attribute read by name (`getattr(sys, name)`) or on an object of unknown
+origin is not reported.
+
+`reads-environment` needs no targets. The ecosystem catalog tags these calls: `os.getenv`,
+`os.getenvb`, the functions of `platform` that describe the machine or the interpreter
+(`platform.system`, `platform.machine`, `platform.python_version`, ...),
+`importlib.util.find_spec`, `importlib.import_module`, `importlib.metadata.version`,
+`importlib.metadata.distribution`, `shutil.which`, and `sysconfig.get_config_var`; and these
+reads: `os.environ`, `os.environb`, `os.name`, `sys.platform`, `sys.version`,
+`sys.version_info`, `sys.hexversion`, `sys.implementation`, and `sys.flags`. A call on
+`os.environ` (`os.environ.get("X")`) is a read of `os.environ`. One report per scope function
+names the first read it reaches and counts every one.
 
 - Each scope function is checked through any number of calls.
 - A violation inside another scope function is reported there only, once.

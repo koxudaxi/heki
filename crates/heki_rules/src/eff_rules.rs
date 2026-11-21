@@ -2,9 +2,10 @@
 //! `EFF107`, `EFF201` (docs/ANALYSIS_AND_KB_SPEC.md section 2.4).
 
 use crate::mut_rules::{
-    CallTargets, ContractTarget, SiteId, Subclasses, allows_fresh, group_texts,
-    helper_changes_field, initializes_itself, parse_call_targets, parse_read_targets,
-    parse_targets, patterns, project_classes, site_callee, write_hits,
+    CallTargets, ContractTarget, FunctionMatcher, FunctionMatchers, SiteId, Subclasses,
+    allows_fresh, group_texts, helper_changes_field, initializes_itself, parse_call_targets,
+    parse_read_targets, parse_targets, patterns, project_classes, reports_import_probes,
+    site_callee, write_hits,
 };
 use crate::opt_rules::Sizes;
 use crate::{
@@ -14,12 +15,12 @@ use heki_ast::Span;
 use heki_diagnostics::Diagnostic;
 use heki_effect::guards::{loop_bit, per_item_bit};
 use heki_effect::{
-    BLOCKING_EFFECTS, BoundCallee, BoundaryReport, CallHop, CallSite, CallTarget, Construction,
-    EffectSummary, Facts, FuncKey, PerItem, Runner, SiteEffect, TypeCtx, WriteKind,
-    anchors_call_site, boundary_reports_in,
+    AccessKind, BLOCKING_EFFECTS, BoundCallee, BoundaryReport, CallHop, CallSite, CallTarget,
+    Construction, EffectSummary, ExternalAccess, Facts, FuncKey, PerItem, Runner, SiteEffect,
+    TypeCtx, WriteKind, anchors_call_site, boundary_reports_in,
 };
 use heki_ir::{InstKind, IrFunction};
-use heki_kb::ExecEffectKind;
+use heki_kb::{EnvironmentAccess, ExecEffectKind};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -416,8 +417,8 @@ pub(crate) fn eff107(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
 }
 
 /// `forbid` tokens of `[[tool.heki.effect-boundaries]]` and the execution effects each one
-/// forbids (`mutates-params`, `writes-targets`, `reads-targets`, and `calls` forbid facts of
-/// another kind instead).
+/// forbids (`mutates-params`, `writes-targets`, `reads-targets`, `calls`, and
+/// `reads-environment` forbid facts of another kind instead).
 const FORBID_TOKENS: &[(&str, &[ExecEffectKind])] = &[
     ("blocking", BLOCKING_EFFECTS),
     ("blocking-net", &[ExecEffectKind::BlockingNet]),
@@ -430,6 +431,7 @@ const FORBID_TOKENS: &[(&str, &[ExecEffectKind])] = &[
     ("writes-targets", &[]),
     ("reads-targets", &[]),
     ("calls", &[]),
+    ("reads-environment", &[]),
 ];
 
 /// `UnknownForbid::expected`, built from [`FORBID_TOKENS`].
@@ -454,12 +456,17 @@ struct Boundary<'r> {
     allow_writes: Vec<ContractTarget>,
     reads_targets: bool,
     read_targets: Vec<ContractTarget>,
+    /// `read-targets` as names of module attributes outside the project, by the same index.
+    external_reads: FunctionMatchers,
     calls: bool,
     call_targets: CallTargets,
     allowed_callees: Vec<DottedPattern>,
     note: Option<&'r str>,
     /// `fresh-objects = "allow"`: writes constructing the object they write are allowed.
     allow_fresh: bool,
+    reads_environment: bool,
+    /// `import-probes = "report"`: `reads-environment` also forbids import probes.
+    import_probes: bool,
 }
 
 /// `name` and each of its dotted prefixes (`pkg.mod.f`, then `pkg` and `pkg.mod`).
@@ -552,6 +559,18 @@ impl Boundary<'_> {
     fn checks_writes(&self) -> bool {
         self.writes_targets || !self.write_universe.is_empty()
     }
+
+    /// Whether `reads-environment` forbids `access`: a call or a read the ecosystem catalog
+    /// tags as one of the environment, or an import probe with `import-probes = "report"`.
+    fn forbids_environment(&self, cx: &CheckContext<'_>, access: &ExternalAccess) -> bool {
+        let tagged = |kind| cx.kb.lookup(&access.name).and_then(|e| e.environment) == Some(kind);
+        self.reads_environment
+            && match access.kind {
+                AccessKind::Call => tagged(EnvironmentAccess::Call),
+                AccessKind::Read => tagged(EnvironmentAccess::Read),
+                AccessKind::ImportProbe => self.import_probes,
+            }
+    }
 }
 
 fn boundaries<'a>(cx: &CheckContext<'a>) -> Result<Vec<Boundary<'a>>, RuleConfigError> {
@@ -586,6 +605,18 @@ fn boundaries<'a>(cx: &CheckContext<'a>) -> Result<Vec<Boundary<'a>>, RuleConfig
         if !b.allow_writes.is_empty() && b.write_universe.is_empty() {
             return Err(RuleConfigError::AllowWritesWithoutUniverse(b.name.clone()));
         }
+        let import_probes =
+            reports_import_probes(b.import_probes.as_deref(), "effect-boundaries", &b.name)?;
+        if import_probes && !forbids("reads-environment") {
+            return Err(RuleConfigError::ImportProbesWithoutEnvironment(
+                b.name.clone(),
+            ));
+        }
+        let external_reads = b
+            .read_targets
+            .iter()
+            .map(|t| FunctionMatcher::named(t, "effect-boundaries.read-targets"))
+            .collect::<Result<Vec<_>, _>>()?;
         let targets = |texts: &[String], context: &'static str| {
             parse_targets(cx, &all_classes, texts, context, context)
         };
@@ -606,6 +637,10 @@ fn boundaries<'a>(cx: &CheckContext<'a>) -> Result<Vec<Boundary<'a>>, RuleConfig
                 "effect-boundaries.read-targets",
                 "effect-boundaries.read-targets",
             )?,
+            external_reads: FunctionMatchers::new(
+                external_reads,
+                "effect-boundaries.read-targets",
+            )?,
             calls: forbids("calls"),
             call_targets: parse_call_targets(
                 cx,
@@ -617,6 +652,8 @@ fn boundaries<'a>(cx: &CheckContext<'a>) -> Result<Vec<Boundary<'a>>, RuleConfig
             allowed_callees: patterns(&b.allowed_callees, "effect-boundaries.allowed-callees")?,
             note: b.message.as_deref(),
             allow_fresh: allows_fresh(b.fresh_objects.as_deref(), "effect-boundaries", &b.name)?,
+            reads_environment: forbids("reads-environment"),
+            import_probes,
         });
     }
     Ok(out)
@@ -702,6 +739,29 @@ fn note<K: Ord>(
         .insert(site);
 }
 
+/// The first environment read of a scope function (`reads-environment`): its kind and name, and
+/// every distinct site of every kind.
+type EnvironmentFound = Option<(Found, AccessKind, String)>;
+
+/// Record the environment read `site`, keeping the first one `first` builds.
+fn note_environment(
+    found: &mut EnvironmentFound,
+    site: SiteId,
+    first: impl FnOnce() -> (Vec<CallHop>, Span, AccessKind, String),
+) {
+    let (found, _, _) = found.get_or_insert_with(|| {
+        let (chain, span, kind, name) = first();
+        let found = Found {
+            chain,
+            span,
+            kind: kind.as_str(),
+            sites: BTreeSet::new(),
+        };
+        (found, kind, name)
+    });
+    found.sites.insert(site);
+}
+
 /// The target of a reported `write-universe` write: the universe entry it matches, with a glob
 /// attribute part replaced by the written attribute (`DataModel.*` -> `DataModel.fields`), so
 /// writes to a subclass instance keep the class the configuration names.
@@ -735,6 +795,7 @@ struct Reach<'a> {
     reads: BTreeMap<usize, Found>,
     /// By the `call-targets` indices a call matches ([`called_targets`]).
     calls: BTreeMap<Vec<usize>, Found>,
+    environment: EnvironmentFound,
 }
 
 impl<'a> Reach<'a> {
@@ -755,6 +816,7 @@ impl<'a> Reach<'a> {
             writes: BTreeMap::new(),
             reads: BTreeMap::new(),
             calls: BTreeMap::new(),
+            environment: None,
         };
         let mut index_of: FxHashMap<(FuncKey, Facts), usize> = FxHashMap::default();
         index_of.insert((start.clone(), start_facts), 0);
@@ -778,6 +840,9 @@ impl<'a> Reach<'a> {
             }
             if b.reads_targets && runs_body {
                 reach.collect_reads(cx, b, i, &func);
+            }
+            if runs_body {
+                reach.collect_external(cx, b, i, &func);
             }
             for &(path, site) in own {
                 let hop = |caller: &FuncKey, callee: String| CallHop {
@@ -950,6 +1015,69 @@ impl<'a> Reach<'a> {
         }
     }
 
+    /// What node `i` accesses outside the project in its own body that the boundary forbids
+    /// (local facts of the index, kept for what some boundary forbids): calls of external
+    /// `call-targets` (`calls`), reads of module attributes `read-targets` names
+    /// (`reads-targets`), and the environment reads of `reads-environment`. A call
+    /// `allowed-callees` names is allowed.
+    fn collect_external(
+        &mut self,
+        cx: &CheckContext<'_>,
+        b: &Boundary<'_>,
+        i: usize,
+        func: &FuncKey,
+    ) {
+        let accesses = cx.index.file_of(func).into_iter().flat_map(|path| {
+            let own = cx.index.files[path].external_accesses.get(func);
+            own.into_iter().flatten().map(move |a| (path, a))
+        });
+        for (path, a) in accesses {
+            let call = a.kind == AccessKind::Call;
+            if call && b.allows_symbol(&a.name) {
+                continue;
+            }
+            let site: SiteId = (func.fqn(), a.span);
+            let nodes = &self.nodes;
+            // A call's chain ends with the hop to the function called; node `i` reads or
+            // imports itself.
+            let chain = || {
+                let mut chain = chain_to(nodes, i);
+                chain.extend(call.then(|| CallHop {
+                    caller: func.clone(),
+                    callee: a.name.clone(),
+                    span: a.span,
+                    path: path.to_path_buf(),
+                }));
+                chain
+            };
+            let (calls, reads) = match a.kind {
+                AccessKind::Call if b.calls => (
+                    b.call_targets.functions.naming_external(&a.name),
+                    Vec::new(),
+                ),
+                AccessKind::Read if b.reads_targets => {
+                    (Vec::new(), b.external_reads.naming_external(&a.name))
+                }
+                _ => (Vec::new(), Vec::new()),
+            };
+            for t in calls {
+                note(&mut self.calls, vec![t], site.clone(), || {
+                    (chain(), a.span, a.kind.as_str())
+                });
+            }
+            for t in reads {
+                note(&mut self.reads, t, site.clone(), || {
+                    (chain(), a.span, a.kind.as_str())
+                });
+            }
+            if b.forbids_environment(cx, a) {
+                note_environment(&mut self.environment, site, || {
+                    (chain(), a.span, a.kind, a.name.clone())
+                });
+            }
+        }
+    }
+
     /// Parameters of the scope function that a reached function mutates, through followed
     /// edges only (a forward flow of "callee parameter k is scope parameter p" bits), and the
     /// distinct sites of those changes (each in the body making it).
@@ -1083,6 +1211,28 @@ impl<'a> Reach<'a> {
             };
             let message = forbids(format!("`{}` {} {called}{via}", key.qualname, found.kind));
             emit(found, format!("calls:{target}"), message);
+        }
+        if let Some((found, kind, name)) = &self.environment {
+            let what = match kind {
+                AccessKind::Call => format!("calls `{name}`"),
+                AccessKind::Read => format!("reads `{name}`"),
+                AccessKind::ImportProbe => format!("probes the import of `{name}`"),
+            };
+            // A call's chain ends at the function called.
+            let calls_through = match kind {
+                AccessKind::Call => found.chain.len() > 1,
+                _ => !found.chain.is_empty(),
+            };
+            let via = if calls_through {
+                via_first(found)
+            } else {
+                String::new()
+            };
+            let message = forbids(format!(
+                "`{}` reads the environment ({what}{via})",
+                key.qualname
+            ));
+            emit(found, "reads-environment".to_owned(), message);
         }
         if b.mutates_params {
             let (bits, sites) = self.mutated_params(cx, f.params.len());

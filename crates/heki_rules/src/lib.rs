@@ -635,6 +635,10 @@ pub enum RuleConfigError {
     },
     #[error("effect-boundaries `{0}` sets `allow-writes` but no `write-universe`")]
     AllowWritesWithoutUniverse(String),
+    #[error(
+        "effect-boundaries `{0}` sets `import-probes = \"report\"` but does not forbid `reads-environment`"
+    )]
+    ImportProbesWithoutEnvironment(String),
     /// A mode key of a contract (`fresh-objects`, `unresolved`) with an unknown value.
     #[error("unknown `{key}` value `{value}` in {section} `{contract}` (expected {expected})")]
     UnknownMode {
@@ -996,6 +1000,13 @@ impl DottedPattern {
     /// The glob of a pattern with glob syntax (`None`: a literal name).
     pub fn glob(&self) -> Option<&Glob> {
         self.glob.as_ref().map(GlobMatcher::glob)
+    }
+
+    /// Whether the pattern matches all of `name`, not only one of its dotted suffixes.
+    pub fn matches_whole(&self, name: &str) -> bool {
+        self.glob
+            .as_ref()
+            .map_or(name == self.text, |glob| glob.is_match(name))
     }
 
     pub fn matches(&self, name: &str) -> bool {

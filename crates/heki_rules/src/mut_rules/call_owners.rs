@@ -340,6 +340,33 @@ impl FunctionMatchers {
         !self.matching(key).is_empty()
     }
 
+    /// The matchers naming `symbol`, a function, class, or module attribute outside the
+    /// project ([`FunctionMatcher::names_external`]), ascending: looked up by the whole name,
+    /// never by its suffixes.
+    pub(crate) fn naming_external(&self, symbol: &str) -> Vec<usize> {
+        let mut found: Vec<usize> = self
+            .literal
+            .get(symbol)
+            .into_iter()
+            .flatten()
+            .copied()
+            .collect();
+        found.extend(
+            self.globs
+                .matches(symbol)
+                .into_iter()
+                .map(|g| self.glob_matchers[g]),
+        );
+        found.sort_unstable();
+        found.dedup();
+        found.retain(|&i| self.matchers[i].names_external(symbol));
+        found
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.matchers.is_empty()
+    }
+
     /// The matchers whose whole text names the class `class` (its fqn).
     fn naming_class(&self, class: &str) -> Vec<usize> {
         let mut found = Vec::new();

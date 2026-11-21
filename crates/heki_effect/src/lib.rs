@@ -22,6 +22,7 @@ mod callgraph;
 mod construction;
 pub mod consumption;
 mod contracts;
+mod environment;
 pub mod guards;
 mod infer;
 mod invalidation;
@@ -38,6 +39,7 @@ pub use cache_flow::{
     CacheEvent, CacheFlow, FlowBlock, SelfAttrWrite, attr_writes, self_attr_writes,
 };
 pub use contracts::Contracts;
+pub use environment::{AccessKind, ExternalAccess};
 pub use invalidation::{
     FlowWrite, FuncFlow, INITIALIZERS, Reach, SiteFlow, UnmetWrite, body_runs_at,
     builds_written_object, delegates_to_callers, is_initializer, reach_across,
@@ -1357,6 +1359,11 @@ pub struct FileSummary {
     /// The `MUT101` facts of the file's methods that write a `self` attribute themselves, one
     /// per definition in source order (local, IR-free).
     pub cache_flows: FxHashMap<FuncKey, Vec<CacheFlow>>,
+    /// What each function of the file accesses outside the project that an effect boundary
+    /// forbids, in its own body and in the class bodies it runs (local, IR-free; empty unless a
+    /// boundary names such an access, [`Contracts::external_call`]).
+    #[serde(default, skip_serializing_if = "FxHashMap::is_empty")]
+    pub external_accesses: FxHashMap<FuncKey, Vec<ExternalAccess>>,
 }
 
 impl FileSummary {
