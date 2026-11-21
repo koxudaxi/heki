@@ -2574,6 +2574,8 @@ impl<'a> Extractor<'a> {
         self.store_escapes(kind);
         if self.opt_in.locks {
             self.lock_acquired(bb, kind, span);
+        }
+        if self.opt_in.locks || self.opt_in.exclusive {
             self.name_rebound(kind);
         }
         if self.opt_in.exclusive {

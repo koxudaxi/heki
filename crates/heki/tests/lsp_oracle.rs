@@ -2110,7 +2110,7 @@ fn steps_eff109() -> Vec<Step> {
         Step::new(
             "EFF109 is no longer selected, and the helper's module changes",
             vec![
-                Action::Configure(CONFIG.replace(", \"EFF109\"]", "]")),
+                Action::Configure(CONFIG.replace(", \"EFF109\"", "")),
                 Action::Save("pkg/lock_pool.py", format!("# Pools.\n{LOCK_POOL}")),
             ],
         )

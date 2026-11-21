@@ -568,6 +568,10 @@ impl<'a> Check<'_, 'a> {
                 continue;
             }
             for (obj, u) in summary.exclusive_uses() {
+                // A task that may bind the name first may use another object under it.
+                if locks::may_rebind(summary, obj) {
+                    continue;
+                }
                 let Some(holder) = self.through(s, &bound, decl, obj) else {
                     continue;
                 };

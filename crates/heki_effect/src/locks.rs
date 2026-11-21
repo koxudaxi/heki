@@ -138,7 +138,7 @@ impl LockAcquire {
 }
 
 /// A function's `EFF109` facts (`EffectSummary::locks`; computed only while the rule runs,
-/// `OptInFacts::locks`). Both are propagated to callers.
+/// `OptInFacts::locks`, and `rebinds` while `EFF110` does too). Both are propagated to callers.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LockFacts {
     /// The locks the function takes when its body runs, itself or through the calls that run
@@ -178,9 +178,9 @@ impl LockFacts {
 }
 
 /// Whether the function with facts `facts` may bind the name `lock` (its own names): then the
-/// lock its body takes under that name may be another object than the one the name reached
-/// at the call.
-pub(crate) fn may_rebind(facts: &crate::EffectSummary, lock: &ObjRef) -> bool {
+/// lock its body takes (or the object it uses, `EFF110`) under that name may be another object
+/// than the one the name reached at the call.
+pub fn may_rebind(facts: &crate::EffectSummary, lock: &ObjRef) -> bool {
     match lock {
         ObjRef::Param {
             param,

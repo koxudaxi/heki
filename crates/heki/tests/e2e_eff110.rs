@@ -354,7 +354,8 @@ fn eff110_reports_an_async_session_only_where_it_may_be_unbound() {
 
 /// None of these shares one object between tasks started together: stdout and stderr of a
 /// process, each task's own reader and writer, reads under a lock, a handle per task, a task
-/// started again only once the last one is done, and a session per task.
+/// started again only once the last one is done, a session per task, and a task that binds
+/// the attribute it reads to a new reader first.
 const SEPARATE: &str = r#"import asyncio
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -436,6 +437,18 @@ async def per_task(uids: list[int]) -> list[object]:
 
 async def alone(reader: asyncio.StreamReader) -> list[bytes]:
     return await asyncio.gather(drain(reader))
+
+
+class Reconnecting:
+    def __init__(self, reader: asyncio.StreamReader) -> None:
+        self.reader = reader
+
+    async def fresh_line(self, host: str) -> bytes:
+        self.reader, _ = await asyncio.open_connection(host, 80)
+        return await self.reader.readline()
+
+    async def both(self) -> list[bytes]:
+        return await asyncio.gather(self.fresh_line("a"), self.fresh_line("b"))
 "#;
 
 #[test]
