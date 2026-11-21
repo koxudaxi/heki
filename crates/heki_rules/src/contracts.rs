@@ -77,17 +77,19 @@ pub(crate) struct ConfigContracts {
 /// [`Contracts::external_read`], [`Contracts::import_probes`]).
 #[derive(Debug)]
 struct ExternalNames {
-    /// The `call-targets` of the boundaries forbidding `calls`.
-    calls: FunctionMatchers,
-    /// The `read-targets` of the boundaries forbidding `reads-targets`.
-    reads: FunctionMatchers,
+    /// The `call-targets` of the boundaries forbidding `calls` (`None`: too many globs).
+    calls: Option<FunctionMatchers>,
+    /// The `read-targets` of the boundaries forbidding `reads-targets` (`None`: too many globs).
+    reads: Option<FunctionMatchers>,
     /// The catalog's environment calls and reads, when a boundary forbids `reads-environment`.
     environment: FxHashMap<String, EnvironmentAccess>,
     probes: bool,
 }
 
 impl ExternalNames {
-    fn new(config: &HekiConfig, kb: &EffectiveEcosystemKb) -> Result<Self, RuleConfigError> {
+    /// A bad pattern is left out: it is a configuration error of `EFF201`, which parses every
+    /// boundary before it reports, and only when it runs, as for the other contracts.
+    fn new(config: &HekiConfig, kb: &EffectiveEcosystemKb) -> Self {
         let forbidding = |token: &'static str| {
             config
                 .effect_boundaries
@@ -97,9 +99,9 @@ impl ExternalNames {
         let matchers = |texts: Vec<&String>, context: &'static str| {
             let named = texts
                 .into_iter()
-                .map(|t| FunctionMatcher::named(t, context))
-                .collect::<Result<Vec<_>, _>>()?;
-            FunctionMatchers::new(named, context)
+                .filter_map(|t| FunctionMatcher::named(t, context).ok())
+                .collect();
+            FunctionMatchers::new(named, context).ok()
         };
         let environment = if forbidding("reads-environment").next().is_some() {
             kb.entries
@@ -109,21 +111,21 @@ impl ExternalNames {
         } else {
             FxHashMap::default()
         };
-        Ok(Self {
+        Self {
             calls: matchers(
                 forbidding("calls").flat_map(|b| &b.call_targets).collect(),
                 "effect-boundaries.call-targets",
-            )?,
+            ),
             reads: matchers(
                 forbidding("reads-targets")
                     .flat_map(|b| &b.read_targets)
                     .collect(),
                 "effect-boundaries.read-targets",
-            )?,
+            ),
             environment,
             probes: forbidding("reads-environment")
                 .any(|b| b.import_probes.as_deref() == Some("report")),
-        })
+        }
     }
 
     /// Whether the catalog tags `symbol` as an environment access of kind `access`.
@@ -227,7 +229,7 @@ impl ConfigContracts {
             writer_contexts: NameMasks::default(),
             unresolved_reads: last_names(reads.flat_map(|r| &r.targets), "read-owners.targets")?,
             unresolved_calls: last_names(calls.flat_map(|r| &r.targets), "call-owners.targets")?,
-            external: ExternalNames::new(config, kb)?,
+            external: ExternalNames::new(config, kb),
         })
     }
 }
@@ -304,11 +306,15 @@ impl Contracts for ConfigContracts {
 
     fn external_call(&self, symbol: &str) -> bool {
         self.external.environment(symbol, EnvironmentAccess::Call)
-            || !self.external.calls.naming_external(symbol).is_empty()
+            || self
+                .external
+                .calls
+                .as_ref()
+                .is_some_and(|m| !m.naming_external(symbol).is_empty())
     }
 
     fn reads_external(&self) -> bool {
-        !self.external.reads.is_empty()
+        self.external.reads.as_ref().is_some_and(|m| !m.is_empty())
             || self
                 .external
                 .environment
@@ -318,7 +324,11 @@ impl Contracts for ConfigContracts {
 
     fn external_read(&self, fqn: &str) -> bool {
         self.external.environment(fqn, EnvironmentAccess::Read)
-            || !self.external.reads.naming_external(fqn).is_empty()
+            || self
+                .external
+                .reads
+                .as_ref()
+                .is_some_and(|m| !m.naming_external(fqn).is_empty())
     }
 
     fn import_probes(&self) -> bool {

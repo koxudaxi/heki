@@ -1878,12 +1878,11 @@ impl<'a> Extractor<'a> {
     /// Record `inst` when it reads an attribute of a module outside the project that an effect
     /// boundary forbids reading (`sys.platform`, or `platform` bound by `from sys import
     /// platform`). The value read must be that object by name: a value of unknown origin
-    /// reads nothing.
+    /// reads nothing, nor does a closure cell (`LoadDeref`), whose value is not typed.
     fn external_read(&mut self, inst: &InstKind, span: Span) {
         let (InstKind::AttrLoad { dst, .. }
         | InstKind::LoadGlobal { dst, .. }
         | InstKind::LoadName { dst, .. }
-        | InstKind::LoadDeref { dst, .. }
         | InstKind::Import { dst, .. }) = inst
         else {
             return;

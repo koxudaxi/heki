@@ -619,6 +619,8 @@ fn boundaries<'a>(cx: &CheckContext<'a>) -> Result<Vec<Boundary<'a>>, RuleConfig
             .iter()
             .map(|t| FunctionMatcher::named(t, "effect-boundaries.read-targets"))
             .collect::<Result<Vec<_>, _>>()?;
+        let external_reads =
+            FunctionMatchers::new(external_reads, "effect-boundaries.read-targets")?;
         let targets = |texts: &[String], context: &'static str| {
             parse_targets(cx, &all_classes, texts, context, context)
         };
@@ -639,10 +641,7 @@ fn boundaries<'a>(cx: &CheckContext<'a>) -> Result<Vec<Boundary<'a>>, RuleConfig
                 "effect-boundaries.read-targets",
                 "effect-boundaries.read-targets",
             )?,
-            external_reads: FunctionMatchers::new(
-                external_reads,
-                "effect-boundaries.read-targets",
-            )?,
+            external_reads,
             calls: forbids("calls"),
             call_targets: parse_call_targets(
                 cx,

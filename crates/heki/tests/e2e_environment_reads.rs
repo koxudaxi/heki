@@ -304,6 +304,13 @@ def by_class_body() -> type:
 
 def unknown(module: object) -> object:
     return getattr(sys, "platform"), module
+
+
+def by_class_copy() -> type:
+    class Settings:
+        platform = platform
+
+    return Settings
 "#;
     let helpers = r#"import sys
 
@@ -342,6 +349,8 @@ def is_mac() -> bool:
         ),
         (32, says("local_import", "calls `os.getenv`"), 1),
         (37, says("by_class_body", "reads `sys.platform`"), 1),
+        // The class body reads the module's `platform` before it binds its own.
+        (48, says("by_class_copy", "reads `sys.platform`"), 1),
     ];
     let got: Vec<(u64, &str, u64)> = found
         .iter()
@@ -490,6 +499,14 @@ def unguarded() -> object:
     assert_eq!(lines_and_messages(&found), expected);
 }
 
+/// Read targets whose globs each compile but are too many to match together in one set.
+fn many_globs() -> String {
+    let globs: Vec<String> = (0..20_000)
+        .map(|i| format!("\"*X{i}?[ab]*{{c,d}}*._*\""))
+        .collect();
+    globs.join(", ")
+}
+
 #[test]
 fn import_probes_without_reads_environment_is_a_configuration_error() {
     for (boundary, error) in [
@@ -500,6 +517,21 @@ fn import_probes_without_reads_environment_is_a_configuration_error() {
         (
             "forbid = [\"reads-environment\"]\nimport-probes = \"always\"\n",
             "unknown `import-probes` value `always` in effect-boundaries `env` (expected `allow` or `report`)",
+        ),
+        (
+            "forbid = [\"reads-targets\"]\nread-targets = [\"sys.[x\"]\n",
+            "invalid glob `sys.[x` in effect-boundaries.read-targets",
+        ),
+        (
+            "forbid = [\"calls\"]\ncall-targets = [\"os.[g\"]\n",
+            "invalid glob `os.[g` in effect-boundaries.call-targets",
+        ),
+        (
+            &format!(
+                "forbid = [\"reads-targets\"]\nread-targets = [{}]\n",
+                many_globs()
+            ),
+            "the globs of effect-boundaries.read-targets are too many to match together",
         ),
     ] {
         let p = Project::new(&format!("env_config_error_{}", boundary.len()));
@@ -514,5 +546,8 @@ fn import_probes_without_reads_environment_is_a_configuration_error() {
         let (code, stdout, stderr) = p.check(&[]);
         assert_eq!(code, 2, "{stdout}{stderr}");
         assert!(stderr.contains(error), "{stderr}");
+        // A boundary whose rule does not run is not validated, as for the other contracts.
+        let (code, stdout, stderr) = p.check(&["--select", "MUT201"]);
+        assert_eq!(code, 0, "{stdout}{stderr}");
     }
 }
