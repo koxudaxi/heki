@@ -6325,8 +6325,10 @@ allowed writers:
 - through a local alias (`fields = model.fields; fields.append(...)`), also one `getattr` with a
   constant name loads (`getattr(model, "fields").append(...)`), or what a method, property, or
   function returns when it returns the attribute itself on every `return`
-  (`model.field_list().append(...)` with `return self.fields`) and every class the object may be
-  runs it (no `cached_property`, no class attribute of the name coming first);
+  (`model.field_list().append(...)` with `return self.fields`), stores no attribute of that name
+  itself, and every class the object may be runs it (no `cached_property`, no class attribute of
+  the name coming first); the object must be passed by position (no keyword-only parameter, no
+  `*args` unpacking);
 - through `setattr(model, "fields", ...)` / `object.__setattr__` (also through a module-level
   name bound once to it: `_set = object.__setattr__`) or `model.__dict__["fields"]`,
   also with a string constant for the name (`model.__dict__[FIELDS_KEY]`, imported or not):
