@@ -360,6 +360,18 @@ fn fix_in_memory(args: &CheckArgs, hot: Option<&ProfileData>) -> Result<FixRun> 
 }
 
 pub(crate) fn run(args: &CheckArgs) -> Result<ExitCode> {
+    let Some(path) = &args.walk_steps else {
+        return run_check(args);
+    };
+    heki_ir::walk::record_steps();
+    let code = run_check(args)?;
+    let steps = serde_json::to_string_pretty(&heki_ir::walk::recorded_steps())?;
+    std::fs::write(path, steps + "\n")
+        .with_context(|| format!("cannot write `{}`", path.display()))?;
+    Ok(code)
+}
+
+fn run_check(args: &CheckArgs) -> Result<ExitCode> {
     let hot = args
         .profile
         .as_deref()
