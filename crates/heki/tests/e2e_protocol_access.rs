@@ -262,3 +262,30 @@ fn an_implementation_keeps_its_accesses_for_its_protocol_callers() {
         ]
     );
 }
+
+/// A glob target naming the protocol's members: a call through the protocol names the method
+/// the protocol declares.
+#[test]
+fn a_glob_target_names_the_protocol_method_called() {
+    let p = Project::new("protocol_glob_target");
+    p.write(
+        "pyproject.toml",
+        &MIXED_CONFIG.replace(
+            "targets = [\"Concrete._compute\"]",
+            "targets = [\"Host._*\"]",
+        ),
+    )
+    .write("pkg/__init__.py", "")
+    .write("pkg/host.py", MIXED_HOST)
+    .write("pkg/use.py", MIXED_USE);
+    let (_, stdout, _) = p.check(&["--select", "MUT204", "--output-format", "concise"]);
+    let lines: Vec<&str> = stdout.lines().filter(|l| l.contains("MUT204")).collect();
+    assert_eq!(
+        lines,
+        vec![
+            "pkg/use.py:9:12: MUT204 `through_protocol` calls `pkg.host.Host._helper` outside the call owners of `compute`",
+            "pkg/use.py:9:26: MUT204 `through_protocol` calls `pkg.host.Host._outer` outside the call owners of `compute`",
+        ],
+        "{stdout}"
+    );
+}
