@@ -2292,15 +2292,31 @@ impl<'a> Extractor<'a> {
     /// [`ownership::source`] of `inst`, with the project callees of the function's calls by
     /// their results (`callees`).
     fn ownership_source(&self, inst: &'a Inst, callees: &FxHashMap<VarId, &Callee>) -> Source<'a> {
+        self.ownership_source_given(inst, callees, &|v| self.made_here(v, callees))
+    }
+
+    /// [`ownership::made_here`] of the object `var` holds.
+    fn made_here(&self, var: VarId, callees: &FxHashMap<VarId, &Callee>) -> bool {
+        ownership::made_here(self.copied_from(var), &self.defs, &|i, made_here| {
+            self.ownership_source_given(i, callees, made_here)
+        })
+    }
+
+    /// [`Self::ownership_source`], where `made_here` tells the values that hold an object the
+    /// function makes itself.
+    fn ownership_source_given(
+        &self,
+        inst: &'a Inst,
+        callees: &FxHashMap<VarId, &Callee>,
+        made_here: &dyn Fn(VarId) -> bool,
+    ) -> Source<'a> {
         let callee = inst.kind.dst().and_then(|d| callees.get(&d).copied());
         match (&inst.kind, callee) {
             // A property read calls its getter.
             (InstKind::AttrLoad { .. }, Some(Callee::Project(..))) => Source::Project,
             (kind, callee) => {
-                let source_of = |i: &'a Inst| self.ownership_source(i, callees);
-                let made_here = |v: VarId| ownership::made_here(v, &self.defs, &source_of);
                 let constructs = self.construction(kind).is_some();
-                ownership::source(kind, callee, constructs, self.cx.kb, &made_here)
+                ownership::source(kind, callee, constructs, self.cx.kb, made_here)
             }
         }
     }
@@ -3473,8 +3489,7 @@ impl<'a> Extractor<'a> {
             }
         }
         let callees = self.callees_by_result();
-        let new_object =
-            |v: VarId| ownership::made_here(v, &self.defs, &|i| self.ownership_source(i, &callees));
+        let new_object = |v: VarId| self.made_here(v, &callees);
         let stores = stores
             .into_iter()
             .map(|(attr, at)| {

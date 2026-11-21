@@ -494,6 +494,32 @@ fn stores_of_a_long_alias_chain_into_many_lists_past_the_budget_return_unknown()
     );
 }
 
+/// A function reading attributes down a chain ten thousand deep (`x = x.child`) under `MUT112`:
+/// whether each receiver holds an object the function makes is read from its own definition,
+/// not again through every read before it, which took a walk as deep as the chain (and the
+/// stack) per read and pass.
+#[test]
+fn attribute_reads_down_a_long_chain_decide_each_receiver_once() {
+    let links = 10_000;
+    let mut lines = vec![
+        "def walk(node):".to_owned(),
+        "    extra = node or []".to_owned(),
+        "    extra.append(1)".to_owned(),
+        "    x = node".to_owned(),
+    ];
+    lines.extend((0..links).map(|_| "    x = x.child".to_owned()));
+    lines.push("    x.append(1)".to_owned());
+    let p = Project::new("bounds_attribute_chain");
+    p.write("pyproject.toml", MUT112_CONFIG)
+        .write("m.py", &(lines.join("\n") + "\n"));
+    let found: Vec<u64> = check_within(&p, Duration::from_secs(20))
+        .iter()
+        .filter(|d| d["rule_code"] == "MUT112")
+        .map(|d| d["line"].as_u64().unwrap())
+        .collect();
+    assert_eq!(found, vec![3]);
+}
+
 /// A function returning the last of a long chain of calls, each handed the previous call's
 /// result as two of its arguments (`x40 = choose(x39, x39, flag)`), with `choose` returning
 /// either: what each call returns is resolved once, not once per path down the chain.

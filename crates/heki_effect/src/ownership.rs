@@ -309,22 +309,22 @@ pub fn copied_operand(
     }
 }
 
-/// Whether the object `var` holds is one the function makes itself: through copies, its
-/// definition is a new object by `source_of`.
+/// The [`source`] of an instruction, given the values that hold an object the function makes
+/// itself ([`made_here`]).
+pub type SourceGiven<'i, 'f> = dyn Fn(&'i Inst, &dyn Fn(VarId) -> bool) -> Source<'i> + 'f;
+
+/// Whether the object a variable holds is one the function makes itself: `root`, the value the
+/// variable copies through any number of copies, is defined as a new object. Whether an
+/// instruction makes a new object never depends on what its operands hold, so `source_of` is
+/// asked with none made here, and the question does not go on through the operands
+/// (`x = x.child`, thousands deep).
 pub fn made_here<'i>(
-    var: VarId,
+    root: VarId,
     defs: &FxHashMap<VarId, &'i Inst>,
-    source_of: &dyn Fn(&'i Inst) -> Source<'i>,
+    source_of: &SourceGiven<'i, '_>,
 ) -> bool {
-    let mut cur = var;
-    while let Some(inst) = defs.get(&cur) {
-        match (&inst.kind, source_of(inst)) {
-            (_, Source::New) => return true,
-            (InstKind::Copy { src, .. }, _) => cur = *src,
-            _ => return false,
-        }
-    }
-    false
+    defs.get(&root)
+        .is_some_and(|inst| matches!(source_of(inst, &|_| false), Source::New))
 }
 
 /// [`source`] of a method call outside the project, by the method's name.
