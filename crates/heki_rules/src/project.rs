@@ -407,6 +407,11 @@ pub struct ProjectOptions<'a> {
     /// In-memory sources replacing files on disk (keyed like [`ParsedFile::path`]); one that is
     /// not on the disk is a file of the project when discovery would find it there.
     pub overrides: Option<&'a FxHashMap<PathBuf, String>>,
+    /// Files the caller knows are gone although the disk may still list them (a deletion the
+    /// editor reported; on Windows a deleted file stays listed until its last handle closes):
+    /// discovery leaves them out, and the module layout counts them absent. An open document's
+    /// path does not belong here: its text is in `overrides`.
+    pub removed: Option<&'a FxHashSet<PathBuf>>,
 }
 
 /// Configuration and knowledge bases of a project root.
@@ -448,7 +453,10 @@ impl ProjectEnv {
             .collect::<Result<Vec<_>, _>>()?;
         let kb = EffectiveEcosystemKb::load_builtin(&overrides)?;
         let soundness_kb = EffectiveSoundnessKb::load_builtin(runtime.python_version)?;
-        let layout = ModuleLayout::detect(&root, &cfg);
+        let removed = opts.removed;
+        let layout = ModuleLayout::detect_without(&root, &cfg, &|p| {
+            removed.is_some_and(|r| r.contains(&display_path(p)))
+        });
         Ok(Self {
             root,
             cfg,
@@ -516,6 +524,9 @@ impl Project {
             opts.paths.to_vec()
         };
         let mut found = collect_files(&paths, &env.root, &exclude)?;
+        if let Some(removed) = opts.removed {
+            found.retain(|p| !removed.contains(&display_path(p)));
+        }
         // An open document that is not on the disk yet belongs to the project as it will once
         // saved (`discovers`); its text is in `overrides`.
         if let Some(overrides) = opts.overrides {
