@@ -673,7 +673,7 @@ fn transfer(
                 .or_default()
                 .insert(slot.clone());
         }
-        let memos = facts.memo_param_paths.get(&i);
+        let memos = facts.memo_param_paths.as_deref().and_then(|m| m.get(&i));
         let memo = |path: &String| memos.is_some_and(|m| m.contains(path));
         match &o.param {
             Some((p, None)) => {

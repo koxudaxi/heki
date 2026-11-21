@@ -495,8 +495,8 @@ pub struct EffectSummary {
     /// (`setdefault`, a store under `if k not in p.<attr>:`), or a store of `p.<attr>` where a
     /// `None` / falsy test of it found it unset. What the object computes stays the same
     /// (`MUT202`).
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub memo_param_paths: BTreeMap<u8, BTreeSet<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memo_param_paths: Option<Box<BTreeMap<u8, BTreeSet<String>>>>,
     /// `param index -> attributes` of the argument whose objects are changed, in place or
     /// deeper (`p.a.append(...)`, `p.a.b = v`), also through local copies and calls: the
     /// `mutated_param_paths` that are not just a rebinding of the attribute (`p.a = v`). A
@@ -537,8 +537,8 @@ pub struct EffectSummary {
     /// mutator method) changes it only through the value's own `__hash__`, which its class
     /// answers for, and a builtin container that can change in place cannot be hashed at all
     /// (`MUT107`).
-    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
-    pub hashed_whole_self_attrs: BTreeSet<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hashed_whole_self_attrs: Option<Box<BTreeSet<String>>>,
     pub mutates_self_attrs: BTreeSet<AttrKeyPath>,
     pub invalidates_cached: BTreeSet<String>,
     /// The facts of every typed write the function reaches, through any callee.
@@ -835,7 +835,8 @@ impl EffectSummary {
     /// `memo_param_paths` only while every change of it does.
     pub(crate) fn note_param_change(&mut self, p: u8, path: String, memo: bool) {
         let paths = self.mutated_param_paths.entry(p).or_default();
-        let memos = self.memo_param_paths.entry(p).or_default();
+        let all_memos = self.memo_param_paths.get_or_insert_with(Box::default);
+        let memos = all_memos.entry(p).or_default();
         let changed_otherwise = paths.contains(&path) && !memos.contains(&path);
         if memo && !changed_otherwise {
             memos.insert(path.clone());
@@ -843,7 +844,10 @@ impl EffectSummary {
             memos.remove(&path);
         }
         if memos.is_empty() {
-            self.memo_param_paths.remove(&p);
+            all_memos.remove(&p);
+        }
+        if all_memos.is_empty() {
+            self.memo_param_paths = None;
         }
         paths.insert(path);
         self.mutates_params |= 1u64 << p;
@@ -852,7 +856,7 @@ impl EffectSummary {
     /// Whether the function changes parameter `p` other than by filling a memo or initializing
     /// lazily (`memo_param_paths`); `attrs`: only below those of its attributes.
     pub fn changes_param_state(&self, p: u8, attrs: Option<&BTreeSet<String>>) -> bool {
-        let memos = self.memo_param_paths.get(&p);
+        let memos = self.memo_param_paths.as_deref().and_then(|m| m.get(&p));
         let paths = self.mutated_param_paths.get(&p).into_iter().flatten();
         paths
             .filter(|path| attrs.is_none_or(|a| a.contains(*path)))
@@ -865,7 +869,8 @@ impl EffectSummary {
     /// ([`Self::hashed_whole_self_attrs`]) when neither reads it otherwise.
     pub(crate) fn add_self_reads(&mut self, other: &EffectSummary) {
         self.lazily_read_self_attrs = read_only_as(self, other, |s| &s.lazily_read_self_attrs);
-        self.hashed_whole_self_attrs = read_only_as(self, other, |s| &s.hashed_whole_self_attrs);
+        let hashed = read_only_as(self, other, hashed_whole);
+        self.hashed_whole_self_attrs = (!hashed.is_empty()).then(|| Box::new(hashed));
         self.reads_self_attrs
             .extend(other.reads_self_attrs.iter().cloned());
     }
@@ -1859,6 +1864,14 @@ impl ProjectIndex {
             }
         }
     }
+}
+
+/// No attributes (a fact a summary does not carry).
+static NO_ATTRS: BTreeSet<String> = BTreeSet::new();
+
+/// [`EffectSummary::hashed_whole_self_attrs`], none when the summary carries none.
+fn hashed_whole(s: &EffectSummary) -> &BTreeSet<String> {
+    s.hashed_whole_self_attrs.as_deref().unwrap_or(&NO_ATTRS)
 }
 
 /// The `self` attributes `a` and `b` together read only in the way `kind` holds: those either

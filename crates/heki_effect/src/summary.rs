@@ -312,7 +312,7 @@ fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary) {
     // A must-fact: propagate only through parameters both definitions forward unconditionally.
     into.unconditional_forwards &= other.unconditional_forwards;
     for (i, paths) in other.mutated_param_paths {
-        let memos = other.memo_param_paths.get(&i);
+        let memos = other.memo_param_paths.as_deref().and_then(|m| m.get(&i));
         for path in paths {
             let memo = memos.is_some_and(|m| m.contains(&path));
             into.note_param_change(i, path, memo);
@@ -1361,7 +1361,8 @@ impl<'a> Extractor<'a> {
         if f.owner_class_qualname.is_some()
             && self.key.qualname.rsplit('.').next() == Some("__hash__")
         {
-            self.summary.hashed_whole_self_attrs = self.hashed_whole_self_attrs();
+            let hashed = self.hashed_whole_self_attrs();
+            self.summary.hashed_whole_self_attrs = (!hashed.is_empty()).then(|| Box::new(hashed));
         }
         self.summary.refresh_typed_field_writes();
         let flow = self.events.take().map(|events| {

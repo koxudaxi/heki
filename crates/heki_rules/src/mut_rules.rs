@@ -2581,7 +2581,10 @@ pub(crate) fn mut107(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
                     // Filters 2 and 3: lazy initialization, memo dictionaries. Filter 6: an
                     // in-place change of a value the hash hands whole to `hash()` changes only
                     // the value's own hash, which its own class answers for.
-                    let hashed_whole = hs.hashed_whole_self_attrs.contains(*attr);
+                    let hashed_whole = hs
+                        .hashed_whole_self_attrs
+                        .as_deref()
+                        .is_some_and(|h| h.contains(*attr));
                     let first = self_attr_writes(f).into_iter().find(|(a, w)| {
                         *a == *attr
                             && !w.fills_memo(attr)
