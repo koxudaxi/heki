@@ -4865,7 +4865,9 @@ impl<'a> Extractor<'a> {
             let chain = vec![Arc::new(self.hop(symbol.clone(), span))];
             self.summary.exec_chains.insert(*e, chain);
         }
-        let unconditional = if self.opt_in.must_effects {
+        // The catalog describes the library's class: a project subclass may override the
+        // method, and then the call runs no catalogued implementation.
+        let unconditional = if self.opt_in.must_effects && self.targets_complete() {
             self.unconditional(entry, passed, &effects)
         } else {
             0
@@ -4897,7 +4899,8 @@ impl<'a> Extractor<'a> {
     }
 
     /// The `effects` of a call of `entry` it has whatever the state and the arguments it does
-    /// not show (`CallTarget::Layer2::unconditional`): a database effect only where the entry
+    /// not show (`CallTarget::Layer2::unconditional`, for a call whose only target is the
+    /// catalogued one): a database effect only where the entry
     /// `emits` it on every call, and none when a case of the entry tests an argument that may be
     /// a parameter of the function (through copies and phis), which its callers may pass a value
     /// selecting the case. An argument heki cannot evaluate otherwise is one the call waits on

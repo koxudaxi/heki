@@ -1287,6 +1287,48 @@ async def handler(host, ip):
 }
 
 #[test]
+fn a_project_subclass_overriding_a_catalogued_method_leaves_its_calls_unestablished() {
+    // A value annotated `httpx.Client` may be a project subclass (R2): one that overrides `get`
+    // runs no request, so a helper calling `get` has not established it, and neither has its
+    // caller. `requests.Session` has no such subclass.
+    assert_eq!(
+        check(
+            "cat_overridden_catalogued_method",
+            "app.py",
+            r#"import httpx
+import requests
+
+
+class CachedClient(httpx.Client):
+    def get(self, url):
+        return url
+
+
+def fetch(c: httpx.Client, url):
+    return c.get(url)
+
+
+def fetch_session(s: requests.Session, url):
+    return s.get(url)
+
+
+async def tn_overridden(c: httpx.Client):
+    return fetch(c, "https://example.com")
+
+
+async def tp_session(s: requests.Session):
+    return fetch_session(s, "https://example.com")
+"#,
+            "EFF101,EFF111",
+        ),
+        vec![
+            d(19, "EFF111", "tn_overridden", "httpx.Client.get"),
+            d(23, "EFF101", "tp_session", "requests.Session.get"),
+        ]
+    );
+}
+
+#[test]
 fn waits_that_their_arguments_end_at_once_are_not_reported() {
     // No sleep, a polled child, a numeric or local host, a `data:` URL: none of them waits.
     // An argument heki cannot evaluate is one the call waits on.
