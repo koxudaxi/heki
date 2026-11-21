@@ -2804,3 +2804,109 @@ fn forwarded_flags_are_decided_by_the_caller() {
         ]
     );
 }
+
+const SETTINGS: &str = r#"QUIET = 0
+SHARED = 0
+"#;
+
+const REBIND: &str = r#"import app.settings
+
+
+def configure():
+    app.settings.SHARED = 5
+"#;
+
+const CONSTANT_ARGUMENTS: &str = r#"import socket
+import time
+from urllib.request import urlopen
+
+from app.settings import QUIET, SHARED
+
+PAUSE = 0
+NO_DELAY = 0.0
+PAGE = "data:,x"
+HOST = "localhost"
+LOOPBACK = "127.0.0.1"
+V6 = "::1"
+WAIT = 1
+REMOTE = "example.com"
+TWICE = 0
+TWICE = 1
+
+
+def nap():
+    time.sleep(PAUSE)
+
+
+async def tn_module_constants():
+    nap()
+    time.sleep(NO_DELAY)
+    urlopen(PAGE).read()
+    socket.getaddrinfo(HOST, 80)
+    socket.gethostbyname(LOOPBACK)
+    socket.getaddrinfo(V6, 80)
+
+
+async def tn_imported_constant():
+    time.sleep(QUIET)
+
+
+async def tp_waiting_constant():
+    time.sleep(WAIT)
+
+
+async def tp_remote_constant():
+    socket.getaddrinfo(REMOTE, 80)
+
+
+async def tp_bound_twice():
+    time.sleep(TWICE)
+
+
+async def tp_rebound_elsewhere():
+    time.sleep(SHARED)
+"#;
+
+/// A catalog case reads a module constant bound once to a literal as it reads the literal: a
+/// sleep of no time, a `data:` URL, and a local or numeric host end at once, also through a
+/// helper and from another module. A constant that waits, one bound twice, and one another
+/// module rebinds are values the call waits on.
+#[test]
+fn catalog_argument_cases_read_module_constants_bound_once() {
+    let p = Project::new("cat_constant_arguments");
+    p.write("app/__init__.py", "")
+        .write("app/settings.py", SETTINGS)
+        .write("app/rebind.py", REBIND)
+        .write("app/use.py", CONSTANT_ARGUMENTS);
+    let (code, stdout, stderr) = p.check(&["--output-format", "json", "--select", "EFF101,EFF111"]);
+    assert!(code == 0 || code == 1, "{stdout}{stderr}");
+    let diags: Vec<Value> = serde_json::from_str(&stdout).unwrap();
+    let got: Vec<(String, u64, String, String)> = diags
+        .iter()
+        .map(|d| {
+            (
+                d["path"].as_str().unwrap().to_owned(),
+                d["line"].as_u64().unwrap(),
+                d["rule_code"].as_str().unwrap().to_owned(),
+                d["qualname"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    let at = |line: u64, qualname: &str| {
+        (
+            "app/use.py".to_owned(),
+            line,
+            "EFF101".to_owned(),
+            qualname.to_owned(),
+        )
+    };
+    assert_eq!(
+        got,
+        vec![
+            at(37, "tp_waiting_constant"),
+            at(41, "tp_remote_constant"),
+            at(45, "tp_bound_twice"),
+            at(49, "tp_rebound_elsewhere"),
+        ]
+    );
+}

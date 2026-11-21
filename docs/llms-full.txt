@@ -3190,7 +3190,9 @@ Each step of the chain is established, not assumed:
 - the waiting call is in the ecosystem catalog, waits on every call (a database call that may be
   answered by a session's identity map, a cache, an open connection, or that sends only pending
   changes does not), and no argument that may come from the caller can make it return at once
-  (`time.sleep(delay)` with `delay` a parameter is not established). An argument heki cannot
+  (`time.sleep(delay)` with `delay` a parameter is not established). A literal argument, and
+  a module constant bound once to one (`PAUSE = 0`, also imported from another module, unless
+  a module rebinds it), is evaluated: `time.sleep(PAUSE)` does not wait. An argument heki cannot
   evaluate counts as one the call waits on (assumption R6), the URL or name a database
   connection was opened from included: a statement on a SQLAlchemy engine or another DB-API
   connection opened from a value heki does not know waits. `sqlite3.connect` is the one
