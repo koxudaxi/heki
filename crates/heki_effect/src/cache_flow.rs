@@ -9,7 +9,7 @@
 
 use crate::{CONTAINER_MUTATORS, CallSite, FuncKey, TypeCtx, aliases_of, guards, self_aliases};
 use heki_ast::Span;
-use heki_ir::{BlockId, CompareOpKind, ConstLiteral, InstKind, IrFunction, Terminator, VarId};
+use heki_ir::{BlockId, CompareOpKind, InstKind, IrFunction, Terminator, VarId};
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use std::cell::OnceCell;
@@ -241,12 +241,9 @@ pub fn attr_writes<'f>(
             membership.entry(*then_bb).or_default().push((held, *lhs));
         }
     }
-    // The store fills the key the branch found missing: the same value, or the same string.
+    // The store fills the key the branch found missing: the same value, or an equal constant.
     let literal = |v: &VarId| match defs.get(v) {
-        Some(InstKind::Const {
-            literal: ConstLiteral::Str(s),
-            ..
-        }) => Some(s.as_str()),
+        Some(InstKind::Const { literal, .. }) => Some(literal),
         _ => None,
     };
     let same_key = |tested: &VarId, index: &VarId| {

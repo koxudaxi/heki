@@ -882,6 +882,8 @@ class Strip:
     def default_decoder(self):
         if "default" not in self._decoders:
             self._decoders["default"] = object()
+        if 0 not in self._decoders:
+            self._decoders[0] = object()
 
     def misfill(self):
         if "probe" not in self._decoders:
