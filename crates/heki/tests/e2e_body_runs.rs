@@ -1402,6 +1402,7 @@ def fixed_items_of_the_first_batch(batches):
 /// Clients made once per item, and clients a pool or the receiver holds, or that the omitted
 /// arguments' defaults switch off.
 const PER_ITEM_CLIENTS: &str = r#"import functools
+import itertools
 import time
 
 import requests
@@ -1517,6 +1518,10 @@ def fetch_columns(url, enabled, *items):
 
 def held_arguments_next_to_unpacked_iterables(columns):
     return list(map(functools.partial(fetch_columns, "u", False), *columns))
+
+
+def a_held_keyword_next_to_unpacked_items(rows):
+    return list(itertools.starmap(functools.partial(fetch_if, enabled=False), rows))
 "#;
 
 #[test]

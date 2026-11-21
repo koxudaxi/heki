@@ -3836,7 +3836,7 @@ struct PassedItems {
 
 impl PassedItems {
     /// Bind the items to the parameters below `positional` from `first` on (after the receiver
-    /// and the arguments a partial object holds). The items and the objects bound before them
+    /// and the arguments a partial object holds) that no keyword binds. The items and the objects bound before them
     /// are the same objects through the builtin's loop (`ArgBinding::stays_in_loops`), as the
     /// objects a `for` loop takes from its iterable are.
     fn bind(&self, params: &mut Vec<ArgOrigin>, first: usize, positional: usize) {
@@ -3862,7 +3862,16 @@ impl PassedItems {
                 .into_iter()
                 .collect(),
         };
-        for (slot, b) in slots.into_iter().filter(|(slot, _)| *slot < positional) {
+        // A parameter a keyword binds already takes no item (Python raises if one also comes
+        // by position).
+        let free = |slot: usize, params: &[ArgOrigin]| {
+            slot < positional && params.get(slot).is_none_or(|o| o.binding.is_none())
+        };
+        let slots: Vec<(usize, &ArgBinding)> = slots
+            .into_iter()
+            .filter(|(slot, _)| free(*slot, params))
+            .collect();
+        for (slot, b) in slots {
             if params.len() <= slot {
                 params.resize(slot + 1, ArgOrigin::default());
             }
