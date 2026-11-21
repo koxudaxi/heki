@@ -402,7 +402,7 @@ fn a_module_that_does_not_parse_leaves_the_names_under_it_unresolved() {
         "rows.py",
         "import sqlalchemy.orm\n\n\nasync def rows(q: sqlalchemy.orm.Query):\n    for row in q:\n        pass\n",
     );
-    assert!(concise(&p).1.contains("rows.py:5:16: EFF101 "));
+    assert!(concise(&p).1.contains("rows.py:5:16: EFF111 "));
     p.write("sqlalchemy/orm.py", "print \"done\"\n");
     let (code, stdout, stderr) = p.check(&["--output-format", "concise"]);
     assert_eq!((code, stdout.as_str()), (2, ""), "{stderr}");
