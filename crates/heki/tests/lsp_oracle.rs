@@ -2870,6 +2870,10 @@ const TALLY_FORWARD: &str =
 // handed to.
 const RING: &str = "from collections import deque\n\nfrom app.ring_ops import turn\n\n\nclass Ring:\n    def __init__(self) -> None:\n        self.ring: deque[int] = deque()\n        self._cursor = self._cycle()\n\n    def _cycle(self):\n        while True:\n            yield from self.ring\n\n    def spin(self) -> None:\n        turn(self.ring)\n";
 const RING_OPS: &str = "def turn(q):\n    q.rotate(1)\n";
+// A dict a kept generator iterates (`MUT113`), changed by subclass methods of another module:
+// through the first of two calls of one length on a line, and directly, before another dict.
+const SPOOL: &str = "class Spool:\n    def __init__(self):\n        self.entries = {}\n        self.backlog = {}\n        self._cursor = self._cycle()\n\n    def _cycle(self):\n        while True:\n            yield from self.entries\n";
+const SPOOL_SUB: &str = "from app.spool import Spool\n\n\nclass Pruned(Spool):\n    def prune(self):\n        self._drop(); self._seen()\n\n    def _drop(self):\n        self.entries.clear()\n\n    def _seen(self):\n        return len(self.entries)\n\n    def trim(self):\n        self.entries.clear(); self.backlog.clear()\n";
 const TALLY_LISTED: &str = "from app.tally import Tally\nfrom app.tally_forward import _forward\n\n\ndef listed(t: Tally):\n    return list(_forward(t))\n";
 
 fn edge_files() -> Vec<(&'static str, String)> {
@@ -2891,6 +2895,8 @@ fn edge_files() -> Vec<(&'static str, String)> {
         ("app/tally_listed.py", TALLY_LISTED),
         ("app/ring.py", RING),
         ("app/ring_ops.py", RING_OPS),
+        ("app/spool.py", SPOOL),
+        ("app/spool_sub.py", SPOOL_SUB),
     ]
     .into_iter()
     .map(|(rel, text)| (rel, text.to_owned()))
@@ -2915,6 +2921,7 @@ fn edge_steps() -> Vec<Step> {
     steps.extend(steps_src_layout());
     steps.extend(steps_ignore_files());
     steps.extend(steps_forwarded_generator());
+    steps.extend(steps_swapped_calls());
     steps.extend(steps_baseline());
     steps
 }
@@ -2958,6 +2965,35 @@ fn steps_forwarded_generator() -> Vec<Step> {
             vec![save("app/ring_ops.py", RING_OPS)],
         )
         .present(&[("app/ring.py", "MUT113")]),
+    ]
+}
+
+/// `MUT113`: two calls of one length on a line swap, so every call site keeps its span while the
+/// call changing the dict a kept generator of another module iterates moves to the other one;
+/// then two changes of one length swap the same way. The generator's report shows where each
+/// method changes the dict.
+fn steps_swapped_calls() -> Vec<Step> {
+    let swapped = SPOOL_SUB.replace("self._drop(); self._seen()", "self._seen(); self._drop()");
+    let changes_swapped = SPOOL_SUB.replace(
+        "self.entries.clear(); self.backlog.clear()",
+        "self.backlog.clear(); self.entries.clear()",
+    );
+    vec![
+        Step::new(
+            "two calls of one length on a line swap, the change moving to the second",
+            vec![Action::Save("app/spool_sub.py", swapped)],
+        )
+        .present(&[("app/spool.py", "MUT113")]),
+        Step::new(
+            "the calls swap back",
+            vec![save("app/spool_sub.py", SPOOL_SUB)],
+        )
+        .present(&[("app/spool.py", "MUT113")]),
+        Step::new(
+            "two changes of one length on a line swap, the dict's moving to the second",
+            vec![Action::Save("app/spool_sub.py", changes_swapped)],
+        )
+        .present(&[("app/spool.py", "MUT113")]),
     ]
 }
 

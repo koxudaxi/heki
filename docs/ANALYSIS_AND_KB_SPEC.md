@@ -511,7 +511,9 @@ re-checks the files with such reports above a function whose facts changed. Like
 classes whose instances run each writer (`heki_rules::stale_writes_by_file`), as of the file's
 latest analysis; when they change, the files reading those cached properties are re-checked. A
 `MUT113` report shows where other methods change a container (`self_container_change_sites`):
-the language server re-checks the files showing a change site that moved, as for a call site.
+the language server re-checks the files showing a change site that moved, as for a call site. A
+place it records keeps what is there (a call's callees, a change's attribute), so that two calls
+or changes of one length swapping on a line, which keep every span, count as moved too.
 
 The incremental index also records what summarizing each file read of the project declarations
 (`FileSummary::decl_reads`: the modules looked up, the classes whose subclasses were listed, the
@@ -724,7 +726,7 @@ functions with none).
    before and after the change, so that a call it stops making is followed too), and in turn what
    each hands on (the result of a call it returns, or iterates while suspending: the relation
    step 5 follows up from a generator). The language server re-checks the files showing a
-   container change site that moved.
+   container change site that moved, or whose call or change at a place is another one.
 
 #### `MUT103`: cross-function effect snapshots (`heki snapshot summary`)
 - The summaries of public functions (`mutates_params`, `escapes_params`, `mutates_self_attrs`,
