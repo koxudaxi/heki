@@ -142,6 +142,16 @@ const GUARD_GLOBAL_USE: &str =
     "from pkg.guard_global import conn\n\n\ndef run(xs):\n    for x in xs:\n        conn()\n";
 const GUARD_CONN_CACHED: &str = "from functools import cached_property\nfrom urllib.request import urlopen\n\n\nclass Conn:\n    def __init__(self):\n        self._sock = None\n\n    @cached_property\n    def sock(self):\n        return urlopen(\"https://example.com\")\n\n    def send(self):\n        return self.sock\n";
 
+// Guards a buffer decides (`EFF101`): a reader in another module gains a `hasattr` test that a
+// buffer argument decides, then tests an attribute a buffer may lack, then rebinds a missing
+// argument to a buffer (a test of the merged value), and loses its tests again.
+const BUF_READ: &str = "from io import BytesIO\nfrom urllib.request import urlopen\n\n\ndef read_any(src=None):\n    return urlopen(src).read()\n";
+const BUF_READ_HASATTR: &str = "from io import BytesIO\nfrom urllib.request import urlopen\n\n\ndef read_any(src=None):\n    if hasattr(src, \"read\"):\n        return src.read()\n    return urlopen(src).read()\n";
+const BUF_READ_REBINDING: &str = "from io import BytesIO\nfrom urllib.request import urlopen\n\n\ndef read_any(src=None):\n    if src is None:\n        src = BytesIO()\n    if isinstance(src, (str, bytes)):\n        return urlopen(src).read()\n    return src.read()\n";
+const BUF_USE: &str = "from io import BytesIO\n\nfrom pkg.buf_read import read_any\n\n\nasync def load(data):\n    return read_any(BytesIO(data))\n";
+const BUF_DEFAULT_USE: &str =
+    "from pkg.buf_read import read_any\n\n\nasync def load():\n    return read_any()\n";
+
 // Contracts: private helpers writing / reading guarded attributes report themselves without
 // callers, nothing when only allowed functions call them, and at a non-allowed caller.
 const MODEL: &str = "class Registry:\n    def __init__(self):\n        self.entries = []\n\n\nclass Vault:\n    def __init__(self):\n        self.secret = \"\"\n";
@@ -341,6 +351,11 @@ const CATALOG: &str = "from functools import lru_cache\n\n\nclass Catalog:\n    
 const LOOKUP: &str = "from pkg.catalog import Catalog, defaults\n\n\ndef find(c: Catalog, key) -> dict:\n    return c.fresh(key)\n";
 const LOOKUP_SHARED: &str = "from pkg.catalog import Catalog, defaults\n\n\ndef find(c: Catalog, key) -> dict:\n    return c.entry(key)\n";
 const LOOKUP_CACHED: &str = "from pkg.catalog import Catalog, defaults\n\n\ndef find(c: Catalog, key) -> dict:\n    return defaults()\n";
+// `MUT202`: a method of a cached object in another module fills the object's own memo, then
+// changes its state instead.
+const GLYPHS: &str = "from functools import lru_cache\n\n\nclass Glyphs:\n    def __init__(self):\n        self._width_cache = {}\n        self.seen = []\n\n    def width(self, ch):\n        if ch not in self._width_cache:\n            self._width_cache[ch] = len(ch)\n        return self._width_cache[ch]\n\n\n@lru_cache\ndef shared_glyphs() -> Glyphs:\n    return Glyphs()\n";
+const GLYPHS_RECORDING: &str = "from functools import lru_cache\n\n\nclass Glyphs:\n    def __init__(self):\n        self._width_cache = {}\n        self.seen = []\n\n    def width(self, ch):\n        self.seen.append(ch)\n        return len(ch)\n\n\n@lru_cache\ndef shared_glyphs() -> Glyphs:\n    return Glyphs()\n";
+const GLYPH_USER: &str = "from pkg.glyphs import shared_glyphs\n\n\ndef measure(text):\n    return sum(shared_glyphs().width(ch) for ch in text)\n\n\ndef first(text):\n    return shared_glyphs().width(text[0])\n";
 const TAGGER: &str = "from pkg.catalog import Catalog\nfrom pkg.lookup import find\n\n\ndef tag(c: Catalog):\n    find(c, \"k\")[\"tag\"] = 1\n";
 const NODES: &str = "class Node:\n    def __init__(self):\n        self.kids = []\n\n\nclass Index:\n    def refresh(self):\n        self.stale = False\n\n\ndef attach(node: Node, kid):\n    node.kids.append(kid)\n";
 const ANNOUNCE: &str =
@@ -382,6 +397,14 @@ const SHEET: &str = "from functools import cached_property\n\n\nclass Sheet:\n  
 const GRID: &str = "from pkg.sheet import Sheet\n\n\nclass Grid(Sheet):\n    pass\n";
 const GRID_RESETTING: &str = "from pkg.sheet import Sheet\n\n\nclass Grid(Sheet):\n    def __init__(self):\n        super().__init__()\n        self._reset()\n";
 const GRID_INITIALIZING: &str = "from pkg.sheet import Sheet\n\n\nclass Grid(Sheet):\n    def __init__(self):\n        super().__init__()\n";
+// What `MUT107` takes from a `__hash__` and an `__init__` in another module: whether the hash
+// hands an attribute whole to `hash()` (an in-place change of it is then the value's own), which
+// private helpers initialization runs through others, and whether a class between the writer and
+// the hash defines `__eq__` alone (its instances cannot be hashed).
+const STAMP: &str = "class Stamp:\n    def __init__(self, parts):\n        self.parts = parts\n        self.name = \"\"\n        self._load(parts)\n\n    def __hash__(self):\n        return hash((self.parts, self.name)) ^ len(self.parts)\n\n    def _load(self, parts):\n        self.loaded = True\n";
+const STAMP_MIDDLE: &str = "from pkg.stamp import Stamp\n\n\nclass Middle(Stamp):\n    def _prepare(self, parts):\n        self._decode(parts)\n";
+const STAMP_MIDDLE_EQ: &str = "from pkg.stamp import Stamp\n\n\nclass Middle(Stamp):\n    def __eq__(self, other):\n        return self is other\n\n    def _prepare(self, parts):\n        self._decode(parts)\n";
+const STAMPED: &str = "from pkg.stamp_middle import Middle\n\n\nclass Stamped(Middle):\n    def add(self, part):\n        self.parts.append(part)\n\n    def _decode(self, parts):\n        self.name = str(parts)\n";
 
 // Lazy initialization (`MUT101`): a cached property reads a connection only through a mixin
 // helper in another module that initializes it lazily, so the lazy initialization of a
@@ -537,6 +560,9 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/guard_default_use.py", GUARD_DEFAULT_USE),
         ("pkg/guard_conn.py", GUARD_CONN),
         ("pkg/guard_conn_use.py", GUARD_CONN_USE),
+        ("pkg/buf_read.py", BUF_READ),
+        ("pkg/buf_use.py", BUF_USE),
+        ("pkg/buf_default_use.py", BUF_DEFAULT_USE),
         ("pkg/guard_global.py", GUARD_GLOBAL),
         ("pkg/guard_global_use.py", GUARD_GLOBAL_USE),
         ("pkg/model.py", MODEL),
@@ -629,6 +655,8 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/catalog.py", CATALOG),
         ("pkg/lookup.py", LOOKUP),
         ("pkg/tagger.py", TAGGER),
+        ("pkg/glyphs.py", GLYPHS),
+        ("pkg/glyph_user.py", GLYPH_USER),
         ("pkg/nodes.py", NODES),
         ("pkg/announce.py", ANNOUNCE),
         ("pkg/grow.py", GROW),
@@ -647,6 +675,9 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/labeled.py", LABELED),
         ("pkg/sheet.py", SHEET),
         ("pkg/grid.py", GRID),
+        ("pkg/stamp.py", STAMP),
+        ("pkg/stamp_middle.py", STAMP_MIDDLE),
+        ("pkg/stamped.py", STAMPED),
         ("pkg/conn_mixin.py", CONN_MIXIN),
         ("pkg/conn_client.py", CONN_CLIENT),
         ("pkg/conn_pooled.py", CONN_POOLED),
@@ -1670,6 +1701,16 @@ fn steps_mut110() -> Vec<Step> {
 fn steps_mut202_mut109() -> Vec<Step> {
     vec![
         Step::new(
+            "a cached object's method in another module stops filling a memo and records",
+            vec![save("pkg/glyphs.py", GLYPHS_RECORDING)],
+        )
+        .present(&[("pkg/glyph_user.py", "MUT202")]),
+        Step::new(
+            "the method fills its memo again",
+            vec![save("pkg/glyphs.py", GLYPHS)],
+        )
+        .absent(&[("pkg/glyph_user.py", "MUT202")]),
+        Step::new(
             "a wrapper in another module starts returning a declared producer's value",
             vec![save("pkg/lookup.py", LOOKUP_SHARED)],
         )
@@ -1813,12 +1854,71 @@ fn steps_inherited_writers() -> Vec<Step> {
     ]
 }
 
+/// `MUT107`: what a hash and an initializer in other modules decide for a writer in a subclass:
+/// the hash starts hashing the changed attribute whole, the base's private helper starts reaching
+/// the subclass's writer from `__init__` through a helper of the class in between (then a public
+/// method calls that helper too, so the writer runs after initialization), and that class defines
+/// `__eq__` alone.
+fn steps_hash_writers() -> Vec<Step> {
+    let whole = STAMP.replace(" ^ len(self.parts)", "");
+    let loading = whole.replace("self.loaded = True", "self._prepare(parts)");
+    let refreshing =
+        format!("{loading}\n    def refresh(self, parts):\n        self._prepare(parts)\n");
+    vec![
+        Step::new(
+            "the hash in another module hashes the changed list whole",
+            vec![Action::Save("pkg/stamp.py", whole)],
+        )
+        .present(&[("pkg/stamped.py", "MUT107")]),
+        Step::new(
+            "initialization reaches the writer through private helpers in two other modules",
+            vec![Action::Save("pkg/stamp.py", loading)],
+        )
+        .absent(&[("pkg/stamped.py", "MUT107")]),
+        Step::new(
+            "a public method there also calls the helper in between",
+            vec![Action::Save("pkg/stamp.py", refreshing)],
+        )
+        .present(&[("pkg/stamped.py", "MUT107")]),
+        Step::new(
+            "the hash reads the list's length again",
+            vec![save("pkg/stamp.py", STAMP)],
+        )
+        .present(&[("pkg/stamped.py", "MUT107")]),
+        Step::new(
+            "a class in another module between them defines `__eq__` alone",
+            vec![save("pkg/stamp_middle.py", STAMP_MIDDLE_EQ)],
+        )
+        .absent(&[("pkg/stamped.py", "MUT107")]),
+        Step::new(
+            "the class in between stops defining it",
+            vec![save("pkg/stamp_middle.py", STAMP_MIDDLE)],
+        )
+        .present(&[("pkg/stamped.py", "MUT107")]),
+    ]
+}
+
 /// `MUT112`: what a function returns reaches its callers through a wrapper in another module
 /// (`EffectSummary::returns_origins`), also when the wrapper hands it a call's result
 /// (`EffectSummary::returns_results`), and a store in `self.<attr>` follows the in-place changes
 /// that the methods of its class family make in other modules (`heki_rules::family_readers`).
 fn steps_mut112() -> Vec<Step> {
     vec![
+        // The summaries carry the facts of `MUT112` and `MUT113` only while a rule reads them
+        // (`OptInFacts`): a configuration selecting them again re-indexes with the facts.
+        Step::new(
+            "MUT112 and MUT113 are no longer selected, and the function two modules below stops copying its argument",
+            vec![
+                Action::Configure(CONFIG.replace(", \"MUT112\", \"MUT113\"]", "]")),
+                save("pkg/own_prepare.py", OWN_PREPARE_SAME),
+            ],
+        )
+        .absent(&[("pkg/own_use.py", "MUT112")]),
+        Step::new(
+            "MUT112 and MUT113 are selected again",
+            vec![Action::Configure(CONFIG.to_owned())],
+        )
+        .present(&[("pkg/own_use.py", "MUT112")]),
         Step::new(
             "the function two modules below stops copying its argument",
             vec![save("pkg/own_prepare.py", OWN_PREPARE_SAME)],
@@ -2010,6 +2110,8 @@ fn steps() -> Vec<Step> {
             ("pkg/guard_use.py", "EFF102"),
             ("pkg/guard_default_use.py", "EFF102"),
             ("pkg/guard_conn_use.py", "EFF102"),
+            ("pkg/buf_use.py", "EFF101"),
+            ("pkg/buf_default_use.py", "EFF101"),
             ("pkg/guard_global_use.py", "EFF102"),
             ("pkg/fill.py", "MUT201"),
             ("pkg/fill_main.py", "MUT201"),
@@ -2146,6 +2248,36 @@ fn steps() -> Vec<Step> {
         )
         .present(&[("pkg/guard_conn_use.py", "EFF102")]),
         Step::new(
+            "a reader in another file gains the `hasattr` test a buffer argument decides",
+            vec![save("pkg/buf_read.py", BUF_READ_HASATTR)],
+        )
+        .present(&[("pkg/buf_default_use.py", "EFF101")])
+        .absent(&[("pkg/buf_use.py", "EFF101")]),
+        Step::new(
+            "the reader tests an attribute a buffer may lack",
+            vec![save(
+                "pkg/buf_read.py",
+                &BUF_READ_HASATTR.replace("\"read\")", "\"name\")"),
+            )],
+        )
+        .present(&[("pkg/buf_use.py", "EFF101")]),
+        Step::new(
+            "the reader rebinds a missing argument to a buffer before its `isinstance` test",
+            vec![save("pkg/buf_read.py", BUF_READ_REBINDING)],
+        )
+        .absent(&[
+            ("pkg/buf_use.py", "EFF101"),
+            ("pkg/buf_default_use.py", "EFF101"),
+        ]),
+        Step::new(
+            "the reader loses its tests",
+            vec![save("pkg/buf_read.py", BUF_READ)],
+        )
+        .present(&[
+            ("pkg/buf_use.py", "EFF101"),
+            ("pkg/buf_default_use.py", "EFF101"),
+        ]),
+        Step::new(
             "a helper in another file keeps its connection in a module global",
             vec![save(
                 "pkg/guard_global.py",
@@ -2172,6 +2304,7 @@ fn steps() -> Vec<Step> {
     steps.extend(steps_mut202_mut109());
     steps.extend(steps_indirect_helpers());
     steps.extend(steps_inherited_writers());
+    steps.extend(steps_hash_writers());
     steps.extend(steps_mut111());
     steps.extend(steps_mut112());
     steps.extend(steps_mut113());
@@ -2809,6 +2942,10 @@ const TALLY_FORWARD: &str =
 // handed to.
 const RING: &str = "from collections import deque\n\nfrom app.ring_ops import turn\n\n\nclass Ring:\n    def __init__(self) -> None:\n        self.ring: deque[int] = deque()\n        self._cursor = self._cycle()\n\n    def _cycle(self):\n        while True:\n            yield from self.ring\n\n    def spin(self) -> None:\n        turn(self.ring)\n";
 const RING_OPS: &str = "def turn(q):\n    q.rotate(1)\n";
+// A dict a kept generator iterates (`MUT113`), changed by subclass methods of another module:
+// through the first of two calls of one length on a line, and directly, before another dict.
+const SPOOL: &str = "class Spool:\n    def __init__(self):\n        self.entries = {}\n        self.backlog = {}\n        self._cursor = self._cycle()\n\n    def _cycle(self):\n        while True:\n            yield from self.entries\n";
+const SPOOL_SUB: &str = "from app.spool import Spool\n\n\nclass Pruned(Spool):\n    def prune(self):\n        self._drop(); self._seen()\n\n    def _drop(self):\n        self.entries.clear()\n\n    def _seen(self):\n        return len(self.entries)\n\n    def trim(self):\n        self.entries.clear(); self.backlog.clear()\n";
 const TALLY_LISTED: &str = "from app.tally import Tally\nfrom app.tally_forward import _forward\n\n\ndef listed(t: Tally):\n    return list(_forward(t))\n";
 
 fn edge_files() -> Vec<(&'static str, String)> {
@@ -2830,6 +2967,8 @@ fn edge_files() -> Vec<(&'static str, String)> {
         ("app/tally_listed.py", TALLY_LISTED),
         ("app/ring.py", RING),
         ("app/ring_ops.py", RING_OPS),
+        ("app/spool.py", SPOOL),
+        ("app/spool_sub.py", SPOOL_SUB),
     ]
     .into_iter()
     .map(|(rel, text)| (rel, text.to_owned()))
@@ -2854,6 +2993,7 @@ fn edge_steps() -> Vec<Step> {
     steps.extend(steps_src_layout());
     steps.extend(steps_ignore_files());
     steps.extend(steps_forwarded_generator());
+    steps.extend(steps_swapped_calls());
     steps.extend(steps_baseline());
     steps
 }
@@ -2897,6 +3037,35 @@ fn steps_forwarded_generator() -> Vec<Step> {
             vec![save("app/ring_ops.py", RING_OPS)],
         )
         .present(&[("app/ring.py", "MUT113")]),
+    ]
+}
+
+/// `MUT113`: two calls of one length on a line swap, so every call site keeps its span while the
+/// call changing the dict a kept generator of another module iterates moves to the other one;
+/// then two changes of one length swap the same way. The generator's report shows where each
+/// method changes the dict.
+fn steps_swapped_calls() -> Vec<Step> {
+    let swapped = SPOOL_SUB.replace("self._drop(); self._seen()", "self._seen(); self._drop()");
+    let changes_swapped = SPOOL_SUB.replace(
+        "self.entries.clear(); self.backlog.clear()",
+        "self.backlog.clear(); self.entries.clear()",
+    );
+    vec![
+        Step::new(
+            "two calls of one length on a line swap, the change moving to the second",
+            vec![Action::Save("app/spool_sub.py", swapped)],
+        )
+        .present(&[("app/spool.py", "MUT113")]),
+        Step::new(
+            "the calls swap back",
+            vec![save("app/spool_sub.py", SPOOL_SUB)],
+        )
+        .present(&[("app/spool.py", "MUT113")]),
+        Step::new(
+            "two changes of one length on a line swap, the dict's moving to the second",
+            vec![Action::Save("app/spool_sub.py", changes_swapped)],
+        )
+        .present(&[("app/spool.py", "MUT113")]),
     ]
 }
 

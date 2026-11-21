@@ -29,7 +29,8 @@ use heki_ast::Span;
 use heki_diagnostics::{Diagnostic, RelatedLocation};
 use heki_effect::iterations::changed_at;
 use heki_effect::{
-    CallSite, ContainerIteration, FileSummary, FuncKey, ProjectIndex, ResultIteration, SiteRole,
+    CallSite, ContainerChange, ContainerIteration, FileSummary, FuncKey, IteratedContainer,
+    IteratedResult, ProjectIndex, ResultIteration, SiteRole,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::cell::RefCell;
@@ -85,27 +86,113 @@ pub(super) fn run(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
         });
         for (g, unit, local) in checked {
             let mut exposure: Option<Exposure<'_>> = None;
-            for it in &local.iteration_facts().container_iterations {
-                if it.between.suspends && reported.insert((g.key.clone(), it.span, it.attr.clone()))
+            let loops = &local.iteration_facts().container_iterations;
+            let suspending = suspending_attrs(loops);
+            let mut loop_calls: Vec<Option<LoopCalls<'_>>> = loops.iter().map(|_| None).collect();
+            for (attr, container, i) in iterated_in_order(loops) {
+                let it = &loops[i];
+                if it.between.suspends && reported.insert((g.key.clone(), it.span, attr.to_owned()))
                 {
                     let exposure = exposure.get_or_insert_with(|| Exposure::of(cx, &uses, &g.key));
-                    let changing = changing_methods(cx, g, it, family, init_called, exposure);
-                    report_suspended(cx, unit, g, it, &changing, out);
+                    let changing =
+                        changing_methods(cx, g, attr, container, family, init_called, exposure);
+                    report_suspended(cx, unit, g, it.span, attr, &changing, out);
                 }
                 if it.between.calls.is_empty() {
                     continue;
                 }
-                let by_span = sites
-                    .entry(unit.input.path.as_path())
-                    .or_insert_with(|| cx.sites_by_span(unit));
-                for span in &it.between.calls {
-                    if reported.insert((g.key.clone(), *span, it.attr.clone())) {
-                        report_called(cx, unit, g, it, *span, by_span, out);
+                let calls = loop_calls[i].get_or_insert_with(|| {
+                    let by_span = sites
+                        .entry(unit.input.path.as_path())
+                        .or_insert_with(|| cx.sites_by_span(unit));
+                    LoopCalls::of(cx, g, it, by_span, &suspending)
+                });
+                for &call in calls.by_attr.get(attr).into_iter().flatten() {
+                    let span = it.between.calls[call];
+                    if reported.insert((g.key.clone(), span, attr.to_owned())) {
+                        let changes = &calls.changes[call];
+                        report_called(cx, unit, g, it.span, attr, container, span, changes, out);
                     }
                 }
             }
         }
     });
+}
+
+/// Each attribute a method's iterations step, with its container and the iteration (by index),
+/// by attribute, container, and iteration: the order in which the first report of a call or a
+/// suspension for an attribute is the one made.
+fn iterated_in_order(loops: &[ContainerIteration]) -> Vec<(&str, IteratedContainer, usize)> {
+    let mut out: Vec<(&str, IteratedContainer, usize)> = loops
+        .iter()
+        .enumerate()
+        .flat_map(|(i, it)| it.iterated.iter().map(move |(a, c)| (a.as_str(), *c, i)))
+        .collect();
+    out.sort_by(|a, b| {
+        (a.0, a.1, loops[a.2].span, &loops[a.2].between).cmp(&(
+            b.0,
+            b.1,
+            loops[b.2].span,
+            &loops[b.2].between,
+        ))
+    });
+    out
+}
+
+/// The attributes each suspending iteration of a method steps, by the iteration's span.
+fn suspending_attrs(loops: &[ContainerIteration]) -> FxHashMap<Span, FxHashSet<&str>> {
+    let mut out: FxHashMap<Span, FxHashSet<&str>> = FxHashMap::default();
+    for it in loops.iter().filter(|it| it.between.suspends) {
+        out.entry(it.span)
+            .or_default()
+            .extend(it.iterated.iter().map(|(a, _)| a.as_str()));
+    }
+    out
+}
+
+/// What the calls in an iteration's body change, read once for all the attributes it steps.
+struct LoopCalls<'a> {
+    /// Per call (by its index in `BetweenSteps::calls`), the containers of the method's own
+    /// instance its callees change, by callee ([`changed_at`]).
+    changes: Vec<Vec<(&'a FuncKey, String, ContainerChange)>>,
+    /// Per attribute, the calls a report about it may come from, in order: those changing it,
+    /// and those at a suspending iteration of it, which a report of the suspension shares.
+    by_attr: FxHashMap<String, Vec<usize>>,
+}
+
+impl<'a> LoopCalls<'a> {
+    fn of(
+        cx: &CheckContext<'a>,
+        g: &Method<'_>,
+        it: &ContainerIteration,
+        sites: &SitesBySpan<'a>,
+        suspending: &FxHashMap<Span, FxHashSet<&str>>,
+    ) -> Self {
+        let mut by_attr: FxHashMap<String, Vec<usize>> = FxHashMap::default();
+        let changes: Vec<_> = it
+            .between
+            .calls
+            .iter()
+            .enumerate()
+            .map(|(i, span)| {
+                let changes: Vec<_> = sites
+                    .get(&(g.key.qualname.clone(), *span))
+                    .into_iter()
+                    .flatten()
+                    .flat_map(|site| changed_at(cx.index, site))
+                    .collect();
+                let shared = suspending.get(span).into_iter().flatten().copied();
+                for attr in changes.iter().map(|(_, a, _)| a.as_str()).chain(shared) {
+                    let calls = by_attr.entry(attr.to_owned()).or_default();
+                    if calls.last() != Some(&i) {
+                        calls.push(i);
+                    }
+                }
+                changes
+            })
+            .collect();
+        Self { changes, by_attr }
+    }
 }
 
 /// What can run while a generator method is suspended, from where its generator objects go.
@@ -126,76 +213,136 @@ struct Exposure<'a> {
 /// generator's instance (`None`: none of them is known to).
 type Reached = (FuncKey, Option<u8>);
 
+/// A step of [`Exposure::follow`]'s walk. A chain of private wrappers returning each other's
+/// results is as long as the generated code makes it, so the walk keeps its own stack, in the
+/// order a depth-first walk takes the steps.
+enum Step<'f, 'a> {
+    /// Reach `func`, whose parameter `instance` holds the generator's instance.
+    Reach(&'f FuncKey, Option<u8>),
+    /// Go on with the rest of the callers of `func`.
+    Callers(
+        &'f FuncKey,
+        Option<u8>,
+        std::collections::hash_set::Iter<'a, FuncKey>,
+    ),
+    /// Go on at the calls of `func` in one of its callers.
+    Calls(Box<AtCalls<'f, 'a>>),
+}
+
+/// [`Step::Calls`]: the calls of `func`, whose parameter `instance` holds the generator's
+/// instance, in `caller`, a function of the file at `path` with the uses `file` records.
+struct AtCalls<'f, 'a> {
+    func: &'f FuncKey,
+    instance: Option<u8>,
+    caller: &'a FuncKey,
+    path: &'a Path,
+    file: Rc<FileUses<'a>>,
+    /// The index of the next call among the caller's calls of `func`, and whether the walk has
+    /// followed its result into the caller's own callers already.
+    next: usize,
+    followed: bool,
+    /// The iterations, and the objects in them, whose loop calls are added already: a loop over
+    /// `zip(a(), b())` is one iteration of both results.
+    added: FxHashSet<(usize, u32)>,
+}
+
 impl<'a> Exposure<'a> {
     fn of(cx: &CheckContext<'a>, uses: &ResultUses<'a>, generator: &FuncKey) -> Self {
         let mut out = Self::default();
-        out.follow(cx, uses, (generator, Some(0)), &mut FxHashSet::default());
+        out.follow(cx, uses, generator);
         out
     }
 
-    /// Add where the object `func` returns (a generator, or one it hands on) goes at each call of
-    /// it, by the uses its caller records: returned, iterated (`IterationFacts::result_iterations`;
-    /// by a generator suspending inside the iteration, too), and whether it outlives one of these
-    /// uses (`CallSite::result_held`). A project function it is passed to is not followed.
-    /// `instance` is the parameter of `func` holding the generator's instance.
-    fn follow(
-        &mut self,
-        cx: &CheckContext<'a>,
-        uses: &ResultUses<'a>,
-        (func, instance): (&FuncKey, Option<u8>),
-        visited: &mut FxHashSet<Reached>,
-    ) {
-        if visited.insert((func.clone(), instance)) {
-            self.offered |= !is_private(&func.qualname);
-            for caller in cx.index.reverse_call_graph.get(func).into_iter().flatten() {
-                if let Some((path, file_uses)) = uses.of_file(cx.index, caller) {
-                    let of_caller = &file_uses[caller];
-                    self.follow_calls(
-                        cx,
-                        uses,
-                        (func, instance),
-                        (caller, path, of_caller),
-                        visited,
-                    );
+    /// Add where the object `generator` returns goes at each call of it, by the uses its caller
+    /// records: returned (then the same at each call of the caller, which hands it on), iterated
+    /// (`IterationFacts::result_iterations`; by a generator suspending inside the iteration,
+    /// too), and whether it outlives one of these uses (`CallSite::result_held`). A project
+    /// function it is passed to is not followed. Each function is reached once per parameter
+    /// holding the generator's instance (`Reached`).
+    fn follow(&mut self, cx: &CheckContext<'a>, uses: &ResultUses<'a>, generator: &FuncKey) {
+        let mut visited: FxHashSet<Reached> = FxHashSet::default();
+        let mut stack = vec![Step::Reach(generator, Some(0))];
+        while let Some(step) = stack.pop() {
+            match step {
+                Step::Reach(func, instance) => {
+                    if visited.insert((func.clone(), instance)) {
+                        self.offered |= !is_private(&func.qualname);
+                        if let Some(callers) = cx.index.reverse_call_graph.get(func) {
+                            stack.push(Step::Callers(func, instance, callers.iter()));
+                        }
+                    }
                 }
+                Step::Callers(func, instance, mut callers) => {
+                    let Some(caller) = callers.next() else {
+                        continue;
+                    };
+                    stack.push(Step::Callers(func, instance, callers));
+                    if let Some((path, file)) = uses.of_file(cx.index, caller) {
+                        stack.push(Step::Calls(Box::new(AtCalls {
+                            func,
+                            instance,
+                            caller,
+                            path,
+                            file,
+                            next: 0,
+                            followed: false,
+                            added: FxHashSet::default(),
+                        })));
+                    }
+                }
+                Step::Calls(at) => self.at_call(at, &mut stack),
             }
         }
     }
 
-    /// [`Self::follow`] at the calls of `func` in `caller`, a function of the file at `path` whose
-    /// uses of its calls' results are `of_caller`. A loop over a call's result runs its calls on
-    /// the generator's instance where they bind the object the call binds to `instance`
-    /// (`ResultIteration::on_arguments`).
-    fn follow_calls(
-        &mut self,
-        cx: &CheckContext<'a>,
-        uses: &ResultUses<'a>,
-        (func, instance): (&FuncKey, Option<u8>),
-        (caller, path, of_caller): (&'a FuncKey, &'a Path, &CallerUses<'a>),
-        visited: &mut FxHashSet<Reached>,
-    ) {
-        let calls = of_caller.calling.get(func).into_iter().flatten();
-        for call in calls.filter(|s| s.role == SiteRole::Call) {
-            if of_caller.handed_on.contains(&call.span) {
-                let in_caller = instance.and_then(|p| bound_parameter(call, func, p));
-                self.follow(cx, uses, (caller, in_caller), visited);
+    /// One call of [`Step::Calls`]: a call whose result the caller hands on is followed into the
+    /// caller's callers first. A loop over the call's result runs its calls on the generator's
+    /// instance where they bind the object the call binds to `instance`
+    /// (`ResultIteration::receivers`, `IteratedResult::arguments`).
+    fn at_call<'f>(&mut self, mut at: Box<AtCalls<'f, 'a>>, stack: &mut Vec<Step<'f, 'a>>)
+    where
+        'a: 'f,
+    {
+        let file = Rc::clone(&at.file);
+        let of_caller = &file[at.caller];
+        let calls = of_caller
+            .calling
+            .get(at.func)
+            .map_or(&[][..], Vec::as_slice);
+        let Some(&call) = calls.get(at.next) else {
+            return;
+        };
+        if call.role == SiteRole::Call {
+            if !at.followed && of_caller.handed_on.contains(&call.span) {
+                let in_caller = at.instance.and_then(|p| bound_parameter(call, at.func, p));
+                let caller = at.caller;
+                at.followed = true;
+                stack.push(Step::Calls(at));
+                stack.push(Step::Reach(caller, in_caller));
+                return;
             }
             self.held |= call.result_held;
-            for used in of_caller.iterations.get(&call.span).into_iter().flatten() {
+            for &(n, used, result) in of_caller.iterations.get(&call.span).into_iter().flatten() {
+                let objects: Vec<u32> = result
+                    .arguments
+                    .iter()
+                    .filter(|(p, o)| Some(*p) == at.instance && at.added.insert((n, *o)))
+                    .map(|(_, o)| *o)
+                    .collect();
                 let on_instance = |i: usize| {
-                    instance.is_some_and(|p| {
-                        used.on_arguments
-                            .get(i)
-                            .is_some_and(|bits| (bits >> p) & 1 == 1)
-                    })
+                    let receiver = used.receivers.get(i).copied().flatten();
+                    receiver.is_some_and(|o| objects.contains(&o))
                 };
                 let calls = used.between.calls.iter().enumerate();
                 for (_, span) in calls.filter(|(i, _)| on_instance(*i)) {
                     let found = of_caller.at.get(span).into_iter().flatten();
-                    self.loop_calls.extend(found.map(|site| (path, *site)));
+                    self.loop_calls.extend(found.map(|site| (at.path, *site)));
                 }
             }
         }
+        at.next += 1;
+        at.followed = false;
+        stack.push(Step::Calls(at));
     }
 }
 
@@ -207,8 +354,9 @@ struct CallerUses<'i> {
     calling: FxHashMap<&'i FuncKey, Vec<&'i CallSite>>,
     /// Its call sites by span.
     at: FxHashMap<Span, Vec<&'i CallSite>>,
-    /// Its iterations of each call's result, by the call's span.
-    iterations: FxHashMap<Span, Vec<&'i ResultIteration>>,
+    /// Its iterations of each call's result, by the call's span, with their positions among its
+    /// `result_iterations`.
+    iterations: FxHashMap<Span, Vec<(usize, &'i ResultIteration, &'i IteratedResult)>>,
     /// The spans of the calls whose result it hands on: it returns the object, or iterates it
     /// while suspending (a generator delegating to it). Its own callers then run while a
     /// generator that object holds is suspended.
@@ -255,15 +403,15 @@ fn file_uses(file: &FileSummary) -> FileUses<'_> {
         }
     }
     for (key, summary) in &file.local_functions {
-        for used in &summary.iteration_facts().result_iterations {
+        let iterations = summary.iteration_facts().result_iterations.iter();
+        for (n, used) in iterations.enumerate() {
             let of_caller = out.entry(key).or_default();
-            of_caller
-                .iterations
-                .entry(used.call)
-                .or_default()
-                .push(used);
-            if used.between.suspends {
-                of_caller.handed_on.insert(used.call);
+            for result in &used.results {
+                let at = of_caller.iterations.entry(result.call).or_default();
+                at.push((n, used, result));
+                if used.between.suspends {
+                    of_caller.handed_on.insert(result.call);
+                }
             }
         }
     }
@@ -339,12 +487,14 @@ struct Changing<'a> {
     place: Option<(&'a Path, Span, String)>,
 }
 
-/// The methods of `family` that change the container `it` iterates and can run while the
-/// generator `g` is suspended in it (`exposure`): the class's own methods first.
+/// The methods of `family` that change the container `self.<attr>` holds (`container`) and can
+/// run while the generator `g` is suspended iterating it (`exposure`): the class's own methods
+/// first.
 fn changing_methods<'m, 'a: 'm>(
     cx: &CheckContext<'a>,
     g: &Method<'a>,
-    it: &ContainerIteration,
+    attr: &str,
+    container: IteratedContainer,
     family: &[&'m Method<'a>],
     init_called: &FxHashSet<FuncKey>,
     exposure: &Exposure<'a>,
@@ -352,8 +502,8 @@ fn changing_methods<'m, 'a: 'm>(
     let breaks = |key: &FuncKey| {
         cx.index
             .summary(key)
-            .and_then(|s| s.iteration_facts().changes_self_containers.get(&it.attr))
-            .is_some_and(|c| it.container.broken_by(*c))
+            .and_then(|s| s.iteration_facts().changes_self_containers.get(attr))
+            .is_some_and(|c| container.broken_by(*c))
     };
     let mut out: Vec<Changing<'m>> = Vec::new();
     let mut seen: FxHashSet<&FuncKey> = FxHashSet::default();
@@ -364,11 +514,11 @@ fn changing_methods<'m, 'a: 'm>(
             continue;
         }
         if seen.insert(&m.key) {
-            let place = change_site(cx, m, it).map(|span| {
+            let place = change_site(cx, m, attr, container).map(|span| {
                 (
                     m.path,
                     span,
-                    format!("`{}` changes `self.{}`", m.key.qualname, it.attr),
+                    format!("`{}` changes `self.{attr}`", m.key.qualname),
                 )
             });
             out.push(Changing { key: &m.key, place });
@@ -412,15 +562,16 @@ fn reads(cx: &CheckContext<'_>, m: &Method<'_>) -> bool {
             .is_some_and(|d| d.is_property)
 }
 
-/// Where `m` changes the container `it` iterates: its own first change, or else its first call
-/// that changes it.
-fn change_site(cx: &CheckContext<'_>, m: &Method<'_>, it: &ContainerIteration) -> Option<Span> {
+/// Where `m` changes the container `self.<attr>` holds (`container`): its own first change, or
+/// else its first call that changes it.
+fn change_site(
+    cx: &CheckContext<'_>,
+    m: &Method<'_>,
+    attr: &str,
+    container: IteratedContainer,
+) -> Option<Span> {
     if let Some(span) = local_summary(cx.index, m)
-        .and_then(|s| {
-            s.iteration_facts()
-                .self_container_change_sites
-                .get(&it.attr)
-        })
+        .and_then(|s| s.iteration_facts().self_container_change_sites.get(attr))
         .and_then(|spans| spans.first())
     {
         return Some(*span);
@@ -434,7 +585,7 @@ fn change_site(cx: &CheckContext<'_>, m: &Method<'_>, it: &ContainerIteration) -
         .filter(|s| {
             changed_at(cx.index, s)
                 .iter()
-                .any(|(_, attr, change)| *attr == it.attr && it.container.broken_by(*change))
+                .any(|(_, a, change)| a == attr && container.broken_by(*change))
         })
         .map(|s| s.span)
         .min()
@@ -451,14 +602,14 @@ fn report_suspended(
     cx: &CheckContext<'_>,
     unit: &ModuleUnit<'_>,
     g: &Method<'_>,
-    it: &ContainerIteration,
+    iteration: Span,
+    attr: &str,
     changing: &[Changing<'_>],
     out: &mut Vec<Diagnostic>,
 ) {
     let Some(named) = changing.first() else {
         return;
     };
-    let attr = &it.attr;
     let related: Vec<RelatedLocation> = changing
         .iter()
         .filter_map(|c| {
@@ -470,7 +621,7 @@ fn report_suspended(
         out,
         "MUT113",
         unit,
-        it.span,
+        iteration,
         &g.key.qualname,
         format!("{}.{attr}", class_of(&g.key)),
         format!(
@@ -487,23 +638,23 @@ fn report_suspended(
     }
 }
 
+/// `changes`: what the callees of the call at `span` change ([`LoopCalls::changes`]).
+#[allow(clippy::too_many_arguments)]
 fn report_called(
     cx: &CheckContext<'_>,
     unit: &ModuleUnit<'_>,
     g: &Method<'_>,
-    it: &ContainerIteration,
+    iteration: Span,
+    attr: &str,
+    container: IteratedContainer,
     span: Span,
-    sites: &SitesBySpan<'_>,
+    changes: &[(&FuncKey, String, ContainerChange)],
     out: &mut Vec<Diagnostic>,
 ) {
-    let attr = &it.attr;
-    let mut changing: Vec<&FuncKey> = sites
-        .get(&(g.key.qualname.clone(), span))
-        .into_iter()
-        .flatten()
-        .flat_map(|site| changed_at(cx.index, site))
-        .filter(|(_, a, change)| a == attr && it.container.broken_by(*change))
-        .map(|(callee, _, _)| callee)
+    let mut changing: Vec<&FuncKey> = changes
+        .iter()
+        .filter(|(_, a, change)| a == attr && container.broken_by(*change))
+        .map(|(callee, _, _)| *callee)
         .collect();
     changing.sort();
     changing.dedup();
@@ -512,7 +663,7 @@ fn report_called(
     };
     let related = cx.related_at(
         &unit.input.path,
-        it.span,
+        iteration,
         format!("`{}` iterates `self.{attr}` here", g.key.qualname),
     );
     if let Some(d) = cx.emit(

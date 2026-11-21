@@ -15,12 +15,11 @@
 //! changes that attribute in place.
 
 use super::readonly_mutation::IN_PLACE;
-use super::{
-    CallInst, CallParts, ClassMethods, MUTABLE_BUILTINS, facts_run_at, is_memo_name, site_call,
-};
+use super::{CallInst, CallParts, ClassMethods, MUTABLE_BUILTINS, facts_run_at, site_call};
 use crate::{CheckContext, ModuleUnit};
 use heki_ast::Span;
 use heki_diagnostics::Diagnostic;
+use heki_effect::cache_flow::is_memo_name;
 use heki_effect::ownership::{self, Holder, Place, Source};
 use heki_effect::{
     CONTAINER_MUTATORS, CallHop, CallSite, Callee, EffectSummary, FuncKey, SiteRole, TypeCtx, Val,
@@ -47,6 +46,10 @@ pub(crate) fn mut112(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
     debug_assert!(
         cx.index.propagates_typed_writes(),
         "`typed_writes` decides for MUT112"
+    );
+    debug_assert!(
+        cx.index.opt_in_facts().return_origins,
+        "`opt_in_facts` decides for MUT112"
     );
     let classes = ClassMethods::new(cx.units, cx.index);
     let found: Vec<Vec<Diagnostic>> = cx
@@ -465,8 +468,7 @@ impl<'a, 'u> FnCheck<'a, 'u> {
         if tests.is_empty() {
             return;
         }
-        let idom =
-            ownership::immediate_dominators(self.f, &self.preds, |p, b| self.live.edge(p, b));
+        let idom = heki_ir::immediate_dominators(self.f, &self.preds, |p, b| self.live.edge(p, b));
         let test_at: FxHashMap<BlockId, usize> =
             tests.iter().enumerate().map(|(i, t)| (t.at, i)).collect();
         let mut heads: FxHashMap<BlockId, (usize, bool)> = FxHashMap::default();
