@@ -61,4 +61,5 @@ def test_the_tables_of_the_real_page_are_read() -> None:
     rows = build_docs.precision_rows(build_docs.MEASUREMENT)
     assert rows["EFF101"]["sample"] == "50" and rows["EFF101"]["f"] == "9"
     assert rows["EFF101"]["right"] == "82%"
-    assert build_docs.precision_rows(build_docs.CERTIFICATION) == {}
+    certified = build_docs.precision_rows(build_docs.CERTIFICATION)
+    assert certified["MUT114"]["census"] == "5" and certified["MUT114"]["holdout_false"] == "0"
