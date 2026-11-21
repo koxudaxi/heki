@@ -127,6 +127,66 @@ const SAME_ITEMS: &[&str] = &[
     "dict",
 ];
 
+/// The most times a loop runs, as the code bounds it ([`FnIndex::fixed_trips`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Trips {
+    /// The code fixes the count, whatever the input: its iterable is built from constants
+    /// (`range(1000)`, a display, a string constant), a test pins its length (`len(x) == 40`),
+    /// or a counter the code starts and steps runs it. The loop may still leave earlier.
+    Fixed(u32),
+    /// A constant only caps what may be input: a length test (`if len(x) > 1000: raise`), a
+    /// slice (`rows[:100]`), a `zip` with an iterable the code does not bound. An upper bound,
+    /// not a fixed count.
+    Capped(u32),
+}
+
+impl Trips {
+    fn of(n: u32, fixed: bool) -> Self {
+        if fixed {
+            Self::Fixed(n)
+        } else {
+            Self::Capped(n)
+        }
+    }
+
+    /// The most times the loop runs.
+    pub fn at_most(self) -> u32 {
+        match self {
+            Self::Fixed(n) | Self::Capped(n) => n,
+        }
+    }
+}
+
+/// A read down attributes and constant keys from a root ([`FnIndex::access_path`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AccessPath {
+    root: VarId,
+    /// From the value up to the root.
+    keys: Vec<PathKey>,
+    /// The default of a last read by `get(key, default)`.
+    default: Option<VarId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PathKey {
+    Attr(String),
+    Str(String),
+    Int(i64),
+}
+
+/// How many reads an access path may chain.
+const MAX_ACCESS_STEPS: u32 = 8;
+
+/// The key a subscript or `get` reads: its string constant, or an integer the code fixes.
+fn path_key(key_const: Option<&str>, index: Option<paths::Scalar<'_>>) -> Option<PathKey> {
+    match (key_const, index) {
+        (Some(k), _) | (None, Some(paths::Scalar::Str(k))) => Some(PathKey::Str(k.to_owned())),
+        (None, Some(paths::Scalar::Int(n))) => Some(PathKey::Int(n)),
+        _ => None,
+    }
+}
+
 /// What a builtin wrapper of iterables yields ([`FnIndex::item_step`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ItemStep {
@@ -747,7 +807,7 @@ impl<'a> FnIndex<'a> {
         let [arg] = args else {
             return (args.is_empty() && name != "sorted").then_some((kind, 0));
         };
-        let n = self.iter_bound_depth(*arg, &mut |_| None, depth + 1, SMALL_MAX)?;
+        let n = self.iter_bound_depth(*arg, &mut |_| None, depth + 1, SMALL_MAX, &mut false)?;
         Some((kind, n))
     }
 
@@ -1199,18 +1259,21 @@ impl<'a> FnIndex<'a> {
     /// iterable, `.items()` / `.keys()` / `.values()`). `leaf` decides a load of a global or an
     /// attribute this module's constants do not cover (the Advisory lane knows other modules).
     pub fn iter_bound(&self, v: VarId, leaf: &mut dyn FnMut(&Inst) -> Option<u32>) -> Option<u32> {
-        self.iter_bound_depth(v, leaf, 0, SMALL_MAX)
+        self.iter_bound_depth(v, leaf, 0, SMALL_MAX, &mut false)
     }
 
     /// [`Self::iter_bound`] up to `cap` items. Past [`SMALL_MAX`] it also counts what holds any
     /// number of items the code fixes: a slice by constant bounds, a tuple display, a list or set
-    /// display nothing grows, and a module's string and string-tuple constants.
+    /// display nothing grows, and a module's string and string-tuple constants. `capped` is set
+    /// when the bound only caps what may be input (a slice, a `zip` with an iterable it does not
+    /// bound) instead of coming from collections the code fixes.
     fn iter_bound_depth(
         &self,
         v: VarId,
         leaf: &mut dyn FnMut(&Inst) -> Option<u32>,
         depth: u32,
         cap: u32,
+        capped: &mut bool,
     ) -> Option<u32> {
         if depth > MAX_NESTED_SIZES {
             return None;
@@ -1230,17 +1293,21 @@ impl<'a> FnIndex<'a> {
                     range_len(&ints?).and_then(|n| within(n as usize))
                 }
                 ItemStep::Same(x) | ItemStep::Kept(x) | ItemStep::Mapped(x) => {
-                    self.iter_bound_depth(x, leaf, depth + 1, cap)
+                    self.iter_bound_depth(x, leaf, depth + 1, cap, capped)
                 }
-                ItemStep::Zip(args) => args
-                    .into_iter()
-                    .filter_map(|a| self.iter_bound_depth(a, leaf, depth + 1, cap))
-                    .min(),
+                ItemStep::Zip(args) => {
+                    let bounds: Vec<Option<u32>> = args
+                        .into_iter()
+                        .map(|a| self.iter_bound_depth(a, leaf, depth + 1, cap, capped))
+                        .collect();
+                    *capped |= bounds.iter().any(Option::is_none);
+                    bounds.into_iter().flatten().min()
+                }
             };
         }
         let past_small = cap > SMALL_MAX;
         match &inst.kind {
-            InstKind::Copy { src, .. } => self.iter_bound_depth(*src, leaf, depth + 1, cap),
+            InstKind::Copy { src, .. } => self.iter_bound_depth(*src, leaf, depth + 1, cap, capped),
             InstKind::Const {
                 literal: ConstLiteral::Str(s),
                 ..
@@ -1249,7 +1316,10 @@ impl<'a> FnIndex<'a> {
                 index,
                 is_slice: true,
                 ..
-            } if past_small && !self.grows(&[v], &[], None) => self.slice_len(*index),
+            } if past_small && !self.grows(&[v], &[], None) => {
+                *capped = true;
+                self.slice_len(*index)
+            }
             InstKind::AllocBuiltin { dst, kind, elems }
                 if past_small
                     && (0..elems.len()).all(|i| !self.f.is_starred(*dst, i))
@@ -1578,33 +1648,55 @@ impl<'a> FnIndex<'a> {
         let made_iter = self.f.block(lp.header).insts.first()?.kind.operands();
         // The `MakeIter` of the header's `IterNext`, before the loop.
         let (at, _) = self.f.def_inst(*made_iter.first()?)?;
-        self.iter_bound_depth(iterable, leaf, 0, cap)
-            .or_else(|| self.guarded_len(iterable, at, &lp.body, cap))
+        self.iter_bound_depth(iterable, leaf, 0, cap, &mut false)
+            .or_else(|| self.guarded_len(iterable, at, &lp.body, cap, &mut false))
     }
 
-    /// The most times the loop `lp` runs, when the code fixes it at any count: what its
-    /// iterable yields (past [`SMALL_MAX`] too: `range(1000)`, `rows[:100]`, `zip(rows,
-    /// range(50))`, a display or string constant of any length), a length test every path to
-    /// the loop passes (up to [`LEN_CAP_MAX`]), or the counter a `while` loop steps
-    /// ([`Self::counted_trips`]). `Open` when nothing these facts read fixes it. No claim rests
-    /// on a size: an open count only leaves the loop data-sized to the rules that read it so.
-    /// `leaf` decides loads of globals and attributes.
+    /// The most times the loop `lp` runs, when something the code states bounds it at any count
+    /// ([`Trips`]): what its iterable yields (past [`SMALL_MAX`] too: `range(1000)`, a display or
+    /// string constant of any length, `rows[:100]`, `zip(rows, range(50))`), a length test every
+    /// path to the loop passes, on the iterable or on the same access path (up to
+    /// [`LEN_CAP_MAX`]), or the counter a `while` loop steps ([`Self::counted_trips`]). `Open`
+    /// when nothing these facts read bounds it. No claim rests on a size: an open count only
+    /// leaves the loop data-sized to the rules that read it so. `leaf` decides loads of globals
+    /// and attributes.
     pub fn fixed_trips(
         &self,
         lp: &NaturalLoop,
         leaf: &mut dyn FnMut(&Inst) -> Option<u32>,
-    ) -> Answer<u32> {
-        if let LoopBound::ConstSmall(n) = lp.bound
-            && self.recorded_trips
-        {
-            return Answer::Known(n);
-        }
-        let found = if self.loop_iterable(lp).is_some() {
-            self.fixed_trip(lp, leaf, u32::MAX)
-        } else {
-            self.counted_trips(lp, u32::MAX)
+    ) -> Answer<Trips> {
+        let Some(iterable) = self.loop_iterable(lp) else {
+            return self
+                .counted_trips(lp, u32::MAX)
+                .map_or(Answer::Open, |n| Answer::Known(Trips::Fixed(n)));
         };
-        found.map_or(Answer::Open, Answer::Known)
+        let mut capped = false;
+        if let Some(n) = self.iter_bound_depth(iterable, leaf, 0, u32::MAX, &mut capped) {
+            return Answer::Known(Trips::of(n, !capped));
+        }
+        // The `MakeIter` of the header's `IterNext`, before the loop.
+        let made = self
+            .f
+            .block(lp.header)
+            .insts
+            .first()
+            .map(|i| i.kind.operands());
+        let at = made
+            .and_then(|m| m.first().copied())
+            .and_then(|m| self.shape().defining(m))
+            .map(|(b, _)| b);
+        let mut pinned = false;
+        let guarded =
+            at.and_then(|at| self.guarded_len(iterable, at, &lp.body, LEN_CAP_MAX, &mut pinned));
+        match (guarded, lp.bound) {
+            (Some(n), _) => Answer::Known(Trips::of(n, pinned)),
+            // A count the IR records without saying where it comes from (the iterable a
+            // generator expression's creator passes): only a bound.
+            (None, LoopBound::ConstSmall(n)) if self.recorded_trips => {
+                Answer::Known(Trips::Capped(n))
+            }
+            (None, _) => Answer::Open,
+        }
     }
 
     /// The most items `v` holds in the block `at`, and while the blocks `during` run, by the
@@ -1613,7 +1705,14 @@ impl<'a> FnIndex<'a> {
     /// comparison chains (`if not 1 <= len(v) <= 6: raise ...`), when nothing on the way to `at`
     /// or in `during` (a loop over `v`, whose iterator sees what the body appends) grows `v`;
     /// what happens to it after (`return {"cards": cards}`) leaves the length there as it is.
-    fn guarded_len(&self, v: VarId, at: BlockId, during: &[BlockId], cap: u32) -> Option<u32> {
+    fn guarded_len(
+        &self,
+        v: VarId,
+        at: BlockId,
+        during: &[BlockId],
+        cap: u32,
+        pinned: &mut bool,
+    ) -> Option<u32> {
         let v = self.copied_from(v);
         let measured = self.measured.get_or_init(|| {
             self.f
@@ -1623,26 +1722,203 @@ impl<'a> FnIndex<'a> {
                 .filter_map(|i| Some(self.copied_from(self.len_argument(i.kind.dst()?)?)))
                 .collect()
         });
-        if !measured.contains(&v) {
+        let path = self.access_path(v);
+        if !measured.contains(&v) && path.is_none() {
             return None;
         }
-        let bound = self
-            .len_guards()
-            .iter()
-            .filter(|g| g.var == v && g.bound <= cap && self.dominates(g.edge_to, at))
-            .map(|g| g.bound)
-            .min()?;
         let mut on_the_way = self.reaching(at);
         for b in during {
             on_the_way[b.0 as usize] = true;
         }
-        let origins = Origins {
-            roots: vec![v],
-            shared: true,
-            ..Origins::default()
+        let unchanged = |values: Vec<VarId>| {
+            let origins = Origins {
+                roots: values,
+                shared: true,
+                ..Origins::default()
+            };
+            self.growth(&origins, None, Some(&on_the_way)).is_some()
         };
-        self.growth(&origins, None, Some(&on_the_way))
-            .and(Some(bound))
+        let guards: Vec<&LenGuard> = self
+            .len_guards()
+            .iter()
+            .filter(|g| g.bound <= cap && self.dominates(g.edge_to, at))
+            .collect();
+        // A test of the value itself holds while nothing on the way grows it.
+        let same: Vec<&LenGuard> = guards.iter().copied().filter(|g| g.var == v).collect();
+        let mut tested: Vec<&LenGuard> = if !same.is_empty() && unchanged(vec![v]) {
+            same
+        } else {
+            Vec::new()
+        };
+        // A test of another read of the same access path from the same root (`if
+        // len(report.get("runs", [])) != 40: raise`, then `for run in report["runs"]`), whose
+        // `get` default the test rejects so that the key is there, holds while nothing on the
+        // way grows the reads or changes the root: a store into it, a deletion from it, or a call
+        // it is passed to (reading it is what the path does).
+        if let Some(p) = &path {
+            let linked: Vec<&LenGuard> = guards
+                .iter()
+                .copied()
+                .filter(|g| {
+                    g.var != v
+                        && self.access_path(g.var).is_some_and(|q| {
+                            q.root == p.root
+                                && q.keys == p.keys
+                                && q.default.is_none_or(|d| {
+                                    self.rejects_length(d, g.bound, self.pins_len(g))
+                                })
+                        })
+                })
+                .collect();
+            let root = self.aliases(&[p.root]);
+            let mut ops = Vec::new();
+            let root_changed = self
+                .f
+                .blocks
+                .iter()
+                .filter(|bb| on_the_way[bb.id.0 as usize])
+                .flat_map(|bb| &bb.insts)
+                .any(|i| match &i.kind {
+                    InstKind::AttrLoad { .. } => false,
+                    InstKind::AttrStore { obj, .. }
+                    | InstKind::AttrDelete { obj, .. }
+                    | InstKind::SubscriptDelete { obj, .. }
+                        if root.contains(obj) =>
+                    {
+                        true
+                    }
+                    _ => {
+                        ops.clear();
+                        self.grown_operands(i, false, &mut ops);
+                        ops.iter().any(|o| root.contains(o))
+                    }
+                });
+            let mut values = vec![v];
+            values.extend(linked.iter().map(|g| g.var));
+            if !linked.is_empty() && !root_changed && unchanged(values) {
+                tested.extend(linked);
+            }
+        }
+        let bound = tested.iter().map(|g| g.bound).min()?;
+        *pinned = tested.iter().any(|g| g.bound == bound && self.pins_len(g));
+        Some(bound)
+    }
+
+    /// The access path `v` is read down: its root and the attributes and constant keys from
+    /// it (`report["runs"]`, `cfg.items`, `report.get("runs", [])`, whose default it keeps).
+    fn access_path(&self, v: VarId) -> Option<AccessPath> {
+        let shape = self.shape();
+        let mut keys = Vec::new();
+        let mut default = None;
+        let mut cur = shape.copy_root(v);
+        for step in 0..MAX_ACCESS_STEPS {
+            let key = match shape.inst(cur).map(|i| &i.kind) {
+                Some(InstKind::AttrLoad { obj, attr, .. }) => {
+                    cur = shape.copy_root(*obj);
+                    PathKey::Attr(attr.clone())
+                }
+                Some(InstKind::SubscriptLoad {
+                    obj,
+                    index,
+                    key_const,
+                    is_slice: false,
+                    ..
+                }) => {
+                    let key = path_key(key_const.as_deref(), paths::scalar(self, *index))?;
+                    cur = shape.copy_root(*obj);
+                    key
+                }
+                // Only the last read may be a `get`: a missing key gives the default there.
+                Some(InstKind::MethodCall {
+                    recv,
+                    method,
+                    args,
+                    kwargs,
+                    star_from: None,
+                    ..
+                }) if step == 0
+                    && method == "get"
+                    && kwargs.is_empty()
+                    && matches!(args.len(), 1 | 2) =>
+                {
+                    let key = path_key(None, paths::scalar(self, args[0]))?;
+                    default = args.get(1).copied();
+                    cur = shape.copy_root(*recv);
+                    key
+                }
+                _ => break,
+            };
+            keys.push(key);
+        }
+        (!keys.is_empty()).then_some(AccessPath {
+            root: cur,
+            keys,
+            default,
+        })
+    }
+
+    /// Whether the test giving `g` fixes the length at its bound (`len(x) == N`, or `!= N`
+    /// leaving), not only caps it.
+    fn pins_len(&self, g: &LenGuard) -> bool {
+        let shape = self.shape();
+        let [from] = shape.preds(g.edge_to) else {
+            return false;
+        };
+        let Terminator::Branch { cond, then_bb, .. } = self.f.block(*from).terminator else {
+            return false;
+        };
+        let mut holds = then_bb == g.edge_to;
+        let mut v = shape.copy_root(cond);
+        for _ in 0..MAX_ACCESS_STEPS {
+            match shape.inst(v).map(|i| &i.kind) {
+                Some(InstKind::UnaryOp {
+                    op: UnaryOpKind::Not,
+                    operand,
+                    ..
+                }) => {
+                    holds = !holds;
+                    v = shape.copy_root(*operand);
+                }
+                Some(InstKind::Compare { op, lhs, rhs, .. }) => {
+                    let equal = matches!(
+                        (op, holds),
+                        (CompareOpKind::Eq, true) | (CompareOpKind::NotEq, false)
+                    );
+                    let bound = |x: VarId| {
+                        paths::scalar(self, x) == Some(paths::Scalar::Int(i64::from(g.bound)))
+                    };
+                    let measures = |x: VarId| self.len_argument(x).is_some();
+                    return equal
+                        && ((measures(*lhs) && bound(*rhs)) || (measures(*rhs) && bound(*lhs)));
+                }
+                _ => return false,
+            }
+        }
+        false
+    }
+
+    /// Whether a test that the length is at most `bound` (exactly `bound` when `pinned`) fails
+    /// for the value `default`: `None` has no length, and a literal one whose length breaks it.
+    fn rejects_length(&self, default: VarId, bound: u32, pinned: bool) -> bool {
+        let shape = self.shape();
+        let len = match shape.inst(shape.copy_root(default)).map(|i| &i.kind) {
+            Some(InstKind::Const {
+                literal: ConstLiteral::None,
+                ..
+            }) => return true,
+            Some(InstKind::Const {
+                literal: ConstLiteral::Str(text),
+                ..
+            }) => text.chars().count(),
+            Some(InstKind::AllocBuiltin { dst, elems, .. })
+                if shape.first_starred(*dst).is_none() =>
+            {
+                elems.len()
+            }
+            _ => return false,
+        };
+        let len = u32::try_from(len).unwrap_or(u32::MAX);
+        len > bound || (pinned && len != bound)
     }
 
     fn preds(&self) -> &[Vec<BlockId>] {
