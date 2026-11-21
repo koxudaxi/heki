@@ -342,6 +342,37 @@ fn origin_walks_past_their_budget_return_unknown() {
     );
 }
 
+/// A loop carrying a long chain of assignments in reverse (`v0 = v1`, ..., `v2999 = shared or []`,
+/// the names bound to `None` before it): the value moves one link per iteration, and the
+/// ownership fixpoint follows it in one sweep along the chain, visiting what a value grows
+/// into instead of every instruction again for each link.
+#[test]
+fn ownership_through_a_long_chain_a_loop_carries_in_reverse_is_found_in_one_sweep() {
+    let links = 3_000;
+    let mut lines = vec!["def carry(shared, items):".to_owned()];
+    for i in 0..=links {
+        lines.push(format!("    v{i} = None"));
+    }
+    lines.push("    for _ in items:".to_owned());
+    for i in 0..links {
+        lines.push(format!("        v{i} = v{}", i + 1));
+    }
+    lines.push(format!("        v{links} = shared or []"));
+    lines.push("    v0.append(1)".to_owned());
+    let p = Project::new("bounds_reverse_loop_chain");
+    p.write("pyproject.toml", MUT112_CONFIG)
+        .write("m.py", &(lines.join("\n") + "\n"));
+    let found = check_within(&p, Duration::from_secs(20));
+    assert_eq!(
+        found
+            .iter()
+            .filter(|d| d["rule_code"] == "MUT112")
+            .map(|d| d["line"].as_u64().unwrap())
+            .collect::<Vec<_>>(),
+        vec![2 * links as u64 + 5]
+    );
+}
+
 /// A function appending each alias of a long chain to a list (one list for all of them, or a new
 /// list per alias) and returning the last alias or its parameter, and a caller changing what it
 /// returns.

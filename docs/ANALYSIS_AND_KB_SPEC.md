@@ -600,8 +600,9 @@ which module imports which.
    fixpoint only joins, and each change adds a kind or a parameter to one value. A second
    definition of the same qualname appends its nodes after the first one's. The facts take
    part in Early Cutoff like every summary field.
-3. **The forward analysis** (`heki_rules`, per function, to a fixpoint) joins the kinds of a
-   value at phis, maps a project call's result through its callees' `returns_origins` and the
+3. **The forward analysis** (`heki_rules`, per function, to a fixpoint that visits each phi and
+   instruction once, then again only when a value it reads grows) joins the kinds of a value at
+   phis, maps a project call's result through its callees' `returns_origins` and the
    bound arguments, and takes a closure's variable from what the enclosing function bound to it
    (`MakeClosure` captures; functions are analyzed enclosing first). It follows the blocks and
    edges of `ownership::Live` only. A side of an `is` test (of the branch it decides) is the

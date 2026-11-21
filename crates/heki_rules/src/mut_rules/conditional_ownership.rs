@@ -32,6 +32,8 @@ use heki_ir::{
 };
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 
 /// The help of a change in the function.
 const COPY_FIRST: &str = "copy the borrowed value before changing it (`list(...)`, `dict(...)`, `.copy()`), so that every path changes an object of its own";
@@ -341,6 +343,14 @@ struct Change {
     /// The change only removes (`del x[k]`, `x.pop(k)`, `x.clear()`, ...): on an empty new
     /// object it does nothing.
     removes: bool,
+}
+
+/// A phi (with its block) or an instruction (with the value it defines) the ownership fixpoint
+/// derives a value at.
+#[derive(Clone, Copy)]
+enum Visit<'a> {
+    Phi(BlockId, &'a heki_ir::PhiNode),
+    Inst(&'a Inst, VarId),
 }
 
 /// Container methods that only remove.
@@ -813,20 +823,53 @@ impl<'a, 'u> FnCheck<'a, 'u> {
     }
 
     /// The values of the function's variables, to a fixpoint: a phi joins its inputs, and a
-    /// value is derived again when an operand's grows. A value only grows (each kind is set
-    /// once), so the loop ends.
+    /// value is derived again when a value it reads grows. Each phi and instruction is visited
+    /// once in reverse postorder, then again only when a value it reads grows, always the
+    /// earliest pending one in reverse postorder first (a phi input leaves out the objects an
+    /// `is` test tested it against, so it reads those first), so a chain a loop carries one link
+    /// per iteration is followed link by link without visiting the rest of the function again.
+    /// A value only grows (each kind is set once, each flag turns once), so each is visited a
+    /// bounded number of times.
     fn fixpoint(&mut self) {
-        let rpo: Vec<BlockId> = self
-            .f
-            .rpo_blocks()
-            .into_iter()
-            .filter(|b| self.live.block(*b))
-            .collect();
-        loop {
-            let mut changed = false;
-            for &bb in &rpo {
-                let block = self.f.block(bb);
-                for phi in &block.phis {
+        let mut visits: Vec<Visit<'a>> = Vec::new();
+        // What reads each value, by visit: the phis it is an input of, and those whose inputs an
+        // `is` test that failed on the way tested against it; the instructions it is an operand
+        // of, and those making a new object kept in it.
+        let mut readers: FxHashMap<VarId, Vec<usize>> = FxHashMap::default();
+        let f = self.f;
+        for bb in f.rpo_blocks().into_iter().filter(|b| self.live.block(*b)) {
+            let block = f.block(bb);
+            for phi in &block.phis {
+                for &(from, v) in &phi.incoming {
+                    let tested = self.not_same.get(&(phi.dst, from)).into_iter().flatten();
+                    for read in std::iter::once(v).chain(tested.copied()) {
+                        readers.entry(read).or_default().push(visits.len());
+                    }
+                }
+                visits.push(Visit::Phi(bb, phi));
+            }
+            for inst in &block.insts {
+                let Some(dst) = inst.kind.dst() else {
+                    continue;
+                };
+                let containers = self.kept.get(&inst.span).into_iter().flatten().filter_map(
+                    |place| match place {
+                        Place::Object(c) => Some(*c),
+                        Place::Global(_) | Place::Cell(_) => None,
+                    },
+                );
+                for read in inst.kind.operands().into_iter().chain(containers) {
+                    readers.entry(read).or_default().push(visits.len());
+                }
+                visits.push(Visit::Inst(inst, dst));
+            }
+        }
+        let mut queued = vec![true; visits.len()];
+        let mut pending: BinaryHeap<Reverse<usize>> = (0..visits.len()).map(Reverse).collect();
+        while let Some(Reverse(i)) = pending.pop() {
+            queued[i] = false;
+            let grown = match visits[i] {
+                Visit::Phi(bb, phi) => {
                     let mut joined: Option<Own> = None;
                     for &(from, v) in &phi.incoming {
                         if v == phi.dst || !self.live.edge(from, bb) {
@@ -834,21 +877,23 @@ impl<'a, 'u> FnCheck<'a, 'u> {
                         }
                         joined = join_opt(joined, self.incoming(from, phi.dst, v));
                     }
-                    if let Some(o) = joined {
-                        changed |= self.grow(phi.dst, o);
-                    }
+                    let grew = joined.is_some_and(|o| self.grow(phi.dst, o));
+                    grew.then_some(phi.dst)
                 }
-                for inst in &block.insts {
-                    let Some(dst) = inst.kind.dst() else {
-                        continue;
-                    };
-                    if let Some(o) = self.transfer(inst) {
-                        changed |= self.grow(dst, o);
-                    }
+                Visit::Inst(inst, dst) => {
+                    let grew = self.transfer(inst).is_some_and(|o| self.grow(dst, o));
+                    grew.then_some(dst)
                 }
-            }
-            if !changed {
-                break;
+            };
+            for &reader in grown
+                .and_then(|var| readers.get(&var))
+                .into_iter()
+                .flatten()
+            {
+                if !queued[reader] {
+                    queued[reader] = true;
+                    pending.push(Reverse(reader));
+                }
             }
         }
     }
