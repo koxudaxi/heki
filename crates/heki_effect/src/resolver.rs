@@ -322,6 +322,11 @@ pub struct ClassDecl {
     /// the name from then on, which no string constant of the class or its bases fixes.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub rebound_attrs: BTreeSet<String>,
+    /// The class-body names bound to something other than a constant, a display, or a field
+    /// specifier (`dataclasses.field(...)`, `attrs.field(...)`): methods, properties, and any
+    /// call, which may make a descriptor. Reading such a name on an instance may run code.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub code_attrs: BTreeSet<String>,
 }
 
 /// What `@dataclass` makes of the class attributes of a class's fields ([`ClassDecl::dataclass`]).
@@ -2136,6 +2141,42 @@ impl ProjectDecls {
         })
     }
 
+    /// Whether reading `attr` on an instance of the project class `class` (or, under assumption
+    /// R2, of a project subclass) reads a plain attribute and runs no code of the project: a
+    /// class along its MRO declares it (a field, a slot, or what its body or methods store), no
+    /// class of its MRO or of its subclasses binds it to a method, property, or other call in
+    /// its body or defines `__getattr__` or `__getattribute__`, every base is a project class
+    /// (or `object`, `NamedTuple`, `Generic`), and no metaclass heki does not know creates the
+    /// class.
+    pub fn plain_attr(&self, class: &str, attr: &str) -> bool {
+        let class = self.canonical(class);
+        let decls_of = |classes: Vec<String>| -> Option<Vec<&ClassDecl>> {
+            classes
+                .iter()
+                .filter(|c| !PLAIN_BASES.contains(&c.as_str()))
+                .map(|c| {
+                    self.read(|k| note(&mut k.class_facts, c));
+                    self.class(c)
+                })
+                .collect()
+        };
+        let (Some(mro), Some(subclasses)) = (
+            decls_of(self.mro(&class)),
+            decls_of(self.subclasses_of(&class)),
+        ) else {
+            return false;
+        };
+        // `__getattr__` runs for an attribute an instance lacks, `__getattribute__` for all.
+        let plain_in = |d: &&ClassDecl| {
+            !d.code_attrs.contains(attr)
+                && !d.members.contains("__getattribute__")
+                && !d.members.contains("__getattr__")
+        };
+        !self.has_custom_metaclass(&class)
+            && mro.iter().chain(&subclasses).all(plain_in)
+            && mro.iter().any(|d| d.members.contains(attr))
+    }
+
     /// The class whose `__hash__` the instances of the project class `class` use: the first
     /// class along its MRO whose body defines `__hash__` as a method, or binds `__eq__` without
     /// binding `__hash__` (Python then sets its `__hash__` to `None`). `None` when no project
@@ -3094,6 +3135,7 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
     decls.small_globals = input.ir.constants.displays.clone();
     (decls.grown_globals, decls.rebound_globals) = foreign_grown_globals(input, &decls.imports);
     attr_displays(input, &mut decls);
+    code_attrs(input, &mut decls);
     let rebound: Vec<(String, String)> = class_attrs_rebound(input, &decls)
         .into_iter()
         .map(|(class, attr)| (class.to_owned(), attr.to_owned()))
@@ -3208,6 +3250,72 @@ fn attr_displays(input: &ModuleInput<'_>, decls: &mut ModuleDecls) {
             note_function_attrs(input, f, &selfs, &mut class.attr_displays);
         }
     }
+}
+
+/// External bases whose instances read the attributes of their subclasses as plain ones: a
+/// `NamedTuple`'s fields are tuple items, and `Generic` adds only type parameters.
+const PLAIN_BASES: &[&str] = &[
+    "object",
+    "builtins.object",
+    "typing.NamedTuple",
+    "typing_extensions.NamedTuple",
+    "typing.Generic",
+    "typing_extensions.Generic",
+];
+
+/// The field specifiers whose call in a class body declares a field and leaves no descriptor.
+const FIELD_SPECIFIERS: &[&str] = &[
+    "field",
+    "dataclasses.field",
+    "attr.ib",
+    "attr.attrib",
+    "attr.field",
+    "attrs.field",
+];
+
+/// `ClassDecl::code_attrs` of the module's classes, from their bodies.
+fn code_attrs(input: &ModuleInput<'_>, decls: &mut ModuleDecls) {
+    for f in input.ir.functions.iter().filter(|f| f.is_class_body) {
+        // The semantic model declares every class the IR has (one AST).
+        if let Some(class) = decls.classes.get_mut(&f.qualname) {
+            class.code_attrs = class_body_code_attrs(f);
+        }
+    }
+}
+
+/// The names a class body binds to something that may run code when read on an instance.
+fn class_body_code_attrs(f: &IrFunction) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    {
+        let shape = heki_ir::walk::FnShape::new(f);
+        for inst in f.blocks.iter().flat_map(|b| &b.insts) {
+            let Some(attr) = inst
+                .kind
+                .dst()
+                .and_then(|d| f.var_name(d))
+                .filter(|n| !n.starts_with('.'))
+            else {
+                continue;
+            };
+            let value = match &inst.kind {
+                InstKind::Copy { src, .. } => shape.inst(shape.copy_root(*src)).map(|i| &i.kind),
+                kind => Some(kind),
+            };
+            let plain = match value {
+                Some(
+                    InstKind::Const { .. }
+                    | InstKind::AllocBuiltin { .. }
+                    | InstKind::DictLiteral { .. },
+                ) => true,
+                Some(InstKind::Call { callee, .. }) => FIELD_SPECIFIERS.contains(&callee.as_str()),
+                _ => false,
+            };
+            if !plain {
+                out.insert(attr.to_owned());
+            }
+        }
+    }
+    out
 }
 
 /// [`attr_displays`] of one class body or method (`selfs`: the variables holding `self`).

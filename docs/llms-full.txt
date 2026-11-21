@@ -736,8 +736,8 @@ $ heki check --heuristic
 
 The first command runs the exact rules (hand-checked samples of their reports found none wrong
 about the code) and the rules of the [contracts](https://heki.koxudaxi.dev/configuration/#contracts) you declare. In
-0.2.0 the exact rules are the proven tier of the `OPT` rewrite rules: the reports whose rewrite
-heki proves safe. A text run says how many heuristic rules it left off. `--heuristic` runs those too; their reports can be wrong about the code, and every
+0.2.0 the exact rules are the proven tier of the `OPT` rewrite rules (the reports whose rewrite
+heki proves safe) and the exact tier of `OPT113`. A text run says how many heuristic rules it left off. `--heuristic` runs those too; their reports can be wrong about the code, and every
 output labels them ([Rule Precision](https://heki.koxudaxi.dev/precision/)).
 
 heki checks every Python file under the current directory, except the
@@ -1505,7 +1505,7 @@ Two independent questions decide whether heki offers the rewrite:
 | ------------- | ----- | --------- | ---------- |
 | Unconditional (faster from the first iteration) | `OPT101`, `OPT102` | exact (the proven reports) | `heki check --fix` |
 | Size-dependent | `OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130` | exact (the proven reports) | `heki check --fix --include-size-dependent`, or `--fix --profile <dump>` in hot functions |
-| Size-dependent, no rewrite | `OPT103`, `OPT112`, `OPT113` | `OPT103` exact (the proven reports), `OPT112` and `OPT113` heuristic | none: suggestion only |
+| Size-dependent, no rewrite | `OPT103`, `OPT112`, `OPT113` | `OPT103` exact (the proven reports), `OPT113` exact (its exact tier), `OPT112` heuristic | none: suggestion only |
 
 ### When the size is fixed
 
@@ -1805,7 +1805,8 @@ For custom tooling, `--output-format json` gives every field: see
 
 heki 0.1 ran every rule that is not opt-in by default. Since rules have a certainty, only the
 exact ones do: in 0.2.0, the proven tier of the eight `OPT` rewrite rules (`OPT101`-`OPT103`,
-`OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130`), their reports whose rewrite heki proves safe.
+`OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130`), their reports whose rewrite heki proves safe,
+and the exact tier of `OPT113`.
 
 - `lint.heuristic = true` restores the rules of 0.1, now labelled `heuristic` in every output.
 - A baseline keeps its entries: their keys (file, function, rule, target) do not change.
@@ -2059,7 +2060,7 @@ Quadratic patterns heki can rewrite, each proven safe by the alias analysis befo
 | OPT110 | [loop-linear-membership](https://heki.koxudaxi.dev/rules/loop-linear-membership/) | Size-dependent `e in lst` inside a loop -> hoist `set` outside loop. | 🔧 |
 | OPT111 | [loop-linear-dedup](https://heki.koxudaxi.dev/rules/loop-linear-dedup/) | Size-dependent `if v not in seen: seen.append(v)` -> auxiliary `set`. | 🔧 |
 | OPT112 | [loop-linear-list-lookup](https://heki.koxudaxi.dev/rules/loop-linear-list-lookup/) | Size-dependent `list.index` / `list.remove` / `list.count` inside a loop (repeated linear scans). | ≈ |
-| OPT113 | [nested-loop-equijoin](https://heki.koxudaxi.dev/rules/nested-loop-equijoin/) | Size-dependent nested-loop equi-join (`for a in A: for b in B: if a.k == b.k`) -> `dict` index. | ≈ |
+| OPT113 | [nested-loop-equijoin](https://heki.koxudaxi.dev/rules/nested-loop-equijoin/) | Size-dependent nested-loop equi-join (`for a in A: for b in B: if a.k == b.k`) -> `dict` index. |  |
 | OPT120 | [list-front-pop](https://heki.koxudaxi.dev/rules/list-front-pop/) | Size-dependent `q.pop(0)` / `del q[0]` / `q = q[1:]` -> `collections.deque`. | 🔧 |
 | OPT121 | [list-front-insert](https://heki.koxudaxi.dev/rules/list-front-insert/) | Size-dependent `q.insert(0, v)` -> `collections.deque`. | 🔧 |
 | OPT130 | [loop-invariant-container-rebuild](https://heki.koxudaxi.dev/rules/loop-invariant-container-rebuild/) | Size-dependent loop-invariant container reconstruction (`e in set(keys)`). | 🔧 |
@@ -2081,8 +2082,10 @@ Every heki report is **exact** or **heuristic**:
   without ruling it out. It can be wrong about the code, and every output labels it `heuristic`.
 
 A rule is exact once it is certified (below), and heuristic until then. An exact rule's reports
-are exact, with one exception: an `OPT` rule's report whose rewrite heki could not prove safe
-is heuristic, as that premise is open. Only exact reports are shown by default.
+are exact, with one exception: an `OPT` rule's report that did not establish a premise of the
+rule's exact tier is heuristic, as that premise is open: a rewrite heki could not prove safe, a
+loop whose trip count the code fixes, or an `OPT113` join whose rule page premises do not all
+hold. Only exact reports are shown by default.
 
 - A heuristic rule runs when `select` or `extend-select` names its code or name. With
   `lint.heuristic = true` (`--heuristic`), the heuristic rules that are not opt-in also run by
@@ -2094,7 +2097,8 @@ is heuristic, as that premise is open. Only exact reports are shown by default.
   ends with a note saying how many.
 
 See [Rule selection](https://heki.koxudaxi.dev/configuration/#rule-selection-toolhekilint). The proven tier of the eight
-`OPT` rewrite rules is exact (certified below); the other rules are heuristic.
+`OPT` rewrite rules and the exact tier of `OPT113` are exact (certified below); the other rules
+are heuristic.
 
 ## What a report states
 
@@ -2189,7 +2193,9 @@ A certified rule has a row here: the release that certified it, and the reports 
 and of its holdout run with the false claims among them. The census of the proven `OPT` tier
 checked by hand every exact report on the Stage 0-A corpus with the build of 2026-11-21 (one
 report, whose rewrite needed the set-order obligation, left the tier); the holdout run checked
-every exact report of one run on the 100 packages of the frozen holdout corpus.
+every exact report of one run on the 100 packages of the frozen holdout corpus. `OPT113`'s
+census reports are those of its exact tier with the plain-key premise, all among the reports
+the census of the earlier tier checked by hand.
 
 | Rule | Certified | Census: reports / false | Holdout: reports / false |
 | ---- | --------- | ----------------------: | -----------------------: |
@@ -2201,6 +2207,7 @@ every exact report of one run on the 100 packages of the frozen holdout corpus.
 | `OPT120` | 0.2.0 | 70 / 0 | 33 / 0 |
 | `OPT121` | 0.2.0 | 12 / 0 | 5 / 0 |
 | `OPT130` | 0.2.0 | 1 / 0 | 0 / 0 |
+| `OPT113` | 0.2.0 | 8 / 0 | 6 / 0 |
 
 ## Measurements
 
@@ -2226,7 +2233,7 @@ loop a fixed 4 times, which is not data-sized.
 | `OPT110` | exact | round 3, 2026-11-21 | 50 | 0 / 3 / 36 / 11 | 78% | 65-87% | 6% |
 | `OPT111` | exact | round 3, 2026-11-21 | 50 | 0 / 2 / 42 / 6 | 88% | 76-94% | 4% |
 | `OPT112` | heuristic | round 3, 2026-11-21 | 50 | 0 / 2 / 43 / 5 | 90% | 79-96% | 4% |
-| `OPT113` | heuristic | round 3, 2026-11-21 | 50 | 0 / 11 / 35 / 4 | 92% | 81-97% | 22% |
+| `OPT113` | exact | round 3, 2026-11-21 | 50 | 0 / 11 / 35 / 4 | 92% | 81-97% | 22% |
 | `OPT120` | exact | round 3, 2026-11-21 | 50 | 0 / 2 / 45 / 3 | 94% | 84-98% | 4% |
 | `OPT121` | exact | round 3, 2026-11-21 | 50 | 0 / 1 / 41 / 8 | 84% | 71-92% | 2% |
 | `OPT130` | exact | round 3, 2026-11-21 | 30 | 0 / 2 / 27 / 1 | 97% | 83-99% | 7% |
@@ -4062,7 +4069,9 @@ Its premises:
 Not part of the claim: how many times the statement runs (one under a branch inside the loop
 counts), and how large the loop or the value is. The message claims no size and no cost estimate. A
 loop or a value that the code fixes at 16 or fewer items is not reported, since the rewrite would
-not pay off.
+not pay off. A proven report in a loop whose trip count the code fixes at more, or caps with a
+length test every path to the loop passes, is heuristic: it is true, but a fixed count is no
+evidence either way, so the exact tier leaves it out.
 
 ## Why is this bad?
 Each concatenation copies everything accumulated so far.
@@ -4390,7 +4399,9 @@ Its premises:
 Not part of the claim: how many times the statement runs (one under a branch inside the loop
 counts), and how large the loop or the list is. The message claims no size and no cost estimate. A
 loop or a list that the code fixes at 16 or fewer items is not reported, since the rewrite would not
-pay off.
+pay off. A proven report in a loop whose trip count the code fixes at more, or caps with a length
+test every path to the loop passes, is heuristic: it is true, but a fixed count is no evidence
+either way, so the exact tier leaves it out.
 
 ## Why is this bad?
 Inserting at the front shifts every element, so building a list this way is quadratic.
@@ -4463,7 +4474,9 @@ Its premises:
 Not part of the claim: how many times the statement runs (one under a branch inside the loop
 counts), and how large the loop or the list is. The message claims no size and no cost estimate. A
 loop or a list that the code fixes at 16 or fewer items is not reported, since the rewrite would not
-pay off.
+pay off. A proven report in a loop whose trip count the code fixes at more, or caps with a length
+test every path to the loop passes, is heuristic: it is true, but a fixed count is no evidence
+either way, so the exact tier leaves it out.
 
 ## Why is this bad?
 Removing the first element shifts every remaining element, so a queue drained this way is
@@ -4926,7 +4939,9 @@ Its premises:
 Not part of the claim: how many times the statement runs (one under a branch inside the loop
 counts), and how large the loop or the container is. The message claims no size and no cost
 estimate. A loop or a container that the code fixes at 16 or fewer items is not reported, since the
-rewrite would not pay off.
+rewrite would not pay off. A proven report in a loop whose trip count the code fixes at more, or
+caps with a length test every path to the loop passes, is heuristic: it is true, but a fixed count
+is no evidence either way, so the exact tier leaves it out.
 
 The rewrite also needs what the container is built from to stay the same during the loop
 (`ValueLoopInvariant`), which only a proven report establishes.
@@ -5005,7 +5020,9 @@ Its premises:
 Not part of the claim: how many times the statement runs (one under a branch inside the loop
 counts), and how large the loop or the list is. The message claims no size and no cost estimate. A
 loop or a list that the code fixes at 16 or fewer items is not reported, since the rewrite would not
-pay off.
+pay off. A proven report in a loop whose trip count the code fixes at more, or caps with a length
+test every path to the loop passes, is heuristic: it is true, but a fixed count is no evidence
+either way, so the exact tier leaves it out.
 
 ## Why is this bad?
 The membership test scans the list, so de-duplicating `n` items costs `n²` comparisons.
@@ -5181,9 +5198,11 @@ Its premises:
 Not part of the claim: how many times the statement runs (one under a branch inside the loop
 counts), and how large the loop or the list is. The message claims no size and no cost estimate. A
 loop or a list that the code fixes at 16 or fewer items is not reported, since the rewrite would not
-pay off. Nor is whether a `set` can replace the list: elements that cannot be hashed, or a list that
-changes during the loop, block the rewrite (the help names the obligation); the scan happens either
-way.
+pay off. A proven report in a loop whose trip count the code fixes at more, or caps with a length
+test every path to the loop passes, is heuristic: it is true, but a fixed count is no evidence
+either way, so the exact tier leaves it out. Nor is whether a `set` can replace the list: elements
+that cannot be hashed, or a list that changes during the loop, block the rewrite (the help names the
+obligation); the scan happens either way.
 
 ## Why is this bad?
 `e in lst` scans the list, so the loop costs the product of both sizes. A set lookup is
@@ -5358,13 +5377,9 @@ Source: https://heki.koxudaxi.dev/rules/nested-loop-equijoin/
 
 # nested-loop-equijoin (OPT113)
 
-Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` (slower code) · No automatic fix
+Family: Complexity Rewrites (OPT) · Exact · Enabled by default · Severity `warning` (slower code) · No automatic fix
 
 Size-dependent nested-loop equi-join (`for a in A: for b in B: if a.k == b.k`) -> `dict` index.
-
-!!! note "Heuristic"
-
-    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 50 sampled reports (round 3, 2026-11-21), 92% were right about the code. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 ## What it does
 Checks nested loops that join two collections by comparing a key of each with `==`:
@@ -5384,8 +5399,8 @@ its first matching comparison. It does not report:
   (`if a == b: continue` in an all-pairs loop), or a comparison whose false side does work:
   an `else` / `elif` body, the failure of an `assert a == b`, a `break` / `return` on a
   mismatch, or statements that only the mismatches run because a match `break`s. They run for
-  the pairs an index would skip, so every pair is needed; statements after the `if` that every
-  pair runs do not count;
+  the pairs an index would skip, so every pair is needed. Statements after the `if` that every
+  pair runs do not stop a report, but it is then heuristic (below);
 - joins where the code fixes the size of either loop, so that the cost grows with one side
   only: a display of at most 16 items (`for b in ("x", "y")`, also through a name or a module
   constant of this or another module (`NAME`, `module.NAME`, also read in a module body) when
@@ -5396,18 +5411,61 @@ its first matching comparison. It does not report:
 
 ## What a report states
 
-A report states that, for every pair of items of the nested loops, the code tests an equality
-between a key of the outer item and a key of the inner item.
+A report of the rule's exact tier states that, for each item of the outer loop, the inner loop
+compares a key of the outer item with a key of the inner item and does nothing else for an inner
+item that does not match. Its message says so: "for each item of `orders`, the loop over
+`customers` compares `order.customer_id == customer.id` and does nothing else for an item that
+does not match".
 
 Its premises:
 
 - **Equality of keys**: the comparison is `==` between keys of the two items (the items, their
-  components, attributes, or constant subscripts). Established.
-- **Independent loops**: the inner iterable is not computed from the outer item. Established.
-- **Every pair**: the comparison runs for every pair. Open: a comparison under a branch of the inner
-  loop counts, and so does other work for each pair besides it.
-- **Data-sized**: the code does not fix the size of either loop at 16 or fewer. Open: a size heki
-  cannot bound counts as data-sized.
+  components, attributes, or constant subscripts). Established. Each key that the inner loop loads
+  runs no code of the project: an attribute is a plain one of an item whose class heki knows (a
+  dataclass, `attrs`, or `NamedTuple` field, a slot, or what the class body or a method stores, with
+  no property, method, other descriptor, `__getattr__`, or `__getattribute__` of that name along the
+  class's MRO or in a project subclass, every base a project class, and no metaclass heki does not
+  know), and a subscript reads a builtin container or a component of a tuple the inner loop's
+  builtin step makes. An attribute of an item of unknown class may be a property, so the report is
+  then heuristic.
+- **Steps through inputs**: each loop steps through items of the function's inputs: every source
+  of its items is a parameter, or an attribute or an item of one (`orders`, `req.rows`,
+  `sorted(customers)`), also through a list the function fills only by appending items of such a
+  source (`for row in rows: results.append((key, row))`). A call's result, a method's receiver
+  (`self.rows`), a module constant, or a display leaves it open.
+- **Idle on a mismatch**: an inner item whose key differs runs only the loads of the two keys and
+  the comparison: no statement before the test or after the `if`, no `else` or `elif`, no earlier
+  `and` operand (`b.active and a.k == b.k`), and no code of the project to advance the inner loop.
+  The inner iterable is a builtin container by its type (`customers: list[Customer]`; an annotation
+  counts, assumption R2, unless a project subclass of the container defines its own `__iter__`), a
+  display, `sorted(...)` or another builtin that builds a container, a view of a `dict`, or the
+  pieces of a `str` (with the same condition on `items` and `split`). A value of unknown type may be
+  a generator, and a generator, `map`, `filter`, or another call runs code for each item.
+- **Same collection, same keys**: the inner loop steps through the same collection on every
+  iteration of the outer loop: its iterable is bound before the outer loop, or computed inside it
+  only from values bound before it, and the outer loop does not change those values through their
+  names, every name a copy binds to them (`rows = ys` makes `ys` one): no changing method, store,
+  `del`, call that receives one (a builtin counts too when it is handed a function, as `sorted(ys,
+  key=f)` is; a method of a builtin container only stores or reads its arguments), closure that
+  captures one, `yield`, or `await`. Nor does it change the compared key of an inner item: no store
+  into or deletion of what the key loads (`b.k = ...` for the key `b.k`), and no such call or
+  closure that reaches the item or the key's object.
+
+Not part of the claim: any count or size. A loop whose trip count the code fixes or caps (a
+constant `range`, a constant slice, a display, or a length test every path to the loop passes,
+`if len(rows) > 100: raise ...`) has no report in the exact tier: one of 16 or fewer is not
+reported at all, and a larger one is no evidence either way.
+
+A report without one of these premises is heuristic, and its message says only "nested loops
+join `orders` and `customers` on `order.customer_id == customer.id`". It rests on the open
+premise that both loops are data-sized: the code does not fix the size of either loop at 16 or
+fewer, and a size heki cannot bound counts as data-sized.
+
+No message claims a size or a cost. The help names a `set` or a `dict` only for keys known to be
+hashable, and an index built before the outer loop only for an inner collection that is the same,
+with the same keys, on every outer iteration; otherwise it states the condition ("if the keys are
+hashable, ..."). For a mapping the inner loop steps through by its own keys (`for k, v in
+d.items()` with the key `k`), it says to look each outer key up in the mapping instead.
 
 ## Why is this bad?
 The inner loop runs completely for every outer element, so the join costs O(n·m) comparisons.

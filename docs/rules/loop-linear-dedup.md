@@ -32,7 +32,9 @@ Its premises:
 Not part of the claim: how many times the statement runs (one under a branch inside the loop
 counts), and how large the loop or the list is. The message claims no size and no cost estimate. A
 loop or a list that the code fixes at 16 or fewer items is not reported, since the rewrite would not
-pay off.
+pay off. A proven report in a loop whose trip count the code fixes at more, or caps with a length
+test every path to the loop passes, is heuristic: it is true, but a fixed count is no evidence
+either way, so the exact tier leaves it out.
 
 ## Why is this bad?
 The membership test scans the list, so de-duplicating `n` items costs `n²` comparisons.

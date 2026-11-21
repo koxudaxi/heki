@@ -264,3 +264,64 @@ fn an_opt_report_has_its_rules_certainty_only_when_its_rewrite_is_proven() {
         );
     }
 }
+
+/// Three `OPT110` scans whose rewrite is proven safe: in a loop over an input, in a loop the
+/// code fixes at 50 trips, and in one it fixes at 5.
+const TRIPS: &str = "\
+def data_sized(probes, n):
+    known = list(range(n))
+    hits = 0
+    for p in probes:
+        if int(p) in known:
+            hits += 1
+    return hits
+
+
+def fixed_past_small(n):
+    known = list(range(n))
+    hits = 0
+    for p in range(50):
+        if p in known:
+            hits += 1
+    return hits
+
+
+def fixed_small(n):
+    known = list(range(n))
+    hits = 0
+    for p in range(5):
+        if p in known:
+            hits += 1
+    return hits
+";
+
+#[test]
+fn a_proven_opt_report_in_a_loop_the_code_fixes_is_never_exact() {
+    let p = Project::new("opt_report_trips");
+    p.write("app.py", TRIPS);
+    let (_, rule, _) = p.heki(&["rule", "OPT110", "--output-format", "json"]);
+    let rule: serde_json::Value = serde_json::from_str(&rule).unwrap();
+    let (_, json, stderr) = p.heki(&["check", "--select", "OPT110", "--output-format", "json"]);
+    let diags: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap();
+    let tiers: Vec<(&serde_json::Value, &serde_json::Value)> = diags
+        .iter()
+        .map(|d| (&d["line"], &d["certainty"]))
+        .collect();
+    // Fixed at 50, the scan is still reported, but as heuristic: the report would be true, and
+    // a fixed count is no evidence of harm either way. Fixed at 5, it is not reported.
+    assert_eq!(
+        tiers,
+        [
+            (&serde_json::json!(5), &rule["certainty"]),
+            (&serde_json::json!(14), &serde_json::json!("heuristic")),
+        ],
+        "{json}{stderr}"
+    );
+    assert!(
+        diags.iter().all(|d| d["help"]
+            .as_str()
+            .unwrap()
+            .contains("[proven-safe suggestion")),
+        "{json}"
+    );
+}

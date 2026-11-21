@@ -226,8 +226,8 @@ fn opt113_does_not_advise_an_index_of_unhashable_keys() {
         vec![
             "`r` is an unhashable `dict`, so index `rows` by a hashable form of it (a `tuple` or `frozenset` of its items) before the outer loop",
             "`tags` is an unhashable `list`, so index `B` by a hashable form of it (a `tuple` or `frozenset` of its items) before the outer loop",
-            "build a `set` of `actual` before the outer loop",
-            "group the elements of `rows + rows` by value in a `dict` (value → list of equal elements) before the outer loop, then read each outer key with `.get(key, [])` so that a key with no element keeps its empty list",
+            "if the keys are hashable, build a `set` of `actual` before the outer loop",
+            "if the keys are hashable, group the elements of `rows + rows` by value in a `dict` (value → list of equal elements) before the outer loop, then read each outer key with `.get(key, [])` so that a key with no element keeps its empty list",
         ],
         "{found:#?}"
     );
@@ -1112,18 +1112,20 @@ fn opt113_unhashable_display_elements() {
                 14,
                 "`r` is an unhashable `set`, so index `alias` by a hashable form of it (a `tuple` or `frozenset` of its items) before the outer loop"
             ),
+            // Lists among the elements: a `set` or `dict` holds them only if they are hashable.
             (
                 22,
-                "group the elements of `rows` by value in a `dict` (value → list of equal elements) before the outer loop, then read each outer key with `.get(key, [])` so that a key with no element keeps its empty list"
+                "if the keys are hashable, group the elements of `rows` by value in a `dict` (value → list of equal elements) before the outer loop, then read each outer key with `.get(key, [])` so that a key with no element keeps its empty list"
             ),
             // Elements of two unhashable classes; class objects are hashable.
             (
                 30,
                 "`r` is an unhashable `list`, so index `rows` by a hashable form of it (a `tuple` or `frozenset` of its items) before the outer loop"
             ),
+            // heki does not type the items of a display of classes.
             (
                 38,
-                "group the elements of `rows` by value in a `dict` (value → list of equal elements) before the outer loop, then read each outer key with `.get(key, [])` so that a key with no element keeps its empty list"
+                "if the keys are hashable, group the elements of `rows` by value in a `dict` (value → list of equal elements) before the outer loop, then read each outer key with `.get(key, [])` so that a key with no element keeps its empty list"
             ),
         ],
         "{found:#?}"
@@ -1205,5 +1207,678 @@ fn starred_elements_keep_the_names_in_blockers() {
             .2
             .ends_with("[not auto-fixable: DequeEquivalentOps(work): `work` : this use has no `deque` equivalent (line 5)]"),
         "{found:#?}"
+    );
+}
+
+/// `OPT113`'s exact claim, and the shapes that leave a premise of it open: the outer loop over a
+/// module constant of 20 items, work before the test or after the `if` for every pair, an earlier
+/// `and` operand, a generator, a `filter` call, or a value of unknown type (it may be a generator)
+/// as the inner iterable, an inner collection the outer loop changes, also through another name
+/// bound to it, rebinds, or may let other code change (`yield`, a builtin handed a function, a
+/// closure capturing it), a store into the compared key of an inner item, also by a function handed
+/// the item, and a trip count the code fixes.
+const PREMISES: &str = r#"from dataclasses import dataclass, field
+from typing import NamedTuple
+
+from library import Base as LibraryBase
+
+
+@dataclass
+class Row:
+    k: int
+    id: int
+    customer_id: int
+    type_var: int
+    key: int
+    active: bool
+    ok: bool
+    flag: bool
+    pending: bool
+    used: bool = field(default=False)
+
+
+class Plain:
+    def __init__(self, k):
+        self.k = k
+
+
+class Pair(NamedTuple):
+    k: int
+
+
+class External(LibraryBase):
+    def __init__(self, k):
+        self.k = k
+
+
+class Prop:
+    @property
+    def k(self):
+        return 1
+
+
+class Base:
+    def __init__(self, k):
+        self.k = k
+
+
+class Sub(Base):
+    @property
+    def k(self):
+        return 2
+
+
+class Meta(type):
+    pass
+
+
+class Made(metaclass=Meta):
+    def __init__(self, k):
+        self.k = k
+
+
+def described():
+    return None
+
+
+class Desc:
+    k = described()
+
+
+def plain_items(xs: list[Plain], ys: list[Plain]):
+    out = []
+    for a in xs:
+        for b in ys:
+            if a.k == b.k:
+                out.append(b)
+    return out
+
+
+def tuple_fields(xs: list[Pair], ys: list[Pair]):
+    out = []
+    for a in xs:
+        for b in ys:
+            if a.k == b.k:
+                out.append(b)
+    return out
+
+
+def union_items(xs: list[Row | Plain], ys: list[Row]):
+    out = []
+    for a in xs:
+        for b in ys:
+            if a.k == b.k:
+                out.append(b)
+    return out
+
+
+def inert_work(xs: list[Row], ys: list[Row]):
+    out = []
+    for a in xs:
+        for b in ys:
+            n = len(ys)
+            if a.k == b.k:
+                out.append(n)
+    return out
+
+
+def external_base(xs: list[External], ys: list[External]):
+    out = []
+    for a in xs:
+        for b in ys:
+            if a.k == b.k:
+                out.append(b)
+    return out
+
+
+def property_key(xs: list[Prop], ys: list[Prop]):
+    out = []
+    for a in xs:
+        for b in ys:
+            if a.k == b.k:
+                out.append(b)
+    return out
+
+
+def subclass_property(xs: list[Base], ys: list[Base]):
+    out = []
+    for a in xs:
+        for b in ys:
+            if a.k == b.k:
+                out.append(b)
+    return out
+
+
+def metaclass_made(xs: list[Made], ys: list[Made]):
+    out = []
+    for a in xs:
+        for b in ys:
+            if a.k == b.k:
+                out.append(b)
+    return out
+
+
+def descriptor_key(xs: list[Desc], ys: list[Desc]):
+    out = []
+    for a in xs:
+        for b in ys:
+            if a.k == b.k:
+                out.append(b)
+    return out
+
+
+def untyped_items(xs, ys: list):
+    out = []
+    for a in xs:
+        for b in ys:
+            if a.k == b.k:
+                out.append(b)
+    return out
+
+
+RUNNERS = (
+    "a", "b", "c", "d", "e", "f", "g", "h", "i", "j",
+    "k", "l", "m", "n", "o", "p", "q", "r", "s", "t",
+)
+
+
+def exact_join(orders: list[Row], customers: list[Row]):
+    out = []
+    for order in orders:
+        for customer in customers:
+            if order.customer_id == customer.id:
+                out.append((order, customer))
+        del order.pending
+    return out
+
+
+def outer_constant(jobs):
+    out = []
+    for kind in RUNNERS:
+        for j in jobs:
+            if j["kind"] == kind:
+                out.append(j)
+    return out
+
+
+def work_before_test(xs: list[Row], ys: list[Row], check):
+    out = []
+    for c1 in xs:
+        for c2 in ys:
+            skip = check(c2)
+            if c1.type_var == c2.type_var and skip:
+                out.append(c1)
+    return out
+
+
+def inner_changed(records: list[Row], events: list[Row]):
+    for record in records:
+        for event in events:
+            if event.key == record.key:
+                events.remove(event)
+                break
+
+
+def lazy_inner(names, calls, receiver_of):
+    out = []
+    for name in names:
+        for r in (receiver_of(c) for c in calls):
+            if r == name:
+                out.append(r)
+    return out
+
+
+def and_filter(xs: list[Row], ys: list[Row]):
+    out = []
+    for a in xs:
+        for b in ys:
+            if b.active and a.k == b.k:
+                out.append(a)
+    return out
+
+
+def sorted_inner(xs: list[Row], ys: list[Row]):
+    out = []
+    for a in xs:
+        for b in sorted(ys):
+            if a.k == b.k:
+                out.append(a)
+    return out
+
+
+def sliced(xs: list[Row], ys: list[Row]):
+    out = []
+    for a in xs:
+        for b in ys[:100]:
+            if a.k == b.k:
+                out.append(a)
+    return out
+
+
+def str_keys(xs: list[str], ys: list[str]):
+    out = []
+    for a in xs:
+        for b in ys:
+            if a == b:
+                out.append(a)
+    return out
+
+
+def mixed_keys(xs: list[str], ys: list[str | int]):
+    out = []
+    for a in xs:
+        for b in ys:
+            if a == b:
+                out.append(a)
+    return out
+
+
+def after_if_work(xs: list[Row], ys: list[Row], log):
+    out = []
+    for a in xs:
+        for b in ys:
+            if a.k == b.k:
+                out.append(a)
+            log(b)
+    return out
+
+
+def filtered_inner(xs: list[Row], ys: list[Row], keep):
+    out = {}
+    for a in xs:
+        for b in filter(keep, ys):
+            if a.k == b.k:
+                out[a.k] = b
+    return out
+
+
+def enumerated(xs: list[Row], ys: list[Row]):
+    out = []
+    for a in xs:
+        for i, b in enumerate(ys):
+            if a.k == b.k:
+                out.append(i)
+    return out
+
+
+def view(xs: list[Row], table: dict[str, Row]):
+    out = []
+    for a in xs:
+        for b in table.values():
+            if a.k == b.k:
+                out.append(b)
+    return out
+
+
+def either(xs: list[Row], ys: list[Row], zs: list[Row], flag):
+    rows = ys if flag else zs
+    out = []
+    for a in xs:
+        for b in rows:
+            if a.k == b.k:
+                out.append(b)
+    return out
+
+
+def rebound(xs: list[Row], ys: list[Row], zs: list[Row]):
+    out = []
+    for a in xs:
+        rows = ys if a.flag else zs
+        for b in rows:
+            if a.k == b.k:
+                out.append(b)
+    return out
+
+
+def generator_before(names, calls, receiver_of):
+    receivers = (receiver_of(c) for c in calls)
+    out = []
+    for name in names:
+        for r in receivers:
+            if r == name:
+                out.append(r)
+    return out
+
+
+def unknown_type(xs: list[Row], ys):
+    out = []
+    for a in xs:
+        for b in ys:
+            if a.k == b.k:
+                out.append(b)
+    return out
+
+
+def aliased(xs: list[Row], ys: list[Row]):
+    rows = ys
+    out = []
+    for a in xs:
+        for b in rows:
+            if a.k == b.k:
+                out.append(b)
+        ys.pop()
+    return out
+
+
+def prefiltered(xs: list[Row], ys: list[Row]):
+    kept = [b for b in ys if b.ok]
+    out = []
+    for a in xs:
+        for b in kept:
+            if a.k == b.k:
+                out.append(b)
+    return out
+
+
+def words(xs: list[Row], text: str):
+    out = []
+    for a in xs:
+        for w in text.split():
+            if a.k == w:
+                out.append(w)
+    return out
+
+
+def rekeyed(xs: list[Row], ys: list[Row]):
+    for a in xs:
+        for b in ys:
+            if a.k == b.k:
+                b.k = None
+
+
+def item_rekeyed(xs: list[dict], ys: list[dict]):
+    for a in xs:
+        for b in ys:
+            if a["k"] == b["k"]:
+                b["k"] = None
+
+
+def marks(xs: list[Row], ys: list[Row], cache: dict):
+    for a in xs:
+        for b in ys:
+            if a.k == b.k:
+                b.used = True
+        del cache[a.k]
+
+
+def by_key(xs: list[Row], d: dict):
+    out = []
+    for a in xs:
+        for k, v in d.items():
+            if a.k == k:
+                out.append(v)
+    return out
+
+
+def by_keys(xs: list[Row], d: dict):
+    out = []
+    for a in xs:
+        for k in d.keys():
+            if k == a.k:
+                out.append(k)
+    return out
+
+
+def by_value(xs: list[Row], d: dict[str, Row]):
+    out = []
+    for a in xs:
+        for k, v in d.items():
+            if v.k == a.k:
+                out.append(k)
+    return out
+
+
+def by_item_value(xs: list[Row], d: dict):
+    out = []
+    for a in xs:
+        for k, v in d.items():
+            if v == a.k:
+                out.append(k)
+    return out
+
+
+def sorted_with_key(xs: list[Row], ys: list[Row], shrink):
+    for a in xs:
+        for b in ys:
+            if a.k == b.k:
+                print(b)
+        sorted(ys, key=shrink)
+
+
+def filter_before(xs: list[Row], ys: list[Row], keep):
+    kept = filter(keep, ys)
+    out = []
+    for a in xs:
+        for b in kept:
+            if a.k == b.k:
+                out.append(b)
+    return out
+
+
+def helper_rekeys(xs: list[Row], ys: list[Row], rekey):
+    for a in xs:
+        for b in ys:
+            if a.k == b.k:
+                rekey(b)
+
+
+def closure_drops(xs: list[Row], ys: list[Row]):
+    drop = lambda: ys.pop()
+    out = []
+    for a in xs:
+        for b in ys:
+            if a.k == b.k:
+                out.append(b)
+        drop()
+    return out
+
+
+def lambda_in_loop(xs: list[Row], ys: list[Row], other: list):
+    for a in xs:
+        for b in ys:
+            if a.k == b.k:
+                print(b)
+        other.sort(key=lambda x: ys.index(x))
+
+
+def extended_alias(xs: list[Row], ys: list[Row]):
+    rows = ys
+    for a in xs:
+        for b in ys:
+            if a.k == b.k:
+                print(b)
+        rows += ["new"]
+
+
+def yielding(xs: list[Row], ys: list[Row]):
+    for a in xs:
+        for b in ys:
+            if a.k == b.k:
+                print(b)
+        yield a
+"#;
+
+#[test]
+fn opt113_states_its_exact_claim_only_when_every_premise_holds() {
+    let p = Project::new("regr_opt113_premises");
+    p.write("app.py", PREMISES);
+    let (_, rule, _) = p.heki(&["rule", "OPT113", "--output-format", "json"]);
+    let rule: serde_json::Value = serde_json::from_str(&rule).unwrap();
+    let (_, json, stderr) = p.heki(&["check", "--select", "OPT113", "--output-format", "json"]);
+    let diags: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap();
+    let exact = "does nothing else for an item that does not match";
+    let tiers: Vec<(&str, bool, &serde_json::Value)> = diags
+        .iter()
+        .map(|d| {
+            (
+                d["qualname"].as_str().unwrap(),
+                d["message"].as_str().unwrap().ends_with(exact),
+                &d["certainty"],
+            )
+        })
+        .collect();
+    let heuristic = serde_json::json!("heuristic");
+    let tier = |exact: bool| {
+        if exact {
+            &rule["certainty"]
+        } else {
+            &heuristic
+        }
+    };
+    assert_eq!(
+        tiers,
+        [
+            ("plain_items", true, tier(true)),
+            ("tuple_fields", true, tier(true)),
+            ("union_items", true, tier(true)),
+            ("inert_work", false, tier(false)),
+            ("external_base", false, tier(false)),
+            ("property_key", false, tier(false)),
+            ("subclass_property", false, tier(false)),
+            ("metaclass_made", false, tier(false)),
+            ("descriptor_key", false, tier(false)),
+            ("untyped_items", false, tier(false)),
+            ("exact_join", true, tier(true)),
+            ("outer_constant", false, tier(false)),
+            ("work_before_test", false, tier(false)),
+            ("inner_changed", false, tier(false)),
+            ("lazy_inner", false, tier(false)),
+            ("and_filter", false, tier(false)),
+            ("sorted_inner", true, tier(true)),
+            ("sliced", false, tier(false)),
+            ("str_keys", true, tier(true)),
+            ("mixed_keys", true, tier(true)),
+            ("after_if_work", false, tier(false)),
+            ("filtered_inner", false, tier(false)),
+            ("enumerated", true, tier(true)),
+            ("view", true, tier(true)),
+            ("either", true, tier(true)),
+            ("rebound", false, tier(false)),
+            ("generator_before", false, tier(false)),
+            ("unknown_type", false, tier(false)),
+            ("aliased", false, tier(false)),
+            ("prefiltered", true, tier(true)),
+            ("words", true, tier(true)),
+            ("rekeyed", false, tier(false)),
+            ("item_rekeyed", false, tier(false)),
+            ("marks", true, tier(true)),
+            ("by_key", true, tier(true)),
+            ("by_keys", true, tier(true)),
+            ("by_value", true, tier(true)),
+            ("by_item_value", true, tier(true)),
+            ("sorted_with_key", false, tier(false)),
+            ("filter_before", false, tier(false)),
+            ("helper_rekeys", false, tier(false)),
+            ("closure_drops", false, tier(false)),
+            ("lambda_in_loop", false, tier(false)),
+            ("extended_alias", false, tier(false)),
+            ("yielding", false, tier(false)),
+        ],
+        "{json}{stderr}"
+    );
+    let help = |name: &str| {
+        diags.iter().find(|d| d["qualname"] == name).unwrap()["help"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    // The advice names a `set` or a `dict` only for keys known to be hashable, and an index
+    // built once only for an inner collection that is the same on every outer iteration.
+    assert!(help("str_keys").starts_with("group the elements of `ys`"));
+    assert!(help("mixed_keys").starts_with("group the elements of `ys`"));
+    assert!(help("exact_join").starts_with("index `customers`"));
+    assert!(help("untyped_items").starts_with("if the keys are hashable, "));
+    assert!(help("inner_changed").starts_with(
+        "if `events` is the same collection, with the same keys, on every iteration of the outer loop, "
+    ));
+    // A store into the compared key of an inner item would leave an index built once stale.
+    assert!(help("rekeyed").starts_with(
+        "if `ys` is the same collection, with the same keys, on every iteration of the outer loop"
+    ));
+    // A mapping stepped through by its own keys needs no index: a lookup in it does.
+    assert_eq!(
+        help("by_key"),
+        "`d` is already keyed by `k`: look each outer key up in it (`d.get(...)`) instead of looping over it"
+    );
+    assert!(help("by_keys").starts_with("`d` is already keyed by `k`"));
+    assert!(help("by_value").starts_with("index `d.items()`"));
+    assert!(help("by_item_value").starts_with("if the keys are hashable,"));
+}
+
+/// Under assumption R2 a value annotated `list` may be an instance of a project subclass: one
+/// with its own `__iter__` (or a `dict` subclass with its own `items`) runs code to advance the
+/// inner loop, so the joins over such annotated values are heuristic.
+const OVERRIDES: &str = r#"from dataclasses import dataclass
+
+
+@dataclass
+class Row:
+    k: int
+
+
+class LoudList(list):
+    def __iter__(self):
+        print("next")
+        return super().__iter__()
+
+
+class LoudDict(dict):
+    def items(self):
+        print("items")
+        return super().items()
+
+
+def over_list(xs: list[Row], ys: list[Row]):
+    out = []
+    for a in xs:
+        for b in ys:
+            if a.k == b.k:
+                out.append(b)
+    return out
+
+
+def over_items(xs: list[Row], d: dict[str, Row]):
+    out = []
+    for a in xs:
+        for k, v in d.items():
+            if v.k == a.k:
+                out.append(k)
+    return out
+
+
+def over_sorted(xs: list[Row], ys: list[Row]):
+    out = []
+    for a in xs:
+        for b in sorted(ys):
+            if a.k == b.k:
+                out.append(b)
+    return out
+"#;
+
+#[test]
+fn opt113_leaves_annotated_iterables_open_when_a_project_subclass_iterates_its_own_way() {
+    let p = Project::new("regr_opt113_overrides");
+    p.write("app.py", OVERRIDES);
+    let (_, json, stderr) = p.heki(&["check", "--select", "OPT113", "--output-format", "json"]);
+    let diags: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap();
+    let exact = "does nothing else for an item that does not match";
+    let tiers: Vec<(&str, bool)> = diags
+        .iter()
+        .map(|d| {
+            (
+                d["qualname"].as_str().unwrap(),
+                d["message"].as_str().unwrap().ends_with(exact),
+            )
+        })
+        .collect();
+    // `sorted(...)` builds a builtin list whatever it is given.
+    assert_eq!(
+        tiers,
+        [
+            ("over_list", false),
+            ("over_items", false),
+            ("over_sorted", true)
+        ],
+        "{json}{stderr}"
     );
 }

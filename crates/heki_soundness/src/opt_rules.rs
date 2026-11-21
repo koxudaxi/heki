@@ -15,6 +15,7 @@ use crate::liveness::Liveness;
 use crate::obligations::{Checker, ObligationKind, ProofObligation, SafetyVerdict};
 use crate::{FrameState, KindMask, ObligationStatus, ProfitabilityTier, SafetyTier};
 use heki_ast::{LineIndex, Span};
+use heki_ir::walk::Answer;
 use heki_ir::{
     BinOpKind, BlockId, BuiltinKind, CompareOpKind, DictEntry, FnIndex, Inst, InstKind, IrFunction,
     LoopBound, ModuleIr, NaturalLoop, Terminator, VarId,
@@ -101,6 +102,9 @@ pub struct OptCandidate {
     pub not_profitable: Option<String>,
     /// What proves the quadratic / linear cost (`None`: nothing does, e.g. `x in param`).
     pub cost_evidence: Option<String>,
+    /// The most times the loop runs, when the code fixes or caps it (`FnIndex::fixed_trips`),
+    /// for a size-dependent rewrite; `None` for the others.
+    pub fixed_trips: Option<u32>,
     pub edits: Vec<TextEdit>,
 }
 
@@ -115,6 +119,14 @@ impl OptCandidate {
         self.verdict.tier != SafetyTier::Disproved
             && self.not_profitable.is_none()
             && self.cost_evidence.is_some()
+    }
+
+    /// In its rule's exact tier (ADR-018, decisions 4 and 9): the rewrite is proven safe, and a
+    /// size-dependent one is in a loop whose trip count the code does not fix. A fixed count is
+    /// no evidence either way, so such a report is true but heuristic (a bound of 16 or fewer
+    /// that the loop's `LoopBound` shows is not profitable, and not reported at all).
+    pub fn in_exact_tier(&self) -> bool {
+        self.is_safe() && self.fixed_trips.is_none()
     }
 
     /// The edits, when the rewrite is proven safe.
@@ -894,10 +906,13 @@ impl<'a, 'c> Rules<'a, 'c> {
         name
     }
 
+    /// `lp`: the loop a size-dependent rewrite is profitable for (`None` for `OPT101` /
+    /// `OPT102`, profitable from one iteration).
     #[allow(clippy::too_many_arguments)]
     fn candidate(
         &self,
         rule: OptRule,
+        lp: Option<&NaturalLoop>,
         span: Span,
         target: String,
         message: String,
@@ -919,6 +934,10 @@ impl<'a, 'c> Rules<'a, 'c> {
             profitability: rule.profitability(),
             not_profitable,
             cost_evidence,
+            fixed_trips: lp.and_then(|lp| match self.ix.fixed_trips(lp, &mut |_| None) {
+                Answer::Known(trips) => Some(trips.at_most()),
+                Answer::Open => None,
+            }),
             edits,
         }
     }
@@ -1120,6 +1139,7 @@ impl<'a, 'c> Rules<'a, 'c> {
         }
         Some(self.candidate(
             OptRule::Opt101,
+            None,
             span,
             name.clone(),
             format!(
@@ -1193,6 +1213,7 @@ impl<'a, 'c> Rules<'a, 'c> {
         }
         Some(self.candidate(
             OptRule::Opt102,
+            None,
             span,
             name.clone(),
             format!(
@@ -1378,6 +1399,7 @@ impl<'a, 'c> Rules<'a, 'c> {
         }
         Some(self.candidate(
             OptRule::Opt102,
+            None,
             span,
             name.clone(),
             format!(
@@ -1753,12 +1775,19 @@ impl<'a, 'c> Rules<'a, 'c> {
         });
         Some(self.candidate(
             OptRule::Opt103,
+            Some(lp),
             span,
             name.clone(),
             format!(
                 "concatenating to `{name}` copies the whole `{what}` each time it runs in the loop"
             ),
-            "collect the pieces in a list and join them once after the loop".to_owned(),
+            match kind {
+                Some(Tuple) => {
+                    "extend a list with each piece and convert it once with `tuple(...)` after the loop"
+                }
+                _ => "collect the pieces in a list and join them once after the loop",
+            }
+            .to_owned(),
             obs,
             capped.or_else(|| loop_bound_note(lp)),
             self.init_evidence(&st, acc, &[Bytes, Tuple]),
@@ -1820,6 +1849,7 @@ impl<'a, 'c> Rules<'a, 'c> {
         Some(
             self.candidate(
                 OptRule::Opt103,
+                Some(lp),
                 binop.span,
                 target.clone(),
                 format!(
@@ -2004,6 +2034,7 @@ impl<'a, 'c> Rules<'a, 'c> {
         }
         Some(self.candidate(
             OptRule::Opt110,
+            Some(lp),
             cmp.span,
             name.clone(),
             format!("`... in {name}` scans the {kind} each time it runs in the loop"),
@@ -2133,6 +2164,7 @@ impl<'a, 'c> Rules<'a, 'c> {
         }
         Some(self.candidate(
             OptRule::Opt130,
+            Some(lp),
             cmp.span,
             target,
             format!("`{callee}(...)` builds a new container for the membership test each time it runs in the loop"),
@@ -2320,6 +2352,7 @@ impl<'a, 'c> Rules<'a, 'c> {
         }
         Some(self.candidate(
             OptRule::Opt111,
+            Some(lp),
             cmp.span,
             name.clone(),
             format!("`if ... not in {name}: {name}.append(...)` scans the list each time it runs in the loop"),
@@ -2759,6 +2792,7 @@ impl<'a, 'c> Rules<'a, 'c> {
             .or_else(|| loop_bound_note(lp));
         Some(self.candidate(
             rule,
+            Some(lp),
             span,
             name.clone(),
             msg,

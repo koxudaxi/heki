@@ -56,7 +56,7 @@
 - [loop-linear-list-lookup (OPT112)](https://heki.koxudaxi.dev/rules/loop-linear-list-lookup/): Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity warning (slower code) · No automatic fix
 - [loop-linear-membership (OPT110)](https://heki.koxudaxi.dev/rules/loop-linear-membership/): Family: Complexity Rewrites (OPT) · Exact · Enabled by default · Severity warning (slower code) · Proven-safe suggestion (--fix --include-size-dependent)
 - [loop-unpooled-client (EFF102)](https://heki.koxudaxi.dev/rules/loop-unpooled-client/): Family: Execution Effects (EFF) · Heuristic · Off by default · Severity warning (slower code) · No automatic fix
-- [nested-loop-equijoin (OPT113)](https://heki.koxudaxi.dev/rules/nested-loop-equijoin/): Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity warning (slower code) · No automatic fix
+- [nested-loop-equijoin (OPT113)](https://heki.koxudaxi.dev/rules/nested-loop-equijoin/): Family: Complexity Rewrites (OPT) · Exact · Enabled by default · Severity warning (slower code) · No automatic fix
 - [read-owner-violation (MUT203)](https://heki.koxudaxi.dev/rules/read-owner-violation/): Family: Mutation & State (MUT) · Heuristic · Runs when its contract is declared · Severity error (a bug) · No automatic fix
 - [readonly-param-mutation (MUT110)](https://heki.koxudaxi.dev/rules/readonly-param-mutation/): Family: Mutation & State (MUT) · Heuristic · Off by default · Severity error (a bug) · No automatic fix
 - [readonly-return-mutation (MUT202)](https://heki.koxudaxi.dev/rules/readonly-return-mutation/): Family: Mutation & State (MUT) · Heuristic · Off by default · Severity error (a bug) · No automatic fix
