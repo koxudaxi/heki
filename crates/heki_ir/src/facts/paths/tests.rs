@@ -59,7 +59,7 @@ fn facts_with(
                 continue;
             }
             let at = (bb.id, i);
-            let iteration = ix.shape().innermost_index(bb.id).map(|li| {
+            let iteration = ix.shape.innermost_index(bb.id).map(|li| {
                 (
                     paths.on_every_iteration(li, at, Progress::Called),
                     paths.on_every_iteration(li, at, Progress::Returned),
@@ -693,14 +693,14 @@ def f(db, rows):
             .unwrap()
     };
     let check = at("check");
-    let dead_loop = ix.shape().innermost_index(check.0).unwrap();
+    let dead_loop = ix.shape.innermost_index(check.0).unwrap();
     assert_eq!(paths.on_every_return(check, Progress::Called), DEAD);
     assert_eq!(
         paths.on_every_iteration(dead_loop, check, Progress::Called),
         DEAD
     );
     let each = at("each");
-    let live_loop = ix.shape().innermost_index(each.0).unwrap();
+    let live_loop = ix.shape.innermost_index(each.0).unwrap();
     assert_eq!(
         paths.on_every_iteration(live_loop, each, Progress::Returned),
         EVERY
