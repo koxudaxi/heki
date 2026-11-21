@@ -425,15 +425,15 @@ Missed findings close as heki learns more:
   (`KEY: Final = "_key"`), also when imported, re-exported, or bound to another `Final` name, a
   module-level string bound once in its module, or a class constant declared `ClassVar` or
   `Final` and bound once (`Model.KEY`, `self.KEY`, `cls.KEY`).
-- **Not followed** for a module-level name without `Final` that another module rebinds or
-  deletes, a class constant stored on its class or an instance outside the class body
-  (`Model.KEY = "x"`; from another module, only one without `Final`), a class constant a
-  subclass defines again, is given its own value (`Child.KEY = "x"`), or inherits first from
-  another base it lists before the class (`class Child(Other, Model)`; read on that subclass,
-  or on an instance or `cls` that may be one), a `Final` field of a dataclass or of a class a
-  `dataclass_transform` builds read on an instance (`Keys("x").KEY` is `"x"`), or on a class
-  object whose default a class with `slots=True` or built by a transform replaces, or a
-  computed name.
+- **Not followed** for a module-level name without `Final` that another module rebinds or deletes,
+  one bound in a loop or before a star import that may rebind it, a class constant stored on its
+  class or an instance outside the class body (`Model.KEY = "x"`; from another module, only one
+  without `Final`), a class constant a subclass defines again, is given its own value
+  (`Child.KEY = "x"`), or inherits first from another base it lists before the class
+  (`class Child(Other, Model)`; read on that subclass, or on an instance or `cls` that may be one),
+  a `Final` field of a dataclass or of a class a `dataclass_transform` builds read on an instance
+  (`Keys("x").KEY` is `"x"`), or on a class object whose default a class with `slots=True` or built
+  by a transform replaces, or a computed name.
 - A `write-owners` contract with `unresolved = "report"` reports the writes heki cannot tie to a
   class ([`MUT205`](https://heki.koxudaxi.dev/rules/unresolved-guarded-write/)).
 
@@ -2232,8 +2232,8 @@ alias, a class with thousands of subclasses whose class constant as many functio
 instance, a strict `read-owners` target on such a class that as many functions read on an object of
 unknown class, as many calls of a method of such a class that a call target naming no class names, a
 module binding thousands of names each to an attribute of the one before, a function making twenty
-thousand calls of eight operands each, a helper that types nothing reading, calling, or writing one
-strict target name thousands of times, and which a caller calls as many times.
+thousand calls of eight operands each, and a helper that types nothing making thousands of strict
+accesses of one name that one caller calls as many times.
 
 A change to the IR builder, a walk, a fixpoint, or a rule's state is also run over a large
 corpus of real projects before it is merged, every run under a memory cap and a timeout. No
@@ -4782,11 +4782,12 @@ write:
   attribute holds (`obj.fields.append(x)`, `obj.meta["k"][name] = v`) count;
 - an attribute name computed at run time written on an instance of a target class:
   `setattr(model, name, v)`, `model.__dict__[name] = v`, `model.__dict__.update(...)`, and a
-  `__dict__` key in a name that is no constant: a module-level name bound twice or rebound by
-  another module, a class attribute without `ClassVar` or `Final` (an instance may hold its
-  own), one a subclass defines again or inherits first from another base, a `Final` field of a
-  dataclass read on an instance (or on a class object with `slots=True` along the way), and one
-  stored on its class, a subclass, or an instance outside the class body (`Model.KEY = "x"`).
+  `__dict__` key in a name that is no constant: a module-level name bound twice, in a loop, or
+  before a star import, or rebound by another module, a class attribute without `ClassVar` or
+  `Final` (an instance may hold its own), one a subclass defines again or inherits first from
+  another base, a `Final` field of a dataclass read on an instance (or on a class object with
+  `slots=True` along the way), and one stored on its class, a subclass, or an instance outside
+  the class body (`Model.KEY = "x"`).
 
 The rules of `MUT201` for what is allowed apply: allowed writers, exempt methods, a class's own
 initialization (`setattr(self, name, v)` in `__init__`), functions that only run inside allowed

@@ -109,8 +109,8 @@ alias, a class with thousands of subclasses whose class constant as many functio
 instance, a strict `read-owners` target on such a class that as many functions read on an object of
 unknown class, as many calls of a method of such a class that a call target naming no class names, a
 module binding thousands of names each to an attribute of the one before, a function making twenty
-thousand calls of eight operands each, a helper that types nothing reading, calling, or writing one
-strict target name thousands of times, and which a caller calls as many times.
+thousand calls of eight operands each, and a helper that types nothing making thousands of strict
+accesses of one name that one caller calls as many times.
 
 A change to the IR builder, a walk, a fixpoint, or a rule's state is also run over a large
 corpus of real projects before it is merged, every run under a memory cap and a timeout. No
