@@ -168,6 +168,8 @@ fn mut114_states_its_claim_only_where_every_premise_holds() {
     p.write("producers.py", PRODUCERS)
         .write("uses.py", USES)
         .write("caching.py", CACHING);
+    // `MUT202` keeps the declared producers: a cached result is no report of its own.
+    assert!(diagnostics(&p, &["--select", "MUT202"]).is_empty());
     let diags = diagnostics(&p, &["--select", "MUT114"]);
     let uses: Vec<Value> = diags
         .iter()

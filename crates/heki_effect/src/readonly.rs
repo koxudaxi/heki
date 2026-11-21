@@ -246,28 +246,24 @@ impl ContainerKind {
 
     /// Whether `method` changes a container of this kind in place.
     pub fn mutator(self, method: &str) -> bool {
-        match self {
-            Self::List => matches!(
-                method,
-                "append" | "extend" | "insert" | "pop" | "remove" | "clear" | "sort" | "reverse"
-            ),
-            Self::Dict => matches!(
-                method,
-                "update" | "pop" | "popitem" | "clear" | "setdefault"
-            ),
-            Self::Set => matches!(
-                method,
-                "add"
-                    | "discard"
-                    | "remove"
-                    | "pop"
-                    | "clear"
-                    | "update"
-                    | "difference_update"
-                    | "intersection_update"
-                    | "symmetric_difference_update"
-            ),
-        }
+        let mutators: &[&str] = match self {
+            Self::List => &[
+                "append", "extend", "insert", "pop", "remove", "clear", "sort", "reverse",
+            ],
+            Self::Dict => &["update", "pop", "popitem", "clear", "setdefault"],
+            Self::Set => &[
+                "add",
+                "discard",
+                "remove",
+                "pop",
+                "clear",
+                "update",
+                "difference_update",
+                "intersection_update",
+                "symmetric_difference_update",
+            ],
+        };
+        mutators.contains(&method)
     }
 
     /// Whether an item store or delete (`x[k] = v`, `del x[k]`) changes a container of this kind.
@@ -427,15 +423,17 @@ fn constructed_kind<'t>(
     // `list` / `dict` / `set` / `sorted` the module does not rebind.
     let builtin = |name: &str| resolve(name).is_none_or(|t| t == format!("builtins.{name}"));
     let mut kind = None;
+    // Each value is queued once.
     let mut seen: rustc_hash::FxHashSet<VarId> = rustc_hash::FxHashSet::default();
-    let mut work: Vec<VarId> = returned.to_vec();
+    let mut work: Vec<VarId> = returned
+        .iter()
+        .copied()
+        .filter(|v| seen.insert(*v))
+        .collect();
     while let Some(var) = work.pop() {
-        if !seen.insert(var) {
-            continue;
-        }
         let built = match defs.get(&var).map(|i| &i.kind) {
             Some(InstKind::Copy { src, .. }) => {
-                work.push(*src);
+                work.extend(Some(*src).filter(|v| seen.insert(*v)));
                 continue;
             }
             Some(InstKind::AllocBuiltin { kind, .. }) => match kind {
@@ -464,7 +462,8 @@ fn constructed_kind<'t>(
                     phi.incoming
                         .iter()
                         .filter(|(from, v)| *v != var && live.edge(*from, *block))
-                        .map(|(_, v)| *v),
+                        .map(|(_, v)| *v)
+                        .filter(|v| seen.insert(*v)),
                 );
                 continue;
             }

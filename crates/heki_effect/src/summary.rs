@@ -977,6 +977,10 @@ impl<'a> Extractor<'a> {
         }
         ex.build_aliases();
         ex.memo_fills = ex.memo_fills();
+        let class_of = |v: VarId| match ex.types.get(&v) {
+            Some(Val::Inst(class)) => Some(class.as_str()),
+            _ => None,
+        };
         if ex.summary.is_lru_cache {
             let module = ex.cx.module;
             ex.summary.cached_result = readonly::cached_result(
@@ -984,22 +988,11 @@ impl<'a> Extractor<'a> {
                 &ex.defs,
                 &ex.live,
                 |t| module.resolve_dotted(t, false),
-                |v| match ex.types.get(&v) {
-                    Some(Val::Inst(class)) => Some(class.as_str()),
-                    _ => None,
-                },
+                class_of,
             );
         }
-        let returned = readonly::returned_values(
-            f,
-            &ex.defs,
-            &ex.live,
-            |kind| ex.derivations(kind),
-            |v| match ex.types.get(&v) {
-                Some(Val::Inst(class)) => Some(class.as_str()),
-                _ => None,
-            },
-        );
+        let returned =
+            readonly::returned_values(f, &ex.defs, &ex.live, |kind| ex.derivations(kind), class_of);
         ex.returned = returned;
         ex.summary.typed_params = (0..64u32)
             .zip(&f.params)
