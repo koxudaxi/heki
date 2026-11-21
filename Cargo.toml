@@ -45,6 +45,11 @@ ruff_python_ast = { git = "https://github.com/astral-sh/ruff", tag = "0.17.5" }
 ruff_text_size = { git = "https://github.com/astral-sh/ruff", tag = "0.17.5" }
 
 # Core utilities
+# The colors of the text output, in the styles of Ruff's renderer (clap already builds this crate
+# and the next one).
+anstyle = "1.0"
+# Turns on escape codes in a Windows console, which needs `unsafe`, forbidden in heki's crates.
+anstyle-query = "1.1"
 anyhow = "1.0"
 blake3 = "1.5"
 clap = { version = "4.5", features = ["derive"] }

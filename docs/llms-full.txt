@@ -845,6 +845,23 @@ Every format, `--diff`, and the errors of files that cannot be read or parsed pr
 path relative to the working directory when the file is inside it (otherwise as given), as Ruff
 does, and with `/` separators on every platform, Windows included.
 
+### Colors
+
+On a terminal, the `full` and `concise` output and `--diff` are colored as Ruff colors its
+output: paths in bold, rule codes in red, the severity, the source frame and its caret, and the
+lines a diff removes and adds. The same variables and option as Ruff's decide it, each row over
+the rows above it:
+
+| Setting | Colors |
+| ------- | ------ |
+| stdout is a terminal / a pipe or a file | on / off |
+| `NO_COLOR` set (to anything), or `CLICOLOR=0` | off |
+| `FORCE_COLOR` set to anything but the empty string, or `CLICOLOR_FORCE` to anything but `0` | on (for a CI log that shows colors) |
+| `--color always` / `--color never` | on / off |
+
+`json`, `github`, and `sarif` output never holds colors, and the summary and the errors heki
+writes to stderr are not colored.
+
 ## Exit codes
 
 | Code | Meaning |
@@ -1816,6 +1833,8 @@ Options:
           Exit with code 1 on reports of this severity or higher: `error` (the default), or `warning` to fail on warnings too (`lint.fail-on`) [possible values: error, warning]
       --output-format <OUTPUT_FORMAT>
           Output format [default: full] [possible values: full, concise, json, github, sarif]
+      --color <WHEN>
+          When to color the `full` and `concise` output and `--diff`, as Ruff does: `auto` colors them on a terminal unless `NO_COLOR` is set (`FORCE_COLOR` or `CLICOLOR_FORCE` color them anywhere), `always`, or `never` [default: auto] [possible values: auto, always, never]
       --config <CONFIG>
           Explicit configuration file: a `pyproject.toml` (its `[tool.heki]` table) or a file with the keys at its top level, like `heki.toml`
       --target-version <TARGET_VERSION>
