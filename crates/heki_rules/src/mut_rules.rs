@@ -652,12 +652,20 @@ pub fn family_readers(
                 || index.summary(k).is_some_and(|s| s.is_cached_property)
         })
     };
-    let has_suspending_generator = |class: &String| {
-        decls
-            .methods_of(class)
-            .iter()
-            .any(|k| iterated_mutation::suspends(index, k))
+    // Each class's methods are read once, whatever number of its methods changed.
+    let mut suspending: FxHashMap<String, bool> = FxHashMap::default();
+    let mut has_suspending_generator = |class: &String| {
+        *suspending.entry(class.clone()).or_insert_with(|| {
+            decls
+                .methods_of(class)
+                .iter()
+                .any(|k| iterated_mutation::suspends(index, k))
+        })
     };
+    // Per changed class: the names of the methods its ancestors define, whether a class of its
+    // family has a suspending generator, and the classes of its family with reported reads.
+    let mut families: FxHashMap<String, (FxHashSet<String>, bool, Vec<String>)> =
+        FxHashMap::default();
     let methods = changed.iter().filter_map(|key| {
         let (owner, name) = key.qualname.rsplit_once('.')?;
         let class = format!("{}.{owner}", key.module);
@@ -676,36 +684,31 @@ pub fn family_readers(
         {
             roots.insert(class.clone());
         }
+        let (inherited, suspending, reported) =
+            families.entry(class.clone()).or_insert_with(|| {
+                let ancestors = decls.ancestors_of(&class);
+                let inherited = ancestors
+                    .iter()
+                    .flat_map(|a| decls.methods_of(a))
+                    .filter_map(|k| k.qualname.rsplit('.').next().map(str::to_owned))
+                    .collect();
+                let family: Vec<String> = ancestors
+                    .into_iter()
+                    .chain(decls.subclasses_of(&class))
+                    .chain([class.clone()])
+                    .collect();
+                let suspending = family.iter().any(&mut has_suspending_generator);
+                let reported = family.into_iter().filter(has_reported_reads).collect();
+                (inherited, suspending, reported)
+            });
         // A method that overrides an inherited one (or stops doing so) changes which of the
         // ancestors' methods the class family inherits.
-        let overrides = decls.ancestors_of(&class).iter().any(|a| {
-            decls
-                .methods_of(a)
-                .iter()
-                .any(|k| k.qualname.rsplit('.').next() == Some(name))
-        });
-        if overrides {
-            roots.insert(class.clone());
-        }
-        let suspending = decls
-            .ancestors_of(&class)
-            .iter()
-            .chain(&decls.subclasses_of(&class))
-            .chain([&class])
-            .any(has_suspending_generator);
-        if suspending {
-            roots.insert(class.clone());
+        if inherited.contains(name) || *suspending {
+            roots.insert(class);
         }
         // Initialization, and the private helpers it alone calls, write nothing a cached
         // property or a hash reads.
-        roots.extend(
-            decls
-                .ancestors_of(&class)
-                .into_iter()
-                .chain(decls.subclasses_of(&class))
-                .chain([class])
-                .filter(has_reported_reads),
-        );
+        roots.extend(reported.iter().cloned());
     }
     let mut out = BTreeSet::new();
     for root in roots {

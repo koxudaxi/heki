@@ -6,7 +6,8 @@
 mod common;
 
 use common::Project;
-use serde_json::Value;
+use common::lsp::{Lsp, codes, uri};
+use serde_json::{Value, json};
 use std::io::Read;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -1763,4 +1764,63 @@ fn a_long_chain_of_wrappers_handing_on_a_generator_is_walked_on_its_own_stack() 
         iterated_mutations("bounds_wrapper_chain", &(lines.join("\n") + "\n")),
         1
     );
+}
+
+/// An edit through the language server changing every method of a class of five thousand
+/// methods (and adding a blocking call to an `async def`, whose `EFF101` report shows the edit
+/// was checked): which class families read the changed methods' summaries is decided once per
+/// class, not by reading the class's methods again for each changed method.
+#[test]
+fn an_edit_changing_thousands_of_methods_reads_each_class_once() {
+    let methods = 5_000;
+    let module = |changed: bool| {
+        let mut lines = vec![
+            "import time".to_owned(),
+            String::new(),
+            String::new(),
+            "class Table:".to_owned(),
+            "    def __init__(self) -> None:".to_owned(),
+            "        self.rows: dict[str, int] = {}".to_owned(),
+        ];
+        for i in 0..methods {
+            lines.push(String::new());
+            lines.push(format!("    def m{i}(self) -> None:"));
+            lines.push(if changed {
+                format!("        self.rows[\"k{i}\"] = {i}")
+            } else {
+                format!("        print({i})")
+            });
+        }
+        if changed {
+            lines.extend(
+                ["", "", "async def pause() -> None:", "    time.sleep(1)"].map(str::to_owned),
+            );
+        }
+        lines.join("\n") + "\n"
+    };
+    let p = Project::new("bounds_family_edit");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/table.py", &module(false));
+    let table = uri(&p.dir.join("pkg/table.py"));
+    let mut lsp = Lsp::start(&p.dir, &["server", "--stdio"]);
+    lsp.request(
+        "initialize",
+        json!({"processId": null, "rootUri": uri(&p.dir), "capabilities": {}}),
+    );
+    lsp.notify("initialized", json!({}));
+    lsp.ready();
+    lsp.open(&table, &module(false));
+    lsp.diagnostics(&table, <[Value]>::is_empty);
+    let changed = module(true);
+    lsp.change(&table, 2, &changed);
+    p.write("pkg/table.py", &changed);
+    lsp.notify(
+        "textDocument/didSave",
+        json!({"textDocument": {"uri": table}, "text": changed}),
+    );
+    // Each wait fails past its time limit.
+    let diags = lsp.diagnostics(&table, |d| !d.is_empty());
+    assert_eq!(codes(&diags), vec!["EFF101"]);
+    lsp.settle();
+    lsp.stop(true);
 }
