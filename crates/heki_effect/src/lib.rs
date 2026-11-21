@@ -165,14 +165,14 @@ pub struct MustExec {
     pub effects: EffectChains,
     /// For an effect whose chains end in different calls (implementations of one call reaching
     /// different waits), every such call: the witnesses beside the kept chain's last call.
-    #[serde(default, skip_serializing_if = "EffectChains::is_empty")]
+    #[serde(default)]
     pub alternatives: EffectChains,
 }
 
 /// A chain per effect, sorted by effect. A function has run one or two effects whenever it
-/// returns, which a vector holds in a tenth of the bytes of a tree's first node; it reads and
-/// writes as the map it stands for.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// returns, which a vector holds in a tenth of the bytes of a tree's first node.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct EffectChains(Vec<(ExecEffectKind, SharedChain)>);
 
 impl EffectChains {
@@ -186,10 +186,6 @@ impl EffectChains {
 
     pub fn values_mut(&mut self) -> impl Iterator<Item = &mut SharedChain> {
         self.0.iter_mut().map(|(_, chain)| chain)
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
     }
 
     /// Set the chain of `e`, replacing the one it had.
@@ -212,19 +208,6 @@ impl EffectChains {
 
     pub fn retain(&mut self, mut keep: impl FnMut(&ExecEffectKind) -> bool) {
         self.0.retain(|(k, _)| keep(k));
-    }
-}
-
-impl Serialize for EffectChains {
-    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        s.collect_map(self.0.iter().map(|(k, chain)| (k, chain)))
-    }
-}
-
-impl<'de> Deserialize<'de> for EffectChains {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        BTreeMap::<ExecEffectKind, SharedChain>::deserialize(d)
-            .map(|m| Self(m.into_iter().collect()))
     }
 }
 
