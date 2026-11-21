@@ -771,6 +771,7 @@ fn gate_5_handbuilt_file_summaries() {
         per_item: None,
         dispatch: None,
         result_discarded: false,
+        queues: None,
         result_held: false,
     });
     index.update_file(file_b);
@@ -1417,6 +1418,7 @@ fn callers_left_without_a_defining_file_are_skipped() {
         per_item: None,
         dispatch: None,
         result_discarded: false,
+        queues: None,
         result_held: false,
     });
     let live = key("c", "live");
@@ -1445,6 +1447,7 @@ fn callers_left_without_a_defining_file_are_skipped() {
         per_item: None,
         dispatch: None,
         result_discarded: false,
+        queues: None,
         result_held: false,
     });
     file_c.call_sites.push(CallSite {
@@ -1471,6 +1474,7 @@ fn callers_left_without_a_defining_file_are_skipped() {
         per_item: None,
         dispatch: None,
         result_discarded: false,
+        queues: None,
         result_held: false,
     });
     let dup = file("b_alt.py", "b", &[&caller]);

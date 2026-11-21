@@ -263,8 +263,9 @@ resolution (`heki_semantic`); then an SSA-CFG IR is built for every function.
 - **Lowering**: `for` (the anonymous iterator becomes an explicit SSA variable through `MakeIter`
   and `IterNext`; **the `for.iter` header expression stays outside the loop body**), `while`,
   `with` / `async with`, `try` / `except` / `else` / `finally`, comprehensions, generator
-  expressions (`MakeGenExpr`), augmented assignments, unpacking, and `match` become basic
-  instructions.
+  expressions (`MakeGenExpr`), augmented assignments, unpacking, `match`, and f-strings (each
+  replacement field converted and formatted where it stands, `Convert` and `Format`, then
+  joined, `BuildString`) become basic instructions.
 - **First-class `await` / `yield`**: suspension points are explicit, and awaited calls are
   distinguished from synchronous calls.
 - **Classes, decorators, and loops**: natural loops with a `LoopBound` (`ConstSmall(k)` /
@@ -342,6 +343,7 @@ EffectSummary(f) = {
 
     exec_guards:              Map<ExecEffect, EffectGuards>, // input tests every occurrence needs; lazy init
                                                     // (once per object, from which parameters)
+    capacity_waits:           Vec<CapacityWait>,    // own queue waits whose capacity the callers decide
 
     // Offloading and the async context
     offloads_blocking_params: Bitset,               // wrapper that runs the callable in parameter i on a thread
@@ -503,7 +505,7 @@ is **rejected**: the hits were sparse and mostly deliberate idioms;
 
 | Rule ID | Default | Stage 0-A density | What it finds and how precision is controlled |
 |---|---|---|---|
-| **EFF101** | Off (heuristic) | Web/async **37.6%** (82% indirect) | Blocking calls (network, database, subprocess, synchronization, sleep) reachable from `async def`, directly or indirectly. Offload wrappers and offloading decorators (their queries and writes still count), sync-over-async relaxation, awaited calls and `subprocess.Popen` excluded; a generator is reported where it is iterated, not where it is created; boundary-only reporting with root-cause grouping, `logging` / `print` excluded |
+| **EFF101** | Off (heuristic) | Web/async **37.6%** (82% indirect) | Blocking calls (network, database, subprocess, synchronization, sleep) reachable from `async def`, directly or indirectly. Offload wrappers and offloading decorators (their queries and writes still count), sync-over-async relaxation, awaited calls and `subprocess.Popen` excluded; `queue.Queue.put` only on a queue known to be bounded (its `maxsize`, followed through locals, attributes, globals, and parameters); a generator is reported where it is iterated, not where it is created; boundary-only reporting with root-cause grouping, `logging` / `print` excluded |
 | **EFF102** | Off (heuristic) | Web/async **44.1%** / DB **48.5%** (90–93% indirect) | HTTP clients, sessions, or connection pools created in a loop (across functions too). `for.iter` excluded; `ConstSmall` / `RetryPattern` / `DaemonPolling` loops relaxed |
 | **EFF103** | Off (heuristic) | DB **47.6%** (74% indirect) | Explicit database queries or external RPC calls in a loop (N+1, across functions too). `for.iter`, DDL, migrations, ORM internals, and bulk APIs excluded. **Implicit ORM lazy loading is out of scope (known limitation)** |
 | **EFF105** | Opt-in (heuristic) | — | Local file I/O reachable from `async def` (`BlockingFs`; `--extend-select EFF105`) |
@@ -667,7 +669,7 @@ heki/
 
 ## 9. CLI, configuration, Ratchet baseline, and profile dumps (one interface with Ruff and `t-linter`)
 
-### 9.1 Commands (exit codes: `0` clean / `1` diagnostics / `2` errors)
+### 9.1 Commands (exit codes: `0` clean or only warnings / `1` errors, and warnings with `--fail-on warning` / `2` configuration, I/O, or syntax errors)
 ```bash
 heki check [PATHS...]                         # semantic diagnostics (MUT, EFF / DATA, OPT)
 heki check --fix [PATHS...]                   # apply safe and unconditional fixes (OPT101 / OPT102)
@@ -675,6 +677,7 @@ heki check --fix --include-size-dependent     # also the proven size-dependent r
 heki check --diff [PATHS...]                  # preview the fixes
 heki check --select EFF,MUT --ignore MUT101   # rule selection (codes, prefixes, or names)
 heki check --heuristic                        # also the heuristic rules (lint.heuristic = true)
+heki check --fail-on warning                  # warnings fail the run too (lint.fail-on = "warning")
 heki check --output-format full|concise|json|github|sarif
 heki check --baseline heki-baseline.toml      # Ratchet: more findings fail, fewer ask to shrink the file
 heki check --update-baseline                  # record a new baseline or shrink an existing one (growth is refused)
@@ -700,6 +703,7 @@ select = ["EFF", "DATA", "MUT", "OPT"]
 extend-select = ["EFF105"]
 ignore = []
 heuristic = true                     # prefixes and the defaults also select the heuristic rules
+fail-on = "warning"                  # warnings fail heki check too (default: "error")
 
 [tool.heki.lint.severity]
 MUT101 = "warning"
