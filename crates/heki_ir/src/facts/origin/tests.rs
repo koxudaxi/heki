@@ -446,3 +446,22 @@ def f(db):
     assert_eq!(origin.function, creator.id);
     assert!(matches!(origin.source, ItemSource::Call { .. }));
 }
+
+#[test]
+fn items_deeper_than_the_walk_follows_and_ranges_it_does_not_read_are_open() {
+    let src = r#"
+def f(rows, n):
+    for x in rows[0][0][0]:  # L
+        pass
+    for x in rows[0][0][0][0]:  # L
+        pass
+    for i in range(0, len(rows), 1):  # L
+        pass
+    for i in range(n, len(rows)):  # L
+        pass
+"#;
+    assert_eq!(
+        origins(src, "f", "# L"),
+        vec!["part0", "open", "param0/count", "open"]
+    );
+}

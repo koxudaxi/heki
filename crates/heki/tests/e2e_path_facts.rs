@@ -195,6 +195,7 @@ fn trip_counts_the_code_fixes_past_sixteen() {
     let facts = dump_facts(
         "paths_trip_counts",
         r#"NAMES = ("a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q")
+ALPHABET = "abcdefghijklmnopqrstuvwxyz"
 
 
 def counts(rows, db):
@@ -217,6 +218,13 @@ def counts(rows, db):
         n += 1
     for i in range(3):
         db.one(i)
+    for i in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20):
+        db.one(i)
+    for c in ALPHABET:
+        db.one(c)
+    k = 0
+    while 500 > k:
+        k += 1
 "#,
     );
     let trips: Vec<Value> = function(&facts, "counts")["loops"]
@@ -236,6 +244,10 @@ def counts(rows, db):
             json!({"known": 30}),
             json!({"known": 1000}),
             json!({"known": 3}),
+            json!({"known": 20}),
+            json!({"known": 26}),
+            // The counter on the right of its test.
+            json!({"known": 500}),
         ]
     );
 }

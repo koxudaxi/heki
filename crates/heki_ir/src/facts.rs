@@ -1478,17 +1478,7 @@ impl<'a> FnIndex<'a> {
             return None;
         }
         // The counter as the left operand: `limit < i` tests `i > limit`.
-        let op = if counter_first {
-            op
-        } else {
-            match op {
-                CompareOpKind::Lt => CompareOpKind::Gt,
-                CompareOpKind::LtE => CompareOpKind::GtE,
-                CompareOpKind::Gt => CompareOpKind::Lt,
-                CompareOpKind::GtE => CompareOpKind::LtE,
-                other => other,
-            }
-        };
+        let op = if counter_first { op } else { mirrored(op) };
         counted_trips_past(start, step, limit, op).filter(|n| *n <= cap)
     }
 
@@ -2038,6 +2028,17 @@ fn waits_for_time(f: &IrFunction, inst: &Inst) -> bool {
 
 /// Whether integers in `order` pass the comparison `op` (`None` for a test of identity or
 /// membership).
+/// The operator that tests `b <op'> a` exactly when `a <op> b` holds.
+fn mirrored(op: CompareOpKind) -> CompareOpKind {
+    match op {
+        CompareOpKind::Lt => CompareOpKind::Gt,
+        CompareOpKind::LtE => CompareOpKind::GtE,
+        CompareOpKind::Gt => CompareOpKind::Lt,
+        CompareOpKind::GtE => CompareOpKind::LtE,
+        symmetric => symmetric,
+    }
+}
+
 /// How many times a test `i <op> limit` holds for `i` = `start`, `start + step`, ... before it
 /// first fails, when the counter moves towards the limit so that it fails once and for all:
 /// `None` when it never fails or the operator does not order the counter.
@@ -2508,7 +2509,7 @@ fn refine_round(
 
 #[cfg(test)]
 mod tests {
-    use super::{CompareOpKind, compare_holds, counted_trips_past, range_len};
+    use super::{CompareOpKind, compare_holds, counted_trips_past, mirrored, range_len};
 
     #[test]
     fn range_len_matches_python() {
@@ -2525,6 +2526,21 @@ mod tests {
         }
         assert_eq!(range_len(&[0, 1, 0]), None);
         assert_eq!(range_len(&[]), None);
+    }
+
+    #[test]
+    fn a_mirrored_comparison_holds_for_the_operands_swapped() {
+        use CompareOpKind::{Eq, Gt, GtE, Lt, LtE, NotEq};
+        use std::cmp::Ordering::{Equal, Greater, Less};
+        for op in [Lt, LtE, Gt, GtE, Eq, NotEq] {
+            for order in [Less, Equal, Greater] {
+                assert_eq!(
+                    compare_holds(op, order),
+                    compare_holds(mirrored(op), order.reverse()),
+                    "{op:?} {order:?}"
+                );
+            }
+        }
     }
 
     #[test]

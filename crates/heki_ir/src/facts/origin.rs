@@ -321,14 +321,13 @@ impl<'m> ItemOrigins<'m> {
                     }
                 }
             }
-            // In a function, a `LoadName` reads a local a `del` may have unbound, not the global.
-            InstKind::LoadName { .. } if !ix.f.is_module_body => walk.fail(),
+            // A `LoadName` reads a name a `del` may have unbound: never a constant.
+            InstKind::LoadName { .. } => walk.fail(),
             InstKind::LoadGlobal {
                 name,
                 is_lazy_import: false,
                 ..
-            }
-            | InstKind::LoadName { name, .. } => {
+            } => {
                 let m = &self.ir.constants;
                 // The items of a string, or of a tuple of strings, are fixed too; those of another
                 // display are values the walk does not follow.

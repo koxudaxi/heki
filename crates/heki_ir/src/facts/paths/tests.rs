@@ -613,3 +613,17 @@ def f(p):
     let (called, _, _) = facts(src, "f", "os.path.join(p)");
     assert_eq!(called, EVERY);
 }
+
+#[test]
+fn an_attribute_of_a_value_that_is_no_module_may_raise() {
+    let src = r#"
+def f(db, xs):
+    try:
+        join = "-".join
+        db.fetch(join(xs))
+    except AttributeError:
+        return None
+"#;
+    let (called, _, _) = facts(src, "f", "db.fetch(join(xs))");
+    assert_eq!(called, NOT_EVERY);
+}
