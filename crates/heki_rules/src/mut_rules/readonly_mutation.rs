@@ -13,7 +13,7 @@
 use super::{Allowance, facts_run_at, initializes_itself, runs_inside_allowed};
 use crate::{CheckContext, ModuleUnit, SitesByCaller};
 use heki_ast::Span;
-use heki_diagnostics::Diagnostic;
+use heki_diagnostics::{Certainty, Diagnostic};
 use heki_effect::{
     BoundCallee, CallHop, CallSite, EffectSummary, FuncKey, ProjectIndex, ReadOnlyAttr,
     ReadOnlyKind, SiteRole, Slot, WriteKind,
@@ -258,22 +258,24 @@ impl Rule<'_, '_> {
                     let name = &decl.param_names[usize::from(*p)];
                     let (chain, (changer, j)) = self.chain(&call, k, None);
                     // The line where the function at the end of the chain changes the object its
-                    // parameter `j` holds, which is the caller's parameter whenever it runs.
-                    let Some((change_path, change)) = self.inplace_site(&changer, j) else {
-                        continue;
+                    // parameter `j` holds, which is the caller's parameter whenever it runs. The
+                    // chain does not follow a change made where a returned generator is
+                    // iterated: without its line the claim is open, and the report heuristic.
+                    let witness = self.inplace_site(&changer, j).map(|(path, span)| {
+                        let what =
+                            format!("`{}` changes the object in place here", changer.qualname);
+                        cx.related_at(path, span, what)
+                    });
+                    let (caller, callee) = (&site.caller.qualname, bc.callee.fqn());
+                    let message = match &witness {
+                        Some(w) => format!(
+                            "`{caller}` passes its read-only parameter `{name}` to `{callee}`; whenever line {} of `{}` runs, it changes the caller's object in place",
+                            w.line, changer.qualname,
+                        ),
+                        None => format!(
+                            "`{caller}` passes its read-only parameter `{name}` to `{callee}`, which changes it in place"
+                        ),
                     };
-                    let witness = cx.related_at(
-                        change_path,
-                        change,
-                        format!("`{}` changes the object in place here", changer.qualname),
-                    );
-                    let message = format!(
-                        "`{}` passes its read-only parameter `{name}` to `{}`; line {} of `{}` changes that object in place",
-                        site.caller.qualname,
-                        bc.callee.fqn(),
-                        witness.line,
-                        changer.qualname,
-                    );
                     let help = format!(
                         "pass a copy (`list({name})` / `dict({name})`), or annotate the helper's parameter with a mutable type"
                     );
@@ -289,7 +291,10 @@ impl Rule<'_, '_> {
                         &help,
                         &chain,
                     ) {
-                        d.related.push(witness);
+                        match witness {
+                            Some(w) => d.related.push(w),
+                            None => d.certainty = Certainty::Heuristic.at_most(d.certainty),
+                        }
                     }
                 }
             }

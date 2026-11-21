@@ -221,7 +221,7 @@ fn mut110_readonly_parameters_handed_to_helpers() {
     let one = at(&diags, c, 21);
     assert_eq!(
         message(one),
-        "`one_call` passes its read-only parameter `items` to `pkg.fill.push`; line 7 of `push` changes that object in place"
+        "`one_call` passes its read-only parameter `items` to `pkg.fill.push`; whenever line 7 of `push` runs, it changes the caller's object in place"
     );
     assert_eq!(
         one["help"],
@@ -249,7 +249,8 @@ fn mut110_readonly_parameters_handed_to_helpers() {
 /// The claim is the named line: whenever it runs during the call, it changes the caller's object.
 /// So a change under a test of the argument's type is reported, and a parameter that is a copy on
 /// one path before the call, or a helper's parameter rebound to a copy on one path before the
-/// change, is not.
+/// change, is not. A change made where a generator another function returns is iterated has no
+/// line in the chain: that report is heuristic and names none.
 const ANCHORED: &str = r#"from collections.abc import Sequence
 
 
@@ -280,6 +281,23 @@ def rebound_in_the_helper(values: Sequence[float]) -> None:
 
 def under_a_type_test(values: Sequence[float]) -> None:
     append_to_lists(values)
+
+
+def wipe(values):
+    values.clear()
+    yield 1
+
+
+def adapter(values):
+    return wipe(values)
+
+
+def consume(values):
+    list(adapter(values))
+
+
+def through_a_generator(values: Sequence[float]) -> None:
+    consume(values)
 "#;
 
 #[test]
@@ -289,13 +307,25 @@ fn mut110_names_a_line_that_changes_the_callers_object_whenever_it_runs() {
         .write("pkg/anchored.py", ANCHORED);
     let diags = diagnostics(&p, &[]);
     let a = "pkg/anchored.py";
-    assert_eq!(found(&diags), vec![d(a, 30, "under_a_type_test", "values")]);
+    assert_eq!(
+        found(&diags),
+        vec![
+            d(a, 30, "under_a_type_test", "values"),
+            d(a, 47, "through_a_generator", "values"),
+        ]
+    );
     assert_eq!(
         message(&diags[0]),
-        "`under_a_type_test` passes its read-only parameter `values` to `pkg.anchored.append_to_lists`; line 16 of `append_to_lists` changes that object in place"
+        "`under_a_type_test` passes its read-only parameter `values` to `pkg.anchored.append_to_lists`; whenever line 16 of `append_to_lists` runs, it changes the caller's object in place"
     );
     assert_eq!(chain(&diags[0]), vec![(a.into(), 30), (a.into(), 16)]);
     assert_eq!(diags[0]["severity"], "warning");
+    assert_eq!(
+        message(&diags[1]),
+        "`through_a_generator` passes its read-only parameter `values` to `pkg.anchored.consume`, which changes it in place"
+    );
+    assert_eq!(diags[1]["certainty"], "heuristic");
+    assert_eq!(chain(&diags[1]), vec![(a.into(), 47)]);
 }
 
 // ============================================================== defaults and `heki rule`

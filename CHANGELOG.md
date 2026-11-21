@@ -112,8 +112,9 @@ release can change rules, configuration keys, diagnostics, and output formats.
   annotation.
 - `MUT110` names the line where the helper changes the parameter, in the message and as a
   related location: "`median` passes its read-only parameter `values` to `helpers.sort_values`;
-  line 2 of `sort_values` changes that object in place". The claim is that line, which changes
-  the caller's object whenever it runs; it no longer says that every call changes it.
+  whenever line 2 of `sort_values` runs, it changes the caller's object in place". It no longer
+  says that every call changes it. A change heki finds only where a generator another function
+  returns is iterated names no line, and that report is heuristic.
 - `EFF102` and `EFF103` also report the function a builtin calls once per item: the function
   handed to `map`, `filter`, `itertools.starmap`, `itertools.filterfalse`, and
   `functools.reduce`, and the `key` of `sorted`, `list.sort`, `min`, `max`, and
