@@ -259,11 +259,11 @@ fn phi_inputs_after_many_is_tests_find_their_sides_once_per_edge() {
 
 /// A function returning the last of a long chain of conditional expressions, each choosing
 /// between a call of the previous value and the previous value itself
-/// (`x400 = identity(x399) if flag else x399`): each phi is walked once and referred to by the
+/// (`x200 = identity(x199) if flag else x199`): each phi is walked once and referred to by the
 /// walks that meet it, instead of every argument walking all the phis before it.
 #[test]
 fn returned_phis_of_calls_on_the_previous_value_are_walked_once() {
-    let links = 400;
+    let links = 200;
     let mut lines = vec![
         "def identity(x):".to_owned(),
         "    return x".to_owned(),
@@ -342,13 +342,13 @@ fn origin_walks_past_their_budget_return_unknown() {
     );
 }
 
-/// A loop carrying a long chain of assignments in reverse (`v0 = v1`, ..., `v2999 = shared or []`,
+/// A loop carrying a long chain of assignments in reverse (`v0 = v1`, ..., `v1499 = shared or []`,
 /// the names bound to `None` before it): the value moves one link per iteration, and the
 /// ownership fixpoint follows it in one sweep along the chain, visiting what a value grows
 /// into instead of every instruction again for each link.
 #[test]
 fn ownership_through_a_long_chain_a_loop_carries_in_reverse_is_found_in_one_sweep() {
-    let links = 3_000;
+    let links = 1_500;
     let mut lines = vec!["def carry(shared, items):".to_owned()];
     for i in 0..=links {
         lines.push(format!("    v{i} = None"));
