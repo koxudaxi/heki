@@ -28,6 +28,7 @@ SAFE_EXACT_PATHS = frozenset(
         "ARCHITECTURE.md",
         "CHANGELOG.md",
         "README.md",
+        "scripts/ansi_svg.py",
         "scripts/build_docs.py",
         "scripts/build_llms_txt.py",
         "scripts/check_memory.py",
