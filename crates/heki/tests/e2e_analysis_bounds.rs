@@ -1726,3 +1726,41 @@ fn a_loop_over_many_generator_results_is_summarized_once() {
         1
     );
 }
+
+/// A private generator handed on through five thousand private wrappers, each returning the one
+/// before's result (`def _w1(self): return self._w0()`), and a loop over the last one's result
+/// calling a method that changes the generator's container: the walk from the generator to the
+/// loop keeps its own stack, one entry per wrapper, instead of a native frame per wrapper.
+#[test]
+fn a_long_chain_of_wrappers_handing_on_a_generator_is_walked_on_its_own_stack() {
+    let wrappers = 5_000;
+    let mut lines = vec![
+        "class Box:".to_owned(),
+        "    def __init__(self) -> None:".to_owned(),
+        "        self.items: dict[str, int] = {}".to_owned(),
+        String::new(),
+        "    def _w0(self):".to_owned(),
+        "        yield from self.items".to_owned(),
+    ];
+    for i in 1..=wrappers {
+        lines.push(String::new());
+        lines.push(format!("    def _w{i}(self):"));
+        lines.push(format!("        return self._w{}()", i - 1));
+    }
+    lines.extend(
+        [
+            "",
+            "    def _drop(self, k: str) -> None:",
+            "        self.items.pop(k, None)",
+            "",
+            "    def drain(self) -> None:",
+        ]
+        .map(str::to_owned),
+    );
+    lines.push(format!("        for k in self._w{wrappers}():"));
+    lines.push("            self._drop(k)".to_owned());
+    assert_eq!(
+        iterated_mutations("bounds_wrapper_chain", &(lines.join("\n") + "\n")),
+        1
+    );
+}

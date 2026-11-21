@@ -120,8 +120,9 @@ the previous value and the value, one returned call handed the last of a long ch
 each of its arguments, a loop carrying a long chain of assignments in reverse, a loop rotating
 aliases of many `self` containers, a chain of merges of many `self` containers, a loop over a
 generator whose body makes many calls, loops whose bodies hold many conditional blocks one after
-another, a function consuming a generator's result many times in a row, and a loop over a `zip` of
-many generator results whose body makes as many calls.
+another, a function consuming a generator's result many times in a row, a loop over a `zip` of many
+generator results whose body makes as many calls, and a generator handed on through thousands of
+private wrappers, each returning the one before's result.
 
 A change to the IR builder, a walk, a fixpoint, or a rule's state is also run over a large
 corpus of real projects before it is merged, every run under a memory cap and a timeout. No

@@ -127,69 +127,120 @@ struct Exposure<'a> {
 /// generator's instance (`None`: none of them is known to).
 type Reached = (FuncKey, Option<u8>);
 
+/// A step of [`Exposure::follow`]'s walk. A chain of private wrappers returning each other's
+/// results is as long as the generated code makes it, so the walk keeps its own stack, in the
+/// order a depth-first walk takes the steps.
+enum Step<'f, 'a> {
+    /// Reach `func`, whose parameter `instance` holds the generator's instance.
+    Reach(&'f FuncKey, Option<u8>),
+    /// Go on with the rest of the callers of `func`.
+    Callers(
+        &'f FuncKey,
+        Option<u8>,
+        std::collections::hash_set::Iter<'a, FuncKey>,
+    ),
+    /// Go on at the calls of `func` in one of its callers.
+    Calls(Box<AtCalls<'f, 'a>>),
+}
+
+/// [`Step::Calls`]: the calls of `func`, whose parameter `instance` holds the generator's
+/// instance, in `caller`, a function of the file at `path` with the uses `file` records.
+struct AtCalls<'f, 'a> {
+    func: &'f FuncKey,
+    instance: Option<u8>,
+    caller: &'a FuncKey,
+    path: &'a Path,
+    file: Rc<FileUses<'a>>,
+    /// The index of the next call among the caller's calls of `func`, and whether the walk has
+    /// followed its result into the caller's own callers already.
+    next: usize,
+    followed: bool,
+    /// The iterations, and the objects in them, whose loop calls are added already: a loop over
+    /// `zip(a(), b())` is one iteration of both results.
+    added: FxHashSet<(usize, u32)>,
+}
+
 impl<'a> Exposure<'a> {
     fn of(cx: &CheckContext<'a>, uses: &ResultUses<'a>, generator: &FuncKey) -> Self {
         let mut out = Self::default();
-        out.follow(cx, uses, (generator, Some(0)), &mut FxHashSet::default());
+        out.follow(cx, uses, generator);
         out
     }
 
-    /// Add where the object `func` returns (a generator, or one it hands on) goes at each call of
-    /// it, by the uses its caller records: returned, iterated (`IterationFacts::result_iterations`;
-    /// by a generator suspending inside the iteration, too), and whether it outlives one of these
-    /// uses (`CallSite::result_held`). A project function it is passed to is not followed.
-    /// `instance` is the parameter of `func` holding the generator's instance.
-    fn follow(
-        &mut self,
-        cx: &CheckContext<'a>,
-        uses: &ResultUses<'a>,
-        (func, instance): (&FuncKey, Option<u8>),
-        visited: &mut FxHashSet<Reached>,
-    ) {
-        if visited.insert((func.clone(), instance)) {
-            self.offered |= !is_private(&func.qualname);
-            for caller in cx.index.reverse_call_graph.get(func).into_iter().flatten() {
-                if let Some((path, file_uses)) = uses.of_file(cx.index, caller) {
-                    let of_caller = &file_uses[caller];
-                    self.follow_calls(
-                        cx,
-                        uses,
-                        (func, instance),
-                        (caller, path, of_caller),
-                        visited,
-                    );
+    /// Add where the object `generator` returns goes at each call of it, by the uses its caller
+    /// records: returned (then the same at each call of the caller, which hands it on), iterated
+    /// (`IterationFacts::result_iterations`; by a generator suspending inside the iteration,
+    /// too), and whether it outlives one of these uses (`CallSite::result_held`). A project
+    /// function it is passed to is not followed. Each function is reached once per parameter
+    /// holding the generator's instance (`Reached`).
+    fn follow(&mut self, cx: &CheckContext<'a>, uses: &ResultUses<'a>, generator: &FuncKey) {
+        let mut visited: FxHashSet<Reached> = FxHashSet::default();
+        let mut stack = vec![Step::Reach(generator, Some(0))];
+        while let Some(step) = stack.pop() {
+            match step {
+                Step::Reach(func, instance) => {
+                    if visited.insert((func.clone(), instance)) {
+                        self.offered |= !is_private(&func.qualname);
+                        if let Some(callers) = cx.index.reverse_call_graph.get(func) {
+                            stack.push(Step::Callers(func, instance, callers.iter()));
+                        }
+                    }
                 }
+                Step::Callers(func, instance, mut callers) => {
+                    let Some(caller) = callers.next() else {
+                        continue;
+                    };
+                    stack.push(Step::Callers(func, instance, callers));
+                    if let Some((path, file)) = uses.of_file(cx.index, caller) {
+                        stack.push(Step::Calls(Box::new(AtCalls {
+                            func,
+                            instance,
+                            caller,
+                            path,
+                            file,
+                            next: 0,
+                            followed: false,
+                            added: FxHashSet::default(),
+                        })));
+                    }
+                }
+                Step::Calls(at) => self.at_call(at, &mut stack),
             }
         }
     }
 
-    /// [`Self::follow`] at the calls of `func` in `caller`, a function of the file at `path` whose
-    /// uses of its calls' results are `of_caller`. A loop over a call's result runs its calls on
-    /// the generator's instance where they bind the object the call binds to `instance`
+    /// One call of [`Step::Calls`]: a call whose result the caller hands on is followed into the
+    /// caller's callers first. A loop over the call's result runs its calls on the generator's
+    /// instance where they bind the object the call binds to `instance`
     /// (`ResultIteration::receivers`, `IteratedResult::arguments`).
-    fn follow_calls(
-        &mut self,
-        cx: &CheckContext<'a>,
-        uses: &ResultUses<'a>,
-        (func, instance): (&FuncKey, Option<u8>),
-        (caller, path, of_caller): (&'a FuncKey, &'a Path, &CallerUses<'a>),
-        visited: &mut FxHashSet<Reached>,
-    ) {
-        let calls = of_caller.calling.get(func).into_iter().flatten();
-        // The iterations, and the objects in them, whose loop calls are added already: a loop
-        // over `zip(a(), b())` is one iteration of both results.
-        let mut added: FxHashSet<(usize, u32)> = FxHashSet::default();
-        for call in calls.filter(|s| s.role == SiteRole::Call) {
-            if of_caller.handed_on.contains(&call.span) {
-                let in_caller = instance.and_then(|p| bound_parameter(call, func, p));
-                self.follow(cx, uses, (caller, in_caller), visited);
+    fn at_call<'f>(&mut self, mut at: Box<AtCalls<'f, 'a>>, stack: &mut Vec<Step<'f, 'a>>)
+    where
+        'a: 'f,
+    {
+        let file = Rc::clone(&at.file);
+        let of_caller = &file[at.caller];
+        let calls = of_caller
+            .calling
+            .get(at.func)
+            .map_or(&[][..], Vec::as_slice);
+        let Some(&call) = calls.get(at.next) else {
+            return;
+        };
+        if call.role == SiteRole::Call {
+            if !at.followed && of_caller.handed_on.contains(&call.span) {
+                let in_caller = at.instance.and_then(|p| bound_parameter(call, at.func, p));
+                let caller = at.caller;
+                at.followed = true;
+                stack.push(Step::Calls(at));
+                stack.push(Step::Reach(caller, in_caller));
+                return;
             }
             self.held |= call.result_held;
             for &(n, used, result) in of_caller.iterations.get(&call.span).into_iter().flatten() {
                 let objects: Vec<u32> = result
                     .arguments
                     .iter()
-                    .filter(|(p, o)| Some(*p) == instance && added.insert((n, *o)))
+                    .filter(|(p, o)| Some(*p) == at.instance && at.added.insert((n, *o)))
                     .map(|(_, o)| *o)
                     .collect();
                 let on_instance = |i: usize| {
@@ -199,10 +250,13 @@ impl<'a> Exposure<'a> {
                 let calls = used.between.calls.iter().enumerate();
                 for (_, span) in calls.filter(|(i, _)| on_instance(*i)) {
                     let found = of_caller.at.get(span).into_iter().flatten();
-                    self.loop_calls.extend(found.map(|site| (path, *site)));
+                    self.loop_calls.extend(found.map(|site| (at.path, *site)));
                 }
             }
         }
+        at.next += 1;
+        at.followed = false;
+        stack.push(Step::Calls(at));
     }
 }
 
