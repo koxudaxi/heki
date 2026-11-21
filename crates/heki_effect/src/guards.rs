@@ -30,6 +30,7 @@
 //! a callee's guards across a call site for both the fixpoint and the rules. Anything not
 //! recognized keeps the effect.
 
+use crate::capacity::{ParamCapacities, bound_capacity};
 use crate::resolver::{ProjectDecls, Val, aliases_of};
 use crate::{
     ArgBinding, BoundCallee, CallSite, ConstArg, ConstClass, EffectGuards, EffectSummary,
@@ -50,14 +51,18 @@ use std::collections::BTreeMap;
 impl EffectGuards {
     /// No guard at all: the effect runs whenever the function does.
     pub fn is_trivial(&self) -> bool {
-        self.inputs.is_empty() && self.once_per.is_none()
+        self.inputs.is_empty() && self.once_per.is_none() && self.bounded_queue.is_none()
     }
 
-    /// The guards of two occurrences together: the tests both need, and lazy initialization
-    /// only when both are lazy (from the parameters of either).
+    /// The guards of two occurrences together: the tests both need, lazy initialization only
+    /// when both are lazy (from the parameters of either), and a bounded queue only when both
+    /// wait on the same one.
     fn join(&mut self, other: &Self) {
         self.inputs.retain(|g| other.inputs.contains(g));
         self.once_per = self.once_per.zip(other.once_per).map(|(a, b)| a | b);
+        self.bounded_queue = self
+            .bounded_queue
+            .filter(|p| other.bounded_queue == Some(*p));
     }
 }
 
@@ -117,7 +122,15 @@ impl ConstArg {
             ConstLiteral::Ellipsis => (ConstClass::Other, Some(true)),
             ConstLiteral::Other => return None,
         };
-        Some(Self { class, truthy })
+        let positive = match literal {
+            ConstLiteral::Int(n) => Some(*n > 0),
+            _ => None,
+        };
+        Some(Self {
+            class,
+            truthy,
+            positive,
+        })
     }
 
     /// The outcome of `test` on this value, when the value decides it.
@@ -176,17 +189,21 @@ const FILE_PROTOCOL: &[&str] = &[
     "writelines",
 ];
 
+/// The builtin kinds of displays and comprehensions, with their classes.
+const DISPLAY_CLASSES: [(BuiltinKind, ConstClass); 4] = [
+    (BuiltinKind::List, ConstClass::List),
+    (BuiltinKind::Tuple, ConstClass::Tuple),
+    (BuiltinKind::Set, ConstClass::Set),
+    (BuiltinKind::Dict, ConstClass::Dict),
+];
+
 impl ConstClass {
-    /// The class of a display or comprehension of `kind` (an f-string, `Str`, has none: a single
-    /// replacement field is the result of `__format__`, which may be a `str` subclass).
+    /// The class of a display or comprehension of `kind`.
     fn of_builtin(kind: BuiltinKind) -> Option<Self> {
-        match kind {
-            BuiltinKind::List => Some(Self::List),
-            BuiltinKind::Tuple => Some(Self::Tuple),
-            BuiltinKind::Set => Some(Self::Set),
-            BuiltinKind::Dict => Some(Self::Dict),
-            _ => None,
-        }
+        DISPLAY_CLASSES
+            .iter()
+            .find(|(k, _)| *k == kind)
+            .map(|(_, class)| *class)
     }
 
     /// The buffer class a call of `module.name` constructs.
@@ -318,21 +335,33 @@ pub(crate) struct Through {
 }
 
 /// Map the guards `callee` of one effect of `bc` across `site`: `None` when an argument or a
-/// test the caller has made decides a guard against the effect (it does not run here).
+/// test the caller has made decides a guard against the effect (it does not run here). A queue
+/// a call binds is bounded when `capacities` shows what it gives the parameter bounded.
 pub(crate) fn through_call(
     site: &CallSite,
     bc: &BoundCallee,
     callee: Option<&EffectGuards>,
+    capacities: &ParamCapacities,
 ) -> Option<Through> {
     let mut guards = EffectGuards {
         inputs: site.guards.iter().cloned().collect(),
         once_per: site.once_per,
+        bounded_queue: None,
     };
     let mut once_loops = site.once_loops;
     let Some(callee) = callee else {
         return Some(Through { guards, once_loops });
     };
     let binding = |p: usize| bc.params.get(p).and_then(|o| o.binding.as_ref());
+    if let Some(p) = callee.bounded_queue.map(usize::from) {
+        // The caller's own parameter: its calls decide. Anything else is decided here: a queue
+        // not known to be bounded does not wait.
+        match binding(p).and_then(|b| b.input.as_ref()) {
+            Some(GuardSubject { param, attr: None }) => guards.bounded_queue = Some(*param),
+            _ if capacities.bounded(&bound_capacity(site, bc, p)) => {}
+            _ => return None,
+        }
+    }
     for g in &callee.inputs {
         let Some(b) = binding(usize::from(g.subject.param)) else {
             continue;
@@ -891,6 +920,7 @@ impl LocalGuards {
         EffectGuards {
             inputs: self.facts_at(cx, bb).into_iter().collect(),
             once_per: self.once_per_at(cx, bb),
+            bounded_queue: None,
         }
     }
 
@@ -996,18 +1026,7 @@ impl<'a> GuardInputs<'_, 'a> {
     }
 
     pub(crate) fn phi(&self, v: VarId) -> Option<(BlockId, &'a PhiNode)> {
-        self.phis
-            .get_or_init(|| {
-                let mut phis = FxHashMap::default();
-                for bb in &self.f.blocks {
-                    for phi in &bb.phis {
-                        phis.insert(phi.dst, (bb.id, phi));
-                    }
-                }
-                phis
-            })
-            .get(&v)
-            .copied()
+        phi_table(self.f, self.phis).get(&v).copied()
     }
 
     /// The guard subject `v` is: a parameter other than `*args` / `**kwargs`, or an attribute
@@ -1040,6 +1059,22 @@ impl<'a> GuardInputs<'_, 'a> {
     fn param_index(&self, v: VarId) -> Option<usize> {
         self.f.params.iter().take(64).position(|p| p.var == v)
     }
+}
+
+/// The block and phi defining each phi variable of `f`, built in `cell` on first use.
+pub(crate) fn phi_table<'c, 'a>(
+    f: &'a IrFunction,
+    cell: &'c OnceCell<FxHashMap<VarId, (BlockId, &'a PhiNode)>>,
+) -> &'c FxHashMap<VarId, (BlockId, &'a PhiNode)> {
+    cell.get_or_init(|| {
+        let mut phis = FxHashMap::default();
+        for bb in &f.blocks {
+            for phi in &bb.phis {
+                phis.insert(phi.dst, (bb.id, phi));
+            }
+        }
+        phis
+    })
 }
 
 /// The bit of loop `lp` in a mask of the loops around a site (`CallSite::once_loops`).
@@ -1384,7 +1419,11 @@ fn const_arg(cx: &GuardInputs<'_, '_>, classes: &Classes, var: VarId) -> Option<
             .or(entries.is_empty().then_some(false)),
         _ => None,
     };
-    Some(ConstArg { class, truthy })
+    Some(ConstArg {
+        class,
+        truthy,
+        positive: None,
+    })
 }
 
 /// Whether a list, tuple, or set display of `elems` is truthy: true with an element written
