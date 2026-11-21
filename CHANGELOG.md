@@ -5,7 +5,7 @@ All notable changes to heki are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). heki is experimental: until 1.0, any
 release can change rules, configuration keys, diagnostics, and output formats.
 
-## [0.2.0] - Unreleased
+## [0.2.0] - 2026-11-21
 
 ### Breaking changes
 
@@ -33,8 +33,6 @@ release can change rules, configuration keys, diagnostics, and output formats.
 
 ### Added
 
-- `heki inspect <SYMBOL> [PATHS]...` (experimental) says what heki knows about one function,
-
 - `src` (`[tool.heki]`) lists the source roots, as Ruff's `src` and ty's `environment.root`
   do: directories relative to the project root whose files are named relative to them, so a
   subdirectory application (`src = ["backend"]`, for `backend/config/env.py` imported as
@@ -55,6 +53,31 @@ release can change rules, configuration keys, diagnostics, and output formats.
   heuristic report may not have established. `docs/precision.md` defines exact and heuristic
   reports, the assumptions R1-R7 exact claims rest on, how a rule is certified, and what each
   rule measured.
+- `EFF111` (`async-possibly-blocking-call`) and `EFF113` (`loop-possible-db-query`), heuristic: the
+  reports `EFF101` and `EFF103` made before, where the new exact claims are not established. See the
+  `EFF101` and `EFF103` entry under Changed.
+- `sqlite3.connect` of an in-memory database (`":memory:"`, `file::memory:`, `mode=memory`) does not
+  wait, and neither do the statements on that connection. A connection waits only where heki
+  establishes that it was opened on a file (a literal or a module constant without an in-memory
+  form, or a path built from such parts and `__file__`); any other, one opened from a parameter, an
+  f-string, or an environment lookup, or only named by an annotation, may be in memory, so its waits
+  are not established (`EFF111`; its statements still count for `EFF103`). Reports name such
+  connections' methods by the library's API (`sqlite3.Connection.execute`). A pragma that only reads
+  or sets an option of the connection (`PRAGMA busy_timeout = 5000`) does not wait.
+- Test code, which `lint.relax-async-in-tests` leaves out of `EFF101`, `EFF111`, `EFF105`, and
+  `EFF106`, is what pytest discovers: `test_*` functions and the functions nested in them,
+  `test_*.py` and `*_test.py` files at any depth, and files under `test/` or `tests/`.
+- The ecosystem catalog says when a call waits. A blocking effect waits for input or output or for
+  another thread (`blocking_sync`), which can have done its part already. Every wait entry lists the
+  arguments that end it at once: `time.sleep(0)`, `Popen.wait(timeout=0)`, a numeric host or
+  `localhost` for `socket.getaddrinfo` and `socket.gethostbyname`, a `data:` URL for `urlopen`; no
+  rule reports those calls as waiting. Database entries carry `emits` (`always`,
+  `on-identity-map-miss` for `Session.get`, `if-pending` for `Session.flush` / `commit` and a
+  driver's `commit()` / `rollback()`, `unless-cached` for Django's `QuerySet.count()` / `exists()` /
+  `first()` / `last()`, `unless-connected` for a pool checkout), and context managers
+  `exit_suppresses` (`false` for files, locks, HTTP sessions, and database connections; `true` for
+  `contextlib.suppress`), and calls whose results the environment sizes `items` (`rows`, `lines`,
+  `entries`, `text`). New argument tests: `one_of` and `numeric_address`.
 - `MUT206` (`unresolved-guarded-read`) and `MUT207` (`unresolved-guarded-call`): `read-owners`
   and `call-owners` contracts take `unresolved = "report"`, as `write-owners` does, and then
   report the reads of an attribute and the calls of a method named like a target on an object of
@@ -73,6 +96,16 @@ release can change rules, configuration keys, diagnostics, and output formats.
   (`items = given or []`, `d.get(k, {})`, a callee returning a memo or its argument), made
   directly, through a helper, or in a closure, and a store of such a value in `self.<attr>` that a
   method of the class family changes in place.
+- `MUT114` (`cached-result-mutation`) reports an in-place change of an object that a
+  `functools.lru_cache` / `functools.cache` function returned, which `MUT202` reported without
+  configuration before. It runs by default, and a report is exact when the function changes in place
+  the list, dict, or set that the cached function returned, the same object on every path: the
+  decorator resolves through the imports to `functools` (a module's own `cache` decorator does not
+  count), its `maxsize` is left out, `None`, or a literal number above `0`, the function takes a
+  parameter besides `self` / `cls`, and every return a run can reach hands out that kind of
+  container, by its return annotation or by construction (`html.escape(text).split("\n")` included).
+  Its other reports (through wrappers or helpers, an object below the result, a class instance) are
+  heuristic.
 - `MUT113` (`iterated-container-mutation`, opt-in, experimental) reports a dict, set, or deque
   of `self` changed in place while a method iterates it: by another method of the class while a
   generator is suspended inside the iteration, or by a function the loop's body calls; the next
@@ -81,41 +114,131 @@ release can change rules, configuration keys, diagnostics, and output formats.
   run (`invocations[0].toolExecutionNotifications`, with its location), and then sets
   `executionSuccessful` to `false`; the results of the other files are kept. JSON output is
   unchanged: the errors stay on stderr, and the exit code is still `2`.
+- `call-owners` takes `subclasses = false`: a class target then means constructing exactly the
+  class, so raising a subclass of a guarded exception class is no `MUT204` report. `Class.method`
+  targets keep covering overrides.
+- Contract names take a module part, `module:qualname`, which names definitions of one module
+  without its submodules: `pkg:*` names what `pkg/__init__.py` defines, where `pkg.*` also covers
+  `pkg.sub.user.sub_user`. The module part matches the whole module name, exactly or as a glob
+  (`pkg.*:run`), and works in every key that names project functions or classes, the class of
+  `Class.attr` targets included (`pkg.model:DataModel.fields`).
+- Effect boundaries check what a scope reads of the environment it runs in. `call-targets` name
+  functions and classes outside the project by their full dotted name (`os.getenv`, `platform.*`),
+  and `read-targets` module attributes (`sys.platform`, `os.environ`, also read through
+  `from sys import platform`); a dotted suffix or a leading glob still names project functions only.
+  The `forbid` token `reads-environment` forbids the calls and reads the ecosystem catalog tags with
+  the new `environment` key (`os.getenv`, `platform.system`, `importlib.util.find_spec`,
+  `importlib.metadata.version`, `os.environ`, `sys.version_info`, ...), in one report per scope
+  function, and with `import-probes = "report"` the imports inside a `try` whose `except` clause
+  names `ImportError` or `ModuleNotFoundError`.
+- `call-owners` and effect boundaries (for `calls`) take `references = "calls"`: a reference handing
+  a target on to be called later counts as a call of it, reported as "`f` hands on
+  `pkg.core.decide`": passed to a call (`partial(decide)`, `field(default_factory=Rule)`), stored,
+  returned, yielded, raised, or held by such a display, also through an import or a module alias.
+  Uses that only name a class (`isinstance`, `except`, a base class, `cast`, a typing subscript, an
+  annotation, a comparison) are no reference.
 
 ### Changed
 
-- Only exact reports are shown by default. A report is *exact* when every premise of its claim
-  was established and its rule was certified (a false exact report is a bug), and *heuristic*
-  when a premise can be open, so that it can be wrong about the code. A heuristic rule runs
-  when `select` or `extend-select` names its code or name, and with the new
-  `[tool.heki.lint] heuristic = true` (`--heuristic`) also by default and for every prefix and
-  `ALL`, as Ruff's `preview` does. An exact rule's heuristic reports (an `OPT` report whose
-  rewrite is not proven) are shown under the same conditions. A contract rule runs when its
-  contract is declared, whatever its certainty. No rule is exact yet: `heki check` with no configuration runs only the contract
-  rules, and `heki check --fix` applies no fix, since `OPT101` and `OPT102` stay heuristic until
-  a measurement certifies them. `MUT202`, which also reports `@lru_cache` / `@cache` results
-  without a contract, is selected like the other heuristic rules, so a `readonly-returns`
-  contract needs it named or `lint.heuristic = true`. `lint.heuristic = true` restores the rules
-  of 0.1; baselines keep their keys.
+- `DATA101` marks a report exact when every premise is established (the update returns on every
+  iteration that completes, every path around the back edge carries it, the loop steps through a
+  parameter, the rows of a query, the lines of a file, or directory entries, and its trip count is
+  not fixed) and heuristic otherwise; its message names the loop's origin and drops "(quadratic
+  copying)".
+- `EFF101` and `EFF103` state exact claims, each premise established: `EFF101` that whenever the
+  reported call returns, a call that waits for the network, a database, a child process, or a sleep
+  has run on the event loop's thread, through functions that each make the next call on every path
+  on which they return (exception edges included), with every implementation of each call followed
+  (protocol receivers are not); `EFF103` that every iteration of a loop over a parameter, the rows
+  of a query, the lines of a file, or the entries of a directory sends a database statement. Their
+  messages state the claim and its witnesses only: a call whose implementations reach different
+  statements names each with the function that makes it, and relates each where it is, and "N+1" and
+  "batch the queries" are gone. Everything else they reported is `EFF111` / `EFF113`. Waits on
+  another thread (`Thread.join()`, `Event.wait()`, locks, `Queue.get()`, `put()` on a bounded queue,
+  `Future.result()`) are `EFF111` only. Both are certified exact, as is `DATA101`
+  (`docs/precision.md` has their census and holdout counts), and run by default.
+- Only exact reports are shown by default. A report is *exact* when every premise of its claim was
+  established and its rule was certified (a false exact report is a bug), and *heuristic* when a
+  premise can be open, so that it can be wrong about the code. A heuristic rule runs when `select`
+  or `extend-select` names its code or name, and with the new `[tool.heki.lint] heuristic = true`
+  (`--heuristic`) also by default and for every prefix and `ALL`, as Ruff's `preview` does. An exact
+  rule's heuristic reports (an `OPT` report whose rewrite is not proven) are shown under the same
+  conditions. A contract rule runs when its contract is declared, whatever its certainty. The proven
+  tier of the eight `OPT` rewrite rules (`OPT101`-`OPT103`, `OPT110`, `OPT111`, `OPT120`, `OPT121`,
+  `OPT130`) is exact: a census of every one of its 234 reports on the Stage 0-A corpus, and a check
+  of the 235 of one run on a frozen holdout corpus of 100 packages, found none wrong. `OPT113`'s
+  exact tier is certified too (8 reports in the census and 6 in the holdout run, none wrong) and
+  runs by default. `EFF101`, `EFF103`, `DATA101`, `MUT110`, and `MUT114` are exact too
+  (`docs/precision.md` has their census and holdout counts, and lists their certifications).
+  `heki check` with no configuration runs the exact rules (`EFF101`, `EFF103`, `DATA101`, `MUT110`,
+  `MUT114`, and the proven tier of the `OPT` rules above) and the contract rules and shows the
+  reports whose rewrite is proven safe, and `heki check --fix` applies the proven fixes of `OPT101`
+  and `OPT102`. `lint.heuristic = true` restores the rules of 0.1; baselines keep their keys, except
+  the reports that move to `MUT114` (below).
+- `MUT202` (`readonly-return-mutation`) is a contract rule: it reports the declared
+  `readonly-returns` producers, and runs when such a contract is declared. Changes of `@lru_cache` /
+  `@cache` results move to `MUT114` (`cached-result-mutation`): regenerate a baseline that holds
+  them, or add `MUT114` to `ignore`.
 - Every output labels heuristic reports: `[error, heuristic]` in `full`,
   `EFF102 [heuristic] ...` in `concise`, `title=heki EFF102 (heuristic)` in `github`, and
   ` [heuristic]` after the language server's message. `heki rule --all` lists each rule's
   certainty and when it runs (`on`, `off`, `opt-in`, or `contract`) instead of
   `default=true` / `false`.
-- A rule's default severity follows what happens in the code it reports, not its family: a bug
-  (a wrong result, an exception, a lost update, a deadlock, or a broken contract) is an
-  `error`, slower code a `warning`. `EFF101`, `EFF102`, `EFF103`, `EFF105`, `DATA101`, and the
-  `OPT` rules default to `warning` instead of `error`; the other rules stay `error`. This
-  changes the output label, the SARIF level, the language server's severity, and the exit code
-  (see Breaking changes: a warning no longer fails the run). `[tool.heki.lint.severity]` still
-  overrides it. Each rule page shows its default severity, and `heki rule --output-format json`
-  gives each rule's `consequence` (`bug` or `slowdown`).
-- `EFF102` and `EFF103` also report the function a builtin calls once per item: the function
+- A rule's default severity follows what happens in the code it reports, not its family: a bug (a
+  wrong result, an exception, a lost update, a deadlock, or a broken contract) is an `error`, slower
+  code a `warning`. `EFF101`, `EFF102`, `EFF103`, `EFF105`, `DATA101`, and the `OPT` rules default
+  to `warning` instead of `error`; the other rules stay `error`. This changes the output label, the
+  SARIF level, the language server's severity, and the exit code (see Breaking changes: a warning no
+  longer fails the run). `[tool.heki.lint.severity]` still overrides it. Each rule page shows its
+  default severity, and `heki rule --output-format json` gives each rule's `consequence` (`bug`,
+  `minor-bug`, or `slowdown`). A bug that is rarely harmful is a `warning` too: `MUT110`
+  (`readonly-param-mutation`), a broken read-only annotation.
+- `MUT110` names the line where the helper changes the parameter, in the message and as a related
+  location: "`median` passes its read-only parameter `values` to `helpers.sort_values`; whenever
+  line 2 of `sort_values` runs, it changes the caller's object in place". It no longer says that
+  every call changes it. `MUT110` is exact and runs by default when the line changes a builtin
+  container (`list`, `dict`, `set`, ... by annotation, construction, or an `isinstance` test); a
+  change of a value heki does not know as one (a helper that types nothing), or one heki finds only
+  where a generator another function returns is iterated, names no line, and that report is
+  heuristic.
+- `OPT` messages state their claim and nothing else: what the statement does each time it runs in
+  the loop (`` `rows = rows + [...]` copies the whole list each time it runs in the loop ``),
+  without "on every iteration", which heki does not establish, and without cost estimates
+  ("(quadratic)", "(O(n) per iteration)", "(O(n²))", "(O(n·m))"). `OPT110` names the container it
+  scans (a list or a tuple), and `OPT130` says the constructor builds a new container for the
+  membership test, not "the same container", which only a proven rewrite establishes. The rule pages
+  state the claim the same way: its premises are the container's builtin type, the loop, and, for a
+  rule's exact tier, the proven rewrite; no size is claimed. A proven report of a size-dependent
+  `OPT` rule in a loop whose trip count the code fixes or caps (`range(50)`, `rows[:100]`, a display
+  of 20 items, a length test such as `if len(rows) > 100: raise ...`) is heuristic: true, but no
+  evidence either way.
+- `OPT113` reports carry a tier. A report is in the exact tier when each key the inner loop loads is
+  a plain attribute of an item whose class heki knows (a dataclass, `attrs`, or `NamedTuple` field,
+  or what the class stores, with no property or other descriptor of that name in the project) or an
+  item of a builtin container, both loops step through the function's inputs (parameters, or
+  attributes or items of them), an inner item whose key differs runs nothing but the comparison (no
+  statement before the test or after the `if`, no earlier `and` operand, and an inner iterable that
+  is a builtin container by its type or construction, not a value of unknown type, a generator,
+  `map`, `filter`, or another call), and the inner loop steps through the same collection, with the
+  same keys, on every outer iteration; a loop whose trip count the code fixes or caps has no exact
+  report. Its message states that claim ("for each item of `orders`, the loop over `customers`
+  compares `order.customer_id == customer.id` and does nothing else for an item that does not
+  match"); the other reports are heuristic. The help names a `set` or `dict` only for keys known to
+  be hashable, and an index built before the outer loop only for an inner collection that stays the
+  same; otherwise it states the condition ("if the keys are hashable, ..."). For a mapping the inner
+  loop steps through by its own keys, it says to look each outer key up in the mapping.
+- `OPT103`'s help for a `tuple` accumulator says to extend a list and convert it once with
+  `tuple(...)`, not to join the pieces.
+- `EFF102` and `EFF113` also report the function a builtin calls once per item: the function
   handed to `map`, `filter`, `itertools.starmap`, `itertools.filterfalse`, and
   `functools.reduce`, and the `key` of `sorted`, `list.sort`, `min`, `max`, and
   `itertools.groupby` (`sorted(users, key=lambda u: score(conn, u))`), when the items are not a
-  fixed number. Its body runs at the call for every rule, so `EFF101` sees its blocking calls
-  too. A `functools.partial` handed to such a builtin is followed to the function it calls.
+  fixed number and heki can tell which function it is. Its body runs at the call for every rule,
+  so `EFF111` sees its blocking calls too. A `functools.partial` handed to such a builtin is
+  followed to the function it calls.
+- `MUT107` (`hash-attr-mutation`) is opt-in: it runs only when `select` or `extend-select` names it,
+  also with `lint.heuristic = true`. Its message states the claim only: "`Tag.rename` rebinds
+  `self.name` outside initialization, and `Tag.__hash__` reads it".
 
 ### Fixed
 
@@ -150,12 +273,11 @@ release can change rules, configuration keys, diagnostics, and output formats.
   loop (followed by `return`, `break`, or `raise`): it runs once per run of the loop.
 - `EFF101` no longer reports `result()` or `exception()` of a `concurrent.futures.Future` known
   to be done: under `if f.done():`, or once `await asyncio.wrap_future(f)` has returned.
-- `EFF101` no longer reports `put()` on a `queue.Queue`, `LifoQueue`, or `PriorityQueue` that
-  is not known to be bounded: built without a positive `maxsize`, or one heki cannot follow to
-  where it is built. A `put` waits only while its queue is full. heki follows the queue into
-  local variables, the attributes its class family stores, module globals, and parameters
-  whose callers bind known queues; an `effect-boundaries` contract forbidding `blocking-sync`
-  counts a `put` the same way.
+- `EFF111` no longer reports `put()` on a `queue.Queue`, `LifoQueue`, or `PriorityQueue` that is not
+  known to be bounded: built without a positive `maxsize`, or one heki cannot follow to where it is
+  built. A `put` waits only while its queue is full. heki follows the queue into local variables,
+  the attributes its class family stores, module globals, and parameters whose callers bind known
+  queues; an `effect-boundaries` contract forbidding `blocking-sync` counts a `put` the same way.
 - `EFF107` (`unretained-async-task`, opt-in) no longer reports a task whose bound method is
   passed to a call or stored, as in `self.addCleanup(task.cancel)` or
   `loop.call_later(1, task.cancel)`: the bound method holds the task.
@@ -190,6 +312,16 @@ release can change rules, configuration keys, diagnostics, and output formats.
   attribute (`self.xref = {}`, then `self.xref[k] = v`), nor a store or a `defaultdict` read under
   a key the container holds (past `if self.items.get(k) is None: raise KeyError(k)`, inside
   `if k in self.items:` at any depth).
+- `MUT107` reads the `__hash__` of the writer's instances: each `self` method and property the hash
+  calls is the one the writer's class finds along its MRO, not an override in another subclass
+  (`Expression.__hash__` reading `self.identity` reads `self.lhs` only on the instances of the
+  subclass whose `identity` reads it).
+- `MUT101` and `MUT107` no longer report a write that is no plain store: to an attribute that a
+  class along the MRO binds to a property (`@property`, `@x.setter`, `@x.deleter`,
+  `x = property(...)`; a raising deleter changes nothing), on a class whose MRO defines
+  `__setattr__` or `__delattr__`, and on a class with a base heki names no class for
+  (`class Proxy(with_metaclass(Meta))`, `Base = declarative_base()`), whose metaclass may install
+  descriptors.
 - `MUT107` (`hash-attr-mutation`) no longer reports a write that cannot change a hash a `set` or
   `dict` has filed: an in-place change (an item store, `append`) of an attribute `__hash__`
   hands whole to `hash()` (`hash(self.items)`: a list or `bytearray` there cannot be hashed, and
@@ -250,6 +382,53 @@ release can change rules, configuration keys, diagnostics, and output formats.
 - `heki check` no longer overflows its stack on a loop no path enters (after a `return`,
   `raise`, or `break`) that computes a value from itself (`d = d.x`, `d = d[mask]`): the value
   was defined by itself, and the walks along definitions went around it forever.
+- A module-level name bound once to another object by name is that object, in its module and
+  imported from it, unless another module rebinds it: `_set = object.__setattr__` makes
+  `_set(node, "kind", v)` a `MUT201` write, and `sleep = time.sleep` makes `sleep(1)` in an
+  `async def` an `EFF101` report. Any other global a module binds is never the builtin of the same
+  name: after `open = functools.partial(...)`, `open(path)` is no blocking `builtins.open`
+  (`EFF105`), and a call of it is unresolved unless a `[[tool.heki.ecosystem]]` entry declares it. A
+  name heki does not see the module bind (a compiled submodule, a star import of one) keeps what the
+  catalog says of it (`mypkg._native.read`).
+- A method that no project class of the receiver's MRO defines is no longer taken from a base
+  outside the project that is not known to define it (`abc.ABC._copy_model_type`,
+  `typing.Generic.result_type`): the call is unresolved, as a call heki cannot follow. Special
+  methods, public methods of builtin types, and the members the catalog lists still come from the
+  base, when no base heki knows nothing of comes before it.
+- `getattr(obj, "attr"[, default])` with a constant name is a load of the attribute for the write
+  contracts, also behind a walrus
+  (`if (extras := getattr(self, "extras", None)) is not None: extras["k"] = 2` is a `MUT201` write
+  of `Node.extras["k"]`).
+- A method, property, or function that returns an attribute of an argument on every `return`
+  (`return self.items`) hands out that object: `node.members().append(1)` and `node.view.append(1)`
+  are `MUT201` writes of `Node.items`. It does so on a class whose reads run it: not through a
+  `cached_property` (an assignment can replace what the instance keeps), not on a member of a union,
+  or a class, whose own attribute of the name comes first or is stored on the class outside its
+  body, and not for a function that stores the attribute itself
+  (`items = self.items; self.items = []; return items`) or a keyword-only parameter.
+- `object.__new__(Node)`, also through an alias, and `Node.__new__(Node)` where no class of the MRO
+  defines `__new__` construct a `Node`: the new object has its class, and with
+  `fresh-objects = "allow"` a helper filling it is no `MUT201` report.
+- A glob in the last segment of a `call-owners` target or an effect boundary's `call-targets`
+  matches within the function, method, or class name, as the attribute of a `Class.attr` target
+  does: `pkg.*._*` no longer names every function of a private module (`pkg.parser._concern.typed`),
+  nor `pkg.api_*` the functions of `pkg.api_helpers`, so such functions are no targets that may call
+  the others, and their calls are reported.
+- A report of a glob target names the attribute, function, or class it matched
+  (`reads `pkg.types.DataType._flag``, was `reads `pkg.*._*``), and one report standing for several
+  members lists the others; the diagnostic target, and so the baseline key, stays the configured
+  text.
+- `call-owners` contracts (`MUT204`) and the `calls` of effect boundaries look a call's targets up
+  from the callee's names instead of trying every target, and `MUT204` indexes the targets of all
+  its contracts together: a contract of 1,300 targets on a 200,000-line project took about 30 s and
+  now takes about 1 s, with the same reports.
+- A read or a call through a value typed with a project `Protocol` that declares the member is
+  judged by the protocol, the type the code uses it through: `def f(h: Host): h._m` is no `MUT203`
+  read of `_m` of the classes implementing `Host`, `h._helper()` no `MUT204` call of theirs, and
+  what an implementation's private method reads or calls inside stays with it instead of being
+  handed to the caller (also when other callers call it through the class and take it over). A
+  member the protocol does not declare is still one of the implementations', and a write through the
+  protocol still writes their attribute.
 
 ## [0.1.2] - 2026-11-21
 
@@ -370,7 +549,7 @@ The first public preview.
 - Wheels for Linux (x86_64 and aarch64 with glibc, x86_64 with musl), macOS (arm64 and x86_64),
   and Windows (x86_64), and a source distribution.
 
-[0.2.0]: https://github.com/koxudaxi/heki/compare/v0.1.2...HEAD
+[0.2.0]: https://github.com/koxudaxi/heki/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/koxudaxi/heki/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/koxudaxi/heki/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/koxudaxi/heki/releases/tag/v0.1.0

@@ -1188,8 +1188,8 @@ returns   value: state that outlives the call
 callers   1
   handler  users.py:39
 reports
-  pkg/users.py:39  EFF101 `handler` reaches the blocking call `requests.get` on the event loop
-  pkg/users.py:39  EFF101 `handler` reaches the blocking call `time.sleep` on the event loop
+  pkg/users.py:39  EFF101 `pkg.users.Loader.load` always runs the waiting call `requests.get` on the event loop (2 calls down, on every path)
+  pkg/users.py:39  EFF101 `pkg.users.Loader.load` always runs the waiting call `time.sleep` on the event loop (2 calls down, on every path)
 contracts none
 ";
     assert_eq!(out, expected);

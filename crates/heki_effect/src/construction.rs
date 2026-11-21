@@ -12,6 +12,7 @@
 //! nothing kept so far, under conditions on the callees, which propagation resolves.
 
 use crate::{FuncKey, NewArg, NewCond, NewKind};
+use heki_ir::walk::FnShape;
 use heki_ir::{InstKind, IrFunction, VarId};
 use rustc_hash::FxHashMap;
 
@@ -126,11 +127,11 @@ impl Recorder {
         self.queries.len() - 1
     }
 
-    /// Answer every query, and the returns of `f` (`returns`: whether the function's result is
-    /// a new object at every `return` with a value).
+    /// Answer every query, and the returns of the function of `shape` (`returns`: whether the
+    /// function's result is a new object at every `return` with a value).
     pub(crate) fn resolve(
         self,
-        f: &IrFunction,
+        shape: &FnShape<'_>,
         may_params: &FxHashMap<VarId, u64>,
         param_of: &dyn Fn(VarId) -> Option<u8>,
         callee_of: &dyn Fn(u32, u16) -> FuncKey,
@@ -141,6 +142,7 @@ impl Recorder {
         if self.queries.is_empty() && (self.allocs.is_empty() || !returns) {
             return (Vec::new(), None);
         }
+        let f = shape.f;
         let roots = self.roots(f, may_params, param_of);
         let trackable = |v: VarId| roots.may.contains_key(&v) || param_of(v).is_some();
         let returned: Vec<(Pos, VarId)> = if returns {
@@ -236,10 +238,9 @@ impl Recorder {
         // The two buffers are reused, so the iterations allocate nothing.
         let mut block_in: Vec<State> = vec![empty.clone(); n];
         let (mut state, mut exc) = (empty.clone(), empty);
-        let rpo = f.rpo_blocks();
         loop {
             let mut changed = false;
-            for &b in &rpo {
+            for &b in shape.rpo() {
                 let bi = b.0 as usize;
                 state.clone_from(&block_in[bi]);
                 exc.clone_from(&state);

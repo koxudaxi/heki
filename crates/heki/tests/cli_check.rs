@@ -1,7 +1,13 @@
 //! End-to-end `heki check` tests through the real binary.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+/// The variables that turn the colors of the text output on or off: every run starts without
+/// them, and the color tests set their own.
+const COLOR_VARIABLES: [&str; 4] = ["FORCE_COLOR", "CLICOLOR_FORCE", "NO_COLOR", "CLICOLOR"];
 
 struct Project {
     dir: PathBuf,
@@ -26,13 +32,20 @@ impl Project {
         self
     }
 
-    fn heki(&self, args: &[&str]) -> (i32, String, String) {
-        let out = Command::new(env!("CARGO_BIN_EXE_heki"))
-            .args(["check", "--heuristic"])
+    /// `heki check --heuristic <args>` in the project directory.
+    fn command(&self, args: &[&str]) -> Command {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_heki"));
+        cmd.args(["check", "--heuristic"])
             .args(args)
-            .current_dir(&self.dir)
-            .output()
-            .unwrap();
+            .current_dir(&self.dir);
+        for var in COLOR_VARIABLES {
+            cmd.env_remove(var);
+        }
+        cmd
+    }
+
+    fn heki(&self, args: &[&str]) -> (i32, String, String) {
+        let out = self.command(args).output().unwrap();
         (
             out.status.code().unwrap(),
             String::from_utf8(out.stdout).unwrap(),
@@ -79,7 +92,7 @@ fn semantic_fixtures_gate_json() {
         (73, "MUT201"),
         (76, "MUT201"),
         (78, "MUT201"),
-        (92, "MUT202"),
+        (92, "MUT114"),
         (108, "EFF101"),
         (143, "EFF102"),
     ]
@@ -104,7 +117,7 @@ fn exit_codes_and_clean_runs() {
     let (code, stdout, stderr) = p.heki(&[]);
     assert_eq!(code, 0);
     assert!(
-        stdout.starts_with("pkg/bad.py:4:5: EFF101 (async-blocking-call) [warning, heuristic]"),
+        stdout.starts_with("pkg/bad.py:4:5: EFF101 (async-blocking-call) [warning] "),
         "{stdout}"
     );
     assert!(stdout.contains("4 |     time.sleep(1)"));
@@ -230,21 +243,18 @@ fn output_formats_and_config_selection() {
         );
     // The message is one sentence; the help is a line of its own in `full`, a field in JSON,
     // the result's `properties.help` in SARIF, and left out of `concise` and `github`.
-    let message = "`handler` reaches the blocking call `time.sleep` on the event loop";
+    let message = "`handler` runs the waiting call `time.sleep` on the event loop";
     let help = "use `await asyncio.sleep(...)`, or offload it with `asyncio.to_thread`";
     let (code, stdout, _) = p.heki(&["--output-format", "github"]);
     assert_eq!(code, 1);
     assert_eq!(
         stdout.lines().collect::<Vec<_>>(),
         vec![format!(
-            "::error file=src/pkg/api.py,line=4,col=5,title=heki EFF101 (heuristic)::{message}"
+            "::error file=src/pkg/api.py,line=4,col=5,title=heki EFF101::{message}"
         )]
     );
     let (_, stdout, _) = p.heki(&["--output-format", "concise"]);
-    assert_eq!(
-        stdout,
-        format!("src/pkg/api.py:4:5: EFF101 [heuristic] {message}\n")
-    );
+    assert_eq!(stdout, format!("src/pkg/api.py:4:5: EFF101 {message}\n"));
     let (_, stdout, _) = p.heki(&[]);
     assert!(
         stdout.ends_with(&format!(
@@ -329,7 +339,7 @@ fn slower_code_defaults_to_warning() {
     let (code, stdout, _) = p.heki(&["--select", "OPT"]);
     assert_eq!(code, 0, "{stdout}");
     assert!(
-        stdout.starts_with("app.py:7:9: OPT101 (list-quadratic-concat) [warning, heuristic] "),
+        stdout.starts_with("app.py:7:9: OPT101 (list-quadratic-concat) [warning] "),
         "{stdout}"
     );
     let (_, stdout, _) = p.heki(&["--output-format", "sarif", "--select", "OPT113"]);
@@ -366,7 +376,7 @@ fn warnings_do_not_fail_the_check_unless_fail_on_says_so() {
     let (code, stdout, stderr) = p.heki(&[]);
     assert_eq!(code, 0, "{stderr}");
     assert!(
-        stdout.starts_with("app.py:4:5: EFF101 (async-blocking-call) [warning, heuristic]"),
+        stdout.starts_with("app.py:4:5: EFF101 (async-blocking-call) [warning] "),
         "{stdout}"
     );
     assert!(stderr.contains("Found 1 diagnostic(s)"), "{stderr}");
@@ -631,7 +641,7 @@ fn baselines_and_snapshots_are_kept_when_a_file_fails_to_parse() {
 fn sleeps(n: usize) -> String {
     let mut src = String::from("import time\n\nasync def h():\n");
     for i in 0..n {
-        src.push_str(&format!("    time.sleep({i})\n"));
+        src.push_str(&format!("    time.sleep({})\n", i + 1));
     }
     src
 }
@@ -644,11 +654,15 @@ fn folded_blocking_calls_are_suppressed_and_baselined_one_by_one() {
     let (code, stdout, _) = p.heki(&concise);
     assert_eq!(code, 0);
     assert_eq!(stdout.lines().count(), 1, "{stdout}");
-    assert!(stdout.contains("(+10 more async call sites"), "{stdout}");
+    // Exact reports fold by the call each of them always runs, and say it.
+    assert!(
+        stdout.contains("(+10 more async call sites that always run `time.sleep`)"),
+        "{stdout}"
+    );
     // Suppressing the first call leaves the other ten, below the folding threshold.
     p.write(
         "a.py",
-        &sleeps(11).replacen("time.sleep(0)", "time.sleep(0)  # heki: ignore[EFF101]", 1),
+        &sleeps(11).replacen("time.sleep(1)", "time.sleep(1)  # heki: ignore[EFF101]", 1),
     );
     let (code, stdout, _) = p.heki(&concise);
     assert_eq!(code, 0);
@@ -697,4 +711,206 @@ fn walk_steps_are_written_as_json_and_hidden_from_help() {
     let (code, help, _) = p.heki(&["--help"]);
     assert_eq!(code, 0);
     assert!(!help.contains("walk-steps"), "{help}");
+}
+
+/// The escape codes of the colored text output, as Ruff writes them.
+mod codes {
+    pub const RESET: &str = "\x1b[0m";
+    pub const PATH: &str = "\x1b[1m";
+    /// The `:` of a location, with its reset.
+    pub const SEP: &str = "\x1b[36m:\x1b[0m";
+    pub const RULE_CODE: &str = "\x1b[1m\x1b[31m";
+    pub const ERROR: &str = "\x1b[1m\x1b[91m";
+    pub const WARNING: &str = "\x1b[1m\x1b[33m";
+    pub const GUTTER: &str = "\x1b[1m\x1b[94m";
+    pub const HELP: &str = "\x1b[1m\x1b[96m";
+    pub const DELETION: &str = "\x1b[31m";
+    pub const INSERTION: &str = "\x1b[32m";
+}
+
+/// `text` without the escape codes that color it (`ESC [ ... m`).
+fn uncolored(text: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(start) = rest.find('\x1b') {
+        out.push_str(&rest[..start]);
+        let end = rest[start..]
+            .find('m')
+            .expect("an escape code ends with `m`");
+        rest = &rest[start + end + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Color variables set for one run.
+type Vars<'a> = &'a [(&'a str, &'a str)];
+
+fn stdout_of(mut cmd: Command, vars: Vars) -> String {
+    let out = cmd.envs(vars.iter().copied()).output().unwrap();
+    String::from_utf8(out.stdout).unwrap()
+}
+
+const QUADRATIC: &str =
+    "def f(items):\n    x = []\n    for i in items:\n        x = x + [i]\n    return x\n";
+
+/// A project with an error (`EFF101`, raised by `lint.severity`), a warning with a fix
+/// (`OPT101`), and the plain `full` output of both.
+fn colored_project(name: &str) -> (Project, String) {
+    let p = Project::new(name);
+    p.write("app.py", BLOCKING)
+        .write("opt.py", QUADRATIC)
+        .write("heki.toml", "[lint.severity]\nEFF101 = \"error\"\n");
+    let plain = stdout_of(p.command(&[]), &[]);
+    assert!(plain.contains("(async-blocking-call) [error"), "{plain}");
+    assert!(
+        plain.contains("(list-quadratic-concat) [warning"),
+        "{plain}"
+    );
+    (p, plain)
+}
+
+/// The text output takes Ruff's colors, and only escape codes are added: without them it is the
+/// plain output. The machine formats never change.
+#[test]
+fn colored_text_output_has_ruffs_colors_and_the_plain_text() {
+    use codes::*;
+    let (p, plain) = colored_project("colors");
+    let forced = |args: &[&str]| stdout_of(p.command(args), &[("FORCE_COLOR", "1")]);
+    let full = forced(&[]);
+    assert_eq!(uncolored(&full), plain);
+    for styled in [
+        format!(
+            "{PATH}app.py{RESET}{SEP}4{SEP}5{SEP} {RULE_CODE}EFF101{RESET} (async-blocking-call) [{ERROR}error{RESET}"
+        ),
+        format!(
+            "\n  {GUTTER}|{RESET}\n{GUTTER}4 |{RESET}     time.sleep(1)\n  {GUTTER}|{RESET}     {ERROR}^{RESET}\n"
+        ),
+        format!(
+            "\n  {GUTTER}={RESET} {GUTTER}related{RESET}: {PATH}app.py{RESET}{SEP}4{SEP}5{SEP} `handler` calls"
+        ),
+        format!("\n  {GUTTER}={RESET} {HELP}help{RESET}: "),
+        format!("(list-quadratic-concat) [{WARNING}warning{RESET}"),
+        format!("\n  {GUTTER}|{RESET}         {WARNING}^{RESET}\n"),
+    ] {
+        assert!(full.contains(&styled), "{styled:?} not in {full:?}");
+    }
+
+    let concise = forced(&["--output-format", "concise"]);
+    assert_eq!(
+        uncolored(&concise),
+        stdout_of(p.command(&["--output-format", "concise"]), &[])
+    );
+    assert!(
+        concise.starts_with(&format!(
+            "{PATH}app.py{RESET}{SEP}4{SEP}5{SEP} {RULE_CODE}EFF101{RESET} "
+        )),
+        "{concise:?}"
+    );
+
+    let diff = forced(&["--diff"]);
+    assert_eq!(uncolored(&diff), stdout_of(p.command(&["--diff"]), &[]));
+    assert_eq!(
+        diff,
+        format!(
+            "--- {DELETION}a/opt.py{RESET}\n+++ {INSERTION}b/opt.py{RESET}\n@@ -1,5 +1,5 @@\n def f(items):\n     x = []\n     for i in items:\n{DELETION}-        x = x + [i]{RESET}\n{INSERTION}+        x.append(i){RESET}\n     return x\n"
+        )
+    );
+
+    for format in ["json", "github", "sarif"] {
+        let args = ["--output-format", format];
+        let machine = stdout_of(p.command(&args), &[]);
+        assert_eq!(forced(&args), machine, "{format}");
+        let always = stdout_of(
+            p.command(&[&args[..], &["--color", "always"]].concat()),
+            &[],
+        );
+        assert_eq!(always, machine, "{format}");
+    }
+}
+
+/// Ruff's decision when stdout is not a terminal: `--color always` / `never` decide alone, then
+/// `FORCE_COLOR` (not empty) and `CLICOLOR_FORCE` (not `0`) turn color on, also over
+/// `NO_COLOR`; otherwise the output is plain.
+#[test]
+fn piped_output_is_colored_only_when_color_is_forced() {
+    let (p, plain) = colored_project("color_piped");
+    let cases: &[(Vars, &[&str], bool)] = &[
+        (&[], &[], false),
+        (&[("FORCE_COLOR", "1")], &[], true),
+        (&[("FORCE_COLOR", "0")], &[], true),
+        (&[("FORCE_COLOR", "")], &[], false),
+        (&[("CLICOLOR_FORCE", "1")], &[], true),
+        (&[("CLICOLOR_FORCE", "")], &[], true),
+        (&[("CLICOLOR_FORCE", "0")], &[], false),
+        (&[("FORCE_COLOR", "1"), ("NO_COLOR", "1")], &[], true),
+        (&[("CLICOLOR_FORCE", "1"), ("NO_COLOR", "1")], &[], true),
+        (&[("CLICOLOR", "1")], &[], false),
+        (&[], &["--color", "always"], true),
+        (&[("NO_COLOR", "1")], &["--color", "always"], true),
+        (&[("FORCE_COLOR", "1")], &["--color", "never"], false),
+        (&[("CLICOLOR_FORCE", "1")], &["--color", "never"], false),
+        (&[("FORCE_COLOR", "1")], &["--color", "auto"], true),
+    ];
+    for &(vars, args, colored) in cases {
+        let out = stdout_of(p.command(args), vars);
+        assert_eq!(out.contains('\x1b'), colored, "{vars:?} {args:?}:\n{out}");
+        assert_eq!(uncolored(&out), plain, "{vars:?} {args:?}");
+    }
+}
+
+/// Ruff's decision when stdout is a terminal: colored, unless `NO_COLOR` is set (to anything),
+/// `CLICOLOR` is `0`, or `--color never` is given; `FORCE_COLOR` and `--color always` win over
+/// `NO_COLOR`. The terminal is a pseudo-terminal Python opens, which Windows does not have.
+#[cfg(unix)]
+#[test]
+fn terminal_output_is_colored_unless_no_color_is_set() {
+    // `heki` with its stdout on the terminal; stderr stays a pipe.
+    const ON_TERMINAL: &str = "import os, subprocess, sys
+main, side = os.openpty()
+child = subprocess.Popen(sys.argv[1:], stdout=side)
+os.close(side)
+out = b''
+while True:
+    try:
+        chunk = os.read(main, 65536)
+    except OSError:
+        break
+    if not chunk:
+        break
+    out += chunk
+child.wait()
+sys.stdout.buffer.write(out)
+";
+    let (p, plain) = colored_project("color_terminal");
+    let cases: &[(Vars, &[&str], bool)] = &[
+        (&[], &[], true),
+        (&[], &["--color", "auto"], true),
+        (&[("NO_COLOR", "1")], &[], false),
+        (&[("NO_COLOR", "")], &[], false),
+        (&[("CLICOLOR", "0")], &[], false),
+        (&[("CLICOLOR", "1")], &[], true),
+        (&[], &["--color", "never"], false),
+        (&[("NO_COLOR", "1"), ("FORCE_COLOR", "1")], &[], true),
+        (&[("NO_COLOR", "1")], &["--color", "always"], true),
+    ];
+    for &(vars, args, colored) in cases {
+        let heki = p.command(args);
+        let mut on_terminal = Command::new(common::python());
+        on_terminal
+            .args(["-c", ON_TERMINAL])
+            .arg(heki.get_program())
+            .args(heki.get_args())
+            .current_dir(&p.dir);
+        for (var, value) in heki.get_envs() {
+            match value {
+                Some(value) => on_terminal.env(var, value),
+                None => on_terminal.env_remove(var),
+            };
+        }
+        // The terminal ends lines with CR LF.
+        let out = stdout_of(on_terminal, vars).replace("\r\n", "\n");
+        assert_eq!(out.contains('\x1b'), colored, "{vars:?} {args:?}:\n{out}");
+        assert_eq!(uncolored(&out), plain, "{vars:?} {args:?}");
+    }
 }

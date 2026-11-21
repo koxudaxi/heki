@@ -79,7 +79,7 @@ def parser_bad_direct_alias_and_indirect(model: Model) -> None:
 
 
 # ==============================================================================
-# MUT202: Declarative Read-Only Return / @lru_cache shared mutation
+# MUT114: @lru_cache result shared mutation
 # ==============================================================================
 @lru_cache(maxsize=32)
 def get_shared_schema(name: str) -> dict[str, list[str]]:
@@ -88,7 +88,7 @@ def get_shared_schema(name: str) -> dict[str, list[str]]:
 
 def caller_corrupts_shared_cache() -> None:
     schema = get_shared_schema("user")
-    # EXPECT: MUT202 (mutates shared cached return value)
+    # EXPECT: MUT114 (mutates shared cached return value)
     schema["fields"].append("corrupted")
 
 

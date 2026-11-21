@@ -36,6 +36,12 @@ jobs:
 
   clippy:
     name: clippy
+    # A pull request in the middle of a stack is covered by the stack's bottom and top: GitHub
+    # merges a stack from its top, and the bottom is the next one to land on main.
+    if: &full-run >-
+      github.event.pull_request.stack == null
+      || github.event.pull_request.stack.base.ref == github.event.pull_request.base.ref
+      || github.event.pull_request.stack.position == github.event.pull_request.stack.size
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -74,6 +80,7 @@ jobs:
 
   test:
     name: test (${{ matrix.os }})
+    if: *full-run
     strategy:
       fail-fast: false
       matrix:
@@ -104,6 +111,7 @@ jobs:
 
   coverage:
     name: coverage (100% lines)
+    if: *full-run
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -138,6 +146,7 @@ jobs:
 
   cpython:
     name: CPython ${{ matrix.python }} (symtable / sentinel / counterexamples)
+    if: *full-run
     strategy:
       fail-fast: false
       matrix:
@@ -169,6 +178,7 @@ jobs:
 
   memory:
     name: peak memory
+    if: *full-run
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -182,6 +192,12 @@ jobs:
       # counting build reads the same bytes on every run.
       - name: Peak heap within budget
         run: python3 scripts/check_memory.py --heki target/release/heki
+      # Generated shapes at the largest size heki models, in a function, a method, and a module
+      # body: fails when one costs more than 1 s (scaled to the runner by a fixed linear shape on
+      # the same build) or 1 GiB of heap beyond an empty module, or when an owner's walk steps
+      # grow faster than linearly.
+      - name: Analysis cost of generated shapes
+        run: python3 scripts/check_walk_shapes.py --heki target/release/heki
       # At release time (release.yml calls this workflow), and on a manual run: the peak RSS of
       # a release build, which also holds the allocator's fragmentation and mappings, under a
       # coarse budget.
@@ -193,6 +209,7 @@ jobs:
 
   sdist:
     name: source distribution tests
+    if: *full-run
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -223,6 +240,7 @@ jobs:
     # The release workflows run only on main or for a release, so their scripts are tested here,
     # on every pull request.
     name: release scripts
+    if: *full-run
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -233,3 +251,37 @@ jobs:
           enable-cache: false
       # Python 3.12 is the runner's `python3`, which release-draft.yml runs the scripts with.
       - run: uvx --python 3.12 --from "pytest==8.4.2" --with "pyyaml==6.0.3" --with "jsonschema==4.25.1" pytest scripts/tests
+
+  gate:
+    name: CI gate
+    # The one required check: every job passed, or, in the middle of a stack, every job but the
+    # always-on ones was skipped.
+    if: always()
+    needs: [fmt, clippy, architecture, test, coverage, cpython, memory, sdist, release-scripts]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Every job passed or was skipped as the stack position allows
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+          FULL_RUN: >-
+            ${{ github.event.pull_request.stack == null
+            || github.event.pull_request.stack.base.ref == github.event.pull_request.base.ref
+            || github.event.pull_request.stack.position == github.event.pull_request.stack.size }}
+          ALWAYS_ON: fmt architecture
+        shell: python
+        run: |
+          import json
+          import os
+          import sys
+
+          results = {name: job["result"] for name, job in json.loads(os.environ["NEEDS"]).items()}
+          print(json.dumps(results, sort_keys=True))
+          expected = "success" if os.environ["FULL_RUN"] == "true" else "skipped"
+          always_on = set(os.environ["ALWAYS_ON"].split())
+          wrong = {
+              name: result
+              for name, result in results.items()
+              if result != ("success" if name in always_on else expected)
+          }
+          print("unexpected:", json.dumps(wrong, sort_keys=True))
+          sys.exit(1 if wrong or not results else 0)

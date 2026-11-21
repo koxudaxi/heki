@@ -9,7 +9,7 @@ An experimental rule is never enabled by default: it runs only when `select` or 
 | ID | Kind | Target | Since | Tracking |
 | -- | ---- | ------ | ----- | -------- |
 | `cli-option.profile` | cli-option | `heki check --profile` | 0.1.1 | - |
-| `command.inspect` | command | `heki inspect` | 0.2.0 | - |
+| `command.inspect` | command | `heki inspect` | 0.2.1 | - |
 | `rule.MUT101` | rule | [`MUT101`](rules/cached-property-stale-mutation.md) | 0.1.0 | - |
 | `rule.MUT111` | rule | [`MUT111`](rules/cached-property-stale-read.md) | 0.1.1 | - |
 | `rule.MUT112` | rule | [`MUT112`](rules/conditional-ownership-mutation.md) | 0.2.0 | - |
@@ -27,7 +27,7 @@ It reads the output of CPython 3.15's sampling profiler, and that format can sti
 
 - **Kind:** command
 - **Target:** `heki inspect`
-- **Since:** 0.2.0
+- **Since:** 0.2.1
 
 The facts it shows, its purity verdict, and its JSON object can still change as heki's summaries close gaps; the object's `version` changes when a field is removed or changes meaning.
 

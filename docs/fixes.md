@@ -13,10 +13,9 @@ $ heki check --fix --include-size-dependent      # also the proven-safe size-dep
 $ heki check --fix --profile profile.txt         # size-dependent rewrites in hot functions only
 ```
 
-- A fix comes with a report: `--fix` applies only the fixes of the reports shown. The `OPT`
-  rules are [heuristic](precision.md) for now, so a run without configuration applies none;
-  add `--heuristic` (`lint.heuristic = true`), or select the rules, as in
-  `heki check --fix --select OPT101,OPT102`.
+- A fix comes with a report: `--fix` applies only the fixes of the reports shown. A report whose
+  rewrite heki proves safe is [exact](precision.md#certifications) and shown by default, so a
+  run without configuration applies the fixes of `OPT101` and `OPT102`.
 - `--diff` takes the same flags as `--fix` and writes nothing.
 - `--include-size-dependent` applies the size-dependent rewrites in every function, with or
   without `--profile`.
@@ -44,9 +43,9 @@ Two independent questions decide whether heki offers the rewrite:
 
 | Profitability | Rules | Certainty | Applied by |
 | ------------- | ----- | --------- | ---------- |
-| Unconditional (faster from the first iteration) | `OPT101`, `OPT102` | heuristic | `heki check --fix` |
-| Size-dependent | `OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130` | heuristic | `heki check --fix --include-size-dependent`, or `--fix --profile <dump>` in hot functions |
-| Size-dependent, no rewrite | `OPT103`, `OPT112`, `OPT113` | heuristic | none: suggestion only |
+| Unconditional (faster from the first iteration) | `OPT101`, `OPT102` | exact (the proven reports) | `heki check --fix` |
+| Size-dependent | `OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130` | exact (the proven reports) | `heki check --fix --include-size-dependent`, or `--fix --profile <dump>` in hot functions |
+| Size-dependent, no rewrite | `OPT103`, `OPT112`, `OPT113` | `OPT103` exact (the proven reports), `OPT113` exact (its exact tier), `OPT112` heuristic | none: suggestion only |
 
 ### When the size is fixed
 

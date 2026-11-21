@@ -10,7 +10,7 @@ use common::Project;
 use serde_json::Value;
 
 /// The family-2 rules the catalog feeds (the opt-in ones are selected where a test needs them).
-const RULES: &str = "EFF101,EFF102,EFF103,DATA101";
+const RULES: &str = "EFF101,EFF111,EFF102,EFF103,EFF113,DATA101";
 
 /// `(line, rule, qualname, target)` of every diagnostic of `heki check` on the one-file project
 /// `rel` holding `source`.
@@ -347,7 +347,7 @@ fn sqlalchemy_sync_apis_block_and_async_ones_only_count_queries() {
             // `Engine.connect()` / `begin()` connect; `begin()` types its connection.
             d(
                 29,
-                "EFF101",
+                "EFF111",
                 "tp_engine",
                 "sqlalchemy.engine.Engine.connect"
             ),
@@ -357,7 +357,7 @@ fn sqlalchemy_sync_apis_block_and_async_ones_only_count_queries() {
                 "tp_engine",
                 "sqlalchemy.engine.Connection.execute"
             ),
-            d(31, "EFF101", "tp_engine", "sqlalchemy.engine.Engine.begin"),
+            d(31, "EFF111", "tp_engine", "sqlalchemy.engine.Engine.begin"),
             d(
                 32,
                 "EFF101",
@@ -369,7 +369,7 @@ fn sqlalchemy_sync_apis_block_and_async_ones_only_count_queries() {
             d(38, "EFF101", "tp_session", "sqlmodel.Session.exec"),
             d(
                 43,
-                "EFF103",
+                "EFF113",
                 "tp_queries_in_loops",
                 "sqlalchemy.orm.Session.get"
             ),
@@ -382,7 +382,7 @@ fn sqlalchemy_sync_apis_block_and_async_ones_only_count_queries() {
             // Awaited async queries still count in loops, and so do new engines.
             d(
                 73,
-                "EFF103",
+                "EFF113",
                 "tp_async_queries_and_engines_in_loops",
                 "sqlalchemy.ext.asyncio.AsyncSession.get"
             ),
@@ -474,7 +474,7 @@ async def tp_psycopg2_and_pymysql(dsn):
 
 async def tp_sqlite(path, conn: sqlite3.Connection):
     count(conn)
-    cur = sqlite3.connect(path).execute("SELECT 1")
+    cur = sqlite3.connect("app.db").execute("SELECT 1")
     cur.fetchall()
 
 
@@ -571,10 +571,10 @@ fn dbapi_drivers_block_on_connect_and_statements_but_not_on_row_reads() {
             d(22, "EFF101", "tp_psycopg", "psycopg.Connection.execute"),
             d(23, "EFF101", "tp_psycopg", "psycopg.connect"),
             d(25, "EFF101", "tp_psycopg", "psycopg.Cursor.executemany"),
-            d(26, "EFF101", "tp_psycopg", "psycopg.Connection.commit"),
+            d(26, "EFF111", "tp_psycopg", "psycopg.Connection.commit"),
             d(
                 27,
-                "EFF101",
+                "EFF111",
                 "tp_psycopg",
                 "psycopg_pool.ConnectionPool.connection"
             ),
@@ -600,7 +600,7 @@ fn dbapi_drivers_block_on_connect_and_statements_but_not_on_row_reads() {
                 "pymysql.connections.Connection.commit"
             ),
             // sqlite3 reads the database file when it steps a statement (`fetch*`).
-            d(41, "EFF101", "tp_sqlite", "sqlite3.Cursor.fetchone"),
+            d(41, "EFF111", "tp_sqlite", "sqlite3.Cursor.fetchone"),
             d(42, "EFF101", "tp_sqlite", "sqlite3.Connection.execute"),
             d(42, "EFF101", "tp_sqlite", "sqlite3.connect"),
             d(43, "EFF101", "tp_sqlite", "sqlite3.Cursor.fetchall"),
@@ -690,7 +690,7 @@ fn dbapi_drivers_block_on_connect_and_statements_but_not_on_row_reads() {
             ),
             d(
                 119,
-                "EFF101",
+                "EFF111",
                 "tp_named_cursors_fetch_from_the_server",
                 "psycopg.ServerCursor.__iter__"
             ),
@@ -1020,7 +1020,7 @@ fn boto3_and_django_block_on_their_calls_and_lazy_querysets_do_not() {
             // Reported at the call that runs the query, not at the lazy `filter()`.
             d(
                 41,
-                "EFF101",
+                "EFF111",
                 "tp_django",
                 "django.db.models.query.QuerySet.first"
             ),
@@ -1146,7 +1146,7 @@ fn pandas_io_and_quadratic_concatenation() {
             "catalog_data",
             "app/frames.py",
             DATA,
-            "EFF101,EFF103,EFF105,DATA101"
+            "EFF101,EFF111,EFF103,EFF113,EFF105,DATA101"
         ),
         vec![
             // File readers are `EFF105` (opt-in); SQL readers and writers block on the database.
@@ -1222,7 +1222,7 @@ class Frontend(StaticFiles):
 #[test]
 fn file_metadata_and_name_lookups_block() {
     assert_eq!(
-        check("cat_metadata", "app.py", METADATA, "EFF101,EFF105"),
+        check("cat_metadata", "app.py", METADATA, "EFF101,EFF111,EFF105"),
         vec![
             d(10, "EFF105", "tp_metadata", "os.stat"),
             d(11, "EFF105", "tp_metadata", "os.path.exists"),
@@ -1234,8 +1234,8 @@ fn file_metadata_and_name_lookups_block() {
             d(20, "EFF105", "tp_paths", "pathlib.Path.is_file"),
             d(21, "EFF105", "tp_paths", "pathlib.Path.is_dir"),
             d(22, "EFF105", "tp_paths", "pathlib.Path.resolve"),
-            d(26, "EFF101", "tp_lookups", "socket.getaddrinfo"),
-            d(27, "EFF101", "tp_lookups", "socket.gethostbyname"),
+            d(26, "EFF111", "tp_lookups", "socket.getaddrinfo"),
+            d(27, "EFF111", "tp_lookups", "socket.gethostbyname"),
             d(28, "EFF101", "tp_lookups", "socket.getfqdn"),
             d(
                 47,
@@ -1280,9 +1280,583 @@ async def handler(host, ip):
     parse_passive(ip)
     resolve(host)
 "#,
-            "EFF101",
+            "EFF101,EFF111",
         ),
-        vec![d(25, "EFF101", "handler", "socket.getaddrinfo")]
+        vec![d(25, "EFF111", "handler", "socket.getaddrinfo")]
+    );
+}
+
+#[test]
+fn a_project_subclass_overriding_a_catalogued_method_leaves_its_calls_unestablished() {
+    // A value annotated `httpx.Client` may be a project subclass (R2): one that overrides `get`
+    // runs no request, so a helper calling `get` has not established it, and neither has its
+    // caller. `requests.Session` has no such subclass.
+    assert_eq!(
+        check(
+            "cat_overridden_catalogued_method",
+            "app.py",
+            r#"import httpx
+import requests
+
+
+class CachedClient(httpx.Client):
+    def get(self, url):
+        return url
+
+
+def fetch(c: httpx.Client, url):
+    return c.get(url)
+
+
+def fetch_session(s: requests.Session, url):
+    return s.get(url)
+
+
+async def tn_overridden(c: httpx.Client):
+    return fetch(c, "https://example.com")
+
+
+async def tp_session(s: requests.Session):
+    return fetch_session(s, "https://example.com")
+"#,
+            "EFF101,EFF111",
+        ),
+        vec![
+            d(19, "EFF111", "tn_overridden", "httpx.Client.get"),
+            d(23, "EFF101", "tp_session", "requests.Session.get"),
+        ]
+    );
+}
+
+/// `sqlite3.connect` waits on a file only where heki establishes that its argument names one: a
+/// literal or a module constant without an in-memory form, or a path built from such parts and
+/// `__file__`. Every other way of opening an in-memory database (a module constant, a partial, a
+/// default, an environment lookup, an f-string, `%`, or `.format()` URI, `*args`, a phi, a
+/// container, a constructor argument) is not established; a path from a module value that is no
+/// string constant is not either.
+#[test]
+fn only_a_named_file_makes_a_sqlite_connection_wait() {
+    let p = Project::new("cat_sqlite_names_a_file");
+    for (rel, source) in [
+        ("shapes.py", MEMORY_SHAPES),
+        ("shapes2.py", MEMORY_SHAPES_2),
+        ("shapes3.py", MEMORY_SHAPES_3),
+        ("shapes4.py", MEMORY_SHAPES_4),
+        ("ondisk.py", FILE_SHAPES),
+    ] {
+        p.write(rel, source);
+    }
+    let (code, stdout, stderr) = p.check(&["--output-format", "json", "--select", "EFF101"]);
+    assert!(code == 0 || code == 1, "{stdout}{stderr}");
+    let diags: Vec<Value> = serde_json::from_str(&stdout).unwrap();
+    let mut got: Vec<(String, u64)> = diags
+        .iter()
+        .map(|d| {
+            (
+                d["path"].as_str().unwrap().to_owned(),
+                d["line"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    got.dedup();
+    let file = |line: u64| ("ondisk.py".to_owned(), line);
+    assert_eq!(got, vec![file(10), file(14), file(18), file(26), file(30)]);
+}
+
+const MEMORY_SHAPES: &str = r#"import contextlib
+import functools
+import os
+import sqlite3
+
+DB = ":memory:"
+
+
+async def through_closing() -> None:
+    with contextlib.closing(sqlite3.connect(":memory:")) as conn:
+        conn.execute("SELECT 1")
+
+
+async def through_with() -> None:
+    with sqlite3.connect(":memory:") as conn:
+        conn.execute("SELECT 1")
+
+
+async def through_cursor() -> None:
+    cur = sqlite3.connect(":memory:").cursor()
+    cur.execute("SELECT 1")
+    cur.fetchall()
+
+
+async def through_phi(path: str | None) -> None:
+    conn = sqlite3.connect(path) if path else sqlite3.connect(":memory:")
+    conn.execute("SELECT 1")
+
+
+async def through_module_constant() -> None:
+    conn = sqlite3.connect(DB)
+    conn.execute("SELECT 1")
+
+
+async def through_partial() -> None:
+    opener = functools.partial(sqlite3.connect, ":memory:")
+    opener().execute("SELECT 1")
+
+
+def open_default(path: str = ":memory:") -> sqlite3.Connection:
+    return sqlite3.connect(path)
+
+
+async def through_default() -> None:
+    open_default().execute("SELECT 1")
+
+
+class Holder:
+    shared = sqlite3.connect(":memory:")
+
+    def __init__(self) -> None:
+        self.conns = {"a": sqlite3.connect(":memory:")}
+        self.items = [sqlite3.connect(":memory:")]
+
+    def by_class_attribute(self) -> None:
+        self.shared.execute("SELECT 1")
+
+    def by_dict(self) -> None:
+        self.conns["a"].execute("SELECT 1")
+
+    def by_list(self) -> None:
+        self.items[0].execute("SELECT 1")
+
+
+async def holders() -> None:
+    h = Holder()
+    h.by_class_attribute()
+    h.by_dict()
+    h.by_list()
+
+
+def unannotated_return():
+    return sqlite3.connect(":memory:")
+
+
+async def through_unannotated_return() -> None:
+    unannotated_return().execute("SELECT 1")
+
+
+class Repo:
+    def __init__(self, conn) -> None:
+        self.conn = conn
+
+    def get(self) -> None:
+        self.conn.execute("SELECT 1")
+
+
+async def through_constructor_argument() -> None:
+    Repo(sqlite3.connect(":memory:")).get()
+
+
+async def through_uri() -> None:
+    conn = sqlite3.connect("file:memdb1?mode=memory&cache=shared", uri=True)
+    conn.execute("SELECT 1")
+
+
+async def through_env_default() -> None:
+    conn = sqlite3.connect(os.environ.get("DB", ":memory:"))
+    conn.execute("SELECT 1")
+
+
+async def through_keyword() -> None:
+    conn = sqlite3.connect(database=":memory:")
+    conn.execute("SELECT 1")
+
+
+async def through_backup() -> None:
+    src = sqlite3.connect(":memory:")
+    dst = sqlite3.connect(":memory:")
+    src.backup(dst)
+    dst.execute("SELECT 1")
+"#;
+
+const MEMORY_SHAPES_2: &str = r#"import sqlite3
+
+
+async def through_fstring_uri(name: str) -> None:
+    conn = sqlite3.connect(f"file:{name}?mode=memory&cache=shared", uri=True)
+    conn.execute("SELECT 1")
+
+
+async def through_concat_uri(name: str) -> None:
+    conn = sqlite3.connect("file:" + name + "?mode=memory", uri=True)
+    conn.execute("SELECT 1")
+
+
+async def through_local_constant() -> None:
+    path = ":memory:"
+    conn = sqlite3.connect(path)
+    conn.execute("SELECT 1")
+
+
+async def through_star(args: tuple[str]) -> None:
+    conn = sqlite3.connect(*args)
+    conn.execute("SELECT 1")
+"#;
+
+const MEMORY_SHAPES_3: &str = r#"import sqlite3
+
+
+async def through_percent(alias: str) -> None:
+    conn = sqlite3.connect("file:memorydb_%s?mode=memory&cache=shared" % alias, uri=True)
+    conn.execute("SELECT 1")
+
+
+async def through_format(alias: str) -> None:
+    conn = sqlite3.connect("file:memorydb_{}?mode=memory&cache=shared".format(alias), uri=True)
+    conn.execute("SELECT 1")
+
+
+async def through_constant_fstring() -> None:
+    conn = sqlite3.connect(f"file:rope-{1}:?mode=memory&cache=shared", uri=True)
+    conn.execute("SELECT 1")
+
+
+class Data:
+    def __init__(self, name: str) -> None:
+        self._filename = f"file:coverage-{name}?mode=memory&cache=shared"
+
+    def read(self) -> None:
+        sqlite3.connect(self._filename, uri=True).execute("SELECT 1")
+
+
+async def through_attribute_fstring() -> None:
+    Data("x").read()
+"#;
+
+const MEMORY_SHAPES_4: &str = r#"import sqlite3
+
+
+class Store:
+    def __init__(self, path: str = ":memory:") -> None:
+        self.conn = sqlite3.connect(f"{path}")
+
+    def get(self) -> None:
+        self.conn.execute("SELECT 1")
+
+
+async def fstring_default() -> None:
+    Store().get()
+
+
+def open_fmt(path: str = ":memory:"):
+    return sqlite3.connect("{}".format(path))
+
+
+async def format_default() -> None:
+    open_fmt().execute("SELECT 1")
+"#;
+
+const FILE_SHAPES: &str = r#"import os
+import sqlite3
+from pathlib import Path
+
+DB = "app.db"
+HERE = os.path.dirname(__file__)
+
+
+async def tp_literal() -> None:
+    sqlite3.connect("app.db").execute("SELECT 1")
+
+
+async def tp_constant() -> None:
+    sqlite3.connect(DB).execute("SELECT 1")
+
+
+async def tp_path() -> None:
+    sqlite3.connect(Path(__file__).parent / "data.db").execute("SELECT 1")
+
+
+async def tp_joined() -> None:
+    sqlite3.connect(os.path.join(HERE, "data.db")).execute("SELECT 1")
+
+
+async def tp_suffixed() -> None:
+    sqlite3.connect(Path(__file__).with_suffix(".db")).execute("SELECT 1")
+
+
+async def tp_joined_to_a_literal() -> None:
+    sqlite3.connect(os.path.join("data", "app.db")).execute("SELECT 1")
+
+
+def join(*parts: str) -> str:
+    return ":memory:"
+
+
+async def tn_project_function_named_like_a_path_function() -> None:
+    sqlite3.connect(join("data", "app.db")).execute("SELECT 1")
+
+
+async def tn_path_method_on_a_parameter(base: Path) -> None:
+    sqlite3.connect(base.with_suffix(".db")).execute("SELECT 1")
+"#;
+
+/// A connection whose opening heki does not see, a parameter or a value only an annotation
+/// types, may be in memory: its waits are not established, whatever opens it (here, in memory,
+/// through annotated parameters, attributes, and return values). Its statements are sent either
+/// way, so a loop over data still sends one per item.
+#[test]
+fn connections_only_annotations_name_may_be_in_memory() {
+    let p = Project::new("cat_annotated_connections");
+    p.write("repro.py", REPRO_ANNOTATED)
+        .write("repro2.py", REPRO_UNANNOTATED);
+    let (code, stdout, stderr) = p.check(&[
+        "--output-format",
+        "json",
+        "--select",
+        "EFF101,EFF111,EFF103,EFF113",
+    ]);
+    assert!(code == 0 || code == 1, "{stdout}{stderr}");
+    let diags: Vec<Value> = serde_json::from_str(&stdout).unwrap();
+    let got: Vec<(String, u64, String)> = diags
+        .iter()
+        .map(|d| {
+            (
+                d["path"].as_str().unwrap().to_owned(),
+                d["line"].as_u64().unwrap(),
+                d["rule_code"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    let at = |path: &str, line: u64, code: &str| (path.to_owned(), line, code.to_owned());
+    assert_eq!(
+        got,
+        vec![
+            at("repro.py", 14, "EFF111"),
+            at("repro.py", 15, "EFF111"),
+            at("repro.py", 27, "EFF111"),
+            at("repro.py", 32, "EFF111"),
+            at("repro.py", 34, "EFF103"),
+            at("repro2.py", 29, "EFF111"),
+        ]
+    );
+}
+
+const REPRO_ANNOTATED: &str = r#"import sqlite3
+
+
+def count_rows(db: sqlite3.Connection) -> int:
+    return db.execute("SELECT count(*) FROM t").fetchone()[0]
+
+
+def make_table(db: sqlite3.Connection) -> None:
+    db.execute("CREATE TABLE t(x)")
+
+
+async def annotated_parameter() -> int:
+    conn = sqlite3.connect(":memory:")
+    make_table(conn)
+    return count_rows(conn)
+
+
+class Cache:
+    def __init__(self) -> None:
+        self.conn: sqlite3.Connection = sqlite3.connect(":memory:")
+
+    def get(self) -> None:
+        self.conn.execute("SELECT 1")
+
+
+async def annotated_attribute() -> None:
+    Cache().get()
+
+
+async def loop_over(items: list[str]) -> None:
+    conn = sqlite3.connect(":memory:")
+    make_table(conn)
+    for item in items:
+        conn.execute("INSERT INTO t VALUES (?)", (item,))
+"#;
+
+const REPRO_UNANNOTATED: &str = r#"import sqlite3
+
+
+class Plain:
+    def __init__(self) -> None:
+        self.conn = sqlite3.connect(":memory:")
+
+    def get(self) -> None:
+        self.conn.execute("SELECT 1")
+
+
+async def unannotated_attribute() -> None:
+    Plain().get()
+
+
+def helper(db):
+    db.execute("SELECT 1")
+
+
+async def unannotated_parameter() -> None:
+    helper(sqlite3.connect(":memory:"))
+
+
+def opened() -> sqlite3.Connection:
+    return sqlite3.connect(":memory:")
+
+
+async def through_annotated_return() -> None:
+    opened().execute("SELECT 1")
+"#;
+
+#[test]
+fn in_memory_databases_and_connection_options_do_not_wait() {
+    // An in-memory database is opened, and its statements run, without waiting; a connection
+    // opened from a parameter (here through a literal default) or only named by an annotation
+    // may be one, so its waits are not established. A pragma that sets an option of the connection does not wait either; one
+    // that changes the database file does.
+    assert_eq!(
+        check(
+            "cat_in_memory_sqlite",
+            "app.py",
+            r#"import sqlite3
+
+
+class History:
+    def __init__(self, path=":memory:"):
+        self.connection = sqlite3.connect(str(path))
+        self.connection.execute("CREATE TABLE t (x)")
+
+
+async def tn_through_a_default():
+    History()
+
+
+async def tn_direct():
+    sqlite3.connect(":memory:")
+
+
+async def tn_uri():
+    sqlite3.connect("file::memory:?cache=shared", uri=True)
+    sqlite3.connect("file:cache?mode=memory&cache=shared", uri=True)
+
+
+async def tp_file():
+    sqlite3.connect("app.db")
+
+
+async def tn_connection_options(conn: sqlite3.Connection):
+    conn.execute("PRAGMA busy_timeout = 5000")
+    conn.execute("pragma foreign_keys=ON")
+
+
+async def tp_journal(conn: sqlite3.Connection):
+    conn.execute("PRAGMA journal_mode=WAL")
+
+
+def open_named(name):
+    return sqlite3.connect(f"{name}.db").execute("SELECT 1")
+
+
+def open_joined(name):
+    return sqlite3.connect(name + ".db").execute("SELECT 1")
+
+
+async def tn_paths_from_parameters():
+    open_named("app")
+    open_joined("app")
+
+
+async def tn_option_reads_and_values(conn: sqlite3.Connection, ms):
+    conn.execute("PRAGMA foreign_keys")
+    conn.execute(f"PRAGMA busy_timeout = {ms}")
+
+
+async def tp_pragma_named_at_run_time(conn: sqlite3.Connection, name):
+    conn.execute(f"PRAGMA {name}")
+"#,
+            "EFF101,EFF111",
+        ),
+        vec![
+            d(
+                11,
+                "EFF111",
+                "tn_through_a_default",
+                "sqlite3.Connection.execute"
+            ),
+            d(24, "EFF101", "tp_file", "sqlite3.connect"),
+            d(33, "EFF111", "tp_journal", "sqlite3.Connection.execute"),
+            d(
+                // An f-string names no file heki can establish (here one ending in `.db`).
+                45,
+                "EFF111",
+                "tn_paths_from_parameters",
+                "sqlite3.Connection.execute"
+            ),
+            d(
+                46,
+                "EFF111",
+                "tn_paths_from_parameters",
+                "sqlite3.Connection.execute"
+            ),
+            d(
+                55,
+                "EFF111",
+                "tp_pragma_named_at_run_time",
+                "sqlite3.Connection.execute"
+            ),
+        ]
+    );
+}
+
+#[test]
+fn waits_that_their_arguments_end_at_once_are_not_reported() {
+    // No sleep, a polled child, a numeric or local host, a `data:` URL: none of them waits.
+    // An argument heki cannot evaluate is one the call waits on.
+    assert_eq!(
+        check(
+            "cat_waits_end_at_once",
+            "app.py",
+            r#"import socket
+import subprocess
+import time
+from urllib.request import urlopen
+
+
+async def tn_no_sleep():
+    time.sleep(0)
+    time.sleep(0.0)
+
+
+async def tn_polled(child: subprocess.Popen):
+    child.wait(timeout=0)
+
+
+async def tn_local_hosts():
+    socket.getaddrinfo("127.0.0.1", 80)
+    socket.getaddrinfo(host="::1", port=80)
+    socket.getaddrinfo("localhost", 80)
+    socket.gethostbyname("10.0.0.1")
+
+
+async def tn_data_url():
+    return urlopen("data:,hello").read()
+
+
+async def tp_sleep(seconds):
+    time.sleep(seconds)
+
+
+async def tp_lookup():
+    socket.getaddrinfo("example.com", 80)
+
+
+async def tp_fetch():
+    return urlopen("https://example.com").read()
+"#,
+            "EFF101,EFF111",
+        ),
+        vec![
+            d(28, "EFF111", "tp_sleep", "time.sleep"),
+            d(32, "EFF101", "tp_lookup", "socket.getaddrinfo"),
+            d(36, "EFF101", "tp_fetch", "urllib.request.urlopen"),
+        ]
     );
 }
 
@@ -1314,8 +1888,8 @@ import vendor.db
 import vendor.locks
 
 
-def tp_factory_keeps_its_return_type(path, ids):
-    conn = sqlite3.connect(path)
+def tp_factory_keeps_its_return_type(ids):
+    conn = sqlite3.connect("app.db")
     for i in ids:
         conn.execute("SELECT ?", (i,))
 
@@ -1356,7 +1930,7 @@ fn overrides_set_only_the_keys_they_list() {
             OVERRIDES,
             "app/overridden.py",
             OVERRIDDEN,
-            "EFF101,EFF102,EFF103,EFF106"
+            "EFF101,EFF111,EFF102,EFF103,EFF113,EFF106"
         ),
         vec![
             d(
@@ -1428,11 +2002,11 @@ fn copy_sanitizers_copy_as_deeply_as_declared() {
             SANITIZERS,
             "app/sanitized.py",
             SANITIZED,
-            "MUT202"
+            "MUT114"
         ),
         vec![d(
             16,
-            "MUT202",
+            "MUT114",
             "tp_shallow_sanitizer_keeps_the_items_shared",
             "app.sanitized.cached"
         )]
@@ -1482,18 +2056,18 @@ fn model_copy_with_update_is_a_shallow_copy() {
             "catalog_model_copy",
             "app/models.py",
             MODEL_COPIES,
-            "MUT202"
+            "MUT114"
         ),
         vec![
             d(
                 23,
-                "MUT202",
+                "MUT114",
                 "tp_update_values_are_kept_by_reference",
                 "app.models.cached"
             ),
             d(
                 32,
-                "MUT202",
+                "MUT114",
                 "tp_caller_of_the_update_copy",
                 "app.models.cached"
             ),
@@ -1541,7 +2115,7 @@ fn pandas_readers_do_the_io_of_their_source() {
             "catalog_pandas_sources",
             "app/sources.py",
             PANDAS_SOURCES,
-            "EFF101,EFF105"
+            "EFF101,EFF111,EFF105"
         ),
         vec![
             d(8, "EFF101", "tp_downloads", "pandas.read_csv"),
@@ -1587,7 +2161,7 @@ fn connection_options_decide_where_the_connection_is_made() {
             "catalog_connection_options",
             "app/connect.py",
             CONNECTION_OPTIONS,
-            "EFF101"
+            "EFF101,EFF111"
         ),
         vec![
             d(
@@ -1654,20 +2228,25 @@ async def tn_waits_that_return_at_once(event: threading.Event, lock: threading.L
 #[test]
 fn synchronous_waits_block_unless_they_return_at_once() {
     assert_eq!(
-        check("catalog_sync_waits", "app/waits.py", SYNC_WAITS, "EFF101"),
+        check(
+            "catalog_sync_waits",
+            "app/waits.py",
+            SYNC_WAITS,
+            "EFF101,EFF111"
+        ),
         vec![
-            d(12, "EFF101", "tp_waits", "threading.Event.wait"),
-            d(13, "EFF101", "tp_waits", "threading.Lock.acquire"),
-            d(14, "EFF101", "tp_waits", "queue.Queue.get"),
-            d(15, "EFF101", "tp_waits", "threading.Thread.join"),
-            d(16, "EFF101", "tp_waits", "threading.Thread.join"),
+            d(12, "EFF111", "tp_waits", "threading.Event.wait"),
+            d(13, "EFF111", "tp_waits", "threading.Lock.acquire"),
+            d(14, "EFF111", "tp_waits", "queue.Queue.get"),
+            d(15, "EFF111", "tp_waits", "threading.Thread.join"),
+            d(16, "EFF111", "tp_waits", "threading.Thread.join"),
             d(
                 21,
-                "EFF101",
+                "EFF111",
                 "tp_futures",
                 "concurrent.futures.Future.result"
             ),
-            d(22, "EFF101", "tp_futures", "concurrent.futures.wait"),
+            d(22, "EFF111", "tp_futures", "concurrent.futures.wait"),
         ]
     );
 }
@@ -1695,7 +2274,7 @@ fn consuming_calls_iterate_catalog_iterables() {
             "catalog_consumed_queries",
             "app/consumed.py",
             CONSUMED_QUERIES,
-            "EFF101"
+            "EFF101,EFF111"
         ),
         vec![
             d(
@@ -1766,12 +2345,12 @@ fn lazy_iterators_do_their_io_when_iterated() {
             "catalog_lazy_iterators",
             "app/lazy.py",
             LAZY_ITERATORS,
-            "EFF101,EFF103,EFF105"
+            "EFF101,EFF111,EFF103,EFF113,EFF105"
         ),
         vec![
             d(
                 15,
-                "EFF101",
+                "EFF111",
                 "tp_iterated_on_the_loop",
                 "pymongo.cursor.Cursor.__iter__"
             ),
@@ -1795,7 +2374,7 @@ fn lazy_iterators_do_their_io_when_iterated() {
             ),
             d(
                 32,
-                "EFF103",
+                "EFF113",
                 "tp_async_cursors_run_per_item",
                 "pymongo.asynchronous.cursor.AsyncCursor.__aiter__"
             ),
@@ -1962,7 +2541,7 @@ fn declarations_of_project_functions_apply_to_their_callers() {
     assert_eq!(
         check_files("catalog_declared_project", &files, RULES),
         vec![
-            app(7, "EFF101", "tp_declared_effects", "pkg.db.run_query"),
+            app(7, "EFF111", "tp_declared_effects", "pkg.db.run_query"),
             app(
                 17,
                 "EFF102",
@@ -2044,36 +2623,36 @@ fn offloaded_callables_run_on_a_worker() {
             "catalog_worker_callbacks",
             "app/workers.py",
             WORKER_CALLBACKS,
-            "EFF101,EFF103,MUT202"
+            "EFF101,EFF111,EFF103,EFF113,MUT114"
         ),
         vec![
             d(
                 27,
-                "MUT202",
+                "MUT114",
                 "tp_worker_mutates_a_shared_list",
                 "app.workers.cached"
             ),
             d(
                 33,
-                "EFF103",
+                "EFF113",
                 "tp_queries_per_item_on_a_worker",
                 "sqlalchemy.orm.Session.execute"
             ),
             d(
                 34,
-                "EFF103",
+                "EFF113",
                 "tp_queries_per_item_on_a_worker",
                 "sqlalchemy.orm.Session.execute"
             ),
             d(
                 35,
-                "EFF103",
+                "EFF113",
                 "tp_queries_per_item_on_a_worker",
                 "sqlalchemy.orm.Session.execute"
             ),
             d(
                 49,
-                "MUT202",
+                "MUT114",
                 "tp_worker_method_mutates_a_shared_list",
                 "app.workers.cached"
             ),
@@ -2154,13 +2733,13 @@ fn run_sync_callables_run_on_the_event_loop() {
             "catalog_sync_facades",
             "app/facades.py",
             SYNC_FACADES,
-            "EFF101,EFF103"
+            "EFF101,EFF111,EFF103,EFF113"
         ),
         vec![
-            d(15, "EFF101", "tp_blocking_call_in_run_sync", "requests.get"),
+            d(15, "EFF111", "tp_blocking_call_in_run_sync", "requests.get"),
             d(
                 25,
-                "EFF103",
+                "EFF113",
                 "tp_query_per_item_through_the_facade",
                 "sqlalchemy.orm.Session.execute"
             ),
@@ -2207,18 +2786,18 @@ fn forwarded_flags_are_decided_by_the_caller() {
             "catalog_forwarded_flags",
             "app/client.py",
             FORWARDED_FLAGS,
-            "EFF101"
+            "EFF101,EFF111"
         ),
         vec![
             d(
                 15,
-                "EFF101",
+                "EFF111",
                 "Client.aclose_and_wait",
                 "concurrent.futures.ThreadPoolExecutor.shutdown"
             ),
             d(
                 27,
-                "EFF101",
+                "EFF111",
                 "Configured.aclose",
                 "concurrent.futures.ThreadPoolExecutor.shutdown"
             ),

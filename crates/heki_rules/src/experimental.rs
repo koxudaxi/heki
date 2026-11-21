@@ -75,7 +75,7 @@ pub const EXPERIMENTAL_FEATURES: &[ExperimentalFeature] = &[
         id: "command.inspect",
         kind: ExperimentalKind::Command,
         target: "heki inspect",
-        since: "0.2.0",
+        since: "0.2.1",
         reason: "The facts it shows, its purity verdict, and its JSON object can still change as \
             heki's summaries close gaps; the object's `version` changes when a field is removed \
             or changes meaning.",
