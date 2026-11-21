@@ -1624,6 +1624,9 @@ impl<'a, 'c> Rules<'a, 'c> {
                 SetUse::Observes(format!("{who} is iterated (line {line})"))
             }
             InstKind::Yield { .. } => SetUse::Observes(format!("{who} is yielded (line {line})")),
+            InstKind::Convert { .. } | InstKind::Format { .. } => {
+                SetUse::Observes(format!("{who} is formatted (line {line})"))
+            }
             InstKind::AllocBuiltin { .. }
             | InstKind::DictLiteral { .. }
             | InstKind::AttrStore { .. }
@@ -2489,6 +2492,10 @@ impl<'a, 'c> Rules<'a, 'c> {
                         in_place: true,
                         ..
                     } if *lhs == u && *rhs != u => None,
+                    InstKind::Convert { .. } | InstKind::Format { .. } => Some(format!(
+                        "it is formatted (line {}): a `deque`'s text differs",
+                        self.line(off)
+                    )),
                     _ => Some(format!(
                         "this use has no `deque` equivalent (line {})",
                         self.line(off)

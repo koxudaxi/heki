@@ -9,7 +9,7 @@ use heki_ast::{LineIndex, Span};
 use heki_ir::walk::{Answer, Budget};
 use heki_ir::{
     Carries, FnIndex, FunctionId, InstKind, ItemOrigins, ItemSource, ModuleBindings, ModuleIr,
-    Must, PathReader, Paths, Progress,
+    Must, PathReader, Paths, Progress, Trips,
 };
 use heki_kb::EffectiveEcosystemKb;
 use serde::Serialize;
@@ -53,7 +53,7 @@ struct IterationFacts {
 #[derive(Serialize)]
 struct LoopFacts {
     line: u32,
-    fixed_trips: Answer<u32>,
+    fixed_trips: Answer<Trips>,
     origin: Answer<Vec<OriginFacts>>,
 }
 

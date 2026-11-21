@@ -43,7 +43,7 @@ The recorded set can only shrink:
 | --------- | ------------ | ------------------------------ |
 | No baseline file yet | an error (exit code 2) | records today's findings |
 | A finding was fixed | a note that the entry can shrink | records the smaller entry |
-| An entry grew, or a new finding appeared | reports it, with a note on the allowed and found counts (exit code 1) | reports it the same way and leaves the file as it is (exit code 1) |
+| An entry grew, or a new finding appeared | reports it, with a note on the allowed and found counts (exit code 1 for an error, and for a warning with [`fail-on = "warning"`](configuration.md#rule-selection-toolhekilint)) | reports it the same way and leaves the file as it is (exit code 1) |
 | A file could not be analyzed (a syntax error, an unreadable file) | reports the error and the other files' findings (exit code 2) | writes nothing, so the entries of that file are not lost (exit code 2) |
 
 To record new findings on purpose, delete the baseline and record it again.
@@ -103,7 +103,9 @@ across files, so the hook checks the whole project instead of the staged files o
             pass_filenames: false
     ```
 
-With a baseline configured, the hook fails only on new findings.
+The hook fails on errors and passes with warnings, which it prints. To make warnings fail it too,
+set `fail-on = "warning"` in `[tool.heki.lint]`, or add `--fail-on warning` to `entry`. With a
+baseline configured, the hook fails only on new findings.
 
 ## Continuous integration
 
@@ -123,9 +125,13 @@ With a baseline configured, the hook fails only on new findings.
         sarif_file: heki.sarif
     ```
 
+Warnings become annotations without failing the step; `fail-on = "warning"` in
+`[tool.heki.lint]` (or `--fail-on warning`) makes them fail it, as in pre-commit.
+
 With SARIF:
 
-- findings (exit code `1`) become code-scanning alerts and keep the step green;
+- findings become code-scanning alerts, warnings included, and keep the step green (exit code
+  `1` when one fails the run);
 - a configuration, read, or syntax error (exit code `2`) still fails the step; a file heki could
   not read or parse is an `error` notification of the run
   (`invocations[0].toolExecutionNotifications`, with `executionSuccessful: false`), and the
