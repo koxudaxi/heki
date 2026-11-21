@@ -1,7 +1,8 @@
 //! The cost of the analyses past the IR, end to end through the real binary: `isinstance`
 //! narrowing through phis, the passes of the type inference and of the classes of merged values,
 //! the size of the Soundness lane's proof state, the values `EFF107` follows from a task factory,
-//! and the walk to the callable a builtin calls once per item.
+//! the walk to the callable a builtin calls once per item, contracts with many call targets, and
+//! the walk to the uses handing a reference to a call target on.
 
 mod common;
 
@@ -2011,6 +2012,183 @@ fn many_key_tests_of_a_container_of_self_find_their_sides_once() {
         mut113_lines(&p, Duration::from_secs(20)),
         vec![lines.len() as u64]
     );
+}
+
+/// A module binding thousands of names, each to the one before (`a1 = a0`, `a2 = a1`, ...):
+/// every alias is resolved once, and the last still names `object.__setattr__`.
+#[test]
+fn a_long_chain_of_module_aliases_resolves_each_once() {
+    let names = 5_000;
+    let mut lines = vec!["a0 = object.__setattr__".to_owned()];
+    lines.extend((1..names).map(|i| format!("a{i} = a{}", i - 1)));
+    lines.extend(
+        [
+            "",
+            "",
+            "class Node:",
+            "    def __init__(self) -> None:",
+            "        self.kind = \"\"",
+            "",
+            "",
+            "def mark(node: Node) -> None:",
+        ]
+        .map(str::to_owned),
+    );
+    lines.push(format!("    a{}(node, \"kind\", \"x\")", names - 1));
+    let p = Project::new("bounds_module_alias_chain");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT201\"]\n\n[[tool.heki.write-owners]]\nname = \"kinds\"\ntargets = [\"Node.kind\"]\nallowed-writers = [\"Node.*\"]\n",
+    )
+    .write("m.py", &(lines.join("\n") + "\n"));
+    let diags = check_within(&p, Duration::from_secs(20));
+    assert_eq!(diags.len(), 1, "{diags:#?}");
+    assert_eq!(diags[0]["qualname"], "mark");
+}
+
+/// A method returning one of thousands of copies of `self.items` behind as many tests: the
+/// value each copy copies is found once, not once per return.
+#[test]
+fn returns_of_a_long_copy_chain_find_its_root_once() {
+    let copies = 3_000;
+    let mut lines = vec![
+        "class Node:".to_owned(),
+        "    def __init__(self) -> None:".to_owned(),
+        "        self.items: list[int] = []".to_owned(),
+        String::new(),
+        "    def members(self, flags: list[bool]) -> list[int]:".to_owned(),
+        "        c0 = self.items".to_owned(),
+    ];
+    for i in 1..copies {
+        lines.push(format!("        c{i} = c{}", i - 1));
+        lines.push(format!("        if flags[{i}]:"));
+        lines.push(format!("            return c{i}"));
+    }
+    lines.push(format!("        return c{}", copies - 1));
+    lines.extend(
+        [
+            "",
+            "",
+            "def grow(node: Node) -> None:",
+            "    node.members([]).append(1)",
+        ]
+        .map(str::to_owned),
+    );
+    let p = Project::new("bounds_getter_copy_chain");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT201\"]\n\n[[tool.heki.write-owners]]\nname = \"items\"\ntargets = [\"Node.items\"]\nallowed-writers = [\"Node.*\"]\n",
+    )
+    .write("m.py", &(lines.join("\n") + "\n"));
+    let diags = check_within(&p, Duration::from_secs(20));
+    assert_eq!(diags.len(), 1, "{diags:#?}");
+    assert_eq!(diags[0]["qualname"], "grow");
+}
+
+/// `classes` classes with a private method, and `functions` functions calling the methods of
+/// instances of them `calls` times each.
+fn many_calls(classes: usize, functions: usize, calls: usize) -> (String, String) {
+    let mut model = Vec::new();
+    for c in 0..classes {
+        model.extend([
+            format!("class C{c}:"),
+            "    def _m(self) -> int:".to_owned(),
+            "        return 0".to_owned(),
+            String::new(),
+            String::new(),
+        ]);
+    }
+    let names: Vec<String> = (0..classes).map(|c| format!("C{c}")).collect();
+    let params: Vec<String> = (0..classes).map(|c| format!("c{c}: C{c}")).collect();
+    let mut usage = vec![
+        format!("from pkg.m import {}", names.join(", ")),
+        String::new(),
+        String::new(),
+    ];
+    for f in 0..functions {
+        usage.push(format!("def f{f}({}) -> None:", params.join(", ")));
+        usage.extend((0..calls).map(|k| format!("    c{}._m()", k % classes)));
+        usage.extend([String::new(), String::new()]);
+    }
+    (model.join("\n"), usage.join("\n") + "\n")
+}
+
+/// The targets a call matches are looked up from the callee's names, once per call for all
+/// `call-owners` contracts: thousands of targets, in one contract or in as many contracts,
+/// dotted or sharing one module part (`pkg.m:X0._*`), cost no more per call than one.
+#[test]
+fn call_targets_are_looked_up_not_tried_one_by_one() {
+    let (model, usage) = many_calls(10, 100, 100);
+    let mut configs = Vec::new();
+    for (form, module) in [("dotted", "pkg.m."), ("module", "pkg.m:")] {
+        let targets: Vec<String> = (0..2000)
+            .map(|i| format!("\"{module}X{i}._*\""))
+            .chain(std::iter::once(format!("\"{module}C0._*\"")))
+            .collect();
+        let one_contract = format!(
+            "[[tool.heki.call-owners]]\nname = \"many\"\ntargets = [{}]\nforbidden-callers = [\"pkg.use.f0\"]\n",
+            targets.join(", ")
+        );
+        let many_contracts: String = targets
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                format!("[[tool.heki.call-owners]]\nname = \"c{i}\"\ntargets = [{t}]\nforbidden-callers = [\"pkg.use.f0\"]\n\n")
+            })
+            .collect();
+        configs.push((format!("{form}_one"), one_contract));
+        configs.push((format!("{form}_many"), many_contracts));
+    }
+    for (name, contracts) in configs {
+        let p = Project::new(&format!("bounds_call_targets_{name}"));
+        p.write(
+            "pyproject.toml",
+            &format!(
+                "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT204\"]\n\n{contracts}"
+            ),
+        )
+        .write("pkg/__init__.py", "")
+        .write("pkg/m.py", &model)
+        .write("pkg/use.py", &usage);
+        let diags = check_within(&p, Duration::from_secs(20));
+        // Only the forbidden caller's ten calls of `C0._m` are reported.
+        assert_eq!(diags.len(), 10, "{name}: {diags:#?}");
+        assert!(diags.iter().all(|d| d["qualname"] == "f0"), "{name}");
+    }
+}
+
+/// Thousands of references to a `call-owners` target, each a rebinding of one name that a long
+/// chain of phis carries to one `return` (`references = "calls"`): which values reach a use
+/// handing them on is found in one walk of the function, not once per reference (a function
+/// twice as long passes the IR's size budget).
+#[test]
+fn references_carried_by_a_long_phi_chain_are_found_in_one_walk() {
+    let rebindings = 2000;
+    let mut lines = vec![
+        "def decide():".to_owned(),
+        "    return 1".to_owned(),
+        String::new(),
+        String::new(),
+        "def pick(flags):".to_owned(),
+        "    chosen = None".to_owned(),
+    ];
+    for i in 0..rebindings {
+        lines.push(format!("    if flags[{i}]:"));
+        lines.push("        chosen = decide".to_owned());
+    }
+    lines.push("    return chosen".to_owned());
+    let p = Project::new("bounds_reference_phi_chain");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT204\"]\n\n[[tool.heki.call-owners]]\nname = \"home\"\ntargets = [\"m.decide\"]\nallowed-callers = [\"m.decide\"]\nreferences = \"calls\"\n",
+    )
+    .write("m.py", &(lines.join("\n") + "\n"));
+    let found = check_within(&p, Duration::from_secs(20));
+    let handed = found
+        .iter()
+        .filter(|d| d["rule_code"] == "MUT204" && d["qualname"] == "pick")
+        .count();
+    assert_eq!(handed, rebindings);
 }
 
 /// Puts after each of many branches that may build a new unbounded queue: the queue of each put

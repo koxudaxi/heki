@@ -326,7 +326,7 @@ fn slower_code_defaults_to_warning() {
     let (code, stdout, _) = p.heki(&["--select", "OPT"]);
     assert_eq!(code, 0, "{stdout}");
     assert!(
-        stdout.starts_with("app.py:7:9: OPT101 (list-quadratic-concat) [warning, heuristic] "),
+        stdout.starts_with("app.py:7:9: OPT101 (list-quadratic-concat) [warning] "),
         "{stdout}"
     );
     let (_, stdout, _) = p.heki(&["--output-format", "sarif", "--select", "OPT113"]);

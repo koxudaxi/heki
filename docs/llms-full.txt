@@ -472,6 +472,13 @@ Missed findings close as heki learns more:
   a `Final` field of a dataclass or of a class a `dataclass_transform` builds read on an instance
   (`Keys("x").KEY` is `"x"`), or on a class object whose default a class with `slots=True` or built
   by a transform replaces, or a computed name.
+- `setattr` and `object.__setattr__` are followed through a module-level name bound once to them
+  (`_set = object.__setattr__`), and `getattr(obj, "fields")` is `obj.fields` itself: changing
+  what it returns changes the attribute's object.
+- A write-owners contract sees a container change through what a method or a property returns
+  when it returns the attribute itself on every `return` (`node.members().append(x)` with
+  `return self.items`) and every class the object may be runs it. A `cached_property` hands out
+  nothing: what the instance keeps can be replaced.
 - A `write-owners` contract with `unresolved = "report"` reports the writes heki cannot tie to a
   class ([`MUT205`](https://heki.koxudaxi.dev/rules/unresolved-guarded-write/)).
 
@@ -729,9 +736,9 @@ $ heki check --heuristic
 ```
 
 The first command runs the exact rules (hand-checked samples of their reports found none wrong
-about the code) and the rules of the [contracts](https://heki.koxudaxi.dev/configuration/#contracts) you declare. No rule
-is exact yet, so without a contract it reports nothing for now, and says how many heuristic rules
-it left off. `--heuristic` runs those too; their reports can be wrong about the code, and every
+about the code) and the rules of the [contracts](https://heki.koxudaxi.dev/configuration/#contracts) you declare. In
+0.2.0 the exact rules are the proven tier of the `OPT` rewrite rules (the reports whose rewrite
+heki proves safe) and the exact tier of `OPT113`. A text run says how many heuristic rules it left off. `--heuristic` runs those too; their reports can be wrong about the code, and every
 output labels them ([Rule Precision](https://heki.koxudaxi.dev/precision/)).
 
 heki checks every Python file under the current directory, except the
@@ -769,10 +776,10 @@ app/api.py:5:12: EFF101 (async-blocking-call) [warning, heuristic] `handler` rea
 ## Fix what heki can prove
 
 `--fix` applies the rewrites heki proves safe and always faster (`OPT101`, `OPT102`), and
-`--diff` shows them first. Both rules are heuristic, so they run with `--heuristic`:
+`--diff` shows them first:
 
 ```console
-$ heki check --heuristic --diff
+$ heki check --diff
 --- a/app/report.py
 +++ b/app/report.py
 @@ -1,5 +1,5 @@
@@ -789,12 +796,13 @@ Fixed 1 issue(s) in 1 file(s).
 
 `--fix` then reports what is left, such as the `EFF101` above, which has no automatic fix.
 
-When heki cannot prove a fix safe, the help says why and nothing is rewritten. Here the list is
-also handed to other code inside the loop:
+When heki cannot prove a fix safe, the help says why, nothing is rewritten, and the report is
+heuristic whatever the rule's certainty. Here the list is also handed to other code inside the
+loop:
 
 ```console
-$ heki check app/shared.py
-app/shared.py:4:9: OPT101 (list-quadratic-concat) [warning] `rows = rows + [...]` copies the whole list on every iteration (quadratic)
+$ heki check --heuristic app/shared.py
+app/shared.py:4:9: OPT101 (list-quadratic-concat) [warning, heuristic] `rows = rows + [...]` copies the whole list each time it runs in the loop
   |
 4 |         rows = rows + [item]
   |         ^
@@ -1035,9 +1043,29 @@ Contracts declare what no type can say. Each kind is an array of tables with its
 - Every name in a contract is a dotted pattern. It matches the full name or any dotted suffix
   (`DataModel.fields` matches `pkg.model.DataModel.fields`, not `pkg.BigModel.fields`), and it
   may be a glob (`*`, `?`, `[...]`, `{a,b}`).
+- A glob's `*` spans dots (`pkg.parser.*` covers the functions of every module under
+  `pkg.parser`), except in the last segment of a target, which names the attribute, function,
+  method, or class: `pkg.*._*` names the private members of everything in `pkg`, and no function
+  of a private module whose own name is public; `pkg.api_*` names `pkg.api_commit`, not
+  `pkg.api_helpers.api_reset`.
+- A name with a module part, `module:qualname`, names definitions of the project modules the
+  part names, never of their submodules. The module part matches the whole module name, exactly
+  or as a glob (`pkg.*:run`), not a suffix; the qualified name after the colon matches the whole
+  name inside the module, a `*` spanning dots. `pkg:*` names everything `pkg/__init__.py`
+  defines (its functions, classes, methods, nested functions, and module body `<module>`), where
+  `pkg.*` also covers `pkg.sub.user.sub_user`; `pkg.sub:Store.*` names the methods of `Store` in
+  `pkg.sub`. In a `Class.attr` target the module part belongs to the class
+  (`pkg.model:DataModel.fields`), and a call target with one is matched whole (`pkg:*` names
+  every function, method, and class of `pkg`). Such a name never matches an external symbol, and
+  `unresolved = "report"` counts its last name (`decide` of `pkg:decide`). A module part that
+  names no project module is no error: the name matches nothing.
+- A report of a glob target names the member it matched (`reads
+  `pkg.types.DataType._flag``); one report standing for several members lists the others.
 - A `Class.attr` target covers the subclasses of the class too.
 - A contract heki cannot use is a configuration error: a target that is not `Class.attr`, an
-  invalid glob, or an unknown value of `forbid`, `fresh-objects`, or `unresolved`.
+  invalid glob, a name with more than one colon or an empty module or qualified name, call
+  targets whose globs are too many to match together (tens of thousands of complex ones), or an
+  unknown value of `forbid`, `fresh-objects`, `unresolved`, or `references`.
 - With `unresolved = "report"`, a contract also reports the accesses it cannot tie to a class,
   each under its own rule (`MUT205` writes, `MUT206` reads, `MUT207` calls): an attribute or
   method named like a target, accessed on an object of unknown class (an unannotated parameter,
@@ -1083,8 +1111,8 @@ the target.
 
 With `fresh-objects = "allow"`, a write is no violation when it constructs the object it writes:
 
-- the object was allocated in the same call chain: by calling its class, by a copy, or by a
-  project function returning a new object;
+- the object was allocated in the same call chain: by calling its class, by `object.__new__`
+  (`object.__new__(Node)`), by a copy, or by a project function returning a new object;
 - nothing can hold it yet: no store, `yield`, closure, or call that may keep it ran before the
   write.
 
@@ -1110,6 +1138,13 @@ unresolved = "report"
 
 The read side of `write-owners`. A read is `ref.children`, a read through a local alias,
 `getattr(ref, "children")`, or `ref.__dict__["children"]`.
+
+A read, or a call (`call-owners`, and an effect boundary's `call-targets` and
+`allowed-callees`), through a value typed with a project protocol that declares the member is
+judged by the protocol, the type the code uses it through: `def f(h: Host): h._m` reads
+`Host._m`, not `_m` of the classes implementing `Host`, and a private method of an
+implementation called through the protocol keeps what it reads and calls. A write through such
+a value still writes the implementations' attribute.
 
 | Key | Default | Meaning |
 | --- | ------- | ------- |
@@ -1143,11 +1178,13 @@ The call side of `write-owners`.
 | --- | ------- | ------- |
 | `name` | `""` | The contract's name in reports. |
 | `targets` | `[]` | Functions, methods, or classes. A `Class.method` target covers the method's overrides in subclasses; a class target means constructing the class or a subclass. |
+| `subclasses` | `true` | `false`: a class target means constructing exactly the class, not a subclass (an exception class whose subclasses anyone may raise). `Class.method` targets keep covering overrides. |
 | `allowed-callers` | `[]` | Functions allowed to call the targets. |
 | `forbidden-callers` | `[]` | When set, only calls by these functions are reported. |
 | `exempt-methods` | `[]` | Methods allowed to call the targets, matched as in `write-owners`. |
 | `message` | none | The help of every report of the contract. |
 | `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the calls of a method named like a target (its last name) on an object of unknown class are reported under [`MUT207`](https://heki.koxudaxi.dev/rules/unresolved-guarded-call/). |
+| `references` | `"ignore"` | `"ignore"` or `"calls"`: whether a reference handing a target on to be called later counts as a call of it (`[decide]`, `return decide`, `partial(decide)`, `field(default_factory=Rule)`, `obj.callback = self.decide`). |
 
 - A call is reported only when every function it may call (each candidate in the class
   hierarchy) is a target: `text.replace(...)` on a `str` is never a call of
@@ -1156,6 +1193,16 @@ The call side of `write-owners`.
   with a constant name are followed.
 - The targets of a contract may call each other: a call of the guarded operation is checked where
   it is made, so what the operation does inside is part of it.
+- With `references = "calls"`, a target handed on is reported where it is named ("`f` hands on
+  `pkg.core.decide`"; a name an import or the module body binds, at the statement handing it
+  on): passed to a call, stored in an attribute, an item, or a global, returned,
+  yielded, raised, or held by a display that is. A use that only names it is no reference: an
+  argument of `isinstance`, `issubclass`, another builtin that only inspects its arguments
+  (`print`, `getattr`, `type`), `super`, `typing.cast`, `typing.TypeVar`, `typing.NewType`, or
+  `contextlib.suppress`; an `except` clause, a class's bases and keywords, a default or an
+  annotation of a function; a subscript (`Optional[Rule]`), a comparison, a receiver
+  (`Rule.of(...)`), and a module binding another name to it (an import, `run = core.decide`). A
+  callable a builtin calls once per item (`sorted(xs, key=decide)`) is a call already.
 
 ### Allowed and forbidden functions
 
@@ -1207,6 +1254,12 @@ name = "pass-sort-base-classes"
 scopes = ["pkg.parser.passes.sort_base_classes"]
 allow-writes = ["DataModel.base_classes"]
 write-universe = ["DataModel.*", "DataModelFieldBase.*", "DataType.*"]
+
+[[tool.heki.effect-boundaries]]
+name = "portable-generation"
+scopes = ["pkg.generate.*"]
+forbid = ["reads-environment"]
+import-probes = "report"
 ```
 
 | Key | Default | Meaning |
@@ -1215,12 +1268,14 @@ write-universe = ["DataModel.*", "DataModelFieldBase.*", "DataType.*"]
 | `scopes` | `[]` | Modules, classes, or functions whose functions must stay inside the boundary; nested functions are included. |
 | `forbid` | `[]` | What the scope functions must not reach (tokens below). |
 | `write-targets` | `[]` | `Class.attr` targets of `writes-targets`, required with it. `Class.attr["key"]` names one entry, as in `write-owners`. |
-| `read-targets` | `[]` | `Class.attr` targets of `reads-targets`, required with it: reads as `read-owners` sees them, also inside property getters. A container entry is a configuration error. |
-| `call-targets` | `[]` | Functions, methods, or classes of `calls`, required with it, matched as the `targets` of `call-owners`. |
+| `read-targets` | `[]` | `Class.attr` targets of `reads-targets`, required with it: reads as `read-owners` sees them, also inside property getters. A container entry is a configuration error. An entry can also name an attribute of a module outside the project by its full name (`sys.platform`, `os.environ`, below). |
+| `call-targets` | `[]` | Functions, methods, or classes of `calls`, required with it, matched as the `targets` of `call-owners`. An entry can also name a function or class outside the project by its full name (`os.getenv`, `platform.*`, below). |
 | `write-universe` | `[]` | `Class.attr` entries: a reached write of one that `allow-writes` does not name is reported, once per written `Class.attr`. |
 | `allow-writes` | `[]` | `Class.attr` writes the boundary allows, exempt from `write-targets` too. Needs `write-universe`. |
 | `allowed-callees` | `[]` | Functions, classes, modules, or ecosystem symbols whose effects are allowed: paths through them are not followed, and calls of them are no `calls` violation. |
 | `fresh-objects` | `"allow"` | `"allow"` or `"report"`: whether a write that constructs the object it writes (as in `write-owners`) counts as a write of the boundary. |
+| `references` | `"ignore"` | `"ignore"` or `"calls"`, as for `call-owners`: whether a reference handing a `call-targets` entry on counts for `calls`. |
+| `import-probes` | `"allow"` | `"allow"` or `"report"`: whether `reads-environment` also forbids an import probe, an `import` inside a `try` with an `except` clause naming `ImportError` or `ModuleNotFoundError`. `"report"` without `reads-environment` is a configuration error. |
 | `message` | none | The help of every report of the boundary. |
 
 | `forbid` token | Forbids |
@@ -1231,6 +1286,27 @@ write-universe = ["DataModel.*", "DataModelFieldBase.*", "DataType.*"]
 | `writes-targets` | writing a `write-targets` attribute |
 | `reads-targets` | reading a `read-targets` attribute |
 | `calls` | calling a `call-targets` function or class |
+| `reads-environment` | reading the environment the program runs in: calling or reading what the ecosystem catalog tags `environment` (below), and import probes with `import-probes = "report"` |
+
+Outside the project, `call-targets` and `read-targets` entries name symbols by their full dotted
+name, starting with the top-level module: `os.getenv` matches a call of `os.getenv` (also
+`from os import getenv`, `import os as o`), `platform.*` every function of `platform`, and
+`sys.platform` a read of `sys.platform` (also `from sys import platform`, or `import sys as s`
+and `s.platform`). A dotted suffix (`getenv`), a leading glob (`*.getenv`), or a module part (`os:getenv`) never
+names a symbol outside the project, so an entry for project functions keeps its meaning. Only a call or a read
+heki resolves counts: an attribute read by name (`getattr(sys, name)`) or on an object of unknown
+origin is not reported.
+
+`reads-environment` needs no targets. The ecosystem catalog tags these calls: `os.getenv`,
+`os.getenvb`, the functions of `platform` that describe the machine or the interpreter
+(`platform.system`, `platform.machine`, `platform.python_version`, ...),
+`importlib.util.find_spec`, `importlib.import_module`, `importlib.metadata.version`,
+`importlib.metadata.distribution`, `shutil.which`, and `sysconfig.get_config_var`; and these
+reads: `os.environ`, `os.environb`, `os.name`, `sys.platform`, `sys.version`,
+`sys.version_info`, `sys.hexversion`, `sys.implementation`, and `sys.flags`. An entry set
+`excluded = true` (`[[tool.heki.ecosystem]]`, below) is never reported. A call on
+`os.environ` (`os.environ.get("X")`) is a read of `os.environ`. One report per scope function
+names the first read it reaches and counts every one.
 
 - Each scope function is checked through any number of calls.
 - A violation inside another scope function is reported there only, once.
@@ -1428,9 +1504,9 @@ Two independent questions decide whether heki offers the rewrite:
 
 | Profitability | Rules | Certainty | Applied by |
 | ------------- | ----- | --------- | ---------- |
-| Unconditional (faster from the first iteration) | `OPT101`, `OPT102` | heuristic | `heki check --fix` |
-| Size-dependent | `OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130` | heuristic | `heki check --fix --include-size-dependent`, or `--fix --profile <dump>` in hot functions |
-| Size-dependent, no rewrite | `OPT103`, `OPT112`, `OPT113` | heuristic | none: suggestion only |
+| Unconditional (faster from the first iteration) | `OPT101`, `OPT102` | exact (the proven reports) | `heki check --fix` |
+| Size-dependent | `OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130` | exact (the proven reports) | `heki check --fix --include-size-dependent`, or `--fix --profile <dump>` in hot functions |
+| Size-dependent, no rewrite | `OPT103`, `OPT112`, `OPT113` | `OPT103` exact (the proven reports), `OPT113` exact (its exact tier), `OPT112` heuristic | none: suggestion only |
 
 ### When the size is fixed
 
@@ -1729,12 +1805,14 @@ For custom tooling, `--output-format json` gives every field: see
 ### From heki 0.1
 
 heki 0.1 ran every rule that is not opt-in by default. Since rules have a certainty, only the
-exact ones do ([Rule precision](https://heki.koxudaxi.dev/precision/#certifications) lists them):
+exact ones do: in 0.2.0, `EFF101`, `EFF103`, `DATA101`, the proven tier of the eight `OPT`
+rewrite rules (`OPT101`-`OPT103`, `OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130`), their
+reports whose rewrite heki proves safe, and the exact tier of `OPT113` ([Rule
+precision](https://heki.koxudaxi.dev/precision/#certifications) lists them).
 
 - `lint.heuristic = true` restores the rules of 0.1, now labelled `heuristic` in every output.
 - A baseline keeps its entries: their keys (file, function, rule, target) do not change.
-- `heki check --fix` applies the fixes of `OPT101` and `OPT102` only when they run: with
-  `lint.heuristic = true`, or when `select` or `extend-select` names them.
+- `heki check --fix` applies the proven fixes of `OPT101` and `OPT102` by default, as in 0.1.
 
 ## Effect snapshots (`MUT103`)
 
@@ -1980,16 +2058,16 @@ Quadratic patterns heki can rewrite, each proven safe by the alias analysis befo
 
 | Code | Name | Message | |
 | ---- | ---- | ------- | ------: |
-| OPT101 | [list-quadratic-concat](https://heki.koxudaxi.dev/rules/list-quadratic-concat/) | Unconditionally profitable `list` quadratic concatenation (`x = x + [e]` -> `x.append(e)`). | 🛠️ ≈ |
-| OPT102 | [set-dict-quadratic-merge](https://heki.koxudaxi.dev/rules/set-dict-quadratic-merge/) | Unconditionally profitable `set`/`dict` quadratic merge (`{**d, ...}` with `d` first). | 🛠️ ≈ |
-| OPT103 | [immutable-quadratic-concat](https://heki.koxudaxi.dev/rules/immutable-quadratic-concat/) | Size-dependent immutable quadratic accumulation (`bytes`/`tuple`/attr `str`). | ≈ |
-| OPT110 | [loop-linear-membership](https://heki.koxudaxi.dev/rules/loop-linear-membership/) | Size-dependent `e in lst` inside a loop -> hoist `set` outside loop. | 🔧 ≈ |
-| OPT111 | [loop-linear-dedup](https://heki.koxudaxi.dev/rules/loop-linear-dedup/) | Size-dependent `if v not in seen: seen.append(v)` -> auxiliary `set`. | 🔧 ≈ |
+| OPT101 | [list-quadratic-concat](https://heki.koxudaxi.dev/rules/list-quadratic-concat/) | Unconditionally profitable `list` quadratic concatenation (`x = x + [e]` -> `x.append(e)`). | 🛠️ |
+| OPT102 | [set-dict-quadratic-merge](https://heki.koxudaxi.dev/rules/set-dict-quadratic-merge/) | Unconditionally profitable `set`/`dict` quadratic merge (`{**d, ...}` with `d` first). | 🛠️ |
+| OPT103 | [immutable-quadratic-concat](https://heki.koxudaxi.dev/rules/immutable-quadratic-concat/) | Size-dependent immutable quadratic accumulation (`bytes`/`tuple`/attr `str`). |  |
+| OPT110 | [loop-linear-membership](https://heki.koxudaxi.dev/rules/loop-linear-membership/) | Size-dependent `e in lst` inside a loop -> hoist `set` outside loop. | 🔧 |
+| OPT111 | [loop-linear-dedup](https://heki.koxudaxi.dev/rules/loop-linear-dedup/) | Size-dependent `if v not in seen: seen.append(v)` -> auxiliary `set`. | 🔧 |
 | OPT112 | [loop-linear-list-lookup](https://heki.koxudaxi.dev/rules/loop-linear-list-lookup/) | Size-dependent `list.index` / `list.remove` / `list.count` inside a loop (repeated linear scans). | ≈ |
-| OPT113 | [nested-loop-equijoin](https://heki.koxudaxi.dev/rules/nested-loop-equijoin/) | Size-dependent nested-loop equi-join (`for a in A: for b in B: if a.k == b.k`) -> `dict` index. | ≈ |
-| OPT120 | [list-front-pop](https://heki.koxudaxi.dev/rules/list-front-pop/) | Size-dependent `q.pop(0)` / `del q[0]` / `q = q[1:]` -> `collections.deque`. | 🔧 ≈ |
-| OPT121 | [list-front-insert](https://heki.koxudaxi.dev/rules/list-front-insert/) | Size-dependent `q.insert(0, v)` -> `collections.deque`. | 🔧 ≈ |
-| OPT130 | [loop-invariant-container-rebuild](https://heki.koxudaxi.dev/rules/loop-invariant-container-rebuild/) | Size-dependent loop-invariant container reconstruction (`e in set(keys)`). | 🔧 ≈ |
+| OPT113 | [nested-loop-equijoin](https://heki.koxudaxi.dev/rules/nested-loop-equijoin/) | Size-dependent nested-loop equi-join (`for a in A: for b in B: if a.k == b.k`) -> `dict` index. |  |
+| OPT120 | [list-front-pop](https://heki.koxudaxi.dev/rules/list-front-pop/) | Size-dependent `q.pop(0)` / `del q[0]` / `q = q[1:]` -> `collections.deque`. | 🔧 |
+| OPT121 | [list-front-insert](https://heki.koxudaxi.dev/rules/list-front-insert/) | Size-dependent `q.insert(0, v)` -> `collections.deque`. | 🔧 |
+| OPT130 | [loop-invariant-container-rebuild](https://heki.koxudaxi.dev/rules/loop-invariant-container-rebuild/) | Size-dependent loop-invariant container reconstruction (`e in set(keys)`). | 🔧 |
 
 
 ---
@@ -2008,8 +2086,10 @@ Every heki report is **exact** or **heuristic**:
   without ruling it out. It can be wrong about the code, and every output labels it `heuristic`.
 
 A rule is exact once it is certified (below), and heuristic until then. An exact rule's reports
-are exact, with one exception: an `OPT` rule's report whose rewrite heki could not prove safe
-is heuristic, as that premise is open. Only exact reports are shown by default.
+are exact, with one exception: an `OPT` rule's report that did not establish a premise of the
+rule's exact tier is heuristic, as that premise is open: a rewrite heki could not prove safe, a
+loop whose trip count the code fixes, or an `OPT113` join whose rule page premises do not all
+hold. Only exact reports are shown by default.
 
 - A heuristic rule runs when `select` or `extend-select` names its code or name. With
   `lint.heuristic = true` (`--heuristic`), the heuristic rules that are not opt-in also run by
@@ -2020,8 +2100,9 @@ is heuristic, as that premise is open. Only exact reports are shown by default.
 - A run of `full` or `concise` output that leaves heuristic rules off, or heuristic reports out,
   ends with a note saying how many.
 
-See [Rule selection](https://heki.koxudaxi.dev/configuration/#rule-selection-toolhekilint). The exact rules are listed
-under [Certifications](https://heki.koxudaxi.dev/precision/#certifications).
+See [Rule selection](https://heki.koxudaxi.dev/configuration/#rule-selection-toolhekilint). `EFF101`, `EFF103`,
+`DATA101`, the proven tier of the eight `OPT` rewrite rules, and the exact tier of `OPT113` are
+exact (certified below); the other rules are heuristic.
 
 ## What a report states
 
@@ -2116,11 +2197,25 @@ release, or the rule becomes heuristic in that release and needs a new certifica
 ## Certifications
 
 A certified rule has a row here: the release that certified it, and the reports of its census
-and of its holdout run with the false claims among them. The census of `EFF101` counts its
-boundaries before reports reaching one waiting call are folded together.
+and of its holdout run with the false claims among them. The census of the proven `OPT` tier
+checked by hand every exact report on the Stage 0-A corpus with the build of 2026-11-21 (one
+report, whose rewrite needed the set-order obligation, left the tier); the holdout run checked
+every exact report of one run on the 100 packages of the frozen holdout corpus. `OPT113`'s
+census reports are those of its exact tier with the plain-key premise, all among the reports
+the census of the earlier tier checked by hand. The census of `EFF101` counts its boundaries
+before reports reaching one waiting call are folded together.
 
 | Rule | Certified | Census: reports / false | Holdout: reports / false |
 | ---- | --------- | ----------------------: | -----------------------: |
+| `OPT101` | 0.2.0 | 7 / 0 | 2 / 0 |
+| `OPT102` | 0.2.0 | 1 / 0 | 0 / 0 |
+| `OPT103` | 0.2.0 | 128 / 0 | 188 / 0 |
+| `OPT110` | 0.2.0 | 8 / 0 | 0 / 0 |
+| `OPT111` | 0.2.0 | 7 / 0 | 7 / 0 |
+| `OPT120` | 0.2.0 | 70 / 0 | 33 / 0 |
+| `OPT121` | 0.2.0 | 12 / 0 | 5 / 0 |
+| `OPT130` | 0.2.0 | 1 / 0 | 0 / 0 |
+| `OPT113` | 0.2.0 | 8 / 0 | 6 / 0 |
 | `EFF101` | 0.2.0 | 287 / 0 | 152 / 0 |
 | `EFF103` | 0.2.0 | 103 / 0 | 122 / 0 |
 | `DATA101` | 0.2.0 | 6 / 0 | 0 / 0 |
@@ -2144,16 +2239,16 @@ loop a fixed 4 times, which is not data-sized.
 | `MUT107` | heuristic | round 3, 2026-11-21 | 50 | 1 / 1 / 37 / 11 | 78% | 65-87% | 4% |
 | `MUT110` | heuristic | round 3, 2026-11-21 | 4 | 0 / 0 / 4 / 0 | 100% | 51-100% | 0% |
 | `MUT202` | heuristic | round 3, 2026-11-21 | 20 | 2 / 1 / 11 / 6 | 70% | 48-85% | 15% |
-| `OPT101` | heuristic | round 3, 2026-11-21 | 9 | 0 / 0 / 7 / 2 | 78% | 45-94% | 0% |
-| `OPT102` | heuristic | round 3, 2026-11-21 | 6 | 0 / 1 / 3 / 2 | 67% | 30-90% | 17% |
-| `OPT103` | heuristic | round 3, 2026-11-21 | 50 | 0 / 2 / 44 / 4 | 92% | 81-97% | 4% |
-| `OPT110` | heuristic | round 3, 2026-11-21 | 50 | 0 / 3 / 36 / 11 | 78% | 65-87% | 6% |
-| `OPT111` | heuristic | round 3, 2026-11-21 | 50 | 0 / 2 / 42 / 6 | 88% | 76-94% | 4% |
+| `OPT101` | exact | round 3, 2026-11-21 | 9 | 0 / 0 / 7 / 2 | 78% | 45-94% | 0% |
+| `OPT102` | exact | round 3, 2026-11-21 | 6 | 0 / 1 / 3 / 2 | 67% | 30-90% | 17% |
+| `OPT103` | exact | round 3, 2026-11-21 | 50 | 0 / 2 / 44 / 4 | 92% | 81-97% | 4% |
+| `OPT110` | exact | round 3, 2026-11-21 | 50 | 0 / 3 / 36 / 11 | 78% | 65-87% | 6% |
+| `OPT111` | exact | round 3, 2026-11-21 | 50 | 0 / 2 / 42 / 6 | 88% | 76-94% | 4% |
 | `OPT112` | heuristic | round 3, 2026-11-21 | 50 | 0 / 2 / 43 / 5 | 90% | 79-96% | 4% |
-| `OPT113` | heuristic | round 3, 2026-11-21 | 50 | 0 / 11 / 35 / 4 | 92% | 81-97% | 22% |
-| `OPT120` | heuristic | round 3, 2026-11-21 | 50 | 0 / 2 / 45 / 3 | 94% | 84-98% | 4% |
-| `OPT121` | heuristic | round 3, 2026-11-21 | 50 | 0 / 1 / 41 / 8 | 84% | 71-92% | 2% |
-| `OPT130` | heuristic | round 3, 2026-11-21 | 30 | 0 / 2 / 27 / 1 | 97% | 83-99% | 7% |
+| `OPT113` | exact | round 3, 2026-11-21 | 50 | 0 / 11 / 35 / 4 | 92% | 81-97% | 22% |
+| `OPT120` | exact | round 3, 2026-11-21 | 50 | 0 / 2 / 45 / 3 | 94% | 84-98% | 4% |
+| `OPT121` | exact | round 3, 2026-11-21 | 50 | 0 / 1 / 41 / 8 | 84% | 71-92% | 2% |
+| `OPT130` | exact | round 3, 2026-11-21 | 30 | 0 / 2 / 27 / 1 | 97% | 83-99% | 7% |
 
 The other rules (the contract rules and the opt-in rules) have not been measured on this
 protocol yet.
@@ -2356,7 +2451,7 @@ Contracts reach further when a function changes its calls:
 | ---------- | ---------------- | ------- |
 | an ownership or `invalidation` contract | every function below it | whether a function only runs inside allowed callers, or whether its callers announce its writes, depends on all callers above it |
 | a contract on calls (`call-owners`, an effect boundary forbidding `calls`) | every function above it | a call of a target is reported at the callers of the private helper making it, and at the scope functions reaching it |
-| an effect boundary, when the function changes its calls of library APIs | every function above it | a boundary may allow one API and forbid another of the same effect, and counts every call it reaches |
+| an effect boundary, when the function changes its calls of library APIs, or the calls, module attribute reads, and import probes outside the project that a boundary forbids | every function above it | a boundary may allow one API and forbid another of the same effect, counts every call it reaches, and no summary records an access outside the project |
 
 Edits that change none of these, such as most comments, stop at the edited file.
 
@@ -2591,6 +2686,10 @@ follows these rules:
   (`y = x; x = y`) can close a cycle. A walk along copies ends on such a cycle.
 - A rule that follows exception edges, one from each call that can raise, runs a dataflow over
   blocks with one fact per tracked value. It never enumerates paths.
+- A contract's targets are looked up from what an access names (the dotted suffixes of a
+  function's names, its module and qualname, its class), never tried one by one: the cost grows
+  with the sites, not with sites times targets, and the targets of every contract of a rule are
+  indexed together.
 
 The engines of `heki_ir::walk` apply these rules by construction, and every walk over IR ids,
 the call graph, or the class hierarchy goes through them:
@@ -2629,33 +2728,36 @@ chain of copies, a long chain of aliases of a class with an attribute store thro
 alias, a class with thousands of subclasses whose class constant as many functions read on an
 instance, a strict `read-owners` target on such a class that as many functions read on an object of
 unknown class, as many calls of a method of such a class that a call target naming no class names, a
-module binding thousands of names each to an attribute of the one before, a function making twenty
-thousand calls of eight operands each, a helper that types nothing making thousands of strict
-accesses of one name that one caller calls as many times, a helper that types nothing reading,
-calling, or writing one strict target name thousands of times, which a caller calls as many times,
-many `is` tests each followed by a conditional expression on the tested parameter, many branches on
-a long chain of copies of one `is` test, a long chain of returned calls each handed the previous
-call's result as two of its arguments, a long chain of returned aliases each appended to one list or
-to a new list of its own, a long chain of conditional expressions each choosing between a call of
-the previous value and the value, one returned call handed the last of a long chain of item reads as
-each of its arguments, a loop carrying a long chain of assignments in reverse, a loop rotating
-aliases of many `self` containers, a chain of merges of many `self` containers, a loop over a
-generator whose body makes many calls, loops whose bodies hold many conditional blocks one after
-another, a function consuming a generator's result many times in a row, a loop over a `zip` of many
-generator results whose body makes as many calls, a loop over a `zip` of thousands of `self`
-containers whose body makes as many calls, one `zip` of thousands of `self` containers stepped by as
-many `yield from`s, a generator handed on through thousands of private wrappers, each returning the
-one before's result, an edit through the language server changing every method of a class of
-thousands of methods, methods changing a typed dict of `self` thousands of times, a method storing
-under a key after each of hundreds of tests that such a dict holds the key, and a function reading
-attributes down a chain ten thousand deep (`x = x.child`), many queue puts each after a branch that
-may build a new queue, a long chain of helpers handing a queue on, named in the opposite order of
-the calls, a class whose thousands of queue attributes each store the one before, with a put on
-each, and the path facts of a `try` body of thousands of calls whose handler returns, of loops
-nested twenty deep with a call at each depth, of a thousand loops one after another, and of a chain
-of hundreds of `and` tests of module constants, and the item origins of a chain of thousands of
-wrappers, of a list filled by appends in a thousand loops, and of a phi of sixty branches each
-choosing a different parameter.
+module binding thousands of names each to an attribute of the one before, a module binding thousands
+of names each to the one before, a method returning one of thousands of copies of an attribute
+behind as many tests, a function making twenty thousand calls of eight operands each, a helper that
+types nothing making thousands of strict accesses of one name that one caller calls as many times, a
+helper that types nothing reading, calling, or writing one strict target name thousands of times,
+which a caller calls as many times, many `is` tests each followed by a conditional expression on the
+tested parameter, many branches on a long chain of copies of one `is` test, a long chain of returned
+calls each handed the previous call's result as two of its arguments, a long chain of returned
+aliases each appended to one list or to a new list of its own, a long chain of conditional
+expressions each choosing between a call of the previous value and the value, one returned call
+handed the last of a long chain of item reads as each of its arguments, a loop carrying a long chain
+of assignments in reverse, a loop rotating aliases of many `self` containers, a chain of merges of
+many `self` containers, a loop over a generator whose body makes many calls, loops whose bodies hold
+many conditional blocks one after another, a function consuming a generator's result many times in a
+row, a loop over a `zip` of many generator results whose body makes as many calls, a loop over a
+`zip` of thousands of `self` containers whose body makes as many calls, one `zip` of thousands of
+`self` containers stepped by as many `yield from`s, a generator handed on through thousands of
+private wrappers, each returning the one before's result, an edit through the language server
+changing every method of a class of thousands of methods, methods changing a typed dict of `self`
+thousands of times, a method storing under a key after each of hundreds of tests that such a dict
+holds the key, and a function reading attributes down a chain ten thousand deep (`x = x.child`),
+many queue puts each after a branch that may build a new queue, a long chain of helpers handing a
+queue on, named in the opposite order of the calls, a class whose thousands of queue attributes each
+store the one before, with a put on each, and the path facts of a `try` body of thousands of calls
+whose handler returns, of loops nested twenty deep with a call at each depth, of a thousand loops
+one after another, and of a chain of hundreds of `and` tests of module constants, and the item
+origins of a chain of thousands of wrappers, of a list filled by appends in a thousand loops, and of
+a phi of sixty branches each choosing a different parameter, and thousands of `call-owners` targets,
+in one contract or in as many contracts, and thousands of references to a `call-owners` target that
+a long chain of phis carries to one `return`.
 
 A change to the IR builder, a walk, a fixpoint, or a rule's state is also run over a large
 corpus of real projects before it is merged, every run under a memory cap and a timeout. No
@@ -3462,7 +3564,34 @@ the allowed callers and resolves to a target:
 - a module-level function (`pkg.util.reset_cache()`);
 - a class: constructing it or a subclass (`FinalFacts(...)`, `pkg.facts.FinalFacts(...)`,
   `cls(...)` in a class method), also for a dataclass or another class without an `__init__` of
-  its own.
+  its own; with `subclasses = false`, constructing exactly the class.
+
+With `references = "calls"`, a reference handing a target on to be called later counts as a call
+of it, reported where the target is named ("`f` hands on `pkg.core.decide`"; a name an import or
+the module body binds is read without a position of its own, so it is reported at the statement
+handing it on): passed to a call
+(`partial(decide)`, `register(self.decide)`, `field(default_factory=Rule)`), stored in an
+attribute, an item, or a global, returned, yielded, raised, or held by a display that is
+(`[decide]`, `{"a": decide}`), also through an import alias (`from pkg.core import decide as
+chosen`), a module alias (`run = core.decide`), or a module attribute (`core.decide`). A use that
+only names a class is no reference: an argument of `isinstance`, `issubclass`, another builtin that
+only inspects its arguments (`print`, `getattr`, `type`), `super`, `typing.cast`, `typing.TypeVar`,
+`typing.NewType`, or `contextlib.suppress`; an `except` clause, a class's bases and keywords, a
+function's defaults and annotations; a subscript (`Optional[Rule]`), a comparison (`f is decide`), a
+receiver (`Rule.of(...)`), and a module binding another name to it. A callable a builtin calls once
+per item (`sorted(xs, key=decide)`, `map(decide, xs)`) is a call already, and so is the
+`functools.partial` object handed to one. A reference in a class body counts for the function
+running the class statement (`<module>` for a class at module level).
+
+A call through a value typed with a project `Protocol` that declares the method is judged by the
+protocol's declaration (`h._helper()` with `h: Host` calls `Host._helper`), not by the
+implementations it runs, and what an implementation's private method calls inside stays with it
+(also when other callers call the method through the class and take its calls over).
+
+A target's last segment names the function, method, or class: a glob there matches within that
+name only (`pkg.*._*` is every private member in `pkg`, not every function of a private module,
+and `pkg.api_*` is `pkg.api_commit`, not `pkg.api_helpers.api_reset`), and the report names the
+function the call reaches.
 
 A call is reported only when every function it may call is a target: when the receiver's class
 hierarchy also offers a method that is no target (a receiver typed with a base class whose own
@@ -3484,7 +3613,8 @@ coroutine's where it is awaited. Not reported either:
   callers above it starts in an allowed caller, an exempt method, or a class's own
   initialization (as for `MUT201`);
 - a class's own initialization: an initializer (`__init__`, `__post_init__`, ...) of a class of
-  the target's family calling a guarded method on its own `self` (for a target naming no class,
+  the target's family calling a guarded method on its own `self`, or handing it on with
+  `references = "calls"`, directly or through a private helper (for a target naming no class,
   `reset`, the family is the classes defining the methods it names and their subclasses);
 - a target calling a target of the same contract (`remove_reference` calling
   `self.replace_reference(None)`, an override calling `super().replace_reference(...)`): the
@@ -3493,7 +3623,8 @@ coroutine's where it is awaited. Not reported either:
 ## What a report states
 
 A report states that the function calls a function or method, or constructs a class, that a
-`call-owners` contract reserves, outside the contract's call owners.
+`call-owners` contract reserves, outside the contract's call owners; with `references = "calls"`,
+that it hands one on.
 
 Its premises:
 
@@ -3504,6 +3635,10 @@ Its premises:
   inside allowed contexts. Established from the contract.
 - **Through helpers**: a helper's write, read, or call counts at its caller. Open: one path of the
   helper is enough.
+- **Hands on** (`references = "calls"`): the value named is the target, and it reaches, through
+  copies and displays, an argument, a store, a `return`, a `yield`, or a `raise`. Open: a value
+  merged from several paths is enough. Whether the code it is handed to calls it is not part of
+  the claim.
 
 ## Why is this bad?
 Some operations keep invariants only when one component runs them: a store that updates its
@@ -3555,7 +3690,9 @@ No automatic fix.
     subclasses; a class target covers constructing the class and its subclasses; a target
     naming no class (`reset`) covers every project function and method of that name.
   - `allowed-callers`: functions allowed to call the targets, as dotted names or globs matched
-    against the function's qualified name and its `Class.method` qualname (`pkg.store.*`).
+    against the function's qualified name and its `Class.method` qualname (`pkg.store.*`). A
+    module part names one module without its submodules: `pkg:*` allows what `pkg/__init__.py`
+    defines, not `pkg.sub.user.sub_user`.
   - `forbidden-callers`: when set, only calls by these functions are reported (matched like
     `allowed-callers`); `allowed-callers` and `exempt-methods` stay exceptions inside them. A
     call is in scope when the reporting function or one of the private helpers it hands the call
@@ -3567,6 +3704,8 @@ No automatic fix.
   - `message`: the help of every report of the contract.
   - `unresolved`: `"ignore"` (default) or `"report"`: also report the calls the contract cannot
     tie to a class, under `MUT207`.
+  - `references`: `"ignore"` (default) or `"calls"`: a reference handing a target on to be
+    called later counts as a call of it.
 
 
 ---
@@ -3746,11 +3885,22 @@ count for a read.
   - `reads-targets`: reads of the `Class.attr` entries of `read-targets` (and their
     subclasses), in every form `MUT203` follows (`obj.attr`, `getattr(obj, "attr")`,
     `obj.__dict__["attr"]`, a property getter that reads it); an initializer reading its own
-    instance is no read;
+    instance is no read. An entry also names an attribute of a module outside the project by its
+    full dotted name (`sys.platform`), read as `sys.platform` or through
+    `from sys import platform`;
   - `calls`: calls of the `call-targets` entries, matched as the targets of `MUT204`: a function,
     a method (with its overrides in subclasses, through bound-method aliases and `getattr` with a
     constant name), or a class (constructing it); a call is one only when every function it may
-    call is a target;
+    call is a target. An entry also names a function or class outside the project by its full
+    dotted name (`os.getenv`, `platform.*`); a dotted suffix, a leading glob, or a module part
+    does not. With `references = "calls"`, a reached function handing a target on to be called
+    later (passed, stored, returned, yielded, raised, or held by such a display) counts too, as
+    for `MUT204` ("`render` hands on `pkg.core.decide`");
+  - `reads-environment`: reading the environment the program runs in: a call or a module
+    attribute read the ecosystem catalog tags `environment` (`os.getenv`, `platform.system`,
+    `importlib.util.find_spec`, `os.environ`, `sys.platform`, `sys.version_info`, ...), and,
+    with `import-probes = "report"`, an `import` inside a `try` with an `except` clause naming
+    `ImportError` or `ModuleNotFoundError`;
   - `mutates-params`: mutating a parameter, its attributes, or its contents. For a method,
     parameter 0 is `self`, so a method writing `self.x` mutates a parameter.
 - `write-universe` with `allow-writes` states the writes a scope may make positively: a reached
@@ -3774,13 +3924,18 @@ chain is a shortest one. The search does not enter:
 - functions an offloading decorator or API runs on another thread (`@sync_to_async`,
   `asyncio.to_thread(f)`, ...).
 
+A call or a read outside the project counts only when heki resolves it to the name: through
+imports and aliases of the module, never by an attribute name computed at run time or on an
+object of unknown origin.
+
 Unlike `EFF101`, the search does not read the callees' guards: a reached function's effects
 count whatever its arguments are, so `__repr__` calling `save(text, io.StringIO())` reaches the
 `open` that `save` runs only for a path.
 
 A violation is reported once per scope function and forbidden effect (or write, read, or call
-target; a `write-universe` write once per written `Class.attr`), at the call in the scope
-function that starts the shortest chain (or at the blocking call, write, read, or call itself),
+target; a `write-universe` write once per written `Class.attr`; every environment read of
+`reads-environment` together), at the call in the scope function that starts the shortest chain
+(or at the blocking call, write, read, call, or import itself),
 with the chain as related information; `mutates-params` is reported at the function's
 definition. The report counts every distinct site of that kind the scope function reaches
 (`sites` in JSON; for `mutates-params`, every change of a parameter, in the body making it), so
@@ -3806,7 +3961,12 @@ Its premises:
 - **Reaches**: each function on the chain reaches the next call. Open: one path is enough, and the
   rule reads no branch at all: a call under any test counts.
 - **Forbidden effect**: the last call has an effect `forbid` lists, as the ecosystem catalog or the
-  boundary's own entries describe it.
+  boundary's own entries describe it; or the last function makes the call, the read, or the import
+  probe `forbid` lists. Established for a read and an import probe: the module attribute is named
+  through the module's imports, and the `except` clause names the import error. With
+  `references = "calls"`, a target handed on is one for `calls`: the value is the target, and it
+  reaches a use handing it on. Established; whether the code it is handed to calls it is not
+  part of the claim.
 
 ## Why is this bad?
 Some parts of a code base promise to be pure: rendering a model must not mutate it, domain code
@@ -3854,21 +4014,28 @@ No automatic fix.
   - `name`: the boundary name, used in messages and in the diagnostic target
     (`pure-render:blocking_net`, `pure-render:DataModel.fields` for a write,
     `pure-render:reads:DataModel.fields`, `pure-render:calls:GenerationStore.*`,
-    `pure-render:mutates-params`), so a read and a write of one field are two reports.
+    `pure-render:reads-environment`, `pure-render:mutates-params`), so a read and a write of one
+    field are two reports.
   - `scopes`: modules, classes, or functions (dotted names or globs).
   - `forbid`: `blocking-net`, `blocking-db`, `blocking-fs`, `blocking-subprocess`,
     `blocking-sync`, `sleep`, `blocking`, `mutates-params`, `writes-targets`, `reads-targets`,
-    `calls`.
+    `calls`, `reads-environment`.
   - `write-targets`: `Class.attr` entries for `writes-targets` (required with it).
-  - `read-targets`: `Class.attr` entries for `reads-targets` (required with it).
+  - `read-targets`: `Class.attr` entries for `reads-targets` (required with it), or attributes of
+    modules outside the project by their full name.
   - `call-targets`: functions, methods, or classes for `calls` (required with it), as for the
-    `targets` of `[[tool.heki.call-owners]]`.
+    `targets` of `[[tool.heki.call-owners]]`, or functions and classes outside the project by
+    their full name.
   - `write-universe`: `Class.attr` entries whose reached writes are reported unless
     `allow-writes` names them; the diagnostic target is the entry, with a glob attribute replaced
     by the written one (`pass:DataModel.fields` for `DataModel.*`).
   - `allow-writes`: `Class.attr` writes the boundary allows (needs `write-universe`).
   - `fresh-objects`: `"allow"` (default) or `"report"`: whether writes that construct the object
     they write count, as for `[[tool.heki.write-owners]]`.
+  - `references`: `"ignore"` (default) or `"calls"`: whether a reference handing a
+    `call-targets` entry on counts for `calls`, as for `[[tool.heki.call-owners]]`.
+  - `import-probes`: `"allow"` (default) or `"report"`: whether `reads-environment` also forbids
+    import probes (needs `reads-environment`).
   - `allowed-callees`: functions, classes, modules, or ecosystem symbols whose effects are
     allowed.
   - `message`: the help of every report of the boundary.
@@ -3992,13 +4159,9 @@ Source: https://heki.koxudaxi.dev/rules/immutable-quadratic-concat/
 
 # immutable-quadratic-concat (OPT103)
 
-Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` (slower code) · No automatic fix
+Family: Complexity Rewrites (OPT) · Exact · Enabled by default · Severity `warning` (slower code) · No automatic fix
 
 Size-dependent immutable quadratic accumulation (`bytes`/`tuple`/attr `str`).
-
-!!! note "Heuristic"
-
-    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 50 sampled reports (round 3, 2026-11-21), 92% were right about the code. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 ## What it does
 Checks quadratic accumulation of immutable values in a loop:
@@ -4018,21 +4181,25 @@ no other reference. Neither are:
 
 ## What a report states
 
-A report states that an immutable value (`bytes`, a `tuple`, a `str` attribute) grows by
-concatenation on every iteration of the loop, so each iteration copies all of it.
+A report states that concatenating to an immutable value (`bytes`, a `tuple`, a `str` attribute),
+in a loop, copies all of it each time it runs.
 
 Its premises:
 
 - **Immutable type**: the value's exact type is known from its construction. Established.
-- **Loop-carried**: the result is the value of the next iteration. Established by the IR.
-- **On every iteration**: the statement runs on every iteration of the loop. Open: a statement under
-  a branch inside the loop counts.
-- **Data-sized**: the code does not fix the sizes the cost depends on (the loop's and the
-  container's) at 16 or fewer. Open: a size heki cannot bound counts as data-sized.
+- **Loop-carried**: the result is the value the next iteration starts from. Established by the IR.
+- **In a loop**: the statement is in the body of a loop. Established by the IR.
 - **Rewrite proven safe**: the help says `[safe fix: ...]`, `[proven-safe suggestion: ...]`, or
   `[proven safe; ...]`. A report whose help names a blocking obligation instead (`[not auto-fixable:
   ...]`) lacks this premise and is heuristic whatever the rule's certainty; the proven reports are
   the rule's exact tier.
+
+Not part of the claim: how many times the statement runs (one under a branch inside the loop
+counts), and how large the loop or the value is. The message claims no size and no cost estimate. A
+loop or a value that the code fixes at 16 or fewer items is not reported, since the rewrite would
+not pay off. A proven report in a loop whose trip count the code fixes at more, or caps with a
+length test every path to the loop passes, is heuristic: it is true, but a fixed count is no
+evidence either way, so the exact tier leaves it out.
 
 ## Why is this bad?
 Each concatenation copies everything accumulated so far.
@@ -4329,13 +4496,9 @@ Source: https://heki.koxudaxi.dev/rules/list-front-insert/
 
 # list-front-insert (OPT121)
 
-Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` (slower code) · Proven-safe suggestion (`--fix --include-size-dependent`)
+Family: Complexity Rewrites (OPT) · Exact · Enabled by default · Severity `warning` (slower code) · Proven-safe suggestion (`--fix --include-size-dependent`)
 
 Size-dependent `q.insert(0, v)` -> `collections.deque`.
-
-!!! note "Heuristic"
-
-    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 50 sampled reports (round 3, 2026-11-21), 84% were right about the code. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 ## What it does
 Checks loops that insert at the front of a list, `q.insert(0, v)`, and suggests a
@@ -4347,22 +4510,26 @@ costs no more than building it.
 
 ## What a report states
 
-A report states that inserting at the front of the list (`lst.insert(0, x)`) shifts every element,
-on every iteration of the loop.
+A report states that inserting at the front of the list (`lst.insert(0, x)`), in a loop, moves
+every element each time it runs.
 
 Its premises:
 
 - **Builtin list**: the value is a builtin `list` by its construction (a display, a comprehension,
   `list(...)`). Established: the Soundness lane takes types from constructions only, never from
   annotations.
-- **On every iteration**: the statement runs on every iteration of the loop. Open: a statement under
-  a branch inside the loop counts.
-- **Data-sized**: the code does not fix the sizes the cost depends on (the loop's and the
-  container's) at 16 or fewer. Open: a size heki cannot bound counts as data-sized.
+- **In a loop**: the statement is in the body of a loop. Established by the IR.
 - **Rewrite proven safe**: the help says `[safe fix: ...]`, `[proven-safe suggestion: ...]`, or
   `[proven safe; ...]`. A report whose help names a blocking obligation instead (`[not auto-fixable:
   ...]`) lacks this premise and is heuristic whatever the rule's certainty; the proven reports are
   the rule's exact tier.
+
+Not part of the claim: how many times the statement runs (one under a branch inside the loop
+counts), and how large the loop or the list is. The message claims no size and no cost estimate. A
+loop or a list that the code fixes at 16 or fewer items is not reported, since the rewrite would not
+pay off. A proven report in a loop whose trip count the code fixes at more, or caps with a length
+test every path to the loop passes, is heuristic: it is true, but a fixed count is no evidence
+either way, so the exact tier leaves it out.
 
 ## Why is this bad?
 Inserting at the front shifts every element, so building a list this way is quadratic.
@@ -4398,13 +4565,9 @@ Source: https://heki.koxudaxi.dev/rules/list-front-pop/
 
 # list-front-pop (OPT120)
 
-Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` (slower code) · Proven-safe suggestion (`--fix --include-size-dependent`)
+Family: Complexity Rewrites (OPT) · Exact · Enabled by default · Severity `warning` (slower code) · Proven-safe suggestion (`--fix --include-size-dependent`)
 
 Size-dependent `q.pop(0)` / `del q[0]` / `q = q[1:]` -> `collections.deque`.
-
-!!! note "Heuristic"
-
-    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 50 sampled reports (round 3, 2026-11-21), 94% were right about the code. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 ## What it does
 Checks loops that remove the first element of a list: `q.pop(0)`, `del q[0]`, and
@@ -4423,21 +4586,25 @@ iteration of the loop.
 ## What a report states
 
 A report states that removing the first element of the list (`lst.pop(0)`, `del lst[0]`, `lst =
-lst[1:]`) shifts or copies every other element, on every iteration of the loop.
+lst[1:]`), in a loop, moves or copies every remaining element each time it runs.
 
 Its premises:
 
 - **Builtin list**: the value is a builtin `list` by its construction (a display, a comprehension,
   `list(...)`). Established: the Soundness lane takes types from constructions only, never from
   annotations.
-- **On every iteration**: the statement runs on every iteration of the loop. Open: a statement under
-  a branch inside the loop counts.
-- **Data-sized**: the code does not fix the sizes the cost depends on (the loop's and the
-  container's) at 16 or fewer. Open: a size heki cannot bound counts as data-sized.
+- **In a loop**: the statement is in the body of a loop. Established by the IR.
 - **Rewrite proven safe**: the help says `[safe fix: ...]`, `[proven-safe suggestion: ...]`, or
   `[proven safe; ...]`. A report whose help names a blocking obligation instead (`[not auto-fixable:
   ...]`) lacks this premise and is heuristic whatever the rule's certainty; the proven reports are
   the rule's exact tier.
+
+Not part of the claim: how many times the statement runs (one under a branch inside the loop
+counts), and how large the loop or the list is. The message claims no size and no cost estimate. A
+loop or a list that the code fixes at 16 or fewer items is not reported, since the rewrite would not
+pay off. A proven report in a loop whose trip count the code fixes at more, or caps with a length
+test every path to the loop passes, is heuristic: it is true, but a fixed count is no evidence
+either way, so the exact tier leaves it out.
 
 ## Why is this bad?
 Removing the first element shifts every remaining element, so a queue drained this way is
@@ -4503,13 +4670,9 @@ Source: https://heki.koxudaxi.dev/rules/list-quadratic-concat/
 
 # list-quadratic-concat (OPT101)
 
-Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` (slower code) · Safe fix (`--fix`)
+Family: Complexity Rewrites (OPT) · Exact · Enabled by default · Severity `warning` (slower code) · Safe fix (`--fix`)
 
 Unconditionally profitable `list` quadratic concatenation (`x = x + [e]` -> `x.append(e)`).
-
-!!! note "Heuristic"
-
-    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 9 sampled reports (round 3, 2026-11-21), 78% were right about the code. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 ## What it does
 Checks loops that grow a list by building a new one every iteration, `x = x + [e]`, and
@@ -4517,23 +4680,24 @@ rewrites it to `x.append(e)` (`x.extend([...])` for several elements).
 
 ## What a report states
 
-A report states that `x = x + [e]` builds a new list from the whole accumulated list on every
-iteration of the loop, where appending would change it in place.
+A report states that `x = x + [e]`, in a loop, builds a new list from the whole accumulated list
+each time it runs, where appending would change it in place.
 
 Its premises:
 
 - **Builtin list**: the value is a builtin `list` by its construction (a display, a comprehension,
   `list(...)`). Established: the Soundness lane takes types from constructions only, never from
   annotations.
-- **Loop-carried**: the result is the accumulator of the next iteration. Established by the IR.
-- **On every iteration**: the statement runs on every iteration of the loop. Open: a statement under
-  a branch inside the loop counts.
-- **Data-sized**: the code does not fix the sizes the cost depends on (the loop's and the
-  container's) at 16 or fewer. Open: a size heki cannot bound counts as data-sized.
+- **Loop-carried**: the result is the value the next iteration starts from. Established by the IR.
+- **In a loop**: the statement is in the body of a loop. Established by the IR.
 - **Rewrite proven safe**: the help says `[safe fix: ...]`, `[proven-safe suggestion: ...]`, or
   `[proven safe; ...]`. A report whose help names a blocking obligation instead (`[not auto-fixable:
   ...]`) lacks this premise and is heuristic whatever the rule's certainty; the proven reports are
   the rule's exact tier.
+
+Not part of the claim: how many times the statement runs (one under a branch inside the loop
+counts), and how large the loop or the list is. The message claims no size and no cost estimate. The
+rewrite never makes the code slower, so a loop the code fixes at a few items is reported too.
 
 ## Why is this bad?
 `x + [e]` copies the whole list, so the loop is quadratic. `append` is amortized constant time
@@ -4861,13 +5025,9 @@ Source: https://heki.koxudaxi.dev/rules/loop-invariant-container-rebuild/
 
 # loop-invariant-container-rebuild (OPT130)
 
-Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` (slower code) · Proven-safe suggestion (`--fix --include-size-dependent`)
+Family: Complexity Rewrites (OPT) · Exact · Enabled by default · Severity `warning` (slower code) · Proven-safe suggestion (`--fix --include-size-dependent`)
 
 Size-dependent loop-invariant container reconstruction (`e in set(keys)`).
-
-!!! note "Heuristic"
-
-    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 30 sampled reports (round 3, 2026-11-21), 97% were right about the code. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 ## What it does
 Checks loops that rebuild the same container on every iteration just to test membership,
@@ -4879,21 +5039,28 @@ functions.
 
 ## What a report states
 
-A report states that the loop builds the same container (`set(keys)`, `list(...)`, `tuple(...)`,
-`dict(...)`) on every iteration to test membership in it.
+A report states that a builtin constructor (`set(keys)`, `list(...)`, `tuple(...)`, `dict(...)`),
+in a loop, builds a new container for a membership test each time it runs.
 
 Its premises:
 
-- **Loop-invariant**: what the container is built from does not change during the loop. Established
-  by the Soundness lane.
-- **On every iteration**: the statement runs on every iteration of the loop. Open: a statement under
-  a branch inside the loop counts.
-- **Data-sized**: the code does not fix the sizes the cost depends on (the loop's and the
-  container's) at 16 or fewer. Open: a size heki cannot bound counts as data-sized.
+- **Builtin container**: the constructor builds a builtin container of a known type. Established
+  only on a proven report: an unknown type is one of the obligations that block the rewrite.
+- **In a loop**: the statement is in the body of a loop. Established by the IR.
 - **Rewrite proven safe**: the help says `[safe fix: ...]`, `[proven-safe suggestion: ...]`, or
   `[proven safe; ...]`. A report whose help names a blocking obligation instead (`[not auto-fixable:
   ...]`) lacks this premise and is heuristic whatever the rule's certainty; the proven reports are
   the rule's exact tier.
+
+Not part of the claim: how many times the statement runs (one under a branch inside the loop
+counts), and how large the loop or the container is. The message claims no size and no cost
+estimate. A loop or a container that the code fixes at 16 or fewer items is not reported, since the
+rewrite would not pay off. A proven report in a loop whose trip count the code fixes at more, or
+caps with a length test every path to the loop passes, is heuristic: it is true, but a fixed count
+is no evidence either way, so the exact tier leaves it out.
+
+The rewrite also needs what the container is built from to stay the same during the loop
+(`ValueLoopInvariant`), which only a proven report establishes.
 
 ## Why is this bad?
 The container is rebuilt from scratch on every iteration, which costs as much as the scan it
@@ -4939,13 +5106,9 @@ Source: https://heki.koxudaxi.dev/rules/loop-linear-dedup/
 
 # loop-linear-dedup (OPT111)
 
-Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` (slower code) · Proven-safe suggestion (`--fix --include-size-dependent`)
+Family: Complexity Rewrites (OPT) · Exact · Enabled by default · Severity `warning` (slower code) · Proven-safe suggestion (`--fix --include-size-dependent`)
 
 Size-dependent `if v not in seen: seen.append(v)` -> auxiliary `set`.
-
-!!! note "Heuristic"
-
-    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 50 sampled reports (round 3, 2026-11-21), 88% were right about the code. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 ## What it does
 Checks the de-duplication idiom `if v not in seen: seen.append(v)` inside a loop and suggests
@@ -4956,22 +5119,26 @@ functions.
 
 ## What a report states
 
-A report states that `if v not in seen: seen.append(v)` scans the list on every iteration of the
-loop.
+A report states that `if v not in seen: seen.append(v)`, in a loop, scans the list each time it
+runs.
 
 Its premises:
 
 - **Builtin list**: the value is a builtin `list` by its construction (a display, a comprehension,
   `list(...)`). Established: the Soundness lane takes types from constructions only, never from
   annotations.
-- **On every iteration**: the statement runs on every iteration of the loop. Open: a statement under
-  a branch inside the loop counts.
-- **Data-sized**: the code does not fix the sizes the cost depends on (the loop's and the
-  container's) at 16 or fewer. Open: a size heki cannot bound counts as data-sized.
+- **In a loop**: the statement is in the body of a loop. Established by the IR.
 - **Rewrite proven safe**: the help says `[safe fix: ...]`, `[proven-safe suggestion: ...]`, or
   `[proven safe; ...]`. A report whose help names a blocking obligation instead (`[not auto-fixable:
   ...]`) lacks this premise and is heuristic whatever the rule's certainty; the proven reports are
   the rule's exact tier.
+
+Not part of the claim: how many times the statement runs (one under a branch inside the loop
+counts), and how large the loop or the list is. The message claims no size and no cost estimate. A
+loop or a list that the code fixes at 16 or fewer items is not reported, since the rewrite would not
+pay off. A proven report in a loop whose trip count the code fixes at more, or caps with a length
+test every path to the loop passes, is heuristic: it is true, but a fixed count is no evidence
+either way, so the exact tier leaves it out.
 
 ## Why is this bad?
 The membership test scans the list, so de-duplicating `n` items costs `n²` comparisons.
@@ -5047,14 +5214,14 @@ not reported. Neither are:
 
 ## What a report states
 
-A report states that `xs.index(...)`, `xs.remove(...)`, or `xs.count(...)` scans the whole list on
-every iteration of the loop.
+A report states that `xs.index(...)`, `xs.remove(...)`, or `xs.count(...)`, in a loop, scans the
+list each time it runs (`count` scans all of it; `index` and `remove` scan up to the first match).
 
 Its premises:
 
 - **List**: the receiver is a `list`, by construction or annotation (assumption R2).
-- **On every iteration**: the statement runs on every iteration of the loop. Open: a statement under
-  a branch inside the loop counts.
+- **In a loop**: the call is in the body of a loop that can run it again on the same list.
+  Established. How many times it runs is not part of the claim: a call under a branch counts.
 - **Data-sized**: the code does not fix the sizes the cost depends on (the loop's and the
   container's) at 16 or fewer. Open: a size heki cannot bound counts as data-sized.
 
@@ -5111,13 +5278,9 @@ Source: https://heki.koxudaxi.dev/rules/loop-linear-membership/
 
 # loop-linear-membership (OPT110)
 
-Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` (slower code) · Proven-safe suggestion (`--fix --include-size-dependent`)
+Family: Complexity Rewrites (OPT) · Exact · Enabled by default · Severity `warning` (slower code) · Proven-safe suggestion (`--fix --include-size-dependent`)
 
 Size-dependent `e in lst` inside a loop -> hoist `set` outside loop.
-
-!!! note "Heuristic"
-
-    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 50 sampled reports (round 3, 2026-11-21), 78% were right about the code. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 ## What it does
 Checks membership tests against a list or tuple inside a loop, `e in lst`, where the list does
@@ -5134,25 +5297,28 @@ hot. Not reported:
 
 ## What a report states
 
-A report states that the membership test `e in lst` scans the list on every iteration of the loop.
+A report states that the membership test `e in lst`, in a loop, scans the list (or tuple) each
+time it runs.
 
 Its premises:
 
 - **Builtin list**: the value is a builtin `list` or `tuple` by its construction (a display, a
   comprehension, `list(...)`). Established: the Soundness lane takes types from constructions only,
   never from annotations.
-- **On every iteration**: the statement runs on every iteration of the loop. Open: a statement under
-  a branch inside the loop counts.
-- **Data-sized**: the code does not fix the sizes the cost depends on (the loop's and the
-  container's) at 16 or fewer. Open: a size heki cannot bound counts as data-sized.
+- **In a loop**: the statement is in the body of a loop. Established by the IR.
 - **Rewrite proven safe**: the help says `[safe fix: ...]`, `[proven-safe suggestion: ...]`, or
   `[proven safe; ...]`. A report whose help names a blocking obligation instead (`[not auto-fixable:
   ...]`) lacks this premise and is heuristic whatever the rule's certainty; the proven reports are
   the rule's exact tier.
 
-Not part of the claim: whether a `set` can replace the list. Elements that cannot be hashed, or a
-list that changes during the loop, block the rewrite (the help names the obligation); the scan
-happens either way.
+Not part of the claim: how many times the statement runs (one under a branch inside the loop
+counts), and how large the loop or the list is. The message claims no size and no cost estimate. A
+loop or a list that the code fixes at 16 or fewer items is not reported, since the rewrite would not
+pay off. A proven report in a loop whose trip count the code fixes at more, or caps with a length
+test every path to the loop passes, is heuristic: it is true, but a fixed count is no evidence
+either way, so the exact tier leaves it out. Nor is whether a `set` can replace the list: elements
+that cannot be hashed, or a list that changes during the loop, block the rewrite (the help names the
+obligation); the scan happens either way.
 
 ## Why is this bad?
 `e in lst` scans the list, so the loop costs the product of both sizes. A set lookup is
@@ -5446,13 +5612,9 @@ Source: https://heki.koxudaxi.dev/rules/nested-loop-equijoin/
 
 # nested-loop-equijoin (OPT113)
 
-Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` (slower code) · No automatic fix
+Family: Complexity Rewrites (OPT) · Exact · Enabled by default · Severity `warning` (slower code) · No automatic fix
 
 Size-dependent nested-loop equi-join (`for a in A: for b in B: if a.k == b.k`) -> `dict` index.
-
-!!! note "Heuristic"
-
-    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 50 sampled reports (round 3, 2026-11-21), 92% were right about the code. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 ## What it does
 Checks nested loops that join two collections by comparing a key of each with `==`:
@@ -5472,8 +5634,8 @@ its first matching comparison. It does not report:
   (`if a == b: continue` in an all-pairs loop), or a comparison whose false side does work:
   an `else` / `elif` body, the failure of an `assert a == b`, a `break` / `return` on a
   mismatch, or statements that only the mismatches run because a match `break`s. They run for
-  the pairs an index would skip, so every pair is needed; statements after the `if` that every
-  pair runs do not count;
+  the pairs an index would skip, so every pair is needed. Statements after the `if` that every
+  pair runs do not stop a report, but it is then heuristic (below);
 - joins where the code fixes the size of either loop, so that the cost grows with one side
   only: a display of at most 16 items (`for b in ("x", "y")`, also through a name or a module
   constant of this or another module (`NAME`, `module.NAME`, also read in a module body) when
@@ -5484,18 +5646,61 @@ its first matching comparison. It does not report:
 
 ## What a report states
 
-A report states that, for every pair of items of the nested loops, the code tests an equality
-between a key of the outer item and a key of the inner item.
+A report of the rule's exact tier states that, for each item of the outer loop, the inner loop
+compares a key of the outer item with a key of the inner item and does nothing else for an inner
+item that does not match. Its message says so: "for each item of `orders`, the loop over
+`customers` compares `order.customer_id == customer.id` and does nothing else for an item that
+does not match".
 
 Its premises:
 
 - **Equality of keys**: the comparison is `==` between keys of the two items (the items, their
-  components, attributes, or constant subscripts). Established.
-- **Independent loops**: the inner iterable is not computed from the outer item. Established.
-- **Every pair**: the comparison runs for every pair. Open: a comparison under a branch of the inner
-  loop counts, and so does other work for each pair besides it.
-- **Data-sized**: the code does not fix the size of either loop at 16 or fewer. Open: a size heki
-  cannot bound counts as data-sized.
+  components, attributes, or constant subscripts). Established. Each key that the inner loop loads
+  runs no code of the project: an attribute is a plain one of an item whose class heki knows (a
+  dataclass, `attrs`, or `NamedTuple` field, a slot, or what the class body or a method stores, with
+  no property, method, other descriptor, `__getattr__`, or `__getattribute__` of that name along the
+  class's MRO or in a project subclass, every base a project class, and no metaclass heki does not
+  know), and a subscript reads a builtin container or a component of a tuple the inner loop's
+  builtin step makes. An attribute of an item of unknown class may be a property, so the report is
+  then heuristic.
+- **Steps through inputs**: each loop steps through items of the function's inputs: every source
+  of its items is a parameter, or an attribute or an item of one (`orders`, `req.rows`,
+  `sorted(customers)`), also through a list the function fills only by appending items of such a
+  source (`for row in rows: results.append((key, row))`). A call's result, a method's receiver
+  (`self.rows`), a module constant, or a display leaves it open.
+- **Idle on a mismatch**: an inner item whose key differs runs only the loads of the two keys and
+  the comparison: no statement before the test or after the `if`, no `else` or `elif`, no earlier
+  `and` operand (`b.active and a.k == b.k`), and no code of the project to advance the inner loop.
+  The inner iterable is a builtin container by its type (`customers: list[Customer]`; an annotation
+  counts, assumption R2, unless a project subclass of the container defines its own `__iter__`), a
+  display, `sorted(...)` or another builtin that builds a container, a view of a `dict`, or the
+  pieces of a `str` (with the same condition on `items` and `split`). A value of unknown type may be
+  a generator, and a generator, `map`, `filter`, or another call runs code for each item.
+- **Same collection, same keys**: the inner loop steps through the same collection on every
+  iteration of the outer loop: its iterable is bound before the outer loop, or computed inside it
+  only from values bound before it, and the outer loop does not change those values through their
+  names, every name a copy binds to them (`rows = ys` makes `ys` one): no changing method, store,
+  `del`, call that receives one (a builtin counts too when it is handed a function, as `sorted(ys,
+  key=f)` is; a method of a builtin container only stores or reads its arguments), closure that
+  captures one, `yield`, or `await`. Nor does it change the compared key of an inner item: no store
+  into or deletion of what the key loads (`b.k = ...` for the key `b.k`), and no such call or
+  closure that reaches the item or the key's object.
+
+Not part of the claim: any count or size. A loop whose trip count the code fixes or caps (a
+constant `range`, a constant slice, a display, or a length test every path to the loop passes,
+`if len(rows) > 100: raise ...`) has no report in the exact tier: one of 16 or fewer is not
+reported at all, and a larger one is no evidence either way.
+
+A report without one of these premises is heuristic, and its message says only "nested loops
+join `orders` and `customers` on `order.customer_id == customer.id`". It rests on the open
+premise that both loops are data-sized: the code does not fix the size of either loop at 16 or
+fewer, and a size heki cannot bound counts as data-sized.
+
+No message claims a size or a cost. The help names a `set` or a `dict` only for keys known to be
+hashable, and an index built before the outer loop only for an inner collection that is the same,
+with the same keys, on every outer iteration; otherwise it states the condition ("if the keys are
+hashable, ..."). For a mapping the inner loop steps through by its own keys (`for k, v in
+d.items()` with the key `k`), it says to look each outer key up in the mapping instead.
 
 ## Why is this bad?
 The inner loop runs completely for every outer element, so the join costs O(n·m) comparisons.
@@ -5590,8 +5795,13 @@ annotation or from different assignments) is each of them, and an `isinstance` c
 in the code it guards (`if isinstance(x, Model): ...`, `if not isinstance(x, Model): return`,
 also inside `and` / `or`). A value typed with a project `Protocol` is an instance of the project
 classes that implement it structurally (having every member it defines; at most eight, counting
-a class and not its subclasses). An object whose class heki cannot see (an unannotated parameter
-or return, `Any`, a value of more than three classes) is not tied to the target.
+a class and not its subclasses), but a read of a member the protocol declares is judged by the
+protocol, the type the code reads it through: it reads the protocol's member, not the
+implementations' (`def f(h: Host): h._m` reads `Host._m` when `Host` declares `_m`), and a
+private method of an implementation called through the protocol keeps its own reads instead of
+handing them to the caller (also when other callers call it through the class and take them
+over). An object whose class heki cannot see (an unannotated parameter or return, `Any`, a
+value of more than three classes) is not tied to the target.
 
 A private helper (`_name`, or a comprehension, generator expression, or lambda scope) with
 project callers hands the responsibility to its callers: the read is reported at every call
@@ -6033,13 +6243,9 @@ Source: https://heki.koxudaxi.dev/rules/set-dict-quadratic-merge/
 
 # set-dict-quadratic-merge (OPT102)
 
-Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` (slower code) · Safe fix (`--fix`)
+Family: Complexity Rewrites (OPT) · Exact · Enabled by default · Severity `warning` (slower code) · Safe fix (`--fix`)
 
 Unconditionally profitable `set`/`dict` quadratic merge (`{**d, ...}` with `d` first).
-
-!!! note "Heuristic"
-
-    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 6 sampled reports (round 3, 2026-11-21), 67% were right about the code. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 ## What it does
 Checks loops that rebuild a dict or set every iteration and rewrites them in place:
@@ -6052,22 +6258,24 @@ Checks loops that rebuild a dict or set every iteration and rewrites them in pla
 ## What a report states
 
 A report states that the merge (`{**d, ...}` with the accumulator first, `s = s | t`, `d = d |
-other`) builds a new set or dict from the whole accumulated one on every iteration of the loop,
-where updating it would change it in place.
+other`), in a loop, builds a new set or dict from the whole accumulated one each time it runs, where
+updating it would change it in place.
 
 Its premises:
 
 - **Builtin set or dict**: the value is a builtin `set` or `dict` by its construction. Established:
   the Soundness lane takes types from constructions only.
-- **Loop-carried**: the result is the accumulator of the next iteration. Established by the IR.
-- **On every iteration**: the statement runs on every iteration of the loop. Open: a statement under
-  a branch inside the loop counts.
-- **Data-sized**: the code does not fix the sizes the cost depends on (the loop's and the
-  container's) at 16 or fewer. Open: a size heki cannot bound counts as data-sized.
+- **Loop-carried**: the result is the value the next iteration starts from. Established by the IR.
+- **In a loop**: the statement is in the body of a loop. Established by the IR.
 - **Rewrite proven safe**: the help says `[safe fix: ...]`, `[proven-safe suggestion: ...]`, or
   `[proven safe; ...]`. A report whose help names a blocking obligation instead (`[not auto-fixable:
   ...]`) lacks this premise and is heuristic whatever the rule's certainty; the proven reports are
   the rule's exact tier.
+
+Not part of the claim: how many times the statement runs (one under a branch inside the loop
+counts), and how large the loop or the set or dict is. The message claims no size and no cost
+estimate. The rewrite never makes the code slower, so a loop the code fixes at a few items is
+reported too.
 
 ## Why is this bad?
 Each rebuild copies the whole container, so the loop is quadratic. The in-place update is never
@@ -6588,8 +6796,15 @@ reserves for a set of allowed writer functions. A write is reported when it happ
 allowed writers:
 
 - directly (`model.fields = [...]`, `model.fields.append(...)`, `del model.fields`);
-- through a local alias (`fields = model.fields; fields.append(...)`);
-- through `setattr(model, "fields", ...)` / `object.__setattr__` or `model.__dict__["fields"]`,
+- through a local alias (`fields = model.fields; fields.append(...)`), also one `getattr` with a
+  constant name loads (`getattr(model, "fields").append(...)`), or what a method, property, or
+  function returns when it returns the attribute itself on every `return`
+  (`model.field_list().append(...)` with `return self.fields`), stores no attribute of that name
+  itself, and every class the object may be runs it (no `cached_property`, no class attribute of
+  the name coming first); the object must be passed by position (no keyword-only parameter, no
+  `*args` unpacking);
+- through `setattr(model, "fields", ...)` / `object.__setattr__` (also through a module-level
+  name bound once to it: `_set = object.__setattr__`) or `model.__dict__["fields"]`,
   also with a string constant for the name (`model.__dict__[FIELDS_KEY]`, imported or not):
   a module-level name declared `Final` or bound once in its module and rebound by no other, or
   a class-body name declared `ClassVar` or `Final` and bound once (`self.KEY`, `cls.KEY`,
@@ -6682,7 +6897,8 @@ passes `self` to (`self._init_fields()`, `_setup(self)`). An object that may be 
 not `self` stay reported: another parameter, an attribute of `self`.
 
 A write that constructs the object it writes is allowed too (`fresh-objects = "allow"`, the
-default): the object was allocated in the same call chain, by calling its class, by copying
+default): the object was allocated in the same call chain, by calling its class, by
+`object.__new__(Model)` (also `Model.__new__(Model)` when no class defines `__new__`), by copying
 (`copy.copy`, `copy.deepcopy`, `dataclasses.replace`, `.copy()`, `.model_copy()`), or by a
 project function that returns such an object, and nothing else can hold it yet: no store into
 another object, a container, a global, or a closure, no `yield`, and no call that may keep it
@@ -6760,7 +6976,8 @@ No automatic fix.
     `pkg.model.Model.*`).
   - `allowed-writers`: functions allowed to write the targets, as dotted names or globs matched
     against the function's qualified name and its `Class.method` qualname (`Store.*`,
-    `pkg.parser.generation.*`).
+    `pkg.parser.generation.*`). A module part names one module without its submodules:
+    `pkg.model:*` allows what `pkg/model/__init__.py` defines, not `pkg.model.io.save`.
   - `forbidden-writers`: when set, only writes by these functions are reported (matched like
     `allowed-writers`, `pkg.render.*`); `allowed-writers` and `exempt-methods` stay exceptions
     inside them. A write is in scope when a function on its chain (the reporting function, the
