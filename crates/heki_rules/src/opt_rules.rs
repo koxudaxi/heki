@@ -1266,6 +1266,36 @@ impl JoinPremises<'_, '_, '_> {
         known_instance(self.types, v, classes)
     }
 
+    /// Whether loading `attr` from `obj` reads a plain attribute of a project class heki knows
+    /// `obj` to be an instance of (every class of a union), running no code of the project
+    /// (`ProjectDecls::plain_attr`). An object of unknown class may have a property of that
+    /// name.
+    fn plain_attr(&self, obj: VarId, attr: &str) -> bool {
+        match self.types.get(&obj) {
+            Some(Val::Inst(class)) => self.decls.plain_attr(class, attr),
+            Some(Val::Union(classes)) => classes.iter().all(|c| self.decls.plain_attr(c, attr)),
+            _ => false,
+        }
+    }
+
+    /// Whether the inner loop's builtin step makes tuples: it steps through `items()` of a
+    /// `dict`, `enumerate(...)`, or `zip(...)`.
+    fn steps_through_tuples(&self, inner: &ForLoop<'_>) -> bool {
+        let shape = self.sizes.ix.shape();
+        match shape.inst(shape.copy_root(inner.iterable)).map(|i| &i.kind) {
+            Some(InstKind::MethodCall { recv, method, .. }) => {
+                method == "items" && self.builtin_type(*recv, &["builtins.dict"])
+            }
+            Some(InstKind::Call {
+                callee_var, callee, ..
+            }) => matches!(
+                self.sizes.ix.builtin(*callee_var, callee),
+                Some("enumerate" | "zip")
+            ),
+            _ => false,
+        }
+    }
+
     /// Whether no project class derived from one of `classes` defines `method` itself: under
     /// R2 a value annotated with a builtin container may be an instance of such a subclass.
     fn not_overridden(&self, classes: &[&str], method: &str) -> bool {
@@ -1388,6 +1418,7 @@ impl JoinPremises<'_, '_, '_> {
     /// out of the inner loop.
     fn idle_on_mismatch(&self, inner: &ForLoop<'_>, outer: &ForLoop<'_>, cmp: VarId) -> bool {
         let f = self.defs.f;
+        let inner_element = self.defs.next_of(inner.lp).map(|(e, _)| e);
         let shape = self.sizes.ix.shape();
         let alias = forward_aliases(f, &[cmp]);
         let header = inner.lp.header;
@@ -1401,12 +1432,20 @@ impl JoinPremises<'_, '_, '_> {
                 ))
             })
         };
+        // A key load runs no code of the project: a plain attribute of an item whose class heki
+        // knows, an item of a builtin container, or a component of a tuple the inner loop's
+        // builtin step makes (`for k, v in d.items()`).
+        let tuples = self.steps_through_tuples(inner);
         let key_work = |inst: &Inst| match &inst.kind {
             InstKind::IterNext { .. } => true,
             InstKind::Const { dst, .. } => index_of_key(dst),
-            InstKind::Copy { dst, .. }
-            | InstKind::AttrLoad { dst, .. }
-            | InstKind::SubscriptLoad { dst, .. } => key(dst),
+            InstKind::Copy { dst, .. } => key(dst),
+            InstKind::AttrLoad { dst, obj, attr } => key(dst) && self.plain_attr(*obj, attr),
+            InstKind::SubscriptLoad { dst, obj, .. } => {
+                key(dst)
+                    && (self.builtin_type(*obj, CONTAINERS)
+                        || (tuples && Some(shape.copy_root(*obj)) == inner_element))
+            }
             InstKind::Compare { dst, .. } => *dst == cmp,
             _ => false,
         };
