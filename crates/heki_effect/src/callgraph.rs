@@ -383,16 +383,23 @@ pub(crate) fn site_must_chain(
         CallTarget::Project(callees) => {
             let mut out = SiteMust::default();
             for bc in callees {
-                let callee = index.summary(&bc.callee)?;
-                if callee.is_abstract() {
-                    continue;
-                }
+                let callee = index.summary(&bc.callee).filter(|c| !c.is_abstract());
+                let Some(callee) = callee.filter(|c| c.must_exec.is_some()) else {
+                    // An abstract method never runs; a summary without facts has none.
+                    match index.summary(&bc.callee) {
+                        Some(c) if c.is_abstract() => continue,
+                        _ => return None,
+                    }
+                };
                 if !runs_at_call(callee, site)
                     || !crate::summary::keeps_returned_value(&callee.decorators)
                 {
                     return None;
                 }
-                let chain = callee.must_exec.as_deref()?.chain(e)?;
+                let chain = callee.must_exec.as_deref().and_then(|m| m.chain(e));
+                let Some(chain) = chain else {
+                    return None;
+                };
                 let Some(sink) = chain.last() else {
                     continue;
                 };

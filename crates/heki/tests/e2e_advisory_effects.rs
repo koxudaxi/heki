@@ -778,13 +778,14 @@ fn each_effect_has_its_own_help() {
             (
                 d["line"].as_u64().unwrap(),
                 d["message"].as_str().unwrap(),
-                d["help"].as_str().unwrap(),
+                d["help"].as_str().unwrap_or_default(),
             )
         })
         .collect();
     let offload = "offload it with `asyncio.to_thread`, or";
     let client = "create one client or session before the loop and reuse it";
-    let batch = "load what it needs once before the loop";
+    // An exact claim's report has no advice beyond the claim.
+    let none = "";
     assert_eq!(
         reports,
         vec![
@@ -833,12 +834,12 @@ fn each_effect_has_its_own_help() {
             (
                 52,
                 "every iteration over parameter `ids` sends a database statement: `sqlite3.Cursor.execute`",
-                batch
+                none
             ),
             (
                 53,
                 "every iteration over parameter `ids` sends a database statement: `sqlite3.Cursor.execute` (through `app.lookup`)",
-                batch
+                none
             ),
         ]
     );
@@ -1044,6 +1045,28 @@ def per_row(conn: sqlite3.Connection):
 def per_open_line(conn: sqlite3.Connection, p):
     for line in open(p):
         conn.execute("SELECT ?", (line,))
+
+
+def per_character(conn: sqlite3.Connection, p: Path):
+    for ch in p.read_text():
+        conn.execute("SELECT ?", (ch,))
+
+
+from abc import ABC, abstractmethod
+
+
+class Sender(ABC):
+    @abstractmethod
+    def send(self, x): ...
+
+
+class Mailer(Sender):
+    def send(self, x):
+        return requests.post(x)
+
+
+async def tp_abstract(s: Sender):
+    s.send("x")
 "#;
 
 #[test]
@@ -1128,7 +1151,7 @@ fn exact_claims_establish_each_premise() {
             (
                 117,
                 "EFF103",
-                "every iteration over parameter `ids` sends a database statement: `sqlite3.Connection.execute`"
+                "every iteration, once for each item of parameter `ids`, sends a database statement: `sqlite3.Connection.execute`"
             ),
             (
                 137,
@@ -1174,6 +1197,16 @@ fn exact_claims_establish_each_premise() {
                 193,
                 "EFF103",
                 "every iteration over the lines of `builtins.open` sends a database statement: `sqlite3.Connection.execute`"
+            ),
+            (
+                198,
+                "EFF113",
+                "`sqlite3.Connection.execute` runs a database query on every loop iteration"
+            ),
+            (
+                215,
+                "EFF101",
+                "`pkg.premises.Mailer.send` always runs the blocking call `requests.post` on the event loop (1 call down, on every path)"
             ),
         ]
     );

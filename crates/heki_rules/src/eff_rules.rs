@@ -20,7 +20,9 @@ use heki_effect::{
     anchors_call_site, boundary_reports_in,
 };
 use heki_ir::walk::{Answer, Budget};
-use heki_ir::{BlockId, InstKind, IrFunction, ItemOrigin, ItemOrigins, ItemSource, Must, Progress};
+use heki_ir::{
+    BlockId, Carries, InstKind, IrFunction, ItemOrigin, ItemOrigins, ItemSource, Must, Progress,
+};
 use heki_kb::{ExecEffectKind, ResultItems, WaitKind};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{BTreeMap, BTreeSet};
@@ -426,12 +428,8 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
             continue;
         }
         // The split is the same whichever of the two rules runs: `EFF113` reports the rest.
-        let exact = if cx.enabled("EFF103", unit) || cx.enabled("EFF113", unit) {
-            let origins = item_origins.get_or_init(|| ItemOrigins::new(unit.input.ir));
-            established_queries(cx, unit, &tcx, f, origins, &queries)
-        } else {
-            queries.iter().map(|_| None).collect()
-        };
+        let origins = item_origins.get_or_init(|| ItemOrigins::new(unit.input.ir));
+        let exact = established_queries(cx, unit, &tcx, f, origins, &queries);
         for (q, exact) in queries.iter().zip(exact) {
             let root = q.chain.last().map(|h| h.callee.clone()).unwrap_or_default();
             match exact {
@@ -443,7 +441,7 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
                     &key.qualname,
                     root,
                     e.message(),
-                    Some("load what it needs once before the loop".to_owned()),
+                    None,
                     &e.must.chain,
                 ),
                 Some(_) => None,
@@ -487,8 +485,47 @@ struct LoopQuery<'s> {
 /// What establishes an `EFF103` report: the origins of the items the loop steps through, and
 /// what the call has sent whenever it returns.
 struct EstablishedQuery {
-    origins: Vec<String>,
+    origins: DataOrigins,
     must: SiteMust,
+}
+
+/// Where the items of a loop over data come from, as a report names them
+/// ([`data_origin`]).
+pub(crate) struct DataOrigins {
+    names: Vec<String>,
+    /// Some origin carries only its count (`map(f, ids)`): the loop runs once for each of its
+    /// items without stepping through them.
+    counts_only: bool,
+}
+
+impl DataOrigins {
+    /// The origins of every item of `found`, or `None` when one is not the data's.
+    pub(crate) fn of(
+        cx: &CheckContext<'_>,
+        tcx: &TypeCtx<'_>,
+        ir: &heki_ir::ModuleIr,
+        found: &std::collections::BTreeSet<ItemOrigin>,
+    ) -> Option<Self> {
+        let names = found
+            .iter()
+            .map(|o| data_origin(cx, tcx, ir, *o))
+            .collect::<Option<Vec<String>>>()?;
+        (!names.is_empty()).then(|| Self {
+            names,
+            counts_only: found.iter().any(|o| o.carries == Carries::Count),
+        })
+    }
+
+    /// "on every iteration over parameter `ids`", or "on every iteration, once for each item of
+    /// parameter `ids`," for a count: what a message says repeats.
+    pub(crate) fn every_iteration(&self) -> String {
+        let named = self.names.join(" and ");
+        if self.counts_only {
+            format!("every iteration, once for each item of {named},")
+        } else {
+            format!("every iteration over {named}")
+        }
+    }
 }
 
 impl EstablishedQuery {
@@ -510,8 +547,8 @@ impl EstablishedQuery {
                 .join(" or "),
         };
         format!(
-            "every iteration over {} sends a database statement: {what}",
-            self.origins.join(" and ")
+            "{} sends a database statement: {what}",
+            self.origins.every_iteration()
         )
     }
 }
@@ -561,12 +598,8 @@ fn established_queries(
                     let Answer::Known(found) = found else {
                         return None;
                     };
-                    let named = found
-                        .iter()
-                        .map(|o| data_origin(cx, tcx, unit.input.ir, *o))
-                        .collect::<Option<Vec<String>>>()?;
-                    (!named.is_empty()).then(|| EstablishedQuery {
-                        origins: named,
+                    Some(EstablishedQuery {
+                        origins: DataOrigins::of(cx, tcx, unit.input.ir, &found)?,
                         must: must.clone(),
                     })
                 })

@@ -3926,8 +3926,7 @@ impl<'a> TypeCtx<'a> {
                         .project
                         .instance_targets_complete(class, method, callee)
             }
-            Some(Val::Ref(_) | Val::Super(_)) => true,
-            None => false,
+            other => matches!(other, Some(Val::Ref(_) | Val::Super(_))),
         }
     }
 

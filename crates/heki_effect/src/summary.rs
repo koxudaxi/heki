@@ -4548,16 +4548,13 @@ impl<'a> Extractor<'a> {
     /// (`CallSite::complete`).
     fn targets_complete(&self) -> bool {
         let (bb, index) = self.pos;
-        let Some(inst) = self.f.block(bb).insts.get(index) else {
-            return false;
-        };
-        match &inst.kind {
-            InstKind::MethodCall { recv, method, .. } => {
+        match self.f.block(bb).insts.get(index).map(|i| &i.kind) {
+            Some(InstKind::MethodCall { recv, method, .. }) => {
                 let recv = self.val(*recv);
                 let callee = self.cx.resolve_method(recv, method);
                 self.cx.method_targets_complete(recv, method, &callee)
             }
-            InstKind::Call { callee_var, .. } => {
+            Some(InstKind::Call { callee_var, .. }) => {
                 let value = callee_var.and_then(|v| self.val(v));
                 let callee = self.cx.resolve_call(value);
                 self.cx.call_targets_complete(value, &callee)

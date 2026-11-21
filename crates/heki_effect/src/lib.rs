@@ -1670,9 +1670,7 @@ impl ProjectIndex {
     /// whenever the call returns, with the chain and the witnesses that show it ([`SiteMust`];
     /// `None` when that is not established, or when no enabled rule reads must-facts).
     pub fn site_must(&self, path: &Path, site: &CallSite, e: ExecEffectKind) -> Option<SiteMust> {
-        if !self.opt_in.must_effects {
-            return None;
-        }
+        // Without must-facts no call site is complete, so nothing is established.
         callgraph::site_must_chain(self, path, site, e)
     }
 
