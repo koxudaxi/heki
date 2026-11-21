@@ -430,6 +430,32 @@ fn watch_reports_what_check_reports() {
     assert_eq!(json(&watch.stdout), json(check.as_bytes()));
 }
 
+/// `--watch` colors its reports as `heki check` colors them.
+#[test]
+fn watch_colors_its_reports_like_check() {
+    let p = Project::new("watch_color");
+    p.write(
+        "app.py",
+        "import time\n\n\nasync def handler():\n    time.sleep(1)\n",
+    );
+    let stdout = |watch: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_heki"))
+            .args(["check", "--heuristic", "--color", "always"])
+            .args(watch)
+            .current_dir(&p.dir)
+            .env("HEKI_WATCH_MAX_RUNS", "0")
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap()
+    };
+    let watched = stdout(&["--watch"]);
+    assert!(
+        watched.contains("\x1b[1m\x1b[31mEFF101\x1b[0m"),
+        "{watched:?}"
+    );
+    assert_eq!(watched, stdout(&[]));
+}
+
 const LEVELS: &str = "LEVELS = [\"low\", \"mid\", \"high\"]\n";
 const LEVELS_GROWN: &str =
     "LEVELS = [\"low\", \"mid\", \"high\"]\n\n\ndef add(level):\n    LEVELS.append(level)\n";

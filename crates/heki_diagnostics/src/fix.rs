@@ -6,6 +6,8 @@
 //! re-proves it on the new text), and the accepted edits are applied back to front.
 
 use crate::TextEdit;
+use crate::style::{Stylesheet, paint};
+use anstyle::Style;
 use std::fmt::Write as _;
 
 fn conflicts(a: &TextEdit, b: &TextEdit) -> bool {
@@ -233,11 +235,15 @@ fn middle_split(a: &[&str], b: &[&str]) -> Option<(usize, usize)> {
     None
 }
 
-fn push_line(out: &mut String, sign: char, line: &str) {
-    out.push(sign);
-    out.push_str(line);
-    if !line.ends_with('\n') {
-        out.push_str("\n\\ No newline at end of file\n");
+fn push_line(out: &mut String, sign: char, line: &str, style: Style) {
+    let text = line.strip_suffix('\n');
+    let _ = writeln!(
+        out,
+        "{}",
+        paint(style, format_args!("{sign}{}", text.unwrap_or(line)))
+    );
+    if text.is_none() {
+        out.push_str("\\ No newline at end of file\n");
     }
 }
 
@@ -274,7 +280,7 @@ fn header_path(prefix: &str, path: &str) -> String {
 }
 
 /// Unified diff (`--- a/<path>` / `+++ b/<path>`, 3 lines of context); empty if equal.
-pub fn unified_diff(path: &str, old: &str, new: &str) -> String {
+pub fn unified_diff(path: &str, old: &str, new: &str, styles: &Stylesheet) -> String {
     if old == new {
         return String::new();
     }
@@ -290,8 +296,8 @@ pub fn unified_diff(path: &str, old: &str, new: &str) -> String {
         .collect();
     let mut out = format!(
         "--- {}\n+++ {}\n",
-        header_path("a/", path),
-        header_path("b/", path)
+        paint(styles.deletion, header_path("a/", path)),
+        paint(styles.insertion, header_path("b/", path))
     );
     let mut i = 0;
     while i < changed.len() {
@@ -335,9 +341,9 @@ pub fn unified_diff(path: &str, old: &str, new: &str) -> String {
         );
         for op in hunk {
             match *op {
-                Op::Equal(x, _) => push_line(&mut out, ' ', a[x]),
-                Op::Delete(x) => push_line(&mut out, '-', a[x]),
-                Op::Insert(y) => push_line(&mut out, '+', b[y]),
+                Op::Equal(x, _) => push_line(&mut out, ' ', a[x], Style::new()),
+                Op::Delete(x) => push_line(&mut out, '-', a[x], styles.deletion),
+                Op::Insert(y) => push_line(&mut out, '+', b[y], styles.insertion),
             }
         }
     }
@@ -439,7 +445,7 @@ mod tests {
                 }
             })
             .collect();
-        let d = unified_diff("big.py", &old, &new);
+        let d = unified_diff("big.py", &old, &new, &Stylesheet::plain());
         assert_eq!(d.lines().filter(|l| l.starts_with('-')).count(), 5_001);
         assert_eq!(d.lines().filter(|l| l.starts_with('+')).count(), 5_001);
     }
@@ -467,25 +473,25 @@ mod tests {
     fn unified_diff_hunks() {
         let old = "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n";
         let new = "a\nB\nc\nd\ne\nf\ng\nh\ni\nj\nk";
-        let d = unified_diff("m.py", old, new);
+        let d = unified_diff("m.py", old, new, &Stylesheet::plain());
         assert_eq!(
             d,
             "--- a/m.py\n+++ b/m.py\n@@ -1,5 +1,5 @@\n a\n-b\n+B\n c\n d\n e\n@@ -8,3 +8,4 @@\n h\n i\n j\n+k\n\\ No newline at end of file\n"
         );
-        assert_eq!(unified_diff("m.py", old, old), "");
-        let ins = unified_diff("m.py", "x\n", "y\nx\n");
+        assert_eq!(unified_diff("m.py", old, old, &Stylesheet::plain()), "");
+        let ins = unified_diff("m.py", "x\n", "y\nx\n", &Stylesheet::plain());
         assert_eq!(ins, "--- a/m.py\n+++ b/m.py\n@@ -1,1 +1,2 @@\n+y\n x\n");
-        let all = unified_diff("m.py", "", "z\n");
+        let all = unified_diff("m.py", "", "z\n", &Stylesheet::plain());
         assert_eq!(all, "--- a/m.py\n+++ b/m.py\n@@ -0,0 +1,1 @@\n+z\n");
         // Names a patch tool would misread are quoted the way `git diff` quotes them.
-        let quoted = unified_diff("x\\\"y\tz\u{1}.py", "a\n", "b\n");
+        let quoted = unified_diff("x\\\"y\tz\u{1}.py", "a\n", "b\n", &Stylesheet::plain());
         assert!(
             quoted.starts_with(
                 "--- \"a/x\\\\\\\"y\\tz\\001.py\"\n+++ \"b/x\\\\\\\"y\\tz\\001.py\"\n"
             ),
             "{quoted}"
         );
-        let line_breaks = unified_diff("one\ntwo\r.py", "a\n", "b\n");
+        let line_breaks = unified_diff("one\ntwo\r.py", "a\n", "b\n", &Stylesheet::plain());
         assert!(
             line_breaks.starts_with("--- \"a/one\\ntwo\\r.py\"\n+++ \"b/one\\ntwo\\r.py\"\n"),
             "{line_breaks}"
