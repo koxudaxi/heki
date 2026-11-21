@@ -1928,7 +1928,7 @@ fn rule_and_explain_commands() {
     assert!(lines[0].starts_with("MUT101   cached-property-stale-mutation "));
     // Each rule's certainty and when it runs with no configuration.
     for (code, state) in [
-        ("OPT101", "[heuristic off      fix=true ]"),
+        ("OPT101", "[exact     on       fix=true ]"),
         ("EFF105", "[heuristic opt-in   fix=false]"),
         ("MUT201", "[heuristic contract fix=false]"),
     ] {
@@ -1995,7 +1995,7 @@ fn rule_and_explain_commands() {
             &one["activation"],
             &one["default_enabled"]
         ),
-        (&json!("heuristic"), &json!("default"), &json!(false))
+        (&json!("exact"), &json!("default"), &json!(true))
     );
     let contract: Value =
         serde_json::from_str(&heki(&["rule", "MUT201", "--output-format", "json"]).1).unwrap();
@@ -2003,10 +2003,14 @@ fn rule_and_explain_commands() {
         (&contract["activation"], &contract["default_enabled"]),
         (&json!("contract"), &json!(true))
     );
-    // A heuristic rule's page says so before its documentation, as its JSON note does.
-    let note = one["heuristic_note"].as_str().unwrap();
+    // An exact rule has no note; a heuristic rule's page says so before its documentation, as
+    // its JSON note does.
+    assert_eq!(one["heuristic_note"], Value::Null);
+    let heuristic: Value =
+        serde_json::from_str(&heki(&["rule", "OPT112", "--output-format", "json"]).1).unwrap();
+    let note = heuristic["heuristic_note"].as_str().unwrap();
     assert!(note.starts_with("This rule is heuristic: "), "{note}");
-    let (_, page, _) = heki(&["rule", "OPT101"]);
+    let (_, page, _) = heki(&["rule", "OPT112"]);
     assert!(
         page.contains(&format!("\n\n{note}\n\n## What it does\n")),
         "{page}"

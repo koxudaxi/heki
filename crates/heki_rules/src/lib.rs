@@ -163,7 +163,7 @@ pub const RULE_PAGES: &str = "https://heki.koxudaxi.dev/rules/";
 /// `OPT120`, `OPT121`, `OPT130`). Their exact tier is the reports whose rewrite is proven safe,
 /// the others are heuristic whatever this says (ADR-018, decision 9). They are certified
 /// together, so that whether the proven tier runs by default is this one value.
-const PROVEN_OPT_TIER: Certainty = Certainty::Heuristic;
+const PROVEN_OPT_TIER: Certainty = Certainty::Exact;
 
 /// Core v1.0 rule catalog (empirically validated in Stage 0-A + `dcg` study).
 pub const CORE_RULES: &[RuleMeta] = &[
