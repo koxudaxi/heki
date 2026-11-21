@@ -18,8 +18,8 @@ mutate state or reach I/O.
 
 A report is *exact* when heki established every premise of its claim and its rule was
 certified, and only exact reports are shown by default. The others are *heuristic*: they can be
-wrong, every output labels them, and `heki check --heuristic` shows them too. No rule is exact
-yet.
+wrong, every output labels them, and `heki check --heuristic` shows them too. The exact rules
+are listed in [Rule precision](https://heki.koxudaxi.dev/precision/#certifications).
 
 <p>
   <a class="md-button md-button--primary" href="getting-started/">Getting Started</a>
@@ -57,7 +57,7 @@ async def get_user(user_id: int) -> dict[str, str]:
 
 ```console
 $ heki check --heuristic
-app/api.py:5:12: EFF101 (async-blocking-call) [warning, heuristic] `app.users.load_user` always runs the waiting call `requests.get` on the event loop (2 calls down, on every path)
+app/api.py:5:12: EFF101 (async-blocking-call) [warning] `app.users.load_user` always runs the waiting call `requests.get` on the event loop (2 calls down, on every path)
   |
 5 |     return load_user(user_id)
   |            ^
@@ -88,7 +88,7 @@ def order_summaries(cursor: sqlite3.Cursor, orders: list[tuple[int, int]]) -> li
 
 ```console
 $ heki check --heuristic
-app/orders.py:11:37: EFF103 (loop-db-query) [warning, heuristic] every iteration over parameter `orders` sends a database statement: `sqlite3.Cursor.execute` (through `app.orders.customer_name`)
+app/orders.py:11:37: EFF103 (loop-db-query) [warning] every iteration over parameter `orders` sends a database statement: `sqlite3.Cursor.execute` (through `app.orders.customer_name`)
    |
 11 |         lines.append(f"#{order_id} {customer_name(cursor, customer_id)}")
    |                                     ^
@@ -102,7 +102,7 @@ Ruff, ty, Pyrefly, pyright, and mypy report nothing for either example with thei
 
 ### Your own conventions, too
 
-The checks above need no configuration, only `--heuristic` while their rules are heuristic.
+The checks above need no configuration: `EFF101` and `EFF103` are exact and run by default.
 The rules of your own project, which you keep today by review, by AST scripts, or by run-time
 guards in tests, can be added as a few lines of [configuration](https://heki.koxudaxi.dev/configuration/):
 
@@ -138,9 +138,9 @@ Each report shows the chain of calls that leads to the bug.
 
 | What goes wrong | Rule | Certainty |
 | --- | --- | --- |
-| A blocking call that a call in an `async def` always runs, several helpers below | [`EFF101`](https://heki.koxudaxi.dev/rules/async-blocking-call/) | heuristic |
+| A blocking call that a call in an `async def` always runs, several helpers below | [`EFF101`](https://heki.koxudaxi.dev/rules/async-blocking-call/) | exact |
 | A blocking call an `async def` can reach | [`EFF111`](https://heki.koxudaxi.dev/rules/async-possibly-blocking-call/) | heuristic |
-| A database statement on every iteration of a loop over data | [`EFF103`](https://heki.koxudaxi.dev/rules/loop-db-query/) | heuristic |
+| A database statement on every iteration of a loop over data | [`EFF103`](https://heki.koxudaxi.dev/rules/loop-db-query/) | exact |
 | A database query, or a new HTTP client, a loop can run on every iteration | [`EFF113`](https://heki.koxudaxi.dev/rules/loop-possible-db-query/), [`EFF102`](https://heki.koxudaxi.dev/rules/loop-unpooled-client/) | heuristic |
 | An attribute that `__hash__` reads, changed after the object went into a `set` | [`MUT107`](https://heki.koxudaxi.dev/rules/hash-attr-mutation/) | heuristic |
 | A `Sequence` / `Mapping` argument changed in place by a helper | [`MUT110`](https://heki.koxudaxi.dev/rules/readonly-param-mutation/) | heuristic |
@@ -1729,7 +1729,7 @@ For custom tooling, `--output-format json` gives every field: see
 ### From heki 0.1
 
 heki 0.1 ran every rule that is not opt-in by default. Since rules have a certainty, only the
-exact ones do, and no rule is exact yet:
+exact ones do ([Rule precision](https://heki.koxudaxi.dev/precision/#certifications) lists them):
 
 - `lint.heuristic = true` restores the rules of 0.1, now labelled `heuristic` in every output.
 - A baseline keeps its entries: their keys (file, function, rule, target) do not change.
@@ -1956,10 +1956,10 @@ Work that runs where it should not: blocking calls on the event loop, clients an
 
 | Code | Name | Message | |
 | ---- | ---- | ------- | ------: |
-| EFF101 | [async-blocking-call](https://heki.koxudaxi.dev/rules/async-blocking-call/) | A call in `async def` that always runs a network, database, subprocess, or sleep call that waits on the event loop. | ≈ |
+| EFF101 | [async-blocking-call](https://heki.koxudaxi.dev/rules/async-blocking-call/) | A call in `async def` that always runs a network, database, subprocess, or sleep call that waits on the event loop. |  |
 | EFF111 | [async-possibly-blocking-call](https://heki.koxudaxi.dev/rules/async-possibly-blocking-call/) | Heuristic sibling of `EFF101`: a call in `async def` that can reach a blocking call on the event loop. | ≈ |
 | EFF102 | [loop-unpooled-client](https://heki.koxudaxi.dev/rules/loop-unpooled-client/) | Allocating an unpooled HTTP/DB/RPC client or sessionless request inside a loop. | ≈ |
-| EFF103 | [loop-db-query](https://heki.koxudaxi.dev/rules/loop-db-query/) | A loop over data whose every iteration sends a database statement. | ≈ |
+| EFF103 | [loop-db-query](https://heki.koxudaxi.dev/rules/loop-db-query/) | A loop over data whose every iteration sends a database statement. |  |
 | EFF113 | [loop-possible-db-query](https://heki.koxudaxi.dev/rules/loop-possible-db-query/) | Heuristic sibling of `EFF103`: a loop that can run a database query on every iteration. | ≈ |
 | EFF105 | [async-blocking-fs](https://heki.koxudaxi.dev/rules/async-blocking-fs/) | Opt-in: blocking local filesystem I/O reachable from `async def`. | ≈ 🔌 |
 | EFF106 | [lock-or-tx-held-across-io](https://heki.koxudaxi.dev/rules/lock-or-tx-held-across-io/) | Opt-in: `await` or blocking network I/O while holding a `threading` lock or a DB transaction. | ≈ 🔌 |
@@ -1972,7 +1972,7 @@ Quadratic re-allocation of DataFrames and arrays across loop iterations.
 
 | Code | Name | Message | |
 | ---- | ---- | ------- | ------: |
-| DATA101 | [loop-carried-concat](https://heki.koxudaxi.dev/rules/loop-carried-concat/) | Loop-carried quadratic `pandas.concat` / `numpy.vstack` / `numpy.append` accumulation. | ≈ |
+| DATA101 | [loop-carried-concat](https://heki.koxudaxi.dev/rules/loop-carried-concat/) | Loop-carried quadratic `pandas.concat` / `numpy.vstack` / `numpy.append` accumulation. |  |
 
 ## Complexity Rewrites (OPT)
 
@@ -2020,7 +2020,8 @@ is heuristic, as that premise is open. Only exact reports are shown by default.
 - A run of `full` or `concise` output that leaves heuristic rules off, or heuristic reports out,
   ends with a note saying how many.
 
-See [Rule selection](https://heki.koxudaxi.dev/configuration/#rule-selection-toolhekilint). No rule is exact yet.
+See [Rule selection](https://heki.koxudaxi.dev/configuration/#rule-selection-toolhekilint). The exact rules are listed
+under [Certifications](https://heki.koxudaxi.dev/precision/#certifications).
 
 ## What a report states
 
@@ -2115,15 +2116,20 @@ release, or the rule becomes heuristic in that release and needs a new certifica
 ## Certifications
 
 A certified rule has a row here: the release that certified it, and the reports of its census
-and of its holdout run with the false claims among them. No rule is certified yet.
+and of its holdout run with the false claims among them. The census of `EFF101` counts its
+boundaries before reports reaching one waiting call are folded together.
 
 | Rule | Certified | Census: reports / false | Holdout: reports / false |
 | ---- | --------- | ----------------------: | -----------------------: |
+| `EFF101` | 0.2.0 | 287 / 0 | 152 / 0 |
+| `EFF103` | 0.2.0 | 103 / 0 | 122 / 0 |
+| `DATA101` | 0.2.0 | 6 / 0 | 0 / 0 |
 
 ## Measurements
 
 Round 3 sampled up to 50 reports per rule on the Stage 0-A corpus, with the build of 2026-11-21.
-These are measurements of heuristic rules, not certifications. Its reviewers also counted as
+These are measurements of the rules as they were then, all heuristic, not certifications;
+the Certainty column gives each rule's certainty now. Its reviewers also counted as
 wrong a bound past 16 that the code states and an exclusion a rule page documents but heki does
 not recognize; under the terms above those reports are right, so these figures are lower
 bounds. For `OPT101` and `OPT102` the table keeps the reviewers' verdicts: four of their samples
@@ -2131,10 +2137,10 @@ loop a fixed 4 times, which is not data-sized.
 
 | Rule | Certainty | Measured | Sample | C / P / B / F | Right about the code | 95% interval | Real harm |
 | ---- | --------- | -------- | -----: | ------------- | -------------------: | ------------ | --------: |
-| `EFF101` | heuristic | round 3, 2026-11-21 | 50 | 3 / 13 / 25 / 9 | 82% | 69-90% | 32% |
+| `EFF101` | exact | round 3, 2026-11-21 | 50 | 3 / 13 / 25 / 9 | 82% | 69-90% | 32% |
 | `EFF102` | heuristic | round 3, 2026-11-21 | 50 | 0 / 2 / 25 / 23 | 54% | 40-67% | 4% |
-| `EFF103` | heuristic | round 3, 2026-11-21 | 50 | 0 / 8 / 29 / 13 | 74% | 60-84% | 16% |
-| `DATA101` | heuristic | round 3, 2026-11-21 | 28 | 0 / 3 / 17 / 8 | 71% | 53-85% | 11% |
+| `EFF103` | exact | round 3, 2026-11-21 | 50 | 0 / 8 / 29 / 13 | 74% | 60-84% | 16% |
+| `DATA101` | exact | round 3, 2026-11-21 | 28 | 0 / 3 / 17 / 8 | 71% | 53-85% | 11% |
 | `MUT107` | heuristic | round 3, 2026-11-21 | 50 | 1 / 1 / 37 / 11 | 78% | 65-87% | 4% |
 | `MUT110` | heuristic | round 3, 2026-11-21 | 4 | 0 / 0 / 4 / 0 | 100% | 51-100% | 0% |
 | `MUT202` | heuristic | round 3, 2026-11-21 | 20 | 2 / 1 / 11 / 6 | 70% | 48-85% | 15% |
@@ -2856,13 +2862,9 @@ Source: https://heki.koxudaxi.dev/rules/async-blocking-call/
 
 # async-blocking-call (EFF101)
 
-Family: Execution Effects (EFF) · Heuristic · Off by default · Severity `warning` (slower code) · No automatic fix
+Family: Execution Effects (EFF) · Exact · Enabled by default · Severity `warning` (slower code) · No automatic fix
 
 A call in `async def` that always runs a network, database, subprocess, or sleep call that waits on the event loop.
-
-!!! note "Heuristic"
-
-    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 50 sampled reports (round 3, 2026-11-21), 82% were right about the code. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 ## What it does
 Checks `async def` functions where a call, whenever it returns, has run a call that waits for
@@ -4679,13 +4681,9 @@ Source: https://heki.koxudaxi.dev/rules/loop-carried-concat/
 
 # loop-carried-concat (DATA101)
 
-Family: Data Pipelines (DATA) · Heuristic · Off by default · Severity `warning` (slower code) · No automatic fix
+Family: Data Pipelines (DATA) · Exact · Enabled by default · Severity `warning` (slower code) · No automatic fix
 
 Loop-carried quadratic `pandas.concat` / `numpy.vstack` / `numpy.append` accumulation.
-
-!!! note "Heuristic"
-
-    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 28 sampled reports (round 3, 2026-11-21), 71% were right about the code. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 ## What it does
 Checks loops that grow a DataFrame or array by re-concatenating it on every iteration:
@@ -4712,19 +4710,27 @@ number of times, whatever the input.
 ## What a report states
 
 A report states that the value is rebuilt from its previous value by the reallocating call on every
-iteration of the loop, so each iteration copies all of it.
+iteration of the loop that completes, so each such iteration copies all of it. Its exact reports
+(those the rule shows by default once it is certified) also name what the loop steps through: a
+parameter, a part of one, the rows of a query, the lines of a file, or the entries of a directory.
 
 Its premises:
 
-- **Loop-carried**: the new value is computed from the previous one and feeds the next iteration.
-  Established by the IR, except that the exception edge of a `with` block counts as carrying the
-  previous value for every context manager.
-- **On every iteration**: the reallocation runs on every iteration. Open: one that runs on some
+- **Loop-carried**: every path around the back edge carries the new value, computed from the
+  previous one (no path resets the variable). Open in a heuristic report: one path that updates
+  it is enough.
+- **On every iteration**: the reallocating call returns on every iteration that completes,
+  exception edges into handlers included. Open in a heuristic report: one that runs on some
   iterations only counts.
-- **Data-sized**: the code does not fix the trip count. Open: a trip count heki cannot bound counts
-  as data-sized.
-- **Reallocates**: the call copies all of its inputs into a new value, as the ecosystem catalog
-  describes it.
+- **Origin**: the loop steps through items the data decides (as for `EFF103`), and the code does
+  not fix its trip count. Open in a heuristic report: a trip count heki cannot bound counts as
+  data-sized.
+- **Reallocates**: the call copies all of its inputs into a new value on every call, as the
+  ecosystem catalog describes it. Open in a heuristic report: a project function that
+  reallocates the value it is handed may return another value on some path.
+
+Not part of the claim: how large the value grows. An exact report gives no advice: collecting
+the parts first does not fit a loop that reads the value on every iteration.
 
 ## Why is this bad?
 Every concatenation copies everything accumulated so far, so the loop is quadratic in the total
@@ -4758,13 +4764,9 @@ Source: https://heki.koxudaxi.dev/rules/loop-db-query/
 
 # loop-db-query (EFF103)
 
-Family: Execution Effects (EFF) · Heuristic · Off by default · Severity `warning` (slower code) · No automatic fix
+Family: Execution Effects (EFF) · Exact · Enabled by default · Severity `warning` (slower code) · No automatic fix
 
 A loop over data whose every iteration sends a database statement.
-
-!!! note "Heuristic"
-
-    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 50 sampled reports (round 3, 2026-11-21), 74% were right about the code. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 ## What it does
 Checks loops that send a database statement on every iteration that completes, over items whose

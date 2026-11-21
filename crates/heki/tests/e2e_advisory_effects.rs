@@ -637,6 +637,121 @@ def combine(a, b):
     assert_eq!(diags[0]["target"], "df");
 }
 
+/// An established `DATA101` report names what the loop steps through: the update returns on
+/// every iteration that completes, every path around the back edge carries it, and the items are
+/// the data's. A path that resets the value, items whose origin is not the data's (an attribute
+/// of the receiver), a project helper doing the reallocation (it may return another value), or
+/// data that holds the previous value only on some paths leave the report heuristic, worded
+/// without an origin (a `while` loop steps through no items).
+#[test]
+fn data101_names_the_origin_of_an_established_report() {
+    let p = Project::new("data101_established");
+    p.write(
+        "frames.py",
+        r#"import pandas as pd
+
+
+def from_parameter(frames):
+    df = pd.DataFrame()
+    for part in frames:
+        df = pd.concat([df, part])
+    return df
+
+
+def reset_on_some_path(frames):
+    df = pd.DataFrame()
+    for part in frames:
+        df = pd.concat([df, part])
+        if len(df) > 10:
+            df = pd.DataFrame()
+    return df
+
+
+class Builder:
+    def build(self):
+        df = pd.DataFrame()
+        for part in self.parts:
+            df = pd.concat([df, part])
+        return df
+
+
+def combine(acc, part):
+    return pd.concat([acc, part])
+
+
+def through_a_helper(frames):
+    df = pd.DataFrame()
+    for part in frames:
+        df = combine(df, part)
+    return df
+
+
+def drops_it_on_some_path(frames, keep):
+    df = pd.DataFrame()
+    for part in frames:
+        prior = df if keep else pd.DataFrame()
+        df = pd.concat([prior, part])
+    return df
+
+
+from pandas import concat
+
+
+def through_an_imported_name(frames):
+    df = pd.DataFrame()
+    for part in frames:
+        df = concat([df, part])
+    return df
+
+
+def drained(chunks):
+    df = pd.DataFrame()
+    while chunks:
+        part = chunks.pop()
+        df = pd.concat([df, part])
+    return df
+"#,
+    );
+    let diags = diagnostics(&p, &["--select", "DATA101"]);
+    let messages: Vec<(u64, &str)> = diags
+        .iter()
+        .map(|d| (d["line"].as_u64().unwrap(), d["message"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        messages,
+        vec![
+            (
+                7,
+                "`df` is rebuilt from itself with `pandas.concat` on every iteration over parameter `frames`"
+            ),
+            (
+                14,
+                "`df` is rebuilt from itself with `pandas.concat` on every loop iteration"
+            ),
+            (
+                24,
+                "`df` is rebuilt from itself with `pandas.concat` on every loop iteration"
+            ),
+            (
+                35,
+                "`df` is rebuilt from itself with `pandas.concat` on every loop iteration"
+            ),
+            (
+                43,
+                "`df` is rebuilt from itself with `pandas.concat` on every loop iteration"
+            ),
+            (
+                53,
+                "`df` is rebuilt from itself with `pandas.concat` on every iteration over parameter `frames`"
+            ),
+            (
+                61,
+                "`df` is rebuilt from itself with `pandas.concat` on every loop iteration"
+            ),
+        ]
+    );
+}
+
 #[test]
 fn py_module_beats_sibling_pyi_stub_end_to_end() {
     let p = Project::new("effects_py_over_pyi");

@@ -126,11 +126,11 @@ fn lsp_session_publishes_fixes_and_cuts_off_unchanged_summaries() {
         related[1]["location"]["range"]["start"],
         json!({"line": 4, "character": 4})
     );
-    // The message is the sentence alone, labelled for a heuristic rule; the help follows the
-    // hops, at the diagnostic itself.
+    // The message is the sentence alone, with no label for an exact report; the help follows
+    // the hops, at the diagnostic itself.
     assert_eq!(
         eff["message"],
-        "`pkg.util.helper` always runs the waiting call `time.sleep` on the event loop (1 call down, on every path) [heuristic]"
+        "`pkg.util.helper` always runs the waiting call `time.sleep` on the event loop (1 call down, on every path)"
     );
     assert_eq!(related.len(), 3, "{related:#?}");
     assert_eq!(related[2]["location"]["uri"], api);

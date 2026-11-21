@@ -110,6 +110,11 @@ release can change rules, configuration keys, diagnostics, and output formats.
 
 ### Changed
 
+- `DATA101` marks a report exact when every premise is established (the update returns on every
+  iteration that completes, every path around the back edge carries it, the loop steps through
+  a parameter, the rows of a query, the lines of a file, or directory entries, and its trip count
+  is not fixed) and heuristic otherwise; its message names the loop's origin and drops
+  "(quadratic copying)".
 - `EFF101` and `EFF103` state exact claims, each premise established: `EFF101` that whenever
   the reported call returns, a call that waits for the network, a database, a child process, or a
   sleep has run on the event loop's thread, through functions that each make the next call on
@@ -117,10 +122,12 @@ release can change rules, configuration keys, diagnostics, and output formats.
   call followed (protocol receivers are not); `EFF103` that every iteration of a loop over a
   parameter, the rows of a query, the lines of a file, or the entries of a directory sends a
   database statement. Their messages state the claim and its witnesses only: a call whose
-  implementations reach different statements names each with its implementation, and "N+1" and
+  implementations reach different statements names each with the function that makes it, and
+  relates each where it is, and "N+1" and
   "batch the queries" are gone. Everything else they reported is `EFF111` / `EFF113`. Waits on
   another thread (`Thread.join()`, `Event.wait()`, locks, `Queue.get()`, `Future.result()`) are
-  `EFF111` only. Both stay heuristic until the census certifies them.
+  `EFF111` only. Both are certified exact, as is `DATA101` (`docs/precision.md` has their
+  census and holdout counts), and run by default.
 - Only exact reports are shown by default. A report is *exact* when every premise of its claim
   was established and its rule was certified (a false exact report is a bug), and *heuristic*
   when a premise can be open, so that it can be wrong about the code. A heuristic rule runs
@@ -128,8 +135,8 @@ release can change rules, configuration keys, diagnostics, and output formats.
   `[tool.heki.lint] heuristic = true` (`--heuristic`) also by default and for every prefix and
   `ALL`, as Ruff's `preview` does. An exact rule's heuristic reports (an `OPT` report whose
   rewrite is not proven) are shown under the same conditions. A contract rule runs when its
-  contract is declared, whatever its certainty. No rule is exact yet: `heki check` with no configuration runs only the contract
-  rules, and `heki check --fix` applies no fix, since `OPT101` and `OPT102` stay heuristic until
+  contract is declared, whatever its certainty. `heki check` with no configuration runs the exact rules (`EFF101`, `EFF103`,
+  `DATA101`) and the contract rules, and `heki check --fix` applies no fix, since `OPT101` and `OPT102` stay heuristic until
   a measurement certifies them. `MUT202`, which also reports `@lru_cache` / `@cache` results
   without a contract, is selected like the other heuristic rules, so a `readonly-returns`
   contract needs it named or `lint.heuristic = true`. `lint.heuristic = true` restores the rules

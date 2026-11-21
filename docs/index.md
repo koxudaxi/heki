@@ -9,8 +9,8 @@ mutate state or reach I/O.
 
 A report is *exact* when heki established every premise of its claim and its rule was
 certified, and only exact reports are shown by default. The others are *heuristic*: they can be
-wrong, every output labels them, and `heki check --heuristic` shows them too. No rule is exact
-yet.
+wrong, every output labels them, and `heki check --heuristic` shows them too. The exact rules
+are listed in [Rule precision](precision.md#certifications).
 
 <p>
   <a class="md-button md-button--primary" href="getting-started/">Getting Started</a>
@@ -48,7 +48,7 @@ async def get_user(user_id: int) -> dict[str, str]:
 
 ```console
 $ heki check --heuristic
-app/api.py:5:12: EFF101 (async-blocking-call) [warning, heuristic] `app.users.load_user` always runs the waiting call `requests.get` on the event loop (2 calls down, on every path)
+app/api.py:5:12: EFF101 (async-blocking-call) [warning] `app.users.load_user` always runs the waiting call `requests.get` on the event loop (2 calls down, on every path)
   |
 5 |     return load_user(user_id)
   |            ^
@@ -79,7 +79,7 @@ def order_summaries(cursor: sqlite3.Cursor, orders: list[tuple[int, int]]) -> li
 
 ```console
 $ heki check --heuristic
-app/orders.py:11:37: EFF103 (loop-db-query) [warning, heuristic] every iteration over parameter `orders` sends a database statement: `sqlite3.Cursor.execute` (through `app.orders.customer_name`)
+app/orders.py:11:37: EFF103 (loop-db-query) [warning] every iteration over parameter `orders` sends a database statement: `sqlite3.Cursor.execute` (through `app.orders.customer_name`)
    |
 11 |         lines.append(f"#{order_id} {customer_name(cursor, customer_id)}")
    |                                     ^
@@ -93,7 +93,7 @@ Ruff, ty, Pyrefly, pyright, and mypy report nothing for either example with thei
 
 ### Your own conventions, too
 
-The checks above need no configuration, only `--heuristic` while their rules are heuristic.
+The checks above need no configuration: `EFF101` and `EFF103` are exact and run by default.
 The rules of your own project, which you keep today by review, by AST scripts, or by run-time
 guards in tests, can be added as a few lines of [configuration](configuration.md):
 
@@ -129,9 +129,9 @@ Each report shows the chain of calls that leads to the bug.
 
 | What goes wrong | Rule | Certainty |
 | --- | --- | --- |
-| A blocking call that a call in an `async def` always runs, several helpers below | [`EFF101`](rules/async-blocking-call.md) | heuristic |
+| A blocking call that a call in an `async def` always runs, several helpers below | [`EFF101`](rules/async-blocking-call.md) | exact |
 | A blocking call an `async def` can reach | [`EFF111`](rules/async-possibly-blocking-call.md) | heuristic |
-| A database statement on every iteration of a loop over data | [`EFF103`](rules/loop-db-query.md) | heuristic |
+| A database statement on every iteration of a loop over data | [`EFF103`](rules/loop-db-query.md) | exact |
 | A database query, or a new HTTP client, a loop can run on every iteration | [`EFF113`](rules/loop-possible-db-query.md), [`EFF102`](rules/loop-unpooled-client.md) | heuristic |
 | An attribute that `__hash__` reads, changed after the object went into a `set` | [`MUT107`](rules/hash-attr-mutation.md) | heuristic |
 | A `Sequence` / `Mapping` argument changed in place by a helper | [`MUT110`](rules/readonly-param-mutation.md) | heuristic |

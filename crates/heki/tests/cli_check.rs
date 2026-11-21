@@ -104,7 +104,7 @@ fn exit_codes_and_clean_runs() {
     let (code, stdout, stderr) = p.heki(&[]);
     assert_eq!(code, 0);
     assert!(
-        stdout.starts_with("pkg/bad.py:4:5: EFF101 (async-blocking-call) [warning, heuristic]"),
+        stdout.starts_with("pkg/bad.py:4:5: EFF101 (async-blocking-call) [warning] "),
         "{stdout}"
     );
     assert!(stdout.contains("4 |     time.sleep(1)"));
@@ -237,14 +237,11 @@ fn output_formats_and_config_selection() {
     assert_eq!(
         stdout.lines().collect::<Vec<_>>(),
         vec![format!(
-            "::error file=src/pkg/api.py,line=4,col=5,title=heki EFF101 (heuristic)::{message}"
+            "::error file=src/pkg/api.py,line=4,col=5,title=heki EFF101::{message}"
         )]
     );
     let (_, stdout, _) = p.heki(&["--output-format", "concise"]);
-    assert_eq!(
-        stdout,
-        format!("src/pkg/api.py:4:5: EFF101 [heuristic] {message}\n")
-    );
+    assert_eq!(stdout, format!("src/pkg/api.py:4:5: EFF101 {message}\n"));
     let (_, stdout, _) = p.heki(&[]);
     assert!(
         stdout.ends_with(&format!(
