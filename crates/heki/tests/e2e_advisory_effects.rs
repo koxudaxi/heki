@@ -690,7 +690,7 @@ class Builder:
                 "`df` is rebuilt from itself with `pandas.concat` on every loop iteration"
             ),
             (
-                25,
+                24,
                 "`df` is rebuilt from itself with `pandas.concat` on every loop iteration"
             ),
         ]
@@ -1188,7 +1188,7 @@ fn exact_claims_establish_each_premise() {
             (
                 117,
                 "EFF103",
-                "every iteration over parameter `ids` sends a database statement: `sqlite3.Connection.execute`"
+                "every iteration over one value per item of parameter `ids` sends a database statement: `sqlite3.Connection.execute`"
             ),
             (
                 137,
