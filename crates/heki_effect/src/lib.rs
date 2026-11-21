@@ -41,7 +41,7 @@ pub use invalidation::{
     builds_written_object, delegates_to_callers, is_initializer, reach_across,
 };
 pub use ownership::{LocalOrigins, Origins, ResultOf};
-pub use query::{ChangeChain, ParamChange};
+pub use query::{CallsByCaller, ChangeChain, ParamChange};
 pub use readonly::{ProtectedReturn, ReturnStep, Shared};
 pub use report::{BoundaryReport, boundary_reports, boundary_reports_in};
 pub use resolver::{

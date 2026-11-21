@@ -15,8 +15,8 @@ use crate::{CheckContext, ModuleUnit, SitesByCaller};
 use heki_ast::Span;
 use heki_diagnostics::Diagnostic;
 use heki_effect::{
-    BoundCallee, CallHop, CallSite, EffectSummary, FuncKey, ParamChange, ProjectIndex,
-    ReadOnlyAttr, ReadOnlyKind, SiteRole, Slot, WriteKind,
+    BoundCallee, CallHop, CallSite, CallsByCaller, EffectSummary, FuncKey, ParamChange,
+    ProjectIndex, ReadOnlyAttr, ReadOnlyKind, SiteRole, Slot, WriteKind,
 };
 use rustc_hash::FxHashSet;
 use std::collections::{BTreeMap, BTreeSet};
@@ -53,6 +53,7 @@ pub(crate) fn run(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
         cx,
         fields,
         params,
+        calls: cx.index.calls_by_caller(),
         sites: None,
         seen: FxHashSet::default(),
         none: Allowance::default(),
@@ -110,6 +111,8 @@ struct Rule<'c, 'a> {
     fields: bool,
     /// `MUT110` (read-only parameters) runs.
     params: bool,
+    /// The calls the reports' chains walk, indexed once for every report.
+    calls: CallsByCaller<'a>,
     /// Built on the first need (`runs_inside_allowed`).
     sites: Option<SitesByCaller<'a>>,
     /// `(rule, function, span, target)` already reported.
@@ -324,14 +327,17 @@ impl Rule<'_, '_> {
 
     /// The hop of the call into its callee (whose parameter `k` changes `what` in place), then
     /// the shortest chain of calls down to the function whose own body makes the change.
-    fn chain(&self, call: &Call<'_>, k: u8, what: Changed) -> Vec<CallHop> {
+    fn chain(&mut self, call: &Call<'_>, k: u8, what: Changed) -> Vec<CallHop> {
         let into = CallHop {
             caller: call.site.caller.clone(),
             callee: call.bc.callee.fqn(),
             span: call.site.span,
             path: call.path.to_path_buf(),
         };
-        let below = self.cx.index.param_change_chain(&call.bc.callee, k, &what);
+        let below = self
+            .cx
+            .index
+            .param_change_chain(&mut self.calls, &call.bc.callee, k, &what);
         std::iter::once(into).chain(below.hops).collect()
     }
 

@@ -1269,3 +1269,43 @@ fn a_change_handed_down_through_one_module_indexes_its_calls_once() {
     assert_eq!(found[0]["rule_code"], "MUT110");
     assert_eq!(found[0]["related"].as_array().unwrap().len(), 12_000);
 }
+
+/// Eight thousand functions of one module, each handing its read-only parameter to a helper
+/// that changes it itself, and to one that hands it to that helper: the reports' chains share
+/// one index of the module's calls, and a chain that ends at its first function indexes none.
+#[test]
+fn many_reports_into_one_module_share_its_index_of_calls() {
+    let mut lines = vec![
+        "from collections.abc import Sequence".to_owned(),
+        String::new(),
+        String::new(),
+        "def change(x):".to_owned(),
+        "    x.append(1)".to_owned(),
+        String::new(),
+        String::new(),
+        "def relay(x):".to_owned(),
+        "    change(x)".to_owned(),
+    ];
+    for i in 0..8_000 {
+        lines.extend([
+            String::new(),
+            String::new(),
+            format!("def entry{i}(xs: Sequence[int]):"),
+            "    change(xs)".to_owned(),
+            "    relay(xs)".to_owned(),
+        ]);
+    }
+    let p = Project::new("bounds_change_chains_into_one_module");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT110\"]\n",
+    )
+    .write("m.py", &(lines.join("\n") + "\n"));
+    let found = check_within(&p, Duration::from_secs(20));
+    assert_eq!(found.len(), 16_000);
+    let hops: Vec<usize> = found
+        .iter()
+        .map(|d| d["related"].as_array().unwrap().len())
+        .collect();
+    assert_eq!(hops.iter().filter(|&&n| n == 2).count(), 8_000);
+}

@@ -25,34 +25,31 @@ impl EffectSummary {
     }
 }
 
-/// The calls of a function that run its callees' bodies (`SiteRole::Call`), in the order of
-/// its file's call sites. Each file is indexed by caller once, on the first function of it a
-/// walk enters, so a walk through many functions of one module does not rescan its sites.
-struct CallsOf<'i> {
+/// The call sites of each function in the order of its file's call sites, indexed by caller
+/// one file at a time, on the first function of the file a walk needs the calls of. The walks of
+/// one run share it ([`ProjectIndex::calls_by_caller`]), so neither a walk through many
+/// functions of one module nor many walks into one module rescan its sites.
+pub struct CallsByCaller<'i> {
     index: &'i ProjectIndex,
     by_file: FxHashMap<&'i Path, FxHashMap<&'i FuncKey, Vec<&'i CallSite>>>,
 }
 
-impl<'i> CallsOf<'i> {
-    fn new(index: &'i ProjectIndex) -> Self {
-        Self {
-            index,
-            by_file: FxHashMap::default(),
-        }
-    }
-
-    /// `func`'s defining file and its calls there.
-    fn of(&mut self, func: &FuncKey) -> Option<(&'i Path, &[&'i CallSite])> {
-        let path = self.index.file_of(func)?;
-        let file = self.index.files.get(path)?;
+impl<'i> CallsByCaller<'i> {
+    /// The call sites of `func`, a summarized function, in its defining file.
+    fn of(&mut self, func: &FuncKey) -> &[&'i CallSite] {
+        let path = self
+            .index
+            .file_of(func)
+            .expect("call sites are asked of summarized functions");
+        let file = &self.index.files[path];
         let calls = self.by_file.entry(path).or_insert_with(|| {
             let mut by_caller: FxHashMap<&FuncKey, Vec<&CallSite>> = FxHashMap::default();
-            for site in file.call_sites.iter().filter(|s| s.role == SiteRole::Call) {
+            for site in &file.call_sites {
                 by_caller.entry(&site.caller).or_default().push(site);
             }
             by_caller
         });
-        Some((path, calls.get(func).map_or(&[][..], Vec::as_slice)))
+        calls.get(func).map_or(&[][..], Vec::as_slice)
     }
 }
 
@@ -78,12 +75,21 @@ pub struct ChangeChain {
 }
 
 impl ProjectIndex {
+    /// An empty [`CallsByCaller`] for the walks of one run.
+    pub fn calls_by_caller(&self) -> CallsByCaller<'_> {
+        CallsByCaller {
+            index: self,
+            by_file: FxHashMap::default(),
+        }
+    }
+
     /// The shortest chain of calls from `start`, whose parameter `param` changes `what` in place,
     /// down to the first function whose own (local) summary makes the change: breadth first over
     /// the calls that hand the argument on as itself, or the slot as the argument itself
     /// (`helper(p.a)`), in the order of each file's call sites.
     pub fn param_change_chain(
         &self,
+        calls: &mut CallsByCaller<'_>,
         start: &FuncKey,
         param: u8,
         what: &ParamChange,
@@ -94,7 +100,6 @@ impl ProjectIndex {
             span: site.span,
             path: path.to_path_buf(),
         };
-        let mut calls = CallsOf::new(self);
         let mut states = vec![ChainState {
             func: start.clone(),
             param,
@@ -112,7 +117,9 @@ impl ProjectIndex {
                 states[i].param,
                 states[i].what.clone(),
             );
-            let (path, sites) = calls.of(&func).expect("states are summarized functions");
+            let path = self
+                .file_of(&func)
+                .expect("states are summarized functions");
             if self.files[path]
                 .local_functions
                 .get(&func)
@@ -121,7 +128,8 @@ impl ProjectIndex {
                 found = Some(i);
                 break;
             }
-            for s in sites {
+            let sites = calls.of(&func);
+            for &s in sites.iter().filter(|s| s.role == SiteRole::Call) {
                 let callees = s
                     .project_callees()
                     .iter()
