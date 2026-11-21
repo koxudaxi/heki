@@ -1289,13 +1289,22 @@ impl<'a> Extractor<'a> {
     /// `(dst, holder, attr)` of a call or property read that returns attribute `attr` of an
     /// object it is handed (`node.members()`, `node.view`, `items_of(node)` returning
     /// `node.items`): every project function it may run returns that attribute of the same
-    /// parameter ([`crate::FunctionDecl::returns_param_attr`]), bound here to `holder`.
+    /// parameter ([`crate::FunctionDecl::returns_param_attr`]), bound here to `holder`, and
+    /// every class the value it dispatches on may be runs one of them
+    /// ([`resolver::TypeCtx::runs_on_every_class`]).
     fn returned_attr(&self, kind: &InstKind) -> Option<(VarId, VarId, String)> {
         let project = &self.cx.project;
-        let (dst, callee, recv, args, star_from) = match kind {
+        let (dst, callee, recv, args, star_from, dispatch) = match kind {
             InstKind::AttrLoad { dst, obj, attr } if project.may_return_param_attr(attr) => {
                 let getters = self.cx.resolve_attr_load(self.val(*obj), attr)?;
-                (*dst, getters, Some(*obj), &[][..], None)
+                (
+                    *dst,
+                    getters,
+                    Some(*obj),
+                    &[][..],
+                    None,
+                    (*obj, attr.as_str()),
+                )
             }
             InstKind::MethodCall {
                 dst,
@@ -1306,7 +1315,15 @@ impl<'a> Extractor<'a> {
                 ..
             } if project.may_return_param_attr(method) => {
                 let callee = self.cx.resolve_method(self.val(*recv), method);
-                (*dst, callee, Some(*recv), args.as_slice(), *star_from)
+                let dispatch = (*recv, method.as_str());
+                (
+                    *dst,
+                    callee,
+                    Some(*recv),
+                    args.as_slice(),
+                    *star_from,
+                    dispatch,
+                )
             }
             InstKind::Call {
                 dst,
@@ -1328,7 +1345,14 @@ impl<'a> Extractor<'a> {
                     return None;
                 }
                 let callee = self.cx.resolve_call(self.val(*c));
-                (*dst, callee, None, args.as_slice(), *star_from)
+                (
+                    *dst,
+                    callee,
+                    None,
+                    args.as_slice(),
+                    *star_from,
+                    (*c, "__call__"),
+                )
             }
             _ => return None,
         };
@@ -1351,6 +1375,10 @@ impl<'a> Extractor<'a> {
             }
         }
         let (position, attr) = returned?;
+        let (value, name) = dispatch;
+        if !self.cx.runs_on_every_class(self.val(value), name, &keys) {
+            return None;
+        }
         let holder = match position {
             None => recv?,
             Some(i) if star_from.is_none_or(|s| i < usize::from(s)) => *args.get(i)?,

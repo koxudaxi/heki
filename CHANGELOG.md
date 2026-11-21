@@ -150,7 +150,9 @@ release can change rules, configuration keys, diagnostics, and output formats.
   `_set(node, "kind", v)` a `MUT201` write, and `sleep = time.sleep` makes `sleep(1)` in an
   `async def` an `EFF101` report. Any other global a module binds is never the builtin of the same
   name: after `open = functools.partial(...)`, `open(path)` is no blocking `builtins.open`
-  (`EFF105`).
+  (`EFF105`), and a call of it is unresolved unless a `[[tool.heki.ecosystem]]` entry declares it.
+  A name heki does not see the module bind (a compiled submodule, a star import of one) keeps
+  what the catalog says of it (`mypkg._native.read`).
 - A method that no project class of the receiver's MRO defines is no longer taken from a base
   outside the project that is not known to define it (`abc.ABC._copy_model_type`,
   `typing.Generic.result_type`): the call is unresolved, as a call heki cannot follow. Special
@@ -161,7 +163,9 @@ release can change rules, configuration keys, diagnostics, and output formats.
   extras["k"] = 2` is a `MUT201` write of `Node.extras["k"]`).
 - A method, property, or function that returns an attribute of an argument on every `return`
   (`return self.items`) hands out that object: `node.members().append(1)` and
-  `node.view.append(1)` are `MUT201` writes of `Node.items`.
+  `node.view.append(1)` are `MUT201` writes of `Node.items`. It does so on a class whose reads run
+  it: not through a `cached_property` (an assignment can replace what the instance keeps), and not
+  on a member of a union, or a class, whose own attribute of the name comes first.
 - `object.__new__(Node)`, also through an alias, and `Node.__new__(Node)` where no class of the
   MRO defines `__new__` construct a `Node`: the new object has its class, and with
   `fresh-objects = "allow"` a helper filling it is no `MUT201` report.

@@ -347,12 +347,25 @@ async def builtin() -> object:
     return open("data.txt")
 "#;
 
+const ALIAS_CALLER: &str = r#"from pkg import aliased
+from pkg.aliased import nap
+
+
+async def by_module() -> None:
+    aliased.nap(1)
+
+
+async def by_name() -> None:
+    nap(1)
+"#;
+
 #[test]
 fn a_module_global_is_its_own_object_and_an_alias_the_one_it_names() {
     let p = Project::new("module_globals");
     p.write("pkg/__init__.py", "")
         .write("pkg/io.py", IO)
-        .write("pkg/aliased.py", ALIASED);
+        .write("pkg/aliased.py", ALIASED)
+        .write("pkg/caller.py", ALIAS_CALLER);
     assert_eq!(
         found(&diagnostics(&p, &["--extend-select", "EFF105"])),
         vec![
@@ -361,8 +374,190 @@ fn a_module_global_is_its_own_object_and_an_alias_the_one_it_names() {
             d("pkg/aliased.py", 12, "EFF101", "time.sleep"),
             // Deleting a local of the same name binds no global: `open` is still the builtin.
             d("pkg/aliased.py", 20, "EFF105", "builtins.open"),
+            // The alias called through its module, and imported from it.
+            d("pkg/caller.py", 6, "EFF101", "time.sleep"),
+            d("pkg/caller.py", 10, "EFF101", "time.sleep"),
             // `open` bound by the module to something else is no builtin, nor is a global
             // bound to a choice between objects.
+        ]
+    );
+}
+
+const CATALOGUED: &str = r#"[project]
+name = "t"
+
+[[tool.heki.ecosystem]]
+symbol = "mypkg._native.read"
+effects = ["blocking_net"]
+
+[[tool.heki.ecosystem]]
+symbol = "mypkg.fetch"
+effects = ["blocking_net"]
+
+[[tool.heki.ecosystem]]
+symbol = "mypkg.http.get"
+effects = ["blocking_net"]
+"#;
+
+const HTTP: &str = r#"import functools
+import time
+import urllib.request
+
+get = functools.partial(urllib.request.urlopen, timeout=5)
+nap = functools.partial(time.sleep, 1)
+
+
+async def same_module() -> None:
+    get("x")
+"#;
+
+const APP: &str = r#"import mypkg._native as native
+from mypkg import fetch, http
+from mypkg._native import read
+
+
+async def by_name() -> None:
+    read()
+
+
+async def by_module() -> None:
+    native.read()
+
+
+async def star_imported() -> None:
+    fetch()
+
+
+async def declared_global() -> None:
+    http.get("x")
+
+
+async def undeclared_global() -> None:
+    http.nap()
+"#;
+
+/// A name heki does not see the module bind (a compiled submodule, a star import of one) is
+/// what the catalog says of it, and so is a module global the configuration declares; a global
+/// of a value heki does not know and the configuration leaves out is an unresolved call.
+#[test]
+fn a_catalogued_name_heki_does_not_see_bound_keeps_its_effects() {
+    let p = Project::new("catalogued_names");
+    p.write("pyproject.toml", CATALOGUED)
+        .write("mypkg/__init__.py", "from ._native import *\n")
+        .write("mypkg/http.py", HTTP)
+        .write("mypkg/app.py", APP);
+    assert_eq!(
+        found(&diagnostics(&p, &[])),
+        vec![
+            d("mypkg/app.py", 7, "EFF101", "mypkg._native.read"),
+            d("mypkg/app.py", 11, "EFF101", "mypkg._native.read"),
+            d("mypkg/app.py", 15, "EFF101", "mypkg.fetch"),
+            d("mypkg/app.py", 19, "EFF101", "mypkg.http.get"),
+            d("mypkg/http.py", 10, "EFF101", "mypkg.http.get"),
+        ]
+    );
+}
+
+const GETTERS: &str = r#"import functools
+
+
+class A:
+    def __init__(self) -> None:
+        self.items: list[int] = []
+
+    @property
+    def view(self) -> list[int]:
+        return self.items
+
+    def members(self) -> list[int]:
+        return self.items
+
+
+class B:
+    def __init__(self) -> None:
+        self.items: list[int] = []
+        self.view: list[int] = []
+
+
+class C:
+    def __init__(self) -> None:
+        self.items: list[int] = []
+
+    @functools.cached_property
+    def view(self) -> list[int]:
+        return self.items
+
+
+class D(A):
+    view: list[int] = []  # noqa: RUF012
+
+
+class E(A):
+    pass
+
+
+class F(object):
+    pass
+
+
+def plain(a: A, e: E) -> None:
+    a.view.append(1)
+    e.view.append(1)
+
+
+def subclass_may_override(a: A) -> None:
+    a.members().append(1)
+
+
+def union(obj: A | B) -> None:
+    obj.view.append(1)
+    obj.members().append(1)
+
+
+def cached(c: C) -> None:
+    c.view = []
+    c.view.append(1)
+
+
+def class_attribute_first(d: D) -> None:
+    d.view.append(1)
+
+
+def lacking(obj: A | F) -> None:
+    obj.view.append(1)
+"#;
+
+const GETTERS_CONFIG: &str = r#"[project]
+name = "t"
+
+[tool.heki.lint]
+select = ["MUT201"]
+
+[[tool.heki.write-owners]]
+name = "store"
+targets = ["A.items", "B.items", "C.items", "D.items", "E.items"]
+allowed-writers = ["pkg.store.*"]
+"#;
+
+/// A getter hands out its attribute only on a class whose reads run it: not on a member of a
+/// union reading a plain attribute or lacking the method, not through a `cached_property`
+/// (its value can be replaced on the instance), and not on a class whose own class attribute
+/// comes first along its MRO.
+#[test]
+fn a_getter_hands_out_its_attribute_only_where_every_read_runs_it() {
+    let p = Project::new("getters_every_read");
+    p.write("pyproject.toml", GETTERS_CONFIG)
+        .write("pkg/__init__.py", "")
+        .write("pkg/model.py", GETTERS);
+    let m = "pkg/model.py";
+    assert_eq!(
+        found(&diagnostics(&p, &[])),
+        vec![
+            d(m, 44, "MUT201", "A.items"),
+            // A target on a base covers the instances of its subclasses.
+            d(m, 45, "MUT201", "A.items"),
+            d(m, 45, "MUT201", "E.items"),
+            d(m, 49, "MUT201", "A.items"),
         ]
     );
 }
