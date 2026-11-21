@@ -44,7 +44,7 @@ The recorded set can only shrink:
 | No baseline file yet | an error (exit code 2) | records today's findings |
 | A finding was fixed | a note that the entry can shrink | records the smaller entry |
 | An entry grew, or a new finding appeared | reports it, with a note on the allowed and found counts (exit code 1 for an error, and for a warning with [`fail-on = "warning"`](configuration.md#rule-selection-toolhekilint)) | reports it the same way and leaves the file as it is (exit code 1) |
-| A file could not be analyzed (a syntax error, an unreadable file) | reports the error (exit code 2) | writes nothing, so the entries of that file are not lost (exit code 2) |
+| A file could not be analyzed (a syntax error, an unreadable file) | reports the error and the other files' findings (exit code 2) | writes nothing, so the entries of that file are not lost (exit code 2) |
 
 To record new findings on purpose, delete the baseline and record it again.
 
@@ -132,8 +132,10 @@ With SARIF:
 
 - findings become code-scanning alerts, warnings included, and keep the step green (exit code
   `1` when one fails the run);
-- a configuration, read, or syntax error (exit code `2`) still fails the step: heki then writes
-  SARIF only for the files it could analyze, which would hide the others;
+- a configuration, read, or syntax error (exit code `2`) still fails the step; a file heki could
+  not read or parse is an `error` notification of the run
+  (`invocations[0].toolExecutionNotifications`, with `executionSuccessful: false`), and the
+  results of the other files are kept;
 - results carry the message, the location, the call chain (`relatedLocations`), and the help
   (`properties.help`; SARIF's `rules[].help` is one text per rule, and a report's help can name
   the object it is about).
