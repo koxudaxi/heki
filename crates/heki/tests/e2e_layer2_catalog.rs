@@ -1328,6 +1328,255 @@ async def tp_session(s: requests.Session):
     );
 }
 
+/// `sqlite3.connect` waits on a file only where heki establishes that its argument names one: a
+/// literal or a module constant without an in-memory form, or a path built from such parts and
+/// `__file__`. Every other way of opening an in-memory database (a module constant, a partial, a
+/// default, an environment lookup, an f-string, `%`, or `.format()` URI, `*args`, a phi, a
+/// container, a constructor argument) is not established; a path from a module value that is no
+/// string constant is not either.
+#[test]
+fn only_a_named_file_makes_a_sqlite_connection_wait() {
+    let p = Project::new("cat_sqlite_names_a_file");
+    for (rel, source) in [
+        ("shapes.py", MEMORY_SHAPES),
+        ("shapes2.py", MEMORY_SHAPES_2),
+        ("shapes3.py", MEMORY_SHAPES_3),
+        ("shapes4.py", MEMORY_SHAPES_4),
+        ("ondisk.py", FILE_SHAPES),
+    ] {
+        p.write(rel, source);
+    }
+    let (code, stdout, stderr) = p.check(&["--output-format", "json", "--select", "EFF101"]);
+    assert!(code == 0 || code == 1, "{stdout}{stderr}");
+    let diags: Vec<Value> = serde_json::from_str(&stdout).unwrap();
+    let mut got: Vec<(String, u64)> = diags
+        .iter()
+        .map(|d| {
+            (
+                d["path"].as_str().unwrap().to_owned(),
+                d["line"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    got.dedup();
+    let file = |line: u64| ("ondisk.py".to_owned(), line);
+    assert_eq!(got, vec![file(10), file(14), file(18)]);
+}
+
+const MEMORY_SHAPES: &str = r#"import contextlib
+import functools
+import os
+import sqlite3
+
+DB = ":memory:"
+
+
+async def through_closing() -> None:
+    with contextlib.closing(sqlite3.connect(":memory:")) as conn:
+        conn.execute("SELECT 1")
+
+
+async def through_with() -> None:
+    with sqlite3.connect(":memory:") as conn:
+        conn.execute("SELECT 1")
+
+
+async def through_cursor() -> None:
+    cur = sqlite3.connect(":memory:").cursor()
+    cur.execute("SELECT 1")
+    cur.fetchall()
+
+
+async def through_phi(path: str | None) -> None:
+    conn = sqlite3.connect(path) if path else sqlite3.connect(":memory:")
+    conn.execute("SELECT 1")
+
+
+async def through_module_constant() -> None:
+    conn = sqlite3.connect(DB)
+    conn.execute("SELECT 1")
+
+
+async def through_partial() -> None:
+    opener = functools.partial(sqlite3.connect, ":memory:")
+    opener().execute("SELECT 1")
+
+
+def open_default(path: str = ":memory:") -> sqlite3.Connection:
+    return sqlite3.connect(path)
+
+
+async def through_default() -> None:
+    open_default().execute("SELECT 1")
+
+
+class Holder:
+    shared = sqlite3.connect(":memory:")
+
+    def __init__(self) -> None:
+        self.conns = {"a": sqlite3.connect(":memory:")}
+        self.items = [sqlite3.connect(":memory:")]
+
+    def by_class_attribute(self) -> None:
+        self.shared.execute("SELECT 1")
+
+    def by_dict(self) -> None:
+        self.conns["a"].execute("SELECT 1")
+
+    def by_list(self) -> None:
+        self.items[0].execute("SELECT 1")
+
+
+async def holders() -> None:
+    h = Holder()
+    h.by_class_attribute()
+    h.by_dict()
+    h.by_list()
+
+
+def unannotated_return():
+    return sqlite3.connect(":memory:")
+
+
+async def through_unannotated_return() -> None:
+    unannotated_return().execute("SELECT 1")
+
+
+class Repo:
+    def __init__(self, conn) -> None:
+        self.conn = conn
+
+    def get(self) -> None:
+        self.conn.execute("SELECT 1")
+
+
+async def through_constructor_argument() -> None:
+    Repo(sqlite3.connect(":memory:")).get()
+
+
+async def through_uri() -> None:
+    conn = sqlite3.connect("file:memdb1?mode=memory&cache=shared", uri=True)
+    conn.execute("SELECT 1")
+
+
+async def through_env_default() -> None:
+    conn = sqlite3.connect(os.environ.get("DB", ":memory:"))
+    conn.execute("SELECT 1")
+
+
+async def through_keyword() -> None:
+    conn = sqlite3.connect(database=":memory:")
+    conn.execute("SELECT 1")
+
+
+async def through_backup() -> None:
+    src = sqlite3.connect(":memory:")
+    dst = sqlite3.connect(":memory:")
+    src.backup(dst)
+    dst.execute("SELECT 1")
+"#;
+
+const MEMORY_SHAPES_2: &str = r#"import sqlite3
+
+
+async def through_fstring_uri(name: str) -> None:
+    conn = sqlite3.connect(f"file:{name}?mode=memory&cache=shared", uri=True)
+    conn.execute("SELECT 1")
+
+
+async def through_concat_uri(name: str) -> None:
+    conn = sqlite3.connect("file:" + name + "?mode=memory", uri=True)
+    conn.execute("SELECT 1")
+
+
+async def through_local_constant() -> None:
+    path = ":memory:"
+    conn = sqlite3.connect(path)
+    conn.execute("SELECT 1")
+
+
+async def through_star(args: tuple[str]) -> None:
+    conn = sqlite3.connect(*args)
+    conn.execute("SELECT 1")
+"#;
+
+const MEMORY_SHAPES_3: &str = r#"import sqlite3
+
+
+async def through_percent(alias: str) -> None:
+    conn = sqlite3.connect("file:memorydb_%s?mode=memory&cache=shared" % alias, uri=True)
+    conn.execute("SELECT 1")
+
+
+async def through_format(alias: str) -> None:
+    conn = sqlite3.connect("file:memorydb_{}?mode=memory&cache=shared".format(alias), uri=True)
+    conn.execute("SELECT 1")
+
+
+async def through_constant_fstring() -> None:
+    conn = sqlite3.connect(f"file:rope-{1}:?mode=memory&cache=shared", uri=True)
+    conn.execute("SELECT 1")
+
+
+class Data:
+    def __init__(self, name: str) -> None:
+        self._filename = f"file:coverage-{name}?mode=memory&cache=shared"
+
+    def read(self) -> None:
+        sqlite3.connect(self._filename, uri=True).execute("SELECT 1")
+
+
+async def through_attribute_fstring() -> None:
+    Data("x").read()
+"#;
+
+const MEMORY_SHAPES_4: &str = r#"import sqlite3
+
+
+class Store:
+    def __init__(self, path: str = ":memory:") -> None:
+        self.conn = sqlite3.connect(f"{path}")
+
+    def get(self) -> None:
+        self.conn.execute("SELECT 1")
+
+
+async def fstring_default() -> None:
+    Store().get()
+
+
+def open_fmt(path: str = ":memory:"):
+    return sqlite3.connect("{}".format(path))
+
+
+async def format_default() -> None:
+    open_fmt().execute("SELECT 1")
+"#;
+
+const FILE_SHAPES: &str = r#"import os
+import sqlite3
+from pathlib import Path
+
+DB = "app.db"
+HERE = os.path.dirname(__file__)
+
+
+async def tp_literal() -> None:
+    sqlite3.connect("app.db").execute("SELECT 1")
+
+
+async def tp_constant() -> None:
+    sqlite3.connect(DB).execute("SELECT 1")
+
+
+async def tp_path() -> None:
+    sqlite3.connect(Path(__file__).parent / "data.db").execute("SELECT 1")
+
+
+async def tp_joined() -> None:
+    sqlite3.connect(os.path.join(HERE, "data.db")).execute("SELECT 1")
+"#;
+
 /// A connection whose opening heki does not see, a parameter or a value only an annotation
 /// types, may be in memory: its waits are not established, whatever opens it (here, in memory,
 /// through annotated parameters, attributes, and return values). Its statements are sent either
@@ -1514,11 +1763,11 @@ async def tp_pragma_named_at_run_time(conn: sqlite3.Connection, name):
             d(24, "EFF101", "tp_file", "sqlite3.connect"),
             d(33, "EFF111", "tp_journal", "sqlite3.Connection.execute"),
             d(
-                // An f-string is opaque (R6): a file name ending in `.db`, here.
+                // An f-string names no file heki can establish (here one ending in `.db`).
                 45,
-                "EFF101",
+                "EFF111",
                 "tn_paths_from_parameters",
-                "sqlite3.connect"
+                "sqlite3.Connection.execute"
             ),
             d(
                 46,

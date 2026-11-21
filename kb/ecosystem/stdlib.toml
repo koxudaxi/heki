@@ -732,15 +732,18 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "sqlite3.connect"
 effects = ["blocking_db", "unpooled_client_alloc"]
-# A connection heki sees opened on a file (`sqlite3.connect(file)`) waits on it; an in-memory
-# database is opened without I/O, and its statements run without waiting. One opened from a
-# parameter may be in memory, as may one only an annotation names (`sqlite3.Connection`).
-return_type = "sqlite3.connect(file)"
+# A connection waits on a file only when heki establishes that the argument names one (a
+# literal or a constant without an in-memory form, or a path built from such parts); an
+# in-memory database is opened without I/O, and its statements run without waiting. Any other
+# argument (a parameter, an f-string, an environment lookup) may be in memory: such a
+# connection, like one only an annotation names (`sqlite3.Connection`), may not wait.
+return_type = "sqlite3.Connection"
+emits = "if-on-disk"
 cases = [
     { arg = 0, param = "database", one_of = [":memory:"], effects = ["unpooled_client_alloc"], return_type = 'sqlite3.connect(":memory:")' },
     { arg = 0, param = "database", prefix = ["file::memory:"], effects = ["unpooled_client_alloc"], return_type = 'sqlite3.connect(":memory:")' },
     { arg = 0, param = "database", contains = ["mode=memory"], effects = ["unpooled_client_alloc"], return_type = 'sqlite3.connect(":memory:")' },
-    { arg = 0, param = "database", from_parameter = true, return_type = "sqlite3.Connection" },
+    { arg = 0, param = "database", names_file = true, return_type = "sqlite3.connect(file)", emits = "always" },
 ]
 exit_suppresses = false
 opaque_to_layer3 = true

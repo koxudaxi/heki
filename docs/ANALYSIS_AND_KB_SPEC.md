@@ -1175,12 +1175,14 @@ deeply unless `update=` hands it values by reference: `MUT202`), `return_type` (
 `sqlite3.connect`), `sync_lock_or_tx` (`threading.Lock`, `Session.begin`: `EFF106`), and
 `opaque_to_layer3` (reserved for Layer 3), and `cases`: what the call does instead when one
 argument (by position, the receiver not counted, or by keyword) is a given literal, a string
-literal with a given prefix, equal to one of given strings (`one_of`), an IPv4 or IPv6 address
-(`numeric_address`), or not empty, an instance of a given class, or an integer that sets
+literal with a given prefix, equal to one of given strings (`one_of`), containing one
+(`contains`), an IPv4 or IPv6 address (`numeric_address`), or not empty, a value established to
+name a file (`names_file`: a literal or module constant without an in-memory form, or a path
+built from such parts and `__file__`), an instance of a given class, or an integer that sets
 a named flag, alone or as an operand of `|` (`pd.read_csv` of a `https://` URL is
 `blocking_net`, of an `io.StringIO` nothing; `socket.getaddrinfo(..., flags=AI_NUMERICHOST)`
 resolves nothing); the first case that holds sets
-the call's `effects` and `return_type`, and an argument that is not passed, or may be passed
+the call's `effects`, `return_type`, and `emits`, and an argument that is not passed, or may be passed
 through `*` / `**` unpacking, selects none. A boolean flag case (`equals = false`) whose argument
 is a parameter of the calling function (`shutdown(wait=wait)`) becomes a guard: the effects it
 switches off need the parameter to be true, which the callers decide (`close(wait=False)`). A file lists its `opaque_packages`. Projects add or

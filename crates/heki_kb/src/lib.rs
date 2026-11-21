@@ -330,11 +330,12 @@ pub struct ArgCase {
     pub numeric_address: bool,
     /// A string literal containing one of these.
     pub contains: Vec<String>,
-    /// A value the calling function may compute from one of its parameters (the parameter, or
-    /// `str()` or a concatenation of it), which its callers decide.
-    pub from_parameter: bool,
+    /// A value established to name a file ([`ArgFact::names_file`]).
+    pub names_file: bool,
     pub effects: Option<Vec<ExecEffectKind>>,
     pub return_type: Option<String>,
+    /// When the call waits in this case, instead of the entry's `emits`.
+    pub emits: Option<Emits>,
 }
 
 /// A literal `ArgCase::equals` compares with.
@@ -349,9 +350,10 @@ pub enum ArgLiteral {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ArgFact {
     pub literal: Option<LiteralValue>,
-    /// The value may be computed from a parameter of the calling function
-    /// ([`ArgCase::from_parameter`]).
-    pub from_parameter: bool,
+    /// The value is established to name a file: a literal or a module constant bound once with
+    /// no in-memory form (`":memory:"`, `file::memory:`, `mode=memory`), `__file__`, or a path
+    /// built only from such parts.
+    pub names_file: bool,
     /// The class of the value, when it is an instance of a known one.
     pub class: Option<String>,
     /// The named constants the value sets with `|` (one name alone sets itself): each flag is
@@ -394,18 +396,10 @@ impl ArgCase {
             self.one_of.is_empty() || text.is_some_and(|t| self.one_of.iter().any(|o| o == t));
         let contains = self.contains.is_empty()
             || text.is_some_and(|t| self.contains.iter().any(|c| t.contains(c.as_str())));
-        let parameter = !self.from_parameter || fact.from_parameter;
+        let file = !self.names_file || fact.names_file;
         let numeric =
             !self.numeric_address || text.is_some_and(|t| t.parse::<std::net::IpAddr>().is_ok());
-        equals
-            && prefix
-            && nonempty
-            && instance
-            && flag
-            && one_of
-            && numeric
-            && contains
-            && parameter
+        equals && prefix && nonempty && instance && flag && one_of && numeric && contains && file
     }
 }
 
@@ -438,6 +432,11 @@ impl EcosystemEntry {
     pub fn effects_in<'e>(&'e self, case: Option<&'e ArgCase>) -> &'e [ExecEffectKind] {
         case.and_then(|c| c.effects.as_deref())
             .unwrap_or(&self.effects)
+    }
+
+    /// When the call waits: its case's `emits`, or the entry's.
+    pub fn emits_in(&self, case: Option<&ArgCase>) -> Emits {
+        case.and_then(|c| c.emits).unwrap_or(self.emits)
     }
 
     pub fn return_type_in<'e>(&'e self, case: Option<&'e ArgCase>) -> Option<&'e str> {
@@ -1319,13 +1318,17 @@ mod tests {
                             ArgCase {
                                 arg: Some(0),
                                 param: Some("database".into()),
-                                from_parameter: true,
-                                return_type: Some("sqlite3.Connection".into()),
+                                names_file: true,
+                                return_type: Some(SQLITE3_FILE.into()),
+                                emits: Some(Emits::Always),
                                 ..ArgCase::default()
                             },
                         ]
                     },
-                    returning(SQLITE3_FILE, entry(&[BlockingDb, UnpooledClientAlloc])),
+                    returning(
+                        "sqlite3.Connection",
+                        entry(&[BlockingDb, UnpooledClientAlloc]),
+                    ),
                 ),
             ),
             // The connections of an in-memory database and of one named by a parameter.
@@ -2267,6 +2270,7 @@ mod tests {
         (
             Emits::IfOnDisk,
             &[
+                "sqlite3.connect",
                 "sqlite3.Connection.execute",
                 "sqlite3.Connection.executemany",
                 "sqlite3.Connection.executescript",
@@ -2510,7 +2514,7 @@ mod tests {
                         || !case.one_of.is_empty()
                         || case.numeric_address
                         || !case.contains.is_empty()
-                        || case.from_parameter,
+                        || case.names_file,
                     "{symbol}"
                 );
                 assert!(

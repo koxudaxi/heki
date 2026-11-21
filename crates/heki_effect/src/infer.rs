@@ -867,10 +867,6 @@ impl<'e, 'a> Engine<'e, 'a> {
             call.star_from,
             (index, keyword),
             |v| {
-                // A value no instruction defines is a parameter or a phi: either may come from
-                // a parameter.
-                let no_phi = |_: VarId, _: &mut Vec<VarId>| false;
-                let undefined = |d: VarId| self.f.def_inst(d).is_none();
                 resolver::arg_fact(
                     |d| self.f.def_inst(d).map(|(_, i)| i),
                     class,
@@ -878,7 +874,7 @@ impl<'e, 'a> Engine<'e, 'a> {
                         Ty::Ref(fqn) => Some(fqn.clone()),
                         _ => None,
                     },
-                    (&no_phi, &undefined),
+                    &|n| self.cx.global_str(n).map(str::to_owned),
                     v,
                 )
             },
