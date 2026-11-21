@@ -398,6 +398,41 @@ jobs:
       # Python 3.12 is the runner's `python3`, which release-draft.yml runs the scripts with.
       - run: uvx --python 3.12 --from "pytest==8.4.2" --with "pyyaml==6.0.3" --with "jsonschema==4.25.1" pytest scripts/tests
 
+  pre-commit-hook:
+    # `.pre-commit-hooks.yaml` as a project's configuration uses it: pre-commit builds heki from
+    # this checkout and runs the hook on a project with one report.
+    name: pre-commit hook
+    if: *full-run
+    runs-on: ubuntu-24.04
+    # A cold release build, without a cache: pre-commit builds in its own directory.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # maturin builds with the cargo on PATH; the runner's own Rust can be older than heki's
+      # `rust-version`.
+      - uses: dtolnay/rust-toolchain@92e73e19cbfb3981e63ef478a16f95f415e634d3 # 1.99.0
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          enable-cache: false
+      - name: The hook builds heki and checks a project
+        working-directory: ${{ runner.temp }}
+        # An explicit `bash` adds `-o pipefail`: a hook that fails fails the step.
+        shell: bash
+        env:
+          HOOK_REPOSITORY: ${{ github.workspace }}
+        run: |
+          mkdir -p project/app
+          cd project
+          printf '[project]\nname = "hook-check"\n' > pyproject.toml
+          printf 'import time\n\n\nasync def handler() -> None:\n    time.sleep(1)\n' > app/handler.py
+          git init --quiet
+          git add .
+          # The hook sets `verbose: true`, so a passing run with a warning still prints it.
+          uvx --from "pre-commit==4.7.0" pre-commit try-repo "$HOOK_REPOSITORY" heki --all-files | tee output.txt
+          grep -q "app/handler.py:5:5: EFF101 " output.txt
+
   gate:
     name: CI gate
     # The one required check: every job passed, or, in the middle of a stack, every job but the
@@ -415,6 +450,7 @@ jobs:
       - cpython
       - memory
       - release-scripts
+      - pre-commit-hook
     runs-on: ubuntu-24.04
     steps:
       - name: Every job passed or was skipped as the stack position allows
