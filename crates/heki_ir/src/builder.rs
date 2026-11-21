@@ -426,7 +426,11 @@ impl<'a> ModuleLowerer<'a> {
             passed_from: None,
         };
         let fn_id = self.alloc_function_slot(placeholder);
-        self.lowered_at.insert(spec.span, fn_id);
+        // The module body is no definition, and its span (the whole source) is also the span of
+        // a definition or an expression that spans the whole file.
+        if !spec.is_module_body {
+            self.lowered_at.insert(spec.span, fn_id);
+        }
 
         let mut builder = FnBuilder::new(
             self,
