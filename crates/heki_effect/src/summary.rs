@@ -33,7 +33,7 @@ use heki_ir::{
 };
 use heki_kb::{EffectiveEcosystemKb, ExecEffectKind};
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::cell::{OnceCell, RefCell};
+use std::cell::OnceCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
@@ -588,8 +588,6 @@ struct Extractor<'a> {
     stored_attrs: Vec<&'a str>,
     /// The block and phi defining each phi variable (`GuardInputs::phis`).
     phis: OnceCell<FxHashMap<VarId, (BlockId, &'a PhiNode)>>,
-    /// Buffers of the guard analysis's backward walks (`GuardInputs::scratch`).
-    scratch: RefCell<(FxHashSet<VarId>, Vec<VarId>)>,
     /// The loops around each block.
     around: OnceCell<Vec<Vec<&'a NaturalLoop>>>,
     guards: LocalGuards,
@@ -905,7 +903,6 @@ impl<'a> Extractor<'a> {
             fresh: FxHashSet::default(),
             stored_attrs,
             phis: OnceCell::new(),
-            scratch: RefCell::default(),
             around: OnceCell::new(),
             guards: LocalGuards::default(),
             summary,
@@ -974,7 +971,6 @@ impl<'a> Extractor<'a> {
             stored_attrs: &self.stored_attrs,
             fresh: &self.fresh,
             phis: &self.phis,
-            scratch: &self.scratch,
             kb: self.cx.kb,
         }
     }

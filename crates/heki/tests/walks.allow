@@ -12,9 +12,7 @@ heki_effect::consumption::runs_on_every_return  W2  worklist: reach, Closure, or
 heki_effect::guards::Facts::decompose_at  W1  recursion (calls itself): Memo or Closure
 heki_effect::guards::Facts::find_tests  W2  worklist: reach, Closure, or fixpoint
 heki_effect::guards::LocalGuards::repeating  W2  worklist: reach, Closure, or fixpoint
-heki_effect::guards::derived  W2  worklist: reach, Closure, or fixpoint
 heki_effect::guards::dominated  W2  worklist: reach, Closure, or fixpoint
-heki_effect::guards::fresh_in_loop  W2  worklist: reach, Closure, or fixpoint
 heki_effect::guards::returns_or_retests  W2  worklist: reach, Closure, or fixpoint
 heki_effect::guards::sets_on_every_way  W2  worklist: reach, Closure, or fixpoint
 heki_effect::guards::stays_set  W2  worklist: reach, Closure, or fixpoint
