@@ -96,6 +96,16 @@ release can change rules, configuration keys, diagnostics, and output formats.
   (`items = given or []`, `d.get(k, {})`, a callee returning a memo or its argument), made
   directly, through a helper, or in a closure, and a store of such a value in `self.<attr>` that a
   method of the class family changes in place.
+- `MUT114` (`cached-result-mutation`) reports an in-place change of an object that a
+  `functools.lru_cache` / `functools.cache` function returned, which `MUT202` reported without
+  configuration before. It runs by default, and a report is exact when the function changes in place
+  the list, dict, or set that the cached function returned, the same object on every path: the
+  decorator resolves through the imports to `functools` (a module's own `cache` decorator does not
+  count), its `maxsize` is left out, `None`, or a literal number above `0`, the function takes a
+  parameter besides `self` / `cls`, and every return a run can reach hands out that kind of
+  container, by its return annotation or by construction (`html.escape(text).split("\n")` included).
+  Its other reports (through wrappers or helpers, an object below the result, a class instance) are
+  heuristic.
 - `MUT113` (`iterated-container-mutation`, opt-in, experimental) reports a dict, set, or deque
   of `self` changed in place while a method iterates it: by another method of the class while a
   generator is suspended inside the iteration, or by a function the loop's body calls; the next
@@ -158,27 +168,39 @@ release can change rules, configuration keys, diagnostics, and output formats.
   `OPT130`) is exact: a census of every one of its 234 reports on the Stage 0-A corpus, and a check
   of the 235 of one run on a frozen holdout corpus of 100 packages, found none wrong. `OPT113`'s
   exact tier is certified too (8 reports in the census and 6 in the holdout run, none wrong) and
-  runs by default. `EFF101`, `EFF103`, and `DATA101` are exact too (`docs/precision.md` has their
-  census and holdout counts). `heki check` with no configuration runs the exact rules (`EFF101`,
-  `EFF103`, `DATA101`, and the proven tier of the `OPT` rules above) and the contract rules and
-  shows the reports whose rewrite is proven safe, and `heki check --fix` applies the proven fixes of
-  `OPT101` and `OPT102`. `MUT202`, which also reports `@lru_cache` / `@cache` results without a
-  contract, is selected like the other heuristic rules, so a `readonly-returns` contract needs it
-  named or `lint.heuristic = true`. `lint.heuristic = true` restores the rules of 0.1; baselines
-  keep their keys.
+  runs by default. `EFF101`, `EFF103`, `DATA101`, `MUT110`, and `MUT114` are exact too
+  (`docs/precision.md` has their census and holdout counts, and lists their certifications).
+  `heki check` with no configuration runs the exact rules (`EFF101`, `EFF103`, `DATA101`, `MUT110`,
+  `MUT114`, and the proven tier of the `OPT` rules above) and the contract rules and shows the
+  reports whose rewrite is proven safe, and `heki check --fix` applies the proven fixes of `OPT101`
+  and `OPT102`. `lint.heuristic = true` restores the rules of 0.1; baselines keep their keys, except
+  the reports that move to `MUT114` (below).
+- `MUT202` (`readonly-return-mutation`) is a contract rule: it reports the declared
+  `readonly-returns` producers, and runs when such a contract is declared. Changes of `@lru_cache` /
+  `@cache` results move to `MUT114` (`cached-result-mutation`): regenerate a baseline that holds
+  them, or add `MUT114` to `ignore`.
 - Every output labels heuristic reports: `[error, heuristic]` in `full`,
   `EFF102 [heuristic] ...` in `concise`, `title=heki EFF102 (heuristic)` in `github`, and
   ` [heuristic]` after the language server's message. `heki rule --all` lists each rule's
   certainty and when it runs (`on`, `off`, `opt-in`, or `contract`) instead of
   `default=true` / `false`.
-- A rule's default severity follows what happens in the code it reports, not its family: a bug
-  (a wrong result, an exception, a lost update, a deadlock, or a broken contract) is an
-  `error`, slower code a `warning`. `EFF101`, `EFF102`, `EFF103`, `EFF105`, `DATA101`, and the
-  `OPT` rules default to `warning` instead of `error`; the other rules stay `error`. This
-  changes the output label, the SARIF level, the language server's severity, and the exit code
-  (see Breaking changes: a warning no longer fails the run). `[tool.heki.lint.severity]` still
-  overrides it. Each rule page shows its default severity, and `heki rule --output-format json`
-  gives each rule's `consequence` (`bug` or `slowdown`).
+- A rule's default severity follows what happens in the code it reports, not its family: a bug (a
+  wrong result, an exception, a lost update, a deadlock, or a broken contract) is an `error`, slower
+  code a `warning`. `EFF101`, `EFF102`, `EFF103`, `EFF105`, `DATA101`, and the `OPT` rules default
+  to `warning` instead of `error`; the other rules stay `error`. This changes the output label, the
+  SARIF level, the language server's severity, and the exit code (see Breaking changes: a warning no
+  longer fails the run). `[tool.heki.lint.severity]` still overrides it. Each rule page shows its
+  default severity, and `heki rule --output-format json` gives each rule's `consequence` (`bug`,
+  `minor-bug`, or `slowdown`). A bug that is rarely harmful is a `warning` too: `MUT110`
+  (`readonly-param-mutation`), a broken read-only annotation.
+- `MUT110` names the line where the helper changes the parameter, in the message and as a related
+  location: "`median` passes its read-only parameter `values` to `helpers.sort_values`; whenever
+  line 2 of `sort_values` runs, it changes the caller's object in place". It no longer says that
+  every call changes it. `MUT110` is exact and runs by default when the line changes a builtin
+  container (`list`, `dict`, `set`, ... by annotation, construction, or an `isinstance` test); a
+  change of a value heki does not know as one (a helper that types nothing), or one heki finds only
+  where a generator another function returns is iterated, names no line, and that report is
+  heuristic.
 - `OPT` messages state their claim and nothing else: what the statement does each time it runs in
   the loop (`` `rows = rows + [...]` copies the whole list each time it runs in the loop ``),
   without "on every iteration", which heki does not establish, and without cost estimates
@@ -213,6 +235,9 @@ release can change rules, configuration keys, diagnostics, and output formats.
   `itertools.groupby` (`sorted(users, key=lambda u: score(conn, u))`), when the items are not a
   fixed number. Its body runs at the call for every rule, so `EFF101` sees its blocking calls
   too. A `functools.partial` handed to such a builtin is followed to the function it calls.
+- `MUT107` (`hash-attr-mutation`) is opt-in: it runs only when `select` or `extend-select` names it,
+  also with `lint.heuristic = true`. Its message states the claim only: "`Tag.rename` rebinds
+  `self.name` outside initialization, and `Tag.__hash__` reads it".
 
 ### Fixed
 
@@ -286,6 +311,16 @@ release can change rules, configuration keys, diagnostics, and output formats.
   attribute (`self.xref = {}`, then `self.xref[k] = v`), nor a store or a `defaultdict` read under
   a key the container holds (past `if self.items.get(k) is None: raise KeyError(k)`, inside
   `if k in self.items:` at any depth).
+- `MUT107` reads the `__hash__` of the writer's instances: each `self` method and property the hash
+  calls is the one the writer's class finds along its MRO, not an override in another subclass
+  (`Expression.__hash__` reading `self.identity` reads `self.lhs` only on the instances of the
+  subclass whose `identity` reads it).
+- `MUT101` and `MUT107` no longer report a write that is no plain store: to an attribute that a
+  class along the MRO binds to a property (`@property`, `@x.setter`, `@x.deleter`,
+  `x = property(...)`; a raising deleter changes nothing), on a class whose MRO defines
+  `__setattr__` or `__delattr__`, and on a class with a base heki names no class for
+  (`class Proxy(with_metaclass(Meta))`, `Base = declarative_base()`), whose metaclass may install
+  descriptors.
 - `MUT107` (`hash-attr-mutation`) no longer reports a write that cannot change a hash a `set` or
   `dict` has filed: an in-place change (an item store, `append`) of an attribute `__hash__`
   hands whole to `hash()` (`hash(self.items)`: a list or `bytearray` there cannot be hashed, and
