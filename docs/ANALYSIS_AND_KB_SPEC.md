@@ -659,8 +659,8 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      `model_copy(deep=True)`, `dataclasses.replace`, `copy.replace`, the builtin container
      constructors `dict` / `list` / `tuple` / `set` / `frozenset`, and the Layer 2
      `copy_sanitizer` entries, as deep as each entry says: a shallow copy ends it for the top
-     level only), a display that only unpacks tagged values (`{**x}`, `[*xs]`,
-     `readonly::display_copies`) is a shallow copy of them, and a slice is a shallow copy unless
+     level only), a display that only unpacks tagged values (`{**x}` with no other entry,
+     `[*xs, *ys]`, `readonly::display_copies`) is a shallow copy of them, and a slice is a shallow copy unless
      the value's class is inferred and is not a builtin sequence
      (`readonly::subscript_step`, shared with the return flow). A copy method of a project class
      (`Image.copy`) is a call of that method, not a copy by its name (`readonly::call_derivation`).

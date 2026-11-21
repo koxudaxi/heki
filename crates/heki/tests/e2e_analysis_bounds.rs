@@ -870,3 +870,35 @@ fn aliases_of_a_large_string_constant_share_its_text() {
     let diags = check_within(&p, Duration::from_secs(20));
     assert!(diags.is_empty(), "{diags:#?}");
 }
+
+/// A helper filling thousands of items of its argument's attribute, each in a branch of its own
+/// (`if flag: p.items[0] = 0`): the `not in` tests that would make a store a memo fill are found
+/// in one walk of the blocks.
+#[test]
+fn item_stores_in_many_branches_find_membership_tests_once() {
+    let mut lines = vec![
+        "from functools import lru_cache".to_owned(),
+        String::new(),
+        String::new(),
+        "@lru_cache(maxsize=None)".to_owned(),
+        "def config(name):".to_owned(),
+        "    return object()".to_owned(),
+        String::new(),
+        String::new(),
+        "def fill(p, flag):".to_owned(),
+    ];
+    for i in 0..3000 {
+        lines.push("    if flag:".to_owned());
+        lines.push(format!("        p.items[{i}] = {i}"));
+    }
+    lines.extend(["", "", "def use(name):", "    fill(config(name), True)"].map(str::to_owned));
+    let p = Project::new("bounds_branch_item_stores");
+    p.write("m.py", &(lines.join("\n") + "\n"));
+    let found = check_within(&p, Duration::from_secs(20));
+    let reported: Vec<&str> = found
+        .iter()
+        .filter(|d| d["rule_code"] == "MUT202")
+        .map(|d| d["qualname"].as_str().unwrap())
+        .collect();
+    assert_eq!(reported, vec!["use"], "{found:#?}");
+}

@@ -388,6 +388,16 @@ class Column(Field):
         self.name = name
 
 
+class Restored(Field):
+    def __eq__(self, other):
+        return self is other
+
+    __hash__ = Field.__hash__
+
+    def rename(self, name):
+        self.name = name
+
+
 class Labeled(MetaField):
     def __hash__(self):
         return hash(("labeled", self.name))
@@ -400,12 +410,14 @@ class Tagged(MetaField):
         );
     // `CompositeKey` instances hash with their own `__hash__`, and `Identity` instances (an
     // `__eq__` without `__hash__`) cannot be hashed: neither writer changes a `Field` hash.
-    // `Field.relabel` runs on instances of every class here, and is reported once.
+    // `Restored` hashes with `Field.__hash__` again. `Field.relabel` runs on instances of every
+    // class here, and is reported once.
     assert_eq!(
         reports(&p, "MUT107"),
         vec![
             at("pkg/fields.py", 9, "Field.relabel"),
             at("pkg/keys.py", 25, "Column.rename"),
+            at("pkg/keys.py", 35, "Restored.rename"),
         ]
     );
 }
@@ -649,14 +661,17 @@ def retitle(name):
     s["fields"] = ["x"]
     t = {**schema(name), "extra": []}
     t["extra"].append(1)
+    fresh = {"fields": []}
+    u = {**schema(name), **fresh}
+    u["fields"].append(1)
     r = list(rows(name))
     r.append(["y"])
     copied(name)["new"] = 1
 "#,
     );
     // The new container holds the cached one's values: changing them changes the cache, while
-    // changing the new container's own items does not. A display adding values of its own is
-    // not followed (`t["extra"]` is its own list).
+    // changing the new container's own items does not. A dict display adding values of its own
+    // is not followed (`t["extra"]` is its own list, and so is `u["fields"]`).
     assert_eq!(
         reports(&p, "MUT202"),
         vec![

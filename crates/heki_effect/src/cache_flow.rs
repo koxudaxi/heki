@@ -223,16 +223,24 @@ pub fn attr_writes<'f>(
             break;
         }
     }
-    // The `if k not in <obj>.<attr>:` branch into `bb`.
+    // The `if k not in <obj>.<attr>:` branches, by the block they lead into.
+    let mut membership: FxHashMap<BlockId, Vec<(u32, &str)>> = FxHashMap::default();
+    for p in &f.blocks {
+        if let Terminator::Branch { cond, then_bb, .. } = &p.terminator
+            && let Some(InstKind::Compare {
+                op: CompareOpKind::NotIn,
+                rhs,
+                ..
+            }) = defs.get(cond)
+            && let Some(&held) = alias.get(rhs)
+        {
+            membership.entry(*then_bb).or_default().push(held);
+        }
+    }
     let guarded = |bb: BlockId, held: (u32, &str)| {
-        f.blocks.iter().any(|p| match &p.terminator {
-            Terminator::Branch { cond, then_bb, .. } if *then_bb == bb => matches!(
-                defs.get(cond),
-                Some(InstKind::Compare { op: CompareOpKind::NotIn, rhs, .. })
-                    if alias.get(rhs) == Some(&held)
-            ),
-            _ => false,
-        })
+        membership
+            .get(&bb)
+            .is_some_and(|tests| tests.contains(&held))
     };
     // `(block, index, (object, attr), memo_shaped, rebinds)` of each write.
     let mut found = Vec::new();

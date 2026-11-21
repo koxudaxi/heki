@@ -1554,18 +1554,26 @@ impl ProjectDecls {
     }
 
     /// The class whose `__hash__` the instances of the project class `class` use: the first
-    /// class along its MRO whose body defines `__hash__`, or defines `__eq__` without it (Python
-    /// then sets its `__hash__` to `None`). `None` when no project class before an external
-    /// base does (heki does not know what an external class defines).
+    /// class along its MRO whose body defines `__hash__` as a method, or binds `__eq__` without
+    /// binding `__hash__` (Python then sets its `__hash__` to `None`). `None` when no project
+    /// class before an external base does (heki does not know what an external class defines),
+    /// or when a class binds `__hash__` otherwise (`__hash__ = Base.__hash__`).
     pub fn hash_owner(&self, class: &str) -> Option<String> {
-        self.mro(class)
-            .into_iter()
-            .take_while(|c| self.is_project_class(c))
-            .find(|c| {
-                self.read(|k| note(&mut k.class_facts, c));
-                self.class(c)
-                    .is_some_and(|d| d.members.contains("__hash__") || d.members.contains("__eq__"))
-            })
+        for c in self.mro(class) {
+            self.read(|k| note(&mut k.class_facts, &c));
+            let members = &self.class(&c)?.members;
+            let defines = || {
+                self.methods_of(&c)
+                    .iter()
+                    .any(|k| k.qualname.rsplit('.').next() == Some("__hash__"))
+            };
+            match (members.contains("__hash__"), members.contains("__eq__")) {
+                (true, _) => return defines().then_some(c),
+                (false, true) => return Some(c),
+                (false, false) => {}
+            }
+        }
+        None
     }
 
     /// Every project class that (transitively) inherits from `class`, sorted.

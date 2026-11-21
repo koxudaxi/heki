@@ -46,21 +46,17 @@ pub fn subscript_step(f: &IrFunction, inst: &Inst, obj_type: Option<&str>) -> Re
 }
 
 /// The values a display that only unpacks others copies into the container it makes: the
-/// `**m` entries of a dict display and the starred elements of a list, tuple, or set display
+/// one `**m` entry of a dict display, or the starred elements of a list, tuple, or set display
 /// (`{**m}`, `[*xs, *ys]`). The new container is a shallow copy of each
-/// ([`ReturnStep::SHALLOW_COPY`]). A display that also holds values of its own
-/// (`{**m, "k": []}`) is not followed: which of its items are the copied ones depends on keys
+/// ([`ReturnStep::SHALLOW_COPY`]). A dict display with more entries (`{**m, "k": []}`,
+/// `{**m, **fresh}`) is not followed: which of its items are the copied ones depends on keys
 /// the shared value does not carry.
 pub fn display_copies(f: &IrFunction, kind: &InstKind) -> Vec<VarId> {
     match kind {
-        InstKind::DictLiteral { entries, .. } => entries
-            .iter()
-            .map(|e| match e {
-                DictEntry::Unpack { dict } => Some(*dict),
-                DictEntry::KeyValue { .. } => None,
-            })
-            .collect::<Option<Vec<_>>>()
-            .unwrap_or_default(),
+        InstKind::DictLiteral { entries, .. } => match entries.as_slice() {
+            [DictEntry::Unpack { dict }] => vec![*dict],
+            _ => Vec::new(),
+        },
         InstKind::AllocBuiltin { elems, .. } if elems.iter().all(|v| f.is_unpacked(*v)) => {
             elems.clone()
         }
