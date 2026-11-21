@@ -182,15 +182,17 @@ pub(crate) fn group_texts(
     site: Option<&CallSite>,
 ) -> (String, String) {
     let texts: Vec<&str> = group.iter().map(|&i| targets[i].text.as_str()).collect();
+    // In the order first named, each once.
     let mut named: Vec<String> = Vec::new();
+    let mut seen: FxHashSet<String> = FxHashSet::default();
     for &i in group {
         let names = match site {
             Some(site) if super::names_members(&targets[i].text) => targets[i].called_at(site),
             _ => vec![targets[i].text.clone()],
         };
-        for name in names.into_iter().map(|n| format!("`{n}`")) {
-            if !named.contains(&name) {
-                named.push(name);
+        for name in names {
+            if seen.insert(name.clone()) {
+                named.push(format!("`{name}`"));
             }
         }
     }
