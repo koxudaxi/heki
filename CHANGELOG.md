@@ -53,6 +53,31 @@ release can change rules, configuration keys, diagnostics, and output formats.
   heuristic report may not have established. `docs/precision.md` defines exact and heuristic
   reports, the assumptions R1-R7 exact claims rest on, how a rule is certified, and what each
   rule measured.
+- `EFF111` (`async-possibly-blocking-call`) and `EFF113` (`loop-possible-db-query`), heuristic: the
+  reports `EFF101` and `EFF103` made before, where the new exact claims are not established. See the
+  first entry under Changed.
+- `sqlite3.connect` of an in-memory database (`":memory:"`, `file::memory:`, `mode=memory`) does not
+  wait, and neither do the statements on that connection. A connection waits only where heki
+  establishes that it was opened on a file (a literal or a module constant without an in-memory
+  form, or a path built from such parts and `__file__`); any other, one opened from a parameter, an
+  f-string, or an environment lookup, or only named by an annotation, may be in memory, so its waits
+  are not established (`EFF111`; its statements still count for `EFF103`). Reports name such
+  connections' methods by the library's API (`sqlite3.Connection.execute`). A pragma that only reads
+  or sets an option of the connection (`PRAGMA busy_timeout = 5000`) does not wait.
+- Test code, which `lint.relax-async-in-tests` leaves out of `EFF101`, `EFF111`, `EFF105`, and
+  `EFF106`, is what pytest discovers: `test_*` functions and the functions nested in them,
+  `test_*.py` and `*_test.py` files at any depth, and files under `test/` or `tests/`.
+- The ecosystem catalog says when a call waits. A blocking effect waits for input or output or for
+  another thread (`blocking_sync`), which can have done its part already. Every wait entry lists the
+  arguments that end it at once: `time.sleep(0)`, `Popen.wait(timeout=0)`, a numeric host or
+  `localhost` for `socket.getaddrinfo` and `socket.gethostbyname`, a `data:` URL for `urlopen`; no
+  rule reports those calls as waiting. Database entries carry `emits` (`always`,
+  `on-identity-map-miss` for `Session.get`, `if-pending` for `Session.flush` / `commit` and a
+  driver's `commit()` / `rollback()`, `unless-cached` for Django's `QuerySet.count()` / `exists()` /
+  `first()` / `last()`, `unless-connected` for a pool checkout), and context managers
+  `exit_suppresses` (`false` for files, locks, HTTP sessions, and database connections; `true` for
+  `contextlib.suppress`), and calls whose results the environment sizes `items` (`rows`, `lines`,
+  `entries`, `text`). New argument tests: `one_of` and `numeric_address`.
 - `MUT206` (`unresolved-guarded-read`) and `MUT207` (`unresolved-guarded-call`): `read-owners`
   and `call-owners` contracts take `unresolved = "report"`, as `write-owners` does, and then
   report the reads of an attribute and the calls of a method named like a target on an object of
@@ -82,19 +107,42 @@ release can change rules, configuration keys, diagnostics, and output formats.
 
 ### Changed
 
-- Only exact reports are shown by default. A report is *exact* when every premise of its claim
-  was established and its rule was certified (a false exact report is a bug), and *heuristic*
-  when a premise can be open, so that it can be wrong about the code. A heuristic rule runs
-  when `select` or `extend-select` names its code or name, and with the new
-  `[tool.heki.lint] heuristic = true` (`--heuristic`) also by default and for every prefix and
-  `ALL`, as Ruff's `preview` does. An exact rule's heuristic reports (an `OPT` report whose
-  rewrite is not proven) are shown under the same conditions. A contract rule runs when its
-  contract is declared, whatever its certainty. No rule is exact yet: `heki check` with no configuration runs only the contract
-  rules, and `heki check --fix` applies no fix, since `OPT101` and `OPT102` stay heuristic until
-  a measurement certifies them. `MUT202`, which also reports `@lru_cache` / `@cache` results
-  without a contract, is selected like the other heuristic rules, so a `readonly-returns`
-  contract needs it named or `lint.heuristic = true`. `lint.heuristic = true` restores the rules
-  of 0.1; baselines keep their keys.
+- `DATA101` marks a report exact when every premise is established (the update returns on every
+  iteration that completes, every path around the back edge carries it, the loop steps through a
+  parameter, the rows of a query, the lines of a file, or directory entries, and its trip count is
+  not fixed) and heuristic otherwise; its message names the loop's origin and drops "(quadratic
+  copying)".
+- `EFF101` and `EFF103` state exact claims, each premise established: `EFF101` that whenever the
+  reported call returns, a call that waits for the network, a database, a child process, or a sleep
+  has run on the event loop's thread, through functions that each make the next call on every path
+  on which they return (exception edges included), with every implementation of each call followed
+  (protocol receivers are not); `EFF103` that every iteration of a loop over a parameter, the rows
+  of a query, the lines of a file, or the entries of a directory sends a database statement. Their
+  messages state the claim and its witnesses only: a call whose implementations reach different
+  statements names each with the function that makes it, and relates each where it is, and "N+1" and
+  "batch the queries" are gone. Everything else they reported is `EFF111` / `EFF113`. Waits on
+  another thread (`Thread.join()`, `Event.wait()`, locks, `Queue.get()`, `put()` on a bounded queue,
+  `Future.result()`) are `EFF111` only. Both are certified exact, as is `DATA101`
+  (`docs/precision.md` has their census and holdout counts), and run by default.
+- Only exact reports are shown by default. A report is *exact* when every premise of its claim was
+  established and its rule was certified (a false exact report is a bug), and *heuristic* when a
+  premise can be open, so that it can be wrong about the code. A heuristic rule runs when `select`
+  or `extend-select` names its code or name, and with the new `[tool.heki.lint] heuristic = true`
+  (`--heuristic`) also by default and for every prefix and `ALL`, as Ruff's `preview` does. An exact
+  rule's heuristic reports (an `OPT` report whose rewrite is not proven) are shown under the same
+  conditions. A contract rule runs when its contract is declared, whatever its certainty. The proven
+  tier of the eight `OPT` rewrite rules (`OPT101`-`OPT103`, `OPT110`, `OPT111`, `OPT120`, `OPT121`,
+  `OPT130`) is exact: a census of every one of its 234 reports on the Stage 0-A corpus, and a check
+  of the 235 of one run on a frozen holdout corpus of 100 packages, found none wrong. `OPT113`'s
+  exact tier is certified too (8 reports in the census and 6 in the holdout run, none wrong) and
+  runs by default. `EFF101`, `EFF103`, and `DATA101` are exact too (`docs/precision.md` has their
+  census and holdout counts). `heki check` with no configuration runs the exact rules (`EFF101`,
+  `EFF103`, `DATA101`, and the proven tier of the `OPT` rules above) and the contract rules and
+  shows the reports whose rewrite is proven safe, and `heki check --fix` applies the proven fixes of
+  `OPT101` and `OPT102`. `MUT202`, which also reports `@lru_cache` / `@cache` results without a
+  contract, is selected like the other heuristic rules, so a `readonly-returns` contract needs it
+  named or `lint.heuristic = true`. `lint.heuristic = true` restores the rules of 0.1; baselines
+  keep their keys.
 - Every output labels heuristic reports: `[error, heuristic]` in `full`,
   `EFF102 [heuristic] ...` in `concise`, `title=heki EFF102 (heuristic)` in `github`, and
   ` [heuristic]` after the language server's message. `heki rule --all` lists each rule's
@@ -108,6 +156,34 @@ release can change rules, configuration keys, diagnostics, and output formats.
   (see Breaking changes: a warning no longer fails the run). `[tool.heki.lint.severity]` still
   overrides it. Each rule page shows its default severity, and `heki rule --output-format json`
   gives each rule's `consequence` (`bug` or `slowdown`).
+- `OPT` messages state their claim and nothing else: what the statement does each time it runs in
+  the loop (`` `rows = rows + [...]` copies the whole list each time it runs in the loop ``),
+  without "on every iteration", which heki does not establish, and without cost estimates
+  ("(quadratic)", "(O(n) per iteration)", "(O(n²))", "(O(n·m))"). `OPT110` names the container it
+  scans (a list or a tuple), and `OPT130` says the constructor builds a new container for the
+  membership test, not "the same container", which only a proven rewrite establishes. The rule pages
+  state the claim the same way: its premises are the container's builtin type, the loop, and, for a
+  rule's exact tier, the proven rewrite; no size is claimed. A proven report of a size-dependent
+  `OPT` rule in a loop whose trip count the code fixes or caps (`range(50)`, `rows[:100]`, a display
+  of 20 items, a length test such as `if len(rows) > 100: raise ...`) is heuristic: true, but no
+  evidence either way.
+- `OPT113` reports carry a tier. A report is in the exact tier when each key the inner loop loads is
+  a plain attribute of an item whose class heki knows (a dataclass, `attrs`, or `NamedTuple` field,
+  or what the class stores, with no property or other descriptor of that name in the project) or an
+  item of a builtin container, both loops step through the function's inputs (parameters, or
+  attributes or items of them), an inner item whose key differs runs nothing but the comparison (no
+  statement before the test or after the `if`, no earlier `and` operand, and an inner iterable that
+  is a builtin container by its type or construction, not a value of unknown type, a generator,
+  `map`, `filter`, or another call), and the inner loop steps through the same collection, with the
+  same keys, on every outer iteration; a loop whose trip count the code fixes or caps has no exact
+  report. Its message states that claim ("for each item of `orders`, the loop over `customers`
+  compares `order.customer_id == customer.id` and does nothing else for an item that does not
+  match"); the other reports are heuristic. The help names a `set` or `dict` only for keys known to
+  be hashable, and an index built before the outer loop only for an inner collection that stays the
+  same; otherwise it states the condition ("if the keys are hashable, ..."). For a mapping the inner
+  loop steps through by its own keys, it says to look each outer key up in the mapping.
+- `OPT103`'s help for a `tuple` accumulator says to extend a list and convert it once with
+  `tuple(...)`, not to join the pieces.
 - `EFF102` and `EFF103` also report the function a builtin calls once per item: the function
   handed to `map`, `filter`, `itertools.starmap`, `itertools.filterfalse`, and
   `functools.reduce`, and the `key` of `sorted`, `list.sort`, `min`, `max`, and
@@ -148,12 +224,11 @@ release can change rules, configuration keys, diagnostics, and output formats.
   loop (followed by `return`, `break`, or `raise`): it runs once per run of the loop.
 - `EFF101` no longer reports `result()` or `exception()` of a `concurrent.futures.Future` known
   to be done: under `if f.done():`, or once `await asyncio.wrap_future(f)` has returned.
-- `EFF101` no longer reports `put()` on a `queue.Queue`, `LifoQueue`, or `PriorityQueue` that
-  is not known to be bounded: built without a positive `maxsize`, or one heki cannot follow to
-  where it is built. A `put` waits only while its queue is full. heki follows the queue into
-  local variables, the attributes its class family stores, module globals, and parameters
-  whose callers bind known queues; an `effect-boundaries` contract forbidding `blocking-sync`
-  counts a `put` the same way.
+- `EFF111` no longer reports `put()` on a `queue.Queue`, `LifoQueue`, or `PriorityQueue` that is not
+  known to be bounded: built without a positive `maxsize`, or one heki cannot follow to where it is
+  built. A `put` waits only while its queue is full. heki follows the queue into local variables,
+  the attributes its class family stores, module globals, and parameters whose callers bind known
+  queues; an `effect-boundaries` contract forbidding `blocking-sync` counts a `put` the same way.
 - `EFF107` (`unretained-async-task`, opt-in) no longer reports a task whose bound method is
   passed to a call or stored, as in `self.addCleanup(task.cancel)` or
   `loop.call_later(1, task.cancel)`: the bound method holds the task.
