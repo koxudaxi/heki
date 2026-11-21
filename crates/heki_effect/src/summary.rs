@@ -8,6 +8,9 @@ use crate::construction::{Escape, Pos, Recorder};
 use crate::consumption::{ItemArgs, IterFlow, PerItemCall, Roots, param_iteration};
 use crate::guards::{self, GuardInputs, LocalGuards, per_item_bit};
 use crate::invalidation::{self, Events, FlowWrite, FuncFlow, Reach, SiteFlow};
+use crate::iterations::{
+    self, BetweenSteps, ContainerChange, IteratedContainer, IteratedResult, ResultIteration,
+};
 use crate::ownership::{self, LocalOrigins, Origins, ParamRole, Source};
 use crate::readonly::{self, Derivation, ProtectedReturn, ReturnStep, Shared};
 use crate::resolver::{
@@ -17,19 +20,20 @@ use crate::resolver::{
 use crate::{
     Access, ArgBinding, ArgOrigin, ArgTargets, AttrKeyPath, BoundCallee, CallHop, CallSite,
     CallTarget, Construction, Contracts, Dispatch, EffectSummary, FileSummary, FuncKey,
-    GuardSubject, Implementers, Items, ModuleInput, NewArg, NewCond, NewKind, PerItem,
+    GuardSubject, Implementers, Items, ModuleInput, NewArg, NewCond, NewKind, OptInFacts, PerItem,
     ProjectDecls, ReadKind, ReturnsNew, Runner, SharedLine, SiteRole, Slot, TypedFieldReadSite,
     TypedFieldWriteSite, Unresolved, UnresolvedAccessSite, UnresolvedWriteSite, WriteKind,
 };
 use heki_ast::Span;
 use heki_ir::{
-    BinOpKind, BlockId, BuiltinKind, ConstLiteral, DictEntry, FunctionId, FunctionKind, Inst,
-    InstKind, IrFunction, ModuleIr, NaturalLoop, PhiNode, Terminator, VarId,
+    BinOpKind, BlockId, BuiltinKind, CompareOpKind, ConstLiteral, DictEntry, FunctionId,
+    FunctionKind, Inst, InstKind, IrFunction, ModuleIr, NaturalLoop, PhiNode, Terminator,
+    UnaryOpKind, VarId,
 };
 use heki_kb::{EffectiveEcosystemKb, ExecEffectKind};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::cell::{OnceCell, RefCell};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -126,13 +130,14 @@ pub(crate) fn summarize_module(
     own: (Arc<ModuleDecls>, DeclKeys),
     track: bool,
     contracts: Option<&dyn Contracts>,
+    opt_in: OptInFacts,
 ) -> FileSummary {
     let (own_decls, completion_reads) = own;
     let (mut file, reads) = if track {
-        decls.record(|| extract_module(input, decls, kb, contracts))
+        decls.record(|| extract_module(input, decls, kb, contracts, opt_in))
     } else {
         (
-            extract_module(input, decls, kb, contracts),
+            extract_module(input, decls, kb, contracts, opt_in),
             DeclKeys::default(),
         )
     };
@@ -147,6 +152,7 @@ fn extract_module(
     decls: &ProjectDecls,
     kb: &EffectiveEcosystemKb,
     contracts: Option<&dyn Contracts>,
+    opt_in: OptInFacts,
 ) -> FileSummary {
     let cx = TypeCtx::new(input, decls, kb);
     let mut file = FileSummary {
@@ -173,13 +179,13 @@ fn extract_module(
             qualname: func_qualname(f).to_owned(),
         };
         let (mut summary, mut sites, flow) =
-            Extractor::new(f, &key, &cx, &input.path, contracts).run();
+            Extractor::new(f, &key, &cx, &input.path, contracts, opt_in).run();
         // A `class` statement in a function runs its body there: the body's effects and calls
         // are the function's (its methods run only when they are called).
         if !f.is_module_body {
             for body in class_bodies_run_by(input.ir, f) {
                 let (s, body_sites, _) =
-                    Extractor::new(body, &key, &cx, &input.path, contracts).run();
+                    Extractor::new(body, &key, &cx, &input.path, contracts, opt_in).run();
                 absorb_class_body(&mut summary, s);
                 sites.extend(
                     body_sites
@@ -368,6 +374,9 @@ fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary) {
         into.inplace_param_slots.entry(i).or_default().extend(slots);
     }
     into.mutates_self_attrs.extend(other.mutates_self_attrs);
+    if let Some(facts) = other.iterations {
+        into.iteration_facts_mut().merge(*facts);
+    }
     into.invalidates_cached.extend(other.invalidates_cached);
     into.typed_field_write_sites
         .extend(other.typed_field_write_sites);
@@ -616,6 +625,61 @@ struct Extractor<'a> {
     maybe_new: FxHashSet<VarId>,
     /// [`Contracts::ownership`]: the facts only ownership contracts read are computed.
     ownership: bool,
+    /// The opt-in facts the enabled rules read.
+    opt_in: OptInFacts,
+    /// The value each copy copies ([`Self::copied_from`]), built on first use.
+    copy_roots: OnceCell<FxHashMap<VarId, VarId>>,
+    /// The function's dominator tree over all its edges, built on first use.
+    dominators: OnceCell<heki_ir::DominatorTree>,
+    /// [`KeyFacts`], built on first use.
+    key_facts: OnceCell<KeyFacts<'a>>,
+    /// The changes of checked containers of `self` the visit finds, recorded after it
+    /// ([`Self::self_container_changes`]).
+    self_changes: Vec<SelfChange>,
+}
+
+/// A key of a container as [`Extractor::key_present`] compares keys: the same variable through
+/// copies, or the same constant (`self.items["k"]`).
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum KeyOf<'a> {
+    Var(VarId),
+    Const(&'a ConstLiteral),
+}
+
+/// The tests and reads of keys of the containers attributes of `self` hold, by attribute
+/// ([`Extractor::key_present`]).
+struct KeyFacts<'a> {
+    /// Per key, the blocks dominated by a side of a branch on which the container holds the key,
+    /// when the branch alone enters that side.
+    sides: FxHashMap<String, FxHashMap<KeyOf<'a>, heki_ir::Dominated>>,
+    /// The index of the first read of each key in each block.
+    reads: FxHashMap<String, FxHashMap<(BlockId, KeyOf<'a>), usize>>,
+}
+
+/// A change of the checked container (`MUT113`) that `var` holds, `self.<attr>`.
+struct SelfChange {
+    var: VarId,
+    attr: String,
+    change: ContainerChange,
+    span: Span,
+}
+
+/// The stores of a function to the attributes of `self` its changes change, and its reads of
+/// attributes of `self` ([`Extractor::rebound_before`]).
+struct Rebindings<'a> {
+    stores: FxHashMap<&'a str, Rebinding>,
+    /// The attribute each read reads, and where.
+    reads: FxHashMap<VarId, (&'a str, Position)>,
+}
+
+/// The stores of a function to one attribute of `self`.
+struct Rebinding {
+    /// Whether every store is of a new object.
+    all_new: bool,
+    /// The index of the first store in each block.
+    first_in_block: FxHashMap<BlockId, usize>,
+    /// The blocks the stores' blocks dominate.
+    dominated: heki_ir::Dominated,
 }
 
 /// A project call, for the sites of the object it returns (`SiteRole`).
@@ -631,6 +695,152 @@ struct ProjectCall {
     dst: VarId,
     /// Each callee with the parameter each argument variable binds.
     params: Vec<(FuncKey, Vec<(u8, VarId)>)>,
+    /// The receiver its callees bind to their first parameter (a method's `self`, a property's
+    /// object), which `params` leaves out.
+    recv: Option<VarId>,
+}
+
+/// The object a value holds ([`CallObjects::object_of`]): a value, or an attribute read of one.
+type Object<'s> = (VarId, Option<&'s str>);
+
+/// The project calls of a function by span, and the object each of its values holds, for the
+/// objects of a `ResultIteration`: built once per function, each value's object found once.
+struct CallObjects<'x> {
+    calls_at: FxHashMap<Span, Vec<&'x ProjectCall>>,
+    /// The values a project call returns: a property read among them runs a getter, which may
+    /// return a new object at each read.
+    results: FxHashSet<VarId>,
+    defs: &'x FxHashMap<VarId, &'x Inst>,
+    types: &'x FxHashMap<VarId, Val>,
+    /// The method's own `self`, which `super()` is.
+    self_var: Option<VarId>,
+    copied: RefCell<FxHashMap<VarId, VarId>>,
+}
+
+impl<'x> CallObjects<'x> {
+    fn new(ex: &'x Extractor<'_>) -> Self {
+        let mut calls_at: FxHashMap<Span, Vec<&'x ProjectCall>> = FxHashMap::default();
+        for call in &ex.project_calls {
+            calls_at
+                .entry(ex.sites[call.site].span)
+                .or_default()
+                .push(call);
+        }
+        Self {
+            calls_at,
+            results: ex.project_calls.iter().map(|c| c.dst).collect(),
+            defs: &ex.defs,
+            types: &ex.types,
+            self_var: ex.f.params.first().map(|p| p.var),
+            copied: RefCell::default(),
+        }
+    }
+
+    /// The iteration `between` steps the results of `calls`, with the objects of the loop's calls
+    /// that the iterated calls bind to a parameter (numbered by their first loop call).
+    fn iteration(&self, between: BetweenSteps, calls: &[(Span, &ProjectCall)]) -> ResultIteration {
+        let arguments: Vec<Vec<(u8, Object<'_>)>> = calls
+            .iter()
+            .map(|(_, call)| {
+                let bound = call
+                    .params
+                    .iter()
+                    .flat_map(|(_, bound)| bound.iter().copied());
+                let all = call.recv.map(|r| (0, r)).into_iter().chain(bound);
+                all.filter(|(p, _)| *p < 64)
+                    .map(|(p, v)| (p, self.object_of(v)))
+                    .collect()
+            })
+            .collect();
+        let bound: FxHashSet<Object<'_>> = arguments.iter().flatten().map(|(_, o)| *o).collect();
+        let mut numbers: FxHashMap<Object<'_>, u32> = FxHashMap::default();
+        let receivers: Vec<Option<u32>> = between
+            .calls
+            .iter()
+            .map(|span| {
+                let at = self.calls_at.get(span).into_iter().flatten();
+                let firsts = at.filter_map(|c| {
+                    c.recv.or_else(|| {
+                        c.params
+                            .iter()
+                            .flat_map(|(_, bound)| bound)
+                            .find(|(p, _)| *p == 0)
+                            .map(|(_, v)| *v)
+                    })
+                });
+                let object = firsts
+                    .map(|v| self.object_of(v))
+                    .find(|o| bound.contains(o))?;
+                let next = u32::try_from(numbers.len()).unwrap_or(u32::MAX);
+                Some(*numbers.entry(object).or_insert(next))
+            })
+            .collect();
+        let mut results: Vec<IteratedResult> = calls
+            .iter()
+            .zip(arguments)
+            .map(|((call, _), arguments)| IteratedResult {
+                call: *call,
+                arguments: arguments
+                    .into_iter()
+                    .filter_map(|(p, o)| Some((p, *numbers.get(&o)?)))
+                    .collect(),
+            })
+            .collect();
+        results.sort();
+        let receivers = if receivers.iter().all(Option::is_none) {
+            Vec::new()
+        } else {
+            receivers
+        };
+        ResultIteration {
+            between,
+            receivers,
+            results,
+        }
+    }
+
+    /// The object `var` holds, as far as the function's code tells: the value it copies, or an
+    /// attribute read of one that runs no property getter (`self.registry` read twice is one
+    /// object, as the containers `MUT113` checks are attributes of `self`).
+    fn object_of(&self, var: VarId) -> Object<'x> {
+        let value = self.copied_value(var);
+        match self.defs.get(&value).map(|inst| &inst.kind) {
+            Some(InstKind::AttrLoad { obj, attr, .. }) if !self.results.contains(&value) => {
+                (self.copied_value(*obj), Some(attr.as_str()))
+            }
+            _ => (value, None),
+        }
+    }
+
+    /// The value `var` copies, through `Copy`; `super()` is the method's own `self`. A phi merges
+    /// different values. Each copy on the way keeps the answer.
+    fn copied_value(&self, var: VarId) -> VarId {
+        let mut chain = Vec::new();
+        let mut cur = var;
+        let found = loop {
+            if let Some(&known) = self.copied.borrow().get(&cur) {
+                break known;
+            }
+            match self.defs.get(&cur).map(|inst| &inst.kind) {
+                Some(InstKind::Copy { src, .. }) => {
+                    chain.push(cur);
+                    cur = *src;
+                }
+                _ => {
+                    chain.push(cur);
+                    break match (self.types.get(&cur), self.self_var) {
+                        (Some(Val::Super(_)), Some(first)) => first,
+                        _ => cur,
+                    };
+                }
+            }
+        };
+        let mut copied = self.copied.borrow_mut();
+        for v in chain {
+            copied.insert(v, found);
+        }
+        found
+    }
 }
 
 /// Whether a decorator of `f` is one of `names` ([`ModuleDecls::decorator_is`]).
@@ -645,6 +855,7 @@ impl<'a> Extractor<'a> {
         cx: &'a TypeCtx<'a>,
         path: &'a Path,
         contracts: Option<&'a dyn Contracts>,
+        opt_in: OptInFacts,
     ) -> Self {
         let (types, narrowed, isinstance_classes) = cx.infer_flow(f);
         let mut defs = FxHashMap::default();
@@ -728,6 +939,11 @@ impl<'a> Extractor<'a> {
             track: false,
             maybe_new: FxHashSet::default(),
             ownership: false,
+            opt_in,
+            copy_roots: OnceCell::new(),
+            dominators: OnceCell::new(),
+            key_facts: OnceCell::new(),
+            self_changes: Vec::new(),
         };
         ex.ownership = contracts.is_some_and(|c| c.ownership());
         ex.track = ex.ownership && ex.may_construct();
@@ -1402,9 +1618,26 @@ impl<'a> Extractor<'a> {
                 self.visit(bb.id, index, &inst.kind, inst.span);
             }
         }
+        self.self_container_changes();
         self.resolve_construction();
-        self.returned_origins();
+        if self.opt_in.return_origins {
+            self.returned_origins();
+        }
         self.iterations();
+        if self.opt_in.iterations {
+            let site_spans: FxHashSet<Span> = self.sites.iter().map(|s| s.span).collect();
+            let container_iterations = iterations::container_iterations(
+                f,
+                self.cx,
+                &self.types,
+                &self.self_attr_alias,
+                &site_spans,
+                self.summary.is_generator,
+            );
+            if !container_iterations.is_empty() {
+                self.summary.iteration_facts_mut().container_iterations = container_iterations;
+            }
+        }
         self.apply_declaration();
         if self.summary.is_cached_property && f.kind == FunctionKind::Sync {
             self.summary.returns_self_attrs = self.returned_self_attrs();
@@ -1430,12 +1663,45 @@ impl<'a> Extractor<'a> {
         (self.summary, self.sites, flow)
     }
 
+    /// `IterationFacts::result_iterations`: what runs between the steps of each iteration (by
+    /// position, `iterated`, per project call) of the object a project call returns (a
+    /// generator, or one a plain function hands on).
+    fn result_iterations(&mut self, iterated: &[Vec<(Span, u16, Position)>]) {
+        if iterated.iter().all(Vec::is_empty) {
+            return;
+        }
+        let site_spans: FxHashSet<Span> = self.sites.iter().map(|s| s.span).collect();
+        let objects = CallObjects::new(self);
+        // The calls whose results each iteration steps, by its position: one fact per iteration.
+        let mut stepping: BTreeMap<Position, Vec<(Span, &ProjectCall)>> = BTreeMap::new();
+        for (call, uses) in self.project_calls.iter().zip(iterated) {
+            for &(_, _, at) in uses {
+                let span = self.sites[call.site].span;
+                stepping.entry(at).or_default().push((span, call));
+            }
+        }
+        let mut found = Vec::new();
+        for ((block, index), calls) in stepping {
+            let inst = &self.f.block(block).insts[index];
+            if let Some(between) =
+                BetweenSteps::of(self.f, inst, &site_spans, self.summary.is_generator)
+            {
+                found.push(objects.iteration(between, &calls));
+            }
+        }
+        self.summary
+            .iteration_facts_mut()
+            .result_iterations
+            .extend(found);
+    }
+
     /// Where the function iterates its parameters and the objects its project calls return
     /// (`consumption::IterFlow`): the parameter facts (`consumes_params`,
     /// `unconditional_forwards`, `iterates_params`), and one more site of a call's callees
     /// wherever the object it returns is iterated, returned by this (plain) function, or passed
     /// to a project call (`SiteRole`). Any other use (stored, passed to an external or
-    /// unresolved call, yielded, stepped with `next()`) runs nothing here.
+    /// unresolved call, yielded, stepped with `next()`) runs nothing here; a result that outlives
+    /// one of its uses is `CallSite::result_held`.
     fn iterations(&mut self) {
         let f = self.f;
         if f.params.is_empty() && self.project_calls.is_empty() {
@@ -1474,15 +1740,28 @@ impl<'a> Extractor<'a> {
                 }
             }
         }
+        if self.opt_in.iterations {
+            self.result_iterations(&iterated);
+        }
         // Which call results a plain function returns (a generator's `return` value ends its
         // iteration and is no iterator handed out).
         let mut returned = vec![false; self.project_calls.len()];
-        if f.kind == FunctionKind::Sync && !f.is_module_body {
+        let plain = f.kind == FunctionKind::Sync && !f.is_module_body;
+        if plain {
             for bb in &f.blocks {
                 if let Terminator::Return(Some(v)) = bb.terminator {
                     for c in calls_in(&flow.expand_steps(&[v])) {
                         returned[c] = true;
                     }
+                }
+            }
+        }
+        if self.opt_in.iterations {
+            let results: FxHashSet<VarId> = by_dst.keys().copied().collect();
+            let held = iterations::held_results(f, &flow, &results, plain);
+            for call in &self.project_calls {
+                if held.contains(&call.dst) {
+                    self.sites[call.site].result_held = true;
                 }
             }
         }
@@ -1875,14 +2154,7 @@ impl<'a> Extractor<'a> {
         if returned.is_empty() || !keeps_returned_value(&f.decorators) {
             return;
         }
-        let mut callees: FxHashMap<VarId, &Callee> = FxHashMap::default();
-        for bb in &f.blocks {
-            for (i, inst) in bb.insts.iter().enumerate() {
-                if let (Some(dst), Some(c)) = (inst.kind.dst(), self.callees.get(&(bb.id, i))) {
-                    callees.insert(dst, c);
-                }
-            }
-        }
+        let callees = self.callees_by_result();
         let phis: FxHashMap<VarId, (BlockId, &PhiNode)> = f
             .blocks
             .iter()
@@ -1901,17 +2173,7 @@ impl<'a> Extractor<'a> {
                 Some((p.var, role))
             })
             .collect();
-        let kb = self.cx.kb;
-        let source_of = |inst: &'a Inst| {
-            let callee = inst.kind.dst().and_then(|d| callees.get(&d).copied());
-            match (&inst.kind, callee) {
-                // A property read calls its getter.
-                (InstKind::AttrLoad { .. }, Some(Callee::Project(..))) => Source::Project,
-                (kind, callee) => {
-                    ownership::source(kind, callee, self.construction(kind).is_some(), kb)
-                }
-            }
-        };
+        let source_of = |inst: &'a Inst| self.ownership_source(inst, &callees);
         let slice_copies = |v: VarId| {
             ownership::slice_copies(match self.types.get(&v) {
                 Some(Val::Inst(c)) => Some(c.as_str()),
@@ -2024,6 +2286,38 @@ impl<'a> Extractor<'a> {
                 params.resize(slot + 1, ArgOrigin::default());
             }
             params[slot].origins = Some(Box::new(o));
+        }
+    }
+
+    /// [`ownership::source`] of `inst`, with the project callees of the function's calls by
+    /// their results (`callees`).
+    fn ownership_source(&self, inst: &'a Inst, callees: &FxHashMap<VarId, &Callee>) -> Source<'a> {
+        self.ownership_source_given(inst, callees, &|v| self.made_here(v, callees))
+    }
+
+    /// [`ownership::made_here`] of the object `var` holds.
+    fn made_here(&self, var: VarId, callees: &FxHashMap<VarId, &Callee>) -> bool {
+        ownership::made_here(self.copied_from(var), &self.defs, &|i, made_here| {
+            self.ownership_source_given(i, callees, made_here)
+        })
+    }
+
+    /// [`Self::ownership_source`], where `made_here` tells the values that hold an object the
+    /// function makes itself.
+    fn ownership_source_given(
+        &self,
+        inst: &'a Inst,
+        callees: &FxHashMap<VarId, &Callee>,
+        made_here: &dyn Fn(VarId) -> bool,
+    ) -> Source<'a> {
+        let callee = inst.kind.dst().and_then(|d| callees.get(&d).copied());
+        match (&inst.kind, callee) {
+            // A property read calls its getter.
+            (InstKind::AttrLoad { .. }, Some(Callee::Project(..))) => Source::Project,
+            (kind, callee) => {
+                let constructs = self.construction(kind).is_some();
+                ownership::source(kind, callee, constructs, self.cx.kb, made_here)
+            }
         }
     }
 
@@ -2243,6 +2537,8 @@ impl<'a> Extractor<'a> {
     }
 
     fn visit(&mut self, bb: BlockId, index: usize, kind: &'a InstKind, span: Span) {
+        // (The subscript instructions bind `index` to their key.)
+        let index_in_block = index;
         self.store_escapes(kind);
         match kind {
             InstKind::AttrLoad { dst, obj, attr } if attr != "__dict__" => {
@@ -2267,6 +2563,7 @@ impl<'a> Extractor<'a> {
                 obj,
                 index,
                 key_const,
+                is_slice,
                 ..
             } => {
                 // `obj.__dict__["attr"]`, `obj.__dict__[KEY]`.
@@ -2275,6 +2572,15 @@ impl<'a> Extractor<'a> {
                 {
                     self.typed_read(owner, &k, ReadKind::DictDirect, span);
                 }
+                // Reading a missing key of a `defaultdict` inserts it.
+                if self.opt_in.iterations
+                    && !is_slice
+                    && !crate::consumption::is_unpacking(self.f, *index, span)
+                    && matches!(self.val(*obj), Some(Val::Inst(c)) if c == "collections.defaultdict")
+                    && !self.key_present(bb, index_in_block, *obj, *index)
+                {
+                    self.container_change(*obj, ContainerChange::Resizes, span);
+                }
             }
             InstKind::BinOp {
                 dst,
@@ -2282,8 +2588,12 @@ impl<'a> Extractor<'a> {
                 lhs,
                 in_place: true,
                 ..
-            } if self.changes_in_place(*dst, *lhs, *op) => {
-                self.container_mut(*lhs, None, None, span);
+            } if self.has_in_place_operator(*lhs, *op) => {
+                if self.changes_in_place(*dst, *lhs, *op) {
+                    self.container_mut(*lhs, None, None, span);
+                }
+                // `self.items |= other` changes the container before storing it back.
+                self.container_change(*lhs, ContainerChange::Resizes, span);
             }
             // A value stored in a module global or a closure variable outlives the call.
             InstKind::StoreGlobal { value, .. } | InstKind::StoreDeref { value, .. } => {
@@ -2306,6 +2616,10 @@ impl<'a> Extractor<'a> {
                 value,
             } => {
                 self.subscript_write(*obj, key_const.as_deref(), *index, false, span);
+                // A store under a key the container holds changes no iterator's step.
+                if !self.key_present(bb, index_in_block, *obj, *index) {
+                    self.container_change(*obj, ContainerChange::StoresItems, span);
+                }
                 self.note_escape(*value);
             }
             InstKind::SubscriptDelete {
@@ -2314,6 +2628,7 @@ impl<'a> Extractor<'a> {
                 key_const,
             } => {
                 self.subscript_write(*obj, key_const.as_deref(), *index, true, span);
+                self.container_change(*obj, ContainerChange::Resizes, span);
             }
             InstKind::MethodCall {
                 dst,
@@ -2341,6 +2656,11 @@ impl<'a> Extractor<'a> {
                             self.note_escape(*a);
                         }
                     }
+                }
+                if !matches!(callee, Callee::Project(..))
+                    && let Some(change) = iterations::method_change(method)
+                {
+                    self.container_change(*recv, change, span);
                 }
                 // `obj.__dict__.get("attr"[, default])`.
                 if method == "get"
@@ -2930,10 +3250,324 @@ impl<'a> Extractor<'a> {
         let stored = self.uses.get(&dst).into_iter().flatten().any(|u| {
             matches!(u, InstKind::AttrStore { value, .. } | InstKind::SubscriptStore { value, .. } if *value == dst)
         });
-        !stored
-            && matches!(self.val(lhs), Some(Val::Inst(class)) if IN_PLACE_OPERATORS
-                .iter()
-                .any(|(c, ops)| c == class && ops.contains(&op)))
+        !stored && self.has_in_place_operator(lhs, op)
+    }
+
+    /// Whether `lhs op= ...` changes the built-in container `lhs` holds in place, whatever the
+    /// result is stored to.
+    fn has_in_place_operator(&self, lhs: VarId, op: BinOpKind) -> bool {
+        matches!(self.val(lhs), Some(Val::Inst(class)) if IN_PLACE_OPERATORS
+            .iter()
+            .any(|(c, ops)| c == class && ops.contains(&op)))
+    }
+
+    /// Whether the checked container of `self` that `obj` holds has the key `key` at instruction
+    /// `index` of `bb` (`MUT113`): the instruction is on the side of a test where the container
+    /// holds the key (inside `if key in <container>:`, past `if key not in <container>: return`
+    /// or `if <container>.get(key) is None: raise KeyError(key)`), or past a read of
+    /// `<container>[key]` in its block (not for a `Counter`). The container is `obj`, a copy of
+    /// it, or another read of the same `self.<attr>`.
+    fn key_present(&self, bb: BlockId, index: usize, obj: VarId, key: VarId) -> bool {
+        let Some(attr) = self.checked_self_container(obj) else {
+            return false;
+        };
+        let key = self.key_identity(key);
+        let facts = self.key_facts();
+        // A read of a missing key raises, or inserts it into a `defaultdict`; a `Counter` returns
+        // 0 without inserting it.
+        let counter = |c: &String| matches!(c.as_str(), "collections.Counter" | "typing.Counter");
+        let may_be_counter = matches!(self.val(obj), Some(Val::Inst(c)) if counter(c))
+            || matches!(self.val(obj), Some(Val::Union(cs)) if cs.iter().any(counter));
+        let read_before = !may_be_counter
+            && facts
+                .reads
+                .get(attr.as_str())
+                .and_then(|reads| reads.get(&(bb, key)))
+                .is_some_and(|&first| first < index);
+        read_before
+            || facts
+                .sides
+                .get(attr.as_str())
+                .and_then(|sides| sides.get(&key))
+                .is_some_and(|dominated| self.dominators().contains(dominated, bb))
+    }
+
+    /// [`KeyFacts`] of the function, from one walk on first use.
+    fn key_facts(&self) -> &KeyFacts<'a> {
+        self.key_facts.get_or_init(|| {
+            let preds = self.f.predecessors();
+            let mut reads: FxHashMap<String, FxHashMap<(BlockId, KeyOf<'a>), usize>> =
+                FxHashMap::default();
+            let mut sides: FxHashMap<String, FxHashMap<KeyOf<'a>, Vec<BlockId>>> =
+                FxHashMap::default();
+            for b in &self.f.blocks {
+                for (i, inst) in b.insts.iter().enumerate() {
+                    if let InstKind::SubscriptLoad {
+                        obj,
+                        index,
+                        is_slice: false,
+                        ..
+                    } = &inst.kind
+                        && let Some(attr) = self.self_attr_alias.get(obj)
+                    {
+                        let key = self.key_identity(*index);
+                        let first = reads.entry(attr.clone()).or_default();
+                        first.entry((b.id, key)).or_insert(i);
+                    }
+                }
+                if let Terminator::Branch {
+                    cond,
+                    then_bb,
+                    else_bb,
+                } = b.terminator
+                    && let Some((attr, key, on_then)) = self.key_test(cond)
+                {
+                    let side = if on_then { then_bb } else { else_bb };
+                    if preds[side.0 as usize].len() == 1 {
+                        let by_key = sides.entry(attr.clone()).or_default();
+                        by_key.entry(key).or_default().push(side);
+                    }
+                }
+            }
+            let sides = sides
+                .into_iter()
+                .map(|(attr, by_key)| {
+                    let by_key = by_key
+                        .into_iter()
+                        .map(|(key, blocks)| (key, self.dominators().dominated_by(blocks)))
+                        .collect();
+                    (attr, by_key)
+                })
+                .collect();
+            KeyFacts { sides, reads }
+        })
+    }
+
+    /// The attribute of `self` whose container a branch on `cond` tests, the key, and the side
+    /// on which the container holds the key (`true`: the `then` side): `key in c`,
+    /// `key not in c`, `c.get(key)`, `c.get(key) is None`, `c.get(key) is not None`, through
+    /// `not`.
+    fn key_test(&self, cond: VarId) -> Option<(&String, KeyOf<'a>, bool)> {
+        let none = |v: VarId| self.constant(v) == Some(&ConstLiteral::None);
+        // `c.get(key)` (without a default other than `None`): `None` only for a missing key or a
+        // stored `None`.
+        let lookup = |v: VarId| match self.defs.get(&self.copied_from(v)).map(|i| &i.kind) {
+            Some(InstKind::MethodCall {
+                recv,
+                method,
+                args,
+                kwargs,
+                ..
+            }) if method == "get"
+                && kwargs.is_empty()
+                && (args.len() == 1 || args.len() == 2 && none(args[1])) =>
+            {
+                Some((*recv, args[0]))
+            }
+            _ => None,
+        };
+        // `not` and copies (acyclic: neither reads a phi).
+        let (mut cur, mut negated) = (self.copied_from(cond), false);
+        while let Some(InstKind::UnaryOp {
+            op: UnaryOpKind::Not,
+            operand,
+            ..
+        }) = self.defs.get(&cur).map(|i| &i.kind)
+        {
+            negated = !negated;
+            cur = self.copied_from(*operand);
+        }
+        let (container, key, on_then) = match self.defs.get(&cur).map(|i| &i.kind) {
+            Some(InstKind::Compare {
+                op: op @ (CompareOpKind::In | CompareOpKind::NotIn),
+                lhs,
+                rhs,
+                ..
+            }) => (*rhs, *lhs, (*op == CompareOpKind::In) != negated),
+            Some(InstKind::Compare {
+                op: op @ (CompareOpKind::Is | CompareOpKind::IsNot),
+                lhs,
+                rhs,
+                ..
+            }) => {
+                let tested = if none(*rhs) { *lhs } else { *rhs };
+                let (container, key) = lookup(tested).filter(|_| none(*lhs) || none(*rhs))?;
+                (container, key, (*op == CompareOpKind::Is) == negated)
+            }
+            _ => {
+                let (container, key) = lookup(cur)?;
+                (container, key, !negated)
+            }
+        };
+        let attr = self.self_attr_alias.get(&container)?;
+        Some((attr, self.key_identity(key), on_then))
+    }
+
+    /// The key `var` is, as the stores and the tests of keys compare them.
+    fn key_identity(&self, var: VarId) -> KeyOf<'a> {
+        match self.constant(var) {
+            Some(literal) => KeyOf::Const(literal),
+            None => KeyOf::Var(self.copied_from(var)),
+        }
+    }
+
+    /// The literal the constant `var` holds (through copies).
+    fn constant(&self, var: VarId) -> Option<&'a ConstLiteral> {
+        match self.defs.get(&self.copied_from(var)).map(|i| &i.kind) {
+            Some(InstKind::Const { literal, .. }) => Some(literal),
+            _ => None,
+        }
+    }
+
+    /// `var` through copies.
+    fn copied_from(&self, var: VarId) -> VarId {
+        let roots = self
+            .copy_roots
+            .get_or_init(|| ownership::copy_roots(&self.defs));
+        roots.get(&var).copied().unwrap_or(var)
+    }
+
+    /// The function's dominator tree over all its edges.
+    fn dominators(&self) -> &heki_ir::DominatorTree {
+        self.dominators
+            .get_or_init(|| heki_ir::DominatorTree::of(self.f))
+    }
+
+    /// The attribute of `self` whose checked container (`MUT113`) `var` holds.
+    fn checked_self_container(&self, var: VarId) -> Option<&String> {
+        let checked = self.val(var).and_then(IteratedContainer::of_val).is_some();
+        self.self_attr_alias.get(&var).filter(|_| checked)
+    }
+
+    /// Whether the container `var` holds is a new object the function bound to `self.<attr>`
+    /// itself: `var` is a read of `self.<attr>` (through copies) that a store of a new object to
+    /// `self.<attr>` comes before on every path (`self.xref = {}`, then `self.xref[k] = v`), and
+    /// every store of the function to `self.<attr>` is of a new object. Its changes are that
+    /// object's, not those of a container an iteration started before the call steps.
+    fn rebound_before(&self, var: VarId, attr: &str, rebindings: &Rebindings<'_>) -> bool {
+        let read = rebindings
+            .reads
+            .get(&self.copied_from(var))
+            .filter(|(read, _)| *read == attr);
+        let (Some(&(_, (read_bb, read_index))), Some(stores)) = (read, rebindings.stores.get(attr))
+        else {
+            return false;
+        };
+        let tree = self.dominators();
+        stores.all_new
+            && (stores
+                .first_in_block
+                .get(&read_bb)
+                .is_some_and(|&first| first < read_index)
+                || tree
+                    .strict_dominator(read_bb)
+                    .is_some_and(|d| tree.contains(&stores.dominated, d)))
+    }
+
+    /// [`Rebindings`] of the attributes `changes` change, from one walk of the function once
+    /// the callees of all its calls are known.
+    fn rebindings(&self, changes: &[SelfChange]) -> Rebindings<'a> {
+        let changed: FxHashSet<&str> = changes.iter().map(|c| c.attr.as_str()).collect();
+        let mut reads = FxHashMap::default();
+        let mut stores: FxHashMap<&'a str, Vec<(Position, VarId)>> = FxHashMap::default();
+        for b in &self.f.blocks {
+            for (i, inst) in b.insts.iter().enumerate() {
+                match &inst.kind {
+                    InstKind::AttrLoad { dst, obj, attr } if self.self_vars.contains(obj) => {
+                        reads.insert(*dst, (attr.as_str(), (b.id, i)));
+                    }
+                    InstKind::AttrStore { obj, attr, value }
+                        if self.self_vars.contains(obj) && changed.contains(attr.as_str()) =>
+                    {
+                        stores
+                            .entry(attr.as_str())
+                            .or_default()
+                            .push(((b.id, i), *value));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let callees = self.callees_by_result();
+        let new_object = |v: VarId| self.made_here(v, &callees);
+        let stores = stores
+            .into_iter()
+            .map(|(attr, at)| {
+                let mut first_in_block = FxHashMap::default();
+                for &((b, i), _) in &at {
+                    first_in_block.entry(b).or_insert(i);
+                }
+                let rebinding = Rebinding {
+                    all_new: at.iter().all(|&(_, value)| new_object(value)),
+                    first_in_block,
+                    dominated: self
+                        .dominators()
+                        .dominated_by(at.iter().map(|&((b, _), _)| b)),
+                };
+                (attr, rebinding)
+            })
+            .collect();
+        Rebindings { stores, reads }
+    }
+
+    /// The project callees of the function's calls, by the variables their results go to.
+    fn callees_by_result(&self) -> FxHashMap<VarId, &Callee> {
+        let mut out: FxHashMap<VarId, &Callee> = FxHashMap::default();
+        for bb in &self.f.blocks {
+            for (i, inst) in bb.insts.iter().enumerate() {
+                if let (Some(dst), Some(c)) = (inst.kind.dst(), self.callees.get(&(bb.id, i))) {
+                    out.insert(dst, c);
+                }
+            }
+        }
+        out
+    }
+
+    /// An in-place change of the container `var` holds (`MUT113`): of a parameter itself, and of
+    /// `self.<attr>` of a class whose iterators check for changes ([`Self::self_changes`]).
+    fn container_change(&mut self, var: VarId, change: ContainerChange, span: Span) {
+        if !self.opt_in.iterations {
+            return;
+        }
+        if let Some((i, None)) = self.param_alias.get(&var).cloned() {
+            let facts = self.summary.iteration_facts_mut();
+            iterations::merge_changes(&mut facts.changes_param_containers, [(i, change)]);
+        }
+        if let Some(attr) = self.checked_self_container(var).cloned() {
+            self.self_changes.push(SelfChange {
+                var,
+                attr,
+                change,
+                span,
+            });
+        }
+    }
+
+    /// Record the changes of checked containers of `self` the visit found, but those of a new
+    /// object the function bound to the attribute before ([`Self::rebound_before`]): once the
+    /// callees of all the calls are known, which tell the stores of new objects.
+    fn self_container_changes(&mut self) {
+        let changes = std::mem::take(&mut self.self_changes);
+        if changes.is_empty() {
+            return;
+        }
+        let rebindings = self.rebindings(&changes);
+        let kept: Vec<SelfChange> = changes
+            .into_iter()
+            .filter(|c| !self.rebound_before(c.var, &c.attr, &rebindings))
+            .collect();
+        for SelfChange {
+            attr, change, span, ..
+        } in kept
+        {
+            let facts = self.summary.iteration_facts_mut();
+            iterations::merge_changes(&mut facts.changes_self_containers, [(attr.clone(), change)]);
+            facts
+                .self_container_change_sites
+                .entry(attr)
+                .or_default()
+                .insert(span);
+        }
     }
 
     /// In-place mutation of the container held in `var` (mutator method or subscript write):
@@ -3137,11 +3771,13 @@ impl<'a> Extractor<'a> {
     /// object it returns.
     fn call_inst(&mut self, bb: BlockId, index: usize, callee: Callee, call: &Call<'_>) {
         if let Some((site, params)) = self.call(bb, &callee, call) {
+            let binds_recv = self.sites[site].binds_recv && call.constructs.is_none();
             self.project_calls.push(ProjectCall {
                 site,
                 at: (bb, index),
                 dst: call.dst,
                 params,
+                recv: call.recv_var.or(call.value).filter(|_| binds_recv),
             });
         }
         self.callees.insert((bb, index), callee);
@@ -3212,6 +3848,7 @@ impl<'a> Extractor<'a> {
                         per_item: None,
                         dispatch: None,
                         result_discarded: false,
+                        result_held: false,
                     });
                 }
                 self.handed_callable(bb, symbol, call);
@@ -3866,6 +4503,7 @@ impl<'a> Extractor<'a> {
             per_item: None,
             dispatch: None,
             result_discarded: false,
+            result_held: false,
         }
     }
 
@@ -4398,6 +5036,7 @@ fn role_site(
         per_item: site.per_item.clone(),
         dispatch: site.dispatch.clone(),
         result_discarded: false,
+        result_held: false,
     }
 }
 
