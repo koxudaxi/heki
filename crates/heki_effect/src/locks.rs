@@ -775,18 +775,14 @@ fn read_condition<'i>(
     tests: &mut StateTests,
 ) {
     let mut stack = vec![cond];
-    let mut seen = FxHashSet::default();
+    // A value read twice (`x == x`) is read once.
+    let mut seen: FxHashSet<VarId> = stack.iter().copied().collect();
+    let mut operands = Vec::new();
     while let Some(v) = stack.pop() {
-        // A value read twice (`x == x`) is read once.
-        let kind = if seen.insert(v) {
-            def(v).map(|i| &i.kind)
-        } else {
-            None
-        };
-        match kind {
-            Some(InstKind::Copy { src, .. }) => stack.push(*src),
-            Some(InstKind::UnaryOp { operand, .. }) => stack.push(*operand),
-            Some(InstKind::Compare { lhs, rhs, .. }) => stack.extend([*lhs, *rhs]),
+        match def(v).map(|i| &i.kind) {
+            Some(InstKind::Copy { src, .. }) => operands.push(*src),
+            Some(InstKind::UnaryOp { operand, .. }) => operands.push(*operand),
+            Some(InstKind::Compare { lhs, rhs, .. }) => operands.extend([*lhs, *rhs]),
             Some(InstKind::AttrLoad { obj, attr, .. }) => {
                 if let Some(p) = param_of(*obj) {
                     tests.attrs.insert((p, attr.clone()));
@@ -804,6 +800,7 @@ fn read_condition<'i>(
             }
             _ => {}
         }
+        stack.extend(operands.drain(..).filter(|w| seen.insert(*w)));
     }
 }
 
