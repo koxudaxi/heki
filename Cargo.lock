@@ -592,6 +592,7 @@ dependencies = [
  "heki_semantic",
  "rustc-hash",
  "serde",
+ "serde_json",
  "smallvec",
 ]
 
