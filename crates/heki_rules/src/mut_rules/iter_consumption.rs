@@ -118,7 +118,10 @@ fn add_callee_consumption(
                 if offset == 1 && !decl.is_classmethod {
                     bound.extend(recv.map(|r| (0, r)));
                 }
-                bound.extend(positional.iter().enumerate().map(|(i, v)| (i + offset, *v)));
+                let slots = positional.iter().enumerate();
+                bound.extend(
+                    slots.filter_map(|(i, v)| Some((decl.positional_param(i + offset)?, *v))),
+                );
                 for (name, v) in kwargs {
                     let pos = name.as_ref().and_then(|n| decl.keyword_param(n));
                     bound.extend(pos.map(|p| (p, *v)));

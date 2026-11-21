@@ -4727,14 +4727,14 @@ impl<'a> Extractor<'a> {
         bindings: &Bindings<'_>,
         marked: &FxHashSet<String>,
     ) -> Option<Vec<(String, ArgValue)>> {
-        let positional = usize::from(decl.positional_params);
         let passed = offset + bindings.slots.len();
-        let doubled = |p: usize| p < offset || (p < positional && p < passed);
+        let doubled = |p: usize| p < offset || (decl.positional_param(p).is_some() && p < passed);
+        let past_positionals = |&(s, _): &(usize, VarId)| decl.positional_param(s).is_none();
         let raises = bindings
             .keywords
             .iter()
             .any(|&(_, _, p)| p.map_or(!decl.has_kwargs, doubled))
-            || (!decl.has_varargs && bindings.slots.last().is_some_and(|&(s, _)| s >= positional));
+            || (!decl.has_varargs && bindings.slots.last().is_some_and(past_positionals));
         if raises {
             return None;
         }
@@ -4749,8 +4749,8 @@ impl<'a> Extractor<'a> {
             }
             out.extend(self.arg_value(v).map(|value| (name.to_owned(), value)));
         }
-        for &(slot, a) in bindings.slots.iter().filter(|(s, _)| *s < positional) {
-            if let Some(name) = name_of(slot) {
+        for &(slot, a) in &bindings.slots {
+            if let Some(name) = decl.positional_param(slot).and_then(name_of) {
                 out.extend(self.arg_value(a).map(|value| (name.clone(), value)));
             }
         }
@@ -5026,11 +5026,12 @@ impl<'a> Extractor<'a> {
                     let passing = self.bindings(call, decl, offset);
                     let mut bound: Vec<(u8, VarId)> = Vec::new();
                     for &(slot, a) in &passing.slots {
+                        let Some(slot) = decl.positional_param(slot) else {
+                            continue;
+                        };
                         let mut o = self.origin(a);
-                        if slot < usize::from(decl.positional_params) {
-                            o.binding = Some(self.binding(a, loops));
-                            handed.extend(self.handed_queue(key, slot, a));
-                        }
+                        o.binding = Some(self.binding(a, loops));
+                        handed.extend(self.handed_queue(key, slot, a));
                         if params.len() <= slot {
                             params.resize(slot + 1, ArgOrigin::default());
                         }
@@ -6309,8 +6310,8 @@ impl<'c> Call<'c> {
 /// How a call binds the parameters of one callee ([`Extractor::bindings`]), as Python binds
 /// them.
 struct Bindings<'c> {
-    /// Each positional argument with the parameter slot it binds
-    /// ([`Extractor::positional_slots`]); one past the positional parameters is in `*args`.
+    /// Each positional argument with its slot ([`Extractor::positional_slots`]): the parameter
+    /// it binds, if any, is [`FunctionDecl::positional_param`].
     slots: Vec<(usize, VarId)>,
     /// Each keyword with the parameter it binds ([`FunctionDecl::keyword_param`]); one binding
     /// none lands in `**kwargs`, or the call raises `TypeError`.
@@ -6604,8 +6605,9 @@ impl PassedItems {
 struct Handed<'b> {
     /// The receiver, unless it is the object a constructor call creates.
     recv: Option<VarId>,
-    /// `(parameter, argument)` of the arguments (`*` unpacking binds the ones from
-    /// `Call::star_from` on inexactly) and of the keywords naming a parameter.
+    /// `(parameter, argument)` of the positional arguments binding a positional parameter (`*`
+    /// unpacking binds the ones from `Call::star_from` on inexactly) and of the keywords
+    /// binding a parameter.
     bound: &'b [(u8, VarId)],
     /// The parameter of the first positional argument.
     offset: usize,

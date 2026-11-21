@@ -890,8 +890,8 @@ impl<'v> Binding<'v> {
         }
         let i = p.checked_sub(offset)?;
         // Past the positional parameters, or from a `*` unpacking on, nothing is known.
-        let positional = p < usize::from(decl.positional_params)
-            && self.star_from.is_none_or(|s| i < usize::from(s));
+        let positional =
+            decl.positional_param(p).is_some() && self.star_from.is_none_or(|s| i < usize::from(s));
         positional.then(|| self.args.get(i).copied()).flatten()
     }
 }

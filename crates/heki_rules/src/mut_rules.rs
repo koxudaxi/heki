@@ -1650,8 +1650,9 @@ impl<'i> CallInst<'i> {
 
 /// The arguments of a call of the project function `decl` by the callee's parameter positions:
 /// a bound method's receiver at 0 (not for a class method's class or a static method),
-/// positional arguments after it, keyword arguments by the parameter they bind
-/// ([`heki_effect::FunctionDecl::keyword_param`]).
+/// positional and keyword arguments by the parameter they bind
+/// ([`heki_effect::FunctionDecl::positional_param`],
+/// [`heki_effect::FunctionDecl::keyword_param`]).
 pub(crate) fn bind_arguments(
     decl: &heki_effect::FunctionDecl,
     binds_recv: bool,
@@ -1667,7 +1668,8 @@ pub(crate) fn bind_arguments(
     {
         bound.push((0, r));
     }
-    bound.extend(args.iter().enumerate().map(|(i, v)| (i + offset, *v)));
+    let positions = args.iter().enumerate();
+    bound.extend(positions.filter_map(|(i, v)| Some((decl.positional_param(i + offset)?, *v))));
     for (name, v) in kwargs {
         if let Some(pos) = name.as_ref().and_then(|n| decl.keyword_param(n)) {
             bound.push((pos, *v));

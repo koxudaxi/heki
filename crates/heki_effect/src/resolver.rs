@@ -440,6 +440,13 @@ impl FunctionDecl {
         self.called_as_defined && (!self.is_async || self.is_generator)
     }
 
+    /// The parameter a positional argument binds in `slot` (counted from the receiver): one of
+    /// the positional parameters. A position past them lands in `*args`, a new tuple holding
+    /// it, or the call raises `TypeError`; it never binds a keyword-only parameter.
+    pub fn positional_param(&self, slot: usize) -> Option<usize> {
+        (slot < usize::from(self.positional_params)).then_some(slot)
+    }
+
     /// The parameter a keyword argument `name` binds: a named parameter past the
     /// positional-only ones. Any other keyword (one naming a positional-only parameter, `*args`,
     /// or `**kwargs`) lands in `**kwargs`, or the call raises `TypeError`.
