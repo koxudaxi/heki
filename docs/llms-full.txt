@@ -2620,7 +2620,10 @@ you edit always shows its own boundary.
 ## When the server re-analyzes
 
 The server indexes the workspace in the background, then keeps only the per-function effect
-summaries in memory.
+summaries in memory. It runs the analyses one at a time, in the order of the editor's messages
+(an edit's analysis takes its place when its debounce ends), so the diagnostics do not depend on
+which analysis happens to start first: of documents opened together, each is analyzed with the
+ones opened before it already indexed.
 
 | Event | Re-analyzed |
 | ----- | ----------- |
