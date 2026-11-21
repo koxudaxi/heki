@@ -1723,7 +1723,7 @@ Exit codes: `0` no diagnostics, `1` diagnostics (or Ratchet regressions, or pend
 ```text
 Experimental static checker for Python that tracks side effects and mutations across function calls
 
-Usage: heki-exact-c-17f224f8.real <COMMAND>
+Usage: heki <COMMAND>
 
 Commands:
   check        Run semantic checks across Python files or directories (Ruff-aligned)
@@ -1743,7 +1743,7 @@ Options:
 ```text
 Run semantic checks across Python files or directories (Ruff-aligned)
 
-Usage: heki-exact-c-17f224f8.real check [OPTIONS] [PATHS]...
+Usage: heki check [OPTIONS] [PATHS]...
 
 Arguments:
   [PATHS]...  Files or directories to check [default: .]
@@ -1788,7 +1788,7 @@ Options:
 ```text
 Start the incremental Language Server Protocol (LSP) server
 
-Usage: heki-exact-c-17f224f8.real server [OPTIONS]
+Usage: heki server [OPTIONS]
 
 Options:
       --stdio         Use stdio transport (default LSP mode)
@@ -1802,7 +1802,7 @@ Options:
 ```text
 Explain a rule, its Proof Obligations, and counterexamples (`ruff rule` style)
 
-Usage: heki-exact-c-17f224f8.real rule [OPTIONS] [RULE]
+Usage: heki rule [OPTIONS] [RULE]
 
 Arguments:
   [RULE]  Rule code (`EFF101`) or slug (`async-blocking-call`), or `--all` to list all rules
@@ -1818,7 +1818,7 @@ Options:
 ```text
 Manage interprocedural effect summary snapshots (`MUT103`)
 
-Usage: heki-exact-c-17f224f8.real snapshot [OPTIONS] [PATHS]...
+Usage: heki snapshot [OPTIONS] [PATHS]...
 
 Arguments:
   [PATHS]...  Files or directories to summarize [default: .]
@@ -1839,7 +1839,7 @@ Options:
 ```text
 List Assumption A1 hazards (`eval`, `exec`, `locals()`, frame introspection, functions too large to model) in a project
 
-Usage: heki-exact-c-17f224f8.real assumptions [OPTIONS] [PATHS]...
+Usage: heki assumptions [OPTIONS] [PATHS]...
 
 Arguments:
   [PATHS]...  [default: .]
