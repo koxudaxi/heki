@@ -1,7 +1,7 @@
 //! The cost of the analyses past the IR, end to end through the real binary: `isinstance`
 //! narrowing through phis, the passes of the type inference and of the classes of merged values,
 //! the size of the Soundness lane's proof state, the values `EFF107` follows from a task factory,
-//! and the walk to the callable a builtin calls once per item.
+//! the walk to the callable a builtin calls once per item, and contracts with many call targets.
 
 mod common;
 
@@ -2082,6 +2082,71 @@ fn returns_of_a_long_copy_chain_find_its_root_once() {
     let diags = check_within(&p, Duration::from_secs(20));
     assert_eq!(diags.len(), 1, "{diags:#?}");
     assert_eq!(diags[0]["qualname"], "grow");
+}
+
+/// `classes` classes with a private method, and `functions` functions calling the methods of
+/// instances of them `calls` times each.
+fn many_calls(classes: usize, functions: usize, calls: usize) -> (String, String) {
+    let mut model = Vec::new();
+    for c in 0..classes {
+        model.extend([
+            format!("class C{c}:"),
+            "    def _m(self) -> int:".to_owned(),
+            "        return 0".to_owned(),
+            String::new(),
+            String::new(),
+        ]);
+    }
+    let names: Vec<String> = (0..classes).map(|c| format!("C{c}")).collect();
+    let params: Vec<String> = (0..classes).map(|c| format!("c{c}: C{c}")).collect();
+    let mut usage = vec![
+        format!("from pkg.m import {}", names.join(", ")),
+        String::new(),
+        String::new(),
+    ];
+    for f in 0..functions {
+        usage.push(format!("def f{f}({}) -> None:", params.join(", ")));
+        usage.extend((0..calls).map(|k| format!("    c{}._m()", k % classes)));
+        usage.extend([String::new(), String::new()]);
+    }
+    (model.join("\n"), usage.join("\n") + "\n")
+}
+
+/// The targets a call matches are looked up from the callee's names, once per call for all
+/// `call-owners` contracts: thousands of targets, in one contract or in as many contracts,
+/// cost no more per call than one.
+#[test]
+fn call_targets_are_looked_up_not_tried_one_by_one() {
+    let (model, usage) = many_calls(10, 100, 100);
+    let targets: Vec<String> = (0..2000).map(|i| format!("\"pkg.m.X{i}._*\"")).collect();
+    let one_contract = format!(
+        "[[tool.heki.call-owners]]\nname = \"many\"\ntargets = [{}, \"pkg.m.C0._*\"]\nforbidden-callers = [\"pkg.use.f0\"]\n",
+        targets.join(", ")
+    );
+    let many_contracts: String = targets
+        .iter()
+        .chain(std::iter::once(&"\"pkg.m.C0._*\"".to_owned()))
+        .enumerate()
+        .map(|(i, t)| {
+            format!("[[tool.heki.call-owners]]\nname = \"c{i}\"\ntargets = [{t}]\nforbidden-callers = [\"pkg.use.f0\"]\n\n")
+        })
+        .collect();
+    for (name, contracts) in [("one", one_contract), ("many", many_contracts)] {
+        let p = Project::new(&format!("bounds_call_targets_{name}"));
+        p.write(
+            "pyproject.toml",
+            &format!(
+                "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT204\"]\n\n{contracts}"
+            ),
+        )
+        .write("pkg/__init__.py", "")
+        .write("pkg/m.py", &model)
+        .write("pkg/use.py", &usage);
+        let diags = check_within(&p, Duration::from_secs(20));
+        // Only the forbidden caller's ten calls of `C0._m` are reported.
+        assert_eq!(diags.len(), 10, "{name}: {diags:#?}");
+        assert!(diags.iter().all(|d| d["qualname"] == "f0"), "{name}");
+    }
 }
 
 /// Puts after each of many branches that may build a new unbounded queue: the queue of each put

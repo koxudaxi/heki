@@ -947,7 +947,7 @@ pub(crate) struct Allowance {
     forbidden: Vec<DottedPattern>,
     /// Functions the contract guards (`call-owners` targets): they are part of the guarded
     /// operation, whose calls are checked where they are made, so they may use each other.
-    targets: Vec<FunctionMatcher>,
+    targets: Option<std::sync::Arc<FunctionMatchers>>,
 }
 
 /// Project functions a `call-owners` / `call-targets` entry names: the whole text by fqn or
@@ -956,7 +956,7 @@ pub(crate) struct Allowance {
 /// method, or class: a glob there matches within that name only (`pkg.*._*` names the private
 /// members of everything in `pkg`, not every function of a private module), as the attribute of
 /// a `Class.attr` target does.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct FunctionMatcher {
     whole: DottedPattern,
     /// The text split at its last dot when the last segment is a glob: what holds the member
@@ -997,10 +997,19 @@ impl FunctionMatcher {
         })
     }
 
+    /// The whole text's glob (`None`: a literal name, [`Self::whole_text`]).
+    pub(crate) fn whole_glob(&self) -> Option<&globset::Glob> {
+        self.whole.glob()
+    }
+
+    pub(crate) fn whole_text(&self) -> &str {
+        self.whole.text()
+    }
+
     /// Whether the whole text names `name` (a function's fqn or qualname, a class's fqn). A
     /// glob in the last segment matches the last name only, and the rest of the text what holds
     /// it: `pkg.api_*` names `pkg.api_commit`, not `pkg.api_helpers.api_reset`.
-    fn names(&self, name: &str) -> bool {
+    pub(crate) fn names(&self, name: &str) -> bool {
         let Some((holder, member)) = &self.member else {
             return self.whole.matches(name);
         };
@@ -1027,15 +1036,6 @@ impl FunctionMatcher {
     pub(crate) fn method_family(&self) -> Option<&FxHashSet<String>> {
         self.method.as_ref().map(|(family, _)| family)
     }
-
-    /// Every project class the whole text names, plus their subclasses.
-    pub(crate) fn classes(
-        &self,
-        cx: &CheckContext<'_>,
-        all_classes: &[String],
-    ) -> FxHashSet<String> {
-        class_family(cx, all_classes, |c| self.names(c))
-    }
 }
 
 /// The `allowed-*`, `forbidden-*`, and `exempt-methods` keys of one owner contract with their
@@ -1052,7 +1052,7 @@ impl Allowance {
             allowed: patterns(keys.allowed.0, keys.allowed.1)?,
             exempt_names: FxHashSet::default(),
             forbidden: patterns(keys.forbidden.0, keys.forbidden.1)?,
-            targets: Vec::new(),
+            targets: None,
         };
         for e in keys.exempt.0 {
             if e.contains('.') || has_glob_syntax(e) {
@@ -1073,12 +1073,15 @@ impl Allowance {
         self.allowed
             .iter()
             .any(|p| p.matches(&fqn) || p.matches(&key.qualname))
-            || self.targets.iter().any(|t| t.matches(key))
+            || self.targets.as_ref().is_some_and(|t| t.any(key))
     }
 
     /// The same allowance, with the guarded functions `targets` allowed too.
-    pub(crate) fn with_targets(self, targets: Vec<FunctionMatcher>) -> Self {
-        Self { targets, ..self }
+    pub(crate) fn with_targets(self, targets: std::sync::Arc<FunctionMatchers>) -> Self {
+        Self {
+            targets: Some(targets),
+            ..self
+        }
     }
 
     /// Whether the contract has `forbidden-*` patterns.
@@ -3098,5 +3101,5 @@ pub(crate) fn delegated_reports(
 mod call_owners;
 
 pub(crate) use call_owners::{
-    CallTargetPattern, called_targets, group_texts, mut204, parse_call_targets, site_callee,
+    CallTargets, FunctionMatchers, group_texts, mut204, parse_call_targets, site_callee,
 };

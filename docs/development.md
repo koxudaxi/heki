@@ -127,6 +127,9 @@ follows these rules:
   (`y = x; x = y`) can close a cycle. A walk along copies ends on such a cycle.
 - A rule that follows exception edges, one from each call that can raise, runs a dataflow over
   blocks with one fact per tracked value. It never enumerates paths.
+- A contract's targets are looked up from what an access names (the dotted suffixes of a
+  function's names, its class), never tried one by one: the cost grows with the sites, not with
+  sites times targets, and the targets of every contract of a rule are indexed together.
 
 The engines of `heki_ir::walk` apply these rules by construction, and every walk over IR ids,
 the call graph, or the class hierarchy goes through them:
@@ -192,7 +195,8 @@ store the one before, with a put on each, and the path facts of a `try` body of 
 whose handler returns, of loops nested twenty deep with a call at each depth, of a thousand loops
 one after another, and of a chain of hundreds of `and` tests of module constants, and the item
 origins of a chain of thousands of wrappers, of a list filled by appends in a thousand loops, and of
-a phi of sixty branches each choosing a different parameter.
+a phi of sixty branches each choosing a different parameter, and thousands of `call-owners` targets,
+in one contract or in as many contracts.
 
 A change to the IR builder, a walk, a fixpoint, or a rule's state is also run over a large
 corpus of real projects before it is merged, every run under a memory cap and a timeout. No

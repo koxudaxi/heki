@@ -2,9 +2,9 @@
 //! `EFF107`, `EFF201` (docs/ANALYSIS_AND_KB_SPEC.md section 2.4).
 
 use crate::mut_rules::{
-    CallTargetPattern, ContractTarget, SiteId, allows_fresh, called_targets, group_texts,
-    helper_changes_field, initializes_itself, parse_call_targets, parse_read_targets,
-    parse_targets, patterns, project_classes, site_callee, write_hits,
+    CallTargets, ContractTarget, SiteId, allows_fresh, group_texts, helper_changes_field,
+    initializes_itself, parse_call_targets, parse_read_targets, parse_targets, patterns,
+    project_classes, site_callee, write_hits,
 };
 use crate::opt_rules::Sizes;
 use crate::{
@@ -455,7 +455,7 @@ struct Boundary<'r> {
     reads_targets: bool,
     read_targets: Vec<ContractTarget>,
     calls: bool,
-    call_targets: Vec<CallTargetPattern>,
+    call_targets: CallTargets,
     allowed_callees: Vec<DottedPattern>,
     note: Option<&'r str>,
     /// `fresh-objects = "allow"`: writes constructing the object they write are allowed.
@@ -782,7 +782,7 @@ impl<'a> Reach<'a> {
                     path: path.to_path_buf(),
                 };
                 if b.calls && runs_body && !b.allows_call(site) {
-                    for group in called_targets(&b.call_targets, site) {
+                    for group in b.call_targets.called(site) {
                         let nodes = &reach.nodes;
                         note(&mut reach.calls, group, (func.fqn(), site.span), || {
                             let mut chain = chain_to(nodes, i);
