@@ -153,6 +153,20 @@ def f(rows, payload, ids, conn, path, json):
 }
 
 #[test]
+fn a_local_named_like_a_module_constant_is_not_the_constant() {
+    let src = r#"
+NAMES = ("a", "b")
+
+def g(rows):
+    NAMES = rows
+    del NAMES
+    for x in NAMES:  # L
+        pass
+"#;
+    assert_eq!(origins(src, "g", "# L"), vec!["open"]);
+}
+
+#[test]
 fn comprehensions_and_appended_lists_keep_the_items_they_produce() {
     let src = r#"
 class Store:
@@ -283,4 +297,84 @@ fn steps_compose_in_the_order_python_applies_them() {
             .map(|o| o.text),
         Some(false)
     );
+}
+
+#[test]
+fn every_other_shape_names_its_sources_or_none() {
+    let src = r#"
+async def f(rows, payload, ids, n, open_, p, fetch, flag):
+    for x in await fetch():  # L
+        pass
+    for k in {"a": 1, **payload}:  # L
+        pass
+    grown = {"a": 1}
+    grown["b"] = 2
+    for k in grown:  # L
+        pass
+    for x in rows + ids:  # L
+        pass
+    for x in rows * 2:  # L
+        pass
+    for x in zip(*rows):  # L
+        pass
+    for i in range(1, len(rows)):  # L
+        pass
+    for i in range(n):  # L
+        pass
+    with open_(p) as fh:
+        for line in fh:  # L
+            pass
+    copied = list(rows)
+    copied.append(1)
+    for x in copied:  # L
+        pass
+    single = []
+    single.append(n)
+    for x in single:  # L
+        pass
+    pairs = [v for k, v in payload.items()]
+    for x in pairs:  # L
+        pass
+    drained = []
+    while rows:
+        drained.append(rows.pop())
+    for x in drained:  # L
+        pass
+    merged = []
+    if flag:
+        merged = []
+    for r in rows:
+        merged.append(r)
+    for x in merged:  # L
+        pass
+    while len(rows):  # L
+        pass
+"#;
+    assert_eq!(
+        origins(src, "f", "# L"),
+        vec![
+            "call:fetch()",
+            "param1 fixed",
+            "open",
+            "param0 param2",
+            "open",
+            "open",
+            "param0/count",
+            "open",
+            "call:open_(p)",
+            "call:list(rows)",
+            "fixed",
+            // A component of an item is one of the items' parts: the dict's values.
+            "param1",
+            "open",
+            "param0",
+            "open",
+        ]
+    );
+}
+
+#[test]
+fn a_loop_of_the_module_body_reads_module_constants() {
+    let src = "NAMES = (\"a\", \"b\")\nfor name in NAMES:  # L\n    pass\n";
+    assert_eq!(origins(src, "<module>", "# L"), vec!["fixed"]);
 }

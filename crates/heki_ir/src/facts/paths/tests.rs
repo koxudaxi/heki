@@ -510,3 +510,106 @@ def loop(rows, db):
     assert_eq!(paths.on_every_iteration(0, at, Progress::Returned), EVERY);
     assert_eq!(ix.decided().never_taken(f.loops[0].header), None);
 }
+
+#[test]
+fn the_remaining_shapes_of_tests_raises_and_regions() {
+    let src = r#"
+import os
+import json
+del json
+
+def f(sock, flag, conn, row, db):
+    if sock.ready:
+        sock.maybe()
+    if (False if flag else False):
+        sock.dead_phi()
+    try:
+        conn.send(row.a.b)
+    except ValueError:
+        return None
+    try:
+        json.loads(row)
+    except Exception:
+        return None
+    try:
+        if flag:
+            raise ValueError()
+        db.fetch()
+    except ValueError:
+        return None
+    for r in row:
+        db.inside(r)
+    db.outside()
+"#;
+    for (call, called) in [
+        ("sock.maybe()", NOT_EVERY),
+        ("sock.dead_phi()", DEAD),
+        ("conn.send(row.a.b)", NOT_EVERY),
+        ("json.loads(row)", NOT_EVERY),
+        ("db.fetch()", NOT_EVERY),
+    ] {
+        let (c, _, _) = facts(src, "f", call);
+        assert_eq!(c, called, "{call}");
+    }
+    let ir = build(src);
+    let f = ir.functions.iter().find(|f| f.name == "f").unwrap();
+    let ix = FnIndex::new(f, &ir.constants);
+    let bindings = ModuleBindings::of(&ir);
+    let budget = Budget::of_function("test", f);
+    // The reader that knows only the bindings knows no module member.
+    let paths = Paths::new(&ix, &PathReader::with_bindings(&bindings), &budget);
+    let at = |method: &str| {
+        f.blocks
+            .iter()
+            .find_map(|bb| {
+                let i = bb.insts.iter().position(
+                    |i| matches!(&i.kind, InstKind::MethodCall { method: m, .. } if m == method),
+                )?;
+                Some((bb.id, i))
+            })
+            .unwrap()
+    };
+    // A point outside a loop never runs on its iterations.
+    assert_eq!(
+        paths.on_every_iteration(0, at("outside"), Progress::Called),
+        DEAD
+    );
+    assert_eq!(
+        paths.on_every_iteration(0, at("inside"), Progress::Called),
+        EVERY
+    );
+}
+
+#[test]
+fn a_member_of_an_imported_module_is_known_only_to_a_reader_that_says_so() {
+    let src = r#"
+import os
+
+def f(p):
+    with open(p):
+        pass
+    try:
+        os.path.join(p)
+    except TypeError:
+        return None
+"#;
+    let ir = build(src);
+    let f = ir.functions.iter().find(|f| f.name == "f").unwrap();
+    let ix = FnIndex::new(f, &ir.constants);
+    let bindings = ModuleBindings::of(&ir);
+    let budget = Budget::of_function("test", f);
+    let paths = Paths::new(&ix, &PathReader::with_bindings(&bindings), &budget);
+    let at = f
+        .blocks
+        .iter()
+        .find_map(|bb| {
+            let i = bb.insts.iter().position(
+                |i| matches!(&i.kind, InstKind::MethodCall { method, .. } if method == "join"),
+            )?;
+            Some((bb.id, i))
+        })
+        .unwrap();
+    assert_eq!(paths.on_every_return(at, Progress::Called), NOT_EVERY);
+    let (called, _, _) = facts(src, "f", "os.path.join(p)");
+    assert_eq!(called, EVERY);
+}

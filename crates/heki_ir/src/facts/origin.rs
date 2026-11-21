@@ -27,7 +27,7 @@ use crate::walk::{Answer, Budget, Closure, Def, Fallible, KeySet, Use, Visit, re
 use crate::{
     BinOpKind, BlockId, BuiltinKind, DictEntry, FunctionId, InstKind, ModuleIr, Terminator, VarId,
 };
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::BTreeSet;
@@ -155,6 +155,9 @@ type Fact = Fallible<KeySet<ItemOrigin>>;
 pub struct ItemOrigins<'m> {
     ir: &'m ModuleIr,
     indexes: RefCell<FxHashMap<FunctionId, Rc<FnIndex<'m>>>>,
+    /// Per function, the values whose object something in it may grow
+    /// ([`FnIndex::grown_vars`]), decided once for all its questions.
+    grown: RefCell<FxHashMap<FunctionId, Rc<FxHashSet<VarId>>>>,
     closure: Closure<Key, Fact>,
 }
 
@@ -163,6 +166,7 @@ impl<'m> ItemOrigins<'m> {
         Self {
             ir,
             indexes: RefCell::new(FxHashMap::default()),
+            grown: RefCell::new(FxHashMap::default()),
             closure: Closure::new(),
         }
     }
@@ -204,6 +208,18 @@ impl<'m> ItemOrigins<'m> {
         )
     }
 
+    /// Whether something in `ix`'s function may grow the object `v` holds, or let other code
+    /// grow it: its items are then no longer only those the walk sees.
+    fn may_grow(&self, ix: &FnIndex<'m>, v: VarId) -> bool {
+        let grown = Rc::clone(
+            self.grown
+                .borrow_mut()
+                .entry(ix.f.id)
+                .or_insert_with(|| Rc::new(ix.grown_vars())),
+        );
+        grown.contains(&v)
+    }
+
     /// The fact a question holds by itself, and the questions it rests on.
     fn decide_origin(&self, budget: &Budget, (f, v, steps): Key) -> (Fact, Vec<Key>) {
         let ix = self.index(f);
@@ -213,17 +229,8 @@ impl<'m> ItemOrigins<'m> {
             fact: Fact::default(),
             next: Vec::new(),
         };
-        // A generator expression or comprehension function receives its outermost iterable
-        // as `.0` from the function creating it.
-        if ix.f.var_name(v) == Some(".0") {
-            match ix.f.passed_from {
-                Some((creator, iterable)) => walk.ask_in(creator, iterable, steps),
-                None => walk.fail(),
-            }
-            return (walk.fact, walk.next);
-        }
         match ix.shape().def(v) {
-            Def::Param => self.of_param(&ix, v, &mut walk),
+            Def::Param | Def::None => Self::of_param(&ix, v, &mut walk),
             Def::Phi(b, i) => {
                 let decided = ix.decided();
                 for &(pred, x) in &ix.f.block(b).phis[i as usize].incoming {
@@ -233,23 +240,30 @@ impl<'m> ItemOrigins<'m> {
                 }
             }
             Def::Inst(b, i) => self.of_instruction(budget, &ix, (b, i as usize), &mut walk),
-            Def::None => walk.fail(),
         }
         (walk.fact, walk.next)
     }
 
-    fn of_param(&self, ix: &FnIndex<'m>, v: VarId, walk: &mut Decision) {
+    /// A parameter, or the `.0` through which a generator expression or comprehension function
+    /// receives its outermost iterable from the function creating it.
+    fn of_param(ix: &FnIndex<'m>, v: VarId, walk: &mut Decision) {
         let func = ix.f;
-        let Some(p) = func.params.iter().position(|p| p.var == v) else {
-            return walk.fail();
-        };
-        let receiver =
-            p == 0 && func.owner_class.is_some() && !func.has_decorator(&["staticmethod"]);
-        match (receiver, u8::try_from(p)) {
-            (true, _) => walk.add_source(ItemSource::Receiver),
-            (false, Ok(p)) => walk.add_source(ItemSource::Param(p)),
-            (false, Err(_)) => walk.fail(),
+        let passed = func.passed_from.filter(|_| func.var_name(v) == Some(".0"));
+        if let Some((creator, iterable)) = passed {
+            return walk.ask_in(creator, iterable, walk.steps);
         }
+        let position = func.params.iter().position(|p| p.var == v);
+        let receiver = position == Some(0)
+            && func.owner_class.is_some()
+            && !func.has_decorator(&["staticmethod"]);
+        let source = position.and_then(|p| u8::try_from(p).ok()).map(|p| {
+            if receiver {
+                ItemSource::Receiver
+            } else {
+                ItemSource::Param(p)
+            }
+        });
+        walk.add_source(source);
     }
 
     fn of_instruction(
@@ -265,21 +279,23 @@ impl<'m> ItemOrigins<'m> {
             InstKind::Copy { src, .. }
             | InstKind::Await { value: src, .. }
             | InstKind::MakeIter { iterable: src, .. } => walk.ask(*src, steps),
-            InstKind::Const { .. } => walk.add_source(ItemSource::Fixed),
+            InstKind::Const { .. } => walk.add_source(Some(ItemSource::Fixed)),
             InstKind::AllocBuiltin { dst, kind, elems } => {
                 self.of_display(budget, ix, *dst, *kind, elems, walk);
             }
             InstKind::DictLiteral { dst, entries } => {
-                if ix.grows(&[*dst], &[BuiltinKind::Dict], None) {
+                if self.may_grow(ix, *dst) {
                     return walk.fail();
                 }
                 for e in entries {
                     match e {
-                        DictEntry::KeyValue { .. } => walk.add_source(ItemSource::Fixed),
+                        DictEntry::KeyValue { .. } => walk.add_source(Some(ItemSource::Fixed)),
                         DictEntry::Unpack { dict } => walk.ask(*dict, steps),
                     }
                 }
             }
+            // In a function, a `LoadName` reads a local a `del` may have unbound, not the global.
+            InstKind::LoadName { .. } if !ix.f.is_module_body => walk.fail(),
             InstKind::LoadGlobal {
                 name,
                 is_lazy_import: false,
@@ -294,7 +310,7 @@ impl<'m> ItemOrigins<'m> {
                         || m.displays.contains_key(name)
                         || m.bools.contains_key(name));
                 if constant {
-                    walk.add_source(ItemSource::Fixed);
+                    walk.add_source(Some(ItemSource::Fixed));
                 } else {
                     walk.fail();
                 }
@@ -331,8 +347,7 @@ impl<'m> ItemOrigins<'m> {
     }
 
     /// A list, tuple, set, or dict display: its starred operands' sources and a fixed item for
-    /// each other operand, when nothing grows it; else, for a list or set, what the function
-    /// appends to it.
+    /// each other operand, when nothing grows it; else what the function appends to it.
     fn of_display(
         &self,
         budget: &Budget,
@@ -346,14 +361,11 @@ impl<'m> ItemOrigins<'m> {
             if ix.shape().is_starred(dst, k) {
                 walk.ask(*e, walk.steps);
             } else {
-                walk.add_source(ItemSource::Fixed);
+                walk.add_source(Some(ItemSource::Fixed));
             }
         }
-        if is_immutable_kind(kind) || !ix.grows(&[dst], &[kind], None) {
+        if is_immutable_kind(kind) || !self.may_grow(ix, dst) {
             return;
-        }
-        if !matches!(kind, BuiltinKind::List | BuiltinKind::Set) {
-            return walk.fail();
         }
         self.of_appends(budget, ix, dst, walk);
     }
@@ -430,15 +442,14 @@ impl<'m> ItemOrigins<'m> {
             f: g,
             ..walk.clone_empty()
         };
+        // A generator expression yields its element on each step; `yield` cannot appear in it.
         for bb in &gx.f.blocks {
             for inst in &bb.insts {
-                match inst.kind {
-                    InstKind::Yield {
-                        value: Some(value), ..
-                    } => inner.produces(&gx, bb.id, value, &[]),
-                    InstKind::Yield { value: None, .. } => inner.add_source(ItemSource::Fixed),
-                    InstKind::YieldFrom { .. } => inner.fail(),
-                    _ => {}
+                if let InstKind::Yield {
+                    value: Some(value), ..
+                } = inst.kind
+                {
+                    inner.produces(&gx, bb.id, value, &[]);
                 }
             }
         }
@@ -449,8 +460,9 @@ impl<'m> ItemOrigins<'m> {
         let inst = &ix.f.block(b).insts[i];
         let steps = walk.steps;
         if let Some((step, built)) = ix.item_step(inst) {
-            if let (Some(constructor), Some(dst)) = (built, inst.kind.dst())
-                && ix.not_grown(dst, constructor).is_none()
+            // A new container the function grows holds more than its input's items.
+            if let (Some(_), Some(dst)) = (built, inst.kind.dst())
+                && self.may_grow(ix, dst)
             {
                 return walk.call_at(b, i);
             }
@@ -475,10 +487,13 @@ impl<'m> ItemOrigins<'m> {
         if let Some(id) = comprehension {
             // A comprehension function (before 3.12) returns the list it fills.
             let g = FunctionId(id);
-            let Some(func) = self.ir.functions.get(id as usize) else {
-                return walk.fail();
-            };
-            for bb in &func.blocks {
+            for bb in self
+                .ir
+                .functions
+                .get(id as usize)
+                .into_iter()
+                .flat_map(|f| &f.blocks)
+            {
                 if let Terminator::Return(Some(r)) = bb.terminator {
                     walk.ask_in(g, r, steps);
                 }
@@ -504,7 +519,7 @@ impl<'m> ItemOrigins<'m> {
         let int = |v: VarId| matches!(scalar(ix, v), Some(Scalar::Int(_)));
         let one = |v: VarId| scalar(ix, v) == Some(Scalar::Int(1));
         if args.iter().all(|a| int(*a)) {
-            return walk.add_source(ItemSource::Fixed);
+            return walk.add_source(Some(ItemSource::Fixed));
         }
         let measured = match args {
             [stop] => ix.len_argument(*stop),
@@ -547,8 +562,10 @@ impl Decision {
         self.fact = Fact::failed();
     }
 
-    fn add_source(&mut self, source: ItemSource) {
-        let Some(origin) = self.steps.apply(source) else {
+    /// Add `source` read through the steps; `None`, or a source the steps cannot read (an item
+    /// of a call's result), has none the walk can name.
+    fn add_source(&mut self, source: Option<ItemSource>) {
+        let Some(origin) = source.and_then(|s| self.steps.apply(s)) else {
             return self.fail();
         };
         if let Some(origins) = &mut self.fact.0 {
@@ -557,10 +574,10 @@ impl Decision {
     }
 
     fn call_at(&mut self, b: BlockId, i: usize) {
-        match u32::try_from(i) {
-            Ok(index) => self.add_source(ItemSource::Call { block: b, index }),
-            Err(_) => self.fail(),
-        }
+        let call = u32::try_from(i)
+            .ok()
+            .map(|index| ItemSource::Call { block: b, index });
+        self.add_source(call);
     }
 
     fn ask(&mut self, v: VarId, steps: Steps) {
@@ -585,7 +602,7 @@ impl Decision {
     fn produces(&mut self, ix: &FnIndex<'_>, b: BlockId, value: VarId, aliases: &[VarId]) {
         let shape = ix.shape();
         let Some(lp) = shape.innermost(b) else {
-            return self.add_source(ItemSource::Fixed);
+            return self.add_source(Some(ItemSource::Fixed));
         };
         let (Some(iterable), Some(item)) = (
             ix.loop_iterable(lp),

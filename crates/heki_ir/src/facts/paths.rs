@@ -833,6 +833,7 @@ impl<'p, 'a> Paths<'p, 'a> {
     fn immediate_dominators(&self, preds: &[SmallVec<[u32; 2]>]) -> Option<Vec<u32>> {
         let mut idom = vec![UNREACHED; preds.len()];
         idom[0] = 0;
+        let mut settled = false;
         for _ in 0..MAX_PASSES {
             let mut changed = false;
             let mut steps = 0usize;
@@ -869,11 +870,12 @@ impl<'p, 'a> Paths<'p, 'a> {
             if !self.budget.take(steps) {
                 return None;
             }
-            if !changed {
-                return Some(idom);
+            settled = !changed;
+            if settled {
+                break;
             }
         }
-        None
+        settled.then_some(idom)
     }
 }
 
@@ -898,12 +900,12 @@ fn exception_target(
                 _ => None,
             })
             .collect();
-        if managers.is_empty()
-            || !managers
+        let goes_on = !managers.is_empty()
+            && managers
                 .iter()
-                .all(|m| (reader.exit_suppresses)(*m) == Answer::Known(false))
-        {
-            return Some(to);
+                .all(|m| (reader.exit_suppresses)(*m) == Answer::Known(false));
+        if !goes_on {
+            break;
         }
         to = f.block(to).exc_target?;
     }
