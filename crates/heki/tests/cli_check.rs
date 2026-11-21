@@ -104,7 +104,7 @@ fn exit_codes_and_clean_runs() {
     let (code, stdout, stderr) = p.heki(&[]);
     assert_eq!(code, 0);
     assert!(
-        stdout.starts_with("pkg/bad.py:4:5: EFF101 (async-blocking-call) [warning, heuristic]"),
+        stdout.starts_with("pkg/bad.py:4:5: EFF101 (async-blocking-call) [warning] "),
         "{stdout}"
     );
     assert!(stdout.contains("4 |     time.sleep(1)"));
@@ -230,21 +230,18 @@ fn output_formats_and_config_selection() {
         );
     // The message is one sentence; the help is a line of its own in `full`, a field in JSON,
     // the result's `properties.help` in SARIF, and left out of `concise` and `github`.
-    let message = "`handler` reaches the blocking call `time.sleep` on the event loop";
+    let message = "`handler` runs the waiting call `time.sleep` on the event loop";
     let help = "use `await asyncio.sleep(...)`, or offload it with `asyncio.to_thread`";
     let (code, stdout, _) = p.heki(&["--output-format", "github"]);
     assert_eq!(code, 1);
     assert_eq!(
         stdout.lines().collect::<Vec<_>>(),
         vec![format!(
-            "::error file=src/pkg/api.py,line=4,col=5,title=heki EFF101 (heuristic)::{message}"
+            "::error file=src/pkg/api.py,line=4,col=5,title=heki EFF101::{message}"
         )]
     );
     let (_, stdout, _) = p.heki(&["--output-format", "concise"]);
-    assert_eq!(
-        stdout,
-        format!("src/pkg/api.py:4:5: EFF101 [heuristic] {message}\n")
-    );
+    assert_eq!(stdout, format!("src/pkg/api.py:4:5: EFF101 {message}\n"));
     let (_, stdout, _) = p.heki(&[]);
     assert!(
         stdout.ends_with(&format!(
@@ -366,7 +363,7 @@ fn warnings_do_not_fail_the_check_unless_fail_on_says_so() {
     let (code, stdout, stderr) = p.heki(&[]);
     assert_eq!(code, 0, "{stderr}");
     assert!(
-        stdout.starts_with("app.py:4:5: EFF101 (async-blocking-call) [warning, heuristic]"),
+        stdout.starts_with("app.py:4:5: EFF101 (async-blocking-call) [warning] "),
         "{stdout}"
     );
     assert!(stderr.contains("Found 1 diagnostic(s)"), "{stderr}");
@@ -644,7 +641,11 @@ fn folded_blocking_calls_are_suppressed_and_baselined_one_by_one() {
     let (code, stdout, _) = p.heki(&concise);
     assert_eq!(code, 0);
     assert_eq!(stdout.lines().count(), 1, "{stdout}");
-    assert!(stdout.contains("(+10 more async call sites"), "{stdout}");
+    // Exact reports fold by the call each of them always runs, and say it.
+    assert!(
+        stdout.contains("(+10 more async call sites that always run `time.sleep`)"),
+        "{stdout}"
+    );
     // Suppressing the first call leaves the other ten, below the folding threshold.
     p.write(
         "a.py",

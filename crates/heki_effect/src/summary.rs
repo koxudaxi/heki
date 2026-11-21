@@ -22,17 +22,17 @@ use crate::resolver::{
 use crate::{
     Access, ArgBinding, ArgOrigin, ArgTargets, AttrKeyPath, BoundCallee, CallHop, CallSite,
     CallTarget, Construction, ContractClass, Contracts, Dispatch, EffectSummary, FileSummary,
-    FuncKey, GuardSubject, Implementers, Items, ModuleInput, NewArg, NewCond, NewKind, OptInFacts,
-    PerItem, ProjectDecls, ReadKind, ReturnsNew, Runner, SharedLine, SiteRole, Slot,
-    TypedFieldReadSite, TypedFieldWriteSite, Unresolved, UnresolvedAccessSite, UnresolvedWriteSite,
-    WriteKind,
+    FuncKey, GuardSubject, Implementers, Items, ModuleInput, MustExec, NewArg, NewCond, NewKind,
+    OnEveryReturn, OptInFacts, PerItem, ProjectDecls, ReadKind, ReturnsNew, Runner, SharedLine,
+    SiteRole, Slot, TypedFieldReadSite, TypedFieldWriteSite, Unresolved, UnresolvedAccessSite,
+    UnresolvedWriteSite, WriteKind,
 };
 use heki_ast::Span;
 use heki_ir::walk::Answer;
 use heki_ir::{
     BinOpKind, BlockId, BuiltinKind, CompareOpKind, ConstLiteral, DictEntry, FunctionId,
-    FunctionKind, Inst, InstKind, IrFunction, ModuleIr, NaturalLoop, PhiNode, Terminator,
-    UnaryOpKind, VarId,
+    FunctionKind, Inst, InstKind, IrFunction, ModuleIr, Must, NaturalLoop, PhiNode, Progress,
+    Terminator, UnaryOpKind, VarId,
 };
 use heki_kb::{EffectiveEcosystemKb, ExecEffectKind};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -383,6 +383,7 @@ fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary) {
     for (k, chain) in other.exec_chains {
         into.exec_chains.entry(k).or_insert(chain);
     }
+    into.must_exec = Some(Box::new(MustExec::of_name_bound_twice()));
     into.mutates_params |= other.mutates_params;
     // Typed only where both definitions type it.
     into.typed_params &= other.typed_params;
@@ -682,6 +683,9 @@ struct Extractor<'a> {
     opt_in: OptInFacts,
     /// The value each copy copies ([`Self::copied_from`]), built on first use.
     copy_roots: OnceCell<FxHashMap<VarId, VarId>>,
+    /// Per call instruction, whether the function has made it whenever it returns normally
+    /// (filled before the visit when an enabled rule reads [`EffectSummary::must_exec`]).
+    must_run: FxHashMap<(BlockId, usize), OnEveryReturn>,
     /// The function's dominator tree over all its edges, built on first use.
     dominators: OnceCell<heki_ir::DominatorTree>,
     /// [`KeyFacts`], built on first use.
@@ -1004,6 +1008,7 @@ impl<'a> Extractor<'a> {
             ownership: false,
             opt_in,
             copy_roots: OnceCell::new(),
+            must_run: FxHashMap::default(),
             dominators: OnceCell::new(),
             key_facts: OnceCell::new(),
             self_changes: Vec::new(),
@@ -1893,6 +1898,9 @@ impl<'a> Extractor<'a> {
 
     fn run(mut self) -> Extracted {
         let f = self.f;
+        if self.opt_in.must_effects {
+            self.path_facts();
+        }
         let reads_external = self.contracts.is_some_and(|c| c.reads_external());
         for bb in &f.blocks {
             for (index, inst) in bb.insts.iter().enumerate() {
@@ -2059,6 +2067,9 @@ impl<'a> Extractor<'a> {
             result_discarded: false,
             result_held: false,
             queues: None,
+            // Handing a function on does not run it: no must-fact goes through the reference.
+            complete: false,
+            on_every_return: OnEveryReturn::default(),
         })
     }
 
@@ -4317,6 +4328,8 @@ impl<'a> Extractor<'a> {
                         result_discarded: false,
                         queues: None,
                         result_held: false,
+                        complete: false,
+                        on_every_return: crate::OnEveryReturn::default(),
                     });
                 }
                 self.handed_callable(bb, symbol, call);
@@ -4985,6 +4998,14 @@ impl<'a> Extractor<'a> {
 
     fn site(&self, bb: BlockId, target: CallTarget, is_awaited: bool, span: Span) -> CallSite {
         let cx = self.guard_inputs();
+        let (complete, on_every_return) = if self.opt_in.must_effects {
+            (
+                self.targets_complete(),
+                self.must_run.get(&self.pos).copied().unwrap_or_default(),
+            )
+        } else {
+            (false, OnEveryReturn::default())
+        };
         CallSite {
             caller: self.key.clone(),
             target,
@@ -5008,6 +5029,85 @@ impl<'a> Extractor<'a> {
             result_discarded: false,
             queues: None,
             result_held: false,
+            complete,
+            on_every_return,
+        }
+    }
+
+    /// Whether the call at [`Self::pos`] has as its targets every implementation it can run
+    /// (`CallSite::complete`).
+    fn targets_complete(&self) -> bool {
+        let (bb, index) = self.pos;
+        match self.f.block(bb).insts.get(index).map(|i| &i.kind) {
+            Some(InstKind::MethodCall { recv, method, .. }) => {
+                let recv = self.val(*recv);
+                let callee = self.cx.resolve_method(recv, method);
+                self.cx.method_targets_complete(recv, method, &callee)
+            }
+            Some(InstKind::Call { callee_var, .. }) => {
+                let value = callee_var.and_then(|v| self.val(v));
+                let callee = self.cx.resolve_call(value);
+                self.cx.call_targets_complete(value, &callee)
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether `v` is a phi, with its inputs pushed on `next`.
+    fn phi_inputs(&self, v: VarId, next: &mut Vec<VarId>) -> bool {
+        match self.guard_inputs().phi(v) {
+            Some((_, phi)) => {
+                next.extend(phi.incoming.iter().map(|(_, input)| *input));
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Whether `v` is one of the function's parameters.
+    fn is_param(&self, v: VarId) -> bool {
+        self.f.params.iter().any(|p| p.var == v)
+    }
+
+    /// [`Self::must_run`] and [`MustExec::never_returns`], from the path facts of the function
+    /// with what the catalog and the project's declarations know: the members of modules and
+    /// the context managers whose exit never suppresses an exception.
+    fn path_facts(&mut self) {
+        let f = self.f;
+        let every = |a: Answer<Must>| a == Answer::Known(Must::Every);
+        let owner = "heki_effect::summary::Extractor::path_facts";
+        let (must_run, never_returns) =
+            crate::with_paths(self.cx, f, &self.types, owner, |paths, _| {
+                let mut must_run = FxHashMap::default();
+                for bb in &f.blocks {
+                    for (index, inst) in bb.insts.iter().enumerate() {
+                        if !crate::anchors_call_site(&inst.kind) {
+                            continue;
+                        }
+                        let at = (bb.id, index);
+                        let called = paths.on_every_return(at, Progress::Called);
+                        must_run.insert(
+                            at,
+                            OnEveryReturn {
+                                called: every(called),
+                                returned: every(paths.on_every_return(at, Progress::Returned)),
+                                live: called.is_open() || called != Answer::Known(Must::Dead),
+                            },
+                        );
+                    }
+                }
+                let never_returns = f.blocks.first().is_some_and(|entry| {
+                    paths.on_every_return((entry.id, 0), Progress::Called)
+                        == Answer::Known(Must::NeverCompletes)
+                });
+                (must_run, never_returns)
+            });
+        self.must_run = must_run;
+        if never_returns {
+            self.summary.must_exec = Some(Box::new(MustExec {
+                never_returns,
+                ..MustExec::default()
+            }));
         }
     }
 
@@ -5214,6 +5314,7 @@ impl<'a> Extractor<'a> {
                         Val::Ref(fqn) => Some(fqn.clone()),
                         _ => None,
                     },
+                    &|n| self.cx.global_str(n).map(str::to_owned),
                     v,
                 )
             })
@@ -5222,6 +5323,8 @@ impl<'a> Extractor<'a> {
         // effects (`DbQuery`, `UnpooledClientAlloc`, ...) are kept for EFF102 / EFF103. A schema
         // or setting statement is no data query, though running it still blocks.
         let ddl = self.runs_ddl(&symbol, args.first().copied());
+        // A connection option does not wait on the database (`PRAGMA busy_timeout = 5000`).
+        let setting = ddl && self.runs_connection_setting(&symbol, args.first().copied());
         // A wait on a future known to be done returns at once.
         let finished = entry.waits_until_done
             && passed.recv.is_some_and(|r| {
@@ -5234,6 +5337,7 @@ impl<'a> Extractor<'a> {
             .copied()
             .filter(|e| !((is_awaited || finished) && BLOCKING_EFFECTS.contains(e)))
             .filter(|e| !(ddl && *e == ExecEffectKind::DbQuery))
+            .filter(|e| !(setting && *e == ExecEffectKind::BlockingDb))
             .collect();
         // A `put` waits only on a bounded queue: the code may decide its capacity here, or leave
         // it to the project (what the callers bind to a parameter).
@@ -5272,6 +5376,8 @@ impl<'a> Extractor<'a> {
             return;
         }
         let occurrence = self.guards.occurrence(&self.guard_inputs(), bb);
+        // Reports and contracts name the library API a catalog class's method is.
+        let api = entry.api.clone().unwrap_or_else(|| symbol.clone());
         let flagged = match case {
             Some(_) => None,
             None => self.forwarded_flag(entry, passed),
@@ -5308,7 +5414,7 @@ impl<'a> Extractor<'a> {
             };
             let had = !self.summary.direct_exec_effects.insert(*e);
             guards::add_occurrence(&mut self.summary.exec_guards, *e, had, &guards);
-            let chain = vec![Arc::new(self.hop(symbol.clone(), span))];
+            let chain = vec![Arc::new(self.hop(api.clone(), span))];
             self.summary.exec_chains.insert(*e, chain);
         }
         for w in while_full.iter().filter(|_| own_param.is_none()) {
@@ -5319,15 +5425,38 @@ impl<'a> Extractor<'a> {
                         capacity: w.capacity.clone(),
                     },
                     guards: occurrence_of(e),
-                    hop: self.hop(symbol.clone(), span),
+                    hop: self.hop(api.clone(), span),
                 });
             }
         }
+        // The catalog describes the library's class: a project subclass may override the
+        // method, and then the call runs no catalogued implementation.
+        let unconditional = if self.opt_in.must_effects && self.targets_complete() {
+            self.unconditional(entry, case, passed, &effects)
+        } else {
+            0
+        };
+        let must: Vec<ExecEffectKind> = effects
+            .iter()
+            .copied()
+            .filter(|e| unconditional & crate::effect_bit(*e) != 0)
+            .collect();
+        if !must.is_empty() && self.must_run.get(&self.pos).is_some_and(|r| r.called) {
+            let hop = Arc::new(self.hop(api.clone(), span));
+            let facts = self.summary.must_exec.get_or_insert_with(Box::default);
+            for e in must {
+                facts
+                    .effects
+                    .entry(e)
+                    .or_insert_with(|| vec![Arc::clone(&hop)]);
+            }
+        }
         let target = CallTarget::Layer2 {
-            symbol,
+            symbol: api,
             effects,
             offloads_blocking_arg: entry.offloads_blocking_arg,
             async_safe: entry.async_safe,
+            unconditional,
         };
         let site = self.site(bb, target, is_awaited, span);
         let queues = while_full.map(|w| {
@@ -5337,6 +5466,50 @@ impl<'a> Extractor<'a> {
             })
         });
         self.sites.push(CallSite { queues, ..site });
+    }
+
+    /// The `effects` of a call of `entry` it has whatever the state and the arguments it does
+    /// not show (`CallTarget::Layer2::unconditional`, for a call whose only target is the
+    /// catalogued one): a database effect only where the entry
+    /// `emits` it on every call, and none when a case of the entry tests an argument that may be
+    /// computed from a parameter of the function (`resolver::from_parameter`), which its callers
+    /// may pass a value selecting the case. An argument heki cannot evaluate otherwise is one the
+    /// call waits on (R6).
+    fn unconditional(
+        &self,
+        entry: &heki_kb::EcosystemEntry,
+        case: Option<&heki_kb::ArgCase>,
+        passed: Passed<'_>,
+        effects: &BTreeSet<ExecEffectKind>,
+    ) -> u16 {
+        let from_caller = entry.cases.iter().any(|c| {
+            resolver::passed_var(
+                passed.args,
+                passed.kwargs,
+                passed.star_from,
+                (c.arg, c.param.as_deref()),
+            )
+            .is_some_and(|v| {
+                resolver::from_parameter(
+                    &|d| self.defs.get(&d).copied(),
+                    &|x, next| self.phi_inputs(x, next),
+                    &|x| self.is_param(x),
+                    v,
+                )
+            })
+        });
+        if from_caller {
+            return 0;
+        }
+        effects
+            .iter()
+            .filter(|e| match entry.emits_in(case) {
+                heki_kb::Emits::Always => true,
+                // A connection that may be in memory sends its statements without waiting.
+                heki_kb::Emits::IfOnDisk => **e != ExecEffectKind::BlockingDb,
+                _ => !matches!(e, ExecEffectKind::BlockingDb | ExecEffectKind::DbQuery),
+            })
+            .fold(0, |mask, e| mask | crate::effect_bit(*e))
     }
 
     /// A `[[tool.heki.ecosystem]]` entry naming the function declares what calling it does, as
@@ -5772,6 +5945,8 @@ fn role_site(
         result_discarded: false,
         queues: site.queues.clone(),
         result_held: false,
+        complete: false,
+        on_every_return: crate::OnEveryReturn::default(),
     }
 }
 

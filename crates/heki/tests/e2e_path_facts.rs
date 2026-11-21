@@ -286,6 +286,35 @@ def passed_on(report, db, fill):
     fill(report)
     for run in report["runs"]:
         db.one(run)
+
+
+def attribute_deleted(report, db):
+    if len(report["runs"]) != 40:
+        raise ValueError(report)
+    del report.cache
+    for run in report["runs"]:
+        db.one(run)
+
+
+def none_default(report, db):
+    if len(report.get("runs", None)) != 40:
+        raise ValueError(report)
+    for run in report["runs"]:
+        db.one(run)
+
+
+def text_default(report, db):
+    if len(report.get("code", "")) != 3:
+        raise ValueError(report)
+    for letter in report["code"]:
+        db.one(letter)
+
+
+def default_from_caller(report, db, fallback):
+    if len(report.get("runs", fallback)) != 40:
+        raise ValueError(report)
+    for run in report["runs"]:
+        db.one(run)
 "#,
     );
     let trips = |qualname: &str| -> Vec<Value> {
@@ -325,6 +354,13 @@ def passed_on(report, db, fill):
     assert_eq!(trips("changed"), vec![json!("open")]);
     assert_eq!(trips("deleted"), vec![json!("open")]);
     assert_eq!(trips("passed_on"), vec![json!("open")]);
+    assert_eq!(trips("attribute_deleted"), vec![json!("open")]);
+    // A `None` default has no length, and an empty text default fails a test that the length is
+    // 3: either way the key is there.
+    assert_eq!(trips("none_default"), vec![fixed(40)]);
+    assert_eq!(trips("text_default"), vec![fixed(3)]);
+    // A default heki does not know may be what the test measured.
+    assert_eq!(trips("default_from_caller"), vec![json!("open")]);
     // `get` without a default gives `None`, which has no length: the key is there.
     assert_eq!(trips("without_default"), vec![fixed(40)]);
     // A default the test accepts may be what it measured, not the value the loop reads.
@@ -379,6 +415,11 @@ class Store:
         changed = [(h, str(t)) for h, t in rows if t]
         for h, t in changed:
             pass
+        seen = {rows[0]}
+        for row in rows:
+            seen.add(row)
+        for x in map(str, seen):
+            pass
 "#,
     );
     let origins: Vec<Value> = function(&facts, "Store.load")["loops"]
@@ -417,6 +458,9 @@ class Store:
             one("param 1"),
             json!("open"),
             // A comprehension with an `if` leaves rows out: no count follows them.
+            one("param 1"),
+            json!("open"),
+            // A set that grows merges equal items: through `map`, no count follows them.
             one("param 1"),
             json!("open"),
         ]

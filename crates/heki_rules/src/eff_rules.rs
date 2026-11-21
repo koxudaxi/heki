@@ -15,17 +15,25 @@ use crate::{
 use heki_ast::Span;
 use heki_diagnostics::Diagnostic;
 use heki_effect::guards::{loop_bit, per_item_bit};
+use heki_effect::with_paths;
 use heki_effect::{
     AccessKind, BLOCKING_EFFECTS, BoundCallee, BoundaryReport, CallHop, CallSite, CallTarget,
     Construction, EffectSummary, ExternalAccess, Facts, FuncKey, PerItem, Runner, SiteEffect,
-    TypeCtx, WriteKind, anchors_call_site, boundary_reports_in,
+    SiteMust, TypeCtx, WriteKind, anchors_call_site, boundary_reports_in,
 };
-use heki_ir::{InstKind, IrFunction};
-use heki_kb::{EcosystemEntry, EnvironmentAccess, ExecEffectKind};
+pub(crate) use heki_ir::ItemOrigins;
+use heki_ir::walk::{Answer, Budget};
+use heki_ir::{BlockId, Carries, InstKind, IrFunction, ItemOrigin, ItemSource, Must, Progress};
+use heki_kb::{EcosystemEntry, EnvironmentAccess, ExecEffectKind, ResultItems, WaitKind};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::LazyLock;
+
+/// The rules whose reports are split by the must-facts of execution effects
+/// (`heki_effect::EffectSummary::must_exec`): an established report is the exact rule's, the
+/// rest its heuristic sibling's.
+pub(crate) const MUST_EFFECT_RULES: &[&str] = &["EFF101", "EFF111", "EFF103", "EFF113", "DATA101"];
 
 /// Modules whose own code is an ORM implementation (EFF103 is about ORM *users*).
 const ORM_PACKAGES: &[&str] = &["sqlalchemy", "django.db", "sqlmodel"];
@@ -48,25 +56,95 @@ fn relaxed(s: &EffectSummary, key: &FuncKey, unit: &ModuleUnit<'_>, relax_tests:
     if has_decorator(s, "asynccontextmanager") && name.contains("lifespan") {
         return true;
     }
-    relax_tests && (name.starts_with("test_") || unit.rel_path.split('/').any(|c| c == "tests"))
+    relax_tests && is_test_code(&key.qualname, &unit.rel_path)
+}
+
+/// Test code as pytest discovers it by default: a `test_*` function (a method of a test class
+/// included) and the functions nested in one, and every function of a `test_*.py` or
+/// `*_test.py` file or of a file under a `test/` or `tests/` directory.
+pub(crate) fn is_test_code(qualname: &str, rel_path: &str) -> bool {
+    let mut components = rel_path.split('/').peekable();
+    let mut in_tests = false;
+    let mut file = "";
+    while let Some(c) = components.next() {
+        if components.peek().is_some() {
+            in_tests |= c == "tests" || c == "test";
+        } else {
+            file = c;
+        }
+    }
+    let stem = file.strip_suffix(".py").unwrap_or(file);
+    in_tests
+        || stem.starts_with("test_")
+        || stem.ends_with("_test")
+        || qualname.split('.').any(|part| part.starts_with("test_"))
+}
+
+/// The code of a boundary report: `EFF105` for the file system, `EFF101` when whenever the call
+/// returns it has run a wait for input or output (`BoundaryReport::must`), `EFF111` otherwise.
+fn boundary_code(r: &BoundaryReport) -> &'static str {
+    if r.effect == ExecEffectKind::BlockingFs {
+        "EFF105"
+    } else if r.must.is_some() && r.effect.wait_kind() == Some(WaitKind::Io) {
+        "EFF101"
+    } else {
+        "EFF111"
+    }
+}
+
+/// The message of an `EFF101` report: the waiting call the reported call is, the one it always
+/// runs through helpers, or the one each implementation runs.
+fn always_waits(function: &str, must: &SiteMust) -> String {
+    match (must.chain.as_slice(), must.witnesses.as_slice()) {
+        ([] | [_], _) => format!(
+            "`{function}` runs the waiting call `{}` on the event loop",
+            must.target()
+        ),
+        ([first, ..], [witness]) => format!(
+            "`{}` always runs the waiting call `{}` on the event loop ({} down, on every path)",
+            first.callee,
+            witness.callee,
+            match must.chain.len() - 1 {
+                1 => "1 call".to_owned(),
+                n => format!("{n} calls"),
+            }
+        ),
+        ([first, ..], witnesses) => {
+            let method = first.callee.rsplit('.').next().unwrap_or(&first.callee);
+            format!(
+                "`{method}` always runs a waiting call on the event loop: {}",
+                each_witness(witnesses)
+            )
+        }
+    }
+}
+
+/// The calls of several implementations' chains with the effect, each named with the function
+/// that makes it.
+fn each_witness(witnesses: &[CallHop]) -> String {
+    witnesses
+        .iter()
+        .map(|w| format!("`{}` (in `{}`)", w.callee, w.caller.qualname))
+        .collect::<Vec<_>>()
+        .join(" or ")
 }
 
 pub(crate) fn eff101_105(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
-    if !cx.selection.is_enabled("EFF101") && !cx.selection.is_enabled("EFF105") {
+    if !["EFF101", "EFF111", "EFF105"]
+        .iter()
+        .any(|code| cx.selection.is_enabled(code))
+    {
         return;
     }
     let relax_tests = cx.config.lint.relax_async_in_tests.unwrap_or(true);
     let mut eff101: Vec<BoundaryReport> = Vec::new();
+    let mut eff111: Vec<BoundaryReport> = Vec::new();
     let mut eff105: Vec<BoundaryReport> = Vec::new();
     // The boundaries of the checked files: all of them for `heki check`, the edited one for
     // the LSP engine.
     let reports = boundary_reports_in(cx.index, cx.units.iter().map(|u| u.input.path.as_path()));
     for r in reports {
-        let code = if r.effect == ExecEffectKind::BlockingFs {
-            "EFF105"
-        } else {
-            "EFF101"
-        };
+        let code = boundary_code(&r);
         let unit = cx.unit(&r.path).expect(REPORTS_OF_UNITS);
         let relaxed_here = cx
             .index
@@ -75,13 +153,13 @@ pub(crate) fn eff101_105(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
         if !cx.enabled(code, unit) || relaxed_here {
             continue;
         }
-        if code == "EFF105" {
-            eff105.push(r);
-        } else {
-            eff101.push(r);
+        match code {
+            "EFF105" => eff105.push(r),
+            "EFF101" => eff101.push(r),
+            _ => eff111.push(r),
         }
     }
-    for (code, reports) in [("EFF101", eff101), ("EFF105", eff105)] {
+    for (code, reports) in [("EFF101", eff101), ("EFF111", eff111), ("EFF105", eff105)] {
         for r in &reports {
             let unit = cx.unit(&r.path).expect(REPORTS_OF_UNITS);
             let what = if code == "EFF105" {
@@ -95,22 +173,36 @@ pub(crate) fn eff101_105(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
                 Some(h) if r.iterates => format!(" by iterating `{}`", h.callee),
                 _ => String::new(),
             };
-            let message = format!(
-                "`{}` reaches {what} `{}` on the event loop{iterating}",
-                r.function.qualname, r.root_cause
-            );
+            // An exact report names, keys, and folds by the call it claims: the end of the chain
+            // every implementation runs, not of the shortest chain the heuristic tier found.
+            let (message, chain, target) = match &r.must {
+                Some(must) if code == "EFF101" => (
+                    always_waits(&r.function.qualname, must),
+                    must.related(),
+                    must.target(),
+                ),
+                _ => (
+                    format!(
+                        "`{}` reaches {what} `{}` on the event loop{iterating}",
+                        r.function.qualname, r.root_cause
+                    ),
+                    r.chain.clone(),
+                    r.root_cause.clone(),
+                ),
+            };
+            let fold_key = format!("{target}|{}", effect_name(r.effect));
             if let Some(d) = cx.emit(
                 out,
                 code,
                 unit,
                 r.span,
                 &r.function.qualname,
-                r.root_cause.clone(),
+                target,
                 message,
                 Some(unblocking_help(r.effect).to_owned()),
-                &r.chain,
+                &chain,
             ) {
-                d.fold_key = Some(format!("{}|{}", r.root_cause, effect_name(r.effect)));
+                d.fold_key = Some(fold_key);
             }
         }
     }
@@ -145,10 +237,18 @@ pub fn fold_root_causes(diags: &mut Vec<Diagnostic>) {
     }
     for (&i, &more) in &folded {
         let d = &mut diags[i];
-        d.message = format!(
-            "{} (+{more} more async call sites reaching the same blocking root cause)",
-            d.message
-        );
+        // An exact report's group shares the call each of its reports claims.
+        d.message = if d.rule_code == "EFF101" {
+            format!(
+                "{} (+{more} more async call sites that always run `{}`)",
+                d.message, d.target
+            )
+        } else {
+            format!(
+                "{} (+{more} more async call sites reaching the same blocking root cause)",
+                d.message
+            )
+        };
     }
     *diags = std::mem::take(diags)
         .into_iter()
@@ -213,7 +313,7 @@ pub(crate) fn shortest(effects: &[SiteEffect], kind: ExecEffectKind) -> Option<&
 
 pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Diagnostic>) {
     let want102 = cx.enabled("EFF102", unit);
-    let want103 = cx.enabled("EFF103", unit)
+    let want103 = (cx.enabled("EFF103", unit) || cx.enabled("EFF113", unit))
         && !ORM_PACKAGES.iter().any(|p| {
             unit.input.module_name == *p || unit.input.module_name.starts_with(&format!("{p}."))
         })
@@ -236,6 +336,7 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
     let tcx = TypeCtx::new(&unit.input, cx.decls, cx.kb);
     let no_types = FxHashMap::default();
     let constants = cx.fixed_constants(unit);
+    let item_origins: std::cell::OnceCell<ItemOrigins<'_>> = std::cell::OnceCell::new();
     for f in &unit.input.ir.functions {
         if f.is_class_body {
             continue;
@@ -256,6 +357,7 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
         let mut data_sized: Vec<Option<bool>> = vec![None; f.loops.len()];
         // An iteration shares its span with the call producing the iterable: one report.
         let mut seen: FxHashSet<Span> = FxHashSet::default();
+        let mut queries: Vec<LoopQuery<'_>> = Vec::new();
         for bb in &f.blocks {
             let depth = f.block_loop_depth(bb.id);
             if depth == 0 && !per_item_calls {
@@ -269,7 +371,7 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
             // calling a callable once per item is one more loop, inside the others, as long as
             // the items it iterates.
             let mut data_loops: Option<u64> = None;
-            for inst in &bb.insts {
+            for (index, inst) in bb.insts.iter().enumerate() {
                 // Reading a property runs its getter (a call site at the read); iterating a
                 // generator runs its body and iterating an object of a catalogued class its
                 // `__iter__` (call sites at the iteration). Creating a generator expression
@@ -353,30 +455,242 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
                     );
                 }
                 if let Some((chain, repeats)) = per_iteration(ExecEffectKind::DbQuery) {
-                    let root = chain.last().map(|h| h.callee.clone()).unwrap_or_default();
-                    cx.emit(
-                        out,
-                        "EFF103",
-                        unit,
-                        inst.span,
-                        &key.qualname,
-                        root.clone(),
-                        format!(
-                            "`{}` runs a database query{} {} (N+1)",
-                            chain[0].callee,
-                            through_helpers(chain),
-                            repeats.every()
-                        ),
-                        Some(format!(
-                            "batch the queries, or load the data once before the {}",
-                            repeats.ahead_of()
-                        )),
-                        chain,
-                    );
+                    queries.push(LoopQuery {
+                        at: (bb.id, index),
+                        span: inst.span,
+                        chain: chain.to_vec(),
+                        repeats,
+                        sites: list,
+                    });
                 }
             }
         }
+        if queries.is_empty() {
+            continue;
+        }
+        // The split is the same whichever of the two rules runs: `EFF113` reports the rest.
+        let origins = item_origins.get_or_init(|| ItemOrigins::new(unit.input.ir));
+        let exact = established_queries(cx, unit, &tcx, f, origins, &queries);
+        for (q, exact) in queries.iter().zip(exact) {
+            let root = q.chain.last().map(|h| h.callee.clone()).unwrap_or_default();
+            match exact {
+                // An exact report names and keys the call it claims.
+                Some(e) if cx.enabled("EFF103", unit) => cx.emit(
+                    out,
+                    "EFF103",
+                    unit,
+                    q.span,
+                    &key.qualname,
+                    e.must.target(),
+                    e.message(),
+                    None,
+                    &e.must.related(),
+                ),
+                Some(_) => None,
+                None if cx.enabled("EFF113", unit) => cx.emit(
+                    out,
+                    "EFF113",
+                    unit,
+                    q.span,
+                    &key.qualname,
+                    root,
+                    format!(
+                        "`{}` runs a database query{} {}",
+                        q.chain[0].callee,
+                        through_helpers(&q.chain),
+                        q.repeats.every()
+                    ),
+                    Some(format!(
+                        "load what it needs once before the {}",
+                        q.repeats.ahead_of()
+                    )),
+                    &q.chain,
+                ),
+                None => None,
+            };
+        }
     }
+}
+
+/// A call in a loop that may run a database query on every iteration (`EFF103` / `EFF113`).
+struct LoopQuery<'s> {
+    /// The call's instruction (block, index).
+    at: (BlockId, usize),
+    span: Span,
+    /// The shortest chain to the query.
+    chain: Vec<CallHop>,
+    repeats: Repeats<'s>,
+    /// The call sites at the instruction.
+    sites: &'s [&'s CallSite],
+}
+
+/// What establishes an `EFF103` report: the origins of the items the loop steps through, and
+/// what the call has sent whenever it returns.
+struct EstablishedQuery {
+    origins: DataOrigins,
+    must: SiteMust,
+}
+
+/// Where the items of a loop over data come from, as a report names them
+/// ([`data_origin`]).
+pub(crate) struct DataOrigins {
+    names: Vec<String>,
+    /// Some origin carries only its count (`map(f, ids)`): the loop runs once for each of its
+    /// items without stepping through them.
+    counts_only: bool,
+}
+
+impl DataOrigins {
+    /// The origins of every item of `found`, or `None` when one is not the data's.
+    pub(crate) fn of(
+        cx: &CheckContext<'_>,
+        tcx: &TypeCtx<'_>,
+        ir: &heki_ir::ModuleIr,
+        found: &std::collections::BTreeSet<ItemOrigin>,
+    ) -> Option<Self> {
+        let names = found
+            .iter()
+            .map(|o| data_origin(cx, tcx, ir, *o))
+            .collect::<Option<Vec<String>>>()?;
+        (!names.is_empty()).then(|| Self {
+            names,
+            counts_only: found.iter().any(|o| o.carries == Carries::Count),
+        })
+    }
+
+    /// "every iteration over parameter `ids`", or "every iteration, once for each item of
+    /// parameter `ids`" for a count: what a message says repeats.
+    pub(crate) fn every_iteration(&self) -> String {
+        let named = self.names.join(" and ");
+        if self.counts_only {
+            format!("every iteration, once for each item of {named}")
+        } else {
+            format!("every iteration over {named}")
+        }
+    }
+
+    /// The end of a clause [`Self::every_iteration`] opens in the middle of a sentence.
+    pub(crate) fn clause_end(&self) -> &'static str {
+        if self.counts_only { "," } else { "" }
+    }
+}
+
+impl EstablishedQuery {
+    fn message(&self) -> String {
+        let what = match (self.must.witnesses.as_slice(), self.must.chain.as_slice()) {
+            ([witness], [first, _, ..]) => {
+                format!("`{}` (through `{}`)", witness.callee, first.callee)
+            }
+            ([witness], _) => format!("`{}`", witness.callee),
+            (witnesses, _) => each_witness(witnesses),
+        };
+        format!(
+            "{}{} sends a database statement: {what}",
+            self.origins.every_iteration(),
+            self.origins.clause_end()
+        )
+    }
+}
+
+/// Which of `queries` in `f` are established (`EFF103`): the call sends a statement whenever it
+/// returns ([`heki_effect::ProjectIndex::site_must`]) and runs on every iteration that completes
+/// of a loop around it, exception edges included, whose items the data decides: a parameter or a
+/// part of one, or a catalog call's rows, lines, directory entries, or the lines of its text
+/// (`heki_kb::EcosystemEntry::items`). A loop whose trip count the code fixes is not one, at any
+/// count.
+fn established_queries(
+    cx: &CheckContext<'_>,
+    unit: &ModuleUnit<'_>,
+    tcx: &TypeCtx<'_>,
+    f: &IrFunction,
+    origins: &ItemOrigins<'_>,
+    queries: &[LoopQuery<'_>],
+) -> Vec<Option<EstablishedQuery>> {
+    let types = tcx.infer(f);
+    let owner = "heki_rules::eff_rules::established_queries";
+    let budget = Budget::of_function(owner, f);
+    with_paths(tcx, f, &types, owner, |paths, ix| {
+        queries
+            .iter()
+            .map(|q| {
+                if q.repeats.0.is_some() {
+                    return None;
+                }
+                let (site, must) = q.sites.iter().find_map(|s| {
+                    cx.index
+                        .site_must(&unit.input.path, s, ExecEffectKind::DbQuery)
+                        .map(|m| (s, m))
+                })?;
+                let progress = match site.target {
+                    CallTarget::Layer2 { .. } => Progress::Called,
+                    CallTarget::Project(_) => Progress::Returned,
+                };
+                f.loops.iter().enumerate().find_map(|(li, lp)| {
+                    if !ix.shape().in_loop(li, q.at.0)
+                        || paths.on_every_iteration(li, q.at, progress)
+                            != Answer::Known(Must::Every)
+                        || !ix.fixed_trips(lp, &mut |_| None).is_open()
+                    {
+                        return None;
+                    }
+                    let found = origins.of_loop(&budget, f.id, li);
+                    let Answer::Known(found) = found else {
+                        return None;
+                    };
+                    Some(EstablishedQuery {
+                        origins: DataOrigins::of(cx, tcx, unit.input.ir, &found)?,
+                        must: must.clone(),
+                    })
+                })
+            })
+            .collect()
+    })
+}
+
+/// How a report names `origin` when the data decides the number of its items: a parameter or
+/// a part of one, or a catalog call sizing its result (`heki_kb::EcosystemEntry::items`), in
+/// the function the origin names (a generator expression's loop reads its creator's iterable).
+/// `None` for a method's receiver, a fixed collection, or a call the catalog does not size.
+pub(crate) fn data_origin(
+    cx: &CheckContext<'_>,
+    tcx: &TypeCtx<'_>,
+    ir: &heki_ir::ModuleIr,
+    origin: ItemOrigin,
+) -> Option<String> {
+    let f = ir.function(origin.function);
+    let param = |p: u8| f.params.get(usize::from(p)).map(|p| p.name.as_str());
+    let named = match origin.source {
+        ItemSource::Param(p) => format!("parameter `{}`", param(p)?),
+        ItemSource::ParamPart(p) => format!("a part of parameter `{}`", param(p)?),
+        ItemSource::Call { block, index } => {
+            let inst = f.block(block).insts.get(usize::try_from(index).ok()?)?;
+            let types = tcx.infer(f);
+            let callee = match &inst.kind {
+                InstKind::Call { callee_var, .. } => {
+                    tcx.resolve_call(callee_var.and_then(|v| types.get(&v)))
+                }
+                InstKind::MethodCall { recv, method, .. } => {
+                    tcx.resolve_method(types.get(recv), method)
+                }
+                _ => return None,
+            };
+            let heki_effect::Callee::External(symbol) = callee else {
+                return None;
+            };
+            let entry = cx.kb.lookup(&symbol)?;
+            let what = match (entry.items?, origin.text) {
+                (ResultItems::Rows, false) => "the rows",
+                (ResultItems::Lines, false) => "the lines",
+                (ResultItems::Entries, false) => "the entries",
+                (ResultItems::Text, true) => "the lines of the text",
+                _ => return None,
+            };
+            // A catalog class's method is named by the library API it is.
+            format!("{what} of `{}`", entry.api.as_deref().unwrap_or(&symbol))
+        }
+        ItemSource::Receiver | ItemSource::Fixed => return None,
+    };
+    Some(named)
 }
 
 /// What repeats an effect `EFF102` / `EFF103` report: a data-sized loop around the call, or the

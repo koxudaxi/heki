@@ -24,9 +24,9 @@ hold. Only exact reports are shown by default.
 - A run of `full` or `concise` output that leaves heuristic rules off, or heuristic reports out,
   ends with a note saying how many.
 
-See [Rule selection](configuration.md#rule-selection-toolhekilint). The proven tier of the eight
-`OPT` rewrite rules and the exact tier of `OPT113` are exact (certified below); the other rules
-are heuristic.
+See [Rule selection](configuration.md#rule-selection-toolhekilint). `EFF101`, `EFF103`,
+`DATA101`, the proven tier of the eight `OPT` rewrite rules, and the exact tier of `OPT113` are
+exact (certified below); the other rules are heuristic.
 
 ## What a report states
 
@@ -72,7 +72,10 @@ Exact claims hold in every run consistent with seven assumptions
 - **R4**: imports resolve as configured.
 - **R5**: the checked files are the project.
 - **R6**: a library call's argument is a value it waits on (a nonzero sleep, a host name to look
-  up) unless heki establishes otherwise.
+  up) unless heki establishes otherwise, and so are the arguments that opened the connection it
+  runs on (a SQLAlchemy engine or another DB-API connection opened from a URL heki does not
+  know waits). `sqlite3.connect` is the one exception, as its in-memory form is common: a SQLite
+  connection waits only when heki establishes that it was opened on a file.
 - **R7**: no asynchronous or resource-exhaustion exception (`MemoryError`, `KeyboardInterrupt`, a
   signal) is raised. Under it, loading a local, a module name bound once, a builtin, or a member
   of an imported module, and building a `list` or `tuple` display, do not raise; other attribute
@@ -123,7 +126,8 @@ checked by hand every exact report on the Stage 0-A corpus with the build of 202
 report, whose rewrite needed the set-order obligation, left the tier); the holdout run checked
 every exact report of one run on the 100 packages of the frozen holdout corpus. `OPT113`'s
 census reports are those of its exact tier with the plain-key premise, all among the reports
-the census of the earlier tier checked by hand.
+the census of the earlier tier checked by hand. The census of `EFF101` counts its boundaries
+before reports reaching one waiting call are folded together.
 
 | Rule | Certified | Census: reports / false | Holdout: reports / false |
 | ---- | --------- | ----------------------: | -----------------------: |
@@ -136,11 +140,15 @@ the census of the earlier tier checked by hand.
 | `OPT121` | 0.2.0 | 12 / 0 | 5 / 0 |
 | `OPT130` | 0.2.0 | 1 / 0 | 0 / 0 |
 | `OPT113` | 0.2.0 | 8 / 0 | 6 / 0 |
+| `EFF101` | 0.2.0 | 287 / 0 | 152 / 0 |
+| `EFF103` | 0.2.0 | 103 / 0 | 122 / 0 |
+| `DATA101` | 0.2.0 | 6 / 0 | 0 / 0 |
 
 ## Measurements
 
 Round 3 sampled up to 50 reports per rule on the Stage 0-A corpus, with the build of 2026-11-21.
-These are measurements of heuristic rules, not certifications. Its reviewers also counted as
+These are measurements of the rules as they were then, all heuristic, not certifications;
+the Certainty column gives each rule's certainty now. Its reviewers also counted as
 wrong a bound past 16 that the code states and an exclusion a rule page documents but heki does
 not recognize; under the terms above those reports are right, so these figures are lower
 bounds. For `OPT101` and `OPT102` the table keeps the reviewers' verdicts: four of their samples
@@ -148,10 +156,10 @@ loop a fixed 4 times, which is not data-sized.
 
 | Rule | Certainty | Measured | Sample | C / P / B / F | Right about the code | 95% interval | Real harm |
 | ---- | --------- | -------- | -----: | ------------- | -------------------: | ------------ | --------: |
-| `EFF101` | heuristic | round 3, 2026-11-21 | 50 | 3 / 13 / 25 / 9 | 82% | 69-90% | 32% |
+| `EFF101` | exact | round 3, 2026-11-21 | 50 | 3 / 13 / 25 / 9 | 82% | 69-90% | 32% |
 | `EFF102` | heuristic | round 3, 2026-11-21 | 50 | 0 / 2 / 25 / 23 | 54% | 40-67% | 4% |
-| `EFF103` | heuristic | round 3, 2026-11-21 | 50 | 0 / 8 / 29 / 13 | 74% | 60-84% | 16% |
-| `DATA101` | heuristic | round 3, 2026-11-21 | 28 | 0 / 3 / 17 / 8 | 71% | 53-85% | 11% |
+| `EFF103` | exact | round 3, 2026-11-21 | 50 | 0 / 8 / 29 / 13 | 74% | 60-84% | 16% |
+| `DATA101` | exact | round 3, 2026-11-21 | 28 | 0 / 3 / 17 / 8 | 71% | 53-85% | 11% |
 | `MUT107` | heuristic | round 3, 2026-11-21 | 50 | 1 / 1 / 37 / 11 | 78% | 65-87% | 4% |
 | `MUT110` | heuristic | round 3, 2026-11-21 | 4 | 0 / 0 / 4 / 0 | 100% | 51-100% | 0% |
 | `MUT202` | heuristic | round 3, 2026-11-21 | 20 | 2 / 1 / 11 / 6 | 70% | 48-85% | 15% |

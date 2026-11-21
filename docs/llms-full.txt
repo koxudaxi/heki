@@ -18,8 +18,8 @@ mutate state or reach I/O.
 
 A report is *exact* when heki established every premise of its claim and its rule was
 certified, and only exact reports are shown by default. The others are *heuristic*: they can be
-wrong, every output labels them, and `heki check --heuristic` shows them too. No rule is exact
-yet.
+wrong, every output labels them, and `heki check --heuristic` shows them too. The exact rules
+are listed in [Rule precision](https://heki.koxudaxi.dev/precision/#certifications).
 
 <p>
   <a class="md-button md-button--primary" href="getting-started/">Getting Started</a>
@@ -57,7 +57,7 @@ async def get_user(user_id: int) -> dict[str, str]:
 
 ```console
 $ heki check --heuristic
-app/api.py:5:12: EFF101 (async-blocking-call) [warning, heuristic] `get_user` reaches the blocking call `requests.get` on the event loop
+app/api.py:5:12: EFF101 (async-blocking-call) [warning] `app.users.load_user` always runs the waiting call `requests.get` on the event loop (2 calls down, on every path)
   |
 5 |     return load_user(user_id)
   |            ^
@@ -88,13 +88,12 @@ def order_summaries(cursor: sqlite3.Cursor, orders: list[tuple[int, int]]) -> li
 
 ```console
 $ heki check --heuristic
-app/orders.py:11:37: EFF103 (loop-db-query) [warning, heuristic] `app.orders.customer_name` runs a database query (`sqlite3.Cursor.execute`) on every loop iteration (N+1)
+app/orders.py:11:37: EFF103 (loop-db-query) [warning] every iteration over parameter `orders` sends a database statement: `sqlite3.Cursor.execute` (through `app.orders.customer_name`)
    |
 11 |         lines.append(f"#{order_id} {customer_name(cursor, customer_id)}")
    |                                     ^
   = related: app/orders.py:11:37: `order_summaries` calls `app.orders.customer_name`
   = related: app/orders.py:5:5: `customer_name` calls `sqlite3.Cursor.execute`
-  = help: batch the queries, or load the data once before the loop
 
 Found 1 diagnostic(s) in 1 file(s).
 ```
@@ -103,7 +102,7 @@ Ruff, ty, Pyrefly, pyright, and mypy report nothing for either example with thei
 
 ### Your own conventions, too
 
-The checks above need no configuration, only `--heuristic` while their rules are heuristic.
+The checks above need no configuration: `EFF101` and `EFF103` are exact and run by default.
 The rules of your own project, which you keep today by review, by AST scripts, or by run-time
 guards in tests, can be added as a few lines of [configuration](https://heki.koxudaxi.dev/configuration/):
 
@@ -139,8 +138,10 @@ Each report shows the chain of calls that leads to the bug.
 
 | What goes wrong | Rule | Certainty |
 | --- | --- | --- |
-| A blocking call several helpers below an `async def` | [`EFF101`](https://heki.koxudaxi.dev/rules/async-blocking-call/) | heuristic |
-| A database query, or a new HTTP client, on every loop iteration | [`EFF103`](https://heki.koxudaxi.dev/rules/loop-db-query/), [`EFF102`](https://heki.koxudaxi.dev/rules/loop-unpooled-client/) | heuristic |
+| A blocking call that a call in an `async def` always runs, several helpers below | [`EFF101`](https://heki.koxudaxi.dev/rules/async-blocking-call/) | exact |
+| A blocking call an `async def` can reach | [`EFF111`](https://heki.koxudaxi.dev/rules/async-possibly-blocking-call/) | heuristic |
+| A database statement on every iteration of a loop over data | [`EFF103`](https://heki.koxudaxi.dev/rules/loop-db-query/) | exact |
+| A database query, or a new HTTP client, a loop can run on every iteration | [`EFF113`](https://heki.koxudaxi.dev/rules/loop-possible-db-query/), [`EFF102`](https://heki.koxudaxi.dev/rules/loop-unpooled-client/) | heuristic |
 | An attribute that `__hash__` reads, changed after the object went into a `set` | [`MUT107`](https://heki.koxudaxi.dev/rules/hash-attr-mutation/) | heuristic |
 | A `Sequence` / `Mapping` argument changed in place by a helper | [`MUT110`](https://heki.koxudaxi.dev/rules/readonly-param-mutation/) | heuristic |
 | Opt-in: a frozen or `ReadOnly` field changed in place | [`MUT108`](https://heki.koxudaxi.dev/rules/readonly-type-mutation/) | heuristic |
@@ -994,8 +995,8 @@ supported version that every clause admits:
 | `extend-select` | `[]` | Rules to add. |
 | `ignore` | `[]` | Rules to disable. |
 | `per-file-ignores` | `{}` | Glob → rules disabled in matching files (project-relative POSIX paths). As in Ruff, `*` also matches `/`: `scripts/*.py` covers `scripts/tools/worker.py` too. |
-| `severity` | `"warning"` for the rules that report slower code (`EFF101`, `EFF102`, `EFF103`, `EFF105`, `DATA101`, and the `OPT` rules), `"error"` for the others, which report bugs | Rule → `"error"` or `"warning"`. It changes the output, the SARIF level, and whether a report makes `heki check` fail (`fail-on`). |
-| `relax-async-in-tests` | `true` | Skip `EFF101`, `EFF105`, and `EFF106` in `test_*` functions and in files under `tests/`. |
+| `severity` | `"warning"` for the rules that report slower code (`EFF101`, `EFF102`, `EFF103`, `EFF105`, `DATA101`, and the `OPT` rules), `"error"` for the others, which report bugs | Rule → `"error"` or `"warning"`. It changes the output and the SARIF level; both make `heki check` fail. |
+| `relax-async-in-tests` | `true` | Skip `EFF101`, `EFF111`, `EFF105`, and `EFF106` in test code as pytest finds it: `test_*` functions and the functions nested in them, `test_*.py` and `*_test.py` files, and files under `test/` or `tests/`. |
 | `heuristic` | `false` | Whether the heuristic rules that are not opt-in run by default and for a prefix or `ALL`, as the exact rules do. `--heuristic` and `--no-heuristic` override it. |
 | `fail-on` | `"error"` | The least severity whose reports make `heki check` (and `--watch`) exit with code 1: `"error"`, or `"warning"` to fail on warnings too. Warnings are reported either way, and the language server shows them. `--fail-on` overrides it. |
 
@@ -1804,9 +1805,10 @@ For custom tooling, `--output-format json` gives every field: see
 ### From heki 0.1
 
 heki 0.1 ran every rule that is not opt-in by default. Since rules have a certainty, only the
-exact ones do: in 0.2.0, the proven tier of the eight `OPT` rewrite rules (`OPT101`-`OPT103`,
-`OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130`), their reports whose rewrite heki proves safe,
-and the exact tier of `OPT113`.
+exact ones do: in 0.2.0, `EFF101`, `EFF103`, `DATA101`, the proven tier of the eight `OPT`
+rewrite rules (`OPT101`-`OPT103`, `OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130`), their
+reports whose rewrite heki proves safe, and the exact tier of `OPT113` ([Rule
+precision](https://heki.koxudaxi.dev/precision/#certifications) lists them).
 
 - `lint.heuristic = true` restores the rules of 0.1, now labelled `heuristic` in every output.
 - A baseline keeps its entries: their keys (file, function, rule, target) do not change.
@@ -1986,7 +1988,7 @@ Source: https://heki.koxudaxi.dev/rules/
 
 # Rules
 
-heki has 35 rules in four families. A rule is exact when it reports only what it established and was certified on the corpus, and heuristic (≈) when a report can be wrong about the code: [Rule Precision](https://heki.koxudaxi.dev/precision/) says how a rule is certified and what each one measured. Each rule's page says what a report states.
+heki has 37 rules in four families. A rule is exact when it reports only what it established and was certified on the corpus, and heuristic (≈) when a report can be wrong about the code: [Rule Precision](https://heki.koxudaxi.dev/precision/) says how a rule is certified and what each one measured. Each rule's page says what a report states.
 
 - The exact rules run by default, and for a prefix such as `EFF` or `ALL`. A report of an exact rule that did not establish every premise (an `OPT` report whose rewrite is not proven) is shown where a heuristic rule would run.
 - A heuristic rule runs when `select` / `extend-select` names its code or name. With `lint.heuristic = true` (`--heuristic`), the heuristic rules that are not opt-in also run by default and for a prefix or `ALL`.
@@ -2032,9 +2034,11 @@ Work that runs where it should not: blocking calls on the event loop, clients an
 
 | Code | Name | Message | |
 | ---- | ---- | ------- | ------: |
-| EFF101 | [async-blocking-call](https://heki.koxudaxi.dev/rules/async-blocking-call/) | Direct or indirect blocking network/DB/subprocess/sleep call reachable from `async def`. | ≈ |
+| EFF101 | [async-blocking-call](https://heki.koxudaxi.dev/rules/async-blocking-call/) | A call in `async def` that always runs a network, database, subprocess, or sleep call that waits on the event loop. |  |
+| EFF111 | [async-possibly-blocking-call](https://heki.koxudaxi.dev/rules/async-possibly-blocking-call/) | Heuristic sibling of `EFF101`: a call in `async def` that can reach a blocking call on the event loop. | ≈ |
 | EFF102 | [loop-unpooled-client](https://heki.koxudaxi.dev/rules/loop-unpooled-client/) | Allocating an unpooled HTTP/DB/RPC client or sessionless request inside a loop. | ≈ |
-| EFF103 | [loop-db-query](https://heki.koxudaxi.dev/rules/loop-db-query/) | Explicit DB query / external RPC executed inside a loop (N+1). | ≈ |
+| EFF103 | [loop-db-query](https://heki.koxudaxi.dev/rules/loop-db-query/) | A loop over data whose every iteration sends a database statement. |  |
+| EFF113 | [loop-possible-db-query](https://heki.koxudaxi.dev/rules/loop-possible-db-query/) | Heuristic sibling of `EFF103`: a loop that can run a database query on every iteration. | ≈ |
 | EFF105 | [async-blocking-fs](https://heki.koxudaxi.dev/rules/async-blocking-fs/) | Opt-in: blocking local filesystem I/O reachable from `async def`. | ≈ 🔌 |
 | EFF106 | [lock-or-tx-held-across-io](https://heki.koxudaxi.dev/rules/lock-or-tx-held-across-io/) | Opt-in: `await` or blocking network I/O while holding a `threading` lock or a DB transaction. | ≈ 🔌 |
 | EFF107 | [unretained-async-task](https://heki.koxudaxi.dev/rules/unretained-async-task/) | Opt-in: an `asyncio.create_task` result bound to a local variable but never awaited, returned, or stored. | ≈ 🔌 |
@@ -2046,7 +2050,7 @@ Quadratic re-allocation of DataFrames and arrays across loop iterations.
 
 | Code | Name | Message | |
 | ---- | ---- | ------- | ------: |
-| DATA101 | [loop-carried-concat](https://heki.koxudaxi.dev/rules/loop-carried-concat/) | Loop-carried quadratic `pandas.concat` / `numpy.vstack` / `numpy.append` accumulation. | ≈ |
+| DATA101 | [loop-carried-concat](https://heki.koxudaxi.dev/rules/loop-carried-concat/) | Loop-carried quadratic `pandas.concat` / `numpy.vstack` / `numpy.append` accumulation. |  |
 
 ## Complexity Rewrites (OPT)
 
@@ -2096,9 +2100,9 @@ hold. Only exact reports are shown by default.
 - A run of `full` or `concise` output that leaves heuristic rules off, or heuristic reports out,
   ends with a note saying how many.
 
-See [Rule selection](https://heki.koxudaxi.dev/configuration/#rule-selection-toolhekilint). The proven tier of the eight
-`OPT` rewrite rules and the exact tier of `OPT113` are exact (certified below); the other rules
-are heuristic.
+See [Rule selection](https://heki.koxudaxi.dev/configuration/#rule-selection-toolhekilint). `EFF101`, `EFF103`,
+`DATA101`, the proven tier of the eight `OPT` rewrite rules, and the exact tier of `OPT113` are
+exact (certified below); the other rules are heuristic.
 
 ## What a report states
 
@@ -2144,7 +2148,10 @@ Exact claims hold in every run consistent with seven assumptions
 - **R4**: imports resolve as configured.
 - **R5**: the checked files are the project.
 - **R6**: a library call's argument is a value it waits on (a nonzero sleep, a host name to look
-  up) unless heki establishes otherwise.
+  up) unless heki establishes otherwise, and so are the arguments that opened the connection it
+  runs on (a SQLAlchemy engine or another DB-API connection opened from a URL heki does not
+  know waits). `sqlite3.connect` is the one exception, as its in-memory form is common: a SQLite
+  connection waits only when heki establishes that it was opened on a file.
 - **R7**: no asynchronous or resource-exhaustion exception (`MemoryError`, `KeyboardInterrupt`, a
   signal) is raised. Under it, loading a local, a module name bound once, a builtin, or a member
   of an imported module, and building a `list` or `tuple` display, do not raise; other attribute
@@ -2195,7 +2202,8 @@ checked by hand every exact report on the Stage 0-A corpus with the build of 202
 report, whose rewrite needed the set-order obligation, left the tier); the holdout run checked
 every exact report of one run on the 100 packages of the frozen holdout corpus. `OPT113`'s
 census reports are those of its exact tier with the plain-key premise, all among the reports
-the census of the earlier tier checked by hand.
+the census of the earlier tier checked by hand. The census of `EFF101` counts its boundaries
+before reports reaching one waiting call are folded together.
 
 | Rule | Certified | Census: reports / false | Holdout: reports / false |
 | ---- | --------- | ----------------------: | -----------------------: |
@@ -2208,11 +2216,15 @@ the census of the earlier tier checked by hand.
 | `OPT121` | 0.2.0 | 12 / 0 | 5 / 0 |
 | `OPT130` | 0.2.0 | 1 / 0 | 0 / 0 |
 | `OPT113` | 0.2.0 | 8 / 0 | 6 / 0 |
+| `EFF101` | 0.2.0 | 287 / 0 | 152 / 0 |
+| `EFF103` | 0.2.0 | 103 / 0 | 122 / 0 |
+| `DATA101` | 0.2.0 | 6 / 0 | 0 / 0 |
 
 ## Measurements
 
 Round 3 sampled up to 50 reports per rule on the Stage 0-A corpus, with the build of 2026-11-21.
-These are measurements of heuristic rules, not certifications. Its reviewers also counted as
+These are measurements of the rules as they were then, all heuristic, not certifications;
+the Certainty column gives each rule's certainty now. Its reviewers also counted as
 wrong a bound past 16 that the code states and an exclusion a rule page documents but heki does
 not recognize; under the terms above those reports are right, so these figures are lower
 bounds. For `OPT101` and `OPT102` the table keeps the reviewers' verdicts: four of their samples
@@ -2220,10 +2232,10 @@ loop a fixed 4 times, which is not data-sized.
 
 | Rule | Certainty | Measured | Sample | C / P / B / F | Right about the code | 95% interval | Real harm |
 | ---- | --------- | -------- | -----: | ------------- | -------------------: | ------------ | --------: |
-| `EFF101` | heuristic | round 3, 2026-11-21 | 50 | 3 / 13 / 25 / 9 | 82% | 69-90% | 32% |
+| `EFF101` | exact | round 3, 2026-11-21 | 50 | 3 / 13 / 25 / 9 | 82% | 69-90% | 32% |
 | `EFF102` | heuristic | round 3, 2026-11-21 | 50 | 0 / 2 / 25 / 23 | 54% | 40-67% | 4% |
-| `EFF103` | heuristic | round 3, 2026-11-21 | 50 | 0 / 8 / 29 / 13 | 74% | 60-84% | 16% |
-| `DATA101` | heuristic | round 3, 2026-11-21 | 28 | 0 / 3 / 17 / 8 | 71% | 53-85% | 11% |
+| `EFF103` | exact | round 3, 2026-11-21 | 50 | 0 / 8 / 29 / 13 | 74% | 60-84% | 16% |
+| `DATA101` | exact | round 3, 2026-11-21 | 28 | 0 / 3 / 17 / 8 | 71% | 53-85% | 11% |
 | `MUT107` | heuristic | round 3, 2026-11-21 | 50 | 1 / 1 / 37 / 11 | 78% | 65-87% | 4% |
 | `MUT110` | heuristic | round 3, 2026-11-21 | 4 | 0 / 0 / 4 / 0 | 100% | 51-100% | 0% |
 | `MUT202` | heuristic | round 3, 2026-11-21 | 20 | 2 / 1 / 11 / 6 | 70% | 48-85% | 15% |
@@ -2952,134 +2964,73 @@ Source: https://heki.koxudaxi.dev/rules/async-blocking-call/
 
 # async-blocking-call (EFF101)
 
-Family: Execution Effects (EFF) · Heuristic · Off by default · Severity `warning` (slower code) · No automatic fix
+Family: Execution Effects (EFF) · Exact · Enabled by default · Severity `warning` (slower code) · No automatic fix
 
-Direct or indirect blocking network/DB/subprocess/sleep call reachable from `async def`.
-
-!!! note "Heuristic"
-
-    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 50 sampled reports (round 3, 2026-11-21), 82% were right about the code. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
+A call in `async def` that always runs a network, database, subprocess, or sleep call that waits on the event loop.
 
 ## What it does
-Checks `async def` functions that reach a blocking call on the event loop, directly or through
-synchronous helpers: network I/O (`requests`, `httpx.Client`, `urllib`), host name lookups
-(`socket.getaddrinfo` / `gethostbyname` / `getfqdn`; the event loop has `loop.getaddrinfo()`;
-`getaddrinfo` with the `AI_NUMERICHOST` flag only parses an address and is not reported),
-database drivers
-(`sqlite3`, `psycopg`, `pymongo`, ...; the fetches of a named, server-side psycopg cursor
-`conn.cursor("name")` too), subprocesses waiting for completion, `time.sleep`, and
-waits on other threads (acquiring a `threading` lock, `Event.wait()`, `Thread.join()`,
-`queue.Queue.get()`, `put()` on a queue known to be bounded (see below), `Future.result()`,
-`concurrent.futures.wait()`; a zero timeout or
-`blocking=False` / `block=False` returns at once and is not reported, also when a helper passes
-on its own flag parameter and its caller passes `False`: `close(wait=False)` over
-`shutdown(wait=wait)`; so does `result()` / `exception()` of a `concurrent.futures.Future` known
-to be done: under `if f.done():` (also after `if not f.done(): return`, a `while not f.done():`
-poll, or with `and`), or once `await asyncio.wrap_future(f)` has returned, on every path to the
-call). A function SQLAlchemy's
-`AsyncSession.run_sync(fn)` / `AsyncConnection.run_sync(fn)` runs is called on the event loop:
-its database I/O through the session or connection it receives is awaited for it, its other
-blocking calls are reported. Where an argument decides what a library call does, a literal
-one is followed: `pd.read_csv("https://...")` downloads the file.
+Checks `async def` functions where a call, whenever it returns, has run a call that waits for
+input or output on the event loop's thread: a network request, a database operation, a child
+process, or a sleep (`time.sleep` with a length that is not zero). The waiting call is the
+reported call itself, or the end of a chain of synchronous functions each of which makes the
+next call on every path on which it returns.
 
-`put()` on a `queue.Queue`, `LifoQueue`, or `PriorityQueue` waits only while the queue is full,
-which only a queue its `maxsize` bounds can be, so it is reported only on a queue known to be
-bounded: a positive `maxsize` (a literal, a module constant, a class constant, or an integer a
-constructor parameter receives from every call, such as its default) on some path, and every
-path known. heki follows the queue from where it is built into local variables, the attributes
-the class family's own bodies and methods store (`self.queue = queue.Queue(maxsize=n)`, or a
-queue the class's `__init__` receives), module globals, and parameters, whose project callers
-decide: a helper's at each call, an `async def`'s by what all of its callers pass. A queue built
-without a `maxsize` (or with zero, a negative one, or `None`), one from a call or an object heki
-cannot see, and one a parameter without project callers receives are not known to be bounded,
-and putting on them is not reported.
+Each step of the chain is established, not assumed:
 
-Reading a `@property` or `functools.cached_property` attribute of a project class runs its
-getter, so the read counts as a call of the getter (`self.client` whose getter opens a
-connection). A property that also defines a setter or deleter is not followed.
+- the call is made on every path on which the function returns, exception edges included: an
+  exception raised before it (by an earlier statement, an earlier call in the same statement or
+  `with` header, or the call itself when it is a helper) that a handler takes and then returns
+  or goes on is a path without it;
+- every implementation the call can run is followed, and each one makes the next call: all the
+  overrides in project subclasses of the receiver's class, every class that inherits a mixin
+  method calling `self`, every member of a union; a receiver typed by a protocol has
+  implementations heki cannot list, and is not followed; a decorator other than
+  `staticmethod`, `classmethod`, `property`, `abstractmethod`, or `override` may not run the
+  body, and is not followed; a function defined twice is not followed;
+- the waiting call is in the ecosystem catalog, waits on every call (a database call that may be
+  answered by a session's identity map, a cache, an open connection, or that sends only pending
+  changes does not), and no argument that may come from the caller can make it return at once
+  (`time.sleep(delay)` with `delay` a parameter is not established). An argument heki cannot
+  evaluate counts as one the call waits on (assumption R6), the URL or name a database
+  connection was opened from included: a statement on a SQLAlchemy engine or another DB-API
+  connection opened from a value heki does not know waits. `sqlite3.connect` is the one
+  exception, as its in-memory form is common: a SQLite connection waits only when heki
+  establishes that it was opened on a file (a literal or a module constant without an in-memory
+  form, or a path built from such parts and `__file__`), and any other may be in memory.
 
-Calling a generator function only creates the generator; its body runs where the generator is
-iterated: a `for` loop or comprehension over it, unpacking it, `yield from` it, a call that
-consumes it (`list(...)`, `sorted(...)`, `"".join(...)`, `items.extend(...)`, ...), a lazy wrapper
-iterated there (`enumerate(...)`, `zip(...)`, `itertools.islice(...)`, ...), or a project
-function iterating the parameter it is handed. A generator returned by a plain function runs
-where its caller iterates it. `next(gen)` runs the body only up to its first `yield`, which heki
-does not separate from the rest, so it is not followed.
+Waits on another thread (`Thread.join()`, `Event.wait()`, acquiring a lock, `Queue.get()`,
+`put()` on a bounded queue, `Future.result()`, `Executor.shutdown()`) end at once when that
+thread has done its part, which is state at run time: they are `EFF111` reports. So is everything else `EFF111` reports: a path
+heki cannot decide, a call it cannot resolve to all its implementations.
 
-A call whose arguments switch off the callee's branch with the blocking call is not followed
-into it: `load(name, cache=False)` does not reach the request under `if cache:`. The branches
-are the callee's tests of its parameters: truthiness, `is None`, `isinstance` with builtin,
-`io`, or `os.PathLike` classes, and `hasattr` (which a value's class decides for the methods of
-the file protocol: `read`, `write`, `close`, ...), also of a parameter the callee rebinds on
-some paths (`if buf is None: buf = io.StringIO()`, then `if isinstance(buf, str): open(buf)`
-opens a file only for a path argument). The arguments that decide them are constants and the
-literal defaults of omitted ones (`False`, `None`, `0`, `""`, empty displays), values whose
-exact class the caller knows (a display or comprehension, or an `io.StringIO` / `io.BytesIO` it
-constructs, also held in a variable: `fetch(io.BytesIO(data))` does not reach the download
-under `if not hasattr(src, "read"):`; an instance of a subclass does not count), and tests the
-caller has already made on the same value: a call made only when `isinstance(self._input,
-PathLike)` is false does not reach the callee's branch for `isinstance(self._input, PathLike)`.
-A generator's branches are decided at the call that creates it. Lazy initialization does not
-relax this rule: a connection opened once still blocks the event loop that once.
-
-The rule reports the boundary: the call (or property read, or iteration) inside the `async def`
-that leads to the blocking operation, with the call chain as related information. Several
-boundaries reaching the same blocking call are shown as one report with a count once more than
-ten of them are shown (in the editor, per file). Inline suppressions and Ratchet baselines see
-every boundary: suppressing the first one leaves the others reported, and a baseline counts each.
-
-It does not report:
-
-- calls offloaded to a thread (`asyncio.to_thread`, `loop.run_in_executor`,
-  `anyio.to_thread.run_sync`, `run_in_threadpool`, `asgiref`'s `sync_to_async`,
-  `asyncer.asyncify`, and project wrappers that forward their callable to them; what the
-  offloaded function does besides blocking still counts where it is called, such as its
-  queries in a loop for `EFF103`);
-- functions decorated to run on a thread: `@sync_to_async` (also as a factory,
-  `@sync_to_async(thread_sensitive=False)`), `channels`' `@database_sync_to_async`, `@asyncify`,
-  and any decorator declared with `offloads-blocking-arg = 0`. `@d def f` is `f = d(f)`, so
-  calling `f` calls `d(f)`; other decorators (`functools.wraps` wrappers) are followed;
-- generators that leave the `async def` without being iterated there: returned, stored, or
-  handed to a call that is not a consuming one, such as `StreamingResponse(rows())` or
-  `iterate_in_threadpool(rows())` (whatever iterates them later, often a thread pool, is not
-  analyzed);
-- `async` APIs, also where they are not awaited directly (`async with`, `asyncio.gather`,
-  `asyncio.wait_for`): `httpx.AsyncClient`, `aiohttp`, `redis.asyncio`, SQLAlchemy's
-  `AsyncSession`, psycopg's `AsyncConnection`, pymongo's `AsyncMongoClient`, ...;
-- clients that connect on first use (`redis.Redis(...)`, `pymongo.MongoClient(...)`, except
-  that a `mongodb+srv://` URI literal is resolved in the constructor unless `connect=False`,
-  `pymysql.connect(..., defer_connect=True)`, `sqlalchemy.create_engine(...)`) and calls that
-  only build an object (`Redis.pipeline()`, a
-  lazy Django `QuerySet.filter(...)`): the call that does the I/O is the one reported;
-- spawning a process without waiting (`subprocess.Popen(...)`);
-- private coroutine functions that only run through a synchronous driver without an event loop
-  (`.send(None)`, a `run_sync` function); `asyncio.run(...)` runs its coroutine on an event loop,
-  where blocking stops the tasks it starts;
-- CLI commands (`@click.command`, `@app.command`), ASGI lifespan handlers, and tests
-  (`test_*` functions and files under `tests/`, see the option below).
+The rule reports the boundary: the call inside the `async def` that leads to the waiting call,
+with the chain as related information. Several boundaries reaching the same waiting call are
+shown as one report with a count once more than ten of them are shown. Calls offloaded to a
+thread, `async` APIs, CLI commands, ASGI lifespan handlers, and tests (as pytest finds them) are not
+reported, as for `EFF111`.
 
 ## What a report states
 
-A report states that the `async def` reaches the blocking call at the end of the chain on the event
-loop: the reported call (or property read, or iteration) leads, through the calls shown, to a call
-that blocks the thread.
+A report states that whenever the reported call returns, the waiting call at the end of the
+chain has run on the event loop's thread.
 
 Its premises:
 
-- **Resolves**: each call on the chain is to the function shown, through the calls heki resolves.
-  Open through a method call: one candidate implementation that leads on is enough.
-- **Reaches**: each function on the chain reaches the next call. Open: one path is enough, and a
-  branch heki cannot decide counts as taken; only the branches the caller's arguments switch off,
-  and the cases listed above, are left out.
-- **Blocks**: the last call blocks the thread, as the ecosystem catalog describes it. An argument
-  heki cannot evaluate counts as one the call waits on (assumption R6). Open for an effect with a
-  condition heki does not know: `queue.Queue.put` counts as blocking on a queue whose bound heki
-  cannot see.
+- **Every return**: each function on the chain has made the next call on every path on which it
+  returns normally, exception edges into handlers included; the last call counts as made also
+  when it raised.
+- **Every implementation**: each call on the chain has as its targets every implementation it
+  can run (assumptions R2 and R5), each a synchronous function run as written, and each has the
+  fact.
+- **Waits**: the last call waits for the network, a database, a child process, or a sleep on
+  every call, as the ecosystem catalog describes it (R3), for every argument heki cannot evaluate,
+  the arguments that opened its connection included (R6; a SQLite connection only when it was
+  established to be opened on a file).
 
-Not part of the claim: how long the call blocks, and how often the path runs.
+Not part of the claim: how long the call waits, and how often the reported call runs.
 
 ## Why is this bad?
-A blocking call inside a coroutine stops the whole event loop: every other request, timer, and
+A call that waits inside a coroutine stops the whole event loop: every other request, timer, and
 task waits until it returns.
 
 ## Example
@@ -3093,7 +3044,7 @@ def load() -> bytes:
 
 
 async def handler() -> bytes:
-    return load()  # EFF101: reaches `time.sleep`
+    return load()  # EFF101: always runs `time.sleep`
 ```
 
 Use instead:
@@ -3189,6 +3140,183 @@ No automatic fix.
 ## Options
 - `lint.extend-select = ["EFF105"]` enables the rule.
 - `lint.relax-async-in-tests` applies as for `EFF101`.
+
+
+---
+
+Source: https://heki.koxudaxi.dev/rules/async-possibly-blocking-call/
+
+# async-possibly-blocking-call (EFF111)
+
+Family: Execution Effects (EFF) · Heuristic · Off by default · Severity `warning` (slower code) · No automatic fix
+
+Heuristic sibling of `EFF101`: a call in `async def` that can reach a blocking call on the event loop.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. It has not been measured yet. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
+
+## What it does
+The heuristic sibling of `EFF101`: checks `async def` functions that can reach a blocking call on
+the event loop, directly or through synchronous helpers, where `EFF101` does not establish that
+the call always runs it (a branch heki cannot decide, a call it cannot resolve to every
+implementation, a wait on another thread, a database call that waits only in some state): network I/O (`requests`, `httpx.Client`, `urllib`), host name lookups
+(`socket.getaddrinfo` / `gethostbyname` / `getfqdn`; the event loop has `loop.getaddrinfo()`;
+`getaddrinfo` with the `AI_NUMERICHOST` flag only parses an address and is not reported),
+database drivers
+(`sqlite3`, `psycopg`, `pymongo`, ...; the fetches of a named, server-side psycopg cursor
+`conn.cursor("name")` too), subprocesses waiting for completion, `time.sleep`, and
+waits on other threads (acquiring a `threading` lock, `Event.wait()`, `Thread.join()`,
+`queue.Queue.get()`, `put()` on a queue known to be bounded (see below), `Future.result()`,
+`concurrent.futures.wait()`; a zero timeout or
+`blocking=False` / `block=False` returns at once and is not reported, also when a helper passes
+on its own flag parameter and its caller passes `False`: `close(wait=False)` over
+`shutdown(wait=wait)`; so does `result()` / `exception()` of a `concurrent.futures.Future` known
+to be done: under `if f.done():` (also after `if not f.done(): return`, a `while not f.done():`
+poll, or with `and`), or once `await asyncio.wrap_future(f)` has returned, on every path to the
+call). A function SQLAlchemy's
+`AsyncSession.run_sync(fn)` / `AsyncConnection.run_sync(fn)` runs is called on the event loop:
+its database I/O through the session or connection it receives is awaited for it, its other
+blocking calls are reported. Where an argument decides what a library call does, a literal
+one is followed: `pd.read_csv("https://...")` downloads the file.
+
+`put()` on a `queue.Queue`, `LifoQueue`, or `PriorityQueue` waits only while the queue is full,
+which only a queue its `maxsize` bounds can be, so it is reported only on a queue known to be
+bounded: a positive `maxsize` (a literal, a module constant, a class constant, or an integer a
+constructor parameter receives from every call, such as its default) on some path, and every
+path known. heki follows the queue from where it is built into local variables, the attributes
+the class family's own bodies and methods store (`self.queue = queue.Queue(maxsize=n)`, or a
+queue the class's `__init__` receives), module globals, and parameters, whose project callers
+decide: a helper's at each call, an `async def`'s by what all of its callers pass. A queue built
+without a `maxsize` (or with zero, a negative one, or `None`), one from a call or an object heki
+cannot see, and one a parameter without project callers receives are not known to be bounded,
+and putting on them is not reported.
+
+Reading a `@property` or `functools.cached_property` attribute of a project class runs its
+getter, so the read counts as a call of the getter (`self.client` whose getter opens a
+connection). A property that also defines a setter or deleter is not followed.
+
+Calling a generator function only creates the generator; its body runs where the generator is
+iterated: a `for` loop or comprehension over it, unpacking it, `yield from` it, a call that
+consumes it (`list(...)`, `sorted(...)`, `"".join(...)`, `items.extend(...)`, ...), a lazy wrapper
+iterated there (`enumerate(...)`, `zip(...)`, `itertools.islice(...)`, ...), or a project
+function iterating the parameter it is handed. A generator returned by a plain function runs
+where its caller iterates it. `next(gen)` runs the body only up to its first `yield`, which heki
+does not separate from the rest, so it is not followed.
+
+A call whose arguments switch off the callee's branch with the blocking call is not followed
+into it: `load(name, cache=False)` does not reach the request under `if cache:`. The branches
+are the callee's tests of its parameters: truthiness, `is None`, `isinstance` with builtin,
+`io`, or `os.PathLike` classes, and `hasattr` (which a value's class decides for the methods of
+the file protocol: `read`, `write`, `close`, ...), also of a parameter the callee rebinds on
+some paths (`if buf is None: buf = io.StringIO()`, then `if isinstance(buf, str): open(buf)`
+opens a file only for a path argument). The arguments that decide them are constants and the
+literal defaults of omitted ones (`False`, `None`, `0`, `""`, empty displays), values whose
+exact class the caller knows (a display or comprehension, or an `io.StringIO` / `io.BytesIO` it
+constructs, also held in a variable: `fetch(io.BytesIO(data))` does not reach the download
+under `if not hasattr(src, "read"):`; an instance of a subclass does not count), and tests the
+caller has already made on the same value: a call made only when `isinstance(self._input,
+PathLike)` is false does not reach the callee's branch for `isinstance(self._input, PathLike)`.
+A generator's branches are decided at the call that creates it. Lazy initialization does not
+relax this rule: a connection opened once still blocks the event loop that once.
+
+The rule reports the boundary: the call (or property read, or iteration) inside the `async def`
+that leads to the blocking operation, with the call chain as related information. Several
+boundaries reaching the same blocking call are shown as one report with a count once more than
+ten of them are shown (in the editor, per file). Inline suppressions and Ratchet baselines see
+every boundary: suppressing the first one leaves the others reported, and a baseline counts each.
+
+It does not report:
+
+- calls offloaded to a thread (`asyncio.to_thread`, `loop.run_in_executor`,
+  `anyio.to_thread.run_sync`, `run_in_threadpool`, `asgiref`'s `sync_to_async`,
+  `asyncer.asyncify`, and project wrappers that forward their callable to them; what the
+  offloaded function does besides blocking still counts where it is called, such as its
+  queries in a loop for `EFF103`);
+- functions decorated to run on a thread: `@sync_to_async` (also as a factory,
+  `@sync_to_async(thread_sensitive=False)`), `channels`' `@database_sync_to_async`, `@asyncify`,
+  and any decorator declared with `offloads-blocking-arg = 0`. `@d def f` is `f = d(f)`, so
+  calling `f` calls `d(f)`; other decorators (`functools.wraps` wrappers) are followed;
+- generators that leave the `async def` without being iterated there: returned, stored, or
+  handed to a call that is not a consuming one, such as `StreamingResponse(rows())` or
+  `iterate_in_threadpool(rows())` (whatever iterates them later, often a thread pool, is not
+  analyzed);
+- `async` APIs, also where they are not awaited directly (`async with`, `asyncio.gather`,
+  `asyncio.wait_for`): `httpx.AsyncClient`, `aiohttp`, `redis.asyncio`, SQLAlchemy's
+  `AsyncSession`, psycopg's `AsyncConnection`, pymongo's `AsyncMongoClient`, ...;
+- clients that connect on first use (`redis.Redis(...)`, `pymongo.MongoClient(...)`, except
+  that a `mongodb+srv://` URI literal is resolved in the constructor unless `connect=False`,
+  `pymysql.connect(..., defer_connect=True)`, `sqlalchemy.create_engine(...)`) and calls that
+  only build an object (`Redis.pipeline()`, a
+  lazy Django `QuerySet.filter(...)`): the call that does the I/O is the one reported;
+- spawning a process without waiting (`subprocess.Popen(...)`);
+- private coroutine functions that only run through a synchronous driver without an event loop
+  (`.send(None)`, a `run_sync` function); `asyncio.run(...)` runs its coroutine on an event loop,
+  where blocking stops the tasks it starts;
+- CLI commands (`@click.command`, `@app.command`), ASGI lifespan handlers, and tests
+  (as pytest finds them: `test_*` functions and the functions nested in them, `test_*.py` and
+  `*_test.py` files, and files under `test/` or `tests/`; see the option below).
+
+## What a report states
+
+A report states that the `async def` can reach the blocking call at the end of the chain on the
+event loop: the reported call (or property read, or iteration) leads, through the calls shown, to a
+call that blocks the thread. A report `EFF101` establishes is not repeated here.
+
+Its premises:
+
+- **Resolves**: each call on the chain is to the function shown, through the calls heki resolves.
+  Open through a method call: one candidate implementation that leads on is enough.
+- **Reaches**: each function on the chain reaches the next call. Open: one path is enough, and a
+  branch heki cannot decide counts as taken; only the branches the caller's arguments switch off,
+  and the cases listed above, are left out.
+- **Blocks**: the last call blocks the thread, as the ecosystem catalog describes it. An argument
+  heki cannot evaluate counts as one the call waits on (assumption R6). Open for an effect with a
+  condition heki does not know: a wait on another thread counts as blocking although that thread
+  may have done its part, and a database call that waits only in some state of its session or
+  connection (`emits` in the catalog) counts as waiting.
+
+Not part of the claim: how long the call blocks, and how often the path runs.
+
+## Why is this bad?
+A blocking call inside a coroutine stops the whole event loop: every other request, timer, and
+task waits until it returns.
+
+## Example
+```python
+import time
+
+
+CACHE: dict[str, bytes] = {}
+
+
+def load(key: str) -> bytes:
+    if key not in CACHE:
+        time.sleep(1)
+    return CACHE.get(key, b"")
+
+
+async def handler(key: str) -> bytes:
+    return load(key)  # EFF111: can reach `time.sleep`
+```
+
+Use instead:
+```python
+import asyncio
+
+
+async def handler(key: str) -> bytes:
+    return await asyncio.to_thread(load, key)
+```
+
+## Fix safety
+No automatic fix.
+
+## Options
+- `lint.relax-async-in-tests` (default `true`): skip test code.
+- `[[tool.heki.ecosystem]]` declares project functions as blocking (`effects`), as offload
+  wrappers (`offloads-blocking-arg`; with `0`, also an offloading decorator), or as async-safe
+  (`async-safe`).
 
 
 ---
@@ -4717,13 +4845,9 @@ Source: https://heki.koxudaxi.dev/rules/loop-carried-concat/
 
 # loop-carried-concat (DATA101)
 
-Family: Data Pipelines (DATA) · Heuristic · Off by default · Severity `warning` (slower code) · No automatic fix
+Family: Data Pipelines (DATA) · Exact · Enabled by default · Severity `warning` (slower code) · No automatic fix
 
 Loop-carried quadratic `pandas.concat` / `numpy.vstack` / `numpy.append` accumulation.
-
-!!! note "Heuristic"
-
-    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 28 sampled reports (round 3, 2026-11-21), 71% were right about the code. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 ## What it does
 Checks loops that grow a DataFrame or array by re-concatenating it on every iteration:
@@ -4750,19 +4874,27 @@ number of times, whatever the input.
 ## What a report states
 
 A report states that the value is rebuilt from its previous value by the reallocating call on every
-iteration of the loop, so each iteration copies all of it.
+iteration of the loop that completes, so each such iteration copies all of it. Its exact reports
+(those the rule shows by default once it is certified) also name what the loop steps through: a
+parameter, a part of one, the rows of a query, the lines of a file, or the entries of a directory.
 
 Its premises:
 
-- **Loop-carried**: the new value is computed from the previous one and feeds the next iteration.
-  Established by the IR, except that the exception edge of a `with` block counts as carrying the
-  previous value for every context manager.
-- **On every iteration**: the reallocation runs on every iteration. Open: one that runs on some
+- **Loop-carried**: every path around the back edge carries the new value, computed from the
+  previous one (no path resets the variable). Open in a heuristic report: one path that updates
+  it is enough.
+- **On every iteration**: the reallocating call returns on every iteration that completes,
+  exception edges into handlers included. Open in a heuristic report: one that runs on some
   iterations only counts.
-- **Data-sized**: the code does not fix the trip count. Open: a trip count heki cannot bound counts
-  as data-sized.
-- **Reallocates**: the call copies all of its inputs into a new value, as the ecosystem catalog
-  describes it.
+- **Origin**: the loop steps through items the data decides (as for `EFF103`), and the code does
+  not fix its trip count. Open in a heuristic report: a trip count heki cannot bound counts as
+  data-sized.
+- **Reallocates**: the call copies all of its inputs into a new value on every call, as the
+  ecosystem catalog describes it. Open in a heuristic report: a project function that
+  reallocates the value it is handed may return another value on some path.
+
+Not part of the claim: how large the value grows. An exact report gives no advice: collecting
+the parts first does not fit a loop that reads the value on every iteration.
 
 ## Why is this bad?
 Every concatenation copies everything accumulated so far, so the loop is quadratic in the total
@@ -4796,73 +4928,57 @@ Source: https://heki.koxudaxi.dev/rules/loop-db-query/
 
 # loop-db-query (EFF103)
 
-Family: Execution Effects (EFF) · Heuristic · Off by default · Severity `warning` (slower code) · No automatic fix
+Family: Execution Effects (EFF) · Exact · Enabled by default · Severity `warning` (slower code) · No automatic fix
 
-Explicit DB query / external RPC executed inside a loop (N+1).
-
-!!! note "Heuristic"
-
-    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 50 sampled reports (round 3, 2026-11-21), 74% were right about the code. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
+A loop over data whose every iteration sends a database statement.
 
 ## What it does
-Checks loops that run a database query on every iteration (the "N+1 queries" problem):
-`cursor.execute(...)`, `session.execute(...)` (awaited ones on async sessions and connections
-too), the SQLAlchemy `Query` methods that run the query (`all`, `first`, `one`, `count`, ...)
-and iterating a `Query` (`for row in session.query(User):` in an outer loop, a comprehension,
-`list(query)`),
-the Django `QuerySet` methods that run the query (`get`, `first`, `count`, ... and their `a*`
-variants), `pymongo`, `redis`, and DynamoDB commands, `pandas.read_sql`, and project functions
-that reach them, also when an offloading API runs them on a worker thread per item (`await
-asyncio.to_thread(load, i)`, a function decorated with `@sync_to_async`), including the getter of a property read in the loop and a generator iterated in
-the loop (its body runs where it is iterated, as for `EFF101`). A function a builtin calls once
-per item runs in a loop as long as the items (`sorted(users, key=lambda u: score(conn, u))`,
-`list(map(load, ids))`; see `EFF102` for the builtins and the items whose number the code fixes).
+Checks loops that send a database statement on every iteration that completes, over items whose
+number the data decides: a parameter (or an attribute or element of one), the rows of a query,
+the lines of a file, or the entries of a directory. The statement is sent by the call in the loop
+itself, or at the end of a chain of functions each of which makes the next call on every path on
+which it returns.
 
-It does not report reading the rows of a statement already executed (`cursor.fetchone()`),
-calls that only build a query (`session.query(User).filter(...)`, `QuerySet.filter(...)`,
-`Redis.pipeline()`), the bulk APIs, which send many rows in one statement and are called per
-batch by design (`QuerySet.bulk_create`, `in_bulk`, pymongo's `insert_many`, `bulk_write`), DDL
-statements (SQL starting with `CREATE`, `ALTER`, `DROP`, or `PRAGMA` run by a DB-API
-`execute` / `executemany` / `executescript` or SQLAlchemy's `exec_driver_sql`, also inside a
-helper the loop calls: a literal, an f-string, `%`, or `.format()` whose literal start is one,
-SQLAlchemy's `text()` of one, and the statements of a module's string constants: the items of a
-tuple, the pieces `.split(";")` / `.splitlines()` cut a schema into), migration code
-(`upgrade` / `downgrade` functions, files under `migrations/` or `alembic/`), the ORM packages'
-own implementation, or loops whose size the code fixes when no data-sized loop is around them
-(`for ident in enumerate((1, 2), 1)`, `zip(order, ["m1", "m2"])`, a name bound to a small
-display; see `EFF102`).
+Each step is established, not assumed:
 
-As for `EFF102`, a query that only runs while an attribute is unset, which the code then sets
-(`if self._columns is None: self._columns = cursor.execute(...)`), runs once per object and is
-not reported when the loop does not construct the object; so does one in a
-`functools.cached_property` getter, and one behind a module global runs once per process. A
-query that only runs while a local variable the loop carries is unset or a first-iteration flag
-holds (`if first: cursor.execute(...); first = False`), or that every way on from leaves the
-loop (`cursor.execute(...)` followed by `return`, `break`, or `raise`), runs once per run of the
-loop. A call whose arguments switch off the branch with the query (a constant, a literal
-default, a test the caller has made) is not followed into it.
+- the loop steps through items of such an origin, through wrappers that keep them (`sorted`,
+  `list`, `filter`, slices, dict views, the components of `enumerate` and `zip`); through `map`,
+  a comprehension's element, or a project function only their number carries, and that is not
+  an origin; a loop whose number of iterations the code fixes (a constant range, a display) is
+  not reported, whatever the number;
+- the call runs on every iteration that completes, exception edges included: an `except`
+  handler that `continue`s before it is an iteration without it;
+- every implementation each call on the chain can run is followed and makes the next call on
+  every path on which it returns, as for `EFF101`;
+- the last call sends a statement on every call, as the ecosystem catalog describes it: not a
+  `Session.get` the identity map may answer, a `flush()` / `commit()` that sends only pending
+  changes, or a Django query set's `count()` that may read its cache; DDL, bulk APIs, and calls
+  that only build a query are left out.
+
+Everything else the loop rules found is an `EFF113` report. Migration code and the ORM packages'
+own implementation are not reported.
 
 ## What a report states
 
-A report states that every iteration of the loop runs a database query (or a command of a database
-client) through the call shown: one round trip per item, the "N+1" of the message.
+A report states that every iteration of the loop that completes sends a database statement: the
+one named, or, when the implementations a call can run reach different ones, each with its
+implementation.
 
 Its premises:
 
-- **Resolves**: each call on the chain is to the function shown, through the calls heki resolves.
-  Open through a method call: one candidate implementation that leads on is enough.
-- **Reaches**: each function on the chain reaches the next call. Open: one path is enough, and a
-  branch heki cannot decide counts as taken; only the branches the caller's arguments switch off,
-  and the cases listed above, are left out.
-- **On every iteration**: the call runs on every iteration of the loop. Open: it counts as running
-  on every iteration unless heki shows that it runs once per object, per process, or per run of the
-  loop (the cases above).
-- **Data-sized**: the code does not fix the size of the loop at 16 or fewer. Open: a size heki
-  cannot bound counts as data-sized.
-- **Queries**: the call sends a statement to the database, as the ecosystem catalog describes it;
-  DDL, bulk APIs, and calls that only build a query are left out.
+- **Origin**: the loop steps through items of a parameter, the rows of a query, the lines of a
+  file, or the entries of a directory, and the code does not fix their number.
+- **Every iteration**: the call runs on every iteration that completes, exception edges into
+  handlers included.
+- **Every return**: each function on the chain has made the next call on every path on which it
+  returns normally.
+- **Every implementation**: each call on the chain has as its targets every implementation it
+  can run (assumptions R2 and R5), each with the fact.
+- **Sends**: the last call sends a statement on every call, as the ecosystem catalog describes it
+  (R3).
 
-Not part of the claim: how many items the loop has, and how slow the query is.
+Not part of the claim: how many items the loop has, how slow the statement is, and whether the
+statements could be batched.
 
 ## Why is this bad?
 One round trip per item makes the run time grow with the number of rows and with the network
@@ -5237,6 +5353,125 @@ A `list[int]` annotation is never trusted: a list subclass can override `__conta
 Not reported when the container is small whatever the input, or when the loop runs a fixed
 small number of times (`for i in range(3):`): building the set costs about as much as the scans
 it saves.
+
+
+---
+
+Source: https://heki.koxudaxi.dev/rules/loop-possible-db-query/
+
+# loop-possible-db-query (EFF113)
+
+Family: Execution Effects (EFF) · Heuristic · Off by default · Severity `warning` (slower code) · No automatic fix
+
+Heuristic sibling of `EFF103`: a loop that can run a database query on every iteration.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. It has not been measured yet. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
+
+## What it does
+The heuristic sibling of `EFF103`: checks loops that can run a database query on every
+iteration, where `EFF103` does not establish it (the items' origin, a path heki cannot decide, a
+call it cannot resolve to every implementation, a database call that sends a statement only in
+some state):
+`cursor.execute(...)`, `session.execute(...)` (awaited ones on async sessions and connections
+too), the SQLAlchemy `Query` methods that run the query (`all`, `first`, `one`, `count`, ...)
+and iterating a `Query` (`for row in session.query(User):` in an outer loop, a comprehension,
+`list(query)`),
+the Django `QuerySet` methods that run the query (`get`, `first`, `count`, ... and their `a*`
+variants), `pymongo`, `redis`, and DynamoDB commands, `pandas.read_sql`, and project functions
+that reach them, also when an offloading API runs them on a worker thread per item (`await
+asyncio.to_thread(load, i)`, a function decorated with `@sync_to_async`), including the getter of a property read in the loop and a generator iterated in
+the loop (its body runs where it is iterated, as for `EFF101`). A function a builtin calls once
+per item runs in a loop as long as the items (`sorted(users, key=lambda u: score(conn, u))`,
+`list(map(load, ids))`; see `EFF102` for the builtins and the items whose number the code fixes).
+
+It does not report reading the rows of a statement already executed (`cursor.fetchone()`),
+calls that only build a query (`session.query(User).filter(...)`, `QuerySet.filter(...)`,
+`Redis.pipeline()`), the bulk APIs, which send many rows in one statement and are called per
+batch by design (`QuerySet.bulk_create`, `in_bulk`, pymongo's `insert_many`, `bulk_write`), DDL
+statements (SQL starting with `CREATE`, `ALTER`, `DROP`, or `PRAGMA` run by a DB-API
+`execute` / `executemany` / `executescript` or SQLAlchemy's `exec_driver_sql`, also inside a
+helper the loop calls: a literal, an f-string, `%`, or `.format()` whose literal start is one,
+SQLAlchemy's `text()` of one, and the statements of a module's string constants: the items of a
+tuple, the pieces `.split(";")` / `.splitlines()` cut a schema into), migration code
+(`upgrade` / `downgrade` functions, files under `migrations/` or `alembic/`), the ORM packages'
+own implementation, or loops whose size the code fixes when no data-sized loop is around them
+(`for ident in enumerate((1, 2), 1)`, `zip(order, ["m1", "m2"])`, a name bound to a small
+display; see `EFF102`).
+
+As for `EFF102`, a query that only runs while an attribute is unset, which the code then sets
+(`if self._columns is None: self._columns = cursor.execute(...)`), runs once per object and is
+not reported when the loop does not construct the object; so does one in a
+`functools.cached_property` getter, and one behind a module global runs once per process. A
+query that only runs while a local variable the loop carries is unset or a first-iteration flag
+holds (`if first: cursor.execute(...); first = False`), or that every way on from leaves the
+loop (`cursor.execute(...)` followed by `return`, `break`, or `raise`), runs once per run of the
+loop. A call whose arguments switch off the branch with the query (a constant, a literal
+default, a test the caller has made) is not followed into it.
+
+## What a report states
+
+A report states that every iteration of the loop can run a database query (or a command of a
+database client) through the call shown. A report `EFF103` establishes is not repeated here.
+
+Its premises:
+
+- **Resolves**: each call on the chain is to the function shown, through the calls heki resolves.
+  Open through a method call: one candidate implementation that leads on is enough.
+- **Reaches**: each function on the chain reaches the next call. Open: one path is enough, and a
+  branch heki cannot decide counts as taken; only the branches the caller's arguments switch off,
+  and the cases listed above, are left out.
+- **On every iteration**: the call runs on every iteration of the loop. Open: it counts as running
+  on every iteration unless heki shows that it runs once per object, per process, or per run of the
+  loop (the cases above).
+- **Data-sized**: the code does not fix the size of the loop at 16 or fewer. Open: a size heki
+  cannot bound counts as data-sized.
+- **Queries**: the call sends a statement to the database, as the ecosystem catalog describes it;
+  DDL, bulk APIs, and calls that only build a query are left out. Open for a call that sends one
+  only in some state of its session (`emits` in the catalog: `Session.get` answered by the
+  identity map, `Session.flush` without pending changes).
+
+Not part of the claim: how many items the loop has, and how slow the query is.
+
+## Why is this bad?
+One round trip per item makes the run time grow with the number of rows and with the network
+latency to the database. A single batched query is usually orders of magnitude faster.
+
+## Example
+```python
+import sqlite3
+
+
+def names(cursor: sqlite3.Cursor, ids: list[int]) -> list[str]:
+    out = []
+    for i in ids:
+        if i > 0:
+            cursor.execute("SELECT name FROM users WHERE id = ?", (i,))  # EFF113
+            out.append(cursor.fetchone()[0])
+    return out
+```
+
+Use instead:
+```python
+import sqlite3
+
+
+def names(cursor: sqlite3.Cursor, ids: list[int]) -> list[str]:
+    if not ids:
+        return []
+    marks = ",".join("?" * len(ids))
+    cursor.execute(f"SELECT id, name FROM users WHERE id IN ({marks})", ids)
+    name_of = dict(cursor.fetchall())
+    return [name_of[i] for i in ids]  # `KeyError` for an unknown ID (the loop: `TypeError`)
+```
+
+The query returns each matching row once and in no particular order, so the result is rebuilt
+from the IDs: in their order, with repeated IDs repeated. A database caps the number of
+parameters in one statement; split a long list of IDs into chunks.
+
+## Fix safety
+No automatic fix.
 
 
 ---

@@ -409,7 +409,7 @@ fn a_module_that_does_not_parse_leaves_the_names_under_it_unresolved() {
         "rows.py",
         "import sqlalchemy.orm\n\n\nasync def rows(q: sqlalchemy.orm.Query):\n    for row in q:\n        pass\n",
     );
-    assert!(concise(&p).1.contains("rows.py:5:16: EFF101 "));
+    assert!(concise(&p).1.contains("rows.py:5:16: EFF111 "));
     p.write("sqlalchemy/orm.py", "print \"done\"\n");
     let (code, stdout, stderr) = p.check(&["--output-format", "concise"]);
     assert_eq!((code, stdout.as_str()), (2, ""), "{stderr}");
@@ -445,7 +445,7 @@ fn requires_python_exclusions_move_the_target_version() {
             "pyproject.toml",
             &format!("[project]\nname = \"t\"\nrequires-python = \"{spec}\"\n"),
         );
-        let (code, stdout, stderr) = p.check(&["--select", "EFF101"]);
+        let (code, stdout, stderr) = p.check(&["--select", "EFF101,EFF111"]);
         assert_eq!(code, 1, "{spec}: {stderr}");
         stdout.contains("<listcomp>")
     };

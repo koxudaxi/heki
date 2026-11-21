@@ -23,19 +23,27 @@ number of times, whatever the input.
 ## What a report states
 
 A report states that the value is rebuilt from its previous value by the reallocating call on every
-iteration of the loop, so each iteration copies all of it.
+iteration of the loop that completes, so each such iteration copies all of it. Its exact reports
+(those the rule shows by default once it is certified) also name what the loop steps through: a
+parameter, a part of one, the rows of a query, the lines of a file, or the entries of a directory.
 
 Its premises:
 
-- **Loop-carried**: the new value is computed from the previous one and feeds the next iteration.
-  Established by the IR, except that the exception edge of a `with` block counts as carrying the
-  previous value for every context manager.
-- **On every iteration**: the reallocation runs on every iteration. Open: one that runs on some
+- **Loop-carried**: every path around the back edge carries the new value, computed from the
+  previous one (no path resets the variable). Open in a heuristic report: one path that updates
+  it is enough.
+- **On every iteration**: the reallocating call returns on every iteration that completes,
+  exception edges into handlers included. Open in a heuristic report: one that runs on some
   iterations only counts.
-- **Data-sized**: the code does not fix the trip count. Open: a trip count heki cannot bound counts
-  as data-sized.
-- **Reallocates**: the call copies all of its inputs into a new value, as the ecosystem catalog
-  describes it.
+- **Origin**: the loop steps through items the data decides (as for `EFF103`), and the code does
+  not fix its trip count. Open in a heuristic report: a trip count heki cannot bound counts as
+  data-sized.
+- **Reallocates**: the call copies all of its inputs into a new value on every call, as the
+  ecosystem catalog describes it. Open in a heuristic report: a project function that
+  reallocates the value it is handed may return another value on some path.
+
+Not part of the claim: how large the value grows. An exact report gives no advice: collecting
+the parts first does not fit a loop that reads the value on every iteration.
 
 ## Why is this bad?
 Every concatenation copies everything accumulated so far, so the loop is quadratic in the total

@@ -221,6 +221,11 @@ pub enum Emits {
     /// Only when no open connection is at hand (a pool checkout, Django's
     /// `connection.cursor()`).
     UnlessConnected,
+    /// Its waits (`blocking_db`) only when the connection's database is on disk, which heki did
+    /// not see opened: one opened from a parameter (`sqlite3.connect(path)` with
+    /// `path=":memory:"` passed in) or only named by an annotation may be in memory. It sends
+    /// its statements either way.
+    IfOnDisk,
 }
 
 /// What the items of a call's result are when the environment decides how many there are
@@ -287,6 +292,10 @@ pub struct EcosystemEntry {
     /// What the items of the call's result are, when the environment decides how many there
     /// are (the origin of a loop's items: `EFF103`).
     pub items: Option<ResultItems>,
+    /// The library API a method of a catalog class is, as reports name it: the class of what a
+    /// call returns in one case (`sqlite3.connect(":memory:")`) has the methods of a library
+    /// class (`sqlite3.Connection.execute`).
+    pub api: Option<String>,
     /// Whether a `with` statement over an instance of this class, or over the result of this
     /// call, can suppress the exception its body raises: `Some(false)` when `__exit__` /
     /// `__aexit__` returns a false value on every path, `Some(true)` when it can return a true
@@ -349,8 +358,14 @@ pub struct ArgCase {
     pub one_of: Vec<String>,
     /// A string literal that is an IPv4 address in dotted-decimal form or an IPv6 address.
     pub numeric_address: bool,
+    /// A string literal containing one of these.
+    pub contains: Vec<String>,
+    /// A value established to name a file ([`ArgFact::names_file`]).
+    pub names_file: bool,
     pub effects: Option<Vec<ExecEffectKind>>,
     pub return_type: Option<String>,
+    /// When the call waits in this case, instead of the entry's `emits`.
+    pub emits: Option<Emits>,
 }
 
 /// A literal `ArgCase::equals` compares with.
@@ -365,6 +380,10 @@ pub enum ArgLiteral {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ArgFact {
     pub literal: Option<LiteralValue>,
+    /// The value is established to name a file: a literal or a module constant bound once with
+    /// no in-memory form (`":memory:"`, `file::memory:`, `mode=memory`), `__file__`, or a path
+    /// built only from such parts.
+    pub names_file: bool,
     /// The class of the value, when it is an instance of a known one.
     pub class: Option<String>,
     /// The named constants the value sets with `|` (one name alone sets itself): each flag is
@@ -405,9 +424,12 @@ impl ArgCase {
         let flag = self.flag.is_empty() || fact.flags.iter().any(|f| self.flag.contains(f));
         let one_of =
             self.one_of.is_empty() || text.is_some_and(|t| self.one_of.iter().any(|o| o == t));
+        let contains = self.contains.is_empty()
+            || text.is_some_and(|t| self.contains.iter().any(|c| t.contains(c.as_str())));
+        let file = !self.names_file || fact.names_file;
         let numeric =
             !self.numeric_address || text.is_some_and(|t| t.parse::<std::net::IpAddr>().is_ok());
-        equals && prefix && nonempty && instance && flag && one_of && numeric
+        equals && prefix && nonempty && instance && flag && one_of && numeric && contains && file
     }
 }
 
@@ -446,6 +468,11 @@ impl EcosystemEntry {
     pub fn effects_in<'e>(&'e self, case: Option<&'e ArgCase>) -> &'e [ExecEffectKind] {
         case.and_then(|c| c.effects.as_deref())
             .unwrap_or(&self.effects)
+    }
+
+    /// When the call waits: its case's `emits`, or the entry's.
+    pub fn emits_in(&self, case: Option<&ArgCase>) -> Emits {
+        case.and_then(|c| c.emits).unwrap_or(self.emits)
     }
 
     pub fn return_type_in<'e>(&'e self, case: Option<&'e ArgCase>) -> Option<&'e str> {
@@ -1370,10 +1397,82 @@ mod tests {
             ),
             (
                 s(&["sqlite3.connect"]),
-                returning(
-                    "sqlite3.Connection",
-                    entry(&[BlockingDb, UnpooledClientAlloc]),
+                with_cases(
+                    {
+                        let in_memory = |case: ArgCase| ArgCase {
+                            arg: Some(0),
+                            param: Some("database".into()),
+                            effects: Some(vec![UnpooledClientAlloc]),
+                            return_type: Some(SQLITE3_MEMORY.into()),
+                            ..case
+                        };
+                        vec![
+                            in_memory(ArgCase {
+                                one_of: s(&[":memory:"]),
+                                ..ArgCase::default()
+                            }),
+                            in_memory(ArgCase {
+                                prefix: s(&["file::memory:"]),
+                                ..ArgCase::default()
+                            }),
+                            in_memory(ArgCase {
+                                contains: s(&["mode=memory"]),
+                                ..ArgCase::default()
+                            }),
+                            ArgCase {
+                                arg: Some(0),
+                                param: Some("database".into()),
+                                names_file: true,
+                                return_type: Some(SQLITE3_FILE.into()),
+                                emits: Some(Emits::Always),
+                                ..ArgCase::default()
+                            },
+                        ]
+                    },
+                    returning(
+                        "sqlite3.Connection",
+                        entry(&[BlockingDb, UnpooledClientAlloc]),
+                    ),
                 ),
+            ),
+            // The connections of an in-memory database and of one named by a parameter.
+            (
+                [
+                    with_prefix(SQLITE3_MEMORY, SQLITE3_EXECUTES),
+                    with_prefix(&format!("{SQLITE3_MEMORY}.cursor()"), SQLITE3_EXECUTES),
+                ]
+                .concat(),
+                returning(&format!("{SQLITE3_MEMORY}.cursor()"), entry(&[DbQuery])),
+            ),
+            (
+                s(&[&format!("{SQLITE3_MEMORY}.cursor")]),
+                returning(&format!("{SQLITE3_MEMORY}.cursor()"), entry(&[])),
+            ),
+            (
+                [
+                    with_prefix(SQLITE3_FILE, SQLITE3_EXECUTES),
+                    with_prefix(&format!("{SQLITE3_FILE}.cursor()"), SQLITE3_EXECUTES),
+                ]
+                .concat(),
+                returning(
+                    &format!("{SQLITE3_FILE}.cursor()"),
+                    entry(&[BlockingDb, DbQuery]),
+                ),
+            ),
+            (
+                s(&[&format!("{SQLITE3_FILE}.cursor")]),
+                returning(&format!("{SQLITE3_FILE}.cursor()"), entry(&[])),
+            ),
+            (
+                [
+                    with_prefix(SQLITE3_FILE, COMMIT_ROLLBACK),
+                    with_prefix(
+                        &format!("{SQLITE3_FILE}.cursor()"),
+                        &["fetchone", "fetchmany", "fetchall"],
+                    ),
+                ]
+                .concat(),
+                entry(&[BlockingDb]),
             ),
             (
                 s(&["sqlite3.Connection.cursor"]),
@@ -2241,6 +2340,11 @@ mod tests {
         "channels",
     ];
 
+    /// The classes of the connections `sqlite3.connect` opens on an in-memory database and on
+    /// one a parameter names.
+    const SQLITE3_MEMORY: &str = "sqlite3.connect(\":memory:\")";
+    const SQLITE3_FILE: &str = "sqlite3.connect(file)";
+
     /// The database calls that wait only in a state the call does not show.
     const CONDITIONAL_EMITTERS: &[(Emits, &[&str])] = &[
         (
@@ -2276,6 +2380,23 @@ mod tests {
                 "psycopg.Connection.rollback",
                 "psycopg2.extensions.connection.commit",
                 "psycopg2.extensions.connection.rollback",
+                "sqlite3.connect(file).commit",
+                "sqlite3.connect(file).rollback",
+            ],
+        ),
+        (
+            Emits::IfOnDisk,
+            &[
+                "sqlite3.connect",
+                "sqlite3.Connection.execute",
+                "sqlite3.Connection.executemany",
+                "sqlite3.Connection.executescript",
+                "sqlite3.Cursor.execute",
+                "sqlite3.Cursor.executemany",
+                "sqlite3.Cursor.executescript",
+                "sqlite3.Cursor.fetchone",
+                "sqlite3.Cursor.fetchmany",
+                "sqlite3.Cursor.fetchall",
             ],
         ),
         (
@@ -2325,6 +2446,20 @@ mod tests {
                 "psycopg.Cursor.execute",
                 "pymongo.collection.Collection.find",
                 "pymongo.collection.Collection.aggregate",
+                "sqlite3.connect(\":memory:\").execute",
+                "sqlite3.connect(\":memory:\").executemany",
+                "sqlite3.connect(\":memory:\").executescript",
+                "sqlite3.connect(\":memory:\").cursor().execute",
+                "sqlite3.connect(\":memory:\").cursor().executemany",
+                "sqlite3.connect(\":memory:\").cursor().executescript",
+                "sqlite3.connect(file).execute",
+                "sqlite3.connect(file).executemany",
+                "sqlite3.connect(file).executescript",
+                "sqlite3.connect(file).cursor().execute",
+                "sqlite3.connect(file).cursor().executemany",
+                "sqlite3.connect(file).cursor().executescript",
+                "sqlite3.connect(file).cursor().fetchmany",
+                "sqlite3.connect(file).cursor().fetchall",
             ],
         ),
         (
@@ -2392,11 +2527,20 @@ mod tests {
                     .iter()
                     .find(|(_, symbols)| symbols.contains(&symbol.as_str()))
                     .map(|(items, _)| *items);
+                // The methods of the classes of what `sqlite3.connect` returns are the library's.
+                let api = [SQLITE3_MEMORY, SQLITE3_FILE].iter().find_map(|class| {
+                    let method = symbol.strip_prefix(&format!("{class}."))?;
+                    Some(match method.strip_prefix("cursor().") {
+                        Some(m) => format!("sqlite3.Cursor.{m}"),
+                        None => format!("sqlite3.Connection.{method}"),
+                    })
+                });
                 let expected = EcosystemEntry {
                     symbol: symbol.clone(),
                     emits,
                     exit_suppresses,
                     items,
+                    api,
                     ..expected.clone()
                 };
                 assert_eq!(kb.lookup(&symbol), Some(&expected), "{symbol}");
@@ -2485,7 +2629,9 @@ mod tests {
                         || !case.instance_of.is_empty()
                         || !case.flag.is_empty()
                         || !case.one_of.is_empty()
-                        || case.numeric_address,
+                        || case.numeric_address
+                        || !case.contains.is_empty()
+                        || case.names_file,
                     "{symbol}"
                 );
                 assert!(

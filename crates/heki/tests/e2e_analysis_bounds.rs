@@ -199,7 +199,7 @@ fn classes_past_the_pass_bound_are_unknown() {
         p.write("m.py", &chain_before_buffer_read(links));
         check_within(&p, Duration::from_secs(20))
             .iter()
-            .filter(|d| d["rule_code"] == "EFF101")
+            .filter(|d| d["rule_code"] == "EFF111")
             .count()
     };
     assert_eq!(blocking(4), 0);
@@ -808,7 +808,7 @@ fn waits_on_a_future_look_up_the_awaits_before_them_once() {
         let found = check_within(&p, Duration::from_secs(20));
         let lines: Vec<u64> = found
             .iter()
-            .filter(|d| d["rule_code"] == "EFF101")
+            .filter(|d| d["rule_code"] == "EFF111")
             .map(|d| d["line"].as_u64().unwrap())
             .collect();
         let expected: Vec<u64> = if waits > 10 {
@@ -1029,7 +1029,7 @@ fn lists_that_extend_each_other_are_not_fixed() {
     let found = check_within(&p, Duration::from_secs(20));
     let queries: Vec<&Value> = found
         .iter()
-        .filter(|d| d["rule_code"] == "EFF103")
+        .filter(|d| d["rule_code"] == "EFF113")
         .collect();
     assert_eq!(queries.len(), 1, "{found:#?}");
 }
@@ -1105,7 +1105,7 @@ fn callables_past_the_partial_and_copy_bounds_are_not_followed() {
         p.write("m.py", &partial_chain(depth, copies));
         check_within(&p, Duration::from_secs(20))
             .iter()
-            .filter(|d| d["rule_code"] == "EFF103")
+            .filter(|d| d["rule_code"] == "EFF113")
             .count()
     };
     assert_eq!(queries(3, 3), 1);
@@ -1549,7 +1549,7 @@ fn tests_of_a_wide_merge_keep_their_edges_within_a_budget() {
     let found = check_within(&p, Duration::from_secs(20));
     let reported: Vec<&str> = found
         .iter()
-        .filter(|d| d["rule_code"] == "EFF101")
+        .filter(|d| d["rule_code"] == "EFF111")
         .map(|d| d["qualname"].as_str().unwrap())
         .collect();
     assert_eq!(reported, vec!["load"], "{found:#?}");
@@ -2219,7 +2219,7 @@ fn puts_after_many_rebindings_of_a_queue_walk_each_value_once() {
     assert!(
         found
             .iter()
-            .any(|d| d["rule_code"] == "EFF101" && d["qualname"] == "fill"),
+            .any(|d| d["rule_code"] == "EFF111" && d["qualname"] == "fill"),
         "{found:#?}"
     );
 }
@@ -2259,7 +2259,7 @@ fn queue_parameters_along_a_reversed_chain_of_helpers_resolve_in_linear_time() {
     assert!(
         found
             .iter()
-            .any(|d| d["rule_code"] == "EFF101" && d["qualname"] == "entry"),
+            .any(|d| d["rule_code"] == "EFF111" && d["qualname"] == "entry"),
         "{found:#?}"
     );
 }
@@ -2304,7 +2304,7 @@ fn puts_along_a_chain_of_attributes_resolve_each_attribute_once() {
     assert!(
         found
             .iter()
-            .any(|d| d["rule_code"] == "EFF101" && d["qualname"] == "entry"),
+            .any(|d| d["rule_code"] == "EFF111" && d["qualname"] == "entry"),
         "{found:#?}"
     );
 }
@@ -2443,4 +2443,43 @@ fn item_origins_decide_each_question_once() {
         last_origin("chosen")["known"].as_array().map(Vec::len),
         Some(60)
     );
+}
+
+/// The implementations of a call are checked over at most 64 classes (the receiver's class and
+/// its project subclasses): a receiver class with more subclasses has no complete set of targets,
+/// so a call that blocks through every one of them is not established (`EFF111`, not `EFF101`).
+#[test]
+fn implementations_past_the_class_bound_are_not_complete() {
+    let blocking = |subclasses: usize| -> Vec<String> {
+        let mut lines = vec![
+            "import time".to_owned(),
+            String::new(),
+            String::new(),
+            "class Base:".to_owned(),
+            "    def run(self):".to_owned(),
+            "        time.sleep(1)".to_owned(),
+        ];
+        for i in 0..subclasses {
+            lines.extend([
+                String::new(),
+                String::new(),
+                format!("class Sub{i}(Base):"),
+                "    pass".to_owned(),
+            ]);
+        }
+        lines.extend([
+            String::new(),
+            String::new(),
+            "async def handler(b: Base):".to_owned(),
+            "    b.run()".to_owned(),
+        ]);
+        let p = Project::new(&format!("bounds_dispatch_classes_{subclasses}"));
+        p.write("m.py", &(lines.join("\n") + "\n"));
+        check_within(&p, Duration::from_secs(20))
+            .iter()
+            .map(|d| d["rule_code"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    assert_eq!(blocking(3), ["EFF101"]);
+    assert_eq!(blocking(300), ["EFF111"]);
 }
