@@ -17,6 +17,8 @@ pub const EXPERIMENTAL_POLICY: &str = "Experimental features can still change in
 pub enum ExperimentalKind {
     /// A rule code (`MUT101`).
     Rule,
+    /// A command (`heki inspect`), its options and output included.
+    Command,
     /// A command and one of its options (`heki check --profile`).
     CliOption,
     /// A key below `[tool.heki]`, with its tables (`lint.relax-async-in-tests`).
@@ -70,11 +72,37 @@ pub const EXPERIMENTAL_FEATURES: &[ExperimentalFeature] = &[
         tracking: None,
     },
     ExperimentalFeature {
+        id: "command.inspect",
+        kind: ExperimentalKind::Command,
+        target: "heki inspect",
+        since: "0.2.1",
+        reason: "The facts it shows, its purity verdict, and its JSON object can still change as \
+            heki's summaries close gaps; the object's `version` changes when a field is removed \
+            or changes meaning.",
+        tracking: None,
+    },
+    ExperimentalFeature {
         id: "rule.MUT113",
         kind: ExperimentalKind::Rule,
         target: "MUT113",
         since: "0.2.0",
         reason: "It has few reports, and most of them are still false.",
+        tracking: None,
+    },
+    ExperimentalFeature {
+        id: "rule.EFF109",
+        kind: ExperimentalKind::Rule,
+        target: "EFF109",
+        since: "0.2.1",
+        reason: "Its precision is measured on a small sample of reports only.",
+        tracking: None,
+    },
+    ExperimentalFeature {
+        id: "rule.EFF110",
+        kind: ExperimentalKind::Rule,
+        target: "EFF110",
+        since: "0.2.1",
+        reason: "Its precision is measured on a small sample of reports only.",
         tracking: None,
     },
     ExperimentalFeature {
