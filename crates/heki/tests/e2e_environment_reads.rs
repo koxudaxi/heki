@@ -223,11 +223,11 @@ fn external_targets_match_calls_and_module_reads_by_their_full_names() {
 #[test]
 fn entries_naming_project_functions_by_a_suffix_name_nothing_outside() {
     // `getenv`, `*.getenv`, and `*.platform` name project functions or attributes by a
-    // suffix, and `os.*.getenv` and `version_info.major` name no external symbol by its full
-    // name.
+    // suffix, `os:getenv` names project definitions by a module part, and `os.*.getenv` and
+    // `version_info.major` name no external symbol by its full name.
     let found = reports(
         "env_suffix_entries",
-        "forbid = [\"calls\", \"reads-targets\"]\nread-targets = [\"*.platform\", \"version_info.major\"]\ncall-targets = [\"getenv\", \"*.getenv\", \"os.*.getenv\", \"*.find_spec\"]\n",
+        "forbid = [\"calls\", \"reads-targets\"]\nread-targets = [\"*.platform\", \"version_info.major\"]\ncall-targets = [\"getenv\", \"*.getenv\", \"os.*.getenv\", \"*.find_spec\", \"os:getenv\", \"importlib.util:find_spec\"]\n",
         &[("pkg/generate.py", GENERATE)],
     );
     assert_eq!(found, Vec::new());

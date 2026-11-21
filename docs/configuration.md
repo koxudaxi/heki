@@ -390,8 +390,8 @@ Outside the project, `call-targets` and `read-targets` entries name symbols by t
 name, starting with the top-level module: `os.getenv` matches a call of `os.getenv` (also
 `from os import getenv`, `import os as o`), `platform.*` every function of `platform`, and
 `sys.platform` a read of `sys.platform` (also `from sys import platform`, or `import sys as s`
-and `s.platform`). A dotted suffix (`getenv`) or a leading glob (`*.getenv`) never names a symbol
-outside the project, so an entry for project functions keeps its meaning. Only a call or a read
+and `s.platform`). A dotted suffix (`getenv`), a leading glob (`*.getenv`), or a module part (`os:getenv`) never
+names a symbol outside the project, so an entry for project functions keeps its meaning. Only a call or a read
 heki resolves counts: an attribute read by name (`getattr(sys, name)`) or on an object of unknown
 origin is not reported.
 

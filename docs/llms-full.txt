@@ -1238,8 +1238,8 @@ Outside the project, `call-targets` and `read-targets` entries name symbols by t
 name, starting with the top-level module: `os.getenv` matches a call of `os.getenv` (also
 `from os import getenv`, `import os as o`), `platform.*` every function of `platform`, and
 `sys.platform` a read of `sys.platform` (also `from sys import platform`, or `import sys as s`
-and `s.platform`). A dotted suffix (`getenv`) or a leading glob (`*.getenv`) never names a symbol
-outside the project, so an entry for project functions keeps its meaning. Only a call or a read
+and `s.platform`). A dotted suffix (`getenv`), a leading glob (`*.getenv`), or a module part (`os:getenv`) never
+names a symbol outside the project, so an entry for project functions keeps its meaning. Only a call or a read
 heki resolves counts: an attribute read by name (`getattr(sys, name)`) or on an object of unknown
 origin is not reported.
 
@@ -3602,7 +3602,8 @@ count for a read.
     a method (with its overrides in subclasses, through bound-method aliases and `getattr` with a
     constant name), or a class (constructing it); a call is one only when every function it may
     call is a target. An entry also names a function or class outside the project by its full
-    dotted name (`os.getenv`, `platform.*`); a dotted suffix or a leading glob does not;
+    dotted name (`os.getenv`, `platform.*`); a dotted suffix, a leading glob, or a module part
+    does not;
   - `reads-environment`: reading the environment the program runs in: a call or a module
     attribute read the ecosystem catalog tags `environment` (`os.getenv`, `platform.system`,
     `importlib.util.find_spec`, `os.environ`, `sys.platform`, `sys.version_info`, ...), and,
