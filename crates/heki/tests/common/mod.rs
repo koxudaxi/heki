@@ -56,10 +56,12 @@ impl Project {
         )
     }
 
-    /// `heki check --heuristic <args>`: the rules these tests exercise are heuristic, and
-    /// without it they run only when named (`--no-heuristic` in `args` turns it off again).
+    /// `heki check --heuristic --fail-on warning <args>`: the rules these tests exercise are
+    /// heuristic, and without it they run only when named (`--no-heuristic` in `args` turns it
+    /// off again); many of them report warnings, and with `--fail-on warning` exit code 1 says
+    /// that a run reported something.
     pub fn check(&self, args: &[&str]) -> (i32, String, String) {
-        let mut all = vec!["check", "--heuristic"];
+        let mut all = vec!["check", "--heuristic", "--fail-on", "warning"];
         all.extend_from_slice(args);
         self.heki(&all)
     }
