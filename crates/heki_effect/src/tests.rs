@@ -768,6 +768,7 @@ fn gate_5_handbuilt_file_summaries() {
         runner: crate::Runner::Caller,
         binds_recv: false,
         handed_callable: None,
+        per_item: None,
         dispatch: None,
         result_discarded: false,
     });
@@ -1385,6 +1386,7 @@ fn callers_left_without_a_defining_file_are_skipped() {
         runner: crate::Runner::Caller,
         binds_recv: false,
         handed_callable: None,
+        per_item: None,
         dispatch: None,
         result_discarded: false,
     });
@@ -1411,6 +1413,7 @@ fn callers_left_without_a_defining_file_are_skipped() {
         runner: crate::Runner::Caller,
         binds_recv: false,
         handed_callable: None,
+        per_item: None,
         dispatch: None,
         result_discarded: false,
     });
@@ -1435,6 +1438,7 @@ fn callers_left_without_a_defining_file_are_skipped() {
         runner: crate::Runner::Caller,
         binds_recv: false,
         handed_callable: None,
+        per_item: None,
         dispatch: None,
         result_discarded: false,
     });
