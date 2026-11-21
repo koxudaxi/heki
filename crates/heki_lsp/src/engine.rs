@@ -497,7 +497,7 @@ impl Workspace {
             path,
             &self.env.root,
             text.to_owned(),
-            self.env.layout,
+            &self.env.layout,
             self.env.runtime,
         )
     }
@@ -1042,7 +1042,7 @@ impl Workspace {
     /// about, as `heki check` does: a name under it resolves to nothing, not to the catalog.
     /// Returns the files it affects.
     pub fn unreadable(&mut self, path: &Path) -> Vec<PathBuf> {
-        let module = unread_module(path, &self.env.root, self.env.layout);
+        let module = unread_module(path, &self.env.root, &self.env.layout);
         self.replace_file(path, Some(module))
     }
 

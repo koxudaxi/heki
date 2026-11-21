@@ -120,6 +120,7 @@ fn analyze(
     let project = Project::load(&ProjectOptions {
         paths: &args.paths,
         config: args.config.as_deref(),
+        working_dir: None,
         target_version: args.target_version.as_deref(),
         overrides,
     })?;
@@ -550,6 +551,7 @@ pub(crate) fn run_snapshot(args: &SnapshotArgs) -> Result<ExitCode> {
     let project = Project::load(&ProjectOptions {
         paths: &paths,
         config: args.config.as_deref(),
+        working_dir: None,
         target_version: args.target_version.as_deref(),
         overrides: None,
     })?;

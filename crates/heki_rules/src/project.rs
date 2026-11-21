@@ -6,7 +6,7 @@ use crate::ModuleUnit;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use heki_ast::{LineIndex, Span};
 use heki_diagnostics::{Diagnostic, InlineIgnores};
-use heki_effect::{ModuleInput, ModuleLayout, UnreadModule, module_name_for_path};
+use heki_effect::{ModuleInput, ModuleLayout, UnreadModule};
 use heki_env::{ConfigError, HekiConfig, PythonVersion, RuntimeProfile};
 use heki_ir::ModuleIr;
 use heki_kb::{EcosystemPatch, EffectiveEcosystemKb, EffectiveSoundnessKb, KbError};
@@ -40,7 +40,8 @@ pub const DEFAULT_EXCLUDE: &[&str] = &[
     "venv",
 ];
 
-const ROOT_MARKERS: &[&str] = &["heki.toml", ".heki.toml", "pyproject.toml", ".git"];
+/// The files that hold a configuration and so mark the project root.
+const CONFIG_MARKERS: &[&str] = &["heki.toml", ".heki.toml", "pyproject.toml"];
 
 #[derive(Debug, Error)]
 pub enum ProjectError {
@@ -177,18 +178,36 @@ pub fn display_path(path: &Path) -> PathBuf {
         .unwrap_or_else(|_| path.to_path_buf())
 }
 
-/// Nearest ancestor of `start` holding a root marker (`heki.toml`, `pyproject.toml`, `.git`).
-pub fn find_root(start: &Path) -> PathBuf {
+/// The project root of a run from `working_dir` whose first path is `start` (a file or a
+/// directory): the nearest directory at or above `start` holding a configuration file
+/// ([`CONFIG_MARKERS`]), searched up to the top of the enclosing Git working tree (the directory
+/// holding `.git`; a configuration above it belongs to another project). Without one, the root is
+/// `working_dir` when that holds `start`, as Ruff and ty take it, but never a directory above the
+/// top of the working tree: then the top itself. Outside both, it is `start`'s own directory.
+pub fn find_root(start: &Path, working_dir: &Path) -> PathBuf {
     let start = canonical_or_given(start);
     let dir = if start.is_dir() {
         start.clone()
     } else {
         start.parent().map(Path::to_path_buf).unwrap_or_default()
     };
-    dir.ancestors()
-        .find(|d| ROOT_MARKERS.iter().any(|m| d.join(m).exists()))
-        .unwrap_or(&dir)
-        .to_path_buf()
+    let mut git_top = None;
+    for d in dir.ancestors() {
+        if CONFIG_MARKERS.iter().any(|m| d.join(m).exists()) {
+            return d.to_path_buf();
+        }
+        if d.join(".git").exists() {
+            git_top = Some(d);
+            break;
+        }
+    }
+    let working_dir = canonical_or_given(working_dir);
+    let holds_start = dir.starts_with(&working_dir);
+    match git_top {
+        Some(top) if !(holds_start && working_dir.starts_with(top)) => top.to_path_buf(),
+        _ if holds_start => working_dir,
+        _ => dir,
+    }
 }
 
 fn glob_set(patterns: &[String], what: &'static str) -> Result<GlobSet, ProjectError> {
@@ -323,7 +342,7 @@ pub fn parse_source(
     path: &Path,
     root: &Path,
     source: String,
-    layout: ModuleLayout,
+    layout: &ModuleLayout,
     runtime: RuntimeProfile,
 ) -> Result<ParsedFile, FileError> {
     let parsed = heki_ast::parse_module(&source).map_err(|errs| {
@@ -353,21 +372,20 @@ pub fn parse_source(
 
 /// The project-relative POSIX path of the file at `path`, the module it defines, and whether
 /// that module is a package. A file outside a module layout defines the module of its stem.
-fn module_identity(path: &Path, root: &Path, layout: ModuleLayout) -> (String, String, bool) {
+fn module_identity(path: &Path, root: &Path, layout: &ModuleLayout) -> (String, String, bool) {
     let rel = rel_posix(path, root);
-    let (module_name, is_package) = module_name_for_path(Path::new(&rel), layout.src)
-        .unwrap_or_else(|| {
-            let stem = path
-                .file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            (stem, false)
-        });
+    let (module_name, is_package) = layout.module_name(Path::new(&rel)).unwrap_or_else(|| {
+        let stem = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        (stem, false)
+    });
     (rel, module_name, is_package)
 }
 
 /// The file at `path` that heki could not read or parse, as the module it would define.
-pub fn unread_module(path: &Path, root: &Path, layout: ModuleLayout) -> UnreadModule {
+pub fn unread_module(path: &Path, root: &Path, layout: &ModuleLayout) -> UnreadModule {
     let (_, module_name, is_package) = module_identity(path, root, layout);
     UnreadModule {
         path: display_path(path),
@@ -381,6 +399,10 @@ pub fn unread_module(path: &Path, root: &Path, layout: ModuleLayout) -> UnreadMo
 pub struct ProjectOptions<'a> {
     pub paths: &'a [PathBuf],
     pub config: Option<&'a Path>,
+    /// The directory the run works from, where a project without a configuration file is
+    /// rooted ([`find_root`]): the workspace folder of the language server. `None`: the current
+    /// directory.
+    pub working_dir: Option<&'a Path>,
     pub target_version: Option<&'a str>,
     /// In-memory sources replacing files on disk (keyed like [`ParsedFile::path`]); one that is
     /// not on the disk is a file of the project when discovery would find it there.
@@ -404,7 +426,11 @@ impl ProjectEnv {
             .first()
             .cloned()
             .unwrap_or_else(|| PathBuf::from("."));
-        let root = find_root(&first);
+        let working_dir = match opts.working_dir {
+            Some(dir) => dir.to_path_buf(),
+            None => std::env::current_dir().unwrap_or_else(|_| first.clone()),
+        };
+        let root = find_root(&first, &working_dir);
         let cfg = match opts.config {
             Some(path) => HekiConfig::load_from_file(path)?,
             None => HekiConfig::load_from_dir(&root)?,
@@ -422,7 +448,7 @@ impl ProjectEnv {
             .collect::<Result<Vec<_>, _>>()?;
         let kb = EffectiveEcosystemKb::load_builtin(&overrides)?;
         let soundness_kb = EffectiveSoundnessKb::load_builtin(runtime.python_version)?;
-        let layout = ModuleLayout::detect(&root);
+        let layout = ModuleLayout::detect(&root, &cfg);
         Ok(Self {
             root,
             cfg,
@@ -507,7 +533,7 @@ impl Project {
                     None => heki_ast::read_source(p).map_err(|e| FileError::unreadable(p, &e)),
                 };
                 source
-                    .and_then(|source| parse_source(p, &env.root, source, env.layout, env.runtime))
+                    .and_then(|source| parse_source(p, &env.root, source, &env.layout, env.runtime))
             })
             .collect();
         let mut files = Vec::new();
@@ -517,7 +543,7 @@ impl Project {
             match r {
                 Ok(parsed) => files.push(parsed),
                 Err(e) => {
-                    unread.push(unread_module(p, &env.root, env.layout));
+                    unread.push(unread_module(p, &env.root, &env.layout));
                     errors.push(e);
                 }
             }
