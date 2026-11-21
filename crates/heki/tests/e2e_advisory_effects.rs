@@ -1182,6 +1182,12 @@ class Mailer(Sender):
 
 async def tp_abstract(s: Sender):
     s.send("x")
+
+
+def per_row_of_a_file():
+    conn = sqlite3.connect("app.db")
+    for (i,) in conn.execute("SELECT id FROM t"):
+        conn.execute("SELECT ?", (i,))
 "#;
 
 #[test]
@@ -1322,6 +1328,11 @@ fn exact_claims_establish_each_premise() {
                 215,
                 "EFF101",
                 "`pkg.premises.Mailer.send` always runs the waiting call `requests.post` on the event loop (1 call down, on every path)"
+            ),
+            (
+                221,
+                "EFF103",
+                "every iteration over the rows of `sqlite3.Connection.execute` sends a database statement: `sqlite3.Connection.execute`"
             ),
         ]
     );

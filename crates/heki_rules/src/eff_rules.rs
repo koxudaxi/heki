@@ -682,14 +682,16 @@ pub(crate) fn data_origin(
             let heki_effect::Callee::External(symbol) = callee else {
                 return None;
             };
-            let what = match (cx.kb.lookup(&symbol)?.items?, origin.text) {
+            let entry = cx.kb.lookup(&symbol)?;
+            let what = match (entry.items?, origin.text) {
                 (ResultItems::Rows, false) => "the rows",
                 (ResultItems::Lines, false) => "the lines",
                 (ResultItems::Entries, false) => "the entries",
                 (ResultItems::Text, true) => "the lines of the text",
                 _ => return None,
             };
-            format!("{what} of `{symbol}`")
+            // A catalog class's method is named by the library API it is.
+            format!("{what} of `{}`", entry.api.as_deref().unwrap_or(&symbol))
         }
         ItemSource::Receiver | ItemSource::Fixed => return None,
     };
