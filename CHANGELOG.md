@@ -33,6 +33,8 @@ release can change rules, configuration keys, diagnostics, and output formats.
 
 ### Added
 
+- `heki inspect <SYMBOL> [PATHS]...` (experimental) says what heki knows about one function,
+
 - `src` (`[tool.heki]`) lists the source roots, as Ruff's `src` and ty's `environment.root`
   do: directories relative to the project root whose files are named relative to them, so a
   subdirectory application (`src = ["backend"]`, for `backend/config/env.py` imported as
