@@ -711,8 +711,8 @@ impl<'a> Defs<'a> {
     /// a.children`, `for b in index[a.k]`, `for b in f(a)`, `for b in xs[i + 1:]` traverse the
     /// outer element instead of joining with an independent collection.
     fn reads_elements(&self, lp: &NaturalLoop, inner: BlockId, var: VarId) -> bool {
-        // A slice, an f-string, or a comprehension is a value without operands: the
-        // instructions inside its span count as its operands.
+        // A slice or a comprehension is a value without operands: the instructions inside its
+        // span count as its operands.
         let values: Vec<(Span, VarId)> = lp
             .body
             .iter()

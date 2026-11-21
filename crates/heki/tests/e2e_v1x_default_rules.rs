@@ -1020,6 +1020,20 @@ def small_inner(A):
         for b in PAIR:
             if a == b:
                 print(a)
+
+
+def fetched(found, index, search):
+    for title, body in found:
+        for x in search(f'"{title}" in:title'):
+            if x["title"] == title:
+                print(x, body)
+    for name in found:
+        for row in index[f"{name}"]:
+            if row.name == name:
+                print(row)
+        for row in index[f"{name!r:>{name}}"]:
+            if row.name == name:
+                print(row)
 "#;
 
 #[test]
@@ -1037,7 +1051,8 @@ fn opt113_reports_nested_loop_equijoins_but_not_traversals_or_all_pairs_loops() 
     // of two matches, an inner collection the outer loop rebinds without its element, a
     // comprehension over an independent collection, and a match under another `if`.
     // Not reported: traversals of the outer element (`a.children`, `index[a.k]`, `fn(a)`, an
-    // element of an element, `items[i + 1:]` after `enumerate`, `index[f"{a.k}"]`, a
+    // element of an element, `items[i + 1:]` after `enumerate`, `index[f"{a.k}"]`, an
+    // f-string of the element itself (`f"{name}"`, its conversion and specification), a
     // comprehension over `a.children`), all-pairs loops skipping matches (`continue`, also
     // under `or`), a match that is one alternative of an `or` (either side), comparisons that
     // pick a value for every pair (a conditional expression, an `if` / `else` assigning

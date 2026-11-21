@@ -493,8 +493,17 @@ incremental LSP design, and the Stage 0-A Wave 2 decisions.
   `DATA101`, and the `OPT` rules are slowdowns; `EFF106` (a synchronous lock or a transaction
   held across I/O can deadlock the event loop), `EFF107`, `EFF201`, and every `MUT` rule are
   bugs. A rule split off another (a heuristic sibling code) has its parent's consequence.
-  `lint.severity` still overrides per rule, and both severities make `heki check` fail.
+  `lint.severity` still overrides per rule.
   *Rejected*: severity by family (it says how a rule is built, not what the code does).
+- **Exit code**: only an `error` report makes `heki check` fail (exit code 1). A `warning` is
+  printed, and shown by the language server, without failing the run, unless
+  `lint.fail-on = "warning"` (`--fail-on warning`) asks for it. A check that fails on every
+  slower loop, a report users may judge harmless in their domain, stands in their way and is
+  turned off, and then its bug reports go unseen too; a bug is worth stopping for. With a
+  baseline the same threshold applies to the Ratchet regressions. A refused `--update-baseline`
+  (the update did not happen) and pending `--diff` changes (files would change) still exit 1.
+  *Rejected*: failing on both severities (the 0.1 behavior); an `--exit-zero` switch (it hides
+  the bugs too).
 ---
 
 ## 5. Open items

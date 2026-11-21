@@ -99,9 +99,10 @@ fn exit_codes_and_clean_runs() {
     assert_eq!(code, 0, "{stdout}{stderr}");
     assert!(stderr.contains("All checks passed"));
 
+    // A warning is reported without failing the run.
     p.write("pkg/bad.py", BLOCKING);
     let (code, stdout, stderr) = p.heki(&[]);
-    assert_eq!(code, 1);
+    assert_eq!(code, 0);
     assert!(
         stdout.starts_with("pkg/bad.py:4:5: EFF101 (async-blocking-call) [warning, heuristic]"),
         "{stdout}"
@@ -112,7 +113,9 @@ fn exit_codes_and_clean_runs() {
     assert_eq!(p.heki(&["--select", "NOPE9"]).0, 2);
     assert_eq!(p.heki(&["--target-version", "py27"]).0, 2);
     assert_eq!(p.heki(&["missing_dir"]).0, 2);
-    assert_eq!(p.heki(&["--ignore", "EFF101"]).0, 0);
+    let (code, _, stderr) = p.heki(&["--ignore", "EFF101"]);
+    assert_eq!(code, 0);
+    assert!(stderr.contains("All checks passed"), "{stderr}");
 
     p.write("pkg/broken.py", "def f(:\n");
     let (code, _, stderr) = p.heki(&[]);
@@ -129,7 +132,7 @@ fn inline_suppressions_ignore_hashes_in_strings() {
         "import time\n\nasync def h():\n    time.sleep(len(\"# heki: ignore[EFF101]\"))\n    time.sleep(1)  # heki: ignore[EFF101]\n    time.sleep(2)  # noqa: async-blocking-call\n    time.sleep(3)  # heki: ignore[MUT201]\n",
     );
     let (code, stdout, _) = p.heki(&["--output-format", "concise"]);
-    assert_eq!(code, 1);
+    assert_eq!(code, 0);
     let lines: Vec<&str> = stdout.lines().collect();
     assert_eq!(lines.len(), 2, "{stdout}");
     assert!(lines[0].starts_with("a.py:4:5: EFF101 "), "{stdout}");
@@ -152,7 +155,7 @@ fn inline_suppressions_and_source_lines_in_files_with_cr_or_crlf_line_breaks() {
         p.write(file, &src);
     }
     let (code, stdout, _) = p.heki(&["--output-format", "concise"]);
-    assert_eq!(code, 1);
+    assert_eq!(code, 0);
     // Each file reports only the unsuppressed call, on its own line 5.
     let starts: Vec<&str> = stdout
         .lines()
@@ -170,7 +173,9 @@ fn inline_suppressions_and_source_lines_in_files_with_cr_or_crlf_line_breaks() {
 #[test]
 fn ratchet_baseline_update_and_compare() {
     let p = Project::new("ratchet");
-    p.write("a.py", BLOCKING);
+    // The exit code tells a regression of these warnings apart.
+    p.write("a.py", BLOCKING)
+        .write("heki.toml", "[lint]\nfail-on = \"warning\"\n");
     let (code, _, stderr) = p.heki(&["--baseline", "heki-baseline.toml", "--update-baseline"]);
     assert_eq!(code, 0, "{stderr}");
     let text = std::fs::read_to_string(p.dir.join("heki-baseline.toml")).unwrap();
@@ -294,7 +299,7 @@ async def handler():
 "#;
 
 #[test]
-fn slower_code_defaults_to_warning_and_still_fails_the_check() {
+fn slower_code_defaults_to_warning() {
     let p = Project::new("opt_warning");
     p.write("app.py", SLOW_AND_BLOCKING);
     let severities = |args: &[&str]| -> Vec<(String, String)> {
@@ -320,9 +325,9 @@ fn slower_code_defaults_to_warning_and_still_fails_the_check() {
             pair("EFF101", "warning"),
         ]
     );
-    // Warnings alone still fail the check; the label and the SARIF level change.
+    // Warnings alone do not fail the check; the label and the SARIF level change.
     let (code, stdout, _) = p.heki(&["--select", "OPT"]);
-    assert_eq!(code, 1, "{stdout}");
+    assert_eq!(code, 0, "{stdout}");
     assert!(
         stdout.starts_with("app.py:7:9: OPT101 (list-quadratic-concat) [warning] "),
         "{stdout}"
@@ -343,6 +348,100 @@ fn slower_code_defaults_to_warning_and_still_fails_the_check() {
             pair("EFF101", "warning"),
         ]
     );
+    // An error fails it.
+    assert_eq!(p.heki(&["--select", "OPT"]).0, 1);
+}
+
+/// A write of `Model.fields` outside the functions its contract ([`WRITE_OWNERS`]) allows:
+/// `MUT201`, an `error` (a broken contract).
+const CONTRACT_BREACH: &str = "class Model:\n    def __init__(self):\n        self.fields = []\n\n\ndef add(m: Model):\n    m.fields.append(1)\n";
+const WRITE_OWNERS: &str = "[[write-owners]]\nname = \"store\"\ntargets = [\"models.Model.fields\"]\nallowed-writers = [\"store.*\"]\n";
+const FORMATS: [&str; 5] = ["full", "concise", "json", "github", "sarif"];
+
+#[test]
+fn warnings_do_not_fail_the_check_unless_fail_on_says_so() {
+    let p = Project::new("fail_on");
+    p.write("app.py", BLOCKING);
+    // Only warnings: they are printed, and the run passes.
+    let (code, stdout, stderr) = p.heki(&[]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stdout.starts_with("app.py:4:5: EFF101 (async-blocking-call) [warning, heuristic]"),
+        "{stdout}"
+    );
+    assert!(stderr.contains("Found 1 diagnostic(s)"), "{stderr}");
+    // `--fail-on warning` or `lint.fail-on = "warning"` makes them fail it.
+    assert_eq!(p.heki(&["--fail-on", "warning"]).0, 1);
+    p.write("heki.toml", "[lint]\nfail-on = \"warning\"\n");
+    assert_eq!(p.heki(&[]).0, 1);
+    // The command line overrides the configuration both ways.
+    assert_eq!(p.heki(&["--fail-on", "error"]).0, 0);
+    p.write("heki.toml", "[lint]\nfail-on = \"error\"\n");
+    assert_eq!(p.heki(&[]).0, 0);
+    assert_eq!(p.heki(&["--fail-on", "warning"]).0, 1);
+    // Every output format exits alike.
+    for format in FORMATS {
+        let (code, stdout, _) = p.heki(&["--output-format", format]);
+        assert_eq!(code, 0, "{format}: {stdout}");
+        assert!(stdout.contains("EFF101"), "{format}: {stdout}");
+        let (code, _, _) = p.heki(&["--output-format", format, "--fail-on", "warning"]);
+        assert_eq!(code, 1, "{format}");
+    }
+    // An error fails the run at either setting, in every format.
+    p.write("models.py", CONTRACT_BREACH)
+        .write("heki.toml", WRITE_OWNERS);
+    for format in FORMATS {
+        for fail_on in ["error", "warning"] {
+            let (code, stdout, _) = p.heki(&["--output-format", format, "--fail-on", fail_on]);
+            assert_eq!(code, 1, "{format} {fail_on}: {stdout}");
+            assert!(stdout.contains("MUT201"), "{format}: {stdout}");
+        }
+    }
+    let (code, stdout, _) = p.heki(&["--output-format", "concise"]);
+    assert_eq!(code, 1, "{stdout}");
+    // Other values are errors, in the configuration and on the command line.
+    p.write("heki.toml", "[lint]\nfail-on = \"info\"\n");
+    let (code, _, stderr) = p.heki(&[]);
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("fail-on"), "{stderr}");
+    assert_eq!(p.heki(&["--fail-on", "info"]).0, 2);
+}
+
+#[test]
+fn ratchet_regressions_fail_at_the_fail_on_severity() {
+    let p = Project::new("ratchet_fail_on");
+    p.write("a.py", BLOCKING)
+        .write("models.py", CONTRACT_BREACH)
+        .write(
+            "heki.toml",
+            &format!("baseline = \"heki-baseline.toml\"\n{WRITE_OWNERS}"),
+        );
+    let (code, _, stderr) = p.heki(&["--update-baseline"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(p.heki(&[]).0, 0);
+    // A new error is a regression that fails the run.
+    p.write(
+        "more.py",
+        "from models import Model\n\n\ndef add_more(m: Model):\n    m.fields.append(2)\n",
+    );
+    let (code, stdout, _) = p.heki(&["--output-format", "concise"]);
+    assert_eq!(code, 1, "{stdout}");
+    assert!(stdout.starts_with("more.py:5:5: MUT201 "), "{stdout}");
+    assert_eq!(stdout.lines().count(), 1, "{stdout}");
+    std::fs::remove_file(p.dir.join("more.py")).unwrap();
+    // A new warning is a regression that is reported without failing the run, unless
+    // `fail-on` says so.
+    p.write("b.py", BLOCKING);
+    let (code, stdout, stderr) = p.heki(&["--output-format", "concise"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.starts_with("b.py:4:5: EFF101 "), "{stdout}");
+    assert!(stderr.contains("Found 1 Ratchet regression(s)"), "{stderr}");
+    assert_eq!(p.heki(&["--fail-on", "warning"]).0, 1);
+    // A baseline that is not updated because an entry grew fails the run, whatever the
+    // regressions' severity: the update did not happen.
+    let (code, _, stderr) = p.heki(&["--update-baseline"]);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.contains("not updated"), "{stderr}");
 }
 
 #[test]
@@ -543,7 +642,7 @@ fn folded_blocking_calls_are_suppressed_and_baselined_one_by_one() {
     p.write("a.py", &sleeps(11));
     let concise = ["--output-format", "concise"];
     let (code, stdout, _) = p.heki(&concise);
-    assert_eq!(code, 1);
+    assert_eq!(code, 0);
     assert_eq!(stdout.lines().count(), 1, "{stdout}");
     assert!(stdout.contains("(+10 more async call sites"), "{stdout}");
     // Suppressing the first call leaves the other ten, below the folding threshold.
@@ -552,7 +651,7 @@ fn folded_blocking_calls_are_suppressed_and_baselined_one_by_one() {
         &sleeps(11).replacen("time.sleep(0)", "time.sleep(0)  # heki: ignore[EFF101]", 1),
     );
     let (code, stdout, _) = p.heki(&concise);
-    assert_eq!(code, 1);
+    assert_eq!(code, 0);
     assert_eq!(stdout.lines().count(), 10, "{stdout}");
     assert!(stdout.starts_with("a.py:5:5: EFF101 "), "{stdout}");
     // The baseline records every site: a twelfth call is a regression.
@@ -569,7 +668,7 @@ fn folded_blocking_calls_are_suppressed_and_baselined_one_by_one() {
     );
     p.write("a.py", &sleeps(12));
     let (code, stdout, stderr) = p.heki(&[&baseline[..], &concise[..]].concat());
-    assert_eq!(code, 1, "{stderr}");
+    assert_eq!(code, 0, "{stderr}");
     assert!(stderr.contains("allows 11 site(s), found 12"), "{stderr}");
     assert_eq!(stdout.lines().count(), 1, "{stdout}");
     assert!(stdout.contains("(+11 more async call sites"), "{stdout}");
@@ -581,7 +680,8 @@ fn folded_blocking_calls_are_suppressed_and_baselined_one_by_one() {
 fn walk_steps_are_written_as_json_and_hidden_from_help() {
     let p = Project::new("walk_steps");
     p.write("m.py", BLOCKING);
-    let (code, _, stderr) = p.heki(&["--walk-steps", "steps.json", "."]);
+    // A run that fails (its warning, with `--fail-on warning`) writes them too.
+    let (code, _, stderr) = p.heki(&["--fail-on", "warning", "--walk-steps", "steps.json", "."]);
     assert_eq!(code, 1, "{stderr}");
     let steps = std::fs::read_to_string(p.dir.join("steps.json")).unwrap();
     let steps: serde_json::Value = serde_json::from_str(&steps).unwrap();

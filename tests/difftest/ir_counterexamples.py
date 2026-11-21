@@ -7,6 +7,8 @@ original, and `crates/heki/tests/e2e_soundness.rs` asserts that heki now reports
 as `Blocked` or not at all and rewrites none of them. Run it with CPython 3.15.
 """
 
+import collections
+
 
 # ------------------------------------------------------------------------------
 # Replacement fields of f-strings bind names and run code
@@ -43,6 +45,62 @@ def old_nested_format_spec(items):
     for item in items:
         xs.append(item)
     return kept[0], xs
+
+
+# A replacement field formats its value, also in a format specification: the text of a list
+# is not the text of a deque.
+def cx_formatted_queue(items):
+    q = list(items)
+    shown = []
+    while q:
+        q.pop(0)
+        shown.append(f"left: {q}")
+    return shown
+
+
+def old_formatted_queue(items):
+    q = collections.deque(list(items))
+    shown = []
+    while q:
+        q.popleft()
+        shown.append(f"left: {q}")
+    return shown
+
+
+def cx_queue_in_format_spec(items):
+    q = list(items)
+    shown = []
+    while q:
+        q.pop(0)
+        shown.append(f"{0:{q!r:.1}}")
+    return shown
+
+
+def old_queue_in_format_spec(items):
+    q = collections.deque(list(items))
+    shown = []
+    while q:
+        q.popleft()
+        shown.append(f"{0:{q!r:.1}}")
+    return shown
+
+
+def cx_queue_in_template_spec(items):
+    q = list(items)
+    shown = []
+    while q:
+        q.pop(0)
+        shown.append(t"{0:{q}}".interpolations[0].format_spec)
+    return shown
+
+
+def old_queue_in_template_spec(items):
+    q = collections.deque(list(items))
+    shown = []
+    while q:
+        q.popleft()
+        shown.append(t"{0:{q}}".interpolations[0].format_spec)
+    return shown
 
 
 # ------------------------------------------------------------------------------
@@ -650,6 +708,9 @@ def main() -> int:
     pairs = [
         (cx_walrus_in_fstring, old_walrus_in_fstring, with_owned_factory),
         (cx_nested_format_spec, old_nested_format_spec, lambda f: f([1])),
+        (cx_formatted_queue, old_formatted_queue, lambda f: f([1, 2])),
+        (cx_queue_in_format_spec, old_queue_in_format_spec, lambda f: f([1])),
+        (cx_queue_in_template_spec, old_queue_in_template_spec, lambda f: f([1])),
         *[
             (cx, old, with_owned_factory)
             for cx, old in [

@@ -175,17 +175,21 @@ const FILE_PROTOCOL: &[&str] = &[
     "writelines",
 ];
 
+/// The builtin kinds of displays and comprehensions, with their classes.
+const DISPLAY_CLASSES: [(BuiltinKind, ConstClass); 4] = [
+    (BuiltinKind::List, ConstClass::List),
+    (BuiltinKind::Tuple, ConstClass::Tuple),
+    (BuiltinKind::Set, ConstClass::Set),
+    (BuiltinKind::Dict, ConstClass::Dict),
+];
+
 impl ConstClass {
-    /// The class of a display or comprehension of `kind` (an f-string, `Str`, has none: a single
-    /// replacement field is the result of `__format__`, which may be a `str` subclass).
+    /// The class of a display or comprehension of `kind`.
     fn of_builtin(kind: BuiltinKind) -> Option<Self> {
-        match kind {
-            BuiltinKind::List => Some(Self::List),
-            BuiltinKind::Tuple => Some(Self::Tuple),
-            BuiltinKind::Set => Some(Self::Set),
-            BuiltinKind::Dict => Some(Self::Dict),
-            _ => None,
-        }
+        DISPLAY_CLASSES
+            .iter()
+            .find(|(k, _)| *k == kind)
+            .map(|(_, class)| *class)
     }
 
     /// The buffer class a call of `module.name` constructs.
