@@ -640,8 +640,9 @@ def combine(a, b):
 /// An established `DATA101` report names what the loop steps through: the update returns on
 /// every iteration that completes, every path around the back edge carries it, and the items are
 /// the data's. A path that resets the value, items whose origin is not the data's (an attribute
-/// of the receiver), or a project helper doing the reallocation (it may return another value)
-/// leave the report heuristic, worded without an origin.
+/// of the receiver), a project helper doing the reallocation (it may return another value), or
+/// data that holds the previous value only on some paths leave the report heuristic, worded
+/// without an origin.
 #[test]
 fn data101_names_the_origin_of_an_established_report() {
     let p = Project::new("data101_established");
@@ -683,6 +684,14 @@ def through_a_helper(frames):
     for part in frames:
         df = combine(df, part)
     return df
+
+
+def drops_it_on_some_path(frames, keep):
+    df = pd.DataFrame()
+    for part in frames:
+        prior = df if keep else pd.DataFrame()
+        df = pd.concat([prior, part])
+    return df
 "#,
     );
     let diags = diagnostics(&p, &["--select", "DATA101"]);
@@ -707,6 +716,10 @@ def through_a_helper(frames):
             ),
             (
                 35,
+                "`df` is rebuilt from itself with `pandas.concat` on every loop iteration"
+            ),
+            (
+                43,
                 "`df` is rebuilt from itself with `pandas.concat` on every loop iteration"
             ),
         ]
