@@ -1684,6 +1684,23 @@ fn global_changes_of_every_definition_and_of_class_bodies_run_in_a_function() {
 }
 
 #[test]
+fn the_first_change_of_a_global_and_cells_without_an_owner() {
+    let src = "REGISTRY = []\n\n\ndef make():\n    class Early:\n        REGISTRY.append(1)\n\n    REGISTRY.append(2)\n    return Early\n\n\nclass Counted:\n    count = 0\n\n    def bump(self):\n        __class__.count += 1\n";
+    let index = project(&[("m.py", src)]);
+    // The class body runs before the function's own change: its change is the first.
+    let make = summary(&index, "m", "make");
+    let first = make.changed_state[&SharedState::Global("REGISTRY".to_owned())];
+    let line = |offset: u32| src[..offset as usize].matches('\n').count() + 1;
+    assert_eq!(line(first.start), 6);
+    // The implicit `__class__` cell of a method has no enclosing function: it counts as a
+    // module global.
+    assert_eq!(
+        changed_globals(summary(&index, "m", "Counted.bump")),
+        ["__class__"]
+    );
+}
+
+#[test]
 fn a1_hazards_are_calls_heki_cannot_follow() {
     let index = project(&[(
         "m.py",
