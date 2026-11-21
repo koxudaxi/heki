@@ -2,7 +2,8 @@
 //! one module, as JSON, for the tests that check them through the binary.
 //!
 //! The reader is the one every rule has without resolving calls: the module's bindings, module
-//! members named in the catalog, and every `with` statement's `__exit__` as one that may suppress.
+//! members named in the catalog, no attribute of any other object, and every `with` statement's
+//! `__exit__` as one that may suppress.
 
 use heki_ast::{LineIndex, Span};
 use heki_ir::walk::{Answer, Budget};

@@ -376,6 +376,7 @@ fn run_assumptions(args: AssumptionsArgs) -> Result<ExitCode> {
     let project = Project::load(&ProjectOptions {
         paths: &args.paths,
         config: None,
+        working_dir: None,
         target_version: args.target_version.as_deref(),
         overrides: None,
     })?;
