@@ -80,9 +80,13 @@ def run_child(tools, root, entries, watch=None):
             return json.load(f)
 
 
-def load_entries(root):
+def load_meta(root):
     with open(os.path.join(root, "oracle.json"), encoding="utf-8") as f:
-        return json.load(f)["entries"]
+        return json.load(f)
+
+
+def load_entries(root):
+    return load_meta(root)["entries"]
 
 
 def check_project(root, tools, entries=None):
@@ -93,6 +97,8 @@ def check_project(root, tools, entries=None):
         "checked": {},
         "refutations": [],
         "violations": [],
+        "departures": [],
+        "premise": None,
         "unmapped": [],
         "errors": [],
         "runs": {"total": 0, "timeout": 0, "bad-input": 0, "monitor-error": 0},
@@ -105,6 +111,9 @@ def check_project(root, tools, entries=None):
     exact = [r for r in reports if r.get("certainty") == "exact" and r["rule_code"] in planner.EXACT_RULES]
     for report in exact:
         out["reports"][report["rule_code"]] = out["reports"].get(report["rule_code"], 0) + 1
+    premise = load_meta(root).get("premise")
+    if premise is not None:
+        _check_stripped_premise(premise, exact, out)
     if not exact:
         return out
     built = planner.build(root, exact)
@@ -126,6 +135,43 @@ def check_project(root, tools, entries=None):
     if fixable:
         _check_rewrites(root, tools, entries, fixable, by_id, out)
     return out
+
+
+def _check_stripped_premise(premise, exact, out):
+    """A program from the premise table (`premise_generator.py`): with a premise stripped, an
+    exact report of the rule is a false claim (or, for a premise that only decides whether the
+    rule reports, a departure from its page); with none stripped, the rule is expected to report."""
+    import premise_generator
+
+    rule, stripped = premise["rule"], premise["stripped"]
+    reported = [r for r in exact if r["rule_code"] == rule]
+    out["premise"] = {"rule": rule, "stripped": stripped, "exact": len(reported)}
+    if stripped is None or not reported:
+        return
+    report = reported[0]
+    finding = {
+        "rule": rule,
+        "claim": "stripped",
+        "kind": "stripped-premise",
+        "premise": f"{stripped}: false by construction, and the report is exact",
+        "entry": None,
+        "input": None,
+        "detail": {"stripped": stripped},
+        "report": {
+            "path": report.get("path"),
+            "line": report.get("line"),
+            "column": report.get("column"),
+            "message": report.get("message"),
+            "help": report.get("help"),
+            "target": report.get("target"),
+            "related": [[r["path"], r["line"], r["message"]] for r in report.get("related", [])],
+        },
+    }
+    if (rule, stripped) in premise_generator.RELEVANCE:
+        finding["kind"] = "relevance-premise"
+        out["departures"].append(finding)
+    else:
+        out["refutations"].append(finding)
 
 
 def _count_runs(out, runs):

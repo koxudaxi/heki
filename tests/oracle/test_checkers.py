@@ -195,7 +195,7 @@ class Data101(unittest.TestCase):
             )
         )
         refutation = checkers.check(self.claim, [trace])["refutations"][0]
-        self.assertTrue(refutation["premise"].startswith("On every iteration"))
+        self.assertTrue(refutation["premise"].startswith("Every iteration"))
 
 
 class Mut110(unittest.TestCase):
@@ -473,6 +473,52 @@ class Helpers(unittest.TestCase):
         before = monitor.snapshot(items)
         items[1].add(3)
         self.assertNotEqual(before, monitor.snapshot(items))
+
+
+class PremiseTable(unittest.TestCase):
+    table = {
+        "EFF101": ["Every return", "Every implementation", "Waits"],
+        "MUT114": ["Cached", "Keyed", "Container kind", "Same object", "Changed in place"],
+    }
+
+    def test_the_generator_strips_every_premise_of_the_table(self):
+        import premise_generator
+
+        self.assertEqual(premise_generator.check_table(self.table), ["EFF101", "MUT114"])
+        with self.assertRaises(premise_generator.TableError):
+            premise_generator.check_table({"EFF101": ["Every return", "A premise no builder strips"]})
+
+    def test_every_program_keeps_all_premises_or_strips_one(self):
+        import premise_generator
+
+        seen = set()
+        for seed in range(200):
+            project = premise_generator.generate(seed, self.table)
+            premise = project.premise
+            self.assertIn(premise["stripped"], [None, *self.table[premise["rule"]]])
+            seen.add((premise["rule"], premise["stripped"]))
+        self.assertEqual(len(seen), 4 + 6)
+
+    def report(self, rule):
+        return {"rule_code": rule, "certainty": "exact", "path": "app/s0.py", "line": 3, "related": []}
+
+    def test_an_exact_report_with_a_premise_stripped_refutes_it(self):
+        import driver
+
+        out = {"refutations": [], "departures": [], "premise": None}
+        driver._check_stripped_premise({"rule": "EFF101", "stripped": "Waits"}, [self.report("EFF101")], out)
+        self.assertEqual(out["refutations"][0]["kind"], "stripped-premise")
+        self.assertEqual(out["premise"], {"rule": "EFF101", "stripped": "Waits", "exact": 1})
+
+    def test_a_relevance_premise_is_a_departure_and_a_base_program_refutes_nothing(self):
+        import driver
+
+        out = {"refutations": [], "departures": [], "premise": None}
+        driver._check_stripped_premise({"rule": "MUT114", "stripped": "Keyed"}, [self.report("MUT114")], out)
+        self.assertEqual((out["refutations"], out["departures"][0]["kind"]), ([], "relevance-premise"))
+        out = {"refutations": [], "departures": [], "premise": None}
+        driver._check_stripped_premise({"rule": "EFF101", "stripped": None}, [self.report("EFF101")], out)
+        self.assertEqual(out["refutations"], [])
 
 
 def _source(text):

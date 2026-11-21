@@ -33,6 +33,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import driver  # noqa: E402
 import generator  # noqa: E402
 import minimize  # noqa: E402
+import premise_generator  # noqa: E402
 
 
 def check_seed(seed, args):
@@ -40,7 +41,10 @@ def check_seed(seed, args):
     work = os.path.join(args.out, "work", f"seed-{seed}")
     if os.path.exists(work):
         shutil.rmtree(work)
-    project = generator.generate(seed, families=args.families)
+    if uses_table(seed, args):
+        project = premise_generator.generate(seed, args.table)
+    else:
+        project = generator.generate(seed, families=args.families)
     project.write(work)
     started = time.monotonic()
     result = driver.check_project(os.path.realpath(work), tools)
@@ -48,7 +52,11 @@ def check_seed(seed, args):
     result["families"] = project.families
     result["seconds"] = round(time.monotonic() - started, 3)
     kept = []
-    for kind, findings in (("refutations", result["refutations"]), ("violations", result["violations"])):
+    for kind, findings in (
+        ("refutations", result["refutations"]),
+        ("violations", result["violations"]),
+        ("departures", result["departures"]),
+    ):
         for finding in findings:
             target = os.path.join(args.out, kind, f"{finding['rule']}-{finding['kind']}", f"seed-{seed}")
             if os.path.exists(target):
@@ -59,6 +67,24 @@ def check_seed(seed, args):
             kept.append(target)
     shutil.rmtree(work, ignore_errors=True)
     return result
+
+
+def uses_table(seed, args):
+    """Whether the seed's project comes from the premise table: every seed with `--mode table`,
+    the odd ones with `--mode both`."""
+    return args.mode == "table" or (args.mode == "both" and seed % 2 == 1)
+
+
+def premise_table(heki):
+    """Rule code to premise names, as `heki rule --all --output-format json` prints the table."""
+    import subprocess
+
+    rules = json.loads(
+        subprocess.run(
+            [heki, "rule", "--all", "--output-format", "json"], capture_output=True, text=True, check=True
+        ).stdout
+    )
+    return {r["code"]: [p["name"] for p in r.get("premises", [])] for r in rules if r.get("premises")}
 
 
 def summarize(results, started, args):
@@ -74,6 +100,8 @@ def summarize(results, started, args):
         "runs": collections.Counter(),
         "errors": collections.Counter(),
         "groups": {},
+        "premises": {},
+        "departures": collections.Counter(),
     }
     for result in results:
         summary["exact_reports"].update(result["reports"])
@@ -83,6 +111,17 @@ def summarize(results, started, args):
             summary["unmapped"][rule] += 1
         for error in result["errors"]:
             summary["errors"][error[0]] += 1
+        premise = result.get("premise")
+        if premise:
+            row = summary["premises"].setdefault(
+                f"{premise['rule']} / {premise['stripped'] or 'none stripped'}",
+                {"projects": 0, "exact": 0, "refuted": 0},
+            )
+            row["projects"] += 1
+            row["exact"] += premise["exact"] > 0
+            row["refuted"] += any(f["rule"] == premise["rule"] for f in result["refutations"])
+        for finding in result.get("departures", []):
+            summary["departures"][f"{finding['rule']} / {finding['detail']['stripped']}"] += 1
         for kind, findings in (("refutations", result["refutations"]), ("violations", result["violations"])):
             for finding in findings:
                 summary[kind][finding["rule"]] += 1
@@ -105,6 +144,12 @@ def print_summary(summary):
         print("reports the plan could not map:", dict(summary["unmapped"]))
     if summary["errors"]:
         print("oracle errors:", dict(summary["errors"]))
+    if summary["premises"]:
+        print("premise table (projects / with an exact report / refuted):")
+        for key, row in sorted(summary["premises"].items()):
+            print(f"  {key}: {row['projects']} / {row['exact']} / {row['refuted']}")
+    if summary["departures"]:
+        print("exact reports with a relevance premise stripped:", dict(summary["departures"]))
     print("refutations per rule:", dict(sorted(summary["refutations"].items())) or "none")
     print("assumption violations per rule:", dict(sorted(summary["violations"].items())) or "none")
     for key, group in sorted(summary["groups"].items()):
@@ -149,6 +194,17 @@ def main():
     parser.add_argument(
         "--families", nargs="*", choices=sorted(generator.FAMILIES), help="generate only these families"
     )
+    parser.add_argument(
+        "--table-heki",
+        help="the heki whose `rule --output-format json` gives the premise table (default: --heki); "
+        "to check a build older than the table with it",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["grammar", "table", "both"],
+        default="both",
+        help="generate from the shape grammar, from the premise table (every premise but one kept), or both",
+    )
     parser.add_argument("--run-timeout", type=float, default=2.0, help="seconds per program run")
     parser.add_argument("--minimize", action="store_true", help="shrink refutations to small repros")
     parser.add_argument("--minimize-per-group", type=int, default=1)
@@ -157,6 +213,11 @@ def main():
     args = parser.parse_args()
     args.heki = os.path.realpath(args.heki)
     args.out = os.path.realpath(args.out)
+    args.table = (
+        premise_table(os.path.realpath(args.table_heki or args.heki)) if args.mode != "grammar" else {}
+    )
+    if args.mode != "grammar":
+        premise_generator.check_table(args.table)
     os.makedirs(args.out, exist_ok=True)
     started = time.monotonic()
     results = []
@@ -189,7 +250,10 @@ def main():
         for result in results:
             f.write(
                 json.dumps(
-                    {k: result[k] for k in ("seed", "families", "reports", "checked", "seconds", "errors")}
+                    {
+                        k: result[k]
+                        for k in ("seed", "families", "premise", "reports", "checked", "seconds", "errors")
+                    }
                 )
                 + "\n"
             )
