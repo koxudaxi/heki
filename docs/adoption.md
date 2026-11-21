@@ -141,7 +141,7 @@ With SARIF:
   the object it is about).
 
 For custom tooling, `--output-format json` gives every field: see
-[Coding Agents](coding-agents.md#use-the-cli-in-the-agents-loop).
+[Coding Agents](coding-agents.md#after-an-edit-heki-check).
 
 ## Rolling out rules
 
