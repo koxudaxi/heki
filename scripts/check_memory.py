@@ -267,7 +267,7 @@ def run(heki: str, mode: str, root: Path, timed: bool) -> tuple[str, os.struct_r
     """One run of `mode` (with `/usr/bin/time -l` when `timed`): its stderr and resource usage."""
     args, extra_env = MODES[mode]
     _, code, stderr, usage = execute(heki, args, root, extra_env, timed)
-    # 0: clean, 1: diagnostics (the generated project has some); anything else is a failure.
+    # 0 or 1: the reports of the generated project, warnings or errors; anything else is a failure.
     if code not in (0, 1):
         sys.exit(f"heki {' '.join(args)} exited with {code}:\n{stderr}")
     return stderr, usage

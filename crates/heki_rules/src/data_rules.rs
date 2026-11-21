@@ -186,7 +186,7 @@ fn combines(
 /// The operands an instruction's result may hold. An operator holds its operands only as a
 /// builtin container operation: sequence concatenation and repetition (`+`, `*`) and dict
 /// union (`|`); the other operators never hold an array or a frame (sets and dict keys hold
-/// only hashable values). With an operand computed entry by entry from the previous value
+/// only hashable values), nor does a formatted `str`. With an operand computed entry by entry from the previous value
 /// ([`FromPrevious::Entrywise`]) it holds neither: an array's or a frame's operator takes
 /// precedence over a list's or a dict's and works on each entry, so `x - np.outer(u, v)` and
 /// `w * x[1:] + c` are new arrays whose every entry changed. A loop that rebuilds its value
@@ -211,7 +211,12 @@ fn held_operands(kind: &InstKind, derivations: &mut Derivations<'_>) -> Vec<VarI
                 .map(|(v, _)| v)
                 .collect()
         }
-        InstKind::BinOp { .. } | InstKind::UnaryOp { .. } | InstKind::Compare { .. } => Vec::new(),
+        InstKind::BinOp { .. }
+        | InstKind::UnaryOp { .. }
+        | InstKind::Compare { .. }
+        | InstKind::Convert { .. }
+        | InstKind::Format { .. }
+        | InstKind::BuildString { .. } => Vec::new(),
         ref other => other.operands(),
     }
 }

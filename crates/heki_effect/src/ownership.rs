@@ -237,7 +237,11 @@ pub fn source<'i>(
     made_here: &dyn Fn(VarId) -> bool,
 ) -> Source<'i> {
     match kind {
-        InstKind::AllocBuiltin { .. } | InstKind::DictLiteral { .. } => Source::New,
+        InstKind::AllocBuiltin { .. }
+        | InstKind::DictLiteral { .. }
+        | InstKind::Convert { .. }
+        | InstKind::Format { .. }
+        | InstKind::BuildString { .. } => Source::New,
         InstKind::BinOp {
             lhs,
             in_place: true,
