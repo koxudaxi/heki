@@ -1639,6 +1639,24 @@ impl<'a> FnCtx<'a> {
         out
     }
 
+    /// The exact type each instruction of `bb` gives the value it defines, stepping the block
+    /// once from its entry state.
+    pub(crate) fn defined_types(
+        &self,
+        an: &Analysis,
+        bb: BlockId,
+    ) -> Vec<(VarId, Option<BuiltinKind>)> {
+        let mut out = Vec::new();
+        if let Some(mut st) = an.block_in[bb.0 as usize].clone() {
+            for (i, inst) in self.f.block(bb).insts.iter().enumerate() {
+                let mut eff = InstEffects::default();
+                self.step(&mut st, bb, i, inst, &mut eff);
+                out.extend(inst.kind.dst().map(|d| (d, st.exact_type(d))));
+            }
+        }
+        out
+    }
+
     /// State immediately before instruction `idx` of `bb` (`idx == insts.len()`: before the
     /// terminator).
     pub(crate) fn state_before(

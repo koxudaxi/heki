@@ -574,6 +574,13 @@ const ACCUMULATE: &[Expect] = &[
         )],
     ),
     (
+        "set_compared_with_a_merge",
+        &[(
+            "OPT102",
+            V::Blocked("SetOrderUnobserved(s): `s` is compared with a value of unknown type"),
+        )],
+    ),
+    (
         "set_combined_with_parameter",
         &[(
             "OPT102",

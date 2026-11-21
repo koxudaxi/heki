@@ -523,6 +523,14 @@ def set_compared_with_parameter(items, other):
     return s == other
 
 
+def set_compared_with_a_merge(items, other, flag):
+    s = set()
+    for g in items:
+        s = s | {g}
+    t = s if flag else other
+    return s == t
+
+
 def set_combined_with_parameter(items, other):
     s = set()
     for g in items:
@@ -649,6 +657,7 @@ def main() -> int:
             run(set_stored, items),
             run(lambda xs: list(set_yielded(xs)), items),
             run(set_compared_with_parameter, items, {0, 1}),
+            run(set_compared_with_a_merge, items, {0}, n % 2),
             run(set_combined_with_parameter, items, {1}),
             run(set_combined_then_listed, items),
             run(set_merged_into_another, items),
