@@ -2099,3 +2099,53 @@ fn path_facts_decide_each_region_once() {
     let each = call("sequential", "db.each(999)")["on_every_iteration"][0].clone();
     assert_eq!(each["called"], json!({"known": "every"}));
 }
+
+/// The origin walk decides each question once: a chain of thousands of wrappers each of the one
+/// before, a list filled by appends in each of a thousand loops, and a phi of sixty branches each
+/// choosing a different parameter (as many as the IR budget models with their phis).
+#[test]
+fn item_origins_decide_each_question_once() {
+    let wrappers = 3000;
+    let mut lines = vec!["def chain(rows):".to_owned(), "    x0 = rows".to_owned()];
+    lines.extend((1..=wrappers).map(|i| format!("    x{i} = sorted(x{})", i - 1)));
+    lines.push(format!("    for y in x{wrappers}:"));
+    lines.push("        pass".to_owned());
+    lines.push(String::new());
+    lines.push("def filled(rows):".to_owned());
+    lines.push("    out = []".to_owned());
+    for _ in 0..1000 {
+        lines.push("    for r in rows:".to_owned());
+        lines.push("        out.append(r)".to_owned());
+    }
+    lines.push("    for y in out:".to_owned());
+    lines.push("        pass".to_owned());
+    lines.push(String::new());
+    let params: Vec<String> = (0..60).map(|i| format!("p{i}")).collect();
+    lines.push(format!("def chosen(flag, {}):", params.join(", ")));
+    lines.push("    xs = p0".to_owned());
+    for (i, p) in params[1..].iter().enumerate() {
+        lines.push(format!("    if flag == {i}:"));
+        lines.push(format!("        xs = {p}"));
+    }
+    lines.push("    for y in xs:".to_owned());
+    lines.push("        pass".to_owned());
+    let p = Project::new("bounds_item_origins");
+    p.write("m.py", &(lines.join("\n") + "\n"));
+    let facts = dump_facts_within(&p, Duration::from_secs(20));
+    let last_origin = |qualname: &str| -> Value {
+        let f = facts["functions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["qualname"] == qualname)
+            .unwrap();
+        f["loops"].as_array().unwrap().last().unwrap()["origin"].clone()
+    };
+    let one = |source: &str| json!({"known": [{"source": source, "carries": "items"}]});
+    assert_eq!(last_origin("chain"), one("param 0"));
+    assert_eq!(last_origin("filled"), one("param 0"));
+    assert_eq!(
+        last_origin("chosen")["known"].as_array().map(Vec::len),
+        Some(60)
+    );
+}

@@ -21,8 +21,10 @@
 //! - `while len(acc) < N` (also one `and` operand) with a constant `N` of at most
 //!   [`LEN_CAP_MAX`] caps `acc` ([`crate::NaturalLoop::len_caps`]).
 
+mod origin;
 mod paths;
 
+pub use origin::{Carries, ItemOrigin, ItemOrigins, ItemSource};
 pub use paths::{Decided, ModuleBindings, Must, PathReader, Paths, Progress};
 
 use crate::walk::{Answer, FnShape};

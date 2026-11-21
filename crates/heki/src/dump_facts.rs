@@ -6,7 +6,10 @@
 
 use heki_ast::{LineIndex, Span};
 use heki_ir::walk::{Answer, Budget};
-use heki_ir::{FnIndex, InstKind, ModuleBindings, ModuleIr, Must, PathReader, Paths, Progress};
+use heki_ir::{
+    Carries, FnIndex, InstKind, ItemOrigins, ItemSource, ModuleBindings, ModuleIr, Must,
+    PathReader, Paths, Progress,
+};
 use heki_kb::EffectiveEcosystemKb;
 use serde::Serialize;
 
@@ -50,6 +53,16 @@ struct IterationFacts {
 struct LoopFacts {
     line: u32,
     fixed_trips: Answer<u32>,
+    origin: Answer<Vec<OriginFacts>>,
+}
+
+/// An item origin, a call source by its text.
+#[derive(Serialize)]
+struct OriginFacts {
+    source: String,
+    carries: Carries,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    text: bool,
 }
 
 pub fn module(ir: &ModuleIr, src: &str, kb: &EffectiveEcosystemKb) -> ModuleFacts {
@@ -60,6 +73,7 @@ pub fn module(ir: &ModuleIr, src: &str, kb: &EffectiveEcosystemKb) -> ModuleFact
         module_member: &member,
         ..PathReader::with_bindings(&bindings)
     };
+    let origins = ItemOrigins::new(ir);
     let functions = ir
         .functions
         .iter()
@@ -120,6 +134,24 @@ pub fn module(ir: &ModuleIr, src: &str, kb: &EffectiveEcosystemKb) -> ModuleFact
                 .map(|(li, lp)| LoopFacts {
                     line: loop_line(li),
                     fixed_trips: ix.fixed_trips(lp, &mut |_| None),
+                    origin: origins.of_loop(&budget, f.id, li).map(|set| {
+                        set.into_iter()
+                            .map(|o| OriginFacts {
+                                source: match o.source {
+                                    ItemSource::Param(p) => format!("param {p}"),
+                                    ItemSource::ParamPart(p) => format!("part of param {p}"),
+                                    ItemSource::Receiver => "receiver".to_owned(),
+                                    ItemSource::Fixed => "fixed".to_owned(),
+                                    ItemSource::Call { block, index } => {
+                                        let span = f.block(block).insts[index as usize].span;
+                                        format!("call {}", text(src, span))
+                                    }
+                                },
+                                carries: o.carries,
+                                text: o.text,
+                            })
+                            .collect()
+                    }),
                 })
                 .collect();
             FunctionFacts {

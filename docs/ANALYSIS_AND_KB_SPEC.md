@@ -246,6 +246,19 @@ Compound expressions are flattened into **basic instructions in explicit left-to
     the same handler and every path to them passes the first, so moving their edges to the head
     changes no dominator. The graph of a region is built once, its dominators found in at most
     four passes in reverse postorder; past the budget the answer is `Open`.
+  - `ItemOrigins::of_loop` (`heki_ir::facts::origin`): where the items a `for` loop steps
+    through come from, as a set of `ItemOrigin`s: a parameter (`Param`), an attribute or item of
+    one (`ParamPart`), the method's receiver (`Receiver`), a collection the code fixes (`Fixed`),
+    or the result of a call (`Call`), which the reader resolves against the catalog: a source is
+    a catalog target, never a name. Items pass through `list`, `tuple`, `set`, `sorted`,
+    `reversed`, `iter`, `filter`, `enumerate`, `zip`, slices, dict views, and a comprehension,
+    generator expression, or list filled only by appends that produces a loop's item (or a
+    component of it); through `map`, a comprehension's element expression, and `range(len(x))`
+    only the count carries (`Carries::Count`). `str.split` / `str.splitlines` give pieces of their
+    receiver's text (`ItemOrigin::text`). A phi takes the inputs along the edges that can run. An
+    item of a call's result, a global that is no constant, and anything else are `Open`. The walk
+    is a `Closure` over questions `(function, value, steps)`, the steps being what the way from
+    the loop applies to the value's sources (an item, a count, pieces of text).
   - `heki dump-facts` (hidden) prints these facts and `fixed_trips` as JSON for the tests.
 
 ---
