@@ -12,9 +12,9 @@ $ heki check --heuristic
 ```
 
 The first command runs the exact rules (hand-checked samples of their reports found none wrong
-about the code) and the rules of the [contracts](configuration.md#contracts) you declare. No rule
-is exact yet, so without a contract it reports nothing for now, and says how many heuristic rules
-it left off. `--heuristic` runs those too; their reports can be wrong about the code, and every
+about the code) and the rules of the [contracts](configuration.md#contracts) you declare. In
+0.2.0 the exact rules are the proven tier of the `OPT` rewrite rules: the reports whose rewrite
+heki proves safe. A text run says how many heuristic rules it left off. `--heuristic` runs those too; their reports can be wrong about the code, and every
 output labels them ([Rule Precision](precision.md)).
 
 heki checks every Python file under the current directory, except the
@@ -52,10 +52,10 @@ app/api.py:5:12: EFF101 (async-blocking-call) [warning, heuristic] `handler` rea
 ## Fix what heki can prove
 
 `--fix` applies the rewrites heki proves safe and always faster (`OPT101`, `OPT102`), and
-`--diff` shows them first. Both rules are heuristic, so they run with `--heuristic`:
+`--diff` shows them first:
 
 ```console
-$ heki check --heuristic --diff
+$ heki check --diff
 --- a/app/report.py
 +++ b/app/report.py
 @@ -1,5 +1,5 @@
@@ -72,12 +72,13 @@ Fixed 1 issue(s) in 1 file(s).
 
 `--fix` then reports what is left, such as the `EFF101` above, which has no automatic fix.
 
-When heki cannot prove a fix safe, the help says why and nothing is rewritten. Here the list is
-also handed to other code inside the loop:
+When heki cannot prove a fix safe, the help says why, nothing is rewritten, and the report is
+heuristic whatever the rule's certainty. Here the list is also handed to other code inside the
+loop:
 
 ```console
-$ heki check app/shared.py
-app/shared.py:4:9: OPT101 (list-quadratic-concat) [warning] `rows = rows + [...]` copies the whole list on every iteration (quadratic)
+$ heki check --heuristic app/shared.py
+app/shared.py:4:9: OPT101 (list-quadratic-concat) [warning, heuristic] `rows = rows + [...]` copies the whole list each time it runs in the loop
   |
 4 |         rows = rows + [item]
   |         ^

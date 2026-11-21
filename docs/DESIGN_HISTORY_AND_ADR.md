@@ -474,7 +474,8 @@ incremental LSP design, and the Stage 0-A Wave 2 decisions.
   reports whose rewrite is not proven are heuristic), the `heuristic` key and options, the
   withholding of an exact rule's heuristic reports, the note, the labels in every output, the
   "What a report states" section of every rule page, and the certification check are
-  implemented. Every rule is heuristic until certified. The measurements are in
+  implemented. The proven tier of the `OPT` rewrite rules is certified in 0.2.0; the other rules
+  are heuristic until certified. The measurements are in
   [docs/precision.md](precision.md), and release gate 3 of
   [ARCHITECTURE.md](../ARCHITECTURE.md) is the certification.
 

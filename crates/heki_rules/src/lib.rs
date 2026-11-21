@@ -160,6 +160,12 @@ impl RuleMeta {
 /// Where the rule pages are published: the documentation's `site_url` (`zensical.toml`).
 pub const RULE_PAGES: &str = "https://heki.koxudaxi.dev/rules/";
 
+/// The certainty of the eight Soundness-lane `OPT` rules (`OPT101`-`OPT103`, `OPT110`, `OPT111`,
+/// `OPT120`, `OPT121`, `OPT130`). Their exact tier is the reports whose rewrite is proven safe,
+/// the others are heuristic whatever this says (ADR-018, decision 9). They are certified
+/// together, so that whether the proven tier runs by default is this one value.
+const PROVEN_OPT_TIER: Certainty = Certainty::Exact;
+
 /// Core v1.0 rule catalog (empirically validated in Stage 0-A + `dcg` study).
 pub const CORE_RULES: &[RuleMeta] = &[
     RuleMeta {
@@ -467,7 +473,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "OPT101",
         slug: "list-quadratic-concat",
         family: RuleFamily::Opt,
-        certainty: Certainty::Heuristic,
+        certainty: PROVEN_OPT_TIER,
         activation: Activation::Default,
         consequence: Consequence::Slowdown,
         size_dependent_fix: false,
@@ -479,7 +485,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "OPT102",
         slug: "set-dict-quadratic-merge",
         family: RuleFamily::Opt,
-        certainty: Certainty::Heuristic,
+        certainty: PROVEN_OPT_TIER,
         activation: Activation::Default,
         consequence: Consequence::Slowdown,
         size_dependent_fix: false,
@@ -491,7 +497,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "OPT103",
         slug: "immutable-quadratic-concat",
         family: RuleFamily::Opt,
-        certainty: Certainty::Heuristic,
+        certainty: PROVEN_OPT_TIER,
         activation: Activation::Default,
         consequence: Consequence::Slowdown,
         size_dependent_fix: false,
@@ -503,7 +509,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "OPT110",
         slug: "loop-linear-membership",
         family: RuleFamily::Opt,
-        certainty: Certainty::Heuristic,
+        certainty: PROVEN_OPT_TIER,
         activation: Activation::Default,
         consequence: Consequence::Slowdown,
         size_dependent_fix: true,
@@ -515,7 +521,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "OPT111",
         slug: "loop-linear-dedup",
         family: RuleFamily::Opt,
-        certainty: Certainty::Heuristic,
+        certainty: PROVEN_OPT_TIER,
         activation: Activation::Default,
         consequence: Consequence::Slowdown,
         size_dependent_fix: true,
@@ -551,7 +557,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "OPT120",
         slug: "list-front-pop",
         family: RuleFamily::Opt,
-        certainty: Certainty::Heuristic,
+        certainty: PROVEN_OPT_TIER,
         activation: Activation::Default,
         consequence: Consequence::Slowdown,
         size_dependent_fix: true,
@@ -563,7 +569,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "OPT121",
         slug: "list-front-insert",
         family: RuleFamily::Opt,
-        certainty: Certainty::Heuristic,
+        certainty: PROVEN_OPT_TIER,
         activation: Activation::Default,
         consequence: Consequence::Slowdown,
         size_dependent_fix: true,
@@ -575,7 +581,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "OPT130",
         slug: "loop-invariant-container-rebuild",
         family: RuleFamily::Opt,
-        certainty: Certainty::Heuristic,
+        certainty: PROVEN_OPT_TIER,
         activation: Activation::Default,
         consequence: Consequence::Slowdown,
         size_dependent_fix: true,

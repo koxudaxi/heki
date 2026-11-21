@@ -735,9 +735,9 @@ $ heki check --heuristic
 ```
 
 The first command runs the exact rules (hand-checked samples of their reports found none wrong
-about the code) and the rules of the [contracts](https://heki.koxudaxi.dev/configuration/#contracts) you declare. No rule
-is exact yet, so without a contract it reports nothing for now, and says how many heuristic rules
-it left off. `--heuristic` runs those too; their reports can be wrong about the code, and every
+about the code) and the rules of the [contracts](https://heki.koxudaxi.dev/configuration/#contracts) you declare. In
+0.2.0 the exact rules are the proven tier of the `OPT` rewrite rules: the reports whose rewrite
+heki proves safe. A text run says how many heuristic rules it left off. `--heuristic` runs those too; their reports can be wrong about the code, and every
 output labels them ([Rule Precision](https://heki.koxudaxi.dev/precision/)).
 
 heki checks every Python file under the current directory, except the
@@ -775,10 +775,10 @@ app/api.py:5:12: EFF101 (async-blocking-call) [warning, heuristic] `handler` rea
 ## Fix what heki can prove
 
 `--fix` applies the rewrites heki proves safe and always faster (`OPT101`, `OPT102`), and
-`--diff` shows them first. Both rules are heuristic, so they run with `--heuristic`:
+`--diff` shows them first:
 
 ```console
-$ heki check --heuristic --diff
+$ heki check --diff
 --- a/app/report.py
 +++ b/app/report.py
 @@ -1,5 +1,5 @@
@@ -795,12 +795,13 @@ Fixed 1 issue(s) in 1 file(s).
 
 `--fix` then reports what is left, such as the `EFF101` above, which has no automatic fix.
 
-When heki cannot prove a fix safe, the help says why and nothing is rewritten. Here the list is
-also handed to other code inside the loop:
+When heki cannot prove a fix safe, the help says why, nothing is rewritten, and the report is
+heuristic whatever the rule's certainty. Here the list is also handed to other code inside the
+loop:
 
 ```console
-$ heki check app/shared.py
-app/shared.py:4:9: OPT101 (list-quadratic-concat) [warning] `rows = rows + [...]` copies the whole list on every iteration (quadratic)
+$ heki check --heuristic app/shared.py
+app/shared.py:4:9: OPT101 (list-quadratic-concat) [warning, heuristic] `rows = rows + [...]` copies the whole list each time it runs in the loop
   |
 4 |         rows = rows + [item]
   |         ^
@@ -1502,9 +1503,9 @@ Two independent questions decide whether heki offers the rewrite:
 
 | Profitability | Rules | Certainty | Applied by |
 | ------------- | ----- | --------- | ---------- |
-| Unconditional (faster from the first iteration) | `OPT101`, `OPT102` | heuristic | `heki check --fix` |
-| Size-dependent | `OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130` | heuristic | `heki check --fix --include-size-dependent`, or `--fix --profile <dump>` in hot functions |
-| Size-dependent, no rewrite | `OPT103`, `OPT112`, `OPT113` | heuristic | none: suggestion only |
+| Unconditional (faster from the first iteration) | `OPT101`, `OPT102` | exact (the proven reports) | `heki check --fix` |
+| Size-dependent | `OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130` | exact (the proven reports) | `heki check --fix --include-size-dependent`, or `--fix --profile <dump>` in hot functions |
+| Size-dependent, no rewrite | `OPT103`, `OPT112`, `OPT113` | `OPT103` exact (the proven reports), `OPT112` and `OPT113` heuristic | none: suggestion only |
 
 ### When the size is fixed
 
@@ -1803,12 +1804,12 @@ For custom tooling, `--output-format json` gives every field: see
 ### From heki 0.1
 
 heki 0.1 ran every rule that is not opt-in by default. Since rules have a certainty, only the
-exact ones do, and no rule is exact yet:
+exact ones do: in 0.2.0, the proven tier of the eight `OPT` rewrite rules (`OPT101`-`OPT103`,
+`OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130`), their reports whose rewrite heki proves safe.
 
 - `lint.heuristic = true` restores the rules of 0.1, now labelled `heuristic` in every output.
 - A baseline keeps its entries: their keys (file, function, rule, target) do not change.
-- `heki check --fix` applies the fixes of `OPT101` and `OPT102` only when they run: with
-  `lint.heuristic = true`, or when `select` or `extend-select` names them.
+- `heki check --fix` applies the proven fixes of `OPT101` and `OPT102` by default, as in 0.1.
 
 ## Effect snapshots (`MUT103`)
 
@@ -2052,16 +2053,16 @@ Quadratic patterns heki can rewrite, each proven safe by the alias analysis befo
 
 | Code | Name | Message | |
 | ---- | ---- | ------- | ------: |
-| OPT101 | [list-quadratic-concat](https://heki.koxudaxi.dev/rules/list-quadratic-concat/) | Unconditionally profitable `list` quadratic concatenation (`x = x + [e]` -> `x.append(e)`). | 🛠️ ≈ |
-| OPT102 | [set-dict-quadratic-merge](https://heki.koxudaxi.dev/rules/set-dict-quadratic-merge/) | Unconditionally profitable `set`/`dict` quadratic merge (`{**d, ...}` with `d` first). | 🛠️ ≈ |
-| OPT103 | [immutable-quadratic-concat](https://heki.koxudaxi.dev/rules/immutable-quadratic-concat/) | Size-dependent immutable quadratic accumulation (`bytes`/`tuple`/attr `str`). | ≈ |
-| OPT110 | [loop-linear-membership](https://heki.koxudaxi.dev/rules/loop-linear-membership/) | Size-dependent `e in lst` inside a loop -> hoist `set` outside loop. | 🔧 ≈ |
-| OPT111 | [loop-linear-dedup](https://heki.koxudaxi.dev/rules/loop-linear-dedup/) | Size-dependent `if v not in seen: seen.append(v)` -> auxiliary `set`. | 🔧 ≈ |
+| OPT101 | [list-quadratic-concat](https://heki.koxudaxi.dev/rules/list-quadratic-concat/) | Unconditionally profitable `list` quadratic concatenation (`x = x + [e]` -> `x.append(e)`). | 🛠️ |
+| OPT102 | [set-dict-quadratic-merge](https://heki.koxudaxi.dev/rules/set-dict-quadratic-merge/) | Unconditionally profitable `set`/`dict` quadratic merge (`{**d, ...}` with `d` first). | 🛠️ |
+| OPT103 | [immutable-quadratic-concat](https://heki.koxudaxi.dev/rules/immutable-quadratic-concat/) | Size-dependent immutable quadratic accumulation (`bytes`/`tuple`/attr `str`). |  |
+| OPT110 | [loop-linear-membership](https://heki.koxudaxi.dev/rules/loop-linear-membership/) | Size-dependent `e in lst` inside a loop -> hoist `set` outside loop. | 🔧 |
+| OPT111 | [loop-linear-dedup](https://heki.koxudaxi.dev/rules/loop-linear-dedup/) | Size-dependent `if v not in seen: seen.append(v)` -> auxiliary `set`. | 🔧 |
 | OPT112 | [loop-linear-list-lookup](https://heki.koxudaxi.dev/rules/loop-linear-list-lookup/) | Size-dependent `list.index` / `list.remove` / `list.count` inside a loop (repeated linear scans). | ≈ |
 | OPT113 | [nested-loop-equijoin](https://heki.koxudaxi.dev/rules/nested-loop-equijoin/) | Size-dependent nested-loop equi-join (`for a in A: for b in B: if a.k == b.k`) -> `dict` index. | ≈ |
-| OPT120 | [list-front-pop](https://heki.koxudaxi.dev/rules/list-front-pop/) | Size-dependent `q.pop(0)` / `del q[0]` / `q = q[1:]` -> `collections.deque`. | 🔧 ≈ |
-| OPT121 | [list-front-insert](https://heki.koxudaxi.dev/rules/list-front-insert/) | Size-dependent `q.insert(0, v)` -> `collections.deque`. | 🔧 ≈ |
-| OPT130 | [loop-invariant-container-rebuild](https://heki.koxudaxi.dev/rules/loop-invariant-container-rebuild/) | Size-dependent loop-invariant container reconstruction (`e in set(keys)`). | 🔧 ≈ |
+| OPT120 | [list-front-pop](https://heki.koxudaxi.dev/rules/list-front-pop/) | Size-dependent `q.pop(0)` / `del q[0]` / `q = q[1:]` -> `collections.deque`. | 🔧 |
+| OPT121 | [list-front-insert](https://heki.koxudaxi.dev/rules/list-front-insert/) | Size-dependent `q.insert(0, v)` -> `collections.deque`. | 🔧 |
+| OPT130 | [loop-invariant-container-rebuild](https://heki.koxudaxi.dev/rules/loop-invariant-container-rebuild/) | Size-dependent loop-invariant container reconstruction (`e in set(keys)`). | 🔧 |
 
 
 ---
@@ -2092,7 +2093,8 @@ is heuristic, as that premise is open. Only exact reports are shown by default.
 - A run of `full` or `concise` output that leaves heuristic rules off, or heuristic reports out,
   ends with a note saying how many.
 
-See [Rule selection](https://heki.koxudaxi.dev/configuration/#rule-selection-toolhekilint). No rule is exact yet.
+See [Rule selection](https://heki.koxudaxi.dev/configuration/#rule-selection-toolhekilint). The proven tier of the eight
+`OPT` rewrite rules is exact (certified below); the other rules are heuristic.
 
 ## What a report states
 
@@ -2184,10 +2186,21 @@ release, or the rule becomes heuristic in that release and needs a new certifica
 ## Certifications
 
 A certified rule has a row here: the release that certified it, and the reports of its census
-and of its holdout run with the false claims among them. No rule is certified yet.
+and of its holdout run with the false claims among them. The census of the proven `OPT` tier
+checked by hand every exact report on the Stage 0-A corpus with the build of 2026-11-21 (one
+report, whose rewrite needed the set-order obligation, left the tier); the holdout run checked
+every exact report of one run on the 100 packages of the frozen holdout corpus.
 
 | Rule | Certified | Census: reports / false | Holdout: reports / false |
 | ---- | --------- | ----------------------: | -----------------------: |
+| `OPT101` | 0.2.0 | 7 / 0 | 2 / 0 |
+| `OPT102` | 0.2.0 | 1 / 0 | 0 / 0 |
+| `OPT103` | 0.2.0 | 128 / 0 | 188 / 0 |
+| `OPT110` | 0.2.0 | 8 / 0 | 0 / 0 |
+| `OPT111` | 0.2.0 | 7 / 0 | 7 / 0 |
+| `OPT120` | 0.2.0 | 70 / 0 | 33 / 0 |
+| `OPT121` | 0.2.0 | 12 / 0 | 5 / 0 |
+| `OPT130` | 0.2.0 | 1 / 0 | 0 / 0 |
 
 ## Measurements
 
@@ -2207,16 +2220,16 @@ loop a fixed 4 times, which is not data-sized.
 | `MUT107` | heuristic | round 3, 2026-11-21 | 50 | 1 / 1 / 37 / 11 | 78% | 65-87% | 4% |
 | `MUT110` | heuristic | round 3, 2026-11-21 | 4 | 0 / 0 / 4 / 0 | 100% | 51-100% | 0% |
 | `MUT202` | heuristic | round 3, 2026-11-21 | 20 | 2 / 1 / 11 / 6 | 70% | 48-85% | 15% |
-| `OPT101` | heuristic | round 3, 2026-11-21 | 9 | 0 / 0 / 7 / 2 | 78% | 45-94% | 0% |
-| `OPT102` | heuristic | round 3, 2026-11-21 | 6 | 0 / 1 / 3 / 2 | 67% | 30-90% | 17% |
-| `OPT103` | heuristic | round 3, 2026-11-21 | 50 | 0 / 2 / 44 / 4 | 92% | 81-97% | 4% |
-| `OPT110` | heuristic | round 3, 2026-11-21 | 50 | 0 / 3 / 36 / 11 | 78% | 65-87% | 6% |
-| `OPT111` | heuristic | round 3, 2026-11-21 | 50 | 0 / 2 / 42 / 6 | 88% | 76-94% | 4% |
+| `OPT101` | exact | round 3, 2026-11-21 | 9 | 0 / 0 / 7 / 2 | 78% | 45-94% | 0% |
+| `OPT102` | exact | round 3, 2026-11-21 | 6 | 0 / 1 / 3 / 2 | 67% | 30-90% | 17% |
+| `OPT103` | exact | round 3, 2026-11-21 | 50 | 0 / 2 / 44 / 4 | 92% | 81-97% | 4% |
+| `OPT110` | exact | round 3, 2026-11-21 | 50 | 0 / 3 / 36 / 11 | 78% | 65-87% | 6% |
+| `OPT111` | exact | round 3, 2026-11-21 | 50 | 0 / 2 / 42 / 6 | 88% | 76-94% | 4% |
 | `OPT112` | heuristic | round 3, 2026-11-21 | 50 | 0 / 2 / 43 / 5 | 90% | 79-96% | 4% |
 | `OPT113` | heuristic | round 3, 2026-11-21 | 50 | 0 / 11 / 35 / 4 | 92% | 81-97% | 22% |
-| `OPT120` | heuristic | round 3, 2026-11-21 | 50 | 0 / 2 / 45 / 3 | 94% | 84-98% | 4% |
-| `OPT121` | heuristic | round 3, 2026-11-21 | 50 | 0 / 1 / 41 / 8 | 84% | 71-92% | 2% |
-| `OPT130` | heuristic | round 3, 2026-11-21 | 30 | 0 / 2 / 27 / 1 | 97% | 83-99% | 7% |
+| `OPT120` | exact | round 3, 2026-11-21 | 50 | 0 / 2 / 45 / 3 | 94% | 84-98% | 4% |
+| `OPT121` | exact | round 3, 2026-11-21 | 50 | 0 / 1 / 41 / 8 | 84% | 71-92% | 2% |
+| `OPT130` | exact | round 3, 2026-11-21 | 30 | 0 / 2 / 27 / 1 | 97% | 83-99% | 7% |
 
 The other rules (the contract rules and the opt-in rules) have not been measured on this
 protocol yet.
@@ -4011,13 +4024,9 @@ Source: https://heki.koxudaxi.dev/rules/immutable-quadratic-concat/
 
 # immutable-quadratic-concat (OPT103)
 
-Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` (slower code) · No automatic fix
+Family: Complexity Rewrites (OPT) · Exact · Enabled by default · Severity `warning` (slower code) · No automatic fix
 
 Size-dependent immutable quadratic accumulation (`bytes`/`tuple`/attr `str`).
-
-!!! note "Heuristic"
-
-    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 50 sampled reports (round 3, 2026-11-21), 92% were right about the code. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 ## What it does
 Checks quadratic accumulation of immutable values in a loop:
@@ -4037,21 +4046,23 @@ no other reference. Neither are:
 
 ## What a report states
 
-A report states that an immutable value (`bytes`, a `tuple`, a `str` attribute) grows by
-concatenation on every iteration of the loop, so each iteration copies all of it.
+A report states that concatenating to an immutable value (`bytes`, a `tuple`, a `str` attribute),
+in a loop, copies all of it each time it runs.
 
 Its premises:
 
 - **Immutable type**: the value's exact type is known from its construction. Established.
-- **Loop-carried**: the result is the value of the next iteration. Established by the IR.
-- **On every iteration**: the statement runs on every iteration of the loop. Open: a statement under
-  a branch inside the loop counts.
-- **Data-sized**: the code does not fix the sizes the cost depends on (the loop's and the
-  container's) at 16 or fewer. Open: a size heki cannot bound counts as data-sized.
+- **Loop-carried**: the result is the value the next iteration starts from. Established by the IR.
+- **In a loop**: the statement is in the body of a loop. Established by the IR.
 - **Rewrite proven safe**: the help says `[safe fix: ...]`, `[proven-safe suggestion: ...]`, or
   `[proven safe; ...]`. A report whose help names a blocking obligation instead (`[not auto-fixable:
   ...]`) lacks this premise and is heuristic whatever the rule's certainty; the proven reports are
   the rule's exact tier.
+
+Not part of the claim: how many times the statement runs (one under a branch inside the loop
+counts), and how large the loop or the value is. The message claims no size and no cost estimate. A
+loop or a value that the code fixes at 16 or fewer items is not reported, since the rewrite would
+not pay off.
 
 ## Why is this bad?
 Each concatenation copies everything accumulated so far.
@@ -4348,13 +4359,9 @@ Source: https://heki.koxudaxi.dev/rules/list-front-insert/
 
 # list-front-insert (OPT121)
 
-Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` (slower code) · Proven-safe suggestion (`--fix --include-size-dependent`)
+Family: Complexity Rewrites (OPT) · Exact · Enabled by default · Severity `warning` (slower code) · Proven-safe suggestion (`--fix --include-size-dependent`)
 
 Size-dependent `q.insert(0, v)` -> `collections.deque`.
-
-!!! note "Heuristic"
-
-    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 50 sampled reports (round 3, 2026-11-21), 84% were right about the code. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 ## What it does
 Checks loops that insert at the front of a list, `q.insert(0, v)`, and suggests a
@@ -4366,22 +4373,24 @@ costs no more than building it.
 
 ## What a report states
 
-A report states that inserting at the front of the list (`lst.insert(0, x)`) shifts every element,
-on every iteration of the loop.
+A report states that inserting at the front of the list (`lst.insert(0, x)`), in a loop, moves
+every element each time it runs.
 
 Its premises:
 
 - **Builtin list**: the value is a builtin `list` by its construction (a display, a comprehension,
   `list(...)`). Established: the Soundness lane takes types from constructions only, never from
   annotations.
-- **On every iteration**: the statement runs on every iteration of the loop. Open: a statement under
-  a branch inside the loop counts.
-- **Data-sized**: the code does not fix the sizes the cost depends on (the loop's and the
-  container's) at 16 or fewer. Open: a size heki cannot bound counts as data-sized.
+- **In a loop**: the statement is in the body of a loop. Established by the IR.
 - **Rewrite proven safe**: the help says `[safe fix: ...]`, `[proven-safe suggestion: ...]`, or
   `[proven safe; ...]`. A report whose help names a blocking obligation instead (`[not auto-fixable:
   ...]`) lacks this premise and is heuristic whatever the rule's certainty; the proven reports are
   the rule's exact tier.
+
+Not part of the claim: how many times the statement runs (one under a branch inside the loop
+counts), and how large the loop or the list is. The message claims no size and no cost estimate. A
+loop or a list that the code fixes at 16 or fewer items is not reported, since the rewrite would not
+pay off.
 
 ## Why is this bad?
 Inserting at the front shifts every element, so building a list this way is quadratic.
@@ -4417,13 +4426,9 @@ Source: https://heki.koxudaxi.dev/rules/list-front-pop/
 
 # list-front-pop (OPT120)
 
-Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` (slower code) · Proven-safe suggestion (`--fix --include-size-dependent`)
+Family: Complexity Rewrites (OPT) · Exact · Enabled by default · Severity `warning` (slower code) · Proven-safe suggestion (`--fix --include-size-dependent`)
 
 Size-dependent `q.pop(0)` / `del q[0]` / `q = q[1:]` -> `collections.deque`.
-
-!!! note "Heuristic"
-
-    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 50 sampled reports (round 3, 2026-11-21), 94% were right about the code. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 ## What it does
 Checks loops that remove the first element of a list: `q.pop(0)`, `del q[0]`, and
@@ -4442,21 +4447,23 @@ iteration of the loop.
 ## What a report states
 
 A report states that removing the first element of the list (`lst.pop(0)`, `del lst[0]`, `lst =
-lst[1:]`) shifts or copies every other element, on every iteration of the loop.
+lst[1:]`), in a loop, moves or copies every remaining element each time it runs.
 
 Its premises:
 
 - **Builtin list**: the value is a builtin `list` by its construction (a display, a comprehension,
   `list(...)`). Established: the Soundness lane takes types from constructions only, never from
   annotations.
-- **On every iteration**: the statement runs on every iteration of the loop. Open: a statement under
-  a branch inside the loop counts.
-- **Data-sized**: the code does not fix the sizes the cost depends on (the loop's and the
-  container's) at 16 or fewer. Open: a size heki cannot bound counts as data-sized.
+- **In a loop**: the statement is in the body of a loop. Established by the IR.
 - **Rewrite proven safe**: the help says `[safe fix: ...]`, `[proven-safe suggestion: ...]`, or
   `[proven safe; ...]`. A report whose help names a blocking obligation instead (`[not auto-fixable:
   ...]`) lacks this premise and is heuristic whatever the rule's certainty; the proven reports are
   the rule's exact tier.
+
+Not part of the claim: how many times the statement runs (one under a branch inside the loop
+counts), and how large the loop or the list is. The message claims no size and no cost estimate. A
+loop or a list that the code fixes at 16 or fewer items is not reported, since the rewrite would not
+pay off.
 
 ## Why is this bad?
 Removing the first element shifts every remaining element, so a queue drained this way is
@@ -4522,13 +4529,9 @@ Source: https://heki.koxudaxi.dev/rules/list-quadratic-concat/
 
 # list-quadratic-concat (OPT101)
 
-Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` (slower code) · Safe fix (`--fix`)
+Family: Complexity Rewrites (OPT) · Exact · Enabled by default · Severity `warning` (slower code) · Safe fix (`--fix`)
 
 Unconditionally profitable `list` quadratic concatenation (`x = x + [e]` -> `x.append(e)`).
-
-!!! note "Heuristic"
-
-    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 9 sampled reports (round 3, 2026-11-21), 78% were right about the code. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 ## What it does
 Checks loops that grow a list by building a new one every iteration, `x = x + [e]`, and
@@ -4536,23 +4539,24 @@ rewrites it to `x.append(e)` (`x.extend([...])` for several elements).
 
 ## What a report states
 
-A report states that `x = x + [e]` builds a new list from the whole accumulated list on every
-iteration of the loop, where appending would change it in place.
+A report states that `x = x + [e]`, in a loop, builds a new list from the whole accumulated list
+each time it runs, where appending would change it in place.
 
 Its premises:
 
 - **Builtin list**: the value is a builtin `list` by its construction (a display, a comprehension,
   `list(...)`). Established: the Soundness lane takes types from constructions only, never from
   annotations.
-- **Loop-carried**: the result is the accumulator of the next iteration. Established by the IR.
-- **On every iteration**: the statement runs on every iteration of the loop. Open: a statement under
-  a branch inside the loop counts.
-- **Data-sized**: the code does not fix the sizes the cost depends on (the loop's and the
-  container's) at 16 or fewer. Open: a size heki cannot bound counts as data-sized.
+- **Loop-carried**: the result is the value the next iteration starts from. Established by the IR.
+- **In a loop**: the statement is in the body of a loop. Established by the IR.
 - **Rewrite proven safe**: the help says `[safe fix: ...]`, `[proven-safe suggestion: ...]`, or
   `[proven safe; ...]`. A report whose help names a blocking obligation instead (`[not auto-fixable:
   ...]`) lacks this premise and is heuristic whatever the rule's certainty; the proven reports are
   the rule's exact tier.
+
+Not part of the claim: how many times the statement runs (one under a branch inside the loop
+counts), and how large the loop or the list is. The message claims no size and no cost estimate. The
+rewrite never makes the code slower, so a loop the code fixes at a few items is reported too.
 
 ## Why is this bad?
 `x + [e]` copies the whole list, so the loop is quadratic. `append` is amortized constant time
@@ -4892,13 +4896,9 @@ Source: https://heki.koxudaxi.dev/rules/loop-invariant-container-rebuild/
 
 # loop-invariant-container-rebuild (OPT130)
 
-Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` (slower code) · Proven-safe suggestion (`--fix --include-size-dependent`)
+Family: Complexity Rewrites (OPT) · Exact · Enabled by default · Severity `warning` (slower code) · Proven-safe suggestion (`--fix --include-size-dependent`)
 
 Size-dependent loop-invariant container reconstruction (`e in set(keys)`).
-
-!!! note "Heuristic"
-
-    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 30 sampled reports (round 3, 2026-11-21), 97% were right about the code. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 ## What it does
 Checks loops that rebuild the same container on every iteration just to test membership,
@@ -4910,21 +4910,26 @@ functions.
 
 ## What a report states
 
-A report states that the loop builds the same container (`set(keys)`, `list(...)`, `tuple(...)`,
-`dict(...)`) on every iteration to test membership in it.
+A report states that a builtin constructor (`set(keys)`, `list(...)`, `tuple(...)`, `dict(...)`),
+in a loop, builds a new container for a membership test each time it runs.
 
 Its premises:
 
-- **Loop-invariant**: what the container is built from does not change during the loop. Established
-  by the Soundness lane.
-- **On every iteration**: the statement runs on every iteration of the loop. Open: a statement under
-  a branch inside the loop counts.
-- **Data-sized**: the code does not fix the sizes the cost depends on (the loop's and the
-  container's) at 16 or fewer. Open: a size heki cannot bound counts as data-sized.
+- **Builtin container**: the constructor builds a builtin container of a known type. Established
+  only on a proven report: an unknown type is one of the obligations that block the rewrite.
+- **In a loop**: the statement is in the body of a loop. Established by the IR.
 - **Rewrite proven safe**: the help says `[safe fix: ...]`, `[proven-safe suggestion: ...]`, or
   `[proven safe; ...]`. A report whose help names a blocking obligation instead (`[not auto-fixable:
   ...]`) lacks this premise and is heuristic whatever the rule's certainty; the proven reports are
   the rule's exact tier.
+
+Not part of the claim: how many times the statement runs (one under a branch inside the loop
+counts), and how large the loop or the container is. The message claims no size and no cost
+estimate. A loop or a container that the code fixes at 16 or fewer items is not reported, since the
+rewrite would not pay off.
+
+The rewrite also needs what the container is built from to stay the same during the loop
+(`ValueLoopInvariant`), which only a proven report establishes.
 
 ## Why is this bad?
 The container is rebuilt from scratch on every iteration, which costs as much as the scan it
@@ -4970,13 +4975,9 @@ Source: https://heki.koxudaxi.dev/rules/loop-linear-dedup/
 
 # loop-linear-dedup (OPT111)
 
-Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` (slower code) · Proven-safe suggestion (`--fix --include-size-dependent`)
+Family: Complexity Rewrites (OPT) · Exact · Enabled by default · Severity `warning` (slower code) · Proven-safe suggestion (`--fix --include-size-dependent`)
 
 Size-dependent `if v not in seen: seen.append(v)` -> auxiliary `set`.
-
-!!! note "Heuristic"
-
-    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 50 sampled reports (round 3, 2026-11-21), 88% were right about the code. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 ## What it does
 Checks the de-duplication idiom `if v not in seen: seen.append(v)` inside a loop and suggests
@@ -4987,22 +4988,24 @@ functions.
 
 ## What a report states
 
-A report states that `if v not in seen: seen.append(v)` scans the list on every iteration of the
-loop.
+A report states that `if v not in seen: seen.append(v)`, in a loop, scans the list each time it
+runs.
 
 Its premises:
 
 - **Builtin list**: the value is a builtin `list` by its construction (a display, a comprehension,
   `list(...)`). Established: the Soundness lane takes types from constructions only, never from
   annotations.
-- **On every iteration**: the statement runs on every iteration of the loop. Open: a statement under
-  a branch inside the loop counts.
-- **Data-sized**: the code does not fix the sizes the cost depends on (the loop's and the
-  container's) at 16 or fewer. Open: a size heki cannot bound counts as data-sized.
+- **In a loop**: the statement is in the body of a loop. Established by the IR.
 - **Rewrite proven safe**: the help says `[safe fix: ...]`, `[proven-safe suggestion: ...]`, or
   `[proven safe; ...]`. A report whose help names a blocking obligation instead (`[not auto-fixable:
   ...]`) lacks this premise and is heuristic whatever the rule's certainty; the proven reports are
   the rule's exact tier.
+
+Not part of the claim: how many times the statement runs (one under a branch inside the loop
+counts), and how large the loop or the list is. The message claims no size and no cost estimate. A
+loop or a list that the code fixes at 16 or fewer items is not reported, since the rewrite would not
+pay off.
 
 ## Why is this bad?
 The membership test scans the list, so de-duplicating `n` items costs `n²` comparisons.
@@ -5078,14 +5081,14 @@ not reported. Neither are:
 
 ## What a report states
 
-A report states that `xs.index(...)`, `xs.remove(...)`, or `xs.count(...)` scans the whole list on
-every iteration of the loop.
+A report states that `xs.index(...)`, `xs.remove(...)`, or `xs.count(...)`, in a loop, scans the
+list each time it runs (`count` scans all of it; `index` and `remove` scan up to the first match).
 
 Its premises:
 
 - **List**: the receiver is a `list`, by construction or annotation (assumption R2).
-- **On every iteration**: the statement runs on every iteration of the loop. Open: a statement under
-  a branch inside the loop counts.
+- **In a loop**: the call is in the body of a loop that can run it again on the same list.
+  Established. How many times it runs is not part of the claim: a call under a branch counts.
 - **Data-sized**: the code does not fix the sizes the cost depends on (the loop's and the
   container's) at 16 or fewer. Open: a size heki cannot bound counts as data-sized.
 
@@ -5142,13 +5145,9 @@ Source: https://heki.koxudaxi.dev/rules/loop-linear-membership/
 
 # loop-linear-membership (OPT110)
 
-Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` (slower code) · Proven-safe suggestion (`--fix --include-size-dependent`)
+Family: Complexity Rewrites (OPT) · Exact · Enabled by default · Severity `warning` (slower code) · Proven-safe suggestion (`--fix --include-size-dependent`)
 
 Size-dependent `e in lst` inside a loop -> hoist `set` outside loop.
-
-!!! note "Heuristic"
-
-    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 50 sampled reports (round 3, 2026-11-21), 78% were right about the code. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 ## What it does
 Checks membership tests against a list or tuple inside a loop, `e in lst`, where the list does
@@ -5165,25 +5164,26 @@ hot. Not reported:
 
 ## What a report states
 
-A report states that the membership test `e in lst` scans the list on every iteration of the loop.
+A report states that the membership test `e in lst`, in a loop, scans the list (or tuple) each
+time it runs.
 
 Its premises:
 
 - **Builtin list**: the value is a builtin `list` or `tuple` by its construction (a display, a
   comprehension, `list(...)`). Established: the Soundness lane takes types from constructions only,
   never from annotations.
-- **On every iteration**: the statement runs on every iteration of the loop. Open: a statement under
-  a branch inside the loop counts.
-- **Data-sized**: the code does not fix the sizes the cost depends on (the loop's and the
-  container's) at 16 or fewer. Open: a size heki cannot bound counts as data-sized.
+- **In a loop**: the statement is in the body of a loop. Established by the IR.
 - **Rewrite proven safe**: the help says `[safe fix: ...]`, `[proven-safe suggestion: ...]`, or
   `[proven safe; ...]`. A report whose help names a blocking obligation instead (`[not auto-fixable:
   ...]`) lacks this premise and is heuristic whatever the rule's certainty; the proven reports are
   the rule's exact tier.
 
-Not part of the claim: whether a `set` can replace the list. Elements that cannot be hashed, or a
-list that changes during the loop, block the rewrite (the help names the obligation); the scan
-happens either way.
+Not part of the claim: how many times the statement runs (one under a branch inside the loop
+counts), and how large the loop or the list is. The message claims no size and no cost estimate. A
+loop or a list that the code fixes at 16 or fewer items is not reported, since the rewrite would not
+pay off. Nor is whether a `set` can replace the list: elements that cannot be hashed, or a list that
+changes during the loop, block the rewrite (the help names the obligation); the scan happens either
+way.
 
 ## Why is this bad?
 `e in lst` scans the list, so the loop costs the product of both sizes. A set lookup is
@@ -5950,13 +5950,9 @@ Source: https://heki.koxudaxi.dev/rules/set-dict-quadratic-merge/
 
 # set-dict-quadratic-merge (OPT102)
 
-Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` (slower code) · Safe fix (`--fix`)
+Family: Complexity Rewrites (OPT) · Exact · Enabled by default · Severity `warning` (slower code) · Safe fix (`--fix`)
 
 Unconditionally profitable `set`/`dict` quadratic merge (`{**d, ...}` with `d` first).
-
-!!! note "Heuristic"
-
-    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 6 sampled reports (round 3, 2026-11-21), 67% were right about the code. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 ## What it does
 Checks loops that rebuild a dict or set every iteration and rewrites them in place:
@@ -5969,22 +5965,24 @@ Checks loops that rebuild a dict or set every iteration and rewrites them in pla
 ## What a report states
 
 A report states that the merge (`{**d, ...}` with the accumulator first, `s = s | t`, `d = d |
-other`) builds a new set or dict from the whole accumulated one on every iteration of the loop,
-where updating it would change it in place.
+other`), in a loop, builds a new set or dict from the whole accumulated one each time it runs, where
+updating it would change it in place.
 
 Its premises:
 
 - **Builtin set or dict**: the value is a builtin `set` or `dict` by its construction. Established:
   the Soundness lane takes types from constructions only.
-- **Loop-carried**: the result is the accumulator of the next iteration. Established by the IR.
-- **On every iteration**: the statement runs on every iteration of the loop. Open: a statement under
-  a branch inside the loop counts.
-- **Data-sized**: the code does not fix the sizes the cost depends on (the loop's and the
-  container's) at 16 or fewer. Open: a size heki cannot bound counts as data-sized.
+- **Loop-carried**: the result is the value the next iteration starts from. Established by the IR.
+- **In a loop**: the statement is in the body of a loop. Established by the IR.
 - **Rewrite proven safe**: the help says `[safe fix: ...]`, `[proven-safe suggestion: ...]`, or
   `[proven safe; ...]`. A report whose help names a blocking obligation instead (`[not auto-fixable:
   ...]`) lacks this premise and is heuristic whatever the rule's certainty; the proven reports are
   the rule's exact tier.
+
+Not part of the claim: how many times the statement runs (one under a branch inside the loop
+counts), and how large the loop or the set or dict is. The message claims no size and no cost
+estimate. The rewrite never makes the code slower, so a loop the code fixes at a few items is
+reported too.
 
 ## Why is this bad?
 Each rebuild copies the whole container, so the loop is quadratic. The in-place update is never
