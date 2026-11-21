@@ -7,11 +7,13 @@
 use globset::GlobSet;
 use heki_diagnostics::{Diagnostic, RatchetBaseline};
 use heki_effect::{
-    CallSite, DeclKeys, DeclPasses, FuncKey, ProjectIndex, SiteRole, summarize_project_with_reads,
+    CallSite, DeclKeys, DeclPasses, FileSummary, FuncKey, ProjectIndex, SiteRole, UnreadModule,
+    summarize_project_with_reads,
 };
+pub use heki_rules::Selectors;
 use heki_rules::project::{
     FileError, ParsedFile, Project, ProjectEnv, ProjectError, ProjectOptions, discovers,
-    exclude_set, parse_source, retain_unsuppressed,
+    exclude_set, parse_source, retain_unsuppressed, unread_module,
 };
 use heki_rules::{
     CHAIN_RULES, ChainFacts, CheckExtras, RuleSelection, SNAPSHOT_FILE, SelectionError,
@@ -127,17 +129,9 @@ pub struct EditOutcome {
     /// diagnostics show call sites or container changes of this file that moved, and every
     /// checked file when the project starts or stops patching `builtins`.
     pub affected: Vec<PathBuf>,
-    /// Why the file has no diagnostics: a syntax error (the file then leaves the index, as a
-    /// file `heki check` cannot parse is not part of the project).
+    /// Why the file has no diagnostics: a syntax error (the file then stays in the index as a
+    /// module heki knows nothing about, as a file `heki check` cannot parse does).
     pub error: Option<FileError>,
-}
-
-/// Selection overrides (`--select` / `--extend-select` / `--ignore`).
-#[derive(Debug, Clone, Default)]
-pub struct Selectors {
-    pub select: Vec<String>,
-    pub extend_select: Vec<String>,
-    pub ignore: Vec<String>,
 }
 
 pub struct Workspace {
@@ -160,6 +154,9 @@ pub struct Workspace {
     /// call chain walks the own in-place changes and calls of functions in other files
     /// (`heki_rules::ChainFacts`).
     chain_reports: FxHashSet<PathBuf>,
+    /// The heuristic reports of exact rules the latest check of each file withheld
+    /// (`RuleSelection::withhold_heuristic`).
+    withheld: FxHashMap<PathBuf, usize>,
     /// What the latest check of each file read of the declarations (what its summary read is
     /// in its `FileSummary`).
     check_reads: CheckReads,
@@ -317,13 +314,8 @@ impl Workspace {
     ) -> Result<(Self, Vec<FileError>), EngineError> {
         let project = Project::load(opts).map_err(EngineError::Project)?;
         let env_cfg = &project.env.cfg;
-        let selection = RuleSelection::resolve(
-            &env_cfg.lint,
-            &selectors.select,
-            &selectors.extend_select,
-            &selectors.ignore,
-        )
-        .map_err(EngineError::Selection)?;
+        let selection =
+            RuleSelection::resolve(&env_cfg.lint, selectors).map_err(EngineError::Selection)?;
         if let Some(k) = env_cfg
             .lint
             .severity
@@ -361,10 +353,20 @@ impl Workspace {
         let opt_in = heki_rules::opt_in_facts(&selection);
         let summaries = summarize_project_with_reads(
             &project.inputs(),
+            &project.unread,
             &project.env.kb,
             contracts.as_deref(),
             opt_in,
         );
+        let unread = project.unread.iter().map(|m| {
+            (
+                m.path.clone(),
+                FileMeta {
+                    module_name: m.module_name.clone(),
+                    shown_places: Vec::new(),
+                },
+            )
+        });
         let files = project
             .files
             .iter()
@@ -378,6 +380,7 @@ impl Workspace {
                     },
                 )
             })
+            .chain(unread)
             .collect();
         let reach = ContractReach {
             owners: !env_cfg.write_owners.is_empty()
@@ -396,6 +399,7 @@ impl Workspace {
             env,
             files: parsed,
             errors,
+            ..
         } = project;
         drop(parsed);
         let index = ProjectIndex::build_for(summaries, contracts, typed_writes, opt_in);
@@ -434,6 +438,7 @@ impl Workspace {
                 decls,
                 shown: FxHashMap::default(),
                 chain_reports: FxHashSet::default(),
+                withheld: FxHashMap::default(),
                 check_reads: CheckReads::default(),
                 patching_builtins,
                 stale_writes,
@@ -455,6 +460,15 @@ impl Workspace {
 
     pub fn stats(&self) -> &EngineStats {
         &self.stats
+    }
+
+    pub fn selection(&self) -> &RuleSelection {
+        &self.selection
+    }
+
+    /// The heuristic reports of exact rules the latest checks of the files withheld.
+    pub fn withheld_heuristic(&self) -> usize {
+        self.withheld.values().sum()
     }
 
     /// The files in the index.
@@ -483,7 +497,7 @@ impl Workspace {
             path,
             &self.env.root,
             text.to_owned(),
-            self.env.layout,
+            &self.env.layout,
             self.env.runtime,
         )
     }
@@ -513,13 +527,7 @@ impl Workspace {
             retain_unsuppressed(&mut diags, [parsed]);
             diags
         });
-        let shown = diags
-            .iter()
-            .flat_map(|d| &d.related)
-            .filter(|r| r.path != parsed.path)
-            .map(|r| r.path.clone())
-            .collect();
-        self.shown.insert(parsed.path.clone(), shown);
+        // A withheld report counts: an edit to its call chain can make it exact.
         let chains = diags
             .iter()
             .any(|d| CHAIN_RULES.contains(&d.rule_code.as_str()));
@@ -528,6 +536,15 @@ impl Workspace {
         } else {
             self.chain_reports.remove(&parsed.path);
         }
+        let withheld = self.selection.withhold_heuristic(&mut diags);
+        self.withheld.insert(parsed.path.clone(), withheld);
+        let shown = diags
+            .iter()
+            .flat_map(|d| &d.related)
+            .filter(|r| r.path != parsed.path)
+            .map(|r| r.path.clone())
+            .collect();
+        self.shown.insert(parsed.path.clone(), shown);
         self.check_reads.insert(parsed.path.clone(), &reads);
         // Baseline keys name the file, so the counts of one file are the counts of its keys.
         if let Some((_, baseline)) = &self.baseline {
@@ -933,14 +950,15 @@ impl Workspace {
     }
 
     /// Re-summarize one file and check it. The second value is `(summary changed, declarations
-    /// changed)`, or `None` when the file does not parse: it then leaves the index.
+    /// changed)`, or `None` when the file does not parse: it then stays in the index as a module
+    /// heki knows nothing about ([`Self::unreadable`]).
     fn analyze(&mut self, path: &Path, text: &str) -> (EditOutcome, Option<(bool, bool)>) {
         let parsed = match self.parse(path, text) {
             Ok(parsed) => parsed,
             Err(e) => {
                 let outcome = EditOutcome {
                     diagnostics: Vec::new(),
-                    affected: self.remove(path),
+                    affected: self.unreadable(path),
                     error: Some(e),
                 };
                 return (outcome, None);
@@ -981,8 +999,9 @@ impl Workspace {
 
     /// Re-analyze the `queued` files and, in turn, every file those re-analyses affect, until
     /// none is left. `text_of` reads a file (an open document's text, else the disk); a file
-    /// it cannot read left the project and is removed (`None` in the result). Returns the
-    /// latest outcome of every file re-analyzed.
+    /// it cannot read left the project and is removed, or stays a module heki knows nothing
+    /// about while it exists (`None` in the result). Returns the latest outcome of every file
+    /// re-analyzed.
     ///
     /// It ends: re-analyzing a file whose inputs did not change since its last re-analysis
     /// changes nothing and affects no file, and each file's inputs change finitely often.
@@ -1001,7 +1020,7 @@ impl Workspace {
                     Some(outcome)
                 }
                 None => {
-                    queue.extend(self.remove(&path));
+                    queue.extend(self.unread_or_removed(&path));
                     None
                 }
             };
@@ -1010,21 +1029,61 @@ impl Workspace {
         out
     }
 
-    /// Drop a deleted file (or one that no longer parses); returns the files it affects.
+    /// Drop a deleted file; returns the files it affects.
     pub fn remove(&mut self, path: &Path) -> Vec<PathBuf> {
+        self.replace_file(path, None)
+    }
+
+    /// Keep a file of the project that heki cannot read or parse as a module it knows nothing
+    /// about, as `heki check` does: a name under it resolves to nothing, not to the catalog.
+    /// Returns the files it affects.
+    pub fn unreadable(&mut self, path: &Path) -> Vec<PathBuf> {
+        let module = unread_module(path, &self.env.root, &self.env.layout);
+        self.replace_file(path, Some(module))
+    }
+
+    /// A file of the project whose text could not be read: a module heki knows nothing about
+    /// while it exists ([`Self::unreadable`]), gone from the project once it is deleted
+    /// ([`Self::remove`]). Returns the files it affects.
+    pub fn unread_or_removed(&mut self, path: &Path) -> Vec<PathBuf> {
+        if path.exists() {
+            self.unreadable(path)
+        } else {
+            self.remove(path)
+        }
+    }
+
+    /// Take the facts of `path` out of the index, leaving the module heki could not read in
+    /// their place (`unread`) or nothing; returns the files that affects.
+    fn replace_file(&mut self, path: &Path, unread: Option<UnreadModule>) -> Vec<PathBuf> {
         self.shown.remove(path);
         self.chain_reports.remove(path);
+        self.withheld.remove(path);
         self.check_reads.remove(path);
-        let Some(meta) = self.files.remove(path) else {
-            return Vec::new();
+        let module_name = match &unread {
+            Some(m) => {
+                let meta = FileMeta {
+                    module_name: m.module_name.clone(),
+                    shown_places: Vec::new(),
+                };
+                self.files.insert(path.to_path_buf(), meta);
+                m.module_name.clone()
+            }
+            None => match self.files.remove(path) {
+                Some(meta) => meta.module_name,
+                None => return Vec::new(),
+            },
         };
         let callers_before = self.caller_view(path);
         let chains_before = chain_facts(&self.index, path);
         let ecosystem_before = self.ecosystem_view(path);
-        let update = self.index.remove_file(path);
-        let change = match self.index.module_decls(&meta.module_name) {
-            Some(remaining) => self.decls.replace(remaining),
-            None => self.decls.remove(&meta.module_name),
+        let update = match &unread {
+            Some(m) => self.index.update_file(FileSummary::unread(m)),
+            None => self.index.remove_file(path),
+        };
+        let change = match self.index.module_decls(&module_name) {
+            Some(owner) => self.decls.replace(owner),
+            None => self.decls.remove(&module_name),
         };
         self.stats.indexed_files = self.index.files.len();
         let mut affected = self.affected_by(

@@ -12,7 +12,7 @@ use anyhow::Result;
 use heki_ast::LineIndex;
 use heki_diagnostics::{Diagnostic, render, sort_diagnostics};
 use heki_effect::ModuleLayout;
-use heki_lsp::{CONFIG_FILES, EditOutcome, Selectors, Workspace};
+use heki_lsp::{CONFIG_FILES, EditOutcome, Workspace};
 use heki_profile::{ProfileData, ProfiledFunction};
 use heki_rules::project::{
     FileError, ProjectEnv, ProjectOptions, collect_files, display_path, exclude_set,
@@ -162,6 +162,7 @@ impl Watcher<'_> {
         ProjectOptions {
             paths: &self.args.paths,
             config: self.args.config.as_deref(),
+            working_dir: None,
             target_version: self.args.target_version.as_deref(),
             overrides: None,
         }
@@ -174,13 +175,11 @@ impl Watcher<'_> {
         let config_files = self.config_files(&env);
         let config = stamps_of(&config_files, earlier.1);
         let files = self.scan(&env, earlier.0)?;
-        let selectors = Selectors {
-            select: self.args.select.clone(),
-            extend_select: self.args.extend_select.clone(),
-            ignore: self.args.ignore.clone(),
-        };
-        let (ws, errors) =
-            Workspace::load(&self.opts(), &selectors, self.args.baseline.as_deref())?;
+        let (ws, errors) = Workspace::load(
+            &self.opts(),
+            &crate::check::selectors(self.args),
+            self.args.baseline.as_deref(),
+        )?;
         Ok(Loaded {
             ws,
             errors,
@@ -250,10 +249,12 @@ impl Watcher<'_> {
                 .line_text(&text, line)
                 .map(str::to_owned)
         };
+        let failures = crate::check::shown_failures(report.errors.values());
         print!(
             "{}",
             render(
                 &all,
+                &failures,
                 crate::check::format_of(self.args.output_format),
                 &source_line
             )
@@ -271,6 +272,13 @@ impl Watcher<'_> {
                 all.len(),
                 report.diags.len()
             );
+            let (rules_off, withheld) = ws.map_or((0, 0), |ws| {
+                (
+                    ws.selection().heuristic_off().len(),
+                    ws.withheld_heuristic(),
+                )
+            });
+            crate::check::heuristic_hint(rules_off, withheld);
         }
         !all.is_empty()
     }
@@ -356,12 +364,12 @@ impl Report {
                     affected.extend(out.affected.iter().cloned());
                     self.record(p, Some(out));
                 }
-                // A file that cannot be read is no longer part of the project, as for
+                // A file that cannot be read is a module heki knows nothing about, as for
                 // `heki check`: its facts leave the index, and what they affected is
                 // re-analyzed.
                 Err(e) => {
                     affected.remove(p);
-                    affected.extend(ws.remove(p));
+                    affected.extend(ws.unread_or_removed(p));
                     self.diags.remove(p);
                     self.errors.insert(p.clone(), FileError::unreadable(p, &e));
                 }
@@ -414,7 +422,7 @@ pub(crate) fn run(args: &CheckArgs, hot: Option<&ProfileData>) -> Result<ExitCod
         // climbs to the root, changes with it.
         let relayout = ws
             .as_ref()
-            .is_some_and(|ws| ModuleLayout::detect(&ws.env.root) != ws.env.layout);
+            .is_some_and(|ws| ModuleLayout::detect(&ws.env.root, &ws.env.cfg) != ws.env.layout);
         if reconfigured || relayout {
             match w.load((&files, &config)) {
                 Ok(loaded) => {

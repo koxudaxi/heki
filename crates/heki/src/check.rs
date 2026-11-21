@@ -6,29 +6,38 @@ use crate::{CheckArgs, OutputFormat, SnapshotArgs};
 use anyhow::{Context, Result, bail};
 use heki_ast::LineIndex;
 use heki_diagnostics::{
-    BASELINE_VERSION, CountUnit, Diagnostic, RatchetBaseline, baseline_counts, fix_python_source,
-    github_escape, path_text, render, unified_diff,
+    BASELINE_VERSION, CountUnit, Diagnostic, FileFailure, RatchetBaseline, baseline_counts,
+    fix_python_source, github_escape, path_text, render, unified_diff,
 };
-use heki_effect::{ProjectIndex, analyze_project, analyze_project_for, func_qualname};
+use heki_effect::{OptInFacts, ProjectIndex, TypedWrites, analyze_project_for, func_qualname};
 use heki_profile::{HotFunctions, ProfileData, ProfiledFunction};
 use heki_rules::project::{
     FileError, ParsedFile, Project, ProjectOptions, canonical, retain_unsuppressed,
 };
 use heki_rules::{
-    CheckExtras, RuleSelection, SNAPSHOT_FILE, SummarySnapshot, check_project, find_rule,
-    fold_root_causes,
+    CheckExtras, RuleSelection, SNAPSHOT_FILE, Selectors, SummarySnapshot, check_project,
+    find_rule, fold_root_causes,
 };
 use rustc_hash::FxHashMap;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-/// Rule selection of a run (`--select` / `--extend-select` / `--ignore` over the config), with
-/// `lint.severity` keys validated.
+/// The selection options of the command line.
+pub(crate) fn selectors(args: &CheckArgs) -> Selectors {
+    Selectors {
+        select: args.select.clone(),
+        extend_select: args.extend_select.clone(),
+        ignore: args.ignore.clone(),
+        heuristic: args.heuristic.value(),
+    }
+}
+
+/// Rule selection of a run (the command line over the config), with `lint.severity` keys
+/// validated.
 pub(crate) fn selection(args: &CheckArgs, project: &Project) -> Result<RuleSelection> {
     let cfg = &project.env.cfg;
-    let selection =
-        RuleSelection::resolve(&cfg.lint, &args.select, &args.extend_select, &args.ignore)?;
+    let selection = RuleSelection::resolve(&cfg.lint, &selectors(args))?;
     for key in cfg.lint.severity.keys() {
         if find_rule(key).is_none() {
             bail!("unknown rule `{key}` in lint.severity");
@@ -97,6 +106,10 @@ struct Analyzed {
     index: ProjectIndex,
     diags: Vec<Diagnostic>,
     hot: Option<HotFunctions>,
+    /// The heuristic rules that did not run only because `lint.heuristic` is off.
+    heuristic_off: usize,
+    /// The heuristic reports of exact rules withheld because `lint.heuristic` is off.
+    withheld: usize,
 }
 
 fn analyze(
@@ -107,6 +120,7 @@ fn analyze(
     let project = Project::load(&ProjectOptions {
         paths: &args.paths,
         config: args.config.as_deref(),
+        working_dir: None,
         target_version: args.target_version.as_deref(),
         overrides,
     })?;
@@ -117,7 +131,14 @@ fn analyze(
     let contracts = heki_rules::summary_contracts(&env.cfg)?;
     let typed_writes = heki_rules::typed_writes(&env.cfg, &selection);
     let opt_in = heki_rules::opt_in_facts(&selection);
-    let index = analyze_project_for(&inputs, &env.kb, contracts, typed_writes, opt_in);
+    let index = analyze_project_for(
+        &inputs,
+        &project.unread,
+        &env.kb,
+        contracts,
+        typed_writes,
+        opt_in,
+    );
     let units = project.units();
     let extras = CheckExtras {
         soundness_kb: &env.soundness_kb,
@@ -130,6 +151,7 @@ fn analyze(
     drop(units);
     drop(inputs);
     retain_unsuppressed(&mut diags, &project.files);
+    let withheld = selection.withhold_heuristic(&mut diags);
     let hot = profile.map(|p| p.attribute(profiled_functions(&project)));
     annotate_hot(&mut diags, hot.as_ref());
     Ok(Analyzed {
@@ -137,6 +159,8 @@ fn analyze(
         index,
         diags,
         hot,
+        heuristic_off: selection.heuristic_off().len(),
+        withheld,
     })
 }
 
@@ -194,6 +218,20 @@ pub(crate) fn shown_errors<'a>(errors: impl IntoIterator<Item = &'a FileError>) 
     errors
         .into_iter()
         .map(|e| e.report(&shown_text(&e.path)))
+        .collect()
+}
+
+/// File errors as SARIF output carries them, with the paths `heki check` prints.
+pub(crate) fn shown_failures<'a>(
+    errors: impl IntoIterator<Item = &'a FileError>,
+) -> Vec<FileFailure> {
+    errors
+        .into_iter()
+        .map(|e| FileFailure {
+            path: shown_path(&e.path),
+            position: e.position,
+            message: e.message.clone(),
+        })
         .collect()
 }
 
@@ -315,10 +353,12 @@ pub(crate) fn run(args: &CheckArgs) -> Result<ExitCode> {
         mut project,
         index,
         diags,
+        heuristic_off,
+        withheld,
         ..
     } = analyze(args, hot.as_ref(), None)?;
     project.errors.extend(conflicts);
-    let code = report(args, &project, diags)?;
+    let code = report(args, &project, diags, heuristic_off, withheld)?;
     // The process ends here: freeing the index and the parsed files one allocation at a time
     // would only cost time.
     std::mem::forget(index);
@@ -349,11 +389,14 @@ fn write_fixed(files: &[FixedFile]) -> Result<(usize, usize, Vec<FileError>)> {
     Ok((fixes, written, conflicts))
 }
 
-/// Baseline handling, rendering, summary, and exit code of one analyzed run.
+/// Baseline handling, rendering, summary, and exit code of one analyzed run, whose selection
+/// left `heuristic_off` rules off and withheld `withheld` reports for being heuristic.
 pub(crate) fn report(
     args: &CheckArgs,
     project: &Project,
     mut diags: Vec<Diagnostic>,
+    heuristic_off: usize,
+    withheld: usize,
 ) -> Result<ExitCode> {
     let root = &project.env.root;
     let by_path: FxHashMap<&Path, &ParsedFile> = project
@@ -460,21 +503,32 @@ pub(crate) fn report(
         .iter()
         .map(|p| (shown_path(&p.path), (p, LineIndex::from_source(&p.source))))
         .collect();
-    let source_line = |p: &Path, line: u32| {
-        by_shown
-            .get(p)
-            .and_then(|(f, lines)| lines.line_text(&f.source, line))
-            .map(str::to_owned)
+    // A file that did not parse is read again for the line of its syntax error.
+    let source_line = |p: &Path, line: u32| match by_shown.get(p) {
+        Some((f, lines)) => lines.line_text(&f.source, line).map(str::to_owned),
+        None => {
+            let text = heki_ast::read_source(p).ok()?;
+            LineIndex::from_source(&text)
+                .line_text(&text, line)
+                .map(str::to_owned)
+        }
     };
+    let failures = shown_failures(&project.errors);
     print!(
         "{}",
-        render(&diags, format_of(args.output_format), &source_line)
+        render(
+            &diags,
+            &failures,
+            format_of(args.output_format),
+            &source_line
+        )
     );
     if matches!(
         args.output_format,
         OutputFormat::Full | OutputFormat::Concise
     ) {
         summary(&diags, project.files.len(), baseline_path.is_some());
+        heuristic_hint(heuristic_off, withheld);
     }
     let code = if diags.is_empty() {
         ExitCode::SUCCESS
@@ -497,11 +551,19 @@ pub(crate) fn run_snapshot(args: &SnapshotArgs) -> Result<ExitCode> {
     let project = Project::load(&ProjectOptions {
         paths: &paths,
         config: args.config.as_deref(),
+        working_dir: None,
         target_version: args.target_version.as_deref(),
         overrides: None,
     })?;
     let inputs = project.inputs();
-    let index = analyze_project(&inputs, &project.env.kb);
+    let index = analyze_project_for(
+        &inputs,
+        &project.unread,
+        &project.env.kb,
+        None,
+        TypedWrites::Propagated,
+        OptInFacts::ALL,
+    );
     let units = project.units();
     let snap = SummarySnapshot::build(&units, &index);
     if args.write {
@@ -553,6 +615,13 @@ fn summary(diags: &[Diagnostic], files: usize, baseline: bool) {
         eprintln!("All checks passed ({files} file(s)).");
     } else {
         eprintln!("Found {} {what} in {files} file(s).", diags.len());
+    }
+}
+
+/// After the summary of a text format: what `lint.heuristic` would add ([`heki_rules::heuristic_hint`]).
+pub(crate) fn heuristic_hint(rules_off: usize, reports_withheld: usize) {
+    if let Some(note) = heki_rules::heuristic_hint(rules_off, reports_withheld) {
+        eprintln!("{note}");
     }
 }
 

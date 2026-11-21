@@ -93,7 +93,10 @@ Compound expressions are flattened into **basic instructions in explicit left-to
   every path of which leaves) is lowered into blocks without predecessors that end in
   `Unreachable`: no merge, back edge, or handler takes a value from it. A loop there has no
   entry edge: the SSA lookup of a name gives a phi to a block with one predecessor that it
-  reaches again, as to a join, so its walk around such a cycle ends.
+  reaches again, as to a join, so its walk around such a cycle ends. Its phis stay even when
+  they merge one value besides themselves (only a block a path reaches drops such a phi for that
+  value): a value the loop computes from itself (`d = d.x`) is defined through the phi, so every
+  cycle of definitions passes through a phi, which the walks along definitions rely on.
 - **Exception edges carry the bindings of the point that raised**: inside a `try` or `with`
   body a name is never rebound after an instruction that may raise in the same block
   (`InstKind::may_raise`; the binding starts a new block), so a handler's phi merges the
@@ -223,7 +226,7 @@ the targets of write and read boundaries.
 
 | Priority | Source | Confidence | Example |
 |---|---|---|---|
-| 1 | Local constructors and direct imports (relative imports, `src/` layout, re-exports) | Exact | `requests.get(u)`, `client = httpx.Client(); client.get(u)` |
+| 1 | Local constructors and direct imports (relative imports, source roots, re-exports) | Exact | `requests.get(u)`, `client = httpx.Client(); client.get(u)` |
 | 2 | PEP 484 annotations (parameters, locals, return types, attributes), container item types, and return annotations along the MRO; `isinstance` narrowing and unions of up to three classes | Typed | `def f(repo: UserRepo, db: Session): db.execute(...)`, `for m in models: m.save()` with `models: list[Model]` |
 | 3 | `self.attr = Cls(...)` in `__init__` and similar | Typed | `self.http = httpx.Client()`, then `self.http.get(...)` in another method |
 | 4 | Same-name methods in the class hierarchy (CHA / RTA); a project `Protocol` dispatches to its structural implementations | Heuristic | Concrete subclasses of an abstract base (more than 8 candidates: unresolved) |
@@ -243,10 +246,12 @@ annotation is what awaiting it gives (`await`, and the target of `async with`), 
 future or a task gives an untracked result. The catalog types an external awaitable by what
 awaiting it gives.
 
-Module names come from project-relative paths (`pkg/mod.py` → `pkg.mod`, `pkg/__init__.py` →
-`pkg`). A `src/` directory that is not itself a package (no `src/__init__.py`) is a source root:
-`src/acme/io.py` is `acme.io`, for regular and namespace packages and for modules directly under
-`src/`. A module name that several files share is defined by one of them, in full and
+Module names come from the paths below a source root (`pkg/mod.py` → `pkg.mod`,
+`pkg/__init__.py` → `pkg`), the deepest one holding the file, else the project root. The `src`
+setting lists the source roots; without it they are detected as ty detects them: `src/`, the
+directory named after the project when it holds one of the same name (`acme/acme/`), and
+`python/`, each when it is not itself a package (no `__init__.py`). `src/acme/io.py` is
+`acme.io`, for regular and namespace packages and for modules directly under `src/`. A module name that several files share is defined by one of them, in full and
 incremental analysis alike: an implementation before its `.pyi` stub, a package
 (`pkg/__init__.py`) before a module file of the same name (`pkg.py`, which Python does not import
 next to it), then the greater path. A relative import resolves inside the packages it climbs; one
@@ -310,11 +315,12 @@ EffectSummary(f) = {
     retains_params:           Bitset,                      // parameters the function keeps (stores, returns)
     returns_new:              bool,                        // returns an object it constructs, nothing else
                                                            // holding it (fresh-objects)
-    returns_origins:          Origins,                     // what the returned object may be, path by path:
-                                                           // new, held state, parameter i, or an element of
-                                                           // parameter i (MUT112; propagated)
-    returns_results:          Vec<ResultOf>,               // the project calls whose results (or elements of
-                                                           // them) it may return, by span (MUT112; local)
+    return_origins:           Option<Box<ReturnOrigins>>,  // MUT112, absent for most functions: what the
+                                                           // returned object may be, path by path (new, held
+                                                           // state, parameter i, or an element of parameter i;
+                                                           // propagated), the project calls whose results (or
+                                                           // elements of them) it may return, by span, and the
+                                                           // phis its origin walks met (local)
     unresolved_write_sites:   Set<UnresolvedWrite>,        // target-named writes on objects of unknown class,
                                                            // computed names on guarded classes (MUT205)
     unresolved_access_sites:  Set<UnresolvedAccess>,       // reads and method calls named like a strict
@@ -640,7 +646,7 @@ which module imports which.
    depends on its operands) is an element of that object, of unknown origin. A parameter is
    borrowed, `*args` / `**kwargs` are new with borrowed elements, and a method's `self` is its own
    object.
-2. **The summary fact**: `returns_origins` walks back from the returns a run can reach (plain
+2. **The summary fact**: `return_origins` walks back from the returns a run can reach (plain
    sync functions; a memoizing decorator makes the result held, another decorator unknown):
    new, held, parameter `i`, or an element of parameter `i`. A run reaches what
    `ownership::Live` leaves once each branch on a constant takes its one side (`while True:`
@@ -650,14 +656,14 @@ which module imports which.
    held. One walk takes each stored value and the values it copies (through copies and phis)
    with each place once, for all the stores; past a budget of such pairs proportional to the
    function's source, what the function returns is unknown. A project call's result the walk
-   reaches is one of `returns_results` (the call's span, and whether the object is the result or
+   reaches is one of `ReturnOrigins::returned.results` (the call's span, and whether the object is the result or
    an element of it), and each argument of such a call gets `ArgOrigin::origins` from the same
    walk: its own origins and, in turn, the calls whose results it may be. A phi the walk meets
-   (other than where it starts) is a node of `origin_nodes`, as itself or as an element, walked
-   once and referred to by every walk that meets it (`returns_nodes`, `LocalOrigins::nodes`);
+   (other than where it starts) is a node of `ReturnOrigins::nodes`, as itself or as an element, walked
+   once and referred to by every walk that meets it (`LocalOrigins::nodes`);
    past a budget of walked values proportional to the function's source, what the function
    returns is unknown. Propagation (`returned_results`) adds what those calls return: each
-   callee's `returns_origins` without its parameters, and the origins of the arguments bound to
+   callee's returned origins without its parameters, and the origins of the arguments bound to
    the parameters it returns (or an element of them), through any number of nested calls
    (`identity(identity(x))`). Each call's result and each node is resolved once, to a fixpoint
    over the calls and nodes it depends on (a loop makes a call or a phi depend on itself): the
@@ -666,7 +672,7 @@ which module imports which.
    part in Early Cutoff like every summary field.
 3. **The forward analysis** (`heki_rules`, per function, to a fixpoint that visits each phi and
    instruction once, then again only when a value it reads grows) joins the kinds of a value at
-   phis, maps a project call's result through its callees' `returns_origins` and the
+   phis, maps a project call's result through its callees' returned origins and the
    bound arguments, and takes a closure's variable from what the enclosing function bound to it
    (`MakeClosure` captures; functions are analyzed enclosing first). It follows the blocks and
    edges of `ownership::Live` only. A side of an `is` test (of the branch it decides) is the
@@ -703,9 +709,9 @@ which module imports which.
    of the family); with `MUT112` selected, propagation carries typed writes, and the language
    server re-checks the family of every changed method (`family_readers`).
 6. **Only when selected** (`OptInFacts::return_origins`, `heki_rules::opt_in_facts`): the
-   summaries carry `returns_origins`, `returns_results`, `returns_nodes`, `origin_nodes`, and
-   `ArgOrigin::origins`, and propagation resolves them, only with `MUT112` selected; a run
-   without it computes none of them. A configuration change re-indexes the language server's
+   summaries carry `return_origins` and `ArgOrigin::origins`, and propagation resolves them, only
+   with `MUT112` selected; a run without it computes none of them, and its summaries hold no
+   room for them (`return_origins` is `None`). A configuration change re-indexes the language server's
    project with the facts the new selection reads.
 
 #### `MUT113`: containers changed while a method iterates them (opt-in)
@@ -1213,14 +1219,16 @@ an annotation, or a constructor call produces), and the `heki_kb` unit tests pin
 
 339 repositories (118 mature open-source repositories with 12.42 million lines and 221 new GitHub
 repositories of 2026 with 5.68 million lines; 56,629 files, 18,108,143 lines in total) were
-scanned with 8 workers (62.8 s), and all 171 samples of the 8 rules were reviewed by hand:
+scanned with 8 workers (62.8 s), and all 171 samples of the 8 rules were reviewed by hand.
+These figures describe that analysis. Each rule's certainty and its current shape-right and
+real-harm rates are in [docs/precision.md](precision.md).
 
-| Rule | Hit rate by domain | Indirect share | Conclusion of the 171-sample review | Decision in Baseline v4.0 |
+| Rule | Hit rate by domain | Indirect share | Conclusion of the 171-sample review (analysis of 2026-11-19) | Decision in Baseline v4.0 |
 |---|---|---|---|---|
 | **EFF101** | Web/async **37.6%** (35/93) / DB 29.1% | **82.3%** (436/530) | **68% real harm** (including the real `time.sleep` in redis-py `cluster.py:1613`, reached in 4–5 hops) | **Core** (awaited calls and `Popen` excluded) |
 | **EFF102** | Web/async **44.1%** (41/93) / DB **48.5%** (50/103) | **90–93%** | **About 75–80% real harm** after the `for.iter` fix (NeMo, OmniAgent, luigi, ...) | **Core** (`for.iter` and `DaemonPolling` handled) |
 | **EFF103** | DB **47.6%** (49/103) / web 31.2% | **74.2%** (630/849) | Many N+1 queries; DDL, migrations, and ORM internals cause noise | **Core** (`for.iter`, DDL, ORM internals excluded) |
-| **DATA101** | Data/ML **19.5%** (24/123) | — | All 60% false positives of a naive AST check were non-`LoopCarried` padding; with `LoopCarried` **about 90% precise** | **Core** (SSA `LoopCarried` required) |
+| **DATA101** | Data/ML **19.5%** (24/123) | — | All 60% false positives of a naive AST check were non-`LoopCarried` padding; with `LoopCarried` **about 90% of reports were right about the shape** in that review | **Core** (SSA `LoopCarried` required) |
 | **MUT101** | Mature **16.1%** (19/118) / new 0.9% | — | Hit a real bug in datamodel-code-generator 0.86.0, and in mkdocs, wagtail, textual, ...; the about 64% noise of the naive version came from 3 causes | **Adopted in its strict form** (two-phase initialization, memo dicts, disjoint dict keys excluded) |
 | **MUT102a/b** | Mature 4.2% / new 0.5–1.4% | — | Sparse and mostly deliberate idioms (zero-copy `Sequence`, `frozen` accumulating lists) | **Rejected by measurement** (datamodel-code-generator's **`MUT201` / `MUT202`** adopted instead) |
 | **DATA102** | Data/ML 12.2% / mature 2.5% | — | A single-expression syntax check that duplicates Ruff / pandas-vet | **Rejected** |

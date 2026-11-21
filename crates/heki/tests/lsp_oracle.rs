@@ -8,8 +8,8 @@
 //! watcher report it (`workspace/didChangeWatchedFiles`). After it, the harness waits until the
 //! server is idle ([`Lsp::settle`]: `heki/stats` reports no work in flight, and every
 //! publication it counts has arrived; no sleeps) and compares, file by file, the range, code,
-//! severity, message, related locations, and help (the last related entry, at the diagnostic's
-//! own range) of every diagnostic. A step also names diagnostics
+//! severity, certainty, message (labelled for a heuristic rule), related locations, and help (the
+//! last related entry, at the diagnostic's own range) of every diagnostic. A step also names diagnostics
 //! the CLI must (or must not) report, so it exercises what it describes, and a step marked
 //! `cutoff` must stop at the edited files (Early Cutoff). A new step is a few lines.
 
@@ -1875,8 +1875,8 @@ fn steps_hash_writers() -> Vec<Step> {
 }
 
 /// `MUT112`: what a function returns reaches its callers through a wrapper in another module
-/// (`EffectSummary::returns_origins`), also when the wrapper hands it a call's result
-/// (`EffectSummary::returns_results`), and a store in `self.<attr>` follows the in-place changes
+/// (`EffectSummary::return_origins`), also when the wrapper hands it a call's result
+/// (`ReturnOrigins::returned`), and a store in `self.<attr>` follows the in-place changes
 /// that the methods of its class family make in other modules (`heki_rules::family_readers`).
 fn steps_mut112() -> Vec<Step> {
     vec![
@@ -2606,6 +2606,7 @@ struct Diag {
     range: Range,
     code: String,
     severity: u64,
+    certainty: String,
     message: String,
     related: Vec<(Range, String)>,
 }
@@ -2666,7 +2667,13 @@ fn cli(p: &Project) -> BTreeMap<String, Vec<Diag>> {
                 "warning" => 2,
                 other => panic!("severity {other}"),
             },
-            message: d["message"].as_str().unwrap().to_owned(),
+            certainty: d["certainty"].as_str().unwrap().to_owned(),
+            // The server labels a heuristic rule's message as the text formats do.
+            message: match d["certainty"].as_str().unwrap() {
+                "heuristic" => format!("{} [heuristic]", d["message"].as_str().unwrap()),
+                "exact" => d["message"].as_str().unwrap().to_owned(),
+                other => panic!("certainty {other}"),
+            },
             related,
         });
     }
@@ -2697,6 +2704,7 @@ fn published(lsp: &Lsp, root: &str) -> BTreeMap<String, Vec<Diag>> {
                 range: lsp_range(root, &json!(u), &d["range"]),
                 code: d["code"].as_str().unwrap().to_owned(),
                 severity: d["severity"].as_u64().unwrap(),
+                certainty: d["data"]["certainty"].as_str().unwrap().to_owned(),
                 message: d["message"].as_str().unwrap().to_owned(),
                 related: d["relatedInformation"]
                     .as_array()
@@ -2744,6 +2752,8 @@ struct Session {
     /// `file://<root>/`.
     root: String,
     versions: BTreeMap<&'static str, i32>,
+    /// The Git working tree holding the project directory, when it is not the project itself.
+    _working_tree: Option<Project>,
 }
 
 impl Session {
@@ -2761,6 +2771,28 @@ impl Session {
     ) -> Self {
         let p = Project::new(name);
         p.write("pyproject.toml", config);
+        Self::start_in(p, None, files, snapshot)
+    }
+
+    /// A session over `files` in `proj/` of a Git working tree without any configuration file:
+    /// the server, like `heki check` run there, takes the workspace folder as the project root.
+    fn start_below_working_tree(name: &str, files: Vec<(&'static str, String)>) -> Self {
+        let tree = Project::new(name);
+        std::fs::remove_file(tree.dir.join("pyproject.toml")).unwrap();
+        std::fs::create_dir_all(tree.dir.join(".git")).unwrap();
+        let p = Project {
+            dir: tree.dir.join("proj"),
+        };
+        std::fs::create_dir_all(&p.dir).unwrap();
+        Self::start_in(p, Some(tree), files, false)
+    }
+
+    fn start_in(
+        p: Project,
+        working_tree: Option<Project>,
+        files: Vec<(&'static str, String)>,
+        snapshot: bool,
+    ) -> Self {
         for (rel, text) in &files {
             p.write(rel, text);
         }
@@ -2783,6 +2815,7 @@ impl Session {
             lsp,
             root,
             versions: BTreeMap::new(),
+            _working_tree: working_tree,
         };
         for (rel, text) in files {
             s.open(rel, &text);
@@ -2963,10 +2996,23 @@ const HANDLER: &str = "from app.slow import wait\n\n\nasync def handle():\n    w
 const DUP_MODULE: &str = "def one():\n    pass\n";
 const DUP_PACKAGE: &str = "import time\n\n\ndef two():\n    time.sleep(1)\n";
 const DUP_USER: &str = "from app.dup import two\n\n\nasync def use():\n    two()\n";
+// A catalog module's name, which a project module takes over (`steps_unread_module`).
+const SHADOW_USER: &str = "import httpx\n\n\nasync def fetch(url):\n    return httpx.get(url)\n";
+const SHADOW: &str = "def get(url):\n    return url\n";
+const SHADOW_BROKEN: &str = "def get(url):\n    return url\nprint \"done\"\n";
+const SHADOW_BLOCKING: &str = "import time\n\n\ndef get(url):\n    time.sleep(1)\n";
+// Python runs it; heki does not read the encoding.
+const SHADOW_UNREAD: &str =
+    "# -*- coding: cp1252 -*-\nimport time\n\n\ndef get(url):\n    time.sleep(1)\n";
 // A helper under `src/` without package markers, imported by its `src`-layout name.
 const SRC_UTIL: &str = "import time\n\n\ndef wait():\n    time.sleep(1)\n";
 const SRC_CALLER: &str = "from pkg.util import wait\n\n\nasync def call():\n    wait()\n";
 const GENERATED: &str = "import time\n\n\nasync def tick():\n    time.sleep(1)\n";
+// Helpers under the other source roots: `python/` (detected), `t/` (named after the project,
+// holding `t/t`), and `lib/` (only when `src` lists it).
+const PY_CALLER: &str = "from tool.util import wait\n\n\nasync def call():\n    wait()\n";
+const NAMED_CALLER: &str = "from t.helper import wait\n\n\nasync def call():\n    wait()\n";
+const LIB_CALLER: &str = "from kit.slow import wait\n\n\nasync def call():\n    wait()\n";
 // The private generator of `TALLY` (`MUT113`), returned by a function of a second module and
 // consumed in a third. No owner contract is declared here: the server re-checks no file below
 // an edited function for one.
@@ -2994,8 +3040,15 @@ fn edge_files() -> Vec<(&'static str, String)> {
         ("app/dup.py", DUP_MODULE),
         ("app/dup/__init__.py", DUP_PACKAGE),
         ("app/dup_user.py", DUP_USER),
+        ("app/shadow_user.py", SHADOW_USER),
         ("src/pkg/util.py", SRC_UTIL),
         ("caller.py", SRC_CALLER),
+        ("python/tool/util.py", SRC_UTIL),
+        ("py_caller.py", PY_CALLER),
+        ("t/t/helper.py", SRC_UTIL),
+        ("named_caller.py", NAMED_CALLER),
+        ("lib/kit/slow.py", SRC_UTIL),
+        ("lib_caller.py", LIB_CALLER),
         ("app/tally.py", TALLY),
         ("app/tally_forward.py", TALLY_FORWARD),
         ("app/tally_listed.py", TALLY_LISTED),
@@ -3015,16 +3068,21 @@ fn edge_steps() -> Vec<Step> {
             .present(&[
                 ("app/handler.py", "EFF101"),
                 ("app/dup_user.py", "EFF101"),
+                ("app/shadow_user.py", "EFF101"),
                 ("caller.py", "EFF101"),
+                ("py_caller.py", "EFF101"),
+                ("named_caller.py", "EFF101"),
             ])
-            .absent(&[("app/render.py", "EFF201")]),
+            .absent(&[("app/render.py", "EFF201"), ("lib_caller.py", "EFF101")]),
     ];
     steps.extend(steps_shared_module_name());
+    steps.extend(steps_unread_module());
     steps.extend(steps_boundary_calls());
     steps.extend(steps_recursive_snapshot());
     steps.extend(steps_moved_lines());
     steps.extend(steps_discarded_buffer());
     steps.extend(steps_src_layout());
+    steps.extend(steps_source_roots());
     steps.extend(steps_ignore_files());
     steps.extend(steps_forwarded_generator());
     steps.extend(steps_swapped_calls());
@@ -3135,6 +3193,48 @@ fn steps_shared_module_name() -> Vec<Step> {
     ]
 }
 
+/// A project module takes the name of a module the catalog lists: a name under it resolves to the
+/// project's module, and to nothing while that module does not parse, never to the catalog.
+fn steps_unread_module() -> Vec<Step> {
+    vec![
+        Step::new(
+            "a module that does not parse takes a catalog module's name",
+            vec![Action::Create("httpx.py", SHADOW_BROKEN.to_owned())],
+        )
+        .absent(&[("app/shadow_user.py", "EFF101")]),
+        Step::new("the module parses", vec![save("httpx.py", SHADOW)])
+            .absent(&[("app/shadow_user.py", "EFF101")]),
+        Step::new(
+            "the module stops parsing again",
+            vec![save("httpx.py", SHADOW_BROKEN)],
+        )
+        .absent(&[("app/shadow_user.py", "EFF101")]),
+        Step::new("the module blocks", vec![save("httpx.py", SHADOW_BLOCKING)])
+            .present(&[("app/shadow_user.py", "EFF101")]),
+        Step::new(
+            "an unsaved edit is discarded while the disk holds an encoding heki does not read",
+            vec![
+                Action::Change("httpx.py", SHADOW.to_owned()),
+                Action::Write("httpx.py", SHADOW_UNREAD.to_owned()),
+                Action::Close("httpx.py"),
+            ],
+        )
+        .absent(&[("app/shadow_user.py", "EFF101")]),
+        Step::new(
+            "the closed module is written blocking on the disk",
+            vec![Action::Write("httpx.py", SHADOW_BLOCKING.to_owned())],
+        )
+        .present(&[("app/shadow_user.py", "EFF101")]),
+        Step::new(
+            "the closed module is written in an encoding heki does not read",
+            vec![Action::Write("httpx.py", SHADOW_UNREAD.to_owned())],
+        )
+        .absent(&[("app/shadow_user.py", "EFF101")]),
+        Step::new("the module is deleted", vec![Action::Delete("httpx.py")])
+            .present(&[("app/shadow_user.py", "EFF101")]),
+    ]
+}
+
 /// Effect boundaries read the ecosystem calls below them, not only the summaries.
 fn steps_boundary_calls() -> Vec<Step> {
     vec![
@@ -3234,6 +3334,53 @@ fn steps_src_layout() -> Vec<Step> {
     ]
 }
 
+/// The source roots besides `src/`: detected ones change with their package markers and the
+/// project's name, and `src` replaces them.
+fn steps_source_roots() -> Vec<Step> {
+    let listing = |dirs: &str| {
+        EDGE_CONFIG.replace(
+            "[tool.heki.lint]",
+            &format!("[tool.heki]\nsrc = [{dirs}]\n\n[tool.heki.lint]"),
+        )
+    };
+    vec![
+        Step::new(
+            "python becomes a package",
+            vec![Action::Write("python/__init__.py", String::new())],
+        )
+        .absent(&[("py_caller.py", "EFF101")]),
+        Step::new(
+            "python is a source root again",
+            vec![Action::Delete("python/__init__.py")],
+        )
+        .present(&[("py_caller.py", "EFF101")]),
+        Step::new(
+            "the project is renamed",
+            vec![Action::Configure(
+                EDGE_CONFIG.replace("name = \"t\"", "name = \"u\""),
+            )],
+        )
+        .absent(&[("named_caller.py", "EFF101")])
+        .present(&[("py_caller.py", "EFF101")]),
+        Step::new(
+            "src lists lib and leaves out python",
+            vec![Action::Configure(listing("\"src\", \"lib\", \"t\""))],
+        )
+        .present(&[
+            ("lib_caller.py", "EFF101"),
+            ("caller.py", "EFF101"),
+            ("named_caller.py", "EFF101"),
+        ])
+        .absent(&[("py_caller.py", "EFF101")]),
+        Step::new(
+            "the detected source roots again",
+            vec![Action::Configure(EDGE_CONFIG.to_owned())],
+        )
+        .present(&[("py_caller.py", "EFF101"), ("named_caller.py", "EFF101")])
+        .absent(&[("lib_caller.py", "EFF101")]),
+    ]
+}
+
 /// Ignore files decide which files belong to the project.
 fn steps_ignore_files() -> Vec<Step> {
     vec![
@@ -3310,6 +3457,41 @@ fn lsp_diagnostics_equal_a_full_check_through_file_layout_and_buffer_changes() {
     let mut failures = Vec::new();
     for step in edge_steps() {
         failures.extend(s.run(&step));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+    s.lsp.stop(true);
+}
+
+// ------------------------------------------- a project below a Git working tree (session 3)
+
+// `src/defs.py` is `defs` under the project root: four statuses, a small constant (`OPT113`).
+const DEFS: &str =
+    "STATUS_ORDER = [\"available\", \"caveated\", \"approximate\", \"unavailable\"]\n";
+const JOIN: &str = "from defs import STATUS_ORDER\n\n\ndef f(metrics):\n    return [m for s in STATUS_ORDER for m in metrics if m.status == s]\n";
+
+#[test]
+fn lsp_diagnostics_equal_a_full_check_below_a_git_working_tree() {
+    let files = vec![
+        ("src/defs.py", DEFS.to_owned()),
+        ("b_func.py", JOIN.to_owned()),
+    ];
+    let mut s = Session::start_below_working_tree("lsp_oracle_working_tree", files);
+    let steps = [
+        Step::new("initial index", Vec::new()).absent(&[("b_func.py", "OPT113")]),
+        Step::new(
+            "src becomes a package",
+            vec![Action::Write("src/__init__.py", String::new())],
+        )
+        .present(&[("b_func.py", "OPT113")]),
+        Step::new(
+            "src is a source root again",
+            vec![Action::Delete("src/__init__.py")],
+        )
+        .absent(&[("b_func.py", "OPT113")]),
+    ];
+    let mut failures = Vec::new();
+    for step in &steps {
+        failures.extend(s.run(step));
     }
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
     s.lsp.stop(true);

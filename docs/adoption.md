@@ -44,7 +44,7 @@ The recorded set can only shrink:
 | No baseline file yet | an error (exit code 2) | records today's findings |
 | A finding was fixed | a note that the entry can shrink | records the smaller entry |
 | An entry grew, or a new finding appeared | reports it, with a note on the allowed and found counts (exit code 1) | reports it the same way and leaves the file as it is (exit code 1) |
-| A file could not be analyzed (a syntax error, an unreadable file) | reports the error (exit code 2) | writes nothing, so the entries of that file are not lost (exit code 2) |
+| A file could not be analyzed (a syntax error, an unreadable file) | reports the error and the other files' findings (exit code 2) | writes nothing, so the entries of that file are not lost (exit code 2) |
 
 To record new findings on purpose, delete the baseline and record it again.
 
@@ -126,8 +126,10 @@ With a baseline configured, the hook fails only on new findings.
 With SARIF:
 
 - findings (exit code `1`) become code-scanning alerts and keep the step green;
-- a configuration, read, or syntax error (exit code `2`) still fails the step: heki then writes
-  SARIF only for the files it could analyze, which would hide the others;
+- a configuration, read, or syntax error (exit code `2`) still fails the step; a file heki could
+  not read or parse is an `error` notification of the run
+  (`invocations[0].toolExecutionNotifications`, with `executionSuccessful: false`), and the
+  results of the other files are kept;
 - results carry the message, the location, the call chain (`relatedLocations`), and the help
   (`properties.help`; SARIF's `rules[].help` is one text per rule, and a report's help can name
   the object it is about).
@@ -137,21 +139,35 @@ For custom tooling, `--output-format json` gives every field: see
 
 ## Rolling out rules
 
-1. Start with the default rules and a baseline, or `--select` one family at a time.
+1. Start with the default rules and a baseline, or `--select` one family at a time. Only the
+   exact rules run by default; add the heuristic ones with `lint.heuristic = true` (or
+   `--heuristic`), or name the ones you want in `extend-select`. Their reports can be wrong
+   about the code, and every output labels them `heuristic`
+   ([Rule Precision](precision.md)).
 2. Declare [contracts](configuration.md#contracts) for the shared state and the operations you
    care about, and effect boundaries for the code that must stay pure. `MUT201`, `MUT203`,
    `MUT204`, `MUT109`, and `EFF201` report nothing until a contract exists.
 3. Enable the opt-in rules where they matter:
 
-    | Rule | Turn it on for |
-    | ---- | -------------- |
-    | [`EFF105`](rules/async-blocking-fs.md), [`EFF107`](rules/unretained-async-task.md) | async services |
-    | [`EFF106`](rules/lock-or-tx-held-across-io.md) | threaded code, and code that holds database transactions |
-    | [`MUT103`](rules/summary-effect-regression.md) | library APIs (with [effect snapshots](#effect-snapshots-mut103)) |
-    | [`MUT106`](rules/iterator-double-consumption.md) | code that passes iterators and generators around |
-    | [`MUT108`](rules/readonly-type-mutation.md) | code that relies on frozen dataclasses and `ReadOnly` fields |
+    | Rule | Certainty | Turn it on for |
+    | ---- | --------- | -------------- |
+    | [`EFF105`](rules/async-blocking-fs.md), [`EFF107`](rules/unretained-async-task.md) | heuristic | async services |
+    | [`EFF106`](rules/lock-or-tx-held-across-io.md) | heuristic | threaded code, and code that holds database transactions |
+    | [`MUT103`](rules/summary-effect-regression.md) | heuristic | library APIs (with [effect snapshots](#effect-snapshots-mut103)) |
+    | [`MUT106`](rules/iterator-double-consumption.md) | heuristic | code that passes iterators and generators around |
+    | [`MUT108`](rules/readonly-type-mutation.md) | heuristic | code that relies on frozen dataclasses and `ReadOnly` fields |
 
 4. Use `per-file-ignores` rather than broad `ignore` lists, so new code stays covered.
+
+### From heki 0.1
+
+heki 0.1 ran every rule that is not opt-in by default. Since rules have a certainty, only the
+exact ones do, and no rule is exact yet:
+
+- `lint.heuristic = true` restores the rules of 0.1, now labelled `heuristic` in every output.
+- A baseline keeps its entries: their keys (file, function, rule, target) do not change.
+- `heki check --fix` applies the fixes of `OPT101` and `OPT102` only when they run: with
+  `lint.heuristic = true`, or when `select` or `extend-select` names them.
 
 ## Effect snapshots (`MUT103`)
 

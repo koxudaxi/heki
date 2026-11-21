@@ -7,8 +7,46 @@ release can change rules, configuration keys, diagnostics, and output formats.
 
 ## [0.2.0] - Unreleased
 
+### Breaking changes
+
+- Module names change for projects with a `python/` directory or a directory named after the
+  project: they follow the source roots ty detects. Besides `src/`, a `python/` directory (the
+  maturin layout) and a directory named after the project that holds one of the same name
+  (`acme/acme/`) are source roots when they are not packages, so `python/acme/io.py` is
+  `acme.io`, not `python.acme.io`, and the imports of `acme` resolve. The names in messages,
+  in contract patterns, and in baseline `target`s change with them, and the default rules can
+  report calls through the imports that now resolve. `src = ["src"]` restores the earlier names
+  (`src = []` for a project without a `src/` layout).
+- The project root of a project without a configuration file changes: it is the current
+  directory when that holds the checked paths (the language server: its workspace folder), as
+  Ruff and ty root it, instead of the top of the enclosing Git working tree, which stays the
+  root when heki runs above it. Outside a Git working tree, `heki check pkg` is rooted in the
+  current directory, not in `pkg`. Module names, the `path`s of a `--baseline` file, and the
+  place of `.heki-summary-snapshot.json` move with the root; a configuration file keeps the
+  root where it is.
+
 ### Added
 
+- `src` (`[tool.heki]`) lists the source roots, as Ruff's `src` and ty's `environment.root`
+  do: directories relative to the project root whose files are named relative to them, so a
+  subdirectory application (`src = ["backend"]`, for `backend/config/env.py` imported as
+  `config.env`) and a `lib/` layout (`src = ["lib"]`) resolve their imports. It replaces the
+  detected source roots.
+- The JSON output gives every diagnostic its `certainty`, `"exact"` or `"heuristic"`. SARIF
+  gives every rule descriptor `properties.precision` (`very-high` when all its reports are
+  exact, `medium` otherwise) and the tag `heuristic` to a heuristic descriptor and to every
+  heuristic result, read by GitHub code scanning. The language server sets `data.certainty` on
+  every diagnostic and links its code to the rule's page (`codeDescription`). `heki rule --output-format json` gives each
+  rule's `certainty`, `activation` (`default`, `opt-in`, or `contract`), `heuristic_note`, and
+  `default_enabled` (whether it runs with no configuration).
+- `[tool.heki.lint] heuristic`, `heki check --heuristic` / `--no-heuristic`, and
+  `heki server --heuristic` / `--no-heuristic`: see the first entry under Changed. A `full` or
+  `concise` run that leaves heuristic rules off, or heuristic reports out, says how many, and
+  how to show them.
+- Every rule page says what a report states: the premises of its claim, and which of them a
+  heuristic report may not have established. `docs/precision.md` defines exact and heuristic
+  reports, the assumptions R1-R7 exact claims rest on, how a rule is certified, and what each
+  rule measured.
 - `MUT206` (`unresolved-guarded-read`) and `MUT207` (`unresolved-guarded-call`): `read-owners`
   and `call-owners` contracts take `unresolved = "report"`, as `write-owners` does, and then
   report the reads of an attribute and the calls of a method named like a target on an object of
@@ -31,12 +69,39 @@ release can change rules, configuration keys, diagnostics, and output formats.
   of `self` changed in place while a method iterates it: by another method of the class while a
   generator is suspended inside the iteration, or by a function the loop's body calls; the next
   step raises `RuntimeError`.
+- SARIF output lists every file heki could not read or parse as an `error` notification of the
+  run (`invocations[0].toolExecutionNotifications`, with its location), and then sets
+  `executionSuccessful` to `false`; the results of the other files are kept. JSON output is
+  unchanged: the errors stay on stderr, and the exit code is still `2`.
 
 ### Changed
 
-- The `OPT` rules default to severity `warning` instead of `error`: they report slower code,
-  not wrong code. The exit code does not change (a warning still makes `heki check` exit 1),
-  only the output label and the SARIF level. `[tool.heki.lint.severity]` still overrides it.
+- Only exact reports are shown by default. A report is *exact* when every premise of its claim
+  was established and its rule was certified (a false exact report is a bug), and *heuristic*
+  when a premise can be open, so that it can be wrong about the code. A heuristic rule runs
+  when `select` or `extend-select` names its code or name, and with the new
+  `[tool.heki.lint] heuristic = true` (`--heuristic`) also by default and for every prefix and
+  `ALL`, as Ruff's `preview` does. An exact rule's heuristic reports (an `OPT` report whose
+  rewrite is not proven) are shown under the same conditions. A contract rule runs when its
+  contract is declared, whatever its certainty. No rule is exact yet: `heki check` with no configuration runs only the contract
+  rules, and `heki check --fix` applies no fix, since `OPT101` and `OPT102` stay heuristic until
+  a measurement certifies them. `MUT202`, which also reports `@lru_cache` / `@cache` results
+  without a contract, is selected like the other heuristic rules, so a `readonly-returns`
+  contract needs it named or `lint.heuristic = true`. `lint.heuristic = true` restores the rules
+  of 0.1; baselines keep their keys.
+- Every output labels heuristic reports: `[error, heuristic]` in `full`,
+  `EFF102 [heuristic] ...` in `concise`, `title=heki EFF102 (heuristic)` in `github`, and
+  ` [heuristic]` after the language server's message. `heki rule --all` lists each rule's
+  certainty and when it runs (`on`, `off`, `opt-in`, or `contract`) instead of
+  `default=true` / `false`.
+- A rule's default severity follows what happens in the code it reports, not its family: a bug
+  (a wrong result, an exception, a lost update, a deadlock, or a broken contract) is an
+  `error`, slower code a `warning`. `EFF101`, `EFF102`, `EFF103`, `EFF105`, `DATA101`, and the
+  `OPT` rules default to `warning` instead of `error`; the other rules stay `error`. The exit
+  code does not change (a warning still makes `heki check` exit 1), only the output label, the
+  SARIF level, and the language server's severity. `[tool.heki.lint.severity]` still overrides
+  it. Each rule page shows its default severity, and `heki rule --output-format json` gives each
+  rule's `consequence` (`bug` or `slowdown`).
 - `EFF102` and `EFF103` also report the function a builtin calls once per item: the function
   handed to `map`, `filter`, `itertools.starmap`, `itertools.filterfalse`, and
   `functools.reduce`, and the `key` of `sorted`, `list.sort`, `min`, `max`, and
@@ -46,6 +111,11 @@ release can change rules, configuration keys, diagnostics, and output formats.
 
 ### Fixed
 
+- A project module that cannot be read or does not parse still owns its module name: the names
+  under it resolve to nothing, never to a module of the same name the catalog lists. A broken
+  `requests.py` in the project no longer makes `requests.get` a blocking call. The language
+  server and `heki check --watch` keep such a file as the same unknown module while it does not
+  parse.
 - `EFF102` and `EFF103` no longer count a `functools.cached_property` getter as running on
   every read: it runs once per instance, like a lazy initialization of `self`, also when
   `cached_property` comes from a module that re-exports it (`kombu.utils.cached_property`). A
@@ -151,6 +221,13 @@ release can change rules, configuration keys, diagnostics, and output formats.
   `SCHEMA.split(";")` or `SCHEMA.splitlines()`).
 - `EFF101` no longer reports `socket.getaddrinfo` with the `AI_NUMERICHOST` flag, which parses
   a numeric address and never asks a resolver.
+- A file that is one definition, class, lambda, or generator expression with nothing after it
+  (no final newline) is checked: its function was taken for the module body, which has the same
+  span, so it was never analyzed, and `heki check` panicked on such a generator expression
+  (`(x async for x in xs)`).
+- `heki check` no longer overflows its stack on a loop no path enters (after a `return`,
+  `raise`, or `break`) that computes a value from itself (`d = d.x`, `d = d[mask]`): the value
+  was defined by itself, and the walks along definitions went around it forever.
 
 ## [0.1.2] - 2026-11-21
 
