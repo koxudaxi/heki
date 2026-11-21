@@ -1363,3 +1363,122 @@ fn exact_claims_establish_each_premise() {
         )
     );
 }
+
+const PROPERTY_READS: &str = r#"import time
+
+
+class Conn:
+    @property
+    def ready(self):
+        raise ValueError("not ready")
+
+
+class Plain:
+    def ready(self):
+        return True
+
+
+def wait_when_ready(c: Conn):
+    try:
+        c.ready
+        time.sleep(1)
+    except ValueError:
+        pass
+
+
+def wait_after_lookup(p: Plain):
+    try:
+        p.ready
+        time.sleep(1)
+    except ValueError:
+        pass
+
+
+async def tn_property(c: Conn):
+    wait_when_ready(c)
+
+
+async def tp_method_lookup(p: Plain):
+    wait_after_lookup(p)
+"#;
+
+/// Reading a property runs its getter, which may raise into a handler that returns without the
+/// wait: the helper does not always wait. Looking up a plain method does not raise.
+#[test]
+fn a_property_read_may_raise_before_the_wait() {
+    let p = Project::new("exact_property_reads");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/reads.py", PROPERTY_READS);
+    let diags = diagnostics(&p, &["--select", "EFF101,EFF111"]);
+    let got: Vec<(u64, &str)> = diags
+        .iter()
+        .map(|d| {
+            (
+                d["line"].as_u64().unwrap(),
+                d["rule_code"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(got, vec![(32, "EFF111"), (36, "EFF101")], "{diags:#?}");
+}
+
+const HELPER_OVER_DISPATCH: &str = r#"import requests
+
+
+class Repo:
+    def get(self, key):
+        raise NotImplementedError
+
+
+class Remote(Repo):
+    def get(self, key):
+        return requests.get(key)
+
+
+class Local(Repo):
+    def get(self, key):
+        return requests.post(key)
+
+
+def fetch(r: Repo, key):
+    return r.get(key)
+
+
+async def serve(r: Repo):
+    fetch(r, "k")
+"#;
+
+/// A helper over a call whose implementations wait in different calls keeps each of them: the
+/// report names, targets, and relates every one, not the one its shortest chain ends in.
+#[test]
+fn a_helper_summary_keeps_every_witness() {
+    let p = Project::new("exact_helper_witnesses");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/serve.py", HELPER_OVER_DISPATCH);
+    let diags = diagnostics(&p, &["--select", "EFF101,EFF111"]);
+    assert_eq!(diags.len(), 1, "{diags:#?}");
+    let d = &diags[0];
+    assert_eq!(
+        (
+            d["line"].as_u64().unwrap(),
+            d["rule_code"].as_str().unwrap()
+        ),
+        (24, "EFF101")
+    );
+    assert_eq!(
+        d["message"],
+        "`fetch` always runs a waiting call on the event loop: `requests.post` (in `Local.get`) or `requests.get` (in `Remote.get`)"
+    );
+    assert_eq!(d["target"], "requests.get, requests.post");
+    let related: Vec<(u64, &str)> = d["related"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| (r["line"].as_u64().unwrap(), r["message"].as_str().unwrap()))
+        .collect();
+    assert!(
+        related.contains(&(11, "`Remote.get` calls `requests.get`"))
+            && related.contains(&(16, "`Local.get` calls `requests.post`")),
+        "{related:?}"
+    );
+}

@@ -161,6 +161,10 @@ pub struct MustExec {
     /// bound once).
     pub bound_twice: bool,
     pub effects: BTreeMap<ExecEffectKind, SharedChain>,
+    /// For an effect whose chains end in different calls (implementations of one call reaching
+    /// different waits), every such call: the witnesses beside the kept chain's last call.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub alternatives: BTreeMap<ExecEffectKind, SharedChain>,
 }
 
 impl MustExec {
@@ -841,6 +845,7 @@ impl EffectSummary {
         self.exec_guards.retain(|e, _| !hidden.contains(e));
         if let Some(must) = &mut self.must_exec {
             must.effects.retain(|e, _| !hidden.contains(e));
+            must.alternatives.retain(|e, _| !hidden.contains(e));
         }
         if let Some(iterated) = &mut self.iterated {
             iterated.hide_exec_effects(hidden);
@@ -857,7 +862,7 @@ impl EffectSummary {
         for chain in out
             .must_exec
             .iter_mut()
-            .flat_map(|m| m.effects.values_mut())
+            .flat_map(|m| m.effects.values_mut().chain(m.alternatives.values_mut()))
         {
             zero_hop_spans(chain);
         }
