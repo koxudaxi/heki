@@ -11,9 +11,9 @@ Every heki report is **exact** or **heuristic**:
 
 A rule is exact once it is certified (below), and heuristic until then. An exact rule's report
 is exact when it established every premise of the rule's exact claim, and heuristic when one is
-open: an `OPT` rewrite heki could not prove safe, a loop whose trip count the code fixes, an
-`OPT113` join whose rule page premises do not all hold, or a `DATA101`, `MUT110`, or `MUT114`
-report whose rule page premises are not all established. Only exact reports are shown by
+open: an `OPT` rewrite heki could not prove safe, a size-dependent `OPT` rewrite in a loop whose
+trip count the code fixes or caps, an `OPT113` join whose rule page premises do not all hold, or
+a `DATA101`, `MUT110`, or `MUT114` report whose rule page premises are not all established. Only exact reports are shown by
 default.
 
 - A heuristic rule runs when `select` or `extend-select` names its code or name. With

@@ -233,8 +233,9 @@ release can change rules, configuration keys, diagnostics, and output formats.
   handed to `map`, `filter`, `itertools.starmap`, `itertools.filterfalse`, and
   `functools.reduce`, and the `key` of `sorted`, `list.sort`, `min`, `max`, and
   `itertools.groupby` (`sorted(users, key=lambda u: score(conn, u))`), when the items are not a
-  fixed number. Its body runs at the call for every rule, so `EFF111` sees its blocking calls
-  too. A `functools.partial` handed to such a builtin is followed to the function it calls.
+  fixed number and heki can tell which function it is. Its body runs at the call for every rule,
+  so `EFF111` sees its blocking calls too. A `functools.partial` handed to such a builtin is
+  followed to the function it calls.
 - `MUT107` (`hash-attr-mutation`) is opt-in: it runs only when `select` or `extend-select` names it,
   also with `lint.heuristic = true`. Its message states the claim only: "`Tag.rename` rebinds
   `self.name` outside initialization, and `Tag.__hash__` reads it".
