@@ -36,13 +36,14 @@ use crate::{
     ArgBinding, BoundCallee, CallSite, ConstArg, ConstClass, EffectGuards, EffectSummary,
     GuardSubject, GuardTest, InputGuard, SiteRole, Slot,
 };
+use heki_ir::walk::{Answer, Budget, Closure, Def, FnShape, Or};
 use heki_ir::{
     BlockId, BuiltinKind, CompareOpKind, ConstLiteral, DictEntry, Inst, InstKind, IrFunction,
     NaturalLoop, PhiNode, Terminator, UnaryOpKind, VarId,
 };
 use heki_kb::{EffectiveEcosystemKb, ExecEffectKind};
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::cell::{OnceCell, RefCell};
+use std::cell::OnceCell;
 use std::collections::BTreeMap;
 
 // --------------------------------------------------------------------------- the summary facts
@@ -443,29 +444,21 @@ pub struct LazyInitBranch {
 /// The lazy initialization branches of `f` (`MUT107` and the effect guards). Only a block the
 /// test alone leads to counts: an `if` without `else` falls through to a block that the other
 /// branch reaches too.
-pub fn lazy_init_branches(f: &IrFunction) -> Vec<LazyInitBranch> {
+pub fn lazy_init_branches(shape: &FnShape<'_>) -> Vec<LazyInitBranch> {
     let mut defs: FxHashMap<VarId, &InstKind> = FxHashMap::default();
-    for inst in f.blocks.iter().flat_map(|b| &b.insts) {
+    for inst in shape.f.blocks.iter().flat_map(|b| &b.insts) {
         if let Some(d) = inst.kind.dst() {
             defs.insert(d, &inst.kind);
         }
     }
-    branches(f, &|v| defs.get(v).copied())
+    branches(shape, &|v| defs.get(v).copied())
 }
 
 type DefOf<'d, 'a> = &'d dyn Fn(&VarId) -> Option<&'a InstKind>;
 
-/// The value `v` copies, through any number of copies.
-fn through_copies(def: DefOf<'_, '_>, mut v: VarId) -> VarId {
-    while let Some(InstKind::Copy { src, .. }) = def(&v) {
-        v = *src;
-    }
-    v
-}
-
 /// [`lazy_init_branches`] with the defining instruction of every variable.
-fn branches(f: &IrFunction, def: DefOf<'_, '_>) -> Vec<LazyInitBranch> {
-    attr_tests(f, def)
+fn branches(shape: &FnShape<'_>, def: DefOf<'_, '_>) -> Vec<LazyInitBranch> {
+    attr_tests(shape, def)
         .into_iter()
         .map(|t| LazyInitBranch {
             test: t.test,
@@ -477,12 +470,12 @@ fn branches(f: &IrFunction, def: DefOf<'_, '_>) -> Vec<LazyInitBranch> {
 }
 
 /// The branches that find an attribute unset (`obj`, `attr`).
-fn attr_tests(f: &IrFunction, def: DefOf<'_, '_>) -> Vec<StateTest<(VarId, String)>> {
-    let loads_attr = |v: &VarId| match def(&through_copies(def, *v)) {
+fn attr_tests(shape: &FnShape<'_>, def: DefOf<'_, '_>) -> Vec<StateTest<(VarId, String)>> {
+    let loads_attr = |v: &VarId| match def(&shape.copy_root(*v)) {
         Some(InstKind::AttrLoad { obj, attr, .. }) => Some((*obj, attr.clone())),
         _ => None,
     };
-    state_tests(f, def, loads_attr)
+    state_tests(shape, def, loads_attr)
         .into_iter()
         .filter(|t| t.found.unset())
         .collect()
@@ -539,10 +532,11 @@ struct StateTest<S> {
 /// value, each with the block only it leads to: an `if` without `else` falls through to a
 /// block the other branch reaches too, which does not count.
 fn state_tests<S: Clone>(
-    f: &IrFunction,
+    shape: &FnShape<'_>,
     def: DefOf<'_, '_>,
     subject: impl Fn(&VarId) -> Option<S>,
 ) -> Vec<StateTest<S>> {
+    let f = shape.f;
     let is_none = |v: &VarId| {
         matches!(
             def(v),
@@ -604,11 +598,7 @@ fn state_tests<S: Clone>(
             }
         }
     }
-    if found.is_empty() {
-        return found;
-    }
-    let preds = f.predecessors();
-    found.retain(|t| preds[t.init.0 as usize] == [t.test]);
+    found.retain(|t| shape.preds(t.init) == [t.test]);
     found
 }
 
@@ -690,6 +680,28 @@ struct Derived {
     fresh: bool,
 }
 
+impl Derived {
+    /// What an object whose origin the walks did not decide may come from: any parameter, or an
+    /// object the function constructs.
+    const ANY: Self = Self {
+        params: u64::MAX,
+        fresh: true,
+    };
+}
+
+/// Visit the values `v` comes from, for [`Derived`]: the sources of its instruction, or the
+/// inputs of its phi.
+fn for_each_origin(cx: &GuardInputs<'_, '_>, v: VarId, mut visit: impl FnMut(VarId)) {
+    match cx.def(v) {
+        Some(def) => for_each_source(def, visit),
+        None => {
+            if let Some((_, phi)) = cx.phi(v) {
+                phi.incoming.iter().for_each(|(_, w)| visit(*w));
+            }
+        }
+    }
+}
+
 /// Visit the values an instruction's result comes from, for [`Derived`]: what it reads, calls,
 /// or iterates (`obj.attr`, `obj[k]`, `obj.m(a)`, `f(a)`, iterators, `with`, `await`).
 fn for_each_source(kind: &InstKind, mut visit: impl FnMut(VarId)) {
@@ -712,6 +724,7 @@ fn for_each_source(kind: &InstKind, mut visit: impl FnMut(VarId)) {
 /// The inputs the guard analysis of one function reads (owned by the summary extractor).
 pub(crate) struct GuardInputs<'f, 'a> {
     pub f: &'a IrFunction,
+    pub shape: &'f FnShape<'a>,
     pub defs: &'f FxHashMap<VarId, &'a Inst>,
     pub uses: &'f FxHashMap<VarId, Vec<&'a InstKind>>,
     pub types: &'f FxHashMap<VarId, Val>,
@@ -727,8 +740,6 @@ pub(crate) struct GuardInputs<'f, 'a> {
     pub fresh: &'f FxHashSet<VarId>,
     /// The block and phi defining each phi variable (built on first use).
     pub phis: &'f OnceCell<FxHashMap<VarId, (BlockId, &'a PhiNode)>>,
-    /// Buffers of the backward walks.
-    pub scratch: &'f RefCell<(FxHashSet<VarId>, Vec<VarId>)>,
     /// The catalog, for the awaits that finish a future (`EcosystemEntry::done_when_awaited`).
     pub kb: &'a EffectiveEcosystemKb,
     /// The project the names those awaits call resolve in ([`ProjectDecls::catalog`]).
@@ -744,6 +755,14 @@ pub(crate) struct LocalGuards {
     /// The blocks of each loop (by header) from which a path comes back to the header without
     /// leaving the loop, along normal and exception edges.
     repeating: OnceCell<FxHashMap<BlockId, FxHashSet<BlockId>>>,
+    /// The steps of the walks over values (`origins`, `fresh_in_loops`). The lazy
+    /// initializations spend their own [`Cells`].
+    walks: OnceCell<Budget>,
+    /// [`Derived`] of every value asked, as parameter bits and the fresh flag.
+    origins: Closure<VarId, (Or, bool)>,
+    /// Per loop (by header) and value defined in it, whether the value may come from an object
+    /// constructed inside the loop.
+    fresh_in_loops: Closure<(BlockId, VarId), bool>,
 }
 
 /// The input tests of a function and the ones holding at the entry of each block (they hold
@@ -769,7 +788,7 @@ impl LocalGuards {
         self.regions.get_or_init(|| {
             let mut cells = Cells::of(cx.f);
             let classes = self.classes(cx);
-            let mut regions = attr_regions(cx, &mut cells);
+            let mut regions = self.attr_regions(cx, &mut cells);
             regions.extend(global_regions(cx, classes, &mut cells));
             regions.extend(local_regions(cx, classes, &mut cells));
             // Which ones would fit depends on the order of the blocks: none is kept.
@@ -781,22 +800,24 @@ impl LocalGuards {
     }
 
     /// The repeating blocks of every loop, computed on first use.
-    fn repeating(&self, f: &IrFunction) -> &FxHashMap<BlockId, FxHashSet<BlockId>> {
+    fn repeating(&self, shape: &FnShape<'_>) -> &FxHashMap<BlockId, FxHashSet<BlockId>> {
         self.repeating.get_or_init(|| {
-            let preds = f.predecessors();
-            f.loops
+            shape
+                .f
+                .loops
                 .iter()
                 .map(|lp| {
                     let inside: FxHashSet<BlockId> = lp.body.iter().copied().collect();
                     let mut back = FxHashSet::default();
-                    let mut stack: Vec<BlockId> = preds[lp.header.0 as usize]
+                    let mut stack: Vec<BlockId> = shape
+                        .preds(lp.header)
                         .iter()
                         .copied()
                         .filter(|b| inside.contains(b))
                         .collect();
                     while let Some(b) = stack.pop() {
                         if inside.contains(&b) && back.insert(b) {
-                            stack.extend(preds[b.0 as usize].iter().copied());
+                            stack.extend(shape.preds(b).iter().copied());
                         }
                     }
                     (lp.header, back)
@@ -870,16 +891,19 @@ impl LocalGuards {
         }
         let mut out = 0;
         // Every way on from the site leaves the loop (`break`, `return`, `raise`).
-        let repeating = self.repeating(cx.f);
+        let repeating = self.repeating(cx.shape);
         for lp in loops {
             if !repeating[&lp.header].contains(&bb) {
                 out |= loop_bit(lp);
             }
         }
         for r in self.regions(cx).iter().filter(|r| r.blocks[bb.0 as usize]) {
-            for lp in loops.iter().filter(|lp| lp.body.contains(&r.test)) {
+            for lp in loops.iter().filter(|lp| cx.shape.in_body(lp, r.test)) {
                 let once = match r.initialized {
-                    Initialized::Attr(obj) => !fresh_in_loop(cx, obj, lp),
+                    // Once per object across `lp` only where heki shows that the loop does not
+                    // construct the object: EFF102 and EFF103 count a call as running on every
+                    // iteration unless heki shows that it runs once.
+                    Initialized::Attr(obj) => !self.fresh_in_loop(cx, obj, lp).open_means(true),
                     Initialized::Global => true,
                     Initialized::Local(carried) => carried & loop_bit(lp) != 0,
                 };
@@ -907,7 +931,10 @@ impl LocalGuards {
         var: VarId,
         loops: &[&NaturalLoop],
     ) -> ArgBinding {
-        let d = derived(cx, var);
+        // These facts only relax EFF102 and EFF103, which count a call as running on every
+        // iteration unless heki shows that it runs once per object: an argument whose origin
+        // the walks did not decide may be an object the caller constructs, in every loop.
+        let d = self.derived(cx, var).open_means(Derived::ANY);
         ArgBinding {
             constant: const_arg(cx, self.classes(cx), var),
             input: cx.subject(var),
@@ -915,26 +942,87 @@ impl LocalGuards {
             derived_fresh: d.fresh,
             stays_in_loops: loops
                 .iter()
-                .filter(|lp| !d.fresh || !fresh_in_loop(cx, var, lp))
+                .filter(|lp| !d.fresh || !self.fresh_in_loop(cx, var, lp).open_means(true))
                 .fold(0, |m, lp| m | loop_bit(lp)),
         }
+    }
+
+    fn walks(&self, f: &IrFunction) -> &Budget {
+        self.walks.get_or_init(|| Budget::of_function("guards", f))
+    }
+
+    /// [`Derived`] of `var`: the parameters and constructed instances among the values it may
+    /// come from (a union over what reaches it backwards, so no fixpoint is needed).
+    fn derived(&self, cx: &GuardInputs<'_, '_>, var: VarId) -> Answer<Derived> {
+        let own = |v: VarId| {
+            let param = cx.param_index(v).map_or(0, |i| 1u64 << i);
+            (Or(param), cx.fresh.contains(&v))
+        };
+        let next = |v: VarId, out: &mut Vec<VarId>| for_each_origin(cx, v, |w| out.push(w));
+        self.origins
+            .ask(self.walks(cx.f), var, own, next)
+            .map(|fact| {
+                let (Or(params), fresh) = *fact;
+                Derived { params, fresh }
+            })
+    }
+
+    /// Whether `var` may come from an object constructed inside `lp` (a constructor call there).
+    fn fresh_in_loop(
+        &self,
+        cx: &GuardInputs<'_, '_>,
+        var: VarId,
+        lp: &NaturalLoop,
+    ) -> Answer<bool> {
+        let inside = |v: VarId| match cx.shape.def(v) {
+            Def::Inst(b, _) | Def::Phi(b, _) => cx.shape.in_body(lp, b),
+            Def::None | Def::Param => false,
+        };
+        let constructed = |(_, v): (BlockId, VarId)| {
+            inside(v) && cx.fresh.contains(&v) && matches!(cx.def(v), Some(InstKind::Call { .. }))
+        };
+        // A value defined before the loop is the same object in every iteration.
+        let next = |(header, v): (BlockId, VarId), out: &mut Vec<(BlockId, VarId)>| {
+            if inside(v) {
+                for_each_origin(cx, v, |w| {
+                    if inside(w) {
+                        out.push((header, w));
+                    }
+                });
+            }
+        };
+        self.fresh_in_loops
+            .ask(self.walks(cx.f), (lp.header, var), constructed, next)
+            .map(|fresh| *fresh)
+    }
+
+    /// The lazy initializations of attributes: [`attr_tests`] branches that [`initializes`].
+    fn attr_regions(&self, cx: &GuardInputs<'_, '_>, cells: &mut Cells) -> Vec<LazyRegion> {
+        let def = |v: &VarId| cx.def(*v);
+        let mut values: FxHashMap<VarId, FxHashSet<VarId>> = FxHashMap::default();
+        let mut out = Vec::new();
+        for t in attr_tests(cx.shape, &def) {
+            if !initializes(cx, &mut values, &t, cells) {
+                continue;
+            }
+            // An object whose origin the walks did not decide may be one the function
+            // constructs, initialized on every call: no `once_per`, as EFF102 and EFF103 count a
+            // call as running on every iteration unless heki shows that it runs once.
+            let d = self.derived(cx, t.subject.0).open_means(Derived::ANY);
+            out.push(LazyRegion {
+                test: t.test,
+                initialized: Initialized::Attr(t.subject.0),
+                root: (!d.fresh).then_some(d.params),
+                blocks: dominated(cx.shape, t.init, cells),
+            });
+        }
+        out
     }
 }
 
 impl<'a> GuardInputs<'_, 'a> {
     fn def(&self, v: VarId) -> Option<&'a InstKind> {
         self.defs.get(&v).map(|i| &i.kind)
-    }
-
-    /// The string literal `v` is.
-    fn const_str(&self, v: VarId) -> Option<String> {
-        match self.def(v)? {
-            InstKind::Const {
-                literal: ConstLiteral::Str(s),
-                ..
-            } => Some(s.clone()),
-            _ => None,
-        }
     }
 
     pub(crate) fn phi(&self, v: VarId) -> Option<(BlockId, &'a PhiNode)> {
@@ -998,90 +1086,6 @@ pub fn loop_bit(lp: &NaturalLoop) -> u64 {
 /// call inside `depth` loops: it is one level deeper than every loop around the call.
 pub fn per_item_bit(depth: u16) -> u64 {
     1u64 << depth.min(63)
-}
-
-/// Whether `var` may come from an object constructed inside `lp` (a constructor call there).
-fn fresh_in_loop(cx: &GuardInputs<'_, '_>, var: VarId, lp: &NaturalLoop) -> bool {
-    let mut inside: FxHashSet<VarId> = FxHashSet::default();
-    for b in &lp.body {
-        let block = cx.f.block(*b);
-        inside.extend(block.phis.iter().map(|p| p.dst));
-        inside.extend(block.insts.iter().filter_map(|i| i.kind.dst()));
-    }
-    let mut seen = FxHashSet::default();
-    let mut stack = vec![var];
-    while let Some(v) = stack.pop() {
-        if !inside.contains(&v) || !seen.insert(v) {
-            continue;
-        }
-        if let Some((_, phi)) = cx.phi(v) {
-            stack.extend(phi.incoming.iter().map(|(_, w)| *w));
-            continue;
-        }
-        let def = &cx.defs[&v].kind;
-        if cx.fresh.contains(&v) && matches!(def, InstKind::Call { .. }) {
-            return true;
-        }
-        for_each_source(def, |w| stack.push(w));
-    }
-    false
-}
-
-/// [`Derived`] of `var`: the parameters and constructed instances among the values it may
-/// come from (a union over what reaches it backwards, so no fixpoint is needed).
-fn derived(cx: &GuardInputs<'_, '_>, var: VarId) -> Derived {
-    let mut out = Derived::default();
-    if let Some(i) = cx.param_index(var) {
-        out.params = 1u64 << i;
-        out.fresh = cx.fresh.contains(&var);
-        return out;
-    }
-    let mut scratch = cx.scratch.borrow_mut();
-    let (seen, stack) = &mut *scratch;
-    seen.clear();
-    stack.clear();
-    stack.push(var);
-    while let Some(v) = stack.pop() {
-        if !seen.insert(v) {
-            continue;
-        }
-        if let Some(i) = cx.param_index(v) {
-            out.params |= 1u64 << i;
-        }
-        out.fresh |= cx.fresh.contains(&v);
-        match cx.def(v) {
-            Some(def) => {
-                for_each_source(def, |w| stack.push(w));
-            }
-            None => {
-                if let Some((_, phi)) = cx.phi(v) {
-                    stack.extend(phi.incoming.iter().map(|(_, w)| *w));
-                }
-            }
-        }
-    }
-    out
-}
-
-/// The lazy initializations of attributes: [`attr_tests`] branches that [`initializes`].
-fn attr_regions(cx: &GuardInputs<'_, '_>, cells: &mut Cells) -> Vec<LazyRegion> {
-    let f = cx.f;
-    let def = |v: &VarId| cx.def(*v);
-    let mut values: FxHashMap<VarId, FxHashSet<VarId>> = FxHashMap::default();
-    let mut out = Vec::new();
-    for t in attr_tests(f, &def) {
-        if !initializes(cx, &mut values, &t, cells) {
-            continue;
-        }
-        let d = derived(cx, t.subject.0);
-        out.push(LazyRegion {
-            test: t.test,
-            initialized: Initialized::Attr(t.subject.0),
-            root: (!d.fresh).then_some(d.params),
-            blocks: dominated(f, t.init, cells),
-        });
-    }
-    out
 }
 
 /// Every path from `t.init` to a normal return, or back to the test, assigns `obj.attr`
@@ -1171,11 +1175,11 @@ fn global_regions(
 ) -> Vec<LazyRegion> {
     let f = cx.f;
     let def = |v: &VarId| cx.def(*v);
-    let loads_global = |v: &VarId| match def(&through_copies(&def, *v)) {
+    let loads_global = |v: &VarId| match def(&cx.shape.copy_root(*v)) {
         Some(InstKind::LoadGlobal { name, .. }) => Some(name.clone()),
         _ => None,
     };
-    let tests: Vec<StateTest<String>> = state_tests(f, &def, loads_global)
+    let tests: Vec<StateTest<String>> = state_tests(cx.shape, &def, loads_global)
         .into_iter()
         .filter(|t| t.found.unset())
         .collect();
@@ -1199,7 +1203,7 @@ fn global_regions(
                 test: t.test,
                 initialized: Initialized::Global,
                 root: Some(0),
-                blocks: dominated(f, t.init, cells),
+                blocks: dominated(cx.shape, t.init, cells),
             });
         }
     }
@@ -1246,13 +1250,13 @@ fn local_regions(
     }
     let def = |v: &VarId| cx.def(*v);
     let merging = |v: &VarId| {
-        let p = through_copies(&def, *v);
+        let p = cx.shape.copy_root(*v);
         cx.phi(p)?;
         Some((p, f.var_name(p)?))
     };
-    let tests: Vec<StateTest<(VarId, &str)>> = state_tests(f, &def, merging)
+    let tests: Vec<StateTest<(VarId, &str)>> = state_tests(cx.shape, &def, merging)
         .into_iter()
-        .filter(|t| f.block_loop_depth(t.test) > 0)
+        .filter(|t| cx.shape.loop_depth(t.test) > 0)
         .collect();
     if tests.is_empty() {
         return Vec::new();
@@ -1273,10 +1277,10 @@ fn local_regions(
         if !sets_on_every_way(f, t.test, t.init, false, assigns, cells) {
             continue;
         }
-        let blocks = dominated(f, t.init, cells);
+        let blocks = dominated(cx.shape, t.init, cells);
         let set_here = |v: VarId| def_block.get(&v).is_some_and(|b| blocks[b.0 as usize]);
         let mut carried = 0;
-        for lp in f.loops.iter().filter(|lp| lp.body.contains(&t.test)) {
+        for lp in f.loops.iter().filter(|lp| cx.shape.in_body(lp, t.test)) {
             if stays_set(cx, classes, &t, lp, &set_here, cells) {
                 carried |= loop_bit(lp);
             }
@@ -1366,30 +1370,29 @@ fn same_values(f: &IrFunction, root: VarId) -> FxHashSet<VarId> {
     aliases_of(f, std::iter::once(root).chain(reloads))
 }
 
-/// Membership (by block id) of the blocks every path from the entry to which runs through `d`
-/// (normal and exception edges); it takes two cells per block of the function, for its walks
-/// and the membership kept.
-pub(crate) fn dominated(f: &IrFunction, d: BlockId, cells: &mut Cells) -> Vec<bool> {
+/// Membership (by block id) of the blocks reachable from `d` that no path from the entry
+/// reaches without running through `d` (normal and exception edges): the blocks `d` dominates,
+/// and, when no path from the entry reaches `d`, the blocks reachable from it that no such path
+/// reaches either. It takes two cells per block of the function, for its walks and the
+/// membership kept.
+pub(crate) fn dominated(shape: &FnShape<'_>, d: BlockId, cells: &mut Cells) -> Vec<bool> {
+    let f = shape.f;
     cells.take(2 * f.blocks.len());
-    let reach = |start: BlockId, avoid: Option<BlockId>| {
-        let mut seen = vec![false; f.blocks.len()];
-        let mut stack = vec![start];
-        while let Some(cur) = stack.pop() {
-            if Some(cur) == avoid || std::mem::replace(&mut seen[cur.0 as usize], true) {
-                continue;
-            }
-            let block = f.block(cur);
-            stack.extend(block.terminator.successors());
-            stack.extend(block.exc_target);
+    let mut from_d = vec![false; f.blocks.len()];
+    let mut stack = vec![d];
+    while let Some(cur) = stack.pop() {
+        if !std::mem::replace(&mut from_d[cur.0 as usize], true) {
+            stack.extend(shape.succs(cur));
         }
-        seen
-    };
-    let around = reach(BlockId(0), Some(d));
-    let through = reach(d, None);
-    through
+    }
+    // A block the entry reaches is in the set when `d` dominates it. A block it does not reach
+    // is in the set when `d` reaches it, which only a `d` the entry does not reach can do: no
+    // path from the entry reaches the block, so none avoids `d`.
+    let tree = shape.dominators();
+    from_d
         .iter()
-        .zip(&around)
-        .map(|(t, a)| *t && !*a)
+        .zip(&f.blocks)
+        .map(|(&from_d, bb)| from_d && (!shape.reachable(bb.id) || tree.dominates(d, bb.id)))
         .collect()
 }
 
@@ -1397,11 +1400,7 @@ pub(crate) fn dominated(f: &IrFunction, d: BlockId, cells: &mut Cells) -> Vec<bo
 /// exact class among `classes`. A list, set, or dict display has a truthiness only as the
 /// argument alone, so nothing can have filled or emptied it.
 fn const_arg(cx: &GuardInputs<'_, '_>, classes: &Classes, var: VarId) -> Option<ConstArg> {
-    let mut v = var;
-    while let Some(InstKind::Copy { src, .. }) = cx.def(v) {
-        v = *src;
-    }
-    if let Some(InstKind::Const { literal, .. }) = cx.def(v) {
+    if let Some(InstKind::Const { literal, .. }) = cx.def(cx.shape.copy_root(var)) {
         return ConstArg::of_literal(literal);
     }
     let class = *classes.get(&var)?;
@@ -1474,8 +1473,7 @@ fn known_classes(cx: &GuardInputs<'_, '_>) -> Classes {
     let f = cx.f;
     let mut state: FxHashMap<VarId, ClassState> = FxHashMap::default();
     let mut merges: Vec<(VarId, Vec<VarId>)> = Vec::new();
-    let order = f.rpo_blocks();
-    for b in &order {
+    for b in cx.shape.rpo() {
         let block = f.block(*b);
         for phi in &block.phis {
             let inputs = phi.incoming.iter().map(|(_, w)| *w);
@@ -1579,11 +1577,10 @@ fn constructed_class(cx: &GuardInputs<'_, '_>, v: VarId, kind: &InstKind) -> Opt
 type FutureKey = (VarId, Option<String>);
 
 fn future_key(cx: &GuardInputs<'_, '_>, v: VarId) -> FutureKey {
-    let def = |v: &VarId| cx.def(*v);
-    let v = through_copies(&def, v);
+    let v = cx.shape.copy_root(v);
     match cx.def(v) {
         Some(InstKind::AttrLoad { obj, attr, .. }) if !cx.stored_attrs.contains(&attr.as_str()) => {
-            (through_copies(&def, *obj), Some(attr.clone()))
+            (cx.shape.copy_root(*obj), Some(attr.clone()))
         }
         _ => (v, None),
     }
@@ -1596,9 +1593,8 @@ fn finished_by(cx: &GuardInputs<'_, '_>, kind: &InstKind) -> Option<FutureKey> {
     let InstKind::Await { value, .. } = kind else {
         return None;
     };
-    let def = |v: &VarId| cx.def(*v);
     // `wrap_future(f)`, or `asyncio.wrap_future(f)` on the module.
-    let (symbol, args, star_from) = match cx.def(through_copies(&def, *value))? {
+    let (symbol, args, star_from) = match cx.def(cx.shape.copy_root(*value))? {
         InstKind::Call {
             callee_var: Some(callee),
             args,
@@ -1919,7 +1915,7 @@ impl<'c, 'f, 'a> Facts<'c, 'f, 'a> {
                         GuardTest::IsInstance(cx.isinstance_classes.get(&args[1])?.clone())
                     }
                     Some(Val::Ref(n)) if n == "builtins.hasattr" => {
-                        GuardTest::HasAttr(cx.const_str(args[1])?)
+                        GuardTest::HasAttr(cx.shape.str_const(args[1])?.to_owned())
                     }
                     _ => return None,
                 };
@@ -1947,11 +1943,8 @@ impl<'c, 'f, 'a> Facts<'c, 'f, 'a> {
     /// The [`PhiTest`] `v` is: a [`Self::tested`] test of a phi (through copies).
     fn phi_test(&mut self, v: VarId) -> Option<PhiTest> {
         let cx = self.cx;
-        let (mut value, test, polarity) = self.tested(v)?;
-        while let Some(InstKind::Copy { src, .. }) = cx.def(value) {
-            value = *src;
-        }
-        let (block, phi) = cx.phi(value)?;
+        let (value, test, polarity) = self.tested(v)?;
+        let (block, phi) = cx.phi(cx.shape.copy_root(value))?;
         if !self.phi_cells.take(phi.incoming.len()) {
             return None;
         }
@@ -2095,7 +2088,7 @@ impl<'c, 'f, 'a> Facts<'c, 'f, 'a> {
     fn solve(&mut self) -> Vec<Option<FactSet>> {
         let f = self.cx.f;
         let mut entry: Vec<Option<FactSet>> = vec![None; f.blocks.len()];
-        for (i, b) in f.rpo_blocks().into_iter().enumerate() {
+        for (i, &b) in self.cx.shape.rpo().iter().enumerate() {
             if i == 0 {
                 entry[b.0 as usize] = Some(0);
             }

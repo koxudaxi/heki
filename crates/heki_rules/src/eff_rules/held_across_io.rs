@@ -14,11 +14,12 @@ use crate::{CheckContext, ModuleUnit};
 use heki_ast::Span;
 use heki_diagnostics::Diagnostic;
 use heki_effect::consumption::resolve_inst;
+use heki_effect::held::{self, Acquisitions, Change};
 use heki_effect::{CallHop, CallSite, Callee, SiteEffect, TypeCtx, Val, anchors_call_site};
+use heki_ir::walk::FnShape;
 use heki_ir::{BlockId, Inst, InstKind, IrFunction, VarId};
 use heki_kb::ExecEffectKind;
 use rustc_hash::FxHashMap;
-use std::collections::BTreeMap;
 
 /// Call sites of a module by `(caller qualname, span)` ([`CheckContext::sites_by_span`]).
 type SitesBySpan<'a> = FxHashMap<(String, Span), Vec<&'a CallSite>>;
@@ -30,9 +31,6 @@ struct Held {
     /// A transaction starter's result (`false`: a lock instance).
     transaction: bool,
 }
-
-/// Acquisitions certainly held at a program point: `span of the acquiring with item -> mgr`.
-type State = BTreeMap<Span, VarId>;
 
 pub(super) fn run(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Diagnostic>) {
     if !cx.enabled("EFF106", unit) {
@@ -61,22 +59,25 @@ pub(super) fn run(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Di
             continue;
         }
         let types = tcx.infer(f);
-        let held = held_managers(&tcx, f, &types);
+        let shape = FnShape::new(f);
+        let held = held_managers(&tcx, &shape, &types);
         if held.is_empty() {
             continue;
         }
         let sites = sites.get_or_insert_with(|| cx.sites_by_span(unit));
-        let reached = held_at_entry(f, &held)
+        let (taken, changes) = acquisitions(f, &held);
+        let reached = held::at_entry(&shape, taken.len(), |b, i| changes.get(&(b, i)))
             .into_iter()
             .enumerate()
             .filter_map(|(b, s)| s.map(|s| (BlockId(b as u32), s)));
         for (bb, mut state) in reached {
-            for inst in &f.block(bb).insts {
+            for (i, inst) in f.block(bb).insts.iter().enumerate() {
                 // The outermost resource held here names the report.
-                if let Some((&taken, &mgr)) = state.iter().min_by_key(|(sp, _)| sp.start)
+                if let Some(k) = state.ones().min_by_key(|k| taken.span(*k).start)
                     && let Some(offense) = offense(cx, unit, sites, &key.qualname, inst)
                 {
-                    let line = unit.lines.line_col(taken.start).0;
+                    let mgr = *taken.item(k);
+                    let line = unit.lines.line_col(taken.span(k).start).0;
                     let Report {
                         target,
                         message,
@@ -95,7 +96,7 @@ pub(super) fn run(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Di
                         &chain,
                     );
                 }
-                transfer(&inst.kind, &held, inst.span, &mut state);
+                state.apply(changes.get(&(bb, i)));
             }
         }
     }
@@ -195,9 +196,10 @@ fn describe(qualname: &str, held: &Held, line: u32, offense: Offense) -> Report 
 /// Managers of non-async `with` items that hold a flagged lock or transaction.
 fn held_managers(
     tcx: &TypeCtx<'_>,
-    f: &IrFunction,
+    shape: &FnShape<'_>,
     types: &FxHashMap<VarId, Val>,
 ) -> FxHashMap<VarId, Held> {
+    let f = shape.f;
     let flagged = |symbol: &str| tcx.catalog(symbol).is_some_and(|e| e.sync_lock_or_tx);
     let mut out = FxHashMap::default();
     for inst in f.blocks.iter().flat_map(|b| &b.insts) {
@@ -214,19 +216,11 @@ fn held_managers(
             _ => None,
         };
         let held = lock.or_else(|| {
-            let mut cur = mgr;
-            while let Some((_, def)) = f.def_inst(cur) {
-                match &def.kind {
-                    InstKind::Copy { src, .. } => cur = *src,
-                    kind => {
-                        return match resolve_inst(tcx, types, kind) {
-                            Callee::External(symbol) if flagged(&symbol) => Some((symbol, true)),
-                            _ => None,
-                        };
-                    }
-                }
+            let def = shape.inst(shape.copy_root(mgr))?;
+            match resolve_inst(tcx, types, &def.kind) {
+                Callee::External(symbol) if flagged(&symbol) => Some((symbol, true)),
+                _ => None,
             }
-            None
         });
         if let Some((symbol, transaction)) = held {
             out.entry(mgr).or_insert(Held {
@@ -238,62 +232,31 @@ fn held_managers(
     out
 }
 
-/// Apply one instruction to the held set. An `ExitWith` spans its `with` statement, so it
-/// releases the acquisitions of `mgr` by the items inside that statement only.
-fn transfer(kind: &InstKind, held: &FxHashMap<VarId, Held>, span: Span, state: &mut State) {
-    match kind {
-        InstKind::EnterWith { mgr, .. } if held.contains_key(mgr) => {
-            state.insert(span, *mgr);
-        }
-        InstKind::ExitWith { mgr, .. } => {
-            state.retain(|taken, m| {
-                !(m == mgr && span.start <= taken.start && taken.end <= span.end)
-            });
-        }
-        _ => {}
-    }
-}
-
-/// The managers certainly held on entry to each block (`None`: unreachable), a forward
-/// must-dataflow joined by intersection. Along an exception edge only what the block holds at
-/// every one of its instructions flows.
-fn held_at_entry(f: &IrFunction, held: &FxHashMap<VarId, Held>) -> Vec<Option<State>> {
-    let mut ins: Vec<Option<State>> = vec![None; f.blocks.len()];
-    ins[0] = Some(State::new());
-    let rpo = f.rpo_blocks();
-    let meet = |slot: &mut Option<State>, incoming: &State| -> bool {
-        let next = match slot {
-            Some(cur) => cur
-                .iter()
-                .filter(|(k, v)| incoming.get(k) == Some(v))
-                .map(|(k, v)| (*k, *v))
-                .collect(),
-            None => incoming.clone(),
-        };
-        let changed = slot.as_ref() != Some(&next);
-        *slot = Some(next);
-        changed
-    };
-    loop {
-        let mut changed = false;
-        // Reverse postorder reaches every block from an already visited predecessor first.
-        for &b in &rpo {
-            let mut state = ins[b.0 as usize].clone().unwrap_or_default();
-            let bb = f.block(b);
-            let mut throughout = state.clone();
-            for inst in &bb.insts {
-                transfer(&inst.kind, held, inst.span, &mut state);
-                throughout.retain(|k, _| state.contains_key(k));
+/// The acquisitions of `held` managers by `with` items (each holding its manager), and what
+/// each instruction does to them: an `EnterWith` takes one, and an `ExitWith`, which spans its
+/// `with` statement, gives back those of its manager by the items inside that statement.
+fn acquisitions(
+    f: &IrFunction,
+    held: &FxHashMap<VarId, Held>,
+) -> (Acquisitions<VarId>, FxHashMap<(BlockId, usize), Change>) {
+    let mut taken = Acquisitions::default();
+    let mut changes = FxHashMap::default();
+    for bb in &f.blocks {
+        for (i, inst) in bb.insts.iter().enumerate() {
+            if let InstKind::EnterWith { mgr, .. } = inst.kind
+                && held.contains_key(&mgr)
+            {
+                let k = taken.add(inst.span, Some(mgr), mgr);
+                changes.insert((bb.id, i), Change::Take(k));
             }
-            for s in bb.terminator.successors() {
-                changed |= meet(&mut ins[s.0 as usize], &state);
-            }
-            if let Some(e) = bb.exc_target {
-                changed |= meet(&mut ins[e.0 as usize], &throughout);
-            }
-        }
-        if !changed {
-            return ins;
         }
     }
+    for bb in &f.blocks {
+        for (i, inst) in bb.insts.iter().enumerate() {
+            if let InstKind::ExitWith { mgr, .. } = inst.kind {
+                changes.insert((bb.id, i), Change::Give(taken.exited(mgr, inst.span)));
+            }
+        }
+    }
+    (taken, changes)
 }

@@ -23,6 +23,7 @@
 use crate::resolver::{self, Callee, ProjectDecls, TypeCtx, Val};
 use crate::types::{Args, Elem, Obj, Ty};
 use heki_ast::Span;
+use heki_ir::walk::FnShape;
 use heki_ir::{
     BlockId, BuiltinKind, ConstLiteral, DictEntry, FunctionId, FunctionKind, Inst, InstKind,
     IrFunction, ModuleIr, PhiNode, Terminator, UnaryOpKind, VarId,
@@ -402,6 +403,10 @@ fn with_comprehension_cells(
     Rc::new(cells)
 }
 
+/// The function binding a closure's variable (fully qualified), and the class of the instance it
+/// binds to it, when that is one class ([`TypeCtx::captured`]).
+type Captured = (String, Option<String>);
+
 /// The function id of a non-inlined comprehension call (Python 3.11).
 fn comprehension_id(callee: &str) -> FunctionId {
     FunctionId(
@@ -429,7 +434,8 @@ impl TypeCtx<'_> {
             return Rc::clone(done);
         }
         let seed = self.seed_of(f);
-        let inferred = Rc::new(Engine::new(self, f, seed).run());
+        let shape = FnShape::new(f);
+        let inferred = Rc::new(Engine::new(self, &shape, seed).run());
         if inferred.nested_read {
             self.scopes
                 .enclosing
@@ -467,6 +473,27 @@ impl TypeCtx<'_> {
         Seed { iterated, cells }
     }
 
+    /// What the variable `name` that scope `f` reads from an enclosing function is: the
+    /// function binding it (fully qualified), and the class of the instance every value that
+    /// function binds to it is, when that is one class. `None` when no function enclosing `f`
+    /// binds it. The values nested scopes store through `nonlocal` are not among them
+    /// ([`Nesting::rebound`]): a caller that needs them reads the rebindings itself.
+    pub fn captured(&self, f: &IrFunction, name: &str) -> Option<Captured> {
+        let (owner, cell) = self.nesting().visible.get(&f.id)?.get(name)?;
+        let g = self.ir().function(*owner);
+        let class = match self.infer_types(g).cell_fact(cell) {
+            Fact::Known(t) => match t.val() {
+                Some(Val::Inst(c)) => Some(c),
+                _ => None,
+            },
+            Fact::Unset | Fact::Unknown => None,
+        };
+        Some((
+            format!("{}.{}", self.module_name(), resolver::func_qualname(g)),
+            class,
+        ))
+    }
+
     /// What child scope `id` produces when it iterates a value of type `seed` and reads cells
     /// of facts `cells`: the items a generator expression yields, or the container a
     /// comprehension returns.
@@ -480,7 +507,8 @@ impl TypeCtx<'_> {
             iterated: Some(key.1.clone()),
             cells: key.2.iter().cloned().collect(),
         };
-        let inferred = Engine::new(self, child, seed).run();
+        let shape = FnShape::new(child);
+        let inferred = Engine::new(self, &shape, seed).run();
         let produced = |v: VarId| inferred.facts[v.0 as usize].elem();
         let out = if matches!(
             child.kind,
@@ -574,6 +602,7 @@ const MAX_PASSES: usize = 24;
 struct Engine<'e, 'a> {
     cx: &'e TypeCtx<'a>,
     f: &'e IrFunction,
+    shape: &'e FnShape<'e>,
     owner: Option<String>,
     /// The instance `Self` stands for in a method's annotations.
     self_ty: Option<Ty>,
@@ -589,8 +618,6 @@ struct Engine<'e, 'a> {
     strs: FxHashMap<VarId, String>,
     /// How many targets the unpacking assignments of each variable have (`a, b = pair`).
     unpacked: FxHashMap<VarId, usize>,
-    /// The source of each `Copy`.
-    copies: FxHashMap<VarId, VarId>,
     /// Container displays built in the function (`[]`, `{}`, `set()` is a call), by kind.
     displays: FxHashMap<VarId, BuiltinKind>,
     /// The items (or keys) and values added to each display after it is built.
@@ -620,7 +647,6 @@ struct Engine<'e, 'a> {
 /// The CFG facts `isinstance` narrowing needs, and the narrowed types at each block's entry
 /// (`None` until a pass reaches the block).
 struct Narrowing<'e> {
-    preds: Vec<Vec<BlockId>>,
     defs: FxHashMap<VarId, &'e InstKind>,
     /// Each phi with its block.
     phis: FxHashMap<VarId, (BlockId, &'e PhiNode)>,
@@ -628,10 +654,12 @@ struct Narrowing<'e> {
 }
 
 impl<'e, 'a> Engine<'e, 'a> {
-    fn new(cx: &'e TypeCtx<'a>, f: &'e IrFunction, seed: Seed) -> Self {
+    fn new(cx: &'e TypeCtx<'a>, shape: &'e FnShape<'e>, seed: Seed) -> Self {
+        let f = shape.f;
         let mut engine = Self {
             cx,
             f,
+            shape,
             owner: cx.owner_fqn(f),
             self_ty: cx.owner_fqn(f).map(Ty::inst),
             reads_globals: f.is_module_body || f.is_class_body,
@@ -641,7 +669,6 @@ impl<'e, 'a> Engine<'e, 'a> {
             ints: FxHashMap::default(),
             strs: FxHashMap::default(),
             unpacked: FxHashMap::default(),
-            copies: FxHashMap::default(),
             displays: FxHashMap::default(),
             added: FxHashMap::default(),
             cells: seed.cells,
@@ -728,7 +755,6 @@ impl<'e, 'a> Engine<'e, 'a> {
                 .flat_map(|b| b.phis.iter().map(move |p| (p.dst, (b.id, p))))
                 .collect();
             self.narrowing = Some(Narrowing {
-                preds: f.predecessors(),
                 defs,
                 phis,
                 entry: vec![None; f.blocks.len()],
@@ -793,9 +819,6 @@ impl<'e, 'a> Engine<'e, 'a> {
                 } => {
                     self.strs.insert(*dst, text.clone());
                 }
-                InstKind::Copy { dst, src } => {
-                    self.copies.insert(*dst, *src);
-                }
                 InstKind::AllocBuiltin { dst, kind, .. } => {
                     self.displays.insert(*dst, *kind);
                 }
@@ -823,7 +846,7 @@ impl<'e, 'a> Engine<'e, 'a> {
     }
 
     fn run(mut self) -> Inferred {
-        let rpo = self.f.rpo_blocks();
+        let shape = self.shape;
         // Without loops every operand is computed before its users in reverse postorder: one
         // pass is final unless it added items to a display already computed, or handed a child
         // scope a cell bound later in the function.
@@ -839,7 +862,7 @@ impl<'e, 'a> Engine<'e, 'a> {
             self.changed = false;
             self.added_changed = false;
             self.cells_deferred.set(false);
-            for &bb in &rpo {
+            for &bb in shape.rpo() {
                 let block = self.f.block(bb);
                 self.enter(bb);
                 for phi in &block.phis {
@@ -985,7 +1008,7 @@ impl<'e, 'a> Engine<'e, 'a> {
             return;
         };
         let mut entry: Option<FxHashMap<VarId, Ty>> = None;
-        for &p in &n.preds[bb.0 as usize] {
+        for &p in self.shape.preds(bb) {
             let Some(at) = &n.entry[p.0 as usize] else {
                 continue;
             };
@@ -1194,7 +1217,7 @@ impl<'e, 'a> Engine<'e, 'a> {
             (index, keyword),
             |v| {
                 resolver::arg_fact(
-                    |d| self.f.def_inst(d).map(|(_, i)| i),
+                    |d| self.shape.inst(d),
                     class,
                     |n| match self.need(n).ok().flatten()? {
                         Ty::Ref(fqn) => Some(fqn.clone()),
@@ -1445,13 +1468,9 @@ impl<'e, 'a> Engine<'e, 'a> {
     }
 
     /// The display a variable holds (through copies), with its kind.
-    fn display_of(&self, mut var: VarId) -> Option<(VarId, BuiltinKind)> {
-        loop {
-            if let Some(kind) = self.displays.get(&var) {
-                return Some((var, *kind));
-            }
-            var = *self.copies.get(&var)?;
-        }
+    fn display_of(&self, var: VarId) -> Option<(VarId, BuiltinKind)> {
+        let root = self.shape.copy_root(var);
+        self.displays.get(&root).map(|kind| (root, *kind))
     }
 
     fn subscript(&self, span: Span, obj: VarId, index: VarId, is_slice: bool) -> Step {
