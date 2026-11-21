@@ -5,7 +5,7 @@ All notable changes to heki are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). heki is experimental: until 1.0, any
 release can change rules, configuration keys, diagnostics, and output formats.
 
-## [0.2.0] - Unreleased
+## [0.2.0] - 2026-11-21
 
 ### Breaking changes
 
@@ -229,12 +229,13 @@ release can change rules, configuration keys, diagnostics, and output formats.
   loop steps through by its own keys, it says to look each outer key up in the mapping.
 - `OPT103`'s help for a `tuple` accumulator says to extend a list and convert it once with
   `tuple(...)`, not to join the pieces.
-- `EFF102` and `EFF103` also report the function a builtin calls once per item: the function
+- `EFF102` and `EFF113` also report the function a builtin calls once per item: the function
   handed to `map`, `filter`, `itertools.starmap`, `itertools.filterfalse`, and
   `functools.reduce`, and the `key` of `sorted`, `list.sort`, `min`, `max`, and
   `itertools.groupby` (`sorted(users, key=lambda u: score(conn, u))`), when the items are not a
-  fixed number. Its body runs at the call for every rule, so `EFF101` sees its blocking calls
-  too. A `functools.partial` handed to such a builtin is followed to the function it calls.
+  fixed number and heki can tell which function it is. Its body runs at the call for every rule,
+  so `EFF111` sees its blocking calls too. A `functools.partial` handed to such a builtin is
+  followed to the function it calls.
 - `MUT107` (`hash-attr-mutation`) is opt-in: it runs only when `select` or `extend-select` names it,
   also with `lint.heuristic = true`. Its message states the claim only: "`Tag.rename` rebinds
   `self.name` outside initialization, and `Tag.__hash__` reads it".
@@ -548,7 +549,7 @@ The first public preview.
 - Wheels for Linux (x86_64 and aarch64 with glibc, x86_64 with musl), macOS (arm64 and x86_64),
   and Windows (x86_64), and a source distribution.
 
-[0.2.0]: https://github.com/koxudaxi/heki/compare/v0.1.2...HEAD
+[0.2.0]: https://github.com/koxudaxi/heki/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/koxudaxi/heki/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/koxudaxi/heki/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/koxudaxi/heki/releases/tag/v0.1.0
