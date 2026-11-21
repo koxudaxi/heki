@@ -28,7 +28,7 @@ use heki_kb::{EcosystemEntry, EnvironmentAccess, ExecEffectKind, ResultItems, Wa
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
 /// The rules whose reports are split by the must-facts of execution effects
 /// (`heki_effect::EffectSummary::must_exec`): an established report is the exact rule's, the
@@ -121,7 +121,7 @@ fn always_waits(function: &str, must: &SiteMust) -> String {
 
 /// The calls of several implementations' chains with the effect, each named with the function
 /// that makes it.
-fn each_witness(witnesses: &[CallHop]) -> String {
+fn each_witness(witnesses: &[Arc<CallHop>]) -> String {
     witnesses
         .iter()
         .map(|w| format!("`{}` (in `{}`)", w.callee, w.caller.qualname))
