@@ -6,7 +6,7 @@
 //!
 //! What a value holds comes from `heki_effect::ownership`, applied forward over the function's
 //! values: a phi joins its inputs, a project call's result is what its callees' summaries say
-//! they return (`EffectSummary::returns_origins`, with the arguments bound to the parameters
+//! they return (`EffectSummary::return_origins`, with the arguments bound to the parameters
 //! they return), and a closure's variable of an enclosing function is what that function bound
 //! to it. A new object the function stores in other state is that state's on every path. A
 //! change is the function's own change of a container (an item stored or deleted, a container
@@ -721,7 +721,7 @@ impl<'a, 'u> FnCheck<'a, 'u> {
                 .cx
                 .index
                 .summary(&bc.callee)
-                .map(|s| s.returns_origins)
+                .map(|s| s.return_origin_facts().returned.known)
                 .unwrap_or_default();
             if r.new {
                 add(&Own::new_at(inst.span, false));
@@ -737,10 +737,11 @@ impl<'a, 'u> FnCheck<'a, 'u> {
                 continue;
             };
             let bit = 1u64 << pos;
-            if s.returns_origins.params & bit != 0 {
+            let returned = s.return_origin_facts().returned.known;
+            if returned.params & bit != 0 {
                 add(o);
             }
-            if s.returns_origins.elements & bit != 0
+            if returned.elements & bit != 0
                 && let Some(e) = o.element()
             {
                 add(&e);

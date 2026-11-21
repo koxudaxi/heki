@@ -967,7 +967,13 @@ fn watch_follows_a_generator_through_the_factory_returning_it() {
             "from pkg.rows import make_rows\n\n\nasync def handler():\n    for row in make_rows():\n        print(row)\n",
         );
     let mut child = Command::new(env!("CARGO_BIN_EXE_heki"))
-        .args(["check", "--watch", "--output-format", "concise"])
+        .args([
+            "check",
+            "--heuristic",
+            "--watch",
+            "--output-format",
+            "concise",
+        ])
         .current_dir(&p.dir)
         // One re-check per edit below.
         .env("HEKI_WATCH_MAX_RUNS", "3")
@@ -1009,7 +1015,7 @@ fn watch_follows_a_generator_through_the_factory_returning_it() {
     let stdout = String::from_utf8(out.stdout).unwrap();
     assert!(
         stdout.contains(
-            "pkg/api.py:5:16: EFF101 `handler` reaches the blocking call `time.sleep` on the event loop by iterating `pkg.rows.rows`"
+            "pkg/api.py:5:16: EFF101 [heuristic] `handler` reaches the blocking call `time.sleep` on the event loop by iterating `pkg.rows.rows`"
         ),
         "{stdout}"
     );
