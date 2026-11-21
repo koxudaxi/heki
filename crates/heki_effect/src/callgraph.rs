@@ -342,16 +342,14 @@ fn must_through_calls(index: &ProjectIndex, sites: &[(PathBuf, usize)], s: &mut 
                 continue;
             };
             let must = s.must_exec.get_or_insert_with(Box::default);
-            let shared: SharedChain = found.chain.into_iter().map(Arc::new).collect();
             match must.effects.get(&e) {
-                Some(kept) if kept.len() <= shared.len() => {}
+                Some(kept) if kept.len() <= found.chain.len() => {}
                 _ => {
-                    must.effects.insert(e, shared);
+                    must.effects.insert(e, found.chain);
                     // The claim names every call the implementations end in, not only the
                     // kept chain's.
                     if found.witnesses.len() > 1 {
-                        let every = found.witnesses.into_iter().map(Arc::new).collect();
-                        must.alternatives.insert(e, every);
+                        must.alternatives.insert(e, found.witnesses);
                     } else {
                         must.alternatives.remove(&e);
                     }
@@ -384,9 +382,9 @@ pub(crate) fn site_must_chain(
             unconditional,
             ..
         } => (effects.contains(&e) && unconditional & crate::effect_bit(e) != 0).then(|| {
-            let hop = site_hop(site, path, symbol.clone());
+            let hop = Arc::new(site_hop(site, path, symbol.clone()));
             SiteMust {
-                chain: vec![hop.clone()],
+                chain: vec![Arc::clone(&hop)],
                 witnesses: vec![hop],
             }
         }),
@@ -417,12 +415,14 @@ pub(crate) fn site_must_chain(
                     .map_or(std::slice::from_ref(sink), Vec::as_slice);
                 for end in ends {
                     if !out.witnesses.contains(end) {
-                        out.witnesses.push(CallHop::clone(end));
+                        out.witnesses.push(Arc::clone(end));
                     }
                 }
                 if out.chain.is_empty() || chain.len() + 1 < out.chain.len() {
-                    out.chain = std::iter::once(site_hop(site, path, bc.callee.fqn()))
-                        .chain(chain.iter().map(|h| CallHop::clone(h)))
+                    // The callee's hops are shared, not copied: a chain through every caller up
+                    // a call chain adds one hop per caller.
+                    out.chain = std::iter::once(Arc::new(site_hop(site, path, bc.callee.fqn())))
+                        .chain(chain.iter().cloned())
                         .collect();
                 }
             }
@@ -434,11 +434,12 @@ pub(crate) fn site_must_chain(
 /// What a call has run whenever it returns ([`site_must_chain`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct SiteMust {
-    /// The shortest chain from the call to the effect.
-    pub chain: Vec<CallHop>,
+    /// The shortest chain from the call to the effect: the call's own hop, then the hops of the
+    /// callee's kept chain, shared with its summary.
+    pub chain: SharedChain,
     /// Per implementation that returns normally, the call that has the effect at the end of its
     /// chain, where that call is (each call once).
-    pub witnesses: Vec<CallHop>,
+    pub witnesses: SharedChain,
 }
 
 impl SiteMust {
@@ -455,7 +456,11 @@ impl SiteMust {
     /// The related locations of a report: the shortest chain, then each witness off it.
     pub fn related(&self) -> Vec<CallHop> {
         let off_chain = self.witnesses.iter().filter(|w| !self.chain.contains(w));
-        self.chain.iter().chain(off_chain).cloned().collect()
+        self.chain
+            .iter()
+            .chain(off_chain)
+            .map(|h| CallHop::clone(h))
+            .collect()
     }
 }
 

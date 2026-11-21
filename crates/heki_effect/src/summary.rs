@@ -5488,10 +5488,7 @@ impl<'a> Extractor<'a> {
             let hop = Arc::new(self.hop(api.clone(), span));
             let facts = self.summary.must_exec.get_or_insert_with(Box::default);
             for e in must {
-                facts
-                    .effects
-                    .entry(e)
-                    .or_insert_with(|| vec![Arc::clone(&hop)]);
+                facts.effects.insert_new(e, || vec![Arc::clone(&hop)]);
             }
         }
         let target = CallTarget::Layer2 {
