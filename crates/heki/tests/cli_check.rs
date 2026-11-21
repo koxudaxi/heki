@@ -761,8 +761,11 @@ fn colored_project(name: &str) -> (Project, String) {
         .write("opt.py", QUADRATIC)
         .write("heki.toml", "[lint.severity]\nEFF101 = \"error\"\n");
     let plain = stdout_of(p.command(&[]), &[]);
-    assert!(plain.contains("[error, heuristic]"), "{plain}");
-    assert!(plain.contains("[warning, heuristic]"), "{plain}");
+    assert!(plain.contains("(async-blocking-call) [error"), "{plain}");
+    assert!(
+        plain.contains("(list-quadratic-concat) [warning"),
+        "{plain}"
+    );
     (p, plain)
 }
 
@@ -777,16 +780,16 @@ fn colored_text_output_has_ruffs_colors_and_the_plain_text() {
     assert_eq!(uncolored(&full), plain);
     for styled in [
         format!(
-            "{PATH}app.py{RESET}{SEP}4{SEP}5{SEP} {RULE_CODE}EFF101{RESET} (async-blocking-call) [{ERROR}error{RESET}, heuristic] `handler` reaches"
+            "{PATH}app.py{RESET}{SEP}4{SEP}5{SEP} {RULE_CODE}EFF101{RESET} (async-blocking-call) [{ERROR}error{RESET}"
         ),
         format!(
             "\n  {GUTTER}|{RESET}\n{GUTTER}4 |{RESET}     time.sleep(1)\n  {GUTTER}|{RESET}     {ERROR}^{RESET}\n"
         ),
         format!(
-            "\n  {GUTTER}={RESET} {GUTTER}related{RESET}: {PATH}app.py{RESET}{SEP}4{SEP}5{SEP} `handler` calls `time.sleep`\n"
+            "\n  {GUTTER}={RESET} {GUTTER}related{RESET}: {PATH}app.py{RESET}{SEP}4{SEP}5{SEP} `handler` calls"
         ),
-        format!("\n  {GUTTER}={RESET} {HELP}help{RESET}: use `await asyncio.sleep(...)`"),
-        format!("(list-quadratic-concat) [{WARNING}warning{RESET}, heuristic]"),
+        format!("\n  {GUTTER}={RESET} {HELP}help{RESET}: "),
+        format!("(list-quadratic-concat) [{WARNING}warning{RESET}"),
         format!("\n  {GUTTER}|{RESET}         {WARNING}^{RESET}\n"),
     ] {
         assert!(full.contains(&styled), "{styled:?} not in {full:?}");
@@ -799,7 +802,7 @@ fn colored_text_output_has_ruffs_colors_and_the_plain_text() {
     );
     assert!(
         concise.starts_with(&format!(
-            "{PATH}app.py{RESET}{SEP}4{SEP}5{SEP} {RULE_CODE}EFF101{RESET} [heuristic] `handler` reaches"
+            "{PATH}app.py{RESET}{SEP}4{SEP}5{SEP} {RULE_CODE}EFF101{RESET} "
         )),
         "{concise:?}"
     );
