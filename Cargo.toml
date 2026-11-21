@@ -75,3 +75,15 @@ cap = { version = "0.1.2", features = ["stats"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
+
+# The test builds of CI (`cargo nextest archive --cargo-profile ci`). The end-to-end tests run
+# the real binary thousands of times, and light optimization makes those runs several times
+# faster for little more compile time. Debug assertions and overflow checks stay on, as in
+# `dev`; line tables keep the backtraces of failures readable.
+[profile.ci]
+inherits = "dev"
+opt-level = 1
+debug = "line-tables-only"
+
+[profile.ci.package."*"]
+opt-level = 3
