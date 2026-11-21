@@ -363,8 +363,14 @@ jobs:
           python tests/oracle/run_oracle.py --heki target/debug/heki --seeds 200 --jobs 4 --time-limit 300 --out "$RUNNER_TEMP/oracle" --fail-on-refutation
 
   memory:
-    name: peak memory
+    # Shard 1 measures the peak memory; both shards run half of the generated shapes of the
+    # analysis-cost gate (`--shard`), each after its own calibration.
+    name: peak memory and analysis cost (${{ matrix.shard }}/2)
     if: *full-run
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -377,20 +383,23 @@ jobs:
       # generated project: fails when one's peak heap exceeds its budget in the script. The
       # counting build reads the same bytes on every run.
       - name: Peak heap within budget
+        if: matrix.shard == 1
         run: python3 scripts/check_memory.py --heki target/release/heki
       # Generated shapes at the largest size heki models, in a function, a method, and a module
       # body: fails when one costs more than 1 s (scaled to the runner by a fixed linear shape on
       # the same build) or 1 GiB of heap beyond an empty module, or when an owner's walk steps
       # grow faster than linearly.
       - name: Analysis cost of generated shapes
-        run: python3 scripts/check_walk_shapes.py --heki target/release/heki
+        env:
+          SHARD: ${{ matrix.shard }}/2
+        run: python3 scripts/check_walk_shapes.py --heki target/release/heki --shard "$SHARD"
       # At release time (release.yml calls this workflow), and on a manual run: the peak RSS of
       # a release build, which also holds the allocator's fragmentation and mappings, under a
       # coarse budget.
-      - if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
+      - if: matrix.shard == 1 && (github.event_name == 'release' || github.event_name == 'workflow_dispatch')
         run: cargo build --release -p heki
       - name: Peak RSS within budget
-        if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
+        if: matrix.shard == 1 && (github.event_name == 'release' || github.event_name == 'workflow_dispatch')
         run: python3 scripts/check_memory.py --heki target/release/heki --measure rss
 
   release-scripts:

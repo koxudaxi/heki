@@ -234,9 +234,10 @@ $ python3 scripts/check_walk_shapes.py --heki target/release/heki
 ```
 
 `scripts/check_walk_shapes.py` runs generated shapes on the release binary, and CI runs it next to
-the memory gate. A shape that lives in one function is placed in a function, a method, and a module
-body, and grown to the largest size whose function the IR budget still models, so a builder change
-moves the size with it; a shape spread over a project (a wide class hierarchy, a chain of private
+the memory gate, in two jobs that each run half of the shapes (`--shard 1/2` and `--shard 2/2`).
+A shape that lives in one function is placed in a function, a method, and a module body, and grown
+to the largest size whose function the IR budget still models, so a builder change moves the size
+with it; a shape spread over a project (a wide class hierarchy, a chain of private
 helpers) has a fixed size. Each runs with every rule and one contract of each kind, through `heki
 check` and the `--watch` engine, and fails when it costs more than 1 s (on the machine the limits
 were measured on, scaled to the machine running the gate by linear shapes of calls and of loops) or
