@@ -554,7 +554,7 @@ fn import_probes_without_reads_environment_is_a_configuration_error() {
 
 /// The project's own modules, which an import names in `IMPORTS`: a package, its modules, a
 /// directory without `__init__.py` inside it, and a package whose `__init__` lets installed
-/// distributions add modules to it.
+/// distributions add modules to it, and so to `pkg`, which holds it.
 const OWN_MODULES: &[(&str, &str)] = &[
     ("pkg/names.py", "CONFIG = \"pkg.config\"\n"),
     ("pkg/config.py", "VALUE = 1\n"),
@@ -595,8 +595,8 @@ def under_a_package(name: str) -> tuple[object, ...]:
     return (
         import_module(f"pkg.parser.{name}"),
         import_module("pkg.parser." + name),
-        import_module("pkg.%s" % name),
-        import_module("pkg.{}".format(name)),
+        import_module("pkg.parser.%s" % name),
+        import_module("pkg.parser.{}".format(name)),
         import_module(f"pkg.ns.{name}"),
     )
 
@@ -676,6 +676,10 @@ def probing() -> object:
         return import_module("pkg.config")
     except ImportError:
         return None
+
+
+def under_the_top_package(name: str) -> object:
+    return import_module(f"pkg.{name}")
 "#;
 
 /// The tree of `OWN_MODULES` with `IMPORTS` in `pkg/generate/__init__.py`, and `extra`.
@@ -735,6 +739,7 @@ def sibling() -> object:
         (97, "dots_only"),
         (101, "package_head"),
         (106, "probing"),
+        (112, "under_the_top_package"),
         (7, "sibling"),
     ];
     let expected: Vec<(u64, String)> = expected
@@ -774,12 +779,328 @@ fn a_package_heki_cannot_read_may_hold_modules_of_other_distributions() {
     )
     .write("pkg/__init__.py", "")
     .write("pkg/legacy/__init__.py", "# -*- coding: cp1252 -*-\nVALUE = 1\n")
+    .write("pkg/legacy/mod.py", "VALUE = 1\n")
     .write(
         "pkg/generate.py",
-        "from importlib import import_module\n\n\ndef legacy(name: str) -> object:\n    return import_module(f\"pkg.legacy.{name}\")\n\n\ndef whole() -> object:\n    return import_module(\"pkg.legacy\")\n",
+        "from importlib import import_module\n\n\ndef legacy(name: str) -> object:\n    return import_module(f\"pkg.legacy.{name}\")\n\n\ndef whole() -> object:\n    return import_module(\"pkg.legacy\")\n\n\ndef below() -> object:\n    return import_module(\"pkg.legacy.mod\")\n",
     );
     let (code, stdout, stderr) = p.check(&["--output-format", "concise"]);
     assert_eq!(code, 2, "{stdout}{stderr}");
     assert!(stdout.contains("pkg/generate.py:5:12: EFF201"), "{stdout}");
     assert!(!stdout.contains("pkg/generate.py:9:"), "{stdout}");
+    // Its `__path__` may lead anywhere, also to another `mod`.
+    assert!(stdout.contains("pkg/generate.py:13:12: EFF201"), "{stdout}");
+}
+
+/// A project whose `reads-environment` boundary checks `probes.py`.
+const PROBES_CONFIG: &str = "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"EFF201\"]\n\n[[tool.heki.effect-boundaries]]\nname = \"env\"\nscopes = [\"probes.*\"]\nforbid = [\"reads-environment\"]\n";
+
+/// `probes.py`: one function per probe `(function, name, reported)`, importing `name`, or a name
+/// under it when it ends with a dot (`f"pkg.parser.{name}"`).
+fn probes_source(probes: &[(String, String, bool)]) -> String {
+    let mut out = String::from("from importlib import import_module\n");
+    for (function, name, _) in probes {
+        if name.ends_with('.') {
+            out.push_str(&format!(
+                "\n\ndef {function}(name: str) -> object:\n    return import_module(f\"{name}{{name}}\")\n"
+            ));
+        } else {
+            out.push_str(&format!(
+                "\n\ndef {function}() -> object:\n    return import_module(\"{name}\")\n"
+            ));
+        }
+    }
+    out
+}
+
+/// Writes `probes.py` and checks `p` with `args`: the probes reported and the probes expected
+/// to be, both sorted.
+fn reported_probes(
+    p: &Project,
+    probes: &[(String, String, bool)],
+    args: &[&str],
+) -> (Vec<String>, Vec<String>) {
+    p.write("probes.py", &probes_source(probes));
+    let mut all = vec!["--output-format", "json"];
+    all.extend_from_slice(args);
+    let (code, stdout, stderr) = p.check(&all);
+    assert!(code == 0 || code == 1, "{stdout}{stderr}");
+    let diags: Vec<Value> = serde_json::from_str(&stdout).unwrap();
+    let mut reported: Vec<String> = diags
+        .iter()
+        .map(|d| {
+            let message = d["message"].as_str().unwrap();
+            assert!(
+                message.ends_with("reads the environment (calls `importlib.import_module`), which effect boundary `env` forbids"),
+                "{message}"
+            );
+            message.split('`').nth(1).unwrap().to_owned()
+        })
+        .collect();
+    reported.sort();
+    let mut expected: Vec<String> = probes
+        .iter()
+        .filter(|(_, _, reported)| *reported)
+        .map(|(function, ..)| function.clone())
+        .collect();
+    expected.sort();
+    (reported, expected)
+}
+
+fn probe(function: &str, name: &str, reported: bool) -> (String, String, bool) {
+    (function.to_owned(), name.to_owned(), reported)
+}
+
+#[test]
+fn a_subpackage_changing_its_path_takes_names_under_its_parent_outside_the_project() {
+    let p = Project::new("env_path_subpackage");
+    p.write("pyproject.toml", PROBES_CONFIG)
+        .write("pkg/__init__.py", "")
+        .write("pkg/plugins/__init__.py", "__path__ = [\"/opt/plugins\"]\n")
+        .write("pkg/parser/__init__.py", "")
+        .write("clean/__init__.py", "");
+    let probes = [
+        // `name` may be `plugins.thirdparty`, found in `/opt/plugins`.
+        probe("plugin", "pkg.", true),
+        probe("sibling", "pkg.parser.", false),
+        probe("unrelated", "clean.", false),
+    ];
+    let (reported, expected) = reported_probes(&p, &probes, &[]);
+    assert_eq!(reported, expected);
+}
+
+/// What the `__init__.py` of a package under `pkg` does with its `__path__`: whether a name under
+/// the package (`f"pkg.<package>.{name}"`) and its module `mod` (`"pkg.<package>.mod"`) are
+/// imported from outside the project. Directories after the package's own leave its own modules
+/// found first.
+const OWN_PATH_SHAPES: &[(&str, &str, bool, bool)] = &[
+    ("plain", "", false, false),
+    ("reader", READING_PATH, false, false),
+    (
+        "appended",
+        "__path__.append(\"/opt/plugins\")\n",
+        true,
+        false,
+    ),
+    (
+        "extended",
+        "__path__.extend([\"/opt/plugins\"])\n",
+        true,
+        false,
+    ),
+    ("added", "__path__ += [\"/opt/plugins\"]\n", true, false),
+    (
+        "concatenated",
+        "__path__ = __path__ + [\"/opt/plugins\"]\n",
+        true,
+        false,
+    ),
+    (
+        "extend_path",
+        "from pkgutil import extend_path\n\n__path__ = extend_path(__path__, __name__)\n",
+        true,
+        false,
+    ),
+    (
+        "extend_path_of_pkgutil",
+        "import pkgutil\n\n__path__ = pkgutil.extend_path(__path__, __name__)\n",
+        true,
+        false,
+    ),
+    (
+        "extend_path_imported",
+        "__path__ = __import__(\"pkgutil\").extend_path(__path__, __name__)\n",
+        true,
+        false,
+    ),
+    (
+        "declared",
+        "__import__(\"pkg_resources\").declare_namespace(__name__)\n",
+        true,
+        false,
+    ),
+    (
+        "declared_by_name",
+        "import pkg_resources\n\npkg_resources.declare_namespace(\"pkg.declared_by_name\")\n",
+        true,
+        false,
+    ),
+    ("rebound", "__path__ = [\"/opt/plugins\"]\n", true, true),
+    (
+        "prepended",
+        "__path__ = [\"/opt/plugins\"] + __path__\n",
+        true,
+        true,
+    ),
+    (
+        "inserted",
+        "__path__.insert(0, \"/opt/plugins\")\n",
+        true,
+        true,
+    ),
+    ("sliced", "__path__[:0] = [\"/opt/plugins\"]\n", true, true),
+    ("deleted", "del __path__\n", true, true),
+    (
+        "in_a_function",
+        "def setup():\n    __path__.insert(0, \"/opt/plugins\")\n",
+        true,
+        true,
+    ),
+    (
+        "rebound_in_a_function",
+        "def setup():\n    global __path__\n    __path__ = [\"/opt/plugins\"]\n",
+        true,
+        true,
+    ),
+    (
+        "aliased",
+        "def setup(flag):\n    paths = __path__ if flag else []\n    paths.insert(0, \"/opt/plugins\")\n",
+        true,
+        true,
+    ),
+    (
+        "returned",
+        "def paths():\n    return __path__\n",
+        true,
+        true,
+    ),
+    (
+        "handed",
+        "from pkg.registry import register\n\nregister(__path__)\n",
+        true,
+        true,
+    ),
+    (
+        "handed_to_a_method",
+        "from pkg.registry import Registry\n\nRegistry().add(__path__)\n",
+        true,
+        true,
+    ),
+    ("kept_in_a_global", "PATHS = __path__\n", true, true),
+];
+
+/// A package `__init__.py` that only reads its `__path__`.
+const READING_PATH: &str = r#"import os
+import pkgutil
+from importlib import import_module
+
+for _, name, _ in pkgutil.iter_modules(__path__):
+    import_module(f"{__name__}.{name}")
+walked = list(pkgutil.walk_packages(__path__, __name__ + "."))
+first = __path__[0]
+count = len(__path__)
+for directory in __path__:
+    os.listdir(directory)
+found = any(os.path.isdir(d) for d in __path__)
+where = __path__.index(first)
+if __path__:
+    names = [d for d in __path__]
+"#;
+
+/// The packages under `pkg` whose `__path__` another module changes, through its imports
+/// (`CHANGING_PATHS`), as `OWN_PATH_SHAPES`.
+const OTHERS_PATH_SHAPES: &[(&str, bool, bool)] = &[
+    ("grown", true, false),
+    ("shared", true, true),
+    ("replaced", true, true),
+    ("removed", true, true),
+    ("listed", false, false),
+];
+
+const CHANGING_PATHS: &str = r#"import pkgutil
+
+import pkg.grown
+import pkg.listed
+import pkg.removed
+import pkg.replaced as replaced
+from pkg.shared import __path__ as shared_path
+
+pkg.grown.__path__.append("/opt/plugins")
+shared_path.insert(0, "/opt/plugins")
+replaced.__path__ = ["/opt/plugins"]
+for info in pkgutil.iter_modules(pkg.listed.__path__):
+    pass
+del pkg.removed.__path__
+
+
+def add_more():
+    shared_path.append("/opt/more")
+
+
+def rebind(module):
+    module.__path__ = []
+"#;
+
+#[test]
+fn a_package_whose_path_may_lead_outside_the_project_holds_modules_of_other_distributions() {
+    let p = Project::new("env_path_shapes");
+    p.write("pyproject.toml", PROBES_CONFIG)
+        .write("pkg/__init__.py", "")
+        .write("pkg/boot.py", CHANGING_PATHS)
+        .write(
+            "pkg/registry.py",
+            "class Registry:\n    def add(self, paths):\n        return paths\n\n\ndef register(paths):\n    return paths\n",
+        );
+    let mut probes = vec![probe("under_pkg", "pkg.", true)];
+    let shapes = OWN_PATH_SHAPES
+        .iter()
+        .map(|(package, init, under, module)| (*package, *init, *under, *module))
+        .chain(
+            OTHERS_PATH_SHAPES
+                .iter()
+                .map(|(package, under, module)| (*package, "", *under, *module)),
+        );
+    for (package, init, under, module) in shapes {
+        p.write(&format!("pkg/{package}/__init__.py"), init)
+            .write(&format!("pkg/{package}/mod.py"), "VALUE = 1\n");
+        probes.push(probe(
+            &format!("under_{package}"),
+            &format!("pkg.{package}."),
+            under,
+        ));
+        probes.push(probe(
+            &format!("module_{package}"),
+            &format!("pkg.{package}.mod"),
+            module,
+        ));
+    }
+    // Before 3.12 a comprehension is a function of its own, passed the path to iterate.
+    for args in [&[][..], &["--target-version", "py311"]] {
+        let (reported, expected) = reported_probes(&p, &probes, args);
+        assert_eq!(reported, expected, "{args:?}");
+    }
+}
+
+#[test]
+fn the_packages_along_a_name_decide_where_it_is_found() {
+    let p = Project::new("env_path_along");
+    p.write("pyproject.toml", PROBES_CONFIG)
+        .write("top/__init__.py", "__path__.append(\"/opt/plugins\")\n")
+        .write("top/sub/__init__.py", "")
+        .write("top/sub/mod.py", "VALUE = 1\n")
+        .write("top/portion/mod.py", "VALUE = 1\n")
+        .write("moved/__init__.py", "__path__ = [\"/opt/plugins\"]\n")
+        .write("moved/sub/__init__.py", "")
+        .write("moved/sub/mod.py", "VALUE = 1\n")
+        .write("spread/sub/__init__.py", "")
+        .write("spread/sub/mod.py", "VALUE = 1\n")
+        .write("plain/__init__.py", "")
+        .write("plain/mod.py", "VALUE = 1\n");
+    let probes = [
+        // `top/sub/__init__.py` is found before `/opt/plugins/sub`.
+        probe("under_a_package_after", "top.sub.", false),
+        probe("in_a_package_after", "top.sub.mod", false),
+        // `top/portion` is one portion of a namespace package `/opt/plugins/portion` joins.
+        probe("in_a_portion", "top.portion.mod", false),
+        probe("under_a_portion", "top.portion.", true),
+        probe("under_a_moved_package", "moved.sub.", true),
+        probe("in_a_moved_package", "moved.sub.mod", true),
+        // A namespace package has a portion in every directory of `sys.path`.
+        probe("under_a_namespace", "spread.", true),
+        probe("under_a_package_of_a_namespace", "spread.sub.", false),
+        probe("in_a_package_of_a_namespace", "spread.sub.mod", false),
+        probe("under_a_module", "plain.mod.", true),
+    ];
+    let (reported, expected) = reported_probes(&p, &probes, &[]);
+    assert_eq!(reported, expected);
 }

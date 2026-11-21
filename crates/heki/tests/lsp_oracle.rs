@@ -4447,3 +4447,89 @@ fn lsp_diagnostics_equal_a_full_check_below_a_git_working_tree() {
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
     s.lsp.stop(true);
 }
+
+// ----------------------------------------------------------- package paths an import goes through
+
+const PATHS_CONFIG: &str = r#"[project]
+name = "t"
+
+[tool.heki.lint]
+select = ["EFF201"]
+
+[[tool.heki.effect-boundaries]]
+name = "plugins"
+scopes = ["app.loader"]
+forbid = ["reads-environment"]
+"#;
+
+// A name under `app`, which an installed module may answer once a package under `app` changes
+// its `__path__`, and a module of a package, which only a replaced path takes elsewhere.
+const PATHS_LOADER: &str = "from importlib import import_module\n\n\ndef load(name):\n    return import_module(f\"app.{name}\")\n\n\ndef builtin():\n    return import_module(\"app.plugins.builtin\")\n";
+
+/// The `__path__` of packages below the names a module imports (`ModuleDecls::path_changes`, read
+/// across files through `ProjectDecls::changed_paths`): a package gains, changes, and loses a
+/// redirect while another file imports through it, a package with one appears and disappears
+/// below the imported name, and another module changes the package's path.
+#[test]
+fn lsp_diagnostics_equal_a_full_check_while_package_paths_change() {
+    let files = vec![
+        ("app/__init__.py", String::new()),
+        ("app/plugins/__init__.py", String::new()),
+        ("app/plugins/builtin.py", "VALUE = 1\n".to_owned()),
+        ("app/loader.py", PATHS_LOADER.to_owned()),
+    ];
+    let mut s = Session::start_with("lsp_oracle_package_paths", PATHS_CONFIG, files, false);
+    let steps = [
+        Step::new("initial index", Vec::new()).absent(&[("app/loader.py", "EFF201")]),
+        Step::new(
+            "the package appends a directory to its path",
+            vec![save("app/plugins/__init__.py", "__path__.append(\"/opt/plugins\")\n")],
+        )
+        .present(&[("app/loader.py", "EFF201")]),
+        Step::new(
+            "the package replaces its path",
+            vec![save("app/plugins/__init__.py", "__path__ = [\"/opt/plugins\"]\n")],
+        )
+        .present(&[("app/loader.py", "EFF201")]),
+        Step::new(
+            "the package leaves its path alone again",
+            vec![save("app/plugins/__init__.py", "")],
+        )
+        .absent(&[("app/loader.py", "EFF201")]),
+        Step::new(
+            "a package changing its path appears below the imported name",
+            vec![Action::Create(
+                "app/extra/__init__.py",
+                "__path__.insert(0, \"/opt/extra\")\n".to_owned(),
+            )],
+        )
+        .present(&[("app/loader.py", "EFF201")]),
+        Step::new(
+            "the package is deleted",
+            vec![Action::Delete("app/extra/__init__.py")],
+        )
+        .absent(&[("app/loader.py", "EFF201")]),
+        Step::new(
+            "another module replaces the package's path",
+            vec![Action::Create(
+                "app/boot.py",
+                "import app.plugins\n\napp.plugins.__path__ = [\"/opt/plugins\"]\n".to_owned(),
+            )],
+        )
+        .present(&[("app/loader.py", "EFF201")]),
+        Step::new(
+            "the module only lists the package's modules",
+            vec![save(
+                "app/boot.py",
+                "import pkgutil\n\nimport app.plugins\n\nPLUGINS = list(pkgutil.iter_modules(app.plugins.__path__))\n",
+            )],
+        )
+        .absent(&[("app/loader.py", "EFF201")]),
+    ];
+    let mut failures = Vec::new();
+    for step in &steps {
+        failures.extend(s.run(step));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+    s.lsp.stop(true);
+}
