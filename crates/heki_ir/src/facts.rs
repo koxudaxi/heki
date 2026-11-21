@@ -262,9 +262,9 @@ pub struct ModuleConstants {
     /// Names of the builtins the facts rely on (`range`, `len`, ...) that the module rebinds.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub shadowed: BTreeSet<String>,
-    /// Module globals may be bound behind the IR (`exec` or `globals()` at module level): no
-    /// name is fixed and no builtin is trusted. (A `from m import *` only rebinds the public
-    /// names bound before it.)
+    /// Module globals may be bound behind the IR (`exec`, or a change through the dict
+    /// `globals()` returns: [`writes_globals`]): no name is fixed and no builtin is trusted.
+    /// (A `from m import *` only rebinds the public names bound before it.)
     #[serde(default)]
     pub dynamic: bool,
 }
@@ -2352,6 +2352,118 @@ pub fn comprehension_id(callee_var: Option<VarId>, callee: &str) -> Option<u32> 
     }
 }
 
+/// Methods of the dict of module globals that change nothing (`globals().get(name)`).
+const READING_DICT_METHODS: &[&str] = &[
+    "get",
+    "keys",
+    "values",
+    "items",
+    "copy",
+    "__getitem__",
+    "__contains__",
+    "__len__",
+    "__iter__",
+];
+
+/// Builtins that only read the dict they are handed (`len(globals())`, `sorted(globals())`).
+const READING_BUILTINS: &[&str] = &[
+    "len",
+    "list",
+    "tuple",
+    "sorted",
+    "dict",
+    "set",
+    "frozenset",
+    "iter",
+    "repr",
+    "str",
+    "bool",
+];
+
+/// Whether `f` may bind a module global behind the IR through the dict `globals()` returns
+/// (`vars()` and `locals()` are A1 hazards of their own). Storing or deleting an item, calling
+/// a method that changes the dict, or handing it on where other code may change it (an
+/// argument of a call that only reads it is no such hand-off; a stored, returned, or merged
+/// value is) may bind any name, also one declared `Final`, which the runtime does not
+/// enforce. Reading the dict (`globals().get(name)`, `name in globals()`, iterating it) binds
+/// nothing. The builtin `globals` itself handed on (`g = globals`) may be called anywhere.
+fn writes_globals(f: &IrFunction) -> bool {
+    let dict_call = |kind: &InstKind| match kind {
+        InstKind::Call {
+            dst,
+            callee,
+            callee_var: Some(_),
+            args,
+            kwargs,
+            ..
+        } if args.is_empty() && kwargs.is_empty() && callee == "globals" => Some(*dst),
+        _ => None,
+    };
+    let insts = || f.blocks.iter().flat_map(|b| &b.insts);
+    let dicts: FxHashSet<VarId> = insts().filter_map(|i| dict_call(&i.kind)).collect();
+    let names_globals = |kind: &InstKind| match kind {
+        InstKind::LoadGlobal { name, .. } | InstKind::LoadName { name, .. } => name == "globals",
+        _ => false,
+    };
+    if dicts.is_empty() && !insts().any(|i| names_globals(&i.kind)) {
+        return false;
+    }
+    let shape = FnShape::new(f);
+    let is_dict = |v: VarId| dicts.contains(&shape.copy_root(v));
+    let callees: FxHashSet<VarId> = insts()
+        .filter_map(|i| match &i.kind {
+            InstKind::Call {
+                callee_var: Some(c),
+                ..
+            } => Some(*c),
+            _ => None,
+        })
+        .collect();
+    let reads_only = |kind: &InstKind| match kind {
+        InstKind::Copy { .. }
+        | InstKind::SubscriptLoad { .. }
+        | InstKind::Compare { .. }
+        | InstKind::MakeIter { .. } => true,
+        InstKind::MethodCall {
+            recv,
+            method,
+            args,
+            kwargs,
+            ..
+        } => {
+            is_dict(*recv)
+                && READING_DICT_METHODS.contains(&method.as_str())
+                && !args
+                    .iter()
+                    .chain(kwargs.iter().map(|(_, v)| v))
+                    .any(|v| is_dict(*v))
+        }
+        InstKind::Call {
+            callee,
+            callee_var: Some(_),
+            kwargs,
+            ..
+        } => READING_BUILTINS.contains(&callee.as_str()) && kwargs.is_empty(),
+        _ => false,
+    };
+    f.blocks.iter().any(|bb| {
+        bb.phis
+            .iter()
+            .any(|phi| phi.incoming.iter().any(|(_, v)| is_dict(*v)))
+            || bb.insts.iter().any(|inst| {
+                let handed_on = names_globals(&inst.kind)
+                    && inst.kind.dst().is_some_and(|d| !callees.contains(&d));
+                let changed =
+                    inst.kind.operands().into_iter().any(is_dict) && !reads_only(&inst.kind);
+                handed_on || changed
+            })
+            || match bb.terminator {
+                Terminator::Return(Some(v)) | Terminator::Raise(Some(v)) => is_dict(v),
+                _ => false,
+            }
+    })
+}
+
 /// The constants of a module (see [`ModuleConstants`]), knowing what its comprehension
 /// functions return (`comprehensions`).
 fn module_constants(
@@ -2374,14 +2486,10 @@ fn module_constants(
                 } => {
                     deleted.insert(name);
                 }
-                InstKind::Call {
-                    callee,
-                    callee_var: Some(_),
-                    ..
-                } if callee == "globals" => dynamic = true,
                 _ => {}
             }
         }
+        dynamic = dynamic || writes_globals(f);
     }
     let shadowed: BTreeSet<String> = READ_ONLY_BUILTINS
         .iter()
