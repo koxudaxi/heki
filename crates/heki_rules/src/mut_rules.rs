@@ -11,7 +11,7 @@ use heki_effect::{
     AttrKeyPath, BoundCallee, CONTAINER_MUTATORS, CacheEvent, CacheFlow, CallHop, CallSite, Callee,
     Construction, Delivery, EffectSummary, Facts, FlowBlock, FuncKey, INITIALIZERS, ProjectDecls,
     ProjectIndex, ReturnStep, SelfAttrWrite, Shared, SiteRole, TypeCtx, TypedFieldWriteSite, Val,
-    WriteKind, self_attr_writes,
+    WriteKind, attr_writes, self_attr_writes,
 };
 use heki_env::HekiConfig;
 use heki_ir::{BlockId, FnIndex, Inst, InstKind, IrFunction, VarId};
@@ -186,33 +186,6 @@ fn local_summary<'a>(index: &'a ProjectIndex, m: &Method<'_>) -> Option<&'a Effe
         .map(|s| &**s)
 }
 
-/// Memo / cache dictionaries by name: a word of the attribute's name is `cache...` or `memo...`
-/// (`self._cache`, `self.memo`, `self._resultCache`, `self.memoized`), not `memory`.
-fn is_memo_name(attr: &str) -> bool {
-    let mut words: Vec<String> = Vec::new();
-    for part in attr.split('_') {
-        let mut word = String::new();
-        for c in part.chars() {
-            if c.is_ascii_uppercase() && !word.is_empty() {
-                words.push(std::mem::take(&mut word));
-            }
-            word.push(c.to_ascii_lowercase());
-        }
-        words.push(word);
-    }
-    words
-        .iter()
-        .any(|w| w.starts_with("cache") || w.starts_with("memo") && !w.starts_with("memor"))
-}
-
-/// A write that fills a memo dictionary rather than changing what it was computed from: a
-/// memo-shaped write (`setdefault`, a store under `if k not in self.<attr>:`), or an in-place
-/// change of an attribute named as a memo or cache. Rebinding such an attribute is no memo
-/// operation (`self.cache_size = n`).
-fn is_memo_write(attr: &str, w: &SelfAttrWrite) -> bool {
-    w.memo_shaped || !w.rebinds && is_memo_name(attr)
-}
-
 /// Disjoint constant dict keys: every read and every write names a constant key, and no key
 /// is both read and written (`self.params["outtmpl"]` vs `self.params["proxy"]`).
 fn disjoint_keys<'k>(
@@ -315,7 +288,7 @@ fn stale_writes<'m, 'a>(
                     // Filter 2: memo / cache dictionaries.
                     let mut own: Vec<&SelfAttrWrite> = flow
                         .writes_of(attr)
-                        .filter(|w| !is_memo_write(attr, w))
+                        .filter(|w| !w.fills_memo(attr))
                         .collect();
                     // Computing the cached value initialized the attribute (the property reads
                     // it only where it is initialized lazily), so a lazy initialization cannot
@@ -654,17 +627,18 @@ fn filter1_init(m: &Method<'_>, init_called: &FxHashSet<FuncKey>) -> bool {
 /// The project classes whose methods' `MUT101` / `MUT107` / `MUT112` / `MUT113` reports read
 /// the summaries of the methods `changed` (a class family spans modules, see
 /// [`ClassMethods::family`]): a changed `@cached_property` or `__hash__` (or a removed method) is
-/// read for its own family, a changed initialization method for the families of its ancestors
-/// and subclasses that have either, a method overriding an inherited one for its own family, and
-/// any method for its own family when a class of it has a generator suspending inside an
-/// iteration of its own containers (`MUT113` reports the generator with the methods changing
-/// them, and with what its callers run while it is suspended: the callees of a changed function,
-/// and the `callees` a function whose call sites changed had before or has after the change, are
-/// read for the families of the generators whose objects their calls may hand on, also through
-/// the functions handing them on in turn). With `in_place_changes` (`MUT112` selected), every
-/// changed method is read for its own family: a store in `self.<attr>` is reported when a method
-/// of the family changes the attribute in place. A family's classes include the ancestors whose
-/// methods it inherits. A changed writer is otherwise reported in its own file only.
+/// read for its own family, any changed method for the families of its ancestors and subclasses
+/// that have either (the calls of every method decide which private methods only initialization
+/// runs), a method overriding an inherited one for its own family, and any method for its own
+/// family when a class of it has a generator suspending inside an iteration of its own containers
+/// (`MUT113` reports the generator with the methods changing them, and with what its callers run
+/// while it is suspended: the callees of a changed function, and the `callees` a function whose
+/// call sites changed had before or has after the change, are read for the families of the
+/// generators whose objects their calls may hand on, also through the functions handing them on in
+/// turn). With `in_place_changes` (`MUT112` selected), every changed method is read for its own
+/// family: a store in `self.<attr>` is reported when a method of the family changes the attribute
+/// in place. A family's classes include the ancestors whose methods it inherits. A changed writer
+/// is otherwise reported in its own file only.
 pub fn family_readers(
     index: &ProjectIndex,
     decls: &ProjectDecls,
@@ -678,12 +652,20 @@ pub fn family_readers(
                 || index.summary(k).is_some_and(|s| s.is_cached_property)
         })
     };
-    let has_suspending_generator = |class: &String| {
-        decls
-            .methods_of(class)
-            .iter()
-            .any(|k| iterated_mutation::suspends(index, k))
+    // Each class's methods are read once, whatever number of its methods changed.
+    let mut suspending: FxHashMap<String, bool> = FxHashMap::default();
+    let mut has_suspending_generator = |class: &String| {
+        *suspending.entry(class.clone()).or_insert_with(|| {
+            decls
+                .methods_of(class)
+                .iter()
+                .any(|k| iterated_mutation::suspends(index, k))
+        })
     };
+    // Per changed class: the names of the methods its ancestors define, whether a class of its
+    // family has a suspending generator, and the classes of its family with reported reads.
+    let mut families: FxHashMap<String, (FxHashSet<String>, bool, Vec<String>)> =
+        FxHashMap::default();
     let methods = changed.iter().filter_map(|key| {
         let (owner, name) = key.qualname.rsplit_once('.')?;
         let class = format!("{}.{owner}", key.module);
@@ -702,36 +684,31 @@ pub fn family_readers(
         {
             roots.insert(class.clone());
         }
-        // A method that overrides an inherited one (or stops doing so) changes which of the
-        // ancestors' methods the class family inherits.
-        let overrides = decls.ancestors_of(&class).iter().any(|a| {
-            decls
-                .methods_of(a)
-                .iter()
-                .any(|k| k.qualname.rsplit('.').next() == Some(name))
-        });
-        if overrides {
-            roots.insert(class.clone());
-        }
-        let suspending = decls
-            .ancestors_of(&class)
-            .iter()
-            .chain(&decls.subclasses_of(&class))
-            .chain([&class])
-            .any(has_suspending_generator);
-        if suspending {
-            roots.insert(class.clone());
-        }
-        if INIT_METHODS.contains(&name) {
-            roots.extend(
-                decls
-                    .ancestors_of(&class)
+        let (inherited, suspending, reported) =
+            families.entry(class.clone()).or_insert_with(|| {
+                let ancestors = decls.ancestors_of(&class);
+                let inherited = ancestors
+                    .iter()
+                    .flat_map(|a| decls.methods_of(a))
+                    .filter_map(|k| k.qualname.rsplit('.').next().map(str::to_owned))
+                    .collect();
+                let family: Vec<String> = ancestors
                     .into_iter()
                     .chain(decls.subclasses_of(&class))
-                    .chain([class])
-                    .filter(has_reported_reads),
-            );
+                    .chain([class.clone()])
+                    .collect();
+                let suspending = family.iter().any(&mut has_suspending_generator);
+                let reported = family.into_iter().filter(has_reported_reads).collect();
+                (inherited, suspending, reported)
+            });
+        // A method that overrides an inherited one (or stops doing so) changes which of the
+        // ancestors' methods the class family inherits.
+        if inherited.contains(name) || *suspending {
+            roots.insert(class);
         }
+        // Initialization, and the private helpers it alone calls, write nothing a cached
+        // property or a hash reads.
+        roots.extend(reported.iter().cloned());
     }
     let mut out = BTreeSet::new();
     for root in roots {
@@ -745,25 +722,48 @@ pub fn family_readers(
     out
 }
 
-/// Private methods `__init__` of the class family calls on `self` directly.
+/// Private methods `__init__` of the class family calls on `self` directly, and the private
+/// methods only initialization runs through them: each project caller of such a method is an
+/// `__init__` of the family or another one (`__init__` -> `self._load()` -> `self._decode()`).
 fn private_methods_called_from_init(
     index: &ProjectIndex,
     family: &[&Method<'_>],
 ) -> FxHashSet<FuncKey> {
-    let mut out = FxHashSet::default();
-    for init in family.iter().filter(|m| m.name() == "__init__") {
-        let file = index.files.get(init.path);
-        for site in file
+    let inits: Vec<&Method<'_>> = family
+        .iter()
+        .copied()
+        .filter(|m| m.name() == "__init__")
+        .collect();
+    let self_callees = |path: &Path, caller: &FuncKey| -> Vec<FuncKey> {
+        index
+            .files
+            .get(path)
             .into_iter()
             .flat_map(|f| &f.call_sites)
-            .filter(|s| s.caller == init.key && s.recv_is_self)
-        {
-            out.extend(
-                site.project_callees()
-                    .iter()
-                    .filter(|c| is_private(&c.callee.qualname))
-                    .map(|c| c.callee.clone()),
-            );
+            .filter(|s| s.caller == *caller && s.recv_is_self)
+            .flat_map(|s| s.project_callees())
+            .filter(|c| is_private(&c.callee.qualname))
+            .map(|c| c.callee.clone())
+            .collect()
+    };
+    let mut out: FxHashSet<FuncKey> = inits
+        .iter()
+        .flat_map(|init| self_callees(init.path, &init.key))
+        .collect();
+    let mut only_init: FxHashSet<FuncKey> = inits.iter().map(|m| m.key.clone()).collect();
+    let mut work: Vec<(&Path, FuncKey)> = inits.iter().map(|m| (m.path, m.key.clone())).collect();
+    while let Some((path, caller)) = work.pop() {
+        for callee in self_callees(path, &caller) {
+            let runs_only_there = !only_init.contains(&callee)
+                && index
+                    .reverse_call_graph
+                    .get(&callee)
+                    .is_some_and(|callers| callers.iter().all(|k| only_init.contains(k)));
+            if runs_only_there && let Some(p) = index.file_of(&callee) {
+                only_init.insert(callee.clone());
+                out.insert(callee.clone());
+                work.push((p, callee));
+            }
         }
     }
     out
@@ -2092,6 +2092,37 @@ pub(crate) fn site_call<'i>(
     })
 }
 
+/// The value each of `vars` copies, through any number of copies (itself when it is no copy),
+/// each value resolved once. Copies in dead code can close a cycle, which ends a walk.
+fn copy_origins(f: &IrFunction, vars: impl Iterator<Item = VarId>) -> FxHashMap<VarId, VarId> {
+    let sources: FxHashMap<VarId, VarId> = f
+        .blocks
+        .iter()
+        .flat_map(|b| &b.insts)
+        .filter_map(|i| match i.kind {
+            InstKind::Copy { dst, src } => Some((dst, src)),
+            _ => None,
+        })
+        .collect();
+    let mut origin: FxHashMap<VarId, VarId> = FxHashMap::default();
+    for var in vars {
+        let mut path: FxHashSet<VarId> = FxHashSet::default();
+        let mut cur = var;
+        let root = loop {
+            if let Some(&known) = origin.get(&cur) {
+                break known;
+            }
+            match sources.get(&cur) {
+                Some(&src) if path.insert(cur) => cur = src,
+                _ => break cur,
+            }
+        };
+        origin.insert(var, root);
+        origin.extend(path.into_iter().map(|v| (v, root)));
+    }
+    origin
+}
+
 /// Whether the call instruction `inst` consumes the result of another call instruction with
 /// the same span. Only an instruction the IR builder synthesizes around a source expression
 /// shares its span (a comprehension's `acc.append(elt)` carries the span of `elt`); when that
@@ -2296,6 +2327,12 @@ impl<'a> Mut202Fn<'a> {
             }
             InstKind::MakeIter { iterable, .. } => self.ro.get(iterable).cloned(),
             InstKind::IterNext { iter, .. } => self.ro.get(iter)?.derive(ReturnStep::ELEMENT),
+            InstKind::DictLiteral { .. } | InstKind::AllocBuiltin { .. } => {
+                readonly::display_copies(self.f, &inst.kind)
+                    .iter()
+                    .filter_map(|v| self.ro.get(v)?.derive(ReturnStep::SHALLOW_COPY))
+                    .reduce(|a, b| a.join(&b))
+            }
             _ => {
                 let call = self.call_of(inst)?;
                 if let Some(r) = self.producer(&call.callee, inst.span) {
@@ -2314,14 +2351,12 @@ impl<'a> Mut202Fn<'a> {
                     ),
                 };
                 let r = self.ro.get(&operand?)?;
-                let symbol = match &call.callee {
-                    Callee::External(s) => s.as_str(),
-                    _ => "",
-                };
                 let deep = readonly::deep_copy_requested(call.kwargs, |v| {
                     self.f.const_bool(v) == Some(true)
                 });
-                match readonly::call_derivation(method, symbol, self.cx.kb, deep)? {
+                let own_items = call.args.len() > 1 || !call.kwargs.is_empty();
+                match readonly::call_derivation(method, &call.callee, self.cx.kb, deep, own_items)?
+                {
                     Derivation::DeepCopy => None,
                     Derivation::Step(step) => r.derive(step),
                 }
@@ -2389,9 +2424,28 @@ impl<'a> Mut202Fn<'a> {
         if self.ro.is_empty() {
             return;
         }
+        // Filling a memo of a shared object, or initializing one of its attributes lazily,
+        // leaves what it computes as it was (as for the helpers, `memo_param_paths`). Each
+        // object is read on its own: a test of one object's attribute says nothing of another's.
+        let origins = copy_origins(self.f, self.ro.keys().copied());
+        let objects: FxHashMap<VarId, u32> = self
+            .ro
+            .iter()
+            .filter(|(_, r)| !r.shallow_copy)
+            .map(|(v, _)| (*v, origins[v].0))
+            .collect();
+        let memo_fills: FxHashSet<(BlockId, u32)> = attr_writes(self.f, &objects)
+            .into_iter()
+            .filter(|(attr, w)| w.fills_memo(attr) || w.lazy_init)
+            .map(|(_, w)| (w.block, w.index))
+            .collect();
         let mut reported: BTreeSet<Span> = BTreeSet::new();
         for bb in &self.f.blocks {
-            for inst in &bb.insts {
+            for (index, inst) in bb.insts.iter().enumerate() {
+                let at = (bb.id, u32::try_from(index).unwrap_or(u32::MAX));
+                if memo_fills.contains(&at) {
+                    continue;
+                }
                 let (hit, chain) = self.violation(inst);
                 if let Some(r) = hit
                     && reported.insert(inst.span)
@@ -2459,19 +2513,23 @@ impl<'a> Mut202Fn<'a> {
             };
             // Summaries track parameters 0..64 (`mutated_param_paths` keys are `u8`).
             // A shallow copy shares only the objects below its top level: rebinding its
-            // attributes changes the copy alone.
+            // attributes changes the copy alone. Filling a memo of the shared object, or
+            // initializing one of its attributes lazily, leaves what it computes as it was.
+            let p = u8::try_from(pos).ok().filter(|p| *p < 64);
             let mutates = self
                 .facts_run_by_call(inst.span, key, callee)
                 .iter()
                 .any(|facts| {
-                    if r.shallow_copy {
-                        u8::try_from(pos)
-                            .ok()
-                            .and_then(|p| facts.changed_param_attrs.get(&p))
-                            .is_some_and(|attrs| !attrs.is_empty())
-                    } else {
-                        pos < 64 && facts.mutates_params & (1u64 << pos) != 0
-                    }
+                    p.is_some_and(|p| {
+                        if r.shallow_copy {
+                            facts
+                                .changed_param_attrs
+                                .get(&p)
+                                .is_some_and(|attrs| facts.changes_param_state(p, Some(attrs)))
+                        } else {
+                            facts.changes_param_state(p, None)
+                        }
+                    })
                 });
             if mutates {
                 let hop = CallHop {
@@ -2535,6 +2593,7 @@ pub(crate) fn mut107(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
                         && !filter1_init(m, init_called)
                         && !init_helpers.contains(&m.key)
                         && !writes_may_run_descriptors(cx.decls, m)
+                        && !hashes_otherwise(cx.decls, m, h)
                 })
                 .filter_map(|(m, checked)| Some((m, checked, local_summary(cx.index, m)?)));
             for (m, Checked { unit, f }, local) in writers {
@@ -2555,10 +2614,19 @@ pub(crate) fn mut107(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
                     {
                         continue;
                     }
-                    // Filters 2 and 3: lazy initialization, memo dictionaries.
-                    let first = self_attr_writes(f)
-                        .into_iter()
-                        .find(|(a, w)| *a == *attr && !is_memo_write(attr, w) && !w.lazy_init);
+                    // Filters 2 and 3: lazy initialization, memo dictionaries. Filter 6: an
+                    // in-place change of a value the hash hands whole to `hash()` changes only
+                    // the value's own hash, which its own class answers for.
+                    let hashed_whole = hs
+                        .hashed_whole_self_attrs
+                        .as_deref()
+                        .is_some_and(|h| h.contains(*attr));
+                    let first = self_attr_writes(f).into_iter().find(|(a, w)| {
+                        *a == *attr
+                            && !w.fills_memo(attr)
+                            && !w.lazy_init
+                            && (w.rebinds || !hashed_whole)
+                    });
                     let Some((_, write)) = first else {
                         continue;
                     };
@@ -2591,6 +2659,15 @@ pub(crate) fn mut107(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
 
 /// Dunder methods Python makes class methods without a decorator.
 const IMPLICIT_CLASS_METHODS: &[&str] = &["__init_subclass__", "__class_getitem__"];
+
+/// The instances `writer` runs on never hash with `hash`, a `__hash__` of an ancestor of the
+/// writer's class: a class between them defines its own `__hash__`, or `__eq__` alone, which
+/// leaves its instances unhashable.
+fn hashes_otherwise(decls: &ProjectDecls, writer: &Method<'_>, hash: &Method<'_>) -> bool {
+    let (class, hash_class) = (writer.class(), hash.class());
+    decls.ancestors_of(&class).contains(&hash_class)
+        && decls.hash_owner(&class).is_some_and(|c| c != hash_class)
+}
 
 /// A stored hash value (`self._hash`, `self._hashcode`, `self.hash_value`): the hash itself, not
 /// a field it is computed from.
