@@ -2351,13 +2351,14 @@ impl<'a> Mut202Fn<'a> {
         // leaves what it computes as it was (as for the helpers, `memo_param_paths`). Each
         // object is read on its own: a test of one object's attribute says nothing of another's.
         let origins = copy_origins(self.f, self.ro.keys().copied());
-        let mut objects: FxHashMap<VarId, FxHashSet<VarId>> = FxHashMap::default();
-        for (v, _) in self.ro.iter().filter(|(_, r)| !r.shallow_copy) {
-            objects.entry(origins[v]).or_default().insert(*v);
-        }
-        let memo_fills: FxHashSet<(BlockId, u32)> = objects
-            .values()
-            .flat_map(|vars| attr_writes(self.f, vars))
+        let objects: FxHashMap<VarId, u32> = self
+            .ro
+            .iter()
+            .filter(|(_, r)| !r.shallow_copy)
+            .map(|(v, _)| (*v, origins[v].0))
+            .collect();
+        let memo_fills: FxHashSet<(BlockId, u32)> = attr_writes(self.f, &objects)
+            .into_iter()
             .filter(|(attr, w)| w.fills_memo(attr) || w.lazy_init)
             .map(|(_, w)| (w.block, w.index))
             .collect();

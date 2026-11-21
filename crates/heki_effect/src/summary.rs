@@ -22,8 +22,8 @@ use crate::{
 };
 use heki_ast::Span;
 use heki_ir::{
-    BinOpKind, BlockId, BuiltinKind, DictEntry, FunctionId, FunctionKind, Inst, InstKind,
-    IrFunction, ModuleIr, NaturalLoop, PhiNode, Terminator, VarId,
+    BinOpKind, BlockId, BuiltinKind, ConstLiteral, DictEntry, FunctionId, FunctionKind, Inst,
+    InstKind, IrFunction, ModuleIr, NaturalLoop, PhiNode, Terminator, VarId,
 };
 use heki_kb::{EffectiveEcosystemKb, ExecEffectKind};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -825,6 +825,7 @@ impl<'a> Extractor<'a> {
                 self.param_alias.insert(p.var, (i, None));
             }
         }
+        let rebound = Rebound::of(self.f);
         loop {
             let before = (
                 self.param_alias.len(),
@@ -886,12 +887,16 @@ impl<'a> Extractor<'a> {
                             self.dict_of.insert(*dst, owner);
                         }
                         InstKind::AttrLoad { dst, obj, attr } => {
-                            // An attribute of a shallow copy holds what the original's does.
-                            if let Some((i, path)) = self
-                                .param_alias
-                                .get(obj)
-                                .or_else(|| self.param_copy_alias.get(obj))
-                                .cloned()
+                            // An attribute of a shallow copy holds what the original's does,
+                            // unless the function may have rebound it on the copy.
+                            let copied = || {
+                                rebound
+                                    .keeps_attr(attr)
+                                    .then(|| self.param_copy_alias.get(obj))
+                                    .flatten()
+                            };
+                            if let Some((i, path)) =
+                                self.param_alias.get(obj).or_else(copied).cloned()
                             {
                                 if path.is_none() {
                                     self.param_slot_alias
@@ -920,11 +925,13 @@ impl<'a> Extractor<'a> {
                             // `p["key"]` of a parameter, `td["key"]` of a `TypedDict`: a key of a
                             // typed dict is its field.
                             if let Some(key) = key_const {
-                                if let Some((i, None)) = self
-                                    .param_alias
-                                    .get(obj)
-                                    .or_else(|| self.param_copy_alias.get(obj))
-                                {
+                                let copied = || {
+                                    rebound
+                                        .keeps_key(key)
+                                        .then(|| self.param_copy_alias.get(obj))
+                                        .flatten()
+                                };
+                                if let Some((i, None)) = self.param_alias.get(obj).or_else(copied) {
                                     self.param_slot_alias
                                         .insert(*dst, (*i, Slot::Key(key.clone())));
                                 }
@@ -1205,18 +1212,16 @@ impl<'a> Extractor<'a> {
     }
 
     /// [`Self::memo_fills`]: the writes of the parameters' own attributes that fill a memo or
-    /// initialize lazily ([`cache_flow::attr_writes`]), read for each parameter on its own:
-    /// a test of one object's attribute says nothing of another's.
+    /// initialize lazily ([`cache_flow::attr_writes`], each parameter an object of its own).
     fn memo_fills(&self) -> FxHashSet<(BlockId, usize)> {
-        let mut objects: FxHashMap<u8, FxHashSet<VarId>> = FxHashMap::default();
-        for (v, (i, path)) in &self.param_alias {
-            if path.is_none() {
-                objects.entry(*i).or_default().insert(*v);
-            }
-        }
-        objects
-            .values()
-            .flat_map(|vars| cache_flow::attr_writes(self.f, vars))
+        let objects: FxHashMap<VarId, u32> = self
+            .param_alias
+            .iter()
+            .filter(|(_, (_, path))| path.is_none())
+            .map(|(v, (i, _))| (*v, u32::from(*i)))
+            .collect();
+        cache_flow::attr_writes(self.f, &objects)
+            .into_iter()
             .filter(|(attr, w)| w.fills_memo(attr) || w.lazy_init)
             .map(|(_, w)| (w.block, w.index as usize))
             .collect()
@@ -3835,6 +3840,89 @@ fn construction_of(answer: &NewArg, rebinds: bool) -> Construction {
 }
 
 /// Give `dst` the alias shared by every aliased phi input (if they all agree).
+/// What a function may rebind on some object: the attribute names it stores or deletes (also
+/// through `setattr` / `delattr` and `__dict__`), `None` when it may set one it does not name;
+/// and the constant keys it stores or deletes, `None` when it stores under a key it does not name
+/// (`d[k] = v`, `d.update(...)`). An attribute or item of a shallow copy that the function may
+/// rebind may hold a value of its own rather than the original's (`param_copy_alias`).
+struct Rebound<'f> {
+    attrs: Option<FxHashSet<&'f str>>,
+    keys: Option<FxHashSet<&'f str>>,
+}
+
+impl<'f> Rebound<'f> {
+    fn of(f: &'f IrFunction) -> Self {
+        let insts = || f.blocks.iter().flat_map(|b| &b.insts);
+        let mut strings: FxHashMap<VarId, &'f str> = FxHashMap::default();
+        let mut dicts: FxHashSet<VarId> = FxHashSet::default();
+        for inst in insts() {
+            match &inst.kind {
+                InstKind::Const {
+                    dst,
+                    literal: ConstLiteral::Str(text),
+                } => {
+                    strings.insert(*dst, text.as_str());
+                }
+                InstKind::AttrLoad { dst, attr, .. } if attr == "__dict__" => {
+                    dicts.insert(*dst);
+                }
+                _ => {}
+            }
+        }
+        let mut attrs = Some(FxHashSet::default());
+        let mut keys = Some(FxHashSet::default());
+        let add = |set: &mut Option<FxHashSet<&'f str>>, name: Option<&'f str>| match (name, set) {
+            (Some(n), Some(named)) => {
+                named.insert(n);
+            }
+            (_, set) => *set = None,
+        };
+        for inst in insts() {
+            match &inst.kind {
+                InstKind::AttrStore { attr, .. } | InstKind::AttrDelete { attr, .. } => {
+                    add(&mut attrs, Some(attr.as_str()));
+                }
+                InstKind::SubscriptStore { obj, key_const, .. }
+                | InstKind::SubscriptDelete { obj, key_const, .. } => {
+                    let key = key_const.as_deref();
+                    if dicts.contains(obj) {
+                        add(&mut attrs, key);
+                    }
+                    add(&mut keys, key);
+                }
+                InstKind::Call { callee, args, .. }
+                    if matches!(
+                        callee.as_str(),
+                        "setattr" | "delattr" | "object.__setattr__" | "object.__delattr__"
+                    ) =>
+                {
+                    add(
+                        &mut attrs,
+                        args.get(1).and_then(|a| strings.get(a)).copied(),
+                    );
+                }
+                InstKind::MethodCall { method, .. }
+                    if matches!(method.as_str(), "update" | "setdefault" | "__setitem__") =>
+                {
+                    keys = None;
+                }
+                _ => {}
+            }
+        }
+        Self { attrs, keys }
+    }
+
+    /// Whether the function leaves attribute `attr` of every object it holds as it was.
+    fn keeps_attr(&self, attr: &str) -> bool {
+        self.attrs.as_ref().is_some_and(|a| !a.contains(attr))
+    }
+
+    /// Whether the function leaves the item under `key` of every object it holds as it was.
+    fn keeps_key(&self, key: &str) -> bool {
+        self.keys.as_ref().is_some_and(|k| !k.contains(key))
+    }
+}
+
 fn merge_phi<T: Clone + PartialEq>(
     map: &mut FxHashMap<VarId, T>,
     dst: VarId,

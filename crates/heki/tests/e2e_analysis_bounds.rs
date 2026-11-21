@@ -577,3 +577,30 @@ fn a_long_copy_chain_of_a_shared_value_finds_each_origin_once() {
         .collect();
     assert_eq!(reported, vec!["extend"], "{found:#?}");
 }
+
+/// Many attributes read from one shared value, each a value of its own, and changed after: the
+/// memo and lazy-initialization writes of all of them are read in one walk of the function.
+#[test]
+fn many_shared_values_read_their_memo_writes_in_one_walk() {
+    let mut lines = vec![
+        "from functools import lru_cache".to_owned(),
+        String::new(),
+        String::new(),
+        "@lru_cache(maxsize=None)".to_owned(),
+        "def config(name):".to_owned(),
+        "    return object()".to_owned(),
+        String::new(),
+        String::new(),
+        "def touch(name):".to_owned(),
+        "    root = config(name)".to_owned(),
+    ];
+    for i in 0..3000 {
+        lines.push(format!("    a{i} = root.a{i}"));
+        lines.push(format!("    a{i}.cache_size = {i}"));
+    }
+    let p = Project::new("bounds_many_shared_values");
+    p.write("m.py", &(lines.join("\n") + "\n"));
+    let found = check_within(&p, Duration::from_secs(20));
+    let reported = found.iter().filter(|d| d["rule_code"] == "MUT202").count();
+    assert_eq!(reported, 3000, "{found:#?}");
+}
