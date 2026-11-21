@@ -1198,3 +1198,46 @@ fn strict_writes_of_one_name_in_a_helper_walk_its_callers_once() {
     );
     assert!(check_within(&p, Duration::from_secs(20)).is_empty());
 }
+
+/// A value one `if` / `elif` chain of thousands of arms assigns, then tested as many times
+/// (`isinstance(src, str)`): the edges the tests of the merged value keep share the function's
+/// budget, past which a test is no guard and the effect it guards is kept.
+#[test]
+fn tests_of_a_wide_merge_keep_their_edges_within_a_budget() {
+    let n = 2000;
+    let mut lines = vec![
+        "import io".to_owned(),
+        "from urllib.request import urlopen".to_owned(),
+        String::new(),
+        String::new(),
+        "def fetch(src, kind):".to_owned(),
+        "    if kind == 0:".to_owned(),
+        "        src = io.StringIO()".to_owned(),
+    ];
+    for i in 1..n {
+        lines.push(format!("    elif kind == {i}:"));
+        lines.push("        src = io.StringIO()".to_owned());
+    }
+    for _ in 0..n {
+        lines.push("    if isinstance(src, str):".to_owned());
+        lines.push("        urlopen(src).close()".to_owned());
+    }
+    lines.extend(
+        [
+            "",
+            "",
+            "async def load(kind):",
+            "    fetch(\"https://example.com\", kind)",
+        ]
+        .map(str::to_owned),
+    );
+    let p = Project::new("bounds_wide_merge_tests");
+    p.write("m.py", &(lines.join("\n") + "\n"));
+    let found = check_within(&p, Duration::from_secs(20));
+    let reported: Vec<&str> = found
+        .iter()
+        .filter(|d| d["rule_code"] == "EFF101")
+        .map(|d| d["qualname"].as_str().unwrap())
+        .collect();
+    assert_eq!(reported, vec!["load"], "{found:#?}");
+}

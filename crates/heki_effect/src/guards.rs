@@ -1667,6 +1667,9 @@ struct Facts<'c, 'f, 'a> {
     test_of: FxHashMap<VarId, (u32, bool)>,
     /// The tests of values a phi merges, by the value that is the test.
     phi_tests: FxHashMap<VarId, PhiTest>,
+    /// The budget of the edges [`Self::phi_tests`] keep, proportional to the function's source:
+    /// past it a test of a merged value is no guard (the effect is kept).
+    phi_cells: Cells,
     /// The values whose truthiness tells which edge into an `and` / `or` merge was taken, with
     /// their atoms (after the tests).
     merged: FxHashMap<VarId, u32>,
@@ -1696,6 +1699,7 @@ impl<'c, 'f, 'a> Facts<'c, 'f, 'a> {
             tests: Vec::new(),
             test_of: FxHashMap::default(),
             phi_tests: FxHashMap::default(),
+            phi_cells: Cells::of(cx.f),
             merged: FxHashMap::default(),
             futures: FxHashMap::default(),
             first_future: 0,
@@ -1907,6 +1911,9 @@ impl<'c, 'f, 'a> Facts<'c, 'f, 'a> {
             value = *src;
         }
         let (block, phi) = cx.phi(value)?;
+        if !self.phi_cells.take(phi.incoming.len()) {
+            return None;
+        }
         let mut edges = Vec::with_capacity(phi.incoming.len());
         for (pred, w) in &phi.incoming {
             let along = match cx.subject(*w) {
