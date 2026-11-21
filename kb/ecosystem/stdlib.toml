@@ -7,7 +7,7 @@ opaque_packages = [
     "builtins", "asyncio", "socket", "ssl", "subprocess", "time", "io", "os",
     "pathlib", "shutil", "sqlite3", "urllib", "http", "logging", "copy", "functools",
     "itertools", "collections", "threading", "multiprocessing", "concurrent", "dataclasses",
-    "queue",
+    "queue", "importlib", "platform", "sys", "sysconfig",
 ]
 
 # --- Sleep ---
@@ -757,4 +757,213 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "sqlite3.Cursor.fetchall"
 effects = ["blocking_db"]
+opaque_to_layer3 = true
+
+# --- Environment reads ---
+# What the program finds where it runs: `reads-environment` effect boundaries forbid calling the
+# functions (`environment = "call"`) and reading the module attributes (`environment = "read"`).
+
+[[entries]]
+symbol = "os.getenv"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.getenvb"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "platform.architecture"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "platform.machine"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "platform.node"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "platform.platform"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "platform.processor"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "platform.python_build"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "platform.python_compiler"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "platform.python_branch"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "platform.python_implementation"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "platform.python_revision"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "platform.python_version"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "platform.python_version_tuple"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "platform.release"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "platform.system"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "platform.version"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "platform.uname"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "platform.win32_ver"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "platform.win32_edition"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "platform.win32_is_iot"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "platform.mac_ver"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "platform.libc_ver"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "platform.freedesktop_os_release"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "platform.android_ver"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "platform.ios_ver"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "importlib.util.find_spec"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "importlib.import_module"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "importlib.metadata.version"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "importlib.metadata.distribution"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "shutil.which"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sysconfig.get_config_var"
+environment = "call"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.environ"
+environment = "read"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.environb"
+environment = "read"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.name"
+environment = "read"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sys.platform"
+environment = "read"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sys.version"
+environment = "read"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sys.version_info"
+environment = "read"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sys.hexversion"
+environment = "read"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sys.implementation"
+environment = "read"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "sys.flags"
+environment = "read"
 opaque_to_layer3 = true

@@ -219,6 +219,19 @@ pub struct EcosystemEntry {
     /// Awaiting the object the call returns completes only once the future passed at this
     /// position is done (`asyncio.wrap_future(f)`).
     pub done_when_awaited: Option<u8>,
+    /// Calling the symbol (`os.getenv`) or reading it (`sys.platform`) depends on the
+    /// environment the program runs in: the `reads-environment` effect boundaries forbid it.
+    pub environment: Option<EnvironmentAccess>,
+}
+
+/// How a symbol tagged `environment` reads the environment (`EcosystemEntry::environment`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EnvironmentAccess {
+    /// Calling the function reads it (`os.getenv`, `platform.system`).
+    Call,
+    /// Reading the module attribute does (`os.environ`, `sys.platform`).
+    Read,
 }
 
 /// One case of an entry (`EcosystemEntry::cases`): when the argument at position `arg` (the
@@ -946,10 +959,78 @@ mod tests {
             pandas_url_readers(),
             synchronous_waits(),
             lazy_iterators(),
+            environment_reads(),
         ]
         .into_iter()
         .flatten()
         .collect()
+    }
+
+    /// The calls and module attributes `reads-environment` effect boundaries forbid; they carry
+    /// no other fact.
+    fn environment_reads() -> Vec<(Vec<String>, EcosystemEntry)> {
+        const PLATFORM: &[&str] = &[
+            "architecture",
+            "machine",
+            "node",
+            "platform",
+            "processor",
+            "python_build",
+            "python_compiler",
+            "python_branch",
+            "python_implementation",
+            "python_revision",
+            "python_version",
+            "python_version_tuple",
+            "release",
+            "system",
+            "version",
+            "uname",
+            "win32_ver",
+            "win32_edition",
+            "win32_is_iot",
+            "mac_ver",
+            "libc_ver",
+            "freedesktop_os_release",
+            "android_ver",
+            "ios_ver",
+        ];
+        let tagged = |access| EcosystemEntry {
+            environment: Some(access),
+            ..entry(&[])
+        };
+        vec![
+            (
+                [
+                    s(&["os.getenv", "os.getenvb"]),
+                    with_prefix("platform", PLATFORM),
+                    s(&[
+                        "importlib.util.find_spec",
+                        "importlib.import_module",
+                        "importlib.metadata.version",
+                        "importlib.metadata.distribution",
+                        "shutil.which",
+                        "sysconfig.get_config_var",
+                    ]),
+                ]
+                .concat(),
+                tagged(EnvironmentAccess::Call),
+            ),
+            (
+                s(&[
+                    "os.environ",
+                    "os.environb",
+                    "os.name",
+                    "sys.platform",
+                    "sys.version",
+                    "sys.version_info",
+                    "sys.hexversion",
+                    "sys.implementation",
+                    "sys.flags",
+                ]),
+                tagged(EnvironmentAccess::Read),
+            ),
+        ]
     }
 
     fn standard_library() -> Vec<(Vec<String>, EcosystemEntry)> {

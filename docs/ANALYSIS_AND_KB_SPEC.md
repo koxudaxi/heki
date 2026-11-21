@@ -1031,7 +1031,21 @@ deep = true   # changes to attributes and nested containers below are forbidden 
    `allowed-callees`, other scope functions, or bodies that do not run at the call (`async def`
    bodies not awaited, generators not iterated). Its nodes are `(function, Body | Result)`: a
    function returning a generator is entered as what iterating its result runs. The search
-   reads no guards: an argument switching off a callee's branch does not stop it.
+   reads no guards: an argument switching off a callee's branch does not stop it. At each node
+   whose body runs, it also reads the function's accesses outside the project
+   (`FileSummary::external_accesses`, per function, local and IR-free): the calls of external
+   functions and classes (`Callee::External`), the reads of module attributes outside the
+   project (an `AttrLoad`, a global or local load, or an `Import` whose value is the named object
+   `Val::Ref(fqn)` of no project symbol: `sys.platform`, `from sys import platform`), and the
+   import probes (an `Import` whose block's exception edge reaches an `except` clause naming
+   `ImportError` or `ModuleNotFoundError`, through the clauses of each `try` and the re-raise to
+   the enclosing handler). An access is kept only when a boundary forbids it
+   (`Contracts::external_call`, `external_read`, `import_probes`): a `call-targets` or
+   `read-targets` entry names it by its full dotted name (its first name not a glob), or
+   `reads-environment` and the Layer 2 tag `environment` name it. Without such a boundary the
+   map stays empty. The language server compares a file's accesses before and after an edit,
+   without positions, and re-checks the files above a function whose accesses changed, as it
+   does for its Layer 2 call sites.
 
 ### 2.5 Layer 3: on-demand analysis of unregistered dependencies (planned)
 - **Boundary (strict)**: **never enter the standard library or packages registered in Layer 2**
@@ -1142,7 +1156,11 @@ The single place for every execution-effect origin. An entry has `symbol`, `effe
 the caller's thread with a synchronous facade over an async connection), `excluded` (`logging.Logger.*`), `copy_sanitizer` (`"deep"`:
 `copy.deepcopy`; `"shallow"`: `copy.copy`, `BaseModel.model_copy`, whose `deep=True` copies
 deeply unless `update=` hands it values by reference: `MUT202`), `return_type` (factories such as
-`sqlite3.connect`), `sync_lock_or_tx` (`threading.Lock`, `Session.begin`: `EFF106`), and
+`sqlite3.connect`), `sync_lock_or_tx` (`threading.Lock`, `Session.begin`: `EFF106`),
+`environment` (`"call"`: calling the function reads the environment the program runs in,
+`os.getenv`, `platform.system`, `importlib.util.find_spec`; `"read"`: reading the module
+attribute does, `os.environ`, `sys.platform`, `sys.version_info`: what `EFF201`'s
+`reads-environment` forbids; such an entry has no other fact), and
 `opaque_to_layer3` (reserved for Layer 3), and `cases`: what the call does instead when one
 argument (by position, the receiver not counted, or by keyword) is a given literal, a string
 literal with a given prefix or not empty, an instance of a given class, or an integer that sets

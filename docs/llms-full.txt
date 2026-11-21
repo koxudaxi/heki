@@ -1213,6 +1213,12 @@ name = "pass-sort-base-classes"
 scopes = ["pkg.parser.passes.sort_base_classes"]
 allow-writes = ["DataModel.base_classes"]
 write-universe = ["DataModel.*", "DataModelFieldBase.*", "DataType.*"]
+
+[[tool.heki.effect-boundaries]]
+name = "portable-generation"
+scopes = ["pkg.generate.*"]
+forbid = ["reads-environment"]
+import-probes = "report"
 ```
 
 | Key | Default | Meaning |
@@ -1221,13 +1227,14 @@ write-universe = ["DataModel.*", "DataModelFieldBase.*", "DataType.*"]
 | `scopes` | `[]` | Modules, classes, or functions whose functions must stay inside the boundary; nested functions are included. |
 | `forbid` | `[]` | What the scope functions must not reach (tokens below). |
 | `write-targets` | `[]` | `Class.attr` targets of `writes-targets`, required with it. `Class.attr["key"]` names one entry, as in `write-owners`. |
-| `read-targets` | `[]` | `Class.attr` targets of `reads-targets`, required with it: reads as `read-owners` sees them, also inside property getters. A container entry is a configuration error. |
-| `call-targets` | `[]` | Functions, methods, or classes of `calls`, required with it, matched as the `targets` of `call-owners`. |
+| `read-targets` | `[]` | `Class.attr` targets of `reads-targets`, required with it: reads as `read-owners` sees them, also inside property getters. A container entry is a configuration error. An entry can also name an attribute of a module outside the project by its full name (`sys.platform`, `os.environ`, below). |
+| `call-targets` | `[]` | Functions, methods, or classes of `calls`, required with it, matched as the `targets` of `call-owners`. An entry can also name a function or class outside the project by its full name (`os.getenv`, `platform.*`, below). |
 | `write-universe` | `[]` | `Class.attr` entries: a reached write of one that `allow-writes` does not name is reported, once per written `Class.attr`. |
 | `allow-writes` | `[]` | `Class.attr` writes the boundary allows, exempt from `write-targets` too. Needs `write-universe`. |
 | `allowed-callees` | `[]` | Functions, classes, modules, or ecosystem symbols whose effects are allowed: paths through them are not followed, and calls of them are no `calls` violation. |
 | `fresh-objects` | `"allow"` | `"allow"` or `"report"`: whether a write that constructs the object it writes (as in `write-owners`) counts as a write of the boundary. |
 | `references` | `"ignore"` | `"ignore"` or `"calls"`, as for `call-owners`: whether a reference handing a `call-targets` entry on counts for `calls`. |
+| `import-probes` | `"allow"` | `"allow"` or `"report"`: whether `reads-environment` also forbids an import probe, an `import` inside a `try` with an `except` clause naming `ImportError` or `ModuleNotFoundError`. `"report"` without `reads-environment` is a configuration error. |
 | `message` | none | The help of every report of the boundary. |
 
 | `forbid` token | Forbids |
@@ -1238,6 +1245,26 @@ write-universe = ["DataModel.*", "DataModelFieldBase.*", "DataType.*"]
 | `writes-targets` | writing a `write-targets` attribute |
 | `reads-targets` | reading a `read-targets` attribute |
 | `calls` | calling a `call-targets` function or class |
+| `reads-environment` | reading the environment the program runs in: calling or reading what the ecosystem catalog tags `environment` (below), and import probes with `import-probes = "report"` |
+
+Outside the project, `call-targets` and `read-targets` entries name symbols by their full dotted
+name, starting with the top-level module: `os.getenv` matches a call of `os.getenv` (also
+`from os import getenv`, `import os as o`), `platform.*` every function of `platform`, and
+`sys.platform` a read of `sys.platform` (also `from sys import platform`, or `import sys as s`
+and `s.platform`). A dotted suffix (`getenv`), a leading glob (`*.getenv`), or a module part (`os:getenv`) never
+names a symbol outside the project, so an entry for project functions keeps its meaning. Only a call or a read
+heki resolves counts: an attribute read by name (`getattr(sys, name)`) or on an object of unknown
+origin is not reported.
+
+`reads-environment` needs no targets. The ecosystem catalog tags these calls: `os.getenv`,
+`os.getenvb`, the functions of `platform` that describe the machine or the interpreter
+(`platform.system`, `platform.machine`, `platform.python_version`, ...),
+`importlib.util.find_spec`, `importlib.import_module`, `importlib.metadata.version`,
+`importlib.metadata.distribution`, `shutil.which`, and `sysconfig.get_config_var`; and these
+reads: `os.environ`, `os.environb`, `os.name`, `sys.platform`, `sys.version`,
+`sys.version_info`, `sys.hexversion`, `sys.implementation`, and `sys.flags`. A call on
+`os.environ` (`os.environ.get("X")`) is a read of `os.environ`. One report per scope function
+names the first read it reaches and counts every one.
 
 - Each scope function is checked through any number of calls.
 - A violation inside another scope function is reported there only, once.
@@ -2339,7 +2366,7 @@ Contracts reach further when a function changes its calls:
 | ---------- | ---------------- | ------- |
 | an ownership or `invalidation` contract | every function below it | whether a function only runs inside allowed callers, or whether its callers announce its writes, depends on all callers above it |
 | a contract on calls (`call-owners`, an effect boundary forbidding `calls`) | every function above it | a call of a target is reported at the callers of the private helper making it, and at the scope functions reaching it |
-| an effect boundary, when the function changes its calls of library APIs | every function above it | a boundary may allow one API and forbid another of the same effect, and counts every call it reaches |
+| an effect boundary, when the function changes its calls of library APIs, or the calls, module attribute reads, and import probes outside the project that a boundary forbids | every function above it | a boundary may allow one API and forbid another of the same effect, counts every call it reaches, and no summary records an access outside the project |
 
 Edits that change none of these, such as most comments, stop at the edited file.
 
@@ -3606,13 +3633,22 @@ count for a read.
   - `reads-targets`: reads of the `Class.attr` entries of `read-targets` (and their
     subclasses), in every form `MUT203` follows (`obj.attr`, `getattr(obj, "attr")`,
     `obj.__dict__["attr"]`, a property getter that reads it); an initializer reading its own
-    instance is no read;
+    instance is no read. An entry also names an attribute of a module outside the project by its
+    full dotted name (`sys.platform`), read as `sys.platform` or through
+    `from sys import platform`;
   - `calls`: calls of the `call-targets` entries, matched as the targets of `MUT204`: a function,
     a method (with its overrides in subclasses, through bound-method aliases and `getattr` with a
     constant name), or a class (constructing it); a call is one only when every function it may
-    call is a target. With `references = "calls"`, a reached function handing a target on to be
-    called later (passed, stored, returned, yielded, raised, or held by such a display) counts
-    too, as for `MUT204` ("`render` hands on `pkg.core.decide`");
+    call is a target. An entry also names a function or class outside the project by its full
+    dotted name (`os.getenv`, `platform.*`); a dotted suffix, a leading glob, or a module part
+    does not. With `references = "calls"`, a reached function handing a target on to be called
+    later (passed, stored, returned, yielded, raised, or held by such a display) counts too, as
+    for `MUT204` ("`render` hands on `pkg.core.decide`");
+  - `reads-environment`: reading the environment the program runs in: a call or a module
+    attribute read the ecosystem catalog tags `environment` (`os.getenv`, `platform.system`,
+    `importlib.util.find_spec`, `os.environ`, `sys.platform`, `sys.version_info`, ...), and,
+    with `import-probes = "report"`, an `import` inside a `try` with an `except` clause naming
+    `ImportError` or `ModuleNotFoundError`;
   - `mutates-params`: mutating a parameter, its attributes, or its contents. For a method,
     parameter 0 is `self`, so a method writing `self.x` mutates a parameter.
 - `write-universe` with `allow-writes` states the writes a scope may make positively: a reached
@@ -3636,13 +3672,18 @@ chain is a shortest one. The search does not enter:
 - functions an offloading decorator or API runs on another thread (`@sync_to_async`,
   `asyncio.to_thread(f)`, ...).
 
+A call or a read outside the project counts only when heki resolves it to the name: through
+imports and aliases of the module, never by an attribute name computed at run time or on an
+object of unknown origin.
+
 Unlike `EFF101`, the search does not read the callees' guards: a reached function's effects
 count whatever its arguments are, so `__repr__` calling `save(text, io.StringIO())` reaches the
 `open` that `save` runs only for a path.
 
 A violation is reported once per scope function and forbidden effect (or write, read, or call
-target; a `write-universe` write once per written `Class.attr`), at the call in the scope
-function that starts the shortest chain (or at the blocking call, write, read, or call itself),
+target; a `write-universe` write once per written `Class.attr`; every environment read of
+`reads-environment` together), at the call in the scope function that starts the shortest chain
+(or at the blocking call, write, read, call, or import itself),
 with the chain as related information; `mutates-params` is reported at the function's
 definition. The report counts every distinct site of that kind the scope function reaches
 (`sites` in JSON; for `mutates-params`, every change of a parameter, in the body making it), so
@@ -3668,9 +3709,12 @@ Its premises:
 - **Reaches**: each function on the chain reaches the next call. Open: one path is enough, and the
   rule reads no branch at all: a call under any test counts.
 - **Forbidden effect**: the last call has an effect `forbid` lists, as the ecosystem catalog or the
-  boundary's own entries describe it. With `references = "calls"`, a target handed on is one for
-  `calls`: the value is the target, and it reaches a use handing it on. Established; whether the
-  code it is handed to calls it is not part of the claim.
+  boundary's own entries describe it; or the last function makes the call, the read, or the import
+  probe `forbid` lists. Established for a read and an import probe: the module attribute is named
+  through the module's imports, and the `except` clause names the import error. With
+  `references = "calls"`, a target handed on is one for `calls`: the value is the target, and it
+  reaches a use handing it on. Established; whether the code it is handed to calls it is not
+  part of the claim.
 
 ## Why is this bad?
 Some parts of a code base promise to be pure: rendering a model must not mutate it, domain code
@@ -3718,15 +3762,18 @@ No automatic fix.
   - `name`: the boundary name, used in messages and in the diagnostic target
     (`pure-render:blocking_net`, `pure-render:DataModel.fields` for a write,
     `pure-render:reads:DataModel.fields`, `pure-render:calls:GenerationStore.*`,
-    `pure-render:mutates-params`), so a read and a write of one field are two reports.
+    `pure-render:reads-environment`, `pure-render:mutates-params`), so a read and a write of one
+    field are two reports.
   - `scopes`: modules, classes, or functions (dotted names or globs).
   - `forbid`: `blocking-net`, `blocking-db`, `blocking-fs`, `blocking-subprocess`,
     `blocking-sync`, `sleep`, `blocking`, `mutates-params`, `writes-targets`, `reads-targets`,
-    `calls`.
+    `calls`, `reads-environment`.
   - `write-targets`: `Class.attr` entries for `writes-targets` (required with it).
-  - `read-targets`: `Class.attr` entries for `reads-targets` (required with it).
+  - `read-targets`: `Class.attr` entries for `reads-targets` (required with it), or attributes of
+    modules outside the project by their full name.
   - `call-targets`: functions, methods, or classes for `calls` (required with it), as for the
-    `targets` of `[[tool.heki.call-owners]]`.
+    `targets` of `[[tool.heki.call-owners]]`, or functions and classes outside the project by
+    their full name.
   - `write-universe`: `Class.attr` entries whose reached writes are reported unless
     `allow-writes` names them; the diagnostic target is the entry, with a glob attribute replaced
     by the written one (`pass:DataModel.fields` for `DataModel.*`).
@@ -3735,6 +3782,8 @@ No automatic fix.
     they write count, as for `[[tool.heki.write-owners]]`.
   - `references`: `"ignore"` (default) or `"calls"`: whether a reference handing a
     `call-targets` entry on counts for `calls`, as for `[[tool.heki.call-owners]]`.
+  - `import-probes`: `"allow"` (default) or `"report"`: whether `reads-environment` also forbids
+    import probes (needs `reads-environment`).
   - `allowed-callees`: functions, classes, modules, or ecosystem symbols whose effects are
     allowed.
   - `message`: the help of every report of the boundary.

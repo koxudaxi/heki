@@ -6,6 +6,7 @@
 use crate::cache_flow;
 use crate::construction::{Escape, Pos, Recorder};
 use crate::consumption::{ItemArgs, IterFlow, PerItemCall, Roots, param_iteration};
+use crate::environment::{self, AccessKind, ExternalAccess};
 use crate::guards::{self, GuardInputs, LocalGuards, per_item_bit};
 use crate::invalidation::{self, Events, FlowWrite, FuncFlow, Reach, SiteFlow};
 use crate::iterations::{
@@ -184,6 +185,7 @@ fn extract_module(
             mut sites,
             flow,
             mut references,
+            mut external,
         } = Extractor::new(f, &key, &cx, &input.path, contracts, opt_in).run();
         // A `class` statement in a function runs its body there: the body's effects and calls
         // are the function's (its methods run only when they are called).
@@ -191,6 +193,7 @@ fn extract_module(
             for body in class_bodies_run_by(input.ir, f) {
                 let facts = Extractor::new(body, &key, &cx, &input.path, contracts, opt_in).run();
                 absorb_class_body(&mut summary, facts.summary);
+                external.extend(facts.external);
                 sites.extend(
                     facts
                         .sites
@@ -242,6 +245,12 @@ fn extract_module(
         }
         file.call_sites.extend(sites);
         file.reference_sites.extend(references);
+        if !external.is_empty() {
+            file.external_accesses
+                .entry(key.clone())
+                .or_default()
+                .extend(external);
+        }
         // Same qualname defined twice (conditional definitions): keep the union of facts.
         match file.local_functions.get_mut(&key) {
             Some(existing) => merge_duplicate(Arc::make_mut(existing), summary),
@@ -550,6 +559,8 @@ struct Extracted {
     flow: Option<FuncFlow>,
     /// [`FileSummary::reference_sites`].
     references: Vec<CallSite>,
+    /// [`FileSummary::external_accesses`].
+    external: Vec<ExternalAccess>,
 }
 
 /// A typed write site waiting for the answer of its construction query.
@@ -675,6 +686,9 @@ struct Extractor<'a> {
     /// `(call, argument)`: a callable a library API runs (`Self::handed_callable`), and the one
     /// each `functools.partial` object it is holds, by the call handing it over.
     handed: FxHashSet<(VarId, VarId)>,
+    /// The accesses outside the project that effect boundaries forbid
+    /// (`FileSummary::external_accesses`).
+    external: Vec<ExternalAccess>,
 }
 
 /// A key of a container as [`Extractor::key_present`] compares keys: the same variable through
@@ -985,6 +999,7 @@ impl<'a> Extractor<'a> {
             self_changes: Vec::new(),
             references: contracts.is_some_and(|c| c.references()),
             handed: FxHashSet::default(),
+            external: Vec::new(),
         };
         ex.ownership = contracts.is_some_and(|c| c.ownership());
         ex.track = ex.ownership && ex.may_construct();
@@ -1826,11 +1841,18 @@ impl<'a> Extractor<'a> {
 
     fn run(mut self) -> Extracted {
         let f = self.f;
+        let reads_external = self.contracts.is_some_and(|c| c.reads_external());
         for bb in &f.blocks {
             for (index, inst) in bb.insts.iter().enumerate() {
                 self.pos = (bb.id, index);
                 self.visit(bb.id, index, &inst.kind, inst.span);
+                if reads_external {
+                    self.external_read(&inst.kind, inst.span);
+                }
             }
+        }
+        if self.contracts.is_some_and(|c| c.import_probes()) {
+            self.import_probes();
         }
         let references = if self.references {
             self.reference_sites()
@@ -1884,6 +1906,7 @@ impl<'a> Extractor<'a> {
             sites: self.sites,
             flow,
             references,
+            external: self.external,
         }
     }
 
@@ -1972,6 +1995,53 @@ impl<'a> Extractor<'a> {
             result_discarded: false,
             result_held: false,
         })
+    }
+
+    /// Record `inst` when it reads an attribute of a module outside the project that an effect
+    /// boundary forbids reading (`sys.platform`, or `platform` bound by `from sys import
+    /// platform`). The value read must be that object by name: a value of unknown origin
+    /// reads nothing.
+    fn external_read(&mut self, inst: &InstKind, span: Span) {
+        let (InstKind::AttrLoad { dst, .. }
+        | InstKind::LoadGlobal { dst, .. }
+        | InstKind::LoadName { dst, .. }
+        | InstKind::LoadDeref { dst, .. }
+        | InstKind::Import { dst, .. }) = inst
+        else {
+            return;
+        };
+        if let Some(Val::Ref(fqn)) = self.types.get(dst)
+            && self.contracts.is_some_and(|c| c.external_read(fqn))
+            && matches!(self.cx.project.symbol(fqn), resolver::Symbol::External)
+        {
+            self.external.push(ExternalAccess {
+                kind: AccessKind::Read,
+                name: fqn.clone(),
+                span,
+            });
+        }
+    }
+
+    /// Record the imports that probe whether their module is installed
+    /// ([`environment::import_probes`]): the module a plain import names (`black.mode`), or
+    /// what a `from` import binds (`yaml.CSafeLoader`, a relative one resolved).
+    fn import_probes(&mut self) {
+        for (span, module, name) in environment::import_probes(self.f) {
+            let written = match module {
+                Some(m) => format!("{m}.{name}"),
+                None => name.to_owned(),
+            };
+            // `import a.b` binds `a`, but probes `a.b`.
+            let name = match module {
+                None if name.contains('.') => written,
+                _ => self.cx.import_target(span).map_or(written, str::to_owned),
+            };
+            self.external.push(ExternalAccess {
+                kind: AccessKind::ImportProbe,
+                name,
+                span,
+            });
+        }
     }
 
     /// `IterationFacts::result_iterations`: what runs between the steps of each iteration (by
@@ -4126,6 +4196,13 @@ impl<'a> Extractor<'a> {
         match callee {
             Callee::External(symbol) => {
                 if let Some(c) = self.contracts {
+                    if c.external_call(symbol) {
+                        self.external.push(ExternalAccess {
+                            kind: AccessKind::Call,
+                            name: symbol.clone(),
+                            span: call.span,
+                        });
+                    }
                     if let Some(step) = self.returned.get(&call.dst).copied()
                         && let Some(deep) = c.readonly_producer(symbol, symbol)
                     {

@@ -970,19 +970,25 @@ impl FunctionMatcher {
         text: &str,
         context: &'static str,
     ) -> Result<Self, RuleConfigError> {
+        let mut out = Self::named(text, context)?;
+        if let Some((holder, last)) = split_last_dot(text) {
+            let owners = class_set(cx, &DottedPattern::new(holder, context)?, all_classes);
+            if !owners.is_empty() {
+                out.method = Some((owners, DottedPattern::new(last, context)?));
+            }
+        }
+        Ok(out)
+    }
+
+    /// The matcher of `text` without the methods of a class family: what names a symbol
+    /// outside the project ([`Self::names_external`]).
+    pub(crate) fn named(text: &str, context: &'static str) -> Result<Self, RuleConfigError> {
         // The whole text first, so that a bad glob is reported as configured.
         let whole = DottedPattern::new(text, context)?;
         let (holder, last) = match split_last_dot(text) {
             Some((holder, last)) => (Some(DottedPattern::new(holder, context)?), last),
             None => (None, text),
         };
-        let mut method = None;
-        if let Some(class) = &holder {
-            let owners = class_set(cx, class, all_classes);
-            if !owners.is_empty() {
-                method = Some((owners, DottedPattern::new(last, context)?));
-            }
-        }
         let member = if whole.module().is_none() && has_glob_syntax(last) {
             Some((holder, DottedPattern::new(last, context)?))
         } else {
@@ -991,7 +997,7 @@ impl FunctionMatcher {
         Ok(Self {
             whole,
             member,
-            method,
+            method: None,
         })
     }
 
@@ -1015,6 +1021,25 @@ impl FunctionMatcher {
                 }
                 (Some(_), None) => false,
             })
+    }
+
+    /// Whether the text names `symbol`, a function, class, or module attribute outside the
+    /// project, by its full dotted name: as [`Self::names_def`], but never by a dotted suffix
+    /// ([`DottedPattern::matches_whole`]), and only when its first name is not a glob. An entry
+    /// naming project functions by a suffix (`reset`, `*.reset`) or by a module part
+    /// (`pkg:reset`) names nothing outside the project.
+    pub(crate) fn names_external(&self, symbol: &str) -> bool {
+        let text = self.whole.name().text();
+        !has_glob_syntax(text.split('.').next().unwrap_or(text))
+            && self.member.as_ref().map_or_else(
+                || self.whole.matches_whole(symbol),
+                |(holder, member)| {
+                    symbol.rsplit_once('.').is_some_and(|(held_by, last)| {
+                        member.matches_whole(last)
+                            && holder.as_ref().is_some_and(|h| h.matches_whole(held_by))
+                    })
+                },
+            )
     }
 
     pub(crate) fn matches(&self, key: &FuncKey) -> bool {
@@ -1704,6 +1729,8 @@ const UNRESOLVED: &[&str] = &["ignore", "report"];
 /// `fresh-objects` values; the first is the default (writes that construct an object are no
 /// violation).
 const FRESH_OBJECTS: &[&str] = &["allow", "report"];
+/// The values of `import-probes`, the default first.
+const IMPORT_PROBES: &[&str] = &["allow", "report"];
 
 /// Whether a contract reports the accesses heki cannot tie to a class (`unresolved`).
 pub(crate) fn reports_unresolved(
@@ -1754,6 +1781,22 @@ pub(crate) fn counts_references(
         contract,
         "references",
     )? == "calls")
+}
+
+/// Whether an effect boundary's `reads-environment` forbids import probes (`import-probes`).
+pub(crate) fn reports_import_probes(
+    value: Option<&str>,
+    section: &'static str,
+    contract: &str,
+) -> Result<bool, RuleConfigError> {
+    Ok(mode(
+        value,
+        IMPORT_PROBES,
+        "`allow` or `report`",
+        section,
+        contract,
+        "import-probes",
+    )? == "report")
 }
 
 /// The value of a contract's mode key, one of `values` (the first when unset).

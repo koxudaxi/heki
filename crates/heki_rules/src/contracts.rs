@@ -1,15 +1,19 @@
 //! The declared contracts the summaries depend on ([`heki_effect::Contracts`]), built from the
 //! configuration: the `readonly-returns` producers (`MUT202`), the `invalidation` contracts
-//! (`MUT109`), whether any ownership contract is declared, and the names the strict
+//! (`MUT109`), whether any ownership contract is declared, the names the strict
 //! `read-owners` and `call-owners` contracts count unresolved accesses of (`MUT206`, `MUT207`),
-//! and whether a call contract counts references as calls (`MUT204`, `EFF201`).
+//! whether a call contract counts references as calls (`MUT204`, `EFF201`), and what the effect
+//! boundaries forbid outside the project (`EFF201`).
 //! `heki check` and the LSP engine hand them to the analysis, so a wrapper of a producer and an
 //! invalidator reached through calls are known across files without IR.
 
-use crate::mut_rules::{Allowance, AllowanceKeys, ReadOnlyProducers};
+use crate::mut_rules::{
+    Allowance, AllowanceKeys, FunctionMatcher, FunctionMatchers, ReadOnlyProducers,
+};
 use crate::{DottedPattern, RuleConfigError, RuleSelection, last_name, split_last_dot};
 use heki_effect::{ContractClass, Contracts, FuncKey, OptInFacts, TypedWrites};
 use heki_env::HekiConfig;
+use heki_kb::{EffectiveEcosystemKb, EnvironmentAccess};
 use rustc_hash::FxHashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -69,6 +73,66 @@ pub(crate) struct ConfigContracts {
     unresolved_calls: Vec<DottedPattern>,
     /// [`Contracts::references`].
     references: bool,
+    external: ExternalNames,
+}
+
+/// What the effect boundaries forbid outside the project ([`Contracts::external_call`],
+/// [`Contracts::external_read`], [`Contracts::import_probes`]).
+#[derive(Debug)]
+struct ExternalNames {
+    /// The `call-targets` of the boundaries forbidding `calls`.
+    calls: FunctionMatchers,
+    /// The `read-targets` of the boundaries forbidding `reads-targets`.
+    reads: FunctionMatchers,
+    /// The catalog's environment calls and reads, when a boundary forbids `reads-environment`.
+    environment: FxHashMap<String, EnvironmentAccess>,
+    probes: bool,
+}
+
+impl ExternalNames {
+    fn new(config: &HekiConfig, kb: &EffectiveEcosystemKb) -> Result<Self, RuleConfigError> {
+        let forbidding = |token: &'static str| {
+            config
+                .effect_boundaries
+                .iter()
+                .filter(move |b| b.forbid.iter().any(|t| t == token))
+        };
+        let matchers = |texts: Vec<&String>, context: &'static str| {
+            let named = texts
+                .into_iter()
+                .map(|t| FunctionMatcher::named(t, context))
+                .collect::<Result<Vec<_>, _>>()?;
+            FunctionMatchers::new(named, context)
+        };
+        let environment = if forbidding("reads-environment").next().is_some() {
+            kb.entries
+                .values()
+                .filter_map(|e| Some((e.symbol.clone(), e.environment?)))
+                .collect()
+        } else {
+            FxHashMap::default()
+        };
+        Ok(Self {
+            calls: matchers(
+                forbidding("calls").flat_map(|b| &b.call_targets).collect(),
+                "effect-boundaries.call-targets",
+            )?,
+            reads: matchers(
+                forbidding("reads-targets")
+                    .flat_map(|b| &b.read_targets)
+                    .collect(),
+                "effect-boundaries.read-targets",
+            )?,
+            environment,
+            probes: forbidding("reads-environment")
+                .any(|b| b.import_probes.as_deref() == Some("report")),
+        })
+    }
+
+    /// Whether the catalog tags `symbol` as an environment access of kind `access`.
+    fn environment(&self, symbol: &str, access: EnvironmentAccess) -> bool {
+        self.environment.get(symbol) == Some(&access)
+    }
 }
 
 /// Contract masks memoized by `(fqn, qualname)`: a mask depends on the name alone, and the
@@ -99,7 +163,10 @@ impl NameMasks {
 impl ConfigContracts {
     /// Compile the patterns: a target without a dot is `InvalidTarget`, a bad glob `Glob`, and
     /// more than [`MAX_INVALIDATIONS`] contracts `TooManyInvalidations`.
-    pub(crate) fn new(config: &HekiConfig) -> Result<Self, RuleConfigError> {
+    pub(crate) fn new(
+        config: &HekiConfig,
+        kb: &EffectiveEcosystemKb,
+    ) -> Result<Self, RuleConfigError> {
         if config.invalidation.len() > MAX_INVALIDATIONS {
             return Err(RuleConfigError::TooManyInvalidations(
                 config.invalidation.len(),
@@ -164,6 +231,7 @@ impl ConfigContracts {
             unresolved_reads: last_names(reads.flat_map(|r| &r.targets), "read-owners.targets")?,
             unresolved_calls: last_names(calls.flat_map(|r| &r.targets), "call-owners.targets")?,
             references: counts_references(config),
+            external: ExternalNames::new(config, kb)?,
         })
     }
 }
@@ -238,6 +306,29 @@ impl Contracts for ConfigContracts {
         self.unresolved_calls.iter().any(|p| p.matches(name))
     }
 
+    fn external_call(&self, symbol: &str) -> bool {
+        self.external.environment(symbol, EnvironmentAccess::Call)
+            || !self.external.calls.naming_external(symbol).is_empty()
+    }
+
+    fn reads_external(&self) -> bool {
+        !self.external.reads.is_empty()
+            || self
+                .external
+                .environment
+                .values()
+                .any(|a| *a == EnvironmentAccess::Read)
+    }
+
+    fn external_read(&self, fqn: &str) -> bool {
+        self.external.environment(fqn, EnvironmentAccess::Read)
+            || !self.external.reads.naming_external(fqn).is_empty()
+    }
+
+    fn import_probes(&self) -> bool {
+        self.external.probes
+    }
+
     fn references(&self) -> bool {
         self.references
     }
@@ -267,8 +358,9 @@ fn mask(contracts: &[InvalidationNames], has: impl Fn(&InvalidationNames) -> boo
 /// references, so nothing is computed for them).
 pub fn summary_contracts(
     config: &HekiConfig,
+    kb: &EffectiveEcosystemKb,
 ) -> Result<Option<Arc<dyn Contracts>>, RuleConfigError> {
-    let contracts = ConfigContracts::new(config)?;
+    let contracts = ConfigContracts::new(config, kb)?;
     if contracts.producers.is_empty()
         && !contracts.ownership
         && contracts.unresolved_reads.is_empty()

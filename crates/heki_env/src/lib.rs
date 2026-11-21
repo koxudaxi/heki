@@ -182,13 +182,15 @@ pub struct EffectBoundaryRule {
     pub scopes: Vec<String>,
     /// Forbidden effects: `blocking-net`, `blocking-db`, `blocking-fs`, `blocking-subprocess`,
     /// `blocking-sync`, `sleep`, `blocking` (all six), `mutates-params`, `writes-targets`,
-    /// `reads-targets`, `calls`.
+    /// `reads-targets`, `calls`, `reads-environment`.
     pub forbid: Vec<String>,
     /// `Class.attr` targets of `writes-targets`.
     pub write_targets: Vec<String>,
-    /// `Class.attr` targets of `reads-targets`.
+    /// `Class.attr` targets of `reads-targets`, or attributes of modules outside the project by
+    /// their full name (`sys.platform`).
     pub read_targets: Vec<String>,
-    /// Functions, methods, or classes (construction) of `calls`, as for `call-owners` targets.
+    /// Functions, methods, or classes (construction) of `calls`, as for `call-owners` targets,
+    /// or functions and classes outside the project by their full name (`os.getenv`).
     pub call_targets: Vec<String>,
     /// `Class.attr` writes the boundary allows: every other reached write of `write-universe`
     /// (or of `write-targets`) is reported.
@@ -204,6 +206,9 @@ pub struct EffectBoundaryRule {
     /// `"calls"` or `"ignore"` (default), as for `call-owners`: whether a reference handing a
     /// `call-targets` entry on counts as a call of it for `calls`.
     pub references: Option<String>,
+    /// `"allow"` (default) or `"report"`: whether `reads-environment` also forbids the imports
+    /// that probe whether a module is installed (`try: import yaml` / `except ImportError:`).
+    pub import_probes: Option<String>,
     /// The help of every `EFF201` report of this contract.
     pub message: Option<String>,
 }
@@ -687,6 +692,7 @@ allowed-callees = ["pkg.logging.*"]
 message = "render must not mutate model state"
 fresh-objects = "allow"
 references = "calls"
+import-probes = "report"
 "#;
         let wrapper: PyProjectWrapper = toml::from_str(raw).unwrap();
         let cfg = wrapper.tool.heki.unwrap();
@@ -747,6 +753,7 @@ references = "calls"
                 message: Some("render must not mutate model state".into()),
                 fresh_objects: Some("allow".into()),
                 references: Some("calls".into()),
+                import_probes: Some("report".into()),
             }
         );
         assert!(cfg.readonly_returns[0].deep);
