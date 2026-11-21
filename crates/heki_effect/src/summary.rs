@@ -3040,11 +3040,8 @@ impl<'a> Extractor<'a> {
             let callees = self.sites[site]
                 .project_callees_mut()
                 .expect("a project call's site has project callees");
-            let params = &mut callees[ci].params;
-            if params.len() <= slot {
-                params.resize(slot + 1, ArgOrigin::default());
-            }
-            params[slot].origins = Some(Box::new(o));
+            // Every bound slot carries its binding, so the binder kept it in `params`.
+            callees[ci].params[slot].origins = Some(Box::new(o));
         }
     }
 
@@ -6313,8 +6310,10 @@ impl Bindings<'_> {
             return true;
         }
         let required = usize::from(decl.required_positional);
+        let first_keyword_only = usize::from(decl.positional_params);
         let keyword_only = |p: usize| {
-            u8::try_from(p).is_ok_and(|p| decl.required_keyword_only.binary_search(&p).is_ok())
+            p.checked_sub(first_keyword_only)
+                .is_some_and(|j| j < 32 && decl.required_keyword_only >> j & 1 == 1)
         };
         // The receiver and the positions bind the leading parameters, the keywords the others.
         let (mut bound, mut bound_keyword_only) = (passed.min(required), 0);
@@ -6323,7 +6322,8 @@ impl Bindings<'_> {
             bound_keyword_only += usize::from(keyword_only(p));
         }
         !call.unpacks()
-            && (bound < required || bound_keyword_only < decl.required_keyword_only.len())
+            && (bound < required
+                || bound_keyword_only < decl.required_keyword_only.count_ones() as usize)
     }
 
     /// The parameters of `decl` that take their literal defaults: no position or keyword binds

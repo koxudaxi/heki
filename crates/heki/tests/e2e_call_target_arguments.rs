@@ -810,6 +810,20 @@ def by_local_import():
 
 def rebound_elsewhere():
     levels(level=settings.MOVED)
+
+
+class Holder:
+    FLAG = True
+
+    def __init__(self) -> None:
+        self.flag = True
+
+    def by_instance(self):
+        levels(kind=self.flag)
+
+
+def by_class():
+    levels(kind=Holder.FLAG)
 "#;
 
 #[test]
@@ -839,7 +853,8 @@ fn a_module_constant_read_as_an_attribute_or_a_local_import_passes_its_value() {
             &format!("`{func}` calls `levels({target})` outside the call owners of `c`"),
         )
     };
-    // Not matched: an attribute another module rebinds.
+    // Not matched: an attribute another module rebinds, and an attribute of a class or an
+    // instance (no module constant).
     assert_eq!(
         reports(&p),
         vec![

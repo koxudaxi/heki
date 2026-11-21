@@ -414,9 +414,10 @@ pub struct FunctionDecl {
     /// unbound raises `TypeError`. Python gives every positional parameter after one with a
     /// default a default too, so these are the positional parameters without one.
     pub required_positional: u8,
-    /// The keyword-only parameters without a default, by position, ascending.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub required_keyword_only: Vec<u8>,
+    /// The keyword-only parameters without a default, one bit each from the first keyword-only
+    /// parameter (`positional_params`) on; past the 32nd none counts (a mask, not a list: every
+    /// declaration of the project keeps it).
+    pub required_keyword_only: u32,
     /// How many leading parameters have a name a keyword can give (all but `*args` /
     /// `**kwargs`, which come last); a keyword binds those past the positional-only ones
     /// ([`Self::keyword_param`]).
@@ -552,8 +553,9 @@ pub struct ModuleDecls {
     /// `del` in a function declaring the name `global`), and all of them when a star import,
     /// `exec`, or `globals()` may rebind its names: such a name may hold another object than
     /// the import, so no constant of the imported module ([`Self::fixed_import`]).
-    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
-    pub rebound_imports: BTreeSet<String>,
+    /// Boxed: few modules bind an import again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rebound_imports: Option<Box<BTreeSet<String>>>,
     /// Module globals bound to a small display that no function of the module grows
     /// (`heki_ir::ModuleConstants::displays`): other modules read them through
     /// [`ProjectDecls::small_global`].
@@ -655,9 +657,12 @@ impl ModuleDecls {
     /// The fqn the runtime import of `name` binds, when nothing else in the module binds the
     /// name ([`Self::rebound_imports`]): reading it gives what the import bound.
     pub fn fixed_import(&self, name: &str) -> Option<&String> {
-        self.imports
-            .get(name)
-            .filter(|_| !self.rebound_imports.contains(name))
+        self.imports.get(name).filter(|_| {
+            !self
+                .rebound_imports
+                .as_ref()
+                .is_some_and(|names| names.contains(name))
+        })
     }
 
     /// The declarations of a module heki could not read or parse: none. A name under it is
@@ -3372,7 +3377,8 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
     decls.aliases = module_aliases(input, &decls);
     let stores = module_store_counts(input);
     decls.unknown_globals = unknown_globals(&stores, &decls);
-    decls.rebound_imports = rebound_imports(input, &stores, &decls);
+    let rebound = rebound_imports(input, &stores, &decls);
+    decls.rebound_imports = (!rebound.is_empty()).then(|| Box::new(rebound));
     // Qualnames whose every definition is a property getter (a setter, a deleter, or any other
     // function with the same qualname shares its summary).
     let mut getters_only: FxHashMap<&str, bool> = FxHashMap::default();
@@ -3589,10 +3595,11 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
             required_keyword_only: f
                 .params
                 .iter()
+                .filter(|p| p.kw_only)
+                .take(32)
                 .enumerate()
-                .filter(|(_, p)| p.kw_only && !p.has_default)
-                .filter_map(|(i, _)| u8::try_from(i).ok())
-                .collect(),
+                .filter(|(_, p)| !p.has_default)
+                .fold(0, |mask, (j, _)| mask | 1 << j),
             named_params: count_u8(f.params.iter().filter(|p| !p.is_vararg && !p.is_kwarg)),
             has_varargs: f.params.iter().any(|p| p.is_vararg),
             has_kwargs: f.params.iter().any(|p| p.is_kwarg),
@@ -5334,7 +5341,7 @@ static EMPTY_DECLS: ModuleDecls = ModuleDecls {
     global_types: BTreeMap::new(),
     aliases: BTreeMap::new(),
     unknown_globals: BTreeSet::new(),
-    rebound_imports: BTreeSet::new(),
+    rebound_imports: None,
     small_globals: BTreeMap::new(),
     grown_globals: BTreeSet::new(),
     rebound_globals: BTreeSet::new(),
