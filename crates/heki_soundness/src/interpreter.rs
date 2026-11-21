@@ -942,6 +942,24 @@ impl<'a> FnCtx<'a> {
                 }
                 self.after_def(st, *dst, span);
             }
+            // A builtin converts and formats itself with builtin code, which hands its items (to
+            // their `__repr__`) but never the value itself to other code; another class's
+            // `__format__`, `__str__`, or `__repr__` may keep the value and the specification.
+            InstKind::Format {
+                dst, value, spec, ..
+            } => {
+                if self.exact_on_every_path(st, *value, 0) {
+                    self.fresh(st, *dst, BuiltinKind::Str, site, span, ElemKinds::Unknown);
+                } else {
+                    Self::escape_all(st, std::iter::once(*value).chain(*spec), span);
+                    Self::opaque(st, *dst, "formatted value", span);
+                }
+                self.after_def(st, *dst, span);
+            }
+            InstKind::BuildString { dst, .. } => {
+                self.fresh(st, *dst, BuiltinKind::Str, site, span, ElemKinds::Unknown);
+                self.after_def(st, *dst, span);
+            }
             InstKind::Compare { dst, op, lhs, rhs } => {
                 let (lt, rt) = (st.exact_type(*lhs), st.exact_type(*rhs));
                 let plain = |k: Option<BuiltinKind>| {

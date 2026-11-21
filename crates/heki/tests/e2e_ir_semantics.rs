@@ -88,6 +88,56 @@ async def iterates():
     );
 }
 
+#[test]
+fn a_replacement_field_is_converted_before_its_specification_is_evaluated() {
+    let src = "\
+def show(a, b, c, d):
+    return f\"{a()!r:>{b()!s}}-{c()!a}\", f\"{d}\"
+";
+    let ir = dump_ir("ir_fstring_order", src, "py315");
+    let f = function(&ir, "show");
+    let steps: Vec<String> = f["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|b| b["insts"].as_array().unwrap())
+        .filter_map(|i| {
+            let (kind, payload) = i["kind"].as_object()?.iter().next()?;
+            match kind.as_str() {
+                "Call" => Some(format!("call {}", payload["callee"].as_str()?)),
+                "Format" => Some(format!(
+                    "format {} {}",
+                    payload["conversion"].as_str().unwrap_or("-"),
+                    if payload["spec"].is_null() {
+                        "-"
+                    } else {
+                        "spec"
+                    }
+                )),
+                "BuildString" => Some(format!("join {}", payload["parts"].as_array()?.len())),
+                _ => None,
+            }
+        })
+        .collect();
+    // CPython converts `a()` before it calls `b()` for the specification, formats each field
+    // where it stands, and joins the parts once; a field alone (`f"{d}"`) is its own result.
+    assert_eq!(
+        steps,
+        [
+            "call a",
+            "format repr -",
+            "call b",
+            "format str -",
+            "join 1",
+            "format - spec",
+            "call c",
+            "format ascii -",
+            "join 2",
+            "format - -",
+        ]
+    );
+}
+
 // ======================================================================== scopes and frames
 
 #[test]

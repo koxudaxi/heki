@@ -221,6 +221,15 @@ pub enum UnaryOpKind {
     USub,
 }
 
+/// The conversion of a replacement field: `!s` calls `str()`, `!r` `repr()`, `!a` `ascii()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Conversion {
+    Str,
+    Repr,
+    Ascii,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CompareOpKind {
@@ -313,6 +322,24 @@ pub enum InstKind {
         op: CompareOpKind,
         lhs: VarId,
         rhs: VarId,
+    },
+    /// One replacement field of an f-string or of a format specification:
+    /// `format(conversion(value), spec)`, with `""` for a missing `spec`. The conversion runs
+    /// the value's `__str__` / `__repr__`, the formatting its `__format__`: code of its class
+    /// unless that is a builtin. The result is a `str`, of a subclass if `__format__` returns
+    /// one.
+    Format {
+        dst: VarId,
+        value: VarId,
+        conversion: Option<Conversion>,
+        spec: Option<VarId>,
+    },
+    /// An f-string other than one replacement field alone: a new `str` of its literal text and
+    /// its formatted fields (`parts`, each a `Format`'s result), in order. It copies the text of
+    /// its parts and keeps none of them.
+    BuildString {
+        dst: VarId,
+        parts: Vec<VarId>,
     },
     AttrLoad {
         dst: VarId,
@@ -444,6 +471,8 @@ impl InstKind {
             | Self::BinOp { dst, .. }
             | Self::UnaryOp { dst, .. }
             | Self::Compare { dst, .. }
+            | Self::Format { dst, .. }
+            | Self::BuildString { dst, .. }
             | Self::AttrLoad { dst, .. }
             | Self::SubscriptLoad { dst, .. }
             | Self::MakeIter { dst, .. }
@@ -508,6 +537,8 @@ impl InstKind {
             | Self::CatchException { .. }
             | Self::Import { .. } => Vec::new(),
             Self::AllocBuiltin { elems, .. } => elems.clone(),
+            Self::BuildString { parts, .. } => parts.clone(),
+            Self::Format { value, spec, .. } => std::iter::once(*value).chain(*spec).collect(),
             Self::DictLiteral { entries, .. } => {
                 let mut out = Vec::new();
                 for e in entries {

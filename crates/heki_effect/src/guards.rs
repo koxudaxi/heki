@@ -176,8 +176,7 @@ const FILE_PROTOCOL: &[&str] = &[
 ];
 
 impl ConstClass {
-    /// The class of a display or comprehension of `kind` (an f-string, `Str`, has none: a single
-    /// replacement field is the result of `__format__`, which may be a `str` subclass).
+    /// The class of a display or comprehension of `kind`.
     fn of_builtin(kind: BuiltinKind) -> Option<Self> {
         match kind {
             BuiltinKind::List => Some(Self::List),

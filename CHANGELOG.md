@@ -84,6 +84,13 @@ release can change rules, configuration keys, diagnostics, and output formats.
 
 ### Fixed
 
+- An f-string's replacement fields are reads of their values: each is converted and formatted
+  where it stands (`format(conversion(value), spec)`, which may run the value's `__format__`,
+  `__str__`, or `__repr__`), also in a format specification and in a template string's
+  specifications, and the f-string is computed from them. The Soundness lane no longer proves a
+  `collections.deque` rewrite safe for a list an f-string shows (`OPT120` / `OPT121`: the
+  text of a `deque` differs), and `OPT113` no longer reports a traversal whose inner collection
+  is computed from the outer element through an f-string (`index[f"{name}"]`).
 - `EFF102` and `EFF103` no longer count a `functools.cached_property` getter as running on
   every read: it runs once per instance, like a lazy initialization of `self`, also when
   `cached_property` comes from a module that re-exports it (`kombu.utils.cached_property`). A

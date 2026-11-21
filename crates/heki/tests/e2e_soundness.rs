@@ -845,7 +845,7 @@ const DEQUE: &[Expect] = &[
         "copied_queue",
         &[(
             "OPT120",
-            V::Blocked("DequeEquivalentOps(q): it is also created at line 106"),
+            V::Blocked("DequeEquivalentOps(q): it is also created at line 107"),
         )],
     ),
     ("parameter_queue", &[]),
@@ -874,6 +874,10 @@ const DEQUE: &[Expect] = &[
     (
         "alias_after_site",
         &[("OPT120", V::Fix(&["deque([1, 2, 3])", "q.popleft()"]))],
+    ),
+    (
+        "formatted_items",
+        &[("OPT120", V::Fix(&["deque(list(items))", "q.popleft()"]))],
     ),
     (
         "middle_index",
@@ -915,6 +919,28 @@ const DEQUE: &[Expect] = &[
         &[(
             "OPT120",
             V::Blocked("DequeEquivalentOps(q): `q` : `.pop(...)` has no `deque` equivalent here"),
+        )],
+    ),
+    // The queue's text: formatted, converted, or printed by code heki cannot see.
+    (
+        "formatted_queue",
+        &[(
+            "OPT120",
+            V::Blocked("DequeEquivalentOps(q): `q` : it is formatted (line"),
+        )],
+    ),
+    (
+        "stringified_queue",
+        &[(
+            "OPT120",
+            V::Blocked("DequeEquivalentOps(q): `q` : it is passed to `str(...)`"),
+        )],
+    ),
+    (
+        "printed_queue",
+        &[(
+            "OPT120",
+            V::Blocked("Unique(q): it may be shared: passed to code heki cannot see"),
         )],
     ),
     // Both fixes wrap the same display: the second waits for another pass, where `q` is no
@@ -1543,10 +1569,23 @@ fn a_fixpoint_not_reached_in_64_passes_blocks_every_candidate() {
 
 const STORED: &str = "Unique(xs): it may be shared: stored in a container, attribute, or global";
 
+const FORMATTED: &str = "DequeEquivalentOps(q): `q` : it is formatted (line";
+
 const IR_COUNTEREXAMPLES: &[Expect] = &[
     // A replacement field may rebind a builtin name or store the accumulator.
     ("cx_walrus_in_fstring", &[]),
     ("cx_nested_format_spec", &[("OPT101", V::Blocked(STORED))]),
+    // A replacement field, also of a format specification, formats the list: a deque's text
+    // differs.
+    ("cx_formatted_queue", &[("OPT120", V::Blocked(FORMATTED))]),
+    (
+        "cx_queue_in_format_spec",
+        &[("OPT120", V::Blocked(FORMATTED))],
+    ),
+    (
+        "cx_queue_in_template_spec",
+        &[("OPT120", V::Blocked(FORMATTED))],
+    ),
     // A definition's header, a handler's type, and a target's subscript bind in the function:
     // `list` is a local name there, not the builtin.
     ("cx_walrus_in_default", &[]),

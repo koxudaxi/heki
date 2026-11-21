@@ -658,15 +658,16 @@ impl<'a> FnIndex<'a> {
     }
 
     /// The builtin kind of the container the instruction defining `v` (after copies) makes: a
-    /// list, tuple, or set display, a string constant, or a builtin constructor call (what a
-    /// slice can slice).
+    /// list, tuple, or set display, a string constant or an f-string that joins text, or a
+    /// builtin constructor call (what a slice can slice).
     fn made_kind(&self, v: VarId) -> Option<BuiltinKind> {
         match &self.def_inst(self.copied_from(v))?.kind {
             InstKind::AllocBuiltin { kind, .. } => Some(*kind),
             InstKind::Const {
                 literal: ConstLiteral::Str(_),
                 ..
-            } => Some(BuiltinKind::Str),
+            }
+            | InstKind::BuildString { .. } => Some(BuiltinKind::Str),
             InstKind::Call {
                 callee_var, callee, ..
             } => match self.builtin(*callee_var, callee)? {
@@ -967,6 +968,8 @@ impl<'a> FnIndex<'a> {
             | InstKind::IterNext { .. }
             | InstKind::Compare { .. }
             | InstKind::UnaryOp { .. }
+            | InstKind::Format { .. }
+            | InstKind::BuildString { .. }
             | InstKind::SubscriptLoad { .. }
             | InstKind::SubscriptDelete { .. }
             | InstKind::AttrDelete { .. }

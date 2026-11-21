@@ -379,8 +379,8 @@ impl BetweenSteps {
 
 /// What a use of a project call's result does with the object.
 enum ResultUse {
-    /// Nothing that steps it or lets it out: a copy, a comparison, a lazy wrapper made of it
-    /// (the wrapper's own uses are the object's).
+    /// Nothing that steps it or lets it out: a copy, a comparison, formatting it, a lazy wrapper
+    /// made of it (the wrapper's own uses are the object's).
     Inert,
     /// It escapes: stored, yielded, captured, handed to code heki does not follow, or returned
     /// by a generator or a coroutine. Any later code may step it.
@@ -557,6 +557,7 @@ fn result_use(
         InstKind::Copy { .. }
         | InstKind::Compare { .. }
         | InstKind::UnaryOp { .. }
+        | InstKind::Format { .. }
         | InstKind::Delete { .. } => ResultUse::Inert,
         _ if facts.wrapped.contains(&r) => ResultUse::Inert,
         // A generator's own methods step it (`send()`, `throw()`).
