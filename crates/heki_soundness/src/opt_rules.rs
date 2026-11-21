@@ -1778,7 +1778,13 @@ impl<'a, 'c> Rules<'a, 'c> {
             format!(
                 "concatenating to `{name}` copies the whole `{what}` each time it runs in the loop"
             ),
-            "collect the pieces in a list and join them once after the loop".to_owned(),
+            match kind {
+                Some(Tuple) => {
+                    "extend a list with each piece and convert it once with `tuple(...)` after the loop"
+                }
+                _ => "collect the pieces in a list and join them once after the loop",
+            }
+            .to_owned(),
             obs,
             capped.or_else(|| loop_bound_note(lp)),
             self.init_evidence(&st, acc, &[Bytes, Tuple]),

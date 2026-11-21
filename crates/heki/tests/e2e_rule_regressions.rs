@@ -1214,7 +1214,8 @@ fn starred_elements_keep_the_names_in_blockers() {
 /// module constant of 20 items, work before the test or after the `if` for every pair, an earlier
 /// `and` operand, a generator, a `filter` call, or a value of unknown type (it may be a generator)
 /// as the inner iterable, an inner collection the outer loop changes, also through another name
-/// bound to it, rebinds, or may let other code change (`yield`), and a trip count the code fixes.
+/// bound to it, rebinds, or may let other code change (`yield`), a store into the compared key of an
+/// inner item, and a trip count the code fixes.
 const PREMISES: &str = r#"RUNNERS = (
     "a", "b", "c", "d", "e", "f", "g", "h", "i", "j",
     "k", "l", "m", "n", "o", "p", "q", "r", "s", "t",
@@ -1418,6 +1419,64 @@ def words(xs, text: str):
     return out
 
 
+def rekeyed(xs, ys: list):
+    for a in xs:
+        for b in ys:
+            if a.k == b.k:
+                b.k = None
+
+
+def item_rekeyed(xs, ys: list):
+    for a in xs:
+        for b in ys:
+            if a["k"] == b["k"]:
+                b["k"] = None
+
+
+def marks(xs, ys: list, cache: dict):
+    for a in xs:
+        for b in ys:
+            if a.k == b.k:
+                b.used = True
+        del cache[a.k]
+
+
+def by_key(xs, d: dict):
+    out = []
+    for a in xs:
+        for k, v in d.items():
+            if a.k == k:
+                out.append(v)
+    return out
+
+
+def by_keys(xs, d: dict):
+    out = []
+    for a in xs:
+        for k in d.keys():
+            if k == a.k:
+                out.append(k)
+    return out
+
+
+def by_value(xs, d: dict):
+    out = []
+    for a in xs:
+        for k, v in d.items():
+            if v.k == a.k:
+                out.append(k)
+    return out
+
+
+def by_item_value(xs, d: dict):
+    out = []
+    for a in xs:
+        for k, v in d.items():
+            if v == a.k:
+                out.append(k)
+    return out
+
+
 def yielding(xs, ys):
     for a in xs:
         for b in ys:
@@ -1477,6 +1536,13 @@ fn opt113_states_its_exact_claim_only_when_every_premise_holds() {
             ("aliased", false, tier(false)),
             ("prefiltered", true, tier(true)),
             ("words", true, tier(true)),
+            ("rekeyed", false, tier(false)),
+            ("item_rekeyed", false, tier(false)),
+            ("marks", true, tier(true)),
+            ("by_key", true, tier(true)),
+            ("by_keys", true, tier(true)),
+            ("by_value", true, tier(true)),
+            ("by_item_value", true, tier(true)),
             ("yielding", false, tier(false)),
         ],
         "{json}{stderr}"
@@ -1493,6 +1559,18 @@ fn opt113_states_its_exact_claim_only_when_every_premise_holds() {
     assert!(help("mixed_keys").starts_with("group the elements of `ys`"));
     assert!(help("exact_join").starts_with("if the keys are hashable, index `customers`"));
     assert!(help("inner_changed").starts_with(
-        "if `events` is the same collection on every iteration of the outer loop and the keys are hashable,"
+        "if `events` is the same collection, with the same keys, on every iteration of the outer loop and the keys are hashable,"
     ));
+    // A store into the compared key of an inner item would leave an index built once stale.
+    assert!(help("rekeyed").starts_with(
+        "if `ys` is the same collection, with the same keys, on every iteration of the outer loop"
+    ));
+    // A mapping stepped through by its own keys needs no index: a lookup in it does.
+    assert_eq!(
+        help("by_key"),
+        "`d` is already keyed by `k`: look each outer key up in it (`d.get(...)`) instead of looping over it"
+    );
+    assert!(help("by_keys").starts_with("`d` is already keyed by `k`"));
+    assert!(help("by_value").starts_with("if the keys are hashable, index `d.items()`"));
+    assert!(help("by_item_value").starts_with("if the keys are hashable,"));
 }

@@ -3872,8 +3872,9 @@ Its premises:
 Not part of the claim: how many times the statement runs (one under a branch inside the loop
 counts), and how large the loop or the value is. The message claims no size and no cost estimate. A
 loop or a value that the code fixes at 16 or fewer items is not reported, since the rewrite would
-not pay off. A proven report in a loop the code fixes at more trips is heuristic: it is true, but a
-fixed count is no evidence either way, so the exact tier leaves it out.
+not pay off. A proven report in a loop whose trip count the code fixes at more, or caps with a
+length test every path to the loop passes, is heuristic: it is true, but a fixed count is no
+evidence either way, so the exact tier leaves it out.
 
 ## Why is this bad?
 Each concatenation copies everything accumulated so far.
@@ -4205,8 +4206,9 @@ Its premises:
 Not part of the claim: how many times the statement runs (one under a branch inside the loop
 counts), and how large the loop or the list is. The message claims no size and no cost estimate. A
 loop or a list that the code fixes at 16 or fewer items is not reported, since the rewrite would not
-pay off. A proven report in a loop the code fixes at more trips is heuristic: it is true, but a
-fixed count is no evidence either way, so the exact tier leaves it out.
+pay off. A proven report in a loop whose trip count the code fixes at more, or caps with a length
+test every path to the loop passes, is heuristic: it is true, but a fixed count is no evidence
+either way, so the exact tier leaves it out.
 
 ## Why is this bad?
 Inserting at the front shifts every element, so building a list this way is quadratic.
@@ -4283,8 +4285,9 @@ Its premises:
 Not part of the claim: how many times the statement runs (one under a branch inside the loop
 counts), and how large the loop or the list is. The message claims no size and no cost estimate. A
 loop or a list that the code fixes at 16 or fewer items is not reported, since the rewrite would not
-pay off. A proven report in a loop the code fixes at more trips is heuristic: it is true, but a
-fixed count is no evidence either way, so the exact tier leaves it out.
+pay off. A proven report in a loop whose trip count the code fixes at more, or caps with a length
+test every path to the loop passes, is heuristic: it is true, but a fixed count is no evidence
+either way, so the exact tier leaves it out.
 
 ## Why is this bad?
 Removing the first element shifts every remaining element, so a queue drained this way is
@@ -4754,8 +4757,9 @@ Its premises:
 Not part of the claim: how many times the statement runs (one under a branch inside the loop
 counts), and how large the loop or the container is. The message claims no size and no cost
 estimate. A loop or a container that the code fixes at 16 or fewer items is not reported, since the
-rewrite would not pay off. A proven report in a loop the code fixes at more trips is heuristic: it
-is true, but a fixed count is no evidence either way, so the exact tier leaves it out.
+rewrite would not pay off. A proven report in a loop whose trip count the code fixes at more, or
+caps with a length test every path to the loop passes, is heuristic: it is true, but a fixed count
+is no evidence either way, so the exact tier leaves it out.
 
 The rewrite also needs what the container is built from to stay the same during the loop
 (`ValueLoopInvariant`), which only a proven report establishes.
@@ -4838,8 +4842,9 @@ Its premises:
 Not part of the claim: how many times the statement runs (one under a branch inside the loop
 counts), and how large the loop or the list is. The message claims no size and no cost estimate. A
 loop or a list that the code fixes at 16 or fewer items is not reported, since the rewrite would not
-pay off. A proven report in a loop the code fixes at more trips is heuristic: it is true, but a
-fixed count is no evidence either way, so the exact tier leaves it out.
+pay off. A proven report in a loop whose trip count the code fixes at more, or caps with a length
+test every path to the loop passes, is heuristic: it is true, but a fixed count is no evidence
+either way, so the exact tier leaves it out.
 
 ## Why is this bad?
 The membership test scans the list, so de-duplicating `n` items costs `n²` comparisons.
@@ -5019,10 +5024,11 @@ Its premises:
 Not part of the claim: how many times the statement runs (one under a branch inside the loop
 counts), and how large the loop or the list is. The message claims no size and no cost estimate. A
 loop or a list that the code fixes at 16 or fewer items is not reported, since the rewrite would not
-pay off. A proven report in a loop the code fixes at more trips is heuristic: it is true, but a
-fixed count is no evidence either way, so the exact tier leaves it out. Nor is whether a `set` can
-replace the list: elements that cannot be hashed, or a list that changes during the loop, block the
-rewrite (the help names the obligation); the scan happens either way.
+pay off. A proven report in a loop whose trip count the code fixes at more, or caps with a length
+test every path to the loop passes, is heuristic: it is true, but a fixed count is no evidence
+either way, so the exact tier leaves it out. Nor is whether a `set` can replace the list: elements
+that cannot be hashed, or a list that changes during the loop, block the rewrite (the help names the
+obligation); the scan happens either way.
 
 ## Why is this bad?
 `e in lst` scans the list, so the loop costs the product of both sizes. A set lookup is
@@ -5247,8 +5253,9 @@ Its premises:
   components, attributes, or constant subscripts). Established.
 - **Steps through inputs**: each loop steps through items of the function's inputs: every source
   of its items is a parameter, or an attribute or an item of one (`orders`, `req.rows`,
-  `sorted(customers)`). A call's result, a method's receiver (`self.rows`), a module constant,
-  or a display leaves it open.
+  `sorted(customers)`), also through a list the function fills only by appending items of such a
+  source (`for row in rows: results.append((key, row))`). A call's result, a method's receiver
+  (`self.rows`), a module constant, or a display leaves it open.
 - **Idle on a mismatch**: an inner item whose key differs runs only the loads of the two keys and
   the comparison: no statement before the test or after the `if`, no `else` or `elif`, no
   earlier `and` operand (`b.active and a.k == b.k`), and no code of the project to advance the
@@ -5256,13 +5263,18 @@ Its premises:
   an annotation counts, assumption R2), a display, `sorted(...)` or another builtin that builds
   a container, a view of a `dict`, or the pieces of a `str`. A value of unknown type may be a
   generator, and a generator, `map`, `filter`, or another call runs code for each item.
-- **Same collection**: the inner loop steps through the same collection on every iteration of the
-  outer loop: its iterable is bound before the outer loop, or computed inside it only from
-  values bound before it, and the outer loop does not change those values through their names,
-  every name a copy binds to them (`rows = ys` makes `ys` one): no changing method, store, `del`,
-  call that receives one, `yield`, or `await`.
-- **Trip counts not fixed**: the code fixes neither loop's trip count. A count of 16 or fewer is
-  not reported at all; a larger one is no evidence either way.
+- **Same collection, same keys**: the inner loop steps through the same collection on every
+  iteration of the outer loop: its iterable is bound before the outer loop, or computed inside it
+  only from values bound before it, and the outer loop does not change those values through
+  their names, every name a copy binds to them (`rows = ys` makes `ys` one): no changing method,
+  store, `del`, call that receives one, `yield`, or `await`. Nor does it change the compared key
+  of an inner item: no store into or deletion of what the key loads (`b.k = ...` for the key
+  `b.k`), and no changing method of the key's object.
+
+Not part of the claim: any count or size. A loop whose trip count the code fixes or caps (a
+constant `range`, a constant slice, a display, or a length test every path to the loop passes,
+`if len(rows) > 100: raise ...`) has no report in the exact tier: one of 16 or fewer is not
+reported at all, and a larger one is no evidence either way.
 
 A report without one of these premises is heuristic, and its message says only "nested loops
 join `orders` and `customers` on `order.customer_id == customer.id`". It rests on the open
@@ -5270,8 +5282,10 @@ premise that both loops are data-sized: the code does not fix the size of either
 fewer, and a size heki cannot bound counts as data-sized.
 
 No message claims a size or a cost. The help names a `set` or a `dict` only for keys known to be
-hashable, and an index built before the outer loop only for an inner collection that is the same
-on every outer iteration; otherwise it states the condition ("if the keys are hashable, ...").
+hashable, and an index built before the outer loop only for an inner collection that is the same,
+with the same keys, on every outer iteration; otherwise it states the condition ("if the keys are
+hashable, ..."). For a mapping the inner loop steps through by its own keys (`for k, v in
+d.items()` with the key `k`), it says to look each outer key up in the mapping instead.
 
 ## Why is this bad?
 The inner loop runs completely for every outer element, so the join costs O(n·m) comparisons.

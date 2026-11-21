@@ -117,13 +117,16 @@ release can change rules, configuration keys, diagnostics, and output formats.
   runs nothing but the comparison (no statement before the test or after the `if`, no earlier
   `and` operand, and an inner iterable that is a builtin container by its type or construction,
   not a value of unknown type, a generator, `map`, `filter`, or another call), the inner loop
-  steps through the same collection on every outer iteration, and the code fixes neither trip
-  count. Its message states that claim ("for each item of `orders`, the loop over
+  steps through the same collection, with the same keys, on every outer iteration; a loop whose
+  trip count the code fixes or caps has no exact report. Its message states that claim ("for each item of `orders`, the loop over
   `customers` compares `order.customer_id == customer.id` and does nothing else for an item that
   does not match"); the other reports are heuristic. The help names a `set` or `dict` only for
   keys known to be hashable, and an index built before the outer loop only for an inner
   collection that stays the same; otherwise it states the condition ("if the keys are hashable,
-  ...").
+  ..."). For a mapping the inner loop steps through by its own keys, it says to look each outer
+  key up in the mapping.
+- `OPT103`'s help for a `tuple` accumulator says to extend a list and convert it once with
+  `tuple(...)`, not to join the pieces.
 - `EFF102` and `EFF103` also report the function a builtin calls once per item: the function
   handed to `map`, `filter`, `itertools.starmap`, `itertools.filterfalse`, and
   `functools.reduce`, and the `key` of `sorted`, `list.sort`, `min`, `max`, and

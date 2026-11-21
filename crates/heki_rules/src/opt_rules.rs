@@ -879,6 +879,42 @@ impl<'a> Defs<'a> {
                 if self.f.loops.iter().any(|lp| lp.header == h && lp.body.contains(&from)))
     }
 
+    /// The mapping the inner loop steps through by its keys, when the inner key is that key:
+    /// `for k, v in d.items()` with the key `k`, or `for k in d.keys()` (`d`, from the
+    /// iterable's text `inner_iter`).
+    fn keyed_mapping<'t>(
+        &self,
+        inner: &ForLoop<'_>,
+        key: VarId,
+        inner_iter: &'t str,
+    ) -> Option<&'t str> {
+        let (element, _) = self.next_of(inner.lp)?;
+        let (method, mapping) = [".items()", ".keys()"]
+            .into_iter()
+            .find_map(|m| Some((m, inner_iter.strip_suffix(m)?)))?;
+        let mut key = key;
+        while let Some(InstKind::Copy { src, .. }) = self.kind(key) {
+            key = *src;
+        }
+        let first = |index: VarId| {
+            matches!(
+                self.kind(index),
+                Some(InstKind::Const {
+                    literal: ConstLiteral::Int(0),
+                    ..
+                })
+            )
+        };
+        let is_key = match (method, self.kind(key)) {
+            (".keys()", _) => self.whole_element(key),
+            (_, Some(InstKind::SubscriptLoad { obj, index, .. })) => {
+                *obj == element && first(*index)
+            }
+            _ => false,
+        };
+        is_key.then_some(mapping)
+    }
+
     /// Whether `var` is a loop element itself (through `Copy`), not a part of it.
     fn whole_element(&self, mut var: VarId) -> bool {
         while let Some(InstKind::Copy { src, .. }) = self.kind(var) {
@@ -1064,7 +1100,8 @@ pub(crate) fn opt113(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
                     origins: &origins,
                     budget: budget.get_or_insert_with(|| Budget::of_function("OPT113", f)),
                 };
-                let same_collection = premises.same_collection_each_time(inner, j.outer);
+                let same_collection = premises.same_collection_each_time(inner, j.outer)
+                    && premises.keys_unchanged(j.outer, j.inner_side);
                 let exact = same_collection
                     && premises.steps_through_inputs(j.outer)
                     && premises.steps_through_inputs(inner)
@@ -1078,7 +1115,7 @@ pub(crate) fn opt113(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
                 let mut conditions = Vec::new();
                 if !same_collection {
                     conditions.push(format!(
-                        "`{inner_iter}` is the same collection on every iteration of the outer loop"
+                        "`{inner_iter}` is the same collection, with the same keys, on every iteration of the outer loop"
                     ));
                 }
                 // The index holds the inner keys.
@@ -1111,7 +1148,15 @@ pub(crate) fn opt113(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
                     let key = defs.element_text(unit.source, j.inner_side);
                     format!("index `{inner_iter}` by `{key}` in a `dict` before the outer loop")
                 };
-                let help = if conditions.is_empty() {
+                let help = if let Some(mapping) =
+                    defs.keyed_mapping(inner, j.inner_side, &inner_iter)
+                {
+                    // Its keys are hashable, and a lookup reads the mapping as it is then.
+                    format!(
+                        "`{mapping}` is already keyed by `{}`: look each outer key up in it (`{mapping}.get(...)`) instead of looping over it",
+                        defs.element_text(unit.source, j.inner_side)
+                    )
+                } else if conditions.is_empty() {
                     advice
                 } else {
                     format!("if {}, {advice}", conditions.join(" and "))
@@ -1141,7 +1186,7 @@ pub(crate) fn opt113(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
                     .expect("the rule runs on the unit: it returned at its start otherwise");
                 if exact {
                     d.evidence = Some(format!(
-                        "established: both loops step through inputs and their trip counts are not fixed, a pair that does not match runs only the comparison, and `{inner_iter}` is the same collection on every outer iteration"
+                        "established: both loops step through inputs, a pair that does not match runs only the comparison, and `{inner_iter}` is the same collection, with the same keys, on every outer iteration"
                     ));
                 } else {
                     d.certainty = Certainty::Heuristic;
@@ -1390,6 +1435,71 @@ impl JoinPremises<'_, '_, '_> {
             },
         );
         matches!(found, Answer::Known(None))
+    }
+
+    /// The outer loop leaves the compared key of every inner item as it is: it stores into or
+    /// deletes no attribute or constant item that the key `key` loads from the inner item
+    /// (`b.k = ...` for the key `b.k`), and changes neither the key's object nor an object the key
+    /// is loaded from with a method that is not a reading one.
+    fn keys_unchanged(&self, outer: &ForLoop<'_>, key: VarId) -> bool {
+        let f = self.defs.f;
+        let shape = self.sizes.ix.shape();
+        let in_outer = |b: BlockId| shape.in_loop(outer.index, b);
+        // Each load on the way from the inner item to the key: the object it reads (through
+        // copies), and the attribute or constant item it takes (`None`: a computed item).
+        let mut loads: Vec<(VarId, Option<&str>)> = Vec::new();
+        let walked = walk::reach(
+            self.budget,
+            [key],
+            |v, out| {
+                if let Some(InstKind::AttrLoad { obj, .. } | InstKind::SubscriptLoad { obj, .. }) =
+                    shape.inst(shape.copy_root(v)).map(|i| &i.kind)
+                {
+                    out.push(*obj);
+                }
+            },
+            |v| {
+                match shape.inst(shape.copy_root(v)).map(|i| &i.kind) {
+                    Some(InstKind::AttrLoad { obj, attr, .. }) => {
+                        loads.push((shape.copy_root(*obj), Some(attr.as_str())));
+                    }
+                    Some(InstKind::SubscriptLoad { obj, key_const, .. }) => {
+                        loads.push((shape.copy_root(*obj), key_const.as_deref()));
+                    }
+                    _ => {}
+                }
+                walk::Visit::<()>::Expand
+            },
+        );
+        let key = shape.copy_root(key);
+        // A store, a deletion, or a changing method of the key's object or of an object the key
+        // is loaded from, at what the key loads (`None`: anything).
+        let rekeys = |inst: &Inst| {
+            let (obj, what) = match &inst.kind {
+                InstKind::AttrStore { obj, attr, .. } | InstKind::AttrDelete { obj, attr } => {
+                    (*obj, Some(attr.as_str()))
+                }
+                InstKind::SubscriptStore { obj, index, .. }
+                | InstKind::SubscriptDelete { obj, index, .. } => (*obj, shape.str_const(*index)),
+                InstKind::MethodCall { recv, method, .. }
+                    if !READING_METHODS.contains(&method.as_str()) =>
+                {
+                    (*recv, None)
+                }
+                _ => return false,
+            };
+            let obj = shape.copy_root(obj);
+            obj == key
+                || loads.iter().any(|(read, step)| {
+                    *read == obj && (what.is_none() || step.is_none() || what == *step)
+                })
+        };
+        !walked.is_open()
+            && !f
+                .blocks
+                .iter()
+                .filter(|b| in_outer(b.id))
+                .any(|b| b.insts.iter().any(rekeys))
     }
 
     /// The inner loop steps through the same collection on every iteration of the outer one:

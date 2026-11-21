@@ -42,10 +42,11 @@ Its premises:
 Not part of the claim: how many times the statement runs (one under a branch inside the loop
 counts), and how large the loop or the list is. The message claims no size and no cost estimate. A
 loop or a list that the code fixes at 16 or fewer items is not reported, since the rewrite would not
-pay off. A proven report in a loop the code fixes at more trips is heuristic: it is true, but a
-fixed count is no evidence either way, so the exact tier leaves it out. Nor is whether a `set` can
-replace the list: elements that cannot be hashed, or a list that changes during the loop, block the
-rewrite (the help names the obligation); the scan happens either way.
+pay off. A proven report in a loop whose trip count the code fixes at more, or caps with a length
+test every path to the loop passes, is heuristic: it is true, but a fixed count is no evidence
+either way, so the exact tier leaves it out. Nor is whether a `set` can replace the list: elements
+that cannot be hashed, or a list that changes during the loop, block the rewrite (the help names the
+obligation); the scan happens either way.
 
 ## Why is this bad?
 `e in lst` scans the list, so the loop costs the product of both sizes. A set lookup is
