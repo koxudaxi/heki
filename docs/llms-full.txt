@@ -769,12 +769,13 @@ Fixed 1 issue(s) in 1 file(s).
 
 `--fix` then reports what is left, such as the `EFF101` above, which has no automatic fix.
 
-When heki cannot prove a fix safe, the help says why and nothing is rewritten. Here the list is
-also handed to other code inside the loop:
+When heki cannot prove a fix safe, the help says why, nothing is rewritten, and the report is
+heuristic whatever the rule's certainty. Here the list is also handed to other code inside the
+loop:
 
 ```console
-$ heki check app/shared.py
-app/shared.py:4:9: OPT101 (list-quadratic-concat) [warning] `rows = rows + [...]` copies the whole list on every iteration (quadratic)
+$ heki check --heuristic app/shared.py
+app/shared.py:4:9: OPT101 (list-quadratic-concat) [warning, heuristic] `rows = rows + [...]` copies the whole list each time it runs in the loop
   |
 4 |         rows = rows + [item]
   |         ^
@@ -3789,21 +3790,23 @@ no other reference. Neither are:
 
 ## What a report states
 
-A report states that an immutable value (`bytes`, a `tuple`, a `str` attribute) grows by
-concatenation on every iteration of the loop, so each iteration copies all of it.
+A report states that concatenating to an immutable value (`bytes`, a `tuple`, a `str` attribute),
+in a loop, copies all of it each time it runs.
 
 Its premises:
 
 - **Immutable type**: the value's exact type is known from its construction. Established.
-- **Loop-carried**: the result is the value of the next iteration. Established by the IR.
-- **On every iteration**: the statement runs on every iteration of the loop. Open: a statement under
-  a branch inside the loop counts.
-- **Data-sized**: the code does not fix the sizes the cost depends on (the loop's and the
-  container's) at 16 or fewer. Open: a size heki cannot bound counts as data-sized.
+- **Loop-carried**: the result is the value the next iteration starts from. Established by the IR.
+- **In a loop**: the statement is in the body of a loop. Established by the IR.
 - **Rewrite proven safe**: the help says `[safe fix: ...]`, `[proven-safe suggestion: ...]`, or
   `[proven safe; ...]`. A report whose help names a blocking obligation instead (`[not auto-fixable:
   ...]`) lacks this premise and is heuristic whatever the rule's certainty; the proven reports are
   the rule's exact tier.
+
+Not part of the claim: how many times the statement runs (one under a branch inside the loop
+counts), and how large the loop or the value is. The message claims no size and no cost estimate. A
+loop or a value that the code fixes at 16 or fewer items is not reported, since the rewrite would
+not pay off.
 
 ## Why is this bad?
 Each concatenation copies everything accumulated so far.
@@ -4118,22 +4121,24 @@ costs no more than building it.
 
 ## What a report states
 
-A report states that inserting at the front of the list (`lst.insert(0, x)`) shifts every element,
-on every iteration of the loop.
+A report states that inserting at the front of the list (`lst.insert(0, x)`), in a loop, moves
+every element each time it runs.
 
 Its premises:
 
 - **Builtin list**: the value is a builtin `list` by its construction (a display, a comprehension,
   `list(...)`). Established: the Soundness lane takes types from constructions only, never from
   annotations.
-- **On every iteration**: the statement runs on every iteration of the loop. Open: a statement under
-  a branch inside the loop counts.
-- **Data-sized**: the code does not fix the sizes the cost depends on (the loop's and the
-  container's) at 16 or fewer. Open: a size heki cannot bound counts as data-sized.
+- **In a loop**: the statement is in the body of a loop. Established by the IR.
 - **Rewrite proven safe**: the help says `[safe fix: ...]`, `[proven-safe suggestion: ...]`, or
   `[proven safe; ...]`. A report whose help names a blocking obligation instead (`[not auto-fixable:
   ...]`) lacks this premise and is heuristic whatever the rule's certainty; the proven reports are
   the rule's exact tier.
+
+Not part of the claim: how many times the statement runs (one under a branch inside the loop
+counts), and how large the loop or the list is. The message claims no size and no cost estimate. A
+loop or a list that the code fixes at 16 or fewer items is not reported, since the rewrite would not
+pay off.
 
 ## Why is this bad?
 Inserting at the front shifts every element, so building a list this way is quadratic.
@@ -4194,21 +4199,23 @@ iteration of the loop.
 ## What a report states
 
 A report states that removing the first element of the list (`lst.pop(0)`, `del lst[0]`, `lst =
-lst[1:]`) shifts or copies every other element, on every iteration of the loop.
+lst[1:]`), in a loop, moves or copies every remaining element each time it runs.
 
 Its premises:
 
 - **Builtin list**: the value is a builtin `list` by its construction (a display, a comprehension,
   `list(...)`). Established: the Soundness lane takes types from constructions only, never from
   annotations.
-- **On every iteration**: the statement runs on every iteration of the loop. Open: a statement under
-  a branch inside the loop counts.
-- **Data-sized**: the code does not fix the sizes the cost depends on (the loop's and the
-  container's) at 16 or fewer. Open: a size heki cannot bound counts as data-sized.
+- **In a loop**: the statement is in the body of a loop. Established by the IR.
 - **Rewrite proven safe**: the help says `[safe fix: ...]`, `[proven-safe suggestion: ...]`, or
   `[proven safe; ...]`. A report whose help names a blocking obligation instead (`[not auto-fixable:
   ...]`) lacks this premise and is heuristic whatever the rule's certainty; the proven reports are
   the rule's exact tier.
+
+Not part of the claim: how many times the statement runs (one under a branch inside the loop
+counts), and how large the loop or the list is. The message claims no size and no cost estimate. A
+loop or a list that the code fixes at 16 or fewer items is not reported, since the rewrite would not
+pay off.
 
 ## Why is this bad?
 Removing the first element shifts every remaining element, so a queue drained this way is
@@ -4287,23 +4294,24 @@ rewrites it to `x.append(e)` (`x.extend([...])` for several elements).
 
 ## What a report states
 
-A report states that `x = x + [e]` builds a new list from the whole accumulated list on every
-iteration of the loop, where appending would change it in place.
+A report states that `x = x + [e]`, in a loop, builds a new list from the whole accumulated list
+each time it runs, where appending would change it in place.
 
 Its premises:
 
 - **Builtin list**: the value is a builtin `list` by its construction (a display, a comprehension,
   `list(...)`). Established: the Soundness lane takes types from constructions only, never from
   annotations.
-- **Loop-carried**: the result is the accumulator of the next iteration. Established by the IR.
-- **On every iteration**: the statement runs on every iteration of the loop. Open: a statement under
-  a branch inside the loop counts.
-- **Data-sized**: the code does not fix the sizes the cost depends on (the loop's and the
-  container's) at 16 or fewer. Open: a size heki cannot bound counts as data-sized.
+- **Loop-carried**: the result is the value the next iteration starts from. Established by the IR.
+- **In a loop**: the statement is in the body of a loop. Established by the IR.
 - **Rewrite proven safe**: the help says `[safe fix: ...]`, `[proven-safe suggestion: ...]`, or
   `[proven safe; ...]`. A report whose help names a blocking obligation instead (`[not auto-fixable:
   ...]`) lacks this premise and is heuristic whatever the rule's certainty; the proven reports are
   the rule's exact tier.
+
+Not part of the claim: how many times the statement runs (one under a branch inside the loop
+counts), and how large the loop or the list is. The message claims no size and no cost estimate. The
+rewrite never makes the code slower, so a loop the code fixes at a few items is reported too.
 
 ## Why is this bad?
 `x + [e]` copies the whole list, so the loop is quadratic. `append` is amortized constant time
@@ -4661,21 +4669,26 @@ functions.
 
 ## What a report states
 
-A report states that the loop builds the same container (`set(keys)`, `list(...)`, `tuple(...)`,
-`dict(...)`) on every iteration to test membership in it.
+A report states that a builtin constructor (`set(keys)`, `list(...)`, `tuple(...)`, `dict(...)`),
+in a loop, builds a new container for a membership test each time it runs.
 
 Its premises:
 
-- **Loop-invariant**: what the container is built from does not change during the loop. Established
-  by the Soundness lane.
-- **On every iteration**: the statement runs on every iteration of the loop. Open: a statement under
-  a branch inside the loop counts.
-- **Data-sized**: the code does not fix the sizes the cost depends on (the loop's and the
-  container's) at 16 or fewer. Open: a size heki cannot bound counts as data-sized.
+- **Builtin container**: the constructor builds a builtin container of a known type. Established
+  only on a proven report: an unknown type is one of the obligations that block the rewrite.
+- **In a loop**: the statement is in the body of a loop. Established by the IR.
 - **Rewrite proven safe**: the help says `[safe fix: ...]`, `[proven-safe suggestion: ...]`, or
   `[proven safe; ...]`. A report whose help names a blocking obligation instead (`[not auto-fixable:
   ...]`) lacks this premise and is heuristic whatever the rule's certainty; the proven reports are
   the rule's exact tier.
+
+Not part of the claim: how many times the statement runs (one under a branch inside the loop
+counts), and how large the loop or the container is. The message claims no size and no cost
+estimate. A loop or a container that the code fixes at 16 or fewer items is not reported, since the
+rewrite would not pay off.
+
+The rewrite also needs what the container is built from to stay the same during the loop
+(`ValueLoopInvariant`), which only a proven report establishes.
 
 ## Why is this bad?
 The container is rebuilt from scratch on every iteration, which costs as much as the scan it
@@ -4738,22 +4751,24 @@ functions.
 
 ## What a report states
 
-A report states that `if v not in seen: seen.append(v)` scans the list on every iteration of the
-loop.
+A report states that `if v not in seen: seen.append(v)`, in a loop, scans the list each time it
+runs.
 
 Its premises:
 
 - **Builtin list**: the value is a builtin `list` by its construction (a display, a comprehension,
   `list(...)`). Established: the Soundness lane takes types from constructions only, never from
   annotations.
-- **On every iteration**: the statement runs on every iteration of the loop. Open: a statement under
-  a branch inside the loop counts.
-- **Data-sized**: the code does not fix the sizes the cost depends on (the loop's and the
-  container's) at 16 or fewer. Open: a size heki cannot bound counts as data-sized.
+- **In a loop**: the statement is in the body of a loop. Established by the IR.
 - **Rewrite proven safe**: the help says `[safe fix: ...]`, `[proven-safe suggestion: ...]`, or
   `[proven safe; ...]`. A report whose help names a blocking obligation instead (`[not auto-fixable:
   ...]`) lacks this premise and is heuristic whatever the rule's certainty; the proven reports are
   the rule's exact tier.
+
+Not part of the claim: how many times the statement runs (one under a branch inside the loop
+counts), and how large the loop or the list is. The message claims no size and no cost estimate. A
+loop or a list that the code fixes at 16 or fewer items is not reported, since the rewrite would not
+pay off.
 
 ## Why is this bad?
 The membership test scans the list, so de-duplicating `n` items costs `n²` comparisons.
@@ -4829,14 +4844,14 @@ not reported. Neither are:
 
 ## What a report states
 
-A report states that `xs.index(...)`, `xs.remove(...)`, or `xs.count(...)` scans the whole list on
-every iteration of the loop.
+A report states that `xs.index(...)`, `xs.remove(...)`, or `xs.count(...)`, in a loop, scans the
+list each time it runs (`count` scans all of it; `index` and `remove` scan up to the first match).
 
 Its premises:
 
 - **List**: the receiver is a `list`, by construction or annotation (assumption R2).
-- **On every iteration**: the statement runs on every iteration of the loop. Open: a statement under
-  a branch inside the loop counts.
+- **In a loop**: the call is in the body of a loop that can run it again on the same list.
+  Established. How many times it runs is not part of the claim: a call under a branch counts.
 - **Data-sized**: the code does not fix the sizes the cost depends on (the loop's and the
   container's) at 16 or fewer. Open: a size heki cannot bound counts as data-sized.
 
@@ -4916,25 +4931,26 @@ hot. Not reported:
 
 ## What a report states
 
-A report states that the membership test `e in lst` scans the list on every iteration of the loop.
+A report states that the membership test `e in lst`, in a loop, scans the list (or tuple) each
+time it runs.
 
 Its premises:
 
 - **Builtin list**: the value is a builtin `list` or `tuple` by its construction (a display, a
   comprehension, `list(...)`). Established: the Soundness lane takes types from constructions only,
   never from annotations.
-- **On every iteration**: the statement runs on every iteration of the loop. Open: a statement under
-  a branch inside the loop counts.
-- **Data-sized**: the code does not fix the sizes the cost depends on (the loop's and the
-  container's) at 16 or fewer. Open: a size heki cannot bound counts as data-sized.
+- **In a loop**: the statement is in the body of a loop. Established by the IR.
 - **Rewrite proven safe**: the help says `[safe fix: ...]`, `[proven-safe suggestion: ...]`, or
   `[proven safe; ...]`. A report whose help names a blocking obligation instead (`[not auto-fixable:
   ...]`) lacks this premise and is heuristic whatever the rule's certainty; the proven reports are
   the rule's exact tier.
 
-Not part of the claim: whether a `set` can replace the list. Elements that cannot be hashed, or a
-list that changes during the loop, block the rewrite (the help names the obligation); the scan
-happens either way.
+Not part of the claim: how many times the statement runs (one under a branch inside the loop
+counts), and how large the loop or the list is. The message claims no size and no cost estimate. A
+loop or a list that the code fixes at 16 or fewer items is not reported, since the rewrite would not
+pay off. Nor is whether a `set` can replace the list: elements that cannot be hashed, or a list that
+changes during the loop, block the rewrite (the help names the obligation); the scan happens either
+way.
 
 ## Why is this bad?
 `e in lst` scans the list, so the loop costs the product of both sizes. A set lookup is
@@ -5715,22 +5731,24 @@ Checks loops that rebuild a dict or set every iteration and rewrites them in pla
 ## What a report states
 
 A report states that the merge (`{**d, ...}` with the accumulator first, `s = s | t`, `d = d |
-other`) builds a new set or dict from the whole accumulated one on every iteration of the loop,
-where updating it would change it in place.
+other`), in a loop, builds a new set or dict from the whole accumulated one each time it runs, where
+updating it would change it in place.
 
 Its premises:
 
 - **Builtin set or dict**: the value is a builtin `set` or `dict` by its construction. Established:
   the Soundness lane takes types from constructions only.
-- **Loop-carried**: the result is the accumulator of the next iteration. Established by the IR.
-- **On every iteration**: the statement runs on every iteration of the loop. Open: a statement under
-  a branch inside the loop counts.
-- **Data-sized**: the code does not fix the sizes the cost depends on (the loop's and the
-  container's) at 16 or fewer. Open: a size heki cannot bound counts as data-sized.
+- **Loop-carried**: the result is the value the next iteration starts from. Established by the IR.
+- **In a loop**: the statement is in the body of a loop. Established by the IR.
 - **Rewrite proven safe**: the help says `[safe fix: ...]`, `[proven-safe suggestion: ...]`, or
   `[proven safe; ...]`. A report whose help names a blocking obligation instead (`[not auto-fixable:
   ...]`) lacks this premise and is heuristic whatever the rule's certainty; the proven reports are
   the rule's exact tier.
+
+Not part of the claim: how many times the statement runs (one under a branch inside the loop
+counts), and how large the loop or the set or dict is. The message claims no size and no cost
+estimate. The rewrite never makes the code slower, so a loop the code fixes at a few items is
+reported too.
 
 ## Why is this bad?
 Each rebuild copies the whole container, so the loop is quadratic. The in-place update is never

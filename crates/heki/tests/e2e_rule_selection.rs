@@ -216,3 +216,51 @@ fn every_output_labels_a_heuristic_rule_and_only_that() {
         );
     }
 }
+
+/// One `OPT101` report whose rewrite is proven safe, and one whose rewrite a call to unknown
+/// code blocks.
+const PROVEN_AND_BLOCKED: &str = "\
+def proven(items):
+    rows = []
+    for item in items:
+        rows = rows + [item]
+    return rows
+
+
+def blocked(items, sink):
+    rows = []
+    for item in items:
+        rows = rows + [item]
+        sink(rows)
+    return rows
+";
+
+#[test]
+fn an_opt_report_has_its_rules_certainty_only_when_its_rewrite_is_proven() {
+    let p = Project::new("opt_report_tier");
+    p.write("app.py", PROVEN_AND_BLOCKED);
+    let (code, rule, _) = p.heki(&["rule", "OPT101", "--output-format", "json"]);
+    assert_eq!(code, 0);
+    let rule: serde_json::Value = serde_json::from_str(&rule).unwrap();
+    let (_, json, stderr) = p.heki(&["check", "--select", "OPT101", "--output-format", "json"]);
+    let diags: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap();
+    let tiers: Vec<(&serde_json::Value, &serde_json::Value)> = diags
+        .iter()
+        .map(|d| (&d["line"], &d["certainty"]))
+        .collect();
+    assert_eq!(
+        tiers,
+        [
+            (&serde_json::json!(4), &rule["certainty"]),
+            (&serde_json::json!(11), &serde_json::json!("heuristic")),
+        ],
+        "{json}{stderr}"
+    );
+    // The message states what the statement does each time it runs, and no size or cost.
+    for d in &diags {
+        assert_eq!(
+            d["message"],
+            "`rows = rows + [...]` copies the whole list each time it runs in the loop"
+        );
+    }
+}

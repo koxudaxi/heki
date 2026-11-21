@@ -389,9 +389,7 @@ pub(crate) fn opt112(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
                 span,
                 heki_effect::func_qualname(f),
                 target.clone(),
-                format!(
-                    "`{target}.{method}()` scans the whole list on every iteration of the loop (O(n²))"
-                ),
+                format!("`{target}.{method}()` scans the list each time it runs in the loop"),
                 Some(advice),
                 &[],
             );
@@ -1062,7 +1060,7 @@ pub(crate) fn opt113(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
                     heki_effect::func_qualname(f),
                     format!("{lhs}=={rhs}"),
                     format!(
-                        "nested loops join `{outer_iter}` and `{inner_iter}` on `{lhs} == {rhs}` (O(n·m))"
+                        "nested loops join `{outer_iter}` and `{inner_iter}` on `{lhs} == {rhs}`"
                     ),
                     Some(index),
                     &[],

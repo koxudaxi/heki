@@ -212,10 +212,10 @@ fn opt113_does_not_advise_an_index_of_unhashable_keys() {
     assert_eq!(
         messages,
         vec![
-            "nested loops join `A` and `rows` on `a == r` (O(n·m))",
-            "nested loops join `A` and `B` on `a.tags == tags` (O(n·m))",
-            "nested loops join `expected` and `actual` on `actual_item == expected_item` (O(n·m))",
-            "nested loops join `A` and `rows + rows` on `a == r` (O(n·m))",
+            "nested loops join `A` and `rows` on `a == r`",
+            "nested loops join `A` and `B` on `a.tags == tags`",
+            "nested loops join `expected` and `actual` on `actual_item == expected_item`",
+            "nested loops join `A` and `rows + rows` on `a == r`",
         ],
         "{found:#?}"
     );
