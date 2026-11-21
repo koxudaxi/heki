@@ -270,7 +270,17 @@ impl Rule<'_, '_> {
                     && let Some(decl) = readonly.filter(|d| d.readonly_params & (1u64 << p) != 0)
                 {
                     let name = &decl.param_names[usize::from(*p)];
-                    let (chain, (changer, j)) = self.chain(&call, k, None);
+                    // A helper whose parameter is annotated, read-only or mutable, is checked on
+                    // its own: a change reached only through one is not this call's report.
+                    let unannotated = |f: &FuncKey, j: u8| {
+                        cx.decls.function_decl(f).is_none_or(|d| {
+                            (d.readonly_params | d.mutable_params) & (1u64 << j) == 0
+                        })
+                    };
+                    let (chain, (changer, j), found) = self.chain(&call, k, None, &unannotated);
+                    if !found && self.chain(&call, k, None, &|_, _| true).2 {
+                        continue;
+                    }
                     // The line where the function at the end of the chain changes the object its
                     // parameter `j` holds, which is the caller's parameter whenever it runs. The
                     // chain does not follow a change made where a returned generator is
@@ -352,7 +362,7 @@ impl Rule<'_, '_> {
             call.site.caller.qualname,
             call.bc.callee.fqn()
         );
-        let (chain, _) = self.chain(call, k, what);
+        let (chain, _, _) = self.chain(call, k, what, &|_, _| true);
         let (unit, caller, span) = (call.unit, &call.site.caller, call.site.span);
         self.emit(
             out, "MUT108", unit, caller, span, target, message, FIX, &chain,
@@ -370,9 +380,17 @@ impl Rule<'_, '_> {
     }
 
     /// The hop of the call into its callee (whose parameter `k` changes `what` in place), then
-    /// the shortest chain of calls down to the function whose own body makes the change, and
-    /// that function with its parameter (the callee and `k` when no body on the way makes it).
-    fn chain(&mut self, call: &Call<'_>, k: u8, what: Changed) -> (Vec<CallHop>, (FuncKey, u8)) {
+    /// the shortest chain of calls down to the function whose own body makes the change, entering
+    /// only the parameters `enters` admits ([`ProjectIndex::param_change_chain_entering`]), and
+    /// that function with its parameter (the callee and `k` when no body on the way makes it);
+    /// whether such a body was found.
+    fn chain(
+        &mut self,
+        call: &Call<'_>,
+        k: u8,
+        what: Changed,
+        enters: &dyn Fn(&FuncKey, u8) -> bool,
+    ) -> (Vec<CallHop>, (FuncKey, u8), bool) {
         let into = CallHop {
             caller: call.site.caller.clone(),
             callee: call.bc.callee.fqn(),
@@ -380,15 +398,20 @@ impl Rule<'_, '_> {
             path: call.path.to_path_buf(),
         };
         let start = &call.bc.callee;
-        let below = self
-            .cx
-            .index
-            .param_change_chain(&mut self.calls, start, k, &what);
+        let below =
+            self.cx
+                .index
+                .param_change_chain_entering(&mut self.calls, start, k, &what, enters);
+        let found = below.changed_in.is_some();
         let end = (
             below.changed_in.unwrap_or_else(|| start.clone()),
             below.param.unwrap_or(k),
         );
-        (std::iter::once(into).chain(below.hops).collect(), end)
+        (
+            std::iter::once(into).chain(below.hops).collect(),
+            end,
+            found,
+        )
     }
 
     /// One report per `(rule, function, span, target)`.

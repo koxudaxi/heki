@@ -1434,7 +1434,9 @@ finds the module its argument `name` names, a relative name anchored at its argu
 `importlib.import_module`, `importlib.util.find_spec`: what `EFF201`'s `reads-environment`
 forbids; such an entry has no other fact), and
 `opaque_to_layer3` (reserved for Layer 3), and `cases`: what the call does instead when one
-argument (by position, the receiver not counted, or by keyword) is a given literal, a string
+argument (by position, the receiver not counted, or by keyword) is a given literal (an
+argument is the literal it is, or the one a module constant bound once holds:
+`TypeCtx::global_literal`, `ModuleDecls::str_constants` and `literal_constants`), a string
 literal with a given prefix, equal to one of given strings (`one_of`), containing one
 (`contains`), an IPv4 or IPv6 address (`numeric_address`), or not empty, a value established to
 name a file (`names_file`: a literal or module constant without an in-memory form, or a path
