@@ -277,6 +277,9 @@ pub struct HekiConfig {
     pub target_version: Option<String>,
     pub exclude: Option<Vec<String>>,
     pub extend_exclude: Vec<String>,
+    /// Source roots ([`source_root`]): project-relative directories whose files are named
+    /// relative to them. `None` detects them (`heki_effect::ModuleLayout::detect`).
+    pub src: Option<Vec<String>>,
     pub baseline: Option<PathBuf>,
     pub lint: LintConfig,
     pub write_owners: Vec<WriteOwnerRule>,
@@ -291,6 +294,10 @@ pub struct HekiConfig {
     /// not a `[tool.heki]` key).
     #[serde(skip)]
     pub requires_python: Option<PythonVersion>,
+    /// `project.name` of the project's `pyproject.toml` (read by the loaders, not a
+    /// `[tool.heki]` key): the `<project-name>` source root of the detected layout.
+    #[serde(skip)]
+    pub project_name: Option<String>,
 }
 
 #[derive(Debug, Error)]
@@ -314,6 +321,38 @@ pub enum ConfigError {
         "`{key}` at the top level of {path}: a `pyproject.toml` holds the settings under `[tool.heki]`"
     )]
     TopLevelSetting { path: PathBuf, key: String },
+    #[error("`src` entry `{entry}` in {path}: {reason}")]
+    SourceRoot {
+        path: PathBuf,
+        entry: String,
+        reason: &'static str,
+    },
+}
+
+/// The project-relative POSIX form of a `src` entry (`./lib/` -> `lib`; `.`, the project root
+/// itself, -> the empty string), or why it names no directory of the project: it must be
+/// relative to the project root, stay inside it, and name directories, not globs.
+pub fn source_root(entry: &str) -> Result<String, &'static str> {
+    let mut parts: Vec<&str> = Vec::new();
+    for c in Path::new(entry).components() {
+        match c {
+            std::path::Component::Normal(part) => {
+                let part = part.to_str().ok_or("the path is not valid UTF-8")?;
+                if part.contains(['*', '?', '[', ']', '{', '}']) {
+                    return Err("globs are not accepted yet: list the directories");
+                }
+                parts.push(part);
+            }
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                return Err("the directory is outside the project root");
+            }
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => {
+                return Err("the path must be relative to the project root");
+            }
+        }
+    }
+    Ok(parts.join("/"))
 }
 
 /// Which tables of a configuration file hold the settings, by the file's name (as Ruff reads
@@ -356,10 +395,12 @@ impl ConfigLayout {
                     });
                 }
                 let wrapper: PyProjectWrapper = toml::from_str(text).map_err(toml_error)?;
-                Ok(HekiConfig {
+                HekiConfig {
                     requires_python: wrapper.requires_python(),
+                    project_name: wrapper.project_name(),
                     ..wrapper.tool.heki.unwrap_or_default()
-                })
+                }
+                .with_source_roots(path)
             }
             Self::TopLevel => {
                 if table.contains_key("tool") {
@@ -369,10 +410,13 @@ impl ConfigLayout {
                 }
                 let cfg: HekiConfig = toml::from_str(text).map_err(toml_error)?;
                 let dir = path.parent().unwrap_or(Path::new(""));
-                Ok(HekiConfig {
-                    requires_python: sibling_requires_python(&dir.join("pyproject.toml")),
+                let sibling = sibling_pyproject(&dir.join("pyproject.toml"));
+                HekiConfig {
+                    requires_python: sibling.as_ref().and_then(PyProjectWrapper::requires_python),
+                    project_name: sibling.as_ref().and_then(PyProjectWrapper::project_name),
                     ..cfg
-                })
+                }
+                .with_source_roots(path)
             }
         }
     }
@@ -386,9 +430,10 @@ struct PyProjectWrapper {
     project: ProjectSection,
 }
 
+/// Kept as raw values: a malformed entry only loses what heki infers from it.
 #[derive(Debug, Default, Deserialize)]
 struct ProjectSection {
-    /// Kept as a raw value: a malformed entry only loses the inference.
+    name: Option<toml::Value>,
     #[serde(rename = "requires-python")]
     requires_python: Option<toml::Value>,
 }
@@ -398,15 +443,17 @@ impl PyProjectWrapper {
         let spec = self.project.requires_python.as_ref()?.as_str()?;
         requires_python_lower_bound(spec)
     }
+
+    fn project_name(&self) -> Option<String> {
+        self.project.name.as_ref()?.as_str().map(str::to_owned)
+    }
 }
 
-/// `requires-python` of a `pyproject.toml` next to a `heki.toml`-style file; any problem
-/// with that file only loses the inference.
-fn sibling_requires_python(pyproject: &Path) -> Option<PythonVersion> {
+/// The `pyproject.toml` next to a `heki.toml`-style file; any problem with that file only loses
+/// what heki infers from it.
+fn sibling_pyproject(pyproject: &Path) -> Option<PyProjectWrapper> {
     let text = std::fs::read_to_string(pyproject).ok()?;
-    toml::from_str::<PyProjectWrapper>(&text)
-        .ok()?
-        .requires_python()
+    toml::from_str(&text).ok()
 }
 
 /// The Python version a PEP 440 `requires-python` specifier selects: the oldest supported
@@ -569,6 +616,7 @@ impl HekiConfig {
         "target-version",
         "exclude",
         "extend-exclude",
+        "src",
         "baseline",
         "lint",
         "write-owners",
@@ -599,6 +647,21 @@ impl HekiConfig {
             }
         }
         Ok(Self::default())
+    }
+
+    /// The configuration of `path` with its `src` entries in their project-relative form
+    /// ([`source_root`]).
+    fn with_source_roots(mut self, path: &Path) -> Result<Self, ConfigError> {
+        if let Some(entries) = &mut self.src {
+            for entry in entries {
+                *entry = source_root(entry).map_err(|reason| ConfigError::SourceRoot {
+                    path: path.to_path_buf(),
+                    entry: entry.clone(),
+                    reason,
+                })?;
+            }
+        }
+        Ok(self)
     }
 
     /// Resolve `RuntimeProfile` from `target-version`, else the version
@@ -926,6 +989,7 @@ sync-lock-or-tx = true
             target_version: Some(String::new()),
             exclude: Some(Vec::new()),
             extend_exclude: Vec::new(),
+            src: Some(Vec::new()),
             baseline: Some(PathBuf::new()),
             lint: LintConfig::default(),
             write_owners: Vec::new(),
@@ -936,6 +1000,7 @@ sync-lock-or-tx = true
             effect_boundaries: Vec::new(),
             ecosystem: Vec::new(),
             requires_python: None,
+            project_name: None,
         };
         let table = toml::Table::try_from(&all).unwrap();
         let mut keys: Vec<&str> = table.keys().map(String::as_str).collect();
