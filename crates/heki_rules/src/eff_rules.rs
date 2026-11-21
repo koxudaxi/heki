@@ -54,7 +54,28 @@ fn relaxed(s: &EffectSummary, key: &FuncKey, unit: &ModuleUnit<'_>, relax_tests:
     if has_decorator(s, "asynccontextmanager") && name.contains("lifespan") {
         return true;
     }
-    relax_tests && (name.starts_with("test_") || unit.rel_path.split('/').any(|c| c == "tests"))
+    relax_tests && is_test_code(&key.qualname, &unit.rel_path)
+}
+
+/// Test code as pytest discovers it by default: a `test_*` function (a method of a test class
+/// included) and the functions nested in one, and every function of a `test_*.py` or
+/// `*_test.py` file or of a file under a `test/` or `tests/` directory.
+pub(crate) fn is_test_code(qualname: &str, rel_path: &str) -> bool {
+    let mut components = rel_path.split('/').peekable();
+    let mut in_tests = false;
+    let mut file = "";
+    while let Some(c) = components.next() {
+        if components.peek().is_some() {
+            in_tests |= c == "tests" || c == "test";
+        } else {
+            file = c;
+        }
+    }
+    let stem = file.strip_suffix(".py").unwrap_or(file);
+    in_tests
+        || stem.starts_with("test_")
+        || stem.ends_with("_test")
+        || qualname.split('.').any(|part| part.starts_with("test_"))
 }
 
 /// The code of a boundary report: `EFF105` for the file system, `EFF101` when whenever the call
@@ -69,14 +90,17 @@ fn boundary_code(r: &BoundaryReport) -> &'static str {
     }
 }
 
-/// The message of an `EFF101` report through helpers: the waiting call, or the one each
-/// implementation reaches (a direct call keeps the words every boundary report has).
-fn always_blocks(must: &SiteMust) -> Option<String> {
+/// The message of an `EFF101` report: the waiting call the reported call is, the one it always
+/// runs through helpers, or the one each implementation runs.
+fn always_waits(function: &str, must: &SiteMust) -> String {
     let sinks = must.sinks();
-    Some(match (must.chain.as_slice(), sinks.len()) {
-        ([] | [_], _) => return None,
+    match (must.chain.as_slice(), sinks.len()) {
+        ([] | [_], _) => format!(
+            "`{function}` runs the waiting call `{}` on the event loop",
+            sinks.first().copied().unwrap_or_default()
+        ),
         ([first, ..], 1) => format!(
-            "`{}` always runs the blocking call `{}` on the event loop ({} down, on every path)",
+            "`{}` always runs the waiting call `{}` on the event loop ({} down, on every path)",
             first.callee,
             sinks.first().copied().unwrap_or_default(),
             match must.chain.len() - 1 {
@@ -92,11 +116,11 @@ fn always_blocks(must: &SiteMust) -> Option<String> {
                 .map(|(implementation, sink)| format!("`{sink}` (in `{implementation}`)"))
                 .collect();
             format!(
-                "`{method}` always runs a blocking call on the event loop: {}",
+                "`{method}` always runs a waiting call on the event loop: {}",
                 each.join(" or ")
             )
         }
-    })
+    }
 }
 
 pub(crate) fn eff101_105(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
@@ -143,32 +167,38 @@ pub(crate) fn eff101_105(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
                 Some(h) if r.iterates => format!(" by iterating `{}`", h.callee),
                 _ => String::new(),
             };
-            let message = match &r.must {
-                Some(must) if code == "EFF101" => always_blocks(must),
-                _ => None,
-            }
-            .unwrap_or_else(|| {
-                format!(
-                    "`{}` reaches {what} `{}` on the event loop{iterating}",
-                    r.function.qualname, r.root_cause
-                )
-            });
-            let chain = match &r.must {
-                Some(must) if code == "EFF101" => &must.chain,
-                _ => &r.chain,
+            // An exact report names, keys, and folds by the call it claims: the end of the chain
+            // every implementation runs, not of the shortest chain the heuristic tier found.
+            let (message, chain, target) = match &r.must {
+                Some(must) if code == "EFF101" => (
+                    always_waits(&r.function.qualname, must),
+                    &must.chain,
+                    must.chain
+                        .last()
+                        .map_or_else(|| r.root_cause.clone(), |h| h.callee.clone()),
+                ),
+                _ => (
+                    format!(
+                        "`{}` reaches {what} `{}` on the event loop{iterating}",
+                        r.function.qualname, r.root_cause
+                    ),
+                    &r.chain,
+                    r.root_cause.clone(),
+                ),
             };
+            let fold_key = format!("{target}|{}", effect_name(r.effect));
             if let Some(d) = cx.emit(
                 out,
                 code,
                 unit,
                 r.span,
                 &r.function.qualname,
-                r.root_cause.clone(),
+                target,
                 message,
                 Some(unblocking_help(r.effect).to_owned()),
                 chain,
             ) {
-                d.fold_key = Some(format!("{}|{}", r.root_cause, effect_name(r.effect)));
+                d.fold_key = Some(fold_key);
             }
         }
     }
@@ -203,10 +233,18 @@ pub fn fold_root_causes(diags: &mut Vec<Diagnostic>) {
     }
     for (&i, &more) in &folded {
         let d = &mut diags[i];
-        d.message = format!(
-            "{} (+{more} more async call sites reaching the same blocking root cause)",
-            d.message
-        );
+        // An exact report's group shares the call each of its reports claims.
+        d.message = if d.rule_code == "EFF101" {
+            format!(
+                "{} (+{more} more async call sites that always run `{}`)",
+                d.message, d.target
+            )
+        } else {
+            format!(
+                "{} (+{more} more async call sites reaching the same blocking root cause)",
+                d.message
+            )
+        };
     }
     *diags = std::mem::take(diags)
         .into_iter()
@@ -427,12 +465,8 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
             continue;
         }
         // The split is the same whichever of the two rules runs: `EFF113` reports the rest.
-        let exact = if cx.enabled("EFF103", unit) || cx.enabled("EFF113", unit) {
-            let origins = item_origins.get_or_init(|| ItemOrigins::new(unit.input.ir));
-            established_queries(cx, unit, &tcx, f, origins, &queries)
-        } else {
-            queries.iter().map(|_| None).collect()
-        };
+        let origins = item_origins.get_or_init(|| ItemOrigins::new(unit.input.ir));
+        let exact = established_queries(cx, unit, &tcx, f, origins, &queries);
         for (q, exact) in queries.iter().zip(exact) {
             let root = q.chain.last().map(|h| h.callee.clone()).unwrap_or_default();
             match exact {
@@ -444,7 +478,7 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
                     &key.qualname,
                     root,
                     e.message(),
-                    Some("load what it needs once before the loop".to_owned()),
+                    None,
                     &e.must.chain,
                 ),
                 Some(_) => None,
@@ -488,8 +522,52 @@ struct LoopQuery<'s> {
 /// What establishes an `EFF103` report: the origins of the items the loop steps through, and
 /// what the call has sent whenever it returns.
 struct EstablishedQuery {
-    origins: Vec<String>,
+    origins: DataOrigins,
     must: SiteMust,
+}
+
+/// Where the items of a loop over data come from, as a report names them
+/// ([`data_origin`]).
+pub(crate) struct DataOrigins {
+    names: Vec<String>,
+    /// Some origin carries only its count (`map(f, ids)`): the loop runs once for each of its
+    /// items without stepping through them.
+    counts_only: bool,
+}
+
+impl DataOrigins {
+    /// The origins of every item of `found`, or `None` when one is not the data's.
+    pub(crate) fn of(
+        cx: &CheckContext<'_>,
+        tcx: &TypeCtx<'_>,
+        ir: &heki_ir::ModuleIr,
+        found: &std::collections::BTreeSet<ItemOrigin>,
+    ) -> Option<Self> {
+        let names = found
+            .iter()
+            .map(|o| data_origin(cx, tcx, ir, *o))
+            .collect::<Option<Vec<String>>>()?;
+        (!names.is_empty()).then(|| Self {
+            names,
+            counts_only: found.iter().any(|o| o.carries == Carries::Count),
+        })
+    }
+
+    /// "every iteration over parameter `ids`", or "every iteration, once for each item of
+    /// parameter `ids`" for a count: what a message says repeats.
+    pub(crate) fn every_iteration(&self) -> String {
+        let named = self.names.join(" and ");
+        if self.counts_only {
+            format!("every iteration, once for each item of {named}")
+        } else {
+            format!("every iteration over {named}")
+        }
+    }
+
+    /// The end of a clause [`Self::every_iteration`] opens in the middle of a sentence.
+    pub(crate) fn clause_end(&self) -> &'static str {
+        if self.counts_only { "," } else { "" }
+    }
 }
 
 impl EstablishedQuery {
@@ -511,8 +589,9 @@ impl EstablishedQuery {
                 .join(" or "),
         };
         format!(
-            "every iteration over {} sends a database statement: {what}",
-            self.origins.join(" and ")
+            "{}{} sends a database statement: {what}",
+            self.origins.every_iteration(),
+            self.origins.clause_end()
         )
     }
 }
@@ -562,12 +641,8 @@ fn established_queries(
                     let Answer::Known(found) = found else {
                         return None;
                     };
-                    let named = found
-                        .iter()
-                        .map(|o| data_origin(cx, tcx, unit.input.ir, *o))
-                        .collect::<Option<Vec<String>>>()?;
-                    (!named.is_empty()).then(|| EstablishedQuery {
-                        origins: named,
+                    Some(EstablishedQuery {
+                        origins: DataOrigins::of(cx, tcx, unit.input.ir, &found)?,
                         must: must.clone(),
                     })
                 })
@@ -617,10 +692,7 @@ pub(crate) fn data_origin(
         }
         ItemSource::Receiver | ItemSource::Fixed => return None,
     };
-    Some(match origin.carries {
-        Carries::Items => named,
-        Carries::Count => format!("one value per item of {named}"),
-    })
+    Some(named)
 }
 
 /// What repeats an effect `EFF102` / `EFF103` report: a data-sized loop around the call, or the

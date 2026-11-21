@@ -210,8 +210,8 @@ fn calls_comprehensions_filled_lists_and_slices_fix_sizes() {
     let at = |line: u32| format!("{c}:{line}");
     let expected: Vec<(String, &str)> = vec![
         (at(25), "EFF102"),
-        (at(39), "EFF103"),
-        (at(57), "EFF103"),
+        (at(39), "EFF113"),
+        (at(57), "EFF113"),
         (at(78), "DATA101"),
         (at(92), "OPT112"),
         (at(109), "OPT112"),

@@ -1,6 +1,6 @@
 //! Family 2 data rule: `DATA101` (docs/ANALYSIS_AND_KB_SPEC.md section 2.4).
 
-use crate::eff_rules::shortest;
+use crate::eff_rules::{DataOrigins, shortest};
 use crate::mut_rules::{CallInst, site_call};
 use crate::opt_rules::Sizes;
 use crate::{CheckContext, ModuleUnit};
@@ -85,7 +85,7 @@ pub(crate) fn data101(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Ve
                 .expect("loop-carried values are named locals");
             let root = chain.last().map(|h| h.callee.clone()).unwrap_or_default();
             let every = match &established {
-                Some(origins) => format!("on every iteration over {}", origins.join(" and ")),
+                Some(origins) => format!("on {}", origins.every_iteration()),
                 None => "on every loop iteration".to_owned(),
             };
             if let Some(d) = cx.emit(
@@ -126,7 +126,7 @@ fn established_update(
     lp: &NaturalLoop,
     update: VarId,
     at: &[&CallSite],
-) -> Option<Vec<String>> {
+) -> Option<DataOrigins> {
     at.iter().find_map(|s| {
         cx.index
             .site_must(&unit.input.path, s, ExecEffectKind::QuadraticRealloc)
@@ -194,11 +194,7 @@ fn established_update(
         let Answer::Known(found) = origins.of_loop(&budget, f.id, li) else {
             return None;
         };
-        let named = found
-            .iter()
-            .map(|o| crate::eff_rules::data_origin(cx, tcx, unit.input.ir, *o))
-            .collect::<Option<Vec<String>>>()?;
-        (!named.is_empty()).then_some(named)
+        DataOrigins::of(cx, tcx, unit.input.ir, &found)
     })
 }
 

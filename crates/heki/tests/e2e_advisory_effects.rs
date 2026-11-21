@@ -730,7 +730,7 @@ import sqlalchemy
 
 
 def via_sqlite(ids):
-    conn = sqlite3.connect(":memory:")
+    conn = sqlite3.connect("app.db")
     cur = conn.cursor()
     for i in ids:
         conn.execute("SELECT 1 WHERE id = ?", (i,))
@@ -838,24 +838,25 @@ fn each_effect_has_its_own_help() {
             (
                 d["line"].as_u64().unwrap(),
                 d["message"].as_str().unwrap(),
-                d["help"].as_str().unwrap(),
+                d["help"].as_str().unwrap_or_default(),
             )
         })
         .collect();
     let offload = "offload it with `asyncio.to_thread`, or";
     let client = "create one client or session before the loop and reuse it";
-    let batch = "load what it needs once before the loop";
+    // An exact claim's report has no advice beyond the claim.
+    let none = "";
     assert_eq!(
         reports,
         vec![
             (
                 12,
-                "`sleeps` reaches the blocking call `time.sleep` on the event loop",
+                "`sleeps` runs the waiting call `time.sleep` on the event loop",
                 "use `await asyncio.sleep(...)`, or offload it with `asyncio.to_thread`"
             ),
             (
                 16,
-                "`fetches` reaches the blocking call `requests.get` on the event loop",
+                "`fetches` runs the waiting call `requests.get` on the event loop",
                 &format!("{offload} use an async client")
             ),
             (
@@ -865,7 +866,7 @@ fn each_effect_has_its_own_help() {
             ),
             (
                 24,
-                "`runs` reaches the blocking call `subprocess.run` on the event loop",
+                "`runs` runs the waiting call `subprocess.run` on the event loop",
                 &format!("{offload} use `asyncio.create_subprocess_exec`")
             ),
             (
@@ -893,12 +894,12 @@ fn each_effect_has_its_own_help() {
             (
                 52,
                 "every iteration over parameter `ids` sends a database statement: `sqlite3.Cursor.execute`",
-                batch
+                none
             ),
             (
                 53,
                 "every iteration over parameter `ids` sends a database statement: `sqlite3.Cursor.execute` (through `app.lookup`)",
-                batch
+                none
             ),
         ]
     );
@@ -1104,6 +1105,28 @@ def per_row(conn: sqlite3.Connection):
 def per_open_line(conn: sqlite3.Connection, p):
     for line in open(p):
         conn.execute("SELECT ?", (line,))
+
+
+def per_character(conn: sqlite3.Connection, p: Path):
+    for ch in p.read_text():
+        conn.execute("SELECT ?", (ch,))
+
+
+from abc import ABC, abstractmethod
+
+
+class Sender(ABC):
+    @abstractmethod
+    def send(self, x): ...
+
+
+class Mailer(Sender):
+    def send(self, x):
+        return requests.post(x)
+
+
+async def tp_abstract(s: Sender):
+    s.send("x")
 "#;
 
 #[test]
@@ -1128,37 +1151,37 @@ fn exact_claims_establish_each_premise() {
             (
                 72,
                 "EFF101",
-                "`get` always runs a blocking call on the event loop: `requests.get` (in `pkg.premises.Child.get`) or `requests.post` (in `pkg.premises.Local.get`) or `requests.get` (in `pkg.premises.Remote.get`)"
+                "`get` always runs a waiting call on the event loop: `requests.get` (in `pkg.premises.Child.get`) or `requests.post` (in `pkg.premises.Local.get`) or `requests.get` (in `pkg.premises.Remote.get`)"
             ),
             (
                 76,
                 "EFF101",
-                "`pkg.premises.Factory.make` always runs the blocking call `requests.get` on the event loop (2 calls down, on every path)"
+                "`pkg.premises.Factory.make` always runs the waiting call `requests.get` on the event loop (2 calls down, on every path)"
             ),
             (
                 80,
                 "EFF101",
-                "`pkg.premises.Caller.__call__` always runs the blocking call `time.sleep` on the event loop (1 call down, on every path)"
+                "`pkg.premises.Caller.__call__` always runs the waiting call `time.sleep` on the event loop (1 call down, on every path)"
             ),
             (
                 84,
                 "EFF101",
-                "`pkg.premises.Child.get` always runs the blocking call `requests.get` on the event loop (2 calls down, on every path)"
+                "`pkg.premises.Child.get` always runs the waiting call `requests.get` on the event loop (2 calls down, on every path)"
             ),
             (
                 88,
                 "EFF101",
-                "`pkg.premises.with_lock` always runs the blocking call `time.sleep` on the event loop (1 call down, on every path)"
+                "`pkg.premises.with_lock` always runs the waiting call `time.sleep` on the event loop (1 call down, on every path)"
             ),
             (
                 89,
                 "EFF101",
-                "`pkg.premises.with_file` always runs the blocking call `time.sleep` on the event loop (1 call down, on every path)"
+                "`pkg.premises.with_file` always runs the waiting call `time.sleep` on the event loop (1 call down, on every path)"
             ),
             (
                 90,
                 "EFF101",
-                "`pkg.premises.with_client` always runs the blocking call `requests.get` on the event loop (1 call down, on every path)"
+                "`pkg.premises.with_client` always runs the waiting call `requests.get` on the event loop (1 call down, on every path)"
             ),
             (
                 91,
@@ -1188,7 +1211,7 @@ fn exact_claims_establish_each_premise() {
             (
                 117,
                 "EFF103",
-                "every iteration over one value per item of parameter `ids` sends a database statement: `sqlite3.Connection.execute`"
+                "every iteration, once for each item of parameter `ids`, sends a database statement: `sqlite3.Connection.execute`"
             ),
             (
                 137,
@@ -1198,7 +1221,7 @@ fn exact_claims_establish_each_premise() {
             (
                 141,
                 "EFF101",
-                "`get` always runs a blocking call on the event loop: `requests.post` (in `pkg.premises.Local.get`) or `requests.get` (in `pkg.premises.Child.get`) or `requests.get` (in `pkg.premises.Remote.get`)"
+                "`get` always runs a waiting call on the event loop: `requests.post` (in `pkg.premises.Local.get`) or `requests.get` (in `pkg.premises.Child.get`) or `requests.get` (in `pkg.premises.Remote.get`)"
             ),
             (
                 154,
@@ -1208,12 +1231,12 @@ fn exact_claims_establish_each_premise() {
             (
                 167,
                 "EFF101",
-                "`pkg.premises.PlainSub.run` always runs the blocking call `time.sleep` on the event loop (1 call down, on every path)"
+                "`pkg.premises.PlainSub.run` always runs the waiting call `time.sleep` on the event loop (1 call down, on every path)"
             ),
             (
                 177,
                 "EFF101",
-                "`pkg.premises.with_connection` always runs the blocking call `time.sleep` on the event loop (1 call down, on every path)"
+                "`pkg.premises.with_connection` always runs the waiting call `time.sleep` on the event loop (1 call down, on every path)"
             ),
             (
                 177,
@@ -1234,6 +1257,16 @@ fn exact_claims_establish_each_premise() {
                 193,
                 "EFF103",
                 "every iteration over the lines of `builtins.open` sends a database statement: `sqlite3.Connection.execute`"
+            ),
+            (
+                198,
+                "EFF113",
+                "`sqlite3.Connection.execute` runs a database query on every loop iteration"
+            ),
+            (
+                215,
+                "EFF101",
+                "`pkg.premises.Mailer.send` always runs the waiting call `requests.post` on the event loop (1 call down, on every path)"
             ),
         ]
     );

@@ -474,7 +474,7 @@ async def tp_psycopg2_and_pymysql(dsn):
 
 async def tp_sqlite(path, conn: sqlite3.Connection):
     count(conn)
-    cur = sqlite3.connect(path).execute("SELECT 1")
+    cur = sqlite3.connect("app.db").execute("SELECT 1")
     cur.fetchall()
 
 
@@ -600,7 +600,7 @@ fn dbapi_drivers_block_on_connect_and_statements_but_not_on_row_reads() {
                 "pymysql.connections.Connection.commit"
             ),
             // sqlite3 reads the database file when it steps a statement (`fetch*`).
-            d(41, "EFF101", "tp_sqlite", "sqlite3.Cursor.fetchone"),
+            d(41, "EFF101", "tp_sqlite", "sqlite3.Connection.execute"),
             d(42, "EFF101", "tp_sqlite", "sqlite3.Connection.execute"),
             d(42, "EFF101", "tp_sqlite", "sqlite3.connect"),
             d(43, "EFF101", "tp_sqlite", "sqlite3.Cursor.fetchall"),
@@ -1329,6 +1329,65 @@ async def tp_session(s: requests.Session):
 }
 
 #[test]
+fn in_memory_databases_and_connection_options_do_not_wait() {
+    // An in-memory database is opened, and its statements run, without waiting; a connection
+    // opened from a parameter may be one (here through a literal default), so its waits are not
+    // established. A pragma that sets an option of the connection does not wait either; one
+    // that changes the database file does.
+    assert_eq!(
+        check(
+            "cat_in_memory_sqlite",
+            "app.py",
+            r#"import sqlite3
+
+
+class History:
+    def __init__(self, path=":memory:"):
+        self.connection = sqlite3.connect(str(path))
+        self.connection.execute("CREATE TABLE t (x)")
+
+
+async def tn_through_a_default():
+    History()
+
+
+async def tn_direct():
+    sqlite3.connect(":memory:")
+
+
+async def tn_uri():
+    sqlite3.connect("file::memory:?cache=shared", uri=True)
+    sqlite3.connect("file:cache?mode=memory&cache=shared", uri=True)
+
+
+async def tp_file():
+    sqlite3.connect("app.db")
+
+
+async def tn_connection_options(conn: sqlite3.Connection):
+    conn.execute("PRAGMA busy_timeout = 5000")
+    conn.execute("pragma foreign_keys=ON")
+
+
+async def tp_journal(conn: sqlite3.Connection):
+    conn.execute("PRAGMA journal_mode=WAL")
+"#,
+            "EFF101,EFF111",
+        ),
+        vec![
+            d(
+                11,
+                "EFF111",
+                "tn_through_a_default",
+                "sqlite3.connect(parameter).execute"
+            ),
+            d(24, "EFF101", "tp_file", "sqlite3.connect"),
+            d(33, "EFF101", "tp_journal", "sqlite3.Connection.execute"),
+        ]
+    );
+}
+
+#[test]
 fn waits_that_their_arguments_end_at_once_are_not_reported() {
     // No sleep, a polled child, a numeric or local host, a `data:` URL: none of them waits.
     // An argument heki cannot evaluate is one the call waits on.
@@ -1411,8 +1470,8 @@ import vendor.db
 import vendor.locks
 
 
-def tp_factory_keeps_its_return_type(path, ids):
-    conn = sqlite3.connect(path)
+def tp_factory_keeps_its_return_type(ids):
+    conn = sqlite3.connect("app.db")
     for i in ids:
         conn.execute("SELECT ?", (i,))
 

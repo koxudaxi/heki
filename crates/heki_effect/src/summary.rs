@@ -4548,22 +4548,35 @@ impl<'a> Extractor<'a> {
     /// (`CallSite::complete`).
     fn targets_complete(&self) -> bool {
         let (bb, index) = self.pos;
-        let Some(inst) = self.f.block(bb).insts.get(index) else {
-            return false;
-        };
-        match &inst.kind {
-            InstKind::MethodCall { recv, method, .. } => {
+        match self.f.block(bb).insts.get(index).map(|i| &i.kind) {
+            Some(InstKind::MethodCall { recv, method, .. }) => {
                 let recv = self.val(*recv);
                 let callee = self.cx.resolve_method(recv, method);
                 self.cx.method_targets_complete(recv, method, &callee)
             }
-            InstKind::Call { callee_var, .. } => {
+            Some(InstKind::Call { callee_var, .. }) => {
                 let value = callee_var.and_then(|v| self.val(v));
                 let callee = self.cx.resolve_call(value);
                 self.cx.call_targets_complete(value, &callee)
             }
             _ => false,
         }
+    }
+
+    /// Whether `v` is a phi, with its inputs pushed on `next`.
+    fn phi_inputs(&self, v: VarId, next: &mut Vec<VarId>) -> bool {
+        match self.guard_inputs().phi(v) {
+            Some((_, phi)) => {
+                next.extend(phi.incoming.iter().map(|(_, input)| *input));
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Whether `v` is one of the function's parameters.
+    fn is_param(&self, v: VarId) -> bool {
+        self.f.params.iter().any(|p| p.var == v)
     }
 
     /// [`Self::must_run`] and [`MustExec::never_returns`], from the path facts of the function
@@ -4811,6 +4824,7 @@ impl<'a> Extractor<'a> {
                         Val::Ref(fqn) => Some(fqn.clone()),
                         _ => None,
                     },
+                    (&|x, next| self.phi_inputs(x, next), &|x| self.is_param(x)),
                     v,
                 )
             })
@@ -4819,6 +4833,8 @@ impl<'a> Extractor<'a> {
         // effects (`DbQuery`, `UnpooledClientAlloc`, ...) are kept for EFF102 / EFF103. A schema
         // or setting statement is no data query, though running it still blocks.
         let ddl = self.runs_ddl(&symbol, args.first().copied());
+        // A connection option does not wait on the database (`PRAGMA busy_timeout = 5000`).
+        let setting = ddl && self.runs_connection_setting(&symbol, args.first().copied());
         // A wait on a future known to be done returns at once.
         let finished = entry.waits_until_done
             && passed.recv.is_some_and(|r| {
@@ -4831,6 +4847,7 @@ impl<'a> Extractor<'a> {
             .copied()
             .filter(|e| !((is_awaited || finished) && BLOCKING_EFFECTS.contains(e)))
             .filter(|e| !(ddl && *e == ExecEffectKind::DbQuery))
+            .filter(|e| !(setting && *e == ExecEffectKind::BlockingDb))
             .collect();
         if let Some(k) = entry.offloads_blocking_arg
             && let Some((p, None)) = args
@@ -4902,9 +4919,9 @@ impl<'a> Extractor<'a> {
     /// not show (`CallTarget::Layer2::unconditional`, for a call whose only target is the
     /// catalogued one): a database effect only where the entry
     /// `emits` it on every call, and none when a case of the entry tests an argument that may be
-    /// a parameter of the function (through copies and phis), which its callers may pass a value
-    /// selecting the case. An argument heki cannot evaluate otherwise is one the call waits on
-    /// (R6).
+    /// computed from a parameter of the function (`resolver::from_parameter`), which its callers
+    /// may pass a value selecting the case. An argument heki cannot evaluate otherwise is one the
+    /// call waits on (R6).
     fn unconditional(
         &self,
         entry: &heki_kb::EcosystemEntry,
@@ -4918,7 +4935,14 @@ impl<'a> Extractor<'a> {
                 passed.star_from,
                 (c.arg, c.param.as_deref()),
             )
-            .is_some_and(|v| self.may_params.get(&v).is_some_and(|m| *m != 0))
+            .is_some_and(|v| {
+                resolver::from_parameter(
+                    &|d| self.defs.get(&d).copied(),
+                    &|x, next| self.phi_inputs(x, next),
+                    &|x| self.is_param(x),
+                    v,
+                )
+            })
         });
         if from_caller {
             return 0;

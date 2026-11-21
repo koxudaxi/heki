@@ -16,8 +16,8 @@ use crate::{FuncKey, ModuleInput};
 use heki_ast::Span;
 use heki_ir::walk::{Answer, Budget, Visit, reach};
 use heki_ir::{
-    BinOpKind, BlockId, ConstLiteral, FnIndex, FunctionKind, Inst, InstKind, IrFunction, ModuleIr,
-    SmallDisplay, VarId,
+    BinOpKind, BlockId, BuiltinKind, ConstLiteral, FnIndex, FunctionKind, Inst, InstKind,
+    IrFunction, ModuleIr, SmallDisplay, VarId,
 };
 use heki_kb::{ArgFact, EffectiveEcosystemKb, ExecEffectKind, LiteralValue};
 use heki_semantic::{ModuleImport, ScopeKind, SemanticModel};
@@ -3540,20 +3540,84 @@ pub(crate) fn literal<'i>(
     }
 }
 
-/// [`ArgFact`] of `var`: its constant, the class `class_of` gives it, and the flags it sets
-/// through the named objects `name_of` gives its operands.
+/// [`ArgFact`] of `var`: its constant, the class `class_of` gives it, the flags it sets
+/// through the named objects `name_of` gives its operands, and whether it may be computed from
+/// a parameter ([`from_parameter`]; `phi_inputs` and `is_param` as there).
 pub(crate) fn arg_fact<'i>(
     def: impl Fn(VarId) -> Option<&'i Inst>,
     class_of: impl Fn(VarId) -> Option<String>,
     name_of: impl Fn(VarId) -> Option<String>,
+    parameters: ParameterFacts<'_>,
     var: VarId,
 ) -> ArgFact {
     ArgFact {
         literal: literal(&def, var),
+        from_parameter: from_parameter(&def, parameters.0, parameters.1, var),
         class: class_of(var),
         flags: set_flags(&def, &name_of, var),
     }
 }
+
+/// What [`from_parameter`] reads of a function: the inputs of a phi (pushed, with whether the
+/// value is one) and whether a value is a parameter.
+pub(crate) type ParameterFacts<'p> = (
+    &'p dyn Fn(VarId, &mut Vec<VarId>) -> bool,
+    &'p dyn Fn(VarId) -> bool,
+);
+
+/// Builtins whose result is text made from their argument (`str(path)`, `os.fspath(path)`).
+const TEXT_OF_ARGUMENT: &[&str] = &["str", "os.fspath", "Path", "pathlib.Path"];
+
+/// Whether `var` may hold a value its function computes from one of its parameters (`is_param`):
+/// the parameter, through copies, the phis `phi_inputs` lists the inputs of (it returns whether
+/// the value is a phi), concatenations, f-strings, and [`TEXT_OF_ARGUMENT`]. Any other value
+/// is opaque: an argument heki cannot evaluate is one the call waits on (R6). Past its budget
+/// the value may be.
+pub(crate) fn from_parameter<'i>(
+    def: &impl Fn(VarId) -> Option<&'i Inst>,
+    phi_inputs: &dyn Fn(VarId, &mut Vec<VarId>) -> bool,
+    is_param: &dyn Fn(VarId) -> bool,
+    var: VarId,
+) -> bool {
+    let budget = Budget::unmetered("heki_effect::resolver::from_parameter");
+    let mut steps = 0usize;
+    let found = reach(
+        &budget,
+        [var],
+        |v, next| {
+            if phi_inputs(v, next) {
+                return;
+            }
+            match def(v).map(|i| &i.kind) {
+                Some(InstKind::Copy { src, .. }) => next.push(*src),
+                Some(InstKind::BinOp { lhs, rhs, .. }) => next.extend([*lhs, *rhs]),
+                Some(InstKind::AllocBuiltin {
+                    kind: BuiltinKind::Str,
+                    elems,
+                    ..
+                }) => next.extend(elems.iter().copied()),
+                Some(InstKind::Call { callee, args, .. })
+                    if TEXT_OF_ARGUMENT.contains(&callee.as_str()) =>
+                {
+                    next.extend(args.iter().copied());
+                }
+                _ => {}
+            }
+        },
+        |v| {
+            steps += 1;
+            if is_param(v) || steps > MAX_PARAMETER_STEPS {
+                Visit::Stop(())
+            } else {
+                Visit::Expand
+            }
+        },
+    );
+    found != Answer::Known(None)
+}
+
+/// The values [`from_parameter`] looks at, at most: past them the value may come from one.
+const MAX_PARAMETER_STEPS: usize = 64;
 
 /// The named objects `var` sets with `|` (`ArgFact::flags`), through copies. Each value is
 /// visited once: `f1 = f0 | f0` shares its operands.
@@ -3926,8 +3990,7 @@ impl<'a> TypeCtx<'a> {
                         .project
                         .instance_targets_complete(class, method, callee)
             }
-            Some(Val::Ref(_) | Val::Super(_)) => true,
-            None => false,
+            other => matches!(other, Some(Val::Ref(_) | Val::Super(_))),
         }
     }
 

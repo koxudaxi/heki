@@ -720,7 +720,7 @@ class B(Y, X):
     pass
 
 
-def test_rejects_an_inconsistent_order():
+def rejects_an_inconsistent_order():
     with pytest.raises(TypeError):
 
         class Both(A, B):

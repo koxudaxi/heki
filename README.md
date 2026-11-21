@@ -46,7 +46,7 @@ async def get_user(user_id: int) -> dict[str, str]:
 
 ```console
 $ heki check --heuristic
-app/api.py:5:12: EFF101 (async-blocking-call) [warning, heuristic] `app.users.load_user` always runs the blocking call `requests.get` on the event loop (2 calls down, on every path)
+app/api.py:5:12: EFF101 (async-blocking-call) [warning, heuristic] `app.users.load_user` always runs the waiting call `requests.get` on the event loop (2 calls down, on every path)
   |
 5 |     return load_user(user_id)
   |            ^
@@ -83,7 +83,6 @@ app/orders.py:11:37: EFF103 (loop-db-query) [warning, heuristic] every iteration
    |                                     ^
   = related: app/orders.py:11:37: `order_summaries` calls `app.orders.customer_name`
   = related: app/orders.py:5:5: `customer_name` calls `sqlite3.Cursor.execute`
-  = help: load what it needs once before the loop
 
 Found 1 diagnostic(s) in 1 file(s).
 ```
