@@ -2312,37 +2312,6 @@ pub(crate) fn site_call<'i>(
     })
 }
 
-/// The value each of `vars` copies, through any number of copies (itself when it is no copy),
-/// each value resolved once. Copies in dead code can close a cycle, which ends a walk.
-fn copy_origins(f: &IrFunction, vars: impl Iterator<Item = VarId>) -> FxHashMap<VarId, VarId> {
-    let sources: FxHashMap<VarId, VarId> = f
-        .blocks
-        .iter()
-        .flat_map(|b| &b.insts)
-        .filter_map(|i| match i.kind {
-            InstKind::Copy { dst, src } => Some((dst, src)),
-            _ => None,
-        })
-        .collect();
-    let mut origin: FxHashMap<VarId, VarId> = FxHashMap::default();
-    for var in vars {
-        let mut path: FxHashSet<VarId> = FxHashSet::default();
-        let mut cur = var;
-        let root = loop {
-            if let Some(&known) = origin.get(&cur) {
-                break known;
-            }
-            match sources.get(&cur) {
-                Some(&src) if path.insert(cur) => cur = src,
-                _ => break cur,
-            }
-        };
-        origin.insert(var, root);
-        origin.extend(path.into_iter().map(|v| (v, root)));
-    }
-    origin
-}
-
 /// Whether the call instruction `inst` consumes the result of another call instruction with
 /// the same span. Only an instruction the IR builder synthesizes around a source expression
 /// shares its span (a comprehension's `acc.append(elt)` carries the span of `elt`); when that
@@ -2392,7 +2361,8 @@ struct Mut202Fn<'a> {
     tcx: &'a TypeCtx<'a>,
     returns: &'a ReadOnlyReturns,
     f: &'a IrFunction,
-    /// The defining instruction of each of `f`'s variables, looked up per call operand.
+    /// The facts and tables of `f`: the defining instruction of each variable, looked up per
+    /// call operand.
     ix: FnIndex<'a>,
     key: FuncKey,
     types: FxHashMap<VarId, Val>,
@@ -2614,8 +2584,12 @@ impl<'a> Mut202Fn<'a> {
         'a: 'i,
     {
         // A project call as the summaries resolved it; any other call by the inferred values.
-        if let Some(call) = site_call(&|v| self.ix.def_inst(v), self.function_sites(), inst, false)
-        {
+        if let Some(call) = site_call(
+            &|v| self.ix.shape.inst(v),
+            self.function_sites(),
+            inst,
+            false,
+        ) {
             return Some(call);
         }
         let call = CallInst::of(&inst.kind)?;
@@ -2674,7 +2648,7 @@ impl<'a> Mut202Fn<'a> {
                     Some(Val::Inst(class)) => Some(class.as_str()),
                     _ => None,
                 };
-                let step = readonly::subscript_step(self.f, inst, class);
+                let step = readonly::subscript_step(&self.ix.shape, inst, class);
                 self.ro.get(obj)?.derive(step)
             }
             InstKind::AttrLoad { obj, attr, .. } => {
@@ -2726,7 +2700,7 @@ impl<'a> Mut202Fn<'a> {
                 };
                 let r = self.ro.get(&operand?)?;
                 let deep = readonly::deep_copy_requested(call.kwargs, |v| {
-                    self.f.const_bool(v) == Some(true)
+                    self.ix.shape.bool_const(v) == Some(true)
                 });
                 let own_items = call.args.len() > 1 || !call.kwargs.is_empty();
                 match readonly::call_derivation(method, &call.callee, self.cx.kb, deep, own_items)?
@@ -2743,7 +2717,8 @@ impl<'a> Mut202Fn<'a> {
     /// is the shared object), and a value is derived again when its operand's origin grows. An
     /// origin only grows (`Ro::join`), so the loop ends.
     fn propagate(&mut self) {
-        let rpo = self.f.rpo_blocks();
+        // A copy: the passes change `self`.
+        let rpo = self.ix.shape.rpo().to_vec();
         loop {
             let mut changed = false;
             for &bb in &rpo {
@@ -2801,14 +2776,13 @@ impl<'a> Mut202Fn<'a> {
         // Filling a memo of a shared object, or initializing one of its attributes lazily,
         // leaves what it computes as it was (as for the helpers, `memo_param_paths`). Each
         // object is read on its own: a test of one object's attribute says nothing of another's.
-        let origins = copy_origins(self.f, self.ro.keys().copied());
         let objects: FxHashMap<VarId, u32> = self
             .ro
             .iter()
             .filter(|(_, r)| !r.shallow_copy)
-            .map(|(v, _)| (*v, origins[v].0))
+            .map(|(v, _)| (*v, self.ix.shape.copy_root(*v).0))
             .collect();
-        let memo_fills: FxHashSet<(BlockId, u32)> = attr_writes(self.f, &objects)
+        let memo_fills: FxHashSet<(BlockId, u32)> = attr_writes(&self.ix.shape, &objects)
             .into_iter()
             .filter(|(attr, w)| w.fills_memo(attr) || w.lazy_init)
             .map(|(_, w)| (w.block, w.index))
@@ -2927,7 +2901,7 @@ impl<'a> Mut202Fn<'a> {
         }
         // Passing a read-only value to a project function that mutates that parameter, also
         // through an offloading API that calls it on a worker thread.
-        let def = |v| self.ix.def_inst(v);
+        let def = |v| self.ix.shape.inst(v);
         let Some(call) = site_call(&def, self.function_sites(), inst, false)
             .or_else(|| site_call(&def, self.function_sites(), inst, true))
         else {
@@ -3030,6 +3004,7 @@ pub(crate) fn mut107(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
             // class.
             let mut reads_on: FxHashMap<String, FxHashSet<&str>> = FxHashMap::default();
             for (m, Checked { unit, f }, local) in writers {
+                let shape = FnShape::new(f);
                 let receiver = receiver_class(cx.decls, m, h);
                 for (attr, read_keys) in &reads {
                     let writes: Vec<&AttrKeyPath> = local
@@ -3063,7 +3038,7 @@ pub(crate) fn mut107(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
                         .hashed_whole_self_attrs
                         .as_deref()
                         .is_some_and(|h| h.contains(*attr));
-                    let first = self_attr_writes(f).into_iter().find(|(a, w)| {
+                    let first = self_attr_writes(&shape).into_iter().find(|(a, w)| {
                         *a == *attr
                             && !w.fills_memo(attr)
                             && !w.lazy_init

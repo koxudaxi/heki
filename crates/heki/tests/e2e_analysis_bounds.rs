@@ -560,6 +560,108 @@ fn returned_calls_handed_the_previous_result_twice_resolve_each_call_once() {
     assert_eq!(lines, vec![6 + calls as u64 + 5]);
 }
 
+/// A function of twelve thousand calls, each handed the previous call's result (`v1 = g(v0)`),
+/// about as many as its IR budget models, with every rule selected: where each argument may come
+/// from (the caller's parameters, objects it constructs) is decided once per value of the
+/// function, not by a walk back down the chain at every call.
+#[test]
+fn calls_each_handed_the_previous_result_find_each_origin_once() {
+    let calls = 12_400;
+    let mut lines = vec![
+        "def g(x):".to_owned(),
+        "    return x".to_owned(),
+        String::new(),
+        String::new(),
+        "def f(p, session):".to_owned(),
+        "    v0 = p".to_owned(),
+    ];
+    for i in 1..=calls {
+        lines.push(format!("    v{i} = g(v{})", i - 1));
+    }
+    lines.push(format!("    return v{calls}"));
+    let p = Project::new("bounds_call_chain");
+    let (_, rules, _) = p.heki(&["rule", "--all", "--output-format", "json"]);
+    let codes: Vec<Value> = serde_json::from_str::<Vec<Value>>(&rules)
+        .unwrap()
+        .into_iter()
+        .map(|rule| rule["code"].clone())
+        .collect();
+    p.write(
+        "pyproject.toml",
+        &format!(
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = {}\n",
+            Value::from(codes)
+        ),
+    )
+    .write("m.py", &(lines.join("\n") + "\n"));
+    // The function stays modeled, so that its calls are analyzed at all.
+    let (_, hazards, _) = p.heki(&["assumptions", "--json", "m.py"]);
+    let hazards: Vec<Value> = serde_json::from_str(&hazards).unwrap();
+    assert!(
+        hazards.iter().all(|h| h["kind"] != "unmodeled"),
+        "{hazards:#?}"
+    );
+    assert!(check_within(&p, Duration::from_secs(20)).is_empty());
+}
+
+/// A client made lazily (`Conn.get`) on an object built before `depth` nested loops over the
+/// data, reached through a thousand calls handing the object on (`c1 = wrap(c0)`, with `wrap`
+/// typed to return a `Conn`) in the innermost loop.
+fn lazy_client_under_nested_loops(depth: usize) -> String {
+    let links = 1_000;
+    let mut lines: Vec<String> = [
+        "import requests",
+        "",
+        "",
+        "class Conn:",
+        "    def __init__(self):",
+        "        self._session = None",
+        "",
+        "    def get(self, url):",
+        "        if self._session is None:",
+        "            self._session = requests.Session()",
+        "        return self._session.get(url)",
+        "",
+        "",
+        "def wrap(c: Conn) -> Conn:",
+        "    return c",
+        "",
+        "",
+        "def scan(urls):",
+        "    c0 = Conn()",
+    ]
+    .map(str::to_owned)
+    .into();
+    for d in 0..depth {
+        lines.push(format!("{}for u{d} in urls:", " ".repeat(4 + d)));
+    }
+    let indent = " ".repeat(4 + depth);
+    for i in 1..=links {
+        lines.push(format!("{indent}c{i} = wrap(c{})", i - 1));
+    }
+    lines.push(format!("{indent}c{links}.get(u0)"));
+    lines.join("\n") + "\n"
+}
+
+/// Where a value comes from inside nested loops is decided once per loop around it, so the walks
+/// grow with the depth of the loops: thirty loops deep (deeper than CPython compiles) they pass
+/// the function's budget, and the object then counts as one the loops may construct, as `EFF102`
+/// counts a call as running on every iteration unless heki shows that it runs once. In one loop
+/// the client is made once per object.
+#[test]
+fn origins_past_the_walk_budget_count_as_made_in_every_loop() {
+    let eff102 = |depth: usize| {
+        let p = Project::new(&format!("bounds_nested_origins_{depth}"));
+        p.write("m.py", &lazy_client_under_nested_loops(depth));
+        check_within(&p, Duration::from_secs(20))
+            .iter()
+            .filter(|d| d["rule_code"] == "EFF102")
+            .count()
+    };
+    assert_eq!(eff102(1), 0);
+    assert_eq!(eff102(30), 1);
+}
+
 /// Comparisons whose two operands are one value (`b1 = b0 == b0`), under an invalidation
 /// contract: whether a branch depends on a flag, and the flag values on each edge, are decided
 /// once per value instead of once per path to it.
