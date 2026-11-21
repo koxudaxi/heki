@@ -290,7 +290,8 @@ impl State {
     }
 
     /// Re-analyze every queued file and, in turn, what those re-analyses affect; a queued
-    /// file that is neither open nor on the disk any more left the project.
+    /// file that is neither open nor readable on the disk has no diagnostics
+    /// (`Workspace::unread_or_removed`).
     fn flush_pending(&mut self) -> (Vec<Publish>, Vec<String>) {
         let pending = std::mem::take(&mut self.pending);
         if pending.is_empty() {
@@ -316,8 +317,9 @@ impl State {
     }
 
     /// Files changed on the disk (`workspace/didChangeWatchedFiles`): a created or changed
-    /// file is re-analyzed like a saved document (an open document with its own text), a
-    /// deleted one leaves the project; then everything they affect is re-analyzed.
+    /// file is re-analyzed like a saved document (an open document with its own text), one that
+    /// cannot be read is a module heki knows nothing about, a deleted one leaves the project;
+    /// then everything they affect is re-analyzed.
     fn files_changed(&mut self, changes: Vec<FileEvent>) -> (Vec<Publish>, Vec<String>) {
         // The configuration, the summary snapshot, or an ignore file changed: everything is
         // analyzed again (an ignore file changes which files belong to the project), as
@@ -363,6 +365,11 @@ impl State {
                 let (p, e) = self.reanalyze(&path, &text);
                 pubs.extend(p);
                 errors.extend(e);
+            } else {
+                let ws = self.workspace.as_mut().expect("checked above");
+                let affected = ws.unread_or_removed(&path);
+                self.pending.extend(affected);
+                pubs.extend(self.clear(&path));
             }
         }
         let (more, more_errors) = self.flush_pending();
@@ -383,8 +390,9 @@ impl State {
 
     /// A document was closed (`text`: what it held): the file on the disk is its text again.
     /// When they differ (an unsaved edit was discarded), the index forgets the editor's text: the
-    /// file is re-analyzed from the disk, or leaves the project when it is not on the disk, and
-    /// so is everything that affects. The document's diagnostics leave with it.
+    /// file is re-analyzed from the disk, stays a module heki knows nothing about when the disk
+    /// text cannot be read, or leaves the project when it is not on the disk, and so is
+    /// everything that affects. The document's diagnostics leave with it.
     fn closed(
         &mut self,
         path: &Path,
@@ -404,7 +412,7 @@ impl State {
                     errors.extend(outcome.error.as_ref().map(ToString::to_string));
                 }
                 None => {
-                    let affected = ws.remove(path);
+                    let affected = ws.unread_or_removed(path);
                     self.pending.extend(affected);
                 }
             }
