@@ -3202,10 +3202,11 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         has_text
     }
 
-    /// One replacement field: its value, converted, then formatted with its specification.
+    /// One replacement field: its value, converted, then formatted with its specification,
+    /// which is evaluated after the conversion.
     fn lower_field(&mut self, field: &'a ast::InterpolatedElement) -> VarId {
         let span = Span::from(field.range);
-        let value = self.lower_expr(&field.expression);
+        let mut value = self.lower_expr(&field.expression);
         let conversion = match field.conversion {
             ast::ConversionFlag::Str => Some(Conversion::Str),
             ast::ConversionFlag::Repr => Some(Conversion::Repr),
@@ -3218,17 +3219,25 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             }
             ast::ConversionFlag::None => None,
         };
-        let Some(spec) = &field.format_spec else {
-            return self.emit_format(value, conversion, None, span);
-        };
-        // The value is converted before the specification is evaluated: formatting the `str`
-        // a conversion returns without a specification returns it unchanged.
-        let value = match conversion {
-            Some(_) => self.emit_format(value, conversion, None, span),
-            None => value,
-        };
-        let spec = self.lower_format_spec(spec);
-        self.emit_format(value, None, Some(spec), span)
+        if let Some(conversion) = conversion {
+            let dst = self.fresh_var(None);
+            self.emit(
+                InstKind::Convert {
+                    dst,
+                    value,
+                    conversion,
+                },
+                span,
+            );
+            value = dst;
+        }
+        let spec = field
+            .format_spec
+            .as_ref()
+            .map(|spec| self.lower_format_spec(spec));
+        let dst = self.fresh_var(None);
+        self.emit(InstKind::Format { dst, value, spec }, span);
+        dst
     }
 
     /// The text of a format specification: a constant, or an f-string of its own.
@@ -3251,26 +3260,6 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         }
         let dst = self.fresh_var(None);
         self.emit(InstKind::BuildString { dst, parts }, span);
-        dst
-    }
-
-    fn emit_format(
-        &mut self,
-        value: VarId,
-        conversion: Option<Conversion>,
-        spec: Option<VarId>,
-        span: Span,
-    ) -> VarId {
-        let dst = self.fresh_var(None);
-        self.emit(
-            InstKind::Format {
-                dst,
-                value,
-                conversion,
-                spec,
-            },
-            span,
-        );
         dst
     }
 
@@ -4975,6 +4964,7 @@ fn rewrite_inst_vars(kind: &mut InstKind, resolve: impl Fn(VarId) -> VarId) {
                 *s = resolve(*s);
             }
         }
+        InstKind::Convert { value, .. } => *value = resolve(*value),
         InstKind::DictLiteral { entries, .. } => {
             for e in entries {
                 match e {

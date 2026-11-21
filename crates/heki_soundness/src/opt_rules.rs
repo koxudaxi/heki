@@ -2166,7 +2166,7 @@ impl<'a, 'c> Rules<'a, 'c> {
                         in_place: true,
                         ..
                     } if *lhs == u && *rhs != u => None,
-                    InstKind::Format { .. } => Some(format!(
+                    InstKind::Convert { .. } | InstKind::Format { .. } => Some(format!(
                         "it is formatted (line {}): a `deque`'s text differs",
                         self.line(off)
                     )),

@@ -211,6 +211,7 @@ fn held_operands(kind: &InstKind, derivations: &mut Derivations<'_>) -> Vec<VarI
         InstKind::BinOp { .. }
         | InstKind::UnaryOp { .. }
         | InstKind::Compare { .. }
+        | InstKind::Convert { .. }
         | InstKind::Format { .. }
         | InstKind::BuildString { .. } => Vec::new(),
         ref other => other.operands(),

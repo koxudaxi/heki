@@ -1378,27 +1378,25 @@ fn ir_expressions() {
             (json!(1), json!(-1)),
         ]
     );
-    // f-strings (nested format specs, implicit concatenation) format each replacement field
-    // and build a `str`: `a!r` is converted before its specification `>{width}.{precision}`
-    // (an f-string of its own) is built, and `b=` shows `repr(b)`.
-    let formats: Vec<(Option<&str>, Option<&str>, bool)> = of_kind(e, "Format")
+    // f-strings (nested format specs, implicit concatenation) convert and format each
+    // replacement field and build a `str`: `a!r` is converted, then formatted with its
+    // specification `>{width}.{precision}` (an f-string of its own), and `b=` shows `repr(b)`.
+    let converts: Vec<(Option<&str>, &str)> = of_kind(e, "Convert")
         .iter()
-        .map(|f| {
-            (
-                var_name(e, &f["value"]),
-                f["conversion"].as_str(),
-                !f["spec"].is_null(),
-            )
-        })
+        .map(|c| (var_name(e, &c["value"]), c["conversion"].as_str().unwrap()))
+        .collect();
+    assert_eq!(converts, vec![(Some("a"), "repr"), (Some("b"), "repr")]);
+    let formats: Vec<(Option<&str>, bool)> = of_kind(e, "Format")
+        .iter()
+        .map(|f| (var_name(e, &f["value"]), !f["spec"].is_null()))
         .collect();
     assert_eq!(
         formats,
         vec![
-            (Some("a"), Some("repr"), false),
-            (Some("width"), None, false),
-            (Some("precision"), None, false),
-            (None, None, true),
-            (Some("b"), Some("repr"), false),
+            (Some("width"), false),
+            (Some("precision"), false),
+            (None, true),
+            (None, false),
         ]
     );
     assert_eq!(of_kind(e, "BuildString").len(), 2);

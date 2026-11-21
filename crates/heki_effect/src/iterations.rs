@@ -557,6 +557,7 @@ fn result_use(
         InstKind::Copy { .. }
         | InstKind::Compare { .. }
         | InstKind::UnaryOp { .. }
+        | InstKind::Convert { .. }
         | InstKind::Format { .. }
         | InstKind::Delete { .. } => ResultUse::Inert,
         _ if facts.wrapped.contains(&r) => ResultUse::Inert,

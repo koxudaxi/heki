@@ -239,6 +239,7 @@ pub fn source<'i>(
     match kind {
         InstKind::AllocBuiltin { .. }
         | InstKind::DictLiteral { .. }
+        | InstKind::Convert { .. }
         | InstKind::Format { .. }
         | InstKind::BuildString { .. } => Source::New,
         InstKind::BinOp {

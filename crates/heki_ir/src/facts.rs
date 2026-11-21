@@ -968,6 +968,7 @@ impl<'a> FnIndex<'a> {
             | InstKind::IterNext { .. }
             | InstKind::Compare { .. }
             | InstKind::UnaryOp { .. }
+            | InstKind::Convert { .. }
             | InstKind::Format { .. }
             | InstKind::BuildString { .. }
             | InstKind::SubscriptLoad { .. }

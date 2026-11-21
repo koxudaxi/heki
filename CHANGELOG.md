@@ -85,9 +85,9 @@ release can change rules, configuration keys, diagnostics, and output formats.
 ### Fixed
 
 - An f-string's replacement fields are reads of their values: each is converted and formatted
-  where it stands (`format(conversion(value), spec)`, which may run the value's `__format__`,
-  `__str__`, or `__repr__`), also in a format specification and in a template string's
-  specifications, and the f-string is computed from them. The Soundness lane no longer proves a
+  where it stands, as CPython does (which may run the value's `__str__`, `__repr__`, or
+  `__format__`), also in a format specification and in a template string's specifications,
+  and the f-string is computed from them. The Soundness lane no longer proves a
   `collections.deque` rewrite safe for a list an f-string shows (`OPT120` / `OPT121`: the
   text of a `deque` differs), and `OPT113` no longer reports a traversal whose inner collection
   is computed from the outer element through an f-string (`index[f"{name}"]`).

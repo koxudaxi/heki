@@ -257,8 +257,8 @@ resolution (`heki_semantic`); then an SSA-CFG IR is built for every function.
   and `IterNext`; **the `for.iter` header expression stays outside the loop body**), `while`,
   `with` / `async with`, `try` / `except` / `else` / `finally`, comprehensions, generator
   expressions (`MakeGenExpr`), augmented assignments, unpacking, `match`, and f-strings (each
-  replacement field formatted where it stands, `Format`, then joined, `BuildString`) become
-  basic instructions.
+  replacement field converted and formatted where it stands, `Convert` and `Format`, then
+  joined, `BuildString`) become basic instructions.
 - **First-class `await` / `yield`**: suspension points are explicit, and awaited calls are
   distinguished from synchronous calls.
 - **Classes, decorators, and loops**: natural loops with a `LoopBound` (`ConstSmall(k)` /

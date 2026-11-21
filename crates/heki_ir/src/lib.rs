@@ -323,15 +323,22 @@ pub enum InstKind {
         lhs: VarId,
         rhs: VarId,
     },
-    /// One replacement field of an f-string or of a format specification:
-    /// `format(conversion(value), spec)`, with `""` for a missing `spec`. The conversion runs
-    /// the value's `__str__` / `__repr__`, the formatting its `__format__`: code of its class
-    /// unless that is a builtin. The result is a `str`, of a subclass if `__format__` returns
+    /// The conversion of a replacement field (`!s`, `!r`, `!a`): `str(value)`, `repr(value)`,
+    /// or `ascii(value)`, which run the value's `__str__` / `__repr__`, code of its class unless
+    /// that is a builtin. The result is a `str`, of a subclass if `__str__` / `__repr__` returns
     /// one.
+    Convert {
+        dst: VarId,
+        value: VarId,
+        conversion: Conversion,
+    },
+    /// A replacement field of an f-string or of a format specification, after its conversion:
+    /// `format(value, spec)`, with `""` for a missing `spec`, which runs the value's `__format__`,
+    /// code of its class unless that is a builtin. The result is a `str`, of a subclass if
+    /// `__format__` returns one.
     Format {
         dst: VarId,
         value: VarId,
-        conversion: Option<Conversion>,
         spec: Option<VarId>,
     },
     /// An f-string other than one replacement field alone: a new `str` of its literal text and
@@ -471,6 +478,7 @@ impl InstKind {
             | Self::BinOp { dst, .. }
             | Self::UnaryOp { dst, .. }
             | Self::Compare { dst, .. }
+            | Self::Convert { dst, .. }
             | Self::Format { dst, .. }
             | Self::BuildString { dst, .. }
             | Self::AttrLoad { dst, .. }
@@ -556,6 +564,7 @@ impl InstKind {
             | Self::StoreDeref { value, .. }
             | Self::Copy { src: value, .. }
             | Self::UnaryOp { operand: value, .. }
+            | Self::Convert { value, .. }
             | Self::AttrLoad { obj: value, .. }
             | Self::AttrDelete { obj: value, .. }
             | Self::MakeIter {

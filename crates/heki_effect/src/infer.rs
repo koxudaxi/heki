@@ -889,7 +889,7 @@ impl<'e, 'a> Engine<'e, 'a> {
             } => return Err(Pending),
             InstKind::AllocBuiltin { dst, kind, elems } => Some(self.display(*dst, *kind, elems)),
             InstKind::DictLiteral { dst, entries } => Some(self.dict_display(*dst, entries)),
-            InstKind::Format { .. } | InstKind::BuildString { .. } => {
+            InstKind::Convert { .. } | InstKind::Format { .. } | InstKind::BuildString { .. } => {
                 Some(Ty::inst("builtins.str"))
             }
             InstKind::LoadGlobal { name, .. } => Some(cx.global(name)),
