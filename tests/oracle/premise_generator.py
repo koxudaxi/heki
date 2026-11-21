@@ -444,8 +444,16 @@ def opt113(sc, strip):
         else:
             mixin, mixed = sc.name("KeyMixin"), sc.name("Mixed")
             sc.define(["@dataclass"] + block(f"class {right}:", ["key: int", "payload: int = 0"]))
+            # A setter, so that the dataclass initializer of the class it is mixed into can store
+            # the key; reading it still runs the getter.
             sc.define(
-                block(f"class {mixin}:", ["@property"] + block("def key(self):", ["return self.payload"]))
+                block(
+                    f"class {mixin}:",
+                    ["@property"]
+                    + block("def key(self):", ["return self._key + 0"])
+                    + ["", "@key.setter"]
+                    + block("def key(self, value):", ["self._key = value"]),
+                )
             )
             sc.define(block(f"class {mixed}({mixin}, {right}):", ["pass"]))
             make = mixed

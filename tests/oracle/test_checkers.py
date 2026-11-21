@@ -522,6 +522,36 @@ class PremiseTable(unittest.TestCase):
         self.assertEqual(out["refutations"], [])
 
 
+class Minimizing(unittest.TestCase):
+    """A refutation that stands on how the program was built keeps its program text."""
+
+    files = {
+        "app/__init__.py": "",
+        "app/s0.py": "def f(flag):\n    if flag:\n        return None\n    return 1\n",
+    }
+    meta = {"entries": [{"module": "app.s0", "func": "f", "inputs": [{"args": [True]}, {"args": [False]}]}]}
+
+    def minimizer(self):
+        import minimize
+
+        class Always(minimize.Minimizer):
+            def holds(self, files, meta):
+                return True
+
+        return Always(None, "EFF101", "x", budget=30)
+
+    def test_a_stripped_premise_keeps_the_program_and_narrows_the_inputs(self):
+        finding = {"kind": "stripped-premise", "entry": None, "input": None}
+        files, meta = self.minimizer().run(dict(self.files), self.meta, finding)
+        self.assertEqual(files, self.files)
+        self.assertEqual(meta["entries"][0]["inputs"], [{"args": [True]}])
+
+    def test_a_run_time_refutation_is_reduced(self):
+        finding = {"kind": "no-wait", "entry": 0, "input": 1}
+        files, _meta = self.minimizer().run(dict(self.files), self.meta, finding)
+        self.assertNotEqual(files, self.files)
+
+
 class Ins:
     """An instruction as `dis` gives it, for the loop matcher."""
 
