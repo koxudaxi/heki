@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Peak-memory gate: run heki on a generated project and fail when its peak RSS exceeds a budget.
+"""Memory gate: run heki on a generated project and fail when its peak memory exceeds a budget.
 
 The project is generated deterministically and shaped after what dominates heki's memory on
 real code bases:
@@ -15,13 +15,23 @@ real code bases:
   loop after a `return` that no path enters. Past its budget a function is left unmodeled,
   so none of them costs more than its budget.
 
-Each mode runs three times and the lowest peak counts. The peak is the physical footprint on
-macOS (`/usr/bin/time -l`; unlike the resident set size it does not drop when the system
-compresses memory) and the resident set size on Linux (`wait4`). The allocators differ, so each
-platform has its own budgets.
+Two measures:
+
+- `heap`, the gate of every change: the peak of the heap bytes heki asks for, counted by the
+  allocator of a `count-alloc` build, which also runs its parallel work on the main thread
+  alone. No allocator cache, memory pressure, or thread timing moves it, so every run reads the
+  same bytes and one run per mode suffices. The total of the bytes allocated is printed with it.
+- `rss`, at release time: the peak memory of a release build as the system sees it, which also
+  holds the allocator's fragmentation, its mappings, and the code. Each mode runs three times
+  and the lowest peak counts: the physical footprint on macOS (`/usr/bin/time -l`; unlike the
+  resident set size it does not drop when the system compresses memory) and the resident set
+  size on Linux (`wait4`). The allocators differ, so each platform has its own budgets.
 
 Usage:
+    cargo build --release -p heki --features count-alloc
     python3 scripts/check_memory.py --heki target/release/heki
+    cargo build --release -p heki
+    python3 scripts/check_memory.py --heki target/release/heki --measure rss
     python3 scripts/check_memory.py --heki target/release/heki --report   # print, never fail
 """
 
@@ -42,15 +52,22 @@ SHAPE_MODULES = 600
 # `finally` bodies nested this deep pass a function's IR budget.
 COPIES_DEPTH = 16
 
-# Peak budgets in MiB per platform and mode: the lowest of three runs plus about 8 %. Lower a
-# budget when a change makes heki smaller; raise one only with the measurement that justifies it.
-BUDGETS_MIB = {
+# Heap budgets in MiB per mode: the peak on the CI runner at calibration plus 5 %. A change
+# of a budget needs the owner's decision (docs/development.md, Memory).
+HEAP_BUDGETS_MIB = {"check": 56.6, "watch": 51.7, "owners": 70.5}
+
+# RSS budgets in MiB per platform and mode, a coarse check at release time: the lowest of three
+# runs at calibration plus about 10 %.
+RSS_BUDGETS_MIB = {
     # Peak physical footprint.
-    "darwin": {"check": 76, "watch": 83, "owners": 93},
-    # Peak resident set size, to calibrate from the CI runner's measurements.
-    "linux": {"check": 77, "watch": 89, "owners": 95},
+    "darwin": {"check": 78, "watch": 88, "owners": 96},
+    # Peak resident set size on the CI runner.
+    "linux": {"check": 83, "watch": 93, "owners": 101},
 }
-RUNS = 3
+RSS_RUNS = 3
+
+MIB = 1024 * 1024
+HEAP_LINE = re.compile(r"^heki heap: peak (\d+) bytes, total (\d+) bytes$", re.MULTILINE)
 
 MODES = {
     "check": (["check", "--output-format", "json", "."], {}),
@@ -192,12 +209,11 @@ def generate(root: Path) -> int:
     return lines
 
 
-def peak_mib(heki: str, mode: str, root: Path) -> float:
-    """The peak of one run (see the module documentation)."""
+def run(heki: str, mode: str, root: Path, timed: bool) -> tuple[str, os.struct_rusage]:
+    """One run of `mode` (with `/usr/bin/time -l` when `timed`): its stderr and resource usage."""
     args, extra_env = MODES[mode]
     env = {**os.environ, **extra_env}
-    darwin = sys.platform == "darwin"
-    cmd = ["/usr/bin/time", "-l", heki, *args] if darwin else [heki, *args]
+    cmd = ["/usr/bin/time", "-l", heki, *args] if timed else [heki, *args]
     proc = subprocess.Popen(
         cmd, cwd=root, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
     )
@@ -206,45 +222,95 @@ def peak_mib(heki: str, mode: str, root: Path) -> float:
     proc.stderr.close()
     # `wait4` reaps the child and reports its own resource usage.
     _, status, usage = os.wait4(proc.pid, 0)
-    proc.returncode = os.waitstatus_to_exitcode(status)
+    code = os.waitstatus_to_exitcode(status)
     # 0: clean, 1: diagnostics (the generated project has some); anything else is a failure.
-    if proc.returncode not in (0, 1):
-        sys.exit(f"heki {' '.join(args)} exited with {proc.returncode}:\n{stderr}")
+    if code not in (0, 1):
+        sys.exit(f"heki {' '.join(args)} exited with {code}:\n{stderr}")
+    return stderr, usage
+
+
+def heap_peak(heki: str, mode: str, root: Path) -> tuple[int, int]:
+    """The peak and the total of the heap bytes of one run of a `count-alloc` build."""
+    stderr, _ = run(heki, mode, root, timed=False)
+    found = HEAP_LINE.search(stderr)
+    if not found:
+        sys.exit(
+            "heki printed no heap count: the heap measure needs a counting build "
+            "(cargo build --release -p heki --features count-alloc)"
+        )
+    return int(found.group(1)), int(found.group(2))
+
+
+def rss_peak_mib(heki: str, mode: str, root: Path) -> float:
+    """The peak of one run of a release build as the system sees it (module documentation)."""
+    darwin = sys.platform == "darwin"
+    stderr, usage = run(heki, mode, root, timed=darwin)
+    if HEAP_LINE.search(stderr):
+        sys.exit("the rss measure needs a release build without `count-alloc`")
     if darwin:
         found = re.search(r"(\d+)\s+peak memory footprint", stderr)
         if not found:
             sys.exit(f"`/usr/bin/time -l` printed no peak memory footprint:\n{stderr}")
-        return int(found.group(1)) / (1024 * 1024)
+        return int(found.group(1)) / MIB
     # `ru_maxrss` is in KiB on Linux.
     return usage.ru_maxrss / 1024
 
 
+def check_heap(heki: str, root: Path) -> list[str]:
+    """Print each mode's heap peak against its budget; return the modes over budget."""
+    failed = []
+    for mode, budget in HEAP_BUDGETS_MIB.items():
+        peak, total = heap_peak(heki, mode, root)
+        verdict = "ok" if peak <= budget * MIB else "OVER BUDGET"
+        print(
+            f"{mode:<6} peak heap {peak:>11} bytes ({peak / MIB:6.2f} MiB)  "
+            f"total {total:>12} bytes  budget {budget:5.1f} MiB  {verdict}",
+            flush=True,
+        )
+        if peak > budget * MIB:
+            failed.append(mode)
+    return failed
+
+
+def check_rss(heki: str, root: Path) -> list[str]:
+    """Print each mode's lowest RSS peak against its budget; return the modes over budget."""
+    budgets = RSS_BUDGETS_MIB["darwin" if sys.platform == "darwin" else "linux"]
+    what = "footprint" if sys.platform == "darwin" else "RSS"
+    failed = []
+    for mode, budget in budgets.items():
+        peak = min(rss_peak_mib(heki, mode, root) for _ in range(RSS_RUNS))
+        verdict = "ok" if peak <= budget else "OVER BUDGET"
+        print(
+            f"{mode:<6} peak {what} {peak:7.1f} MiB  budget {budget:4d} MiB  {verdict}",
+            flush=True,
+        )
+        if peak > budget:
+            failed.append(mode)
+    return failed
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--heki", required=True, help="path to the heki binary (release build)")
+    parser.add_argument("--heki", required=True, help="path to the heki binary")
+    parser.add_argument(
+        "--measure",
+        choices=("heap", "rss"),
+        default="heap",
+        help="heap: a count-alloc build's heap bytes (the gate); rss: a release build's peak",
+    )
     parser.add_argument("--report", action="store_true", help="print the peaks, never fail")
     args = parser.parse_args()
     heki = str(Path(args.heki).resolve())
-    budgets = BUDGETS_MIB["darwin" if sys.platform == "darwin" else "linux"]
-    what = "footprint" if sys.platform == "darwin" else "RSS"
-    failed = []
     with tempfile.TemporaryDirectory(prefix="heki-memory-gate-") as tmp:
         root = Path(tmp)
         lines = generate(root)
         print(f"generated project: {lines} lines", flush=True)
-        for mode, budget in budgets.items():
-            peak = min(peak_mib(heki, mode, root) for _ in range(RUNS))
-            verdict = "ok" if peak <= budget else "OVER BUDGET"
-            print(
-                f"{mode:<6} peak {what} {peak:7.1f} MiB  budget {budget:4d} MiB  {verdict}",
-                flush=True,
-            )
-            if peak > budget:
-                failed.append(mode)
+        check = check_heap if args.measure == "heap" else check_rss
+        failed = check(heki, root)
     if failed and not args.report:
         print(
             f"peak memory over budget ({', '.join(failed)}): find what grew "
-            "(docs/development.md, Memory) before raising a budget",
+            "(docs/development.md, Memory); a budget changes only with the owner's decision",
             file=sys.stderr,
         )
         return 1
