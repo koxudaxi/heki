@@ -68,7 +68,10 @@ Exact claims hold in every run consistent with seven assumptions
 - **R4**: imports resolve as configured.
 - **R5**: the checked files are the project.
 - **R6**: a library call's argument is a value it waits on (a nonzero sleep, a host name to look
-  up) unless heki establishes otherwise.
+  up) unless heki establishes otherwise, and so are the arguments that opened the connection it
+  runs on (a SQLAlchemy engine or another DB-API connection opened from a URL heki does not
+  know waits). `sqlite3.connect` is the one exception, as its in-memory form is common: a SQLite
+  connection waits only when heki establishes that it was opened on a file.
 - **R7**: no asynchronous or resource-exhaustion exception (`MemoryError`, `KeyboardInterrupt`, a
   signal) is raised. Under it, loading a local, a module name bound once, a builtin, or a member
   of an imported module, and building a `list` or `tuple` display, do not raise; other attribute

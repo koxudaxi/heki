@@ -94,34 +94,38 @@ fn boundary_code(r: &BoundaryReport) -> &'static str {
 /// The message of an `EFF101` report: the waiting call the reported call is, the one it always
 /// runs through helpers, or the one each implementation runs.
 fn always_waits(function: &str, must: &SiteMust) -> String {
-    let sinks = must.sinks();
-    match (must.chain.as_slice(), sinks.len()) {
+    match (must.chain.as_slice(), must.witnesses.as_slice()) {
         ([] | [_], _) => format!(
             "`{function}` runs the waiting call `{}` on the event loop",
-            sinks.first().copied().unwrap_or_default()
+            must.target()
         ),
-        ([first, ..], 1) => format!(
+        ([first, ..], [witness]) => format!(
             "`{}` always runs the waiting call `{}` on the event loop ({} down, on every path)",
             first.callee,
-            sinks.first().copied().unwrap_or_default(),
+            witness.callee,
             match must.chain.len() - 1 {
                 1 => "1 call".to_owned(),
                 n => format!("{n} calls"),
             }
         ),
-        ([first, ..], _) => {
+        ([first, ..], witnesses) => {
             let method = first.callee.rsplit('.').next().unwrap_or(&first.callee);
-            let each: Vec<String> = must
-                .witnesses
-                .iter()
-                .map(|(implementation, sink)| format!("`{sink}` (in `{implementation}`)"))
-                .collect();
             format!(
                 "`{method}` always runs a waiting call on the event loop: {}",
-                each.join(" or ")
+                each_witness(witnesses)
             )
         }
     }
+}
+
+/// The calls of several implementations' chains with the effect, each named with the function
+/// that makes it.
+fn each_witness(witnesses: &[CallHop]) -> String {
+    witnesses
+        .iter()
+        .map(|w| format!("`{}` (in `{}`)", w.callee, w.caller.qualname))
+        .collect::<Vec<_>>()
+        .join(" or ")
 }
 
 pub(crate) fn eff101_105(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
@@ -173,17 +177,15 @@ pub(crate) fn eff101_105(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
             let (message, chain, target) = match &r.must {
                 Some(must) if code == "EFF101" => (
                     always_waits(&r.function.qualname, must),
-                    &must.chain,
-                    must.chain
-                        .last()
-                        .map_or_else(|| r.root_cause.clone(), |h| h.callee.clone()),
+                    must.related(),
+                    must.target(),
                 ),
                 _ => (
                     format!(
                         "`{}` reaches {what} `{}` on the event loop{iterating}",
                         r.function.qualname, r.root_cause
                     ),
-                    &r.chain,
+                    r.chain.clone(),
                     r.root_cause.clone(),
                 ),
             };
@@ -197,7 +199,7 @@ pub(crate) fn eff101_105(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
                 target,
                 message,
                 Some(unblocking_help(r.effect).to_owned()),
-                chain,
+                &chain,
             ) {
                 d.fold_key = Some(fold_key);
             }
@@ -478,10 +480,10 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
                     unit,
                     q.span,
                     &key.qualname,
-                    e.must.chain.last().map_or(root, |h| h.callee.clone()),
+                    e.must.target(),
                     e.message(),
                     None,
-                    &e.must.chain,
+                    &e.must.related(),
                 ),
                 Some(_) => None,
                 None if cx.enabled("EFF113", unit) => cx.emit(
@@ -569,21 +571,12 @@ impl DataOrigins {
 
 impl EstablishedQuery {
     fn message(&self) -> String {
-        let sinks = self.must.sinks();
-        let what = match (sinks.len(), self.must.chain.as_slice()) {
-            (1, [first, _, ..]) => format!(
-                "`{}` (through `{}`)",
-                sinks.first().copied().unwrap_or_default(),
-                first.callee
-            ),
-            (1, _) => format!("`{}`", sinks.first().copied().unwrap_or_default()),
-            _ => self
-                .must
-                .witnesses
-                .iter()
-                .map(|(implementation, sink)| format!("`{sink}` (in `{implementation}`)"))
-                .collect::<Vec<_>>()
-                .join(" or "),
+        let what = match (self.must.witnesses.as_slice(), self.must.chain.as_slice()) {
+            ([witness], [first, _, ..]) => {
+                format!("`{}` (through `{}`)", witness.callee, first.callee)
+            }
+            ([witness], _) => format!("`{}`", witness.callee),
+            (witnesses, _) => each_witness(witnesses),
         };
         format!(
             "{} sends a database statement: {what}",
