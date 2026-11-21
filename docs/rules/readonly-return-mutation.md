@@ -83,7 +83,8 @@ def extend(name: str) -> dict[str, list[str]]:
 - A generator's values and a coroutine's result (`await`) are not followed.
 - A method call on a shared value whose class heki cannot resolve (a producer returning a type
   variable) is not followed; a wrapper with a concrete return annotation resolves it.
-- A display that also holds values of its own (`{**shared, "extra": []}`) is not followed.
+- A dict display that also holds values of its own (`{**shared, "extra": []}`) or unpacks
+  another mapping (`{**shared, **overrides}`) is not followed.
 - A project method returning a part of a shared receiver (`return self._items[key]`) is not
   followed, nor is a `copy()` method of a project class that shares the receiver's values
   (`return Post(self.tags)`).

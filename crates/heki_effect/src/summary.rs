@@ -1224,6 +1224,9 @@ impl<'a> Extractor<'a> {
     /// [`Self::memo_fills`]: the writes of the parameters' own attributes that fill a memo or
     /// initialize lazily ([`cache_flow::attr_writes`], each parameter an object of its own).
     fn memo_fills(&self) -> FxHashSet<(BlockId, usize)> {
+        if self.f.params.is_empty() {
+            return FxHashSet::default();
+        }
         let objects: FxHashMap<VarId, u32> = self
             .param_alias
             .iter()

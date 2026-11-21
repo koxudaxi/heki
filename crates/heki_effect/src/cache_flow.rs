@@ -272,6 +272,9 @@ pub fn attr_writes<'f>(
             }
         }
     }
+    if found.is_empty() {
+        return Vec::new();
+    }
     let mut written: FxHashMap<&str, FxHashSet<u32>> = FxHashMap::default();
     for (_, _, _, (o, attr), _, _) in &found {
         written.entry(attr).or_default().insert(*o);
