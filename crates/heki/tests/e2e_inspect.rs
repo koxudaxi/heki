@@ -6,9 +6,10 @@ mod common;
 use common::Project;
 use serde_json::Value;
 
-/// `heki inspect <args> --output-format json`: exit code, the JSON object, stderr.
+/// `heki inspect --heuristic <args> --output-format json`: exit code, the JSON object, stderr.
+/// The heuristic rules run, as in `Project::check`, so the reports are the same.
 fn inspect(p: &Project, args: &[&str]) -> (i32, Value, String) {
-    let mut all = vec!["inspect"];
+    let mut all = vec!["inspect", "--heuristic"];
     all.extend_from_slice(args);
     all.extend(["--output-format", "json"]);
     let (code, out, err) = p.heki(&all);
@@ -227,11 +228,11 @@ fn a_symbol_naming_no_single_function_exits_2_with_an_error_object() {
     let (code, v, _) = inspect(&p, &["  "]);
     assert_eq!((code, v["error"]["kind"].as_str()), (2, Some("invalid")));
     // `--depth` without `--callers`.
-    let (code, _, err) = p.heki(&["inspect", "fetch", "--depth", "2"]);
+    let (code, _, err) = p.heki(&["inspect", "--heuristic", "fetch", "--depth", "2"]);
     assert_eq!(code, 2);
     assert!(err.contains("--callers"), "{err}");
     // In text form the error goes to stderr.
-    let (code, out, err) = p.heki(&["inspect", "load"]);
+    let (code, out, err) = p.heki(&["inspect", "--heuristic", "load"]);
     assert_eq!((code, out.as_str()), (2, ""));
     assert!(
         err.contains("pkg.users.Loader.load  pkg/users.py:11"),
@@ -1161,7 +1162,7 @@ fn contracts_name_the_roles_a_function_has() {
 #[test]
 fn the_text_form_has_one_line_per_fact() {
     let p = users_project("inspect_text");
-    let (code, out, err) = p.heki(&["inspect", "Loader.load", "--callers"]);
+    let (code, out, err) = p.heki(&["inspect", "--heuristic", "Loader.load", "--callers"]);
     assert_eq!(code, 0, "{err}");
     let expected = "\
 Loader.load  (pkg.users)
@@ -1417,7 +1418,7 @@ fn the_text_form_shows_every_kind_of_fact() {
         .write("facts.py", FACTS)
         .write("callers.py", CALLERS);
     let text = |symbol: &str, extra: &[&str]| {
-        let mut args = vec!["inspect", symbol];
+        let mut args = vec!["inspect", "--heuristic", symbol];
         args.extend_from_slice(extra);
         let (code, out, err) = p.heki(&args);
         assert_eq!(code, 0, "{err}");
@@ -1480,24 +1481,30 @@ fn the_text_form_shows_every_kind_of_fact() {
         .write("m.py", CONTRACTS_CODE)
         .write("other.py", "import m\n\n\ndef keeps(x, sink: list):\n    sink.append(x)\n\n\ndef nothing(x):\n    return 1\n")
         .write("wrap.py", "from m import Model, Store\n\n\ndef secret_of(m: Model):\n    return Store().read(m)\n");
-    let (_, out, _) = owned.heki(&["inspect", "m.Store.read"]);
+    let (_, out, _) = owned.heki(&["inspect", "--heuristic", "m.Store.read"]);
     has(&out, "contracts\n  write-owners store: allowed-writer");
-    let (_, out, _) = owned.heki(&["inspect", "wrap.secret_of"]);
+    let (_, out, _) = owned.heki(&["inspect", "--heuristic", "wrap.secret_of"]);
     has(&out, "  shared with read-only producer m.Store.read");
-    let (_, out, _) = owned.heki(&["inspect", "other.keeps"]);
+    let (_, out, _) = owned.heki(&["inspect", "--heuristic", "other.keeps"]);
     has(&out, "retains   stores x; keeps x, sink");
-    let (_, out, _) = owned.heki(&["inspect", "other.nothing"]);
+    let (_, out, _) = owned.heki(&["inspect", "--heuristic", "other.nothing"]);
     has(&out, "retains   stores no parameter; keeps none");
-    let (_, out, _) = owned.heki(&["inspect", "m.Model.reset", "--extend-select", "MUT112"]);
+    let (_, out, _) = owned.heki(&[
+        "inspect",
+        "--heuristic",
+        "m.Model.reset",
+        "--extend-select",
+        "MUT112",
+    ]);
     has(&out, "m.Model.name");
     owned.write("broken.py", "def f(:\n");
-    let (code, out, _) = owned.heki(&["inspect", "other.nothing"]);
+    let (code, out, _) = owned.heki(&["inspect", "--heuristic", "other.nothing"]);
     assert_eq!(code, 2);
     has(&out, "error: ");
     let users = users_project("inspect_text_unknown");
     users.write("pkg/calls.py", "from pkg.users import fetch\n\n\ndef far(u):\n    return fetch(u)\n\n\ndef vague(x):\n    return x.thing()\n");
-    let (_, out, _) = users.heki(&["inspect", "pkg.calls.vague"]);
+    let (_, out, _) = users.heki(&["inspect", "--heuristic", "pkg.calls.vague"]);
     has(&out, "unknown: unresolved_calls (first at pkg.calls.vague)");
-    let (_, out, _) = users.heki(&["inspect", "fetch", "--callers"]);
+    let (_, out, _) = users.heki(&["inspect", "--heuristic", "fetch", "--callers"]);
     has(&out, "  calls.far  calls.py:5  (return)");
 }

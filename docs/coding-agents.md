@@ -46,14 +46,15 @@ a diff of the two JSON objects shows only what changed.
 
 A typical instruction for the agent:
 
-> After changing Python files, run `heki check --output-format json`. For each diagnostic,
-> read its `help` and `heki rule <rule_code>`, follow `related` to the root cause, and fix it
-> there. Apply
-> `heki check --fix` for the safe rewrites. Never silence a diagnostic with `# heki: ignore`
-> unless the rule's documentation describes the case as intended.
+> After changing Python files, run `heki check --heuristic --output-format json`. For each
+> diagnostic, read its `help` and `heki rule <rule_code>`, follow `related` to the root cause,
+> and fix it there. A diagnostic whose `certainty` is `heuristic` can be wrong about the code:
+> confirm what its message says before changing anything. Apply `heki check --heuristic --fix`
+> for the safe rewrites. Never silence a diagnostic with `# heki: ignore` unless the rule's
+> documentation describes the case as intended.
 
 ```console
-$ heki check --output-format json
+$ heki check --heuristic --output-format json
 ```
 
 Each diagnostic has:
@@ -62,6 +63,7 @@ Each diagnostic has:
 | ----- | ------- |
 | `path`, `line`, `column`, `span` | location (byte span in the file) |
 | `rule_code`, `rule_slug`, `severity`, `message` | the finding: `message` is one sentence saying what happens |
+| `certainty` | `exact`, or `heuristic` when a premise of the report's claim can be open, so that it can be wrong about the code ([Rule Precision](precision.md)) |
 | `help` | what to do about it (`null` when the rule has no advice for the report) |
 | `qualname`, `target` | the function and the object involved |
 | `related` | every hop of the call chain behind the finding |

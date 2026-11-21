@@ -231,7 +231,7 @@ fn build(
         }
     }
     let units: Vec<_> = files.iter().map(|f| f.unit()).collect();
-    let diags = indexed.diagnose_units(&units)?;
+    let (diags, _) = indexed.diagnose_units(&units)?;
     let reports = with_baseline(args, indexed, diags)?;
     let roles = |key| {
         let (cfg, kb, soundness) = (&env.cfg, &env.kb, &env.soundness_kb);
