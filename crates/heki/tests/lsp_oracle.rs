@@ -286,6 +286,9 @@ const SEAL_USE: &str = "from pkg.seal_peek import crack, peek\n\n\nclass Plain:\
 // A call target naming no class (`reseal`): a helper that types nothing calls the method on an
 // object its caller in another module binds to a class defining it, in a third module.
 const SEALER: &str = "class Sealer:\n    def reseal(self):\n        return None\n";
+// The class of an object typed with a class of another module: `type(obj)` and a lambda's
+// closure cell.
+const SEAL_TYPE: &str = "from pkg.seal import Seal\n\n\ndef crack_type(s: Seal):\n    type(s).break_open(s)\n\n\ndef peek_later(s: Seal):\n    return lambda: s.code\n";
 const RESEAL_HELPER: &str = "def redo(s):\n    s.reseal()\n";
 const RESEAL_USE: &str = "from pkg.reseal_helper import redo\nfrom pkg.sealer import Sealer\n\n\ndef again(s: Sealer):\n    redo(s)\n";
 const STRICT_USE: &str = "from pkg.model import Registry\nfrom pkg.strict_ops import _reset\n\n\ndef run(r: Registry):\n    _reset(r)\n";
@@ -1192,6 +1195,35 @@ fn steps_receiver_typing() -> Vec<Step> {
             vec![save("pkg/tagged.py", TAGGED)],
         )
         .present(&[("pkg/views.py", "MUT201"), ("pkg/view_handed.py", "MUT201")]),
+        Step::new(
+            "a module calls a method of `type(obj)` and reads its object in a lambda",
+            vec![Action::Create("pkg/seal_type.py", SEAL_TYPE.to_owned())],
+        )
+        .present(&[
+            ("pkg/seal_type.py", "MUT204"),
+            ("pkg/seal_type.py", "MUT203"),
+        ]),
+        Step::new(
+            "the object's class becomes a protocol: `type(obj)` is of unknown class",
+            vec![save(
+                "pkg/seal.py",
+                &SEAL.replace(
+                    "class Seal:",
+                    "from typing import Protocol\n\n\nclass Seal(Protocol):",
+                ),
+            )],
+        )
+        .present(&[("pkg/seal_type.py", "MUT207")])
+        .absent(&[("pkg/seal_type.py", "MUT204")]),
+        Step::new(
+            "the protocol is a class again",
+            vec![save("pkg/seal.py", SEAL)],
+        )
+        .present(&[("pkg/seal_type.py", "MUT204")]),
+        Step::new(
+            "the module is deleted",
+            vec![Action::Delete("pkg/seal_type.py")],
+        ),
     ]
 }
 

@@ -6592,8 +6592,9 @@ name of the target: `replace_reference` for `DataType.replace_reference`, also f
 class target) is reported once, at the call, when its receiver is of unknown class: an
 unannotated parameter, a loop variable, the result of a call heki does not resolve, a value
 annotated `Any` or `object` (unless an `isinstance` test around the call narrows it to a class),
-or a protocol whose implementations heki cannot list (one without members, or implemented by
-more than eight classes). `obj.replace_reference(...)`, a bound-method alias of it
+a protocol whose implementations heki cannot list (one without members, or implemented by more
+than eight classes), or a variable of an enclosing function that a nested scope rebinds
+(`nonlocal`). `obj.replace_reference(...)`, a bound-method alias of it
 (`replace = obj.replace_reference`), and `getattr(obj, "replace_reference")(...)` with a
 constant name count. A call of a value of unknown origin (`callback()`) names nothing and is not
 reported.
@@ -6682,8 +6683,9 @@ reports the reads outside the read owners that `MUT203` cannot tie to a target c
 (`children` for `Reference.children`, any name for `Reference.*`) is reported once, at the read,
 when its object is of unknown class: an unannotated parameter, a loop variable, the result of a
 call heki does not resolve, a value annotated `Any` or `object` (unless an `isinstance` test
-around the read narrows it to a class), or a protocol whose implementations heki cannot list (one
-without members, or implemented by more than eight classes). `obj.children`, a local alias of it,
+around the read narrows it to a class), a protocol whose implementations heki cannot list (one
+without members, or implemented by more than eight classes), or a variable of an enclosing
+function that a nested scope rebinds (`nonlocal`). `obj.children`, a local alias of it,
 `getattr(obj, "children")` with a constant name, and `obj.__dict__["children"]` count, as for
 `MUT203`.
 
@@ -6772,8 +6774,9 @@ write:
   `Model.*`) written on an object of unknown class: an unannotated parameter that no project
   caller binds to an instance of a known class, a loop variable, the result of a call heki does
   not resolve, a value annotated `Any` or `object` (unless an `isinstance` test around the write
-  narrows it to a class: `if isinstance(obj, Field): ...`), or a protocol whose implementations
-  heki cannot list (one without members, or implemented by more than eight classes). Rebinding
+  narrows it to a class: `if isinstance(obj, Field): ...`), a protocol whose implementations
+  heki cannot list (one without members, or implemented by more than eight classes), or a
+  variable of an enclosing function that a nested scope rebinds (`nonlocal`). Rebinding
   (`obj.fields = []`), deleting, `setattr` with a constant name, and changing the container the
   attribute holds (`obj.fields.append(x)`, `obj.meta["k"][name] = v`) count;
 - an attribute name computed at run time written on an instance of a target class:
