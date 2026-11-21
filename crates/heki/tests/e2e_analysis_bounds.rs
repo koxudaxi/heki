@@ -1,7 +1,8 @@
 //! The cost of the analyses past the IR, end to end through the real binary: `isinstance`
 //! narrowing through phis, the passes of the type inference and of the classes of merged values,
 //! the size of the Soundness lane's proof state, the values `EFF107` follows from a task factory,
-//! and the walk to the callable a builtin calls once per item.
+//! the walk to the callable a builtin calls once per item, contracts with many call targets, and
+//! the walk to the uses handing a reference to a call target on.
 
 mod common;
 
@@ -198,7 +199,7 @@ fn classes_past_the_pass_bound_are_unknown() {
         p.write("m.py", &chain_before_buffer_read(links));
         check_within(&p, Duration::from_secs(20))
             .iter()
-            .filter(|d| d["rule_code"] == "EFF101")
+            .filter(|d| d["rule_code"] == "EFF111")
             .count()
     };
     assert_eq!(blocking(4), 0);
@@ -807,7 +808,7 @@ fn waits_on_a_future_look_up_the_awaits_before_them_once() {
         let found = check_within(&p, Duration::from_secs(20));
         let lines: Vec<u64> = found
             .iter()
-            .filter(|d| d["rule_code"] == "EFF101")
+            .filter(|d| d["rule_code"] == "EFF111")
             .map(|d| d["line"].as_u64().unwrap())
             .collect();
         let expected: Vec<u64> = if waits > 10 {
@@ -901,7 +902,7 @@ fn task_factories_at_the_end_of_a_copy_chain_take_linear_time() {
 }
 
 /// A shared value copied along a long chain of assignments (`v1 = v0`, `v2 = v1`, ...) before
-/// `MUT202` reads which object each copy is: each copy's origin is found once.
+/// `MUT114` reads which object each copy is: each copy's origin is found once.
 #[test]
 fn a_long_copy_chain_of_a_shared_value_finds_each_origin_once() {
     let mut lines = vec![
@@ -925,7 +926,7 @@ fn a_long_copy_chain_of_a_shared_value_finds_each_origin_once() {
     let found = check_within(&p, Duration::from_secs(20));
     let reported: Vec<&str> = found
         .iter()
-        .filter(|d| d["rule_code"] == "MUT202")
+        .filter(|d| d["rule_code"] == "MUT114")
         .map(|d| d["qualname"].as_str().unwrap())
         .collect();
     assert_eq!(reported, vec!["extend"], "{found:#?}");
@@ -954,7 +955,7 @@ fn many_shared_values_read_their_memo_writes_in_one_walk() {
     let p = Project::new("bounds_many_shared_values");
     p.write("m.py", &(lines.join("\n") + "\n"));
     let found = check_within(&p, Duration::from_secs(20));
-    let reported = found.iter().filter(|d| d["rule_code"] == "MUT202").count();
+    let reported = found.iter().filter(|d| d["rule_code"] == "MUT114").count();
     assert_eq!(reported, 3000, "{found:#?}");
 }
 
@@ -984,7 +985,7 @@ fn lazy_initializations_past_the_budget_count_as_changes() {
     let found = check_within(&p, Duration::from_secs(20));
     let reported: Vec<&str> = found
         .iter()
-        .filter(|d| d["rule_code"] == "MUT202")
+        .filter(|d| d["rule_code"] == "MUT114")
         .map(|d| d["qualname"].as_str().unwrap())
         .collect();
     assert_eq!(reported, vec!["use"], "{found:#?}");
@@ -1028,7 +1029,7 @@ fn lists_that_extend_each_other_are_not_fixed() {
     let found = check_within(&p, Duration::from_secs(20));
     let queries: Vec<&Value> = found
         .iter()
-        .filter(|d| d["rule_code"] == "EFF103")
+        .filter(|d| d["rule_code"] == "EFF113")
         .collect();
     assert_eq!(queries.len(), 1, "{found:#?}");
 }
@@ -1104,7 +1105,7 @@ fn callables_past_the_partial_and_copy_bounds_are_not_followed() {
         p.write("m.py", &partial_chain(depth, copies));
         check_within(&p, Duration::from_secs(20))
             .iter()
-            .filter(|d| d["rule_code"] == "EFF103")
+            .filter(|d| d["rule_code"] == "EFF113")
             .count()
     };
     assert_eq!(queries(3, 3), 1);
@@ -1209,7 +1210,7 @@ fn item_stores_in_many_branches_find_membership_tests_once() {
     let found = check_within(&p, Duration::from_secs(20));
     let reported: Vec<&str> = found
         .iter()
-        .filter(|d| d["rule_code"] == "MUT202")
+        .filter(|d| d["rule_code"] == "MUT114")
         .map(|d| d["qualname"].as_str().unwrap())
         .collect();
     assert_eq!(reported, vec!["use"], "{found:#?}");
@@ -1548,7 +1549,7 @@ fn tests_of_a_wide_merge_keep_their_edges_within_a_budget() {
     let found = check_within(&p, Duration::from_secs(20));
     let reported: Vec<&str> = found
         .iter()
-        .filter(|d| d["rule_code"] == "EFF101")
+        .filter(|d| d["rule_code"] == "EFF111")
         .map(|d| d["qualname"].as_str().unwrap())
         .collect();
     assert_eq!(reported, vec!["load"], "{found:#?}");
@@ -2013,6 +2014,183 @@ fn many_key_tests_of_a_container_of_self_find_their_sides_once() {
     );
 }
 
+/// A module binding thousands of names, each to the one before (`a1 = a0`, `a2 = a1`, ...):
+/// every alias is resolved once, and the last still names `object.__setattr__`.
+#[test]
+fn a_long_chain_of_module_aliases_resolves_each_once() {
+    let names = 5_000;
+    let mut lines = vec!["a0 = object.__setattr__".to_owned()];
+    lines.extend((1..names).map(|i| format!("a{i} = a{}", i - 1)));
+    lines.extend(
+        [
+            "",
+            "",
+            "class Node:",
+            "    def __init__(self) -> None:",
+            "        self.kind = \"\"",
+            "",
+            "",
+            "def mark(node: Node) -> None:",
+        ]
+        .map(str::to_owned),
+    );
+    lines.push(format!("    a{}(node, \"kind\", \"x\")", names - 1));
+    let p = Project::new("bounds_module_alias_chain");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT201\"]\n\n[[tool.heki.write-owners]]\nname = \"kinds\"\ntargets = [\"Node.kind\"]\nallowed-writers = [\"Node.*\"]\n",
+    )
+    .write("m.py", &(lines.join("\n") + "\n"));
+    let diags = check_within(&p, Duration::from_secs(20));
+    assert_eq!(diags.len(), 1, "{diags:#?}");
+    assert_eq!(diags[0]["qualname"], "mark");
+}
+
+/// A method returning one of thousands of copies of `self.items` behind as many tests: the
+/// value each copy copies is found once, not once per return.
+#[test]
+fn returns_of_a_long_copy_chain_find_its_root_once() {
+    let copies = 3_000;
+    let mut lines = vec![
+        "class Node:".to_owned(),
+        "    def __init__(self) -> None:".to_owned(),
+        "        self.items: list[int] = []".to_owned(),
+        String::new(),
+        "    def members(self, flags: list[bool]) -> list[int]:".to_owned(),
+        "        c0 = self.items".to_owned(),
+    ];
+    for i in 1..copies {
+        lines.push(format!("        c{i} = c{}", i - 1));
+        lines.push(format!("        if flags[{i}]:"));
+        lines.push(format!("            return c{i}"));
+    }
+    lines.push(format!("        return c{}", copies - 1));
+    lines.extend(
+        [
+            "",
+            "",
+            "def grow(node: Node) -> None:",
+            "    node.members([]).append(1)",
+        ]
+        .map(str::to_owned),
+    );
+    let p = Project::new("bounds_getter_copy_chain");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT201\"]\n\n[[tool.heki.write-owners]]\nname = \"items\"\ntargets = [\"Node.items\"]\nallowed-writers = [\"Node.*\"]\n",
+    )
+    .write("m.py", &(lines.join("\n") + "\n"));
+    let diags = check_within(&p, Duration::from_secs(20));
+    assert_eq!(diags.len(), 1, "{diags:#?}");
+    assert_eq!(diags[0]["qualname"], "grow");
+}
+
+/// `classes` classes with a private method, and `functions` functions calling the methods of
+/// instances of them `calls` times each.
+fn many_calls(classes: usize, functions: usize, calls: usize) -> (String, String) {
+    let mut model = Vec::new();
+    for c in 0..classes {
+        model.extend([
+            format!("class C{c}:"),
+            "    def _m(self) -> int:".to_owned(),
+            "        return 0".to_owned(),
+            String::new(),
+            String::new(),
+        ]);
+    }
+    let names: Vec<String> = (0..classes).map(|c| format!("C{c}")).collect();
+    let params: Vec<String> = (0..classes).map(|c| format!("c{c}: C{c}")).collect();
+    let mut usage = vec![
+        format!("from pkg.m import {}", names.join(", ")),
+        String::new(),
+        String::new(),
+    ];
+    for f in 0..functions {
+        usage.push(format!("def f{f}({}) -> None:", params.join(", ")));
+        usage.extend((0..calls).map(|k| format!("    c{}._m()", k % classes)));
+        usage.extend([String::new(), String::new()]);
+    }
+    (model.join("\n"), usage.join("\n") + "\n")
+}
+
+/// The targets a call matches are looked up from the callee's names, once per call for all
+/// `call-owners` contracts: thousands of targets, in one contract or in as many contracts,
+/// dotted or sharing one module part (`pkg.m:X0._*`), cost no more per call than one.
+#[test]
+fn call_targets_are_looked_up_not_tried_one_by_one() {
+    let (model, usage) = many_calls(10, 100, 100);
+    let mut configs = Vec::new();
+    for (form, module) in [("dotted", "pkg.m."), ("module", "pkg.m:")] {
+        let targets: Vec<String> = (0..2000)
+            .map(|i| format!("\"{module}X{i}._*\""))
+            .chain(std::iter::once(format!("\"{module}C0._*\"")))
+            .collect();
+        let one_contract = format!(
+            "[[tool.heki.call-owners]]\nname = \"many\"\ntargets = [{}]\nforbidden-callers = [\"pkg.use.f0\"]\n",
+            targets.join(", ")
+        );
+        let many_contracts: String = targets
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                format!("[[tool.heki.call-owners]]\nname = \"c{i}\"\ntargets = [{t}]\nforbidden-callers = [\"pkg.use.f0\"]\n\n")
+            })
+            .collect();
+        configs.push((format!("{form}_one"), one_contract));
+        configs.push((format!("{form}_many"), many_contracts));
+    }
+    for (name, contracts) in configs {
+        let p = Project::new(&format!("bounds_call_targets_{name}"));
+        p.write(
+            "pyproject.toml",
+            &format!(
+                "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT204\"]\n\n{contracts}"
+            ),
+        )
+        .write("pkg/__init__.py", "")
+        .write("pkg/m.py", &model)
+        .write("pkg/use.py", &usage);
+        let diags = check_within(&p, Duration::from_secs(20));
+        // Only the forbidden caller's ten calls of `C0._m` are reported.
+        assert_eq!(diags.len(), 10, "{name}: {diags:#?}");
+        assert!(diags.iter().all(|d| d["qualname"] == "f0"), "{name}");
+    }
+}
+
+/// Thousands of references to a `call-owners` target, each a rebinding of one name that a long
+/// chain of phis carries to one `return` (`references = "calls"`): which values reach a use
+/// handing them on is found in one walk of the function, not once per reference (a function
+/// twice as long passes the IR's size budget).
+#[test]
+fn references_carried_by_a_long_phi_chain_are_found_in_one_walk() {
+    let rebindings = 2000;
+    let mut lines = vec![
+        "def decide():".to_owned(),
+        "    return 1".to_owned(),
+        String::new(),
+        String::new(),
+        "def pick(flags):".to_owned(),
+        "    chosen = None".to_owned(),
+    ];
+    for i in 0..rebindings {
+        lines.push(format!("    if flags[{i}]:"));
+        lines.push("        chosen = decide".to_owned());
+    }
+    lines.push("    return chosen".to_owned());
+    let p = Project::new("bounds_reference_phi_chain");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT204\"]\n\n[[tool.heki.call-owners]]\nname = \"home\"\ntargets = [\"m.decide\"]\nallowed-callers = [\"m.decide\"]\nreferences = \"calls\"\n",
+    )
+    .write("m.py", &(lines.join("\n") + "\n"));
+    let found = check_within(&p, Duration::from_secs(20));
+    let handed = found
+        .iter()
+        .filter(|d| d["rule_code"] == "MUT204" && d["qualname"] == "pick")
+        .count();
+    assert_eq!(handed, rebindings);
+}
+
 /// Puts after each of many branches that may build a new unbounded queue: the queue of each put
 /// is a phi of the previous one and a new queue, back to a bounded one.
 fn queue_rebindings(steps: usize) -> String {
@@ -2041,7 +2219,7 @@ fn puts_after_many_rebindings_of_a_queue_walk_each_value_once() {
     assert!(
         found
             .iter()
-            .any(|d| d["rule_code"] == "EFF101" && d["qualname"] == "fill"),
+            .any(|d| d["rule_code"] == "EFF111" && d["qualname"] == "fill"),
         "{found:#?}"
     );
 }
@@ -2081,7 +2259,7 @@ fn queue_parameters_along_a_reversed_chain_of_helpers_resolve_in_linear_time() {
     assert!(
         found
             .iter()
-            .any(|d| d["rule_code"] == "EFF101" && d["qualname"] == "entry"),
+            .any(|d| d["rule_code"] == "EFF111" && d["qualname"] == "entry"),
         "{found:#?}"
     );
 }
@@ -2126,7 +2304,7 @@ fn puts_along_a_chain_of_attributes_resolve_each_attribute_once() {
     assert!(
         found
             .iter()
-            .any(|d| d["rule_code"] == "EFF101" && d["qualname"] == "entry"),
+            .any(|d| d["rule_code"] == "EFF111" && d["qualname"] == "entry"),
         "{found:#?}"
     );
 }
@@ -2265,4 +2443,91 @@ fn item_origins_decide_each_question_once() {
         last_origin("chosen")["known"].as_array().map(Vec::len),
         Some(60)
     );
+}
+
+/// `MUT107` reads what a `__hash__` reads on the instances of each writer's class, following its
+/// `self` calls along that class's MRO: a hash calling a long chain of `self` helpers, and
+/// hundreds of subclasses each changing the attribute the chain's end reads. The walk runs once per
+/// writer class and visits each method once, as the family of each class lists the methods it
+/// inherits.
+#[test]
+fn hash_reads_per_writer_class_visit_each_method_once() {
+    let (helpers, classes) = (600, 600);
+    let mut lines = vec![
+        "class Node:".to_owned(),
+        "    def __init__(self):".to_owned(),
+        "        self.key = 0".to_owned(),
+        String::new(),
+        "    def __hash__(self):".to_owned(),
+        "        return hash(self.h0())".to_owned(),
+    ];
+    for i in 0..helpers {
+        let next = if i + 1 < helpers {
+            format!("self.h{}()", i + 1)
+        } else {
+            "self.key".to_owned()
+        };
+        lines.extend([
+            String::new(),
+            format!("    def h{i}(self):"),
+            format!("        return {next}"),
+        ]);
+    }
+    for i in 0..classes {
+        lines.extend([
+            String::new(),
+            String::new(),
+            format!("class Sub{i}(Node):"),
+            "    def touch(self):".to_owned(),
+            "        self.key = 1".to_owned(),
+        ]);
+    }
+    let p = Project::new("bounds_hash_reads_per_class");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nextend-select = [\"MUT107\"]\n",
+    )
+    .write("m.py", &(lines.join("\n") + "\n"));
+    let found = check_within(&p, Duration::from_secs(20));
+    let reported = found.iter().filter(|d| d["rule_code"] == "MUT107").count();
+    assert_eq!(reported, classes);
+}
+
+/// The implementations of a call are checked over at most 64 classes (the receiver's class and
+/// its project subclasses): a receiver class with more subclasses has no complete set of targets,
+/// so a call that blocks through every one of them is not established (`EFF111`, not `EFF101`).
+#[test]
+fn implementations_past_the_class_bound_are_not_complete() {
+    let blocking = |subclasses: usize| -> Vec<String> {
+        let mut lines = vec![
+            "import time".to_owned(),
+            String::new(),
+            String::new(),
+            "class Base:".to_owned(),
+            "    def run(self):".to_owned(),
+            "        time.sleep(1)".to_owned(),
+        ];
+        for i in 0..subclasses {
+            lines.extend([
+                String::new(),
+                String::new(),
+                format!("class Sub{i}(Base):"),
+                "    pass".to_owned(),
+            ]);
+        }
+        lines.extend([
+            String::new(),
+            String::new(),
+            "async def handler(b: Base):".to_owned(),
+            "    b.run()".to_owned(),
+        ]);
+        let p = Project::new(&format!("bounds_dispatch_classes_{subclasses}"));
+        p.write("m.py", &(lines.join("\n") + "\n"));
+        check_within(&p, Duration::from_secs(20))
+            .iter()
+            .map(|d| d["rule_code"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    assert_eq!(blocking(3), ["EFF101"]);
+    assert_eq!(blocking(300), ["EFF111"]);
 }

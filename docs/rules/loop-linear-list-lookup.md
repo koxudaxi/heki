@@ -39,14 +39,14 @@ not reported. Neither are:
 
 ## What a report states
 
-A report states that `xs.index(...)`, `xs.remove(...)`, or `xs.count(...)` scans the whole list on
-every iteration of the loop.
+A report states that `xs.index(...)`, `xs.remove(...)`, or `xs.count(...)`, in a loop, scans the
+list each time it runs (`count` scans all of it; `index` and `remove` scan up to the first match).
 
 Its premises:
 
 - **List**: the receiver is a `list`, by construction or annotation (assumption R2).
-- **On every iteration**: the statement runs on every iteration of the loop. Open: a statement under
-  a branch inside the loop counts.
+- **In a loop**: the call is in the body of a loop that can run it again on the same list.
+  Established. How many times it runs is not part of the claim: a call under a branch counts.
 - **Data-sized**: the code does not fix the sizes the cost depends on (the loop's and the
   container's) at 16 or fewer. Open: a size heki cannot bound counts as data-sized.
 
