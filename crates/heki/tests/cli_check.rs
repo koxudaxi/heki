@@ -363,7 +363,7 @@ fn warnings_do_not_fail_the_check_unless_fail_on_says_so() {
     let (code, stdout, stderr) = p.heki(&[]);
     assert_eq!(code, 0, "{stderr}");
     assert!(
-        stdout.starts_with("app.py:4:5: EFF101 (async-blocking-call) [warning, heuristic]"),
+        stdout.starts_with("app.py:4:5: EFF101 (async-blocking-call) [warning] "),
         "{stdout}"
     );
     assert!(stderr.contains("Found 1 diagnostic(s)"), "{stderr}");
