@@ -13,7 +13,7 @@
 use super::{Allowance, facts_run_at, initializes_itself, runs_inside_allowed};
 use crate::{CheckContext, ModuleUnit, SitesByCaller};
 use heki_ast::Span;
-use heki_diagnostics::{Certainty, Diagnostic};
+use heki_diagnostics::{Certainty, Diagnostic, RelatedLocation};
 use heki_effect::{
     BoundCallee, CallHop, CallSite, EffectSummary, FuncKey, ProjectIndex, ReadOnlyAttr,
     ReadOnlyKind, SiteRole, Slot, WriteKind,
@@ -93,6 +93,16 @@ pub(crate) fn run(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
             rule.handed_over(unit, path, site, out);
         }
     }
+}
+
+/// A `MUT110` report of one call, emitted once every callee of the call is read.
+struct HandedParam {
+    name: String,
+    message: String,
+    help: String,
+    chain: Vec<CallHop>,
+    /// The line that changes the caller's object, which makes the report exact.
+    witness: Option<RelatedLocation>,
 }
 
 /// One project callee of a call site, with the facts of it that run there.
@@ -206,6 +216,7 @@ impl Rule<'_, '_> {
             let summary = cx.index.summary(&bc.callee)?;
             Some((bc, facts_run_at(cx.index, site, summary)?))
         });
+        let mut handed: Vec<HandedParam> = Vec::new();
         for (bc, callee) in callees {
             let call = Call {
                 unit,
@@ -279,23 +290,27 @@ impl Rule<'_, '_> {
                     let help = format!(
                         "pass a copy (`list({name})` / `dict({name})`), or annotate the helper's parameter with a mutable type"
                     );
-                    let (caller, span) = (&site.caller, site.span);
-                    if let Some(d) = self.emit(
-                        out,
-                        "MUT110",
-                        unit,
-                        caller,
-                        span,
-                        name.clone(),
+                    handed.push(HandedParam {
+                        name: name.clone(),
                         message,
-                        &help,
-                        &chain,
-                    ) {
-                        match witness {
-                            Some(w) => d.related.push(w),
-                            None => d.certainty = Certainty::Heuristic.at_most(d.certainty),
-                        }
-                    }
+                        help,
+                        chain,
+                        witness,
+                    });
+                }
+            }
+        }
+        // One report per parameter: the one naming a line when any callee has one.
+        handed.sort_by_key(|h| h.witness.is_none());
+        for h in handed {
+            let (caller, span) = (&site.caller, site.span);
+            let target = h.name;
+            if let Some(d) = self.emit(
+                out, "MUT110", unit, caller, span, target, h.message, &h.help, &h.chain,
+            ) {
+                match h.witness {
+                    Some(w) => d.related.push(w),
+                    None => d.certainty = Certainty::Heuristic.at_most(d.certainty),
                 }
             }
         }

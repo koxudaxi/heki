@@ -868,6 +868,19 @@ impl<'x> CallObjects<'x> {
 }
 
 /// Whether a decorator of `f` is one of `names` ([`ModuleDecls::decorator_is`]).
+/// The builtin and standard library containers whose own methods and item stores change them in
+/// place (`EffectSummary::param_inplace_sites`).
+const BUILTIN_CONTAINERS: &[&str] = &[
+    "builtins.list",
+    "builtins.dict",
+    "builtins.set",
+    "builtins.bytearray",
+    "collections.deque",
+    "collections.OrderedDict",
+    "collections.defaultdict",
+    "collections.Counter",
+];
+
 fn decorated_as(module: &ModuleDecls, f: &IrFunction, names: &[&str]) -> bool {
     f.decorators.iter().any(|d| module.decorator_is(d, names))
 }
@@ -3093,13 +3106,6 @@ impl<'a> Extractor<'a> {
 
     /// The function's own change, at `span`, of parameter `i` at `path`.
     fn mutate_param(&mut self, i: u8, path: String, span: Span) {
-        if path.is_empty() {
-            self.summary
-                .param_inplace_sites
-                .entry(i)
-                .or_default()
-                .insert(span);
-        }
         let memo = self.memo_fills.contains(&self.pos);
         self.summary.note_param_change(i, path, memo);
         self.summary
@@ -3674,7 +3680,22 @@ impl<'a> Extractor<'a> {
             });
         }
         match self.param_alias.get(&var).cloned() {
-            Some((i, None)) => self.mutate_param(i, String::new(), span),
+            Some((i, None)) => {
+                // A builtin container's own method or item store changes it in place; another
+                // class's (a `Sequence` whose `append` returns a new one) may not.
+                let builtin = matches!(
+                    self.val(var),
+                    Some(Val::Inst(class)) if BUILTIN_CONTAINERS.contains(&class.as_str())
+                );
+                if builtin {
+                    self.summary
+                        .param_inplace_sites
+                        .entry(i)
+                        .or_default()
+                        .insert(span);
+                }
+                self.mutate_param(i, String::new(), span);
+            }
             Some((i, Some(path))) => self.change_below_param_attr(i, path, span),
             None => {}
         }

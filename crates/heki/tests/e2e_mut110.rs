@@ -221,21 +221,20 @@ fn mut110_readonly_parameters_handed_to_helpers() {
     let one = at(&diags, c, 21);
     assert_eq!(
         message(one),
-        "`one_call` passes its read-only parameter `items` to `pkg.fill.push`; whenever line 7 of `push` runs, it changes the caller's object in place"
+        "`one_call` passes its read-only parameter `items` to `pkg.fill.push`, which changes it in place"
     );
     assert_eq!(
         one["help"],
         "pass a copy (`list(items)` / `dict(items)`), or annotate the helper's parameter with a mutable type"
     );
-    // The call, then the line that changes the argument.
-    assert_eq!(
-        chain(at(&diags, c, 21)),
-        vec![(c.into(), 21), (f.into(), 7)]
-    );
+    // `push` does not type `items`: whether `append` changes it in place is open, so the report
+    // names no line and is heuristic.
+    assert_eq!(one["certainty"], "heuristic");
+    assert_eq!(chain(at(&diags, c, 21)), vec![(c.into(), 21)]);
     // Two calls deep: the chain ends at the function that changes the argument.
     assert_eq!(
         chain(at(&diags, c, 25)),
-        vec![(c.into(), 25), (f.into(), 11), (f.into(), 7)]
+        vec![(c.into(), 25), (f.into(), 11)]
     );
     let related = &at(&diags, c, 25)["related"];
     assert_eq!(
@@ -459,4 +458,36 @@ fn mut110_lsp_follows_helper_edits_in_other_files() {
     save(&mut lsp, &p, "pkg/helpers.py", 3, LSP_HELPERS_ANNOTATED);
     lsp.diagnostics(&stats, <[Value]>::is_empty);
     lsp.stop(true);
+}
+
+/// A call that can run two implementations: one names no line, the other changes a list at a
+/// line. The call is reported once, with the line.
+const DISPATCHED: &str = r#"from collections.abc import Sequence
+
+
+class Adder:
+    def add(self, values):
+        values.append(1)
+
+
+class ListAdder(Adder):
+    def add(self, values):
+        if isinstance(values, list):
+            values.append(2)
+
+
+def fill(adder: Adder, values: Sequence[int]) -> None:
+    adder.add(values)
+"#;
+
+#[test]
+fn mut110_prefers_the_implementation_that_names_a_line() {
+    let p = Project::new("mut110_dispatched");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/dispatched.py", DISPATCHED);
+    let diags = diagnostics(&p, &[]);
+    let a = "pkg/dispatched.py";
+    assert_eq!(found(&diags), vec![d(a, 16, "fill", "values")]);
+    assert_eq!(diags[0]["certainty"], "exact", "{diags:#?}");
+    assert_eq!(chain(&diags[0]).last(), Some(&(a.into(), 12)));
 }

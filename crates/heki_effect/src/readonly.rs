@@ -285,8 +285,8 @@ impl ContainerKind {
 
 /// A function whose results a `functools` cache keeps and hands to every later call with the
 /// same arguments (`MUT114`'s producer): decorated with `functools.cache`, or with
-/// `functools.lru_cache` whose `maxsize` is not the literal `0`, resolved through the module's
-/// imports, and otherwise only with `staticmethod` / `classmethod`; it takes a parameter besides
+/// `functools.lru_cache` whose `maxsize` is left out, `None`, or a literal number above 0,
+/// resolved through the module's imports, and otherwise only with `staticmethod` / `classmethod`; it takes a parameter besides
 /// a method's `self` / `cls`, so the cache keys its results; and every return a run can reach
 /// hands out a builtin container of one kind, established by its return annotation (R2) or by
 /// construction (a display, a comprehension, `list(...)` / `dict(...)` / `set(...)` /
@@ -396,17 +396,22 @@ fn cache_decorator(
             None if matches!(head, "staticmethod" | "classmethod") && args.is_none() => continue,
             _ => return None,
         };
-        let keeps_nothing = args.is_some_and(|a| {
-            a.split(',').map(str::trim).enumerate().any(|(i, part)| {
-                let value = part
-                    .strip_prefix("maxsize")
+        // The cache keeps results when `maxsize` is left out (128), `None`, or a literal number
+        // above 0; any other expression may be 0.
+        let maxsize = args
+            .into_iter()
+            .flat_map(|a| a.split(','))
+            .map(str::trim)
+            .enumerate();
+        let keeps = maxsize
+            .filter_map(|(i, part)| {
+                part.strip_prefix("maxsize")
                     .map_or((i == 0 && !part.contains('=')).then_some(part), |rest| {
                         rest.trim_start().strip_prefix('=').map(str::trim)
-                    });
-                value == Some("0")
+                    })
             })
-        });
-        if keeps_nothing || found.replace(decorator).is_some() {
+            .all(|v| v == "None" || v.parse::<u64>().is_ok_and(|n| n > 0));
+        if !keeps || found.replace(decorator).is_some() {
             return None;
         }
     }

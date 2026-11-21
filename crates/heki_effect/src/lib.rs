@@ -521,8 +521,9 @@ pub struct EffectSummary {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub param_change_sites: BTreeMap<u8, BTreeSet<Span>>,
     /// `param index -> spans` of the function's own in-place changes of the argument itself
-    /// (`p.append(x)`, `p[k] = v`, also through a local alias): the changes `MUT110` names. A
-    /// local fact, never propagated.
+    /// (`p.append(x)`, `p[k] = v`, also through a local alias) where its value is a builtin
+    /// container (`list`, `dict`, `set`, `bytearray`, `deque`, ...) by annotation, construction,
+    /// or a type test: the changes `MUT110` names. A local fact, never propagated.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub param_inplace_sites: BTreeMap<u8, BTreeSet<Span>>,
     /// `param index -> slots`: the containers held in these slots of the argument itself

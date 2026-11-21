@@ -46,10 +46,12 @@ Its premises:
 - **Passed as itself**: on every path to the call, the argument is the parameter or a local
   alias of it, not a copy or another value. Established.
 - **Changed at the line**: the named line changes in place the object bound to the parameter of
-  the function it is in, on every path to the line, and that parameter receives the argument
-  through the calls shown, each handing it on as itself. Established. Open: a change made where a
-  generator that another function returns is iterated has no line in the chain; such a report
-  names none and is heuristic.
+  the function it is in, on every path to the line, a builtin container there (`list`, `dict`,
+  `set`, `bytearray`, `deque`, ... by annotation, construction, or an `isinstance` test), and
+  that parameter receives the argument through the calls shown, each handing it on as itself.
+  Established. Open: a change of a value of another class (a `Sequence` whose `append` returns a
+  new one), and one made where a generator that another function returns is iterated; such a
+  report names no line and is heuristic.
 
 ## Why is this bad?
 A `Sequence` or `Mapping` annotation promises the caller that the function only reads its

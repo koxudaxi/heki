@@ -3327,8 +3327,9 @@ A report is exact when the function changes in place, at the reported line, the 
 set that a cached function returned:
 
 - the cached function is decorated with `functools.cache`, or with `functools.lru_cache` whose
-  `maxsize` is not the literal `0`, known by what its name is bound to (`from functools import
-  lru_cache as _lru_cache` counts, a `cache` decorator the module defines itself does not), and
+  `maxsize` is left out, `None`, or a literal number above `0` (a name holding `0` would keep
+  nothing), known by what its name is bound to (`from functools import lru_cache as _lru_cache`
+  counts, a `cache` decorator the module defines itself does not), and
   otherwise only with `staticmethod` / `classmethod`;
 - it takes a parameter besides a method's `self` / `cls`, so the cache keys its results;
 - every return a run can reach hands out a builtin container of one kind: its return annotation
@@ -3357,8 +3358,8 @@ dict, or set that a function cached by `functools.lru_cache` / `functools.cache`
 
 Its premises:
 
-- **Cached**: the decorator is `functools.cache`, or `functools.lru_cache` with a `maxsize`
-  other than the literal `0`, known by what its name is bound to. Established.
+- **Cached**: the decorator is `functools.cache`, or `functools.lru_cache` with `maxsize` left
+  out, `None`, or a literal number above `0`, known by what its name is bound to. Established.
 - **Keyed**: the cached function takes a parameter besides `self` / `cls`. Established.
 - **Container kind**: every return a run can reach hands out a builtin container of the named
   kind, by its return annotation (R2) or by construction. Established.
@@ -5607,10 +5608,12 @@ Its premises:
 - **Passed as itself**: on every path to the call, the argument is the parameter or a local
   alias of it, not a copy or another value. Established.
 - **Changed at the line**: the named line changes in place the object bound to the parameter of
-  the function it is in, on every path to the line, and that parameter receives the argument
-  through the calls shown, each handing it on as itself. Established. Open: a change made where a
-  generator that another function returns is iterated has no line in the chain; such a report
-  names none and is heuristic.
+  the function it is in, on every path to the line, a builtin container there (`list`, `dict`,
+  `set`, `bytearray`, `deque`, ... by annotation, construction, or an `isinstance` test), and
+  that parameter receives the argument through the calls shown, each handing it on as itself.
+  Established. Open: a change of a value of another class (a `Sequence` whose `append` returns a
+  new one), and one made where a generator that another function returns is iterated; such a
+  report names no line and is heuristic.
 
 ## Why is this bad?
 A `Sequence` or `Mapping` annotation promises the caller that the function only reads its
