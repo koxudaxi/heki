@@ -404,7 +404,14 @@ impl Paths<'_> {
                 captured,
                 ..
             } => (*outer_iter != v || captured.contains(&v)).then_some(PathChange::Replaced),
-            InstKind::StoreGlobal { name, .. } if name == "__path__" => return bound(self.own),
+            // A package binding `__path__` rebinds its own path, also to an imported list; in a
+            // module that is not a package, an import binding the name only names the list it
+            // imports, whose changes are followed through the import.
+            InstKind::StoreGlobal { name, .. }
+                if name == "__path__" && (self.own.is_some() || !self.binds_import(kind, v)) =>
+            {
+                return bound(self.own);
+            }
             InstKind::AttrStore { obj, attr, value } if attr == "__path__" && *value == v => {
                 return bound(self.imported(*obj).as_deref());
             }
