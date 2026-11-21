@@ -215,13 +215,18 @@ Compound expressions are flattened into **basic instructions in explicit left-to
     import QUEUE` and `QUEUE.append(x)`, `cfg.QUEUE = []`; `ModuleDecls.grown_globals`, by the
     shared `FnIndex::grown_vars`) is not fixed for the Advisory rules, in its own module or
     any other (`ProjectDecls::grown_elsewhere`, a declaration key the language server tracks).
-  - `FnIndex::fixed_trips` gives the trip count the code fixes at any count, as
-    `Answer::Known(n)`: `range(1000)`, `rows[:100]`, `zip(rows, range(50))`, a tuple display or a
-    list or set display nothing grows, a module's string and string-tuple constants, a length
-    test every path to the loop passes (up to `LEN_CAP_MAX`), and a counted `while` loop.
+  - `FnIndex::fixed_trips` gives the most times a loop runs at any count, as a `Trips`:
+    `Fixed(n)` when the code fixes the count whatever the input (`range(1000)`, a tuple display or
+    a list or set display nothing grows, a module's string and string-tuple constants, a length
+    test that pins the length, `len(x) == 40` or `!= 40` leaving, and a counted `while` loop), and
+    `Capped(n)` when a constant only caps what may be input (a length cap such as `if len(x) >
+    1000: raise`, a slice `rows[:100]`, a `zip` with an iterable the code does not bound). A cap
+    is an upper bound, not a fixed count. A length test bounds the loop when it measures the
+    iterable or a read of the same access path from the same root (`len(report.get("runs", []))`
+    then `report["runs"]`; a `get` default counts when the test rejects its length), with nothing
+    on the way storing into the root, deleting from it, or passing it to a call.
     `LoopBound::ConstSmall` stays the view of counts up to `SMALL_MAX`. No claim rests on a size:
-    an exact report is silent for a loop with a fixed count of any size, and `Open` only leaves
-    the loop data-sized to the rules that read it so.
+    `Open` only leaves the loop data-sized to the rules that read it so.
 - **Path facts** (`heki_ir::facts::Paths`, Advisory and Profitability only), computed on demand
   for the rules that read them, over the walk facility's `FnShape` and the owner's `Budget`:
   - `FnIndex::decided` (`Decided`): a branch whose test the code fixes never takes its other
@@ -258,10 +263,11 @@ Compound expressions are flattened into **basic instructions in explicit left-to
     or the result of a call (`Call`), which the reader resolves against the catalog: a source is
     a catalog target, never a name. Items pass through `list`, `tuple`, `set`, `sorted`,
     `reversed`, `iter`, `filter`, `enumerate`, `zip`, slices, dict views, and a comprehension,
-    generator expression, or list filled only by appends that produces a loop's item (or a
-    component of it); through `map`, a comprehension's element expression, and `range(len(x))`
-    only the count carries (`Carries::Count`). `str.split` / `str.splitlines` give pieces of their
-    receiver's text (`ItemOrigin::text`). A phi takes the inputs along the edges that can run. An
+    generator expression, or list filled only by appends that produces a loop's item; through
+    `map`, a comprehension's element expression, a part of the loop's item (`r[0]`), and
+    `range(len(x))` only the count carries (`Carries::Count`). A set or dict of what carries only
+    a count merges equal results and has no source. `str.split` / `str.splitlines` give pieces
+    of their receiver's text (`ItemOrigin::text`). A phi takes the inputs along the edges that can run. An
     item of a call's result, a global that is no constant, and anything else are `Open`. The walk
     is a `Closure` over questions `(function, value, steps)`, the steps being what the way from
     the loop applies to the value's sources (an item, a count, pieces of text).
