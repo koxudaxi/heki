@@ -54,8 +54,9 @@ pub use readonly::{ProtectedReturn, ReturnStep, Shared};
 pub use report::{BoundaryReport, boundary_reports, boundary_reports_in};
 pub use resolver::{
     Callee, ClassDecl, DeclKeys, DeclPasses, FunctionDecl, ModuleDecls, ModuleLayout, ProjectDecls,
-    ReadOnlyAttr, ReadOnlyKind, StrConstant, StrValue, TypeCtx, Val, aliases_of, detect_src_layout,
-    func_qualname, module_name_for_path, resolve_relative_module, self_aliases,
+    ReadOnlyAttr, ReadOnlyKind, StrConstant, StrValue, TypeCtx, Val, aliases_of,
+    detect_source_roots, func_qualname, module_name_for_path, resolve_relative_module,
+    self_aliases,
 };
 pub use summary::{BLOCKING_EFFECTS, CONTAINER_MUTATORS, offloaded_callable};
 
