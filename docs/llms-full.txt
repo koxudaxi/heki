@@ -757,11 +757,10 @@ app/api.py:5:12: EFF101 (async-blocking-call) [warning, heuristic] `handler` rea
 ## Fix what heki can prove
 
 `--fix` applies the rewrites heki proves safe and always faster (`OPT101`, `OPT102`), and
-`--diff` shows them first. Like the other `OPT` rules, they are off by default: select them by
-code, or with `extend-select = ["OPT"]`:
+`--diff` shows them first. Both rules are heuristic, so they run with `--heuristic`:
 
 ```console
-$ heki check --extend-select OPT101,OPT102 --diff
+$ heki check --heuristic --diff
 --- a/app/report.py
 +++ b/app/report.py
 @@ -1,5 +1,5 @@
@@ -772,7 +771,7 @@ $ heki check --extend-select OPT101,OPT102 --diff
 +        rows.append(item)
      return rows
 Would fix 1 issue(s) in 1 file(s).
-$ heki check --extend-select OPT101,OPT102 --fix
+$ heki check --fix
 Fixed 1 issue(s) in 1 file(s).
 ```
 
@@ -783,7 +782,7 @@ heuristic whatever the rule's certainty. Here the list is also handed to other c
 loop:
 
 ```console
-$ heki check --extend-select OPT101 app/shared.py
+$ heki check --heuristic app/shared.py
 app/shared.py:4:9: OPT101 (list-quadratic-concat) [warning, heuristic] `rows = rows + [...]` copies the whole list each time it runs in the loop
   |
 4 |         rows = rows + [item]
@@ -811,8 +810,7 @@ The other forms (`# heki: ignore`, `# noqa: EFF101`) and `per-file-ignores` are 
 ```console
 $ heki check --select EFF,MUT        # only these families
 $ heki check --extend-select EFF105  # add an opt-in rule
-$ heki check --extend-select OPT     # add the OPT suggestions, off by default
-$ heki check --ignore EFF103         # everything except one rule
+$ heki check --ignore OPT110         # everything except one rule
 ```
 
 Codes, code prefixes, and rule names (`async-blocking-call`) are accepted. A prefix does not
@@ -979,7 +977,7 @@ supported version that every clause admits:
 | `per-file-ignores` | `{}` | Glob → rules disabled in matching files (project-relative POSIX paths). As in Ruff, `*` also matches `/`: `scripts/*.py` covers `scripts/tools/worker.py` too. |
 | `severity` | `"warning"` for the rules that report slower code (`EFF101`, `EFF102`, `EFF103`, `EFF105`, `DATA101`, and the `OPT` rules), `"error"` for the others, which report bugs | Rule → `"error"` or `"warning"`. It changes the output and the SARIF level; both make `heki check` fail. |
 | `relax-async-in-tests` | `true` | Skip `EFF101`, `EFF105`, and `EFF106` in `test_*` functions and in files under `tests/`. |
-| `heuristic` | `false` | Whether every rule that is not opt-in runs by default and for a prefix or `ALL`, as the exact rules that run by default do: the heuristic rules, and the rules that the defaults leave off. `--heuristic` and `--no-heuristic` override it. |
+| `heuristic` | `false` | Whether the heuristic rules that are not opt-in run by default and for a prefix or `ALL`, as the exact rules do. `--heuristic` and `--no-heuristic` override it. |
 
 - A rule is named by its code (`EFF101`), its name (`async-blocking-call`), a code prefix
   (`EFF`, `MUT2`), or `ALL`. An unknown rule is a configuration error.
@@ -987,10 +985,6 @@ supported version that every clause admits:
   `ALL` enable the exact rules and the contract rules; with `heuristic = true` they also enable
   the heuristic rules that are not opt-in, as Ruff's `preview` does. Its code or name enables a
   heuristic rule either way.
-- The defaults leave off the `OPT` rules other than `OPT112`, whose reports are right about the
-  code but rarely harmful. A prefix or `ALL` enables them as it enables the rules that run by
-  default, so `extend-select = ["OPT"]` adds them; `heuristic = true` also adds them to the
-  defaults.
 - An exact rule's report that did not establish every premise of its claim (an `OPT` report
   whose rewrite is not proven) is heuristic, and is shown where a heuristic rule would run: with
   `heuristic = true`, or when its code or name is selected.
@@ -1004,12 +998,7 @@ supported version that every clause admits:
 
 ```toml
 [tool.heki.lint]
-heuristic = true   # every rule that is not opt-in, the heuristic ones too
-```
-
-```toml
-[tool.heki.lint]
-extend-select = ["OPT"]   # the OPT rules, which the defaults leave off
+heuristic = true   # also the heuristic rules that are not opt-in
 ```
 
 ## Contracts
@@ -1802,7 +1791,7 @@ Options:
       --ignore <IGNORE>
           Comma-separated rule codes or slugs to ignore
       --heuristic
-          Also run the heuristic rules, whose reports can be wrong about the code, by default and for every prefix and `ALL`, and by default the rules that a prefix selects but the defaults leave off: every rule that is not opt-in (`lint.heuristic = true`)
+          Also run the heuristic rules, whose reports can be wrong about the code, by default and for every prefix and `ALL` (`lint.heuristic = true`)
       --no-heuristic
           Run a heuristic rule only when its code or name is selected (`lint.heuristic = false`)
       --output-format <OUTPUT_FORMAT>
@@ -1832,7 +1821,7 @@ Usage: heki server [OPTIONS]
 
 Options:
       --stdio         Use stdio transport (default LSP mode)
-      --heuristic     Also run the heuristic rules, whose reports can be wrong about the code, by default and for every prefix and `ALL`, and by default the rules that a prefix selects but the defaults leave off: every rule that is not opt-in (`lint.heuristic = true`)
+      --heuristic     Also run the heuristic rules, whose reports can be wrong about the code, by default and for every prefix and `ALL` (`lint.heuristic = true`)
       --no-heuristic  Run a heuristic rule only when its code or name is selected (`lint.heuristic = false`)
   -h, --help          Print help
 ```
@@ -1904,7 +1893,6 @@ heki has 35 rules in four families. A rule is exact when it reports only what it
 
 - The exact rules run by default, and for a prefix such as `EFF` or `ALL`. A report of an exact rule that did not establish every premise (an `OPT` report whose rewrite is not proven) is shown where a heuristic rule would run.
 - A heuristic rule runs when `select` / `extend-select` names its code or name. With `lint.heuristic = true` (`--heuristic`), the heuristic rules that are not opt-in also run by default and for a prefix or `ALL`.
-- The rules marked ➕ are left off by default: `select` / `extend-select` selects them with their code or name, or, while they are exact, with a prefix such as `OPT` or `ALL`. `lint.heuristic = true` runs them too.
 - The opt-in rules marked 🔌 run only when `select` / `extend-select` names their exact code or name.
 - The contract rules marked 📜 run when their contract is declared, whatever their certainty.
 
@@ -1913,7 +1901,6 @@ heki has 35 rules in four families. A rule is exact when it reports only what it
 - 🛠️ The fix is applied by `heki check --fix` when heki proves it safe.
 - 🔧 A proven-safe rewrite applied only with `--fix --include-size-dependent` or in functions a `--profile` dump shows hot (it can be slower for tiny inputs).
 - ≈ Heuristic rule: a report can be wrong about the code. Every output labels its reports `heuristic`.
-- ➕ Selectable rule: right about the code but rarely harmful, so it runs only when selected.
 - 🔌 Opt-in rule.
 - 📜 Contract rule: it reports only what a declared contract asks for.
 - 🧪 Experimental rule. Experimental features can still change in behavior or precision, or be removed, in any release, and each change is listed in the release notes. An opt-in rule that is not experimental is stable and only off by default. See [Experimental Features](https://heki.koxudaxi.dev/experimental/).
@@ -1970,16 +1957,16 @@ Quadratic patterns heki can rewrite, each proven safe by the alias analysis befo
 
 | Code | Name | Message | |
 | ---- | ---- | ------- | ------: |
-| OPT101 | [list-quadratic-concat](https://heki.koxudaxi.dev/rules/list-quadratic-concat/) | Unconditionally profitable `list` quadratic concatenation (`x = x + [e]` -> `x.append(e)`). | 🛠️ ≈ ➕ |
-| OPT102 | [set-dict-quadratic-merge](https://heki.koxudaxi.dev/rules/set-dict-quadratic-merge/) | Unconditionally profitable `set`/`dict` quadratic merge (`{**d, ...}` with `d` first). | 🛠️ ≈ ➕ |
-| OPT103 | [immutable-quadratic-concat](https://heki.koxudaxi.dev/rules/immutable-quadratic-concat/) | Size-dependent immutable quadratic accumulation (`bytes`/`tuple`/attr `str`). | ≈ ➕ |
-| OPT110 | [loop-linear-membership](https://heki.koxudaxi.dev/rules/loop-linear-membership/) | Size-dependent `e in lst` inside a loop -> hoist `set` outside loop. | 🔧 ≈ ➕ |
-| OPT111 | [loop-linear-dedup](https://heki.koxudaxi.dev/rules/loop-linear-dedup/) | Size-dependent `if v not in seen: seen.append(v)` -> auxiliary `set`. | 🔧 ≈ ➕ |
+| OPT101 | [list-quadratic-concat](https://heki.koxudaxi.dev/rules/list-quadratic-concat/) | Unconditionally profitable `list` quadratic concatenation (`x = x + [e]` -> `x.append(e)`). | 🛠️ ≈ |
+| OPT102 | [set-dict-quadratic-merge](https://heki.koxudaxi.dev/rules/set-dict-quadratic-merge/) | Unconditionally profitable `set`/`dict` quadratic merge (`{**d, ...}` with `d` first). | 🛠️ ≈ |
+| OPT103 | [immutable-quadratic-concat](https://heki.koxudaxi.dev/rules/immutable-quadratic-concat/) | Size-dependent immutable quadratic accumulation (`bytes`/`tuple`/attr `str`). | ≈ |
+| OPT110 | [loop-linear-membership](https://heki.koxudaxi.dev/rules/loop-linear-membership/) | Size-dependent `e in lst` inside a loop -> hoist `set` outside loop. | 🔧 ≈ |
+| OPT111 | [loop-linear-dedup](https://heki.koxudaxi.dev/rules/loop-linear-dedup/) | Size-dependent `if v not in seen: seen.append(v)` -> auxiliary `set`. | 🔧 ≈ |
 | OPT112 | [loop-linear-list-lookup](https://heki.koxudaxi.dev/rules/loop-linear-list-lookup/) | Size-dependent `list.index` / `list.remove` / `list.count` inside a loop (repeated linear scans). | ≈ |
-| OPT113 | [nested-loop-equijoin](https://heki.koxudaxi.dev/rules/nested-loop-equijoin/) | Size-dependent nested-loop equi-join (`for a in A: for b in B: if a.k == b.k`) -> `dict` index. | ≈ ➕ |
-| OPT120 | [list-front-pop](https://heki.koxudaxi.dev/rules/list-front-pop/) | Size-dependent `q.pop(0)` / `del q[0]` / `q = q[1:]` -> `collections.deque`. | 🔧 ≈ ➕ |
-| OPT121 | [list-front-insert](https://heki.koxudaxi.dev/rules/list-front-insert/) | Size-dependent `q.insert(0, v)` -> `collections.deque`. | 🔧 ≈ ➕ |
-| OPT130 | [loop-invariant-container-rebuild](https://heki.koxudaxi.dev/rules/loop-invariant-container-rebuild/) | Size-dependent loop-invariant container reconstruction (`e in set(keys)`). | 🔧 ≈ ➕ |
+| OPT113 | [nested-loop-equijoin](https://heki.koxudaxi.dev/rules/nested-loop-equijoin/) | Size-dependent nested-loop equi-join (`for a in A: for b in B: if a.k == b.k`) -> `dict` index. | ≈ |
+| OPT120 | [list-front-pop](https://heki.koxudaxi.dev/rules/list-front-pop/) | Size-dependent `q.pop(0)` / `del q[0]` / `q = q[1:]` -> `collections.deque`. | 🔧 ≈ |
+| OPT121 | [list-front-insert](https://heki.koxudaxi.dev/rules/list-front-insert/) | Size-dependent `q.insert(0, v)` -> `collections.deque`. | 🔧 ≈ |
+| OPT130 | [loop-invariant-container-rebuild](https://heki.koxudaxi.dev/rules/loop-invariant-container-rebuild/) | Size-dependent loop-invariant container reconstruction (`e in set(keys)`). | 🔧 ≈ |
 
 
 ---
@@ -2007,9 +1994,6 @@ is heuristic, as that premise is open. Only exact reports are shown by default.
 - The heuristic reports of an exact rule are shown under the same conditions: with
   `lint.heuristic = true`, or when its code or name is selected.
 - A contract rule runs when its contract is declared, whatever its certainty.
-- An exact rule whose reports are right but rarely harmful is left off by default: its code, a
-  prefix, or `ALL` selects it (`extend-select = ["OPT"]`), and so does `lint.heuristic = true`,
-  which runs every rule that is not opt-in. The `OPT` rules other than `OPT112` are such rules.
 - A run of `full` or `concise` output that leaves heuristic rules off, or heuristic reports out,
   ends with a note saying how many.
 
@@ -2080,10 +2064,7 @@ Each checked report gets one class:
 
 "Right about the code" is C, P, and B together; "real harm" is C and P. Real harm is published
 for each rule. It decides only whether an exact rule runs by default: it does when its share of
-real harm is worth the line it prints, and otherwise runs only when selected (by its code, a
-prefix, `ALL`, or `lint.heuristic = true`). For 0.2.0 the `OPT` rules other than `OPT112` are of the second kind: in
-the pre-check of their exact claims, 2 of 100 sampled reports of the proven tier and 5 of 100
-of `OPT113` did real harm.
+real harm is worth the line it prints, and is opt-in otherwise.
 
 ## How a rule becomes exact
 
@@ -3847,13 +3828,13 @@ Source: https://heki.koxudaxi.dev/rules/immutable-quadratic-concat/
 
 # immutable-quadratic-concat (OPT103)
 
-Family: Complexity Rewrites (OPT) · Heuristic · Off by default, selected by its code or a prefix · Severity `warning` (slower code) · No automatic fix
+Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` (slower code) · No automatic fix
 
 Size-dependent immutable quadratic accumulation (`bytes`/`tuple`/attr `str`).
 
 !!! note "Heuristic"
 
-    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Once exact, it runs for its prefixes and `ALL` without the key, but still not by default. Of 50 sampled reports (round 3, 2026-11-21), 92% were right about the code. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
+    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 50 sampled reports (round 3, 2026-11-21), 92% were right about the code. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 ## What it does
 Checks quadratic accumulation of immutable values in a loop:
@@ -4187,13 +4168,13 @@ Source: https://heki.koxudaxi.dev/rules/list-front-insert/
 
 # list-front-insert (OPT121)
 
-Family: Complexity Rewrites (OPT) · Heuristic · Off by default, selected by its code or a prefix · Severity `warning` (slower code) · Proven-safe suggestion (`--fix --include-size-dependent`)
+Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` (slower code) · Proven-safe suggestion (`--fix --include-size-dependent`)
 
 Size-dependent `q.insert(0, v)` -> `collections.deque`.
 
 !!! note "Heuristic"
 
-    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Once exact, it runs for its prefixes and `ALL` without the key, but still not by default. Of 50 sampled reports (round 3, 2026-11-21), 84% were right about the code. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
+    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 50 sampled reports (round 3, 2026-11-21), 84% were right about the code. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 ## What it does
 Checks loops that insert at the front of a list, `q.insert(0, v)`, and suggests a
@@ -4259,13 +4240,13 @@ Source: https://heki.koxudaxi.dev/rules/list-front-pop/
 
 # list-front-pop (OPT120)
 
-Family: Complexity Rewrites (OPT) · Heuristic · Off by default, selected by its code or a prefix · Severity `warning` (slower code) · Proven-safe suggestion (`--fix --include-size-dependent`)
+Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` (slower code) · Proven-safe suggestion (`--fix --include-size-dependent`)
 
 Size-dependent `q.pop(0)` / `del q[0]` / `q = q[1:]` -> `collections.deque`.
 
 !!! note "Heuristic"
 
-    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Once exact, it runs for its prefixes and `ALL` without the key, but still not by default. Of 50 sampled reports (round 3, 2026-11-21), 94% were right about the code. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
+    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 50 sampled reports (round 3, 2026-11-21), 94% were right about the code. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 ## What it does
 Checks loops that remove the first element of a list: `q.pop(0)`, `del q[0]`, and
@@ -4366,13 +4347,13 @@ Source: https://heki.koxudaxi.dev/rules/list-quadratic-concat/
 
 # list-quadratic-concat (OPT101)
 
-Family: Complexity Rewrites (OPT) · Heuristic · Off by default, selected by its code or a prefix · Severity `warning` (slower code) · Safe fix (`--fix`)
+Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` (slower code) · Safe fix (`--fix`)
 
 Unconditionally profitable `list` quadratic concatenation (`x = x + [e]` -> `x.append(e)`).
 
 !!! note "Heuristic"
 
-    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Once exact, it runs for its prefixes and `ALL` without the key, but still not by default. Of 9 sampled reports (round 3, 2026-11-21), 78% were right about the code. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
+    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 9 sampled reports (round 3, 2026-11-21), 78% were right about the code. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 ## What it does
 Checks loops that grow a list by building a new one every iteration, `x = x + [e]`, and
@@ -4737,13 +4718,13 @@ Source: https://heki.koxudaxi.dev/rules/loop-invariant-container-rebuild/
 
 # loop-invariant-container-rebuild (OPT130)
 
-Family: Complexity Rewrites (OPT) · Heuristic · Off by default, selected by its code or a prefix · Severity `warning` (slower code) · Proven-safe suggestion (`--fix --include-size-dependent`)
+Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` (slower code) · Proven-safe suggestion (`--fix --include-size-dependent`)
 
 Size-dependent loop-invariant container reconstruction (`e in set(keys)`).
 
 !!! note "Heuristic"
 
-    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Once exact, it runs for its prefixes and `ALL` without the key, but still not by default. Of 30 sampled reports (round 3, 2026-11-21), 97% were right about the code. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
+    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 30 sampled reports (round 3, 2026-11-21), 97% were right about the code. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 ## What it does
 Checks loops that rebuild the same container on every iteration just to test membership,
@@ -4821,13 +4802,13 @@ Source: https://heki.koxudaxi.dev/rules/loop-linear-dedup/
 
 # loop-linear-dedup (OPT111)
 
-Family: Complexity Rewrites (OPT) · Heuristic · Off by default, selected by its code or a prefix · Severity `warning` (slower code) · Proven-safe suggestion (`--fix --include-size-dependent`)
+Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` (slower code) · Proven-safe suggestion (`--fix --include-size-dependent`)
 
 Size-dependent `if v not in seen: seen.append(v)` -> auxiliary `set`.
 
 !!! note "Heuristic"
 
-    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Once exact, it runs for its prefixes and `ALL` without the key, but still not by default. Of 50 sampled reports (round 3, 2026-11-21), 88% were right about the code. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
+    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 50 sampled reports (round 3, 2026-11-21), 88% were right about the code. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 ## What it does
 Checks the de-duplication idiom `if v not in seen: seen.append(v)` inside a loop and suggests
@@ -4996,13 +4977,13 @@ Source: https://heki.koxudaxi.dev/rules/loop-linear-membership/
 
 # loop-linear-membership (OPT110)
 
-Family: Complexity Rewrites (OPT) · Heuristic · Off by default, selected by its code or a prefix · Severity `warning` (slower code) · Proven-safe suggestion (`--fix --include-size-dependent`)
+Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` (slower code) · Proven-safe suggestion (`--fix --include-size-dependent`)
 
 Size-dependent `e in lst` inside a loop -> hoist `set` outside loop.
 
 !!! note "Heuristic"
 
-    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Once exact, it runs for its prefixes and `ALL` without the key, but still not by default. Of 50 sampled reports (round 3, 2026-11-21), 78% were right about the code. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
+    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 50 sampled reports (round 3, 2026-11-21), 78% were right about the code. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 ## What it does
 Checks membership tests against a list or tuple inside a loop, `e in lst`, where the list does
@@ -5214,13 +5195,13 @@ Source: https://heki.koxudaxi.dev/rules/nested-loop-equijoin/
 
 # nested-loop-equijoin (OPT113)
 
-Family: Complexity Rewrites (OPT) · Heuristic · Off by default, selected by its code or a prefix · Severity `warning` (slower code) · No automatic fix
+Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` (slower code) · No automatic fix
 
 Size-dependent nested-loop equi-join (`for a in A: for b in B: if a.k == b.k`) -> `dict` index.
 
 !!! note "Heuristic"
 
-    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Once exact, it runs for its prefixes and `ALL` without the key, but still not by default. Of 50 sampled reports (round 3, 2026-11-21), 92% were right about the code. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
+    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 50 sampled reports (round 3, 2026-11-21), 92% were right about the code. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 ## What it does
 Checks nested loops that join two collections by comparing a key of each with `==`:
@@ -5801,13 +5782,13 @@ Source: https://heki.koxudaxi.dev/rules/set-dict-quadratic-merge/
 
 # set-dict-quadratic-merge (OPT102)
 
-Family: Complexity Rewrites (OPT) · Heuristic · Off by default, selected by its code or a prefix · Severity `warning` (slower code) · Safe fix (`--fix`)
+Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` (slower code) · Safe fix (`--fix`)
 
 Unconditionally profitable `set`/`dict` quadratic merge (`{**d, ...}` with `d` first).
 
 !!! note "Heuristic"
 
-    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Once exact, it runs for its prefixes and `ALL` without the key, but still not by default. Of 6 sampled reports (round 3, 2026-11-21), 67% were right about the code. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
+    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 6 sampled reports (round 3, 2026-11-21), 67% were right about the code. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 ## What it does
 Checks loops that rebuild a dict or set every iteration and rewrites them in place:

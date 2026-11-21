@@ -50,7 +50,7 @@ Options:
       --ignore <IGNORE>
           Comma-separated rule codes or slugs to ignore
       --heuristic
-          Also run the heuristic rules, whose reports can be wrong about the code, by default and for every prefix and `ALL`, and by default the rules that a prefix selects but the defaults leave off: every rule that is not opt-in (`lint.heuristic = true`)
+          Also run the heuristic rules, whose reports can be wrong about the code, by default and for every prefix and `ALL` (`lint.heuristic = true`)
       --no-heuristic
           Run a heuristic rule only when its code or name is selected (`lint.heuristic = false`)
       --output-format <OUTPUT_FORMAT>
@@ -80,7 +80,7 @@ Usage: heki server [OPTIONS]
 
 Options:
       --stdio         Use stdio transport (default LSP mode)
-      --heuristic     Also run the heuristic rules, whose reports can be wrong about the code, by default and for every prefix and `ALL`, and by default the rules that a prefix selects but the defaults leave off: every rule that is not opt-in (`lint.heuristic = true`)
+      --heuristic     Also run the heuristic rules, whose reports can be wrong about the code, by default and for every prefix and `ALL` (`lint.heuristic = true`)
       --no-heuristic  Run a heuristic rule only when its code or name is selected (`lint.heuristic = false`)
   -h, --help          Print help
 ```

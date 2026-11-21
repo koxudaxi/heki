@@ -6,7 +6,6 @@ heki has 35 rules in four families. A rule is exact when it reports only what it
 
 - The exact rules run by default, and for a prefix such as `EFF` or `ALL`. A report of an exact rule that did not establish every premise (an `OPT` report whose rewrite is not proven) is shown where a heuristic rule would run.
 - A heuristic rule runs when `select` / `extend-select` names its code or name. With `lint.heuristic = true` (`--heuristic`), the heuristic rules that are not opt-in also run by default and for a prefix or `ALL`.
-- The rules marked ➕ are left off by default: `select` / `extend-select` selects them with their code or name, or, while they are exact, with a prefix such as `OPT` or `ALL`. `lint.heuristic = true` runs them too.
 - The opt-in rules marked 🔌 run only when `select` / `extend-select` names their exact code or name.
 - The contract rules marked 📜 run when their contract is declared, whatever their certainty.
 
@@ -15,7 +14,6 @@ heki has 35 rules in four families. A rule is exact when it reports only what it
 - 🛠️ The fix is applied by `heki check --fix` when heki proves it safe.
 - 🔧 A proven-safe rewrite applied only with `--fix --include-size-dependent` or in functions a `--profile` dump shows hot (it can be slower for tiny inputs).
 - ≈ Heuristic rule: a report can be wrong about the code. Every output labels its reports `heuristic`.
-- ➕ Selectable rule: right about the code but rarely harmful, so it runs only when selected.
 - 🔌 Opt-in rule.
 - 📜 Contract rule: it reports only what a declared contract asks for.
 - 🧪 Experimental rule. Experimental features can still change in behavior or precision, or be removed, in any release, and each change is listed in the release notes. An opt-in rule that is not experimental is stable and only off by default. See [Experimental Features](../experimental.md).
@@ -72,13 +70,13 @@ Quadratic patterns heki can rewrite, each proven safe by the alias analysis befo
 
 | Code | Name | Message | |
 | ---- | ---- | ------- | ------: |
-| OPT101 | [list-quadratic-concat](list-quadratic-concat.md) | Unconditionally profitable `list` quadratic concatenation (`x = x + [e]` -> `x.append(e)`). | 🛠️ ≈ ➕ |
-| OPT102 | [set-dict-quadratic-merge](set-dict-quadratic-merge.md) | Unconditionally profitable `set`/`dict` quadratic merge (`{**d, ...}` with `d` first). | 🛠️ ≈ ➕ |
-| OPT103 | [immutable-quadratic-concat](immutable-quadratic-concat.md) | Size-dependent immutable quadratic accumulation (`bytes`/`tuple`/attr `str`). | ≈ ➕ |
-| OPT110 | [loop-linear-membership](loop-linear-membership.md) | Size-dependent `e in lst` inside a loop -> hoist `set` outside loop. | 🔧 ≈ ➕ |
-| OPT111 | [loop-linear-dedup](loop-linear-dedup.md) | Size-dependent `if v not in seen: seen.append(v)` -> auxiliary `set`. | 🔧 ≈ ➕ |
+| OPT101 | [list-quadratic-concat](list-quadratic-concat.md) | Unconditionally profitable `list` quadratic concatenation (`x = x + [e]` -> `x.append(e)`). | 🛠️ ≈ |
+| OPT102 | [set-dict-quadratic-merge](set-dict-quadratic-merge.md) | Unconditionally profitable `set`/`dict` quadratic merge (`{**d, ...}` with `d` first). | 🛠️ ≈ |
+| OPT103 | [immutable-quadratic-concat](immutable-quadratic-concat.md) | Size-dependent immutable quadratic accumulation (`bytes`/`tuple`/attr `str`). | ≈ |
+| OPT110 | [loop-linear-membership](loop-linear-membership.md) | Size-dependent `e in lst` inside a loop -> hoist `set` outside loop. | 🔧 ≈ |
+| OPT111 | [loop-linear-dedup](loop-linear-dedup.md) | Size-dependent `if v not in seen: seen.append(v)` -> auxiliary `set`. | 🔧 ≈ |
 | OPT112 | [loop-linear-list-lookup](loop-linear-list-lookup.md) | Size-dependent `list.index` / `list.remove` / `list.count` inside a loop (repeated linear scans). | ≈ |
-| OPT113 | [nested-loop-equijoin](nested-loop-equijoin.md) | Size-dependent nested-loop equi-join (`for a in A: for b in B: if a.k == b.k`) -> `dict` index. | ≈ ➕ |
-| OPT120 | [list-front-pop](list-front-pop.md) | Size-dependent `q.pop(0)` / `del q[0]` / `q = q[1:]` -> `collections.deque`. | 🔧 ≈ ➕ |
-| OPT121 | [list-front-insert](list-front-insert.md) | Size-dependent `q.insert(0, v)` -> `collections.deque`. | 🔧 ≈ ➕ |
-| OPT130 | [loop-invariant-container-rebuild](loop-invariant-container-rebuild.md) | Size-dependent loop-invariant container reconstruction (`e in set(keys)`). | 🔧 ≈ ➕ |
+| OPT113 | [nested-loop-equijoin](nested-loop-equijoin.md) | Size-dependent nested-loop equi-join (`for a in A: for b in B: if a.k == b.k`) -> `dict` index. | ≈ |
+| OPT120 | [list-front-pop](list-front-pop.md) | Size-dependent `q.pop(0)` / `del q[0]` / `q = q[1:]` -> `collections.deque`. | 🔧 ≈ |
+| OPT121 | [list-front-insert](list-front-insert.md) | Size-dependent `q.insert(0, v)` -> `collections.deque`. | 🔧 ≈ |
+| OPT130 | [loop-invariant-container-rebuild](loop-invariant-container-rebuild.md) | Size-dependent loop-invariant container reconstruction (`e in set(keys)`). | 🔧 ≈ |

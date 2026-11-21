@@ -504,8 +504,6 @@ def test_generated_files(path: str, generated: bool) -> None:
         ("\N{ALMOST EQUAL TO}", "heuristic, off by default"),
         ("\N{ALMOST EQUAL TO} \N{SCROLL}", "enabled by default"),
         ("\N{SCROLL}", "enabled by default"),
-        ("\N{HEAVY PLUS SIGN}", "off by default, selected by its prefix"),
-        ("\N{ALMOST EQUAL TO} \N{HEAVY PLUS SIGN}", "heuristic, off by default"),
     ],
 )
 def test_a_rule_runs_by_default_unless_opt_in_or_heuristic_outside_a_contract(

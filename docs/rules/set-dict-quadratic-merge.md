@@ -2,13 +2,13 @@
 
 # set-dict-quadratic-merge (OPT102)
 
-Family: Complexity Rewrites (OPT) · Heuristic · Off by default, selected by its code or a prefix · Severity `warning` (slower code) · Safe fix (`--fix`)
+Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` (slower code) · Safe fix (`--fix`)
 
 Unconditionally profitable `set`/`dict` quadratic merge (`{**d, ...}` with `d` first).
 
 !!! note "Heuristic"
 
-    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Once exact, it runs for its prefixes and `ALL` without the key, but still not by default. Of 6 sampled reports (round 3, 2026-11-21), 67% were right about the code. See [Rule Precision](../precision.md).
+    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 6 sampled reports (round 3, 2026-11-21), 67% were right about the code. See [Rule Precision](../precision.md).
 
 ## What it does
 Checks loops that rebuild a dict or set every iteration and rewrites them in place:
