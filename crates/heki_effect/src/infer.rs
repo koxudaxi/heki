@@ -890,6 +890,9 @@ impl<'e, 'a> Engine<'e, 'a> {
             } => return Err(Pending),
             InstKind::AllocBuiltin { dst, kind, elems } => Some(self.display(*dst, *kind, elems)),
             InstKind::DictLiteral { dst, entries } => Some(self.dict_display(*dst, entries)),
+            InstKind::Convert { dst, .. }
+            | InstKind::Format { dst, .. }
+            | InstKind::BuildString { dst, .. } => Some(self.display(*dst, BuiltinKind::Str, &[])),
             InstKind::LoadGlobal { name, .. } => Some(cx.global(name)),
             // An unassigned local of a function holds no value on this path.
             InstKind::LoadName { name, .. } if self.reads_globals => Some(cx.global(name)),
@@ -993,6 +996,8 @@ impl<'e, 'a> Engine<'e, 'a> {
         })
     }
 
+    /// The type of the new object `dst` of builtin `kind`: a display or a comprehension of
+    /// `elems` and of what the function adds to it, or the `str` of an f-string.
     fn display(&self, dst: VarId, kind: BuiltinKind, elems: &[VarId]) -> Ty {
         let class = format!("builtins.{}", kind.name());
         // A starred element (`*xs`, lowered to a copy of `xs`) adds its items.

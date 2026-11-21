@@ -88,6 +88,86 @@ async def iterates():
     );
 }
 
+#[test]
+fn a_call_in_a_replacement_field_or_a_specification_runs_with_the_string() {
+    let src = "\
+import time
+
+
+def slow():
+    time.sleep(1)
+    return 1
+
+
+async def field():
+    return f\"{slow()!r}\"
+
+
+async def spec(x):
+    return f\"{x:>{slow()}}\"
+
+
+async def template_spec(x):
+    return t\"{x:{slow()!s}}\"
+";
+    assert_eq!(
+        reports("ir_fstring_calls", src, "EFF101"),
+        pairs(&[
+            ("field", "EFF101"),
+            ("spec", "EFF101"),
+            ("template_spec", "EFF101")
+        ])
+    );
+}
+
+#[test]
+fn a_replacement_field_is_converted_before_its_specification_is_evaluated() {
+    let src = "\
+def show(a, b, c, d):
+    return f\"{a()!r:>{b()!s}}-{c()!a}\", f\"{d}\"
+";
+    let ir = dump_ir("ir_fstring_order", src, "py315");
+    let f = function(&ir, "show");
+    let steps: Vec<String> = f["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|b| b["insts"].as_array().unwrap())
+        .filter_map(|i| {
+            let (kind, payload) = i["kind"].as_object()?.iter().next()?;
+            match kind.as_str() {
+                "Call" => Some(format!("call {}", payload["callee"].as_str()?)),
+                "Convert" => Some(format!("convert {}", payload["conversion"].as_str()?)),
+                "Format" if payload["spec"].is_null() => Some("format".to_owned()),
+                "Format" => Some("format spec".to_owned()),
+                "BuildString" => Some(format!("join {}", payload["parts"].as_array()?.len())),
+                _ => None,
+            }
+        })
+        .collect();
+    // As CPython's `CONVERT_VALUE`, `FORMAT_SIMPLE` / `FORMAT_WITH_SPEC`, and `BUILD_STRING`:
+    // `a()` is converted before `b()` is called for its specification, each field is formatted
+    // where it stands, and the parts are joined once; a field alone (`f"{d}"`) is its own
+    // result.
+    assert_eq!(
+        steps,
+        [
+            "call a",
+            "convert repr",
+            "call b",
+            "convert str",
+            "format",
+            "join 1",
+            "format spec",
+            "call c",
+            "convert ascii",
+            "format",
+            "join 2",
+            "format",
+        ]
+    );
+}
+
 // ======================================================================== scopes and frames
 
 #[test]

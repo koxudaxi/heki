@@ -196,7 +196,7 @@ def connect(sock):
 }
 
 #[test]
-fn trip_counts_the_code_fixes_past_sixteen() {
+fn trip_counts_the_code_fixes_past_sixteen_and_the_caps_it_puts_on_input() {
     let facts = dump_facts(
         "paths_trip_counts",
         r#"NAMES = ("a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q")
@@ -230,31 +230,108 @@ def counts(rows, db):
     k = 0
     while 500 > k:
         k += 1
+
+
+def matrix(report, db):
+    if len(report.get("runs", [])) != 40:
+        raise ValueError(report)
+    for run in report["runs"]:
+        db.one(run)
+
+
+def preflight(cases, db):
+    if len(cases.items) > 1000:
+        raise ValueError(cases)
+    for case in cases.items:
+        db.one(case)
+
+
+def changed(report, db, other):
+    if len(report["runs"]) != 40:
+        raise ValueError(report)
+    report["runs"] = other
+    for run in report["runs"]:
+        db.one(run)
+
+
+def generated(db):
+    return sum(db.one(x) for x in (1, 2, 3))
+
+
+def without_default(report, db):
+    if len(report.get("runs")) != 40:
+        raise ValueError(report)
+    for run in report["runs"]:
+        db.one(run)
+
+
+def default_passes(report, db):
+    if len(report.get("runs", [1, 2])) > 5:
+        raise ValueError(report)
+    for run in report["runs"]:
+        db.one(run)
+
+
+def deleted(report, db):
+    if len(report["runs"]) != 40:
+        raise ValueError(report)
+    del report["extra"]
+    for run in report["runs"]:
+        db.one(run)
+
+
+def passed_on(report, db, fill):
+    if len(report["runs"]) != 40:
+        raise ValueError(report)
+    fill(report)
+    for run in report["runs"]:
+        db.one(run)
 "#,
     );
-    let trips: Vec<Value> = function(&facts, "counts")["loops"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|l| l["fixed_trips"].clone())
-        .collect();
+    let trips = |qualname: &str| -> Vec<Value> {
+        function(&facts, qualname)["loops"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|l| l["fixed_trips"].clone())
+            .collect()
+    };
+    let fixed = |n: u64| json!({"known": {"fixed": n}});
+    let capped = |n: u64| json!({"known": {"capped": n}});
     assert_eq!(
-        trips,
+        trips("counts"),
         vec![
             json!("open"),
-            json!({"known": 100}),
-            json!({"known": 50}),
-            json!({"known": 40}),
-            json!({"known": 17}),
-            json!({"known": 30}),
-            json!({"known": 1000}),
-            json!({"known": 3}),
-            json!({"known": 20}),
-            json!({"known": 26}),
+            fixed(100),
+            capped(50),
+            capped(40),
+            fixed(17),
+            capped(30),
+            fixed(1000),
+            fixed(3),
+            fixed(20),
+            fixed(26),
             // The counter on the right of its test.
-            json!({"known": 500}),
+            fixed(500),
         ]
     );
+    // A test of `report.get("runs", [])` pins the length of `report["runs"]`: the empty default
+    // fails it, so the key is there.
+    assert_eq!(trips("matrix"), vec![fixed(40)]);
+    // A cap on input is an upper bound, not a fixed count.
+    assert_eq!(trips("preflight"), vec![capped(1000)]);
+    // A store into the root, a deletion from it, or a call it is passed to between the test and
+    // the loop leaves the count open.
+    assert_eq!(trips("changed"), vec![json!("open")]);
+    assert_eq!(trips("deleted"), vec![json!("open")]);
+    assert_eq!(trips("passed_on"), vec![json!("open")]);
+    // `get` without a default gives `None`, which has no length: the key is there.
+    assert_eq!(trips("without_default"), vec![fixed(40)]);
+    // A default the test accepts may be what it measured, not the value the loop reads.
+    assert_eq!(trips("default_passes"), vec![json!("open")]);
+    // The IR records the count of a loop over what a generator expression's creator passes.
+    let genexpr = function(&facts, "generated.<locals>.<genexpr>");
+    assert_eq!(genexpr["loops"][0]["fixed_trips"], capped(3));
 }
 
 #[test]
@@ -297,6 +374,11 @@ class Store:
             for row in batch:
                 pass
         total = sum(len(x) for x in conn.query())
+        for key in {row[0] for row in rows}:
+            pass
+        changed = [(h, str(t)) for h, t in rows if t]
+        for h, t in changed:
+            pass
 "#,
     );
     let origins: Vec<Value> = function(&facts, "Store.load")["loops"]
@@ -330,6 +412,13 @@ class Store:
             // An item of a display is the element itself.
             one("param 1"),
             one("fixed"),
+            // The set comprehension's own loop, then the loop over the set: equal keys merge,
+            // so the count no longer follows the rows.
+            one("param 1"),
+            json!("open"),
+            // A comprehension with an `if` leaves rows out: no count follows them.
+            one("param 1"),
+            json!("open"),
         ]
     );
     // A generator expression's loop reads the iterable its creator passes.

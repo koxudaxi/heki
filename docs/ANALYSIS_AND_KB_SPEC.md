@@ -76,7 +76,8 @@ Compound expressions are flattened into **basic instructions in explicit left-to
 | Constants and allocation | `Const`, `AllocBuiltin(kind, elems)`, `DictLiteral(entries)` | `list` / `dict` / `set` / `tuple` / `str` / `bytes` / number literals, comprehensions, unshadowed builtin constructors; `DictLiteral` keeps the order of `**` unpacking (`{**d, ...}` vs `{**other, **d}`) |
 | Names | `LoadGlobal`, `LoadName`, `LoadDeref`, `StoreGlobal`, `StoreDeref`, `Copy`, `Delete`, `Import` | `Copy` adds to the direct alias set, `Delete` removes by strong update and leaves the name possibly unbound (a `LoadName` is its value until it is bound again, also at the end of an `except E as e:` handler; `Delete.global` marks a module global); `Import` / `LoadGlobal` carry the PEP 810 `is_lazy` flag |
 | Operators | `BinOp(op, lhs, rhs, in_place)`, `UnaryOp`, `Compare(op, lhs, rhs)` | Augmented assignment is `BinOp` with `in_place`; `in` / `not in` are `Compare`; a chained comparison `a < b < c` branches after each link like `a < b and b < c`, with `b` evaluated once and each `Compare` spanning its own operands; until types are exact, any special method may run |
-| Attributes and items | `AttrLoad`, `AttrStore`, `AttrDelete`, `SubscriptLoad`, `SubscriptStore`, `SubscriptDelete` | Stores make the stored value `Shared`; `AttrDelete` recognizes `@cached_property` invalidation (`del self.prop`) and `MUT201` writes; subscripts keep constant keys and slice bounds; the slice object itself is the tuple `(lower, upper, step)` of its bounds (`None` where one is left out), since `__getitem__` may keep it; a template string builds the tuple of its fields' values (`Template.values`) and is otherwise opaque |
+| Strings | `Convert(value, conversion)`, `Format(value, spec)`, `BuildString(parts)` | As CPython compiles an f-string: each replacement field, left to right, evaluates its value, converts it (`!s` / `!r` / `!a`, and `{x=}` without a specification: `Convert`, which runs `__str__` / `__repr__`), evaluates its format specification (an f-string of its own), and formats the result (`Format`: `format(value, spec)`, which runs `__format__`); each runs code of the value's class unless that is a builtin, and may raise. A field alone is the f-string's result (`__format__` may return a `str` subclass); any other f-string is a `BuildString` of its formatted fields, a new `str` that keeps none of them. A template string keeps its values unconverted and unformatted, as the tuple `Template.values`, formats its specifications' fields, and is otherwise opaque |
+| Attributes and items | `AttrLoad`, `AttrStore`, `AttrDelete`, `SubscriptLoad`, `SubscriptStore`, `SubscriptDelete` | Stores make the stored value `Shared`; `AttrDelete` recognizes `@cached_property` invalidation (`del self.prop`) and `MUT201` writes; subscripts keep constant keys and slice bounds; the slice object itself is the tuple `(lower, upper, step)` of its bounds (`None` where one is left out), since `__getitem__` may keep it |
 | Calls | `Call(callee, args, kwargs, is_awaited)`, `MethodCall(recv, method, args, kwargs, is_awaited)` | `is_awaited` separates awaited calls from synchronous ones (a coroutine awaited after it is made runs at its `await`, which the effect summary follows); `star_from` is the index of the first `*` argument, so arguments bind to parameters exactly up to it |
 | ContainerIteration and generators | `MakeIter(iterable)`, `IterNext(iter)`, `MakeGenExpr(outer_iter, captured)`, `MakeClosure(captured)` | `MakeIter` and `MakeGenExpr` bind a **derived reference** of `iterable` / `outer_iter` to an explicit SSA variable; `MakeClosure` holds every value the function or class object keeps: its cells (free variables of nested scopes at any depth, the iteration variables of inlined comprehensions, the names read by lazily evaluated annotation and type-parameter scopes), its defaults, eagerly evaluated annotations, and a class's bases and keywords (a `type` alias is a `MakeClosure` without a lowered body) |
 | Suspension | `Await`, `Yield`, `YieldFrom` | `Await` lets other tasks run (`Unique` stays unique), as do the implicit awaits of `async for` and `async with` (`InstKind::suspends`); `Yield` makes the yielded value `Shared` |
@@ -215,13 +216,18 @@ Compound expressions are flattened into **basic instructions in explicit left-to
     import QUEUE` and `QUEUE.append(x)`, `cfg.QUEUE = []`; `ModuleDecls.grown_globals`, by the
     shared `FnIndex::grown_vars`) is not fixed for the Advisory rules, in its own module or
     any other (`ProjectDecls::grown_elsewhere`, a declaration key the language server tracks).
-  - `FnIndex::fixed_trips` gives the trip count the code fixes at any count, as
-    `Answer::Known(n)`: `range(1000)`, `rows[:100]`, `zip(rows, range(50))`, a tuple display or a
-    list or set display nothing grows, a module's string and string-tuple constants, a length
-    test every path to the loop passes (up to `LEN_CAP_MAX`), and a counted `while` loop.
+  - `FnIndex::fixed_trips` gives the most times a loop runs at any count, as a `Trips`:
+    `Fixed(n)` when the code fixes the count whatever the input (`range(1000)`, a tuple display or
+    a list or set display nothing grows, a module's string and string-tuple constants, a length
+    test that pins the length, `len(x) == 40` or `!= 40` leaving, and a counted `while` loop), and
+    `Capped(n)` when a constant only caps what may be input (a length cap such as `if len(x) >
+    1000: raise`, a slice `rows[:100]`, a `zip` with an iterable the code does not bound). A cap
+    is an upper bound, not a fixed count. A length test bounds the loop when it measures the
+    iterable or a read of the same access path from the same root (`len(report.get("runs", []))`
+    then `report["runs"]`; a `get` default counts when the test rejects its length), with nothing
+    on the way storing into the root, deleting from it, or passing it to a call.
     `LoopBound::ConstSmall` stays the view of counts up to `SMALL_MAX`. No claim rests on a size:
-    an exact report is silent for a loop with a fixed count of any size, and `Open` only leaves
-    the loop data-sized to the rules that read it so.
+    `Open` only leaves the loop data-sized to the rules that read it so.
 - **Path facts** (`heki_ir::facts::Paths`, Advisory and Profitability only), computed on demand
   for the rules that read them, over the walk facility's `FnShape` and the owner's `Budget`:
   - `FnIndex::decided` (`Decided`): a branch whose test the code fixes never takes its other
@@ -258,10 +264,11 @@ Compound expressions are flattened into **basic instructions in explicit left-to
     or the result of a call (`Call`), which the reader resolves against the catalog: a source is
     a catalog target, never a name. Items pass through `list`, `tuple`, `set`, `sorted`,
     `reversed`, `iter`, `filter`, `enumerate`, `zip`, slices, dict views, and a comprehension,
-    generator expression, or list filled only by appends that produces a loop's item (or a
-    component of it); through `map`, a comprehension's element expression, and `range(len(x))`
-    only the count carries (`Carries::Count`). `str.split` / `str.splitlines` give pieces of their
-    receiver's text (`ItemOrigin::text`). A phi takes the inputs along the edges that can run. An
+    generator expression, or list filled only by appends that produces a loop's item; through
+    `map`, a comprehension's element expression, a part of the loop's item (`r[0]`), and
+    `range(len(x))` only the count carries (`Carries::Count`). A set or dict of what carries only
+    a count merges equal results and has no source. `str.split` / `str.splitlines` give pieces
+    of their receiver's text (`ItemOrigin::text`). A phi takes the inputs along the edges that can run. An
     item of a call's result, a global that is no constant, and anything else are `Open`. The walk
     is a `Closure` over questions `(function, value, steps)`, the steps being what the way from
     the loop applies to the value's sources (an item, a count, pieces of text).
@@ -1132,6 +1139,12 @@ struct FrameState {
   - a call with `*` arguments does not use its Layer 1 entry (the positions do not line up).
 - **Function objects**: creating one escapes every operand of `MakeClosure` (captured
   variables, and default values when the IR passes them).
+- **Formatting**: `Convert` or `Format` of a value that is an exact builtin on every path runs
+  builtin code only, which hands the value's items to their `__repr__` but never the value
+  itself, and gives a new exact `str`; of any other value it escapes the value and the
+  specification, whose class's `__str__` / `__repr__` / `__format__` may keep them. `BuildString` gives a new exact
+  `str`. A rewrite that changes a formatted value's type changes its text (`OPT120` /
+  `OPT121` block on it).
 - **`ValueLoopInvariant(v, loop)`**: besides `BindingLoopInvariant`, the value is an immutable
   builtin (a `tuple` whose elements are hash-consistent builtins too), or a mutable builtin that
   stays `Unique` for the whole loop and whose `alloc_id` (aliases and derived references included)
