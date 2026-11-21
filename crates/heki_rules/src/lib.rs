@@ -1129,6 +1129,12 @@ impl DottedPattern {
         &self.name
     }
 
+    /// Whether the pattern's text names a module body (`<module>`: `pkg.gen:<module>`,
+    /// `pkg.*:<module>`, `pkg.gen.<module>`). A glob that only matches it (`pkg:*`) does not.
+    pub fn names_module_bodies(&self) -> bool {
+        self.name.text.contains("<module>")
+    }
+
     /// Whether the pattern names `name`, which heki knows only as a whole (an attribute, an
     /// external symbol), or one of its dotted suffixes. A pattern with a module part names
     /// project definitions only.

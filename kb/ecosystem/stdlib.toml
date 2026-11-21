@@ -1004,7 +1004,8 @@ opaque_to_layer3 = true
 
 # --- Environment reads ---
 # What the program finds where it runs: `reads-environment` effect boundaries forbid calling the
-# functions (`environment = "call"`) and reading the module attributes (`environment = "read"`).
+# functions (`environment = "call"`), reading the module attributes (`environment = "read"`), and
+# importing or finding a module that is not the project's own (`environment = "import"`).
 
 [[entries]]
 symbol = "os.getenv"
@@ -1138,12 +1139,12 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "importlib.util.find_spec"
-environment = "call"
+environment = "import"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "importlib.import_module"
-environment = "call"
+environment = "import"
 opaque_to_layer3 = true
 
 [[entries]]

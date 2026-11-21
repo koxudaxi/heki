@@ -7,27 +7,30 @@
 //! values, so a variable rebound in a loop (`node = node.parent`) or assigned on some paths only
 //! (a walrus in `and` / `or`) has the type of the values that reach it. A type only grows (the
 //! new one is joined with the old), and classes and nesting depth are bounded, so the fixpoint
-//! ends; a function without loops needs one pass.
+//! ends; a function without loops needs one pass, or two when a child scope it builds reads a
+//! closure cell the function binds later.
 //!
 //! Types come from parameter, local, attribute, and return annotations (with the arguments of
-//! generic containers), constructors, and imports; they flow through copies, attributes, calls,
-//! and the items of containers: iteration, subscripts, unpacking, `dict` views and `get` /
-//! `pop`, the builtins that wrap an iterable (`enumerate`, `zip`, `reversed`, `sorted`, `iter`,
-//! `next`, `list`, `tuple`, `set`, `frozenset`, `dict`, `filter`, `itertools.chain`), displays,
-//! and the items added to a local container (comprehensions build theirs that way). A
-//! comprehension or generator expression with a scope of its own iterates the value its
-//! enclosing function hands it, so the enclosing function is inferred first.
+//! generic containers), constructors, imports, and `type(obj)`; they flow through copies,
+//! attributes, calls, and the items of containers: iteration, subscripts, unpacking, `dict`
+//! views and `get` / `pop`, the builtins that wrap an iterable (`enumerate`, `zip`,
+//! `reversed`, `sorted`, `iter`, `next`, `list`, `tuple`, `set`, `frozenset`, `dict`, `filter`,
+//! `itertools.chain`), displays, and the items added to a local container (comprehensions build
+//! theirs that way). A comprehension or generator expression with a scope of its own iterates
+//! the value its enclosing function hands it, and a nested scope reads the closure cells of the
+//! functions enclosing it, so those functions are inferred first.
 
 use crate::resolver::{self, Callee, ProjectDecls, TypeCtx, Val};
 use crate::types::{Args, Elem, Obj, Ty};
 use heki_ast::Span;
 use heki_ir::{
     BlockId, BuiltinKind, ConstLiteral, DictEntry, FunctionId, FunctionKind, Inst, InstKind,
-    IrFunction, PhiNode, Terminator, UnaryOpKind, VarId,
+    IrFunction, ModuleIr, PhiNode, Terminator, UnaryOpKind, VarId,
 };
 use heki_kb::ArgFact;
-use rustc_hash::FxHashMap;
-use std::cell::{OnceCell, RefCell};
+use rustc_hash::{FxHashMap, FxHashSet};
+use std::cell::{Cell, OnceCell, RefCell};
+use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 /// The arguments a call passes, as written (for the catalog's argument cases).
@@ -39,7 +42,7 @@ struct Passed<'c> {
 }
 
 /// What the fixpoint knows about a variable.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Fact {
     /// No value reaches it (yet).
     Unset,
@@ -62,6 +65,15 @@ impl Fact {
             Fact::Unset => Elem::Empty,
             Fact::Known(t) => Elem::Of(t.clone()),
             Fact::Unknown => Elem::Unknown,
+        }
+    }
+
+    /// The fact as a transfer's result.
+    fn as_step(&self) -> Step {
+        match self {
+            Fact::Unset => Err(Pending),
+            Fact::Known(t) => Ok(Some(t.clone())),
+            Fact::Unknown => Ok(None),
         }
     }
 }
@@ -98,14 +110,22 @@ pub(crate) struct Inferred {
     facts: Vec<Fact>,
     /// The declared types of annotated local names (`x: Model = ...`).
     declared: FxHashMap<String, Ty>,
-    /// The function builds comprehension or generator-expression scopes of its own.
-    encloses: bool,
+    /// Scopes nested in the function read its types: it builds comprehension or
+    /// generator-expression scopes of its own, or binds closure cells.
+    nested_read: bool,
+    /// The closure cells the function binds, by name: every value bound to each.
+    cells: FxHashMap<String, Fact>,
     /// The types `isinstance` checks give variables in the blocks they guard, where they differ
     /// from the variable's own.
     narrowed: FxHashMap<(BlockId, VarId), Ty>,
 }
 
 impl Inferred {
+    /// The fact of the closure cell `name` the function binds.
+    fn cell_fact(&self, name: &str) -> Fact {
+        self.cells[name].clone()
+    }
+
     /// The declared type of the local name `name`.
     pub(crate) fn declared(&self, name: &str) -> Option<&Ty> {
         self.declared.get(name)
@@ -164,16 +184,222 @@ impl Inferred {
     }
 }
 
-/// Inference state shared by the functions of one module: comprehension and
-/// generator-expression scopes need the types of the function that builds them.
+/// Inference state shared by the functions of one module: a scope nested in a function needs
+/// the types of the functions enclosing it (the value a comprehension or generator expression
+/// iterates, and the closure cells it reads).
 #[derive(Default)]
 pub(crate) struct Scopes {
-    /// Child scope -> the function building it and its variable of the iterated value.
-    parents: OnceCell<FxHashMap<FunctionId, (FunctionId, VarId)>>,
-    /// The types of functions that build child scopes.
+    nesting: OnceCell<Nesting>,
+    /// The types of functions whose types nested scopes read.
     enclosing: RefCell<FxHashMap<FunctionId, Rc<Inferred>>>,
-    /// What a child scope produces when it iterates a value of a given type.
-    outputs: RefCell<FxHashMap<(FunctionId, Option<Ty>), Elem>>,
+    /// What a child scope produces in each run.
+    outputs: RefCell<FxHashMap<ChildRun, Elem>>,
+}
+
+/// A run of a child scope: the scope, the type of the value it iterates, and the facts of the
+/// cells it reads.
+type ChildRun = (FunctionId, Option<Ty>, CellFacts);
+
+/// The closure cell of a function, by the function and the cell's name there.
+type CellKey = (FunctionId, String);
+
+/// The closure cells a scope can read, by the name it reads each with.
+type Cells = BTreeMap<String, CellKey>;
+
+/// The facts of the cells a scope's inference reads, by name (sorted).
+type CellFacts = Vec<(String, Fact)>;
+
+/// Where the closure cells of the module's nested scopes are bound.
+struct Nesting {
+    /// The cells each scope nested in a function can read.
+    visible: FxHashMap<FunctionId, Rc<Cells>>,
+    /// The names each function's inference reads through cells (sorted): its own reads, and
+    /// those of the child scopes it runs (comprehensions and generator expressions with a scope
+    /// of their own) that are not its own cells.
+    reads: FxHashMap<FunctionId, Vec<String>>,
+    /// Cells a nested scope may rebind (`nonlocal`, or an assignment expression in a
+    /// comprehension scope before 3.12): they hold more than what the function binding them
+    /// binds.
+    rebound: FxHashSet<CellKey>,
+}
+
+/// How a function creates a nested scope.
+struct Creation<'f> {
+    creator: &'f IrFunction,
+    /// The cells of inlined comprehensions' iteration variables of the creator that the scope
+    /// reads: the values it captures name them.
+    comprehension_cells: Vec<&'f str>,
+}
+
+impl Nesting {
+    fn of(ir: &ModuleIr) -> Self {
+        let mut out = Nesting {
+            visible: FxHashMap::default(),
+            reads: FxHashMap::default(),
+            rebound: FxHashSet::default(),
+        };
+        // No function keeps a cell: no scope reads or rebinds one.
+        if ir.functions.iter().all(|f| f.captured_vars.is_empty()) {
+            return out;
+        }
+        let mut created: FxHashMap<FunctionId, Creation<'_>> = FxHashMap::default();
+        let mut runs: FxHashMap<FunctionId, Vec<FunctionId>> = FxHashMap::default();
+        for g in &ir.functions {
+            for inst in g.blocks.iter().flat_map(|b| &b.insts) {
+                let (child, captured, runs_it) = match &inst.kind {
+                    InstKind::MakeGenExpr {
+                        func_id: Some(id),
+                        captured,
+                        ..
+                    } => (*id, &captured[..], true),
+                    InstKind::Call {
+                        callee_var: None,
+                        callee,
+                        args,
+                        ..
+                    } => (comprehension_id(callee), &args[1..], true),
+                    InstKind::MakeClosure {
+                        func_id: Some(id),
+                        captured,
+                        ..
+                    } => (*id, &captured[..], false),
+                    _ => continue,
+                };
+                let comprehension_cells = captured
+                    .iter()
+                    .filter_map(|v| g.var_name(*v))
+                    .filter(|n| {
+                        heki_ir::comprehension_target_source(n).is_some()
+                            && g.captured_vars.iter().any(|c| c == n)
+                    })
+                    .collect();
+                created.insert(
+                    child,
+                    Creation {
+                        creator: g,
+                        comprehension_cells,
+                    },
+                );
+                if runs_it {
+                    runs.entry(g.id).or_default().push(child);
+                }
+            }
+        }
+        let none = Rc::new(Cells::new());
+        // The cells the scopes each function creates outside its inlined comprehensions can
+        // read, shared by them.
+        let mut for_nested: FxHashMap<FunctionId, Rc<Cells>> = FxHashMap::default();
+        let mut own_reads: FxHashMap<FunctionId, BTreeSet<String>> = FxHashMap::default();
+        // The builder numbers a function before the scopes nested in it, so the cells of a
+        // scope's creator are known when the scope is reached.
+        for f in &ir.functions {
+            let cells = match created.get(&f.id) {
+                Some(c) => {
+                    let p = c.creator;
+                    let shared = for_nested
+                        .entry(p.id)
+                        .or_insert_with(|| nested_in(p, out.visible.get(&p.id).unwrap_or(&none)));
+                    with_comprehension_cells(shared, p.id, &c.comprehension_cells)
+                }
+                None => Rc::clone(&none),
+            };
+            // Nothing in an unmodeled body creates the scopes nested in it, and a scope's cells
+            // come from its creator, so their stores are tied to no cell below: any cell they can
+            // see may be rebound.
+            if f.is_unmodeled() {
+                out.rebound.extend(nested_in(f, &cells).values().cloned());
+            }
+            for inst in f.blocks.iter().flat_map(|b| &b.insts) {
+                match &inst.kind {
+                    InstKind::LoadDeref { name, .. } => {
+                        own_reads.entry(f.id).or_default().insert(name.clone());
+                    }
+                    // A store never rebinds a comprehension's iteration variable.
+                    InstKind::StoreDeref { name, .. } => {
+                        if let Some(cell) = cells.get(name) {
+                            out.rebound.insert(cell.clone());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if !cells.is_empty() {
+                out.visible.insert(f.id, cells);
+            }
+        }
+        // The child scopes a function runs come after it.
+        for f in ir.functions.iter().rev() {
+            let mut names = own_reads.remove(&f.id).unwrap_or_default();
+            for c in runs.get(&f.id).into_iter().flatten() {
+                let visible = out.visible.get(c);
+                for name in out.reads.get(c).into_iter().flatten() {
+                    let bound_here = visible
+                        .and_then(|v| v.get(name))
+                        .is_some_and(|(owner, _)| *owner == f.id);
+                    if !bound_here {
+                        names.insert(name.clone());
+                    }
+                }
+            }
+            if !names.is_empty() {
+                out.reads.insert(f.id, names.into_iter().collect());
+            }
+        }
+        out
+    }
+
+    /// The cells the inference of `f` reads, by the name `f` reads each with.
+    fn read_by(&self, f: FunctionId) -> impl Iterator<Item = (&String, &CellKey)> {
+        let visible = self.visible.get(&f);
+        self.reads
+            .get(&f)
+            .into_iter()
+            .flatten()
+            .filter_map(move |name| Some((name, visible?.get(name)?)))
+    }
+
+    /// `cell`, when its values are those the function binding it binds.
+    fn bound_only<'c>(&self, cell: &'c CellKey) -> Option<&'c CellKey> {
+        (!self.rebound.contains(cell)).then_some(cell)
+    }
+}
+
+/// The cells the scopes `parent` creates outside its inlined comprehensions can read: those
+/// `parent` reads, then its own (the locals of a function they capture).
+fn nested_in(parent: &IrFunction, inherited: &Rc<Cells>) -> Rc<Cells> {
+    let mut own = parent
+        .captured_vars
+        .iter()
+        .filter(|n| heki_ir::comprehension_target_source(n).is_none())
+        .peekable();
+    if own.peek().is_none() {
+        return Rc::clone(inherited);
+    }
+    let mut cells = (**inherited).clone();
+    for name in own {
+        cells.insert(name.clone(), (parent.id, name.clone()));
+    }
+    Rc::new(cells)
+}
+
+/// `shared` with the iteration variables of `parent`'s inlined comprehensions that a scope
+/// created in them reads (`comprehension_cells`, by their cell names) in place of the names
+/// they shadow.
+fn with_comprehension_cells(
+    shared: &Rc<Cells>,
+    parent: FunctionId,
+    comprehension_cells: &[&str],
+) -> Rc<Cells> {
+    if comprehension_cells.is_empty() {
+        return Rc::clone(shared);
+    }
+    let mut cells = (**shared).clone();
+    for cell in comprehension_cells {
+        if let Some(source) = heki_ir::comprehension_target_source(cell) {
+            cells.insert(source.to_owned(), (parent, (*cell).to_owned()));
+        }
+    }
+    Rc::new(cells)
 }
 
 /// The function id of a non-inlined comprehension call (Python 3.11).
@@ -186,6 +412,16 @@ fn comprehension_id(callee: &str) -> FunctionId {
     )
 }
 
+/// What a nested scope receives from the functions enclosing it.
+struct Seed {
+    /// The type of the value a comprehension or generator expression with a scope of its own
+    /// iterates (`None` inside when unknown).
+    iterated: Option<Option<Ty>>,
+    /// The facts of the closure cells its inference reads, by the name it reads each with: every
+    /// value the function binding a cell binds to it, a cell read being a phi of them all.
+    cells: FxHashMap<String, Fact>,
+}
+
 impl TypeCtx<'_> {
     /// The types of `f`'s variables.
     pub(crate) fn infer_types(&self, f: &IrFunction) -> Rc<Inferred> {
@@ -194,7 +430,7 @@ impl TypeCtx<'_> {
         }
         let seed = self.seed_of(f);
         let inferred = Rc::new(Engine::new(self, f, seed).run());
-        if inferred.encloses {
+        if inferred.nested_read {
             self.scopes
                 .enclosing
                 .borrow_mut()
@@ -203,58 +439,48 @@ impl TypeCtx<'_> {
         inferred
     }
 
-    /// For a child scope, the type of the value its enclosing function hands it (`None` inside
-    /// when unknown); `None` for other functions.
-    fn seed_of(&self, f: &IrFunction) -> Option<Option<Ty>> {
-        if !matches!(
-            f.name.as_str(),
-            "<genexpr>" | "<listcomp>" | "<setcomp>" | "<dictcomp>"
-        ) {
-            return None;
-        }
-        let parents = self.scopes.parents.get_or_init(|| {
-            let mut out = FxHashMap::default();
-            for g in &self.ir().functions {
-                for inst in g.blocks.iter().flat_map(|b| &b.insts) {
-                    match &inst.kind {
-                        InstKind::MakeGenExpr {
-                            func_id: Some(id),
-                            outer_iter,
-                            ..
-                        } => {
-                            out.insert(*id, (g.id, *outer_iter));
-                        }
-                        InstKind::Call {
-                            callee_var: None,
-                            callee,
-                            args,
-                            ..
-                        } => {
-                            out.insert(comprehension_id(callee), (g.id, args[0]));
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            out
-        });
-        let &(parent, var) = parents.get(&f.id)?;
-        Some(
-            self.infer_types(self.ir().function(parent))
-                .ty(var)
-                .cloned(),
-        )
+    fn nesting(&self) -> &Nesting {
+        self.scopes.nesting.get_or_init(|| Nesting::of(self.ir()))
     }
 
-    /// What child scope `id` produces when it iterates a value of type `seed`: the items a
-    /// generator expression yields, or the container a comprehension returns.
-    fn child_output(&self, id: FunctionId, seed: Option<Ty>) -> Elem {
-        let key = (id, seed);
+    /// What the functions enclosing `f` hand it: the type of the value a child scope iterates,
+    /// and the facts of the cells a nested scope reads, from their final types.
+    fn seed_of(&self, f: &IrFunction) -> Seed {
+        let iterated = f.passed_from.map(|(creator, var)| {
+            self.infer_types(self.ir().function(creator))
+                .ty(var)
+                .cloned()
+        });
+        let nesting = self.nesting();
+        let cells = nesting
+            .read_by(f.id)
+            .map(|(name, captured)| {
+                let fact = nesting
+                    .bound_only(captured)
+                    .map_or(Fact::Unknown, |(owner, bound)| {
+                        self.infer_types(self.ir().function(*owner))
+                            .cell_fact(bound)
+                    });
+                (name.clone(), fact)
+            })
+            .collect();
+        Seed { iterated, cells }
+    }
+
+    /// What child scope `id` produces when it iterates a value of type `seed` and reads cells
+    /// of facts `cells`: the items a generator expression yields, or the container a
+    /// comprehension returns.
+    fn child_output(&self, id: FunctionId, seed: Option<Ty>, cells: CellFacts) -> Elem {
+        let key = (id, seed, cells);
         if let Some(done) = self.scopes.outputs.borrow().get(&key) {
             return done.clone();
         }
         let child = self.ir().function(id);
-        let inferred = Engine::new(self, child, Some(key.1.clone())).run();
+        let seed = Seed {
+            iterated: Some(key.1.clone()),
+            cells: key.2.iter().cloned().collect(),
+        };
+        let inferred = Engine::new(self, child, seed).run();
         let produced = |v: VarId| inferred.facts[v.0 as usize].elem();
         let out = if matches!(
             child.kind,
@@ -283,6 +509,15 @@ impl TypeCtx<'_> {
 struct Pending;
 
 type Step = Result<Option<Ty>, Pending>;
+
+/// The fact a transfer's operand has.
+fn to_fact(operand: Result<Option<&Ty>, Pending>) -> Fact {
+    match operand {
+        Ok(Some(t)) => Fact::Known(t.clone()),
+        Ok(None) => Fact::Unknown,
+        Err(Pending) => Fact::Unset,
+    }
+}
 
 /// The type of an item, or `Pending` when no item can be there.
 fn item_ty(e: Elem) -> Step {
@@ -360,10 +595,18 @@ struct Engine<'e, 'a> {
     displays: FxHashMap<VarId, BuiltinKind>,
     /// The items (or keys) and values added to each display after it is built.
     added: FxHashMap<VarId, (Elem, Elem)>,
-    encloses: bool,
+    /// The facts of the closure cells of enclosing functions the function can read, by name.
+    cells: FxHashMap<String, Fact>,
+    /// The closure cells the function binds, by name, with the variables it binds each to:
+    /// its parameters and the instructions naming them.
+    own_cells: FxHashMap<String, Vec<VarId>>,
+    nested_read: bool,
     changed: bool,
     /// A pass added items to a display.
     added_changed: bool,
+    /// A pass handed a child scope one of the function's cells before every binding of it was
+    /// computed.
+    cells_deferred: Cell<bool>,
     /// `isinstance` narrowing (only for functions that call a function named `isinstance`).
     narrowing: Option<Narrowing<'e>>,
     /// What `isinstance` checks guarding the current block give its variables.
@@ -385,7 +628,7 @@ struct Narrowing<'e> {
 }
 
 impl<'e, 'a> Engine<'e, 'a> {
-    fn new(cx: &'e TypeCtx<'a>, f: &'e IrFunction, seed: Option<Option<Ty>>) -> Self {
+    fn new(cx: &'e TypeCtx<'a>, f: &'e IrFunction, seed: Seed) -> Self {
         let mut engine = Self {
             cx,
             f,
@@ -401,15 +644,18 @@ impl<'e, 'a> Engine<'e, 'a> {
             copies: FxHashMap::default(),
             displays: FxHashMap::default(),
             added: FxHashMap::default(),
-            encloses: false,
+            cells: seed.cells,
+            own_cells: FxHashMap::default(),
+            nested_read: false,
             changed: false,
             added_changed: false,
+            cells_deferred: Cell::new(false),
             narrowing: None,
             cur: FxHashMap::default(),
             implied_memo: RefCell::default(),
         };
         engine.seed_params();
-        if let Some(seed) = seed {
+        if let Some(seed) = seed.iterated {
             // The iterated value a child scope receives.
             let outer = (0u32..)
                 .zip(&f.var_names)
@@ -512,6 +758,27 @@ impl<'e, 'a> Engine<'e, 'a> {
                 }
             }
         }
+        // A cell holds every value the function binds to it: its parameter's, and those of the
+        // instructions naming it (an unassigned read, `LoadName`, binds none).
+        for name in &f.captured_vars {
+            self.own_cells.insert(name.clone(), Vec::new());
+        }
+        if !self.own_cells.is_empty() {
+            self.nested_read = true;
+            for p in &f.params {
+                if let Some(vars) = self.own_cells.get_mut(&p.name) {
+                    vars.push(p.var);
+                }
+            }
+            for inst in insts() {
+                if let Some(d) = inst.kind.dst()
+                    && !matches!(inst.kind, InstKind::LoadName { .. })
+                    && let Some(vars) = f.var_name(d).and_then(|n| self.own_cells.get_mut(n))
+                {
+                    vars.push(d);
+                }
+            }
+        }
         for inst in f.blocks.iter().flat_map(|b| &b.insts) {
             match &inst.kind {
                 InstKind::Const {
@@ -538,7 +805,7 @@ impl<'e, 'a> Engine<'e, 'a> {
                 InstKind::MakeGenExpr { .. }
                 | InstKind::Call {
                     callee_var: None, ..
-                } => self.encloses = true,
+                } => self.nested_read = true,
                 _ => {}
             }
         }
@@ -558,7 +825,8 @@ impl<'e, 'a> Engine<'e, 'a> {
     fn run(mut self) -> Inferred {
         let rpo = self.f.rpo_blocks();
         // Without loops every operand is computed before its users in reverse postorder: one
-        // pass is final unless it added items to a display already computed.
+        // pass is final unless it added items to a display already computed, or handed a child
+        // scope a cell bound later in the function.
         let acyclic = self.f.loops.is_empty();
         for pass in 1.. {
             if pass > MAX_PASSES {
@@ -570,6 +838,7 @@ impl<'e, 'a> Engine<'e, 'a> {
             }
             self.changed = false;
             self.added_changed = false;
+            self.cells_deferred.set(false);
             for &bb in &rpo {
                 let block = self.f.block(bb);
                 self.enter(bb);
@@ -596,7 +865,7 @@ impl<'e, 'a> Engine<'e, 'a> {
                     }
                 }
             }
-            if !self.changed || acyclic && !self.added_changed {
+            if !self.changed || acyclic && !self.added_changed && !self.cells_deferred.get() {
                 break;
             }
         }
@@ -608,6 +877,16 @@ impl<'e, 'a> Engine<'e, 'a> {
         for (v, fact) in declared {
             facts[v.0 as usize] = fact;
         }
+        let cells = self
+            .own_cells
+            .iter()
+            .map(|(name, bound)| {
+                let fact = bound
+                    .iter()
+                    .fold(Fact::Unset, |acc, v| acc.join(&facts[v.0 as usize]));
+                (name.clone(), fact)
+            })
+            .collect();
         let mut narrowed = FxHashMap::default();
         if let Some(n) = &self.narrowing {
             for (b, entry) in (0u32..).zip(&n.entry) {
@@ -621,18 +900,15 @@ impl<'e, 'a> Engine<'e, 'a> {
         Inferred {
             facts,
             declared: self.names,
-            encloses: self.encloses,
+            nested_read: self.nested_read,
+            cells,
             narrowed,
         }
     }
 
     /// The fact of `var` (see [`Self::need`]).
     fn fact(&self, var: VarId) -> Fact {
-        match self.need(var) {
-            Ok(Some(t)) => Fact::Known(t.clone()),
-            Ok(None) => Fact::Unknown,
-            Err(Pending) => Fact::Unset,
-        }
+        to_fact(self.need(var))
     }
 
     /// The type of `var` for a transfer that needs it. A declared local has its declaration, as
@@ -642,6 +918,53 @@ impl<'e, 'a> Engine<'e, 'a> {
         if let Some(t) = self.cur.get(&var) {
             return Ok(Some(t));
         }
+        self.unnarrowed(var)
+    }
+
+    /// The facts of the cells the inference of child scope `id` reads, as the function hands
+    /// them to it now: its own from the values bound to them so far, the others as it received
+    /// them.
+    fn child_cells(&self, id: FunctionId) -> CellFacts {
+        let nesting = self.cx.nesting();
+        nesting
+            .read_by(id)
+            .map(|(name, captured)| {
+                let fact = match nesting.bound_only(captured) {
+                    Some((owner, bound)) if *owner == self.f.id => self.own_cell(bound),
+                    Some(_) => self.cells[name].clone(),
+                    None => Fact::Unknown,
+                };
+                (name.clone(), fact)
+            })
+            .collect()
+    }
+
+    /// The fact of the cell `name` the function binds, from the values bound to it so far (as
+    /// bound, not as the `isinstance` checks of the current block narrow them): a binding not
+    /// computed yet adds none, and asks for another pass.
+    fn own_cell(&self, name: &str) -> Fact {
+        self.own_cells[name].iter().fold(Fact::Unset, |acc, v| {
+            let bound = to_fact(self.unnarrowed(*v));
+            if bound == Fact::Unset {
+                self.cells_deferred.set(true);
+            }
+            acc.join(&bound)
+        })
+    }
+
+    /// What `type(value)` returns for a value of type `t`: a class object that is the class of
+    /// the instance or a subclass of it, as `cls` in a class method is. Unknown for a union, a
+    /// protocol (its implementations need not be subclasses), and a class outside the project.
+    /// (`value.__class__` is not this: a class or a subclass may rebind it, as proxies do.)
+    fn class_of(&self, t: &Ty) -> Option<Ty> {
+        let project = self.cx.project;
+        let o = t.obj()?;
+        (project.is_project_class(&o.class) && project.protocol(&o.class).is_none())
+            .then(|| Ty::Class(o.class.clone()))
+    }
+
+    /// [`Self::need`] without the `isinstance` checks guarding the current block.
+    fn unnarrowed(&self, var: VarId) -> Result<Option<&Ty>, Pending> {
         let inferred = &self.facts[var.0 as usize];
         match (inferred, self.declared.get(&var)) {
             (Fact::Known(t), Some(d)) if !self.cx.project.narrower(t, d) => Ok(Some(d)),
@@ -900,6 +1223,9 @@ impl<'e, 'a> Engine<'e, 'a> {
             // An unassigned local of a function holds no value on this path.
             InstKind::LoadName { name, .. } if self.reads_globals => Some(cx.global(name)),
             InstKind::LoadName { .. } => return Err(Pending),
+            InstKind::LoadDeref { name, .. } => {
+                return self.cells.get(name).map_or(Ok(None), Fact::as_step);
+            }
             InstKind::Import { .. } => cx.import_type(inst.span),
             InstKind::Copy { src, .. } => self.need(*src)?.cloned(),
             InstKind::Await { value, .. } => self.need(*value)?.and_then(awaited),
@@ -937,7 +1263,7 @@ impl<'e, 'a> Engine<'e, 'a> {
                 ..
             } => {
                 let seed = self.need(*outer_iter)?.cloned();
-                match cx.child_output(*id, seed) {
+                match cx.child_output(*id, seed, self.child_cells(*id)) {
                     Elem::Unknown => None,
                     item => Some(Ty::container("typing.Generator", Args::items(item))),
                 }
@@ -978,7 +1304,8 @@ impl<'e, 'a> Engine<'e, 'a> {
                 ..
             } => {
                 let seed = self.need(args[0])?.cloned();
-                return item_ty(cx.child_output(comprehension_id(callee), seed));
+                let id = comprehension_id(callee);
+                return item_ty(cx.child_output(id, seed, self.child_cells(id)));
             }
             InstKind::MethodCall {
                 recv,
@@ -1206,6 +1533,9 @@ impl<'e, 'a> Engine<'e, 'a> {
                 Some(Ty::Ref(class) | Ty::Class(class)) => Ty::inst(class.as_str()),
                 _ => return Ok(None),
             },
+            "builtins.type" if args.len() == 1 && call.star_from.is_none() => {
+                return Ok(self.need(args[0])?.and_then(|t| self.class_of(t)));
+            }
             "builtins.sorted" => Ty::container("builtins.list", Args::items(items(0))),
             "builtins.list" | "builtins.set" | "builtins.frozenset" => {
                 Ty::container(fqn, Args::items(items(0)))

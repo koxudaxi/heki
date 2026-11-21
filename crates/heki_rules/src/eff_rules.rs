@@ -798,9 +798,16 @@ fn names_function(patterns: &[DottedPattern], key: &FuncKey) -> bool {
 }
 
 impl Boundary<'_> {
-    /// A function of the boundary's scopes (module bodies are not functions).
+    /// A function of the boundary's scopes, or a module body a scope names as `<module>`
+    /// (`pkg.gen:<module>`): a scope naming its module (`pkg.*`, `pkg.gen:*`) does not cover it.
     fn in_scope(&self, key: &FuncKey) -> bool {
-        key.qualname != "<module>" && names_function(&self.scopes, key)
+        if key.qualname != "<module>" {
+            return names_function(&self.scopes, key);
+        }
+        let fqn = key.fqn();
+        self.scopes
+            .iter()
+            .any(|p| p.names_module_bodies() && p.names_within(&fqn, &key.qualname))
     }
 
     /// A Layer 2 symbol (or one of its modules / classes) that `allowed-callees` names.
@@ -879,7 +886,8 @@ impl Boundary<'_> {
     }
 
     /// Whether `reads-environment` forbids `access`: a call or a read the ecosystem catalog
-    /// tags as one of the environment, or an import probe with `import-probes = "report"`.
+    /// tags as one of the environment, an import of a module not established to be the
+    /// project's, or an import probe with `import-probes = "report"`.
     fn forbids_environment(&self, cx: &CheckContext<'_>, access: &ExternalAccess) -> bool {
         let tagged = |kind| {
             cx.kb
@@ -889,7 +897,10 @@ impl Boundary<'_> {
         };
         self.reads_environment
             && match access.kind {
-                AccessKind::Call => tagged(EnvironmentAccess::Call),
+                AccessKind::Call => {
+                    tagged(EnvironmentAccess::Call)
+                        || tagged(EnvironmentAccess::Import) && !access.imports_project_module
+                }
                 AccessKind::Read => tagged(EnvironmentAccess::Read),
                 AccessKind::ImportProbe => self.import_probes,
             }
@@ -1007,7 +1018,7 @@ pub(crate) fn eff201(
     for unit in cx.units {
         let mut done: FxHashSet<(FuncKey, usize)> = FxHashSet::default();
         for f in &unit.input.ir.functions {
-            if f.is_class_body || f.is_module_body {
+            if f.is_class_body {
                 continue;
             }
             let key = CheckContext::key(unit, f);

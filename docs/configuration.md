@@ -404,7 +404,7 @@ import-probes = "report"
 | Key | Default | Meaning |
 | --- | ------- | ------- |
 | `name` | `""` | The boundary's name in reports. |
-| `scopes` | `[]` | Modules, classes, or functions whose functions must stay inside the boundary; nested functions are included. |
+| `scopes` | `[]` | Modules, classes, or functions whose functions must stay inside the boundary; nested functions are included. A module body is included only where a pattern names `<module>` (`pkg.gen:<module>`, below). |
 | `forbid` | `[]` | What the scope functions must not reach (tokens below). |
 | `write-targets` | `[]` | `Class.attr` targets of `writes-targets`, required with it. `Class.attr["key"]` names one entry, as in `write-owners`. |
 | `read-targets` | `[]` | `Class.attr` targets of `reads-targets`, required with it: reads as `read-owners` sees them, also inside property getters. A container entry is a configuration error. An entry can also name an attribute of a module outside the project by its full name (`sys.platform`, `os.environ`, below). |
@@ -447,7 +447,32 @@ reads: `os.environ`, `os.environb`, `os.name`, `sys.platform`, `sys.version`,
 `os.environ` (`os.environ.get("X")`) is a read of `os.environ`. One report per scope function
 names the first read it reaches and counts every one.
 
+`importlib.import_module(name, package)` and `importlib.util.find_spec(name, package)` read the
+environment unless the module they import is established to be the project's own:
+
+- every text `name` may hold names a module of the project (`"pkg.config"`, a module constant,
+  either of two such texts), or starts with a package of the project and a dot
+  (`f"pkg.parser.{name}"`, `"pkg.parser." + name`, `"pkg.%s" % name`). The longest project
+  module before that dot must be a regular package whose `__init__.py` heki reads and does not
+  rebind `__path__` (`pkgutil.extend_path` lets installed distributions add modules to it);
+- a relative name (`".config"`, `f"..parser.{name}"`) is anchored at `package`: a text the code
+  fixes, or the module's own `__package__` or `__name__`;
+- the call is not inside a `try` with an `except` clause naming `ImportError` or
+  `ModuleNotFoundError`: the code expects the import to fail.
+
+A name heki cannot tell (a parameter, `"pkg" + name`, a namespace package without
+`__init__.py`) stays a read of the environment, and so does an import of a module the project
+does not have. A `call-targets` entry naming `importlib.import_module` matches every call of it.
+
 - Each scope function is checked through any number of calls.
+- A module body, what runs when the module is imported, is checked only where a scope names
+  `<module>` itself: `pkg.gen:<module>` (the body of `pkg.gen`), `pkg.*:<module>` (of every
+  module under `pkg`), `pkg.gen.<module>`, or `<module>` (of every module). `pkg.*` and
+  `pkg.gen:*` keep naming the functions only. The body is checked as a scope function is (its
+  module-level reads, calls, import probes, and writes), and the bodies of its classes, which
+  run with it, count for what they take from outside the project (environment reads, import
+  probes, and the external `call-targets` and `read-targets`), not for their other effects.
+  Reports name it `<module>`.
 - A violation inside another scope function is reported there only, once.
 - One report per scope function and forbidden kind (or target) stands for every distinct site of
   it that the function reaches.
