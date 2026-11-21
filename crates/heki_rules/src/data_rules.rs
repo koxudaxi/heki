@@ -6,15 +6,19 @@ use crate::opt_rules::Sizes;
 use crate::{CheckContext, ModuleUnit};
 use heki_diagnostics::Diagnostic;
 use heki_effect::{CallSite, SiteEffect, TypeCtx};
-use heki_ir::{Inst, InstKind, IrFunction, LoopCarriedInfo, NaturalLoop, VarId};
+use heki_ir::{
+    BinOpKind, BuiltinKind, ConstLiteral, Inst, InstKind, IrFunction, LoopCarriedInfo, NaturalLoop,
+    UnaryOpKind, VarId,
+};
 use heki_kb::ExecEffectKind;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 /// `DATA101`: a loop-carried variable rebuilt *from itself* through a `QuadraticRealloc` API
 /// (`df = pd.concat([df, part])`): one of its accumulating updates (`LoopCarriedInfo::updates`,
 /// the back-edge values computed from the previous value) is such a call, and the previous
 /// value reaches it through the data it combines, not only as the `out=` buffer it writes into
-/// (`out = np.concatenate(parts, out=out)` reuses the buffer). One-shot concatenations inside a
+/// (`out = np.concatenate(parts, out=out)` reuses the buffer) or through arithmetic on it
+/// (`x = np.concatenate((x - d, [a]))` combines a new array). One-shot concatenations inside a
 /// loop, also on a branch that leaves the variable unchanged otherwise, are not updates and are
 /// never reported, and neither is a loop whose trip count the code fixes (`Sizes::data_sized`).
 pub(crate) fn data101(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Diagnostic>) {
@@ -37,6 +41,7 @@ pub(crate) fn data101(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Ve
                 defs.insert(d, inst);
             }
         }
+        let starred = first_starred(f);
         for (lc, _) in accumulating_loops(f)
             .into_iter()
             .filter(|(_, lp)| sizes.data_sized(lp))
@@ -52,7 +57,7 @@ pub(crate) fn data101(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Ve
                     _ => defs.get(v)?,
                 };
                 let call = CallInst::of(&inst.kind)?;
-                if !combines(f, &defs, &call, lc.phi_var) {
+                if !combines(f, &defs, &starred, &call, lc.phi_var) {
                     return None;
                 }
                 let at: &[&CallSite] = sites
@@ -138,10 +143,11 @@ fn carries(f: &IrFunction, v: VarId, previous: VarId) -> bool {
 
 /// Whether `call` reads `previous` through what it combines: its receiver, its positional
 /// arguments, or a keyword argument other than the `out=` destination, followed back through the
-/// instructions and phis that compute them.
+/// phis and the operands each instruction's result may hold ([`held_operands`]).
 fn combines(
     f: &IrFunction,
     defs: &FxHashMap<VarId, &Inst>,
+    starred: &FxHashMap<VarId, usize>,
     call: &CallInst<'_>,
     previous: VarId,
 ) -> bool {
@@ -158,19 +164,217 @@ fn combines(
         .flat_map(|b| &b.phis)
         .map(|p| (p.dst, p))
         .collect();
-    let mut seen: rustc_hash::FxHashSet<VarId> = work.iter().copied().collect();
+    let mut derivations = Derivations::new(defs, starred, previous);
+    let mut seen: FxHashSet<VarId> = work.iter().copied().collect();
     while let Some(v) = work.pop() {
         if v == previous {
             return true;
         }
         let next: Vec<VarId> = match (defs.get(&v), phis.get(&v)) {
-            (Some(def), _) => def.kind.operands(),
+            (Some(def), _) => held_operands(&def.kind, &mut derivations),
             (None, Some(phi)) => phi.incoming.iter().map(|(_, x)| *x).collect(),
             (None, None) => Vec::new(),
         };
         work.extend(next.into_iter().filter(|x| seen.insert(*x)));
     }
     false
+}
+
+/// The operands an instruction's result may hold. An operator holds its operands only as a
+/// builtin container operation: sequence concatenation and repetition (`+`, `*`) and dict
+/// union (`|`); the other operators never hold an array or a frame (sets and dict keys hold
+/// only hashable values). With an operand computed entry by entry from the previous value
+/// ([`FromPrevious::Entrywise`]) it holds neither: an array's or a frame's operator takes
+/// precedence over a list's or a dict's and works on each entry, so `x - np.outer(u, v)` and
+/// `w * x[1:] + c` are new arrays whose every entry changed. A loop that rebuilds its value
+/// that way already does work in proportion to the value's size on every iteration, and there
+/// are no unchanged parts to collect and combine once. An item of such a value is a number or
+/// an array, so it is not held either, though a list it repeats is (`parts * q[0]`).
+fn held_operands(kind: &InstKind, derivations: &mut Derivations<'_>) -> Vec<VarId> {
+    match *kind {
+        InstKind::BinOp {
+            op: BinOpKind::Add | BinOpKind::Mult | BinOpKind::BitOr,
+            lhs,
+            rhs,
+            ..
+        } => {
+            let operands = [(lhs, derivations.of(lhs)), (rhs, derivations.of(rhs))];
+            if operands.iter().any(|(_, p)| *p == FromPrevious::Entrywise) {
+                return Vec::new();
+            }
+            operands
+                .into_iter()
+                .filter(|(_, p)| *p != FromPrevious::Item)
+                .map(|(v, _)| v)
+                .collect()
+        }
+        InstKind::BinOp { .. } | InstKind::UnaryOp { .. } | InstKind::Compare { .. } => Vec::new(),
+        ref other => other.operands(),
+    }
+}
+
+/// How a value is computed from the loop's previous value, which is the result of a reallocating
+/// call: an array or a frame of at least one dimension.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FromPrevious {
+    /// The previous value, a slice of one of these, or an operator result with one as an operand
+    /// (but `@`, which makes a number of two vectors, and `not`): an array or a frame computed
+    /// entry by entry.
+    Entrywise,
+    /// An item of an [`FromPrevious::Entrywise`] value or of another item (`q[0]`).
+    Item,
+    /// Any other value, which may hold the previous value.
+    Other,
+}
+
+/// The [`FromPrevious`] of each value of one function, also through copies and unpacking
+/// (`w, v = q[0], q[1:]` takes `v` from the display). Each answer is kept per value.
+struct Derivations<'a> {
+    defs: &'a FxHashMap<VarId, &'a Inst>,
+    /// The first operand written with `*` of each display ([`first_starred`]).
+    starred: &'a FxHashMap<VarId, usize>,
+    previous: VarId,
+    known: FxHashMap<VarId, FromPrevious>,
+}
+
+impl<'a> Derivations<'a> {
+    fn new(
+        defs: &'a FxHashMap<VarId, &'a Inst>,
+        starred: &'a FxHashMap<VarId, usize>,
+        previous: VarId,
+    ) -> Self {
+        Self {
+            defs,
+            starred,
+            previous,
+            known: FxHashMap::default(),
+        }
+    }
+
+    /// How `v` is computed from the previous value. A value whose inputs lead back to itself
+    /// (copies around dead code) takes its answer from the others.
+    fn of(&mut self, v: VarId) -> FromPrevious {
+        let mut visiting: FxHashSet<VarId> = FxHashSet::default();
+        let mut stack = vec![(v, false)];
+        while let Some((x, expanded)) = stack.pop() {
+            if self.known.contains_key(&x) {
+                continue;
+            }
+            if expanded {
+                let answer = self.derive(x);
+                self.known.insert(x, answer);
+            } else {
+                // Its inputs go above it, and a value being visited is not pushed again, so `x`
+                // is known before any other entry of it comes off the stack.
+                visiting.insert(x);
+                stack.push((x, true));
+                let inputs = self.inputs(x);
+                stack.extend(
+                    inputs
+                        .into_iter()
+                        .filter(|i| !self.known.contains_key(i) && !visiting.contains(i))
+                        .map(|i| (i, false)),
+                );
+            }
+        }
+        self.known[&v]
+    }
+
+    /// The values [`Self::derive`] reads for `v`.
+    fn inputs(&self, v: VarId) -> Vec<VarId> {
+        match self.defs.get(&v).map(|inst| &inst.kind) {
+            Some(InstKind::Copy { src, .. }) => vec![*src],
+            Some(InstKind::SubscriptLoad {
+                obj,
+                index,
+                is_slice,
+                ..
+            }) => vec![self.unpacked_item(*obj, *index, *is_slice).unwrap_or(*obj)],
+            Some(InstKind::BinOp { op, lhs, rhs, .. }) if *op != BinOpKind::MatMult => {
+                vec![*lhs, *rhs]
+            }
+            Some(InstKind::UnaryOp { op, operand, .. }) if *op != UnaryOpKind::Not => {
+                vec![*operand]
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// How `v` is computed from the previous value, once its [`Self::inputs`] are known.
+    fn derive(&self, v: VarId) -> FromPrevious {
+        use FromPrevious::{Entrywise, Item, Other};
+        if v == self.previous {
+            return Entrywise;
+        }
+        let of = |x: &VarId| self.known.get(x).copied().unwrap_or(Other);
+        match self.defs.get(&v).map(|inst| &inst.kind) {
+            Some(InstKind::Copy { src, .. }) => of(src),
+            Some(InstKind::SubscriptLoad {
+                obj,
+                index,
+                is_slice,
+                ..
+            }) => match self.unpacked_item(*obj, *index, *is_slice) {
+                Some(item) => of(&item),
+                None => match (of(obj), is_slice) {
+                    (Entrywise, true) => Entrywise,
+                    (Entrywise | Item, _) => Item,
+                    (Other, _) => Other,
+                },
+            },
+            Some(InstKind::BinOp { op, lhs, rhs, .. })
+                if *op != BinOpKind::MatMult && (of(lhs) == Entrywise || of(rhs) == Entrywise) =>
+            {
+                Entrywise
+            }
+            Some(InstKind::UnaryOp { op, operand, .. })
+                if *op != UnaryOpKind::Not && of(operand) == Entrywise =>
+            {
+                Entrywise
+            }
+            _ => Other,
+        }
+    }
+
+    /// The item an indexing at a constant position takes from a tuple or list display with no
+    /// `*` up to that position.
+    fn unpacked_item(&self, display: VarId, index: VarId, is_slice: bool) -> Option<VarId> {
+        let kind = |v: VarId| self.defs.get(&v).map(|inst| &inst.kind);
+        let (
+            false,
+            Some(InstKind::AllocBuiltin {
+                kind: BuiltinKind::Tuple | BuiltinKind::List,
+                elems,
+                dst,
+            }),
+            Some(InstKind::Const {
+                literal: ConstLiteral::Int(i),
+                ..
+            }),
+        ) = (is_slice, kind(display), kind(index))
+        else {
+            return None;
+        };
+        let i = usize::try_from(*i).ok()?;
+        let item = *elems.get(i)?;
+        self.starred
+            .get(dst)
+            .is_none_or(|&first| first > i)
+            .then_some(item)
+    }
+}
+
+/// The first operand written with `*` (`IrFunction::starred`) of each display or call of `f`.
+fn first_starred(f: &IrFunction) -> FxHashMap<VarId, usize> {
+    let mut first: FxHashMap<VarId, usize> = FxHashMap::default();
+    for &(dst, i) in &f.starred {
+        let i = i as usize;
+        first
+            .entry(dst)
+            .and_modify(|k| *k = (*k).min(i))
+            .or_insert(i);
+    }
+    first
 }
 
 /// The keyword arguments of a call but `out=`, the destination buffer it writes into.
