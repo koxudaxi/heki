@@ -1,8 +1,8 @@
 //! The cost of the analyses past the IR, end to end through the real binary: `isinstance`
 //! narrowing through phis, the passes of the type inference and of the classes of merged values,
 //! the size of the Soundness lane's proof state, the values `EFF107` follows from a task factory,
-//! the walk to the callable a builtin calls once per item, contracts with many call targets, and
-//! the walk to the uses handing a reference to a call target on.
+//! the walk to the callable a builtin calls once per item, contracts with many call targets, the
+//! walk to the uses handing a reference to a call target on, and the locks `EFF109` follows.
 
 mod common;
 
@@ -558,6 +558,108 @@ fn returned_calls_handed_the_previous_result_twice_resolve_each_call_once() {
         .map(|d| d["line"].as_u64().unwrap())
         .collect();
     assert_eq!(lines, vec![6 + calls as u64 + 5]);
+}
+
+/// A function of twelve thousand calls, each handed the previous call's result (`v1 = g(v0)`),
+/// about as many as its IR budget models, with every rule selected: where each argument may come
+/// from (the caller's parameters, objects it constructs) is decided once per value of the
+/// function, not by a walk back down the chain at every call.
+#[test]
+fn calls_each_handed_the_previous_result_find_each_origin_once() {
+    let calls = 12_400;
+    let mut lines = vec![
+        "def g(x):".to_owned(),
+        "    return x".to_owned(),
+        String::new(),
+        String::new(),
+        "def f(p, session):".to_owned(),
+        "    v0 = p".to_owned(),
+    ];
+    for i in 1..=calls {
+        lines.push(format!("    v{i} = g(v{})", i - 1));
+    }
+    lines.push(format!("    return v{calls}"));
+    let p = Project::new("bounds_call_chain");
+    let (_, rules, _) = p.heki(&["rule", "--all", "--output-format", "json"]);
+    let codes: Vec<Value> = serde_json::from_str::<Vec<Value>>(&rules)
+        .unwrap()
+        .into_iter()
+        .map(|rule| rule["code"].clone())
+        .collect();
+    p.write(
+        "pyproject.toml",
+        &format!(
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = {}\n",
+            Value::from(codes)
+        ),
+    )
+    .write("m.py", &(lines.join("\n") + "\n"));
+    // The function stays modeled, so that its calls are analyzed at all.
+    let (_, hazards, _) = p.heki(&["assumptions", "--json", "m.py"]);
+    let hazards: Vec<Value> = serde_json::from_str(&hazards).unwrap();
+    assert!(
+        hazards.iter().all(|h| h["kind"] != "unmodeled"),
+        "{hazards:#?}"
+    );
+    assert!(check_within(&p, Duration::from_secs(20)).is_empty());
+}
+
+/// A client made lazily (`Conn.get`) on an object built before `depth` nested loops over the
+/// data, reached through a thousand calls handing the object on (`c1 = wrap(c0)`, with `wrap`
+/// typed to return a `Conn`) in the innermost loop.
+fn lazy_client_under_nested_loops(depth: usize) -> String {
+    let links = 1_000;
+    let mut lines: Vec<String> = [
+        "import requests",
+        "",
+        "",
+        "class Conn:",
+        "    def __init__(self):",
+        "        self._session = None",
+        "",
+        "    def get(self, url):",
+        "        if self._session is None:",
+        "            self._session = requests.Session()",
+        "        return self._session.get(url)",
+        "",
+        "",
+        "def wrap(c: Conn) -> Conn:",
+        "    return c",
+        "",
+        "",
+        "def scan(urls):",
+        "    c0 = Conn()",
+    ]
+    .map(str::to_owned)
+    .into();
+    for d in 0..depth {
+        lines.push(format!("{}for u{d} in urls:", " ".repeat(4 + d)));
+    }
+    let indent = " ".repeat(4 + depth);
+    for i in 1..=links {
+        lines.push(format!("{indent}c{i} = wrap(c{})", i - 1));
+    }
+    lines.push(format!("{indent}c{links}.get(u0)"));
+    lines.join("\n") + "\n"
+}
+
+/// Where a value comes from inside nested loops is decided once per loop around it, so the walks
+/// grow with the depth of the loops: thirty loops deep (deeper than CPython compiles) they pass
+/// the function's budget, and the object then counts as one the loops may construct, as `EFF102`
+/// counts a call as running on every iteration unless heki shows that it runs once. In one loop
+/// the client is made once per object.
+#[test]
+fn origins_past_the_walk_budget_count_as_made_in_every_loop() {
+    let eff102 = |depth: usize| {
+        let p = Project::new(&format!("bounds_nested_origins_{depth}"));
+        p.write("m.py", &lazy_client_under_nested_loops(depth));
+        check_within(&p, Duration::from_secs(20))
+            .iter()
+            .filter(|d| d["rule_code"] == "EFF102")
+            .count()
+    };
+    assert_eq!(eff102(1), 0);
+    assert_eq!(eff102(30), 1);
 }
 
 /// Comparisons whose two operands are one value (`b1 = b0 == b0`), under an invalidation
@@ -2309,6 +2411,175 @@ fn puts_along_a_chain_of_attributes_resolve_each_attribute_once() {
     );
 }
 
+/// `heki inspect <args> --output-format json` of the project, which must finish within
+/// `limit`.
+fn inspect_within(p: &Project, args: &[&str], limit: Duration) -> Value {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_heki"))
+        .arg("inspect")
+        .args(args)
+        .args(["--output-format", "json"])
+        .current_dir(&p.dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+    let reader = std::thread::spawn(move || {
+        let mut out = Vec::new();
+        stdout.read_to_end(&mut out).unwrap();
+        out
+    });
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if started.elapsed() > limit {
+            child.kill().unwrap();
+            panic!("heki inspect ran past {limit:?}");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(status.code(), Some(0));
+    serde_json::from_slice(&reader.join().unwrap()).unwrap()
+}
+
+/// A lattice thirty levels deep, two functions a level, each calling both of the level below
+/// (2^30 paths up from the bottom): the callers' walk lists each call once.
+#[test]
+fn callers_of_a_diamond_lattice_are_walked_once_each() {
+    let mut lines = vec!["def bottom():".to_owned(), "    return 1".to_owned()];
+    let below = |level: usize| {
+        if level == 0 {
+            vec!["bottom".to_owned()]
+        } else {
+            vec![format!("a{}", level - 1), format!("b{}", level - 1)]
+        }
+    };
+    for level in 0..30 {
+        for side in ["a", "b"] {
+            lines.extend([
+                String::new(),
+                String::new(),
+                format!("def {side}{level}():"),
+            ]);
+            lines.extend(below(level).iter().map(|f| format!("    {f}()")));
+        }
+    }
+    let p = Project::new("bounds_caller_lattice");
+    p.write("m.py", &(lines.join("\n") + "\n"));
+    let r = inspect_within(
+        &p,
+        &["m.bottom", "--callers", "--depth", "64"],
+        Duration::from_secs(20),
+    );
+    // Two calls of `bottom`, then four calls into each later level.
+    assert_eq!(r["callers"]["count"], 2 + 4 * 29);
+    assert_eq!(r["callers"]["truncated"], false);
+}
+
+/// Five thousand methods of one class, each calling the next on `self`, the last changing a
+/// `self` attribute; the call chain of the change, and the walks to an unresolved call and to
+/// a changed module global through as many functions, are walked once.
+#[test]
+fn chains_down_thousands_of_calls_of_one_module_are_walked_once() {
+    let mut lines = vec![
+        "G = 0".to_owned(),
+        String::new(),
+        String::new(),
+        "class C:".to_owned(),
+        "    def __init__(self):".to_owned(),
+        "        self.items = []".to_owned(),
+    ];
+    for i in 0..4_999 {
+        lines.extend([
+            String::new(),
+            format!("    def m{i}(self):"),
+            format!("        self.m{}()", i + 1),
+        ]);
+    }
+    lines.extend([
+        String::new(),
+        "    def m4999(self):".to_owned(),
+        "        self.items.append(1)".to_owned(),
+    ]);
+    for i in 0..4_999 {
+        lines.extend([
+            String::new(),
+            String::new(),
+            format!("def f{i}(x):"),
+            format!("    return f{}(x)", i + 1),
+        ]);
+    }
+    lines.extend([
+        String::new(),
+        String::new(),
+        "def f4999(x):".to_owned(),
+        "    global G".to_owned(),
+        "    G = 1".to_owned(),
+        "    return x.anything()".to_owned(),
+    ]);
+    let p = Project::new("bounds_inspect_chains");
+    p.write("m.py", &(lines.join("\n") + "\n"));
+    let r = inspect_within(&p, &["m.C.m0"], Duration::from_secs(20));
+    let items = &r["changes"]["self_attrs"][0];
+    assert_eq!(items["chain"].as_array().unwrap().len(), 4_999);
+    let f = inspect_within(&p, &["m.f0"], Duration::from_secs(20));
+    assert_eq!(
+        f["changes"]["globals"][0]["chain"]
+            .as_array()
+            .unwrap()
+            .len(),
+        4_999
+    );
+    // Impure: the unknown call does not decide the verdict, but `--callers` walks the module.
+    assert_eq!(f["purity"]["verdict"], "impure");
+    let last = inspect_within(
+        &p,
+        &["m.f4999", "--callers", "--depth", "100"],
+        Duration::from_secs(20),
+    );
+    assert_eq!(last["callers"]["count"], 100);
+}
+
+/// A function choosing one of a thousand module globals before changing it, and one making
+/// three thousand calls that each hand a global to a helper changing its argument: the roots of
+/// a merged value are kept up to a limit, and the calls' hand-offs are looked up by call.
+#[test]
+fn shared_state_of_thousands_of_globals_is_walked_once() {
+    let mut lines: Vec<String> = (0..1_000).map(|i| format!("G{i} = []")).collect();
+    lines.extend([
+        String::new(),
+        String::new(),
+        "def append(xs):".to_owned(),
+        "    xs.append(1)".to_owned(),
+        String::new(),
+        String::new(),
+        "def choose(k):".to_owned(),
+        "    x = G0".to_owned(),
+    ]);
+    for i in 1..1_000 {
+        lines.extend([format!("    if k == {i}:"), format!("        x = G{i}")]);
+    }
+    lines.extend([
+        "    x.append(1)".to_owned(),
+        String::new(),
+        String::new(),
+        "def hand():".to_owned(),
+    ]);
+    lines.extend((0..3_000).map(|i| format!("    append(G{})", i % 1_000)));
+    let p = Project::new("bounds_shared_state");
+    p.write("m.py", &(lines.join("\n") + "\n"));
+    let choose = inspect_within(&p, &["m.choose"], Duration::from_secs(20));
+    assert_eq!(
+        choose["purity"]["because"],
+        serde_json::json!(["changes_globals"])
+    );
+    let hand = inspect_within(&p, &["m.hand"], Duration::from_secs(20));
+    // One entry per global, at its first hand-off.
+    assert_eq!(hand["changes"]["globals"].as_array().unwrap().len(), 1_000);
+}
+
 /// `heki dump-facts` of the project's `m.py`, which must finish within `limit`.
 fn dump_facts_within(p: &Project, limit: Duration) -> Value {
     let started = Instant::now();
@@ -2530,4 +2801,254 @@ fn implementations_past_the_class_bound_are_not_complete() {
     };
     assert_eq!(blocking(3), ["EFF101"]);
     assert_eq!(blocking(300), ["EFF111"]);
+}
+
+/// A project selecting `EFF109` with the class `C` (a helper `helper` taking `self._lock`, and
+/// `count` locks of its own), then the method `body` of `C`.
+fn locked_class(name: &str, count: usize, body: Vec<String>) -> Project {
+    let mut lines = vec![
+        "import threading".to_owned(),
+        String::new(),
+        String::new(),
+        "class C:".to_owned(),
+        "    def __init__(self):".to_owned(),
+        "        self._lock = threading.Lock()".to_owned(),
+    ];
+    lines.extend((0..count).map(|i| format!("        self._l{i} = threading.Lock()")));
+    lines.extend(
+        [
+            "",
+            "    def helper(self):",
+            "        with self._lock:",
+            "            pass",
+            "",
+        ]
+        .map(str::to_owned),
+    );
+    lines.extend(body);
+    let p = Project::new(name);
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nextend-select = [\"EFF109\"]\n",
+    )
+    .write("m.py", &(lines.join("\n") + "\n"));
+    p
+}
+
+/// Thousands of tests of `self`'s state before thousands of acquisitions of one lock and as many
+/// calls: the tests on every path to each block come from one pass over the dominator tree, not
+/// from a walk per acquisition or per call site.
+#[test]
+fn state_tests_before_many_acquisitions_and_calls_take_one_pass() {
+    let n = 2_000;
+    let mut body = vec!["    def run(self):".to_owned()];
+    for i in 0..n {
+        body.push(format!("        if self.f{i}:"));
+        body.push("            return".to_owned());
+    }
+    for _ in 0..n {
+        body.push("        with self._lock:".to_owned());
+        body.push("            self.helper()".to_owned());
+    }
+    let p = locked_class("bounds_lock_tests", 0, body);
+    let found = check_within(&p, Duration::from_secs(20));
+    assert_eq!(
+        found.iter().filter(|d| d["rule_code"] == "EFF109").count(),
+        n
+    );
+}
+
+/// Thousands of locks held at once over thousands of blocks: a block's state is a bit per
+/// acquisition of the function.
+#[test]
+fn many_locks_held_at_once_keep_a_bit_each() {
+    let n = 2_000;
+    let mut body = vec!["    def run(self, xs):".to_owned()];
+    body.extend((0..n).map(|i| format!("        self._l{i}.acquire()")));
+    body.push("        self._lock.acquire()".to_owned());
+    for i in 0..n {
+        body.push(format!("        if xs[{i}]:"));
+        body.push("            self.helper()".to_owned());
+    }
+    let p = locked_class("bounds_many_locks", n, body);
+    let found = check_within(&p, Duration::from_secs(20));
+    assert_eq!(
+        found.iter().filter(|d| d["rule_code"] == "EFF109").count(),
+        n
+    );
+}
+
+/// A project selecting `EFF110` with the module `m` of `lines` after a coroutine `load` using a
+/// session one operation at a time.
+fn fanout_module(name: &str, lines: Vec<String>) -> Project {
+    let mut all = vec![
+        "import asyncio".to_owned(),
+        String::new(),
+        "from sqlalchemy.ext.asyncio import AsyncSession".to_owned(),
+        String::new(),
+        String::new(),
+        "async def load(session: AsyncSession, reader: asyncio.StreamReader):".to_owned(),
+        "    await reader.readline()".to_owned(),
+        "    return await session.execute(\"select 1\")".to_owned(),
+        String::new(),
+        String::new(),
+    ];
+    all.extend(lines);
+    let p = Project::new(name);
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\nrequires-python = \">=3.12\"\n\n[tool.heki.lint]\nextend-select = [\"EFF110\"]\n",
+    )
+    .write("m.py", &(all.join("\n") + "\n"));
+    p
+}
+
+/// Thousands of fan-outs of one function on one session: whether the session is used before each
+/// comes from one dataflow per object, not one per fan-out.
+#[test]
+fn many_fanouts_of_one_session_decide_it_once() {
+    let n = 2_000;
+    let mut lines =
+        vec!["async def run(session: AsyncSession, xs, reader: asyncio.StreamReader):".to_owned()];
+    for _ in 0..n {
+        lines.push("    await asyncio.gather(load(session, None), load(session, None))".to_owned());
+    }
+    let p = fanout_module("bounds_many_fanouts", lines);
+    let found = check_within(&p, Duration::from_secs(20));
+    // The first fan-out can be the session's first operation; after it, every path has used it.
+    assert_eq!(
+        found.iter().filter(|d| d["rule_code"] == "EFF110").count(),
+        1
+    );
+}
+
+/// Hundreds of fan-outs of one function, each of a comprehension the function builds itself
+/// (Python 3.12): what each list holds comes from one scan of the function, not one per fan-out.
+/// Each comprehension is a loop the summaries model too, so the count stays where a debug build
+/// runs the whole check well within the limit.
+#[test]
+fn many_comprehension_fanouts_scan_the_function_once() {
+    let n = 500;
+    let mut lines =
+        vec!["async def run(session: AsyncSession, xs, reader: asyncio.StreamReader):".to_owned()];
+    for _ in 0..n {
+        lines.push("    await asyncio.gather(*[load(session, x) for x in xs])".to_owned());
+    }
+    let p = fanout_module("bounds_many_comprehension_fanouts", lines);
+    let found = check_within(&p, Duration::from_secs(20));
+    assert_eq!(
+        found.iter().filter(|d| d["rule_code"] == "EFF110").count(),
+        1
+    );
+}
+
+/// Thousands of tasks a task group starts in one loop: whether a value is the loop's own comes
+/// from one scan of the loop.
+#[test]
+fn many_tasks_of_one_loop_scan_it_once() {
+    let n = 2_000;
+    let mut lines = vec![
+        "async def run(session: AsyncSession, xs, reader: asyncio.StreamReader):".to_owned(),
+        "    async with asyncio.TaskGroup() as tg:".to_owned(),
+        "        for x in xs:".to_owned(),
+    ];
+    for i in 0..n {
+        lines.push(format!("            r{i} = x.r{i}"));
+        lines.push(format!("            tg.create_task(load(r{i}, r{i}))"));
+    }
+    let p = fanout_module("bounds_many_tasks", lines);
+    assert!(
+        check_within(&p, Duration::from_secs(20))
+            .iter()
+            .all(|d| d["rule_code"] != "EFF110")
+    );
+}
+
+/// `links` functions in one module, each making `calls` other calls and handing its argument to
+/// the next, the last changing it in place, below a function with a read-only parameter.
+fn argument_handed_down(links: usize, calls: usize) -> String {
+    let other = vec!["g()"; calls].join("; ");
+    let mut lines = vec![
+        "from collections.abc import Sequence".to_owned(),
+        String::new(),
+        String::new(),
+        "def g():".to_owned(),
+        "    pass".to_owned(),
+        String::new(),
+        String::new(),
+        "def entry(xs: Sequence[int]):".to_owned(),
+        "    f0(xs)".to_owned(),
+    ];
+    for i in 0..links - 1 {
+        lines.extend([
+            String::new(),
+            String::new(),
+            format!("def f{i}(x):"),
+            format!("    {other}; f{}(x)", i + 1),
+        ]);
+    }
+    lines.extend([
+        String::new(),
+        String::new(),
+        format!("def f{}(x):", links - 1),
+        "    x.append(1)".to_owned(),
+    ]);
+    lines.join("\n") + "\n"
+}
+
+/// The chain of a parameter's change through twelve thousand functions of one module, each
+/// with ten other calls: the walk to the function whose body makes the change indexes the
+/// module's calls by caller once, not once per function it passes.
+#[test]
+fn a_change_handed_down_through_one_module_indexes_its_calls_once() {
+    let p = Project::new("bounds_change_chain");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT110\"]\n",
+    )
+    .write("m.py", &argument_handed_down(12_000, 10));
+    let found = check_within(&p, Duration::from_secs(20));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0]["rule_code"], "MUT110");
+    assert_eq!(found[0]["related"].as_array().unwrap().len(), 12_000);
+}
+
+/// Eight thousand functions of one module, each handing its read-only parameter to a helper
+/// that changes it itself, and to one that hands it to that helper: the reports' chains share
+/// one index of the module's calls, and a chain that ends at its first function indexes none.
+#[test]
+fn many_reports_into_one_module_share_its_index_of_calls() {
+    let mut lines = vec![
+        "from collections.abc import Sequence".to_owned(),
+        String::new(),
+        String::new(),
+        "def change(x):".to_owned(),
+        "    x.append(1)".to_owned(),
+        String::new(),
+        String::new(),
+        "def relay(x):".to_owned(),
+        "    change(x)".to_owned(),
+    ];
+    for i in 0..8_000 {
+        lines.extend([
+            String::new(),
+            String::new(),
+            format!("def entry{i}(xs: Sequence[int]):"),
+            "    change(xs)".to_owned(),
+            "    relay(xs)".to_owned(),
+        ]);
+    }
+    let p = Project::new("bounds_change_chains_into_one_module");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT110\"]\n",
+    )
+    .write("m.py", &(lines.join("\n") + "\n"));
+    let found = check_within(&p, Duration::from_secs(20));
+    assert_eq!(found.len(), 16_000);
+    let hops: Vec<usize> = found
+        .iter()
+        .map(|d| d["related"].as_array().unwrap().len())
+        .collect();
+    assert_eq!(hops.iter().filter(|&&n| n == 2).count(), 8_000);
 }

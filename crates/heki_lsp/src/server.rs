@@ -221,6 +221,7 @@ impl State {
             },
             &self.selectors,
             None,
+            true,
         );
         self.pending.clear();
         let mut files: BTreeSet<PathBuf> =
