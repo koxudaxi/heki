@@ -112,12 +112,20 @@ impl ModuleLayout {
     /// The layout of the project at `root`: the `src` setting's directories, else the ones ty
     /// detects ([`detect_source_roots`]).
     pub fn detect(root: &Path, cfg: &HekiConfig) -> Self {
+        Self::detect_without(root, cfg, &|_| false)
+    }
+
+    /// [`Self::detect`] with the files `gone` names counted absent, although the disk may still
+    /// list them: a deletion the editor reported (on Windows a deleted file stays listed until
+    /// its last handle closes).
+    pub fn detect_without(root: &Path, cfg: &HekiConfig, gone: &dyn Fn(&Path) -> bool) -> Self {
+        let is_file = |p: &Path| p.is_file() && !gone(p);
         let source_roots: Vec<String> = match &cfg.src {
             Some(dirs) => dirs.iter().filter(|d| !d.is_empty()).cloned().collect(),
-            None => detect_source_roots(root, cfg.project_name.as_deref()),
+            None => source_roots(root, cfg.project_name.as_deref(), &is_file),
         };
         Self {
-            root_is_package: source_roots.is_empty() && root.join("__init__.py").is_file(),
+            root_is_package: source_roots.is_empty() && is_file(&root.join("__init__.py")),
             source_roots,
         }
     }
@@ -138,11 +146,11 @@ impl ModuleLayout {
 /// A directory that is not a package (no `__init__.py`, or a stub for one). As a source root it
 /// holds the project's top-level packages, namespace packages, and modules (`src/` is the layout
 /// packaging tools install from); a regular package is imported by its own name (`src.pkg`).
-fn is_source_dir(dir: &Path) -> bool {
+fn is_source_dir(dir: &Path, is_file: &dyn Fn(&Path) -> bool) -> bool {
     dir.is_dir()
         && !["__init__.py", "__init__.pyi"]
             .iter()
-            .any(|f| dir.join(f).is_file())
+            .any(|f| is_file(&dir.join(f)))
 }
 
 /// The source roots ty detects without a configured one: `src`, `<project-name>` when
@@ -150,13 +158,22 @@ fn is_source_dir(dir: &Path) -> bool {
 /// is not a package. `project_name` is `project.name` of the `pyproject.toml`, else the root's
 /// own name.
 pub fn detect_source_roots(root: &Path, project_name: Option<&str>) -> Vec<String> {
+    source_roots(root, project_name, &Path::is_file)
+}
+
+/// [`detect_source_roots`], with `is_file` telling which package markers are there.
+fn source_roots(
+    root: &Path,
+    project_name: Option<&str>,
+    is_file: &dyn Fn(&Path) -> bool,
+) -> Vec<String> {
     let own_name = root.file_name().and_then(|n| n.to_str());
     let named = project_name
         .or(own_name)
         .filter(|name| root.join(name).join(name).is_dir());
     let mut roots: Vec<String> = Vec::new();
     for dir in ["src"].into_iter().chain(named).chain(["python"]) {
-        if is_source_dir(&root.join(dir)) && !roots.iter().any(|r| r == dir) {
+        if is_source_dir(&root.join(dir), is_file) && !roots.iter().any(|r| r == dir) {
             roots.push(dir.to_owned());
         }
     }
