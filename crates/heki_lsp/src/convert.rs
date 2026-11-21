@@ -1,6 +1,8 @@
 //! heki diagnostics → LSP diagnostics and code actions (docs/lsp.md).
 //!
-//! - `Diagnostic.message` → the LSP message; `Diagnostic.related` →
+//! - `Diagnostic.message` → the LSP message, with ` [heuristic]` after it for a heuristic rule
+//!   (`data.certainty` says it for every rule), and the rule's page as `codeDescription`;
+//!   `Diagnostic.related` →
 //!   `DiagnosticRelatedInformation` (every call-chain hop), then `Diagnostic.help` as one more
 //!   entry at the diagnostic's own range (`help: ...`), as rust-analyzer shows a `help:` child.
 //! - `Diagnostic.fix` of `safe` + `unconditional` rules → `quickfix`; size-dependent `OPT`
@@ -15,9 +17,9 @@ use heki_rules::find_rule;
 use std::collections::HashMap;
 use std::path::Path;
 use tower_lsp::lsp_types::{
-    CodeAction, CodeActionKind, DiagnosticRelatedInformation, DiagnosticSeverity, DocumentChanges,
-    Location, NumberOrString, OneOf, OptionalVersionedTextDocumentIdentifier, Position, Range,
-    TextDocumentEdit, TextEdit, Url, WorkspaceEdit,
+    CodeAction, CodeActionKind, CodeDescription, DiagnosticRelatedInformation, DiagnosticSeverity,
+    DocumentChanges, Location, NumberOrString, OneOf, OptionalVersionedTextDocumentIdentifier,
+    Position, Range, TextDocumentEdit, TextEdit, Url, WorkspaceEdit,
 };
 
 /// Code action kind of size-dependent `OPT` rewrites.
@@ -86,13 +88,19 @@ pub fn diagnostic(
         })
         .chain(help)
         .collect();
+    let page = find_rule(&d.rule_code).and_then(|r| Url::parse(&r.page_url()).ok());
     tower_lsp::lsp_types::Diagnostic {
         range: own_range,
         severity: Some(severity(d.severity)),
         code: Some(NumberOrString::String(d.rule_code.clone())),
+        code_description: page.map(|href| CodeDescription { href }),
         source: Some("heki".into()),
-        message: d.message.clone(),
+        message: match d.certainty.label() {
+            Some(label) => format!("{} [{label}]", d.message),
+            None => d.message.clone(),
+        },
         related_information: (!related.is_empty()).then_some(related),
+        data: Some(serde_json::json!({ "certainty": d.certainty })),
         ..Default::default()
     }
 }
@@ -261,6 +269,7 @@ mod tests {
             rule_slug: "loop-list-concat".into(),
             target: "x".into(),
             severity: Severity::Error,
+            certainty: heki_diagnostics::Certainty::Exact,
             message: "m".into(),
             help: None,
             evidence: None,

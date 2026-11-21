@@ -533,6 +533,9 @@ pub struct PathReader<'r> {
     pub bindings: Option<&'r ModuleBindings>,
     /// The module `module` has a member `attr` (the catalog's word, or the project's code).
     pub module_member: &'r dyn Fn(&str, &str) -> bool,
+    /// The value `obj` has the attribute `attr` whenever the code runs, so looking it up does not
+    /// raise: a method or attribute of its class, by the catalog or the project's code.
+    pub attribute_found: &'r dyn Fn(VarId, &str) -> bool,
     /// Whether the `__exit__` (`__aexit__`) of the context manager `mgr` may suppress an
     /// exception: `Known(false)` when it returns a false value on every path.
     pub exit_suppresses: &'r dyn Fn(VarId) -> Answer<bool>,
@@ -544,12 +547,16 @@ impl PathReader<'_> {
         fn no_member(_: &str, _: &str) -> bool {
             false
         }
+        fn no_attribute(_: VarId, _: &str) -> bool {
+            false
+        }
         fn may_suppress(_: VarId) -> Answer<bool> {
             Answer::Open
         }
         PathReader {
             bindings: None,
             module_member: &no_member,
+            attribute_found: &no_attribute,
             exit_suppresses: &may_suppress,
         }
     }
@@ -585,17 +592,7 @@ impl PathReader<'_> {
                 is_lazy_import: false,
                 ..
             } => !bindings.binds(name),
-            InstKind::AttrLoad { obj, attr, .. } => !ix
-                .source(*obj)
-                .and_then(|o| match &o.kind {
-                    InstKind::LoadGlobal {
-                        name,
-                        is_lazy_import: false,
-                        ..
-                    } => bindings.modules.get(name),
-                    _ => None,
-                })
-                .is_some_and(|m| (self.module_member)(m, attr)),
+            InstKind::AttrLoad { obj, attr, .. } => self.lookup_raises(ix, *obj, attr),
             InstKind::AllocBuiltin {
                 dst,
                 kind: crate::BuiltinKind::List | crate::BuiltinKind::Tuple,
@@ -603,6 +600,27 @@ impl PathReader<'_> {
             } => (0..elems.len()).any(|i| ix.f.is_starred(*dst, i)),
             _ => true,
         }
+    }
+}
+
+impl PathReader<'_> {
+    /// Whether looking up the attribute `attr` of `obj` may raise (an attribute load, or the
+    /// lookup a method call makes before it calls anything): unless `obj` is a module a plain
+    /// `import` binds once and `attr` one of its members, or the reader finds the attribute.
+    pub fn lookup_raises(&self, ix: &FnIndex<'_>, obj: VarId, attr: &str) -> bool {
+        let Some(bindings) = self.bindings else {
+            return true;
+        };
+        let module = ix.source(obj).and_then(|o| match &o.kind {
+            InstKind::LoadGlobal {
+                name,
+                is_lazy_import: false,
+                ..
+            } => bindings.modules.get(name),
+            _ => None,
+        });
+        let member = module.is_some_and(|m| (self.module_member)(m, attr));
+        !member && !(self.attribute_found)(obj, attr)
     }
 }
 
@@ -659,6 +677,8 @@ pub struct Paths<'p, 'a> {
     first_raise: Vec<u32>,
     /// Per block, where an exception it raises goes in this function (`None`: out of it).
     exception_to: Vec<Option<BlockId>>,
+    /// The method calls whose lookup of the method may raise before anything is called.
+    lookups_raise: FxHashSet<(BlockId, usize)>,
     /// The budget of the owner reading these facts.
     budget: &'p Budget,
     on_return: OnceCell<Answer<Dominance>>,
@@ -684,10 +704,28 @@ impl<'p, 'a> Paths<'p, 'a> {
             .iter()
             .map(|bb| exception_target(f, bb.exc_target, reader))
             .collect();
+        let lookups_raise = f
+            .blocks
+            .iter()
+            .flat_map(|bb| {
+                bb.insts
+                    .iter()
+                    .enumerate()
+                    .map(move |(i, inst)| (bb.id, i, inst))
+            })
+            .filter(|(_, _, inst)| match &inst.kind {
+                InstKind::MethodCall { recv, method, .. } => {
+                    reader.lookup_raises(ix, *recv, method)
+                }
+                _ => false,
+            })
+            .map(|(b, i, _)| (b, i))
+            .collect();
         Self {
             ix,
             first_raise,
             exception_to,
+            lookups_raise,
             budget,
             on_return: OnceCell::new(),
             on_iteration: RefCell::new(FxHashMap::default()),
@@ -716,6 +754,16 @@ impl<'p, 'a> Paths<'p, 'a> {
         let Some(lp) = self.ix.f.loops.get(li) else {
             return Answer::Open;
         };
+        // A loop no path reaches (a decided branch excludes it) has no iteration at all.
+        let reached = self
+            .on_return
+            .get_or_init(|| self.dominance(Region::Function))
+            .as_ref()
+            .map(|d| d.must(lp.header, false));
+        match reached {
+            Answer::Known(Must::Dead) | Answer::Open => return reached,
+            Answer::Known(_) => {}
+        }
         let (block, tail) = self.node_at(at, progress);
         if let Some(known) = self.on_iteration.borrow().get(&li) {
             return known.as_ref().map(|d| d.must(block, tail));
@@ -727,14 +775,18 @@ impl<'p, 'a> Paths<'p, 'a> {
     }
 
     /// The node that is passed exactly when the point is: the head while no raising
-    /// instruction before it (or, for `Returned`, at it) has run.
+    /// instruction before it (or, for `Returned`, at it) has run. A method call whose lookup of
+    /// the method may raise has made no call until the lookup returned: it is called only after
+    /// a raising step of its own.
     fn node_at(&self, (block, index): (BlockId, usize), progress: Progress) -> (BlockId, bool) {
         let first = self
             .first_raise
             .get(block.0 as usize)
             .copied()
             .unwrap_or(u32::MAX) as usize;
-        let tail = first < index || (first == index && progress == Progress::Returned);
+        let past_its_own_step =
+            progress == Progress::Returned || self.lookups_raise.contains(&(block, index));
+        let tail = first < index || (first == index && past_its_own_step);
         (block, tail)
     }
 

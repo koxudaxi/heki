@@ -101,8 +101,13 @@ def in_with(open_, p, sub):
         "every",
         "not_every",
     );
-    // A caught hop may raise before it reaches what it calls.
-    expect("caught_hop", "db.get_setting(\"k\")", "every", "not_every");
+    // Looking up a method of an object of unknown class may raise before anything is called.
+    expect(
+        "caught_hop",
+        "db.get_setting(\"k\")",
+        "not_every",
+        "not_every",
+    );
     expect("caught_hop", "db.fetch(raw)", "every", "every");
     // A handler of an earlier `try` returns without the call.
     expect("earlier_try", "t.join(cwd)", "not_every", "not_every");
@@ -110,7 +115,7 @@ def in_with(open_, p, sub):
     expect(
         "receiver_first",
         "conn.execute(\"q\")",
-        "every",
+        "not_every",
         "not_every",
     );
     expect(
@@ -120,7 +125,7 @@ def in_with(open_, p, sub):
         "not_every",
     );
     // A `with` whose manager heki does not resolve may suppress what its body raises.
-    expect("in_with", "fh.read()", "every", "not_every");
+    expect("in_with", "fh.read()", "not_every", "not_every");
     expect("in_with", "sub.run(data)", "not_every", "not_every");
 }
 
@@ -154,7 +159,7 @@ fn a_call_runs_on_every_iteration_that_completes() {
             "{text}"
         );
     };
-    expect("json.loads(row)", "every", "not_every");
+    expect("json.loads(row)", "not_every", "not_every");
     // The handler goes on to the next item without the call.
     expect("db.execute(v)", "not_every", "not_every");
     expect("db.first(row)", "every", "every");

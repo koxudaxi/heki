@@ -2,9 +2,13 @@
 
 # readonly-type-mutation (MUT108)
 
-Family: Mutation & State (MUT) · Opt-in · Severity `error` · No automatic fix
+Family: Mutation & State (MUT) · Heuristic · Opt-in · Severity `error` (a bug) · No automatic fix
 
 Opt-in: changing in place a field that a standard type declares read-only (frozen dataclass / `NamedTuple` / `dataclass_transform` fields, `Final` / `ReadOnly` attributes, `ReadOnly` `TypedDict` keys), directly, through an alias, or in a helper.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs only when `select` or `extend-select` names its code or name. It has not been measured yet. See [Rule Precision](../precision.md).
 
 ## What it does
 Checks in-place changes of containers held in fields that a standard type declares read-only,
@@ -51,6 +55,20 @@ of `attrs` and Pydantic (heki does not analyze installed packages, so it cannot 
 transform); properties with a setter; `TypedDict` values read through `.get()`
 (`movie.get("names")`); and objects whose class heki cannot see (an `Any` or unannotated
 receiver).
+
+## What a report states
+
+A report states that the code changes in place a container held in a field that a standard type
+declares read-only, directly, through an alias, or through the helpers shown.
+
+Its premises:
+
+- **Read-only field**: the class declares the field read-only (frozen dataclass, `NamedTuple`,
+  `dataclass_transform`, `Final`, `ReadOnly`). Established from the declarations.
+- **Instance**: the object is an instance of the class or of a subclass, by construction or
+  annotation (assumption R2).
+- **Changed in place**: an item store, a mutator method, or a helper changing its argument. Open
+  through a helper: a change on one of its paths is enough.
 
 ## Why is this bad?
 A frozen dataclass or a `NamedTuple` promises immutable instances, so code shares them freely: as

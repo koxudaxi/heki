@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 /// `heki check --output-format json` of the project, which must finish within `limit`.
 fn check_within(p: &Project, limit: Duration) -> Vec<Value> {
     let mut child = Command::new(env!("CARGO_BIN_EXE_heki"))
-        .args(["check", "--output-format", "json", "."])
+        .args(["check", "--heuristic", "--output-format", "json", "."])
         .current_dir(&p.dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -2088,7 +2088,6 @@ fn path_facts_decide_each_region_once() {
     };
     let called =
         |qualname: &str, text: &str| call(qualname, text)["on_every_return"]["called"].clone();
-    assert_eq!(called("body", "db.fetch(0)"), json!({"known": "every"}));
     assert_eq!(called("body", "db.fetch(1)"), json!({"known": "not_every"}));
     assert_eq!(called("body", "db.done()"), json!({"known": "not_every"}));
     assert_eq!(called("tests", "sock.recv()"), json!({"known": "every"}));

@@ -23,9 +23,14 @@ OPT103 = "warning"
 ## Where heki finds the configuration
 
 1. The project root is the nearest directory at or above the first path given (the current
-   directory when no path is given) that holds `heki.toml`, `.heki.toml`, `pyproject.toml`, or
-   `.git`. When none does, it is the first path's own directory (the directory given, or the
-   given file's directory).
+   directory when no path is given) that holds `heki.toml`, `.heki.toml`, or `pyproject.toml`.
+   The search stops at the top of the enclosing Git working tree (the directory holding `.git`):
+   a configuration above it belongs to another project. Without a configuration file, the root
+   is the current directory, as Ruff and ty take it, when it holds the first path; but never a
+   directory above the top of the Git working tree (then the root is that top), and outside the
+   current directory and any Git working tree it is the first path's own directory (the
+   directory given, or the given file's directory). The language server takes its workspace
+   folder for the current directory.
 2. heki reads the first of `heki.toml`, `.heki.toml`, and `pyproject.toml` in that directory. A
    `pyproject.toml` without `[tool.heki]` still marks the root: its project gets the defaults.
 3. `--config <path>` names the file instead. The project root stays where step 1 finds it.
@@ -53,20 +58,32 @@ heki never ignores a setting. These are configuration errors (exit code 2):
 - a heki setting at the top level of a `pyproject.toml` (`[[ecosystem]]` instead of
   `[[tool.heki.ecosystem]]`).
 
-### Module names follow the project root
+### Module names follow the source roots
 
-Module names are the paths below the project root (`app/api.py` is `app.api`; a `src/` layout
-drops `src`). heki resolves the imports between the project's modules by these names, and they
-appear in messages that name a function by its full name and in the `target`s of
-[baseline](adoption.md#ratchet-baselines) entries, whose `path`s are relative to the root too.
-Without a `heki.toml`, `.heki.toml`, or `pyproject.toml` in the project's directory or above it,
-the root is the top of the enclosing Git working tree (the directory holding `.git`), so the
-names depend on where the project sits in the checkout: in a repository, `services/api/app.py`
-is `services.api.app`, and its `from helpers import slow` does not find
-`services/api/helpers.py`; the same files checked out on their own are `app` and `helpers`.
-Without any of them and outside a Git working tree, `heki check pkg` is rooted inside the
-package: its modules are `a` and `b`, not `pkg.a` and `pkg.b`, and `from pkg.b import slow` is
-not resolved. Put a `pyproject.toml` or a `heki.toml` in the project's directory to fix the root.
+Module names are the paths below a source root (`app/api.py` is `app.api` below the project
+root, `src/acme/io.py` is `acme.io` below `src`). heki resolves the imports between the
+project's modules by these names, and they appear in messages that name a function by its full
+name and in the `target`s of [baseline](adoption.md#ratchet-baselines) entries, whose `path`s
+are relative to the project root.
+
+- The `src` setting lists the source roots: directories relative to the project root, like
+  Ruff's `src` and ty's `environment.root`. A file below several of them is named below the
+  deepest one, and a file below none is named below the project root. `src` does not accept
+  globs yet (Ruff's does): list the directories.
+- Without `src`, heki detects the source roots as ty does: `src`, the directory named after the
+  project (`project.name` of the `pyproject.toml`, else the root's own name) when it holds a
+  directory of the same name (`acme/acme/`), and `python` (the maturin layout), each when it is
+  a directory and not a package (no `__init__.py`). A source root that is a package is imported
+  by its own name (`src.helpers`).
+- Other layouts need `src`: a subdirectory application whose directories are imported as
+  top-level packages (`backend/config/env.py` imported as `config.env`) takes
+  `src = ["backend"]`, and a `lib/` layout (`lib/matplotlib`) takes `src = ["lib"]`.
+
+Without a configuration file the project root is where heki runs (see above): in a repository
+without one, `heki check` run in `services/api/` names `services/api/app.py` `app`, and its
+`from helpers import slow` finds `services/api/helpers.py`; run from the top of the repository,
+the same file is `services.api.app` and the import is not resolved. Put a `pyproject.toml` or a
+`heki.toml` in the project's directory to fix the root wherever heki runs.
 
 ## Top-level settings
 
@@ -75,6 +92,7 @@ not resolved. Put a `pyproject.toml` or a `heki.toml` in the project's directory
 | `target-version` | the oldest version `project.requires-python` admits, else `py312` | Python version of the code: `py311` … `py315` (or `3.11` … `3.15`). `--target-version` overrides it. See [below](#the-default-target-version) for the inference and [Scope](scope.md#the-target-python-version) for what the version changes. |
 | `exclude` | the Ruff defaults (`.git`, `.venv`, `build`, `dist`, `node_modules`, …) | Replaces the excluded paths: globs, matched against the project-relative path and each of its components, and covering everything below a matched directory. |
 | `extend-exclude` | `[]` | Adds excluded paths. |
+| `src` | the detected source roots | Source roots, relative to the project root: the module names of the files below each are relative to it (`src = ["lib"]` names `lib/pkg/net.py` `pkg.net`). See [Module names follow the source roots](#module-names-follow-the-source-roots). |
 | `baseline` | none | Ratchet baseline file, relative to the project root, used when `--baseline` is not given: by `heki check`, `--watch`, and the language server. See [Ratchet baselines](adoption.md#ratchet-baselines). |
 
 ### The default target version
@@ -103,36 +121,54 @@ supported version that every clause admits:
 
 | Key | Default | Meaning |
 | --- | ------- | ------- |
-| `select` | every rule except the opt-in ones | Rules to enable instead of the defaults. An empty list enables no rule before `extend-select`, as in Ruff. |
+| `select` | the exact rules and the contract rules | Rules to enable instead of the defaults. An empty list enables no rule before `extend-select`, as in Ruff. |
 | `extend-select` | `[]` | Rules to add. |
 | `ignore` | `[]` | Rules to disable. |
 | `per-file-ignores` | `{}` | Glob → rules disabled in matching files (project-relative POSIX paths). As in Ruff, `*` also matches `/`: `scripts/*.py` covers `scripts/tools/worker.py` too. |
-| `severity` | `"warning"` for the `OPT` rules, `"error"` for the others | Rule → `"error"` or `"warning"`. It changes the output and the SARIF level; both make `heki check` fail. |
+| `severity` | `"warning"` for the rules that report slower code (`EFF101`, `EFF102`, `EFF103`, `EFF105`, `DATA101`, and the `OPT` rules), `"error"` for the others, which report bugs | Rule → `"error"` or `"warning"`. It changes the output and the SARIF level; both make `heki check` fail. |
 | `relax-async-in-tests` | `true` | Skip `EFF101`, `EFF105`, and `EFF106` in `test_*` functions and in files under `tests/`. |
+| `heuristic` | `false` | Whether the heuristic rules that are not opt-in run by default and for a prefix or `ALL`, as the exact rules do. `--heuristic` and `--no-heuristic` override it. |
 
 - A rule is named by its code (`EFF101`), its name (`async-blocking-call`), a code prefix
   (`EFF`, `MUT2`), or `ALL`. An unknown rule is a configuration error.
-- A prefix or `ALL` enables only the default rules. The opt-in rules (`EFF105`, `EFF106`,
-  `EFF107`, `MUT101`, `MUT103`, `MUT106`, `MUT108`, `MUT111`, `MUT112`, `MUT113`) need their
-  exact code or name. In `ignore`, a prefix covers every rule it matches.
-- The command line wins: `--select` replaces `select`, and `--extend-select` and `--ignore` add
-  to the configured lists.
+- Every rule is exact or heuristic ([Rule Precision](precision.md)). The defaults, a prefix, and
+  `ALL` enable the exact rules and the contract rules; with `heuristic = true` they also enable
+  the heuristic rules that are not opt-in, as Ruff's `preview` does. Its code or name enables a
+  heuristic rule either way.
+- An exact rule's report that did not establish every premise of its claim (an `OPT` report
+  whose rewrite is not proven) is heuristic, and is shown where a heuristic rule would run: with
+  `heuristic = true`, or when its code or name is selected.
+- A run of `full` or `concise` output that leaves heuristic rules off, or heuristic reports out,
+  says how many.
+- A prefix or `ALL` never enables the opt-in rules (`EFF105`, `EFF106`, `EFF107`, `MUT101`,
+  `MUT103`, `MUT106`, `MUT108`, `MUT111`, `MUT112`, `MUT113`): they need their exact code or
+  name. In `ignore`, a prefix covers every rule it matches.
+- The command line wins: `--select` replaces `select`, `--extend-select` and `--ignore` add to the
+  configured lists, and `--heuristic` / `--no-heuristic` replace `heuristic`.
+
+```toml
+[tool.heki.lint]
+heuristic = true   # also the heuristic rules that are not opt-in
+```
 
 ## Contracts
 
 Contracts declare what no type can say. Each kind is an array of tables with its own rule:
 
-| Contract | Declares | Rule |
-| -------- | -------- | ---- |
-| [`write-owners`](#write-owners) | who may write an attribute | `MUT201`; `MUT205` with `unresolved = "report"` |
-| [`read-owners`](#read-owners) | who may read an attribute | `MUT203`; `MUT206` with `unresolved = "report"` |
-| [`call-owners`](#call-owners) | who may call a function or construct a class | `MUT204`; `MUT207` with `unresolved = "report"` |
-| [`effect-boundaries`](#effect-boundaries) | what a scope must not reach: I/O, writes, reads, or calls | `EFF201` |
-| [`readonly-returns`](#readonly-returns) | results every caller shares | `MUT202` |
-| [`invalidation`](#invalidation) | writes that must be announced | `MUT109` |
+| Contract | Declares | Rule | Certainty |
+| -------- | -------- | ---- | --------- |
+| [`write-owners`](#write-owners) | who may write an attribute | `MUT201`; `MUT205` with `unresolved = "report"` | heuristic |
+| [`read-owners`](#read-owners) | who may read an attribute | `MUT203`; `MUT206` with `unresolved = "report"` | heuristic |
+| [`call-owners`](#call-owners) | who may call a function or construct a class | `MUT204`; `MUT207` with `unresolved = "report"` | heuristic |
+| [`effect-boundaries`](#effect-boundaries) | what a scope must not reach: I/O, writes, reads, or calls | `EFF201` | heuristic |
+| [`readonly-returns`](#readonly-returns) | results every caller shares | `MUT202` | heuristic |
+| [`invalidation`](#invalidation) | writes that must be announced | `MUT109` | heuristic |
 
 - These rules report nothing until a contract exists, except `MUT202`, which also protects the
   results of `@lru_cache` / `@cache` functions.
+- Declaring a contract selects its rule, whatever its certainty. `MUT202`, which also reports
+  without a contract, is selected like the heuristic rules that are not opt-in: by its code or
+  name, or with `lint.heuristic = true`.
 - Every name in a contract is a dotted pattern. It matches the full name or any dotted suffix
   (`DataModel.fields` matches `pkg.model.DataModel.fields`, not `pkg.BigModel.fields`), and it
   may be a glob (`*`, `?`, `[...]`, `{a,b}`).

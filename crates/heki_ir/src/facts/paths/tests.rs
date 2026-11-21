@@ -35,10 +35,13 @@ fn facts_with(
         .expect("function");
     let ix = FnIndex::new(f, &ir.constants);
     let bindings = ModuleBindings::of(&ir);
-    let member = |m: &str, a: &str| m == "os" && a == "path";
+    let member = |m: &str, a: &str| matches!((m, a), ("os", "path") | ("subprocess", "run"));
+    // The reader's types: `conn` holds an object whose `execute` the catalog lists.
+    let found = |obj: VarId, a: &str| f.var_name(obj) == Some("conn") && a == "execute";
     let reader = PathReader {
         bindings: Some(&bindings),
         module_member: &member,
+        attribute_found: &found,
         exit_suppresses: suppresses,
     };
     let budget = Budget::of_function("test", f);
@@ -141,6 +144,12 @@ def module_member(p):
     except TypeError:
         return None
 
+def lookup_raises(obj):
+    try:
+        obj.fetch()
+    except AttributeError:
+        return None
+
 def subscript_first(cache, db, k):
     try:
         db.fetch(cache[k])
@@ -163,7 +172,8 @@ def never_returns(db):
         ("branch", "db.fetch", NOT_EVERY, NOT_EVERY),
         // The call's own exception still means it was called; the handler takes it after.
         ("own_handler", "subprocess.run", EVERY, NOT_EVERY),
-        ("hop_caught", "db.get_setting", EVERY, NOT_EVERY),
+        // Looking up `get_setting` on an object of unknown class may raise before any call.
+        ("hop_caught", "db.get_setting", NOT_EVERY, NOT_EVERY),
         // A handler of an earlier `try` returns without the call.
         ("earlier_try", "t.join", NOT_EVERY, NOT_EVERY),
         // The receiver's call runs before `fetchall` in the same statement.
@@ -178,7 +188,8 @@ def never_returns(db):
         ("argument_first", "conn.send", NOT_EVERY, NOT_EVERY),
         ("subscript_first", "db.fetch", NOT_EVERY, NOT_EVERY),
         // A member of a module bound by `import` does not.
-        ("module_member", "os.path.join", EVERY, NOT_EVERY),
+        ("module_member", "os.path.join", NOT_EVERY, NOT_EVERY),
+        ("lookup_raises", "obj.fetch()", NOT_EVERY, NOT_EVERY),
         ("handler_reraises", "db.fetch", EVERY, EVERY),
         ("never_returns", "db.fetch", NEVER, NEVER),
     ] {
@@ -267,7 +278,8 @@ def loops(rows, db, json):
         ("db.sometimes", NOT_EVERY, NOT_EVERY),
         // The handler of `json.loads` goes on to the next item without the call.
         ("db.after_try", NOT_EVERY, NOT_EVERY),
-        ("json.loads", EVERY, NOT_EVERY),
+        // `json` is a parameter here: looking up `loads` on it may raise before the call.
+        ("json.loads", NOT_EVERY, NOT_EVERY),
         // An iteration that breaks does not complete.
         ("db.before_break", EVERY, EVERY),
         // No iteration completes: every one leaves the loop.
@@ -584,12 +596,25 @@ def f(sock, flag, conn, row, db):
 fn a_member_of_an_imported_module_is_known_only_to_a_reader_that_says_so() {
     let src = r#"
 import os
+import subprocess
 
 def f(p):
     with open(p):
         pass
     try:
+        subprocess.run(p)
+    except TypeError:
+        return None
+
+def joined(p):
+    try:
         os.path.join(p)
+    except TypeError:
+        return None
+
+def executed(p, conn):
+    try:
+        conn.execute(p)
     except TypeError:
         return None
 "#;
@@ -599,19 +624,32 @@ def f(p):
     let bindings = ModuleBindings::of(&ir);
     let budget = Budget::of_function("test", f);
     let paths = Paths::new(&ix, &PathReader::with_bindings(&bindings), &budget);
-    let at = f
-        .blocks
-        .iter()
-        .find_map(|bb| {
-            let i = bb.insts.iter().position(
-                |i| matches!(&i.kind, InstKind::MethodCall { method, .. } if method == "join"),
-            )?;
-            Some((bb.id, i))
-        })
-        .unwrap();
-    assert_eq!(paths.on_every_return(at, Progress::Called), NOT_EVERY);
-    let (called, _, _) = facts(src, "f", "os.path.join(p)");
-    assert_eq!(called, EVERY);
+    let at = |name: &str| {
+        f.blocks
+            .iter()
+            .find_map(|bb| {
+                let i = bb.insts.iter().position(
+                    |i| matches!(&i.kind, InstKind::MethodCall { method, .. } if method == name),
+                )?;
+                Some((bb.id, i))
+            })
+            .unwrap()
+    };
+    assert_eq!(
+        paths.on_every_return(at("run"), Progress::Called),
+        NOT_EVERY
+    );
+    // With the reader's catalog: `subprocess.run` is a member of the module, and `conn` holds an
+    // object whose class has `execute`. `os.path` is a member too, but `join` is looked up on
+    // the value it gives, which no reader here knows.
+    for (name, call, called) in [
+        ("f", "subprocess.run(p)", EVERY),
+        ("executed", "conn.execute(p)", EVERY),
+        ("joined", "os.path.join(p)", NOT_EVERY),
+    ] {
+        let (c, _, _) = facts(src, name, call);
+        assert_eq!(c, called, "{call}");
+    }
 }
 
 #[test]
@@ -626,4 +664,45 @@ def f(db, xs):
 "#;
     let (called, _, _) = facts(src, "f", "db.fetch(join(xs))");
     assert_eq!(called, NOT_EVERY);
+}
+
+#[test]
+fn a_loop_a_decided_branch_excludes_has_no_iteration() {
+    let src = r#"
+def f(db, rows):
+    if False:
+        while db.check():
+            db.step()
+    for r in rows:
+        db.each(r)
+"#;
+    let ir = build(src);
+    let f = ir.functions.iter().find(|f| f.name == "f").unwrap();
+    let ix = FnIndex::new(f, &ir.constants);
+    let budget = Budget::of_function("test", f);
+    let paths = Paths::new(&ix, &PathReader::ir(), &budget);
+    let at = |method: &str| {
+        f.blocks
+            .iter()
+            .find_map(|bb| {
+                let i = bb.insts.iter().position(
+                    |i| matches!(&i.kind, InstKind::MethodCall { method: m, .. } if m == method),
+                )?;
+                Some((bb.id, i))
+            })
+            .unwrap()
+    };
+    let check = at("check");
+    let dead_loop = ix.shape().innermost_index(check.0).unwrap();
+    assert_eq!(paths.on_every_return(check, Progress::Called), DEAD);
+    assert_eq!(
+        paths.on_every_iteration(dead_loop, check, Progress::Called),
+        DEAD
+    );
+    let each = at("each");
+    let live_loop = ix.shape().innermost_index(each.0).unwrap();
+    assert_eq!(
+        paths.on_every_iteration(live_loop, each, Progress::Returned),
+        EVERY
+    );
 }

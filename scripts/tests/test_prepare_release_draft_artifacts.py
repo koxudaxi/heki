@@ -494,11 +494,30 @@ def test_generated_files(path: str, generated: bool) -> None:
     assert artifacts.is_generated(path) is generated
 
 
+@pytest.mark.parametrize(
+    ("marks", "state"),
+    [
+        ("", "enabled by default"),
+        ("\N{HAMMER AND WRENCH}\N{VARIATION SELECTOR-16}", "enabled by default"),
+        ("\N{ELECTRIC PLUG}", "opt-in"),
+        ("\N{ALMOST EQUAL TO} \N{ELECTRIC PLUG} \N{TEST TUBE}", "opt-in"),
+        ("\N{ALMOST EQUAL TO}", "heuristic, off by default"),
+        ("\N{ALMOST EQUAL TO} \N{SCROLL}", "enabled by default"),
+        ("\N{SCROLL}", "enabled by default"),
+    ],
+)
+def test_a_rule_runs_by_default_unless_opt_in_or_heuristic_outside_a_contract(
+    marks: str, state: str
+) -> None:
+    row = f"| EFF102 | [loop-unpooled-client](loop-unpooled-client.md) | A client. | {marks} |\n"
+    assert artifacts.rules(row) == {"EFF102": f"loop-unpooled-client, {state}"}
+
+
 def test_the_registry_readers_parse_the_real_documentation() -> None:
     """The readers match the layout of the documentation this checkout generates."""
     root = Path(__file__).resolve().parents[2]
     rules = artifacts.rules((root / "docs/rules/index.md").read_text(encoding="utf-8"))
-    assert rules["EFF101"] == "async-blocking-call, enabled by default"
+    assert rules["MUT201"] == "write-owner-violation, enabled by default"
     assert rules["MUT103"] == "summary-effect-regression, opt-in"
     assert "--fix" in artifacts.options(
         (root / "docs/cli-reference.md").read_text(encoding="utf-8")
