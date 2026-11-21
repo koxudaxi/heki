@@ -93,7 +93,10 @@ Compound expressions are flattened into **basic instructions in explicit left-to
   every path of which leaves) is lowered into blocks without predecessors that end in
   `Unreachable`: no merge, back edge, or handler takes a value from it. A loop there has no
   entry edge: the SSA lookup of a name gives a phi to a block with one predecessor that it
-  reaches again, as to a join, so its walk around such a cycle ends.
+  reaches again, as to a join, so its walk around such a cycle ends. Its phis stay even when
+  they merge one value besides themselves (only a block a path reaches drops such a phi for that
+  value): a value the loop computes from itself (`d = d.x`) is defined through the phi, so every
+  cycle of definitions passes through a phi, which the walks along definitions rely on.
 - **Exception edges carry the bindings of the point that raised**: inside a `try` or `with`
   body a name is never rebound after an instruction that may raise in the same block
   (`InstKind::may_raise`; the binding starts a new block), so a handler's phi merges the
@@ -223,7 +226,7 @@ the targets of write and read boundaries.
 
 | Priority | Source | Confidence | Example |
 |---|---|---|---|
-| 1 | Local constructors and direct imports (relative imports, `src/` layout, re-exports) | Exact | `requests.get(u)`, `client = httpx.Client(); client.get(u)` |
+| 1 | Local constructors and direct imports (relative imports, source roots, re-exports) | Exact | `requests.get(u)`, `client = httpx.Client(); client.get(u)` |
 | 2 | PEP 484 annotations (parameters, locals, return types, attributes), container item types, and return annotations along the MRO; `isinstance` narrowing and unions of up to three classes | Typed | `def f(repo: UserRepo, db: Session): db.execute(...)`, `for m in models: m.save()` with `models: list[Model]` |
 | 3 | `self.attr = Cls(...)` in `__init__` and similar | Typed | `self.http = httpx.Client()`, then `self.http.get(...)` in another method |
 | 4 | Same-name methods in the class hierarchy (CHA / RTA); a project `Protocol` dispatches to its structural implementations | Heuristic | Concrete subclasses of an abstract base (more than 8 candidates: unresolved) |
@@ -243,10 +246,12 @@ annotation is what awaiting it gives (`await`, and the target of `async with`), 
 future or a task gives an untracked result. The catalog types an external awaitable by what
 awaiting it gives.
 
-Module names come from project-relative paths (`pkg/mod.py` → `pkg.mod`, `pkg/__init__.py` →
-`pkg`). A `src/` directory that is not itself a package (no `src/__init__.py`) is a source root:
-`src/acme/io.py` is `acme.io`, for regular and namespace packages and for modules directly under
-`src/`. A module name that several files share is defined by one of them, in full and
+Module names come from the paths below a source root (`pkg/mod.py` → `pkg.mod`,
+`pkg/__init__.py` → `pkg`), the deepest one holding the file, else the project root. The `src`
+setting lists the source roots; without it they are detected as ty detects them: `src/`, the
+directory named after the project when it holds one of the same name (`acme/acme/`), and
+`python/`, each when it is not itself a package (no `__init__.py`). `src/acme/io.py` is
+`acme.io`, for regular and namespace packages and for modules directly under `src/`. A module name that several files share is defined by one of them, in full and
 incremental analysis alike: an implementation before its `.pyi` stub, a package
 (`pkg/__init__.py`) before a module file of the same name (`pkg.py`, which Python does not import
 next to it), then the greater path. A relative import resolves inside the packages it climbs; one
