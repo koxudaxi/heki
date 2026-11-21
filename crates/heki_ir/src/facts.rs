@@ -31,6 +31,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use std::cell::{OnceCell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 /// The most items a container display, or a loop's fixed trip count, may have to count as
 /// small: enough for the tables code spells out by hand (the months, the HTTP methods, a list
@@ -161,13 +162,14 @@ pub struct ModuleConstants {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub comprehensions: BTreeMap<u32, SmallDisplay>,
     /// String constants (`SCHEMA = "CREATE TABLE ..."`). A string is immutable, so the name
-    /// holds this text whatever the code does with it.
+    /// holds this text whatever the code does with it. A name bound to another (`OLD =
+    /// SCHEMA`) shares its text.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub strs: BTreeMap<String, String>,
+    pub strs: BTreeMap<String, Arc<str>>,
     /// Tuple displays of string constants, their items in order (`STATEMENTS = ("CREATE ...",
-    /// ...)`): a tuple is immutable too.
+    /// ...)`): a tuple is immutable too. Aliases and items share the texts.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub str_tuples: BTreeMap<String, Vec<String>>,
+    pub str_tuples: BTreeMap<String, Arc<[Arc<str>]>>,
     /// Names of the builtins the facts rely on (`range`, `len`, ...) that the module rebinds.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub shadowed: BTreeSet<String>,
@@ -1264,34 +1266,6 @@ impl<'a> FnIndex<'a> {
         Some(inst)
     }
 
-    /// The string constant `v` holds.
-    fn str_constant(&self, v: VarId) -> Option<String> {
-        match &self.source(v)?.kind {
-            InstKind::Const {
-                literal: ConstLiteral::Str(s),
-                ..
-            } => Some(s.clone()),
-            _ => None,
-        }
-    }
-
-    /// The items of the tuple display of string constants `v` holds.
-    fn str_tuple(&self, v: VarId) -> Option<Vec<String>> {
-        match &self.source(v)?.kind {
-            InstKind::AllocBuiltin {
-                dst,
-                kind: BuiltinKind::Tuple,
-                elems,
-            } => (elems.iter().enumerate())
-                .map(|(i, e)| {
-                    self.str_constant(*e)
-                        .filter(|_| !self.f.is_starred(*dst, i))
-                })
-                .collect(),
-            _ => None,
-        }
-    }
-
     /// The value of an integer expression the code fixes: a literal, a module constant, or
     /// `+`, `-`, `*` and negation of them.
     pub fn const_int(&self, v: VarId) -> Option<i64> {
@@ -1964,6 +1938,65 @@ fn range_len(args: &[i64]) -> Option<i64> {
 
 // ---------------------------------------------------------------------------- module pass
 
+/// The size of a string or a tuple of `len` items, when it is small.
+fn immutable_display(kind: BuiltinKind, len: usize) -> Option<SmallDisplay> {
+    let len = u32::try_from(len).ok().filter(|n| *n <= SMALL_MAX)?;
+    Some(SmallDisplay {
+        kinds: vec![kind],
+        len,
+    })
+}
+
+/// The texts of a module's string constants and tuples of them ([`ModuleConstants::strs`],
+/// [`ModuleConstants::str_tuples`]), one allocation per string or tuple the module writes: a
+/// name bound to another (`S1 = S0`) and a tuple item share it, so the tables grow with the
+/// source, not with its aliases.
+#[derive(Default)]
+struct SharedTexts {
+    /// By the string's `Const`.
+    texts: FxHashMap<VarId, Arc<str>>,
+    /// By the tuple's display.
+    tuples: FxHashMap<VarId, Arc<[Arc<str>]>>,
+}
+
+impl SharedTexts {
+    /// The string constant `v` holds.
+    fn text(&mut self, ix: &FnIndex<'_>, v: VarId) -> Option<Arc<str>> {
+        match &ix.source(v)?.kind {
+            InstKind::Const {
+                dst,
+                literal: ConstLiteral::Str(s),
+            } => Some(
+                self.texts
+                    .entry(*dst)
+                    .or_insert_with(|| Arc::from(s.as_str()))
+                    .clone(),
+            ),
+            _ => None,
+        }
+    }
+
+    /// The items of the tuple display of string constants `v` holds.
+    fn tuple(&mut self, ix: &FnIndex<'_>, v: VarId) -> Option<Arc<[Arc<str>]>> {
+        let InstKind::AllocBuiltin {
+            dst,
+            kind: BuiltinKind::Tuple,
+            elems,
+        } = &ix.source(v)?.kind
+        else {
+            return None;
+        };
+        if let Some(items) = self.tuples.get(dst) {
+            return Some(items.clone());
+        }
+        let items: Arc<[Arc<str>]> = (elems.iter().enumerate())
+            .map(|(i, e)| self.text(ix, *e).filter(|_| !ix.f.is_starred(*dst, i)))
+            .collect::<Option<_>>()?;
+        self.tuples.insert(*dst, items.clone());
+        Some(items)
+    }
+}
+
 /// The id of the comprehension function a call runs (`__comp_<id>`, a comprehension before
 /// 3.12).
 fn comprehension_id(callee_var: Option<VarId>, callee: &str) -> Option<u32> {
@@ -2023,6 +2056,7 @@ fn module_constants(
     let mut ints = BTreeMap::new();
     let mut strs = BTreeMap::new();
     let mut str_tuples = BTreeMap::new();
+    let mut shared = SharedTexts::default();
     let mut candidates: Vec<(String, SmallDisplay)> = Vec::new();
     for bb in &module.blocks {
         if module.is_in_loop(bb.id) {
@@ -2040,15 +2074,23 @@ fn module_constants(
             {
                 continue;
             }
+            // A string constant, or a tuple of them, is one entry: its text, whose length is its
+            // size (both are immutable, whatever their uses).
             if let Some(n) = ix.const_int(*value) {
                 ints.insert(name.clone(), n);
+            } else if let Some(text) = shared.text(&ix, *value) {
+                candidates.extend(
+                    immutable_display(BuiltinKind::Str, text.chars().count())
+                        .map(|d| (name.clone(), d)),
+                );
+                strs.insert(name.clone(), text);
+            } else if let Some(items) = shared.tuple(&ix, *value) {
+                candidates.extend(
+                    immutable_display(BuiltinKind::Tuple, items.len()).map(|d| (name.clone(), d)),
+                );
+                str_tuples.insert(name.clone(), items);
             } else if let Some(d) = ix.stored_display(*value, (bb.id, i)) {
                 candidates.push((name.clone(), d));
-            }
-            if let Some(text) = ix.str_constant(*value) {
-                strs.insert(name.clone(), text);
-            } else if let Some(items) = ix.str_tuple(*value) {
-                str_tuples.insert(name.clone(), items);
             }
         }
     }

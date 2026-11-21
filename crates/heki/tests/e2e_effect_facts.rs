@@ -203,6 +203,38 @@ fn ddl_built_at_run_time_or_taken_from_constants_is_ddl() {
     assert_eq!(lines(&p, "EFF103"), reported);
 }
 
+const SCHEMA_OWNER: &str = r#"import sqlite3
+
+SQL = "CREATE TABLE t (x)"
+STATEMENTS = ("CREATE TABLE u (x)",)
+
+
+def setup(conn: sqlite3.Connection, rows: list[int]) -> None:
+    for row in rows:
+        conn.execute(SQL)
+        for statement in STATEMENTS:
+            conn.execute(statement)
+"#;
+
+#[test]
+fn a_constant_another_module_rebinds_is_no_fixed_statement() {
+    let p = Project::new("ddl_rebound_elsewhere");
+    p.write("pkg/__init__.py", "");
+    p.write("pkg/db.py", SCHEMA_OWNER);
+    // Reading the constants elsewhere leaves them DDL.
+    p.write(
+        "pkg/other.py",
+        "from pkg import db\n\n\ndef peek():\n    return db.SQL, db.STATEMENTS\n",
+    );
+    assert_eq!(lines(&p, "EFF103"), Vec::<u64>::new());
+    // Another module rebinding them may make them queries.
+    p.write(
+        "pkg/other.py",
+        "from pkg import db\n\n\ndef reconfigure():\n    db.SQL = \"SELECT 1\"\n    db.STATEMENTS = (\"SELECT 1\",)\n",
+    );
+    assert_eq!(lines(&p, "EFF103"), vec![9, 11]);
+}
+
 #[test]
 fn a_reentrant_lock_stays_held_after_a_nested_with_exits() {
     let p = Project::new("reentrant_lock");

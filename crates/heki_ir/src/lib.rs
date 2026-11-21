@@ -1274,4 +1274,24 @@ def outer(xs):
         assert!(build("from os.path import *\n").has_star_import);
         assert!(!build("from os.path import join\nimport os\n").has_star_import);
     }
+
+    /// A name bound to another string or tuple constant, and a tuple item naming a string
+    /// constant, share its text: the tables keep one copy of each text the module writes.
+    #[test]
+    fn aliased_text_constants_share_one_text() {
+        let src =
+            "S0 = \"CREATE TABLE t (x)\"\nS1 = S0\nS2 = S1\nT0 = (S0, \"DROP TABLE t\")\nT1 = T0\n";
+        let constants = build(src).constants;
+        let s0 = &constants.strs["S0"];
+        for alias in ["S1", "S2"] {
+            assert!(
+                std::sync::Arc::ptr_eq(s0, &constants.strs[alias]),
+                "{alias}"
+            );
+        }
+        let t0 = &constants.str_tuples["T0"];
+        assert!(std::sync::Arc::ptr_eq(t0, &constants.str_tuples["T1"]));
+        assert!(std::sync::Arc::ptr_eq(s0, &t0[0]));
+        assert_eq!(&*t0[1], "DROP TABLE t");
+    }
 }

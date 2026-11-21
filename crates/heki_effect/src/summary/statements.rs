@@ -5,6 +5,8 @@ use super::Extractor;
 use crate::resolver::Callee;
 use heki_ir::{BinOpKind, BuiltinKind, InstKind, ModuleConstants, VarId};
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::collections::BTreeMap;
+use std::sync::Arc;
 
 /// DB-API (PEP 249) methods, and SQLAlchemy's `exec_driver_sql`, whose first argument is the
 /// statement they run.
@@ -33,10 +35,10 @@ const MAX_DEPTH: u32 = 64;
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum Text {
     /// The whole text.
-    Whole(String),
+    Whole(Arc<str>),
     /// How the text starts: a literal followed by values only known at run time (`f"ALTER
     /// TABLE {name}"`, `"DROP TABLE %s" % name`).
-    Head(String),
+    Head(Arc<str>),
 }
 
 impl Text {
@@ -166,15 +168,15 @@ impl Extractor<'_> {
     /// loop over constant texts yields.
     fn source_texts(&self, v: VarId, walk: &mut Walk) -> Option<Vec<Text>> {
         if let Some(s) = self.const_str(v) {
-            return Some(vec![Text::Whole(s)]);
+            return Some(vec![Text::Whole(Arc::from(s))]);
         }
         if let Some(head) = self.f.str_head(v) {
-            return Some(vec![Text::Head(head.to_owned())]);
+            return Some(vec![Text::Head(Arc::from(head))]);
         }
         match &self.defs.get(&v)?.kind {
-            InstKind::LoadGlobal { name, .. } => {
-                Some(vec![Text::Whole(self.constants().strs.get(name)?.clone())])
-            }
+            InstKind::LoadGlobal { name, .. } => Some(vec![Text::Whole(
+                self.fixed(name, &self.constants().strs)?.clone(),
+            )]),
             // A local read before it is bound raises: no statement runs on that path.
             InstKind::LoadName { .. } if !self.f.is_module_body && !self.f.is_class_body => {
                 Some(Vec::new())
@@ -276,7 +278,7 @@ impl Extractor<'_> {
                 Some(out)
             }
             InstKind::LoadGlobal { name, .. } => Some(
-                (self.constants().str_tuples.get(name)?.iter())
+                (self.fixed(name, &self.constants().str_tuples)?.iter())
                     .map(|s| Text::Whole(s.clone()))
                     .collect(),
             ),
@@ -303,12 +305,21 @@ impl Extractor<'_> {
                         Some(sep) => whole.split(sep.as_str()).collect(),
                         None => lines(&whole).collect(),
                     };
-                    out.extend(pieces.into_iter().map(|p| Text::Whole(p.to_owned())));
+                    out.extend(pieces.into_iter().map(|p| Text::Whole(Arc::from(p))));
                 }
                 Some(out)
             }
             _ => None,
         }
+    }
+
+    /// The entry of the module constant `name` in `table`, unless another module rebinds or
+    /// deletes the name (`db.SQL = "SELECT 1"`, `ProjectDecls::rebound_elsewhere`). Nothing
+    /// else other code does with a string or a tuple changes it.
+    fn fixed<'t, T>(&self, name: &str, table: &'t BTreeMap<String, T>) -> Option<&'t T> {
+        let entry = table.get(name)?;
+        let fqn = format!("{}.{name}", self.cx.module_name());
+        (!self.cx.project.rebound_elsewhere(&fqn)).then_some(entry)
     }
 
     /// The constants of this module (`ModuleIr::constants`).

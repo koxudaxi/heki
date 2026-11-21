@@ -202,7 +202,9 @@ Compound expressions are flattened into **basic instructions in explicit left-to
   - `IrFunction.starred` marks starred display elements, `BasicBlock.term_span` the source of a
     block's terminator (blocker lines point at it), and `ModuleIr.constants`
     (`ModuleConstants`) the module's constant integers, displays, strings, and tuples of
-    strings.
+    strings. A string constant, or a tuple of them, is one entry: its text (`strs` /
+    `str_tuples`, one `Arc<str>` per string the module writes, which aliases and items share),
+    whose length gives its display.
   - The Soundness lane reads these facts within one module only (`FnIndex`). The Advisory rules
     read other modules' small displays through the declarations (`ModuleDecls.small_globals`,
     `ClassDecl.attr_displays`), so the language server re-checks their users when they change.
