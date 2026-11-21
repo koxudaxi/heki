@@ -1076,6 +1076,42 @@ fn transfer(
     }
     // A generator passed to a callee that iterates it runs there.
     t.iterates_params |= caller_params(facts.iterates_params, bc);
+
+    // d. The locks the callee takes on the caller's thread or task, in the caller's names,
+    //    behind the tests of state on every path to the call too; and the names it may bind.
+    if let Some(callee) = facts.locks.as_deref() {
+        for (lock, acq) in &callee.acquires {
+            if let Some((lock, mut acq)) = crate::locks::through_call(
+                site,
+                bc,
+                lock,
+                acq,
+                lead,
+                rewrite,
+                own_writes,
+                &index.param_capacities,
+            ) {
+                if let Some(tests) = &site.state_tests {
+                    crate::locks::add_owner_tests(&mut acq, &lock, tests);
+                }
+                crate::locks::add_acquisition(&mut t.lock_facts_mut().acquires, lock, acq);
+            }
+        }
+        let rebinds: Vec<_> = (callee.rebinds.iter())
+            .filter_map(|name| name.through(bc))
+            .collect();
+        if !rebinds.is_empty() {
+            t.lock_facts_mut().rebinds.extend(rebinds);
+        }
+    }
+
+    // e. The objects the callee uses one operation at a time, in the caller's names.
+    for (obj, u) in facts.exclusive_uses() {
+        if let Some((obj, u)) = crate::one_at_a_time::through_call(site, bc, obj, u, lead, rewrite)
+        {
+            crate::one_at_a_time::add_use(t.exclusive_uses_mut(), obj, u);
+        }
+    }
 }
 
 /// The typed writes a call hands its caller: an `IndirectHelper` site for each typed field or

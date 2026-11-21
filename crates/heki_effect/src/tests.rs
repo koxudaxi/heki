@@ -773,6 +773,8 @@ fn gate_5_handbuilt_file_summaries() {
         result_discarded: false,
         queues: None,
         result_held: false,
+        state_tests: None,
+        under_lock: false,
         complete: false,
         on_every_return: crate::OnEveryReturn::default(),
     });
@@ -1422,6 +1424,8 @@ fn callers_left_without_a_defining_file_are_skipped() {
         result_discarded: false,
         queues: None,
         result_held: false,
+        state_tests: None,
+        under_lock: false,
         complete: false,
         on_every_return: crate::OnEveryReturn::default(),
     });
@@ -1453,6 +1457,8 @@ fn callers_left_without_a_defining_file_are_skipped() {
         result_discarded: false,
         queues: None,
         result_held: false,
+        state_tests: None,
+        under_lock: false,
         complete: false,
         on_every_return: crate::OnEveryReturn::default(),
     });
@@ -1482,6 +1488,8 @@ fn callers_left_without_a_defining_file_are_skipped() {
         result_discarded: false,
         queues: None,
         result_held: false,
+        state_tests: None,
+        under_lock: false,
         complete: false,
         on_every_return: crate::OnEveryReturn::default(),
     });

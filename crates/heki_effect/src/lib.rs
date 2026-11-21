@@ -28,9 +28,12 @@ pub mod consumption;
 mod contracts;
 mod environment;
 pub mod guards;
+pub mod held;
 mod infer;
 mod invalidation;
 pub mod iterations;
+pub mod locks;
+pub mod one_at_a_time;
 pub mod ownership;
 mod query;
 pub mod readonly;
@@ -54,6 +57,8 @@ pub use iterations::{
     BetweenSteps, ContainerChange, ContainerIteration, IteratedContainer, IteratedResult,
     IterationFacts, ResultIteration,
 };
+pub use locks::{LockAcquire, LockFacts, ObjRef, SiteLock, StateTests};
+pub use one_at_a_time::ExclusiveUse;
 pub use ownership::{LocalOrigins, Origins, ResultOf, ReturnOrigins};
 pub use query::{CallsByCaller, ChangeChain, ParamChange};
 pub use readonly::{
@@ -234,7 +239,7 @@ pub fn owned_chain(chain: &[Arc<CallHop>]) -> Vec<CallHop> {
 }
 
 /// Zero the position of every hop of a kept chain (a hop shared with other chains is copied).
-fn zero_hop_spans(chain: &mut [Arc<CallHop>]) {
+pub(crate) fn zero_hop_spans(chain: &mut [Arc<CallHop>]) {
     for hop in chain {
         Arc::make_mut(hop).span = Span { start: 0, end: 0 };
     }
@@ -696,6 +701,17 @@ pub struct EffectSummary {
     /// The function's own reads and calls heki cannot tie to a class (`MUT206`, `MUT207`; never
     /// propagated).
     pub unresolved_access_sites: BTreeSet<UnresolvedAccessSite>,
+    /// The `EFF109` facts: the non-reentrant locks the function takes and the names it may
+    /// bind (`None` when it does neither, as most functions; read through
+    /// [`Self::lock_facts`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locks: Option<Box<LockFacts>>,
+    /// The `EFF110` facts: the objects allowing one operation at a time the function uses when
+    /// its body runs, itself or through the calls that run there on its task, in its own names,
+    /// unless it holds a lock there (`None` when it uses none, as most functions; read through
+    /// [`Self::exclusive_uses`]; propagated).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exclusive: Option<Box<BTreeMap<ObjRef, ExclusiveUse>>>,
 
     // Async offload & Sync-over-Async relaxation (dcg empirical findings)
     pub offloads_blocking_params: u64,
@@ -911,6 +927,9 @@ impl EffectSummary {
             w.hop.span = Span { start: 0, end: 0 };
         }
         out.iterations = out.iterations.map(|f| Box::new(f.without_locations()));
+        out.locks = out.locks.map(|l| Box::new(l.without_locations()));
+        out.exclusive =
+            (out.exclusive).map(|uses| Box::new(one_at_a_time::without_locations(&uses)));
         out.iterated = out.iterated.map(|i| Box::new(i.without_locations()));
         if let Some(r) = &mut out.returns_protected {
             zero_hop_spans(&mut r.chain);
@@ -976,6 +995,45 @@ impl EffectSummary {
     /// [`Self::iterations`], to add facts to.
     pub(crate) fn iteration_facts_mut(&mut self) -> &mut IterationFacts {
         self.iterations.get_or_insert_with(Box::default)
+    }
+
+    /// [`Self::locks`], empty when there are none.
+    pub fn lock_facts(&self) -> &LockFacts {
+        self.locks.as_deref().unwrap_or(&locks::NO_LOCK_FACTS)
+    }
+
+    /// [`Self::locks`], to add facts to.
+    pub(crate) fn lock_facts_mut(&mut self) -> &mut LockFacts {
+        self.locks.get_or_insert_with(Box::default)
+    }
+
+    /// Add the `EFF109` facts of `other` ([`LockFacts::absorb`]).
+    pub(crate) fn absorb_lock_facts(&mut self, other: Option<Box<LockFacts>>) {
+        if let Some(other) = other {
+            self.lock_facts_mut().absorb(*other);
+        }
+    }
+
+    /// [`Self::exclusive`], empty when there are none.
+    pub fn exclusive_uses(&self) -> &BTreeMap<ObjRef, ExclusiveUse> {
+        self.exclusive
+            .as_deref()
+            .unwrap_or(&one_at_a_time::NO_EXCLUSIVE_USES)
+    }
+
+    /// [`Self::exclusive`], to add uses to.
+    pub(crate) fn exclusive_uses_mut(&mut self) -> &mut BTreeMap<ObjRef, ExclusiveUse> {
+        self.exclusive.get_or_insert_with(Box::default)
+    }
+
+    /// Add the `EFF110` uses of another summary ([`one_at_a_time::add_use`]).
+    pub(crate) fn absorb_exclusive_uses(
+        &mut self,
+        other: impl IntoIterator<Item = (ObjRef, ExclusiveUse)>,
+    ) {
+        for (obj, u) in other {
+            one_at_a_time::add_use(self.exclusive_uses_mut(), obj, u);
+        }
     }
 
     /// [`Self::return_origins`], empty when there are none.
@@ -1338,6 +1396,15 @@ pub struct CallSite {
     /// suspended (`MUT113`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub result_held: bool,
+    /// The tests of state on every path to the call (`EFF109`: a lock its callees take behind
+    /// a test of state the holder changes is not reported; only computed while the rule runs,
+    /// `None` when there is none).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_tests: Option<Arc<heki_ir::walk::Answer<StateTests>>>,
+    /// The caller certainly holds a lock at the call: what the callees use one operation at a
+    /// time is kept to one task at a time (`EFF110`; only computed while the rule runs).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub under_lock: bool,
     /// The targets are every implementation the call can run under R2 and R5: the receiver
     /// is no protocol, every member of a union resolves, and no project subclass's
     /// implementation is missing. Computed with [`Self::on_every_return`].
@@ -1663,13 +1730,17 @@ pub enum TypedWrites {
 }
 
 /// The facts of the opt-in rules that summaries and propagation compute only when a rule
-/// reads them: `MUT112`'s return origins (`EffectSummary::return_origins`, `ArgOrigin::origins`)
-/// and `MUT113`'s iteration facts (`EffectSummary::iterations`, `CallSite::result_held`).
-/// `CallSite::returned`, which `MUT202` reads too, is always computed.
+/// reads them: `MUT112`'s return origins (`EffectSummary::return_origins`, `ArgOrigin::origins`),
+/// `MUT113`'s iteration facts (`EffectSummary::iterations`, `CallSite::result_held`), `EFF109`'s
+/// lock facts (`EffectSummary::locks`, `CallSite::state_tests`), and `EFF110`'s one-at-a-time
+/// uses (`EffectSummary::exclusive`, `CallSite::under_lock`). `CallSite::returned`, which
+/// `MUT202` reads too, is always computed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OptInFacts {
     pub return_origins: bool,
     pub iterations: bool,
+    pub locks: bool,
+    pub exclusive: bool,
     /// [`EffectSummary::must_exec`] and what computes it at call sites.
     pub must_effects: bool,
 }
@@ -1679,6 +1750,8 @@ impl OptInFacts {
     pub const ALL: Self = Self {
         return_origins: true,
         iterations: true,
+        locks: true,
+        exclusive: true,
         must_effects: true,
     };
 }

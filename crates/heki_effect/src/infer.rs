@@ -175,7 +175,19 @@ pub(crate) struct Scopes {
     enclosing: RefCell<FxHashMap<FunctionId, Rc<Inferred>>>,
     /// What a child scope produces when it iterates a value of a given type.
     outputs: RefCell<FxHashMap<(FunctionId, Option<Ty>), Elem>>,
+    /// Closure -> each function making it, with the values the closure captures there.
+    makers: OnceCell<FxHashMap<FunctionId, Maker>>,
+    /// A closure's variable of an enclosing function: [`TypeCtx::captured`].
+    captured: RefCell<FxHashMap<(FunctionId, String), Option<Captured>>>,
 }
+
+/// The function making a closure, and the values the closure captures there (from the first
+/// copy of its definition: a `finally` body is built once per way out of its `try`).
+type Maker = (FunctionId, Vec<VarId>);
+
+/// The function binding a closure's variable (fully qualified), and the class of the instance it
+/// binds to it, when that is one class ([`TypeCtx::captured`]).
+type Captured = (String, Option<String>);
 
 /// The function id of a non-inlined comprehension call (Python 3.11).
 fn comprehension_id(callee: &str) -> FunctionId {
@@ -246,6 +258,78 @@ impl TypeCtx<'_> {
                 .ty(var)
                 .cloned(),
         )
+    }
+
+    /// What the variable `name` that closure `f` reads from an enclosing function is: the
+    /// function binding it (fully qualified), and the class of the instance every value it
+    /// binds to the name is, when that is one class. `None` when no enclosing function making
+    /// `f` binds it.
+    pub fn captured(&self, f: &IrFunction, name: &str) -> Option<Captured> {
+        let key = (f.id, name.to_owned());
+        if let Some(done) = self.scopes.captured.borrow().get(&key) {
+            return done.clone();
+        }
+        // Nesting has no cycles; the entry only keeps a malformed module from recursing.
+        self.scopes.captured.borrow_mut().insert(key.clone(), None);
+        let out = self.captured_by_makers(f, name);
+        self.scopes.captured.borrow_mut().insert(key, out.clone());
+        out
+    }
+
+    fn captured_by_makers(&self, f: &IrFunction, name: &str) -> Option<Captured> {
+        let makers = self.scopes.makers.get_or_init(|| {
+            let mut out: FxHashMap<FunctionId, Maker> = FxHashMap::default();
+            for g in &self.ir().functions {
+                for inst in g.blocks.iter().flat_map(|b| &b.insts) {
+                    if let InstKind::MakeClosure {
+                        func_id: Some(id),
+                        captured,
+                        ..
+                    } = &inst.kind
+                    {
+                        out.entry(*id).or_insert_with(|| (g.id, captured.clone()));
+                    }
+                }
+            }
+            out
+        });
+        let (maker, captured) = makers.get(&f.id)?;
+        let g = self.ir().function(*maker);
+        // The function making the closure binds the name, or reads it from its own enclosing
+        // function (a closure making another lists only its own variables as captured).
+        let binds = captured.iter().any(|v| {
+            g.var_name(*v) == Some(name)
+                && !matches!(
+                    g.def_inst(*v).map(|(_, i)| &i.kind),
+                    Some(InstKind::LoadDeref { .. })
+                )
+        });
+        if !binds {
+            return self.captured(g, name);
+        }
+        let types = self.infer_types(g);
+        let mut class = None;
+        let mut one = true;
+        for i in g.blocks.iter().flat_map(|b| &b.insts) {
+            let Some(d) = i.kind.dst().filter(|d| g.var_name(*d) == Some(name)) else {
+                continue;
+            };
+            // No value reaches a binding in code no run gets to.
+            match &types.facts[d.0 as usize] {
+                Fact::Unset => {}
+                Fact::Known(t) => match t.val() {
+                    Some(Val::Inst(c)) if class.as_ref().is_none_or(|k| *k == c) => {
+                        class = Some(c);
+                    }
+                    _ => one = false,
+                },
+                Fact::Unknown => one = false,
+            }
+        }
+        Some((
+            format!("{}.{}", self.module_name(), resolver::func_qualname(g)),
+            class.filter(|_| one),
+        ))
     }
 
     /// What child scope `id` produces when it iterates a value of type `seed`: the items a
