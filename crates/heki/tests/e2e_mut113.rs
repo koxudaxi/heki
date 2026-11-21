@@ -1711,3 +1711,227 @@ fn mut113_is_opt_in_suppressible_and_documented() {
     assert!(stdout.contains("iterated-container-mutation"), "{stdout}");
     assert!(stdout.contains("## What it does"), "{stdout}");
 }
+
+/// Changes no iteration's next step sees: a helper that binds the attribute to a new container
+/// before filling it, a store under a key the container holds (a read that replaces the value
+/// it found, an augmented item assignment), and a `defaultdict` read inside a test that the key
+/// is there. Their neighbors count: a helper filling the container the loop steps (and binding
+/// the attribute to other state afterwards), and a read storing a missing key.
+const SETTLED: &str = r#"import collections
+
+
+class Reader:
+    def __init__(self) -> None:
+        self.xref: dict[int, dict[int, int]] = {}
+        self.index: dict[int, int] = {}
+        self.backup: dict[int, int] = {}
+        self.totals: dict[int, int] = {}
+        self.groups: collections.defaultdict[int, list[int]] = collections.defaultdict(list)
+        self.count = 0
+
+    def read(self, lines: list[int]) -> None:
+        for gen, entry in self.xref.items():
+            if not entry:
+                self._rebuild(lines)
+
+    def _rebuild(self, lines: list[int]) -> None:
+        self.xref = {}
+        self.xref[-1] = {}
+        self.count = 0
+        table = self.xref
+        target = table
+        target[-2] = {}
+        for line in lines:
+            self.xref[line] = {}
+
+    def scan(self, lines: list[int]) -> None:
+        for gen, entry in self.index.items():
+            if not entry:
+                self._refill(lines)
+
+    def _refill(self, lines: list[int]) -> None:
+        target = self.index
+        if lines:
+            target = self.index
+        target[0] = 0
+        for line in lines:
+            self.index[line] = 1
+        self.backup = self.index
+        self.index = self.backup
+
+    def total(self) -> None:
+        for k in self.groups:
+            self._add(k, 1)
+        for k in self.totals:
+            self._bump(k)
+
+    def _add(self, k: int, v: int) -> None:
+        if k in self.groups:
+            if v:
+                self.groups[k].append(v)
+
+    def _bump(self, k: int) -> None:
+        self.totals[k] += 1
+
+
+class States:
+    def __init__(self) -> None:
+        self.states: dict[str, object] = {}
+        self.counts: dict[str, int] = {}
+        self.maybe: dict[str, int] | None = None
+
+    def __getitem__(self, k: str) -> object:
+        name = k
+        value = self.states.get(name)
+        if value is None:
+            raise KeyError(k)
+        self.states[k] = str(value)
+        return self.states[k]
+
+    def __len__(self) -> int:
+        found = self.states.get("size")
+        if found is not None:
+            self.states["size"] = found
+        if not self.states.get("count"):
+            return 0
+        self.states["count"] = 1
+        return 1
+
+    def __bool__(self) -> bool:
+        if self.maybe is not None and "a" in self.maybe:
+            self.maybe["a"] += 1
+        return True
+
+    def __iter__(self):
+        yield from self.states
+
+    def maybes(self):
+        yield from self.maybe or {}
+
+    def __contains__(self, k: str) -> bool:
+        if "z" in self.counts:
+            self.counts[k] = 1
+        if k not in self.counts:
+            self.counts[k] = 0
+        return True
+
+    def names(self):
+        yield from self.counts
+"#;
+
+const SETTLED_RUN: &str = r#"from pkg.settled import Reader, States
+
+
+def outcome(run):
+    try:
+        run()
+    except RuntimeError:
+        return "RuntimeError"
+    return "ok"
+
+
+r = Reader()
+r.xref = {1: {}, 2: {}}
+r.index = {1: 0, 2: 0}
+r.groups[1].append(0)
+r.groups[2].append(0)
+r.totals = {1: 0, 2: 0}
+s = States()
+s.states = {"a": 1, "b": 2}
+s.counts = {"a": 1}
+s.maybe = {"a": 1, "b": 2}
+
+
+def stepped(it, between):
+    next(it)
+    between()
+    next(it)
+
+
+def contained():
+    assert "z" in s
+
+
+print(
+    outcome(lambda: r.read([5, 6])),
+    outcome(lambda: r.scan([5, 6])),
+    outcome(r.total),
+    outcome(lambda: [(s[k], len(s)) for k in s]),
+    outcome(lambda: stepped(s.maybes(), lambda: bool(s))),
+    outcome(lambda: stepped(s.names(), contained)),
+)
+"#;
+
+#[test]
+fn mut113_leaves_out_rebound_containers_and_keys_the_container_holds() {
+    let p = Project::new("mut113_settled");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/settled.py", SETTLED)
+        .write("run.py", SETTLED_RUN);
+    let diags = diagnostics(&p, &["--extend-select", "MUT113"]);
+    assert_eq!(
+        reports(&diags),
+        vec![
+            d("pkg/settled.py", 31, "Reader.scan", "Reader.index"),
+            d("pkg/settled.py", 100, "States.names", "States.counts"),
+        ]
+    );
+    assert_eq!(
+        run_python(&p.dir, "run.py").trim(),
+        "ok RuntimeError ok ok ok RuntimeError"
+    );
+}
+
+/// A helper that binds the attribute to a new container, fills it, and binds it to another new
+/// container a call makes (`self.rows = dict()`): it changes no container a loop steps. Its
+/// neighbor changes the container the loop steps before binding a new one.
+const REBOUND_TWICE: &str = r#"class Table:
+    def __init__(self) -> None:
+        self.rows: dict[str, int] = {"k": 0}
+        self.cols: dict[str, int] = {"k": 0}
+
+    def refresh(self) -> None:
+        for key in self.rows:
+            self._reload()
+
+    def widen(self) -> None:
+        for key in self.cols:
+            self._reset()
+
+    def _reload(self) -> None:
+        self.rows = {}
+        self.rows["a"] = 1
+        self.rows = dict()
+
+    def _reset(self) -> None:
+        self.cols["a"] = 1
+        self.cols = dict()
+"#;
+
+const REBOUND_TWICE_RUN: &str = r#"from pkg.table import Table
+
+
+def outcome(run):
+    try:
+        run()
+    except RuntimeError:
+        return "RuntimeError"
+    return "ok"
+
+
+print(outcome(Table().refresh), outcome(Table().widen))
+"#;
+
+#[test]
+fn mut113_leaves_out_a_change_between_two_stores_of_new_containers() {
+    let p = Project::new("mut113_rebound_twice");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/table.py", REBOUND_TWICE)
+        .write("run.py", REBOUND_TWICE_RUN);
+    let diags = diagnostics(&p, &["--extend-select", "MUT113"]);
+    assert_eq!(
+        reports(&diags),
+        vec![d("pkg/table.py", 12, "Table.widen", "Table.cols")]
+    );
+    assert_eq!(run_python(&p.dir, "run.py").trim(), "ok RuntimeError");
+}

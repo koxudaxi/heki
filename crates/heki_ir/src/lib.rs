@@ -10,9 +10,11 @@
 //!   while `heki_effect` continues normally.
 
 mod builder;
+mod dominators;
 mod facts;
 
 pub use builder::build_module_ir;
+pub use dominators::{Dominated, DominatorTree, immediate_dominators};
 pub use facts::{FnIndex, LEN_CAP_MAX, ModuleConstants, SMALL_MAX, SmallDisplay};
 
 use heki_ast::Span;
@@ -178,7 +180,7 @@ impl BuiltinKind {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConstLiteral {
     None,

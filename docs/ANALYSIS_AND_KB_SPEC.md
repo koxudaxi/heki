@@ -592,8 +592,11 @@ which module imports which.
    closure cell), the operand's object (a copy of the reference, `typing.cast`, an in-place
    operator), an element of the operand (an item, `get` / `pop` / `setdefault`, an iteration
    step), an element or the default (`d.get(k, default)`, `getattr(o, n, default)`), or what the
-   project callees return. A parameter is borrowed, `*args` / `**kwargs` are new with borrowed
-   elements, and a method's `self` is its own object.
+   project callees return. An attribute of an object the function makes itself (through copies,
+   `ownership::made_here`, read from the definition alone: whether it makes a new object never
+   depends on its operands) is an element of that object, of unknown origin. A parameter is
+   borrowed, `*args` / `**kwargs` are new with borrowed elements, and a method's `self` is its own
+   object.
 2. **The summary fact**: `returns_origins` walks back from the returns a run can reach (plain
    sync functions; a memoizing decorator makes the result held, another decorator unknown):
    new, held, parameter `i`, or an element of parameter `i`. A run reaches what
@@ -627,14 +630,18 @@ which module imports which.
    edge from the branch to that successor, and every edge from a block that a run reaches only
    through that successor: the walk up the dominator tree from an edge's source to the
    dominator of its target finds them, once per edge, and the test a condition is (through
-   `not` and copies) and the value a copy copies are each found once per value. On a phi input from the side where an `is` test of the input's value
-   failed, the input leaves out the object it is tested against (`if result is shared: result =
-   shared.copy()`). Where the test is against a constant, a global, or an attribute (`if out is
-   None: out = []`) and the phi also takes inputs from the other side, the parameter the value
-   is on the failed side is *defaulted*, and the new objects from the other side are its
-   replacements: the accumulator idiom. A test that selects no replacement (`if p is None:
-   raise ...`) leaves the parameter borrowed. A new object the function stores somewhere is
-   part of where it is stored.
+   `not` and copies) and the value a copy copies are each found once per value. On a phi input
+   from the side where an `is` test of the input's value failed, the input leaves out the object
+   it is tested against (`if result is shared: result = shared.copy()`). A phi input that copies
+   another input of the phi (`ownership::copied_operand`) where a flag of the caller's decides to
+   copy it (a branch on parameters other than the receiver and the copied value, and constants:
+   `if not in_place: x = x.copy()`) brings the other input's object: the function changes that
+   object on purpose where it does not copy it. Where the test is against a constant, a global,
+   or an attribute (`if out is None: out = []`) and the phi also takes inputs from the other
+   side, the parameter the value is on the failed side is *defaulted*, and the new objects from
+   the other side are its replacements: the accumulator idiom. A test that selects no
+   replacement (`if p is None: raise ...`) leaves the parameter borrowed. A new object the
+   function stores somewhere is part of where it is stored.
 4. **Reports**: a change of a container (an item stored or deleted, a container method, an
    in-place operator on a builtin container, a project callee changing the container it is
    handed, `mutated_param_paths` entry `""`) of a value that may be new and borrowed, once per
@@ -692,12 +699,22 @@ them; a run without the rule computes none of them.
    `insert`, `add`, `update`, `setdefault`, `pop`, `popleft`, `popitem`, `remove`, `discard`,
    `clear`, the `*_update` methods, `rotate`, `move_to_end`, `__delitem__`), `del x[k]`, the
    in-place operators (also stored back, `self.s |= t`), and reading a missing key of a
-   `defaultdict` (a read in the block that `if k in self.<attr>:` enters inserts nothing);
-   `StoresItems` for an item store (`x[k] = v`, `__setitem__`), which breaks only a mapping's
-   iterators. Rebinding the attribute is no change. The function's own change sites are in
-   `self_container_change_sites`. A function's changes of its parameters' own containers, of any
-   class, are counted the same way (`changes_param_containers`, propagated through the helpers it
-   hands them to): a helper storing an item of a deque it is handed breaks no iterator of it.
+   `defaultdict`; `StoresItems` for an item store (`x[k] = v`, `__setitem__`), which breaks only
+   a mapping's iterators. A `defaultdict` read or an item store under a key the container holds
+   is no change: on the side of a test that the key is there (`k in`, `k not in`, `get(k)`
+   against `None` or by its truth, through `not`) that dominates it and is entered only from the
+   test, or after a read of the same key in its block (not for a `Counter`, whose read of a
+   missing key inserts nothing). Rebinding the attribute is no change, and neither is a change of
+   a read of `self.<attr>` that a store of a new object to `self.<attr>` dominates, when every
+   store of the function to it is of a new object: that is the new container's change (a
+   callee's change at a call after the store still counts). The key tests, the key reads, and
+   the stores (of new objects by the callees of all the function's calls) are gathered in one
+   walk per function, and whether one dominates a change is read from the function's dominator
+   tree over normal and exception edges. The function's own change sites are
+   in `self_container_change_sites`. A function's changes of its parameters' own containers, of
+   any class, are counted the same way (`changes_param_containers`, propagated through the
+   helpers it hands them to): a helper storing an item of a deque it is handed breaks no
+   iterator of it.
 4. Calls in a loop's body: a call site among an iteration's calls whose project callees change
    the container while their body runs there (`iterations::changed_at`, through
    `ProjectIndex::delivery`) is reported at the call, with the iteration as a related location.

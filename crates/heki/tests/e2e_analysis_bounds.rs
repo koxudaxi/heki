@@ -494,6 +494,32 @@ fn stores_of_a_long_alias_chain_into_many_lists_past_the_budget_return_unknown()
     );
 }
 
+/// A function reading attributes down a chain ten thousand deep (`x = x.child`) under `MUT112`:
+/// whether each receiver holds an object the function makes is read from its own definition,
+/// not again through every read before it, which took a walk as deep as the chain (and the
+/// stack) per read and pass.
+#[test]
+fn attribute_reads_down_a_long_chain_decide_each_receiver_once() {
+    let links = 10_000;
+    let mut lines = vec![
+        "def walk(node):".to_owned(),
+        "    extra = node or []".to_owned(),
+        "    extra.append(1)".to_owned(),
+        "    x = node".to_owned(),
+    ];
+    lines.extend((0..links).map(|_| "    x = x.child".to_owned()));
+    lines.push("    x.append(1)".to_owned());
+    let p = Project::new("bounds_attribute_chain");
+    p.write("pyproject.toml", MUT112_CONFIG)
+        .write("m.py", &(lines.join("\n") + "\n"));
+    let found: Vec<u64> = check_within(&p, Duration::from_secs(20))
+        .iter()
+        .filter(|d| d["rule_code"] == "MUT112")
+        .map(|d| d["line"].as_u64().unwrap())
+        .collect();
+    assert_eq!(found, vec![3]);
+}
+
 /// A function returning the last of a long chain of calls, each handed the previous call's
 /// result as two of its arguments (`x40 = choose(x39, x39, flag)`), with `choose` returning
 /// either: what each call returns is resolved once, not once per path down the chain.
@@ -1901,4 +1927,88 @@ fn an_edit_changing_thousands_of_methods_reads_each_class_once() {
     assert_eq!(codes(&diags), vec!["EFF101"]);
     lsp.settle();
     lsp.stop(true);
+}
+
+/// The lines of the `MUT113` diagnostics of the project, which must finish within `limit`.
+fn mut113_lines(p: &Project, limit: Duration) -> Vec<u64> {
+    check_within(p, limit)
+        .iter()
+        .filter(|d| d["rule_code"] == "MUT113")
+        .map(|d| d["line"].as_u64().unwrap())
+        .collect()
+}
+
+/// Methods that each change a typed dict of `self` thousands of times (`self.rows[str(i)] =
+/// i`), the first after binding a new dict, called in a loop over it: the stores of new objects
+/// before a change, and the blocks they dominate, are gathered once per function.
+#[test]
+fn many_changes_of_a_container_of_self_decide_their_rebinding_once() {
+    let (methods, writes) = (3, 8_000);
+    let mut lines = vec![
+        "class Table:".to_owned(),
+        "    def __init__(self) -> None:".to_owned(),
+        "        self.rows: dict[str, int] = {}".to_owned(),
+    ];
+    for m in 0..methods {
+        lines.push(String::new());
+        lines.push(format!("    def fill{m}(self) -> None:"));
+        if m == 0 {
+            lines.push("        self.rows = {}".to_owned());
+        }
+        for i in 0..writes {
+            lines.push(format!("        self.rows[str({i})] = {i}"));
+        }
+    }
+    lines.push(String::new());
+    lines.push("    def refresh(self) -> None:".to_owned());
+    lines.push("        for key in self.rows:".to_owned());
+    let mut calls = Vec::new();
+    for m in 0..methods {
+        lines.push(format!("            self.fill{m}()"));
+        calls.push(lines.len() as u64);
+    }
+    let p = Project::new("bounds_self_container_changes");
+    p.write("pyproject.toml", MUT113_CONFIG)
+        .write("m.py", &(lines.join("\n") + "\n"));
+    assert_eq!(mut113_lines(&p, Duration::from_secs(20)), calls[1..]);
+}
+
+/// A method storing under a key of a typed dict of `self` after each of hundreds of tests that
+/// the key is there (`if key in self.rows: self.rows[key] = value`), called in a loop over it:
+/// the sides of the tests are found once per function, and whether one dominates a store by
+/// the dominator tree.
+#[test]
+fn many_key_tests_of_a_container_of_self_find_their_sides_once() {
+    let tests = 600;
+    let mut lines = vec![
+        "class Table:".to_owned(),
+        "    def __init__(self) -> None:".to_owned(),
+        "        self.rows: dict[str, int] = {}".to_owned(),
+        String::new(),
+        "    def update(self, key: str, value: int) -> None:".to_owned(),
+    ];
+    for _ in 0..tests {
+        lines.push("        if key in self.rows:".to_owned());
+        lines.push("            self.rows[key] = value".to_owned());
+    }
+    lines.extend(
+        [
+            "",
+            "    def insert(self, key: str, value: int) -> None:",
+            "        self.rows[key] = value",
+            "",
+            "    def refresh(self) -> None:",
+            "        for key in self.rows:",
+            "            self.update(key, 1)",
+            "            self.insert(key, 1)",
+        ]
+        .map(str::to_owned),
+    );
+    let p = Project::new("bounds_self_container_key_tests");
+    p.write("pyproject.toml", MUT113_CONFIG)
+        .write("m.py", &(lines.join("\n") + "\n"));
+    assert_eq!(
+        mut113_lines(&p, Duration::from_secs(20)),
+        vec![lines.len() as u64]
+    );
 }
