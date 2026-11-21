@@ -495,11 +495,17 @@ def loop(rows, db):
         let budget = Budget::per_source_byte("test", f, 0, steps, steps);
         let paths = Paths::new(&ix, &PathReader::ir(), &budget);
         assert_eq!(paths.on_every_return(at, Progress::Called), Answer::Open);
-        assert_eq!(paths.on_every_iteration(0, at, Progress::Called), Answer::Open);
+        assert_eq!(
+            paths.on_every_iteration(0, at, Progress::Called),
+            Answer::Open
+        );
     }
     let budget = Budget::of_function("test", f);
     let paths = Paths::new(&ix, &PathReader::ir(), &budget);
-    assert_eq!(paths.on_every_iteration(7, at, Progress::Called), Answer::Open);
+    assert_eq!(
+        paths.on_every_iteration(7, at, Progress::Called),
+        Answer::Open
+    );
     assert_eq!(paths.on_every_iteration(0, at, Progress::Called), EVERY);
     assert_eq!(paths.on_every_iteration(0, at, Progress::Returned), EVERY);
     assert_eq!(ix.decided().never_taken(f.loops[0].header), None);
