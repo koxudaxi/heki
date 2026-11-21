@@ -575,9 +575,9 @@ pub struct ModuleDecls {
     /// The packages whose `__path__` the module changes, by the fqn its imports give them
     /// (`plugins.__path__.append(d)`), or by its own name when it is a package changing its own
     /// (`__path__ = extend_path(__path__, __name__)`), and how
-    /// ([`ProjectDecls::holds_modules_starting_with`]).
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub path_changes: BTreeMap<String, PathChange>,
+    /// ([`ProjectDecls::holds_modules_starting_with`]). Boxed: few modules change one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path_changes: Option<Box<BTreeMap<String, PathChange>>>,
     /// String constants, by name: module-level names bound once (`KEY = "_key"`,
     /// `KEY: Final = "_key"`), and class-body names declared `ClassVar` or `Final` and bound
     /// once (`KEY: ClassVar[str] = "_key"`), under `Class.KEY`. A constant names an attribute in
@@ -1649,7 +1649,7 @@ impl ProjectDecls {
             if m.unread && m.is_package {
                 join(m.module_name.clone(), PathChange::Replaced);
             }
-            for (package, change) in &m.path_changes {
+            for (package, change) in m.path_changes.iter().flat_map(|changes| changes.iter()) {
                 join(self.canonical(package), *change);
             }
         }
@@ -3628,7 +3628,8 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
     readonly_metadata(input, &mut decls);
     decls.small_globals = input.ir.constants.displays.clone();
     (decls.grown_globals, decls.rebound_globals) = foreign_grown_globals(input, &decls.imports);
-    decls.path_changes = package_paths::path_changes(input, &decls);
+    let path_changes = package_paths::path_changes(input, &decls);
+    decls.path_changes = (!path_changes.is_empty()).then(|| Box::new(path_changes));
     attr_displays(input, &mut decls);
     code_attrs(input, &mut decls);
     let rebound: Vec<(String, String)> = class_attrs_rebound(input, &decls)
@@ -5345,7 +5346,7 @@ static EMPTY_DECLS: ModuleDecls = ModuleDecls {
     small_globals: BTreeMap::new(),
     grown_globals: BTreeSet::new(),
     rebound_globals: BTreeSet::new(),
-    path_changes: BTreeMap::new(),
+    path_changes: None,
     str_constants: BTreeMap::new(),
     literal_constants: BTreeMap::new(),
     global_capacities: BTreeMap::new(),
