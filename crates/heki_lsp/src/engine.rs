@@ -1019,12 +1019,8 @@ impl Workspace {
                     queue.extend(outcome.affected.iter().cloned());
                     Some(outcome)
                 }
-                None if path.exists() => {
-                    queue.extend(self.unreadable(&path));
-                    None
-                }
                 None => {
-                    queue.extend(self.remove(&path));
+                    queue.extend(self.unread_or_removed(&path));
                     None
                 }
             };
@@ -1044,6 +1040,17 @@ impl Workspace {
     pub fn unreadable(&mut self, path: &Path) -> Vec<PathBuf> {
         let module = unread_module(path, &self.env.root, &self.env.layout);
         self.replace_file(path, Some(module))
+    }
+
+    /// A file of the project whose text could not be read: a module heki knows nothing about
+    /// while it exists ([`Self::unreadable`]), gone from the project once it is deleted
+    /// ([`Self::remove`]). Returns the files it affects.
+    pub fn unread_or_removed(&mut self, path: &Path) -> Vec<PathBuf> {
+        if path.exists() {
+            self.unreadable(path)
+        } else {
+            self.remove(path)
+        }
     }
 
     /// Take the facts of `path` out of the index, leaving the module heki could not read in

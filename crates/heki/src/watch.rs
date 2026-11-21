@@ -369,7 +369,7 @@ impl Report {
                 // re-analyzed.
                 Err(e) => {
                     affected.remove(p);
-                    affected.extend(ws.unreadable(p));
+                    affected.extend(ws.unread_or_removed(p));
                     self.diags.remove(p);
                     self.errors.insert(p.clone(), FileError::unreadable(p, &e));
                 }
