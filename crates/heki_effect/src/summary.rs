@@ -4221,9 +4221,12 @@ impl<'f> Rebound<'f> {
                         args.get(1).and_then(|a| strings.get(a)).copied(),
                     );
                 }
-                InstKind::MethodCall { method, .. }
+                InstKind::MethodCall { recv, method, .. }
                     if matches!(method.as_str(), "update" | "setdefault" | "__setitem__") =>
                 {
+                    if dicts.contains(recv) {
+                        attrs = None;
+                    }
                     keys = None;
                 }
                 _ => {}

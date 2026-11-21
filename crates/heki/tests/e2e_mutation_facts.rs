@@ -807,19 +807,27 @@ def retag_by_name(p, t):
     return draft
 
 
+def retag_by_dict(p, t):
+    draft = copy.copy(p)
+    draft.__dict__.update(tags=[])
+    draft.tags.append(t)
+    return draft
+
+
 def use(name):
     tag(post(name), "x")
     tag_copy_of_copy(post(name), "x")
     retitle(post(name), "y")
     retag(post(name), "z")
     retag_by_name(post(name), "z")
+    retag_by_dict(post(name), "z")
 "#,
     );
     // The copy holds the cached post's tag list; its own title is its own, and so is a tag list
     // it is given before it changes it.
     assert_eq!(
         reports(&p, "MUT202"),
-        vec![at("app.py", 48, "use"), at("app.py", 49, "use")]
+        vec![at("app.py", 55, "use"), at("app.py", 56, "use")]
     );
 }
 
