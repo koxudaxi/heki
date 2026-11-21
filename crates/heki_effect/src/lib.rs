@@ -1452,6 +1452,14 @@ pub struct ProjectIndex {
     pub(crate) opt_in: OptInFacts,
 }
 
+// The index is shared between the threads of a check, so it must stay `Sync`. The engines of
+// `heki_ir::walk` that keep per-check state are not, so one stored in the index fails to compile
+// here: their memos live in their owner for one analysis (ADR-017).
+const _: () = {
+    struct Shared<T: Sync>(std::marker::PhantomData<T>);
+    let _ = Shared::<ProjectIndex>(std::marker::PhantomData);
+};
+
 /// True for `.pyi` typing stubs (prefer the sibling `.py` implementation when both exist).
 pub fn is_stub(path: &Path) -> bool {
     path.extension().is_some_and(|e| e == "pyi")
