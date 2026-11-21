@@ -1295,21 +1295,18 @@ impl JoinPremises<'_, '_, '_> {
         }
     }
 
-    /// Whether no project class derived from one of `classes` defines `method` itself: under
-    /// R2 a value annotated with a builtin container may be an instance of such a subclass.
-    fn not_overridden(&self, classes: &[&str], method: &str) -> bool {
-        classes.iter().all(|class| {
-            let subclasses = self.decls.subclasses_of(class);
-            subclasses
-                .iter()
-                .all(|sub| self.decls.mro_method(sub, method).is_none())
-        })
+    /// Whether no project class derived from one of `classes` overrides `method`, looked up
+    /// `by_name` or called implicitly ([`ProjectDecls::method_not_overridden`]).
+    fn not_overridden(&self, classes: &[&str], method: &str, by_name: bool) -> bool {
+        classes
+            .iter()
+            .all(|class| self.decls.method_not_overridden(class, method, by_name))
     }
 
     /// Whether iterating `v` runs no code of the project: its type is a builtin container, and
     /// no project subclass of one defines its own `__iter__`.
     fn iterates_as_builtin(&self, v: VarId) -> bool {
-        self.builtin_type(v, CONTAINERS) && self.not_overridden(CONTAINERS, "__iter__")
+        self.builtin_type(v, CONTAINERS) && self.not_overridden(CONTAINERS, "__iter__", false)
     }
 
     /// Whether running `inst` may run code of the project that reaches a value `hit` accepts: a
@@ -1557,7 +1554,7 @@ impl JoinPremises<'_, '_, '_> {
                             VIEWS.iter().any(|(m, classes)| {
                                 m == method
                                     && self.builtin_type(*recv, classes)
-                                    && self.not_overridden(classes, m)
+                                    && self.not_overridden(classes, m, true)
                             })
                         }
                         _ => self.iterates_as_builtin(v),

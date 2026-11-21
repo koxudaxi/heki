@@ -237,6 +237,15 @@ pub enum ContainerKind {
 }
 
 impl ContainerKind {
+    /// The builtin class.
+    pub fn class(self) -> &'static str {
+        match self {
+            Self::List => "builtins.list",
+            Self::Dict => "builtins.dict",
+            Self::Set => "builtins.set",
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::List => "list",
@@ -296,6 +305,11 @@ pub struct CachedResult {
     /// `"lru_cache"` or `"cache"`.
     pub decorator: CacheDecorator,
     pub kind: ContainerKind,
+    /// Every returned value is built in the function as the builtin itself (a display, a
+    /// comprehension, `list(...)`), not only named by the return annotation, which under R2
+    /// admits a project subclass.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub built: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -342,15 +356,18 @@ pub(crate) fn cached_result<'t>(
     if returned.is_empty() {
         return None;
     }
-    let annotated = f
-        .return_annotation
-        .as_deref()
-        .and_then(|a| annotated_kind(a, &resolve));
-    let kind = match annotated {
-        Some(kind) => kind,
-        None => constructed_kind(f, defs, live, &returned, &resolve, type_of)?,
+    let built = constructed_kind(f, defs, live, &returned, &resolve, type_of);
+    let annotated = || {
+        f.return_annotation
+            .as_deref()
+            .and_then(|a| annotated_kind(a, &resolve))
     };
-    Some(CachedResult { decorator, kind })
+    let kind = built.or_else(annotated)?;
+    Some(CachedResult {
+        decorator,
+        kind,
+        built: built.is_some(),
+    })
 }
 
 /// The container kind a return annotation names as a whole (`dict[str, Any]`, `typing.List`),

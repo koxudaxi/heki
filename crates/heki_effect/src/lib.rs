@@ -169,11 +169,53 @@ pub struct MustExec {
     /// a call runs one of them, and neither one's facts are the call's (R1 holds for names
     /// bound once).
     pub bound_twice: bool,
-    pub effects: BTreeMap<ExecEffectKind, SharedChain>,
+    pub effects: EffectChains,
     /// For an effect whose chains end in different calls (implementations of one call reaching
     /// different waits), every such call: the witnesses beside the kept chain's last call.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub alternatives: BTreeMap<ExecEffectKind, SharedChain>,
+    #[serde(default)]
+    pub alternatives: EffectChains,
+}
+
+/// A chain per effect, sorted by effect. A function has run one or two effects whenever it
+/// returns, which a vector holds in a tenth of the bytes of a tree's first node.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct EffectChains(Vec<(ExecEffectKind, SharedChain)>);
+
+impl EffectChains {
+    pub fn get(&self, e: &ExecEffectKind) -> Option<&SharedChain> {
+        self.0.iter().find(|(k, _)| k == e).map(|(_, chain)| chain)
+    }
+
+    pub fn keys(&self) -> impl Iterator<Item = &ExecEffectKind> {
+        self.0.iter().map(|(k, _)| k)
+    }
+
+    pub fn values_mut(&mut self) -> impl Iterator<Item = &mut SharedChain> {
+        self.0.iter_mut().map(|(_, chain)| chain)
+    }
+
+    /// Set the chain of `e`, replacing the one it had.
+    pub fn insert(&mut self, e: ExecEffectKind, chain: SharedChain) {
+        self.remove(&e);
+        self.0.push((e, chain));
+        self.0.sort_by_key(|(k, _)| *k);
+    }
+
+    /// Set the chain of `e` unless it has one.
+    pub fn insert_new(&mut self, e: ExecEffectKind, chain: impl FnOnce() -> SharedChain) {
+        if self.get(&e).is_none() {
+            self.insert(e, chain());
+        }
+    }
+
+    pub fn remove(&mut self, e: &ExecEffectKind) {
+        self.0.retain(|(k, _)| k != e);
+    }
+
+    pub fn retain(&mut self, mut keep: impl FnMut(&ExecEffectKind) -> bool) {
+        self.0.retain(|(k, _)| keep(k));
+    }
 }
 
 impl MustExec {
@@ -1027,8 +1069,8 @@ impl EffectSummary {
         }
         self.exec_guards.retain(|e, _| !hidden.contains(e));
         if let Some(must) = &mut self.must_exec {
-            must.effects.retain(|e, _| !hidden.contains(e));
-            must.alternatives.retain(|e, _| !hidden.contains(e));
+            must.effects.retain(|e| !hidden.contains(e));
+            must.alternatives.retain(|e| !hidden.contains(e));
         }
         if let Some(iterated) = &mut self.iterated {
             iterated.hide_exec_effects(hidden);

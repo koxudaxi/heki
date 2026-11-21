@@ -2658,29 +2658,39 @@ impl<'a> Mut202Fn<'a> {
         &self,
         inst: &'a Inst,
     ) -> Option<(&'a FuncKey, heki_effect::CachedResult)> {
-        let (operand, change) = match &inst.kind {
-            InstKind::SubscriptStore { obj, .. } | InstKind::SubscriptDelete { obj, .. } => {
-                (*obj, Change::Item)
+        let (operand, change, method) = match &inst.kind {
+            InstKind::SubscriptStore { obj, .. } => (*obj, Change::Item, "__setitem__"),
+            InstKind::SubscriptDelete { obj, .. } => (*obj, Change::Item, "__delitem__"),
+            InstKind::MethodCall { recv, method, .. } => {
+                (*recv, Change::Method(method), method.as_str())
             }
-            InstKind::MethodCall { recv, method, .. } => (*recv, Change::Method(method)),
             InstKind::BinOp {
                 lhs,
                 op,
                 in_place: true,
                 ..
-            } => (*lhs, Change::InPlace(*op)),
+            } => (*lhs, Change::InPlace(*op), op.in_place_method()),
             _ => return None,
         };
         let MustResult::Of(key) = self.must_results().get(&operand).copied()? else {
             return None;
         };
         let cached = self.cx.index.summary(key)?.cached_result?;
+        let by_name = matches!(change, Change::Method(_));
         let changes = match change {
             Change::Item => cached.kind.takes_item_stores(),
             Change::Method(m) => cached.kind.mutator(m),
             Change::InPlace(op) => cached.kind.in_place_op(op),
         };
-        changes.then_some((key, cached))
+        // Under R2 a result the return annotation names may be an instance of a project subclass
+        // of the builtin, whose own `method` runs instead; one built in the function (a display,
+        // `list(...)`) is the builtin itself.
+        let builtin = cached.built
+            || self
+                .cx
+                .decls
+                .method_not_overridden(cached.kind.class(), method, by_name);
+        (changes && builtin).then_some((key, cached))
     }
 
     /// The function's call sites in the index, every role.

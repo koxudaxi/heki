@@ -482,6 +482,10 @@ pub struct ModuleDecls {
     /// `obj.attr[KEY]`, as its literal would.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub str_constants: BTreeMap<String, StrConstant>,
+    /// Module-level names bound once to a number or boolean literal (`PAUSE = 0`, `DELAY = 0.5`,
+    /// `STRICT = False`), as [`Self::str_constants`] holds the strings.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub literal_constants: BTreeMap<String, LiteralConstant>,
     /// What the module binds its globals to (in its body, and in functions declaring them
     /// `global`), for the globals one binding of which is a queue: the join of every binding
     /// (`crate::capacity`). Any other global has an unknown capacity.
@@ -491,6 +495,16 @@ pub struct ModuleDecls {
     /// knows nothing it defines ([`Self::unread_module`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unread: bool,
+}
+
+/// A number or boolean constant of a module ([`ModuleDecls::literal_constants`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiteralConstant {
+    /// A `Bool`, `Int`, or `Float` literal.
+    pub value: heki_ir::ConstLiteral,
+    /// As [`StrConstant::rebindable`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub rebindable: bool,
 }
 
 /// A string constant of a module or class ([`ModuleDecls::str_constants`]).
@@ -1761,6 +1775,17 @@ impl ProjectDecls {
         self.chase(fqn, true)
     }
 
+    /// The value of the number or boolean constant `fqn` (`pkg.settings.PAUSE`), through
+    /// re-exports, unless another module rebinds it.
+    pub fn literal_constant(&self, fqn: &str) -> Option<LiteralValue> {
+        let fqn = self.canonical(fqn);
+        let (m, rest) = self.split_module(&fqn)?;
+        let constant = m.literal_constants.get(rest)?;
+        (!(constant.rebindable && self.rebound_elsewhere(&fqn)))
+            .then(|| literal_value(&constant.value))
+            .flatten()
+    }
+
     /// The value of the string constant `fqn` (`pkg.keys.KEY`, `pkg.model.Model.KEY`), through
     /// re-exports and constants bound to other constants (at most `MAX_ALIAS_CHASE` steps).
     pub fn str_constant(&self, fqn: &str) -> Option<&str> {
@@ -2244,6 +2269,39 @@ impl ProjectDecls {
                 }
             })
             .flatten()
+    }
+
+    /// Whether `method` of `class` (a builtin container, say) runs on every instance of `class`
+    /// the project can make: under R2 a value of type `class` may be an instance of a project
+    /// subclass. No project class along the MRO of a project subclass binds `method`, has a
+    /// metaclass other than `type` (which may install it), or, when the method is looked up by
+    /// name (`xs.sort()`, not the operator or item store that calls it implicitly, which skips
+    /// it), defines `__getattribute__`. Each class is read once: the subclasses, then the MROs
+    /// of their project bases that derive from no subclass (mixins).
+    pub fn method_not_overridden(&self, class: &str, method: &str, by_name: bool) -> bool {
+        let subclasses = self.subclasses_of(class);
+        let mut seen: FxHashSet<String> = subclasses.iter().cloned().collect();
+        let mut classes = subclasses.clone();
+        for sub in &subclasses {
+            self.read(|k| note(&mut k.class_facts, sub));
+            let bases = self.class(sub).map(|d| d.bases.clone()).unwrap_or_default();
+            for base in bases.iter().map(|b| self.canonical(b)) {
+                if !seen.contains(&base) && self.is_project_class(&base) {
+                    let mixin = self.mro(&base).into_iter();
+                    classes.extend(
+                        mixin.filter(|c| self.is_project_class(c) && seen.insert(c.clone())),
+                    );
+                }
+            }
+        }
+        classes.iter().all(|c| {
+            self.read(|k| note(&mut k.class_facts, c));
+            self.class(c).is_none_or(|d| {
+                !d.members.contains(method)
+                    && !d.custom_metaclass
+                    && !(by_name && d.members.contains("__getattribute__"))
+            })
+        })
     }
 
     /// Every project class that (transitively) inherits from `class`, sorted.
@@ -3276,6 +3334,7 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
         }
     }
     decls.str_constants = str_constants(input, &decls);
+    decls.literal_constants = literal_constants(input, &decls);
     decls
 }
 
@@ -3602,6 +3661,56 @@ fn str_constants(input: &ModuleInput<'_>, decls: &ModuleDecls) -> BTreeMap<Strin
                 declares_field: f.is_class_body && q.is_final && !q.class_var,
             };
             out.insert(key, constant);
+        }
+    }
+    out
+}
+
+/// [`ModuleDecls::literal_constants`]: the module body's names stored once, outside a loop, from
+/// a number or boolean literal (through copies), with the conditions of a string constant: no
+/// import binds the name, and neither `exec` / `globals()` nor a star import may rebind it.
+fn literal_constants(
+    input: &ModuleInput<'_>,
+    decls: &ModuleDecls,
+) -> BTreeMap<String, LiteralConstant> {
+    let resolve = |name: &str| decls.resolve_dotted(name, true);
+    let module_stores = module_store_counts(input);
+    let unfixed = input.ir.constants.dynamic || input.ir.has_star_import;
+    let mut out = BTreeMap::new();
+    for f in input
+        .ir
+        .functions
+        .iter()
+        .filter(|f| f.is_module_body && !unfixed)
+    {
+        let shape = heki_ir::walk::FnShape::new(f);
+        let finals: FxHashSet<&str> = f
+            .local_annotations
+            .iter()
+            .filter(|a| qualifiers(&a.annotation, &resolve).0.is_final)
+            .map(|a| a.target.as_str())
+            .collect();
+        for b in f.blocks.iter().filter(|b| shape.loop_depth(b.id) == 0) {
+            for inst in &b.insts {
+                let InstKind::StoreGlobal { name, value } = &inst.kind else {
+                    continue;
+                };
+                let once = module_stores.get(name.as_str()) == Some(&1)
+                    && !decls.imports.contains_key(name);
+                if let Some(InstKind::Const {
+                    literal:
+                        value @ (ConstLiteral::Bool(_) | ConstLiteral::Int(_) | ConstLiteral::Float(_)),
+                    ..
+                }) = shape
+                    .inst(shape.copy_root(*value))
+                    .map(|i| &i.kind)
+                    .filter(|_| once)
+                {
+                    let rebindable = !finals.contains(name.as_str());
+                    let value = value.clone();
+                    out.insert(name.clone(), LiteralConstant { value, rebindable });
+                }
+            }
         }
     }
     out
@@ -4454,40 +4563,53 @@ pub(crate) fn passed_var(
 /// The constant `var` holds (through copies), with `def` giving each variable's definition.
 pub(crate) fn literal<'i>(
     def: impl Fn(VarId) -> Option<&'i Inst>,
+    globals: &dyn Fn(&str) -> Option<LiteralValue>,
     var: VarId,
 ) -> Option<LiteralValue> {
+    match copy_root_kind(def, var)? {
+        InstKind::Const { literal, .. } => literal_value(literal),
+        InstKind::LoadGlobal { name, .. } => globals(name),
+        _ => None,
+    }
+}
+
+/// What defines the value `var` copies, through local copies.
+fn copy_root_kind<'i>(def: impl Fn(VarId) -> Option<&'i Inst>, var: VarId) -> Option<&'i InstKind> {
     let mut cur = var;
     // Copies of an SSA variable form a tree, so the walk ends.
     loop {
         match &def(cur)?.kind {
             InstKind::Copy { src, .. } => cur = *src,
-            InstKind::Const { literal, .. } => {
-                return match literal {
-                    ConstLiteral::Bool(b) => Some(LiteralValue::Bool(*b)),
-                    ConstLiteral::Int(n) => Some(LiteralValue::Int(*n)),
-                    ConstLiteral::Float(f) => f.parse().ok().map(LiteralValue::Float),
-                    ConstLiteral::Str(s) => Some(LiteralValue::Str(s.clone())),
-                    _ => None,
-                };
-            }
-            _ => return None,
+            other => return Some(other),
         }
     }
 }
 
-/// [`ArgFact`] of `var`: its constant, the class `class_of` gives it, the flags it sets
-/// through the named objects `name_of` gives its operands, and whether it names a file
-/// ([`names_a_file`], with the module's string constants `global_str`).
+/// A literal's value, as a catalog case compares it.
+fn literal_value(literal: &ConstLiteral) -> Option<LiteralValue> {
+    match literal {
+        ConstLiteral::Bool(b) => Some(LiteralValue::Bool(*b)),
+        ConstLiteral::Int(n) => Some(LiteralValue::Int(*n)),
+        ConstLiteral::Float(f) => f.parse().ok().map(LiteralValue::Float),
+        ConstLiteral::Str(s) => Some(LiteralValue::Str(s.clone())),
+        _ => None,
+    }
+}
+
+/// [`ArgFact`] of `var`: its constant (a literal, or a module constant bound once that
+/// `globals` gives, [`TypeCtx::global_literal`]), the class `class_of` gives it, the flags it
+/// sets through the named objects `name_of` gives its operands, and whether it names a file
+/// ([`names_a_file`]).
 pub(crate) fn arg_fact<'i>(
     def: impl Fn(VarId) -> Option<&'i Inst>,
     class_of: impl Fn(VarId) -> Option<String>,
     name_of: impl Fn(VarId) -> Option<String>,
-    global_str: &dyn Fn(&str) -> Option<String>,
+    globals: &dyn Fn(&str) -> Option<LiteralValue>,
     var: VarId,
 ) -> ArgFact {
     ArgFact {
-        literal: literal(&def, var),
-        names_file: names_a_file(&def, &name_of, global_str, var),
+        literal: literal(&def, globals, var),
+        names_file: names_a_file(&def, &name_of, globals, var),
         class: class_of(var),
         flags: set_flags(&def, &name_of, var),
     }
@@ -4534,7 +4656,7 @@ enum FilePart {
 }
 
 /// What `var` is built from: a string literal or a module string constant bound once
-/// (`global_str`) names a file unless it has an in-memory form ([`in_memory_name`]), and so does
+/// (`globals`) names a file unless it has an in-memory form ([`in_memory_name`]), and so does
 /// `__file__`; a copy, `+`, `/`, and `.parent` are made from their operands, a [`PATH_FUNCTIONS`]
 /// call (the called object or receiver resolved by `name_of`) from its arguments, and a
 /// [`PATH_METHODS`] call from its receiver and arguments. Anything else (a parameter, a phi, an
@@ -4542,7 +4664,7 @@ enum FilePart {
 fn file_part<'i>(
     def: &impl Fn(VarId) -> Option<&'i Inst>,
     name_of: &impl Fn(VarId) -> Option<String>,
-    global_str: &dyn Fn(&str) -> Option<String>,
+    globals: &dyn Fn(&str) -> Option<LiteralValue>,
     var: VarId,
 ) -> FilePart {
     let path_function =
@@ -4553,7 +4675,8 @@ fn file_part<'i>(
             ..
         }) => FilePart::Leaf(!in_memory_name(text)),
         Some(InstKind::LoadGlobal { name, .. }) => FilePart::Leaf(
-            name == "__file__" || global_str(name).is_some_and(|text| !in_memory_name(&text)),
+            name == "__file__"
+                || matches!(globals(name), Some(LiteralValue::Str(text)) if !in_memory_name(&text)),
         ),
         Some(InstKind::Copy { src, .. }) => FilePart::Made(vec![*src]),
         Some(InstKind::BinOp {
@@ -4587,13 +4710,13 @@ fn file_part<'i>(
 pub(crate) fn names_a_file<'i>(
     def: &impl Fn(VarId) -> Option<&'i Inst>,
     name_of: &impl Fn(VarId) -> Option<String>,
-    global_str: &dyn Fn(&str) -> Option<String>,
+    globals: &dyn Fn(&str) -> Option<LiteralValue>,
     var: VarId,
 ) -> bool {
     let budget = Budget::unmetered("heki_effect::resolver::names_a_file");
     let mut steps = 0usize;
     let mut leaves = 0usize;
-    let part = |v| file_part(def, name_of, global_str, v);
+    let part = |v| file_part(def, name_of, globals, v);
     let not_a_file = reach(
         &budget,
         [var],
@@ -4874,6 +4997,7 @@ static EMPTY_DECLS: ModuleDecls = ModuleDecls {
     grown_globals: BTreeSet::new(),
     rebound_globals: BTreeSet::new(),
     str_constants: BTreeMap::new(),
+    literal_constants: BTreeMap::new(),
     global_capacities: BTreeMap::new(),
     unread: false,
 };
@@ -4985,6 +5109,20 @@ impl<'a> TypeCtx<'a> {
             return Ty::Ref(format!("{}.{name}", self.module_name()));
         }
         Ty::Ref(format!("builtins.{name}"))
+    }
+
+    /// The value of the module-level constant `name` read inside this module, bound once to a
+    /// literal: a string ([`Self::global_str`]), or a number or boolean
+    /// ([`ModuleDecls::literal_constants`]) of its own or one it imports.
+    pub fn global_literal(&self, name: &str) -> Option<LiteralValue> {
+        if let Some(text) = self.global_str(name) {
+            return Some(LiteralValue::Str(text.to_owned()));
+        }
+        let fqn = match self.module.imports.get(name) {
+            Some(fqn) => fqn.clone(),
+            None => format!("{}.{name}", self.module.module_name),
+        };
+        self.project.literal_constant(&fqn)
     }
 
     /// The value of the module-level string constant `name` read inside this module: one of
