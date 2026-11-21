@@ -4692,11 +4692,9 @@ impl<'a> Extractor<'a> {
                 }
                 let entry =
                     held::at_entry(self.f, steps.taken.len(), |b, i| steps.changes.get(&(b, i)));
-                for (b, state) in entry.into_iter().enumerate() {
-                    let Some(mut state) = state else {
-                        continue;
-                    };
-                    let bb = BlockId(b as u32);
+                let reached = (entry.into_iter().enumerate())
+                    .filter_map(|(b, state)| Some((BlockId(b as u32), state?)));
+                for (bb, mut state) in reached {
                     for i in 0..self.f.block(bb).insts.len() {
                         if !state.is_empty() {
                             out.insert((bb, i));

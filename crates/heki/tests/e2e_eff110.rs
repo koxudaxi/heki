@@ -738,7 +738,7 @@ async def early(reader: asyncio.StreamReader, lock: asyncio.Lock) -> bytes:
     async with lock:
         pass
     return b""
-    return await reader.readline()
+    return await drain(reader)
 
 
 if _READER.at_eof():
@@ -751,6 +751,11 @@ else:
 
 async def defined_twice(reader: asyncio.StreamReader) -> None:
     await asyncio.gather(twice(reader), twice(reader))
+
+
+async def two_operations(session: AsyncSession) -> None:
+    await session.get(object, 1)
+    await session.execute("select 1")
 "#;
 
 #[test]
