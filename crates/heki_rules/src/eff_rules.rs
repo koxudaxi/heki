@@ -1,5 +1,5 @@
 //! Family 2 execution-effect rules: `EFF101`, `EFF105`, `EFF102`, `EFF103`, `EFF106`,
-//! `EFF107`, `EFF201` (docs/ANALYSIS_AND_KB_SPEC.md section 2.4).
+//! `EFF107`, `EFF109`, `EFF110`, `EFF201` (docs/ANALYSIS_AND_KB_SPEC.md section 2.4).
 
 use crate::mut_rules::{
     CallTargets, ContractTarget, FunctionMatcher, FunctionMatchers, SiteId, Subclasses,
@@ -22,7 +22,7 @@ use heki_effect::{
     SiteMust, TypeCtx, WriteKind, anchors_call_site, boundary_reports_in,
 };
 pub(crate) use heki_ir::ItemOrigins;
-use heki_ir::walk::{Answer, Budget};
+use heki_ir::walk::{Answer, Budget, FnShape};
 use heki_ir::{BlockId, Carries, InstKind, IrFunction, ItemOrigin, ItemSource, Must, Progress};
 use heki_kb::{EcosystemEntry, EnvironmentAccess, ExecEffectKind, ResultItems, WaitKind};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -352,14 +352,14 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
             ExecEffectKind::DbQuery => want103 && !migration_fn,
             _ => false,
         };
-        // Built when a call has an effect to report.
-        let mut sizes: Option<Sizes<'_, '_>> = None;
+        let sizes = Sizes::new(cx, &tcx, &no_types, FnShape::new(f), unit, &constants);
+        let shape = &sizes.ix.shape;
         let mut data_sized: Vec<Option<bool>> = vec![None; f.loops.len()];
         // An iteration shares its span with the call producing the iterable: one report.
         let mut seen: FxHashSet<Span> = FxHashSet::default();
         let mut queries: Vec<LoopQuery<'_>> = Vec::new();
         for bb in &f.blocks {
-            let depth = f.block_loop_depth(bb.id);
+            let depth = shape.loop_depth(bb.id);
             if depth == 0 && !per_item_calls {
                 continue;
             }
@@ -404,14 +404,12 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
                 if effects.is_empty() {
                     continue;
                 }
-                let sizes = sizes
-                    .get_or_insert_with(|| Sizes::new(cx, &tcx, &no_types, f, unit, &constants));
                 let around = *data_loops.get_or_insert_with(|| {
                     f.loops
                         .iter()
                         .enumerate()
                         .filter(|(i, lp)| {
-                            lp.body.contains(&bb.id)
+                            shape.in_loop(*i, bb.id)
                                 && *data_sized[*i].get_or_insert_with(|| sizes.data_sized(lp))
                         })
                         .fold(0, |mask, (_, lp)| mask | loop_bit(lp))
@@ -623,7 +621,7 @@ fn established_queries(
                     CallTarget::Project(_) => Progress::Returned,
                 };
                 f.loops.iter().enumerate().find_map(|(li, lp)| {
-                    if !ix.shape().in_loop(li, q.at.0)
+                    if !ix.shape.in_loop(li, q.at.0)
                         || paths.on_every_iteration(li, q.at, progress)
                             != Answer::Known(Must::Every)
                         || !ix.fixed_trips(lp, &mut |_| None).is_open()
@@ -722,7 +720,9 @@ impl Repeats<'_> {
     }
 }
 
+mod fanout_exclusive;
 mod held_across_io;
+mod lock_retaken;
 mod unretained_task;
 
 /// `EFF106` (opt-in): `await` / blocking network I/O while a sync lock or DB transaction is
@@ -734,6 +734,17 @@ pub(crate) fn eff106(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
 /// `EFF107` (opt-in): a locally bound `asyncio.create_task` result that is never retained.
 pub(crate) fn eff107(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Diagnostic>) {
     unretained_task::run(cx, unit, out);
+}
+
+/// `EFF109` (opt-in): a non-reentrant lock taken again while it is held.
+pub(crate) fn eff109(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Diagnostic>) {
+    lock_retaken::run(cx, unit, out);
+}
+
+/// `EFF110` (opt-in): an object allowing one operation at a time, used by tasks started
+/// together.
+pub(crate) fn eff110(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Diagnostic>) {
+    fanout_exclusive::run(cx, unit, out);
 }
 
 /// `forbid` tokens of `[[tool.heki.effect-boundaries]]` and the execution effects each one
@@ -792,7 +803,7 @@ struct Boundary<'r> {
 }
 
 /// Whether a pattern names `key`, its qualname, or a module / class / function containing it.
-fn names_function(patterns: &[DottedPattern], key: &FuncKey) -> bool {
+pub(crate) fn names_function(patterns: &[DottedPattern], key: &FuncKey) -> bool {
     let fqn = key.fqn();
     patterns.iter().any(|p| p.names_within(&fqn, &key.qualname))
 }

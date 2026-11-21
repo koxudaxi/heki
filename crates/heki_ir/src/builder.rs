@@ -1884,11 +1884,16 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             .get(&(self.cur_bb, name.to_owned()))
             .copied();
         let global = self.is_module_body || self.scope.globals.contains(name);
+        let nonlocal = self.scope.nonlocals.contains(name);
+        if nonlocal {
+            self.free_reads.insert(name.to_owned());
+        }
         self.emit(
             InstKind::Delete {
                 var: prev,
                 name: name.to_owned(),
                 global,
+                nonlocal,
             },
             span,
         );

@@ -5,94 +5,85 @@
 
 heki_effect::ProjectIndex::callers_closure  W2  worklist: reach, Closure, or fixpoint
 heki_effect::cache_flow::attr_writes  W3  passes until nothing changes: fixpoint
-heki_effect::cache_flow::flow_blocks  W4  const_str: FnShape
 heki_effect::callgraph::propagate_with_budget  W2  worklist: reach, Closure, or fixpoint
 heki_effect::callgraph::scc_closure  W2  worklist: reach, Closure, or fixpoint
 heki_effect::capacity::ParamCapacities::of  W2  worklist: fixpoint; stage-2 migration debt
-heki_effect::capacity::ValueCapacity::enter  W4  const_int: FnShape; stage-2 migration debt
-heki_effect::construction::Recorder::resolve  W4  rpo_blocks: FnShape
 heki_effect::consumption::expand_through  W2  worklist: reach, Closure, or fixpoint
-heki_effect::consumption::is_text  W4  def_inst: FnShape
-heki_effect::consumption::is_unpacking  W4  def_inst: FnShape
-heki_effect::consumption::loop_exhaustion  W4  body.contains: FnShape
 heki_effect::consumption::runs_on_every_return  W2  worklist: reach, Closure, or fixpoint
 heki_effect::guards::Facts::decompose_at  W1  recursion (calls itself): Memo or Closure
 heki_effect::guards::Facts::find_tests  W2  worklist: reach, Closure, or fixpoint
-heki_effect::guards::Facts::solve  W4  rpo_blocks: FnShape
-heki_effect::guards::Facts::tested  W4  const_str: FnShape
-heki_effect::guards::LocalGuards::once_loops_at  W4  body.contains: FnShape
-heki_effect::guards::LocalGuards::repeating  W2,W4  worklist: reach, Closure, or fixpoint; predecessors: FnShape
-heki_effect::guards::derived  W2  worklist: reach, Closure, or fixpoint
+heki_effect::guards::LocalGuards::repeating  W2  worklist: reach, Closure, or fixpoint
 heki_effect::guards::dominated  W2  worklist: reach, Closure, or fixpoint
-heki_effect::guards::fresh_in_loop  W2  worklist: reach, Closure, or fixpoint
-heki_effect::guards::known_classes  W4  rpo_blocks: FnShape
-heki_effect::guards::local_regions  W4  block_loop_depth, body.contains: FnShape
 heki_effect::guards::returns_or_retests  W2  worklist: reach, Closure, or fixpoint
 heki_effect::guards::sets_on_every_way  W2  worklist: reach, Closure, or fixpoint
-heki_effect::guards::state_tests  W4  predecessors: FnShape
 heki_effect::guards::stays_set  W2  worklist: reach, Closure, or fixpoint
-heki_effect::infer::Engine::collect  W4  predecessors: FnShape
+heki_effect::held::at_entry  W3  stage-2 debt (EFF106, EFF109): passes until nothing changes: fixpoint
 heki_effect::infer::Engine::implied  W1  recursion (through Engine::implied_once): Memo or Closure
 heki_effect::infer::Engine::implied_once  W1  recursion (through Engine::implied): Memo or Closure
 heki_effect::infer::Engine::member  W1  recursion (calls itself): Memo or Closure
 heki_effect::infer::Engine::member_call  W1  recursion (calls itself): Memo or Closure
-heki_effect::infer::Engine::passed  W4  def_inst: FnShape
-heki_effect::infer::Engine::run  W1,W4  recursion (through TypeCtx::child_output, Engine::step): Memo or Closure; rpo_blocks: FnShape
+heki_effect::infer::Engine::run  W1  recursion (through TypeCtx::child_output, Engine::step): Memo or Closure
 heki_effect::infer::Engine::step  W1  recursion (through TypeCtx::child_output, Engine::run): Memo or Closure
+heki_effect::infer::TypeCtx::captured_by_makers  W1,W4  stage-2 debt (EFF109): recursion (through TypeCtx::infer_types): Memo or Closure; def_inst: FnShape
 heki_effect::infer::TypeCtx::child_output  W1  recursion (through Engine::run, Engine::step): Memo or Closure
 heki_effect::infer::TypeCtx::seed_of  W1  recursion (through TypeCtx::infer_types): Memo or Closure
 heki_effect::invalidation::Flags::depends_on_flag  W1  recursion (calls itself): Memo or Closure
 heki_effect::invalidation::Flags::of  W3  passes until nothing changes: fixpoint
 heki_effect::invalidation::Flags::value_in  W1  recursion (calls itself): Memo or Closure
-heki_effect::invalidation::analyze  W4  rpo_blocks: FnShape
 heki_effect::iterations::continuing_body  W2  worklist: reach, Closure, or fixpoint
 heki_effect::iterations::resumed  W2  worklist: reach, Closure, or fixpoint
+heki_effect::locks::BlockTests::common  W1  stage-2 debt (EFF109): recursion (calls itself): Memo or Closure
+heki_effect::locks::lock_class  W1  stage-2 debt (EFF109): recursion (through TypeCtx::infer_types): Memo or Closure
+heki_effect::locks::lock_steps  W1  stage-2 debt (EFF110): recursion (through TypeCtx::infer_types): Memo or Closure
+heki_effect::locks::obj_ref  W1  stage-2 debt (EFF109): recursion (through TypeCtx::infer_types): Memo or Closure
+heki_effect::locks::read_condition  W2  stage-2 debt (EFF109): worklist: reach, Closure, or fixpoint
+heki_effect::locks::rebound_name  W1  stage-2 debt (EFF109): recursion (through TypeCtx::infer_types): Memo or Closure
 heki_effect::ownership::Live::of  W2  worklist: reach, Closure, or fixpoint
 heki_effect::ownership::origins_of  W2  worklist: reach, Closure, or fixpoint
 heki_effect::readonly::returned_values  W2  worklist: reach, Closure, or fixpoint
 heki_effect::resolver::ProjectDecls::c3  W1  recursion (calls itself): Memo or Closure
 heki_effect::resolver::ProjectDecls::definitions_along  W2  worklist: reach, Closure, or fixpoint; stage-2 migration debt
 heki_effect::resolver::ProjectDecls::find_class_str_constant  W1  recursion (through ProjectDecls::class_str_constant): Memo or Closure
-heki_effect::resolver::TypeCtx::str_constant_in  W4  def_inst: FnShape
 heki_effect::resolver::aliases_of  W3  passes until nothing changes: fixpoint
-heki_effect::resolver::compares_false  W4  const_bool: FnShape
 heki_effect::resolver::constant_source  W3  passes until nothing changes: fixpoint
-heki_effect::resolver::imported_fqn  W1,W4  recursion (calls itself): Memo or Closure; def_inst: FnShape
+heki_effect::resolver::imported_fqn  W1  recursion (calls itself): Memo or Closure
 heki_effect::resolver::kept_in_declarations  W1  recursion (calls itself): Memo or Closure
 heki_effect::resolver::set_flags  W2  worklist: reach, Closure, or fixpoint
-heki_effect::summary::Extractor::attr_load  W4  const_str: FnShape; stage-2 migration debt
 heki_effect::summary::Extractor::binding  W1  recursion (calls itself): Memo or Closure
 heki_effect::summary::Extractor::build_aliases  W3  passes until nothing changes: fixpoint
 heki_effect::summary::Extractor::build_fresh  W3  passes until nothing changes: fixpoint
 heki_effect::summary::Extractor::build_may_params  W3  passes until nothing changes: fixpoint
 heki_effect::summary::Extractor::build_reach  W3  passes until nothing changes: fixpoint
-heki_effect::summary::Extractor::call  W1,W4  recursion (through Extractor::handed_callable): Memo or Closure; block_loop_depth: FnShape
-heki_effect::summary::Extractor::container_method  W4  const_str: FnShape
-heki_effect::summary::Extractor::derivations  W4  const_bool: FnShape
+heki_effect::summary::Extractor::call  W1  recursion (through Extractor::handed_callable): Memo or Closure
+heki_effect::summary::Extractor::call_inst  W1  stage-2 debt (EFF110): recursion (through TypeCtx::infer_types): Memo or Closure
+heki_effect::summary::Extractor::child_iteration  W1  stage-2 debt (EFF110): recursion (through TypeCtx::infer_types): Memo or Closure
 heki_effect::summary::Extractor::drives_manually  W2  worklist: reach, Closure, or fixpoint
 heki_effect::summary::Extractor::escape  W1  recursion (calls itself): Memo or Closure
-heki_effect::summary::Extractor::external_call  W4  const_str: FnShape
-heki_effect::summary::Extractor::external_escapes  W4  const_bool: FnShape
+heki_effect::summary::Extractor::exclusive_use  W1  stage-2 debt (EFF110): recursion (through TypeCtx::infer_types): Memo or Closure
+heki_effect::summary::Extractor::external_call  W1  stage-2 debt (EFF110): recursion (through TypeCtx::infer_types): Memo or Closure
 heki_effect::summary::Extractor::external_read  W1  recursion (calls itself): Memo or Closure; stage-2 migration debt
 heki_effect::summary::Extractor::handed_callable  W1  recursion (through Extractor::call): Memo or Closure
 heki_effect::summary::Extractor::hashed_whole_self_attrs  W2  worklist: reach, Closure, or fixpoint
-heki_effect::summary::Extractor::iterations  W4  block_loop_depth: FnShape
-heki_effect::summary::Extractor::key_facts  W4  predecessors: FnShape
-heki_effect::summary::Extractor::key_of  W4  const_str: FnShape
-heki_effect::summary::Extractor::passed_items  W4  block_loop_depth: FnShape
+heki_effect::summary::Extractor::iteration  W1  stage-2 debt (EFF110): recursion (through TypeCtx::infer_types): Memo or Closure
+heki_effect::summary::Extractor::iterations  W1  stage-2 debt (EFF110): recursion (through TypeCtx::infer_types): Memo or Closure
+heki_effect::summary::Extractor::lock_acquired  W1  stage-2 debt (EFF109): recursion (through TypeCtx::infer_types): Memo or Closure
+heki_effect::summary::Extractor::lock_held_at  W1  stage-2 debt (EFF110): recursion (through TypeCtx::infer_types): Memo or Closure
+heki_effect::summary::Extractor::name_rebound  W1  stage-2 debt (EFF109): recursion (through TypeCtx::infer_types): Memo or Closure
+heki_effect::summary::Extractor::property_read  W1  stage-2 debt (EFF110): recursion (through TypeCtx::infer_types): Memo or Closure
 heki_effect::summary::Extractor::reference_site  W4  block_loop_depth: FnShape; stage-2 migration debt
 heki_effect::summary::Extractor::returned_origins  W2  worklist: reach, Closure, or fixpoint
 heki_effect::summary::Extractor::returned_self_attrs  W2  worklist: reach, Closure, or fixpoint
-heki_effect::summary::Extractor::site  W4  block_loop_depth: FnShape
-heki_effect::summary::Extractor::visit  W4  const_str: FnShape
+heki_effect::summary::Extractor::site  W1  stage-2 debt (EFF110): recursion (through TypeCtx::infer_types): Memo or Closure
+heki_effect::summary::Extractor::visit  W1  stage-2 debt (EFF109): recursion (through TypeCtx::infer_types): Memo or Closure
+heki_effect::summary::Extractor::worker_site  W1  stage-2 debt (EFF110): recursion (through TypeCtx::infer_types): Memo or Closure
 heki_effect::summary::HandedValues::handed_at  W2  worklist: reach, Closure, or fixpoint; stage-2 migration debt
 heki_effect::summary::HandedValues::reaching  W2  worklist: reach, Closure, or fixpoint; stage-2 migration debt
 heki_effect::summary::class_bodies_run_by  W2  worklist: reach, Closure, or fixpoint
 heki_effect::summary::statements::Extractor::head_texts  W1  recursion (through Extractor::statement_texts, Extractor::merged_texts, Extractor::source_texts and 3 more): Memo or Closure
 heki_effect::summary::statements::Extractor::item_texts  W1  recursion (through Extractor::statement_texts, Extractor::merged_texts, Extractor::source_texts and 3 more): Memo or Closure
-heki_effect::summary::statements::Extractor::items_by_definition  W1,W4  recursion (through Extractor::statement_texts, Extractor::merged_texts, Extractor::source_texts and 3 more): Memo or Closure; const_str: FnShape
+heki_effect::summary::statements::Extractor::items_by_definition  W1  recursion (through Extractor::statement_texts, Extractor::merged_texts, Extractor::source_texts and 3 more): Memo or Closure
 heki_effect::summary::statements::Extractor::merged_texts  W1,W2  recursion (through Extractor::statement_texts, Extractor::source_texts, Extractor::head_texts and 3 more): Memo or Closure; worklist: reach, Closure, or fixpoint
-heki_effect::summary::statements::Extractor::source_texts  W1,W4  recursion (through Extractor::statement_texts, Extractor::merged_texts, Extractor::head_texts and 3 more): Memo or Closure; const_str: FnShape
+heki_effect::summary::statements::Extractor::source_texts  W1  recursion (through Extractor::statement_texts, Extractor::merged_texts, Extractor::head_texts and 3 more): Memo or Closure
 heki_effect::summary::statements::Extractor::statement_texts  W1  recursion (through Extractor::merged_texts, Extractor::source_texts, Extractor::head_texts and 3 more): Memo or Closure
 heki_effect::summary::statements::Extractor::wrapped_statement  W1  recursion (through Extractor::statement_texts, Extractor::merged_texts, Extractor::source_texts and 3 more): Memo or Closure
 heki_effect::types::Ty::depth  W1  recursion (through Args::depth, Elem::depth): Memo or Closure
@@ -133,74 +124,51 @@ heki_ir::builder::ModuleLowerer::lower_function_body  W1  AST lowering, bounded 
 heki_ir::builder::accumulating_updates  W2  worklist: reach, Closure, or fixpoint
 heki_ir::builder::collect_expr_bindings  W1  AST lowering, bounded by the IR unit budget
 heki_ir::builder::reaches_var  W2  worklist: reach, Closure, or fixpoint
-heki_ir::dominators::DominatorTree::of  W2,W4  numbers the tree FnShape keeps, each block once; predecessors: the tables of FnShape
-heki_ir::dominators::immediate_dominators  W4  rpo_blocks: the tables of FnShape
+heki_ir::dominators::DominatorTree::over  W2  numbers the tree FnShape keeps, each block once
 heki_ir::facts::FnIndex::aliases  W3  passes until nothing changes: fixpoint
-heki_ir::facts::FnIndex::builtin  W4  def_inst: FnShape
 heki_ir::facts::FnIndex::caps_on_the_way  W1  recursion (through FnIndex::implied_caps): Memo or Closure
-heki_ir::facts::FnIndex::compared_len  W4  const_int: FnShape
-heki_ir::facts::FnIndex::const_int_depth  W1,W4  recursion (calls itself): Memo or Closure; def_inst: FnShape
+heki_ir::facts::FnIndex::const_int_depth  W1  recursion (calls itself): Memo or Closure
 heki_ir::facts::FnIndex::constructed  W1  recursion (through FnIndex::container_bound_nested, FnIndex::decide_bound, FnIndex::display_at and 13 more): Memo or Closure
 heki_ir::facts::FnIndex::container_bound_nested  W1  recursion (through FnIndex::decide_bound, FnIndex::display_at, FnIndex::decide_display and 13 more): Memo or Closure
-heki_ir::facts::FnIndex::copied_from  W4  def_inst: FnShape
-heki_ir::facts::FnIndex::counted_trips  W4  body.contains, const_int: FnShape
-heki_ir::facts::FnIndex::counter  W4  const_int: FnShape
 heki_ir::facts::FnIndex::decide_bound  W1  recursion (through FnIndex::container_bound_nested, FnIndex::display_at, FnIndex::decide_display and 13 more): Memo or Closure
-heki_ir::facts::FnIndex::decide_display  W1,W4  recursion (through FnIndex::container_bound_nested, FnIndex::decide_bound, FnIndex::display_at and 13 more): Memo or Closure; def_inst: FnShape
+heki_ir::facts::FnIndex::decide_display  W1  recursion (through FnIndex::container_bound_nested, FnIndex::decide_bound, FnIndex::display_at and 13 more): Memo or Closure
 heki_ir::facts::FnIndex::display_at  W1  recursion (through FnIndex::container_bound_nested, FnIndex::decide_bound, FnIndex::decide_display and 13 more): Memo or Closure
-heki_ir::facts::FnIndex::dominates  W2  worklist: reach, Closure, or fixpoint
-heki_ir::facts::FnIndex::fixed_trip  W1,W4  recursion (through FnIndex::container_bound_nested, FnIndex::decide_bound, FnIndex::display_at and 13 more): Memo or Closure; def_inst: FnShape
-heki_ir::facts::FnIndex::grown_operands  W4  def_inst: FnShape
+heki_ir::facts::FnIndex::fixed_trip  W1  recursion (through FnIndex::container_bound_nested, FnIndex::decide_bound, FnIndex::display_at and 13 more): Memo or Closure
 heki_ir::facts::FnIndex::grown_vars  W3  passes until nothing changes: fixpoint
 heki_ir::facts::FnIndex::grows  W1  recursion (through FnIndex::container_bound_nested, FnIndex::decide_bound, FnIndex::display_at and 13 more): Memo or Closure
 heki_ir::facts::FnIndex::guarded_len  W1  recursion (through FnIndex::container_bound_nested, FnIndex::decide_bound, FnIndex::display_at and 13 more): Memo or Closure
-heki_ir::facts::FnIndex::implied_caps  W1,W4  recursion (through FnIndex::caps_on_the_way): Memo or Closure; def_inst: FnShape
+heki_ir::facts::FnIndex::implied_caps  W1  recursion (through FnIndex::caps_on_the_way): Memo or Closure
 heki_ir::facts::FnIndex::inst_origins  W1  recursion (through FnIndex::container_bound_nested, FnIndex::decide_bound, FnIndex::display_at and 13 more): Memo or Closure
-heki_ir::facts::FnIndex::is_int_constant  W4  def_inst: FnShape
 heki_ir::facts::FnIndex::items_added  W1  recursion (through FnIndex::container_bound_nested, FnIndex::decide_bound, FnIndex::display_at and 13 more): Memo or Closure
 heki_ir::facts::FnIndex::iter_bound  W1  recursion (through FnIndex::container_bound_nested, FnIndex::decide_bound, FnIndex::display_at and 13 more): Memo or Closure
-heki_ir::facts::FnIndex::iter_bound_depth  W1,W4  recursion (through FnIndex::container_bound_nested, FnIndex::decide_bound, FnIndex::display_at and 13 more): Memo or Closure; const_int, def_inst: FnShape
-heki_ir::facts::FnIndex::len_argument  W4  def_inst: FnShape
-heki_ir::facts::FnIndex::len_cap  W4  const_int: FnShape
-heki_ir::facts::FnIndex::lives_across_seen  W1,W4  recursion (calls itself): Memo or Closure; body.contains: FnShape
-heki_ir::facts::FnIndex::loop_iterable  W4  def_inst: FnShape
-heki_ir::facts::FnIndex::made_kind  W4  def_inst: FnShape
+heki_ir::facts::FnIndex::iter_bound_depth  W1  recursion (through FnIndex::container_bound_nested, FnIndex::decide_bound, FnIndex::display_at and 13 more): Memo or Closure
+heki_ir::facts::FnIndex::lives_across_seen  W1  recursion (calls itself): Memo or Closure
 heki_ir::facts::FnIndex::not_grown  W1  recursion (through FnIndex::container_bound_nested, FnIndex::decide_bound, FnIndex::display_at and 13 more): Memo or Closure
 heki_ir::facts::FnIndex::origins  W1  recursion (through FnIndex::container_bound_nested, FnIndex::decide_bound, FnIndex::display_at and 13 more): Memo or Closure
-heki_ir::facts::FnIndex::preds  W4  predecessors: FnShape
 heki_ir::facts::FnIndex::reaching  W2  worklist: reach, Closure, or fixpoint
-heki_ir::facts::FnIndex::runs  W1,W4  recursion (through FnIndex::container_bound_nested, FnIndex::decide_bound, FnIndex::display_at and 13 more): Memo or Closure; body.contains: FnShape
-heki_ir::facts::FnIndex::slice_len  W4  const_int, def_inst: FnShape
-heki_ir::facts::FnIndex::source  W4  def_inst: FnShape
-heki_ir::facts::module_constants  W4  const_int, is_in_loop: FnShape
+heki_ir::facts::FnIndex::runs  W1  recursion (through FnIndex::container_bound_nested, FnIndex::decide_bound, FnIndex::display_at and 13 more): Memo or Closure
 heki_ir::facts::waits_every_iteration  W2  worklist: reach, Closure, or fixpoint
-heki_ir::facts::waits_for_time  W4  def_inst: FnShape
 heki_rules::data_rules::Derivations::of  W2  worklist: reach, Closure, or fixpoint
-heki_rules::data_rules::carries  W2,W4  worklist: reach, Closure, or fixpoint; def_inst: FnShape
+heki_rules::data_rules::carries  W2  worklist: reach, Closure, or fixpoint
 heki_rules::data_rules::combines  W2  worklist: reach, Closure, or fixpoint
-heki_rules::eff_rules::eff102_103  W4  block_loop_depth, body.contains: FnShape
-heki_rules::eff_rules::held_across_io::held_at_entry  W3,W4  passes until nothing changes: fixpoint; rpo_blocks: FnShape
-heki_rules::eff_rules::held_across_io::held_managers  W4  def_inst: FnShape
+heki_rules::eff_rules::fanout_exclusive::Check::child_elements  W1  stage-2 debt (EFF110): recursion (through Check::function, Check::elements): Memo or Closure
+heki_rules::eff_rules::fanout_exclusive::Check::element  W1  stage-2 debt (EFF110): recursion (calls itself): Memo or Closure
+heki_rules::eff_rules::fanout_exclusive::Check::elements  W1  stage-2 debt (EFF110): recursion (through Check::function, Check::child_elements): Memo or Closure
+heki_rules::eff_rules::fanout_exclusive::Check::function  W1  stage-2 debt (EFF110): recursion (through Check::elements, Check::child_elements): Memo or Closure
+heki_rules::eff_rules::fanout_exclusive::Check::holder  W1  stage-2 debt (EFF110): recursion (calls itself): Memo or Closure
+heki_rules::eff_rules::fanout_exclusive::Check::top_holder  W1  stage-2 debt (EFF110): recursion (calls itself): Memo or Closure
 heki_rules::eff_rules::unretained_task::TaskFlow::aliases  W2  worklist: reach, Closure, or fixpoint
 heki_rules::eff_rules::unretained_task::TaskFlow::of  W2  worklist: reach, Closure, or fixpoint
 heki_rules::mut_rules::CacheEvents::invalidated_after  W3  passes until nothing changes: fixpoint
 heki_rules::mut_rules::FunctionMatcher::matches  W1  not recursive: `self.whole.matches` is a pattern's method of the same name
-heki_rules::mut_rules::Mut202Fn::call_of  W4  def_inst: FnShape
-heki_rules::mut_rules::Mut202Fn::propagate  W3,W4  passes until nothing changes: fixpoint; rpo_blocks: FnShape
-heki_rules::mut_rules::Mut202Fn::transfer  W4  const_bool: FnShape
-heki_rules::mut_rules::Mut202Fn::violation  W4  def_inst: FnShape
+heki_rules::mut_rules::Mut202Fn::propagate  W3  passes until nothing changes: fixpoint
 heki_rules::mut_rules::changes_param  W2  worklist: reach, Closure, or fixpoint
-heki_rules::mut_rules::conditional_ownership::FnCheck::fixpoint  W2,W4  worklist: reach, Closure, or fixpoint; rpo_blocks: FnShape
+heki_rules::mut_rules::conditional_ownership::FnCheck::fixpoint  W2  worklist: reach, Closure, or fixpoint
 heki_rules::mut_rules::conditional_ownership::FnCheck::is_flag  W2  worklist: reach, Closure, or fixpoint
-heki_rules::mut_rules::conditional_ownership::FnCheck::new  W4  predecessors: FnShape
 heki_rules::mut_rules::delegates  W2  worklist: reach, Closure, or fixpoint
 heki_rules::mut_rules::invalidation::announced_by_callers  W2  worklist: reach, Closure, or fixpoint
-heki_rules::mut_rules::iter_consumption::back_to_header  W2,W4  worklist: reach, Closure, or fixpoint; body.contains: FnShape
-heki_rules::mut_rules::iter_consumption::iterates  W4  def_inst: FnShape
-heki_rules::mut_rules::iter_consumption::prior  W4  body.contains: FnShape
+heki_rules::mut_rules::iter_consumption::back_to_header  W2  worklist: reach, Closure, or fixpoint
 heki_rules::mut_rules::iter_consumption::reaches  W2  worklist: reach, Closure, or fixpoint
-heki_rules::mut_rules::iter_consumption::run  W4  def_inst: FnShape
-heki_rules::mut_rules::iter_consumption::successors  W4  body.contains: FnShape
 heki_rules::mut_rules::iterated_mutation::Exposure::follow  W2  worklist: reach, Closure, or fixpoint
 heki_rules::mut_rules::iterated_mutation::generators_reached  W2  worklist: reach, Closure, or fixpoint
 heki_rules::mut_rules::private_methods_called_from_init  W2  worklist: reach, Closure, or fixpoint
@@ -208,52 +176,19 @@ heki_rules::mut_rules::reachable_blocks  W2  worklist: reach, Closure, or fixpoi
 heki_rules::mut_rules::readonly_mutation::Rule::emit  W1  not recursive: `cx.emit` is `CheckContext::emit`, of the same name
 heki_rules::mut_rules::runs_inside_allowed_through  W2  worklist: reach, Closure, or fixpoint; stage-2 migration debt
 heki_rules::mut_rules::unresolved::unknown_above  W2  worklist: reach, Closure, or fixpoint
-heki_rules::opt_rules::Defs::continues  W4  body.contains: FnShape
 heki_rules::opt_rules::Defs::derived  W3  passes until nothing changes: fixpoint
 heki_rules::opt_rules::Defs::element_text  W1  recursion (calls itself): Memo or Closure
-heki_rules::opt_rules::Defs::idle_on_mismatch  W2,W4  worklist: reach, Closure, or fixpoint; body.contains: FnShape
-heki_rules::opt_rules::Defs::reads_elements  W2,W4  worklist: reach, Closure, or fixpoint; body.contains: FnShape
+heki_rules::opt_rules::Defs::idle_on_mismatch  W2  worklist: reach, Closure, or fixpoint
+heki_rules::opt_rules::Defs::reads_elements  W2  worklist: reach, Closure, or fixpoint
 heki_rules::opt_rules::Defs::receiver_name  W1  recursion (calls itself): Memo or Closure
-heki_rules::opt_rules::Defs::selects_pairs  W4  predecessors: FnShape
-heki_rules::opt_rules::Defs::stops_at_first_match  W4  body.contains: FnShape
-heki_rules::opt_rules::Sizes::imported  W4  def_inst: FnShape
-heki_rules::opt_rules::Sizes::small_container  W4  def_inst: FnShape
 heki_rules::opt_rules::forward_aliases  W3  passes until nothing changes: fixpoint
-heki_rules::opt_rules::opt112  W4  body.contains, is_in_loop: FnShape
-heki_rules::opt_rules::opt113  W4  body.contains: FnShape
-heki_rules::opt_rules::runs_again  W2,W4  worklist: reach, Closure, or fixpoint; body.contains: FnShape
-heki_soundness::interpreter::FnCtx::builtin_callee  W4  def_inst: FnShape
+heki_rules::opt_rules::runs_again  W2  worklist: reach, Closure, or fixpoint
 heki_soundness::interpreter::FnCtx::exact_on_every_path_in  W1  recursion (calls itself): Memo or Closure
-heki_soundness::interpreter::FnCtx::new  W4  predecessors, rpo_blocks: FnShape
-heki_soundness::interpreter::FnCtx::possible_kinds_depth  W1,W4  recursion (calls itself): Memo or Closure; def_inst: FnShape
-heki_soundness::interpreter::FnCtx::yielded_kinds  W4  def_inst: FnShape
-heki_soundness::liveness::Liveness::compute  W4  rpo_blocks: FnShape
+heki_soundness::interpreter::FnCtx::possible_kinds_depth  W1  recursion (calls itself): Memo or Closure
 heki_soundness::obligations::Checker::defined_in  W1  recursion (calls itself): Memo or Closure
-heki_soundness::obligations::Checker::definitely_bound  W2,W4  worklist: reach, Closure, or fixpoint; def_inst: FnShape
-heki_soundness::obligations::Checker::describe_temp  W4  def_inst: FnShape
-heki_soundness::obligations::Checker::in_loop_or  W4  body.contains: FnShape
-heki_soundness::obligations::Checker::name  W1,W4  recursion (calls itself): Memo or Closure; def_inst: FnShape
+heki_soundness::obligations::Checker::definitely_bound  W2  worklist: reach, Closure, or fixpoint
+heki_soundness::obligations::Checker::name  W1  recursion (calls itself): Memo or Closure
 heki_soundness::obligations::Checker::names_read_from  W2  worklist: reach, Closure, or fixpoint
 heki_soundness::obligations::Checker::reachable_from  W2  worklist: reach, Closure, or fixpoint
-heki_soundness::obligations::Checker::rebinding  W4  body.contains: FnShape
 heki_soundness::opt_rules::Rules::alias_closure  W3  passes until nothing changes: fixpoint
-heki_soundness::opt_rules::Rules::attr_concat  W4  innermost_loop: FnShape
-heki_soundness::opt_rules::Rules::dedup  W4  innermost_loop: FnShape
-heki_soundness::opt_rules::Rules::deque_init_sites  W4  body.contains: FnShape
-heki_soundness::opt_rules::Rules::evaluates_no_code  W4  def_inst: FnShape
-heki_soundness::opt_rules::Rules::for_stmt  W4  def_inst: FnShape
-heki_soundness::opt_rules::Rules::front  W4  innermost_loop: FnShape
-heki_soundness::opt_rules::Rules::hoist_region  W4  def_inst: FnShape
-heki_soundness::opt_rules::Rules::immutable_concat  W4  innermost_loop: FnShape
-heki_soundness::opt_rules::Rules::iterator_used_otherwise  W4  def_inst: FnShape
-heki_soundness::opt_rules::Rules::list_concat  W4  def_inst: FnShape
-heki_soundness::opt_rules::Rules::membership  W4  innermost_loop: FnShape
-heki_soundness::opt_rules::Rules::non_deque_use  W4  const_int: FnShape
-heki_soundness::opt_rules::Rules::non_empty_at  W4  innermost_loop: FnShape
-heki_soundness::opt_rules::Rules::rebuild  W4  innermost_loop: FnShape
-heki_soundness::opt_rules::Rules::simple_text  W4  def_inst: FnShape
-heki_soundness::opt_rules::Rules::single_item_display  W4  def_inst: FnShape
-heki_soundness::opt_rules::find_sites  W4  const_int, def_inst, is_in_loop: FnShape
-heki_soundness::opt_rules::innermost_loop  W4  innermost_loop: FnShape
-heki_soundness::opt_rules::loop_carried_phi  W4  body.contains: FnShape
 heki_soundness::opt_rules::on_every_path  W2  worklist: reach, Closure, or fixpoint

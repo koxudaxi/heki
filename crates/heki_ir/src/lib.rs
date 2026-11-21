@@ -307,6 +307,9 @@ pub enum InstKind {
         /// The name is a module global (`del` in the module body or after `global name`).
         #[serde(default)]
         global: bool,
+        /// The name is an enclosing function's variable (`del` after `nonlocal name`).
+        #[serde(default)]
+        nonlocal: bool,
     },
     BinOp {
         dst: VarId,

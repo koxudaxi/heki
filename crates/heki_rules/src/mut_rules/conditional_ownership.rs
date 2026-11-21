@@ -25,6 +25,7 @@ use heki_effect::{
     CONTAINER_MUTATORS, CallHop, CallSite, Callee, EffectSummary, FuncKey, SiteRole, TypeCtx, Val,
     self_aliases,
 };
+use heki_ir::walk::FnShape;
 use heki_ir::{
     BlockId, CompareOpKind, ConstLiteral, FunctionId, Inst, InstKind, IrFunction, PhiNode,
     Terminator, UnaryOpKind, VarId,
@@ -370,13 +371,12 @@ const REMOVING_METHODS: &[&str] = &[
 struct FnCheck<'a, 'u> {
     u: &'u UnitCheck<'a>,
     f: &'a IrFunction,
+    shape: FnShape<'a>,
     key: FuncKey,
     /// The function's call sites by span.
     sites: Option<&'u FxHashMap<Span, Vec<&'a CallSite>>>,
     types: FxHashMap<VarId, Val>,
     defs: FxHashMap<VarId, &'a Inst>,
-    /// The value each copy copies ([`Self::copied_from`]).
-    copy_roots: FxHashMap<VarId, VarId>,
     /// What the parameters hold when the function starts.
     initial: FxHashMap<VarId, Own>,
     own: FxHashMap<VarId, Own>,
@@ -384,7 +384,6 @@ struct FnCheck<'a, 'u> {
     self_vars: FxHashSet<VarId>,
     /// The blocks a run can reach and the edges it can take.
     live: ownership::Live,
-    preds: Vec<Vec<BlockId>>,
     /// Per phi input (the phi's variable and the block the input comes from), the values an
     /// `is` test that failed on the way tested it against (`if result is shared: result =
     /// shared.copy()`): it is not their objects.
@@ -442,13 +441,12 @@ impl<'a, 'u> FnCheck<'a, 'u> {
             types: u.tcx.infer(f),
             u,
             f,
-            copy_roots: ownership::copy_roots(&defs),
+            shape: FnShape::new(f),
             defs,
             initial: own.clone(),
             own,
             self_vars,
             live,
-            preds: f.predecessors(),
             not_same: FxHashMap::default(),
             callers: FxHashSet::default(),
             replacements: FxHashSet::default(),
@@ -468,13 +466,13 @@ impl<'a, 'u> FnCheck<'a, 'u> {
         if tests.is_empty() {
             return;
         }
-        let idom = heki_ir::immediate_dominators(self.f, &self.preds, |p, b| self.live.edge(p, b));
+        let idom = heki_ir::immediate_dominators(&self.shape, |p, b| self.live.edge(p, b));
         let test_at: FxHashMap<BlockId, usize> =
             tests.iter().enumerate().map(|(i, t)| (t.at, i)).collect();
         let mut heads: FxHashMap<BlockId, (usize, bool)> = FxHashMap::default();
         for (i, t) in tests.iter().enumerate() {
             for (side, same) in [(t.same, true), (t.differs, false)] {
-                if self.preds[side.0 as usize] == [t.at] {
+                if self.shape.preds(side) == [t.at] {
                     heads.insert(side, (i, same));
                 }
             }
@@ -528,12 +526,12 @@ impl<'a, 'u> FnCheck<'a, 'u> {
                     })
                     .collect();
                 for (from, v, sides) in &inputs {
-                    let root = self.copied_from(*v);
+                    let root = self.shape.copy_root(*v);
                     for &(i, _) in sides.iter().filter(|(_, same)| !same) {
                         let t = &tests[i];
-                        let other = if self.copied_from(t.lhs) == root {
+                        let other = if self.shape.copy_root(t.lhs) == root {
                             t.rhs
-                        } else if self.copied_from(t.rhs) == root {
+                        } else if self.shape.copy_root(t.rhs) == root {
                             t.lhs
                         } else {
                             continue;
@@ -647,7 +645,7 @@ impl<'a, 'u> FnCheck<'a, 'u> {
 
     fn source(&self, inst: &'a Inst) -> Source<'a> {
         let made_here = |v: VarId| {
-            ownership::made_here(self.copied_from(v), &self.defs, &|i, made_here| {
+            ownership::made_here(self.shape.copy_root(v), &self.defs, &|i, made_here| {
                 self.source_given(i, made_here)
             })
         };
@@ -695,17 +693,12 @@ impl<'a, 'u> FnCheck<'a, 'u> {
         if self.self_vars.contains(&obj) {
             return Receiver::MethodSelf;
         }
-        let root = self.copied_from(obj);
+        let root = self.shape.copy_root(obj);
         match self.defs.get(&root).map(|i| &i.kind) {
             Some(InstKind::LoadGlobal { name, .. }) => Receiver::Global(name.clone()),
             Some(InstKind::LoadDeref { name, .. }) => Receiver::Cell(name.clone()),
             _ => Receiver::Value(self.f.id, root),
         }
-    }
-
-    /// The value `v` copies, through any number of copies (`v` itself when it is no copy).
-    fn copied_from(&self, v: VarId) -> VarId {
-        self.copy_roots.get(&v).copied().unwrap_or(v)
     }
 
     /// What a project call's result holds: what its callees return, with the arguments bound
@@ -819,7 +812,7 @@ impl<'a, 'u> FnCheck<'a, 'u> {
         let mut kept: FxHashMap<Span, Vec<Place<'a>>> = FxHashMap::default();
         for inst in self.live_insts() {
             for (v, place) in ownership::stores(&inst.kind) {
-                let root = self.copied_from(v);
+                let root = self.shape.copy_root(v);
                 if let (Some(def), Some(o)) = (self.defs.get(&root), self.own.get(&root))
                     && o.new.is_some_and(|n| n.at == def.span)
                     && o.borrowed.is_none()
@@ -852,7 +845,7 @@ impl<'a, 'u> FnCheck<'a, 'u> {
         // of, and those making a new object kept in it.
         let mut readers: FxHashMap<VarId, Vec<usize>> = FxHashMap::default();
         let f = self.f;
-        for bb in f.rpo_blocks().into_iter().filter(|b| self.live.block(*b)) {
+        for &bb in self.shape.rpo().iter().filter(|b| self.live.block(**b)) {
             let block = f.block(bb);
             for phi in &block.phis {
                 for &(from, v) in &phi.incoming {
@@ -945,21 +938,21 @@ impl<'a, 'u> FnCheck<'a, 'u> {
     /// that any other test picks, of the value (`x if isinstance(x, set) else set(x)`) or of
     /// other state (`if config.get("flag"): x = set(x)`), is no such choice.
     fn picked_copy(&self, phi: &PhiNode, from: BlockId, v: VarId) -> Option<VarId> {
-        let def = self.defs.get(&self.copied_from(v))?;
+        let def = self.defs.get(&self.shape.copy_root(v))?;
         let callee = self.call_of(def).map(|c| c.callee);
         let copied = ownership::copied_operand(&def.kind, callee.as_ref(), self.u.cx.kb)?;
-        let original = self.copied_from(copied);
+        let original = self.shape.copy_root(copied);
         let other_input = phi
             .incoming
             .iter()
-            .any(|&(_, w)| w != v && w != phi.dst && self.copied_from(w) == original);
+            .any(|&(_, w)| w != v && w != phi.dst && self.shape.copy_root(w) == original);
         let cond = self.deciding_condition(from).filter(|_| other_input)?;
         self.is_flag(cond, original).then_some(original)
     }
 
     /// The condition of the branch that leads to `block`, its only predecessor.
     fn deciding_condition(&self, block: BlockId) -> Option<VarId> {
-        if let [pred] = self.preds[block.0 as usize].as_slice()
+        if let [pred] = self.shape.preds(block)
             && let Terminator::Branch { cond, .. } = self.f.block(*pred).terminator
         {
             return Some(cond);

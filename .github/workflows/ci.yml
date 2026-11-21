@@ -192,6 +192,12 @@ jobs:
       # counting build reads the same bytes on every run.
       - name: Peak heap within budget
         run: python3 scripts/check_memory.py --heki target/release/heki
+      # Generated shapes at the largest size heki models, in a function, a method, and a module
+      # body: fails when one costs more than 1 s (scaled to the runner by a fixed linear shape on
+      # the same build) or 1 GiB of heap beyond an empty module, or when an owner's walk steps
+      # grow faster than linearly.
+      - name: Analysis cost of generated shapes
+        run: python3 scripts/check_walk_shapes.py --heki target/release/heki
       # At release time (release.yml calls this workflow), and on a manual run: the peak RSS of
       # a release build, which also holds the allocator's fragmentation and mappings, under a
       # coarse budget.
