@@ -798,9 +798,16 @@ fn names_function(patterns: &[DottedPattern], key: &FuncKey) -> bool {
 }
 
 impl Boundary<'_> {
-    /// A function of the boundary's scopes (module bodies are not functions).
+    /// A function of the boundary's scopes, or a module body a scope names as `<module>`
+    /// (`pkg.gen:<module>`): a scope naming its module (`pkg.*`, `pkg.gen:*`) does not cover it.
     fn in_scope(&self, key: &FuncKey) -> bool {
-        key.qualname != "<module>" && names_function(&self.scopes, key)
+        if key.qualname != "<module>" {
+            return names_function(&self.scopes, key);
+        }
+        let fqn = key.fqn();
+        self.scopes
+            .iter()
+            .any(|p| p.names_module_bodies() && p.names_within(&fqn, &key.qualname))
     }
 
     /// A Layer 2 symbol (or one of its modules / classes) that `allowed-callees` names.
@@ -1012,7 +1019,7 @@ pub(crate) fn eff201(
     for unit in cx.units {
         let mut done: FxHashSet<(FuncKey, usize)> = FxHashSet::default();
         for f in &unit.input.ir.functions {
-            if f.is_class_body || f.is_module_body {
+            if f.is_class_body {
                 continue;
             }
             let key = CheckContext::key(unit, f);
