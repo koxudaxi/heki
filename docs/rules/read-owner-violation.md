@@ -2,9 +2,13 @@
 
 # read-owner-violation (MUT203)
 
-Family: Mutation & State (MUT) · Enabled by default · Severity `error` · No automatic fix
+Family: Mutation & State (MUT) · Heuristic · Runs when its contract is declared · Severity `error` (a bug) · No automatic fix
 
 Reading a guarded attribute (directly, via alias, `getattr`, or `__dict__`) outside declared `read-owners`.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when its contract is declared. It has not been measured yet. See [Rule Precision](../precision.md).
 
 ## What it does
 Checks reads of attributes that a `[[tool.heki.read-owners]]` contract reserves for a set of
@@ -53,6 +57,20 @@ in a function that only runs inside allowed contexts (every path of callers abov
 an allowed reader or an exempt method), as for `MUT201`. One report stands for every read behind
 its call (`sites` in JSON), as for `MUT201`. A read runs where the body holding it runs, as for
 `MUT201`: a generator's reads where it is iterated, a coroutine's where it is awaited.
+
+## What a report states
+
+A report states that the function reads a target of a `read-owners` contract outside the contract's
+read owners, directly, through an alias, `getattr`, or `__dict__`, or through the helpers shown.
+
+Its premises:
+
+- **Target**: the object is an instance of a class the contract names, or of a subclass, by
+  construction or annotation (assumption R2). Open: an alias bound on one path is enough.
+- **Outside the owners**: the function is not in the allowed modules and classes, nor runs only
+  inside allowed contexts. Established from the contract.
+- **Through helpers**: a helper's write, read, or call counts at its caller. Open: one path of the
+  helper is enough.
 
 ## Why is this bad?
 Some state is only meaningful through the component that maintains it: an index that keeps a
