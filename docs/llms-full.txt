@@ -2725,6 +2725,10 @@ An open document stays the file's text until it is closed:
 - a file deleted on the disk while its document is open stays in the project until the document
   closes.
 
+A deletion the editor reports holds until the file is reported again (created or changed) or
+saved, even while the disk still lists the file: on Windows a deleted file stays listed until the
+last program holding it open closes it.
+
 ## Without an editor: `--watch`
 
 ```console

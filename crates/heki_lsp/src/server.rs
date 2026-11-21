@@ -12,7 +12,8 @@
 //! - `didSave`: re-analyze the document, then every queued file and, in turn, what those
 //!   affect (`Workspace::refresh_all`), and publish their diagnostics.
 //! - `workspace/didChangeWatchedFiles`: files changed on the disk are re-analyzed like saved
-//!   documents, deleted ones leave the project, and a change of the configuration or of an
+//!   documents, deleted ones leave the project (and stay out, whatever the disk still shows,
+//!   until an event or a save names them again), and a change of the configuration or of an
 //!   ignore file re-indexes it.
 //! - `codeAction`: `OPT` fixes and `# heki: ignore[CODE]` insertions.
 //! - `heki/stats`: engine counters (`EngineStats`), used to verify Early Cutoff, the number of
@@ -24,11 +25,11 @@
 //! the newest diagnostics of each file.
 
 use crate::convert;
-use crate::engine::{CONFIG_FILES, Selectors, Workspace};
+use crate::engine::{CONFIG_FILES, Selectors, Source, Workspace};
 use heki_diagnostics::Diagnostic;
 use heki_effect::ModuleLayout;
 use heki_rules::project::{IGNORE_FILES, ProjectOptions, canonical, find_root};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -72,6 +73,10 @@ struct State {
     versioned_edits: bool,
     /// Files to re-analyze on the next save.
     pending: BTreeSet<PathBuf>,
+    /// Files a `workspace/didChangeWatchedFiles` Deleted event reported, until a Created or
+    /// Changed event or a save names them again: what the disk shows does not bring them back
+    /// (`State::source_of`).
+    deleted: FxHashSet<PathBuf>,
     /// Debounce tokens per document.
     generation: FxHashMap<PathBuf, u64>,
     /// The latest publication created for each file (`Publish::seq`): an older one that has
@@ -133,19 +138,41 @@ struct Publish {
     version: Option<i32>,
 }
 
-/// Absolute, symlink-resolved path of a document (the parent is resolved for unsaved files;
-/// a path whose directory does not exist either is kept as it is).
-fn normalize(path: &Path) -> PathBuf {
-    canonical(path).unwrap_or_else(|_| {
-        path.parent()
-            .zip(path.file_name())
-            .and_then(|(parent, name)| canonical(parent).ok().map(|p| p.join(name)))
-            .unwrap_or_else(|| path.to_path_buf())
-    })
+/// The path a file is known by: its directory resolved (symbolic links, an 8.3 short name on
+/// Windows) and its own name as that directory lists it, as discovery names the files it walks.
+/// What the file resolves to is taken only for the spelling of that name (its case, where the
+/// file system ignores case): a document's key must not follow the file elsewhere. A symbolic
+/// link resolves to another file, and on Windows a file resolved while it is being deleted is
+/// found in `\$Extend\$Deleted`, so a `didClose` racing the deletion would miss the document,
+/// which then stays open and keeps the deleted module in the project. A path whose directory
+/// does not exist is kept as it is.
+fn file_path(path: &Path) -> PathBuf {
+    let Some((dir, name)) = path
+        .parent()
+        .zip(path.file_name())
+        .and_then(|(parent, name)| Some((canonical(parent).ok()?, name)))
+    else {
+        return path.to_path_buf();
+    };
+    let spelled = |p: &Path| p.file_name().map(|n| n.to_string_lossy().to_lowercase());
+    match canonical(path) {
+        Ok(resolved)
+            if resolved.parent() == Some(dir.as_path())
+                && spelled(&resolved) == spelled(Path::new(name)) =>
+        {
+            resolved
+        }
+        _ => dir.join(name),
+    }
+}
+
+/// The workspace folder, resolved.
+fn folder_path(path: &Path) -> PathBuf {
+    canonical(path).unwrap_or_else(|_| file_path(path))
 }
 
 fn path_of(uri: &Url) -> Option<PathBuf> {
-    uri.to_file_path().ok().map(|p| normalize(&p))
+    uri.to_file_path().ok().map(|p| file_path(&p))
 }
 
 fn lock(state: &Mutex<State>) -> MutexGuard<'_, State> {
@@ -155,8 +182,15 @@ fn lock(state: &Mutex<State>) -> MutexGuard<'_, State> {
 }
 
 impl State {
+    fn source_of(&self, path: &Path) -> Source {
+        source_of(&self.docs, &self.deleted, path)
+    }
+
     fn text_of(&self, path: &Path) -> Option<String> {
-        text_of(&self.docs, path)
+        match self.source_of(path) {
+            Source::Text(text) => Some(text),
+            Source::Unreadable(_) | Source::Gone => None,
+        }
     }
 
     /// The sequence number of a new publication for `path`, now its latest.
@@ -215,12 +249,19 @@ impl State {
             .iter()
             .map(|(p, d)| (p.clone(), d.text.clone()))
             .collect();
+        let removed: FxHashSet<PathBuf> = self
+            .deleted
+            .iter()
+            .filter(|p| !self.docs.contains_key(*p))
+            .cloned()
+            .collect();
         let paths = [root];
         let loaded = Workspace::load(
             &ProjectOptions {
                 paths: &paths,
                 working_dir: Some(&paths[0]),
                 overrides: Some(&texts),
+                removed: Some(&removed),
                 ..ProjectOptions::default()
             },
             &self.selectors,
@@ -295,8 +336,7 @@ impl State {
     }
 
     /// Re-analyze every queued file and, in turn, what those re-analyses affect; a queued
-    /// file that is neither open nor readable on the disk has no diagnostics
-    /// (`Workspace::unread_or_removed`).
+    /// file that is neither open nor readable has no diagnostics (`State::source_of`).
     fn flush_pending(&mut self) -> (Vec<Publish>, Vec<String>) {
         let pending = std::mem::take(&mut self.pending);
         if pending.is_empty() {
@@ -306,8 +346,8 @@ impl State {
             .workspace
             .as_mut()
             .expect("files are queued only by an analysis of the loaded workspace");
-        let docs = &self.docs;
-        let results = ws.refresh_all(pending, &|p| text_of(docs, p));
+        let (docs, deleted) = (&self.docs, &self.deleted);
+        let results = ws.refresh_all(pending, &|p| source_of(docs, deleted, p));
         let (mut pubs, mut errors) = (Vec::new(), Vec::new());
         for (path, outcome) in results {
             match outcome {
@@ -326,6 +366,19 @@ impl State {
     /// cannot be read is a module heki knows nothing about, a deleted one leaves the project;
     /// then everything they affect is re-analyzed.
     fn files_changed(&mut self, changes: Vec<FileEvent>) -> (Vec<Publish>, Vec<String>) {
+        let changes: Vec<(PathBuf, FileChangeType)> = changes
+            .into_iter()
+            .filter_map(|c| Some((path_of(&c.uri)?, c.typ)))
+            .collect();
+        // Before the configuration or the layout is looked at: a deleted package marker or
+        // module counts as gone for both.
+        for (path, typ) in &changes {
+            if *typ == FileChangeType::DELETED {
+                self.deleted.insert(path.clone());
+            } else {
+                self.deleted.remove(path);
+            }
+        }
         // The configuration, the summary snapshot, or an ignore file changed: everything is
         // analyzed again (an ignore file changes which files belong to the project), as
         // `heki check --watch` does.
@@ -341,18 +394,13 @@ impl State {
                     .is_some_and(|n| IGNORE_FILES.iter().any(|i| n == *i))
                 || baseline.as_deref() == Some(p)
         };
-        if changes
-            .iter()
-            .any(|c| path_of(&c.uri).is_some_and(|p| reloads(&p)))
-            || self.layout_changed()
-        {
+        if changes.iter().any(|(p, _)| reloads(p)) || self.layout_changed() {
             let (pubs, errors, _) = self.load();
             return (pubs, errors);
         }
         let (mut pubs, mut errors) = (Vec::new(), Vec::new());
         let changes: Vec<(PathBuf, FileChangeType)> = changes
             .into_iter()
-            .filter_map(|c| Some((path_of(&c.uri)?, c.typ)))
             .filter(|(path, _)| self.workspace.as_ref().is_some_and(|ws| ws.accepts(path)))
             .collect();
         for (path, typ) in changes {
@@ -361,20 +409,22 @@ impl State {
             if typ == FileChangeType::DELETED && self.docs.contains_key(&path) {
                 continue;
             }
-            if typ == FileChangeType::DELETED {
-                let ws = self.workspace.as_mut().expect("checked above");
-                let affected = ws.remove(&path);
-                self.pending.extend(affected);
-                pubs.extend(self.clear(&path));
-            } else if let Some(text) = self.text_of(&path) {
-                let (p, e) = self.reanalyze(&path, &text);
-                pubs.extend(p);
-                errors.extend(e);
-            } else {
-                let ws = self.workspace.as_mut().expect("checked above");
-                let affected = ws.unread_or_removed(&path);
-                self.pending.extend(affected);
-                pubs.extend(self.clear(&path));
+            match self.source_of(&path) {
+                Source::Text(text) => {
+                    let (p, e) = self.reanalyze(&path, &text);
+                    pubs.extend(p);
+                    errors.extend(e);
+                }
+                gone_or_unreadable => {
+                    let ws = self.workspace.as_mut().expect("checked above");
+                    let affected = match gone_or_unreadable {
+                        Source::Gone => ws.remove(&path),
+                        _ => ws.unreadable(&path),
+                    };
+                    self.pending.extend(affected);
+                    self.pending.remove(&path);
+                    pubs.extend(self.clear(&path));
+                }
             }
         }
         let (more, more_errors) = self.flush_pending();
@@ -388,16 +438,17 @@ impl State {
     /// (`ModuleLayout`): module names under `src/`, or relative imports climbing to the root,
     /// change with it.
     fn layout_changed(&self) -> bool {
-        self.workspace
-            .as_ref()
-            .is_some_and(|ws| ModuleLayout::detect(&ws.env.root, &ws.env.cfg) != ws.env.layout)
+        self.workspace.as_ref().is_some_and(|ws| {
+            let gone = |p: &Path| self.deleted.contains(p);
+            ModuleLayout::detect_without(&ws.env.root, &ws.env.cfg, &gone) != ws.env.layout
+        })
     }
 
     /// A document was closed (`text`: what it held): the file on the disk is its text again.
     /// When they differ (an unsaved edit was discarded), the index forgets the editor's text: the
     /// file is re-analyzed from the disk, stays a module heki knows nothing about when the disk
-    /// text cannot be read, or leaves the project when it is not on the disk, and so is
-    /// everything that affects. The document's diagnostics leave with it.
+    /// text cannot be read, or leaves the project when it is not on the disk or a Deleted event
+    /// reported it, and so is everything that affects. The document's diagnostics leave with it.
     fn closed(
         &mut self,
         path: &Path,
@@ -405,20 +456,29 @@ impl State {
         text: Option<String>,
     ) -> (Vec<Publish>, Vec<String>) {
         let (mut pubs, mut errors) = (Vec::new(), Vec::new());
-        let disk = heki_ast::read_source(path).ok();
+        let disk = self.source_of(path);
+        let differs = match &disk {
+            Source::Text(on_disk) => text.as_ref() != Some(on_disk),
+            Source::Unreadable(_) | Source::Gone => true,
+        };
         let indexed = self.workspace.as_ref().is_some_and(|ws| ws.accepts(path));
-        if text.is_some() && text != disk && indexed {
+        if text.is_some() && differs && indexed {
             let ws = self.workspace.as_mut().expect("checked above");
-            match &disk {
-                Some(on_disk) => {
-                    let outcome = ws.edit(path, on_disk);
+            match disk {
+                Source::Text(on_disk) => {
+                    let outcome = ws.edit(path, &on_disk);
                     self.pending.remove(path);
                     self.pending.extend(outcome.affected);
                     errors.extend(outcome.error.as_ref().map(ToString::to_string));
                 }
-                None => {
-                    let affected = ws.unread_or_removed(path);
+                Source::Unreadable(_) => {
+                    let affected = ws.unreadable(path);
                     self.pending.extend(affected);
+                }
+                Source::Gone => {
+                    let affected = ws.remove(path);
+                    self.pending.extend(affected);
+                    self.pending.remove(path);
                 }
             }
             let (more, more_errors) = self.flush_pending();
@@ -437,11 +497,14 @@ impl State {
     }
 }
 
-/// An open document's text, else the file on the disk.
-fn text_of(docs: &FxHashMap<PathBuf, Doc>, path: &Path) -> Option<String> {
+/// An open document's text; else nothing for a file a Deleted event reported (on Windows a
+/// deleted file stays visible on the disk, unreadable, until its last handle closes); else what
+/// reading the disk finds.
+fn source_of(docs: &FxHashMap<PathBuf, Doc>, deleted: &FxHashSet<PathBuf>, path: &Path) -> Source {
     match docs.get(path) {
-        Some(d) => Some(d.text.clone()),
-        None => heki_ast::read_source(path).ok(),
+        Some(d) => Source::Text(d.text.clone()),
+        None if deleted.contains(path) => Source::Gone,
+        None => Source::read(path),
     }
 }
 
@@ -571,8 +634,9 @@ impl LanguageServer for Backend {
             .and_then(|f| f.first())
             .map(|f| f.uri.clone())
             .or(params.root_uri)
-            .and_then(|u| path_of(&u))
-            .or_else(|| std::env::current_dir().ok().map(|dir| normalize(&dir)));
+            .and_then(|u| u.to_file_path().ok())
+            .or_else(|| std::env::current_dir().ok())
+            .map(|dir| folder_path(&dir));
         let workspace = params.capabilities.workspace;
         let watch_files = workspace
             .as_ref()
@@ -723,8 +787,13 @@ impl LanguageServer for Backend {
         let Some(path) = path_of(&params.text_document.uri) else {
             return;
         };
-        if let (Some(text), Some(doc)) = (params.text, lock(&self.state).docs.get_mut(&path)) {
-            doc.text = text;
+        {
+            let mut st = lock(&self.state);
+            // The editor wrote the file.
+            st.deleted.remove(&path);
+            if let (Some(text), Some(doc)) = (params.text, st.docs.get_mut(&path)) {
+                doc.text = text;
+            }
         }
         let (pubs, errors) = Self::blocking(&work, &self.state, move |st| {
             if st.layout_changed() {

@@ -160,6 +160,32 @@ pub struct EditOutcome {
     pub error: Option<FileError>,
 }
 
+/// A project file as a re-analysis finds it.
+#[derive(Debug)]
+pub enum Source {
+    /// Its text: an open document's, or the file's on the disk.
+    Text(String),
+    /// A file heki cannot read (its encoding, its permissions): a module heki knows nothing
+    /// about, as for `heki check` ([`Workspace::unreadable`]).
+    Unreadable(std::io::Error),
+    /// No file any more ([`Workspace::remove`]).
+    Gone,
+}
+
+impl Source {
+    /// The file on the disk, decided by the read alone: only a read that finds no file says it
+    /// is gone. Asking whether the path exists after a failed read would answer for another
+    /// moment, and on Windows a deleted file stays visible until its last handle closes while
+    /// every read of it fails.
+    pub fn read(path: &Path) -> Self {
+        match heki_ast::read_source(path) {
+            Ok(text) => Self::Text(text),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::Gone,
+            Err(e) => Self::Unreadable(e),
+        }
+    }
+}
+
 pub struct Workspace {
     pub env: ProjectEnv,
     selection: RuleSelection,
@@ -1048,9 +1074,9 @@ impl Workspace {
     }
 
     /// Re-analyze the `queued` files and, in turn, every file those re-analyses affect, until
-    /// none is left. `text_of` reads a file (an open document's text, else the disk); a file
-    /// it cannot read left the project and is removed, or stays a module heki knows nothing
-    /// about while it exists (`None` in the result). Returns the latest outcome of every file
+    /// none is left. `source_of` reads a file (an open document's text, else the disk); a file
+    /// it cannot read stays a module heki knows nothing about, and a file it finds gone leaves
+    /// the project (`None` in the result for both). Returns the latest outcome of every file
     /// re-analyzed.
     ///
     /// It ends: re-analyzing a file whose inputs did not change since its last re-analysis
@@ -1058,19 +1084,23 @@ impl Workspace {
     pub fn refresh_all(
         &mut self,
         queued: impl IntoIterator<Item = PathBuf>,
-        text_of: &dyn Fn(&Path) -> Option<String>,
+        source_of: &dyn Fn(&Path) -> Source,
     ) -> BTreeMap<PathBuf, Option<EditOutcome>> {
         let mut queue: BTreeSet<PathBuf> = queued.into_iter().collect();
         let mut out = BTreeMap::new();
         while let Some(path) = queue.pop_first() {
-            let outcome = match text_of(&path) {
-                Some(text) => {
+            let outcome = match source_of(&path) {
+                Source::Text(text) => {
                     let outcome = self.refresh(&path, &text);
                     queue.extend(outcome.affected.iter().cloned());
                     Some(outcome)
                 }
-                None => {
-                    queue.extend(self.unread_or_removed(&path));
+                Source::Unreadable(_) => {
+                    queue.extend(self.unreadable(&path));
+                    None
+                }
+                Source::Gone => {
+                    queue.extend(self.remove(&path));
                     None
                 }
             };
@@ -1090,17 +1120,6 @@ impl Workspace {
     pub fn unreadable(&mut self, path: &Path) -> Vec<PathBuf> {
         let module = unread_module(path, &self.env.root, &self.env.layout);
         self.replace_file(path, Some(module))
-    }
-
-    /// A file of the project whose text could not be read: a module heki knows nothing about
-    /// while it exists ([`Self::unreadable`]), gone from the project once it is deleted
-    /// ([`Self::remove`]). Returns the files it affects.
-    pub fn unread_or_removed(&mut self, path: &Path) -> Vec<PathBuf> {
-        if path.exists() {
-            self.unreadable(path)
-        } else {
-            self.remove(path)
-        }
     }
 
     /// Take the facts of `path` out of the index, leaving the module heki could not read in
