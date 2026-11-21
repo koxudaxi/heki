@@ -523,6 +523,28 @@ async def two(channel: Channel) -> list[bytes]:
         found(&diagnostics(&p, &[])),
         vec![d("app.py", 11, "two", "channel->vendor.wire.Channel.recv")]
     );
+    // A pool raising only while unbound, and the call giving its connection back.
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nextend-select = [\"EFF110\"]\n\n\
+         [[tool.heki.ecosystem]]\nsymbol = \"vendor.wire.Channel.recv\"\none-at-a-time = \"when_unbound\"\n\n\
+         [[tool.heki.ecosystem]]\nsymbol = \"vendor.wire.Channel.reset\"\none-at-a-time = \"unbinds\"\n",
+    );
+    assert_eq!(
+        found(&diagnostics(&p, &[])),
+        vec![d("app.py", 11, "two", "channel->vendor.wire.Channel.recv")]
+    );
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[[tool.heki.ecosystem]]\nsymbol = \"vendor.wire.Channel.recv\"\n\
+         one-at-a-time = \"sometimes\"\n",
+    );
+    let (code, _, stderr) = p.check(&[]);
+    assert_eq!(code, 2, "{stderr}");
+    assert!(
+        stderr.contains("invalid one-at-a-time `sometimes`"),
+        "{stderr}"
+    );
 }
 
 #[test]
@@ -710,6 +732,25 @@ async def batch_per_round(readers: list[asyncio.StreamReader], reader: asyncio.S
         tasks = []
         tasks.append(drain(reader))
         await asyncio.gather(*tasks)
+
+
+async def early(reader: asyncio.StreamReader, lock: asyncio.Lock) -> bytes:
+    async with lock:
+        pass
+    return b""
+    return await reader.readline()
+
+
+if _READER.at_eof():
+    async def twice(reader: asyncio.StreamReader) -> bytes:
+        return await reader.readline()
+else:
+    async def twice(reader: asyncio.StreamReader) -> bytes:
+        return await reader.read()
+
+
+async def defined_twice(reader: asyncio.StreamReader) -> None:
+    await asyncio.gather(twice(reader), twice(reader))
 "#;
 
 #[test]
@@ -757,6 +798,12 @@ fn eff110_follows_more_ways_to_start_and_name_tasks() {
                 141,
                 "looped_appends",
                 &format!("reader->{read}")
+            ),
+            d(
+                "shapes.py",
+                167,
+                "defined_twice",
+                &format!("reader->{readline}")
             ),
         ]
     );
