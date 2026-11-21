@@ -1378,6 +1378,18 @@ def bound_after_generator(names: list[str]) -> object:
     return next(gen)._given
 
 
+def declared_bound_before_generator(names: list[str]) -> object:
+    factory: object = Factory()
+    gen = (factory.build(n) for n in names)
+    return next(gen)._given
+
+
+def declared_bound_after_generator(names: list[str]) -> object:
+    gen = (factory.build(n) for n in names)
+    factory: object = Factory()
+    return next(gen)._given
+
+
 def rebound_unknown(model: Model) -> object:
     f = lambda: model._given
     model = untyped()
@@ -1523,6 +1535,10 @@ fn closure_cells_hold_the_values_the_enclosing_function_binds() {
             // the generator is made: `Model`s.
             ("outputs", "MUT203"),
             ("bound_after_generator", "MUT203"),
+            // A declared variable holds the narrower value bound to it; the declaration stands
+            // for a binding not computed yet when the generator is made.
+            ("declared_bound_before_generator", "MUT203"),
+            ("declared_bound_after_generator", "MUT206"),
             ("rebound_unknown.<locals>.<lambda>", "MUT206"),
             ("nonlocal_store.<locals>.<lambda>", "MUT206"),
             ("nonlocal_store.<locals>.<genexpr>", "MUT206"),

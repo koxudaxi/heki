@@ -10,7 +10,8 @@ in one function is placed three ways (a function, a method, and a module body) a
 largest n whose function the IR budget still models: n doubles, then bisects, with
 `heki assumptions --json` telling a modeled function from an unmodeled one, so a change to the
 builder moves the size with it. A family spread over a project (a wide class hierarchy, a chain
-of private helpers, a chain of container subclasses) has a fixed size.
+of private helpers, a chain of container subclasses) has a fixed size, and so has a family in one
+function whose cost already shows at a smaller size, where the walks it does not gate stay cheap.
 
 Each shape is checked with every rule selected and one contract of each kind naming the classes
 and functions the shapes define (a family may add contracts of its own, such as thousands of
@@ -322,6 +323,32 @@ def attribute_chain(n: int) -> Body:
     return Body(("p",), [*lines, f"return a{n}"])
 
 
+# The declared type of the cell families' names: a wide container, so that joining the values bound
+# to a cell costs more than the rest of the work per binding, and the families show a quadratic
+# join at a size where the walks they do not gate stay cheap.
+CELL_TYPE = f"dict[str, list[tuple[{', '.join(['Base'] * 16)}]]]"
+# The size of the cell families.
+CELL_BINDINGS = 1024
+
+
+def cell_reads(n: int) -> Body:
+    """Many assignments to one name of a declared container type, each followed by a generator
+    expression reading it: a closure cell bound many times and read by as many scopes."""
+    lines = [f"x: {CELL_TYPE} = g(0)"]
+    for i in range(n):
+        lines += [f"x = g({i})", "out.append(sum(1 for _ in xs if x))"]
+    return Body(("xs", "out"), lines)
+
+
+def cell_reads_of_several_names(n: int) -> Body:
+    """Assignments to four names in turn, each followed by a generator expression reading all
+    four."""
+    lines = [f"x{k}: {CELL_TYPE} = g({k})" for k in range(4)]
+    for i in range(n):
+        lines += [f"x{i % 4} = g({i})", "out.append(sum(1 for _ in xs if x0 and x1 and x2 and x3))"]
+    return Body(("xs", "out"), lines)
+
+
 def path_aliases(n: int) -> Body:
     """Merges each joining the previous alias of a package's `__path__` and a new read of it,
     each alias read."""
@@ -450,7 +477,8 @@ class Family:
     body: Callable[[int], Body] | None = None
     project: Callable[[int], str] | None = None
     placements: tuple[str, ...] = PLACED
-    # The size of a project family.
+    # The size of a project family, or of a family in one function whose cost shows at a smaller
+    # size than the largest the IR budget models (0: that largest size).
     size: int = 0
     # Adversarial: its budgets may be spent.
     real_code: bool = True
@@ -476,6 +504,14 @@ FAMILIES = [
     Family("match_pass_through", match_pass_through),
     Family("with_statements", with_statements),
     Family("attribute_chain", attribute_chain),
+    # A module body's names are globals, not closure cells.
+    Family("cell_reads", cell_reads, placements=("function", "method"), size=CELL_BINDINGS),
+    Family(
+        "cell_reads_of_several_names",
+        cell_reads_of_several_names,
+        placements=("function", "method"),
+        size=CELL_BINDINGS,
+    ),
     Family("path_aliases", path_aliases),
     Family("merged_package_paths", merged_package_paths),
     Family("lazy_init_sites", lazy_init_sites, placements=("method",)),
@@ -684,6 +720,10 @@ def main() -> int:
                 runner.contracts("" if family.contracts is None else family.contracts(family.size))
                 if family.project is not None:
                     n, failed = family.size, None
+                elif family.size:
+                    n = family.size
+                    modeled = runner.modeled(source(family, placement, n))
+                    failed = None if modeled is True else modeled or "leaves the function unmodeled"
                 else:
                     n, failed = runner.largest_modeled(family, placement)
                 text = source(family, placement, n)

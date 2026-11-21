@@ -221,13 +221,14 @@ $ python3 scripts/check_walk_shapes.py --heki target/release/heki
 the memory gate. A shape that lives in one function is placed in a function, a method, and a module
 body, and grown to the largest size whose function the IR budget still models, so a builder change
 moves the size with it; a shape spread over a project (a wide class hierarchy, a chain of private
-helpers, thousands of argument lists) has a fixed size. Each runs with every rule and one contract
-of each kind (a family may add its own), through `heki check` and the `--watch` engine, and fails
-when it costs more than 1 s (on the machine the limits were measured on, scaled to the machine
-running the gate by linear shapes of calls and of loops) or 1 GiB beyond an empty module. `heki
-check --walk-steps <path>` (hidden) writes the steps each owner's walks took per function as JSON:
-the gate also fails when an owner's steps grow more than 2.5 times from half the size to the full
-size, or when a budget is spent on a shape like real code.
+helpers, thousands of argument lists) has a fixed size, and so has a shape in one function whose
+cost already shows at a smaller size, where the walks it does not gate stay cheap. Each runs with
+every rule and one contract of each kind (a family may add its own), through `heki check` and the
+`--watch` engine, and fails when it costs more than 1 s (on the machine the limits were measured on,
+scaled to the machine running the gate by linear shapes of calls and of loops) or 1 GiB beyond an
+empty module. `heki check --walk-steps <path>` (hidden) writes the steps each owner's walks took per
+function as JSON: the gate also fails when an owner's steps grow more than 2.5 times from half the
+size to the full size, or when a budget is spent on a shape like real code.
 `KNOWN_OVER` in the script lists the shapes known to cost more, and only shrinks: a listed shape
 runs only through `heki check` (not the `--watch` engine), with a short timeout, and fails the gate
 once it costs under a quarter of the limits. `KNOWN_STEPS` lists, the same way, the shapes whose
@@ -236,8 +237,9 @@ steps are known to grow faster than linearly or to spend a budget.
 Each bound comes with a shape in `crates/heki/tests/e2e_analysis_bounds.rs` that is slow without it,
 checked against a time limit: comparisons sharing an operand thirty deep, many `match` statements of
 slicing or pass-through cases, `t1 = t0[t0]` chains in a loop, a loop with many `continue`s and
-`isinstance` tests, a long chain of assignments a loop carries, many loops one after another, each
-with a lazy initialization (the blocks each covers count toward a budget proportional to the
+`isinstance` tests, a long chain of assignments a loop carries, closure cells bound thousands of
+times, each binding followed by a generator expression reading them, many loops one after another,
+each with a lazy initialization (the blocks each covers count toward a budget proportional to the
 source), many waits on one future before many `await`s of it, task factories at the end of a long
 chain of copies, a long chain of aliases of a class with an attribute store through the last one per
 alias, a class with thousands of subclasses whose class constant as many functions read on an
