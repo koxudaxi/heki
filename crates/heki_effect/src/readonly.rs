@@ -9,6 +9,7 @@
 //! graph, so a wrapper needs no configuration of its own.
 
 use crate::{Callee, SharedChain};
+use heki_ir::walk::{Budget, Visit, reach};
 use heki_ir::{DictEntry, Inst, InstKind, IrFunction, PhiNode, Terminator, VarId};
 use heki_kb::{CopyDepth, EffectiveEcosystemKb};
 use rustc_hash::FxHashMap;
@@ -429,57 +430,55 @@ fn constructed_kind<'t>(
         .collect();
     // `list` / `dict` / `set` / `sorted` the module does not rebind.
     let builtin = |name: &str| resolve(name).is_none_or(|t| t == format!("builtins.{name}"));
-    let mut kind = None;
-    // Each value is queued once.
-    let mut seen: rustc_hash::FxHashSet<VarId> = rustc_hash::FxHashSet::default();
-    let mut work: Vec<VarId> = returned
-        .iter()
-        .copied()
-        .filter(|v| seen.insert(*v))
-        .collect();
-    while let Some(var) = work.pop() {
-        let built = match defs.get(&var).map(|i| &i.kind) {
-            Some(InstKind::Copy { src, .. }) => {
-                work.extend(Some(*src).filter(|v| seen.insert(*v)));
-                continue;
-            }
-            Some(InstKind::AllocBuiltin { kind, .. }) => match kind {
-                heki_ir::BuiltinKind::List => ContainerKind::List,
-                heki_ir::BuiltinKind::Dict => ContainerKind::Dict,
-                heki_ir::BuiltinKind::Set => ContainerKind::Set,
-                _ => return None,
-            },
-            Some(InstKind::DictLiteral { .. }) => ContainerKind::Dict,
-            Some(InstKind::Call { callee, .. }) if builtin(callee) => match callee.as_str() {
-                "list" | "sorted" => ContainerKind::List,
-                "dict" => ContainerKind::Dict,
-                "set" => ContainerKind::Set,
-                _ => return None,
-            },
-            Some(InstKind::MethodCall { recv, method, .. })
-                if matches!(method.as_str(), "split" | "rsplit" | "splitlines")
-                    && matches!(type_of(*recv), Some("builtins.str" | "builtins.bytes")) =>
-            {
-                ContainerKind::List
-            }
-            Some(_) => return None,
-            None => {
-                let (block, phi) = phis.get(&var)?;
-                work.extend(
-                    phi.incoming
-                        .iter()
-                        .filter(|(from, v)| *v != var && live.edge(*from, *block))
-                        .map(|(_, v)| *v)
-                        .filter(|v| seen.insert(*v)),
-                );
-                continue;
-            }
-        };
-        if kind.replace(built).is_some_and(|k| k != built) {
-            return None;
+    // The container an instruction builds, if any.
+    let leaf_kind = |inst: &InstKind| match inst {
+        InstKind::AllocBuiltin { kind, .. } => match kind {
+            heki_ir::BuiltinKind::List => Some(ContainerKind::List),
+            heki_ir::BuiltinKind::Dict => Some(ContainerKind::Dict),
+            heki_ir::BuiltinKind::Set => Some(ContainerKind::Set),
+            _ => None,
+        },
+        InstKind::DictLiteral { .. } => Some(ContainerKind::Dict),
+        InstKind::Call { callee, .. } if builtin(callee) => match callee.as_str() {
+            "list" | "sorted" => Some(ContainerKind::List),
+            "dict" => Some(ContainerKind::Dict),
+            "set" => Some(ContainerKind::Set),
+            _ => None,
+        },
+        InstKind::MethodCall { recv, method, .. }
+            if matches!(method.as_str(), "split" | "rsplit" | "splitlines")
+                && matches!(type_of(*recv), Some("builtins.str" | "builtins.bytes")) =>
+        {
+            Some(ContainerKind::List)
         }
-    }
-    kind
+        _ => None,
+    };
+    // Through copies (their operand) and phis (the inputs along edges a run can take).
+    let next = |var: VarId, out: &mut Vec<VarId>| {
+        out.extend(defs.get(&var).into_iter().flat_map(|i| i.kind.operands()));
+        out.extend(phis.get(&var).into_iter().flat_map(|(block, phi)| {
+            phi.incoming
+                .iter()
+                .filter(move |(from, v)| *v != var && live.edge(*from, *block))
+                .map(|(_, v)| *v)
+        }));
+    };
+    let mut kind = None;
+    let visit = |var: VarId| {
+        let built = match defs.get(&var).map(|i| &i.kind) {
+            Some(InstKind::Copy { .. }) => return Visit::Expand,
+            None if phis.contains_key(&var) => return Visit::Expand,
+            Some(inst) => leaf_kind(inst),
+            None => None,
+        };
+        match built {
+            Some(b) if kind.replace(b).is_none_or(|k| k == b) => Visit::Prune,
+            _ => Visit::Stop(()),
+        }
+    };
+    let budget = Budget::of_function("MUT114 cached container", f);
+    let complete = reach(&budget, returned.iter().copied(), next, visit);
+    complete.open_means(Some(())).map_or(kind, |()| None)
 }
 
 /// A function that may return (on some path) a value shared with a read-only producer's other

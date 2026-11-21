@@ -14,7 +14,7 @@ use heki_effect::{
     WriteKind, attr_writes, self_attr_writes,
 };
 use heki_env::HekiConfig;
-use heki_ir::walk::{Budget, Visit, reach};
+use heki_ir::walk::{Budget, FnShape, Visit, reach};
 use heki_ir::{BlockId, FnIndex, Inst, InstKind, IrFunction, VarId};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{BTreeMap, BTreeSet};
@@ -2185,6 +2185,8 @@ struct Mut202Fn<'a> {
     /// The cached function whose result each variable is on every path ([`Self::must_results`],
     /// built on the first need).
     cached: std::cell::OnceCell<FxHashMap<VarId, MustResult<'a>>>,
+    /// The function's tables of definitions and block order (built on the first need).
+    shape: std::cell::OnceCell<FnShape<'a>>,
 }
 
 /// The passes of [`Mut202Fn::must_results`] before it gives up.
@@ -2241,7 +2243,12 @@ impl<'a> Mut202Fn<'a> {
             ro: FxHashMap::default(),
             sites: std::cell::OnceCell::new(),
             cached: std::cell::OnceCell::new(),
+            shape: std::cell::OnceCell::new(),
         }
+    }
+
+    fn shape(&self) -> &FnShape<'a> {
+        self.shape.get_or_init(|| FnShape::new(self.f))
     }
 
     /// The cached function whose result each variable is on every path: a direct call of one
@@ -2272,10 +2279,10 @@ impl<'a> Mut202Fn<'a> {
             let get = |state: &FxHashMap<VarId, MustResult<'a>>, v: VarId| {
                 state.get(&v).copied().unwrap_or(MustResult::Other)
             };
-            let rpo = f.rpo_blocks();
+            let rpo = self.shape().rpo();
             let converged = (0..MUST_RESULT_PASSES).any(|_| {
                 let mut changed = false;
-                for &bb in &rpo {
+                for &bb in rpo {
                     let block = f.block(bb);
                     for phi in &block.phis {
                         let joined = phi
@@ -2309,7 +2316,8 @@ impl<'a> Mut202Fn<'a> {
     /// The one project function the call instruction `inst` runs, when a `functools` cache
     /// keeps its results ([`heki_effect::CachedResult`]).
     fn cached_callee(&self, inst: &'a Inst) -> Option<&'a FuncKey> {
-        let call = site_call(&|v| self.ix.def_inst(v), self.function_sites(), inst, false)?;
+        let shape = self.shape();
+        let call = site_call(&|v| shape.inst(v), self.function_sites(), inst, false)?;
         let callees = call.site?.project_callees();
         let bc = callees.first().filter(|_| callees.len() == 1)?;
         let summary = self.cx.index.summary(&bc.callee)?;

@@ -385,6 +385,12 @@ def use(g, c):
     Registry.entries(g)["k"] = 1
     for x in generated(g):
         x.append(1)
+    same([g]).append(1)
+
+
+@lru_cache
+def same(a):
+    return a
 "#;
 
 #[test]
@@ -429,6 +435,8 @@ fn mut114_knows_each_container_kind_by_annotation_or_construction() {
             (153, true),
             // An item of a generator's value.
             (155, false),
+            // A cached function returning its parameter builds nothing.
+            (156, false),
         ],
         "{diags:#?}"
     );
