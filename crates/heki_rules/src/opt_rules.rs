@@ -902,11 +902,7 @@ impl<'a> Defs<'a> {
             "builtins.frozenset",
             "builtins.NoneType",
         ];
-        match types.get(&var) {
-            Some(Val::Inst(class)) => HASHABLE.contains(&class.as_str()),
-            Some(Val::Union(classes)) => classes.iter().all(|c| HASHABLE.contains(&c.as_str())),
-            _ => false,
-        }
+        known_instance(types, var, HASHABLE)
     }
 
     /// The unhashable builtin type (`list`, `dict`, `set`, `bytearray`) the key `var` is known
@@ -1064,6 +1060,7 @@ pub(crate) fn opt113(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
                 let premises = JoinPremises {
                     defs: &defs,
                     sizes: &sizes,
+                    types,
                     origins: &origins,
                     budget: budget.get_or_insert_with(|| Budget::of_function("OPT113", f)),
                 };
@@ -1173,20 +1170,55 @@ const READING_METHODS: &[&str] = &[
     "endswith",
 ];
 
-/// Methods whose result steps through their receiver's items or text (dict views, pieces of a
-/// string) without running code of the receiver's.
-const VIEW_METHODS: &[&str] = &["items", "keys", "values", "split", "rsplit", "splitlines"];
+/// Whether `v` is known to be an instance of one of `classes`: its inferred type, or every class
+/// of an inferred union.
+fn known_instance(types: &FxHashMap<VarId, Val>, v: VarId, classes: &[&str]) -> bool {
+    match types.get(&v) {
+        Some(Val::Inst(class)) => classes.contains(&class.as_str()),
+        Some(Val::Union(members)) => members.iter().all(|c| classes.contains(&c.as_str())),
+        _ => false,
+    }
+}
+
+/// Methods whose result steps through their receiver's items or text without running code of
+/// the project, and the receivers they do it for: the views of a `dict`, the pieces of a `str`.
+const VIEWS: &[(&str, &[&str])] = &[
+    ("items", &["builtins.dict"]),
+    ("keys", &["builtins.dict"]),
+    ("values", &["builtins.dict"]),
+    ("split", &["builtins.str", "builtins.bytes"]),
+    ("rsplit", &["builtins.str", "builtins.bytes"]),
+    ("splitlines", &["builtins.str", "builtins.bytes"]),
+];
+
+/// The builtin containers whose iteration runs no code of the project.
+const CONTAINERS: &[&str] = &[
+    "builtins.list",
+    "builtins.tuple",
+    "builtins.set",
+    "builtins.frozenset",
+    "builtins.dict",
+    "builtins.str",
+    "builtins.bytes",
+    "builtins.range",
+];
 
 /// The premises of an `OPT113` report's exact tier (ADR-018) besides the comparison of keys,
 /// each established or not; a walk that runs out of its budget establishes nothing.
 struct JoinPremises<'p, 'a, 'c> {
     defs: &'p Defs<'a>,
     sizes: &'p Sizes<'a, 'c>,
+    /// The function's inferred types, annotations included (assumption R2).
+    types: &'p FxHashMap<VarId, Val>,
     origins: &'p ItemOrigins<'a>,
     budget: &'p Budget,
 }
 
 impl JoinPremises<'_, '_, '_> {
+    fn builtin_type(&self, v: VarId, classes: &[&str]) -> bool {
+        known_instance(self.types, v, classes)
+    }
+
     /// The loop steps through items of the function's inputs: every source of its items is a
     /// parameter, an attribute or an item of one (a call result needs the catalog to say what
     /// it yields, and a method's receiver, a module constant, or a display is not an input).
@@ -1276,12 +1308,12 @@ impl JoinPremises<'_, '_, '_> {
         matches!(found, Answer::Known(None))
     }
 
-    /// Advancing the inner loop runs no code of the project: its iterable is an input, an
-    /// attribute or an item of one, a display or a comprehension's result, a builtin that
-    /// builds a container (`sorted`, `list`, `range`, ...), a dict view or the pieces of a
-    /// string, or `enumerate` / `zip` / `reversed` / `iter` of such iterables, also through a
-    /// phi. A generator, a `map` or `filter` call, or any other call may run code for every
-    /// pair.
+    /// Advancing the inner loop runs no code of the project: its iterable is a builtin
+    /// container by its type (an annotation counts, assumption R2), a display or a
+    /// comprehension's result, a builtin that builds a container (`sorted`, `list`, `range`,
+    /// ...), a view of a `dict` or the pieces of a `str`, or `enumerate` / `zip` / `reversed` /
+    /// `iter` of such iterables, also through a phi. A value of unknown type (it may be a
+    /// generator), a `map` or `filter` call, or any other call may run code for every pair.
     fn steps_run_no_code(&self, inner: &ForLoop<'_>) -> bool {
         let f = self.defs.f;
         let shape = self.sizes.ix.shape();
@@ -1320,28 +1352,36 @@ impl JoinPremises<'_, '_, '_> {
             |v| {
                 let v = shape.copy_root(v);
                 let inst = shape.inst(v);
-                // An input iterated directly (`next` adds nothing for it), a phi through its
-                // inputs, or a lazy builtin through its arguments.
-                if matches!(shape.def(v), Def::Param | Def::Phi(..))
+                // A phi through its inputs, a lazy builtin through its arguments.
+                if matches!(shape.def(v), Def::Phi(..))
                     || inst.is_some_and(|i| lazy(ix, shape, i).is_some())
                 {
                     return walk::Visit::Expand;
                 }
-                let builds = inst.is_some_and(|inst| match &inst.kind {
-                    InstKind::AttrLoad { .. }
-                    | InstKind::SubscriptLoad { .. }
-                    | InstKind::LoadGlobal { .. }
-                    | InstKind::AllocBuiltin { .. }
-                    | InstKind::DictLiteral { .. } => true,
-                    InstKind::Call {
-                        callee_var, callee, ..
-                    } => matches!(
-                        ix.builtin(*callee_var, callee),
-                        Some("sorted" | "list" | "tuple" | "set" | "frozenset" | "dict" | "range")
-                    ),
-                    InstKind::MethodCall { method, .. } => VIEW_METHODS.contains(&method.as_str()),
-                    _ => false,
-                });
+                let builds = inst.map_or_else(
+                    || self.builtin_type(v, CONTAINERS),
+                    |inst| match &inst.kind {
+                        InstKind::AllocBuiltin { .. } | InstKind::DictLiteral { .. } => true,
+                        InstKind::Call {
+                            callee_var, callee, ..
+                        } => matches!(
+                            ix.builtin(*callee_var, callee),
+                            Some(
+                                "sorted"
+                                    | "list"
+                                    | "tuple"
+                                    | "set"
+                                    | "frozenset"
+                                    | "dict"
+                                    | "range"
+                            )
+                        ),
+                        InstKind::MethodCall { recv, method, .. } => VIEWS
+                            .iter()
+                            .any(|(m, classes)| m == method && self.builtin_type(*recv, classes)),
+                        _ => self.builtin_type(v, CONTAINERS),
+                    },
+                );
                 if builds {
                     walk::Visit::Prune
                 } else {
@@ -1413,7 +1453,29 @@ impl JoinPremises<'_, '_, '_> {
         if !matches!(found, Answer::Known(None)) {
             return false;
         }
-        let names = forward_aliases(f, &read);
+        // The names of those values: every value they copy, or a phi of theirs takes (`rows =
+        // ys` before the loop makes `ys` a name of `rows`), and every copy of those.
+        let mut sources = Vec::new();
+        let traced = walk::reach(
+            self.budget,
+            read,
+            |v, out| match shape.def(v) {
+                Def::Phi(b, i) => {
+                    out.extend(f.block(b).phis[i as usize].incoming.iter().map(|(_, x)| *x));
+                }
+                _ => out.extend(shape.inst(v).and_then(|i| match i.kind {
+                    InstKind::Copy { src, .. } => Some(src),
+                    _ => None,
+                })),
+            },
+            |v| {
+                sources.push(v);
+                walk::Visit::<()>::Expand
+            },
+        );
+        // A walk past its budget leaves names out, so it establishes nothing.
+        let complete = !traced.is_open();
+        let names = forward_aliases(f, &sources);
         let named = |v: &VarId| names.contains(v);
         let changes = |inst: &Inst| match &inst.kind {
             InstKind::MethodCall {
@@ -1444,9 +1506,11 @@ impl JoinPremises<'_, '_, '_> {
             InstKind::Yield { .. } | InstKind::YieldFrom { .. } | InstKind::Await { .. } => true,
             _ => false,
         };
-        !f.blocks
-            .iter()
-            .filter(|b| in_outer(b.id))
-            .any(|b| b.insts.iter().any(changes))
+        complete
+            && !f
+                .blocks
+                .iter()
+                .filter(|b| in_outer(b.id))
+                .any(|b| b.insts.iter().any(changes))
     }
 }

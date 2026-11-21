@@ -1,0 +1,28 @@
+cargo:rerun-if-changed=build.rs
+cargo:rerun-if-changed=data/
+Wrote 11 entries for CJK_IDEOGRAPH_RANGES of type (char, char)
+Lexicon: # words 17983, byte size 75627, with 3824 (13049 bytes) non-exact matches
+binning: shift 0, size 2390108
+binning: shift 1, size 1278256
+binning: shift 2, size 723728
+binning: shift 3, size 448448
+binning: shift 4, size 312768
+binning: shift 5, size 246912
+binning: shift 6, size 218368
+binning: shift 7, size 208384
+binning: shift 8, size 209152
+binning: shift 9, size 223360
+binning: shift 10, size 246848
+binning: shift 11, size 303648
+binning: shift 12, size 393488
+binning: shift 13, size 557192
+Wrote a 75627 byte string for LEXICON
+Wrote 17983 entries for LEXICON_OFFSETS of type u32
+Wrote 56 entries for LEXICON_SHORT_LENGTHS of type u8
+Wrote 22 entries for LEXICON_ORDERED_LENGTHS of type (usize, u8)
+Wrote 263961 entries for PHRASEBOOK of type u8
+Wrote 8704 entries for PHRASEBOOK_OFFSETS1 of type u16
+Wrote 47744 entries for PHRASEBOOK_OFFSETS2 of type u32
+PHF #0
+Wrote 13490 entries for NAME2CODE_DISP of type (u16, u16)
+Wrote 40470 entries for NAME2CODE_CODE of type char

@@ -1087,21 +1087,21 @@ fn opt113_reports_nested_loop_equijoins_but_not_traversals_or_all_pairs_loops() 
     assert_eq!(
         (message(0), help(0)),
         (
-            "for each item of `orders`, the loop over `customers` compares `order.customer_id == customer.id` and does nothing else for an item that does not match",
+            "nested loops join `orders` and `customers` on `order.customer_id == customer.id`",
             "if the keys are hashable, index `customers` by `customer.id` in a `dict` before the outer loop"
         )
     );
     assert_eq!(
         (message(6), help(6)),
         (
-            "for each item of `xs`, the loop over `ys` compares `x == y` and does nothing else for an item that does not match",
+            "nested loops join `xs` and `ys` on `x == y`",
             "if the keys are hashable, group the elements of `ys` by value in a `dict` (value → list of equal elements) before the outer loop, then read each outer key with `.get(key, [])` so that a key with no element keeps its empty list"
         )
     );
     assert_eq!(
         (message(8), help(8)),
         (
-            "for each item of `A`, the loop over `C` compares `c.k == a.k` and does nothing else for an item that does not match",
+            "nested loops join `A` and `C` on `c.k == a.k`",
             "if the keys are hashable, index `C` in a `dict` from `c.k` to the list of elements with that key before the outer loop, then read each outer key with `.get(key, [])` so that a key with no element keeps its empty list"
         )
     );
@@ -1206,7 +1206,7 @@ fn opt113_skips_joins_whose_loop_size_the_code_fixes() {
     let native = &diags[4];
     assert_eq!(
         native["message"],
-        "for each item of `operations`, the loop over `config[\"calls\"]` compares `call[\"op\"] == name` and does nothing else for an item that does not match"
+        "nested loops join `operations` and `config[\"calls\"]` on `call[\"op\"] == name`"
     );
     assert_eq!(
         native["help"],

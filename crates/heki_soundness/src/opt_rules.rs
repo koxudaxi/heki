@@ -122,9 +122,9 @@ impl OptCandidate {
     }
 
     /// In its rule's exact tier (ADR-018, decisions 4 and 9): the rewrite is proven safe, and a
-    /// size-dependent one is in a loop whose trip count the code does not fix. A fixed count of
-    /// 16 or fewer is not profitable and not reported at all; a larger one is no evidence either
-    /// way, so the report is true but heuristic.
+    /// size-dependent one is in a loop whose trip count the code does not fix. A fixed count is
+    /// no evidence either way, so such a report is true but heuristic (a bound of 16 or fewer
+    /// that the loop's `LoopBound` shows is not profitable, and not reported at all).
     pub fn in_exact_tier(&self) -> bool {
         self.is_safe() && self.fixed_trips.is_none()
     }

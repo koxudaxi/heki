@@ -213,10 +213,8 @@ fn opt113_does_not_advise_an_index_of_unhashable_keys() {
         messages,
         vec![
             "nested loops join `A` and `rows` on `a == r`",
-            // Both loops step through parameters, and a pair that does not match runs only the
-            // comparison (`tags = b.tags` loads the inner item's key): the exact claim.
-            "for each item of `A`, the loop over `B` compares `a.tags == tags` and does nothing else for an item that does not match",
-            "for each item of `expected`, the loop over `actual` compares `actual_item == expected_item` and does nothing else for an item that does not match",
+            "nested loops join `A` and `B` on `a.tags == tags`",
+            "nested loops join `expected` and `actual` on `actual_item == expected_item`",
             "nested loops join `A` and `rows + rows` on `a == r`",
         ],
         "{found:#?}"
@@ -1214,16 +1212,16 @@ fn starred_elements_keep_the_names_in_blockers() {
 
 /// `OPT113`'s exact claim, and the shapes that leave a premise of it open: the outer loop over a
 /// module constant of 20 items, work before the test or after the `if` for every pair, an earlier
-/// `and` operand, a generator or a `filter` call as the inner iterable, an inner collection the
-/// outer loop changes, rebinds, or may let other code change (`yield`), and a trip count the code
-/// fixes.
+/// `and` operand, a generator, a `filter` call, or a value of unknown type (it may be a generator)
+/// as the inner iterable, an inner collection the outer loop changes, also through another name
+/// bound to it, rebinds, or may let other code change (`yield`), and a trip count the code fixes.
 const PREMISES: &str = r#"RUNNERS = (
     "a", "b", "c", "d", "e", "f", "g", "h", "i", "j",
     "k", "l", "m", "n", "o", "p", "q", "r", "s", "t",
 )
 
 
-def exact_join(orders, customers):
+def exact_join(orders, customers: list):
     out = []
     for order in orders:
         for customer in customers:
@@ -1333,7 +1331,7 @@ def filtered_inner(xs, ys, keep):
     return out
 
 
-def enumerated(xs, ys):
+def enumerated(xs, ys: list):
     out = []
     for a in xs:
         for i, b in enumerate(ys):
@@ -1342,7 +1340,7 @@ def enumerated(xs, ys):
     return out
 
 
-def view(xs, table):
+def view(xs, table: dict):
     out = []
     for a in xs:
         for b in table.values():
@@ -1351,7 +1349,7 @@ def view(xs, table):
     return out
 
 
-def either(xs, ys, zs, flag):
+def either(xs, ys: list, zs: tuple, flag):
     rows = ys if flag else zs
     out = []
     for a in xs:
@@ -1378,6 +1376,45 @@ def generator_before(names, calls, receiver_of):
         for r in receivers:
             if r == name:
                 out.append(r)
+    return out
+
+
+def unknown_type(xs, ys):
+    out = []
+    for a in xs:
+        for b in ys:
+            if a.k == b.k:
+                out.append(b)
+    return out
+
+
+def aliased(xs, ys: list):
+    rows = ys
+    out = []
+    for a in xs:
+        for b in rows:
+            if a.k == b.k:
+                out.append(b)
+        ys.pop()
+    return out
+
+
+def prefiltered(xs, ys):
+    kept = [b for b in ys if b.ok]
+    out = []
+    for a in xs:
+        for b in kept:
+            if a.k == b.k:
+                out.append(b)
+    return out
+
+
+def words(xs, text: str):
+    out = []
+    for a in xs:
+        for w in text.split():
+            if a.k == w:
+                out.append(w)
     return out
 
 
@@ -1436,6 +1473,10 @@ fn opt113_states_its_exact_claim_only_when_every_premise_holds() {
             ("either", true, tier(true)),
             ("rebound", false, tier(false)),
             ("generator_before", false, tier(false)),
+            ("unknown_type", false, tier(false)),
+            ("aliased", false, tier(false)),
+            ("prefiltered", true, tier(true)),
+            ("words", true, tier(true)),
             ("yielding", false, tier(false)),
         ],
         "{json}{stderr}"
