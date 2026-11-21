@@ -90,6 +90,8 @@ struct ExternalNames {
     /// The catalog's environment calls and reads, when a boundary forbids `reads-environment`.
     environment: FxHashMap<String, EnvironmentAccess>,
     probes: bool,
+    /// [`Contracts::checks_module_bodies`].
+    module_bodies: bool,
 }
 
 impl ExternalNames {
@@ -131,6 +133,12 @@ impl ExternalNames {
             environment,
             probes: forbidding("reads-environment")
                 .any(|b| b.import_probes.as_deref() == Some("report")),
+            module_bodies: config.effect_boundaries.iter().any(|b| {
+                b.scopes.iter().any(|s| {
+                    DottedPattern::new(s, "effect-boundaries.scopes")
+                        .is_ok_and(|p| p.names_module_bodies())
+                })
+            }),
         }
     }
 
@@ -341,6 +349,10 @@ impl Contracts for ConfigContracts {
 
     fn import_probes(&self) -> bool {
         self.external.probes
+    }
+
+    fn checks_module_bodies(&self) -> bool {
+        self.external.module_bodies
     }
 
     fn references(&self) -> bool {

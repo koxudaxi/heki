@@ -1278,9 +1278,10 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      tasks use it; kill at `"unbinds"`) leaves out a fan-out that every path reaches after a
      use.
 10. **`EFF201`** (contract): a breadth-first search over the IR-free call graph from each scope
-   function finds the shortest chain to each forbidden effect, without entering
-   `allowed-callees`, other scope functions, or bodies that do not run at the call (`async def`
-   bodies not awaited, generators not iterated). Its nodes are `(function, Body | Result)`: a
+   function (and each module body a scope names as `<module>`,
+   `DottedPattern::names_module_bodies`) finds the shortest chain to each forbidden effect,
+   without entering `allowed-callees`, other scope functions, or bodies that do not run at the
+   call (`async def` bodies not awaited, generators not iterated). Its nodes are `(function, Body | Result)`: a
    function returning a generator is entered as what iterating its result runs. The search
    reads no guards: an argument switching off a callee's branch does not stop it. At each node
    whose body runs, it also reads the function's accesses outside the project
@@ -1303,9 +1304,11 @@ deep = true   # changes to attributes and nested containers below are forbidden 
    (`ProjectDecls::holds_modules_starting_with`); a relative name is anchored at the texts of
    `package`, or at the module's own `__package__` or `__name__`. The project modules it looks
    up are declaration reads, so a module created or deleted re-summarizes the function.
-   Without such a boundary the map stays empty. The language server compares a file's accesses
-   before and after an edit, without positions, and re-checks the files above a function whose
-   accesses changed, as it does for its Layer 2 call sites.
+   A module body's accesses include those of the class bodies it runs, as its reference sites
+   do, when a scope names a module body (`Contracts::checks_module_bodies`) or reference sites
+   are kept. Without such a boundary the map stays empty. The language server compares a
+   file's accesses before and after an edit, without positions, and re-checks the files above
+   a function whose accesses changed, as it does for its Layer 2 call sites.
 
 ### 2.5 Layer 3: on-demand analysis of unregistered dependencies (planned)
 - **Boundary (strict)**: **never enter the standard library or packages registered in Layer 2**

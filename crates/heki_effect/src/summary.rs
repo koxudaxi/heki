@@ -211,14 +211,16 @@ fn extract_module(
                 );
                 references.extend(facts.references);
             }
-        } else if contracts.is_some_and(|c| c.references()) {
+        } else if contracts.is_some_and(|c| c.references() || c.checks_module_bodies()) {
             // The module body runs the bodies of its classes: what they hand on (a dataclass
-            // field's `default_factory`) is handed on by the module. Their other facts are not
+            // field's `default_factory`) is handed on by the module, and what they take from
+            // outside the project (`sys.platform`) the module takes. Their other facts are not
             // the module's.
             for body in class_bodies_run_by(input.ir, f) {
                 let body = FnShape::new(body);
                 let facts = Extractor::new(&body, &key, &cx, &input.path, contracts, opt_in).run();
                 references.extend(facts.references);
+                external.extend(facts.external);
             }
         }
         if let Some(mut flow) = flow {

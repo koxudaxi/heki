@@ -1329,7 +1329,7 @@ import-probes = "report"
 | Key | Default | Meaning |
 | --- | ------- | ------- |
 | `name` | `""` | The boundary's name in reports. |
-| `scopes` | `[]` | Modules, classes, or functions whose functions must stay inside the boundary; nested functions are included. |
+| `scopes` | `[]` | Modules, classes, or functions whose functions must stay inside the boundary; nested functions are included. A module body is included only where a pattern names `<module>` (`pkg.gen:<module>`, below). |
 | `forbid` | `[]` | What the scope functions must not reach (tokens below). |
 | `write-targets` | `[]` | `Class.attr` targets of `writes-targets`, required with it. `Class.attr["key"]` names one entry, as in `write-owners`. |
 | `read-targets` | `[]` | `Class.attr` targets of `reads-targets`, required with it: reads as `read-owners` sees them, also inside property getters. A container entry is a configuration error. An entry can also name an attribute of a module outside the project by its full name (`sys.platform`, `os.environ`, below). |
@@ -1390,6 +1390,14 @@ A name heki cannot tell (a parameter, `"pkg" + name`, a namespace package withou
 does not have. A `call-targets` entry naming `importlib.import_module` matches every call of it.
 
 - Each scope function is checked through any number of calls.
+- A module body, what runs when the module is imported, is checked only where a scope names
+  `<module>` itself: `pkg.gen:<module>` (the body of `pkg.gen`), `pkg.*:<module>` (of every
+  module under `pkg`), `pkg.gen.<module>`, or `<module>` (of every module). `pkg.*` and
+  `pkg.gen:*` keep naming the functions only. The body is checked as a scope function is (its
+  module-level reads, calls, import probes, and writes), and the bodies of its classes, which
+  run with it, count for what they take from outside the project (environment reads, import
+  probes, and the external `call-targets` and `read-targets`), not for their other effects.
+  Reports name it `<module>`.
 - A violation inside another scope function is reported there only, once.
 - One report per scope function and forbidden kind (or target) stands for every distinct site of
   it that the function reaches.
@@ -4198,7 +4206,14 @@ count for a read.
   `pkg.domain.*`), a class (`pkg.Renderer`), or a function (`*.render`); every function defined
   inside a matched name is in scope, nested functions included. Patterns are matched against
   the function's qualified name, its qualname, and every dotted prefix of them, so `render` also
-  selects a module named `render`.
+  selects a module named `render`. A module body (`<module>`, what runs when the module is
+  imported) is checked only where a pattern names `<module>` itself: `pkg.gen:<module>`,
+  `pkg.*:<module>`, `pkg.gen.<module>`, or `<module>` for every module. A pattern naming the
+  module (`pkg.*`, `pkg.gen:*`) does not cover its body. The body is searched as a function
+  is, and the bodies of its classes, which run with it, count for what they take from outside
+  the project (`reads-environment`, and the external `call-targets` and `read-targets`); their
+  other effects (calls of project functions, blocking calls, writes and reads of target
+  attributes) do not count.
 - `forbid` lists the forbidden effects:
   - `blocking-net`, `blocking-db`, `blocking-fs`, `blocking-subprocess`, `blocking-sync`,
     `sleep`, or `blocking` for all six: blocking calls of the ecosystem knowledge base
@@ -4289,7 +4304,8 @@ or through the calls shown.
 
 Its premises:
 
-- **In scope**: the function matches the boundary's `scopes`. Established.
+- **In scope**: the function matches the boundary's `scopes`, or a scope names the module body
+  as `<module>`. Established.
 - **Resolves**: each call on the chain is to the function shown, through the calls heki resolves.
   Open through a method call: one candidate implementation that leads on is enough.
 - **Reaches**: each function on the chain reaches the next call. Open: one path is enough, and the
