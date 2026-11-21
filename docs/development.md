@@ -91,6 +91,11 @@ follows these rules:
 - Facts are kept per SSA value, not per variable per block. State that grows with a function has
   a budget proportional to the function's source bytes, as the IR and proof-state budgets in
   [scope](scope.md) do. Past the budget the function gets no finding, never a guess.
+- A question an analysis cannot decide (a walk past its budget, a size the code does not fix, a
+  premise nothing establishes) answers `heki_ir::walk::Answer::Open`, heki's one type for an
+  answer that is established or unknown. Each use states what an open answer means to it, with
+  `open_means` or a `match`: a rewrite takes it as "no rewrite", an exact report as "no finding",
+  and a heuristic report states its own choice there.
 - A `finally` body is built once per way out of the `try`. Anything made per copy, such as a
   class body, is made once.
 - Dead code is modeled too. A loop after a `return` has only its back edge, and copies around it
