@@ -54,7 +54,8 @@ Its premises:
   ecosystem catalog describes it. Open in a heuristic report: a project function that
   reallocates the value it is handed may return another value on some path.
 
-Not part of the claim: how large the value grows.
+Not part of the claim: how large the value grows. An exact report gives no advice: collecting
+the parts first does not fit a loop that reads the value on every iteration.
 
 ## Why is this bad?
 Every concatenation copies everything accumulated so far, so the loop is quadratic in the total

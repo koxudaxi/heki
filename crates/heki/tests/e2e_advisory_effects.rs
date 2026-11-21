@@ -642,7 +642,7 @@ def combine(a, b):
 /// the data's. A path that resets the value, items whose origin is not the data's (an attribute
 /// of the receiver), a project helper doing the reallocation (it may return another value), or
 /// data that holds the previous value only on some paths leave the report heuristic, worded
-/// without an origin.
+/// without an origin (a `while` loop steps through no items).
 #[test]
 fn data101_names_the_origin_of_an_established_report() {
     let p = Project::new("data101_established");
@@ -692,6 +692,24 @@ def drops_it_on_some_path(frames, keep):
         prior = df if keep else pd.DataFrame()
         df = pd.concat([prior, part])
     return df
+
+
+from pandas import concat
+
+
+def through_an_imported_name(frames):
+    df = pd.DataFrame()
+    for part in frames:
+        df = concat([df, part])
+    return df
+
+
+def drained(chunks):
+    df = pd.DataFrame()
+    while chunks:
+        part = chunks.pop()
+        df = pd.concat([df, part])
+    return df
 "#,
     );
     let diags = diagnostics(&p, &["--select", "DATA101"]);
@@ -720,6 +738,14 @@ def drops_it_on_some_path(frames, keep):
             ),
             (
                 43,
+                "`df` is rebuilt from itself with `pandas.concat` on every loop iteration"
+            ),
+            (
+                53,
+                "`df` is rebuilt from itself with `pandas.concat` on every iteration over parameter `frames`"
+            ),
+            (
+                61,
                 "`df` is rebuilt from itself with `pandas.concat` on every loop iteration"
             ),
         ]
