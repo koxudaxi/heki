@@ -210,7 +210,7 @@ struct CheckReads {
 }
 
 /// The number of fields of [`DeclKeys`].
-const DECL_KEY_KINDS: usize = 7;
+const DECL_KEY_KINDS: usize = 8;
 
 impl CheckReads {
     /// Every field of `keys` (destructured without `..`: a new kind of key does not compile
@@ -224,6 +224,7 @@ impl CheckReads {
             class_facts,
             protocols,
             grown_globals,
+            package_paths,
         } = keys;
         [
             modules,
@@ -233,6 +234,7 @@ impl CheckReads {
             class_facts,
             protocols,
             grown_globals,
+            package_paths,
         ]
     }
 

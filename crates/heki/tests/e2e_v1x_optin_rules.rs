@@ -570,6 +570,57 @@ fn mut106_reports_second_passes_over_single_pass_iterators() {
     }
 }
 
+// A positional argument binds a positional parameter only: past them it lands in `*args`, a new
+// tuple holding it, which iterating does not consume.
+const PAST_POSITIONALS: &str = r#"def drain(*its):
+    for x in its:
+        pass
+
+
+def drain_label(first, *rest, label=None):
+    for x in label:
+        pass
+
+
+def drain_one(it):
+    for x in it:
+        pass
+
+
+def gen():
+    yield 1
+
+
+def into_args():
+    g = gen()
+    drain(g)
+    for y in g:
+        print(y)
+
+
+def into_args_beside_keyword_only():
+    g = gen()
+    drain_label(1, g)
+    for y in g:
+        print(y)
+
+
+def into_parameter():
+    g = gen()
+    drain_one(g)
+    for y in g:
+        print(y)
+"#;
+
+#[test]
+fn mut106_follows_a_position_only_into_the_parameter_it_binds() {
+    let p = Project::new("v1x_mut106_past_positionals");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/past.py", PAST_POSITIONALS);
+    let diags = diagnostics(&p, &["--select", "MUT106"]);
+    assert_eq!(found(&diags), vec![d("pkg/past.py", 37, "MUT106", "g")]);
+}
+
 #[test]
 fn mut106_follows_python311_comprehension_frames() {
     let p = Project::new("v1x_mut106_py311");

@@ -24,8 +24,8 @@ use crate::resolver::{
 };
 use crate::{
     Access, ArgBinding, ArgOrigin, ArgTargets, ArgValue, ArgumentValues, AttrKeyPath, BoundCallee,
-    CallHop, CallSite, CallTarget, CellChange, Construction, ContractClass, Contracts, Dispatch,
-    EffectSummary, FileSummary, FuncKey, GuardSubject, HandedState, Implementers, Items,
+    CallHop, CallSite, CallTarget, CellChange, ConstArg, Construction, ContractClass, Contracts,
+    Dispatch, EffectSummary, FileSummary, FuncKey, GuardSubject, HandedState, Implementers, Items,
     ModuleInput, MustExec, NewArg, NewCond, NewKind, OnEveryReturn, OptInFacts, PerItem,
     ProjectDecls, ReadKind, ReturnsNew, Runner, SharedLine, SharedState, SharedStateFacts,
     SiteRole, Slot, TypedFieldReadSite, TypedFieldWriteSite, Unresolved, UnresolvedAccessSite,
@@ -38,7 +38,7 @@ use heki_ir::{
     FunctionKind, Inst, InstKind, IrFunction, ModuleIr, Must, NaturalLoop, PhiNode, Progress,
     Terminator, UnaryOpKind, VarId,
 };
-use heki_kb::{EffectiveEcosystemKb, EnvironmentAccess, ExecEffectKind};
+use heki_kb::{EffectiveEcosystemKb, EnvironmentAccess, ExecEffectKind, LiteralValue};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::cell::{OnceCell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
@@ -2306,53 +2306,42 @@ impl<'a> Extractor<'a> {
     }
 
     /// The bases of the class statements in the function ([`Contracts::reference_bases`]), each
-    /// as a reference site of the project class it names, at the base (`Base`, `core.Base`,
-    /// `Base[int]`). The class's declaration says which project classes its bases are; the IR
-    /// keeps them among the other values the class captures, so the one naming a base only gives
-    /// its position: the class statement's when none is loaded inside the statement (a name an
-    /// import or the module body binds is read without a load of its own).
-    fn base_sites(&self) -> Vec<CallSite> {
-        let names_class = |v: VarId| {
-            self.class_called(v)
-                .or_else(|| match &self.defs.get(&v)?.kind {
+    /// as a reference site of the project class it is (`Base`, `core.Base`, `Base[int]`). A base
+    /// is the value the statement passes ([`IrFunction::class_bases`]), typed in the statement's
+    /// block as any value is, so a name it reads is what the statement's scope binds (a
+    /// parameter, a local, a closure cell, a class-body name), whatever the module imports under
+    /// that name. A site is at the base when the statement loads it, else at the statement (a
+    /// name an import or the module body binds is read without a load of its own).
+    fn base_sites(&mut self) -> Vec<CallSite> {
+        let (f, shape) = (self.f, self.shape);
+        let bases = f.class_bases.iter().filter_map(|&(class, index)| {
+            let (bb, statement) = shape.defining(class)?;
+            let base = *statement.kind.operands().get(index as usize)?;
+            Some((bb, statement.span, base))
+        });
+        let mut out = Vec::new();
+        for (bb, statement, base) in bases {
+            self.pos = (bb, 0);
+            let named = self
+                .class_called(base)
+                .or_else(|| match &self.defs.get(&base)?.kind {
                     InstKind::SubscriptLoad { obj, .. } => self.class_called(*obj),
                     _ => None,
-                })
-        };
-        let mut out = Vec::new();
-        for bb in &self.f.blocks {
-            for inst in &bb.insts {
-                let InstKind::MakeClosure {
-                    func_id: Some(id),
-                    captured,
-                    ..
-                } = &inst.kind
-                else {
-                    continue;
-                };
-                let body = self.cx.ir().function(*id);
-                if !body.is_class_body {
-                    continue;
-                }
-                let class = format!("{}.{}", self.key.module, body.qualname);
-                for base in self.cx.project.bases_of(&class) {
-                    if !self.cx.project.is_project_class(&base) {
-                        continue;
-                    }
-                    let span = captured
-                        .iter()
-                        .filter(|v| names_class(**v).as_ref() == Some(&base))
-                        .filter_map(|v| self.defs.get(v))
-                        .map(|def| def.span)
-                        .find(|at| inst.span.start <= at.start && at.end <= inst.span.end)
-                        .unwrap_or(inst.span);
-                    let loop_depth = self.loops_around(bb.id).iter().map(|l| l.depth).max();
-                    out.push(CallSite {
-                        is_base: true,
-                        ..self.handed_site(span, loop_depth.unwrap_or(0), Vec::new(), Some(base))
-                    });
-                }
-            }
+                });
+            let Some(named) = named else {
+                continue;
+            };
+            let span = self
+                .defs
+                .get(&base)
+                .map(|def| def.span)
+                .filter(|at| statement.start <= at.start && at.end <= statement.end)
+                .unwrap_or(statement);
+            let loop_depth = self.loops_around(bb).iter().map(|l| l.depth).max();
+            out.push(CallSite {
+                is_base: true,
+                ..self.handed_site(span, loop_depth.unwrap_or(0), Vec::new(), Some(named))
+            });
         }
         out
     }
@@ -4695,73 +4684,89 @@ impl<'a> Extractor<'a> {
         false
     }
 
-    /// [`CallSite::arguments`]: the constants `call` passes for the parameters an argument list
-    /// names ([`Contracts::marked_params`]): by keyword, else by position or as the default for
-    /// each callee of `signatures` (with the parameter its first positional argument binds). A
-    /// class without a project `__init__` has none: only a keyword names a parameter there.
-    /// A builtin calling the callees per item passes them no constant of the caller.
-    fn marked_arguments(
-        &self,
-        call: &Call<'_>,
-        signatures: &[(&FunctionDecl, usize)],
-    ) -> Option<Box<ArgumentValues>> {
+    /// [`Contracts::marked_params`], when `call` may pass them: a builtin calling the callees
+    /// per item passes them no constant of the caller.
+    fn marked_params(&self, call: &Call<'_>) -> Option<&'a FxHashSet<String>> {
         let marked = self.contracts?.marked_params();
-        if marked.is_empty() || call.per_item.is_some() {
-            return None;
-        }
-        let mut values = Vec::new();
-        for name in marked {
-            let keyword = call.kwargs.iter().find(|(k, _)| k.as_ref() == Some(name));
-            let value = match keyword {
-                Some((_, v)) => self.arg_value(*v),
-                None => {
-                    let mut each = signatures
-                        .iter()
-                        .map(|(decl, offset)| self.bound_value(call, decl, *offset, name));
-                    each.next()
-                        .flatten()
-                        .filter(|first| each.all(|v| v.as_ref() == Some(first)))
-                }
-            };
-            if let Some(value) = value {
-                values.push((name.clone(), value));
-            }
-        }
-        (!values.is_empty()).then(|| Box::new(ArgumentValues(values)))
+        (!marked.is_empty() && call.per_item.is_none()).then_some(marked)
     }
 
-    /// The constant `call` passes by position for the parameter `name` of `decl` (whose first
-    /// positional argument binds parameter `offset`), or its default when no argument can bind
-    /// it, as far as the default's class and truthiness decide it ([`ArgValue::decided`]).
-    fn bound_value(
+    /// [`CallSite::arguments`] of a class without a project `__init__` (a dataclass, a pydantic
+    /// model): only a keyword names a parameter there.
+    fn keyword_marks(&self, call: &Call<'_>) -> Option<Box<ArgumentValues>> {
+        let marked = self.marked_params(call)?;
+        let values = call.kwargs.iter().filter_map(|(name, v)| {
+            let name = name.as_ref().filter(|n| marked.contains(n.as_str()))?;
+            Some((name.clone(), self.arg_value(*v)?))
+        });
+        agreed_marks(vec![Some(values.collect())])
+    }
+
+    /// The constants `call` passes to `decl` (whose first positional argument binds parameter
+    /// `offset`) for its parameters an argument list names (`marked`), as `bindings` binds them,
+    /// with the name of a keyword landing in `**kwargs` as a parameter of its own. `None` when
+    /// the call raises `TypeError` instead of running `decl`: a keyword binds a parameter the
+    /// receiver or a position binds too, a keyword binds no parameter and `decl` takes no
+    /// `**kwargs`, or a position is past the positional parameters and `decl` takes no `*args`.
+    fn callee_marks(
         &self,
         call: &Call<'_>,
         decl: &FunctionDecl,
         offset: usize,
-        name: &str,
-    ) -> Option<ArgValue> {
-        let param = decl.param_names.iter().position(|p| p == name)?;
-        if param < usize::from(decl.positional_params)
-            && let Some((_, v)) = self
-                .positional_slots(call, offset)
-                .into_iter()
-                .find(|(slot, _)| *slot == param)
-        {
-            return self.arg_value(v);
-        }
-        // `*` or `**` unpacking may pass it.
-        if call.star_from.is_some() || call.kwargs.iter().any(|(k, _)| k.is_none()) {
+        bindings: &Bindings<'_>,
+        marked: &FxHashSet<String>,
+    ) -> Option<Vec<(String, ArgValue)>> {
+        let passed = offset + bindings.slots.len();
+        let doubled = |p: usize| p < offset || (decl.positional_param(p).is_some() && p < passed);
+        let past_positionals = |&(s, _): &(usize, VarId)| decl.positional_param(s).is_none();
+        let raises = bindings
+            .keywords
+            .iter()
+            .any(|&(_, _, p)| p.map_or(!decl.has_kwargs, doubled))
+            || (!decl.has_varargs && bindings.slots.last().is_some_and(past_positionals));
+        if raises {
             return None;
         }
-        let (_, default) = decl
-            .defaults
-            .iter()
-            .find(|(p, _)| usize::from(*p) == param)?;
-        ArgValue::decided(default)
+        let name_of = |p: usize| decl.param_names.get(p).filter(|n| marked.contains(*n));
+        let mut out = Vec::new();
+        for &(name, v, p) in &bindings.keywords {
+            // In `**kwargs`, the keyword passes nothing to a parameter of its name (a
+            // positional-only one, or `*args` / `**kwargs` itself).
+            if !marked.contains(name) || (p.is_none() && decl.param_names.iter().any(|n| n == name))
+            {
+                continue;
+            }
+            out.extend(self.arg_value(v).map(|value| (name.to_owned(), value)));
+        }
+        for &(slot, a) in &bindings.slots {
+            if let Some(name) = decl.positional_param(slot).and_then(name_of) {
+                out.extend(self.arg_value(a).map(|value| (name.clone(), value)));
+            }
+        }
+        for (p, c) in bindings.defaults(call, decl, offset) {
+            if let Some(name) = name_of(p) {
+                out.extend(ArgValue::decided(c).map(|value| (name.clone(), value)));
+            }
+        }
+        Some(out)
     }
 
-    /// The constant `var` holds ([`ArgValue`]): a literal through copies, or a string constant
-    /// bound to a name ([`TypeCtx::str_constant_with`]).
+    /// How `call` binds the parameters of `decl`, whose first positional argument binds
+    /// parameter `offset` (a bound receiver binds those before it).
+    fn bindings<'c>(&self, call: &Call<'c>, decl: &FunctionDecl, offset: usize) -> Bindings<'c> {
+        let keywords = call.kwargs.iter().filter_map(|(name, v)| {
+            let name = name.as_deref()?;
+            Some((name, *v, decl.keyword_param(name)))
+        });
+        Bindings {
+            slots: self.positional_slots(call, offset),
+            keywords: keywords.collect(),
+        }
+    }
+
+    /// The constant `var` holds ([`ArgValue`]): a literal through copies, a string constant
+    /// bound to a name ([`TypeCtx::str_constant_with`]), or a module's number or boolean
+    /// constant ([`TypeCtx::global_literal`]).
     fn arg_value(&self, var: VarId) -> Option<ArgValue> {
         let def = |v: VarId| self.defs.get(&v).copied();
         resolver::const_literal(def, var)
@@ -4769,6 +4774,15 @@ impl<'a> Extractor<'a> {
             .or_else(|| {
                 let text = self.cx.str_constant_with(var, &def, &self.types)?;
                 Some(ArgValue::Str(text))
+            })
+            .or_else(|| {
+                let globals = |name: &str| self.cx.global_literal(name);
+                match resolver::literal(def, &globals, var)? {
+                    LiteralValue::Bool(b) => Some(ArgValue::Bool(b)),
+                    LiteralValue::Int(n) => Some(ArgValue::Int(n)),
+                    // A string is read above, and a float is no value an argument list names.
+                    _ => None,
+                }
             })
     }
 
@@ -4880,7 +4894,7 @@ impl<'a> Extractor<'a> {
                 // A project class without a project `__init__` (a dataclass, a pydantic model):
                 // its construction is still a call site, with no project callees.
                 if let Some(class) = &call.constructs {
-                    let arguments = self.marked_arguments(call, &[]);
+                    let arguments = self.keyword_marks(call);
                     self.sites.push(CallSite {
                         caller: self.key.clone(),
                         target: CallTarget::Project(Vec::new()),
@@ -4934,8 +4948,9 @@ impl<'a> Extractor<'a> {
                 let loops = self.loops_around(bb);
                 // `(callee, its index, receiver, bound arguments, offset)` for `Self::hand_over`.
                 let mut handovers = Vec::new();
-                // `(callee, offset)` of the callees running here, for `Self::marked_arguments`.
-                let mut signatures: Vec<(&FunctionDecl, usize)> = Vec::new();
+                // What each callee running here is passed for the marked parameters, for
+                // `agreed_marks`.
+                let mut marks = Vec::new();
                 let mut handed_state: Vec<HandedState> = Vec::new();
                 // A constructor call binds the object it creates, unless the class may return
                 // an existing instance.
@@ -4997,13 +5012,15 @@ impl<'a> Extractor<'a> {
                     }
                     // A position binds its parameter, and a keyword too unless it lands in
                     // `**kwargs`.
+                    let passing = self.bindings(call, decl, offset);
                     let mut bound: Vec<(u8, VarId)> = Vec::new();
-                    for (slot, a) in self.positional_slots(call, offset) {
+                    for &(slot, a) in &passing.slots {
+                        let Some(slot) = decl.positional_param(slot) else {
+                            continue;
+                        };
                         let mut o = self.origin(a);
-                        if slot < usize::from(decl.positional_params) {
-                            o.binding = Some(self.binding(a, loops));
-                            handed.extend(self.handed_queue(key, slot, a));
-                        }
+                        o.binding = Some(self.binding(a, loops));
+                        handed.extend(self.handed_queue(key, slot, a));
                         if params.len() <= slot {
                             params.resize(slot + 1, ArgOrigin::default());
                         }
@@ -5012,48 +5029,26 @@ impl<'a> Extractor<'a> {
                             bound.push((slot, a));
                         }
                     }
-                    for (name, v) in call.kwargs {
-                        let Some(name) = name else { continue };
-                        if let Some(pos) = decl.param_names.iter().position(|p| p == name) {
-                            if params.len() <= pos {
-                                params.resize(pos + 1, ArgOrigin::default());
-                            }
-                            params[pos] = self.origin(*v);
-                            if pos < usize::from(decl.named_params) {
-                                params[pos].binding = Some(self.binding(*v, loops));
-                                handed.extend(self.handed_queue(key, pos, *v));
-                            }
-                            if let Ok(pos) = u8::try_from(pos) {
-                                bound.push((pos, *v));
-                            }
+                    for &(_, v, pos) in &passing.keywords {
+                        let Some(pos) = pos else { continue };
+                        if params.len() <= pos {
+                            params.resize(pos + 1, ArgOrigin::default());
+                        }
+                        params[pos] = self.origin(v);
+                        params[pos].binding = Some(self.binding(v, loops));
+                        handed.extend(self.handed_queue(key, pos, v));
+                        if let Ok(pos) = u8::try_from(pos) {
+                            bound.push((pos, v));
                         }
                     }
-                    // An omitted parameter has its literal default, unless `*` / `**`
-                    // unpacking may pass it.
-                    if call.star_from.is_none() && call.kwargs.iter().all(|(n, _)| n.is_some()) {
-                        for (pos, c) in &decl.defaults {
-                            let pos = usize::from(*pos);
-                            let by_position = pos < usize::from(decl.positional_params)
-                                && pos
-                                    < offset
-                                        + call.args.len()
-                                        + call.per_item.and_then(|p| p.positions).unwrap_or(0);
-                            let by_name = decl.param_names.get(pos).is_some_and(|n| {
-                                call.kwargs
-                                    .iter()
-                                    .any(|(k, _)| k.as_deref() == Some(n.as_str()))
-                            });
-                            if by_position || by_name {
-                                continue;
-                            }
-                            if params.len() <= pos {
-                                params.resize(pos + 1, ArgOrigin::default());
-                            }
-                            params[pos].binding = Some(ArgBinding {
-                                constant: Some(*c),
-                                ..ArgBinding::default()
-                            });
+                    for (pos, c) in passing.defaults(call, decl, offset) {
+                        if params.len() <= pos {
+                            params.resize(pos + 1, ArgOrigin::default());
                         }
+                        params[pos].binding = Some(ArgBinding {
+                            constant: Some(*c),
+                            ..ArgBinding::default()
+                        });
                     }
                     if let Some(items) = call.per_item {
                         items.bind(
@@ -5068,8 +5063,8 @@ impl<'a> Extractor<'a> {
                     if self.ownership && !offloaded {
                         handovers.push((decl, callees.len(), handed_recv, bound.clone(), offset));
                     }
-                    if !offloaded {
-                        signatures.push((decl, offset));
+                    if !offloaded && let Some(marked) = self.marked_params(call) {
+                        marks.push(self.callee_marks(call, decl, offset, &passing, marked));
                     }
                     if !offloaded && self.opt_in.shared_state {
                         handed_state.extend(self.handed(
@@ -5141,7 +5136,7 @@ impl<'a> Extractor<'a> {
                             .push((self.pos.0, self.pos.1, invalidates));
                     }
                 }
-                let arguments = self.marked_arguments(call, &signatures);
+                let arguments = agreed_marks(marks);
                 let site = self.site(bb, CallTarget::Project(callees), call.is_awaited, call.span);
                 self.sites.push(CallSite {
                     arguments,
@@ -6301,6 +6296,59 @@ impl<'c> Call<'c> {
     }
 }
 
+/// How a call binds the parameters of one callee ([`Extractor::bindings`]), as Python binds
+/// them.
+struct Bindings<'c> {
+    /// Each positional argument with its slot ([`Extractor::positional_slots`]): the parameter
+    /// it binds, if any, is [`FunctionDecl::positional_param`].
+    slots: Vec<(usize, VarId)>,
+    /// Each keyword with the parameter it binds ([`FunctionDecl::keyword_param`]); one binding
+    /// none lands in `**kwargs`, or the call raises `TypeError`.
+    keywords: Vec<(&'c str, VarId, Option<usize>)>,
+}
+
+impl Bindings<'_> {
+    /// The parameters of `decl` that take their literal defaults: no position or keyword binds
+    /// them, and no `*` / `**` unpacking may.
+    fn defaults<'d>(
+        &self,
+        call: &Call<'_>,
+        decl: &'d FunctionDecl,
+        offset: usize,
+    ) -> impl Iterator<Item = (usize, &'d ConstArg)> {
+        let unpacks = call.star_from.is_some() || call.kwargs.iter().any(|(n, _)| n.is_none());
+        let passed =
+            offset + call.args.len() + call.per_item.and_then(|p| p.positions).unwrap_or(0);
+        let by_position = move |p: usize| p < usize::from(decl.positional_params) && p < passed;
+        let by_keyword: Vec<usize> = self.keywords.iter().filter_map(|k| k.2).collect();
+        decl.defaults
+            .iter()
+            .filter(move |_| !unpacks)
+            .map(|(p, c)| (usize::from(*p), c))
+            .filter(move |(p, _)| !by_position(*p) && !by_keyword.contains(p))
+    }
+}
+
+/// [`CallSite::arguments`] from what each callee a call may run is passed for the marked
+/// parameters (`None`: one the call cannot run): the constants every callee agrees on.
+fn agreed_marks(each: Vec<Option<Vec<(String, ArgValue)>>>) -> Option<Box<ArgumentValues>> {
+    let mut each = each.into_iter().map(|marks| {
+        let mut marks = marks?;
+        marks.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        Some(marks)
+    });
+    let mut values = each.next()??;
+    for other in each {
+        let other = other?;
+        values.retain(|(name, value)| {
+            other
+                .binary_search_by(|(n, _)| n.as_str().cmp(name))
+                .is_ok_and(|i| &other[i].1 == value)
+        });
+    }
+    (!values.is_empty()).then(|| Box::new(ArgumentValues(values)))
+}
+
 /// What calling a `functools.partial` object calls ([`Extractor::partial`]).
 struct Partial {
     callable: VarId,
@@ -6546,8 +6594,9 @@ impl PassedItems {
 struct Handed<'b> {
     /// The receiver, unless it is the object a constructor call creates.
     recv: Option<VarId>,
-    /// `(parameter, argument)` of the arguments (`*` unpacking binds the ones from
-    /// `Call::star_from` on inexactly) and of the keywords naming a parameter.
+    /// `(parameter, argument)` of the positional arguments binding a positional parameter (`*`
+    /// unpacking binds the ones from `Call::star_from` on inexactly) and of the keywords
+    /// binding a parameter.
     bound: &'b [(u8, VarId)],
     /// The parameter of the first positional argument.
     offset: usize,

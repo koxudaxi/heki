@@ -14,7 +14,8 @@ of private helpers) has a fixed size, and so has a family in one function whose 
 shows at a smaller size, where the walks it does not gate stay cheap.
 
 Each shape is checked with every rule selected and one contract of each kind naming the classes
-and functions the shapes define, through `heki check` and through the `--watch` engine. The cost
+and functions the shapes define (a family may add contracts of its own, such as thousands of
+argument lists), through `heki check` and through the `--watch` engine. The cost
 is the wall time and the peak (the heap of the memory gate's counting build, or what the system
 reports, see `check_memory.py`) minus those of an empty module; the time limit is scaled to the
 machine by fixed linear shapes of calls and of loops.
@@ -348,6 +349,15 @@ def cell_reads_of_several_names(n: int) -> Body:
     return Body(("xs", "out"), lines)
 
 
+def path_aliases(n: int) -> Body:
+    """Merges each joining the previous alias of a package's `__path__` and a new read of it,
+    each alias read."""
+    lines = ["p0 = requests.__path__"]
+    for i in range(1, n + 1):
+        lines += [f"p{i} = p{i - 1} if flag else requests.__path__", f"use(p{i}.count(x))"]
+    return Body(("flag", "x"), lines)
+
+
 def wide_hierarchy(n: int) -> str:
     """Many subclasses overriding one method, and as many functions calling it on the base."""
     lines = []
@@ -376,6 +386,36 @@ def helper_chain(n: int) -> str:
     return "\n".join(lines)
 
 
+# The functions `argument_marks` defines, each named by an argument list of `marked_targets`.
+MARKED_FUNCTIONS = 1000
+
+
+def argument_marks(n: int) -> str:
+    """Calls passing the constants of argument lists, and as many calls of a function of fifty
+    parameters that no list names, a hundred in each function."""
+    lines = []
+    for i in range(MARKED_FUNCTIONS):
+        lines += [f"def mark{i}(p{i}=False, q=None):", f"    return p{i}", ""]
+    params = ", ".join(f"b{j}=None" for j in range(50))
+    lines += [f"def wide(x, {params}):", "    return x", ""]
+    for f in range(n // 100):
+        lines.append(f"def call{f}(x):")
+        for k in range(100):
+            i = (f * 100 + k) % MARKED_FUNCTIONS
+            lines += [f"    mark{i}(p{i}=True)", "    wide(x)"]
+        lines.append("")
+    return "\n".join(lines)
+
+
+def marked_targets(n: int) -> str:
+    """A `call-owners` contract whose n targets each name a parameter of their own."""
+    targets = ", ".join(f'"m.mark{i}(p{i}=True)"' for i in range(n))
+    return (
+        f'\n[[call-owners]]\nname = "shape-marks"\ntargets = [{targets}]\n'
+        'forbidden-callers = ["m.call0"]\n'
+    )
+
+
 @dataclass(frozen=True)
 class Family:
     name: str
@@ -387,6 +427,8 @@ class Family:
     size: int = 0
     # Adversarial: its budgets may be spent.
     real_code: bool = True
+    # Contracts of its own, added to `CONTRACTS` for its runs.
+    contracts: Callable[[int], str] | None = None
 
 
 FAMILIES = [
@@ -415,10 +457,18 @@ FAMILIES = [
         placements=("function", "method"),
         size=CELL_BINDINGS,
     ),
+    Family("path_aliases", path_aliases),
     Family("lazy_init_sites", lazy_init_sites, placements=("method",)),
     Family("wide_hierarchy", project=wide_hierarchy, placements=("project",), size=4000),
     Family("helper_chain", project=helper_chain, placements=("project",), size=2000),
     Family("callers_of_one_helper", project=callers_of_one_helper, placements=("project",), size=4000),
+    Family(
+        "argument_marks",
+        project=argument_marks,
+        placements=("project",),
+        size=8000,
+        contracts=marked_targets,
+    ),
 ]
 
 
@@ -459,7 +509,11 @@ class Runner:
         codes = json.loads(self.run_text(["rule", "--all", "--output-format", "json"]))
         self.select = ",".join(rule["code"] for rule in codes)
         (root / "pyproject.toml").write_text('[project]\nname = "shapes"\n')
-        (root / "shapes.toml").write_text(CONTRACTS)
+        self.contracts("")
+
+    def contracts(self, extra: str) -> None:
+        """The contracts of the runs that follow: `CONTRACTS` and `extra`."""
+        (self.root / "shapes.toml").write_text(CONTRACTS + extra)
 
     def run_text(self, args: list[str]) -> str:
         done = subprocess.run([self.heki, *args], cwd=self.root, capture_output=True, text=True)
@@ -598,6 +652,7 @@ def main() -> int:
         for family in families:
             for placement in family.placements:
                 shape = (family.name, placement)
+                runner.contracts("" if family.contracts is None else family.contracts(family.size))
                 if family.project is not None:
                     n, failed = family.size, None
                 elif family.size:

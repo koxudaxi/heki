@@ -11,6 +11,7 @@
 //! the configuration-free half of `MUT202` (`@lru_cache` results) is summarized.
 
 use crate::{FuncKey, ProjectDecls};
+use rustc_hash::FxHashSet;
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 
@@ -119,9 +120,10 @@ pub trait Contracts: Debug + Send + Sync {
     /// of class statements (`CallSite::is_base`).
     fn reference_bases(&self) -> bool;
 
-    /// The parameters the argument lists of call targets name (`DataType(is_dict=True)`), sorted:
-    /// the summaries then keep the constants each call passes for them (`CallSite::arguments`).
-    fn marked_params(&self) -> &[String];
+    /// The parameters the argument lists of call targets name (`DataType(is_dict=True)`): the
+    /// summaries then keep the constants each call passes for them (`CallSite::arguments`),
+    /// looking up the names of the parameters the call binds.
+    fn marked_params(&self) -> &FxHashSet<String>;
 
     /// Whether an effect boundary forbids calling `symbol`, a function or class outside the
     /// project (a `call-targets` entry names it, or `reads-environment` with the ecosystem

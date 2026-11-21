@@ -355,3 +355,260 @@ fn an_argument_list_heki_cannot_read_is_a_configuration_error() {
         );
     }
 }
+
+const SIGNATURES: &str = r#"def po_kw(kind=False, /, **kwargs):
+    return kind
+
+
+def po(kind=False, /):
+    return kind
+
+
+def ko(x=None, *, kind=False):
+    return kind
+
+
+def ko_strict(*, kind=False):
+    return kind
+
+
+def ko_args(*args, kind=False):
+    return kind
+
+
+def plain(kind=False):
+    return kind
+
+
+def opts(**options):
+    return options
+
+
+def va(*kind, **kw):
+    return kind
+
+
+def vk(**kind):
+    return kind
+
+
+class Box:
+    def __init__(self, kind=False, /, **kw):
+        self.kind = kind
+
+    def put(self, kind=False, /, **kw):
+        return kind
+
+    def take(self, kind=False):
+        return kind
+
+    @staticmethod
+    def make(kind=False, /):
+        return kind
+"#;
+
+const BINDINGS: &str = r#"from pkg.sig import Box, ko, ko_args, ko_strict, opts, plain, po, po_kw, va, vk
+
+
+def keyword_of_positional_only():
+    po_kw(kind=True)
+
+
+def position_of_positional_only():
+    po_kw(True, kind=False)
+
+
+def positional_only_without_kwargs():
+    po(kind=True)
+    po(True)
+
+
+def keyword_only():
+    ko(kind=True)
+    ko(True)
+    ko_strict(True)
+    ko_args(True)
+
+
+def raising():
+    plain(False, kind=True)
+    plain(kind=True, other=1)
+
+
+def into_kwargs():
+    opts(kind=True)
+    va(kind=True)
+    vk(kind=True)
+
+
+def receivers(b: Box):
+    b.put(True)
+    b.put(kind=True)
+    b.make(True)
+    Box(True)
+    Box(kind=True)
+    Box.take(b, True)
+    b.take(False, kind=True)
+
+
+def unpacking(args, kw):
+    plain(*args, kind=True)
+    plain(kind=True, **kw)
+    plain(*args)
+    plain(**kw)
+"#;
+
+#[test]
+fn a_keyword_binds_a_parameter_only_where_python_binds_it() {
+    let names = "po_kw po ko ko_strict ko_args plain opts va vk Box Box.put Box.take Box.make";
+    let targets = |value: &str| {
+        let texts: Vec<String> = names
+            .split(' ')
+            .map(|n| format!("\"{n}(kind={value})\""))
+            .collect();
+        texts.join(", ")
+    };
+    let p = Project::new("call_target_arguments_bindings");
+    p.write(
+        "pyproject.toml",
+        &format!(
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT204\", \"EFF201\"]\n\n[[tool.heki.call-owners]]\nname = \"on\"\ntargets = [{}]\n\n[[tool.heki.call-owners]]\nname = \"off\"\ntargets = [{}]\n\n[[tool.heki.effect-boundaries]]\nname = \"pure\"\nscopes = [\"pkg.use.keyword_of_positional_only\"]\nforbid = [\"calls\"]\ncall-targets = [\"po_kw(kind=True)\", \"po_kw(kind=False)\"]\n",
+            targets("True"),
+            targets("False")
+        ),
+    )
+    .write("pkg/__init__.py", "")
+    .write("pkg/sig.py", SIGNATURES)
+    .write("pkg/use.py", BINDINGS);
+    let call = |line: u64, func: &str, target: &str, value: &str| {
+        let verb = if target == "Box" {
+            "constructs"
+        } else {
+            "calls"
+        };
+        let contract = if value == "True" { "on" } else { "off" };
+        report(
+            "pkg/use.py",
+            line,
+            5,
+            "MUT204",
+            &format!(
+                "`{func}` {verb} `{target}(kind={value})` outside the call owners of `{contract}`"
+            ),
+        )
+    };
+    let mut expected = vec![
+        // The keyword lands in `**kwargs`: `kind` keeps its default.
+        call(5, "keyword_of_positional_only", "po_kw", "False"),
+        report(
+            "pkg/use.py",
+            5,
+            5,
+            "EFF201",
+            "`keyword_of_positional_only` calls `po_kw(kind=False)`, which effect boundary `pure` forbids",
+        ),
+        // The position binds `kind`, the keyword lands in `**kwargs`.
+        call(9, "position_of_positional_only", "po_kw", "True"),
+        call(14, "positional_only_without_kwargs", "po", "True"),
+        call(18, "keyword_only", "ko", "True"),
+        call(19, "keyword_only", "ko", "False"),
+        call(21, "keyword_only", "ko_args", "False"),
+        // A keyword naming no parameter is one of `**kwargs`.
+        call(30, "into_kwargs", "opts", "True"),
+        call(36, "receivers", "Box.put", "True"),
+        call(37, "receivers", "Box.put", "False"),
+        call(38, "receivers", "Box.make", "True"),
+        call(39, "receivers", "Box", "True"),
+        call(40, "receivers", "Box", "False"),
+        call(41, "receivers", "Box.take", "True"),
+        call(46, "unpacking", "plain", "True"),
+        call(47, "unpacking", "plain", "True"),
+    ];
+    expected.sort();
+    // Nothing for the calls that raise `TypeError` (a keyword naming a positional-only parameter
+    // without `**kwargs`, a position past the parameters without `*args`, a parameter bound by
+    // a position and a keyword, a keyword naming no parameter without `**kwargs`), for a keyword
+    // landing in `**kwargs` beside `*args` or `**kwargs` of its name, and for an argument
+    // unpacking may pass.
+    assert_eq!(reports(&p), expected);
+}
+
+const SETTINGS: &str = r#"from typing import Final
+
+LIMIT = 0
+STRICT: Final = 3
+RATE = 0.5
+MOVED = 0
+TWICE = 0
+TWICE = 1
+"#;
+
+const CONSTANTS: &str = r#"from pkg.settings import LIMIT, MOVED, RATE, STRICT, TWICE
+from pkg.sig import levels
+
+FLAG = True
+TOGGLE = True
+
+
+def flip():
+    global TOGGLE
+    TOGGLE = False
+
+
+def own_constant():
+    levels(kind=FLAG)
+    levels(FLAG)
+
+
+def imported_constants():
+    levels(level=LIMIT)
+    levels(level=STRICT)
+
+
+def no_constants():
+    levels(level=MOVED)
+    levels(level=TWICE)
+    levels(kind=TOGGLE)
+    levels(level=RATE)
+    levels(level=FLAG)
+"#;
+
+#[test]
+fn a_module_constant_passes_its_value() {
+    let p = Project::new("call_target_arguments_constants");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT204\"]\n\n[[tool.heki.call-owners]]\nname = \"c\"\ntargets = [\"levels(kind=True)\", \"levels(kind=False)\", \"levels(level=0)\", \"levels(level=1)\", \"levels(level=3)\"]\n",
+    )
+    .write("pkg/__init__.py", "")
+    .write(
+        "pkg/sig.py",
+        "def levels(kind=None, level=None):\n    return level\n",
+    )
+    .write("pkg/settings.py", SETTINGS)
+    .write(
+        "pkg/rebind.py",
+        "from pkg import settings\n\n\ndef move():\n    settings.MOVED = 3\n",
+    )
+    .write("pkg/use.py", CONSTANTS);
+    let call = |line: u64, func: &str, target: &str| {
+        report(
+            "pkg/use.py",
+            line,
+            5,
+            "MUT204",
+            &format!("`{func}` calls `levels({target})` outside the call owners of `c`"),
+        )
+    };
+    // Not matched: a constant another module rebinds, one bound twice, one a function of its
+    // module rebinds, a float, and a boolean for an integer.
+    assert_eq!(
+        reports(&p),
+        vec![
+            call(14, "own_constant", "kind=True"),
+            call(15, "own_constant", "kind=True"),
+            call(19, "imported_constants", "level=0"),
+            call(20, "imported_constants", "level=3"),
+        ]
+    );
+}
