@@ -12,7 +12,9 @@ pub mod convert;
 pub mod engine;
 pub mod server;
 
-pub use engine::{CONFIG_FILES, EditOutcome, EngineError, EngineStats, Selectors, Workspace};
+pub use engine::{
+    CONFIG_FILES, EditOutcome, EngineError, EngineStats, Selectors, Source, Workspace,
+};
 pub use server::run_stdio;
 
 #[cfg(test)]

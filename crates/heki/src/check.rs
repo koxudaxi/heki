@@ -145,6 +145,7 @@ pub(crate) fn load_and_index(
         working_dir: None,
         target_version: analysis.target_version.as_deref(),
         overrides,
+        removed: None,
     })?;
     let selection = selection(analysis, &project)?;
     let snapshot = snapshot_for(&selection, &project.env.root, format)?;
@@ -672,6 +673,7 @@ pub(crate) fn run_snapshot(args: &SnapshotArgs) -> Result<ExitCode> {
         working_dir: None,
         target_version: args.target_version.as_deref(),
         overrides: None,
+        removed: None,
     })?;
     let inputs = project.inputs();
     let index = analyze_project_for(
