@@ -195,3 +195,31 @@ fn a_glob_call_target_names_members_and_reports_name_what_they_matched() {
         "`tag` writes `DataType.tags[\"k\"]` (container_mut) outside the write owners of `flags`"
     );
 }
+
+/// A glob naming a class: a report of a construction names the class constructed.
+#[test]
+fn a_glob_class_target_names_the_class_constructed() {
+    let p = Project::new("glob_class_target");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT204\"]\n\n[[tool.heki.call-owners]]\nname = \"facts\"\ntargets = [\"pkg.*.Final*\"]\nallowed-callers = [\"pkg.facts.*\"]\n",
+    )
+    .write("pkg/__init__.py", "")
+    .write(
+        "pkg/facts.py",
+        "class FinalFacts:\n    def __init__(self, n: int) -> None:\n        self.n = n\n\n\ndef make() -> FinalFacts:\n    return FinalFacts(1)\n",
+    )
+    .write(
+        "pkg/use.py",
+        "from pkg.facts import FinalFacts\n\n\ndef build() -> FinalFacts:\n    return FinalFacts(2)\n",
+    );
+    assert_eq!(
+        reports(&p),
+        vec![(
+            5,
+            "MUT204".to_owned(),
+            "`build` constructs `pkg.facts.FinalFacts` outside the call owners of `facts`"
+                .to_owned()
+        )]
+    );
+}
