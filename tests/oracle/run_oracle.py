@@ -13,8 +13,9 @@ $ python3.15 tests/oracle/run_oracle.py --heki target/release/heki --seeds 2000 
 The output directory holds `summary.json` and `refutations/<RULE>-<kind>/seed-<n>/` (the project,
 `finding.json`, and with `--minimize` the shrunk project in `min/`). Assumption violations go to
 `violations/` the same way. The exit code is 1 when a refutation was found and
-`--fail-on-refutation` is given, 2 when the oracle itself failed (a crash of the recorder, a
-generated program that does not import), and 0 otherwise.
+`--fail-on-refutation` is given, 2 when the oracle itself failed (heki failed on a project, a
+child process crashed or timed out, the recorder failed, a generated program did not import),
+and 0 otherwise.
 """
 
 from __future__ import annotations
@@ -258,7 +259,9 @@ def main():
                 + "\n"
             )
     print_summary(summary)
-    if summary["errors"].get("monitor") or summary["errors"].get("import"):
+    # heki failing on a project, a child process that crashed or timed out, the recorder failing,
+    # a generated program that does not import: the run checked less than it says.
+    if summary["errors"]:
         return 2
     if args.fail_on_refutation and summary["refutations"]:
         return 1

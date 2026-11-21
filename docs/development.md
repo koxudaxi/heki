@@ -104,7 +104,8 @@ computed, R6), and the generator keeps its programs inside them. The output dire
 `summary.json` and one folder per refutation with the project, `finding.json`, and with
 `--minimize` the shrunk repro in `min/`. Runs take a seed range (`--seeds`, `--start`), stop
 starting new seeds after `--time-limit` seconds, and use `--jobs` processes.
-`--fail-on-refutation` makes a refutation fail the run. The programs need CPython 3.12 or newer;
+`--fail-on-refutation` makes a refutation fail the run; an oracle error always does (heki
+failing on a project, a child process that crashed or timed out, the recorder failing). The programs need CPython 3.12 or newer;
 CI runs the checker tests and seeds 0 to 199 with `--fail-on-refutation` on CPython 3.12 to
 3.15.
 
