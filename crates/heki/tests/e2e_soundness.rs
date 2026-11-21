@@ -496,6 +496,127 @@ const ACCUMULATE: &[Expect] = &[
         "set_or_built",
         &[("OPT102", V::Fix(&["s |= set([g, -g])"]))],
     ),
+    // A set grown in place can iterate in another order: only a set that is just tested
+    // afterwards is rewritten.
+    ("set_only_tested", &[("OPT102", V::Fix(&["s |= {g}"]))]),
+    (
+        "set_tested_in_loop",
+        &[("OPT102", V::Fix(&["seen |= {g % 3}"]))],
+    ),
+    (
+        "set_two_writes",
+        &[
+            ("OPT102", V::Fix(&["s |= {g}"])),
+            ("OPT102", V::Fix(&["s |= {-g}"])),
+        ],
+    ),
+    (
+        "set_returned",
+        &[(
+            "OPT102",
+            V::Blocked("SetOrderUnobserved(s): `s` is returned (line"),
+        )],
+    ),
+    (
+        "set_sorted",
+        &[(
+            "OPT102",
+            V::Blocked("SetOrderUnobserved(s): `s` is passed to `sorted(...)` (line"),
+        )],
+    ),
+    (
+        "set_iterated",
+        &[(
+            "OPT102",
+            V::Blocked("SetOrderUnobserved(s): `s` is iterated (line"),
+        )],
+    ),
+    (
+        "set_counted_by_generator",
+        &[(
+            "OPT102",
+            V::Blocked("SetOrderUnobserved(s): `s` is iterated (line"),
+        )],
+    ),
+    (
+        "set_popped",
+        &[(
+            "OPT102",
+            V::Blocked("SetOrderUnobserved(s): `.pop(...)` is called on `s` (line"),
+        )],
+    ),
+    (
+        "set_appended",
+        &[(
+            "OPT102",
+            V::Blocked("SetOrderUnobserved(s): `s` is passed to `.append(...)` (line"),
+        )],
+    ),
+    (
+        "set_stored",
+        &[(
+            "OPT102",
+            V::Blocked("SetOrderUnobserved(s): `s` is stored (line"),
+        )],
+    ),
+    (
+        "set_yielded",
+        &[(
+            "OPT102",
+            V::Blocked("SetOrderUnobserved(s): `s` is yielded (line"),
+        )],
+    ),
+    (
+        "set_compared_with_parameter",
+        &[(
+            "OPT102",
+            V::Blocked("SetOrderUnobserved(s): `s` is compared with a value of unknown type"),
+        )],
+    ),
+    (
+        "set_combined_with_parameter",
+        &[(
+            "OPT102",
+            V::Blocked(
+                "SetOrderUnobserved(s): `s` is combined with an operand that may not be a set",
+            ),
+        )],
+    ),
+    (
+        "set_combined_then_listed",
+        &[(
+            "OPT102",
+            V::Blocked("SetOrderUnobserved(s): `both` is passed to `list(...)` (line"),
+        )],
+    ),
+    (
+        "set_merged_into_another",
+        &[(
+            "OPT102",
+            V::Blocked("SetOrderUnobserved(s): `out` is updated in place from `s` (line"),
+        )],
+    ),
+    (
+        "set_copied_then_listed",
+        &[(
+            "OPT102",
+            V::Blocked("SetOrderUnobserved(s): `t` is passed to `list(...)` (line"),
+        )],
+    ),
+    (
+        "set_subset_test",
+        &[(
+            "OPT102",
+            V::Blocked("SetOrderUnobserved(s): `s` is used beyond `in`, `len`, truthiness"),
+        )],
+    ),
+    (
+        "set_read_in_handler",
+        &[(
+            "OPT102",
+            V::Blocked("SetOrderUnobserved(s): `s` is passed to `sorted(...)` (line"),
+        )],
+    ),
     (
         "Encoder.encode",
         &[
@@ -518,6 +639,26 @@ fn accumulation_rules() {
         "tests/difftest/soundness_e2e_accumulate.py",
         ACCUMULATE,
     );
+}
+
+#[test]
+fn set_iterated_by_a_comprehension_frame_keeps_its_union() {
+    // Before 3.12 a comprehension runs in its own frame, called with the iterable.
+    let p = Project::new("sound_set_order_py311");
+    p.write(
+        "cases.py",
+        "def distinct(xs):\n    s = set()\n    for x in xs:\n        s = s | {x}\n    return [v for v in s]\n",
+    );
+    let blocked: &[Expect] = &[(
+        "distinct",
+        &[(
+            "OPT102",
+            V::Blocked("SetOrderUnobserved(s): `s` is iterated (line 5)"),
+        )],
+    )];
+    for version in ["py311", "py315"] {
+        assert_verdicts(&opt_json(&p, &["--target-version", version]), blocked);
+    }
 }
 
 // ======================================================================== hoisting
@@ -1193,6 +1334,13 @@ const COUNTEREXAMPLES: &[Expect] = &[
         &[("OPT102", V::Blocked(REGROUPED))],
     ),
     (
+        "cx_set_iterated_after_growth",
+        &[(
+            "OPT102",
+            V::Blocked("SetOrderUnobserved(s): `s` is iterated (line"),
+        )],
+    ),
+    (
         "cx_rebuilt_container_changed",
         &[(
             "OPT130",
@@ -1272,7 +1420,7 @@ fn counterexamples_found_in_m8_stay_unrewritten() {
     let (_, _, stderr) = p.check(&["--select", "OPT", "--fix", "--include-size-dependent"]);
     assert!(stderr.contains("Fixed 0 issue(s)"), "{stderr}");
     assert_eq!(p.read("cases.py"), original);
-    assert!(run_python(&p.dir, "cases.py").contains("old rewrites diverge: 41/41"));
+    assert!(run_python(&p.dir, "cases.py").contains("old rewrites diverge: 42/42"));
 }
 
 // ======================================================================== module-level facts

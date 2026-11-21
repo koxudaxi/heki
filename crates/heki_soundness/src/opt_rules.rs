@@ -730,6 +730,22 @@ fn dedup_append(
         .map(|i| (*then_bb, i))
 }
 
+/// What one use of a value holding an accumulated set does with the set's iteration order.
+enum SetUse {
+    /// Its result does not depend on the order: `x in s`, `len(s)`, truthiness, `del s`.
+    OrderFree,
+    /// `s == t` / `s != t`: order-free when `t` is a builtin value, whose `__eq__` runs no
+    /// code with the set.
+    ComparedWith(VarId),
+    /// The set passes on to this value, whose uses count too: a copy, or the write itself.
+    PassesOn(VarId),
+    /// A set operator: its result takes the set's order, and the other operand must be an
+    /// exact set, or its reflected operator would receive the set.
+    CombinedWith { result: VarId, operand: VarId },
+    /// It may observe the order: how, and on which line.
+    Observes(String),
+}
+
 // ============================================================================ evaluation
 
 struct Rules<'a, 'c> {
@@ -1294,6 +1310,10 @@ impl<'a, 'c> Rules<'a, 'c> {
                 .exception_state_safe(&name, &st, acc, at.0, &name, &[dst]),
         );
         obs.push(self.partial_update(&name, at.0, self.single_item_display(rhs)));
+        // A dict iterates in insertion order, which updating it in place keeps.
+        if kind != Some(Dict) {
+            obs.push(self.set_order_unobserved(&name, kind, at, dst));
+        }
         let stmt = self.assignment_span(copy, binop.span);
         let span = stmt.unwrap_or(binop.span);
         let mut edits = Vec::new();
@@ -1320,6 +1340,215 @@ impl<'a, 'c> Rules<'a, 'c> {
             self.init_evidence(&st, acc, &[Set, Dict]),
             edits,
         ))
+    }
+
+    /// `SetOrderUnobserved`: `s | t` copies `s` into a new table sized for the copy, while
+    /// `s |= t` grows the table of `s`, so the two sets can iterate in different orders.
+    fn set_order_unobserved(
+        &self,
+        name: &str,
+        kind: Option<BuiltinKind>,
+        write: (BlockId, usize),
+        dst: VarId,
+    ) -> ProofObligation {
+        let status = match kind {
+            Some(Set) => match self.set_order_observer(write, dst) {
+                Some(why) => blocked(format!(
+                    "{why}: `{name} |= ...` grows the set in place where `{name} | ...` builds a new one, and the two can iterate in different orders"
+                )),
+                None => established(
+                    "the set is only tested (`in`, `len`, truthiness, `==`), never iterated or handed on",
+                ),
+            },
+            _ => {
+                blocked("it may be a set, whose iteration order can change when it grows in place")
+            }
+        };
+        self.ck.ob(K::SetOrderUnobserved, name, status)
+    }
+
+    /// The first use that may observe the iteration order of the set the write at `write`
+    /// defines as `dst` (`None`: no use can). `Unique` and `ExclusiveAccessAtWrite` leave
+    /// `dst` the only reference to the set, so every later use is of a value the walk reaches
+    /// from it through copies, phis, and the set operators whose result takes its order.
+    fn set_order_observer(&self, write: (BlockId, usize), dst: VarId) -> Option<String> {
+        let f = self.f();
+        let mut reached: FxHashSet<VarId> = FxHashSet::default();
+        reached.insert(dst);
+        let mut work = vec![dst];
+        // The other operands of `==` and of set operators, checked once the walk is done:
+        // `(use, value of the set, operand, the operand must be a set)`.
+        let mut typed: Vec<((BlockId, usize), VarId, VarId, bool)> = Vec::new();
+        while let Some(u) = work.pop() {
+            for &site in self.cx().uses(u) {
+                let mut passes_on = |v: VarId| {
+                    if reached.insert(v) {
+                        work.push(v);
+                    }
+                };
+                let at = match site {
+                    UseSite::Phi { block, pred } => {
+                        for phi in &f.block(block).phis {
+                            if phi.incoming.contains(&(pred, u)) {
+                                passes_on(phi.dst);
+                            }
+                        }
+                        continue;
+                    }
+                    UseSite::Term(b) => match &f.block(b).terminator {
+                        Terminator::Return(_) => {
+                            let line = self.line(crate::interpreter::term_span(f, b).start);
+                            return Some(format!("{} is returned (line {line})", self.ck.name(u)));
+                        }
+                        // A branch tests the set's truthiness, and `raise` of a set raises
+                        // `TypeError` whatever its order.
+                        _ => continue,
+                    },
+                    UseSite::Inst(b, i) => (b, i),
+                };
+                match self.set_use(u, at, write) {
+                    SetUse::OrderFree => {}
+                    SetUse::PassesOn(to) => passes_on(to),
+                    SetUse::ComparedWith(v) => typed.push((at, u, v, false)),
+                    SetUse::CombinedWith { result, operand } => {
+                        typed.push((at, u, operand, true));
+                        passes_on(result);
+                    }
+                    SetUse::Observes(why) => return Some(why),
+                }
+            }
+        }
+        typed.retain(|&(_, _, v, _)| !reached.contains(&v));
+        typed.sort_unstable_by_key(|&(at, ..)| at);
+        // One state per block: an SSA operand keeps the type of its definition, so the state
+        // before the block's last such use holds the operands of all of them.
+        for uses in typed.chunk_by(|a, b| a.0.0 == b.0.0) {
+            let st = self.state(uses[uses.len() - 1].0);
+            for &((b, i), u, v, must_be_set) in uses {
+                let ty = st.as_ref().and_then(|st| st.exact_type(v));
+                let line = self.line(f.block(b).insts[i].span.start);
+                let who = self.ck.name(u);
+                match (must_be_set, ty) {
+                    (true, Some(Set)) | (false, Some(_)) => {}
+                    (true, _) => {
+                        return Some(format!(
+                            "{who} is combined with an operand that may not be a set (line {line}), whose reflected operator would receive it"
+                        ));
+                    }
+                    (false, None) => {
+                        return Some(format!(
+                            "{who} is compared with a value of unknown type (line {line}), whose `__eq__` would receive it"
+                        ));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// What the instruction at `at` does with the iteration order of `u`, a value holding the
+    /// accumulated set.
+    fn set_use(&self, u: VarId, at: (BlockId, usize), write: (BlockId, usize)) -> SetUse {
+        let inst = inst_at(self.f(), at);
+        let who = self.ck.name(u);
+        let line = self.line(inst.span.start);
+        let other = |lhs: VarId, rhs: VarId| if lhs == u { rhs } else { lhs };
+        match &inst.kind {
+            InstKind::BinOp { dst, .. } if at == write => SetUse::PassesOn(*dst),
+            InstKind::Copy { dst, .. } => SetUse::PassesOn(*dst),
+            // `t |= s` puts the set's elements, in its order, into an object other names may
+            // hold too.
+            InstKind::BinOp {
+                lhs,
+                in_place: true,
+                ..
+            } if *lhs != u => SetUse::Observes(format!(
+                "{} is updated in place from {who} (line {line})",
+                self.ck.name(*lhs)
+            )),
+            InstKind::BinOp {
+                dst,
+                op: BinOpKind::BitOr | BinOpKind::BitAnd | BinOpKind::BitXor | BinOpKind::Sub,
+                lhs,
+                rhs,
+                ..
+            } => SetUse::CombinedWith {
+                result: *dst,
+                operand: other(*lhs, *rhs),
+            },
+            InstKind::Delete { .. }
+            | InstKind::UnaryOp {
+                op: heki_ir::UnaryOpKind::Not,
+                ..
+            } => SetUse::OrderFree,
+            InstKind::Compare {
+                op: CompareOpKind::In | CompareOpKind::NotIn,
+                lhs,
+                rhs,
+                ..
+            } if *rhs == u && *lhs != u => SetUse::OrderFree,
+            InstKind::Compare {
+                op: CompareOpKind::Eq | CompareOpKind::NotEq,
+                lhs,
+                rhs,
+                ..
+            } => SetUse::ComparedWith(other(*lhs, *rhs)),
+            InstKind::Call {
+                callee_var,
+                callee,
+                args,
+                kwargs,
+                star_from: None,
+                ..
+            } if kwargs.is_empty()
+                && args.as_slice() == [u]
+                && matches!(
+                    self.cx().builtin_callee(*callee_var, callee),
+                    Some("len" | "bool")
+                ) =>
+            {
+                SetUse::OrderFree
+            }
+            InstKind::Call {
+                callee_var,
+                callee,
+                args,
+                ..
+            } if heki_ir::comprehension_id(*callee_var, callee).is_some()
+                && args.first() == Some(&u) =>
+            {
+                SetUse::Observes(format!("{who} is iterated (line {line})"))
+            }
+            InstKind::Call { callee, .. } => {
+                SetUse::Observes(format!("{who} is passed to `{callee}(...)` (line {line})"))
+            }
+            InstKind::MethodCall { recv, method, .. } if *recv == u => {
+                SetUse::Observes(format!("`.{method}(...)` is called on {who} (line {line})"))
+            }
+            InstKind::MethodCall { method, .. } => {
+                SetUse::Observes(format!("{who} is passed to `.{method}(...)` (line {line})"))
+            }
+            InstKind::MakeIter { .. } | InstKind::YieldFrom { .. } => {
+                SetUse::Observes(format!("{who} is iterated (line {line})"))
+            }
+            InstKind::MakeGenExpr { outer_iter, .. } if *outer_iter == u => {
+                SetUse::Observes(format!("{who} is iterated (line {line})"))
+            }
+            InstKind::Yield { .. } => SetUse::Observes(format!("{who} is yielded (line {line})")),
+            InstKind::AllocBuiltin { .. }
+            | InstKind::DictLiteral { .. }
+            | InstKind::AttrStore { .. }
+            | InstKind::SubscriptStore { .. }
+            | InstKind::StoreGlobal { .. }
+            | InstKind::StoreDeref { .. }
+            | InstKind::MakeGenExpr { .. }
+            | InstKind::MakeClosure { .. } => {
+                SetUse::Observes(format!("{who} is stored (line {line})"))
+            }
+            _ => SetUse::Observes(format!(
+                "{who} is used beyond `in`, `len`, truthiness, and `==` (line {line})"
+            )),
+        }
     }
 
     // ------------------------------------------------------------------------ OPT103
