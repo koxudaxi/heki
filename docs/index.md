@@ -134,6 +134,7 @@ Each report shows the chain of calls that leads to the bug.
 | Opt-in: a generator consumed twice | [`MUT106`](rules/iterator-double-consumption.md) |
 | Opt-in, experimental: a function reading a `@cached_property` that another method leaves stale | [`MUT111`](rules/cached-property-stale-read.md) |
 | Opt-in, experimental: a `@cached_property` left stale after another method changes what it read | [`MUT101`](rules/cached-property-stale-mutation.md) |
+| Opt-in, experimental: a value that is a new object on one path and the caller's object on another, changed in place | [`MUT112`](rules/conditional-ownership-mutation.md) |
 
 ### A safety net for reviews and coding agents
 
@@ -195,7 +196,7 @@ report names the missing obligation instead of offering a fix. See [Fixes and sa
 - 🎯 See what heki [covers and does not cover](scope.md).
 - 📦 [Install heki](installation.md) and 🚀 [run it on a project](getting-started.md).
 - ⚙️ [Configure](configuration.md) rule selection, contracts, and the Python version.
-- 📏 Browse the [33 rules](rules/index.md).
+- 📏 Browse the [34 rules](rules/index.md).
 - 🔧 Read how [fixes are proven safe](fixes.md).
 - 🪜 [Adopt it gradually](adoption.md) with a Ratchet baseline in CI.
 - 🖥️ Use it from [your editor](lsp.md) or 🤖 [a coding agent](coding-agents.md).

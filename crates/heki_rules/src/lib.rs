@@ -1,8 +1,8 @@
 //! Rule registry spanning all 3 families derived from the single Effect & Alias theory.
 //!
 //! - Family 1 (`MUT`): Mutation & State Effect (`MUT101`, `MUT103`, `MUT106`, `MUT107`, `MUT108`,
-//!   `MUT109`, `MUT110`, `MUT111`, `MUT201`, `MUT202`, `MUT203`, `MUT204`, `MUT205`, `MUT206`,
-//!   `MUT207`)
+//!   `MUT109`, `MUT110`, `MUT111`, `MUT112`, `MUT201`, `MUT202`, `MUT203`, `MUT204`, `MUT205`,
+//!   `MUT206`, `MUT207`)
 //! - Family 2 (`EFF` / `DATA`): Execution Effect (`EFF101`, `EFF102`, `EFF103`, `EFF105`, `EFF106`,
 //!   `EFF107`, `EFF201`, `DATA101`)
 //! - Family 3 (`OPT`): Complexity Rewrite (`OPT101`, `OPT102`, `OPT103`, `OPT110`, `OPT111`,
@@ -159,6 +159,16 @@ pub const CORE_RULES: &[RuleMeta] = &[
         auto_fix_default: false,
         summary: "Opt-in: reading a `@cached_property` that a method of its class family can leave stale (a write `MUT101` reports).",
         doc: include_str!("../rule-docs/MUT111.md"),
+    },
+    RuleMeta {
+        code: "MUT112",
+        slug: "conditional-ownership-mutation",
+        family: RuleFamily::Mut,
+        default_enabled: false,
+        size_dependent_fix: false,
+        auto_fix_default: false,
+        summary: "Opt-in: changing in place a value that is a new object on one path and borrowed state (a parameter, an attribute, a global, or what a function returns of such state) on another.",
+        doc: include_str!("../rule-docs/MUT112.md"),
     },
     RuleMeta {
         code: "MUT201",
@@ -556,6 +566,7 @@ pub fn check_project(
     mut_rules::mut101_mut111(&cx, &mut out);
     mut_rules::mut107(&cx, &mut out);
     mut_rules::mut108_mut110(&cx, &mut out);
+    mut_rules::mut112(&cx, &mut out);
     mut_rules::mut109(&cx, &mut out)?;
     mut_rules::mut201(&cx, &mut out)?;
     mut_rules::mut203(&cx, &mut out)?;

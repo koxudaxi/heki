@@ -8,6 +8,7 @@ use crate::construction::{Escape, Pos, Recorder};
 use crate::consumption::{ItemArgs, IterFlow, PerItemCall, Roots, param_iteration};
 use crate::guards::{self, GuardInputs, LocalGuards, per_item_bit};
 use crate::invalidation::{self, Events, FlowWrite, FuncFlow, Reach, SiteFlow};
+use crate::ownership::{self, LocalOrigins, Origins, ParamRole, Source};
 use crate::readonly::{self, Derivation, ProtectedReturn, ReturnStep, Shared};
 use crate::resolver::{
     self, Callee, DeclKeys, FunctionDecl, ModuleDecls, TypeCtx, Val, func_qualname,
@@ -55,6 +56,16 @@ pub const CONTAINER_MUTATORS: &[&str] = &[
     "__setitem__",
     "__delitem__",
 ];
+
+/// The (value, place) pairs the store walk of `returns_origins` may take per byte of a function's
+/// source, above a floor: a function past it returns objects of unknown origin.
+const KEPT_PAIRS_PER_SOURCE_BYTE: usize = 1;
+const MIN_KEPT_PAIRS: usize = 4096;
+
+/// The values the origin walks of `returns_origins` may take per byte of a function's source,
+/// above a floor: a function past it returns objects of unknown origin.
+const ORIGIN_STEPS_PER_SOURCE_BYTE: usize = 1;
+const MIN_ORIGIN_STEPS: usize = 4096;
 
 /// Augmented assignments changing a container in place, by the container's class: `xs += ys`
 /// extends a list, `s |= t` updates a set (`__iadd__`, `__ior__`, ...).
@@ -200,6 +211,11 @@ fn extract_module(
             summary.lazily_read_self_attrs = flow.lazily_initialized().map(str::to_owned).collect();
             file.cache_flows.entry(key.clone()).or_default().push(flow);
         }
+        // Same qualname defined twice (conditional definitions): its origin nodes follow the
+        // first definition's.
+        if let Some(first) = file.local_functions.get(&key) {
+            rebase_origin_nodes(&mut summary, &mut sites, first.origin_nodes.len());
+        }
         file.call_sites.extend(sites);
         // Same qualname defined twice (conditional definitions): keep the union of facts.
         match file.local_functions.get_mut(&key) {
@@ -266,7 +282,7 @@ fn is_overload(f: &IrFunction) -> bool {
 /// stays in the index for the whole run.
 fn release_spare_capacity(file: &mut FileSummary) {
     for site in &mut file.call_sites {
-        if let CallTarget::Project(callees) = &mut site.target {
+        if let Some(callees) = site.project_callees_mut() {
             for bc in callees.iter_mut() {
                 bc.params.shrink_to_fit();
             }
@@ -274,6 +290,30 @@ fn release_spare_capacity(file: &mut FileSummary) {
         }
     }
     file.call_sites.shrink_to_fit();
+}
+
+/// Shift the origin nodes a definition refers to (in its own nodes, its returns, and its call
+/// arguments) by `offset`: the definition's nodes follow another's of the same qualname.
+fn rebase_origin_nodes(summary: &mut EffectSummary, sites: &mut [CallSite], offset: usize) {
+    let offset = u32::try_from(offset).unwrap_or(u32::MAX);
+    let shift = |nodes: &mut Vec<u32>| {
+        for n in nodes {
+            *n = n.saturating_add(offset);
+        }
+    };
+    shift(&mut summary.returns_nodes);
+    for o in &mut summary.origin_nodes {
+        shift(&mut o.nodes);
+    }
+    let args = sites
+        .iter_mut()
+        .filter_map(CallSite::project_callees_mut)
+        .flatten()
+        .flat_map(|bc| &mut bc.params)
+        .filter_map(|p| p.origins.as_deref_mut());
+    for o in args {
+        shift(&mut o.nodes);
+    }
 }
 
 fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary) {
@@ -357,6 +397,10 @@ fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary) {
         }
         _ => ReturnsNew::No,
     };
+    into.returns_origins.join(other.returns_origins);
+    into.returns_results.extend(other.returns_results);
+    into.returns_nodes.extend(other.returns_nodes);
+    into.origin_nodes.extend(other.origin_nodes);
     into.unresolved_write_sites
         .extend(other.unresolved_write_sites);
     into.unresolved_access_sites
@@ -480,6 +524,8 @@ struct Extractor<'a> {
     isinstance_classes: FxHashMap<VarId, Vec<String>>,
     /// Defining instruction of each variable.
     defs: FxHashMap<VarId, &'a Inst>,
+    /// The blocks a run can reach and the edges it can take.
+    live: ownership::Live,
     /// Instructions using each variable as an operand.
     uses: FxHashMap<VarId, Vec<&'a InstKind>>,
     /// The variables a phi or a block's terminator reads (`return v`, a branch on `v`).
@@ -619,6 +665,7 @@ impl<'a> Extractor<'a> {
             decorators: f.decorators.clone(),
             ..EffectSummary::default()
         };
+        let live = ownership::Live::of(f, &defs);
         let mut ex = Self {
             f,
             key,
@@ -628,6 +675,7 @@ impl<'a> Extractor<'a> {
             narrowed,
             isinstance_classes,
             defs,
+            live,
             uses,
             flow_uses: OnceCell::new(),
             self_vars,
@@ -678,6 +726,7 @@ impl<'a> Extractor<'a> {
         let returned = readonly::returned_values(
             f,
             &ex.defs,
+            &ex.live,
             |kind| ex.derivations(kind),
             |v| match ex.types.get(&v) {
                 Some(Val::Inst(class)) => Some(class.as_str()),
@@ -1161,6 +1210,7 @@ impl<'a> Extractor<'a> {
             reach: self.reach_of(var),
             binding: None,
             new_object: NewArg::Old,
+            origins: None,
         };
         let instances: Vec<&String> = origin.instance_classes().collect();
         origin.targets = self.arg_targets(origin.typed_field.as_ref(), &instances);
@@ -1261,6 +1311,7 @@ impl<'a> Extractor<'a> {
             }
         }
         self.resolve_construction();
+        self.returned_origins();
         self.iterations();
         self.apply_declaration();
         if self.summary.is_cached_property && f.kind == FunctionKind::Sync {
@@ -1595,6 +1646,189 @@ impl<'a> Extractor<'a> {
             .collect()
     }
 
+    /// `MUT112`: what the object the function returns may be ([`EffectSummary::returns_origins`]),
+    /// the project calls whose results it may be ([`EffectSummary::returns_results`]), and what
+    /// each argument of those calls may be, in turn through the calls whose results the
+    /// arguments may be ([`ArgOrigin::origins`]: a callee returning its parameter returns the
+    /// argument). A memoizing decorator returns state it keeps; another decorator may return
+    /// anything.
+    fn returned_origins(&mut self) {
+        let f = self.f;
+        if f.kind != FunctionKind::Sync || f.is_module_body {
+            return;
+        }
+        if self.summary.is_lru_cache {
+            self.summary.returns_origins = Origins {
+                held: true,
+                ..Origins::default()
+            };
+            return;
+        }
+        let live = &self.live;
+        let returned: Vec<VarId> = f
+            .blocks
+            .iter()
+            .filter(|b| live.block(b.id))
+            .filter_map(|b| match b.terminator {
+                Terminator::Return(Some(v)) => Some(v),
+                _ => None,
+            })
+            .collect();
+        if returned.is_empty() || !keeps_returned_value(&f.decorators) {
+            return;
+        }
+        let mut callees: FxHashMap<VarId, &Callee> = FxHashMap::default();
+        for bb in &f.blocks {
+            for (i, inst) in bb.insts.iter().enumerate() {
+                if let (Some(dst), Some(c)) = (inst.kind.dst(), self.callees.get(&(bb.id, i))) {
+                    callees.insert(dst, c);
+                }
+            }
+        }
+        let phis: FxHashMap<VarId, (BlockId, &PhiNode)> = f
+            .blocks
+            .iter()
+            .flat_map(|b| b.phis.iter().map(move |p| (p.dst, (b.id, p))))
+            .collect();
+        let params: FxHashMap<VarId, ParamRole> = f
+            .params
+            .iter()
+            .enumerate()
+            .filter_map(|(i, p)| {
+                let role = if p.is_vararg || p.is_kwarg {
+                    ParamRole::Packed
+                } else {
+                    ParamRole::Plain(u8::try_from(i).ok()?)
+                };
+                Some((p.var, role))
+            })
+            .collect();
+        let kb = self.cx.kb;
+        let source_of = |inst: &'a Inst| {
+            let callee = inst.kind.dst().and_then(|d| callees.get(&d).copied());
+            match (&inst.kind, callee) {
+                // A property read calls its getter.
+                (InstKind::AttrLoad { .. }, Some(Callee::Project(..))) => Source::Project,
+                (kind, callee) => {
+                    ownership::source(kind, callee, self.construction(kind).is_some(), kb)
+                }
+            }
+        };
+        let slice_copies = |v: VarId| {
+            ownership::slice_copies(match self.types.get(&v) {
+                Some(Val::Inst(c)) => Some(c.as_str()),
+                _ => None,
+            })
+        };
+        // The objects the function stores somewhere, and where: a stored value, and each value
+        // it copies through copies and phis, is kept there. One walk serves every store and
+        // takes each (value, place) pair once; past a budget of pairs proportional to the
+        // function's source, what it returns is unknown.
+        let budget = KEPT_PAIRS_PER_SOURCE_BYTE * f.span.end.saturating_sub(f.span.start) as usize
+            + MIN_KEPT_PAIRS;
+        let mut kept: FxHashMap<VarId, Vec<ownership::Place<'_>>> = FxHashMap::default();
+        let mut seen: FxHashSet<(VarId, ownership::Place<'_>)> = FxHashSet::default();
+        let mut work: Vec<(VarId, ownership::Place<'_>)> = f
+            .blocks
+            .iter()
+            .filter(|b| live.block(b.id))
+            .flat_map(|b| &b.insts)
+            .flat_map(|inst| ownership::stores(&inst.kind))
+            .collect();
+        while let Some((v, place)) = work.pop() {
+            if !seen.insert((v, place)) {
+                continue;
+            }
+            if seen.len() > budget {
+                return;
+            }
+            kept.entry(v).or_default().push(place);
+            match (self.defs.get(&v).map(|i| &i.kind), phis.get(&v)) {
+                (Some(InstKind::Copy { src, .. }), _) => work.push((*src, place)),
+                (None, Some((_, phi))) => {
+                    work.extend(phi.incoming.iter().map(|(_, x)| (*x, place)));
+                }
+                _ => {}
+            }
+        }
+        let mut nodes = ownership::OriginNodes::default();
+        let origins = |roots: &[(VarId, ownership::Part)], nodes: &mut ownership::OriginNodes| {
+            ownership::origins_of(
+                &self.defs,
+                &phis,
+                live,
+                roots,
+                source_of,
+                |v| params.get(&v).copied(),
+                slice_copies,
+                &kept,
+                nodes,
+            )
+        };
+        let roots: Vec<(VarId, ownership::Part)> = returned
+            .iter()
+            .map(|v| (*v, ownership::Part::Object))
+            .collect();
+        let returns = origins(&roots, &mut nodes);
+        // The arguments of the project calls whose results the function may return, and in
+        // turn of the calls whose results those arguments or the phis the walks meet may be.
+        let mut calls_at: FxHashMap<Span, Vec<&ProjectCall>> = FxHashMap::default();
+        for call in &self.project_calls {
+            calls_at
+                .entry(self.sites[call.site].span)
+                .or_default()
+                .push(call);
+        }
+        let budget = ORIGIN_STEPS_PER_SOURCE_BYTE
+            * f.span.end.saturating_sub(f.span.start) as usize
+            + MIN_ORIGIN_STEPS;
+        let mut queue: Vec<Span> = returns.results.iter().map(|r| r.span).collect();
+        let mut done: FxHashSet<Span> = FxHashSet::default();
+        let mut args: Vec<(usize, usize, usize, LocalOrigins)> = Vec::new();
+        loop {
+            if nodes.steps > budget {
+                return;
+            }
+            if let Some(span) = queue.pop() {
+                if !done.insert(span) {
+                    continue;
+                }
+                for call in calls_at.get(&span).into_iter().flatten() {
+                    for (ci, (_, bound)) in call.params.iter().enumerate() {
+                        for (slot, var) in bound {
+                            let o = origins(&[(*var, ownership::Part::Object)], &mut nodes);
+                            queue.extend(o.results.iter().map(|r| r.span));
+                            if !o.is_empty() {
+                                args.push((call.site, ci, usize::from(*slot), o));
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+            let Some((id, root)) = nodes.next_pending() else {
+                break;
+            };
+            let o = origins(&[root], &mut nodes);
+            queue.extend(o.results.iter().map(|r| r.span));
+            nodes.set(id, o);
+        }
+        self.summary.returns_origins = returns.known;
+        self.summary.returns_results = returns.results;
+        self.summary.returns_nodes = returns.nodes;
+        self.summary.origin_nodes = nodes.into_origins();
+        for (site, ci, slot, o) in args {
+            let callees = self.sites[site]
+                .project_callees_mut()
+                .expect("a project call's site has project callees");
+            let params = &mut callees[ci].params;
+            if params.len() <= slot {
+                params.resize(slot + 1, ArgOrigin::default());
+            }
+            params[slot].origins = Some(Box::new(o));
+        }
+    }
+
     /// Answer the construction queries of the visited function (`construction`): the
     /// construction of its typed writes, `ArgOrigin::new_object` of its call arguments, and
     /// `EffectSummary::returns_new`.
@@ -1605,16 +1839,10 @@ impl<'a> Extractor<'a> {
             Some((i, None)) => Some(*i),
             _ => None,
         };
-        // Calling a generator or an `async def` returns a generator or a coroutine; a decorator
-        // may hand out one cached object (`@lru_cache`, `@cached_property`), so only the
-        // decorators that call the body each time keep its result new.
+        // Calling a generator or an `async def` returns a generator or a coroutine.
         let returns = self.f.kind == FunctionKind::Sync
             && !self.f.is_module_body
-            && self.f.decorators.iter().all(|d| {
-                let base = d.split('(').next().unwrap_or(d).trim();
-                let last = base.rsplit('.').next().unwrap_or(base);
-                RETURN_KEEPING_DECORATORS.contains(&last)
-            });
+            && keeps_returned_value(&self.f.decorators);
         let sites = &self.sites;
         // Hand-overs are to project callees of the function's own call sites.
         let callee_of = |site: u32, callee: u16| {
@@ -1638,10 +1866,10 @@ impl<'a> Extractor<'a> {
             self.summary.unresolved_write_sites.insert(site);
         }
         for (si, ci, pi, q) in std::mem::take(&mut self.pending_args) {
-            // (Only the arguments of project callees are pending.)
-            if let (CallTarget::Project(callees), NewArg::New { .. } | NewArg::Param { .. }) =
-                (&mut self.sites[si].target, &answers[q])
-            {
+            if let NewArg::New { .. } | NewArg::Param { .. } = &answers[q] {
+                let callees = self.sites[si]
+                    .project_callees_mut()
+                    .expect("only the arguments of project callees are pending");
                 let params = &mut callees[ci].params;
                 if params.len() <= pi {
                     params.resize(pi + 1, ArgOrigin::default());
@@ -3987,6 +4215,17 @@ const RETURN_KEEPING_DECORATORS: &[&str] = &[
     "abstractmethod",
     "override",
 ];
+
+/// Whether calling a function decorated with `decorators` returns what its body returns: a
+/// decorator may hand out one cached object (`@lru_cache`, `@cached_property`), so only the
+/// decorators that call the body each time keep its result.
+pub(crate) fn keeps_returned_value(decorators: &[String]) -> bool {
+    decorators.iter().all(|d| {
+        let base = d.split('(').next().unwrap_or(d).trim();
+        let last = base.rsplit('.').next().unwrap_or(base);
+        RETURN_KEEPING_DECORATORS.contains(&last)
+    })
+}
 
 /// Builtins that only inspect their arguments: calling one keeps none of them.
 const INSPECTING_BUILTINS: &[&str] = &[

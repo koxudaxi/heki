@@ -310,6 +310,11 @@ EffectSummary(f) = {
     retains_params:           Bitset,                      // parameters the function keeps (stores, returns)
     returns_new:              bool,                        // returns an object it constructs, nothing else
                                                            // holding it (fresh-objects)
+    returns_origins:          Origins,                     // what the returned object may be, path by path:
+                                                           // new, held state, parameter i, or an element of
+                                                           // parameter i (MUT112; propagated)
+    returns_results:          Vec<ResultOf>,               // the project calls whose results (or elements of
+                                                           // them) it may return, by span (MUT112; local)
     unresolved_write_sites:   Set<UnresolvedWrite>,        // target-named writes on objects of unknown class,
                                                            // computed names on guarded classes (MUT205)
     unresolved_access_sites:  Set<UnresolvedAccess>,       // reads and method calls named like a strict
@@ -363,10 +368,11 @@ invalidation contracts are declared. `TypedFieldWriteSite::key` names the entry 
 `unresolved = "report"` ends a target with (`Contracts::unresolved_read`,
 `Contracts::unresolved_call`), so a summary keeps no read or call no rule asks for.
 
-`CallSite.returned` (whether the call's result may be returned, and how) and `CallSite.flow` (the
-invalidation contracts announced after the call on every normal path, and the next call; set on
-`Iterate` / `Through` sites too), with `FileSummary.flows`, are computed at extraction from the
-CFG and its post-dominator tree, only when a contract is configured; `ProjectIndex` keeps no IR.
+`CallSite.returned` (whether the call's result may be returned, and how) is computed at
+extraction for every project call. `CallSite.flow` (the invalidation contracts announced after
+the call on every normal path, and the next call; set on `Iterate` / `Through` sites too), with
+`FileSummary.flows`, is computed from the CFG and its post-dominator tree, only when a contract is
+configured. `ProjectIndex` keeps no IR.
 
 `FileSummary.cache_flows` (`heki_effect::CacheFlow`, one per definition) holds the `MUT101` facts
 of every method that writes a `self` attribute in its own body: the writes (attribute, position,
@@ -501,7 +507,7 @@ differ); every file that read one of them is re-analyzed. This covers names reso
 re-exports, class hierarchy analysis across modules, and property getters, without depending on
 which module imports which.
 
-### 2.3 Family 1 (`MUT101` / `MUT103` / `MUT106` / `MUT107` / `MUT109` / `MUT111` / `MUT201` / `MUT202` / `MUT203` / `MUT204`)
+### 2.3 Family 1 (`MUT101` / `MUT103` / `MUT106` / `MUT107` / `MUT109` / `MUT111` / `MUT112` / `MUT201` / `MUT202` / `MUT203` / `MUT204`)
 
 #### `MUT101`: mutation of attributes a `@cached_property` depends on, without invalidation (strict Stage 0-A version)
 1. For every `@cached_property` method `p` of a class `C` (with its subclasses; a nested class is
@@ -560,6 +566,74 @@ which module imports which.
    `Class.p` of the property, the message names the first write that runs on an instance of `K`
    itself (else the first), and every reaching write is a related location. A getter or helper
    that reads `p` is reported itself; its callers are not.
+
+#### `MUT112`: a value that is new on one path and borrowed on another, changed in place (opt-in)
+1. **What a value holds** (`heki_effect::ownership`): each instruction's `Source` says what the
+   object it defines is: new (a display, a comprehension, a copy, a container constructor, a
+   project class constructed, an operator's result), held state (an attribute, a global, a
+   closure cell), the operand's object (a copy of the reference, `typing.cast`, an in-place
+   operator), an element of the operand (an item, `get` / `pop` / `setdefault`, an iteration
+   step), an element or the default (`d.get(k, default)`, `getattr(o, n, default)`), or what the
+   project callees return. A parameter is borrowed, `*args` / `**kwargs` are new with borrowed
+   elements, and a method's `self` is its own object.
+2. **The summary fact**: `returns_origins` walks back from the returns a run can reach (plain
+   sync functions; a memoizing decorator makes the result held, another decorator unknown):
+   new, held, parameter `i`, or an element of parameter `i`. A run reaches what
+   `ownership::Live` leaves once each branch on a constant takes its one side (`while True:`
+   never leaves at its header), the blocks the forward analysis follows too. An object the
+   function stores in another object there (an attribute, an item, a display, `setattr`, a
+   container method) is an element of that object; one stored in a global or a closure cell is
+   held. One walk takes each stored value and the values it copies (through copies and phis)
+   with each place once, for all the stores; past a budget of such pairs proportional to the
+   function's source, what the function returns is unknown. A project call's result the walk
+   reaches is one of `returns_results` (the call's span, and whether the object is the result or
+   an element of it), and each argument of such a call gets `ArgOrigin::origins` from the same
+   walk: its own origins and, in turn, the calls whose results it may be. A phi the walk meets
+   (other than where it starts) is a node of `origin_nodes`, as itself or as an element, walked
+   once and referred to by every walk that meets it (`returns_nodes`, `LocalOrigins::nodes`);
+   past a budget of walked values proportional to the function's source, what the function
+   returns is unknown. Propagation (`returned_results`) adds what those calls return: each
+   callee's `returns_origins` without its parameters, and the origins of the arguments bound to
+   the parameters it returns (or an element of them), through any number of nested calls
+   (`identity(identity(x))`). Each call's result and each node is resolved once, to a fixpoint
+   over the calls and nodes it depends on (a loop makes a call or a phi depend on itself): the
+   fixpoint only joins, and each change adds a kind or a parameter to one value. A second
+   definition of the same qualname appends its nodes after the first one's. The facts take
+   part in Early Cutoff like every summary field.
+3. **The forward analysis** (`heki_rules`, per function, to a fixpoint that visits each phi and
+   instruction once, then again only when a value it reads grows) joins the kinds of a value at
+   phis, maps a project call's result through its callees' `returns_origins` and the
+   bound arguments, and takes a closure's variable from what the enclosing function bound to it
+   (`MakeClosure` captures; functions are analyzed enclosing first). It follows the blocks and
+   edges of `ownership::Live` only. A side of an `is` test (of the branch it decides) is the
+   edge from the branch to that successor, and every edge from a block that a run reaches only
+   through that successor: the walk up the dominator tree from an edge's source to the
+   dominator of its target finds them, once per edge, and the test a condition is (through
+   `not` and copies) and the value a copy copies are each found once per value. On a phi input from the side where an `is` test of the input's value
+   failed, the input leaves out the object it is tested against (`if result is shared: result =
+   shared.copy()`). Where the test is against a constant, a global, or an attribute (`if out is
+   None: out = []`) and the phi also takes inputs from the other side, the parameter the value
+   is on the failed side is *defaulted*, and the new objects from the other side are its
+   replacements: the accumulator idiom. A test that selects no replacement (`if p is None:
+   raise ...`) leaves the parameter borrowed. A new object the function stores somewhere is
+   part of where it is stored.
+4. **Reports**: a change of a container (an item stored or deleted, a container method, an
+   in-place operator on a builtin container, a project callee changing the container it is
+   handed, `mutated_param_paths` entry `""`) of a value that may be new and borrowed, once per
+   value at its first change. A defaulted parameter counts when a new object the value may be is
+   no replacement of it (`x = [] if fresh else out` after `if out is None: out = []`), or when
+   the value is also stored on `self`. Not reported: a removal when every new object the value may be starts empty, a
+   conditional expression changed in place without a name, a value stored back where it borrows
+   from (`self.a = self.a or []`, `d[k] = d.get(k) or []`), and memo / cache attributes (as for
+   `MUT101`). Stored back means the same attribute of the same object (an attribute borrow keeps
+   its object: the method's `self`, a global or an enclosing function's variable by name, else
+   the value read, through copies) or an item of the same container: `self.a = other.a or []`
+   stores it in another object.
+5. **Stored on `self`**: a store of such a value in `self.<attr>` is reported at the store when a
+   method of the class family (`ClassMethods::family`) changes that attribute in place
+   (`typed_field_writes` with `ContainerMut`, `AliasContainerMut`, or `IndirectHelper` on a class
+   of the family); with `MUT112` selected, propagation carries typed writes, and the language
+   server re-checks the family of every changed method (`family_readers`).
 
 #### `MUT103`: cross-function effect snapshots (`heki snapshot summary`)
 - The summaries of public functions (`mutates_params`, `escapes_params`, `mutates_self_attrs`,
@@ -661,11 +735,12 @@ deep = true   # changes to attributes and nested containers below are forbidden 
   3. A direct attribute write or container mutation of a tagged value, or passing it in a
      parameter position the callee mutates (`mutates_params`), is reported as **`MUT202`** with
      the call hop.
-  4. **Return flow**: a backward walk from the returns marks each call whose result may be
-     returned (as itself, as an element, or as an item of target unpacking; a copy ends it). A
-     callee that is a producer, an `@lru_cache` function, or `returns_protected` makes the caller
-     `returns_protected`, so a wrapper returning a producer's result is a producer itself, across
-     modules. The join is "protected if any path returns it", and the shortest chain is kept.
+  4. **Return flow**: a backward walk from the returns a run can reach (`ownership::Live`: not
+     a `return` after a `while True:` loop that no `break` leaves) marks each call whose result
+     may be returned (as itself, as an element, or as an item of target unpacking; a copy ends
+     it). A callee that is a producer, an `@lru_cache` function, or `returns_protected` makes
+     the caller `returns_protected`, so a wrapper returning a producer's result is a producer
+     itself, across modules. The join is "protected if any path returns it", and the shortest chain is kept.
      Only plain functions are followed: a generator's `return` value is not what calling it
      returns.
 

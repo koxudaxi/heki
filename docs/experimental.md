@@ -11,6 +11,7 @@ An experimental rule is never enabled by default: it runs only when `select` or 
 | `cli-option.profile` | cli-option | `heki check --profile` | 0.1.1 | - |
 | `rule.MUT101` | rule | [`MUT101`](rules/cached-property-stale-mutation.md) | 0.1.0 | - |
 | `rule.MUT111` | rule | [`MUT111`](rules/cached-property-stale-read.md) | 0.1.1 | - |
+| `rule.MUT112` | rule | [`MUT112`](rules/conditional-ownership-mutation.md) | 0.2.0 | - |
 
 ## `cli-option.profile`
 
@@ -35,3 +36,11 @@ Its precision outside a few code bases is still low.
 - **Since:** 0.1.1
 
 It reports the readers of the stale writes `MUT101` finds, so it shares `MUT101`'s precision.
+
+## `rule.MUT112`
+
+- **Kind:** rule
+- **Target:** [`MUT112`](rules/conditional-ownership-mutation.md)
+- **Since:** 0.2.0
+
+Its precision on real code bases is still low: much of what it reports is code that changes a borrowed container on purpose.

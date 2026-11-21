@@ -25,6 +25,7 @@ mod contracts;
 pub mod guards;
 mod infer;
 mod invalidation;
+pub mod ownership;
 pub mod readonly;
 mod report;
 pub mod resolver;
@@ -38,6 +39,7 @@ pub use invalidation::{
     FlowWrite, FuncFlow, INITIALIZERS, Reach, SiteFlow, UnmetWrite, body_runs_at,
     builds_written_object, delegates_to_callers, is_initializer, reach_across,
 };
+pub use ownership::{LocalOrigins, Origins, ResultOf};
 pub use readonly::{ProtectedReturn, ReturnStep, Shared};
 pub use report::{BoundaryReport, boundary_reports, boundary_reports_in};
 pub use resolver::{
@@ -552,6 +554,23 @@ pub struct EffectSummary {
     pub retains_params: u64,
     /// The function returns a new object that nothing else holds (`fresh-objects`).
     pub returns_new: ReturnsNew,
+    /// What the object the function returns may be, path by path: a new one, state that
+    /// outlives the call, one of its parameters, or an element of one (`MUT112`; propagated from
+    /// the project callees whose result it returns, [`Self::returns_results`]).
+    #[serde(default, skip_serializing_if = "Origins::is_empty")]
+    pub returns_origins: Origins,
+    /// The project calls of the function whose results it may return (`MUT112`): propagation
+    /// adds what they return to `returns_origins`, through the calls whose results their
+    /// arguments may be ([`ArgOrigin::origins`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub returns_results: Vec<ResultOf>,
+    /// The phis the returned object may be ([`Self::origin_nodes`] positions; `MUT112`, local).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub returns_nodes: Vec<u32>,
+    /// What each phi the origin walks of the function meet may be ([`LocalOrigins::nodes`]),
+    /// each walked once (`MUT112`, local).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub origin_nodes: Vec<LocalOrigins>,
     /// The function's own writes heki cannot tie to a class (`MUT205`; never propagated).
     pub unresolved_write_sites: BTreeSet<UnresolvedWriteSite>,
     /// The function's own reads and calls heki cannot tie to a class (`MUT206`, `MUT207`; never
@@ -929,6 +948,12 @@ pub struct ArgOrigin {
     /// The argument (for `typed_field`, the object holding the attribute) is a new object of the
     /// caller, or its parameter, that nothing kept before this call (`fresh-objects`).
     pub new_object: NewArg,
+    /// What the argument may be, path by path, when the caller may return the call's result as
+    /// itself (`MUT112`: a callee returning its parameter returns the argument), also as the
+    /// result of another project call of the caller; `None` for any other call (boxed: few
+    /// arguments have one).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origins: Option<Box<LocalOrigins>>,
 }
 
 /// [`ArgOrigin::targets`]: what the argument's class and field are to the `invalidation`
@@ -1175,6 +1200,14 @@ impl CallSite {
         match &self.target {
             CallTarget::Project(callees) => callees,
             CallTarget::Layer2 { .. } => &[],
+        }
+    }
+
+    /// The resolved project callees, to change (`None` for a Layer 2 API).
+    pub fn project_callees_mut(&mut self) -> Option<&mut Vec<BoundCallee>> {
+        match &mut self.target {
+            CallTarget::Project(callees) => Some(callees),
+            CallTarget::Layer2 { .. } => None,
         }
     }
 }

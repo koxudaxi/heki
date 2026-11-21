@@ -1,5 +1,5 @@
-//! Family 1 rules: `MUT101`, `MUT106`, `MUT107`, `MUT108`, `MUT109`, `MUT110`, `MUT201`,
-//! `MUT202`, `MUT203`, `MUT204` (docs/ANALYSIS_AND_KB_SPEC.md section 2.3).
+//! Family 1 rules: `MUT101`, `MUT106`, `MUT107`, `MUT108`, `MUT109`, `MUT110`, `MUT112`,
+//! `MUT201`, `MUT202`, `MUT203`, `MUT204` (docs/ANALYSIS_AND_KB_SPEC.md section 2.3).
 
 use crate::{
     CheckContext, DottedPattern, ModuleUnit, RuleConfigError, SitesByCaller, has_glob_syntax,
@@ -651,16 +651,20 @@ fn filter1_init(m: &Method<'_>, init_called: &FxHashSet<FuncKey>) -> bool {
         || (is_private(name) && init_called.contains(&m.key))
 }
 
-/// The project classes whose methods' `MUT101` / `MUT107` reports read the summaries of the
-/// methods `changed` (a class family spans modules, see [`ClassMethods::family`]): a changed
-/// `@cached_property` or `__hash__` (or a removed method) is read for its own family, a changed
-/// initialization method for the families of its ancestors and subclasses that have either, and
-/// a method overriding an inherited one for its own family. A family's classes include the
-/// ancestors whose methods it inherits. A changed writer is reported in its own file only.
+/// The project classes whose methods' `MUT101` / `MUT107` / `MUT112` reports read the summaries
+/// of the methods `changed` (a class family spans modules, see [`ClassMethods::family`]): a
+/// changed `@cached_property` or `__hash__` (or a removed method) is read for its own family, a
+/// changed initialization method for the families of its ancestors and subclasses that have
+/// either, and a method overriding an inherited one for its own family. With `in_place_changes`
+/// (`MUT112` selected), every changed method is read for its own family: a store in `self.<attr>`
+/// is reported when a method of the family changes the attribute in place. A family's classes
+/// include the ancestors whose methods it inherits. A changed writer is reported in its own file
+/// only.
 pub fn family_readers(
     index: &ProjectIndex,
     decls: &ProjectDecls,
     changed: &[FuncKey],
+    in_place_changes: bool,
 ) -> BTreeSet<String> {
     let has_reported_reads = |class: &String| {
         decls.methods_of(class).iter().any(|k| {
@@ -675,7 +679,10 @@ pub fn family_readers(
     });
     let mut roots = BTreeSet::new();
     for (key, class, name) in methods {
-        if name == "__hash__" || index.summary(key).is_none_or(|s| s.is_cached_property) {
+        if in_place_changes
+            || name == "__hash__"
+            || index.summary(key).is_none_or(|s| s.is_cached_property)
+        {
             roots.insert(class.clone());
         }
         // A method that overrides an inherited one (or stops doing so) changes which of the
@@ -2602,6 +2609,12 @@ pub use readonly_mutation::{CHAIN_RULES, ChainFacts, chain_facts};
 pub(crate) fn mut108_mut110(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
     readonly_mutation::run(cx, out);
 }
+
+// ==================================================================================== MUT112
+
+mod conditional_ownership;
+
+pub(crate) use conditional_ownership::mut112;
 
 // ==================================================================================== MUT109
 

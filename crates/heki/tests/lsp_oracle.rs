@@ -26,7 +26,7 @@ const CONFIG: &str = r#"[project]
 name = "t"
 
 [tool.heki.lint]
-extend-select = ["MUT101", "MUT108", "MUT111", "EFF107"]
+extend-select = ["MUT101", "MUT108", "MUT111", "EFF107", "MUT112"]
 
 [[tool.heki.write-owners]]
 name = "registry"
@@ -481,6 +481,21 @@ const SAFE_JOURNAL: &str = "from pkg.journal import Journal\n\n\nclass SafeJourn
 const SAFE_JOURNAL_DELEGATING: &str = "from pkg.journal import Journal\n\n\nclass SafeJournal(Journal):\n    def refresh(self, entries):\n        super().refresh(list(entries))\n";
 const HEADLINE: &str = "from pkg.journal import Journal\nfrom pkg.safe_journal import SafeJournal\n\n\ndef headline(journal: Journal):\n    return journal.latest\n\n\ndef safe_headline(journal: SafeJournal):\n    return journal.latest\n";
 
+// Values new on one path and borrowed on another (`MUT112`): a caller two modules above a
+// function that copies its argument (through a wrapper in a third module), and a class whose
+// subclass in another module reads the list its `__init__` may borrow from the caller.
+const OWN_PREPARE: &str =
+    "def prepare(config):\n    if config is None:\n        return {}\n    return dict(config)\n";
+const OWN_PREPARE_SAME: &str =
+    "def prepare(config):\n    if config is None:\n        return {}\n    return config\n";
+const OWN_WRAP: &str = "from pkg.own_prepare import prepare\n\n\ndef prepare_twice(config):\n    return prepare(config)\n";
+const OWN_WRAP_NESTED: &str = "from pkg.own_prepare import prepare\n\n\ndef prepare_twice(config):\n    return prepare(prepare(config))\n";
+const OWN_USE: &str = "from pkg.own_wrap import prepare_twice\n\n\ndef configure(config):\n    cfg = prepare_twice(config)\n    cfg[\"debug\"] = True\n    return cfg\n";
+const OWN_BASE: &str =
+    "class Box:\n    def __init__(self, items=None):\n        self.items = items or []\n";
+const OWN_SUB: &str = "from pkg.own_base import Box\n\n\nclass Bag(Box):\n    def order(self):\n        return sorted(self.items)\n";
+const OWN_SUB_SORTING: &str = "from pkg.own_base import Box\n\n\nclass Bag(Box):\n    def order(self):\n        self.items.sort()\n";
+
 /// The project before the first step (every file is opened).
 fn initial_files() -> Vec<(&'static str, String)> {
     [
@@ -538,6 +553,11 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/ro/mid.py", RO_MID),
         ("pkg/ro/stats.py", RO_STATS),
         ("pkg/ro/impl.py", RO_IMPL),
+        ("pkg/own_prepare.py", OWN_PREPARE),
+        ("pkg/own_wrap.py", OWN_WRAP),
+        ("pkg/own_use.py", OWN_USE),
+        ("pkg/own_base.py", OWN_BASE),
+        ("pkg/own_sub.py", OWN_SUB),
         ("pkg/plot.py", RO_PLOT),
         ("pkg/loops.py", LOOPS),
         ("pkg/compat.py", COMPAT),
@@ -1718,6 +1738,53 @@ fn steps_inherited_writers() -> Vec<Step> {
     ]
 }
 
+/// `MUT112`: what a function returns reaches its callers through a wrapper in another module
+/// (`EffectSummary::returns_origins`), also when the wrapper hands it a call's result
+/// (`EffectSummary::returns_results`), and a store in `self.<attr>` follows the in-place changes
+/// that the methods of its class family make in other modules (`heki_rules::family_readers`).
+fn steps_mut112() -> Vec<Step> {
+    vec![
+        Step::new(
+            "the function two modules below stops copying its argument",
+            vec![save("pkg/own_prepare.py", OWN_PREPARE_SAME)],
+        )
+        .present(&[("pkg/own_use.py", "MUT112")]),
+        Step::new(
+            "the function copies its argument again",
+            vec![save("pkg/own_prepare.py", OWN_PREPARE)],
+        )
+        .absent(&[("pkg/own_use.py", "MUT112")]),
+        Step::new(
+            "the wrapper hands the function the result of another call of it",
+            vec![save("pkg/own_wrap.py", OWN_WRAP_NESTED)],
+        )
+        .absent(&[("pkg/own_use.py", "MUT112")]),
+        Step::new(
+            "the function under the nested call stops copying its argument",
+            vec![save("pkg/own_prepare.py", OWN_PREPARE_SAME)],
+        )
+        .present(&[("pkg/own_use.py", "MUT112")]),
+        Step::new(
+            "the function copies its argument again, and the wrapper calls it once",
+            vec![
+                save("pkg/own_prepare.py", OWN_PREPARE),
+                save("pkg/own_wrap.py", OWN_WRAP),
+            ],
+        )
+        .absent(&[("pkg/own_use.py", "MUT112")]),
+        Step::new(
+            "a subclass method in another module starts sorting the stored list in place",
+            vec![save("pkg/own_sub.py", OWN_SUB_SORTING)],
+        )
+        .present(&[("pkg/own_base.py", "MUT112")]),
+        Step::new(
+            "the subclass method only reads the list again",
+            vec![save("pkg/own_sub.py", OWN_SUB)],
+        )
+        .absent(&[("pkg/own_base.py", "MUT112")]),
+    ]
+}
+
 /// `MUT111`: the readers of a cached property follow its writers in other modules (the stale
 /// writes of a file, `heki_rules::stale_writes_by_file`): an invalidation added and removed, the
 /// writer moving, and a subclass's override that starts and stops reaching the writer through
@@ -1926,6 +1993,7 @@ fn steps() -> Vec<Step> {
     steps.extend(steps_indirect_helpers());
     steps.extend(steps_inherited_writers());
     steps.extend(steps_mut111());
+    steps.extend(steps_mut112());
     steps.extend(steps_receiver_typing());
     steps.extend(steps_effect_index());
     steps.extend([
@@ -2021,8 +2089,8 @@ fn steps() -> Vec<Step> {
         Step::new(
             "the configuration becomes invalid",
             vec![Action::Configure(CONFIG.replace(
-                "extend-select = [\"MUT101\", \"MUT108\", \"MUT111\", \"EFF107\"]",
-                "extend-select = [\"MUT101\", \"MUT108\", \"MUT111\", \"EFF107\"]\nselect = [\"NOPE1\"]",
+                "extend-select = [\"MUT101\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\"]",
+                "extend-select = [\"MUT101\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\"]\nselect = [\"NOPE1\"]",
             ))],
         )
         .absent(&[("pkg/svc_user.py", "EFF101")]),
