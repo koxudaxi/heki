@@ -53,14 +53,6 @@ release can change rules, configuration keys, diagnostics, and output formats.
   heuristic report may not have established. `docs/precision.md` defines exact and heuristic
   reports, the assumptions R1-R7 exact claims rest on, how a rule is certified, and what each
   rule measured.
-- Contract names take a module part, `module:qualname`, which names definitions of one module
-  without its submodules: `pkg:*` names what `pkg/__init__.py` defines, where `pkg.*` also covers
-  `pkg.sub.user.sub_user`. The module part matches the whole module name, exactly or as a glob
-  (`pkg.*:run`), and works in every key that names project functions or classes, the class of
-  `Class.attr` targets included (`pkg.model:DataModel.fields`).
-- `call-owners` takes `subclasses = false`: a class target then means constructing exactly the
-  class, so raising a subclass of a guarded exception class is no `MUT204` report. `Class.method`
-  targets keep covering overrides.
 - `MUT206` (`unresolved-guarded-read`) and `MUT207` (`unresolved-guarded-call`): `read-owners`
   and `call-owners` contracts take `unresolved = "report"`, as `write-owners` does, and then
   report the reads of an attribute and the calls of a method named like a target on an object of
@@ -249,52 +241,6 @@ release can change rules, configuration keys, diagnostics, and output formats.
   `SCHEMA.split(";")` or `SCHEMA.splitlines()`).
 - `EFF101` no longer reports `socket.getaddrinfo` with the `AI_NUMERICHOST` flag, which parses
   a numeric address and never asks a resolver.
-- A module-level name bound once to another object by name is that object, in its module and
-  imported from it, unless another module rebinds it: `_set = object.__setattr__` makes
-  `_set(node, "kind", v)` a `MUT201` write, and `sleep = time.sleep` makes `sleep(1)` in an
-  `async def` an `EFF101` report. Any other global a module binds is never the builtin of the same
-  name: after `open = functools.partial(...)`, `open(path)` is no blocking `builtins.open`
-  (`EFF105`), and a call of it is unresolved unless a `[[tool.heki.ecosystem]]` entry declares it.
-  A name heki does not see the module bind (a compiled submodule, a star import of one) keeps
-  what the catalog says of it (`mypkg._native.read`).
-- A method that no project class of the receiver's MRO defines is no longer taken from a base
-  outside the project that is not known to define it (`abc.ABC._copy_model_type`,
-  `typing.Generic.result_type`): the call is unresolved, as a call heki cannot follow. Special
-  methods, public methods of builtin types, and the members the catalog lists still come from
-  the base, when no base heki knows nothing of comes before it.
-- `getattr(obj, "attr"[, default])` with a constant name is a load of the attribute for the
-  write contracts, also behind a walrus (`if (extras := getattr(self, "extras", None)) is not None:
-  extras["k"] = 2` is a `MUT201` write of `Node.extras["k"]`).
-- A method, property, or function that returns an attribute of an argument on every `return`
-  (`return self.items`) hands out that object: `node.members().append(1)` and
-  `node.view.append(1)` are `MUT201` writes of `Node.items`. It does so on a class whose reads run
-  it: not through a `cached_property` (an assignment can replace what the instance keeps), not on
-  a member of a union, or a class, whose own attribute of the name comes first or is stored on the
-  class outside its body, and not for a function that stores the attribute itself
-  (`items = self.items; self.items = []; return items`) or a keyword-only parameter.
-- `object.__new__(Node)`, also through an alias, and `Node.__new__(Node)` where no class of the
-  MRO defines `__new__` construct a `Node`: the new object has its class, and with
-  `fresh-objects = "allow"` a helper filling it is no `MUT201` report.
-- A glob in the last segment of a `call-owners` target or an effect boundary's `call-targets`
-  matches within the function, method, or class name, as the attribute of a `Class.attr` target
-  does: `pkg.*._*` no longer names every function of a private module (`pkg.parser._concern.typed`),
-  nor `pkg.api_*` the functions of `pkg.api_helpers`, so such functions are no targets that may
-  call the others, and their calls are reported.
-- A report of a glob target names the attribute, function, or class it matched
-  (`reads `pkg.types.DataType._flag``, was `reads `pkg.*._*``), and one report standing for
-  several members lists the others; the diagnostic target, and so the baseline key, stays the
-  configured text.
-- `call-owners` contracts (`MUT204`) and the `calls` of effect boundaries look a call's
-  targets up from the callee's names instead of trying every target, and `MUT204` indexes the
-  targets of all its contracts together: a contract of 1,300 targets on a 200,000-line project
-  took about 30 s and now takes about 1 s, with the same reports.
-- A read or a call through a value typed with a project `Protocol` that declares the member is
-  judged by the protocol, the type the code uses it through: `def f(h: Host): h._m` is no
-  `MUT203` read of `_m` of the classes implementing `Host`, `h._helper()` no `MUT204` call of
-  theirs, and what an implementation's private method reads or calls inside stays with it
-  instead of being handed to the caller (also when other callers call it through the class and
-  take it over). A member the protocol does not declare is still one of
-  the implementations', and a write through the protocol still writes their attribute.
 - A file that is one definition, class, lambda, or generator expression with nothing after it
   (no final newline) is checked: its function was taken for the module body, which has the same
   span, so it was never analyzed, and `heki check` panicked on such a generator expression
