@@ -736,6 +736,15 @@ pub enum RuleConfigError {
         pattern: String,
         context: &'static str,
     },
+    /// A call target's argument list (`DataType(is_dict=True)`) heki cannot read.
+    #[error(
+        "invalid argument list in {context} target `{target}`: {reason} (expected `name(parameter=value, ...)` with `True`, `False`, `None`, an integer, or a quoted string)"
+    )]
+    InvalidArguments {
+        target: String,
+        context: &'static str,
+        reason: &'static str,
+    },
     #[error("the globs of {context} are too many to match together: {cause}")]
     GlobSet {
         context: &'static str,

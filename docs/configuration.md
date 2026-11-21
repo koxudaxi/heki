@@ -193,8 +193,9 @@ Contracts declare what no type can say. Each kind is an array of tables with its
 - A `Class.attr` target covers the subclasses of the class too.
 - A contract heki cannot use is a configuration error: a target that is not `Class.attr`, an
   invalid glob, a name with more than one colon or an empty module or qualified name, call
-  targets whose globs are too many to match together (tens of thousands of complex ones), or an
-  unknown value of `forbid`, `fresh-objects`, `unresolved`, `references`, or `attribution`.
+  targets whose globs are too many to match together (tens of thousands of complex ones), an
+  argument list heki cannot read, or an unknown value of `forbid`, `fresh-objects`, `unresolved`,
+  `references`, or `attribution`.
 - With `unresolved = "report"`, a contract also reports the accesses it cannot tie to a class,
   each under its own rule (`MUT205` writes, `MUT206` reads, `MUT207` calls): an attribute or
   method named like a target, accessed on an object of unknown class (an unannotated parameter,
@@ -308,7 +309,7 @@ The call side of `write-owners`.
 | Key | Default | Meaning |
 | --- | ------- | ------- |
 | `name` | `""` | The contract's name in reports. |
-| `targets` | `[]` | Functions, methods, or classes. A `Class.method` target covers the method's overrides in subclasses; a class target means constructing the class or a subclass. |
+| `targets` | `[]` | Functions, methods, or classes. A `Class.method` target covers the method's overrides in subclasses; a class target means constructing the class or a subclass. A target may end in an argument list (`DataType(is_dict=True)`, below). |
 | `subclasses` | `true` | `false`: a class target means constructing exactly the class, not a subclass (an exception class whose subclasses anyone may raise). `Class.method` targets keep covering overrides. |
 | `allowed-callers` | `[]` | Functions allowed to call the targets. |
 | `forbidden-callers` | `[]` | When set, only calls by these functions are reported. |
@@ -335,6 +336,19 @@ The call side of `write-owners`.
   annotation of a function; a subscript (`Optional[Rule]`), a comparison, a receiver
   (`Rule.of(...)`), and a module binding another name to it (an import, `run = core.decide`). A
   callable a builtin calls once per item (`sorted(xs, key=decide)`) is a call already.
+- A target ending in an argument list, `name(parameter=value, ...)`, names the calls of `name`
+  that pass each value: `"DataType(is_dict=True)"`, `'container_flags(kind="dict")'`. A value is
+  `True`, `False`, `None`, an integer, or a string in single or double quotes (no escapes). A call
+  passes it when heki establishes that the argument bound to the parameter is that constant (a
+  literal, or a string constant bound once, such as a module's `Final` name): passed by keyword
+  (also to a class without a project `__init__`, a dataclass or a pydantic model), by position
+  where every function the call may run binds that position to the parameter, or left out where
+  every such function's default is the value and only `True`, `False`, `None`, `0`, or `""`
+  (heki keeps defaults by class and truthiness). Any other argument (a variable, a call, `*` or
+  `**` unpacking) is not established, and the call is not reported. A reference passes no
+  arguments, so it never matches. A target with an argument list names no symbol outside the
+  project; `unresolved = "report"` matches its last name before the list, whatever the arguments
+  of a call on an object of unknown class.
 - With `references = "calls-and-bases"`, a class statement whose declaration resolves a base to a
   class target is reported too ("`<module>` subclasses `pkg.core.Base`"), at the base, or at the
   class statement for a name an import or the module body binds: the class it makes holds the
@@ -408,7 +422,7 @@ import-probes = "report"
 | `forbid` | `[]` | What the scope functions must not reach (tokens below). |
 | `write-targets` | `[]` | `Class.attr` targets of `writes-targets`, required with it. `Class.attr["key"]` names one entry, as in `write-owners`. |
 | `read-targets` | `[]` | `Class.attr` targets of `reads-targets`, required with it: reads as `read-owners` sees them, also inside property getters. A container entry is a configuration error. An entry can also name an attribute of a module outside the project by its full name (`sys.platform`, `os.environ`, below). |
-| `call-targets` | `[]` | Functions, methods, or classes of `calls`, required with it, matched as the `targets` of `call-owners`. An entry can also name a function or class outside the project by its full name (`os.getenv`, `platform.*`, below). |
+| `call-targets` | `[]` | Functions, methods, or classes of `calls`, required with it, matched as the `targets` of `call-owners` (also with an argument list). An entry can also name a function or class outside the project by its full name (`os.getenv`, `platform.*`, below). |
 | `write-universe` | `[]` | `Class.attr` entries: a reached write of one that `allow-writes` does not name is reported, once per written `Class.attr`. |
 | `allow-writes` | `[]` | `Class.attr` writes the boundary allows, exempt from `write-targets` too. Needs `write-universe`. |
 | `allowed-callees` | `[]` | Functions, classes, modules, or ecosystem symbols whose effects are allowed: paths through them are not followed, and calls of them are no `calls` violation. |

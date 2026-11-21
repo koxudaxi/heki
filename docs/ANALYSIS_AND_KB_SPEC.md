@@ -532,6 +532,12 @@ else at the class statement. The class bodies a module runs add their references
 body's (their other facts are not the module's). Like `call_sites`, they are local facts: the language server compares a function's references with
 its call sites (`Workspace::caller_view`) and shows them in call chains.
 
+`CallSite.arguments` holds, only when a call target has an argument list
+(`Contracts::marked_params`), the constants the call passes for the parameters those lists name:
+by keyword, else by position or as a default decided by its class and truthiness for every
+callee the call binds (the parameter binding of the extraction), a keyword only for a class
+without a project `__init__`.
+
 `CallSite.returned` (whether the call's result may be returned, and how) is computed at
 extraction for every project call. `CallSite.flow` (the invalidation contracts announced after
 the call on every normal path, and the next call; set on `Iterate` / `Through` sites too), with

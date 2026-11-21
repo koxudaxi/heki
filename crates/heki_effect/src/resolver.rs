@@ -4573,6 +4573,18 @@ pub(crate) fn literal<'i>(
     }
 }
 
+/// The literal of the constant `var` holds (through copies), with `def` giving each variable's
+/// definition.
+pub(crate) fn const_literal<'i>(
+    def: impl Fn(VarId) -> Option<&'i Inst>,
+    var: VarId,
+) -> Option<&'i ConstLiteral> {
+    match copy_root_kind(def, var)? {
+        InstKind::Const { literal, .. } => Some(literal),
+        _ => None,
+    }
+}
+
 /// What defines the value `var` copies, through local copies.
 fn copy_root_kind<'i>(def: impl Fn(VarId) -> Option<&'i Inst>, var: VarId) -> Option<&'i InstKind> {
     let mut cur = var;

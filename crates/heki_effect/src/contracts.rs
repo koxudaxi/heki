@@ -119,6 +119,10 @@ pub trait Contracts: Debug + Send + Sync {
     /// of class statements (`CallSite::is_base`).
     fn reference_bases(&self) -> bool;
 
+    /// The parameters the argument lists of call targets name (`DataType(is_dict=True)`), sorted:
+    /// the summaries then keep the constants each call passes for them (`CallSite::arguments`).
+    fn marked_params(&self) -> &[String];
+
     /// Whether an effect boundary forbids calling `symbol`, a function or class outside the
     /// project (a `call-targets` entry names it, or `reads-environment` with the ecosystem
     /// catalog): its calls are kept (`FileSummary::external_accesses`).

@@ -1209,6 +1209,70 @@ fn steps_bases_and_attribution() -> Vec<Step> {
     ]
 }
 
+/// A `call-owners` target and a `call-targets` entry of the `pure` boundary with an argument
+/// list: a call passing the constant through a `Final` name of another module is reported, at
+/// the caller and at the scope function above a helper making it, until that module binds the
+/// name to another string (the callers are analyzed again for the declaration they read), and
+/// the caller's report goes when it passes another literal.
+fn steps_argument_lists() -> Vec<Step> {
+    let config = format!(
+        "{CONFIG}\n[[tool.heki.call-owners]]\nname = \"posting\"\ntargets = ['Ledger.post(amount=\"big\")']\n"
+    )
+    .replace(
+        "call-targets = [\"Ledger.post\", \"Receipt\"]\n",
+        "call-targets = ['Ledger.post(amount=\"big\")', \"Receipt\"]\n",
+    );
+    let amounts = |value: &str| format!("from typing import Final\n\nBIG: Final = \"{value}\"\n");
+    // A method of a `Store`, which the `ledger` contract allows to post.
+    let pay = |argument: &str| {
+        format!(
+            "from pkg.amounts import BIG\nfrom pkg.ledger import Ledger\n\n\nclass Store:\n    def pay(self, l: Ledger):\n        return l.post({argument})\n"
+        )
+    };
+    let helper = format!(
+        "from pkg.amounts import BIG\n{}",
+        PURE_OPS.replace("    return None\n", "    return l.post(BIG)\n")
+    );
+    vec![
+        Step::new(
+            "calls pass the constant of an argument list through a name of another module",
+            vec![
+                Action::Configure(config),
+                Action::Create("pkg/amounts.py", amounts("big")),
+                Action::Create("pkg/posting.py", pay("BIG")),
+                save("pkg/pure_ops.py", &helper),
+            ],
+        )
+        .present(&[("pkg/posting.py", "MUT204"), ("pkg/pure.py", "EFF201")]),
+        Step::new(
+            "the other module binds the name to another string",
+            vec![save("pkg/amounts.py", &amounts("small"))],
+        )
+        .absent(&[("pkg/posting.py", "MUT204"), ("pkg/pure.py", "EFF201")]),
+        Step::new(
+            "it binds the constant again",
+            vec![save("pkg/amounts.py", &amounts("big"))],
+        )
+        .present(&[("pkg/posting.py", "MUT204"), ("pkg/pure.py", "EFF201")]),
+        Step::new(
+            "the caller passes another literal",
+            vec![save("pkg/posting.py", &pay("\"small\""))],
+        )
+        .present(&[("pkg/pure.py", "EFF201")])
+        .absent(&[("pkg/posting.py", "MUT204")]),
+        Step::new(
+            "the files and the contracts are restored",
+            vec![
+                save("pkg/pure_ops.py", PURE_OPS),
+                Action::Delete("pkg/posting.py"),
+                Action::Delete("pkg/amounts.py"),
+                Action::Configure(CONFIG.to_owned()),
+            ],
+        )
+        .absent(&[("pkg/pure.py", "EFF201")]),
+    ]
+}
+
 /// Step 4: `MUT108` (opt-in, enabled in the project's configuration). The frozen-ness of a class
 /// comes from a decorator in another module, and the in-place change from a helper in a third.
 /// The helper then moves the change of the field to a function of its own and back while its
@@ -3247,6 +3311,7 @@ fn steps() -> Vec<Step> {
     steps.extend(steps_contract_extensions());
     steps.extend(steps_references());
     steps.extend(steps_bases_and_attribution());
+    steps.extend(steps_argument_lists());
     steps.extend(steps_environment());
     steps.extend(steps_keys_fresh_strict());
     steps.extend([

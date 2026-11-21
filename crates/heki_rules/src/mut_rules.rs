@@ -974,6 +974,9 @@ pub(crate) struct FunctionMatcher {
     /// part: what holds the member (none for a text without a dot), and the member's name.
     member: Option<(Option<DottedPattern>, DottedPattern)>,
     method: Option<(FxHashSet<String>, DottedPattern)>,
+    /// The text names nothing outside the project ([`Self::names_external`]): the target had an
+    /// argument list, which heki binds only for project functions.
+    project_only: bool,
 }
 
 impl FunctionMatcher {
@@ -1011,7 +1014,16 @@ impl FunctionMatcher {
             whole,
             member,
             method: None,
+            project_only: false,
         })
+    }
+
+    /// The same matcher, naming project functions and classes only.
+    pub(crate) fn project_only(self) -> Self {
+        Self {
+            project_only: true,
+            ..self
+        }
     }
 
     pub(crate) fn whole(&self) -> &DottedPattern {
@@ -1043,7 +1055,8 @@ impl FunctionMatcher {
     /// (`pkg:reset`) names nothing outside the project.
     pub(crate) fn names_external(&self, symbol: &str) -> bool {
         let text = self.whole.name().text();
-        !has_glob_syntax(text.split('.').next().unwrap_or(text))
+        !self.project_only
+            && !has_glob_syntax(text.split('.').next().unwrap_or(text))
             && self.member.as_ref().map_or_else(
                 || self.whole.matches_whole(symbol),
                 |(holder, member)| {
@@ -3707,5 +3720,5 @@ mod call_owners;
 
 pub(crate) use call_owners::{
     CallTargets, FunctionMatchers, Subclasses, call_verb, group_texts, mut204, parse_call_targets,
-    site_callee,
+    site_callee, split_arguments,
 };
