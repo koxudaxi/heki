@@ -1723,6 +1723,19 @@ fn shared_state_handed_to_a_callee_that_changes_it() {
     for f in ["measure", "lookup", "fresh"] {
         assert!(!summary(&index, "m", f).changes_globals(), "{f}");
     }
+    // Early Cutoff compares the facts without their positions, and `globals` reaches callers.
+    let update = summary(&index, "m", "update");
+    let facts = update.without_locations().shared_state.unwrap();
+    assert!(
+        facts
+            .handed
+            .iter()
+            .all(|h| h.site == Span { start: 0, end: 0 })
+    );
+    assert!(!update.same_for_callers(&EffectSummary {
+        shared_state: None,
+        ..update.clone()
+    }));
     // A closure cell bound to the owner's parameter, handed to a callee changing it.
     let add = summary(&index, "m", "collect.<locals>.add");
     assert_eq!(
