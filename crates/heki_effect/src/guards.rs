@@ -353,7 +353,7 @@ pub(crate) fn through_call(
         // not known to be bounded does not wait.
         match binding(p).and_then(|b| b.input.as_ref()) {
             Some(GuardSubject { param, attr: None }) => guards.bounded_queue = Some(*param),
-            _ if capacities.bounded(&bound_capacity(bc.params.get(p))) => {}
+            _ if capacities.bounded(&bound_capacity(site, bc, p)) => {}
             _ => return None,
         }
     }
@@ -911,7 +911,6 @@ impl LocalGuards {
                 .iter()
                 .filter(|lp| !d.fresh || !fresh_in_loop(cx, var, lp))
                 .fold(0, |m, lp| m | loop_bit(lp)),
-            capacity: None,
         }
     }
 }

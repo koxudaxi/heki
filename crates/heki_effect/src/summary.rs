@@ -4,7 +4,7 @@
 //! fixpoint (`callgraph`) maps callee facts through. No IR survives this module.
 
 use crate::cache_flow;
-use crate::capacity::{self, Capacity, CapacityOf, CapacityWait, WhileFull};
+use crate::capacity::{self, Capacity, CapacityOf, CapacityWait, SiteQueues, WhileFull};
 use crate::construction::{Escape, Pos, Recorder};
 use crate::consumption::{ItemArgs, IterFlow, PerItemCall, Roots, param_iteration};
 use crate::guards::{self, GuardInputs, LocalGuards, per_item_bit};
@@ -797,15 +797,22 @@ impl<'a> Extractor<'a> {
         &table[bb.0 as usize]
     }
 
-    /// [`ArgBinding`] of the argument `var` of a call inside `loops`, with what it gives the
-    /// parameter when it is a queue.
+    /// [`ArgBinding`] of the argument `var` of a call inside `loops`.
     fn binding(&self, var: VarId, loops: &[&NaturalLoop]) -> ArgBinding {
-        let mut b = self.guards.binding(&self.guard_inputs(), var, loops);
-        if matches!(self.types.get(&var), Some(Val::Inst(c)) if capacity::is_queue_class(self.cx.kb, c))
-        {
-            b.capacity = Some(Box::new(self.capacity_of(var).capacity));
-        }
-        b
+        self.guards.binding(&self.guard_inputs(), var, loops)
+    }
+
+    /// `(callee, parameter, capacity)` of the argument `var` a call binds exactly to parameter
+    /// `slot` of `callee`, when it is a queue (`SiteQueues::handed`).
+    fn handed_queue(
+        &self,
+        callee: &FuncKey,
+        slot: usize,
+        var: VarId,
+    ) -> Option<(FuncKey, u8, CapacityOf)> {
+        let queue = matches!(self.types.get(&var), Some(Val::Inst(c)) if capacity::is_queue_class(self.cx.kb, c));
+        let slot = u8::try_from(slot).ok().filter(|_| queue)?;
+        Some((callee.clone(), slot, self.capacity_of(var).capacity))
     }
 
     /// What `var` gives a queue (`capacity`): attributes and globals through the project's
@@ -3255,6 +3262,7 @@ impl<'a> Extractor<'a> {
                         per_item: None,
                         dispatch: None,
                         result_discarded: false,
+                        queues: None,
                     });
                 }
                 self.handed_callable(bb, symbol, call);
@@ -3268,6 +3276,8 @@ impl<'a> Extractor<'a> {
                 let mut invalidates: Option<u64> = None;
                 let mut callees = Vec::new();
                 let mut bindings = Vec::new();
+                // The queues the call binds exactly (`SiteQueues::handed`).
+                let mut handed = Vec::new();
                 let mut offloaders: Vec<String> = Vec::new();
                 // The bodies an offloading decorator runs on a worker thread.
                 let mut on_worker = Vec::new();
@@ -3342,6 +3352,7 @@ impl<'a> Extractor<'a> {
                         let mut o = self.origin(a);
                         if slot < usize::from(decl.positional_params) {
                             o.binding = Some(self.binding(a, loops));
+                            handed.extend(self.handed_queue(key, slot, a));
                         }
                         if params.len() <= slot {
                             params.resize(slot + 1, ArgOrigin::default());
@@ -3360,6 +3371,7 @@ impl<'a> Extractor<'a> {
                             params[pos] = self.origin(*v);
                             if pos < usize::from(decl.named_params) {
                                 params[pos].binding = Some(self.binding(*v, loops));
+                                handed.extend(self.handed_queue(key, pos, *v));
                             }
                             if let Ok(pos) = u8::try_from(pos) {
                                 bound.push((pos, *v));
@@ -3475,6 +3487,12 @@ impl<'a> Extractor<'a> {
                     drives_coroutine_manually: drives,
                     binds_recv: *binds_recv,
                     dispatch: self.dispatch(call, site.project_callees()),
+                    queues: (!handed.is_empty()).then(|| {
+                        Box::new(SiteQueues {
+                            while_full: None,
+                            handed,
+                        })
+                    }),
                     constructs: call.constructs.clone(),
                     returned: if constructor || call.per_item.is_some() {
                         None
@@ -3909,6 +3927,7 @@ impl<'a> Extractor<'a> {
             per_item: None,
             dispatch: None,
             result_discarded: false,
+            queues: None,
         }
     }
 
@@ -4154,10 +4173,10 @@ impl<'a> Extractor<'a> {
                     Some(Some(Capacity::Bounded)) => effects.extend(waits),
                     Some(_) => {}
                     None => {
-                        while_full = Some(Box::new(WhileFull {
+                        while_full = Some(WhileFull {
                             effects: waits,
                             capacity,
-                        }));
+                        });
                     }
                 }
             }
@@ -4227,10 +4246,15 @@ impl<'a> Extractor<'a> {
             effects,
             offloads_blocking_arg: entry.offloads_blocking_arg,
             async_safe: entry.async_safe,
-            while_full,
         };
         let site = self.site(bb, target, is_awaited, span);
-        self.sites.push(site);
+        let queues = while_full.map(|w| {
+            Box::new(SiteQueues {
+                while_full: Some(w),
+                handed: Vec::new(),
+            })
+        });
+        self.sites.push(CallSite { queues, ..site });
     }
 
     /// A `[[tool.heki.ecosystem]]` entry naming the function declares what calling it does, as
@@ -4495,6 +4519,7 @@ fn role_site(
         per_item: site.per_item.clone(),
         dispatch: site.dispatch.clone(),
         result_discarded: false,
+        queues: site.queues.clone(),
     }
 }
 

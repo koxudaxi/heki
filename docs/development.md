@@ -117,8 +117,9 @@ a long chain of copies of one `is` test, a long chain of returned calls each han
 call's result as two of its arguments, a long chain of returned aliases each appended to one list or
 to a new list of its own, a long chain of conditional expressions each choosing between a call of
 the previous value and the value, one returned call handed the last of a long chain of item reads as
-each of its arguments, a loop carrying a long chain of assignments in reverse, and many queue puts
-each after a branch that may build a new queue.
+each of its arguments, a loop carrying a long chain of assignments in reverse, many queue puts each
+after a branch that may build a new queue, and a long chain of helpers handing a queue on, named in
+the opposite order of the calls.
 
 A change to the IR builder, a walk, a fixpoint, or a rule's state is also run over a large
 corpus of real projects before it is merged, every run under a memory cap and a timeout. No

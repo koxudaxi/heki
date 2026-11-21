@@ -37,7 +37,7 @@ pub mod types;
 pub use cache_flow::{
     CacheEvent, CacheFlow, FlowBlock, SelfAttrWrite, attr_writes, self_attr_writes,
 };
-pub use capacity::{Capacity, CapacityOf, CapacityWait, ParamOf, WhileFull};
+pub use capacity::{Capacity, CapacityOf, CapacityWait, ParamOf, SiteQueues, WhileFull};
 pub use contracts::Contracts;
 pub use invalidation::{
     FlowWrite, FuncFlow, INITIALIZERS, Reach, SiteFlow, UnmetWrite, body_runs_at,
@@ -737,10 +737,6 @@ pub struct ArgBinding {
     /// The loops around the call (bit `d - 1`: the one at depth `d`) across whose iterations
     /// the argument stays one object: those that do not construct it.
     pub stays_in_loops: u64,
-    /// What the argument, a queue, gives the parameter ([`capacity`]; boxed: few arguments are
-    /// queues).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub capacity: Option<Box<CapacityOf>>,
 }
 
 impl EffectSummary {
@@ -1101,10 +1097,6 @@ pub enum CallTarget {
         effects: BTreeSet<ExecEffectKind>,
         offloads_blocking_arg: Option<u8>,
         async_safe: bool,
-        /// The blocking effects it has only on a bounded queue, whose capacity the project
-        /// decides (`ProjectIndex::while_full_effects`).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        while_full: Option<Box<WhileFull>>,
     },
 }
 
@@ -1195,6 +1187,9 @@ pub struct CallSite {
     /// [`EffectSummary::returns_self_attrs`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub result_discarded: bool,
+    /// What the call knows of queues ([`capacity`]; boxed: few calls have any).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queues: Option<Box<SiteQueues>>,
 }
 
 /// How an API runs a callable it is handed ([`CallSite::runner`]).
@@ -1613,8 +1608,7 @@ impl ProjectIndex {
     }
 
     /// The effects a call of a Layer 2 API has besides its own (`CallTarget::Layer2::effects`):
-    /// those it has only on a queue, which the project shows bounded
-    /// (`CallTarget::Layer2::while_full`).
+    /// those it has only on a queue, which the project shows bounded (`SiteQueues::while_full`).
     pub fn while_full_effects<'s>(
         &self,
         site: &'s CallSite,

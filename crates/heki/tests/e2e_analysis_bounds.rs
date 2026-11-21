@@ -1559,3 +1559,43 @@ fn puts_after_many_rebindings_of_a_queue_walk_each_value_once() {
         "{found:#?}"
     );
 }
+
+/// A chain of helpers each handing its queue parameter to the next, named so that their order
+/// is the opposite of the calls': the parameter of each takes what the one calling it binds.
+fn queue_forwarding_chain(helpers: usize) -> String {
+    let mut lines = vec![
+        "import queue".to_owned(),
+        String::new(),
+        String::new(),
+        "def f0(q: queue.Queue) -> None:".to_owned(),
+        "    q.put(1)".to_owned(),
+    ];
+    for i in 1..helpers {
+        lines.push(String::new());
+        lines.push(String::new());
+        lines.push(format!("def f{i}(q: queue.Queue) -> None:"));
+        lines.push(format!("    f{}(q)", i - 1));
+    }
+    lines.extend([
+        String::new(),
+        String::new(),
+        "async def entry() -> None:".to_owned(),
+        format!("    f{}(queue.Queue(1))", helpers - 1),
+    ]);
+    lines.join("\n") + "\n"
+}
+
+/// The capacities of parameters are a worklist over what each depends on: a change of one
+/// re-reads only the parameters it is passed to, whatever order they are in.
+#[test]
+fn queue_parameters_along_a_reversed_chain_of_helpers_resolve_in_linear_time() {
+    let p = Project::new("bounds_queue_forwarding");
+    p.write("m.py", &queue_forwarding_chain(6000));
+    let found = check_within(&p, Duration::from_secs(20));
+    assert!(
+        found
+            .iter()
+            .any(|d| d["rule_code"] == "EFF101" && d["qualname"] == "entry"),
+        "{found:#?}"
+    );
+}

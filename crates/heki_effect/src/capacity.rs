@@ -22,8 +22,8 @@ use crate::resolver::{
 };
 use crate::types::Ty;
 use crate::{
-    ArgOrigin, CallHop, CallSite, CallTarget, ConstClass, EffectGuards, EffectSummary, FuncKey,
-    ModuleInput, ProjectIndex, SiteRole, guards,
+    BoundCallee, CallHop, CallSite, ConstClass, EffectGuards, EffectSummary, FuncKey, ModuleInput,
+    ProjectIndex, SiteRole, guards,
 };
 use heki_ir::{BlockId, ConstLiteral, FnIndex, Inst, InstKind, IrFunction, PhiNode, VarId};
 use heki_kb::{ArgSlot, EffectiveEcosystemKb, ExecEffectKind};
@@ -115,11 +115,23 @@ impl CapacityOf {
 
 /// The blocking effects of a call that waits only while its receiver, a queue, is full
 /// (`heki_kb::EcosystemEntry::waits_while_full`), with the capacity of the receiver, which the
-/// project decides (`CallTarget::Layer2::while_full`).
+/// project decides ([`SiteQueues::while_full`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WhileFull {
     pub effects: BTreeSet<ExecEffectKind>,
     pub capacity: CapacityOf,
+}
+
+/// What a call knows of queues (`CallSite::queues`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SiteQueues {
+    /// A Layer 2 call waiting only on a bounded queue, whose capacity the project decides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub while_full: Option<WhileFull>,
+    /// What the queues the call binds exactly to its project callees' parameters give them:
+    /// `(callee, parameter, capacity)`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub handed: Vec<(FuncKey, u8, CapacityOf)>,
 }
 
 /// A function's own [`WhileFull`] call: the guards of the occurrence and the call's hop, for
@@ -478,14 +490,19 @@ pub(crate) struct ParamCapacities {
     asked: FxHashSet<FuncKey>,
 }
 
-/// What one call binds to a callee parameter, `o` (`None`: not bound exactly, or passed through
-/// unpacking): the capacity its caller found (`ArgBinding::capacity`), or its constant.
-pub(crate) fn bound_capacity(o: Option<&ArgOrigin>) -> CapacityOf {
-    let Some(b) = o.and_then(|o| o.binding.as_ref()) else {
+/// What `site` binds to parameter `p` of its callee `bc`: unknown unless it binds it exactly
+/// (`ArgOrigin::binding`, not through unpacking), then the queue its caller found
+/// (`SiteQueues::handed`), or its constant.
+pub(crate) fn bound_capacity(site: &CallSite, bc: &BoundCallee, p: usize) -> CapacityOf {
+    let Some(b) = bc.params.get(p).and_then(|o| o.binding.as_ref()) else {
         return CapacityOf::unknown();
     };
-    if let Some(c) = &b.capacity {
-        return (**c).clone();
+    let handed = site.queues.iter().flat_map(|q| &q.handed);
+    if let Some((_, _, c)) = handed
+        .into_iter()
+        .find(|(f, i, _)| *f == bc.callee && usize::from(*i) == p)
+    {
+        return c.clone();
     }
     match b.constant.map(|c| (c.class, c.positive)) {
         Some((ConstClass::None, _)) => CapacityOf::default(),
@@ -505,76 +522,71 @@ fn resolve_with(c: &CapacityOf, value: impl Fn(&ParamOf) -> Option<Capacity>) ->
 }
 
 impl ParamCapacities {
-    /// The capacities of every parameter the index's waits name, and of the parameters their
-    /// callers pass on.
+    /// The capacities of every parameter the index's waits name, and of the parameters the
+    /// queues calls hand on name: the latter are all the parameters a call's binding can name,
+    /// so one pass over the calls finds every source.
     pub(crate) fn of(index: &ProjectIndex) -> Self {
-        let mut demanded: FxHashSet<ParamOf> = FxHashSet::default();
-        let mut frontier: Vec<ParamOf> = Vec::new();
-        let ask = |c: &CapacityOf, demanded: &mut FxHashSet<ParamOf>, next: &mut Vec<ParamOf>| {
-            next.extend(
-                c.params
-                    .iter()
-                    .filter(|p| demanded.insert((*p).clone()))
-                    .cloned(),
-            );
-        };
-        // What the waits name, what calls waiting on a bounded queue name (an `async def`'s
-        // own parameter, which its callers decide), and what queue arguments name (a parameter
-        // a call hands on, which its callers decide too).
+        let mut keys: FxHashSet<ParamOf> = FxHashSet::default();
         for file in index.files.values() {
             for s in file.local_functions.values() {
-                for w in &s.capacity_waits {
-                    ask(&w.wait.capacity, &mut demanded, &mut frontier);
-                }
+                keys.extend(
+                    s.capacity_waits
+                        .iter()
+                        .flat_map(|w| w.wait.capacity.params.iter().cloned()),
+                );
             }
             for c in file.call_sites.iter().flat_map(site_capacities) {
-                ask(c, &mut demanded, &mut frontier);
+                keys.extend(c.params.iter().cloned());
             }
         }
-        // The arguments of every call of a function some parameter of which is asked about,
-        // found one round of callers at a time.
+        let mut wanted: FxHashMap<&FuncKey, Vec<u8>> = FxHashMap::default();
+        for (f, i) in &keys {
+            wanted.entry(f).or_default().push(*i);
+        }
+        // The arguments of every call binding them, and which parameters each one's value
+        // depends on.
         let mut sources: FxHashMap<ParamOf, Vec<CapacityOf>> = FxHashMap::default();
-        while !frontier.is_empty() {
-            let mut wanted: FxHashMap<&FuncKey, Vec<u8>> = FxHashMap::default();
-            for (f, i) in &frontier {
-                wanted.entry(f).or_default().push(*i);
-            }
-            let mut next = Vec::new();
-            let calls = index.files.values().flat_map(|f| &f.call_sites);
-            for site in calls.filter(|s| s.role == SiteRole::Call) {
-                for bc in site.project_callees() {
-                    for &i in wanted.get(&bc.callee).into_iter().flatten() {
-                        let c = bound_capacity(bc.params.get(usize::from(i)));
-                        ask(&c, &mut demanded, &mut next);
-                        sources.entry((bc.callee.clone(), i)).or_default().push(c);
-                    }
+        let calls = index.files.values().flat_map(|f| &f.call_sites);
+        for site in calls.filter(|s| s.role == SiteRole::Call) {
+            for bc in site.project_callees() {
+                for &i in wanted.get(&bc.callee).into_iter().flatten() {
+                    let c = bound_capacity(site, bc, usize::from(i));
+                    sources.entry((bc.callee.clone(), i)).or_default().push(c);
                 }
             }
-            frontier = next;
         }
-        let mut keys: Vec<ParamOf> = demanded.into_iter().collect();
-        keys.sort();
-        // A join fixpoint over the parameters: every value only grows, three steps at most, so
-        // `3 * keys + 1` passes reach it.
-        let mut values: FxHashMap<ParamOf, Option<Capacity>> = FxHashMap::default();
-        for _ in 0..=3 * keys.len() {
-            let mut changed = false;
-            for k in &keys {
-                let now = sources.get(k).map_or(Some(Capacity::Unknown), |srcs| {
-                    let value = |p: &ParamOf| values.get(p).copied().flatten();
-                    srcs.iter().map(|c| resolve_with(c, value)).max().flatten()
-                });
-                changed |= values.insert(k.clone(), now) != Some(now);
+        let mut dependents: FxHashMap<&ParamOf, Vec<&ParamOf>> = FxHashMap::default();
+        for (k, srcs) in &sources {
+            for p in srcs.iter().flat_map(|c| &c.params) {
+                dependents.entry(p).or_default().push(k);
             }
-            if !changed {
-                break;
+        }
+        // A join fixpoint over a worklist: a value only grows, three times at most, and each
+        // change queues the parameters that depend on it.
+        let mut values: FxHashMap<&ParamOf, Option<Capacity>> = FxHashMap::default();
+        let mut queue: Vec<&ParamOf> = keys.iter().collect();
+        queue.sort();
+        let mut queued: FxHashSet<&ParamOf> = queue.iter().copied().collect();
+        while let Some(k) = queue.pop() {
+            queued.remove(k);
+            let now = sources.get(k).map_or(Some(Capacity::Unknown), |srcs| {
+                let value = |p: &ParamOf| values.get(p).copied().flatten();
+                srcs.iter().map(|c| resolve_with(c, value)).max().flatten()
+            });
+            if values.insert(k, now) == Some(now) {
+                continue;
+            }
+            for d in dependents.get(k).into_iter().flatten() {
+                if queued.insert(d) {
+                    queue.push(d);
+                }
             }
         }
         Self {
-            asked: keys.into_iter().map(|(f, _)| f).collect(),
+            asked: keys.iter().map(|(f, _)| f.clone()).collect(),
             values: values
                 .into_iter()
-                .filter_map(|(k, v)| Some((k, v?)))
+                .filter_map(|(k, v)| Some((k.clone(), v?)))
                 .collect(),
         }
     }
@@ -593,7 +605,7 @@ impl ParamCapacities {
                 .any(|s| !s.capacity_waits.is_empty());
             waits
                 || f.call_sites.iter().any(|c| {
-                    site_capacities(c).next().is_some()
+                    c.queues.is_some()
                         || c.project_callees()
                             .iter()
                             .any(|bc| self.asked.contains(&bc.callee))
@@ -649,26 +661,18 @@ impl ParamCapacities {
         &self,
         site: &'s CallSite,
     ) -> Option<&'s BTreeSet<ExecEffectKind>> {
-        match &site.target {
-            CallTarget::Layer2 {
-                while_full: Some(w),
-                ..
-            } if self.bounded(&w.capacity) => Some(&w.effects),
-            _ => None,
-        }
+        let w = site.queues.as_deref()?.while_full.as_ref()?;
+        self.bounded(&w.capacity).then_some(&w.effects)
     }
 }
 
 /// What a call names of the project's facts: the queue it waits on when it waits only on a
-/// bounded one (`CallTarget::Layer2::while_full`), and the queues it hands on.
+/// bounded one, and the queues it hands on (`CallSite::queues`).
 fn site_capacities(site: &CallSite) -> impl Iterator<Item = &CapacityOf> {
-    let while_full = match &site.target {
-        CallTarget::Layer2 { while_full, .. } => while_full.as_deref().map(|w| &w.capacity),
-        CallTarget::Project(_) => None,
-    };
-    let args = site.project_callees().iter().flat_map(|bc| &bc.params);
-    let handed = args.filter_map(|o| o.binding.as_ref()?.capacity.as_deref());
-    while_full.into_iter().chain(handed)
+    site.queues.iter().flat_map(|q| {
+        let while_full = q.while_full.iter().map(|w| &w.capacity);
+        while_full.chain(q.handed.iter().map(|(_, _, c)| c))
+    })
 }
 
 /// The functions of `file` whose facts name one of `params`: their waits, or their calls.
@@ -730,10 +734,10 @@ pub(crate) fn resolve_in_decls(project: &ProjectDecls, start: CapacityOf) -> Cap
 
 /// `ClassDecl::attr_capacities` and `ModuleDecls::global_capacities` of a module: what its class
 /// bodies and methods store in attributes, and what it binds its globals to. A module that
-/// imports no catalogued queue class (nor its module) builds no queue and annotates none, and
-/// records nothing.
+/// neither imports a catalogued queue class (nor its module) nor types an attribute or a global
+/// as one builds no queue and holds none a `put` can be resolved on, and records nothing.
 pub(crate) fn record(input: &ModuleInput<'_>, cx: &TypeCtx<'_>, decls: &mut ModuleDecls) {
-    if input.ir.constants.dynamic || !imports_a_queue(cx, decls) {
+    if input.ir.constants.dynamic || !(imports_a_queue(cx, decls) || types_a_queue(cx, decls)) {
         return;
     }
     let mut attrs: BTreeMap<(String, String), Walked> = BTreeMap::new();
@@ -892,11 +896,24 @@ fn note_maxsize_name(
 /// Whether a parameter annotation names a catalogued queue class (also in a union).
 fn annotates_a_queue(cx: &TypeCtx<'_>, annotation: Option<&str>) -> bool {
     let ty = annotation.and_then(|a| cx.module.resolve_annotation_ty(a));
-    ty.is_some_and(|t| {
-        t.members()
-            .iter()
-            .any(|o| is_queue_class(cx.kb, &cx.project.canonical(&o.class)))
-    })
+    ty.is_some_and(|t| names_a_queue(cx, &t))
+}
+
+/// Whether an instance of `ty` may be one of a catalogued queue class.
+fn names_a_queue(cx: &TypeCtx<'_>, ty: &Ty) -> bool {
+    ty.members()
+        .iter()
+        .any(|o| is_queue_class(cx.kb, &cx.project.canonical(&o.class)))
+}
+
+/// Whether the module's declarations type an attribute of one of its classes, or one of its
+/// globals, as a queue (`self.events: Queue = EVENTS` with `Queue` imported from a project
+/// module).
+fn types_a_queue(cx: &TypeCtx<'_>, decls: &ModuleDecls) -> bool {
+    let attrs = decls.classes.values().flat_map(|c| c.attr_types.values());
+    attrs
+        .chain(decls.global_types.values())
+        .any(|t| names_a_queue(cx, t))
 }
 
 /// Whether the module imports (also for annotations only) a catalogued queue class or a module
