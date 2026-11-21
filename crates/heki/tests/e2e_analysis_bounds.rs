@@ -2268,12 +2268,12 @@ fn item_origins_decide_each_question_once() {
 }
 
 /// `MUT107` reads what a `__hash__` reads on the instances of each writer's class, following its
-/// `self` calls along that class's MRO: a hash calling a long chain of `self` helpers, and
-/// thousands of subclasses each changing the attribute the chain's end reads. The walks of all
-/// writer classes share one budget proportional to the family's methods; past it the writers
-/// are no reports.
+/// `self` calls along that class's MRO: a hash calling a long chain of `self` helpers, and a
+/// thousand subclasses each changing the attribute the chain's end reads. The walk runs once per
+/// writer class and visits each method once, as the family of each class lists the methods it
+/// inherits.
 #[test]
-fn hash_reads_per_writer_class_share_one_budget() {
+fn hash_reads_per_writer_class_visit_each_method_once() {
     let (helpers, classes) = (1_000, 1_000);
     let mut lines = vec![
         "class Node:".to_owned(),
@@ -2311,7 +2311,6 @@ fn hash_reads_per_writer_class_share_one_budget() {
     )
     .write("m.py", &(lines.join("\n") + "\n"));
     let found = check_within(&p, Duration::from_secs(20));
-    // The writers whose walks fit the budget are reported, the others are not.
     let reported = found.iter().filter(|d| d["rule_code"] == "MUT107").count();
-    assert!(0 < reported && reported < classes / 10, "{reported}");
+    assert_eq!(reported, classes);
 }

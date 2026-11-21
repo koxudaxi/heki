@@ -14,7 +14,7 @@ use heki_effect::{
     WriteKind, attr_writes, self_attr_writes,
 };
 use heki_env::HekiConfig;
-use heki_ir::walk::Answer;
+use heki_ir::walk::{Budget, Visit, reach};
 use heki_ir::{BlockId, FnIndex, Inst, InstKind, IrFunction, VarId};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{BTreeMap, BTreeSet};
@@ -2604,10 +2604,8 @@ pub(crate) fn mut107(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
             // What the hash reads on the instances of each writer's class, decided once per
             // class.
             // What the hash reads on the instances of each writer's class, decided once per
-            // class, all of them within a budget proportional to the family's methods: past it,
-            // what the hash reads is open, and the writer is no report.
-            let mut reads_on: FxHashMap<String, Answer<FxHashSet<&str>>> = FxHashMap::default();
-            let mut steps = SELF_READ_STEPS_PER_METHOD * family.len();
+            // class.
+            let mut reads_on: FxHashMap<String, FxHashSet<&str>> = FxHashMap::default();
             for (m, Checked { unit, f }, local) in writers {
                 let receiver = receiver_class(cx.decls, m, h);
                 for (attr, read_keys) in &reads {
@@ -2621,12 +2619,11 @@ pub(crate) fn mut107(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
                     }
                     let read_on_receiver = reads_on
                         .entry(receiver.clone())
-                        .or_insert_with(|| self_reads_on(cx, sites, &h.key, &receiver, &mut steps));
+                        .or_insert_with(|| self_reads_on(cx, sites, &h.key, &receiver));
                     // Filter 4: stored hashes (`self._hash`, which a deserialization hook
                     // recomputes), disjoint constant keys. The write is a plain store, and
                     // the hash reads the attribute on the writer's instances.
-                    let reads_attr = read_on_receiver.as_ref().map(|r| r.contains(*attr));
-                    if !reads_attr.open_means(false)
+                    if !read_on_receiver.contains(*attr)
                         || cx.decls.attr_write_runs_code(&receiver, attr)
                         || is_stored_hash(attr)
                         || disjoint_keys(
@@ -2696,21 +2693,19 @@ fn receiver_class(decls: &ProjectDecls, writer: &Method<'_>, reader: &Method<'_>
     }
 }
 
-/// The steps [`self_reads_on`] may take for one `__hash__`, per method of its class family.
-const SELF_READ_STEPS_PER_METHOD: usize = 16;
-
 /// The `self` attributes `method` reads when it runs on an instance of `receiver`: its own
 /// reads, and those of the `self` methods and properties it calls, each call running the
 /// definition `receiver`'s MRO finds. The summary of `method` joins the reads of every
 /// definition a `self` call may run, those overriding it in other subclasses too. Each method
-/// expanded takes one of `steps`; once they are spent the answer is open.
-fn self_reads_on<'s>(
+/// is visited once, and only methods of the classes along `receiver`'s MRO are; the walk is
+/// over the project index, so its budget is unmetered (`heki check` and the language server
+/// visit the same methods).
+fn self_reads_on<'s, 'k>(
     cx: &CheckContext<'s>,
-    sites: &SitesByCaller<'_>,
-    method: &FuncKey,
+    sites: &SitesByCaller<'k>,
+    method: &'k FuncKey,
     receiver: &str,
-    steps: &mut usize,
-) -> Answer<FxHashSet<&'s str>> {
+) -> FxHashSet<&'s str> {
     let mro: Vec<String> = std::iter::once(receiver.to_owned())
         .chain(cx.decls.ancestors_of(receiver))
         .collect();
@@ -2718,42 +2713,38 @@ fn self_reads_on<'s>(
         let class = format!("{}.{}", k.module, k.qualname.rsplit_once('.')?.0);
         mro.iter().position(|c| *c == class)
     };
+    let next = |k: &'k FuncKey, out: &mut Vec<&'k FuncKey>| {
+        let self_calls = sites.get(k).into_iter().flatten();
+        out.extend(
+            self_calls
+                .filter(|(_, s)| s.recv_is_self)
+                .filter_map(|(_, site)| {
+                    let runs = site
+                        .project_callees()
+                        .iter()
+                        .filter_map(|bc| Some((mro_position(&bc.callee)?, &bc.callee)))
+                        .min_by_key(|(at, _)| *at);
+                    runs.map(|(_, callee)| callee)
+                }),
+        );
+    };
     let mut reads = FxHashSet::default();
-    let mut visited: FxHashSet<FuncKey> = FxHashSet::default();
-    let mut stack = vec![method.clone()];
-    // Each method is expanded once, and only methods of the classes along `receiver`'s MRO
-    // are visited.
-    while let Some(k) = stack.pop() {
-        if !visited.insert(k.clone()) {
-            continue;
-        }
-        let Some(left) = steps.checked_sub(1) else {
-            return Answer::Open;
-        };
-        *steps = left;
+    let visit = |k: &'k FuncKey| {
         let local = cx
             .index
-            .file_of(&k)
+            .file_of(k)
             .and_then(|p| cx.index.files.get(p))
-            .and_then(|f| f.local_functions.get(&k));
+            .and_then(|f| f.local_functions.get(k));
         reads.extend(
             local
                 .into_iter()
                 .flat_map(|l| l.reads_self_attrs.iter().map(|r| r.attr.as_str())),
         );
-        let self_calls = sites.get(&k).into_iter().flatten();
-        for (_, site) in self_calls.filter(|(_, s)| s.recv_is_self) {
-            let runs = site
-                .project_callees()
-                .iter()
-                .filter_map(|bc| Some((mro_position(&bc.callee)?, &bc.callee)))
-                .min_by_key(|(at, _)| *at);
-            if let Some((_, callee)) = runs {
-                stack.push(callee.clone());
-            }
-        }
-    }
-    Answer::Known(reads)
+        Visit::<()>::Expand
+    };
+    let budget = Budget::unmetered("MUT107 hash reads");
+    reach(&budget, [method], next, visit).open_means(None);
+    reads
 }
 
 /// Dunder methods Python makes class methods without a decorator.
