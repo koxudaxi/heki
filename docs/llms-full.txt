@@ -949,7 +949,8 @@ Contracts declare what no type can say. Each kind is an array of tables with its
 - A glob's `*` spans dots (`pkg.parser.*` covers the functions of every module under
   `pkg.parser`), except in the last segment of a target, which names the attribute, function,
   method, or class: `pkg.*._*` names the private members of everything in `pkg`, and no function
-  of a private module whose own name is public.
+  of a private module whose own name is public; `pkg.api_*` names `pkg.api_commit`, not
+  `pkg.api_helpers.api_reset`.
 - A report of a glob target names the member it matched (`reads
   `pkg.types.DataType._flag``); one report standing for several members lists the others.
 - A `Class.attr` target covers the subclasses of the class too.
@@ -2863,8 +2864,9 @@ the allowed callers and resolves to a target:
   its own.
 
 A target's last segment names the function, method, or class: a glob there matches within that
-name only (`pkg.*._*` is every private member in `pkg`, not every function of a private module),
-and the report names the function the call reaches.
+name only (`pkg.*._*` is every private member in `pkg`, not every function of a private module,
+and `pkg.api_*` is `pkg.api_commit`, not `pkg.api_helpers.api_reset`), and the report names the
+function the call reaches.
 
 A call is reported only when every function it may call is a target: when the receiver's class
 hierarchy also offers a method that is no target (a receiver typed with a base class whose own

@@ -139,7 +139,8 @@ Contracts declare what no type can say. Each kind is an array of tables with its
 - A glob's `*` spans dots (`pkg.parser.*` covers the functions of every module under
   `pkg.parser`), except in the last segment of a target, which names the attribute, function,
   method, or class: `pkg.*._*` names the private members of everything in `pkg`, and no function
-  of a private module whose own name is public.
+  of a private module whose own name is public; `pkg.api_*` names `pkg.api_commit`, not
+  `pkg.api_helpers.api_reset`.
 - A report of a glob target names the member it matched (`reads
   `pkg.types.DataType._flag``); one report standing for several members lists the others.
 - A `Class.attr` target covers the subclasses of the class too.

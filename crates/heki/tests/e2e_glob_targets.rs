@@ -223,3 +223,42 @@ fn a_glob_class_target_names_the_class_constructed() {
         )]
     );
 }
+
+/// A glob in the last segment matches the last name only, and the rest of the target what holds
+/// it: `pkg.api_*` names `pkg.api_commit` and not `pkg.api_helpers.api_reset`, and `_*` names
+/// `pkg.core._guarded` and not `pkg._internal.public`. Those are no targets, so their calls of
+/// the targets are reported.
+#[test]
+fn a_last_segment_glob_names_no_member_of_a_nested_holder() {
+    let p = Project::new("glob_last_segment");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT204\"]\n\n[[tool.heki.call-owners]]\nname = \"api\"\ntargets = [\"pkg.api_*\"]\nallowed-callers = [\"pkg.service.*\"]\n\n[[tool.heki.call-owners]]\nname = \"private\"\ntargets = [\"_*\"]\nallowed-callers = [\"pkg.service.*\"]\n",
+    )
+    .write("pkg/__init__.py", "def api_commit() -> None:\n    pass\n")
+    .write(
+        "pkg/api_helpers.py",
+        "from pkg import api_commit\n\n\ndef api_reset() -> None:\n    api_commit()\n",
+    )
+    .write("pkg/core.py", "def _guarded() -> None:\n    pass\n")
+    .write(
+        "pkg/_internal.py",
+        "from pkg.core import _guarded\n\n\ndef public() -> None:\n    _guarded()\n",
+    );
+    assert_eq!(
+        reports(&p),
+        vec![
+            (
+                5,
+                "MUT204".to_owned(),
+                "`public` calls `pkg.core._guarded` outside the call owners of `private`"
+                    .to_owned()
+            ),
+            (
+                5,
+                "MUT204".to_owned(),
+                "`api_reset` calls `pkg.api_commit` outside the call owners of `api`".to_owned()
+            ),
+        ]
+    );
+}

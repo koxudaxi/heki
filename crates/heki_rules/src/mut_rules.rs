@@ -959,8 +959,9 @@ pub(crate) struct Allowance {
 #[derive(Debug)]
 pub(crate) struct FunctionMatcher {
     whole: DottedPattern,
-    /// The last segment of a text with a dot, when it is a glob.
-    member: Option<DottedPattern>,
+    /// The text split at its last dot when the last segment is a glob: what holds the member
+    /// (none for a text without a dot), and the member's name.
+    member: Option<(Option<DottedPattern>, DottedPattern)>,
     method: Option<(FxHashSet<String>, DottedPattern)>,
 }
 
@@ -973,17 +974,22 @@ impl FunctionMatcher {
     ) -> Result<Self, RuleConfigError> {
         // The whole text first, so that a bad glob is reported as configured.
         let whole = DottedPattern::new(text, context)?;
+        let (holder, last) = match text.rsplit_once('.') {
+            Some((holder, last)) => (Some(DottedPattern::new(holder, context)?), last),
+            None => (None, text),
+        };
         let mut method = None;
-        let mut member = None;
-        if let Some((class, name)) = text.rsplit_once('.') {
-            let owners = class_set(cx, &DottedPattern::new(class, context)?, all_classes);
-            if has_glob_syntax(name) {
-                member = Some(DottedPattern::new(name, context)?);
-            }
+        if let Some(class) = &holder {
+            let owners = class_set(cx, class, all_classes);
             if !owners.is_empty() {
-                method = Some((owners, DottedPattern::new(name, context)?));
+                method = Some((owners, DottedPattern::new(last, context)?));
             }
         }
+        let member = if has_glob_syntax(last) {
+            Some((holder, DottedPattern::new(last, context)?))
+        } else {
+            None
+        };
         Ok(Self {
             whole,
             member,
@@ -991,13 +997,20 @@ impl FunctionMatcher {
         })
     }
 
-    /// Whether the whole text names `name` (a function's fqn or qualname, a class's fqn).
+    /// Whether the whole text names `name` (a function's fqn or qualname, a class's fqn). A
+    /// glob in the last segment matches the last name only, and the rest of the text what holds
+    /// it: `pkg.api_*` names `pkg.api_commit`, not `pkg.api_helpers.api_reset`.
     fn names(&self, name: &str) -> bool {
-        self.whole.matches(name)
-            && self
-                .member
-                .as_ref()
-                .is_none_or(|m| m.matches(name.rsplit_once('.').map_or(name, |(_, last)| last)))
+        let Some((holder, member)) = &self.member else {
+            return self.whole.matches(name);
+        };
+        match (holder, name.rsplit_once('.')) {
+            (None, split) => member.matches(split.map_or(name, |(_, last)| last)),
+            (Some(holder), Some((held_by, last))) => {
+                member.matches(last) && holder.matches(held_by)
+            }
+            (Some(_), None) => false,
+        }
     }
 
     pub(crate) fn matches(&self, key: &FuncKey) -> bool {
