@@ -502,8 +502,13 @@ A generator's body runs where it is iterated:
 
 ### Guards
 
-- **Followed:** a test of the function's own input: truthiness, `is None`, or `isinstance` with
-  builtin classes.
+- **Followed:** a test of the function's own input: truthiness, `is None`, `isinstance` with
+  builtin classes, the `io` classes, or `os.PathLike`, or `hasattr` with a string literal, also
+  after the function rebinds the input on some paths (`if buf is None: buf = StringIO()`).
+- **Decided by:** constants, displays and comprehensions, `io.StringIO` / `io.BytesIO` objects
+  the caller constructs, and the literal defaults of omitted parameters (`hasattr` only for the
+  methods of the file protocol: `read`, `write`, `close`, ...); not by an f-string, the result of
+  another call, or an instance of a subclass.
 - **Not followed:** `a or b` (no guard on either value), and `isinstance` with project classes or
   annotated types.
 - A lazy initialization needs a direct test and the store in the function itself: a test in a
@@ -2487,13 +2492,20 @@ where its caller iterates it. `next(gen)` runs the body only up to its first `yi
 does not separate from the rest, so it is not followed.
 
 A call whose arguments switch off the callee's branch with the blocking call is not followed
-into it: `load(name, cache=False)` does not reach the request under `if cache:`. This covers
-constant arguments and the literal defaults of omitted ones (`False`, `None`, `0`, `""`, empty
-displays), and tests the caller has already made on the same value: a call made only when
-`isinstance(self._input, PathLike)` is false does not reach the callee's branch for
-`isinstance(self._input, PathLike)`. A generator's branches are decided at the call that
-creates it. Lazy initialization does not relax this rule: a connection opened once still
-blocks the event loop that once.
+into it: `load(name, cache=False)` does not reach the request under `if cache:`. The branches
+are the callee's tests of its parameters: truthiness, `is None`, `isinstance` with builtin,
+`io`, or `os.PathLike` classes, and `hasattr` (which a value's class decides for the methods of
+the file protocol: `read`, `write`, `close`, ...), also of a parameter the callee rebinds on
+some paths (`if buf is None: buf = io.StringIO()`, then `if isinstance(buf, str): open(buf)`
+opens a file only for a path argument). The arguments that decide them are constants and the
+literal defaults of omitted ones (`False`, `None`, `0`, `""`, empty displays), values whose
+exact class the caller knows (a display or comprehension, or an `io.StringIO` / `io.BytesIO` it
+constructs, also held in a variable: `fetch(io.BytesIO(data))` does not reach the download
+under `if not hasattr(src, "read"):`; an instance of a subclass does not count), and tests the
+caller has already made on the same value: a call made only when `isinstance(self._input,
+PathLike)` is false does not reach the callee's branch for `isinstance(self._input, PathLike)`.
+A generator's branches are decided at the call that creates it. Lazy initialization does not
+relax this rule: a connection opened once still blocks the event loop that once.
 
 The rule reports the boundary: the call (or property read, or iteration) inside the `async def`
 that leads to the blocking operation, with the call chain as related information. Several
@@ -2588,7 +2600,10 @@ Checks `async def` functions that reach blocking local filesystem I/O: `open(...
 `io.StringIO` / `io.BytesIO` buffer does no I/O). It follows the same boundary,
 offload, and guard rules as `EFF101`, generators and offloading decorators included: `await
 in_thread(self.open) if isinstance(self._input, PathLike) else self.open()` is not reported
-when `open` only opens a file under `isinstance(self._input, PathLike)`.
+when `open` only opens a file under `isinstance(self._input, PathLike)`, and neither is
+`save(text, io.StringIO())` when `save` opens its argument only where `hasattr(buf, "write")`
+is false, or `save(text)` when it opens it only where `isinstance(buf, str)` holds after
+`if buf is None: buf = io.StringIO()`.
 
 This rule is opt-in: enable it with `--extend-select EFF105` or `extend-select = ["EFF105"]`.
 Selecting the `EFF` prefix does not enable it.
@@ -3095,6 +3110,10 @@ chain is a shortest one. The search does not enter:
 - functions an offloading decorator or API runs on another thread (`@sync_to_async`,
   `asyncio.to_thread(f)`, ...).
 
+Unlike `EFF101`, the search does not read the callees' guards: a reached function's effects
+count whatever its arguments are, so `__repr__` calling `save(text, io.StringIO())` reaches the
+`open` that `save` runs only for a path.
+
 A violation is reported once per scope function and forbidden effect (or write, read, or call
 target; a `write-universe` write once per written `Class.attr`), at the call in the scope
 function that starts the shortest chain (or at the blocking call, write, read, or call itself),
@@ -3198,8 +3217,17 @@ The rule reports the write itself, once per method and attribute. It does not re
 
 - initialization: `__new__`, `__init__`, `__post_init__`, `model_post_init`, `__setstate__`,
   `__enter__`, `setup`, `setup_*` / `_setup_*` / `_init_*` / `_configure_*` methods, and the private helpers they call
-  (`self.__setstate(state)` on the instance `__new__` allocates included); class attributes
-  that `__init_subclass__` sets;
+  (`self.__setstate(state)` on the instance `__new__` allocates included), and the private
+  helpers that only `__init__` and such helpers call on `self` (`__init__` -> `self._load()`
+  -> `self._decode()`); class attributes that `__init_subclass__` sets;
+- writers whose instances use another hash: a class between the writer's class and the hash's
+  defines its own `__hash__`, or `__eq__` without `__hash__` (Python then makes its instances
+  unhashable);
+- in-place changes (an item store, a mutator method such as `append`) of an attribute
+  `__hash__` hands whole to `hash()` (`hash(self.items)`, `hash((self.kind, self.items))`) and
+  reads for nothing else: the hash is the value's own, so a list, dict, set, or `bytearray`
+  there cannot be hashed at all, and a value of a project class answers for its own hash
+  (`MUT107` checks its class). Rebinding the attribute is reported;
 - classes with a metaclass other than `type` / `abc.ABCMeta` along their MRO (also one heki
   cannot resolve): the metaclass may turn attribute writes into descriptor calls (a generated
   property whose setter invalidates the cached value), which heki does not see;
@@ -3679,9 +3707,13 @@ something else and returns its argument unchanged does not. One-off
 concatenations inside a loop are not reported, also on a branch that leaves the variable
 unchanged otherwise (`if step: x = np.append(edges, last)`), nor is writing into a buffer passed
 as `out=` (`out = np.concatenate(([a], [b]), out=out)` reuses the same buffer): the previous
-value must be among the data that is combined. A loop whose trip count the code fixes is not
-reported either (`for is_p_wave in [False, True]`, `for _ in range(steps)` with `steps = 8`):
-it copies a fixed number of times, whatever the input.
+value must be among the data that is combined. A list holding it counts (`pd.concat([df] +
+parts)`), arithmetic on it does not (`x = np.concatenate((x - np.outer(u, v), [a]))`,
+`q = np.concatenate([[w * q[0]], w * q[1:]])`): every entry of the new value changed, so each
+iteration already works in proportion to the value's size, and there are no unchanged parts to
+collect and combine once. A loop whose trip count the code fixes is not reported either
+(`for is_p_wave in [False, True]`, `for _ in range(steps)` with `steps = 8`): it copies a fixed
+number of times, whatever the input.
 
 ## Why is this bad?
 Every concatenation copies everything accumulated so far, so the loop is quadratic in the total
@@ -4463,13 +4495,24 @@ followed, also on the call result itself
 generator is iterated. Copies end the protection: `copy.deepcopy(...)`,
 `model.model_copy(deep=True)` (without `update=`, whose values Pydantic assigns to the copy by
 reference), and the deep copy sanitizers of the ecosystem knowledge base clear it, shallow copies
-(`copy.copy`, `.copy()`, `dataclasses.replace(...)`, a sanitizer declared
-`copy-sanitizer = "shallow"`, and slices of builtin lists, other builtin sequences, and values
-whose class heki cannot infer, `rows()[:]`) free the top level only: the values below stay shared, so a helper rebinding an
-attribute of the copy (`b.name = "new"`) changes nothing shared, and one changing the object an
-attribute holds (`b.tags.append(x)`) does. A slice of an object of another known class may
-be a view of it (`numpy`) and stays shared. A wrapper that returns a copy on one path and the shared value on
-another still returns a shared value.
+(`copy.copy`, `.copy()`, `dataclasses.replace(...)`, `dict(...)`, `list(...)`, `tuple(...)`,
+`set(...)`, `frozenset(...)`, displays that only unpack the value (`{**shared}`, `[*rows]`), a
+sanitizer declared `copy-sanitizer = "shallow"`, and slices of builtin lists, other builtin
+sequences, and values whose class heki cannot infer, `rows()[:]`) free the top level only: the
+values below stay shared, so a helper rebinding an attribute of the copy (`b.name = "new"`)
+changes nothing shared, and one changing the object an attribute holds (`b.tags.append(x)`, also
+on its own shallow copy of the argument) does. A slice of an object of another known class may
+be a view of it (`numpy`) and stays shared. A `copy()` method of a project class copies as
+deeply as its body does: its result is shared only when the method returns a shared value. A
+wrapper that returns a copy on one path and the shared value on another still returns a shared
+value.
+
+Filling a memo of the shared object, directly or in a method or helper it is handed to, is no
+mutation: an in-place change of an attribute named as a cache or memo (`self._style_cache[k] =
+v`, also through the methods of a cache object held there), a store under
+`if k not in self._decoders:` or through `setdefault`, and a lazy
+initialization (`if self._runtime is None: self._runtime = load()`) leave what the object
+computes as it was.
 
 ## Why is this bad?
 A cached return value is shared by every caller. Mutating it corrupts the cache for everyone
@@ -4511,6 +4554,12 @@ def extend(name: str) -> dict[str, list[str]]:
 - A generator's values and a coroutine's result (`await`) are not followed.
 - A method call on a shared value whose class heki cannot resolve (a producer returning a type
   variable) is not followed; a wrapper with a concrete return annotation resolves it.
+- A dict that also holds values of its own (`{**shared, "extra": []}`,
+  `dict(shared, extra=[])`) or unpacks another mapping (`{**shared, **overrides}`) is not
+  followed.
+- A project method returning a part of a shared receiver (`return self._items[key]`) is not
+  followed, nor is a `copy()` method of a project class that shares the receiver's values
+  (`return Post(self.tags)`).
 
 ## Fix safety
 No automatic fix.

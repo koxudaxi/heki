@@ -44,6 +44,35 @@ pub struct SelfAttrWrite {
     pub lazy_init: bool,
 }
 
+impl SelfAttrWrite {
+    /// A write that fills a memo rather than changing what was computed from the object: a
+    /// memo-shaped write (`setdefault`, a store under `if k not in <obj>.<attr>:`), or an
+    /// in-place change of an attribute named as a memo or cache ([`is_memo_name`]). Rebinding
+    /// such an attribute is no memo operation (`self.cache_size = n`).
+    pub fn fills_memo(&self, attr: &str) -> bool {
+        self.memo_shaped || !self.rebinds && is_memo_name(attr)
+    }
+}
+
+/// Memo / cache dictionaries by name: a word of the attribute's name is `cache...` or `memo...`
+/// (`self._cache`, `self.memo`, `self._resultCache`, `self.memoized`), not `memory`.
+pub fn is_memo_name(attr: &str) -> bool {
+    let mut words: Vec<String> = Vec::new();
+    for part in attr.split('_') {
+        let mut word = String::new();
+        for c in part.chars() {
+            if c.is_ascii_uppercase() && !word.is_empty() {
+                words.push(std::mem::take(&mut word));
+            }
+            word.push(c.to_ascii_lowercase());
+        }
+        words.push(word);
+    }
+    words
+        .iter()
+        .any(|w| w.starts_with("cache") || w.starts_with("memo") && !w.starts_with("memor"))
+}
+
 /// One block of a method: its normal control flow and the points that invalidate or read a
 /// cached property, by instruction index.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -156,122 +185,158 @@ fn self_vars(f: &IrFunction) -> FxHashSet<VarId> {
 /// in place (also through local copies of `self.<attr>`). `self.__dict__` itself is no
 /// attribute a property reads.
 pub fn self_attr_writes(f: &IrFunction) -> Vec<(&str, SelfAttrWrite)> {
-    let self_vars = self_vars(f);
-    // `var -> attr`: the variables holding `self.<attr>`, through copies.
-    let mut alias: FxHashMap<VarId, &str> = FxHashMap::default();
+    attr_writes(f, &self_vars(f).into_iter().map(|v| (v, 0)).collect())
+}
+
+/// An attribute of one of the objects [`attr_writes`] reads: the object's number and the name.
+type Held<'f> = (u32, &'f str);
+
+/// [`self_attr_writes`] of several objects at once (`self`, parameters, shared values): the
+/// writes of `<obj>.<attr>` in `f`'s own body, where `objects` gives each variable holding one
+/// of them the object's number. Each object is read on its own: a test of one object's attribute
+/// says nothing of another's.
+pub fn attr_writes<'f>(
+    f: &'f IrFunction,
+    objects: &FxHashMap<VarId, u32>,
+) -> Vec<(&'f str, SelfAttrWrite)> {
+    // `var -> (object, attr)`: the variables holding `<obj>.<attr>`, through copies.
+    let mut alias: FxHashMap<VarId, (u32, &str)> = FxHashMap::default();
     let mut defs: FxHashMap<VarId, &InstKind> = FxHashMap::default();
     for inst in f.blocks.iter().flat_map(|b| &b.insts) {
         if let Some(d) = inst.kind.dst() {
             defs.insert(d, &inst.kind);
         }
         if let InstKind::AttrLoad { dst, obj, attr } = &inst.kind
-            && self_vars.contains(obj)
+            && let Some(&o) = objects.get(obj)
             && attr != "__dict__"
         {
-            alias.insert(*dst, attr);
+            alias.insert(*dst, (o, attr));
         }
     }
     loop {
         let before = alias.len();
         for inst in f.blocks.iter().flat_map(|b| &b.insts) {
             if let InstKind::Copy { dst, src } = &inst.kind
-                && let Some(&attr) = alias.get(src)
+                && let Some(&a) = alias.get(src)
             {
-                alias.insert(*dst, attr);
+                alias.insert(*dst, a);
             }
         }
         if alias.len() == before {
             break;
         }
     }
-    // The `if k not in self.<attr>:` branch into `bb`.
-    let guarded = |bb: BlockId, attr: &str| {
-        f.blocks.iter().any(|p| match &p.terminator {
-            Terminator::Branch { cond, then_bb, .. } if *then_bb == bb => matches!(
-                defs.get(cond),
-                Some(InstKind::Compare { op: CompareOpKind::NotIn, rhs, .. })
-                    if alias.get(rhs) == Some(&attr)
-            ),
-            _ => false,
-        })
+    // The `if k not in <obj>.<attr>:` branches, by the block they lead into, with the key tested.
+    let mut membership: FxHashMap<BlockId, Vec<(Held<'_>, VarId)>> = FxHashMap::default();
+    for p in &f.blocks {
+        if let Terminator::Branch { cond, then_bb, .. } = &p.terminator
+            && let Some(InstKind::Compare {
+                op: CompareOpKind::NotIn,
+                lhs,
+                rhs,
+                ..
+            }) = defs.get(cond)
+            && let Some(&held) = alias.get(rhs)
+        {
+            membership.entry(*then_bb).or_default().push((held, *lhs));
+        }
+    }
+    // The store fills the key the branch found missing: the same value, or an equal constant.
+    let literal = |v: &VarId| match defs.get(v) {
+        Some(InstKind::Const { literal, .. }) => Some(literal),
+        _ => None,
     };
-    let lazy = lazy_init_blocks(f, &self_vars);
-    let mut out = Vec::new();
+    let same_key = |tested: &VarId, index: &VarId| {
+        tested == index || literal(tested).is_some_and(|t| literal(index) == Some(t))
+    };
+    let guarded = |bb: BlockId, held: (u32, &str), index: &VarId| {
+        membership
+            .get(&bb)
+            .is_some_and(|tests| tests.iter().any(|(h, k)| *h == held && same_key(k, index)))
+    };
+    // `(block, index, (object, attr), memo_shaped, rebinds)` of each write.
+    let mut found = Vec::new();
     for bb in &f.blocks {
         for (index, inst) in bb.insts.iter().enumerate() {
-            // `(attr, memo_shaped, rebinds)`.
             let w = match &inst.kind {
                 InstKind::AttrStore { obj, attr, .. } | InstKind::AttrDelete { obj, attr }
-                    if self_vars.contains(obj) && attr != "__dict__" =>
+                    if attr != "__dict__" =>
                 {
-                    Some((attr.as_str(), false, true))
+                    objects.get(obj).map(|&o| ((o, attr.as_str()), false, true))
                 }
-                InstKind::SubscriptStore { obj, .. } => alias
+                InstKind::SubscriptStore { obj, index, .. } => alias
                     .get(obj)
-                    .map(|&attr| (attr, guarded(bb.id, attr), false)),
+                    .map(|&held| (held, guarded(bb.id, held, index), false)),
                 InstKind::SubscriptDelete { obj, .. } => {
-                    alias.get(obj).map(|&attr| (attr, false, false))
+                    alias.get(obj).map(|&held| (held, false, false))
                 }
                 InstKind::MethodCall { recv, method, .. }
                     if CONTAINER_MUTATORS.contains(&method.as_str()) =>
                 {
                     alias
                         .get(recv)
-                        .map(|&attr| (attr, method == "setdefault", false))
+                        .map(|&held| (held, method == "setdefault", false))
                 }
                 _ => None,
             };
-            if let Some((attr, memo_shaped, rebinds)) = w {
-                out.push((
-                    attr,
-                    SelfAttrWrite {
-                        attr: 0,
-                        span: inst.span,
-                        block: bb.id,
-                        index: u32::try_from(index).unwrap_or(u32::MAX),
-                        memo_shaped,
-                        rebinds,
-                        lazy_init: lazy
-                            .iter()
-                            .any(|(a, blocks)| *a == attr && blocks[bb.id.0 as usize]),
-                    },
-                ));
+            if let Some((held, memo_shaped, rebinds)) = w {
+                found.push((bb.id, index, inst.span, held, memo_shaped, rebinds));
             }
         }
     }
+    if found.is_empty() {
+        return Vec::new();
+    }
+    let mut written: FxHashMap<&str, FxHashSet<u32>> = FxHashMap::default();
+    for (_, _, _, (o, attr), _, _) in &found {
+        written.entry(attr).or_default().insert(*o);
+    }
+    let lazy = lazy_init_blocks(f, objects, &written);
+    let mut out: Vec<(&str, SelfAttrWrite)> = found
+        .into_iter()
+        .map(|(block, index, span, held, memo_shaped, rebinds)| {
+            let write = SelfAttrWrite {
+                attr: 0,
+                span,
+                block,
+                index: u32::try_from(index).unwrap_or(u32::MAX),
+                memo_shaped,
+                rebinds,
+                lazy_init: lazy
+                    .iter()
+                    .any(|(h, blocks)| *h == held && blocks[block.0 as usize]),
+            };
+            (held.1, write)
+        })
+        .collect();
     out.sort_by_key(|(_, w)| w.span);
     out
 }
 
-/// The attributes of `self` that `f` initializes lazily, each with the blocks (by id) that only
-/// the "unset" outcome of one of its `None` / falsy tests leads to
-/// ([`guards::lazy_init_branches`]): every path from the entry to such a block runs through the
-/// branch (normal and exception edges).
-fn lazy_init_blocks(f: &IrFunction, self_vars: &FxHashSet<VarId>) -> Vec<(String, Vec<bool>)> {
-    guards::lazy_init_branches(f)
-        .into_iter()
-        .filter(|b| self_vars.contains(&b.obj))
-        .map(|b| {
-            let blocks = avoidable_from_entry(f, b.init).into_iter().map(|a| !a);
-            (b.attr, blocks.collect())
-        })
-        .collect()
-}
-
-/// Membership (by block id) of the blocks a path from the entry of `f` reaches without running
-/// through `d` (normal and exception edges).
-fn avoidable_from_entry(f: &IrFunction, d: BlockId) -> Vec<bool> {
-    let mut seen = vec![false; f.blocks.len()];
-    let mut stack = vec![BlockId(0)];
-    while let Some(cur) = stack.pop() {
-        if cur == d || std::mem::replace(&mut seen[cur.0 as usize], true) {
-            continue;
+/// The attributes of the objects `objects` holds that `f` initializes lazily, among the
+/// `written` ones, each with the blocks (by id) that only the "unset" outcome of one of its
+/// `None` / falsy tests leads to ([`guards::lazy_init_branches`], [`guards::dominated`]): every
+/// path from the entry to such a block runs through the branch (normal and exception edges).
+/// The walks share the function's budget ([`guards::Cells`]); past it none is kept.
+fn lazy_init_blocks<'f>(
+    f: &IrFunction,
+    objects: &FxHashMap<VarId, u32>,
+    written: &FxHashMap<&'f str, FxHashSet<u32>>,
+) -> Vec<((u32, &'f str), Vec<bool>)> {
+    let mut cells = guards::Cells::of(f);
+    let mut found = Vec::new();
+    let branches = guards::lazy_init_branches(f).into_iter().filter_map(|b| {
+        let o = *objects.get(&b.obj)?;
+        let (attr, by) = written.get_key_value(b.attr.as_str())?;
+        by.contains(&o).then_some(((o, *attr), b.init))
+    });
+    for (held, init) in branches {
+        found.push((held, guards::dominated(f, init, &mut cells)));
+        if cells.spent() {
+            return Vec::new();
         }
-        let block = f.block(cur);
-        stack.extend(block.terminator.successors());
-        stack.extend(block.exc_target);
     }
-    seen
+    found
 }
 
 /// The blocks of `f` with the points that invalidate or read a cached property of its own

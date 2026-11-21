@@ -384,19 +384,31 @@ they do). They are local facts, never propagated, and they let `MUT101` decide s
 index alone, for a method of any indexed file.
 
 **Guards.** An effect inside a branch of a test of the function's own inputs (`if cache:`,
-`if x is None:`, `isinstance(x, T)`, also through `and` / `or` / `not`, early returns, and
-conditional expressions; on a parameter, or an attribute of one the function never assigns)
-records that test. An effect inside a lazy initialization (`MUT107`'s branch, when every way out
-of it sets the attribute) runs once per object, as does every effect of a
-`functools.cached_property` getter, through any callee (its result is kept in the instance's
-`__dict__`); one under the same test of a module global the function assigns (`global _client`)
-runs once per process, unless the function also assigns it a constant the test finds unset on
-a way to a normal return or back to the test (`_client = None`; one before a `raise` only undoes
-a failed initialization). At each call the callee's guards are mapped to
-the caller (`through_call`, wherever a callee's facts reach a caller): a constant argument, the
-literal default of an omitted parameter, or a test the caller has made on the same value that
-decides a guard against the effect prunes it there; an undecided test of a caller input becomes
-the caller's guard. A generator's guards are decided at the call that creates it. `EFF102` /
+`if x is None:`, `isinstance(x, T)`, `hasattr(x, "write")`, also through `and` / `or` / `not`,
+early returns, and conditional expressions; on a parameter, or an attribute of one the function
+never assigns) records that test. A test of a value a phi merges (`if buf is None: buf =
+StringIO()`, then `if isinstance(buf, str): open(buf)`) is read along each edge into the phi:
+the value the edge brings decides the test, or is an input whose test it becomes, and what holds
+on that edge holds with it (facts are never killed); an edge whose value decides against the
+outcome drops out, so `open` above needs `buf is not None` and `isinstance(buf, str)`. An effect
+inside a lazy initialization (`MUT107`'s branch, when every way out of it sets the attribute)
+runs once per object, as does every effect of a `functools.cached_property` getter, through any
+callee (its result is kept in the instance's `__dict__`); one under the same test of a module
+global the function assigns (`global _client`) runs once per process, unless the function also
+assigns it a constant the test finds unset on a way to a normal return or back to the test
+(`_client = None`; one before a `raise` only undoes a failed initialization). At each call the
+callee's guards are mapped to the caller (`through_call`, wherever a callee's facts reach a
+caller): a constant argument, a value whose exact class the caller knows (`ConstArg`: a display
+or comprehension, an `io.StringIO` / `io.BytesIO` it constructs, or a phi of values of one such
+class), the literal default of an omitted parameter, or a test the caller has made on the same
+value that decides a guard against the effect prunes it there; an undecided test of a caller
+input becomes the caller's guard. A known class decides `is None`; `isinstance`, true when a
+tested class is in its MRO and false when every tested class is a builtin type, one of the `io`
+classes, or `os.PathLike` outside it; and `hasattr` for the attributes of the file protocol
+(`read`, `write`, `close`, ...), which the buffers have and the builtin values lack (a buffer may
+gain attributes of its own, so a name outside the protocol, or one a buffer lacks, stays
+undecided). A generator's guards are decided at the call that creates it. `EFF201` does not read
+guards. `EFF102` /
 `EFF103` do not count a lazily initialized effect per iteration unless a data-sized loop around
 the call constructs the object. Within one function, a call also runs at most once per run of a
 loop (`CallSite::once_loops`) when every way on from it leaves the loop (`break`, `return`,
@@ -666,6 +678,19 @@ which module imports which.
   method of the class and its subclasses, with `MUT101`'s initialization, memo, and constant-key
   filters, writes directly under a `None` / falsy guard of the same attribute (lazy
   initialization, `CacheFlow` writes), the attributes `__hash__` caches itself (`self._hash`), and stored-hash names.
+- Initialization includes the private methods only `__init__` and such methods call (every
+  caller in the reverse call graph is one): `__init__` -> `self._load()` -> `self._decode()`.
+  Since any method's calls decide this, the language server re-checks a class family with a
+  `__hash__` or a cached property when any of its methods changes (`family_readers`).
+- A writer whose class uses another `__hash__` (`ProjectDecls::hash_owner`: a class between it and
+  the hash's class defines `__hash__`, or `__eq__` alone, which leaves its instances unhashable)
+  is not paired with that hash.
+- `hashed_whole_self_attrs` of `__hash__`: the attributes every read of which is handed, as
+  itself, to `hash()` (alone or as an element of a hashed tuple display) or has `__hash__` called
+  on it, read by no `self` method or property the hash calls, with `self` handed to no other code.
+  An in-place change of such an attribute (an item store, a mutator method) changes only the
+  value's own hash: a builtin container that can change in place cannot be hashed, and a project
+  value's own `__hash__` is checked in its own class. Rebinding the attribute is still reported.
 
 #### `MUT201`: declared write ownership
 Declared in `pyproject.toml` (no decorators, no run-time overhead):
@@ -726,15 +751,24 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      function) gets a read-only origin tag.
   2. The tag flows within the function through `Copy`, attribute reads (with `deep = true`),
      subscripts, and tuple / list unpacking; copy sanitizers end it (`copy.deepcopy`, `.copy()`,
-     `model_copy(deep=True)`, `dataclasses.replace`, `copy.replace`, and the Layer 2
+     `model_copy(deep=True)`, `dataclasses.replace`, `copy.replace`, the builtin container
+     constructors `dict` / `list` / `tuple` / `set` / `frozenset`, and the Layer 2
      `copy_sanitizer` entries, as deep as each entry says: a shallow copy ends it for the top
-     level only), and a slice is a shallow copy unless the value's class is inferred and is not a
-     builtin sequence
-     (`readonly::subscript_step`, shared with the return flow). A copy keeps its original's class
-     for receiver typing. A phi joins the tags of all its incoming values, to a fixpoint.
+     level only), a display that only unpacks tagged values (`{**x}` with no other entry,
+     `[*xs, *ys]`, `readonly::display_copies`) is a shallow copy of them, and a slice is a shallow copy unless
+     the value's class is inferred and is not a builtin sequence
+     (`readonly::subscript_step`, shared with the return flow). A copy method of a project class
+     (`Image.copy`) is a call of that method, not a copy by its name (`readonly::call_derivation`).
+     A copy keeps its original's class for receiver typing. A phi joins the tags of all its
+     incoming values, to a fixpoint.
   3. A direct attribute write or container mutation of a tagged value, or passing it in a
-     parameter position the callee mutates (`mutates_params`), is reported as **`MUT202`** with
-     the call hop.
+     parameter position the callee changes (`mutated_param_paths` minus `memo_param_paths`; for a
+     shallow copy, below the attributes `changed_param_attrs` names), is reported as **`MUT202`**
+     with the call hop. Filling a memo of the shared object or initializing one of its attributes
+     lazily (`SelfAttrWrite::fills_memo`, `lazy_init`, on any object a parameter or a tagged value
+     holds; through a call, a change of the object a memo-named attribute holds) is no change:
+     what the object computes stays the same. A change below a shallow copy
+     of a parameter (`copy.copy(p).tags.append(x)`) is a change of the parameter.
   4. **Return flow**: a backward walk from the returns a run can reach (`ownership::Live`: not
      a `return` after a `while True:` loop that no `break` leaves) marks each call whose result
      may be returned (as itself, as an element, or as an item of target unpacking; a copy ends
@@ -805,7 +839,10 @@ deep = true   # changes to attributes and nested containers below are forbidden 
    - **`DATA101`**: only `df = pd.concat([df, ...])` / `arr = np.vstack([arr, ...])` whose SSA
      `PhiNode` accumulates across the back edge (`LoopCarried`), or a project call there whose
      callee's `reallocates_params` covers the argument carrying the previous value; one-off
-     concatenation and padding in a loop are excluded.
+     concatenation and padding in a loop are excluded, and so is a value rebuilt only from
+     arithmetic on the previous one (`x = np.concatenate((x - d, [a]))`): an operator holds an
+     operand only as list or tuple concatenation and repetition or dict union, and an operand
+     sliced or computed from the previous array or frame makes it work entry by entry.
 4. **Duplicate aggregation (boundary-only reporting and root-cause grouping)**:
    - In `async A → await async B → sync C → blocking D`, only the first crossing into the
      synchronous world (`async B`) is reported; when more than a threshold (10) of the reports
@@ -835,7 +872,8 @@ deep = true   # changes to attributes and nested containers below are forbidden 
    function finds the shortest chain to each forbidden effect, without entering
    `allowed-callees`, other scope functions, or bodies that do not run at the call (`async def`
    bodies not awaited, generators not iterated). Its nodes are `(function, Body | Result)`: a
-   function returning a generator is entered as what iterating its result runs.
+   function returning a generator is entered as what iterating its result runs. The search
+   reads no guards: an argument switching off a callee's branch does not stop it.
 
 ### 2.5 Layer 3: on-demand analysis of unregistered dependencies (planned)
 - **Boundary (strict)**: **never enter the standard library or packages registered in Layer 2**
