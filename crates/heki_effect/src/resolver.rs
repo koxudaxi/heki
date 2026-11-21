@@ -1895,6 +1895,33 @@ impl ProjectDecls {
         })
     }
 
+    /// The class whose `__hash__` the instances of the project class `class` use: the first
+    /// class along its MRO whose body defines `__hash__` as a method, or binds `__eq__` without
+    /// binding `__hash__` (Python then sets its `__hash__` to `None`). `None` when no project
+    /// class before an external base does (heki does not know what an external class defines),
+    /// or when a class binds `__hash__` otherwise (`__hash__ = Base.__hash__`).
+    pub fn hash_owner(&self, class: &str) -> Option<String> {
+        self.mro(class)
+            .into_iter()
+            .find_map(|c| {
+                self.read(|k| note(&mut k.class_facts, &c));
+                let binds =
+                    |d: &ClassDecl| (d.members.contains("__hash__"), d.members.contains("__eq__"));
+                let defines = || {
+                    self.methods_of(&c)
+                        .iter()
+                        .any(|k| k.qualname.rsplit('.').next() == Some("__hash__"))
+                };
+                match self.class(&c).map(binds) {
+                    None => Some(None),
+                    Some((true, _)) => Some(defines().then_some(c)),
+                    Some((false, true)) => Some(Some(c)),
+                    Some((false, false)) => None,
+                }
+            })
+            .flatten()
+    }
+
     /// Every project class that (transitively) inherits from `class`, sorted.
     pub fn subclasses_of(&self, class: &str) -> Vec<String> {
         let mut out = Vec::new();

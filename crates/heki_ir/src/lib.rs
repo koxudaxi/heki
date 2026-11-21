@@ -10,9 +10,11 @@
 //!   while `heki_effect` continues normally.
 
 mod builder;
+mod dominators;
 mod facts;
 
 pub use builder::build_module_ir;
+pub use dominators::{Dominated, DominatorTree, immediate_dominators};
 pub use facts::{FnIndex, LEN_CAP_MAX, ModuleConstants, SMALL_MAX, SmallDisplay};
 
 use heki_ast::Span;

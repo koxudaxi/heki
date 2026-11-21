@@ -12,8 +12,8 @@ use crate::scc::tarjan_scc;
 use crate::{
     ArgOrigin, AttrKeyPath, BoundCallee, CallHop, CallSite, Construction, Delivery, EffectSummary,
     Facts, FuncKey, LocalOrigins, NewArg, NewCond, NewKind, Origins, ProjectIndex, ProtectedReturn,
-    ReturnsNew, Runner, Shared, SharedChain, SharedLine, SiteRole, TypedFieldWriteSite,
-    UnresolvedWriteSite, WriteKind,
+    ReturnsNew, Runner, Shared, SharedChain, SharedLine, SiteRole, Slot, TypedFieldWriteSite,
+    UnresolvedWriteSite, WriteKind, cache_flow,
 };
 use heki_ast::Span;
 use heki_kb::ExecEffectKind;
@@ -280,11 +280,13 @@ fn recompute(
         }
         s.consumes_params |= consumed.unwrap_or(0) & s.unconditional_forwards;
     }
-    returned_results(
-        index,
-        out.get(func).map(Vec::as_slice).unwrap_or(&[]),
-        &mut s,
-    );
+    if index.opt_in.return_origins {
+        returned_results(
+            index,
+            out.get(func).map(Vec::as_slice).unwrap_or(&[]),
+            &mut s,
+        );
+    }
     if !s.returns_self_attrs.is_empty() {
         drop_attrs_read_by_discarded_calls(index, &self_calls, local, &mut s);
     }
@@ -843,13 +845,13 @@ fn transfer(
                 .or_default()
                 .insert(slot.clone());
         }
+        let memos = facts.memo_param_paths.as_deref().and_then(|m| m.get(&i));
+        let memo = |path: &String| memos.is_some_and(|m| m.contains(path));
         match &o.param {
             Some((p, None)) => {
-                t.mutates_params |= 1u64 << p;
-                t.mutated_param_paths
-                    .entry(*p)
-                    .or_default()
-                    .extend(paths.iter().cloned());
+                for path in paths {
+                    t.note_param_change(*p, path.clone(), memo(path));
+                }
                 if let Some(attrs) = facts.changed_param_attrs.get(&i) {
                     t.changed_param_attrs
                         .entry(*p)
@@ -858,13 +860,12 @@ fn transfer(
                 }
             }
             // The callee's parameter is the caller's `p.attr`: any change of it changes the
-            // object that attribute holds.
+            // object that attribute holds, which fills a memo when the callee only fills one or
+            // when the attribute itself is named as a memo (`self._cache.set(k, v)`).
             Some((p, Some(attr))) => {
-                t.mutates_params |= 1u64 << p;
-                t.mutated_param_paths
-                    .entry(*p)
-                    .or_default()
-                    .insert(attr.clone());
+                let into_memo = matches!(&o.param_slot, Some((q, Slot::Attr(a)))
+                    if q == p && a == attr && cache_flow::is_memo_name(a));
+                t.note_param_change(*p, attr.clone(), into_memo || paths.iter().all(memo));
                 t.changed_param_attrs
                     .entry(*p)
                     .or_default()

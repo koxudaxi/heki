@@ -8,7 +8,9 @@ use crate::construction::{Escape, Pos, Recorder};
 use crate::consumption::{ItemArgs, IterFlow, PerItemCall, Roots, param_iteration};
 use crate::guards::{self, GuardInputs, LocalGuards, per_item_bit};
 use crate::invalidation::{self, Events, FlowWrite, FuncFlow, Reach, SiteFlow};
-use crate::iterations::{self, BetweenSteps, ContainerChange, IteratedContainer, ResultIteration};
+use crate::iterations::{
+    self, BetweenSteps, ContainerChange, IteratedContainer, IteratedResult, ResultIteration,
+};
 use crate::ownership::{self, LocalOrigins, Origins, ParamRole, Source};
 use crate::readonly::{self, Derivation, ProtectedReturn, ReturnStep, Shared};
 use crate::resolver::{
@@ -18,7 +20,7 @@ use crate::resolver::{
 use crate::{
     Access, ArgBinding, ArgOrigin, ArgTargets, AttrKeyPath, BoundCallee, CallHop, CallSite,
     CallTarget, Construction, Contracts, Dispatch, EffectSummary, FileSummary, FuncKey,
-    GuardSubject, Implementers, Items, ModuleInput, NewArg, NewCond, NewKind, PerItem,
+    GuardSubject, Implementers, Items, ModuleInput, NewArg, NewCond, NewKind, OptInFacts, PerItem,
     ProjectDecls, ReadKind, ReturnsNew, Runner, SharedLine, SiteRole, Slot, TypedFieldReadSite,
     TypedFieldWriteSite, Unresolved, UnresolvedAccessSite, UnresolvedWriteSite, WriteKind,
 };
@@ -31,7 +33,7 @@ use heki_ir::{
 use heki_kb::{EffectiveEcosystemKb, ExecEffectKind};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::cell::{OnceCell, RefCell};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -128,13 +130,14 @@ pub(crate) fn summarize_module(
     own: (Arc<ModuleDecls>, DeclKeys),
     track: bool,
     contracts: Option<&dyn Contracts>,
+    opt_in: OptInFacts,
 ) -> FileSummary {
     let (own_decls, completion_reads) = own;
     let (mut file, reads) = if track {
-        decls.record(|| extract_module(input, decls, kb, contracts))
+        decls.record(|| extract_module(input, decls, kb, contracts, opt_in))
     } else {
         (
-            extract_module(input, decls, kb, contracts),
+            extract_module(input, decls, kb, contracts, opt_in),
             DeclKeys::default(),
         )
     };
@@ -149,6 +152,7 @@ fn extract_module(
     decls: &ProjectDecls,
     kb: &EffectiveEcosystemKb,
     contracts: Option<&dyn Contracts>,
+    opt_in: OptInFacts,
 ) -> FileSummary {
     let cx = TypeCtx::new(input, decls, kb);
     let mut file = FileSummary {
@@ -175,13 +179,13 @@ fn extract_module(
             qualname: func_qualname(f).to_owned(),
         };
         let (mut summary, mut sites, flow) =
-            Extractor::new(f, &key, &cx, &input.path, contracts).run();
+            Extractor::new(f, &key, &cx, &input.path, contracts, opt_in).run();
         // A `class` statement in a function runs its body there: the body's effects and calls
         // are the function's (its methods run only when they are called).
         if !f.is_module_body {
             for body in class_bodies_run_by(input.ir, f) {
                 let (s, body_sites, _) =
-                    Extractor::new(body, &key, &cx, &input.path, contracts).run();
+                    Extractor::new(body, &key, &cx, &input.path, contracts, opt_in).run();
                 absorb_class_body(&mut summary, s);
                 sites.extend(
                     body_sites
@@ -354,7 +358,11 @@ fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary) {
     // A must-fact: propagate only through parameters both definitions forward unconditionally.
     into.unconditional_forwards &= other.unconditional_forwards;
     for (i, paths) in other.mutated_param_paths {
-        into.mutated_param_paths.entry(i).or_default().extend(paths);
+        let memos = other.memo_param_paths.as_deref().and_then(|m| m.get(&i));
+        for path in paths {
+            let memo = memos.is_some_and(|m| m.contains(&path));
+            into.note_param_change(i, path, memo);
+        }
     }
     for (i, attrs) in other.changed_param_attrs {
         into.changed_param_attrs.entry(i).or_default().extend(attrs);
@@ -540,6 +548,14 @@ struct Extractor<'a> {
     /// One-level slots of parameters: `p.a` / `p["k"]` of parameter `p` itself, through copies
     /// and agreeing phis (`EffectSummary::inplace_param_slots`).
     param_slot_alias: FxHashMap<VarId, (u8, Slot)>,
+    /// Shallow copies of a parameter, or of the object `p.a` holds (`copy.copy(p)`, `dict(p)`,
+    /// `p.copy()`, `{**p}`), through copies and agreeing phis: a new object holding what the
+    /// original holds, so a change below its top level changes the parameter, as one below
+    /// `param_alias`'s entry would, and a change of its own top level does not.
+    param_copy_alias: FxHashMap<VarId, (u8, Option<String>)>,
+    /// The instructions (block, index) that write an attribute of a parameter (or of a shallow
+    /// copy of one) only to fill a memo or to initialize it lazily (`memo_param_paths`).
+    memo_fills: FxHashSet<(BlockId, usize)>,
     /// `self.<attr>` aliases: `var -> attr`.
     self_attr_alias: FxHashMap<VarId, String>,
     /// `obj.<attr>` with project-class `obj`.
@@ -609,10 +625,12 @@ struct Extractor<'a> {
     maybe_new: FxHashSet<VarId>,
     /// [`Contracts::ownership`]: the facts only ownership contracts read are computed.
     ownership: bool,
+    /// The opt-in facts the enabled rules read.
+    opt_in: OptInFacts,
     /// The value each copy copies ([`Self::copied_from`]), built on first use.
     copy_roots: OnceCell<FxHashMap<VarId, VarId>>,
     /// The function's dominator tree over all its edges, built on first use.
-    dominators: OnceCell<ownership::DominatorTree>,
+    dominators: OnceCell<heki_ir::DominatorTree>,
     /// [`KeyFacts`], built on first use.
     key_facts: OnceCell<KeyFacts<'a>>,
     /// The changes of checked containers of `self` the visit finds, recorded after it
@@ -633,7 +651,7 @@ enum KeyOf<'a> {
 struct KeyFacts<'a> {
     /// Per key, the blocks dominated by a side of a branch on which the container holds the key,
     /// when the branch alone enters that side.
-    sides: FxHashMap<String, FxHashMap<KeyOf<'a>, ownership::Dominated>>,
+    sides: FxHashMap<String, FxHashMap<KeyOf<'a>, heki_ir::Dominated>>,
     /// The index of the first read of each key in each block.
     reads: FxHashMap<String, FxHashMap<(BlockId, KeyOf<'a>), usize>>,
 }
@@ -661,7 +679,7 @@ struct Rebinding {
     /// The index of the first store in each block.
     first_in_block: FxHashMap<BlockId, usize>,
     /// The blocks the stores' blocks dominate.
-    dominated: ownership::Dominated,
+    dominated: heki_ir::Dominated,
 }
 
 /// A project call, for the sites of the object it returns (`SiteRole`).
@@ -682,8 +700,11 @@ struct ProjectCall {
     recv: Option<VarId>,
 }
 
-/// The project calls of a function by span, and the object each of its values holds, for
-/// `ResultIteration::on_arguments`: built once per function, each value's object found once.
+/// The object a value holds ([`CallObjects::object_of`]): a value, or an attribute read of one.
+type Object<'s> = (VarId, Option<&'s str>);
+
+/// The project calls of a function by span, and the object each of its values holds, for the
+/// objects of a `ResultIteration`: built once per function, each value's object found once.
 struct CallObjects<'x> {
     calls_at: FxHashMap<Span, Vec<&'x ProjectCall>>,
     /// The values a project call returns: a property read among them runs a getter, which may
@@ -715,23 +736,26 @@ impl<'x> CallObjects<'x> {
         }
     }
 
-    /// For each call site at `calls`, the parameters (bit `p`) that `iterated` binds to the
-    /// object the site's call binds to its callees' first parameter.
-    fn on_arguments(&self, iterated: &ProjectCall, calls: &[Span]) -> Vec<u64> {
-        let arguments: Vec<(u8, (VarId, Option<&str>))> = iterated
-            .recv
-            .map(|r| (0, r))
-            .into_iter()
-            .chain(
-                iterated
+    /// The iteration `between` steps the results of `calls`, with the objects of the loop's calls
+    /// that the iterated calls bind to a parameter (numbered by their first loop call).
+    fn iteration(&self, between: BetweenSteps, calls: &[(Span, &ProjectCall)]) -> ResultIteration {
+        let arguments: Vec<Vec<(u8, Object<'_>)>> = calls
+            .iter()
+            .map(|(_, call)| {
+                let bound = call
                     .params
                     .iter()
-                    .flat_map(|(_, bound)| bound.iter().copied()),
-            )
-            .filter(|(p, _)| *p < 64)
-            .map(|(p, v)| (p, self.object_of(v)))
+                    .flat_map(|(_, bound)| bound.iter().copied());
+                let all = call.recv.map(|r| (0, r)).into_iter().chain(bound);
+                all.filter(|(p, _)| *p < 64)
+                    .map(|(p, v)| (p, self.object_of(v)))
+                    .collect()
+            })
             .collect();
-        let on: Vec<u64> = calls
+        let bound: FxHashSet<Object<'_>> = arguments.iter().flatten().map(|(_, o)| *o).collect();
+        let mut numbers: FxHashMap<Object<'_>, u32> = FxHashMap::default();
+        let receivers: Vec<Option<u32>> = between
+            .calls
             .iter()
             .map(|span| {
                 let at = self.calls_at.get(span).into_iter().flatten();
@@ -744,26 +768,41 @@ impl<'x> CallObjects<'x> {
                             .map(|(_, v)| *v)
                     })
                 });
-                firsts.fold(0, |bits, first| {
-                    let object = self.object_of(first);
-                    arguments
-                        .iter()
-                        .filter(|(_, o)| *o == object)
-                        .fold(bits, |bits, (p, _)| bits | 1u64 << p)
-                })
+                let object = firsts
+                    .map(|v| self.object_of(v))
+                    .find(|o| bound.contains(o))?;
+                let next = u32::try_from(numbers.len()).unwrap_or(u32::MAX);
+                Some(*numbers.entry(object).or_insert(next))
             })
             .collect();
-        if on.iter().all(|bits| *bits == 0) {
+        let mut results: Vec<IteratedResult> = calls
+            .iter()
+            .zip(arguments)
+            .map(|((call, _), arguments)| IteratedResult {
+                call: *call,
+                arguments: arguments
+                    .into_iter()
+                    .filter_map(|(p, o)| Some((p, *numbers.get(&o)?)))
+                    .collect(),
+            })
+            .collect();
+        results.sort();
+        let receivers = if receivers.iter().all(Option::is_none) {
             Vec::new()
         } else {
-            on
+            receivers
+        };
+        ResultIteration {
+            between,
+            receivers,
+            results,
         }
     }
 
     /// The object `var` holds, as far as the function's code tells: the value it copies, or an
     /// attribute read of one that runs no property getter (`self.registry` read twice is one
     /// object, as the containers `MUT113` checks are attributes of `self`).
-    fn object_of(&self, var: VarId) -> (VarId, Option<&'x str>) {
+    fn object_of(&self, var: VarId) -> Object<'x> {
         let value = self.copied_value(var);
         match self.defs.get(&value).map(|inst| &inst.kind) {
             Some(InstKind::AttrLoad { obj, attr, .. }) if !self.results.contains(&value) => {
@@ -816,6 +855,7 @@ impl<'a> Extractor<'a> {
         cx: &'a TypeCtx<'a>,
         path: &'a Path,
         contracts: Option<&'a dyn Contracts>,
+        opt_in: OptInFacts,
     ) -> Self {
         let (types, narrowed, isinstance_classes) = cx.infer_flow(f);
         let mut defs = FxHashMap::default();
@@ -864,6 +904,8 @@ impl<'a> Extractor<'a> {
             self_vars,
             param_alias: FxHashMap::default(),
             param_slot_alias: FxHashMap::default(),
+            param_copy_alias: FxHashMap::default(),
+            memo_fills: FxHashSet::default(),
             self_attr_alias: FxHashMap::default(),
             obj_attr_alias: FxHashMap::default(),
             dict_of: FxHashMap::default(),
@@ -897,6 +939,7 @@ impl<'a> Extractor<'a> {
             track: false,
             maybe_new: FxHashSet::default(),
             ownership: false,
+            opt_in,
             copy_roots: OnceCell::new(),
             dominators: OnceCell::new(),
             key_facts: OnceCell::new(),
@@ -910,6 +953,7 @@ impl<'a> Extractor<'a> {
             ex.build_reach();
         }
         ex.build_aliases();
+        ex.memo_fills = ex.memo_fills();
         let returned = readonly::returned_values(
             f,
             &ex.defs,
@@ -1059,6 +1103,7 @@ impl<'a> Extractor<'a> {
                 self.param_alias.insert(p.var, (i, None));
             }
         }
+        let rebound = Rebound::of(self.f);
         let mut returned_attrs: FxHashMap<VarId, (VarId, String)> = FxHashMap::default();
         for bb in &self.f.blocks {
             self.pos = (bb.id, 0);
@@ -1072,6 +1117,7 @@ impl<'a> Extractor<'a> {
             let before = (
                 self.param_alias.len(),
                 self.param_slot_alias.len(),
+                self.param_copy_alias.len(),
                 self.self_attr_alias.len(),
                 self.obj_attr_alias.len(),
                 self.dict_of.len(),
@@ -1088,6 +1134,7 @@ impl<'a> Extractor<'a> {
                         .collect();
                     merge_phi(&mut self.param_alias, phi.dst, &inputs, |a| a.clone());
                     merge_phi(&mut self.param_slot_alias, phi.dst, &inputs, |a| a.clone());
+                    merge_phi(&mut self.param_copy_alias, phi.dst, &inputs, |a| a.clone());
                     merge_phi(&mut self.self_attr_alias, phi.dst, &inputs, |a| a.clone());
                     merge_obj_attr_phi(&mut self.obj_attr_alias, phi.dst, &inputs);
                     if !self.item_alias.is_empty() {
@@ -1102,6 +1149,9 @@ impl<'a> Extractor<'a> {
                             }
                             if let Some(a) = self.param_slot_alias.get(src).cloned() {
                                 self.param_slot_alias.insert(*dst, a);
+                            }
+                            if let Some(a) = self.param_copy_alias.get(src).cloned() {
+                                self.param_copy_alias.insert(*dst, a);
                             }
                             if let Some(a) = self.self_attr_alias.get(src).cloned() {
                                 self.self_attr_alias.insert(*dst, a);
@@ -1119,9 +1169,17 @@ impl<'a> Extractor<'a> {
                                 self.item_alias.insert(*dst, i);
                             }
                         }
-                        kind @ (InstKind::AttrLoad { .. } | InstKind::Call { .. }) => {
+                        kind @ (InstKind::AttrLoad { .. }
+                        | InstKind::Call { .. }
+                        | InstKind::MethodCall { .. }
+                        | InstKind::DictLiteral { .. }
+                        | InstKind::AllocBuiltin { .. }) => {
                             if let Some((dst, obj, attr)) = self.attr_load(kind) {
-                                self.alias_attr_load(dst, obj, &attr);
+                                self.alias_attr_load(dst, obj, &attr, &rebound);
+                            } else if let Some(original) = self.shallow_copied_param(kind)
+                                && let Some(dst) = kind.dst()
+                            {
+                                self.param_copy_alias.insert(dst, original);
                             }
                         }
                         InstKind::SubscriptLoad {
@@ -1135,7 +1193,13 @@ impl<'a> Extractor<'a> {
                             // `p["key"]` of a parameter, `td["key"]` of a `TypedDict`: a key of a
                             // typed dict is its field.
                             if let Some(key) = key_const {
-                                if let Some((i, None)) = self.param_alias.get(obj) {
+                                let copied = || {
+                                    rebound
+                                        .keeps_key(key)
+                                        .then(|| self.param_copy_alias.get(obj))
+                                        .flatten()
+                                };
+                                if let Some((i, None)) = self.param_alias.get(obj).or_else(copied) {
                                     self.param_slot_alias
                                         .insert(*dst, (*i, Slot::Key(key.clone())));
                                 }
@@ -1182,13 +1246,14 @@ impl<'a> Extractor<'a> {
                     if let Some(dst) = inst.kind.dst()
                         && let Some((holder, attr)) = returned_attrs.get(&dst)
                     {
-                        self.alias_attr_load(dst, *holder, attr);
+                        self.alias_attr_load(dst, *holder, attr, &rebound);
                     }
                 }
             }
             let after = (
                 self.param_alias.len(),
                 self.param_slot_alias.len(),
+                self.param_copy_alias.len(),
                 self.self_attr_alias.len(),
                 self.obj_attr_alias.len(),
                 self.dict_of.len(),
@@ -1295,13 +1360,21 @@ impl<'a> Extractor<'a> {
     }
 
     /// The alias maps of `dst = obj.<attr>` ([`Self::build_aliases`]).
-    fn alias_attr_load(&mut self, dst: VarId, obj: VarId, attr: &str) {
+    fn alias_attr_load(&mut self, dst: VarId, obj: VarId, attr: &str, rebound: &Rebound<'_>) {
         if attr == "__dict__" {
             let owner = self.owner_of(obj);
             self.dict_of.insert(dst, owner);
             return;
         }
-        if let Some((i, path)) = self.param_alias.get(&obj).cloned() {
+        // An attribute of a shallow copy holds what the original's does, unless the function
+        // may have rebound it on the copy.
+        let copied = || {
+            rebound
+                .keeps_attr(attr)
+                .then(|| self.param_copy_alias.get(&obj))
+                .flatten()
+        };
+        if let Some((i, path)) = self.param_alias.get(&obj).or_else(copied).cloned() {
             if path.is_none() {
                 self.param_slot_alias
                     .insert(dst, (i, Slot::Attr(attr.to_owned())));
@@ -1584,6 +1657,55 @@ impl<'a> Extractor<'a> {
             .str_constant_with(var, &|v| self.defs.get(&v).copied(), &self.types)
     }
 
+    /// [`Self::memo_fills`]: the writes of the parameters' own attributes that fill a memo or
+    /// initialize lazily ([`cache_flow::attr_writes`], each parameter an object of its own).
+    fn memo_fills(&self) -> FxHashSet<(BlockId, usize)> {
+        if self.f.params.is_empty() {
+            return FxHashSet::default();
+        }
+        let objects: FxHashMap<VarId, u32> = self
+            .param_alias
+            .iter()
+            .filter(|(_, (_, path))| path.is_none())
+            .map(|(v, (i, _))| (*v, u32::from(*i)))
+            .collect();
+        cache_flow::attr_writes(self.f, &objects)
+            .into_iter()
+            .filter(|(attr, w)| w.fills_memo(attr) || w.lazy_init)
+            .map(|(_, w)| (w.block, w.index as usize))
+            .collect()
+    }
+
+    /// The parameter (or the object `p.a` holds) the result of `kind` is a shallow copy of
+    /// (`EffectSummary::changed_param_attrs`), holding nothing else: a copy call of the catalog
+    /// or a copy method without other arguments (`copy.copy(p)`, `dict(p)`, `p.copy()`), or a
+    /// display that only unpacks it (`{**p}`, `[*p]`, [`readonly::display_copies`]), of the
+    /// parameter itself, of `p.a`, or of such a copy.
+    fn shallow_copied_param(&self, kind: &InstKind) -> Option<(u8, Option<String>)> {
+        let copied: Vec<VarId> = match kind {
+            InstKind::Call { args, kwargs, .. } | InstKind::MethodCall { args, kwargs, .. }
+                if kwargs.is_empty() && args.len() <= 1 =>
+            {
+                self.derivations(kind)
+                    .into_iter()
+                    .filter(|(_, d)| *d == Derivation::Step(ReturnStep::SHALLOW_COPY))
+                    .map(|(v, _)| v)
+                    .collect()
+            }
+            InstKind::DictLiteral { .. } | InstKind::AllocBuiltin { .. } => {
+                readonly::display_copies(self.f, kind)
+            }
+            _ => return None,
+        };
+        let mut originals = copied.iter().filter_map(|v| {
+            self.param_alias
+                .get(v)
+                .or_else(|| self.param_copy_alias.get(v))
+        });
+        let first = originals.next()?;
+        originals.all(|o| o == first).then(|| first.clone())
+    }
+
     /// `MUT202` derivations of a call's result from its receiver and from its first argument
     /// (copies and element views; see [`readonly::call_derivation`]).
     fn derivations(&self, kind: &InstKind) -> Vec<(VarId, Derivation)> {
@@ -1615,19 +1737,16 @@ impl<'a> Extractor<'a> {
             ),
             _ => return Vec::new(),
         };
-        let symbol = match &callee {
-            Callee::External(s) => s.as_str(),
-            _ => "",
-        };
         let deep = readonly::deep_copy_requested(kwargs, |v| self.f.const_bool(v) == Some(true));
+        let own_items = args.len() > 1 || !kwargs.is_empty();
         let mut out = Vec::new();
         if let Some(r) = recv
-            && let Some(d) = readonly::call_derivation(method, symbol, self.cx.kb, deep)
+            && let Some(d) = readonly::call_derivation(method, &callee, self.cx.kb, deep, own_items)
         {
             out.push((r, d));
         }
         if let Some(a) = args.first()
-            && let Some(d) = readonly::call_derivation(None, symbol, self.cx.kb, deep)
+            && let Some(d) = readonly::call_derivation(None, &callee, self.cx.kb, deep, own_items)
         {
             out.push((*a, d));
         }
@@ -1650,23 +1769,33 @@ impl<'a> Extractor<'a> {
         }
         self.self_container_changes();
         self.resolve_construction();
-        self.returned_origins();
+        if self.opt_in.return_origins {
+            self.returned_origins();
+        }
         self.iterations();
-        let site_spans: FxHashSet<Span> = self.sites.iter().map(|s| s.span).collect();
-        let container_iterations = iterations::container_iterations(
-            f,
-            self.cx,
-            &self.types,
-            &self.self_attr_alias,
-            &site_spans,
-            self.summary.is_generator,
-        );
-        if !container_iterations.is_empty() {
-            self.summary.iteration_facts_mut().container_iterations = container_iterations;
+        if self.opt_in.iterations {
+            let site_spans: FxHashSet<Span> = self.sites.iter().map(|s| s.span).collect();
+            let container_iterations = iterations::container_iterations(
+                f,
+                self.cx,
+                &self.types,
+                &self.self_attr_alias,
+                &site_spans,
+                self.summary.is_generator,
+            );
+            if !container_iterations.is_empty() {
+                self.summary.iteration_facts_mut().container_iterations = container_iterations;
+            }
         }
         self.apply_declaration();
         if self.summary.is_cached_property && f.kind == FunctionKind::Sync {
             self.summary.returns_self_attrs = self.returned_self_attrs();
+        }
+        if f.owner_class_qualname.is_some()
+            && self.key.qualname.rsplit('.').next() == Some("__hash__")
+        {
+            let hashed = self.hashed_whole_self_attrs();
+            self.summary.hashed_whole_self_attrs = (!hashed.is_empty()).then(|| Box::new(hashed));
         }
         self.summary.refresh_typed_field_writes();
         let flow = self.events.take().map(|events| {
@@ -1692,20 +1821,21 @@ impl<'a> Extractor<'a> {
         }
         let site_spans: FxHashSet<Span> = self.sites.iter().map(|s| s.span).collect();
         let objects = CallObjects::new(self);
-        let mut found = Vec::new();
+        // The calls whose results each iteration steps, by its position: one fact per iteration.
+        let mut stepping: BTreeMap<Position, Vec<(Span, &ProjectCall)>> = BTreeMap::new();
         for (call, uses) in self.project_calls.iter().zip(iterated) {
-            for &(_, _, (block, index)) in uses {
-                let inst = &self.f.block(block).insts[index];
-                if let Some(between) =
-                    BetweenSteps::of(self.f, inst, &site_spans, self.summary.is_generator)
-                {
-                    let on_arguments = objects.on_arguments(call, &between.calls);
-                    found.push(ResultIteration {
-                        call: self.sites[call.site].span,
-                        between,
-                        on_arguments,
-                    });
-                }
+            for &(_, _, at) in uses {
+                let span = self.sites[call.site].span;
+                stepping.entry(at).or_default().push((span, call));
+            }
+        }
+        let mut found = Vec::new();
+        for ((block, index), calls) in stepping {
+            let inst = &self.f.block(block).insts[index];
+            if let Some(between) =
+                BetweenSteps::of(self.f, inst, &site_spans, self.summary.is_generator)
+            {
+                found.push(objects.iteration(between, &calls));
             }
         }
         self.summary
@@ -1759,7 +1889,9 @@ impl<'a> Extractor<'a> {
                 }
             }
         }
-        self.result_iterations(&iterated);
+        if self.opt_in.iterations {
+            self.result_iterations(&iterated);
+        }
         // Which call results a plain function returns (a generator's `return` value ends its
         // iteration and is no iterator handed out).
         let mut returned = vec![false; self.project_calls.len()];
@@ -1773,11 +1905,13 @@ impl<'a> Extractor<'a> {
                 }
             }
         }
-        let results: FxHashSet<VarId> = by_dst.keys().copied().collect();
-        let held = iterations::held_results(f, &flow, &results, plain);
-        for call in &self.project_calls {
-            if held.contains(&call.dst) {
-                self.sites[call.site].result_held = true;
+        if self.opt_in.iterations {
+            let results: FxHashSet<VarId> = by_dst.keys().copied().collect();
+            let held = iterations::held_results(f, &flow, &results, plain);
+            for call in &self.project_calls {
+                if held.contains(&call.dst) {
+                    self.sites[call.site].result_held = true;
+                }
             }
         }
         // Each site with the position where the callee's body runs into this function's body
@@ -1886,69 +2020,19 @@ impl<'a> Extractor<'a> {
     /// summary is computed, `callgraph::apply_edge`).
     fn returned_self_attrs(&self) -> BTreeSet<String> {
         let f = self.f;
-        let is_self = |v: &VarId| self.self_vars.contains(v);
-        // `self` itself may only be read from, written to, and called on (project methods,
-        // whose reads count): code that gets `self` may read any attribute.
-        let mut loads: Vec<(VarId, &str)> = Vec::new();
-        for inst in f.blocks.iter().flat_map(|b| &b.insts) {
-            let allowed: Option<VarId> = match &inst.kind {
-                InstKind::AttrLoad { obj, .. } | InstKind::AttrDelete { obj, .. } => Some(*obj),
-                InstKind::AttrStore { obj, value, .. } if !is_self(value) => Some(*obj),
-                InstKind::Copy { dst, src } if is_self(dst) => Some(*src),
-                InstKind::MethodCall { recv, method, .. }
-                    if is_self(recv) || matches!(self.val(*recv), Some(Val::Super(_))) =>
-                {
-                    if !matches!(
-                        self.cx.resolve_method(self.val(*recv), method),
-                        Callee::Project(..)
-                    ) {
-                        return BTreeSet::new();
-                    }
-                    Some(*recv)
-                }
-                _ => None,
-            };
-            if inst
-                .kind
-                .operands()
-                .iter()
-                .any(|v| is_self(v) && Some(*v) != allowed)
-            {
-                return BTreeSet::new();
-            }
-            if let InstKind::AttrLoad { dst, obj, attr } = &inst.kind
-                && is_self(obj)
-            {
-                if attr == "__dict__" {
-                    return BTreeSet::new();
-                }
-                loads.push((*dst, attr));
-            }
-        }
-        if loads.is_empty() {
+        let Some(loads) = self.self_attr_loads().filter(|l| !l.is_empty()) else {
             return BTreeSet::new();
-        }
+        };
         let mut phi_uses: FxHashMap<VarId, Vec<VarId>> = FxHashMap::default();
         let mut tested: FxHashSet<VarId> = FxHashSet::default();
         for bb in &f.blocks {
             for phi in &bb.phis {
                 for (_, v) in &phi.incoming {
-                    if is_self(v) && !is_self(&phi.dst) {
-                        return BTreeSet::new();
-                    }
                     phi_uses.entry(*v).or_default().push(phi.dst);
                 }
             }
-            match bb.terminator {
-                // A returned value is the result.
-                Terminator::Return(Some(v)) if is_self(&v) => return BTreeSet::new(),
-                Terminator::Branch { cond: v, .. } | Terminator::Raise(Some(v)) => {
-                    if is_self(&v) {
-                        return BTreeSet::new();
-                    }
-                    tested.insert(v);
-                }
-                _ => {}
+            if let Terminator::Branch { cond: v, .. } | Terminator::Raise(Some(v)) = bb.terminator {
+                tested.insert(v);
             }
         }
         // The attributes each value may be or hold, from the loads forward: through copies and
@@ -2035,6 +2119,156 @@ impl<'a> Extractor<'a> {
             .map(|(_, attr)| *attr)
             .filter(|attr| !read.contains(attr))
             .map(str::to_owned)
+            .collect()
+    }
+
+    /// The reads `self.<attr>` of a method that hands `self` to no other code, each with the
+    /// value it defines: `self` is only read from, written to, and called on (project methods,
+    /// whose reads count), never merged with another value, tested, raised, or returned. `None`
+    /// when `self` goes anywhere else (code that gets it may read any attribute) or its
+    /// `__dict__` is read.
+    fn self_attr_loads(&self) -> Option<Vec<(VarId, &'a str)>> {
+        let f = self.f;
+        let is_self = |v: &VarId| self.self_vars.contains(v);
+        let mut loads = Vec::new();
+        for inst in f.blocks.iter().flat_map(|b| &b.insts) {
+            let allowed: Option<VarId> = match &inst.kind {
+                InstKind::AttrLoad { obj, .. } | InstKind::AttrDelete { obj, .. } => Some(*obj),
+                InstKind::AttrStore { obj, value, .. } if !is_self(value) => Some(*obj),
+                InstKind::Copy { dst, src } if is_self(dst) => Some(*src),
+                InstKind::MethodCall { recv, method, .. }
+                    if is_self(recv) || matches!(self.val(*recv), Some(Val::Super(_))) =>
+                {
+                    if !matches!(
+                        self.cx.resolve_method(self.val(*recv), method),
+                        Callee::Project(..)
+                    ) {
+                        return None;
+                    }
+                    Some(*recv)
+                }
+                _ => None,
+            };
+            if inst
+                .kind
+                .operands()
+                .iter()
+                .any(|v| is_self(v) && Some(*v) != allowed)
+            {
+                return None;
+            }
+            if let InstKind::AttrLoad { dst, obj, attr } = &inst.kind
+                && is_self(obj)
+            {
+                if attr == "__dict__" {
+                    return None;
+                }
+                loads.push((*dst, attr.as_str()));
+            }
+        }
+        for bb in &f.blocks {
+            let merged = bb
+                .phis
+                .iter()
+                .any(|phi| !is_self(&phi.dst) && phi.incoming.iter().any(|(_, v)| is_self(v)));
+            let escapes = match bb.terminator {
+                Terminator::Return(Some(v))
+                | Terminator::Branch { cond: v, .. }
+                | Terminator::Raise(Some(v)) => is_self(&v),
+                _ => false,
+            };
+            if merged || escapes {
+                return None;
+            }
+        }
+        Some(loads)
+    }
+
+    /// [`EffectSummary::hashed_whole_self_attrs`] of a `__hash__` method, from its own body
+    /// (the reads of the `self` methods and properties it calls are taken away when its final
+    /// summary is computed, `EffectSummary::add_self_reads`).
+    fn hashed_whole_self_attrs(&self) -> BTreeSet<String> {
+        let f = self.f;
+        let Some(loads) = self.self_attr_loads() else {
+            return BTreeSet::new();
+        };
+        // Values a phi merges or a terminator tests, raises, or returns.
+        let mut escaping: FxHashSet<VarId> = FxHashSet::default();
+        for bb in &f.blocks {
+            escaping.extend(
+                bb.phis
+                    .iter()
+                    .flat_map(|p| p.incoming.iter().map(|(_, v)| *v)),
+            );
+            if let Terminator::Return(Some(v))
+            | Terminator::Branch { cond: v, .. }
+            | Terminator::Raise(Some(v)) = bb.terminator
+            {
+                escaping.insert(v);
+            }
+        }
+        let uses = |v: VarId| self.uses.get(&v).into_iter().flatten().copied();
+        let hashes = |kind: &InstKind, v: VarId| match kind {
+            InstKind::Call {
+                callee_var: Some(c),
+                args,
+                kwargs,
+                ..
+            } => {
+                args.as_slice() == [v]
+                    && kwargs.is_empty()
+                    && matches!(self.val(*c), Some(Val::Ref(s)) if s == "builtins.hash")
+            }
+            InstKind::MethodCall {
+                recv,
+                method,
+                args,
+                kwargs,
+                ..
+            } => *recv == v && method == "__hash__" && args.is_empty() && kwargs.is_empty(),
+            _ => false,
+        };
+        // Every use of the value read (through copies) hashes it, or puts it into a tuple
+        // display that is only hashed.
+        let hashed_whole = |load: VarId| {
+            let mut work = vec![load];
+            let mut seen: FxHashSet<VarId> = std::iter::once(load).collect();
+            while let Some(v) = work.pop() {
+                if escaping.contains(&v) {
+                    return false;
+                }
+                for kind in uses(v) {
+                    match kind {
+                        InstKind::Copy { dst, .. } if !f.is_unpacked(*dst) => {
+                            // Copies in dead code can close a cycle.
+                            if seen.insert(*dst) {
+                                work.push(*dst);
+                            }
+                        }
+                        InstKind::AllocBuiltin {
+                            dst,
+                            kind: BuiltinKind::Tuple,
+                            ..
+                        } if !escaping.contains(dst) && uses(*dst).all(|k| hashes(k, *dst)) => {}
+                        kind if hashes(kind, v) => {}
+                        _ => return false,
+                    }
+                }
+            }
+            true
+        };
+        let mut whole: BTreeSet<&str> = BTreeSet::new();
+        let mut read_otherwise: BTreeSet<&str> = BTreeSet::new();
+        for &(v, attr) in &loads {
+            if hashed_whole(v) {
+                whole.insert(attr);
+            } else {
+                read_otherwise.insert(attr);
+            }
+        }
+        whole
+            .difference(&read_otherwise)
+            .map(|a| (*a).to_owned())
             .collect()
     }
 
@@ -2488,7 +2722,8 @@ impl<'a> Extractor<'a> {
                     self.typed_read(owner, &k, ReadKind::DictDirect, span);
                 }
                 // Reading a missing key of a `defaultdict` inserts it.
-                if !is_slice
+                if self.opt_in.iterations
+                    && !is_slice
                     && !crate::consumption::is_unpacking(self.f, *index, span)
                     && matches!(self.val(*obj), Some(Val::Inst(c)) if c == "collections.defaultdict")
                     && !self.key_present(bb, index_in_block, *obj, *index)
@@ -2920,12 +3155,8 @@ impl<'a> Extractor<'a> {
 
     /// The function's own change, at `span`, of parameter `i` at `path`.
     fn mutate_param(&mut self, i: u8, path: String, span: Span) {
-        self.summary.mutates_params |= 1u64 << i;
-        self.summary
-            .mutated_param_paths
-            .entry(i)
-            .or_default()
-            .insert(path);
+        let memo = self.memo_fills.contains(&self.pos);
+        self.summary.note_param_change(i, path, memo);
         self.summary
             .param_change_sites
             .entry(i)
@@ -3347,9 +3578,9 @@ impl<'a> Extractor<'a> {
     }
 
     /// The function's dominator tree over all its edges.
-    fn dominators(&self) -> &ownership::DominatorTree {
+    fn dominators(&self) -> &heki_ir::DominatorTree {
         self.dominators
-            .get_or_init(|| ownership::DominatorTree::of(self.f))
+            .get_or_init(|| heki_ir::DominatorTree::of(self.f))
     }
 
     /// The attribute of `self` whose checked container (`MUT113`) `var` holds.
@@ -3445,6 +3676,9 @@ impl<'a> Extractor<'a> {
     /// An in-place change of the container `var` holds (`MUT113`): of a parameter itself, and of
     /// `self.<attr>` of a class whose iterators check for changes ([`Self::self_changes`]).
     fn container_change(&mut self, var: VarId, change: ContainerChange, span: Span) {
+        if !self.opt_in.iterations {
+            return;
+        }
         if let Some((i, None)) = self.param_alias.get(&var).cloned() {
             let facts = self.summary.iteration_facts_mut();
             iterations::merge_changes(&mut facts.changes_param_containers, [(i, change)]);
@@ -5030,6 +5264,92 @@ fn construction_of(answer: &NewArg, rebinds: bool) -> Construction {
 }
 
 /// Give `dst` the alias shared by every aliased phi input (if they all agree).
+/// What a function may rebind on some object: the attribute names it stores or deletes (also
+/// through `setattr` / `delattr` and `__dict__`), `None` when it may set one it does not name;
+/// and the constant keys it stores or deletes, `None` when it stores under a key it does not name
+/// (`d[k] = v`, `d.update(...)`). An attribute or item of a shallow copy that the function may
+/// rebind may hold a value of its own rather than the original's (`param_copy_alias`).
+struct Rebound<'f> {
+    attrs: Option<FxHashSet<&'f str>>,
+    keys: Option<FxHashSet<&'f str>>,
+}
+
+impl<'f> Rebound<'f> {
+    fn of(f: &'f IrFunction) -> Self {
+        let insts = || f.blocks.iter().flat_map(|b| &b.insts);
+        let mut strings: FxHashMap<VarId, &'f str> = FxHashMap::default();
+        let mut dicts: FxHashSet<VarId> = FxHashSet::default();
+        for inst in insts() {
+            match &inst.kind {
+                InstKind::Const {
+                    dst,
+                    literal: ConstLiteral::Str(text),
+                } => {
+                    strings.insert(*dst, text.as_str());
+                }
+                InstKind::AttrLoad { dst, attr, .. } if attr == "__dict__" => {
+                    dicts.insert(*dst);
+                }
+                _ => {}
+            }
+        }
+        let mut attrs = Some(FxHashSet::default());
+        let mut keys = Some(FxHashSet::default());
+        let add = |set: &mut Option<FxHashSet<&'f str>>, name: Option<&'f str>| match (name, set) {
+            (Some(n), Some(named)) => {
+                named.insert(n);
+            }
+            (_, set) => *set = None,
+        };
+        for inst in insts() {
+            match &inst.kind {
+                InstKind::AttrStore { attr, .. } | InstKind::AttrDelete { attr, .. } => {
+                    add(&mut attrs, Some(attr.as_str()));
+                }
+                InstKind::SubscriptStore { obj, key_const, .. }
+                | InstKind::SubscriptDelete { obj, key_const, .. } => {
+                    let key = key_const.as_deref();
+                    if dicts.contains(obj) {
+                        add(&mut attrs, key);
+                    }
+                    add(&mut keys, key);
+                }
+                InstKind::Call { callee, args, .. }
+                    if matches!(
+                        callee.as_str(),
+                        "setattr" | "delattr" | "object.__setattr__" | "object.__delattr__"
+                    ) =>
+                {
+                    add(
+                        &mut attrs,
+                        args.get(1).and_then(|a| strings.get(a)).copied(),
+                    );
+                }
+                InstKind::MethodCall { recv, method, .. }
+                    if matches!(method.as_str(), "update" | "setdefault" | "__setitem__") =>
+                {
+                    if dicts.contains(recv) {
+                        attrs = None;
+                    }
+                    keys = None;
+                }
+                _ => {}
+            }
+        }
+        Self { attrs, keys }
+    }
+
+    /// Whether the function leaves attribute `attr` of every object it holds as it was.
+    fn keeps_attr(&self, attr: &str) -> bool {
+        self.attrs.as_ref().is_some_and(|a| !a.contains(attr))
+    }
+
+    /// Whether the function leaves the item under `key` of every object it holds as it was.
+    fn keeps_key(&self, key: &str) -> bool {
+        self.keys.as_ref().is_some_and(|k| !k.contains(key))
+    }
+}
+
 fn merge_phi<T: Clone + PartialEq>(
     map: &mut FxHashMap<VarId, T>,
     dst: VarId,

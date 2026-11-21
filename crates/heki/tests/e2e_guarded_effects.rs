@@ -15,6 +15,9 @@
 //!   default is falsy.
 //! - Tests the caller has made (`EFF105`): a call made only when `isinstance(self._input,
 //!   PathLike)` is false does not reach the callee's `isinstance(self._input, PathLike)` branch.
+//! - Paths or buffers (`EFF105`, `EFF101`, `EFF102`): an `io.StringIO` handed to a helper that
+//!   opens its argument only when `hasattr(buf, "write")` is false does not reach the `open`;
+//!   neither does `None` where the helper rebinds it to a buffer before `isinstance(buf, str)`.
 //!
 //! Every fixture marks the lines that must be reported with the rule code in a comment
 //! (`# EFF102`); every other line must not be.
@@ -1274,6 +1277,261 @@ fn correlated_isinstance_guards() {
     );
 }
 
+// =============================================================== paths or buffers
+
+/// Helpers taking a path or a buffer: the file is opened (or the URL fetched) only on the path
+/// branch, chosen by `hasattr`, `isinstance`, or `is None`, also after the helper rebinds its
+/// parameter to a buffer on one branch.
+const BUFFERS: &str = r#"import io
+import os
+from io import StringIO
+from urllib.request import urlopen
+
+
+def save(text, buf=None):
+    if buf is None:
+        return text
+    elif hasattr(buf, "write"):
+        buf.write(text)
+    else:
+        with open(buf, "w") as f:
+            f.write(text)
+    return None
+
+
+def save_named(text, buf):
+    if hasattr(buf, "name"):
+        buf.write(text)
+    else:
+        with open(buf, "w") as f:
+            f.write(text)
+
+
+WRITE = "write"
+
+
+def save_as(text, buf):
+    if hasattr(buf, WRITE):
+        buf.write(text)
+    else:
+        with open(buf, "w") as f:
+            f.write(text)
+
+
+def emit(text, out=None):
+    if out:
+        out.write(text)
+        return
+    with open("log.txt", "a") as f:
+        f.write(text)
+
+
+def write_path(text, dest):
+    if isinstance(dest, (str, os.PathLike)):
+        with open(dest, "w") as f:
+            f.write(text)
+    else:
+        dest.write(text)
+
+
+def write_io(text, dest):
+    if isinstance(dest, io.IOBase):
+        dest.write(text)
+    else:
+        with open(dest, "w") as f:
+            f.write(text)
+
+
+def write_typed(text, dest):
+    if issubclass(type(dest), io.IOBase):
+        dest.write(text)
+    else:
+        with open(dest, "w") as f:
+            f.write(text)
+
+
+def rebound(text, buf=None):
+    if buf is not None:
+        buf = os.fspath(buf)
+    else:
+        buf = StringIO()
+    if hasattr(buf, "write"):
+        buf.write(text)
+    elif isinstance(buf, str):
+        with open(buf, "w") as f:
+            f.write(text)
+
+
+def rebound_default(text, buf=None):
+    if buf is None:
+        buf = StringIO()
+    if isinstance(buf, str):
+        with open(buf, "w") as f:
+            f.write(text)
+
+
+def rebound_named(text, buf=None):
+    if buf is None:
+        buf = StringIO()
+    target = buf
+    if isinstance(target, str):
+        with open(target, "w") as f:
+            f.write(text)
+
+
+def carried(text, buf=None, more=()):
+    if buf is None:
+        buf = StringIO()
+    for p in more:
+        if isinstance(buf, str):
+            with open(buf, "w") as f:
+                f.write(text)
+        buf = p
+
+
+def read_any(src):
+    if hasattr(src, "read"):
+        return src.read()
+    return urlopen(src).read()
+
+
+def lines(items):
+    if isinstance(items, str):
+        with open(items) as f:
+            return f.read().split()
+    return items
+
+
+class Chain:
+    def __init__(self, certs):
+        self.certs = lines(certs)
+
+
+class Buffer(StringIO):
+    pass
+"#;
+
+/// Callers handing a buffer or a path: a buffer or `None` decides the test; a path, an
+/// argument of unknown class, a subclass of a buffer, a value that takes the path branch, or a
+/// test of an attribute a buffer may lack, or of one not named by a string literal, does not.
+/// (More than ten callers reaching `open` would be reported together, so the callers are in two
+/// projects.)
+const BUFFER_USES: &str = r#"import io
+from io import BytesIO, StringIO
+
+from pkg.buffers import Buffer, save, save_as, save_named, write_io, write_path
+
+
+async def saving(t, p):
+    save(t)
+    save(t, None)
+    save(t, StringIO())
+    save(t, io.StringIO())
+    save(t, BytesIO())
+    buf = StringIO()
+    save(t, buf)
+    save(t, "out.txt")  # EFF105
+    save(t, p)  # EFF105
+    save(t, [])  # EFF105
+    save(t, Buffer())  # EFF105
+    save_named(t, StringIO())  # EFF105
+    save_as(t, StringIO())  # EFF105
+
+
+async def paths(t, p):
+    write_path(t, StringIO())
+    write_path(t, BytesIO())
+    write_path(t, p)  # EFF105
+    write_path(t, "out.txt")  # EFF105
+    write_io(t, StringIO())
+    write_io(t, "out.txt")  # EFF105
+    write_io(t, None)  # EFF105
+"#;
+
+/// Callers of the helpers rebinding their parameter, testing a buffer's truth or its class
+/// through `issubclass` (no guard), of a reader of a path, a URL, or a buffer (in an `async def`
+/// and in loops), and of a helper given a display, a comprehension, or a phi of both.
+const REBINDING_USES: &str = r#"from io import BytesIO, StringIO
+
+from pkg.buffers import (
+    Chain,
+    carried,
+    emit,
+    read_any,
+    rebound,
+    rebound_default,
+    rebound_named,
+    write_typed,
+)
+
+
+async def rebinding(t, p):
+    rebound(t)
+    rebound(t, None)
+    rebound(t, "out.txt")  # EFF105
+    rebound_default(t)
+    rebound_default(t, StringIO())
+    rebound_default(t, "out.txt")  # EFF105
+    rebound_default(t, p)  # EFF105
+    carried(t, None, ["out.txt"])  # EFF105
+    rebound_named(t)
+    rebound_named(t, "out.txt")  # EFF105
+
+
+async def flags(t):
+    emit(t, StringIO())
+    emit(t)  # EFF105
+    write_typed(t, StringIO())  # EFF105
+
+
+async def reading(src, data):
+    read_any(BytesIO(data))
+    read_any(StringIO("x"))
+    read_any(src)  # EFF101
+    read_any("https://example.com/")  # EFF101
+    read_any(None)  # EFF101
+    read_any(...)  # EFF101
+
+
+def read_all(srcs, blobs):
+    for b in blobs:
+        read_any(BytesIO(b))
+    for s in srcs:
+        read_any(s)  # EFF102
+
+
+async def chains(xs):
+    certs = []
+    if xs:
+        certs = [x for x in xs]
+    Chain(certs)
+    Chain([x for x in xs])
+    Chain({x for x in xs})
+    Chain({x: x for x in xs})
+    Chain("certs.pem")  # EFF105
+"#;
+
+#[test]
+fn buffer_arguments_switch_path_branches_off() {
+    let rules = ["EFF101", "EFF102", "EFF105"];
+    for (name, uses) in [("buffers", BUFFER_USES), ("rebinding", REBINDING_USES)] {
+        let files = [
+            ("pkg/__init__.py", ""),
+            ("pkg/buffers.py", BUFFERS),
+            ("pkg/uses.py", uses),
+        ];
+        // Python 3.11 builds a comprehension in a frame of its own.
+        for version in ["py311", "py312"] {
+            check_marks(
+                &format!("guards_{name}_{version}"),
+                &files,
+                &["--extend-select", "EFF105", "--target-version", version],
+                &rules,
+            );
+        }
+    }
+}
+
 /// The guards of a callee in another module reach its callers through the index.
 #[test]
 fn guards_cross_modules() {
@@ -1406,5 +1664,27 @@ fn guards_with_generators_and_nested_loops() {
         &[("pkg/__init__.py", ""), ("pkg/iterated.py", ITERATED)],
         &[],
         &["EFF101", "EFF102"],
+    );
+}
+
+/// A list display decides a truthiness test of the helper only when an element is written as
+/// itself: `[*parts]` is empty when `parts` is.
+#[test]
+fn an_unpacked_display_decides_no_truthiness_test() {
+    check_marks(
+        "unpacked_display_truthiness",
+        &[
+            ("pkg/__init__.py", ""),
+            (
+                "pkg/fetch.py",
+                "from urllib.request import urlopen\n\n\ndef fetch(xs):\n    if not xs:\n        return urlopen(\"http://example.com\").read()\n    return b\"\"\n",
+            ),
+            (
+                "pkg/use.py",
+                "from pkg.fetch import fetch\n\n\nasync def known(parts):\n    return fetch([1, *parts])\n\n\nasync def unpacked(parts):\n    return fetch([*parts])  # EFF101\n",
+            ),
+        ],
+        &[],
+        &["EFF101"],
     );
 }

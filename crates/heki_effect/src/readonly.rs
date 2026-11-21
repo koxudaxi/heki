@@ -8,8 +8,8 @@
 //! producer itself. Its summary carries a [`ProtectedReturn`], propagated bottom-up over the call
 //! graph, so a wrapper needs no configuration of its own.
 
-use crate::SharedChain;
-use heki_ir::{Inst, InstKind, IrFunction, PhiNode, Terminator, VarId};
+use crate::{Callee, SharedChain};
+use heki_ir::{DictEntry, Inst, InstKind, IrFunction, PhiNode, Terminator, VarId};
 use heki_kb::{CopyDepth, EffectiveEcosystemKb};
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
@@ -42,6 +42,25 @@ pub fn subscript_step(f: &IrFunction, inst: &Inst, obj_type: Option<&str>) -> Re
             ReturnStep::SHALLOW_COPY
         }
         _ => ReturnStep::ELEMENT,
+    }
+}
+
+/// The values a display that only unpacks others copies into the container it makes: the
+/// one `**m` entry of a dict display, or the starred elements of a list, tuple, or set display
+/// (`{**m}`, `[*xs, *ys]`). The new container is a shallow copy of each
+/// ([`ReturnStep::SHALLOW_COPY`]). A dict display with more entries (`{**m, "k": []}`,
+/// `{**m, **fresh}`) is not followed: which of its items are the copied ones depends on keys
+/// the shared value does not carry.
+pub fn display_copies(f: &IrFunction, kind: &InstKind) -> Vec<VarId> {
+    match kind {
+        InstKind::DictLiteral { entries, .. } => match entries.as_slice() {
+            [DictEntry::Unpack { dict }] => vec![*dict],
+            _ => Vec::new(),
+        },
+        InstKind::AllocBuiltin { elems, .. } if elems.iter().all(|v| f.is_unpacked(*v)) => {
+            elems.clone()
+        }
+        _ => Vec::new(),
     }
 }
 
@@ -152,18 +171,32 @@ pub enum Derivation {
 }
 
 /// The derivation of a call's result from its receiver (`method` set: copy methods, element
-/// accessors) or from its first argument (`method` `None`), for the resolved external `symbol`
-/// (empty for any other callee): copy sanitizers of the catalog copy as deeply as their entry
-/// says, and copy methods of any receiver copy, deeply for `__deepcopy__` and
-/// `model_copy(deep=True)` (`deep_kwarg`).
+/// accessors) or from its first argument (`method` `None`), for the resolved `callee`: copy
+/// sanitizers of the catalog copy as deeply as their entry says, and copy methods of a receiver
+/// that is no project class copy, deeply for `__deepcopy__` and `model_copy(deep=True)`
+/// (`deep_kwarg`). A copy method a project class defines copies as deeply as its own body does,
+/// which its summary says (`EffectSummary::returns_protected`), not its name. A `dict` built
+/// from a mapping and other arguments (`own_items`: `dict(m, k=v)`) holds their values under
+/// their keys, so it is not followed, as a dict display with entries of its own is not
+/// ([`display_copies`]).
 pub fn call_derivation(
     method: Option<&str>,
-    symbol: &str,
+    callee: &Callee,
     kb: &EffectiveEcosystemKb,
     deep_kwarg: bool,
+    own_items: bool,
 ) -> Option<Derivation> {
+    let symbol = match callee {
+        Callee::External(s) => s.as_str(),
+        _ => "",
+    };
+    if method.is_none() && own_items && symbol == "builtins.dict" {
+        return None;
+    }
     let catalogued = kb.lookup(symbol).and_then(|e| e.copy_sanitizer);
-    if catalogued.is_some() || method.is_some_and(|m| COPY_METHODS.contains(&m)) {
+    let copies_by_name =
+        method.is_some_and(|m| COPY_METHODS.contains(&m)) && !matches!(callee, Callee::Project(..));
+    if catalogued.is_some() || copies_by_name {
         let deep_copy = catalogued == Some(CopyDepth::Deep)
             || method == Some("__deepcopy__")
             || method == Some("model_copy") && deep_kwarg;
@@ -301,6 +334,11 @@ pub(crate) fn returned_values<'t>(
             InstKind::SubscriptLoad { obj, .. } => {
                 let derived = subscript_step(f, inst, type_of(*obj));
                 work.push((*obj, step.after(derived)));
+            }
+            InstKind::DictLiteral { .. } | InstKind::AllocBuiltin { .. } => {
+                for copied in display_copies(f, &inst.kind) {
+                    work.push((copied, step.after(ReturnStep::SHALLOW_COPY)));
+                }
             }
             // A call's result derives from its receiver or first argument when it copies or
             // views it; `derive` reports nothing for any other instruction.
