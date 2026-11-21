@@ -17,7 +17,7 @@ use crate::mut_rules::{CallInst, site_call};
 use crate::{CheckContext, ModuleUnit};
 use heki_ast::Span;
 use heki_diagnostics::{Certainty, Diagnostic, TextEdit};
-use heki_effect::{CONTAINER_MUTATORS, CallSite, Items, TypeCtx, Val};
+use heki_effect::{CONTAINER_MUTATORS, CallSite, Items, ProjectDecls, TypeCtx, Val};
 use heki_ir::walk::{self, Answer, Budget, Def, FnShape, Use};
 use heki_ir::{
     BlockId, BuiltinKind, CompareOpKind, ConstLiteral, FnIndex, Inst, InstKind, IrFunction,
@@ -1097,6 +1097,7 @@ pub(crate) fn opt113(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
                     defs: &defs,
                     sizes: &sizes,
                     types,
+                    decls: cx.decls,
                     origins: &origins,
                     budget: budget.get_or_insert_with(|| Budget::of_function("OPT113", f)),
                 };
@@ -1255,6 +1256,7 @@ struct JoinPremises<'p, 'a, 'c> {
     sizes: &'p Sizes<'a, 'c>,
     /// The function's inferred types, annotations included (assumption R2).
     types: &'p FxHashMap<VarId, Val>,
+    decls: &'p ProjectDecls,
     origins: &'p ItemOrigins<'a>,
     budget: &'p Budget,
 }
@@ -1262,6 +1264,44 @@ struct JoinPremises<'p, 'a, 'c> {
 impl JoinPremises<'_, '_, '_> {
     fn builtin_type(&self, v: VarId, classes: &[&str]) -> bool {
         known_instance(self.types, v, classes)
+    }
+
+    /// Whether no project class derived from one of `classes` defines `method` itself: under
+    /// R2 a value annotated with a builtin container may be an instance of such a subclass.
+    fn not_overridden(&self, classes: &[&str], method: &str) -> bool {
+        classes.iter().all(|class| {
+            let subclasses = self.decls.subclasses_of(class);
+            subclasses
+                .iter()
+                .all(|sub| self.decls.mro_method(sub, method).is_none())
+        })
+    }
+
+    /// Whether iterating `v` runs no code of the project: its type is a builtin container, and
+    /// no project subclass of one defines its own `__iter__`.
+    fn iterates_as_builtin(&self, v: VarId) -> bool {
+        self.builtin_type(v, CONTAINERS) && self.not_overridden(CONTAINERS, "__iter__")
+    }
+
+    /// Whether a call is to a builtin that changes no argument and runs no code of the project: no function handed to it (a `key=`, any keyword, `map` / `filter`'s function,
+    /// a `lambda` or a generator expression as an argument).
+    fn inert_builtin(
+        &self,
+        callee_var: Option<VarId>,
+        callee: &str,
+        args: &[VarId],
+        kwargs: &[(Option<String>, VarId)],
+    ) -> bool {
+        let shape = self.sizes.ix.shape();
+        let builtin = self.sizes.ix.builtin(callee_var, callee);
+        builtin.is_some_and(|name| name != "map" && name != "filter")
+            && kwargs.is_empty()
+            && !args.iter().any(|a| {
+                matches!(
+                    shape.inst(*a).map(|i| &i.kind),
+                    Some(InstKind::MakeClosure { .. } | InstKind::MakeGenExpr { .. })
+                )
+            })
     }
 
     /// The loop steps through items of the function's inputs: every source of its items is a
@@ -1404,7 +1444,7 @@ impl JoinPremises<'_, '_, '_> {
                     return walk::Visit::Expand;
                 }
                 let builds = inst.map_or_else(
-                    || self.builtin_type(v, CONTAINERS),
+                    || self.iterates_as_builtin(v),
                     |inst| match &inst.kind {
                         InstKind::AllocBuiltin { .. } | InstKind::DictLiteral { .. } => true,
                         InstKind::Call {
@@ -1421,10 +1461,14 @@ impl JoinPremises<'_, '_, '_> {
                                     | "range"
                             )
                         ),
-                        InstKind::MethodCall { recv, method, .. } => VIEWS
-                            .iter()
-                            .any(|(m, classes)| m == method && self.builtin_type(*recv, classes)),
-                        _ => self.builtin_type(v, CONTAINERS),
+                        InstKind::MethodCall { recv, method, .. } => {
+                            VIEWS.iter().any(|(m, classes)| {
+                                m == method
+                                    && self.builtin_type(*recv, classes)
+                                    && self.not_overridden(classes, m)
+                            })
+                        }
+                        _ => self.iterates_as_builtin(v),
                     },
                 );
                 if builds {
@@ -1512,7 +1556,6 @@ impl JoinPremises<'_, '_, '_> {
     fn same_collection_each_time(&self, inner: &ForLoop<'_>, outer: &ForLoop<'_>) -> bool {
         let f = self.defs.f;
         let shape = self.sizes.ix.shape();
-        let ix = &self.sizes.ix;
         let in_outer = |b: BlockId| shape.in_loop(outer.index, b);
         // A string built in the loop is not followed: an f-string's IR drops its operands.
         let pure_step = |inst: &Inst| match &inst.kind {
@@ -1522,8 +1565,12 @@ impl JoinPremises<'_, '_, '_> {
             | InstKind::BinOp { .. } => true,
             InstKind::AllocBuiltin { kind, .. } => *kind != BuiltinKind::Str,
             InstKind::Call {
-                callee_var, callee, ..
-            } => ix.builtin(*callee_var, callee).is_some(),
+                callee_var,
+                callee,
+                args,
+                kwargs,
+                ..
+            } => self.inert_builtin(*callee_var, callee, args, kwargs),
             InstKind::MethodCall { method, .. } => READING_METHODS.contains(&method.as_str()),
             _ => false,
         };
@@ -1606,7 +1653,7 @@ impl JoinPremises<'_, '_, '_> {
                 kwargs,
                 ..
             } => {
-                ix.builtin(*callee_var, callee).is_none()
+                !self.inert_builtin(*callee_var, callee, args, kwargs)
                     && (args.iter().any(named) || kwargs.iter().any(|(_, v)| named(v)))
             }
             InstKind::AttrStore { obj, .. }

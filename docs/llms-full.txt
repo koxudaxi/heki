@@ -5257,17 +5257,19 @@ Its premises:
   source (`for row in rows: results.append((key, row))`). A call's result, a method's receiver
   (`self.rows`), a module constant, or a display leaves it open.
 - **Idle on a mismatch**: an inner item whose key differs runs only the loads of the two keys and
-  the comparison: no statement before the test or after the `if`, no `else` or `elif`, no
-  earlier `and` operand (`b.active and a.k == b.k`), and no code of the project to advance the
-  inner loop. The inner iterable is a builtin container by its type (`customers: list[Customer]`;
-  an annotation counts, assumption R2), a display, `sorted(...)` or another builtin that builds
-  a container, a view of a `dict`, or the pieces of a `str`. A value of unknown type may be a
-  generator, and a generator, `map`, `filter`, or another call runs code for each item.
+  the comparison: no statement before the test or after the `if`, no `else` or `elif`, no earlier
+  `and` operand (`b.active and a.k == b.k`), and no code of the project to advance the inner loop.
+  The inner iterable is a builtin container by its type (`customers: list[Customer]`; an annotation
+  counts, assumption R2, unless a project subclass of the container defines its own `__iter__`), a
+  display, `sorted(...)` or another builtin that builds a container, a view of a `dict`, or the
+  pieces of a `str` (with the same condition on `items` and `split`). A value of unknown type may be
+  a generator, and a generator, `map`, `filter`, or another call runs code for each item.
 - **Same collection, same keys**: the inner loop steps through the same collection on every
   iteration of the outer loop: its iterable is bound before the outer loop, or computed inside it
   only from values bound before it, and the outer loop does not change those values through
   their names, every name a copy binds to them (`rows = ys` makes `ys` one): no changing method,
-  store, `del`, call that receives one, `yield`, or `await`. Nor does it change the compared key
+  store, `del`, call that receives one (a builtin counts too when it is handed a function, as
+  `sorted(ys, key=f)` is), `yield`, or `await`. Nor does it change the compared key
   of an inner item: no store into or deletion of what the key loads (`b.k = ...` for the key
   `b.k`), and no changing method of the key's object.
 

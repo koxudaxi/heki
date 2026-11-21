@@ -1214,8 +1214,8 @@ fn starred_elements_keep_the_names_in_blockers() {
 /// module constant of 20 items, work before the test or after the `if` for every pair, an earlier
 /// `and` operand, a generator, a `filter` call, or a value of unknown type (it may be a generator)
 /// as the inner iterable, an inner collection the outer loop changes, also through another name
-/// bound to it, rebinds, or may let other code change (`yield`), a store into the compared key of an
-/// inner item, and a trip count the code fixes.
+/// bound to it, rebinds, or may let other code change (`yield`, a builtin handed a function), a store
+/// into the compared key of an inner item, and a trip count the code fixes.
 const PREMISES: &str = r#"RUNNERS = (
     "a", "b", "c", "d", "e", "f", "g", "h", "i", "j",
     "k", "l", "m", "n", "o", "p", "q", "r", "s", "t",
@@ -1477,6 +1477,24 @@ def by_item_value(xs, d: dict):
     return out
 
 
+def sorted_with_key(xs, ys: list, shrink):
+    for a in xs:
+        for b in ys:
+            if a.k == b.k:
+                print(b)
+        sorted(ys, key=shrink)
+
+
+def filter_before(xs, ys: list, keep):
+    kept = filter(keep, ys)
+    out = []
+    for a in xs:
+        for b in kept:
+            if a.k == b.k:
+                out.append(b)
+    return out
+
+
 def yielding(xs, ys):
     for a in xs:
         for b in ys:
@@ -1543,6 +1561,8 @@ fn opt113_states_its_exact_claim_only_when_every_premise_holds() {
             ("by_keys", true, tier(true)),
             ("by_value", true, tier(true)),
             ("by_item_value", true, tier(true)),
+            ("sorted_with_key", false, tier(false)),
+            ("filter_before", false, tier(false)),
             ("yielding", false, tier(false)),
         ],
         "{json}{stderr}"
@@ -1573,4 +1593,74 @@ fn opt113_states_its_exact_claim_only_when_every_premise_holds() {
     assert!(help("by_keys").starts_with("`d` is already keyed by `k`"));
     assert!(help("by_value").starts_with("if the keys are hashable, index `d.items()`"));
     assert!(help("by_item_value").starts_with("if the keys are hashable,"));
+}
+
+/// Under assumption R2 a value annotated `list` may be an instance of a project subclass: one
+/// with its own `__iter__` (or a `dict` subclass with its own `items`) runs code to advance the
+/// inner loop, so the joins over such annotated values are heuristic.
+const OVERRIDES: &str = r#"class LoudList(list):
+    def __iter__(self):
+        print("next")
+        return super().__iter__()
+
+
+class LoudDict(dict):
+    def items(self):
+        print("items")
+        return super().items()
+
+
+def over_list(xs, ys: list):
+    out = []
+    for a in xs:
+        for b in ys:
+            if a.k == b.k:
+                out.append(b)
+    return out
+
+
+def over_items(xs, d: dict):
+    out = []
+    for a in xs:
+        for k, v in d.items():
+            if v.k == a.k:
+                out.append(k)
+    return out
+
+
+def over_sorted(xs, ys: list):
+    out = []
+    for a in xs:
+        for b in sorted(ys):
+            if a.k == b.k:
+                out.append(b)
+    return out
+"#;
+
+#[test]
+fn opt113_leaves_annotated_iterables_open_when_a_project_subclass_iterates_its_own_way() {
+    let p = Project::new("regr_opt113_overrides");
+    p.write("app.py", OVERRIDES);
+    let (_, json, stderr) = p.heki(&["check", "--select", "OPT113", "--output-format", "json"]);
+    let diags: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap();
+    let exact = "does nothing else for an item that does not match";
+    let tiers: Vec<(&str, bool)> = diags
+        .iter()
+        .map(|d| {
+            (
+                d["qualname"].as_str().unwrap(),
+                d["message"].as_str().unwrap().ends_with(exact),
+            )
+        })
+        .collect();
+    // `sorted(...)` builds a builtin list whatever it is given.
+    assert_eq!(
+        tiers,
+        [
+            ("over_list", false),
+            ("over_items", false),
+            ("over_sorted", true)
+        ],
+        "{json}{stderr}"
+    );
 }

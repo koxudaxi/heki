@@ -431,6 +431,11 @@ const SCHEMA_REBINDING: &str =
     "from pkg import schema\n\n\ndef reconfigure():\n    schema.SQL = \"SELECT 1\"\n";
 const QUEUE_READER: &str = "import httpx\n\nfrom pkg.queue_cfg import QUEUE\n\n\ndef each():\n    for item in QUEUE:\n        httpx.Client()\n";
 const QUEUE_MAPPER: &str = "import httpx\n\nfrom pkg.queue_cfg import QUEUE\n\n\ndef each():\n    return list(map(lambda item: httpx.Client(), QUEUE))\n";
+// `OPT113`'s exact tier needs advancing the inner loop to run no project code: a project
+// subclass of `list` with its own `__iter__`, which an argument annotated `list` may be (R2),
+// leaves it open.
+const JOIN_USER: &str = "def join(xs, ys: list):\n    out = []\n    for a in xs:\n        for b in ys:\n            if a.k == b.k:\n                out.append(b)\n    return out\n";
+const LOUD_LIST: &str = "class LoudList(list):\n    def __iter__(self):\n        print(\"next\")\n        return super().__iter__()\n";
 const LEVELS_USER: &str = "from pkg.levels import LEVELS\n\n\ndef ranks(xs):\n    out = []\n    for x in xs:\n        out.append(LEVELS.index(x))\n    return out\n";
 // A module body reads an imported name as a copy of its `Import`: its loop over the list is
 // fixed while the list is.
@@ -630,6 +635,7 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/handoff.py", HANDOFF),
         ("pkg/levels.py", LEVELS),
         ("pkg/levels_user.py", LEVELS_USER),
+        ("pkg/join_user.py", JOIN_USER),
         ("pkg/levels_docs.py", LEVELS_DOCS),
         ("pkg/stmts.py", STMTS),
         ("pkg/stmts_chain.py", STMTS_CHAIN),
@@ -1188,6 +1194,19 @@ fn steps_task_arguments() -> Vec<Step> {
 /// item, and over a tuple, which nothing grows.
 fn steps_small_displays() -> Vec<Step> {
     vec![
+        // `ProjectDecls::subclasses_of` and `mro_method`: a join over an argument annotated
+        // `list` changes tier when another module defines or removes a subclass of `list` that
+        // iterates its own way.
+        Step::new(
+            "another module defines a subclass of list with its own __iter__",
+            vec![Action::Create("pkg/loud.py", LOUD_LIST.to_owned())],
+        )
+        .present(&[("pkg/join_user.py", "OPT113")]),
+        Step::new(
+            "the module with the subclass is deleted",
+            vec![Action::Delete("pkg/loud.py")],
+        )
+        .present(&[("pkg/join_user.py", "OPT113")]),
         Step::new(
             "a module-level list another file scans in a loop starts growing",
             vec![save("pkg/levels.py", LEVELS_GROWN)],
