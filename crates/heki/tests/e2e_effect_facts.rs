@@ -418,7 +418,7 @@ def by_key(orders, customers):
             (14, "build a `set` of `right` before the outer loop".to_owned()),
             (
                 23,
-                "index `customers` in a `dict` from `customer.id` to the list of elements with that key before the outer loop, then read each outer key with `.get(key, [])` so that a key with no element keeps its empty list".to_owned()
+                "if the keys are hashable, index `customers` in a `dict` from `customer.id` to the list of elements with that key before the outer loop, then read each outer key with `.get(key, [])` so that a key with no element keeps its empty list".to_owned()
             ),
         ]
     );

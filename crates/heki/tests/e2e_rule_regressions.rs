@@ -1213,9 +1213,10 @@ fn starred_elements_keep_the_names_in_blockers() {
 }
 
 /// `OPT113`'s exact claim, and the shapes that leave a premise of it open: the outer loop over a
-/// module constant of 20 items, work before the test or after the `if` for every pair, an earlier `and`
-/// operand, a generator as the inner iterable, an inner collection the outer loop changes, and a
-/// trip count the code fixes.
+/// module constant of 20 items, work before the test or after the `if` for every pair, an earlier
+/// `and` operand, a generator or a `filter` call as the inner iterable, an inner collection the
+/// outer loop changes, rebinds, or may let other code change (`yield`), and a trip count the code
+/// fixes.
 const PREMISES: &str = r#"RUNNERS = (
     "a", "b", "c", "d", "e", "f", "g", "h", "i", "j",
     "k", "l", "m", "n", "o", "p", "q", "r", "s", "t",
@@ -1311,6 +1312,61 @@ def after_if_work(xs, ys, log):
                 out.append(a)
             log(b)
     return out
+
+
+def filtered_inner(xs, ys, keep):
+    out = {}
+    for a in xs:
+        for b in filter(keep, ys):
+            if a.k == b.k:
+                out[a.k] = b
+    return out
+
+
+def enumerated(xs, ys):
+    out = []
+    for a in xs:
+        for i, b in enumerate(ys):
+            if a.k == b.k:
+                out.append(i)
+    return out
+
+
+def view(xs, table):
+    out = []
+    for a in xs:
+        for b in table.values():
+            if a.k == b.k:
+                out.append(b)
+    return out
+
+
+def either(xs, ys, zs, flag):
+    rows = ys if flag else zs
+    out = []
+    for a in xs:
+        for b in rows:
+            if a.k == b.k:
+                out.append(b)
+    return out
+
+
+def rebound(xs, ys, zs):
+    out = []
+    for a in xs:
+        rows = ys if a.flag else zs
+        for b in rows:
+            if a.k == b.k:
+                out.append(b)
+    return out
+
+
+def yielding(xs, ys):
+    for a in xs:
+        for b in ys:
+            if a.k == b.k:
+                print(b)
+        yield a
 "#;
 
 #[test]
@@ -1353,6 +1409,12 @@ fn opt113_states_its_exact_claim_only_when_every_premise_holds() {
             ("sliced", false, tier(false)),
             ("str_keys", true, tier(true)),
             ("after_if_work", false, tier(false)),
+            ("filtered_inner", false, tier(false)),
+            ("enumerated", true, tier(true)),
+            ("view", true, tier(true)),
+            ("either", true, tier(true)),
+            ("rebound", false, tier(false)),
+            ("yielding", false, tier(false)),
         ],
         "{json}{stderr}"
     );

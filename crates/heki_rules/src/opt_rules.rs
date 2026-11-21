@@ -1131,7 +1131,7 @@ pub(crate) fn opt113(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
                         "nested loops join `{outer_iter}` and `{inner_iter}` on `{lhs} == {rhs}`"
                     )
                 };
-                let Some(d) = cx.emit(
+                if let Some(d) = cx.emit(
                     out,
                     "OPT113",
                     unit,
@@ -1141,15 +1141,14 @@ pub(crate) fn opt113(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
                     message,
                     Some(help),
                     &[],
-                ) else {
-                    continue;
-                };
-                if exact {
-                    d.evidence = Some(format!(
-                        "established: both loops step through inputs and their trip counts are not fixed, a pair that does not match runs only the comparison, and `{inner_iter}` is the same collection on every outer iteration"
-                    ));
-                } else {
-                    d.certainty = Certainty::Heuristic;
+                ) {
+                    if exact {
+                        d.evidence = Some(format!(
+                            "established: both loops step through inputs and their trip counts are not fixed, a pair that does not match runs only the comparison, and `{inner_iter}` is the same collection on every outer iteration"
+                        ));
+                    } else {
+                        d.certainty = Certainty::Heuristic;
+                    }
                 }
             }
         }
@@ -1193,15 +1192,16 @@ impl JoinPremises<'_, '_, '_> {
     /// parameter, an attribute or an item of one (a call result needs the catalog to say what
     /// it yields, and a method's receiver, a module constant, or a display is not an input).
     fn steps_through_inputs(&self, lp: &ForLoop<'_>) -> bool {
-        match self.origins.of_loop(self.budget, self.defs.f.id, lp.index) {
-            Answer::Known(origins) => {
+        // Open (a budget spent) establishes nothing.
+        self.origins
+            .of_loop(self.budget, self.defs.f.id, lp.index)
+            .map(|origins| {
                 !origins.is_empty()
                     && origins.iter().all(|o| {
                         matches!(o.source, ItemSource::Param(_) | ItemSource::ParamPart(_))
                     })
-            }
-            Answer::Open => false,
-        }
+            })
+            .open_means(false)
     }
 
     /// The code fixes no trip count of the loop: a fixed count past 16 is no evidence either
@@ -1226,12 +1226,11 @@ impl JoinPremises<'_, '_, '_> {
         let key = |v: &VarId| inner.element.contains(v) || outer.element.contains(v);
         // A constant read only as the index of a key (`row["id"]`) runs no code either.
         let index_of_key = |c: &VarId| {
-            shape.readers(*c).iter().all(|u| match *u {
-                Use::Inst(b, i) => matches!(
+            shape.readers(*c).iter().all(|u| {
+                matches!(*u, Use::Inst(b, i) if matches!(
                     &f.block(b).insts[i as usize].kind,
                     InstKind::SubscriptLoad { dst, index, .. } if index == c && key(dst)
-                ),
-                Use::Phi(..) | Use::Terminator(_) => false,
+                ))
             })
         };
         let key_work = |inst: &Inst| match &inst.kind {
@@ -1281,9 +1280,11 @@ impl JoinPremises<'_, '_, '_> {
     /// Advancing the inner loop runs no code of the project: its iterable is an input, an
     /// attribute or an item of one, a display or a comprehension's result, a builtin that
     /// builds a container (`sorted`, `list`, `range`, ...), a dict view or the pieces of a
-    /// string, or `enumerate` / `zip` / `reversed` / `iter` of such iterables. A generator, a
-    /// `map` or `filter` call, or any other call may run code for every pair.
+    /// string, or `enumerate` / `zip` / `reversed` / `iter` of such iterables, also through a
+    /// phi. A generator, a `map` or `filter` call, or any other call may run code for every
+    /// pair.
     fn steps_run_no_code(&self, inner: &ForLoop<'_>) -> bool {
+        let f = self.defs.f;
         let shape = self.sizes.ix.shape();
         let ix = &self.sizes.ix;
         fn lazy<'i>(ix: &FnIndex<'_>, shape: &FnShape<'_>, inst: &'i Inst) -> Option<&'i [VarId]> {
@@ -1310,19 +1311,21 @@ impl JoinPremises<'_, '_, '_> {
             self.budget,
             [inner.iterable],
             |v, out| {
-                if let Some(args) = shape
-                    .inst(shape.copy_root(v))
-                    .and_then(|i| lazy(ix, shape, i))
-                {
+                let v = shape.copy_root(v);
+                if let Def::Phi(b, i) = shape.def(v) {
+                    out.extend(f.block(b).phis[i as usize].incoming.iter().map(|(_, x)| *x));
+                } else if let Some(args) = shape.inst(v).and_then(|i| lazy(ix, shape, i)) {
                     out.extend(args.iter().copied());
                 }
             },
             |v| {
                 let v = shape.copy_root(v);
                 let Some(inst) = shape.inst(v) else {
+                    // A phi steps through what one of its inputs is.
                     return match shape.def(v) {
                         Def::Param => walk::Visit::Prune,
-                        _ => walk::Visit::Stop(()),
+                        Def::Phi(..) => walk::Visit::Expand,
+                        Def::Inst(..) | Def::None => walk::Visit::Stop(()),
                     };
                 };
                 if lazy(ix, shape, inst).is_some() {
