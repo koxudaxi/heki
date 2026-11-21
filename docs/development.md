@@ -156,8 +156,25 @@ and the linear lookups `FnShape` answers from a table (W4). `crates/heki/tests/w
 the functions it still allows, each with its reason. The test fails on a finding the list does
 not allow and on an entry that finds nothing any more, so the list only shrinks as walks move.
 
-`heki check --walk-steps <path>` (hidden) writes the steps each owner's walks took per function as
-JSON: growth across sizes of a shape is then checked without timing noise.
+```console
+$ cargo build --release
+$ python3 scripts/check_walk_shapes.py --heki target/release/heki
+```
+
+`scripts/check_walk_shapes.py` runs generated shapes on the release binary, and CI runs it next to
+the memory gate. A shape that lives in one function is placed in a function, a method, and a module
+body, and grown to the largest size whose function the IR budget still models, so a builder change
+moves the size with it; a shape spread over a project (a wide class hierarchy, a chain of private
+helpers) has a fixed size. Each runs with every rule and one contract of each kind, through `heki
+check` and the `--watch` engine, and fails when it costs more than 1 s (on the machine the limits
+were measured on, scaled to the machine running the gate by linear shapes of calls and of loops) or
+1 GiB beyond an empty module. `heki check --walk-steps <path>` (hidden) writes the steps each
+owner's walks took per function as JSON: the gate also fails when an owner's steps grow more than
+2.5 times from half the size to the full size, or when a budget is spent on a shape like real code.
+`KNOWN_OVER` in the script lists the shapes known to cost more, and only shrinks: a listed shape
+runs only through `heki check` (not the `--watch` engine), with a short timeout, and fails the gate
+once it costs under a quarter of the limits. `KNOWN_STEPS` lists, the same way, the shapes whose
+steps are known to grow faster than linearly or to spend a budget.
 
 Each bound comes with a shape in `crates/heki/tests/e2e_analysis_bounds.rs` that is slow without it,
 checked against a time limit: comparisons sharing an operand thirty deep, many `match` statements of
@@ -175,8 +192,13 @@ behind as many tests, a function making twenty thousand calls of eight operands 
 types nothing making thousands of strict accesses of one name that one caller calls as many times, a
 helper that types nothing reading, calling, or writing one strict target name thousands of times,
 which a caller calls as many times, many `is` tests each followed by a conditional expression on the
-tested parameter, many branches on a long chain of copies of one `is` test, a long chain of returned
-calls each handed the previous call's result as two of its arguments, a long chain of returned
+tested parameter, many branches on a long chain of copies of one `is` test,
+thousands of tests of an object's state before thousands of acquisitions of its lock, thousands of
+locks held at once over thousands of blocks, thousands of fan-outs of one session in one function,
+hundreds of comprehension fan-outs, thousands of tasks a task group starts in one loop, a long chain
+of returned
+calls each handed the previous call's result as two of its arguments, a function of twelve thousand
+calls each handed the previous call's result, with every rule selected, a long chain of returned
 aliases each appended to one list or to a new list of its own, a long chain of conditional
 expressions each choosing between a call of the previous value and the value, one returned call
 handed the last of a long chain of item reads as each of its arguments, a loop carrying a long chain
@@ -198,7 +220,11 @@ one after another, and of a chain of hundreds of `and` tests of module constants
 origins of a chain of thousands of wrappers, of a list filled by appends in a thousand loops, and of
 a phi of sixty branches each choosing a different parameter, and thousands of `call-owners` targets,
 in one contract or in as many contracts, and thousands of references to a `call-owners` target that
-a long chain of phis carries to one `return`.
+a long chain of phis carries to one `return`, an argument handed down through thousands of functions
+of one module to the one that changes it, thousands of reports whose call chains enter one module,
+the callers of the bottom of a lattice of calls thirty levels deep, the chains `heki inspect` walks
+down thousands of calls of one module, a value chosen among a thousand module globals before it is
+changed, and thousands of calls handing a global to a helper that changes it.
 
 A change to the IR builder, a walk, a fixpoint, or a rule's state is also run over a large
 corpus of real projects before it is merged, every run under a memory cap and a timeout. No

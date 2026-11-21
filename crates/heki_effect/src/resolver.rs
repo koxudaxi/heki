@@ -16,7 +16,7 @@ use crate::types::{Args, Elem, Generic, Ty, generic, typing_generic};
 use crate::{FuncKey, ModuleInput};
 use heki_ast::Span;
 use heki_env::HekiConfig;
-use heki_ir::walk::{Answer, Budget, Visit, reach};
+use heki_ir::walk::{Answer, Budget, FnShape, Visit, reach};
 use heki_ir::{
     BinOpKind, BlockId, ConstLiteral, FnIndex, FunctionKind, Inst, InstKind, IrFunction, ModuleIr,
     SmallDisplay, Terminator, VarId,
@@ -3345,7 +3345,7 @@ fn imported_fqn(
     if depth > 8 {
         return None;
     }
-    match &ix.def_inst(v)?.kind {
+    match &ix.shape.inst(v)?.kind {
         InstKind::Copy { src, .. } => imported_fqn(ix, imports, *src, depth + 1),
         InstKind::LoadGlobal { name, .. } | InstKind::LoadName { name, .. } => {
             imports.get(name).cloned()
@@ -3890,7 +3890,7 @@ fn class_attrs_rebound<'i>(
         let defs: FxHashMap<VarId, &InstKind> = insts()
             .filter_map(|i| Some((i.kind.dst()?, &i.kind)))
             .collect();
-        let mut roots: FxHashMap<VarId, VarId> = FxHashMap::default();
+        let shape = FnShape::new(f);
         let receiver = match (&f.owner_class_qualname, f.params.first()) {
             (Some(owner), Some(p))
                 if is_summarized_function(f) && !f.has_decorator(&["staticmethod"]) =>
@@ -3905,7 +3905,7 @@ fn class_attrs_rebound<'i>(
             else {
                 continue;
             };
-            let class = match defs.get(&copy_root(&defs, &mut roots, *obj)) {
+            let class = match defs.get(&shape.copy_root(*obj)) {
                 Some(InstKind::LoadGlobal { name, .. } | InstKind::LoadName { name, .. })
                     if decls.classes.contains_key(name.as_str()) =>
                 {
@@ -3927,33 +3927,6 @@ fn class_attrs_rebound<'i>(
         }
     }
     out
-}
-
-/// The value `var` copies, through any number of copies. Each value's root is kept in `roots`,
-/// so the stores through one long chain of aliases walk it once.
-fn copy_root(
-    defs: &FxHashMap<VarId, &InstKind>,
-    roots: &mut FxHashMap<VarId, VarId>,
-    var: VarId,
-) -> VarId {
-    let mut chain = Vec::new();
-    let mut cur = var;
-    let root = loop {
-        if let Some(root) = roots.get(&cur) {
-            break *root;
-        }
-        match defs.get(&cur) {
-            Some(InstKind::Copy { src, .. }) => {
-                chain.push(cur);
-                cur = *src;
-            }
-            _ => break cur,
-        }
-    };
-    for v in chain {
-        roots.insert(v, root);
-    }
-    root
 }
 
 /// What a module-level constant is bound to, behind `var` (through copies): a string literal
@@ -4051,12 +4024,13 @@ fn readonly_metadata(input: &ModuleInput<'_>, decls: &mut ModuleDecls) {
                 .any(|b| NAMED_TUPLE_BASES.contains(&b.as_str()))
         });
         let (mut fields, mut readonly) = (BTreeSet::new(), BTreeSet::new());
+        let shape = FnShape::new(body);
         for ann in &body.local_annotations {
             let (q, container) = container_annotation(&ann.annotation, &resolve);
             if ann.target.contains('.') || !container {
                 continue;
             }
-            if !compares_false(body, ann.span, &resolve) {
+            if !compares_false(&shape, ann.span, &resolve) {
                 fields.insert(ann.target.clone());
             }
             // `Final` in the body of other classes declares a class-level constant.
@@ -4194,10 +4168,11 @@ fn class_properties(input: &ModuleInput<'_>, decls: &mut ModuleDecls) {
 /// Whether the class-body statement at `span` assigns `field(..., compare=False)`
 /// (`dataclasses.field`): the field is state outside the instance's value.
 fn compares_false(
-    body: &IrFunction,
+    shape: &FnShape<'_>,
     span: Span,
     resolve: &impl Fn(&str) -> Option<String>,
 ) -> bool {
+    let body = shape.f;
     let insts = || body.blocks.iter().flat_map(|b| &b.insts);
     insts()
         .filter(|i| span.start <= i.span.start && i.span.end <= span.end)
@@ -4221,7 +4196,7 @@ fn compares_false(
             };
             name.and_then(|n| resolve(&n)).as_deref() == Some("dataclasses.field")
                 && kwargs.iter().any(|(k, v)| {
-                    k.as_deref() == Some("compare") && body.const_bool(*v) == Some(false)
+                    k.as_deref() == Some("compare") && shape.bool_const(*v) == Some(false)
                 })
         })
 }
@@ -4874,6 +4849,9 @@ pub struct TypeCtx<'a> {
     import_by_span: FxHashMap<Span, String>,
     /// Inference state shared by the functions of the module (child scopes and their parents).
     pub(crate) scopes: crate::infer::Scopes,
+    /// The module's functions whose variables nested functions capture, by qualname, as indices
+    /// into the module's functions ([`Self::captures`]); built on first use.
+    captured: std::sync::OnceLock<FxHashMap<String, Vec<usize>>>,
     /// The module's bindings for the path facts, built on first use.
     bindings: std::cell::OnceCell<heki_ir::ModuleBindings>,
     /// [`ProjectDecls::function_taken`] by class and name, asked once per module (the module's
@@ -4901,6 +4879,28 @@ static EMPTY_DECLS: ModuleDecls = ModuleDecls {
 };
 
 impl<'a> TypeCtx<'a> {
+    /// Whether nested functions of the module's function `qualname` capture its variable
+    /// `name` (a closure cell of it).
+    pub(crate) fn captures(&self, qualname: &str, name: &str) -> bool {
+        let functions = &self.ir.functions;
+        let captured = self.captured.get_or_init(|| {
+            let mut by_qualname: FxHashMap<String, Vec<usize>> = FxHashMap::default();
+            for (i, f) in functions.iter().enumerate() {
+                if !f.captured_vars.is_empty() {
+                    by_qualname
+                        .entry(func_qualname(f).to_owned())
+                        .or_default()
+                        .push(i);
+                }
+            }
+            by_qualname
+        });
+        captured.get(qualname).is_some_and(|ids| {
+            ids.iter()
+                .any(|&i| functions[i].captured_vars.iter().any(|c| c == name))
+        })
+    }
+
     pub fn new(
         input: &'a ModuleInput<'a>,
         project: &'a ProjectDecls,
@@ -4923,6 +4923,7 @@ impl<'a> TypeCtx<'a> {
             ir: input.ir,
             import_by_span,
             scopes: crate::infer::Scopes::default(),
+            captured: std::sync::OnceLock::new(),
             bindings: std::cell::OnceCell::new(),
             taken: RefCell::default(),
         }
@@ -4947,6 +4948,15 @@ impl<'a> TypeCtx<'a> {
         f.owner_class_qualname
             .as_ref()
             .map(|q| format!("{}.{q}", self.module_name()))
+    }
+
+    /// The fully qualified name of the object a module-level name read inside this module is:
+    /// what an import binds (`from pkg.locks import LOCK`), or this module's own global.
+    pub fn global_fqn(&self, name: &str) -> String {
+        match self.module.imports.get(name) {
+            Some(t) => self.project.canonical(t),
+            None => format!("{}.{name}", self.module_name()),
+        }
     }
 
     /// Value of a module-level name read inside this module.
@@ -5369,14 +5379,15 @@ impl<'a> TypeCtx<'a> {
         None
     }
 
-    /// [`Self::str_constant_with`] in `f`, whose variables have the inferred values `types`.
+    /// [`Self::str_constant_with`] in the function of `shape`, whose variables have the inferred
+    /// values `types`.
     pub fn str_constant_in(
         &self,
-        f: &IrFunction,
+        shape: &FnShape<'_>,
         var: VarId,
         types: &FxHashMap<VarId, Val>,
     ) -> Option<String> {
-        self.str_constant_with(var, &|v| f.def_inst(v).map(|(_, inst)| inst), types)
+        self.str_constant_with(var, &|v| shape.inst(v), types)
     }
 
     /// [`ProjectDecls::catalog`] of this module's project.

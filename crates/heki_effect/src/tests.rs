@@ -774,6 +774,8 @@ fn gate_5_handbuilt_file_summaries() {
         queues: None,
         result_held: false,
         is_base: false,
+        state_tests: None,
+        under_lock: false,
         complete: false,
         on_every_return: crate::OnEveryReturn::default(),
     });
@@ -1424,6 +1426,8 @@ fn callers_left_without_a_defining_file_are_skipped() {
         queues: None,
         result_held: false,
         is_base: false,
+        state_tests: None,
+        under_lock: false,
         complete: false,
         on_every_return: crate::OnEveryReturn::default(),
     });
@@ -1456,6 +1460,8 @@ fn callers_left_without_a_defining_file_are_skipped() {
         queues: None,
         result_held: false,
         is_base: false,
+        state_tests: None,
+        under_lock: false,
         complete: false,
         on_every_return: crate::OnEveryReturn::default(),
     });
@@ -1486,6 +1492,8 @@ fn callers_left_without_a_defining_file_are_skipped() {
         queues: None,
         result_held: false,
         is_base: false,
+        state_tests: None,
+        under_lock: false,
         complete: false,
         on_every_return: crate::OnEveryReturn::default(),
     });
@@ -1614,4 +1622,232 @@ fn classes_missing_from_the_semantic_model_keep_their_methods_summarized() {
             .direct_exec_effects
             .contains(&Sleep)
     );
+}
+
+// ================================================================ shared state (inspect)
+
+/// The module globals a summary's own body changes, by name.
+fn changed_globals(s: &EffectSummary) -> Vec<&str> {
+    s.changed_state()
+        .iter()
+        .filter_map(|(k, _)| match k {
+            SharedState::Global(name) => Some(name.as_str()),
+            SharedState::Cell(_) => None,
+        })
+        .collect()
+}
+
+#[test]
+fn module_globals_changed_directly_and_through_calls() {
+    let index = project(&[(
+        "m.py",
+        "import os\n\nCACHE = {}\nREGISTRY = []\nn = 0\n\n\ndef clear():\n    CACHE.clear()\n\n\ndef register(x):\n    REGISTRY.append(x)\n\n\ndef bump():\n    global n\n    n += 1\n\n\ndef drop():\n    global n\n    del n\n\n\ndef set_env():\n    os.environ[\"X\"] = \"1\"\n\n\ndef rename(settings):\n    settings.debug = True\n\n\ndef read():\n    return CACHE.get(\"k\")\n\n\ndef caller():\n    clear()\n\n\ndef rows():\n    yield REGISTRY.pop()\n\n\ndef walks():\n    for _ in rows():\n        pass\n\n\ndef hands_out():\n    return rows()\n",
+    )]);
+    for (f, name) in [
+        ("clear", "CACHE"),
+        ("register", "REGISTRY"),
+        ("bump", "n"),
+        ("drop", "n"),
+        ("set_env", "os"),
+        ("rows", "REGISTRY"),
+    ] {
+        let s = summary(&index, "m", f);
+        assert_eq!(changed_globals(s), [name], "{f}");
+        assert!(s.changes_globals(), "{f}");
+    }
+    for f in ["rename", "read"] {
+        let s = summary(&index, "m", f);
+        assert!(s.changed_state().is_empty() && !s.changes_globals(), "{f}");
+    }
+    // Through a call: the bool, not the names.
+    for f in ["caller", "walks"] {
+        let s = summary(&index, "m", f);
+        assert!(s.changed_state().is_empty(), "{f}");
+        assert!(s.changes_globals(), "{f}");
+    }
+    // A generator returned but not iterated changes nothing until its caller's result is.
+    let hands_out = summary(&index, "m", "hands_out");
+    assert!(!hands_out.changes_globals());
+    assert!(hands_out.iterated.as_ref().unwrap().changes_globals());
+    // A rebinding at the global, and the first of the changes of one name.
+    let bump = summary(&index, "m", "bump");
+    assert_eq!(bump.changed_state().len(), 1);
+}
+
+#[test]
+fn closure_cells_count_except_where_their_owner_keeps_them_inside_its_call() {
+    let index = project(&[(
+        "m.py",
+        "def accumulate(items):\n    out = []\n\n    def add(x):\n        out.append(x)\n\n    for i in items:\n        add(i)\n    return out\n\n\ndef counter():\n    n = 0\n\n    def inc():\n        nonlocal n\n        n += 1\n\n    inc()\n    return n\n\n\ndef fill(target):\n    out = target\n\n    def add(x):\n        out.append(x)\n\n    add(1)\n\n\ndef outer():\n    seen = []\n\n    def mid():\n        def add(x):\n            seen.append(x)\n\n        add(1)\n\n    mid()\n    return seen\n",
+    )]);
+    let cell = |owner: &str, name: &str, rebinds: bool| CellChange {
+        owner: owner.into(),
+        name: name.into(),
+        rebinds,
+    };
+    let add = summary(&index, "m", "accumulate.<locals>.add");
+    assert_eq!(add.changes_cells(), [cell("accumulate", "out", false)]);
+    assert!(
+        add.changed_state()
+            .iter()
+            .any(|(k, _)| *k == SharedState::Cell(cell("accumulate", "out", false)))
+    );
+    let accumulate = summary(&index, "m", "accumulate");
+    assert_eq!(accumulate.new_cells(), ["out".to_owned()]);
+    assert!(accumulate.changes_cells().is_empty());
+    let inc = summary(&index, "m", "counter.<locals>.inc");
+    assert_eq!(inc.changes_cells(), [cell("counter", "n", true)]);
+    assert!(summary(&index, "m", "counter").changes_cells().is_empty());
+    // `out` is the caller's parameter: changing it in place changes the caller's argument.
+    let fill = summary(&index, "m", "fill");
+    assert!(fill.new_cells().is_empty());
+    assert_eq!(fill.changes_cells(), [cell("fill", "out", false)]);
+    // A function nested in the owner changes the owner's cell: a cell of another function to it.
+    let mid = summary(&index, "m", "outer.<locals>.mid");
+    assert_eq!(mid.changes_cells(), [cell("outer", "seen", false)]);
+    assert!(summary(&index, "m", "outer").changes_cells().is_empty());
+    assert!(!summary(&index, "m", "outer").changes_globals());
+}
+
+#[test]
+fn global_changes_of_every_definition_and_of_class_bodies_run_in_a_function() {
+    let index = project(&[(
+        "m.py",
+        "import sys\n\nif sys.version_info >= (3, 12):\n    def f():\n        global A\n        A = 1\n\n    def g():\n        out = []\n\n        def add():\n            out.append(1)\n\n        add()\nelse:\n    def f():\n        global B\n        B = 1\n\n    def g():\n        out = sys.argv\n\n        def add():\n            out.append(1)\n\n        add()\n\n\ndef make():\n    class Local:\n        global C\n        C = 1\n\n    return Local\n",
+    )]);
+    assert_eq!(changed_globals(summary(&index, "m", "f")), ["A", "B"]);
+    // New in one definition only: the change of `out` leaves `g`.
+    let g = summary(&index, "m", "g");
+    assert!(g.new_cells().is_empty());
+    assert_eq!(g.changes_cells().len(), 1);
+    assert_eq!(changed_globals(summary(&index, "m", "make")), ["C"]);
+}
+
+#[test]
+fn the_first_change_of_a_global_and_cells_without_an_owner() {
+    let src = "REGISTRY = []\n\n\ndef make():\n    class Early:\n        REGISTRY.append(1)\n\n    REGISTRY.append(2)\n    return Early\n\n\nclass Counted:\n    count = 0\n\n    def bump(self):\n        __class__.count += 1\n";
+    let index = project(&[("m.py", src)]);
+    // The class body runs before the function's own change: its change is the first.
+    let make = summary(&index, "m", "make");
+    let first = make.changed_state()[0].1;
+    assert_eq!(
+        make.changed_state()[0].0,
+        SharedState::Global("REGISTRY".to_owned())
+    );
+    let line = |offset: u32| src[..offset as usize].matches('\n').count() + 1;
+    assert_eq!(line(first.start), 6);
+    // The implicit `__class__` cell of a method has no enclosing function: it counts as a
+    // module global.
+    assert_eq!(
+        changed_globals(summary(&index, "m", "Counted.bump")),
+        ["__class__"]
+    );
+}
+
+#[test]
+fn the_code_run_at_import_defines_the_module_names() {
+    let index = project(&[(
+        "m.py",
+        "import os\n\nREGISTRY = []\nLIMIT = 3\ndel LIMIT\n\n\ndef helper():\n    return 1\n\n\nREGISTRY.append(helper)\nos.environ[\"X\"] = \"1\"\n",
+    )]);
+    // Binding and deleting its names defines the module; changing objects in place, its own
+    // or another module's, changes them.
+    assert_eq!(
+        changed_globals(summary(&index, "m", "<module>")),
+        ["REGISTRY", "os"]
+    );
+}
+
+#[test]
+fn shared_state_handed_to_a_callee_that_changes_it() {
+    let index = project(&[(
+        "m.py",
+        "CACHE = []\n\n\nclass Registry:\n    def __init__(self):\n        self.items = []\n\n    def add(self, x):\n        self.items.append(x)\n\n    def get(self, i):\n        return self.items[i]\n\n\nREGISTRY = Registry()\n\n\ndef append(xs):\n    xs.append(1)\n\n\ndef size(xs):\n    return len(xs)\n\n\ndef update():\n    append(CACHE)\n\n\ndef measure():\n    return size(CACHE)\n\n\ndef register(x):\n    REGISTRY.add(x)\n\n\ndef lookup(i):\n    return REGISTRY.get(i)\n\n\ndef collect(items):\n    def add(x):\n        append(items)\n\n    add(1)\n\n\ndef fresh():\n    return append([])\n",
+    )]);
+    // An argument or a receiver the callee changes.
+    for f in ["update", "register"] {
+        let s = summary(&index, "m", f);
+        assert!(s.changes_globals(), "{f}");
+        assert!(s.changed_state().is_empty(), "{f}");
+    }
+    // A callee that only reads it, and a new object.
+    for f in ["measure", "lookup", "fresh"] {
+        assert!(!summary(&index, "m", f).changes_globals(), "{f}");
+    }
+    // Early Cutoff compares the facts without their positions, and `globals` reaches callers.
+    let update = summary(&index, "m", "update");
+    let facts = update.without_locations().shared_state.unwrap();
+    assert!(
+        facts
+            .handed
+            .iter()
+            .all(|h| h.site == Span { start: 0, end: 0 })
+    );
+    assert!(!update.same_for_callers(&EffectSummary {
+        shared_state: None,
+        ..update.clone()
+    }));
+    // A closure cell bound to the owner's parameter, handed to a callee changing it.
+    let add = summary(&index, "m", "collect.<locals>.add");
+    assert_eq!(
+        add.changes_cells(),
+        [CellChange {
+            owner: "collect".into(),
+            name: "items".into(),
+            rebinds: false,
+        }]
+    );
+}
+
+#[test]
+fn every_root_of_a_merged_value_and_deleted_cells_count() {
+    let index = project(&[(
+        "m.py",
+        "A = []\nB = []\n\n\ndef either(flag):\n    target = A if flag else B\n    target.clear()\n\n\ndef outer(flag):\n    out = []\n\n    def add():\n        t = out if flag else A\n        t.append(1)\n\n    add()\n    return out\n\n\ndef keeper():\n    value = 1\n\n    def drop():\n        nonlocal value\n        del value\n\n    drop()\n",
+    )]);
+    assert_eq!(changed_globals(summary(&index, "m", "either")), ["A", "B"]);
+    // A value chosen among ten globals changes each of them; past the function's budget the
+    // walk is open, and the value changes a global whose name is not known.
+    let choice = |n: usize| {
+        (0..n).map(|i| format!("G{i} = []\n")).collect::<String>()
+            + "\n\ndef choose(k):\n    x = G0\n"
+            + &(1..n)
+                .map(|i| format!("    if k == {i}:\n        x = G{i}\n"))
+                .collect::<String>()
+            + "    x.append(1)\n"
+    };
+    let ten = project(&[("ten.py", &choice(10))]);
+    let names = changed_globals(summary(&ten, "ten", "choose"));
+    assert_eq!(names.len(), 10);
+    assert!(!names.contains(&""));
+    let wide = project(&[("wide.py", &choice(2_000))]);
+    let choose = summary(&wide, "wide", "choose");
+    assert!(choose.changes_globals());
+    assert_eq!(changed_globals(choose), [""]);
+    // The owner keeps its new list inside its call, but the global still changes.
+    let outer = summary(&index, "m", "outer");
+    assert!(outer.changes_cells().is_empty());
+    assert!(outer.changes_globals());
+    let drop = summary(&index, "m", "keeper.<locals>.drop");
+    assert_eq!(
+        drop.changes_cells(),
+        [CellChange {
+            owner: "keeper".into(),
+            name: "value".into(),
+            rebinds: true,
+        }]
+    );
+    assert!(summary(&index, "m", "keeper").changes_cells().is_empty());
+}
+
+#[test]
+fn a1_hazards_are_calls_heki_cannot_follow() {
+    let index = project(&[(
+        "m.py",
+        "import sys\n\n\ndef run(code):\n    exec(code)\n\n\ndef frame():\n    return sys._getframe(1)\n\n\ndef names():\n    return locals()\n\n\ndef plain(x):\n    return x\n",
+    )]);
+    for f in ["run", "frame", "names"] {
+        assert!(summary(&index, "m", f).unknown_calls, "{f}");
+    }
+    assert!(!summary(&index, "m", "plain").unknown_calls);
 }

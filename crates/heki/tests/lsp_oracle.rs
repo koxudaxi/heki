@@ -26,7 +26,7 @@ const CONFIG: &str = r#"[project]
 name = "t"
 
 [tool.heki.lint]
-extend-select = ["MUT101", "MUT107", "MUT108", "MUT111", "EFF107", "MUT112", "MUT113"]
+extend-select = ["MUT101", "MUT107", "MUT108", "MUT111", "EFF107", "MUT112", "MUT113", "EFF109", "EFF110"]
 
 [[tool.heki.write-owners]]
 name = "registry"
@@ -655,6 +655,22 @@ const Q_MIRROR: &str = "import queue\n\nfrom pkg.q_events import EVENTS\n\nMINE:
 const Q_LOCAL: &str =
     "async def local():\n    from pkg.q_events import EVENTS\n\n    EVENTS.put(1)\n";
 
+// Locks taken again (`EFF109`): a subclass method holding the lock its base class's helper in
+// another module takes, and a function holding a module global that a helper takes only when
+// its argument says so.
+const LOCK_POOL: &str = "import threading\n\nLOCK = threading.Lock()\n\n\nclass Pool:\n    def __init__(self):\n        self._lock = threading.Lock()\n\n    def size(self):\n        with self._lock:\n            return 1\n\n\ndef refill(force=False):\n    if force:\n        with LOCK:\n            return 1\n    return 0\n";
+const LOCK_POOL_PLAIN: &str = "import threading\n\nLOCK = threading.Lock()\n\n\nclass Pool:\n    def __init__(self):\n        self._lock = threading.Lock()\n\n    def size(self):\n        return 1\n\n\ndef refill(force=False):\n    if force:\n        with LOCK:\n            return 1\n    return 0\n";
+const LOCK_USE: &str = "from pkg.lock_pool import LOCK, Pool, refill\n\n\nclass Spool(Pool):\n    def grow(self):\n        with self._lock:\n            return self.size()\n\n\ndef drain():\n    with LOCK:\n        return refill()\n";
+const LOCK_USE_FORCED: &str = "from pkg.lock_pool import LOCK, Pool, refill\n\n\nclass Spool(Pool):\n    def grow(self):\n        return self.size()\n\n\ndef drain():\n    with LOCK:\n        return refill(force=True)\n";
+
+// One reader two tasks use (`EFF110`): the coroutine in another module that reads it, and a
+// function gathering two of them.
+const FAN_READ: &str = "import asyncio\n\n\nasync def read_line(reader: asyncio.StreamReader):\n    return await reader.readline()\n";
+const FAN_READ_NOTHING: &str =
+    "import asyncio\n\n\nasync def read_line(reader: asyncio.StreamReader):\n    return b\"\"\n";
+const FAN_READ_LOCKED: &str = "import asyncio\n\nLOCK = asyncio.Lock()\n\n\nasync def read_line(reader: asyncio.StreamReader):\n    async with LOCK:\n        return await reader.readline()\n";
+const FAN_USE: &str = "import asyncio\n\nfrom pkg.fan_read import read_line\n\n\nasync def both(reader: asyncio.StreamReader):\n    return await asyncio.gather(read_line(reader), read_line(reader))\n";
+
 /// The project before the first step (every file is opened).
 fn initial_files() -> Vec<(&'static str, String)> {
     [
@@ -722,6 +738,10 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/own_use.py", OWN_USE),
         ("pkg/own_base.py", OWN_BASE),
         ("pkg/own_sub.py", OWN_SUB),
+        ("pkg/lock_pool.py", LOCK_POOL),
+        ("pkg/lock_use.py", LOCK_USE),
+        ("pkg/fan_read.py", FAN_READ),
+        ("pkg/fan_use.py", FAN_USE),
         ("pkg/plot.py", RO_PLOT),
         ("pkg/loops.py", LOOPS),
         ("pkg/compat.py", COMPAT),
@@ -911,6 +931,9 @@ struct Step {
     absent: &'static [(&'static str, &'static str)],
     /// Early Cutoff: no other file is re-analyzed or re-published.
     cutoff: bool,
+    /// The edit changes a fact callers read, though no diagnostic shows it: the server
+    /// re-analyzes a caller's file (the opposite of `cutoff`).
+    propagates: bool,
 }
 
 impl Step {
@@ -921,6 +944,7 @@ impl Step {
             present: &[],
             absent: &[],
             cutoff: false,
+            propagates: false,
         }
     }
 
@@ -936,6 +960,11 @@ impl Step {
 
     fn cutoff(mut self) -> Self {
         self.cutoff = true;
+        self
+    }
+
+    fn propagates(mut self) -> Self {
+        self.propagates = true;
         self
     }
 }
@@ -2462,7 +2491,7 @@ fn steps_mut112() -> Vec<Step> {
         Step::new(
             "MUT112 and MUT113 are no longer selected, and the function two modules below stops copying its argument",
             vec![
-                Action::Configure(CONFIG.replace(", \"MUT112\", \"MUT113\"]", "]")),
+                Action::Configure(CONFIG.replace(", \"MUT112\", \"MUT113\"", "")),
                 save("pkg/own_prepare.py", OWN_PREPARE_SAME),
             ],
         )
@@ -2549,6 +2578,15 @@ fn steps_mut111() -> Vec<Step> {
         )
         .present(&[("pkg/headline.py", "MUT111")]),
     ]
+}
+
+/// The blocking helper of `pkg/low.py` with a module-level cache that it reads (`False`) or
+/// clears (`True`) after its blocking call, so that the call keeps its position.
+fn low_with_cache(clears: bool) -> String {
+    let use_cache = if clears { "clear()" } else { "get(url)" };
+    format!(
+        "# network helpers\nimport requests\n\nCACHE = {{}}\n\n\ndef fetch(url):\n    response = requests.get(url)\n    CACHE.{use_cache}\n    return response\n# done\n"
+    )
 }
 
 /// Queue capacities: a `put` waits only on a queue known to be bounded, which the module
@@ -2713,6 +2751,136 @@ fn steps_mut113() -> Vec<Step> {
     ]
 }
 
+/// `EFF109`: the holder follows the locks its callees in another module take (their summaries'
+/// `LockFacts::acquires`): a base-class helper stops and starts taking the lock a subclass method
+/// holds, and the holder of a module global starts passing the argument that leads another
+/// helper to it. It also follows the names they bind (`LockFacts::rebinds`) and the tests of
+/// state on the way to the lock (`CallSite::state_tests`), and the summaries carry the facts
+/// only while the rule is selected (`OptInFacts`).
+fn steps_eff109() -> Vec<Step> {
+    let more = LOCK_POOL.replace(
+        "            return 1\n\n\ndef refill",
+        "            return 1\n\n    def checked_size(self):\n        if self.closed:\n            return 0\n        return self.size()\n\n\ndef reset():\n    global LOCK\n    LOCK = threading.Lock()\n\n\ndef refill",
+    );
+    let resetting = "from pkg.lock_pool import LOCK, Pool, refill, reset\n\n\nclass Spool(Pool):\n    def grow(self):\n        return self.size()\n\n\ndef drain():\n    with LOCK:\n        reset()\n        return refill(force=True)\n";
+    let wrapped = "from pkg.lock_pool import LOCK, Pool, refill\n\n\nclass Spool(Pool):\n    def grow(self):\n        with self._lock:\n            self.closed = True\n            return self.checked_size()\n\n\ndef drain():\n    with LOCK:\n        return refill()\n";
+    vec![
+        Step::new(
+            "the base class's helper in another module stops taking the lock",
+            vec![save("pkg/lock_pool.py", LOCK_POOL_PLAIN)],
+        )
+        .absent(&[("pkg/lock_use.py", "EFF109")]),
+        Step::new(
+            "the helper takes the lock again",
+            vec![save("pkg/lock_pool.py", LOCK_POOL)],
+        )
+        .present(&[("pkg/lock_use.py", "EFF109")]),
+        Step::new(
+            "the subclass stops holding the lock, and the other holder passes the argument that \
+             leads the helper to the global lock",
+            vec![save("pkg/lock_use.py", LOCK_USE_FORCED)],
+        )
+        .present(&[("pkg/lock_use.py", "EFF109")]),
+        Step::new(
+            "the helper no longer takes the global lock",
+            vec![save(
+                "pkg/lock_pool.py",
+                &LOCK_POOL.replace(
+                    "        with LOCK:\n            return 1\n",
+                    "        return 1\n",
+                ),
+            )],
+        )
+        .absent(&[("pkg/lock_use.py", "EFF109")]),
+        Step::new(
+            "EFF109 is no longer selected, and the helper's module changes",
+            vec![
+                Action::Configure(CONFIG.replace(", \"EFF109\"", "")),
+                Action::Save("pkg/lock_pool.py", format!("# Pools.\n{LOCK_POOL}")),
+            ],
+        )
+        .absent(&[("pkg/lock_use.py", "EFF109")]),
+        Step::new(
+            "EFF109 is selected again",
+            vec![Action::Configure(CONFIG.to_owned())],
+        )
+        .present(&[("pkg/lock_use.py", "EFF109")]),
+        Step::new(
+            "the other holder calls a function of the helper's module that binds the global lock \
+             again before the helper takes it",
+            vec![
+                Action::Save("pkg/lock_pool.py", more.clone()),
+                save("pkg/lock_use.py", resetting),
+            ],
+        )
+        .absent(&[("pkg/lock_use.py", "EFF109")]),
+        Step::new(
+            "that function no longer binds the lock",
+            vec![Action::Save(
+                "pkg/lock_pool.py",
+                more.replace(
+                    "    global LOCK\n    LOCK = threading.Lock()\n",
+                    "    pass\n",
+                ),
+            )],
+        )
+        .present(&[("pkg/lock_use.py", "EFF109")]),
+        Step::new(
+            "the subclass holds the lock, sets a flag, and calls a wrapper of the other module \
+             that tests it before the helper",
+            vec![
+                Action::Save("pkg/lock_pool.py", more.clone()),
+                save("pkg/lock_use.py", wrapped),
+            ],
+        )
+        .absent(&[("pkg/lock_use.py", "EFF109")]),
+        Step::new(
+            "the wrapper no longer tests the flag",
+            vec![Action::Save(
+                "pkg/lock_pool.py",
+                more.replace("        if self.closed:\n            return 0\n", ""),
+            )],
+        )
+        .present(&[("pkg/lock_use.py", "EFF109")]),
+        Step::new(
+            "both files as they were",
+            vec![
+                save("pkg/lock_pool.py", LOCK_POOL),
+                save("pkg/lock_use.py", LOCK_USE),
+            ],
+        )
+        .present(&[("pkg/lock_use.py", "EFF109")]),
+    ]
+}
+
+/// `EFF110`: the fan-out follows what the coroutines it starts use in another module
+/// (`EffectSummary::exclusive_uses`): the coroutine stops reading, reads again, and reads under a
+/// lock.
+fn steps_eff110() -> Vec<Step> {
+    vec![
+        Step::new(
+            "the coroutine in another module stops reading the reader",
+            vec![save("pkg/fan_read.py", FAN_READ_NOTHING)],
+        )
+        .absent(&[("pkg/fan_use.py", "EFF110")]),
+        Step::new(
+            "the coroutine reads it again",
+            vec![save("pkg/fan_read.py", FAN_READ)],
+        )
+        .present(&[("pkg/fan_use.py", "EFF110")]),
+        Step::new(
+            "the coroutine reads it under a lock",
+            vec![save("pkg/fan_read.py", FAN_READ_LOCKED)],
+        )
+        .absent(&[("pkg/fan_use.py", "EFF110")]),
+        Step::new(
+            "the coroutine reads it without the lock again",
+            vec![save("pkg/fan_read.py", FAN_READ)],
+        )
+        .present(&[("pkg/fan_use.py", "EFF110")]),
+    ]
+}
+
 fn steps() -> Vec<Step> {
     let mut steps = vec![
         // 1. The initial index.
@@ -2733,6 +2901,8 @@ fn steps() -> Vec<Step> {
             ("pkg/getter_use.py", "MUT201"),
             ("pkg/listing_use.py", "MUT201"),
             ("pkg/natives_use.py", "EFF101"),
+            ("pkg/lock_use.py", "EFF109"),
+            ("pkg/fan_use.py", "EFF110"),
         ]),
         // 2. A sync helper two modules below an `async def` starts and stops blocking.
         Step::new(
@@ -2754,6 +2924,33 @@ fn steps() -> Vec<Step> {
         .cutoff(),
         Step::new(
             "a comment above the blocking call moves the chain's last hop",
+            vec![save(
+                "pkg/low.py",
+                &format!("# network helpers\n{LOW_BLOCKING}# done\n"),
+            )],
+        )
+        .present(&[("pkg/top.py", "EFF101")]),
+        // A callee starts and stops changing a module global: no rule reports it, but the
+        // callers' summaries carry it (`heki inspect`'s purity), so the edit is no Early Cutoff.
+        Step::new(
+            "the helper's module gains a cache",
+            vec![save("pkg/low.py", &low_with_cache(false))],
+        )
+        .present(&[("pkg/top.py", "EFF101")]),
+        Step::new(
+            "the helper below the async def starts clearing the module's cache",
+            vec![save("pkg/low.py", &low_with_cache(true))],
+        )
+        .present(&[("pkg/top.py", "EFF101")])
+        .propagates(),
+        Step::new(
+            "the helper stops clearing the cache",
+            vec![save("pkg/low.py", &low_with_cache(false))],
+        )
+        .present(&[("pkg/top.py", "EFF101")])
+        .propagates(),
+        Step::new(
+            "the cache goes away",
             vec![save(
                 "pkg/low.py",
                 &format!("# network helpers\n{LOW_BLOCKING}# done\n"),
@@ -2961,7 +3158,9 @@ fn steps() -> Vec<Step> {
     steps.extend(steps_hash_writers());
     steps.extend(steps_mut111());
     steps.extend(steps_mut112());
+    steps.extend(steps_eff109());
     steps.extend(steps_mut113());
+    steps.extend(steps_eff110());
     steps.extend(steps_receiver_typing());
     steps.extend(steps_effect_index());
     steps.extend(steps_exact_effects());
@@ -3062,8 +3261,8 @@ fn steps() -> Vec<Step> {
         Step::new(
             "the configuration becomes invalid",
             vec![Action::Configure(CONFIG.replace(
-                "extend-select = [\"MUT101\", \"MUT107\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\", \"MUT113\"]",
-                "extend-select = [\"MUT101\", \"MUT107\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\", \"MUT113\"]\nselect = [\"NOPE1\"]",
+                "extend-select = [\"MUT101\", \"MUT107\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\", \"MUT113\", \"EFF109\", \"EFF110\"]",
+                "extend-select = [\"MUT101\", \"MUT107\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\", \"MUT113\", \"EFF109\", \"EFF110\"]\nselect = [\"NOPE1\"]",
             ))],
         )
         .absent(&[("pkg/svc_user.py", "EFF101")]),
@@ -3548,6 +3747,12 @@ impl Session {
             .into_iter()
             .map(|d| format!("step `{}`: {d}", step.name))
             .collect();
+        if step.propagates && after["dependent_reanalyses"] == before["dependent_reanalyses"] {
+            out.push(format!(
+                "step `{}`: no caller's file was re-analyzed: stats before {before}, after {after}",
+                step.name
+            ));
+        }
         if step.cutoff {
             let edited: BTreeSet<String> = step
                 .actions

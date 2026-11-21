@@ -6,6 +6,7 @@
 //! A phi's incoming value is used at the end of its predecessor, not at the phi's block.
 
 use crate::interpreter::term_use;
+use heki_ir::walk::FnShape;
 use heki_ir::{BlockId, IrFunction, VarId};
 
 /// Dense bit set over `VarId`s.
@@ -55,14 +56,13 @@ pub(crate) struct Liveness {
 }
 
 impl Liveness {
-    pub fn compute(f: &IrFunction) -> Self {
+    pub fn compute(shape: &FnShape<'_>) -> Self {
+        let f = shape.f;
         let nvars = f.var_names.len();
         let n = f.blocks.len();
         let mut live_in = vec![VarSet::new(nvars); n];
         let mut live_out = vec![VarSet::new(nvars); n];
         let mut live_at_raise = vec![VarSet::new(nvars); n];
-        let mut order = f.rpo_blocks();
-        order.reverse();
         let entering = |live_in: &[VarSet], b: BlockId, s: BlockId| {
             let mut live = live_in[s.0 as usize].clone();
             for phi in &f.block(s).phis {
@@ -76,7 +76,7 @@ impl Liveness {
         };
         loop {
             let mut changed = false;
-            for &b in &order {
+            for &b in shape.rpo().iter().rev() {
                 let bi = b.0 as usize;
                 let bb = f.block(b);
                 let mut out = VarSet::new(nvars);
