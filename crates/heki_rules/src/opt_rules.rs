@@ -16,7 +16,7 @@
 use crate::mut_rules::{CallInst, site_call};
 use crate::{CheckContext, ModuleUnit};
 use heki_ast::Span;
-use heki_diagnostics::{Certainty, Diagnostic, TextEdit};
+use heki_diagnostics::{Diagnostic, TextEdit};
 use heki_effect::{CallSite, Items, ProjectDecls, TypeCtx, Val, container_mutator};
 use heki_ir::walk::{self, Answer, Budget, Def, FnShape, Use};
 use heki_ir::{
@@ -79,11 +79,7 @@ pub(crate) fn opt(
             // This `OPT` rule is not selected for the file.
             continue;
         };
-        let tier = if c.in_exact_tier() {
-            Certainty::Exact
-        } else {
-            Certainty::Heuristic
-        };
+        let tier = crate::premises::tier(c.rule.code(), c.in_exact_tier());
         d.certainty = tier.at_most(d.certainty);
         d.evidence = c.cost_evidence.clone().map(|cost| match c.verdict.tier {
             SafetyTier::Safe => format!("{cost}; established: {}", c.verdict.evidence()),
@@ -1184,12 +1180,11 @@ pub(crate) fn opt113(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
                         &[],
                     )
                     .expect("the rule runs on the unit: it returned at its start otherwise");
+                d.certainty = crate::premises::tier("OPT113", exact).at_most(d.certainty);
                 if exact {
                     d.evidence = Some(format!(
                         "established: both loops step through inputs, a pair that does not match runs only the comparison, and `{inner_iter}` is the same collection, with the same keys, on every outer iteration"
                     ));
-                } else {
-                    d.certainty = Certainty::Heuristic;
                 }
             }
         }

@@ -2323,6 +2323,12 @@ The premises the rules use:
   is open whenever no bound is found. An exact report never claims a size: a bound of 16 or
   fewer only removes reports, and a larger fixed bound is no evidence either way.
 
+Each exact rule's premises are rows of one table, `crates/heki_rules/src/premises.rs`: what each
+states and where heki decides it, the one place every rule reading it goes through. A rule page
+lists its claim's premises under "What a report states" by those names (the documentation build
+checks it), `heki rule --output-format json` prints them, and a report is exact only when every
+premise of its rule's row is established.
+
 An exact report's message states its claim and the witnesses of its premises, nothing else: no
 cost estimate such as "(N+1)", and no advice (that goes into the help).
 
@@ -3119,8 +3125,11 @@ $ uvx --from "zensical==0.1.2" zensical serve
   heuristic rules on the generated pages, copies each rule's measurement from
   [Rule Precision](https://heki.koxudaxi.dev/precision/) into its page, and fails when a hand-written table row says
   "heuristic" other than exactly when a rule it names is heuristic, when an exact rule lacks a
-  certification there with no false claim in its census and holdout run, or when a rule's
-  documentation has no "What a report states" section.
+  certification there with no false claim in its census and holdout run, when a rule's
+  documentation has no "What a report states" section, or when an exact rule's page lists other
+  premises under "Its premises:" than the premise table (`crates/heki_rules/src/premises.rs`,
+  which `heki rule --output-format json` prints with each rule), in another order or under other
+  names.
 - The Docs workflow deploys the site to Cloudflare Pages (heki.koxudaxi.dev) once a published
   release is on PyPI (the newest release only), or when it is run by hand on `main`, so the site
   documents the released version. That job runs in the `docs-production` environment, which
@@ -4830,7 +4839,7 @@ in a loop, copies all of it each time it runs.
 
 Its premises:
 
-- **Immutable type**: the value's exact type is known from its construction. Established.
+- **Builtin type by construction**: the value's exact type is known from its construction. Established.
 - **Loop-carried**: the result is the value the next iteration starts from. Established by the IR.
 - **In a loop**: the statement is in the body of a loop. Established by the IR.
 - **Rewrite proven safe**: the help says `[safe fix: ...]`, `[proven-safe suggestion: ...]`, or
@@ -5159,7 +5168,7 @@ every element each time it runs.
 
 Its premises:
 
-- **Builtin list**: the value is a builtin `list` by its construction (a display, a comprehension,
+- **Builtin type by construction**: the value is a builtin `list` by its construction (a display, a comprehension,
   `list(...)`). Established: the Soundness lane takes types from constructions only, never from
   annotations.
 - **In a loop**: the statement is in the body of a loop. Established by the IR.
@@ -5234,7 +5243,7 @@ lst[1:]`), in a loop, moves or copies every remaining element each time it runs.
 
 Its premises:
 
-- **Builtin list**: the value is a builtin `list` by its construction (a display, a comprehension,
+- **Builtin type by construction**: the value is a builtin `list` by its construction (a display, a comprehension,
   `list(...)`). Established: the Soundness lane takes types from constructions only, never from
   annotations.
 - **In a loop**: the statement is in the body of a loop. Established by the IR.
@@ -5329,7 +5338,7 @@ each time it runs, where appending would change it in place.
 
 Its premises:
 
-- **Builtin list**: the value is a builtin `list` by its construction (a display, a comprehension,
+- **Builtin type by construction**: the value is a builtin `list` by its construction (a display, a comprehension,
   `list(...)`). Established: the Soundness lane takes types from constructions only, never from
   annotations.
 - **Loop-carried**: the result is the value the next iteration starts from. Established by the IR.
@@ -5664,10 +5673,10 @@ parameter, a part of one, the rows of a query, the lines of a file, or the entri
 
 Its premises:
 
-- **Loop-carried**: every path around the back edge carries the new value, computed from the
+- **Loop-carried on every path**: every path around the back edge carries the new value, computed from the
   previous one (no path resets the variable). Open in a heuristic report: one path that updates
   it is enough.
-- **On every iteration**: the reallocating call returns on every iteration that completes,
+- **Every iteration**: the reallocating call returns on every iteration that completes,
   exception edges into handlers included. Open in a heuristic report: one that runs on some
   iterations only counts.
 - **Origin**: the loop steps through items the data decides (as for `EFF103`), and the code does
@@ -5828,7 +5837,7 @@ in a loop, builds a new container for a membership test each time it runs.
 
 Its premises:
 
-- **Builtin container**: the constructor builds a builtin container of a known type. Established
+- **Builtin type by construction**: the constructor builds a builtin container of a known type. Established
   only on a proven report: an unknown type is one of the obligations that block the rewrite.
 - **In a loop**: the statement is in the body of a loop. Established by the IR.
 - **Rewrite proven safe**: the help says `[safe fix: ...]`, `[proven-safe suggestion: ...]`, or
@@ -5908,7 +5917,7 @@ runs.
 
 Its premises:
 
-- **Builtin list**: the value is a builtin `list` by its construction (a display, a comprehension,
+- **Builtin type by construction**: the value is a builtin `list` by its construction (a display, a comprehension,
   `list(...)`). Established: the Soundness lane takes types from constructions only, never from
   annotations.
 - **In a loop**: the statement is in the body of a loop. Established by the IR.
@@ -6086,7 +6095,7 @@ time it runs.
 
 Its premises:
 
-- **Builtin list**: the value is a builtin `list` or `tuple` by its construction (a display, a
+- **Builtin type by construction**: the value is a builtin `list` or `tuple` by its construction (a display, a
   comprehension, `list(...)`). Established: the Soundness lane takes types from constructions only,
   never from annotations.
 - **In a loop**: the statement is in the body of a loop. Established by the IR.
@@ -7063,7 +7072,7 @@ updating it would change it in place.
 
 Its premises:
 
-- **Builtin set or dict**: the value is a builtin `set` or `dict` by its construction. Established:
+- **Builtin type by construction**: the value is a builtin `set` or `dict` by its construction. Established:
   the Soundness lane takes types from constructions only.
 - **Loop-carried**: the result is the value the next iteration starts from. Established by the IR.
 - **In a loop**: the statement is in the body of a loop. Established by the IR.
