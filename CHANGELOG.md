@@ -89,12 +89,9 @@ release can change rules, configuration keys, diagnostics, and output formats.
   `[tool.heki.lint] heuristic = true` (`--heuristic`) also by default and for every prefix and
   `ALL`, as Ruff's `preview` does. An exact rule's heuristic reports (an `OPT` report whose
   rewrite is not proven) are shown under the same conditions. A contract rule runs when its
-  contract is declared, whatever its certainty. The proven tier of the eight `OPT` rewrite rules
-  (`OPT101`-`OPT103`, `OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130`) is exact: a census of
-  every one of its 234 reports on the Stage 0-A corpus, and a check of the 235 of one run on a
-  frozen holdout corpus of 100 packages, found none wrong. `heki check` with no
-  configuration runs these rules and the contract rules and shows the reports whose rewrite is
-  proven safe, and `heki check --fix` applies the proven fixes of `OPT101` and `OPT102`. `MUT202`, which also reports `@lru_cache` / `@cache` results
+  contract is declared, whatever its certainty. No rule is exact yet: `heki check` with no configuration runs only the contract
+  rules, and `heki check --fix` applies no fix, since `OPT101` and `OPT102` stay heuristic until
+  a measurement certifies them. `MUT202`, which also reports `@lru_cache` / `@cache` results
   without a contract, is selected like the other heuristic rules, so a `readonly-returns`
   contract needs it named or `lint.heuristic = true`. `lint.heuristic = true` restores the rules
   of 0.1; baselines keep their keys.
@@ -111,14 +108,6 @@ release can change rules, configuration keys, diagnostics, and output formats.
   (see Breaking changes: a warning no longer fails the run). `[tool.heki.lint.severity]` still
   overrides it. Each rule page shows its default severity, and `heki rule --output-format json`
   gives each rule's `consequence` (`bug` or `slowdown`).
-- `OPT` messages state their claim and nothing else: what the statement does each time it runs
-  in the loop (`` `rows = rows + [...]` copies the whole list each time it runs in the loop ``),
-  without "on every iteration", which heki does not establish, and without cost estimates
-  ("(quadratic)", "(O(n) per iteration)", "(O(n²))", "(O(n·m))"). `OPT110` names the container
-  it scans (a list or a tuple), and `OPT130` says the constructor builds a new container for
-  the membership test, not "the same container", which only a proven rewrite establishes. The
-  rule pages state the claim the same way: its premises are the container's builtin type, the
-  loop, and, for a rule's exact tier, the proven rewrite; no size is claimed.
 - `EFF102` and `EFF103` also report the function a builtin calls once per item: the function
   handed to `map`, `filter`, `itertools.starmap`, `itertools.filterfalse`, and
   `functools.reduce`, and the `key` of `sorted`, `list.sort`, `min`, `max`, and
@@ -159,6 +148,12 @@ release can change rules, configuration keys, diagnostics, and output formats.
   loop (followed by `return`, `break`, or `raise`): it runs once per run of the loop.
 - `EFF101` no longer reports `result()` or `exception()` of a `concurrent.futures.Future` known
   to be done: under `if f.done():`, or once `await asyncio.wrap_future(f)` has returned.
+- `EFF101` no longer reports `put()` on a `queue.Queue`, `LifoQueue`, or `PriorityQueue` that
+  is not known to be bounded: built without a positive `maxsize`, or one heki cannot follow to
+  where it is built. A `put` waits only while its queue is full. heki follows the queue into
+  local variables, the attributes its class family stores, module globals, and parameters
+  whose callers bind known queues; an `effect-boundaries` contract forbidding `blocking-sync`
+  counts a `put` the same way.
 - `EFF107` (`unretained-async-task`, opt-in) no longer reports a task whose bound method is
   passed to a call or stored, as in `self.addCleanup(task.cancel)` or
   `loop.call_later(1, task.cancel)`: the bound method holds the task.
