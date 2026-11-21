@@ -154,7 +154,8 @@ release can change rules, configuration keys, diagnostics, and output formats.
   judged by the protocol, the type the code uses it through: `def f(h: Host): h._m` is no
   `MUT203` read of `_m` of the classes implementing `Host`, `h._helper()` no `MUT204` call of
   theirs, and what an implementation's private method reads or calls inside stays with it
-  instead of being handed to the caller. A member the protocol does not declare is still one of
+  instead of being handed to the caller (also when other callers call it through the class and
+  take it over). A member the protocol does not declare is still one of
   the implementations', and a write through the protocol still writes their attribute.
 
 ## [0.1.2] - 2026-11-21

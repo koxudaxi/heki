@@ -154,3 +154,111 @@ fn a_read_through_a_protocol_still_reads_the_implementation() {
         .collect();
     assert_eq!(found, vec![(22, "MUT111")]);
 }
+
+const MIXED_CONFIG: &str = r#"[project]
+name = "t"
+
+[tool.heki.lint]
+select = ["MUT203", "MUT204"]
+
+[[tool.heki.read-owners]]
+name = "m"
+targets = ["Concrete._m"]
+allowed-readers = ["pkg.use.allowed", "pkg.use.allowed_through_protocol"]
+
+[[tool.heki.call-owners]]
+name = "compute"
+targets = ["Concrete._compute"]
+allowed-callers = ["pkg.use.allowed", "pkg.use.allowed_through_protocol"]
+"#;
+
+const MIXED_HOST: &str = r#"from typing import Protocol
+
+
+class Host(Protocol):
+    def _helper(self) -> int: ...
+
+    def _other(self) -> int: ...
+
+    def _outer(self) -> int: ...
+
+
+class Concrete:
+    def __init__(self) -> None:
+        self._m = 1
+
+    def _compute(self) -> int:
+        return 2
+
+    def _helper(self) -> int:
+        return self._m + self._compute()
+
+    def _other(self) -> int:
+        return self._m + self._compute()
+
+    def _outer(self) -> int:
+        return self._inner()
+
+    def _inner(self) -> int:
+        return self._m
+"#;
+
+const MIXED_USE: &str = r#"from pkg.host import Concrete, Host
+
+
+def allowed(c: Concrete) -> int:
+    return c._helper() + c._outer()
+
+
+def through_protocol(h: Host) -> int:
+    return h._helper() + h._outer()
+
+
+def allowed_through_protocol(h: Host) -> int:
+    return h._other()
+
+
+def direct(c: Concrete) -> int:
+    return c._other()
+"#;
+
+/// A private implementation method called through its class and through a protocol: the
+/// callers through the class take its accesses over, and it keeps them for the protocol's.
+#[test]
+fn an_implementation_keeps_its_accesses_for_its_protocol_callers() {
+    let p = Project::new("protocol_mixed_callers");
+    p.write("pyproject.toml", MIXED_CONFIG)
+        .write("pkg/__init__.py", "")
+        .write("pkg/host.py", MIXED_HOST)
+        .write("pkg/use.py", MIXED_USE);
+    let (code, stdout, stderr) = p.check(&["--output-format", "json"]);
+    assert_eq!(code, 1, "{stdout}{stderr}");
+    let diags: Vec<Value> = serde_json::from_str(&stdout).unwrap();
+    let found: Vec<(&str, u64, u64, &str, &str)> = diags
+        .iter()
+        .map(|d| {
+            (
+                d["path"].as_str().unwrap().rsplit('/').next().unwrap(),
+                d["line"].as_u64().unwrap(),
+                d["column"].as_u64().unwrap(),
+                d["rule_code"].as_str().unwrap(),
+                d["qualname"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        found,
+        vec![
+            // `allowed` takes over what `_helper` does; `through_protocol` calls `Host._helper`
+            // and leaves it with the implementation.
+            ("host.py", 20, 16, "MUT203", "Concrete._helper"),
+            ("host.py", 20, 26, "MUT204", "Concrete._helper"),
+            // The same one call up: `Concrete._outer` keeps what `_inner` reads for
+            // `through_protocol`, at its call of `_inner`.
+            ("host.py", 26, 16, "MUT203", "Concrete._outer"),
+            // The protocol caller of `_other` is allowed, its caller through the class is not.
+            ("use.py", 17, 12, "MUT203", "direct"),
+            ("use.py", 17, 12, "MUT204", "direct"),
+        ]
+    );
+}

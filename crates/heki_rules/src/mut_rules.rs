@@ -1172,6 +1172,23 @@ impl Handover {
     }
 }
 
+/// Which callers of the function [`runs_inside_allowed_through`] starts from it follows: all,
+/// or only those keeping the accesses with the function (`!Handover::hands_over`).
+#[derive(Debug, Clone, Copy)]
+enum FirstCallers {
+    All,
+    KeptBy(Handover),
+}
+
+impl FirstCallers {
+    fn follows(self, c: &Caller<'_>) -> bool {
+        match self {
+            Self::All => true,
+            Self::KeptBy(handover) => !handover.hands_over(c),
+        }
+    }
+}
+
 /// One project call site that runs the facts `facts` of a function: the caller, the site and
 /// the binding of the function there, and which of the caller's facts receive them (its body,
 /// or what iterating the object it returns runs).
@@ -1277,6 +1294,19 @@ fn runs_inside_allowed(
     func: &FuncKey,
     obj: u64,
 ) -> bool {
+    runs_inside_allowed_through(cx, sites, allowance, family, func, obj, FirstCallers::All)
+}
+
+/// [`runs_inside_allowed`] along the paths through the callers `first` of `func`.
+fn runs_inside_allowed_through(
+    cx: &CheckContext<'_>,
+    sites: &SitesByCaller<'_>,
+    allowance: &Allowance,
+    family: &FxHashSet<String>,
+    func: &FuncKey,
+    obj: u64,
+    first: FirstCallers,
+) -> bool {
     let is_initializer =
         |k: &FuncKey| INITIALIZERS.contains(&k.qualname.rsplit('.').next().unwrap_or(&k.qualname));
     if is_initializer(func) {
@@ -1290,8 +1320,12 @@ fn runs_inside_allowed(
     let mut visited: FxHashSet<(FuncKey, Facts, u64)> = FxHashSet::default();
     visited.insert((func.clone(), facts, obj));
     let mut allowed_contexts = false;
+    let mut first = Some(first);
     while let Some((callee, facts, obj)) = queue.pop_front() {
-        let callers = callers_of(cx, sites, &callee, facts);
+        let mut callers = callers_of(cx, sites, &callee, facts);
+        if let Some(first) = first.take() {
+            callers.retain(|c| first.follows(c));
+        }
         if callers.is_empty() {
             // A function without project callers, outside every allowed context.
             return false;
@@ -2920,6 +2954,9 @@ struct WalkState {
     func: FuncKey,
     /// Which facts of `func` run the access: its body, or what iterating its result runs.
     facts: Facts,
+    /// `func` runs the access itself: it is the accessing function, or it calls the function
+    /// below (not only returns its result).
+    runs_access: bool,
     /// Parameters of `func` the accessed object may be.
     obj: u64,
     /// A function from the accessing one up to `func` that runs the access falls under
@@ -2951,11 +2988,13 @@ pub(crate) fn delegated_reports(
         return Vec::new();
     }
     let in_scope = allowance.in_scope(func);
+    let reports_itself = |func: &FuncKey, obj: u64, in_scope: bool, first: FirstCallers| {
+        in_scope
+            && !initializes_itself(cx, func, family, obj)
+            && !runs_inside_allowed_through(cx, sites, allowance, family, func, obj, first)
+    };
     if !delegates(cx, sites, func, Handover::ByImplementation) {
-        if !in_scope
-            || initializes_itself(cx, func, family, obj)
-            || runs_inside_allowed(cx, sites, allowance, family, func, obj)
-        {
+        if !reports_itself(func, obj, in_scope, FirstCallers::All) {
             return Vec::new();
         }
         return vec![DelegatedReport {
@@ -2971,12 +3010,27 @@ pub(crate) fn delegated_reports(
     let mut states = vec![WalkState {
         func: func.clone(),
         facts,
+        runs_access: true,
         obj,
         in_scope,
         down: None,
     }];
     let mut visited: FxHashSet<(FuncKey, Facts, u64, bool)> = FxHashSet::default();
     visited.insert((func.clone(), facts, obj, in_scope));
+    // The report at state `j` of the walk: at the access itself, or at `func`'s call site of
+    // the state below, with the hops down to the access.
+    let report_at = |states: &[WalkState], j: usize, func: &FuncKey, mut chain: Vec<CallHop>| {
+        let mut j = j;
+        while let Some((below, h)) = &states[j].down {
+            chain.extend(h.iter().cloned());
+            j = *below;
+        }
+        DelegatedReport {
+            func: func.clone(),
+            span: chain.first().map_or(span, |hop| hop.span),
+            chain,
+        }
+    };
     let mut out = Vec::new();
     let mut i = 0;
     while i < states.len() {
@@ -2986,10 +3040,24 @@ pub(crate) fn delegated_reports(
             states[i].obj,
             states[i].in_scope,
         );
-        for c in callers_of(cx, sites, &callee, facts)
-            .into_iter()
-            .filter(|c| Handover::ByImplementation.hands_over(c))
+        let (handing_over, keeping): (Vec<Caller<'_>>, Vec<Caller<'_>>) =
+            callers_of(cx, sites, &callee, facts)
+                .into_iter()
+                .partition(|c| Handover::ByImplementation.hands_over(c));
+        // Callers through a protocol declaring the method leave the accesses with the function
+        // running them, also when its other callers take them over.
+        if states[i].runs_access
+            && !keeping.is_empty()
+            && reports_itself(
+                &callee,
+                obj,
+                below_in_scope,
+                FirstCallers::KeptBy(Handover::ByImplementation),
+            )
         {
+            out.push(report_at(&states, i, &callee, Vec::new()));
+        }
+        for c in handing_over {
             let caller_obj = c.bc.caller_params_of(obj);
             let hop = |from: &FuncKey, to: &FuncKey| CallHop {
                 caller: from.clone(),
@@ -3008,6 +3076,7 @@ pub(crate) fn delegated_reports(
                     states.push(WalkState {
                         func: c.caller.clone(),
                         facts: Facts::Result,
+                        runs_access: false,
                         obj: caller_obj,
                         in_scope: below_in_scope,
                         down: Some((i, hops)),
@@ -3026,26 +3095,14 @@ pub(crate) fn delegated_reports(
                     states.push(WalkState {
                         func: c.caller.clone(),
                         facts: c.into,
+                        runs_access: true,
                         obj: caller_obj,
                         in_scope,
                         down: Some((i, hops)),
                     });
                 }
-            } else if in_scope
-                && !initializes_itself(cx, c.caller, family, caller_obj)
-                && !runs_inside_allowed(cx, sites, allowance, family, c.caller, caller_obj)
-            {
-                let mut chain = hops;
-                let mut j = i;
-                while let Some((below, h)) = &states[j].down {
-                    chain.extend(h.iter().cloned());
-                    j = *below;
-                }
-                out.push(DelegatedReport {
-                    func: c.caller.clone(),
-                    span: c.site.span,
-                    chain,
-                });
+            } else if reports_itself(c.caller, caller_obj, in_scope, FirstCallers::All) {
+                out.push(report_at(&states, i, c.caller, hops));
             }
         }
         i += 1;
