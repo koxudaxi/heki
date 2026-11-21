@@ -889,8 +889,8 @@ impl<'a> Defs<'a> {
 
     /// Whether the key `var` is known to be hashable: its inferred type, or every class of an
     /// inferred union, is a builtin whose instances hash by value (`str`, `int`, `float`,
-    /// `bool`, `bytes`, `complex`, `frozenset`, `None`), or it is a class object. A `tuple`
-    /// hashes only when its items do, and a project class may set `__hash__ = None`.
+    /// `bool`, `bytes`, `complex`, `frozenset`, `None`). A `tuple` hashes only when its items
+    /// do, and a project class may set `__hash__ = None`.
     fn hashable(&self, var: VarId, types: &FxHashMap<VarId, Val>) -> bool {
         const HASHABLE: &[&str] = &[
             "builtins.str",
@@ -905,8 +905,6 @@ impl<'a> Defs<'a> {
         match types.get(&var) {
             Some(Val::Inst(class)) => HASHABLE.contains(&class.as_str()),
             Some(Val::Union(classes)) => classes.iter().all(|c| HASHABLE.contains(&c.as_str())),
-            // A class object hashes by identity.
-            Some(Val::Class(_)) => true,
             _ => false,
         }
     }
@@ -1131,24 +1129,25 @@ pub(crate) fn opt113(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
                         "nested loops join `{outer_iter}` and `{inner_iter}` on `{lhs} == {rhs}`"
                     )
                 };
-                if let Some(d) = cx.emit(
-                    out,
-                    "OPT113",
-                    unit,
-                    j.span,
-                    heki_effect::func_qualname(f),
-                    format!("{lhs}=={rhs}"),
-                    message,
-                    Some(help),
-                    &[],
-                ) {
-                    if exact {
-                        d.evidence = Some(format!(
-                            "established: both loops step through inputs and their trip counts are not fixed, a pair that does not match runs only the comparison, and `{inner_iter}` is the same collection on every outer iteration"
-                        ));
-                    } else {
-                        d.certainty = Certainty::Heuristic;
-                    }
+                let d = cx
+                    .emit(
+                        out,
+                        "OPT113",
+                        unit,
+                        j.span,
+                        heki_effect::func_qualname(f),
+                        format!("{lhs}=={rhs}"),
+                        message,
+                        Some(help),
+                        &[],
+                    )
+                    .expect("the rule runs on the unit: it returned at its start otherwise");
+                if exact {
+                    d.evidence = Some(format!(
+                        "established: both loops step through inputs and their trip counts are not fixed, a pair that does not match runs only the comparison, and `{inner_iter}` is the same collection on every outer iteration"
+                    ));
+                } else {
+                    d.certainty = Certainty::Heuristic;
                 }
             }
         }
@@ -1320,18 +1319,15 @@ impl JoinPremises<'_, '_, '_> {
             },
             |v| {
                 let v = shape.copy_root(v);
-                let Some(inst) = shape.inst(v) else {
-                    // A phi steps through what one of its inputs is.
-                    return match shape.def(v) {
-                        Def::Param => walk::Visit::Prune,
-                        Def::Phi(..) => walk::Visit::Expand,
-                        Def::Inst(..) | Def::None => walk::Visit::Stop(()),
-                    };
-                };
-                if lazy(ix, shape, inst).is_some() {
+                let inst = shape.inst(v);
+                // An input iterated directly (`next` adds nothing for it), a phi through its
+                // inputs, or a lazy builtin through its arguments.
+                if matches!(shape.def(v), Def::Param | Def::Phi(..))
+                    || inst.is_some_and(|i| lazy(ix, shape, i).is_some())
+                {
                     return walk::Visit::Expand;
                 }
-                let builds = match &inst.kind {
+                let builds = inst.is_some_and(|inst| match &inst.kind {
                     InstKind::AttrLoad { .. }
                     | InstKind::SubscriptLoad { .. }
                     | InstKind::LoadGlobal { .. }
@@ -1345,7 +1341,7 @@ impl JoinPremises<'_, '_, '_> {
                     ),
                     InstKind::MethodCall { method, .. } => VIEW_METHODS.contains(&method.as_str()),
                     _ => false,
-                };
+                });
                 if builds {
                     walk::Visit::Prune
                 } else {

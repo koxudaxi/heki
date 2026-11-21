@@ -1229,6 +1229,7 @@ def exact_join(orders, customers):
         for customer in customers:
             if order.customer_id == customer.id:
                 out.append((order, customer))
+        del order.pending
     return out
 
 
@@ -1304,6 +1305,15 @@ def str_keys(xs: list[str], ys: list[str]):
     return out
 
 
+def mixed_keys(xs: list[str], ys: list[str | int]):
+    out = []
+    for a in xs:
+        for b in ys:
+            if a == b:
+                out.append(a)
+    return out
+
+
 def after_if_work(xs, ys, log):
     out = []
     for a in xs:
@@ -1361,6 +1371,16 @@ def rebound(xs, ys, zs):
     return out
 
 
+def generator_before(names, calls, receiver_of):
+    receivers = (receiver_of(c) for c in calls)
+    out = []
+    for name in names:
+        for r in receivers:
+            if r == name:
+                out.append(r)
+    return out
+
+
 def yielding(xs, ys):
     for a in xs:
         for b in ys:
@@ -1408,12 +1428,14 @@ fn opt113_states_its_exact_claim_only_when_every_premise_holds() {
             ("sorted_inner", true, tier(true)),
             ("sliced", false, tier(false)),
             ("str_keys", true, tier(true)),
+            ("mixed_keys", true, tier(true)),
             ("after_if_work", false, tier(false)),
             ("filtered_inner", false, tier(false)),
             ("enumerated", true, tier(true)),
             ("view", true, tier(true)),
             ("either", true, tier(true)),
             ("rebound", false, tier(false)),
+            ("generator_before", false, tier(false)),
             ("yielding", false, tier(false)),
         ],
         "{json}{stderr}"
@@ -1427,6 +1449,7 @@ fn opt113_states_its_exact_claim_only_when_every_premise_holds() {
     // The advice names a `set` or a `dict` only for keys known to be hashable, and an index
     // built once only for an inner collection that is the same on every outer iteration.
     assert!(help("str_keys").starts_with("group the elements of `ys`"));
+    assert!(help("mixed_keys").starts_with("group the elements of `ys`"));
     assert!(help("exact_join").starts_with("if the keys are hashable, index `customers`"));
     assert!(help("inner_changed").starts_with(
         "if `events` is the same collection on every iteration of the outer loop and the keys are hashable,"
