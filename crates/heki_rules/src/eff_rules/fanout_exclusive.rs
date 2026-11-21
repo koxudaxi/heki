@@ -6,7 +6,7 @@
 //! `start_soon` calls of one anyio task group. Each task (a sibling) is a coroutine a project
 //! call creates, a `create_task` of one, a call a task group starts, or a one-at-a-time call
 //! itself; one in a loop or a comprehension starts several. The objects a sibling uses come from
-//! its callee's summary (`EffectSummary::exclusive_uses`), mapped through the call's arguments to
+//! its callee's summary (`EffectSummary::exclusive`), mapped through the call's arguments to
 //! what the fan-out function names: a parameter or its attribute, a global, a closure variable,
 //! or one of its local variables. Two siblings, or one started several times, using the same
 //! object is reported, unless the object is the loop's own item there (a handle per task).
@@ -168,6 +168,10 @@ pub(super) fn run(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Di
     if !cx.enabled("EFF110", unit) {
         return;
     }
+    debug_assert!(
+        cx.index.opt_in_facts().exclusive,
+        "`opt_in_facts` decides for EFF110"
+    );
     let tcx = TypeCtx::new(&unit.input, cx.decls, cx.kb);
     let functions = &unit.input.ir.functions;
     for f in functions.iter().filter(|f| !f.is_class_body) {
@@ -563,7 +567,7 @@ impl<'a> Check<'_, 'a> {
             if !summary.is_async || summary.is_generator {
                 continue;
             }
-            for (obj, u) in &summary.exclusive_uses {
+            for (obj, u) in summary.exclusive_uses() {
                 let Some(holder) = self.through(s, &bound, decl, obj) else {
                     continue;
                 };
@@ -761,7 +765,7 @@ impl<'a> Check<'_, 'a> {
             (is_awaited || !summary.is_async)
                 && !summary.is_generator
                 && summary
-                    .exclusive_uses
+                    .exclusive_uses()
                     .keys()
                     .any(|obj| self.through(probe, &bound, decl, obj).as_ref() == Some(holder))
         })

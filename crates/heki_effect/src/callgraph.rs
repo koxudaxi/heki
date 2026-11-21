@@ -7,6 +7,7 @@
 //! edited file's SCC closure and then over the affected callers only.
 
 use crate::guards;
+use crate::iterations;
 use crate::scc::tarjan_scc;
 use crate::{
     ArgOrigin, AttrKeyPath, BoundCallee, CallHop, CallSite, Construction, Delivery, EffectSummary,
@@ -279,11 +280,13 @@ fn recompute(
         }
         s.consumes_params |= consumed.unwrap_or(0) & s.unconditional_forwards;
     }
-    returned_results(
-        index,
-        out.get(func).map(Vec::as_slice).unwrap_or(&[]),
-        &mut s,
-    );
+    if index.opt_in.return_origins {
+        returned_results(
+            index,
+            out.get(func).map(Vec::as_slice).unwrap_or(&[]),
+            &mut s,
+        );
+    }
     if !s.returns_self_attrs.is_empty() {
         drop_attrs_read_by_discarded_calls(index, &self_calls, local, &mut s);
     }
@@ -793,6 +796,29 @@ fn transfer(
         t.invalidates_cached
             .extend(facts.invalidates_cached.iter().cloned());
     }
+    let changes = iterations::call_changes(site, bc, callee, facts);
+    if !changes.is_empty() {
+        iterations::merge_changes(
+            &mut t.iteration_facts_mut().changes_self_containers,
+            changes,
+        );
+    }
+    // A callee parameter bound to a caller parameter itself changes that parameter's container.
+    let param_changes: Vec<(u8, iterations::ContainerChange)> = facts
+        .iteration_facts()
+        .changes_param_containers
+        .iter()
+        .filter_map(|(&i, &change)| match origin(usize::from(i))?.param {
+            Some((p, None)) => Some((p, change)),
+            _ => None,
+        })
+        .collect();
+    if !param_changes.is_empty() {
+        iterations::merge_changes(
+            &mut t.iteration_facts_mut().changes_param_containers,
+            param_changes,
+        );
+    }
     // A slot of a callee parameter bound to a caller parameter is that parameter's slot.
     for (&i, slots) in &facts.inplace_param_slots {
         if let Some(ArgOrigin {
@@ -862,20 +888,32 @@ fn transfer(
     // A generator passed to a callee that iterates it runs there.
     t.iterates_params |= caller_params(facts.iterates_params, bc);
 
-    // d. The locks the callee takes on the caller's thread or task, in the caller's names.
-    for (lock, acq) in &facts.acquires_locks {
-        if let Some((lock, acq)) =
-            crate::locks::through_call(site, bc, lock, acq, lead, rewrite, own_writes)
-        {
-            crate::locks::add_acquisition(&mut t.acquires_locks, lock, acq);
+    // d. The locks the callee takes on the caller's thread or task, in the caller's names,
+    //    behind the tests of state on every path to the call too; and the names it may bind.
+    if let Some(callee) = facts.locks.as_deref() {
+        for (lock, acq) in &callee.acquires {
+            if let Some((lock, mut acq)) =
+                crate::locks::through_call(site, bc, lock, acq, lead, rewrite, own_writes)
+            {
+                if let Some(tests) = &site.state_tests {
+                    crate::locks::add_owner_tests(&mut acq, &lock, tests);
+                }
+                crate::locks::add_acquisition(&mut t.lock_facts_mut().acquires, lock, acq);
+            }
+        }
+        let rebinds: Vec<_> = (callee.rebinds.iter())
+            .filter_map(|name| name.through(bc))
+            .collect();
+        if !rebinds.is_empty() {
+            t.lock_facts_mut().rebinds.extend(rebinds);
         }
     }
 
     // e. The objects the callee uses one operation at a time, in the caller's names.
-    for (obj, u) in &facts.exclusive_uses {
+    for (obj, u) in facts.exclusive_uses() {
         if let Some((obj, u)) = crate::one_at_a_time::through_call(site, bc, obj, u, lead, rewrite)
         {
-            crate::one_at_a_time::add_use(&mut t.exclusive_uses, obj, u);
+            crate::one_at_a_time::add_use(t.exclusive_uses_mut(), obj, u);
         }
     }
 }

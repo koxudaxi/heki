@@ -131,6 +131,7 @@ Each report shows the chain of calls that leads to the bug.
 | Opt-in, experimental: a `@cached_property` left stale after another method changes what it read | `MUT101` |
 | Opt-in, experimental: a function reading a `@cached_property` that another method leaves stale | `MUT111` |
 | Opt-in, experimental: a value that is a new object on one path and the caller's object on another, changed in place | `MUT112` |
+| Opt-in, experimental: a dict or set changed while a suspended generator, or a loop calling a helper, iterates it | `MUT113` |
 | Opt-in, experimental: a `threading.Lock` or `asyncio.Lock` taken again, through a helper, while it is held | `EFF109` |
 | Opt-in, experimental: a stream reader, a database connection, or a WebSocket that tasks started together use at once | `EFF110` |
 
@@ -226,7 +227,7 @@ $ heki server                                   # LSP server for editors
 - 🚀 [Getting started](https://heki.koxudaxi.dev/getting-started/) - run heki on a project, read a diagnostic, apply a fix
 - 🎯 [Scope and limitations](https://heki.koxudaxi.dev/scope/) - what heki checks and what it leaves to other tools
 - ⚙️ [Configuration](https://heki.koxudaxi.dev/configuration/) - rule selection, contracts, the Python version
-- 📏 [Rules](https://heki.koxudaxi.dev/rules/) - all 36 rules
+- 📏 [Rules](https://heki.koxudaxi.dev/rules/) - all 37 rules
 - 🔧 [Fixes and safety](https://heki.koxudaxi.dev/fixes/) - how rewrites are proven safe
 - 🪜 [Adopting heki](https://heki.koxudaxi.dev/adoption/) - Ratchet baselines, pre-commit, CI
 - 🖥️ [Editors (LSP)](https://heki.koxudaxi.dev/lsp/) - VS Code, Neovim, and any LSP client

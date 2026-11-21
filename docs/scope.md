@@ -367,8 +367,8 @@ The proofs heki can make, on five axes:
 
 | Axis | What heki establishes | Used by |
 | ---- | --------------------- | ------- |
-| Control flow | which statements can run after which: CFG paths, loops and their bounds, exception edges | `MUT106`, `MUT109`, `EFF102`, `EFF103`, `EFF106`, `EFF109`, `EFF110`, `DATA101`, `OPT` |
-| Calls | which functions a call reaches across modules, and what they do (summaries propagated over the call graph) | `EFF101`, `EFF109`, `EFF110`, `EFF201`, `MUT103`, `MUT108`, `MUT109`, `MUT110`, `MUT112`, `MUT201`–`MUT204` |
+| Control flow | which statements can run after which: CFG paths, loops and their bounds, exception edges | `MUT106`, `MUT109`, `MUT113`, `EFF102`, `EFF103`, `EFF106`, `EFF109`, `EFF110`, `DATA101`, `OPT` |
+| Calls | which functions a call reaches across modules, and what they do (summaries propagated over the call graph) | `EFF101`, `EFF109`, `EFF110`, `EFF201`, `MUT103`, `MUT108`, `MUT109`, `MUT110`, `MUT112`, `MUT113`, `MUT201`–`MUT204` |
 | Aliases | which names, iterators, and views refer to one object; whether it is unique to its frame and of an exact builtin type | `MUT202`, `MUT201`, `MUT204`, `MUT108`, `MUT110`, `MUT112`, `EFF107`, `EFF109`, `EFF110`, `OPT101`–`OPT130` |
 | Effects | which blocking, network, file, or database work runs, from the catalog of library behavior | `EFF101`–`EFF106`, `EFF201`, `DATA101` |
-| State | which attributes and containers a function reads, writes, or mutates, and who may do so | `MUT101`, `MUT107`, `MUT108`, `MUT109`, `MUT110`, `MUT111`, `MUT112`, `MUT201`–`MUT204` |
+| State | which attributes and containers a function reads, writes, or mutates, and who may do so | `MUT101`, `MUT107`, `MUT108`, `MUT109`, `MUT110`, `MUT111`, `MUT112`, `MUT113`, `MUT201`–`MUT204` |

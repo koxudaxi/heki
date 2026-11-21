@@ -3,7 +3,7 @@
 //!
 //! A use is a call of a method the catalog flags `one_at_a_time` on an instance of its class
 //! (`await reader.readline()`, `await conn.fetch(q)`, `await ws.recv()`), or an `async for` over
-//! one (its class's `__anext__`). `EffectSummary::exclusive_uses` holds the function's own uses
+//! one (its class's `__anext__`). `EffectSummary::exclusive` holds the function's own uses
 //! and those of the calls that run in its body on its task, in the function's names
 //! ([`ObjRef`]), as `EffectSummary::acquires_locks` does for locks. A use while the function
 //! certainly holds a lock does not count, and neither do the uses of a call made while it holds
@@ -23,7 +23,7 @@ use std::collections::btree_map::Entry;
 use std::path::Path;
 use std::sync::Arc;
 
-/// One object a function uses one operation at a time (`EffectSummary::exclusive_uses`).
+/// One object a function uses one operation at a time (`EffectSummary::exclusive`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExclusiveUse {
     /// The catalog method (`asyncio.StreamReader.readline`).
@@ -42,6 +42,17 @@ impl ExclusiveUse {
         crate::zero_hop_spans(&mut out.chain);
         out
     }
+}
+
+pub(crate) static NO_EXCLUSIVE_USES: BTreeMap<ObjRef, ExclusiveUse> = BTreeMap::new();
+
+/// The uses with every source location zeroed (Early Cutoff).
+pub(crate) fn without_locations(
+    uses: &BTreeMap<ObjRef, ExclusiveUse>,
+) -> BTreeMap<ObjRef, ExclusiveUse> {
+    (uses.iter())
+        .map(|(obj, u)| (obj.clone(), u.without_locations()))
+        .collect()
 }
 
 /// The kind two uses of one object count as together: one that always raises covers one that

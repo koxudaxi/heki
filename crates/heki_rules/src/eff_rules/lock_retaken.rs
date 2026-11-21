@@ -3,13 +3,15 @@
 //!
 //! A lock is held from a `with` / `async with` over it to the `ExitWith` of that statement, and
 //! from an awaited or blocking `acquire()` to a `release()`, certainly (on every path,
-//! [`held::at_entry`]). The acquisitions a call makes come from the callees' summaries
-//! (`EffectSummary::acquires_locks`, [`heki_effect::ProjectIndex::site_locks`]), in the caller's
-//! names: the same `self.<attr>`, module global, or closure variable on both sides.
+//! [`held::at_entry`]), and while nothing binds its name again: the holder itself, or a function
+//! it calls (`heki_effect::ProjectIndex::site_rebinds`). The acquisitions a call makes come from
+//! the callees' summaries (`LockFacts::acquires`, [`heki_effect::ProjectIndex::site_locks`]), in
+//! the caller's names: the same `self.<attr>`, module global, or closure variable on both sides.
 //!
 //! An acquisition behind a test of the lock owner's state that the holder, or what it calls,
-//! changes, or of a module global the holder sets, is not reported: such code keeps a flag of
-//! its own to know whether it holds the lock (`if self._starting: return`, `if _LIB is not None:
+//! changes, or of a module global the holder sets, in the acquiring function or in one on the
+//! way to it, is not reported: such code keeps a flag of its own to know whether it holds the
+//! lock (`if self._starting: return`, `if _LIB is not None:
 //! return _LIB`), which heki does not evaluate. Neither is a lock some function of the module
 //! releases without holding it: another thread gives that lock back as a signal (a handoff),
 //! so taking it again waits for that thread, by design.
@@ -21,6 +23,9 @@ use heki_effect::held;
 use heki_effect::locks::{self, LockSteps, ObjRef, SiteLock, Taken};
 use heki_effect::ownership;
 use heki_effect::{CallSite, EffectSummary, FuncKey, TypeCtx, anchors_call_site};
+
+/// Call sites of a module by `(caller qualname, span)` (`CheckContext::sites_by_span`).
+type SitesBySpan<'s> = FxHashMap<(String, Span), Vec<&'s CallSite>>;
 use heki_ir::{BlockId, Inst, InstKind, IrFunction, VarId};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::BTreeSet;
@@ -58,7 +63,12 @@ fn handoff_key(f: &IrFunction, lock: &ObjRef) -> Option<ModuleLock> {
 
 /// The locks some function of the module releases where it does not hold them: a signal
 /// between threads.
-fn handoffs(tcx: &TypeCtx<'_>, unit: &ModuleUnit<'_>) -> FxHashSet<ModuleLock> {
+fn handoffs(
+    cx: &CheckContext<'_>,
+    tcx: &TypeCtx<'_>,
+    unit: &ModuleUnit<'_>,
+    sites: &SitesBySpan<'_>,
+) -> FxHashSet<ModuleLock> {
     let mut out = FxHashSet::default();
     for f in unit.input.ir.functions.iter().filter(|f| !f.is_class_body) {
         let releases =
@@ -69,7 +79,7 @@ fn handoffs(tcx: &TypeCtx<'_>, unit: &ModuleUnit<'_>) -> FxHashSet<ModuleLock> {
             continue;
         }
         let key = CheckContext::key(unit, f);
-        let steps = lock_steps(tcx, f, &key);
+        let steps = lock_steps(cx, tcx, sites, f, &key);
         let entry = held::at_entry(f, steps.locks.taken.len(), |b, i| {
             steps.locks.changes.get(&(b, i))
         });
@@ -97,6 +107,10 @@ pub(super) fn run(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Di
     if !cx.enabled("EFF109", unit) {
         return;
     }
+    debug_assert!(
+        cx.index.opt_in_facts().locks,
+        "`opt_in_facts` decides for EFF109"
+    );
     let tcx = TypeCtx::new(&unit.input, cx.decls, cx.kb);
     let mut sites = None;
     let mut signals = None;
@@ -115,12 +129,12 @@ pub(super) fn run(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Di
             continue;
         }
         let key = CheckContext::key(unit, f);
-        let steps = lock_steps(&tcx, f, &key);
+        let sites = sites.get_or_insert_with(|| cx.sites_by_span(unit));
+        let steps = lock_steps(cx, &tcx, sites, f, &key);
         if steps.locks.taken.is_empty() {
             continue;
         }
-        let sites = sites.get_or_insert_with(|| cx.sites_by_span(unit));
-        let signals = signals.get_or_insert_with(|| handoffs(&tcx, unit));
+        let signals = signals.get_or_insert_with(|| handoffs(cx, &tcx, unit, sites));
         let summary = cx.index.summary(&key);
         // The globals the function sets (`global _LIB; _LIB = lib`).
         let sets: FxHashSet<String> = f
@@ -177,8 +191,15 @@ pub(super) fn run(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Di
     }
 }
 
-/// The lock acquisitions of `f` and what each instruction does to them.
-fn lock_steps(tcx: &TypeCtx<'_>, f: &IrFunction, key: &FuncKey) -> Steps {
+/// The lock acquisitions of `f` and what each instruction does to them, the names its calls
+/// may bind among them.
+fn lock_steps(
+    cx: &CheckContext<'_>,
+    tcx: &TypeCtx<'_>,
+    sites: &SitesBySpan<'_>,
+    f: &IrFunction,
+    key: &FuncKey,
+) -> Steps {
     let defs: FxHashMap<VarId, &Inst> = f
         .blocks
         .iter()
@@ -188,7 +209,16 @@ fn lock_steps(tcx: &TypeCtx<'_>, f: &IrFunction, key: &FuncKey) -> Steps {
     let def = |v: VarId| defs.get(&v).copied();
     let types = tcx.infer(f);
     let live = ownership::Live::of(f, &defs);
-    let locks = locks::lock_steps(tcx, f, key, &types, &def, &live);
+    let rebound = |inst: &Inst| -> Vec<ObjRef> {
+        let own = locks::rebound_name(tcx, f, key, &types, &def, &inst.kind);
+        let mut names: Vec<ObjRef> = own.into_iter().collect();
+        if anchors_call_site(&inst.kind) {
+            let here = sites.get(&(key.qualname.clone(), inst.span));
+            names.extend((here.into_iter().flatten()).flat_map(|site| cx.index.site_rebinds(site)));
+        }
+        names
+    };
+    let locks = locks::lock_steps(tcx, f, key, &types, &def, &live, &rebound);
     Steps { live, locks }
 }
 
@@ -199,7 +229,7 @@ fn lock_steps(tcx: &TypeCtx<'_>, f: &IrFunction, key: &FuncKey) -> Steps {
 fn retakes(
     cx: &CheckContext<'_>,
     unit: &ModuleUnit<'_>,
-    sites: &FxHashMap<(String, Span), Vec<&CallSite>>,
+    sites: &SitesBySpan<'_>,
     key: &FuncKey,
     holder: &HolderState<'_>,
     own: Option<&ObjRef>,
