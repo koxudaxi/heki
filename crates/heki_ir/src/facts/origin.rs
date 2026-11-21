@@ -4,9 +4,10 @@
 //! - The items pass through the wrappers that keep them, some of them, or tuples holding them:
 //!   `list`, `tuple`, `set`, `sorted`, `reversed`, `iter`, `filter`, `enumerate`, `zip`, slices,
 //!   dict views, and a comprehension, generator expression, or list the function fills only by
-//!   appending that produces the item of a loop (or a component of it, as unpacking gives).
-//! - Through `map`, the element expression of a comprehension, and `range(len(x))` only the
-//!   count carries ([`Carries::Count`]); an item of what carries only a count has no source.
+//!   appending that produces the item of a loop.
+//! - Through `map`, the element expression of a comprehension (a part of the item included),
+//!   and `range(len(x))` only the count carries ([`Carries::Count`]); an item of what carries
+//!   only a count has no source, and neither has a set or dict of it, whose equal keys merge.
 //! - The pieces `str.split` / `str.splitlines` (also after `strip`-like methods) cut are pieces of
 //!   their receiver's text ([`ItemOrigin::text`]): `CONST.split(";")` is fixed, and the reader
 //!   checks that a call whose text they cut returns text.
@@ -116,6 +117,8 @@ impl Steps {
     const COUNT: u8 = 2;
     /// The value's text is changed in place.
     const TEXT: u8 = 4;
+    /// The value is gathered into a set or the keys of a dict, which keeps one of equal items.
+    const DEDUP: u8 = 8;
 
     fn has(self, flag: u8) -> bool {
         self.flags & flag != 0
@@ -146,9 +149,11 @@ impl Steps {
     }
 
     /// The steps with a count taken first: an item or a piece of what carries only a count has
-    /// no source the walk can name.
+    /// no source the walk can name, and neither has a set of it (equal results of different
+    /// items merge, so the count no longer follows the items; a set of the items themselves only
+    /// keeps some of them).
     fn counted(self) -> Option<Self> {
-        (self.parts == 0 && !self.has(Self::PIECES)).then(|| self.with(Self::COUNT))
+        (self.parts == 0 && !self.has(Self::PIECES | Self::DEDUP)).then(|| self.with(Self::COUNT))
     }
 
     /// What these steps make of `source`, of `function`: `None` when an item of a call's
@@ -317,7 +322,7 @@ impl<'m> ItemOrigins<'m> {
                 for e in entries {
                     match e {
                         DictEntry::KeyValue { key, .. } => walk.element(*key),
-                        DictEntry::Unpack { dict } => walk.ask(*dict, steps),
+                        DictEntry::Unpack { dict } => walk.ask(*dict, steps.with(Steps::DEDUP)),
                     }
                 }
             }
@@ -389,9 +394,15 @@ impl<'m> ItemOrigins<'m> {
         elems: &[VarId],
         walk: &mut Decision,
     ) {
+        // A set keeps one of equal items; an element it holds is not changed by that.
+        let gathered = if kind == BuiltinKind::Set {
+            walk.steps.with(Steps::DEDUP)
+        } else {
+            walk.steps
+        };
         for (k, e) in elems.iter().enumerate() {
             if ix.shape().is_starred(dst, k) {
-                walk.ask(*e, walk.steps);
+                walk.ask(*e, gathered);
             } else {
                 walk.element(*e);
             }
@@ -399,6 +410,7 @@ impl<'m> ItemOrigins<'m> {
         if is_immutable_kind(kind) || !self.may_grow(ix, dst) {
             return;
         }
+        walk.steps = gathered;
         self.of_appends(budget, ix, dst, walk);
     }
 
@@ -499,7 +511,17 @@ impl<'m> ItemOrigins<'m> {
                 return walk.call_at(b, i);
             }
             return match step {
-                ItemStep::Same(x) | ItemStep::Kept(x) => walk.ask(x, steps),
+                ItemStep::Same(x) | ItemStep::Kept(x) => {
+                    let dedup = matches!(built, Some("set" | "frozenset" | "dict"));
+                    walk.ask(
+                        x,
+                        if dedup {
+                            steps.with(Steps::DEDUP)
+                        } else {
+                            steps
+                        },
+                    );
+                }
                 ItemStep::Mapped(x) => walk.ask_counted(x),
                 ItemStep::Zip(args) if !args.is_empty() => {
                     for a in args {
@@ -638,9 +660,9 @@ impl Decision {
     }
 
     /// What producing `value` in block `b` of `ix`'s function (an append, a `yield`) adds: the
-    /// item of the innermost loop around `b` (or a component of it) adds that loop's items; any
-    /// other value one item per iteration of it; a value outside every loop one element. A loop
-    /// over one of `aliases` (the collection being filled) feeds itself.
+    /// item of the innermost loop around `b` adds that loop's items; any other value, a part of
+    /// the item included (`r[0]`), one item per iteration of it; a value outside every loop one
+    /// element. A loop over one of `aliases` (the collection being filled) feeds itself.
     fn produces(&mut self, ix: &FnIndex<'_>, b: BlockId, value: VarId, aliases: &[VarId]) {
         let shape = ix.shape();
         let Some(lp) = shape.innermost(b) else {
@@ -662,16 +684,7 @@ impl Decision {
             return self.fail();
         }
         let value = shape.copy_root(value);
-        let component = match shape.inst(value).map(|i| &i.kind) {
-            Some(InstKind::SubscriptLoad {
-                obj,
-                index,
-                is_slice: false,
-                ..
-            }) if matches!(scalar(ix, *index), Some(Scalar::Int(_))) => Some(shape.copy_root(*obj)),
-            _ => None,
-        };
-        if value == item || component == Some(item) {
+        if value == item {
             self.ask_in(ix.f.id, iterable, self.steps);
         } else {
             let f = std::mem::replace(&mut self.f, ix.f.id);

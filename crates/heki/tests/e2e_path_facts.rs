@@ -297,6 +297,8 @@ class Store:
             for row in batch:
                 pass
         total = sum(len(x) for x in conn.query())
+        for key in {row[0] for row in rows}:
+            pass
 "#,
     );
     let origins: Vec<Value> = function(&facts, "Store.load")["loops"]
@@ -330,6 +332,10 @@ class Store:
             // An item of a display is the element itself.
             one("param 1"),
             one("fixed"),
+            // The set comprehension's own loop, then the loop over the set: equal keys merge,
+            // so the count no longer follows the rows.
+            one("param 1"),
+            json!("open"),
         ]
     );
     // A generator expression's loop reads the iterable its creator passes.
