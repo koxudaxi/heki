@@ -5,6 +5,149 @@ All notable changes to heki are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). heki is experimental: until 1.0, any
 release can change rules, configuration keys, diagnostics, and output formats.
 
+## [0.2.1] - Unreleased
+
+### Added
+
+- `heki check` colors its `full` and `concise` output and `--diff` on a terminal, as Ruff does:
+  paths in bold, rule codes in red, the severity, the source frame and its caret, and the lines a
+  diff removes and adds. `--watch` is colored the same way. The output stays plain when stdout is
+  not a terminal, or when `NO_COLOR` is set (or `CLICOLOR=0`); `FORCE_COLOR` or `CLICOLOR_FORCE`
+  color it anywhere, also over `NO_COLOR`, and the new `heki check --color auto|always|never`
+  decides over every variable. `json`, `github`, and `sarif` output, stderr, and the language server
+  are unchanged.
+- `heki inspect <SYMBOL> [PATHS]...` (experimental) says what heki knows about one function, from
+  the analysis `heki check` runs for the same configuration and selection: the effects it reaches
+  with their call chains and guards, the parameters, `self` attributes, other objects, module
+  globals, and closure cells it changes (with the chain to the body that changes them), the
+  parameters it keeps, what it returns, whether it is pure in heki's sense (`pure`, `impure` with
+  the reasons, or `unknown` with the first function whose calls heki cannot resolve, and what the
+  verdict assumes), its callers (`--callers --depth N` transitively), the reports `heki check` makes
+  in it, and the contracts naming it. The symbol is a dotted name, a dotted suffix, or a glob,
+  `path.py:LINE`, or `path.py::NAME`; `--output-format json` writes one versioned object, and a
+  symbol naming no single function exits with 2 and an error object listing the candidates.
+- `EFF109` (`lock-reacquired-while-held`, opt-in, experimental) reports a non-reentrant lock
+  (`threading.Lock`, `asyncio.Lock`, `asyncio.Condition`, `multiprocessing.Lock`) taken again while
+  it is held: by a nested `with` or `acquire()`, or by a function the holder calls on its own thread
+  or task, any number of calls deep and across modules (a helper on `self`, an awaited coroutine, a
+  property, a generator iterated there), when both sides name the lock the same way (an attribute of
+  `self` or of another parameter, a module global, a variable of an enclosing function). It does not
+  report an acquisition a constant argument switches off, one behind a test of state the holder
+  changes (an attribute of the lock's owner, also through its callees, or a module global it sets,
+  tested by the function taking the lock or by one on the way to it), a lock given back before it is
+  taken again, a lock whose name may be bound to another object first (by the holder, by a function
+  it calls, or on the way to the inner acquisition), or a lock another thread gives back as a
+  signal. Its facts are computed only while it is selected. `[[tool.heki.ecosystem]]` takes
+  `non-reentrant-lock = true` for other lock classes.
+- `EFF110` (`exclusive-object-fanout`, opt-in, experimental) reports an object that allows one
+  operation at a time (`asyncio.StreamReader`, an asyncpg `Connection`, a websockets connection, an
+  aiohttp WebSocket response) used by tasks a function starts together: two of them, or one started
+  for every item, through `asyncio.gather`, `asyncio.wait`, an `asyncio.TaskGroup`, or an anyio task
+  group, through helpers and keyword arguments. SQLAlchemy's `AsyncSession` is reported only where
+  the fan-out can be its first operation since it was made or committed. It does not report
+  different objects (a process's `stdout` and `stderr`), uses under a lock, an object each task gets
+  for itself, a task started again only once it is done, or a task that may bind the object's name
+  first. Its facts are computed only while it is selected. `[[tool.heki.ecosystem]]` takes
+  `one-at-a-time` for other methods.
+- `effect-boundaries` scopes can check module bodies, what runs when a module is imported: a scope
+  naming `<module>` itself (`pkg.gen:<module>`, `pkg.*:<module>`, `pkg.gen.<module>`, or `<module>`
+  for every module) makes `EFF201` check the bodies of the modules it names as it checks a scope
+  function, through the calls they make. Their module-level environment reads (`PLATFORM =
+  sys.platform`, `if sys.version_info >= (3, 14):`), import probes (`try: import yaml` / `except
+  ImportError:`), calls, blocking calls, and writes are reported under the qualname `<module>`, and
+  so is what the bodies of their classes take from outside the project (`class Settings: home =
+  os.getenv("HOME")`). A scope naming only the module (`pkg.*`, `pkg.gen:*`) still leaves its body
+  out, so existing boundaries report as before.
+- `attribution` on `[[tool.heki.write-owners]]`, `[[tool.heki.read-owners]]`, and
+  `[[tool.heki.call-owners]]`: `"call-graph"` (default, the behaviour so far) or `"lexical"`. With
+  `"lexical"`, an access is judged in the function whose code holds it, whoever calls that function:
+  a private helper reports its writes, reads, and calls itself instead of handing them to its
+  callers, and a function that only runs inside allowed functions is no longer allowed. A lambda,
+  comprehension, or generator expression is part of the function it is written in, and a class
+  body's code part of the function running the class statement. A class's own initialization,
+  `exempt-methods`, `fresh-objects`, and the targets of a call contract calling each other stay
+  allowed; for `write-owners`, a call handing a typed object to a helper that changes it without
+  knowing its class stays the caller's write. With `unresolved = "report"` (`MUT205`, `MUT206`,
+  `MUT207`), the callers binding a parameter then only tell its object's class, allowed callers
+  included.
+- `references = "calls-and-bases"` on `call-owners` and on effect boundaries (`calls`): what
+  `"calls"` counts, and a class statement naming a class target among its bases (`class
+  Derived(Base)`, also `core.Base` and `Base[int]`), reported as "`<module>` subclasses
+  `pkg.core.Base`" for the function running the class statement. A base is matched as a construction
+  is, so with `subclasses = false` only the class itself counts; a keyword (`metaclass=Base`) is no
+  base. `"calls"` keeps leaving bases out.
+- A `call-owners` target, or an effect boundary's `call-targets` entry, may end in an argument list
+  of `parameter=value` entries: `"DataType(is_dict=True)"`, `'container_flags(kind="dict")'`. It
+  names only the calls that pass each constant (`True`, `False`, `None`, an integer, or a quoted
+  string): heki must establish that the argument bound to the parameter is that constant, a literal
+  or a string constant bound once, passed by keyword (also to a dataclass or a pydantic model), by
+  position where every function the call may run binds it to the parameter, or left out where every
+  such default is the value (`True`, `False`, `None`, `0`, or `""`). A call whose argument heki
+  cannot tell is not reported, a reference never matches, and such a target names nothing outside
+  the project. Reports name the target with its list (`` `bypass_dict` constructs
+  `pkg.types.DataType(is_dict=True)` ``). An argument list heki cannot read is a configuration
+  error. `MUT207` matches such a target by its name before the list.
+
+### Changed
+
+- Must-fact chains share their callee's hops, which lowers the peak heap of `heki check` and the
+  language server by about 0.5 MiB on the memory gate's project (#90).
+
+### Fixed
+
+- `MUT108` and `MUT110` find the call chain down to the function that changes an argument in time
+  linear in the calls they pass: an argument handed down through thousands of functions of one
+  module no longer takes time quadratic in them.
+- A module that only reads the dict `globals()` returns (`globals().get(name)`, `globals()[name]`,
+  `name in globals()`, iterating it, `len(globals())`, also through a local alias) keeps its
+  constants: a `Final` key of such a module names its attribute again in `obj.__dict__[KEY]` (a
+  `MUT201` write, as in 0.1.2, where 0.2.0 gave `MUT205`). Storing into the dict, deleting from it,
+  a method changing it (`update`, `setdefault`, `pop`), or handing it on (an argument of a call that
+  does not only read it, a returned or stored value, the builtin `globals` itself) still leaves the
+  module's names unfixed.
+- `reads-environment` effect boundaries (`EFF201`) no longer report `importlib.import_module` and
+  `importlib.util.find_spec` importing a module of the project: every text the name may hold names a
+  project module (`"pkg.config"`, a module constant, also an imported one), or starts with a project
+  package and a dot (`f"pkg.parser.{name}"`, `"pkg.parser." + name`, `"pkg.%s" % name`) whose
+  `__init__.py` heki reads and does not rebind `__path__`. A relative name is anchored at `package`,
+  a text or the module's own `__package__` or `__name__`. A name heki cannot tell, a module the
+  project does not have, a namespace package, and a call inside a `try` that takes an `ImportError`
+  stay reported, and a `call-targets` entry naming `importlib.import_module` still matches every
+  call of it. The language server follows a module being created or deleted.
+- A variable of an enclosing function read in a nested scope keeps its class: `self` and the other
+  variables a method or function binds have the class of what it binds to them in its comprehensions
+  and generator expressions with a scope of their own (all generator expressions, and comprehensions
+  before 3.12), lambdas, nested functions, and nested classes. Their reads and calls were of unknown
+  class, so `unresolved = "report"` contracts reported them under `MUT205`, `MUT206`, and `MUT207`
+  (`[name for name in names if name in self._given]` in a method), `MUT201`, `MUT203`, and `MUT204`
+  missed the ones on a target class, and the default rules did not follow the calls they make
+  (`EFF103` through `any(self._query(k) for _ in ...)`). A comprehension's iteration variable read
+  by a lambda or generator expression nested in the comprehension has the class of its items too,
+  from 3.12 as before (`[any(n in m.names for n in names) for m in models]`). A variable that a
+  nested scope rebinds (`nonlocal`, or an assignment expression in a comprehension before 3.12), or
+  that the function binds to a value of unknown class, stays of unknown class.
+- `type(obj)` of an instance of a project class is a class object that is the class or a subclass of
+  it, as `cls` in a class method is: `type(schema)._first_typed(schema)` calls the `_first_typed` of
+  the class and of its subclasses that override it, and `MUT204` reports it where `MUT207` reported
+  a call on an object of unknown class. It stays unknown for a union, a protocol, and a class
+  outside the project; `obj.__class__` is not followed (a class or a subclass may rebind it).
+- `MUT110` and `MUT114` no longer state their exact claim where a project subclass of the builtin
+  container overrides the changing method or operator (`reverse`, `setdefault`, `sort`, `|=`,
+  `__setitem__`, ...), has a custom metaclass, or defines `__getattribute__` (for a named method
+  call; operators and item stores bypass it): under R2 the value may be an instance of that
+  subclass, so the line may change nothing. These were exact reports in 0.2.0 that could be wrong;
+  0.2.1 makes them heuristic. A cached result the function builds with a display, a comprehension or
+  a builtin constructor is exactly the builtin class and stays exact. `OPT113` reads the same fact
+  for `__iter__` and the view methods, now for any binding of the name in a project subclass.
+- `MUT110` no longer reports a change it reaches only through a helper whose parameter is annotated,
+  read-only (that helper is checked on its own) or mutable (a type checker reports the argument).
+  Those were exact reports in 0.2.0 that could be wrong; 0.2.1 drops them.
+- `EFF101` no longer makes an exact report that a catalog call waits when its argument is a module
+  constant, bound once, that ends the wait at once: `time.sleep(PAUSE)` with `PAUSE = 0`, a `data:`
+  URL constant for `urlopen`, a `localhost` constant for `getaddrinfo` or `gethostbyname`. Those
+  were exact reports in 0.2.0 that could be wrong; 0.2.1 drops them. Imported constants count too,
+  unless another module rebinds them.
+
 ## [0.2.0] - 2026-11-21
 
 ### Breaking changes
@@ -549,6 +692,7 @@ The first public preview.
 - Wheels for Linux (x86_64 and aarch64 with glibc, x86_64 with musl), macOS (arm64 and x86_64),
   and Windows (x86_64), and a source distribution.
 
+[0.2.1]: https://github.com/koxudaxi/heki/compare/v0.2.0...HEAD
 [0.2.0]: https://github.com/koxudaxi/heki/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/koxudaxi/heki/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/koxudaxi/heki/compare/v0.1.0...v0.1.1
