@@ -253,9 +253,6 @@ release can change rules, configuration keys, diagnostics, and output formats.
   `SCHEMA.split(";")` or `SCHEMA.splitlines()`).
 - `EFF101` no longer reports `socket.getaddrinfo` with the `AI_NUMERICHOST` flag, which parses
   a numeric address and never asks a resolver.
-- `MUT108` and `MUT110` find the call chain down to the function that changes an argument in
-  time linear in the calls they pass: an argument handed down through thousands of functions of
-  one module no longer takes time quadratic in them.
 - A file that is one definition, class, lambda, or generator expression with nothing after it
   (no final newline) is checked: its function was taken for the module body, which has the same
   span, so it was never analyzed, and `heki check` panicked on such a generator expression
