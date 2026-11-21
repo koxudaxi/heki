@@ -156,6 +156,8 @@ one measured.
 
 - Under a second for a 200,000-line project.
 - A report needs evidence: when heki cannot tell, it stays quiet.
+- Bugs fail the run; slower code is reported as a warning that does not, unless you ask for
+  `--fail-on warning`.
 - Configuration, suppression comments, and output formats follow Ruff, and a baseline fails CI
   only on new findings.
 

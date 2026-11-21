@@ -41,8 +41,8 @@ Each step of the chain is established, not assumed:
   form, or a path built from such parts and `__file__`), and any other may be in memory.
 
 Waits on another thread (`Thread.join()`, `Event.wait()`, acquiring a lock, `Queue.get()`,
-`Future.result()`, `Executor.shutdown()`) end at once when that thread has done its part, which
-is state at run time: they are `EFF111` reports. So is everything else `EFF111` reports: a path
+`put()` on a bounded queue, `Future.result()`, `Executor.shutdown()`) end at once when that
+thread has done its part, which is state at run time: they are `EFF111` reports. So is everything else `EFF111` reports: a path
 heki cannot decide, a call it cannot resolve to all its implementations.
 
 The rule reports the boundary: the call inside the `async def` that leads to the waiting call,

@@ -4,6 +4,7 @@
 //! fixpoint (`callgraph`) maps callee facts through. No IR survives this module.
 
 use crate::cache_flow;
+use crate::capacity::{self, Bound, CapacityOf, CapacityWait, SiteQueues, WhileFull};
 use crate::construction::{Escape, Pos, Recorder};
 use crate::consumption::{ItemArgs, IterFlow, PerItemCall, Roots, param_iteration};
 use crate::guards::{self, GuardInputs, LocalGuards, per_item_bit};
@@ -282,6 +283,7 @@ fn absorb_class_body(into: &mut EffectSummary, body: EffectSummary) {
         .extend(body.typed_field_read_sites);
     into.private_calls.extend(body.private_calls);
     into.unknown_calls |= body.unknown_calls;
+    into.capacity_waits.extend(body.capacity_waits);
     into.refresh_typed_field_writes();
 }
 
@@ -430,6 +432,7 @@ fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary) {
         .extend(other.unresolved_write_sites);
     into.unresolved_access_sites
         .extend(other.unresolved_access_sites);
+    into.capacity_waits.extend(other.capacity_waits);
     into.refresh_typed_field_writes();
 }
 
@@ -587,6 +590,10 @@ struct Extractor<'a> {
     stored_attrs: Vec<&'a str>,
     /// The block and phi defining each phi variable (`GuardInputs::phis`).
     phis: OnceCell<FxHashMap<VarId, (BlockId, &'a PhiNode)>>,
+    /// The function's integer constants (`capacity`), built on first use.
+    ints: OnceCell<heki_ir::FnIndex<'a>>,
+    /// What the queue capacity walks of the function's values found so far.
+    capacity_walks: RefCell<capacity::Walks>,
     /// Buffers of the guard analysis's backward walks (`GuardInputs::scratch`).
     scratch: RefCell<(FxHashSet<VarId>, Vec<VarId>)>,
     /// The loops around each block.
@@ -929,6 +936,8 @@ impl<'a> Extractor<'a> {
             fresh: FxHashSet::default(),
             stored_attrs,
             phis: OnceCell::new(),
+            ints: OnceCell::new(),
+            capacity_walks: RefCell::default(),
             scratch: RefCell::default(),
             around: OnceCell::new(),
             guards: LocalGuards::default(),
@@ -1024,6 +1033,47 @@ impl<'a> Extractor<'a> {
     /// [`ArgBinding`] of the argument `var` of a call inside `loops`.
     fn binding(&self, var: VarId, loops: &[&NaturalLoop]) -> ArgBinding {
         self.guards.binding(&self.guard_inputs(), var, loops)
+    }
+
+    /// `(callee, parameter, capacity)` of the argument `var` a call binds exactly to parameter
+    /// `slot` of `callee`, when it is a queue (`SiteQueues::handed`).
+    fn handed_queue(
+        &self,
+        callee: &FuncKey,
+        slot: usize,
+        var: VarId,
+    ) -> Option<(FuncKey, u8, CapacityOf)> {
+        let queue = matches!(self.types.get(&var), Some(Val::Inst(c)) if capacity::is_queue_class(self.cx.kb, c));
+        let slot = u8::try_from(slot).ok().filter(|_| queue)?;
+        Some((callee.clone(), slot, self.capacity_of(var).capacity))
+    }
+
+    /// What `var` gives a queue (`capacity`): attributes and globals through the project's
+    /// declarations, the parameters as keys.
+    fn capacity_of(&self, var: VarId) -> capacity::Walked {
+        let owner = self.cx.owner_fqn(self.f);
+        let class_of = |v: VarId| {
+            if self.self_vars.contains(&v) {
+                return owner.clone();
+            }
+            match self.types.get(&v) {
+                Some(Val::Inst(c)) if self.cx.project.is_project_class(c) => Some(c.clone()),
+                _ => None,
+            }
+        };
+        capacity::ValueCapacity {
+            cx: self.cx,
+            f: self.f,
+            key: self.key,
+            defs: &self.defs,
+            phis: guards::phi_table(self.f, &self.phis),
+            ints: &self.ints,
+            class_of: &class_of,
+            queue_params: u64::MAX,
+            in_decls: false,
+            walks: &self.capacity_walks,
+        }
+        .walk(var)
     }
 
     /// The constant key of a subscript: its string literal, or the module-level `Final`
@@ -3874,6 +3924,7 @@ impl<'a> Extractor<'a> {
                         per_item: None,
                         dispatch: None,
                         result_discarded: false,
+                        queues: None,
                         result_held: false,
                         complete: false,
                         on_every_return: crate::OnEveryReturn::default(),
@@ -3890,6 +3941,8 @@ impl<'a> Extractor<'a> {
                 let mut invalidates: Option<u64> = None;
                 let mut callees = Vec::new();
                 let mut bindings = Vec::new();
+                // The queues the call binds exactly (`SiteQueues::handed`).
+                let mut handed = Vec::new();
                 let mut offloaders: Vec<String> = Vec::new();
                 // The bodies an offloading decorator runs on a worker thread.
                 let mut on_worker = Vec::new();
@@ -3964,6 +4017,7 @@ impl<'a> Extractor<'a> {
                         let mut o = self.origin(a);
                         if slot < usize::from(decl.positional_params) {
                             o.binding = Some(self.binding(a, loops));
+                            handed.extend(self.handed_queue(key, slot, a));
                         }
                         if params.len() <= slot {
                             params.resize(slot + 1, ArgOrigin::default());
@@ -3982,6 +4036,7 @@ impl<'a> Extractor<'a> {
                             params[pos] = self.origin(*v);
                             if pos < usize::from(decl.named_params) {
                                 params[pos].binding = Some(self.binding(*v, loops));
+                                handed.extend(self.handed_queue(key, pos, *v));
                             }
                             if let Ok(pos) = u8::try_from(pos) {
                                 bound.push((pos, *v));
@@ -4097,6 +4152,12 @@ impl<'a> Extractor<'a> {
                     drives_coroutine_manually: drives,
                     binds_recv: *binds_recv,
                     dispatch: self.dispatch(call, site.project_callees()),
+                    queues: (!handed.is_empty()).then(|| {
+                        Box::new(SiteQueues {
+                            while_full: None,
+                            handed,
+                        })
+                    }),
                     constructs: call.constructs.clone(),
                     returned: if constructor || call.per_item.is_some() {
                         None
@@ -4539,6 +4600,7 @@ impl<'a> Extractor<'a> {
             per_item: None,
             dispatch: None,
             result_discarded: false,
+            queues: None,
             result_held: false,
             complete,
             on_every_return,
@@ -4842,7 +4904,7 @@ impl<'a> Extractor<'a> {
                 self.guards
                     .finished_at(&self.guard_inputs(), bb, self.pos.1, r)
             });
-        let effects: std::collections::BTreeSet<ExecEffectKind> = entry
+        let mut effects: std::collections::BTreeSet<ExecEffectKind> = entry
             .effects_in(case)
             .iter()
             .copied()
@@ -4850,6 +4912,32 @@ impl<'a> Extractor<'a> {
             .filter(|e| !(ddl && *e == ExecEffectKind::DbQuery))
             .filter(|e| !(setting && *e == ExecEffectKind::BlockingDb))
             .collect();
+        // A `put` waits only on a bounded queue: the code may decide its capacity here, or leave
+        // it to the project (what the callers bind to a parameter).
+        let mut while_full = None;
+        if entry.waits_while_full {
+            let waits: BTreeSet<ExecEffectKind> = effects
+                .iter()
+                .copied()
+                .filter(|e| BLOCKING_EFFECTS.contains(e))
+                .collect();
+            if !waits.is_empty() {
+                let capacity = passed
+                    .recv
+                    .map_or_else(CapacityOf::unknown, |r| self.capacity_of(r).capacity);
+                effects.retain(|e| !waits.contains(e));
+                match capacity.decided() {
+                    Some(Some(Answer::Known(Bound::Bounded))) => effects.extend(waits),
+                    Some(_) => {}
+                    None => {
+                        while_full = Some(WhileFull {
+                            effects: waits,
+                            capacity,
+                        });
+                    }
+                }
+            }
+        }
         if let Some(k) = entry.offloads_blocking_arg
             && let Some((p, None)) = args
                 .get(usize::from(k))
@@ -4857,7 +4945,7 @@ impl<'a> Extractor<'a> {
         {
             self.summary.offloads_blocking_params |= 1u64 << p;
         }
-        if effects.is_empty() && entry.offloads_blocking_arg.is_none() {
+        if effects.is_empty() && entry.offloads_blocking_arg.is_none() && while_full.is_none() {
             return;
         }
         let occurrence = self.guards.occurrence(&self.guard_inputs(), bb);
@@ -4867,23 +4955,52 @@ impl<'a> Extractor<'a> {
             Some(_) => None,
             None => self.forwarded_flag(entry, passed),
         };
-        for e in &effects {
-            let had = !self.summary.direct_exec_effects.insert(*e);
-            let occurrence = match flagged {
-                Some((off, param)) if !off.contains(e) => {
-                    let mut needs_flag = occurrence.clone();
-                    needs_flag.inputs.insert(crate::InputGuard {
-                        subject: GuardSubject { param, attr: None },
-                        test: crate::GuardTest::Truthy,
-                        holds: true,
-                    });
-                    needs_flag
+        let occurrence_of = |e: &ExecEffectKind| match flagged {
+            Some((off, param)) if !off.contains(e) => {
+                let mut needs_flag = occurrence.clone();
+                needs_flag.inputs.insert(crate::InputGuard {
+                    subject: GuardSubject { param, attr: None },
+                    test: crate::GuardTest::Truthy,
+                    holds: true,
+                });
+                needs_flag
+            }
+            _ => occurrence.clone(),
+        };
+        // A queue that only the function's parameter can make bounded: each call decides, so
+        // the wait is an effect needing a bounded queue there. Any other is resolved over the
+        // project before propagation (`capacity::ParamCapacities::realize`).
+        let own_param = while_full.as_ref().and_then(|w| {
+            let c = &w.capacity;
+            match (c.fixed, c.params.iter().collect::<Vec<_>>().as_slice()) {
+                (None | Some(Answer::Known(Bound::Unbounded)), [(f, p)]) if f == self.key => {
+                    Some(*p)
                 }
-                _ => occurrence.clone(),
+                _ => None,
+            }
+        });
+        let guarded = own_param.and(while_full.as_ref()).map(|w| &w.effects);
+        for e in effects.iter().chain(guarded.into_iter().flatten()) {
+            let guards = crate::EffectGuards {
+                bounded_queue: own_param.filter(|_| !effects.contains(e)),
+                ..occurrence_of(e)
             };
-            guards::add_occurrence(&mut self.summary.exec_guards, *e, had, &occurrence);
+            let had = !self.summary.direct_exec_effects.insert(*e);
+            guards::add_occurrence(&mut self.summary.exec_guards, *e, had, &guards);
             let chain = vec![Arc::new(self.hop(api.clone(), span))];
             self.summary.exec_chains.insert(*e, chain);
+        }
+        for w in while_full.iter().filter(|_| own_param.is_none()) {
+            for e in &w.effects {
+                self.summary.capacity_waits.push(CapacityWait {
+                    wait: WhileFull {
+                        effects: BTreeSet::from([*e]),
+                        capacity: w.capacity.clone(),
+                    },
+                    guards: occurrence_of(e),
+                    hop: self.hop(api.clone(), span),
+                });
+            }
         }
         // The catalog describes the library's class: a project subclass may override the
         // method, and then the call runs no catalogued implementation.
@@ -4915,7 +5032,13 @@ impl<'a> Extractor<'a> {
             unconditional,
         };
         let site = self.site(bb, target, is_awaited, span);
-        self.sites.push(site);
+        let queues = while_full.map(|w| {
+            Box::new(SiteQueues {
+                while_full: Some(w),
+                handed: Vec::new(),
+            })
+        });
+        self.sites.push(CallSite { queues, ..site });
     }
 
     /// The `effects` of a call of `entry` it has whatever the state and the arguments it does
@@ -5224,6 +5347,7 @@ fn role_site(
         per_item: site.per_item.clone(),
         dispatch: site.dispatch.clone(),
         result_discarded: false,
+        queues: site.queues.clone(),
         result_held: false,
         complete: false,
         on_every_return: crate::OnEveryReturn::default(),

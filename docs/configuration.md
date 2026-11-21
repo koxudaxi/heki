@@ -15,6 +15,7 @@ extend-select = ["EFF105"]
 ignore = ["OPT110"]
 per-file-ignores = { "tests/**" = ["EFF"], "scripts/*.py" = ["OPT"] }
 relax-async-in-tests = true
+fail-on = "warning"                 # warnings fail heki check too (default: "error")
 
 [tool.heki.lint.severity]
 OPT103 = "warning"
@@ -128,6 +129,7 @@ supported version that every clause admits:
 | `severity` | `"warning"` for the rules that report slower code (`EFF101`, `EFF102`, `EFF103`, `EFF105`, `DATA101`, and the `OPT` rules), `"error"` for the others, which report bugs | Rule → `"error"` or `"warning"`. It changes the output and the SARIF level; both make `heki check` fail. |
 | `relax-async-in-tests` | `true` | Skip `EFF101`, `EFF111`, `EFF105`, and `EFF106` in test code as pytest finds it: `test_*` functions and the functions nested in them, `test_*.py` and `*_test.py` files, and files under `test/` or `tests/`. |
 | `heuristic` | `false` | Whether the heuristic rules that are not opt-in run by default and for a prefix or `ALL`, as the exact rules do. `--heuristic` and `--no-heuristic` override it. |
+| `fail-on` | `"error"` | The least severity whose reports make `heki check` (and `--watch`) exit with code 1: `"error"`, or `"warning"` to fail on warnings too. Warnings are reported either way, and the language server shows them. `--fail-on` overrides it. |
 
 - A rule is named by its code (`EFF101`), its name (`async-blocking-call`), a code prefix
   (`EFF`, `MUT2`), or `ALL`. An unknown rule is a configuration error.
