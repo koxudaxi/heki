@@ -12,6 +12,7 @@
 //! its getter, so `resolve_attr_load` resolves it like a method call.
 
 use crate::capacity::CapacityOf;
+use crate::decorators;
 use crate::types::{Args, Elem, Generic, Ty, generic, typing_generic};
 use crate::{FuncKey, ModuleInput};
 use heki_ast::Span;
@@ -76,15 +77,6 @@ const MAX_CONSTANT_ATTRS: usize = 16;
 /// The most dotted segments past the first that a module alias's object may have
 /// ([`module_aliases`]).
 const MAX_ALIAS_SEGMENTS: usize = 8;
-
-/// Decorators that leave calling a function what its definition makes it: a generator function
-/// returns a generator, an `async def` a coroutine, a plain `def` what its body returns.
-const CALL_KEEPING_DECORATORS: &[&str] =
-    &["staticmethod", "classmethod", "abstractmethod", "override"];
-
-/// Decorators (by their last dotted component) that make a method a getter: reading the
-/// attribute on an instance runs it (`@property`, `@functools.cached_property`).
-const PROPERTY_DECORATORS: &[&str] = &["property", "cached_property"];
 
 const BUILTIN_TYPES: &[&str] = &[
     "list",
@@ -3176,7 +3168,7 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
         let getter = f.owner_class_qualname.is_some()
             && f.decorators
                 .iter()
-                .any(|d| decls.decorator_is(d, PROPERTY_DECORATORS));
+                .any(|d| decls.decorator_is(d, &decorators::names(|d| d.getter)));
         *getters_only.entry(&f.qualname).or_insert(true) &= getter;
     }
     // The module scope's bindings are sorted by name.
@@ -3341,7 +3333,7 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
     for f in &input.ir.functions {
         if is_summarized_function(f)
             && f.owner_class_qualname.is_some()
-            && f.has_decorator(PROPERTY_DECORATORS)
+            && f.has_decorator(&decorators::names(|d| d.getter))
             && let Some(t) = f
                 .return_annotation
                 .as_deref()
@@ -3813,7 +3805,7 @@ fn external_defines(kb: &EffectiveEcosystemKb, base: &str, name: &str) -> bool {
 fn returned_param_attr(f: &IrFunction, decls: &ModuleDecls) -> Option<(u8, String)> {
     let plain_decorators = f.decorators.iter().all(|d| {
         let (head, _) = decorator_parts(d);
-        CALL_KEEPING_DECORATORS.contains(&head.rsplit('.').next().unwrap_or(head))
+        decorators::keeps(head.rsplit('.').next().unwrap_or(head), |d| d.keeps_call)
             || decls.decorator_is(d, &["property"])
     });
     if f.kind != FunctionKind::Sync || !plain_decorators {
@@ -4399,13 +4391,10 @@ pub(crate) fn is_generator_function(f: &IrFunction) -> bool {
         && is_called_as_defined(f)
 }
 
-/// Every decorator of `f` is one of [`CALL_KEEPING_DECORATORS`] (by its last dotted component).
+/// Every decorator of `f` keeps calling it what its definition makes it
+/// ([`decorators::Decorator::keeps_call`]).
 fn is_called_as_defined(f: &IrFunction) -> bool {
-    f.decorators.iter().all(|d| {
-        let base = d.split('(').next().unwrap_or(d).trim();
-        let last = base.rsplit('.').next().unwrap_or(base);
-        CALL_KEEPING_DECORATORS.contains(&last)
-    })
+    decorators::all_keep(&f.decorators, |d| d.keeps_call)
 }
 
 /// The catalog symbol of a decorator of `f` that offloads the function it decorates

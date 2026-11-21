@@ -26,6 +26,7 @@ pub use paths::with_paths;
 mod construction;
 pub mod consumption;
 mod contracts;
+pub(crate) mod decorators;
 mod environment;
 pub mod guards;
 pub mod held;

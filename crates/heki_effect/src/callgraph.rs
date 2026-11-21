@@ -392,7 +392,7 @@ pub(crate) fn site_must_chain(
                     }
                 };
                 if !runs_at_call(callee, site)
-                    || !crate::summary::keeps_returned_value(&callee.decorators)
+                    || !crate::decorators::keeps_returned_value(&callee.decorators)
                 {
                     return None;
                 }

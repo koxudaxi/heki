@@ -7,6 +7,7 @@ use crate::cache_flow;
 use crate::capacity::{self, Bound, CapacityOf, CapacityWait, SiteQueues, WhileFull};
 use crate::construction::{Escape, Pos, Recorder};
 use crate::consumption::{ItemArgs, IterFlow, PerItemCall, Roots, param_iteration};
+use crate::decorators::keeps_returned_value;
 use crate::environment::{self, AccessKind, ExternalAccess};
 use crate::guards::{self, GuardInputs, LocalGuards, per_item_bit};
 use crate::held;
@@ -6597,26 +6598,6 @@ fn role_site(
         complete: false,
         on_every_return: crate::OnEveryReturn::default(),
     }
-}
-
-/// Decorators that call the function's body on every call (its result stays a new object).
-const RETURN_KEEPING_DECORATORS: &[&str] = &[
-    "staticmethod",
-    "classmethod",
-    "property",
-    "abstractmethod",
-    "override",
-];
-
-/// Whether calling a function decorated with `decorators` returns what its body returns: a
-/// decorator may hand out one cached object (`@lru_cache`, `@cached_property`), so only the
-/// decorators that call the body each time keep its result.
-pub(crate) fn keeps_returned_value(decorators: &[String]) -> bool {
-    decorators.iter().all(|d| {
-        let base = d.split('(').next().unwrap_or(d).trim();
-        let last = base.rsplit('.').next().unwrap_or(base);
-        RETURN_KEEPING_DECORATORS.contains(&last)
-    })
 }
 
 /// Builtins that only inspect their arguments: calling one keeps none of them.
