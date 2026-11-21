@@ -448,11 +448,11 @@ def check_opt113(claim, runs, sources=None):
                 )
             item = tuple((body.get(n) or [None])[0] for n in names)
             if names and all(v is not None for v in item):
-                inner_key = body.get(keys[1]) if len(keys) == 2 else None
+                inner_key = body.get("key:" + keys[1]) if len(keys) == 2 else None
                 traversals.setdefault((act, it[3]), []).append((item, inner_key))
             if len(keys) != 2:
                 continue
-            outer_value, inner_value = body.get(keys[0]), body.get(keys[1])
+            outer_value, inner_value = body.get("key:" + keys[0]), body.get("key:" + keys[1])
             if not isinstance(outer_value, list) or not isinstance(inner_value, list):
                 continue
             if not (outer_value[1] and inner_value[1]) or outer_value[0] == inner_value[0]:
