@@ -1909,6 +1909,7 @@ impl<'a> Extractor<'a> {
                     args,
                     kwargs,
                     star_from: *star_from,
+                    args_at: Some(0),
                     is_awaited: *is_awaited,
                     recv_is_self,
                     constructs,
@@ -1951,6 +1952,7 @@ impl<'a> Extractor<'a> {
                         args,
                         kwargs,
                         star_from: *star_from,
+                        args_at: Some(0),
                         is_awaited: *is_awaited,
                         recv_is_self,
                         constructs: None,
@@ -1978,6 +1980,7 @@ impl<'a> Extractor<'a> {
                     args,
                     kwargs,
                     star_from: *star_from,
+                    args_at: Some(0),
                     is_awaited: *is_awaited,
                     recv_is_self: false,
                     constructs,
@@ -2005,6 +2008,7 @@ impl<'a> Extractor<'a> {
                     args: &[],
                     kwargs: &[],
                     star_from: None,
+                    args_at: Some(0),
                     is_awaited: false,
                     recv_is_self: false,
                     constructs: None,
@@ -2120,6 +2124,7 @@ impl<'a> Extractor<'a> {
             args: &[],
             kwargs: &[],
             star_from: None,
+            args_at: Some(0),
             is_awaited,
             recv_is_self,
             constructs: None,
@@ -2622,7 +2627,10 @@ impl<'a> Extractor<'a> {
         let mut out = Vec::new();
         let mut slot = offset;
         for (j, a) in call.args.iter().enumerate() {
-            if !self.f.is_starred(call.dst, j) {
+            if !call
+                .args_at
+                .is_some_and(|at| self.f.is_starred(call.dst, at + j))
+            {
                 out.push((slot, *a));
                 slot += 1;
                 continue;
@@ -3149,6 +3157,9 @@ impl<'a> Extractor<'a> {
             args: &args,
             kwargs: &kwargs,
             star_from,
+            // A worker's arguments are the call's own after the callable; the others are the
+            // arguments a partial holds.
+            args_at: (runner == Runner::Worker).then_some(after),
             is_awaited: false,
             recv_is_self,
             constructs: None,
@@ -3272,7 +3283,15 @@ impl<'a> Extractor<'a> {
                 p.args.clear();
             }
             p.args.splice(0..0, held.iter().copied());
-            p.kwargs.splice(0..0, kwargs.iter().cloned());
+            // An outer partial's `**` unpacking may override any keyword this one holds.
+            let overridden = p.kwargs.iter().any(|(k, _)| k.is_none());
+            p.kwargs.splice(
+                0..0,
+                kwargs
+                    .iter()
+                    .filter(|(k, _)| !overridden || k.is_none())
+                    .cloned(),
+            );
             p.open |= open;
             cur = inner;
         }
@@ -3767,6 +3786,10 @@ struct Call<'c> {
     kwargs: &'c [(Option<String>, VarId)],
     /// `InstKind::Call::star_from`.
     star_from: Option<u8>,
+    /// Where `args` start among the instruction's arguments, whose `*` unpacking marks them
+    /// (`IrFunction::is_starred` of `dst`); `None` for arguments a partial object holds, which
+    /// are never unpacked.
+    args_at: Option<usize>,
     is_awaited: bool,
     recv_is_self: bool,
     /// The project class the call constructs (`CallSite::constructs`).

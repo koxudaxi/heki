@@ -1502,6 +1502,21 @@ def after_an_inner_unpacking(values, flags):
     # `fetch_flagged("u", *flags, False, item)`: `False` lands after what `flags` holds.
     key = functools.partial(functools.partial(fetch_flagged, "u", *flags), False)
     return sorted(values, key=key)  # EFF102
+
+
+def keywords_an_outer_unpacking_may_override(urls, options):
+    key = functools.partial(functools.partial(fetch_if_asked, enabled=False), **options)
+    return list(map(key, urls))  # EFF102
+
+
+def fetch_columns(url, enabled, *items):
+    if enabled:
+        return requests.get(url)
+    return None
+
+
+def held_arguments_next_to_unpacked_iterables(columns):
+    return list(map(functools.partial(fetch_columns, "u", False), *columns))
 "#;
 
 #[test]
