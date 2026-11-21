@@ -283,8 +283,8 @@ fn a_glob_target_names_the_protocol_method_called() {
     assert_eq!(
         lines,
         vec![
-            "pkg/use.py:9:12: MUT204 `through_protocol` calls `pkg.host.Host._helper` outside the call owners of `compute`",
-            "pkg/use.py:9:26: MUT204 `through_protocol` calls `pkg.host.Host._outer` outside the call owners of `compute`",
+            "pkg/use.py:9:12: MUT204 [heuristic] `through_protocol` calls `pkg.host.Host._helper` outside the call owners of `compute`",
+            "pkg/use.py:9:26: MUT204 [heuristic] `through_protocol` calls `pkg.host.Host._outer` outside the call owners of `compute`",
         ],
         "{stdout}"
     );

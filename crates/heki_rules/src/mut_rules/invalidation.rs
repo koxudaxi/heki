@@ -14,7 +14,8 @@ use crate::contracts::ConfigContracts;
 use crate::{CheckContext, RuleConfigError, SitesByCaller};
 use heki_diagnostics::Diagnostic;
 use heki_effect::{
-    FuncKey, Reach, UnmetWrite, body_runs_at, builds_written_object, is_initializer, reach_across,
+    ContractClass, FuncKey, Reach, UnmetWrite, body_runs_at, builds_written_object, is_initializer,
+    reach_across,
 };
 use rustc_hash::FxHashSet;
 use std::collections::VecDeque;
@@ -61,8 +62,7 @@ pub(crate) fn run(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) -> Result<()
                     continue;
                 }
                 // The configured target that names the write, as the summary matched it.
-                let mut classes = vec![u.class_qualname.clone()];
-                classes.extend(cx.decls.ancestors_of(&u.class_qualname));
+                let classes = ContractClass::lineage(&names, cx.decls, &u.class_qualname);
                 let contract = &names.invalidations[usize::from(u.contract)];
                 let target = contract
                     .target(&classes, &u.attr)
