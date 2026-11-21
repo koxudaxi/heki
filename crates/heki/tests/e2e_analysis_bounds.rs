@@ -2013,93 +2013,122 @@ fn many_key_tests_of_a_container_of_self_find_their_sides_once() {
     );
 }
 
-/// `links` functions in one module, each making `calls` other calls and handing its argument to
-/// the next, the last changing it in place, below a function with a read-only parameter.
-fn argument_handed_down(links: usize, calls: usize) -> String {
-    let other = vec!["g()"; calls].join("; ");
+/// Puts after each of many branches that may build a new unbounded queue: the queue of each put
+/// is a phi of the previous one and a new queue, back to a bounded one.
+fn queue_rebindings(steps: usize) -> String {
     let mut lines = vec![
-        "from collections.abc import Sequence".to_owned(),
+        "import queue".to_owned(),
         String::new(),
         String::new(),
-        "def g():".to_owned(),
-        "    pass".to_owned(),
-        String::new(),
-        String::new(),
-        "def entry(xs: Sequence[int]):".to_owned(),
-        "    f0(xs)".to_owned(),
+        "async def fill(flags, item):".to_owned(),
+        "    q = queue.Queue(maxsize=1)".to_owned(),
     ];
-    for i in 0..links - 1 {
-        lines.extend([
-            String::new(),
-            String::new(),
-            format!("def f{i}(x):"),
-            format!("    {other}; f{}(x)", i + 1),
-        ]);
+    for i in 0..steps {
+        lines.push(format!("    if flags[{i}]:"));
+        lines.push("        q = queue.Queue()".to_owned());
+        lines.push("    q.put(item)".to_owned());
+    }
+    lines.join("\n") + "\n"
+}
+
+/// The capacity of a function's value is walked once: each put reads what the walks of the
+/// puts before it found instead of walking every rebinding again.
+#[test]
+fn puts_after_many_rebindings_of_a_queue_walk_each_value_once() {
+    let p = Project::new("bounds_queue_rebindings");
+    p.write("m.py", &queue_rebindings(1200));
+    let found = check_within(&p, Duration::from_secs(20));
+    assert!(
+        found
+            .iter()
+            .any(|d| d["rule_code"] == "EFF101" && d["qualname"] == "fill"),
+        "{found:#?}"
+    );
+}
+
+/// A chain of helpers each handing its queue parameter to the next, named so that their order
+/// is the opposite of the calls': the parameter of each takes what the one calling it binds.
+fn queue_forwarding_chain(helpers: usize) -> String {
+    let mut lines = vec![
+        "import queue".to_owned(),
+        String::new(),
+        String::new(),
+        "def f0(q: queue.Queue) -> None:".to_owned(),
+        "    q.put(1)".to_owned(),
+    ];
+    for i in 1..helpers {
+        lines.push(String::new());
+        lines.push(String::new());
+        lines.push(format!("def f{i}(q: queue.Queue) -> None:"));
+        lines.push(format!("    f{}(q)", i - 1));
     }
     lines.extend([
         String::new(),
         String::new(),
-        format!("def f{}(x):", links - 1),
-        "    x.append(1)".to_owned(),
+        "async def entry() -> None:".to_owned(),
+        format!("    f{}(queue.Queue(1))", helpers - 1),
     ]);
     lines.join("\n") + "\n"
 }
 
-/// The chain of a parameter's change through twelve thousand functions of one module, each
-/// with ten other calls: the walk to the function whose body makes the change indexes the
-/// module's calls by caller once, not once per function it passes.
+/// The capacities of parameters are a worklist over what each depends on: a change of one
+/// re-reads only the parameters it is passed to, whatever order they are in.
 #[test]
-fn a_change_handed_down_through_one_module_indexes_its_calls_once() {
-    let p = Project::new("bounds_change_chain");
-    p.write(
-        "pyproject.toml",
-        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT110\"]\n",
-    )
-    .write("m.py", &argument_handed_down(12_000, 10));
+fn queue_parameters_along_a_reversed_chain_of_helpers_resolve_in_linear_time() {
+    let p = Project::new("bounds_queue_forwarding");
+    p.write("m.py", &queue_forwarding_chain(6000));
     let found = check_within(&p, Duration::from_secs(20));
-    assert_eq!(found.len(), 1, "{found:?}");
-    assert_eq!(found[0]["rule_code"], "MUT110");
-    assert_eq!(found[0]["related"].as_array().unwrap().len(), 12_000);
+    assert!(
+        found
+            .iter()
+            .any(|d| d["rule_code"] == "EFF101" && d["qualname"] == "entry"),
+        "{found:#?}"
+    );
 }
 
-/// Eight thousand functions of one module, each handing its read-only parameter to a helper
-/// that changes it itself, and to one that hands it to that helper: the reports' chains share
-/// one index of the module's calls, and a chain that ends at its first function indexes none.
-#[test]
-fn many_reports_into_one_module_share_its_index_of_calls() {
+/// A class whose annotated queue attributes each store the one before, with a method putting on
+/// each: the capacity of every attribute names the one before it.
+fn queue_attribute_chain(attrs: usize) -> String {
     let mut lines = vec![
-        "from collections.abc import Sequence".to_owned(),
+        "import queue".to_owned(),
         String::new(),
         String::new(),
-        "def change(x):".to_owned(),
-        "    x.append(1)".to_owned(),
-        String::new(),
-        String::new(),
-        "def relay(x):".to_owned(),
-        "    change(x)".to_owned(),
+        "class Holder:".to_owned(),
     ];
-    for i in 0..8_000 {
-        lines.extend([
-            String::new(),
-            String::new(),
-            format!("def entry{i}(xs: Sequence[int]):"),
-            "    change(xs)".to_owned(),
-            "    relay(xs)".to_owned(),
-        ]);
+    lines.extend((0..attrs).map(|i| format!("    a{i}: queue.Queue")));
+    lines.extend([
+        String::new(),
+        "    def __init__(self) -> None:".to_owned(),
+        "        self.a0 = queue.Queue(1)".to_owned(),
+    ]);
+    lines.extend((1..attrs).map(|i| format!("        self.a{i} = self.a{}", i - 1)));
+    for i in 0..attrs {
+        lines.push(String::new());
+        lines.push(format!("    def p{i}(self) -> None:"));
+        lines.push(format!("        self.a{i}.put(1)"));
     }
-    let p = Project::new("bounds_change_chains_into_one_module");
-    p.write(
-        "pyproject.toml",
-        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT110\"]\n",
-    )
-    .write("m.py", &(lines.join("\n") + "\n"));
+    lines.extend([
+        String::new(),
+        String::new(),
+        "async def entry(h: Holder) -> None:".to_owned(),
+        format!("    h.p{}()", attrs - 1),
+    ]);
+    lines.join("\n") + "\n"
+}
+
+/// The declarations keep the answer of each attribute and global they resolve: the puts on a
+/// long chain of attributes resolve each attribute once, not the chain once per put.
+#[test]
+fn puts_along_a_chain_of_attributes_resolve_each_attribute_once() {
+    let p = Project::new("bounds_queue_attribute_chain");
+    p.write("m.py", &queue_attribute_chain(6000));
     let found = check_within(&p, Duration::from_secs(20));
-    assert_eq!(found.len(), 16_000);
-    let hops: Vec<usize> = found
-        .iter()
-        .map(|d| d["related"].as_array().unwrap().len())
-        .collect();
-    assert_eq!(hops.iter().filter(|&&n| n == 2).count(), 8_000);
+    assert!(
+        found
+            .iter()
+            .any(|d| d["rule_code"] == "EFF101" && d["qualname"] == "entry"),
+        "{found:#?}"
+    );
 }
 
 /// `heki dump-facts` of the project's `m.py`, which must finish within `limit`.
@@ -2236,4 +2265,93 @@ fn item_origins_decide_each_question_once() {
         last_origin("chosen")["known"].as_array().map(Vec::len),
         Some(60)
     );
+}
+
+/// `links` functions in one module, each making `calls` other calls and handing its argument to
+/// the next, the last changing it in place, below a function with a read-only parameter.
+fn argument_handed_down(links: usize, calls: usize) -> String {
+    let other = vec!["g()"; calls].join("; ");
+    let mut lines = vec![
+        "from collections.abc import Sequence".to_owned(),
+        String::new(),
+        String::new(),
+        "def g():".to_owned(),
+        "    pass".to_owned(),
+        String::new(),
+        String::new(),
+        "def entry(xs: Sequence[int]):".to_owned(),
+        "    f0(xs)".to_owned(),
+    ];
+    for i in 0..links - 1 {
+        lines.extend([
+            String::new(),
+            String::new(),
+            format!("def f{i}(x):"),
+            format!("    {other}; f{}(x)", i + 1),
+        ]);
+    }
+    lines.extend([
+        String::new(),
+        String::new(),
+        format!("def f{}(x):", links - 1),
+        "    x.append(1)".to_owned(),
+    ]);
+    lines.join("\n") + "\n"
+}
+
+/// The chain of a parameter's change through twelve thousand functions of one module, each
+/// with ten other calls: the walk to the function whose body makes the change indexes the
+/// module's calls by caller once, not once per function it passes.
+#[test]
+fn a_change_handed_down_through_one_module_indexes_its_calls_once() {
+    let p = Project::new("bounds_change_chain");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT110\"]\n",
+    )
+    .write("m.py", &argument_handed_down(12_000, 10));
+    let found = check_within(&p, Duration::from_secs(20));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0]["rule_code"], "MUT110");
+    assert_eq!(found[0]["related"].as_array().unwrap().len(), 12_000);
+}
+
+/// Eight thousand functions of one module, each handing its read-only parameter to a helper
+/// that changes it itself, and to one that hands it to that helper: the reports' chains share
+/// one index of the module's calls, and a chain that ends at its first function indexes none.
+#[test]
+fn many_reports_into_one_module_share_its_index_of_calls() {
+    let mut lines = vec![
+        "from collections.abc import Sequence".to_owned(),
+        String::new(),
+        String::new(),
+        "def change(x):".to_owned(),
+        "    x.append(1)".to_owned(),
+        String::new(),
+        String::new(),
+        "def relay(x):".to_owned(),
+        "    change(x)".to_owned(),
+    ];
+    for i in 0..8_000 {
+        lines.extend([
+            String::new(),
+            String::new(),
+            format!("def entry{i}(xs: Sequence[int]):"),
+            "    change(xs)".to_owned(),
+            "    relay(xs)".to_owned(),
+        ]);
+    }
+    let p = Project::new("bounds_change_chains_into_one_module");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT110\"]\n",
+    )
+    .write("m.py", &(lines.join("\n") + "\n"));
+    let found = check_within(&p, Duration::from_secs(20));
+    assert_eq!(found.len(), 16_000);
+    let hops: Vec<usize> = found
+        .iter()
+        .map(|d| d["related"].as_array().unwrap().len())
+        .collect();
+    assert_eq!(hops.iter().filter(|&&n| n == 2).count(), 8_000);
 }

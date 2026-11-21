@@ -98,6 +98,9 @@ pub struct LintConfig {
     /// Whether the heuristic rules that are not opt-in run by default and for a prefix or `ALL`,
     /// as the exact ones do (Ruff's `preview`). Defaults to `false`.
     pub heuristic: Option<bool>,
+    /// The least severity whose reports make `heki check` fail (exit code 1). Defaults to
+    /// `error`: warnings are reported without failing the run.
+    pub fail_on: Option<Severity>,
 }
 
 /// `[[tool.heki.write-owners]]` contract for `MUT201`.

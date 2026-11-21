@@ -276,15 +276,6 @@ pub fn fstring_head(expr: &ruff_python_ast::Expr) -> Option<String> {
     Some(head)
 }
 
-/// The values a template string keeps (`Template.values`): its top-level replacement fields,
-/// in source order (a format specification's fields become text).
-pub fn template_values(ts: &ruff_python_ast::ExprTString) -> Vec<&ruff_python_ast::Expr> {
-    ts.value
-        .iter()
-        .flat_map(|t| t.elements.interpolations().map(|i| &*i.expression))
-        .collect()
-}
-
 /// Parse Python source text with Python 3.15 syntax enabled (including PEP 810 `lazy import`).
 pub fn parse_module(source: &str) -> Result<ParsedModule, Vec<ParseError>> {
     let options = ruff_python_parser::ParseOptions::from(ruff_python_ast::PySourceType::Python)
