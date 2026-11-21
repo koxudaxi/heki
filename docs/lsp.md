@@ -88,7 +88,8 @@ Code actions edit the version of the document their diagnostics were computed on
   an entry that grew).
 - A file belongs to the project when `heki check` would find it. A file that an ignore file, a
   hidden directory, or `exclude` leaves out is not analyzed, also when it is created or opened.
-- A file that does not parse is left out of the project until it parses again.
+- A file that does not parse is a module heki knows nothing about until it parses again, as in
+  `heki check`: the names under it resolve to nothing in the other files.
 - A configuration `heki check` rejects (an unknown rule, a contract target that is not
   `Class.attr`, an invalid pattern) is logged as a warning, and the server analyzes nothing until
   it is fixed.
@@ -163,9 +164,11 @@ $ heki check --watch
   baseline as `heki check` compares them.
 - It only reports: `--fix`, `--diff`, and `--update-baseline` are ignored, with a warning.
 - It reloads everything when the configuration (`pyproject.toml`, `heki.toml`, `.heki.toml`, or
-  the `--config` file), the summary snapshot, or the baseline changes. So does `src/__init__.py`
-  or a root `__init__.py` appearing or disappearing: module names under `src/`, or relative
-  imports that climb to the root, change with the module layout. The server does the same.
+  the `--config` file), the summary snapshot, or the baseline changes. So does a change of the
+  detected source roots (`src/`, `python/`, or the directory named after the project appearing,
+  or becoming a package with an `__init__.py`) or a root `__init__.py` appearing or
+  disappearing: module names below a source root, or relative imports that climb to the root,
+  change with the module layout. The server does the same.
 - What fails once the watch runs (a configuration that no longer parses, a watched path that
   disappears) is reported, and the watch goes on until it is fixed.
 - A file counts as changed when its size, its modification time, or (on Unix) its inode or
