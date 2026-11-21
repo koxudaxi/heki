@@ -229,11 +229,11 @@ release can change rules, configuration keys, diagnostics, and output formats.
   loop steps through by its own keys, it says to look each outer key up in the mapping.
 - `OPT103`'s help for a `tuple` accumulator says to extend a list and convert it once with
   `tuple(...)`, not to join the pieces.
-- `EFF102` and `EFF103` also report the function a builtin calls once per item: the function
+- `EFF102` and `EFF113` also report the function a builtin calls once per item: the function
   handed to `map`, `filter`, `itertools.starmap`, `itertools.filterfalse`, and
   `functools.reduce`, and the `key` of `sorted`, `list.sort`, `min`, `max`, and
   `itertools.groupby` (`sorted(users, key=lambda u: score(conn, u))`), when the items are not a
-  fixed number. Its body runs at the call for every rule, so `EFF101` sees its blocking calls
+  fixed number. Its body runs at the call for every rule, so `EFF111` sees its blocking calls
   too. A `functools.partial` handed to such a builtin is followed to the function it calls.
 - `MUT107` (`hash-attr-mutation`) is opt-in: it runs only when `select` or `extend-select` names it,
   also with `lint.heuristic = true`. Its message states the claim only: "`Tag.rename` rebinds
