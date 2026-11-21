@@ -130,7 +130,7 @@ follows these rules:
 - A contract's targets are looked up from what an access names (the dotted suffixes of a
   function's names, its module and qualname, its class), never tried one by one: the cost grows
   with the sites, not with sites times targets, and the targets of every contract of a rule are
-  indexed together.
+  indexed together. The parameters argument lists name are looked up from those a call binds.
 
 The engines of `heki_ir::walk` apply these rules by construction, and every walk over IR ids,
 the call graph, or the class hierarchy goes through them:
@@ -165,12 +165,13 @@ $ python3 scripts/check_walk_shapes.py --heki target/release/heki
 the memory gate. A shape that lives in one function is placed in a function, a method, and a module
 body, and grown to the largest size whose function the IR budget still models, so a builder change
 moves the size with it; a shape spread over a project (a wide class hierarchy, a chain of private
-helpers) has a fixed size. Each runs with every rule and one contract of each kind, through `heki
-check` and the `--watch` engine, and fails when it costs more than 1 s (on the machine the limits
-were measured on, scaled to the machine running the gate by linear shapes of calls and of loops) or
-1 GiB beyond an empty module. `heki check --walk-steps <path>` (hidden) writes the steps each
-owner's walks took per function as JSON: the gate also fails when an owner's steps grow more than
-2.5 times from half the size to the full size, or when a budget is spent on a shape like real code.
+helpers, thousands of argument lists) has a fixed size. Each runs with every rule and one contract
+of each kind (a family may add its own), through `heki check` and the `--watch` engine, and fails
+when it costs more than 1 s (on the machine the limits were measured on, scaled to the machine
+running the gate by linear shapes of calls and of loops) or 1 GiB beyond an empty module. `heki
+check --walk-steps <path>` (hidden) writes the steps each owner's walks took per function as JSON:
+the gate also fails when an owner's steps grow more than 2.5 times from half the size to the full
+size, or when a budget is spent on a shape like real code.
 `KNOWN_OVER` in the script lists the shapes known to cost more, and only shrinks: a listed shape
 runs only through `heki check` (not the `--watch` engine), with a short timeout, and fails the gate
 once it costs under a quarter of the limits. `KNOWN_STEPS` lists, the same way, the shapes whose
@@ -219,7 +220,8 @@ whose handler returns, of loops nested twenty deep with a call at each depth, of
 one after another, and of a chain of hundreds of `and` tests of module constants, and the item
 origins of a chain of thousands of wrappers, of a list filled by appends in a thousand loops, and of
 a phi of sixty branches each choosing a different parameter, and thousands of `call-owners` targets,
-in one contract or in as many contracts, and thousands of references to a `call-owners` target that
+in one contract or in as many contracts, tens of thousands of argument lists each naming its own
+parameter at as many calls, and thousands of references to a `call-owners` target that
 a long chain of phis carries to one `return`, an argument handed down through thousands of functions
 of one module to the one that changes it, thousands of reports whose call chains enter one module,
 the callers of the bottom of a lattice of calls thirty levels deep, the chains `heki inspect` walks

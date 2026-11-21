@@ -363,9 +363,19 @@ pub struct FunctionDecl {
     pub param_names: Vec<String>,
     /// How many leading parameters a position binds (the receiver included).
     pub positional_params: u8,
-    /// How many leading parameters a keyword binds (all but `*args` / `**kwargs`, which come
-    /// last).
+    /// How many leading parameters only a position binds (those before `/`, the receiver
+    /// included).
+    pub positional_only: u8,
+    /// How many leading parameters have a name a keyword can give (all but `*args` /
+    /// `**kwargs`, which come last); a keyword binds those past the positional-only ones
+    /// ([`Self::keyword_param`]).
     pub named_params: u8,
+    /// It takes `*args`: positions past the positional parameters land there, where the call
+    /// would otherwise raise `TypeError`.
+    pub has_varargs: bool,
+    /// It takes `**kwargs`: a keyword binding no parameter lands there, where the call would
+    /// otherwise raise `TypeError`.
+    pub has_kwargs: bool,
     /// The literal defaults, by parameter position (`guards`: an omitted argument).
     pub defaults: Vec<(u8, crate::ConstArg)>,
     /// Calling it returns a fresh (async) generator: a generator function without decorators
@@ -428,6 +438,17 @@ impl FunctionDecl {
     /// another call created; that is not followed.
     pub fn makes_no_coroutine(&self) -> bool {
         self.called_as_defined && (!self.is_async || self.is_generator)
+    }
+
+    /// The parameter a keyword argument `name` binds: a named parameter past the
+    /// positional-only ones. Any other keyword (one naming a positional-only parameter, `*args`,
+    /// or `**kwargs`) lands in `**kwargs`, or the call raises `TypeError`.
+    pub fn keyword_param(&self, name: &str) -> Option<usize> {
+        let first = usize::from(self.positional_only);
+        let named = self
+            .param_names
+            .get(first..usize::from(self.named_params))?;
+        Some(first + named.iter().position(|p| p == name)?)
     }
 }
 
@@ -3296,7 +3317,10 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
                     .iter()
                     .take_while(|p| !p.kw_only && !p.is_vararg && !p.is_kwarg),
             ),
+            positional_only: count_u8(f.params.iter().filter(|p| p.pos_only)),
             named_params: count_u8(f.params.iter().filter(|p| !p.is_vararg && !p.is_kwarg)),
+            has_varargs: f.params.iter().any(|p| p.is_vararg),
+            has_kwargs: f.params.iter().any(|p| p.is_kwarg),
             defaults: f
                 .params
                 .iter()

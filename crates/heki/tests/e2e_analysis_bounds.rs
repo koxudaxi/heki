@@ -1,8 +1,9 @@
 //! The cost of the analyses past the IR, end to end through the real binary: `isinstance`
 //! narrowing through phis, the passes of the type inference and of the classes of merged values,
 //! the size of the Soundness lane's proof state, the values `EFF107` follows from a task factory,
-//! the walk to the callable a builtin calls once per item, contracts with many call targets, the
-//! walk to the uses handing a reference to a call target on, and the locks `EFF109` follows.
+//! the walk to the callable a builtin calls once per item, contracts with many call targets and
+//! argument lists, the walk to the uses handing a reference to a call target on, and the locks
+//! `EFF109` follows.
 
 mod common;
 
@@ -2257,6 +2258,60 @@ fn call_targets_are_looked_up_not_tried_one_by_one() {
         assert_eq!(diags.len(), 10, "{name}: {diags:#?}");
         assert!(diags.iter().all(|d| d["qualname"] == "f0"), "{name}");
     }
+}
+
+/// Call targets with an argument list naming `targets` distinct parameters, the first `defined`
+/// of whose functions exist, and `functions` functions each making `calls` calls of those
+/// functions passing the named constant, and as many calls of a function of `wide` parameters
+/// that no list names.
+fn argument_marks(
+    targets: usize,
+    defined: usize,
+    functions: usize,
+    calls: usize,
+    wide: usize,
+) -> Project {
+    let texts: Vec<String> = (0..targets)
+        .map(|i| format!("\"pkg.m.f{i}(p{i}=True)\""))
+        .collect();
+    let mut model: Vec<String> = (0..defined)
+        .map(|i| format!("def f{i}(p{i}=False, q=None):\n    return p{i}\n\n"))
+        .collect();
+    let params: String = (0..wide).map(|j| format!(", b{j}=None")).collect();
+    model.push(format!("def g(x{params}):\n    return x\n"));
+    let mut usage = vec!["from pkg import m\n\n".to_owned()];
+    for f in 0..functions {
+        usage.push(format!("def u{f}(x):\n"));
+        for k in 0..calls {
+            let i = (f * calls + k) % defined;
+            usage.push(format!("    m.f{i}(p{i}=True)\n    m.g(x)\n"));
+        }
+        usage.push("\n\n".to_owned());
+    }
+    let p = Project::new(&format!("bounds_argument_marks_{targets}"));
+    p.write(
+        "pyproject.toml",
+        &format!(
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT204\"]\n\n[[tool.heki.call-owners]]\nname = \"marks\"\ntargets = [{}]\nforbidden-callers = [\"pkg.use.u0\"]\n",
+            texts.join(", ")
+        ),
+    )
+    .write("pkg/__init__.py", "")
+    .write("pkg/m.py", &model.join("\n"))
+    .write("pkg/use.py", &usage.concat());
+    p
+}
+
+/// The parameters argument lists name are looked up from the names a call binds: twenty thousand
+/// lists, each naming a parameter of its own, add no work per list to twenty thousand calls, of
+/// their functions and of a function of many parameters none names.
+#[test]
+fn argument_lists_are_looked_up_from_the_bound_parameters() {
+    let p = argument_marks(20_000, 1_000, 100, 100, 50);
+    let diags = check_within(&p, Duration::from_secs(20));
+    // Only the forbidden caller's hundred calls passing the constants are reported.
+    assert_eq!(diags.len(), 100, "{diags:#?}");
+    assert!(diags.iter().all(|d| d["qualname"] == "u0"));
 }
 
 /// Thousands of references to a `call-owners` target, each a rebinding of one name that a long

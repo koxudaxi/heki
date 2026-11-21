@@ -28,12 +28,17 @@ the allowed callers and resolves to a target:
 A target ending in an argument list names only the calls passing those constants:
 `DataType(is_dict=True)` is `DataType(is_dict=True)`, not `DataType(is_list=True)`, and
 `container_flags(kind="dict")` is `container_flags(dt, "dict")`, not `container_flags(dt, "list")`.
-A call passes a constant when heki establishes it: the argument is a literal or a string constant
-bound once (a module's `Final` name), passed by keyword, by position where every function the call
-may run binds that position to the parameter, or left out where every such function's default is
-`True`, `False`, `None`, `0`, or `""` and the value. A variable, a call result, `*` or `**`
-unpacking, or a position of a class without a project `__init__` establishes nothing, and the call
-is not reported. A reference passes nothing, so it never matches such a target.
+A call passes a constant when heki establishes it: the argument is a literal, a string constant
+bound once (a module's `Final` name), or a module's number or boolean bound once (`LIMIT = 0`),
+passed by keyword, by position where every function the call may run binds that position to the
+parameter, or left out where every such function's default is `True`, `False`, `None`, `0`, or
+`""` and the value. A keyword binds as Python binds it: never a positional-only parameter, and one
+naming no parameter passes its value under its name into `**kwargs`. A call that raises
+`TypeError` instead of running the function (a parameter bound by a position and a keyword, a
+keyword without `**kwargs` to land in, a position past the parameters without `*args`) passes
+nothing. A variable, a call result, `*` or `**` unpacking, or a position of a class without a
+project `__init__` establishes nothing, and the call is not reported. A reference passes nothing,
+so it never matches such a target.
 
 With `references = "calls"` (or `"calls-and-bases"`), a reference handing a target on to be
 called later counts as a call of it, reported where the target is named ("`f` hands on `pkg.core.decide`"; a name an import or
@@ -130,7 +135,8 @@ Its premises:
   a base to the target class. Established from the declarations. Whether the subclass is
   constructed is not part of the claim.
 - **Arguments** (a target with an argument list): the call binds each parameter the list names to
-  its constant. Established: an argument heki cannot tell is no match.
+  its constant, as Python binds the call. Established: an argument heki cannot tell is no match,
+  and a call that raises `TypeError` instead of running the function binds nothing.
 
 ## Why is this bad?
 Some operations keep invariants only when one component runs them: a store that updates its

@@ -880,7 +880,7 @@ impl<'v> Binding<'v> {
             return self.recv;
         }
         let name = decl.param_names.get(p)?;
-        if p < usize::from(decl.named_params)
+        if decl.keyword_param(name) == Some(p)
             && let Some((_, v)) = self
                 .kwargs
                 .iter()

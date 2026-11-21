@@ -533,10 +533,17 @@ body's (their other facts are not the module's). Like `call_sites`, they are loc
 its call sites (`Workspace::caller_view`) and shows them in call chains.
 
 `CallSite.arguments` holds, only when a call target has an argument list
-(`Contracts::marked_params`), the constants the call passes for the parameters those lists name:
-by keyword, else by position or as a default decided by its class and truthiness for every
-callee the call binds (the parameter binding of the extraction), a keyword only for a class
-without a project `__init__`.
+(`Contracts::marked_params`), the constants the call passes for the parameters those lists name,
+those every callee the call may run agrees on: by keyword, by position, or as a default decided
+by its class and truthiness, as the parameter binding of the extraction binds them
+(`FunctionDecl::keyword_param`: a keyword never binds a positional-only parameter, and one binding
+no parameter is a parameter of its own name in `**kwargs`), a keyword only for a class without a
+project `__init__`. A callee the call raises `TypeError` for instead of running (a parameter
+bound twice, a keyword without `**kwargs`, a position past the parameters without `*args`) is
+passed nothing. The constants are literals, string constants (`TypeCtx::str_constant_with`), and
+modules' number and boolean constants (`TypeCtx::global_literal`). The marked names are looked up
+for the parameters a call binds, so the work per call is that of binding it, whatever the number
+of argument lists.
 
 `CallSite.returned` (whether the call's result may be returned, and how) is computed at
 extraction for every project call. `CallSite.flow` (the invalidation contracts announced after

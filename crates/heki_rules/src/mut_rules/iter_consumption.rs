@@ -120,9 +120,7 @@ fn add_callee_consumption(
                 }
                 bound.extend(positional.iter().enumerate().map(|(i, v)| (i + offset, *v)));
                 for (name, v) in kwargs {
-                    let pos = name
-                        .as_ref()
-                        .and_then(|n| decl.param_names.iter().position(|p| p == n));
+                    let pos = name.as_ref().and_then(|n| decl.keyword_param(n));
                     bound.extend(pos.map(|p| (p, *v)));
                 }
                 let here: FxHashSet<VarId> = bound

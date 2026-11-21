@@ -340,15 +340,22 @@ The call side of `write-owners`.
   that pass each value: `"DataType(is_dict=True)"`, `'container_flags(kind="dict")'`. A value is
   `True`, `False`, `None`, an integer, or a string in single or double quotes (no escapes). A call
   passes it when heki establishes that the argument bound to the parameter is that constant (a
-  literal, or a string constant bound once, such as a module's `Final` name): passed by keyword
-  (also to a class without a project `__init__`, a dataclass or a pydantic model), by position
-  where every function the call may run binds that position to the parameter, or left out where
-  every such function's default is the value and only `True`, `False`, `None`, `0`, or `""`
-  (heki keeps defaults by class and truthiness). Any other argument (a variable, a call, `*` or
-  `**` unpacking) is not established, and the call is not reported. A reference passes no
-  arguments, so it never matches. A target with an argument list names no symbol outside the
-  project; `unresolved = "report"` matches its last name before the list, whatever the arguments
-  of a call on an object of unknown class.
+  literal, a string constant bound once, such as a module's `Final` name, or a module's number or
+  boolean bound once, as `EFF101` evaluates them: `LIMIT = 0`, also imported, unless a module
+  rebinds it): passed by keyword (also to a class without a project `__init__`, a dataclass or a
+  pydantic model), by position where every function the call may run binds that position to the
+  parameter, or left out where every such function's default is the value and only `True`,
+  `False`, `None`, `0`, or `""` (heki keeps defaults by class and truthiness). A keyword binds as
+  Python binds it: never a positional-only parameter (with `def f(kind=False, /, **kwargs)`,
+  `f(kind=True)` leaves `kind` false), and a keyword naming no parameter passes its value under
+  its name into `**kwargs`. A call that raises `TypeError` instead of running the function passes
+  nothing: a keyword binding a parameter a position or the receiver binds too, a keyword naming
+  no parameter of a function without `**kwargs`, or a position past the parameters of a function
+  without `*args`. Any other argument (a variable, a call, `*` or `**` unpacking) is not
+  established, and the call is not reported. A reference passes no arguments, so it never
+  matches. A target with an argument list names no symbol outside the project; `unresolved =
+  "report"` matches its last name before the list, whatever the arguments of a call on an object
+  of unknown class.
 - With `references = "calls-and-bases"`, a class statement whose declaration resolves a base to a
   class target is reported too ("`<module>` subclasses `pkg.core.Base`"), at the base, or at the
   class statement for a name an import or the module body binds: the class it makes holds the
