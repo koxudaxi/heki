@@ -93,7 +93,10 @@ Compound expressions are flattened into **basic instructions in explicit left-to
   every path of which leaves) is lowered into blocks without predecessors that end in
   `Unreachable`: no merge, back edge, or handler takes a value from it. A loop there has no
   entry edge: the SSA lookup of a name gives a phi to a block with one predecessor that it
-  reaches again, as to a join, so its walk around such a cycle ends.
+  reaches again, as to a join, so its walk around such a cycle ends. Its phis stay even when
+  they merge one value besides themselves (only a block a path reaches drops such a phi for that
+  value): a value the loop computes from itself (`d = d.x`) is defined through the phi, so every
+  cycle of definitions passes through a phi, which the walks along definitions rely on.
 - **Exception edges carry the bindings of the point that raised**: inside a `try` or `with`
   body a name is never rebound after an instruction that may raise in the same block
   (`InstKind::may_raise`; the binding starts a new block), so a handler's phi merges the
