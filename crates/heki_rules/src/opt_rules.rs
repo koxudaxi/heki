@@ -9,11 +9,11 @@
 //! receiver types (`heki_effect::TypeCtx`, PEP 484 annotations included), which the Soundness
 //! lane never trusts.
 
-use crate::mut_rules::site_call;
+use crate::mut_rules::{CallInst, site_call};
 use crate::{CheckContext, ModuleUnit};
 use heki_ast::Span;
 use heki_diagnostics::{Diagnostic, TextEdit};
-use heki_effect::{CONTAINER_MUTATORS, CallSite, TypeCtx, Val};
+use heki_effect::{CONTAINER_MUTATORS, CallSite, Items, TypeCtx, Val};
 use heki_ir::{
     BlockId, BuiltinKind, CompareOpKind, ConstLiteral, FnIndex, Inst, InstKind, IrFunction,
     LoopBound, ModuleConstants, NaturalLoop, PhiNode, SmallDisplay, Terminator, UnaryOpKind, VarId,
@@ -189,6 +189,33 @@ impl<'a, 'c> Sizes<'a, 'c> {
         outer
             .ix
             .iter_bound(iterable, &mut |inst| outer.leaf_len(inst))
+    }
+
+    /// The loop of a builtin calling a callable once per item (`map(f, xs)`, `sorted(xs,
+    /// key=f)`) at `call` is data-sized: no iterable it takes the items from yields a number
+    /// of items the code fixes, as for a `for` loop's iterable (`max(a, b, key=f)` compares
+    /// two values).
+    pub(crate) fn items_data_sized(&self, call: &Inst, items: &Items) -> bool {
+        CallInst::of(&call.kind).is_some_and(|call| match items {
+            Items::Args(positions) => {
+                !positions.is_empty()
+                    && positions.iter().all(|p| {
+                        call.args
+                            .get(usize::from(*p))
+                            .is_some_and(|it| !self.fixed_items(*it))
+                    })
+            }
+            Items::Receiver => call.recv.is_some_and(|(it, _)| !self.fixed_items(it)),
+            Items::Unpacked => true,
+        })
+    }
+
+    /// Iterating `it` yields a number of items the code fixes (`FnIndex::iter_bound`): also a
+    /// small display of another module or an attribute, or a builtin wrapper of one.
+    fn fixed_items(&self, it: VarId) -> bool {
+        self.ix
+            .iter_bound(it, &mut |inst| self.leaf_len(inst))
+            .is_some()
     }
 
     /// `var` is a small display of `kinds` for its whole life: built in this function or bound

@@ -2,8 +2,9 @@
 //! iterate other values lazily (`enumerate(it)` iterates `it` when it is iterated), and where
 //! values are iterated. The one table of iterating calls, shared by `MUT106` (a second pass over
 //! an exhausted iterator), the local summary (`EffectSummary::consumes_params` /
-//! `iterates_params`), and where a generator's body runs (`summary`: the `Iterate`,
-//! `Return`, and `Through` call-site roles).
+//! `iterates_params`), where a generator's body runs (`summary`: the `Iterate`,
+//! `Return`, and `Through` call-site roles), and which callable a builtin calls once per item
+//! (`map(f, xs)`, `sorted(xs, key=f)`: `Runner::PerItem`).
 //!
 //! An iteration *steps* every value it reaches through lazy wrappers (`zip(range(n), it)` steps
 //! `it`) and *exhausts* only some of them (`zip(range(n), it)` takes `n` items of `it`):
@@ -11,6 +12,7 @@
 //!
 //! Every call is resolved through [`TypeCtx`], so a shadowed `list` or `iter` is never matched.
 
+use crate::Items;
 use crate::resolver::{Callee, TypeCtx, Val};
 use heki_ast::Span;
 use heki_ir::{BlockId, ConstLiteral, FunctionKind, Inst, InstKind, IrFunction, Terminator, VarId};
@@ -138,20 +140,20 @@ const ITERATOR_TYPES: &[&str] = &[
     "collections.abc.AsyncGenerator",
 ];
 
-/// The positional arguments a single-pass constructor iterates.
+/// The positional arguments a single-pass constructor iterates (as variables, or as positions).
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Wrapped {
+struct Wrapped<T = VarId> {
     /// Every argument an iteration of the result steps.
-    stepped: Vec<VarId>,
+    stepped: Vec<T>,
     /// The arguments an exhausting iteration of the result exhausts (a subset of `stepped`).
-    exhausted: Vec<VarId>,
+    exhausted: Vec<T>,
     /// Iterated when the result is built (`itertools.product`), not when it is iterated.
     eager: bool,
 }
 
 /// What a single-pass constructor iterates of `args`. `iter(callable, sentinel)` iterates
 /// nothing.
-fn constructor_args(symbol: &str, args: &[VarId]) -> Option<Wrapped> {
+fn constructor_args<T: Copy + PartialEq>(symbol: &str, args: &[T]) -> Option<Wrapped<T>> {
     let &(name, first, end, how) = CONSTRUCTORS.iter().find(|c| c.0 == symbol)?;
     let end = if name == "builtins.iter" && args.len() != 1 {
         0
@@ -172,7 +174,7 @@ fn constructor_args(symbol: &str, args: &[VarId]) -> Option<Wrapped> {
 }
 
 /// The arguments a full consumer iterates to exhaustion (`list(it)`, `sum(it)`, ...).
-fn consumer_args(symbol: &str, args: &[VarId]) -> Vec<VarId> {
+fn consumer_args<T: Copy>(symbol: &str, args: &[T]) -> Vec<T> {
     let Some(&(_, how)) = FULL_CONSUMERS.iter().find(|c| c.0 == symbol) else {
         return Vec::new();
     };
@@ -196,6 +198,123 @@ pub(crate) fn iterated_args(symbol: &str, args: &[VarId]) -> Vec<VarId> {
         Some(w) if w.eager => w.stepped,
         _ => consumer_args(symbol, args),
     }
+}
+
+/// Where a builtin of [`PER_ITEM_CALLERS`] is handed the callable it calls once per item.
+#[derive(Clone, Copy)]
+enum CallableArg {
+    /// The positional argument at this index (`map(f, xs)`).
+    At(usize),
+    /// The keyword `key` (`sorted(xs, key=f)`), or the positional argument at this index when
+    /// the call passes one (`itertools.groupby(xs, f)`).
+    Key(Option<usize>),
+}
+
+/// How a builtin of [`PER_ITEM_CALLERS`] passes an item to the callable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ItemArgs {
+    /// One argument per iterable, walked together (`map(f, xs, ys)` calls `f(x, y)`).
+    OnePerIterable,
+    /// The elements of the item (`itertools.starmap(f, pairs)` calls `f(*pair)`).
+    Elements,
+    /// After the value accumulated so far (`functools.reduce(f, xs)` calls `f(acc, x)`).
+    AfterAccumulator,
+}
+
+/// Builtins calling a callable argument once per item of what they iterate: the positional
+/// arguments [`CONSTRUCTORS`] and [`FULL_CONSUMERS`] give for them, and the list itself for
+/// `list.sort`. The lazy ones (`map`, `filter`, ...) call it where their result is consumed,
+/// which is almost always where they are written, as for a generator expression.
+const PER_ITEM_CALLERS: &[(&str, CallableArg, ItemArgs)] = &[
+    ("builtins.map", CallableArg::At(0), ItemArgs::OnePerIterable),
+    (
+        "builtins.filter",
+        CallableArg::At(0),
+        ItemArgs::OnePerIterable,
+    ),
+    ("itertools.starmap", CallableArg::At(0), ItemArgs::Elements),
+    (
+        "itertools.filterfalse",
+        CallableArg::At(0),
+        ItemArgs::OnePerIterable,
+    ),
+    (
+        "functools.reduce",
+        CallableArg::At(0),
+        ItemArgs::AfterAccumulator,
+    ),
+    (
+        "builtins.sorted",
+        CallableArg::Key(None),
+        ItemArgs::OnePerIterable,
+    ),
+    (
+        "builtins.min",
+        CallableArg::Key(None),
+        ItemArgs::OnePerIterable,
+    ),
+    (
+        "builtins.max",
+        CallableArg::Key(None),
+        ItemArgs::OnePerIterable,
+    ),
+    (
+        "builtins.list.sort",
+        CallableArg::Key(None),
+        ItemArgs::OnePerIterable,
+    ),
+    (
+        "itertools.groupby",
+        CallableArg::Key(Some(1)),
+        ItemArgs::OnePerIterable,
+    ),
+];
+
+/// A callable a builtin calls once per item ([`per_item_callable`]).
+pub(crate) struct PerItemCall {
+    pub(crate) callable: VarId,
+    pub(crate) items: Items,
+    pub(crate) passed: ItemArgs,
+}
+
+/// The callable a call of the external `symbol` calls once per item, and where it takes the
+/// items from. `None` when `symbol` is none of [`PER_ITEM_CALLERS`], or when the call does not
+/// pass the callable where the builtin takes it (`*` unpacking before it, `**` without `key`).
+pub(crate) fn per_item_callable(
+    symbol: &str,
+    args: &[VarId],
+    kwargs: &[(Option<String>, VarId)],
+    star_from: Option<u8>,
+) -> Option<PerItemCall> {
+    let &(_, at, passed) = PER_ITEM_CALLERS.iter().find(|c| c.0 == symbol)?;
+    // From `star_from` on, an argument may be any number of values.
+    let known = star_from.map_or(args.len(), |s| usize::from(s).min(args.len()));
+    let callable = match at {
+        CallableArg::Key(Some(i)) if i < args.len() => *args[..known].get(i)?,
+        CallableArg::At(i) => *args[..known].get(i)?,
+        CallableArg::Key(_) => kwargs
+            .iter()
+            .find(|(k, _)| k.as_deref() == Some("key"))
+            .map(|(_, v)| *v)?,
+    };
+    let items = if symbol == "builtins.list.sort" {
+        Items::Receiver
+    } else if known < args.len() {
+        Items::Unpacked
+    } else {
+        let positions: Vec<u8> = (0..args.len())
+            .map_while(|i| u8::try_from(i).ok())
+            .collect();
+        Items::Args(match constructor_args(symbol, &positions) {
+            Some(w) => w.stepped,
+            None => consumer_args(symbol, &positions),
+        })
+    };
+    Some(PerItemCall {
+        callable,
+        items,
+        passed,
+    })
 }
 
 /// One iteration of tracked values by an instruction.

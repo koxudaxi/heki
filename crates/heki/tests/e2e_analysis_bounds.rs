@@ -1,6 +1,7 @@
 //! The cost of the analyses past the IR, end to end through the real binary: `isinstance`
 //! narrowing through phis, the passes of the type inference, the size of the Soundness lane's
-//! proof state, and the values `EFF107` follows from a task factory.
+//! proof state, the values `EFF107` follows from a task factory, and the walk to the callable a
+//! builtin calls once per item.
 
 mod common;
 
@@ -520,4 +521,48 @@ fn length_tests_repeated_through_assignments_keep_one_cap() {
             "{found:#?}"
         );
     }
+}
+
+/// A query a sort key runs, the key reached through `depth` nested `functools.partial` objects
+/// and `copies` copies before the call.
+fn partial_chain(depth: usize, copies: usize) -> String {
+    let mut out = vec![
+        "import functools".to_owned(),
+        "import sqlite3".to_owned(),
+        String::new(),
+        String::new(),
+        "def score(conn: sqlite3.Connection, uid):".to_owned(),
+        "    return conn.execute(\"SELECT ?\", (uid,))".to_owned(),
+        String::new(),
+        String::new(),
+        "def rank(conn: sqlite3.Connection, ids):".to_owned(),
+        "    k0 = functools.partial(score, conn)".to_owned(),
+    ];
+    for k in 1..=depth {
+        out.push(format!("    k{k} = functools.partial(k{})", k - 1));
+    }
+    out.push(format!("    c0 = k{depth}"));
+    for c in 1..=copies {
+        out.push(format!("    c{c} = c{}", c - 1));
+    }
+    out.push(format!("    return sorted(ids, key=c{copies})"));
+    out.join("\n") + "\n"
+}
+
+/// The callable a builtin calls once per item is followed through at most 16 copies and 16
+/// nested partial objects, a walk at every call handing one: past either bound the sort key is
+/// not resolved, so its query is not reported.
+#[test]
+fn callables_past_the_partial_and_copy_bounds_are_not_followed() {
+    let queries = |depth: usize, copies: usize| -> usize {
+        let p = Project::new(&format!("bounds_partials_{depth}_{copies}"));
+        p.write("m.py", &partial_chain(depth, copies));
+        check_within(&p, Duration::from_secs(20))
+            .iter()
+            .filter(|d| d["rule_code"] == "EFF103")
+            .count()
+    };
+    assert_eq!(queries(3, 3), 1);
+    assert_eq!(queries(30, 3), 0);
+    assert_eq!(queries(3, 30), 0);
 }
