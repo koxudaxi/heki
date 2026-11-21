@@ -193,7 +193,7 @@ struct ContractCalls {
 }
 
 impl ContractCalls {
-    fn new<'t>(contracts: impl Iterator<Item = &'t CallTargets>) -> Self {
+    fn new<'t>(contracts: impl Iterator<Item = &'t CallTargets>) -> Result<Self, RuleConfigError> {
         let mut matchers = Vec::new();
         let mut owners = Vec::new();
         let mut constructors: FxHashMap<String, Vec<(usize, usize)>> = FxHashMap::default();
@@ -207,11 +207,11 @@ impl ContractCalls {
                 pairs.extend(hits.iter().map(|&t| (c, t)));
             }
         }
-        Self {
-            functions: FunctionMatchers::new(matchers),
+        Ok(Self {
+            functions: FunctionMatchers::new(matchers, "call-owners.targets")?,
             owners,
             constructors,
-        }
+        })
     }
 
     /// [`CallTargets::called`] of every contract `site` calls a target of, by contract.
@@ -259,7 +259,12 @@ pub(crate) struct FunctionMatchers {
 }
 
 impl FunctionMatchers {
-    pub(crate) fn new(matchers: Vec<FunctionMatcher>) -> Self {
+    /// Index `matchers`; their globs, each compiled already, may still be too many for one set
+    /// (`GlobSet` under `context`).
+    pub(crate) fn new(
+        matchers: Vec<FunctionMatcher>,
+        context: &'static str,
+    ) -> Result<Self, RuleConfigError> {
         let mut literal: FxHashMap<String, Vec<usize>> = FxHashMap::default();
         let mut globs = GlobSetBuilder::new();
         let mut glob_matchers = Vec::new();
@@ -279,15 +284,14 @@ impl FunctionMatchers {
                 methods.entry(class.clone()).or_default().push(i);
             }
         }
-        Self {
+        let globs = globs.build();
+        Ok(Self {
             matchers,
             literal,
-            globs: globs
-                .build()
-                .expect("each glob compiled into a matcher already"),
+            globs: globs.map_err(|cause| RuleConfigError::GlobSet { context, cause })?,
             glob_matchers,
             methods,
-        }
+        })
     }
 
     /// The matchers whose whole text may name `name` or one of its dotted suffixes.
@@ -386,7 +390,7 @@ pub(crate) fn parse_call_targets(
         });
         matchers.push(functions);
     }
-    let functions = Arc::new(FunctionMatchers::new(matchers));
+    let functions = Arc::new(FunctionMatchers::new(matchers, context)?);
     // The classes each target names, found class by class.
     let mut constructors: FxHashMap<String, Vec<usize>> = FxHashMap::default();
     for class in all_classes {
@@ -485,7 +489,7 @@ pub(crate) fn mut204(
     let sites = cx.sites_by_caller();
     let mut callers: Vec<&FuncKey> = sites.keys().copied().collect();
     callers.sort();
-    let contracts = ContractCalls::new(rules.iter().map(|r| &r.targets));
+    let contracts = ContractCalls::new(rules.iter().map(|r| &r.targets))?;
     let mut reports = MergedReports::default();
     let mut families: Vec<Families> = rules.iter().map(|_| Families::default()).collect();
     for key in callers {

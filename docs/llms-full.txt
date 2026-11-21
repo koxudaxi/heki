@@ -955,7 +955,8 @@ Contracts declare what no type can say. Each kind is an array of tables with its
   `pkg.types.DataType._flag``); one report standing for several members lists the others.
 - A `Class.attr` target covers the subclasses of the class too.
 - A contract heki cannot use is a configuration error: a target that is not `Class.attr`, an
-  invalid glob, or an unknown value of `forbid`, `fresh-objects`, or `unresolved`.
+  invalid glob, call targets whose globs are too many to match together (tens of thousands of
+  complex ones), or an unknown value of `forbid`, `fresh-objects`, or `unresolved`.
 - With `unresolved = "report"`, a contract also reports the accesses it cannot tie to a class,
   each under its own rule (`MUT205` writes, `MUT206` reads, `MUT207` calls): an attribute or
   method named like a target, accessed on an object of unknown class (an unannotated parameter,

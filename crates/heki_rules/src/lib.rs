@@ -498,6 +498,11 @@ pub enum RuleConfigError {
         context: &'static str,
         cause: globset::Error,
     },
+    #[error("the globs of {context} are too many to match together: {cause}")]
+    GlobSet {
+        context: &'static str,
+        cause: globset::Error,
+    },
     #[error("{0} `invalidation` contracts declared; at most {MAX_INVALIDATIONS} are supported")]
     TooManyInvalidations(usize),
 }
