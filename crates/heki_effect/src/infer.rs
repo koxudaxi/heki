@@ -877,7 +877,7 @@ impl<'e, 'a> Engine<'e, 'a> {
                         Ty::Ref(fqn) => Some(fqn.clone()),
                         _ => None,
                     },
-                    &|n| self.cx.global_str(n).map(str::to_owned),
+                    &|n| self.cx.global_literal(n),
                     v,
                 )
             },
