@@ -2039,6 +2039,37 @@ pub(crate) fn site_call<'i>(
     })
 }
 
+/// The value each of `vars` copies, through any number of copies (itself when it is no copy),
+/// each value resolved once. Copies in dead code can close a cycle, which ends a walk.
+fn copy_origins(f: &IrFunction, vars: impl Iterator<Item = VarId>) -> FxHashMap<VarId, VarId> {
+    let sources: FxHashMap<VarId, VarId> = f
+        .blocks
+        .iter()
+        .flat_map(|b| &b.insts)
+        .filter_map(|i| match i.kind {
+            InstKind::Copy { dst, src } => Some((dst, src)),
+            _ => None,
+        })
+        .collect();
+    let mut origin: FxHashMap<VarId, VarId> = FxHashMap::default();
+    for var in vars {
+        let mut path: FxHashSet<VarId> = FxHashSet::default();
+        let mut cur = var;
+        let root = loop {
+            if let Some(&known) = origin.get(&cur) {
+                break known;
+            }
+            match sources.get(&cur) {
+                Some(&src) if path.insert(cur) => cur = src,
+                _ => break cur,
+            }
+        };
+        origin.insert(var, root);
+        origin.extend(path.into_iter().map(|v| (v, root)));
+    }
+    origin
+}
+
 const MUTABLE_BUILTINS: &[&str] = &[
     "builtins.list",
     "builtins.dict",
@@ -2306,25 +2337,6 @@ impl<'a> Mut202Fn<'a> {
         grew
     }
 
-    /// The value `var` copies, through any number of copies (itself when it is no copy). Copies
-    /// in dead code can close a cycle, which ends the walk.
-    fn copied_from(&self, var: VarId) -> VarId {
-        let mut seen: FxHashSet<VarId> = FxHashSet::default();
-        let mut cur = var;
-        while seen.insert(cur)
-            && let Some((
-                _,
-                Inst {
-                    kind: InstKind::Copy { src, .. },
-                    ..
-                },
-            )) = self.f.def_inst(cur)
-        {
-            cur = *src;
-        }
-        cur
-    }
-
     /// Read-only origin of `var` when mutating its own top level is a violation.
     fn guarded(&self, var: VarId) -> Option<&Ro> {
         self.ro.get(&var).filter(|r| !r.shallow_copy)
@@ -2338,9 +2350,10 @@ impl<'a> Mut202Fn<'a> {
         // Filling a memo of a shared object, or initializing one of its attributes lazily,
         // leaves what it computes as it was (as for the helpers, `memo_param_paths`). Each
         // object is read on its own: a test of one object's attribute says nothing of another's.
+        let origins = copy_origins(self.f, self.ro.keys().copied());
         let mut objects: FxHashMap<VarId, FxHashSet<VarId>> = FxHashMap::default();
         for (v, _) in self.ro.iter().filter(|(_, r)| !r.shallow_copy) {
-            objects.entry(self.copied_from(*v)).or_default().insert(*v);
+            objects.entry(origins[v]).or_default().insert(*v);
         }
         let memo_fills: FxHashSet<(BlockId, u32)> = objects
             .values()

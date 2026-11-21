@@ -546,3 +546,34 @@ fn task_factories_at_the_end_of_a_copy_chain_take_linear_time() {
     assert_eq!(tasks.len(), 1, "{tasks:?}");
     assert_eq!(tasks[0]["target"], "asyncio.create_task->t0");
 }
+
+/// A shared value copied along a long chain of assignments (`v1 = v0`, `v2 = v1`, ...) before
+/// `MUT202` reads which object each copy is: each copy's origin is found once.
+#[test]
+fn a_long_copy_chain_of_a_shared_value_finds_each_origin_once() {
+    let mut lines = vec![
+        "from functools import lru_cache".to_owned(),
+        String::new(),
+        String::new(),
+        "@lru_cache(maxsize=None)".to_owned(),
+        "def rows(name):".to_owned(),
+        "    return [[name]]".to_owned(),
+        String::new(),
+        String::new(),
+        "def extend(name):".to_owned(),
+        "    v0 = rows(name)".to_owned(),
+    ];
+    for i in 1..=4000 {
+        lines.push(format!("    v{i} = v{}", i - 1));
+    }
+    lines.push("    v4000.append([name])".to_owned());
+    let p = Project::new("bounds_shared_copy_chain");
+    p.write("m.py", &(lines.join("\n") + "\n"));
+    let found = check_within(&p, Duration::from_secs(20));
+    let reported: Vec<&str> = found
+        .iter()
+        .filter(|d| d["rule_code"] == "MUT202")
+        .map(|d| d["qualname"].as_str().unwrap())
+        .collect();
+    assert_eq!(reported, vec!["extend"], "{found:#?}");
+}
