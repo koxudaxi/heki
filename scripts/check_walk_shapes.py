@@ -23,8 +23,9 @@ at most 2.5 times from n / 2 to n (quadratic growth inside the budget shows with
 noise), and no budget may be spent on a family shaped like real code.
 
 `KNOWN_OVER` lists the shapes known to cost more than the limits; the list only shrinks: a shape
-listed there that costs less than half the limits fails the gate until it is removed (the band
-between keeps a shape near the limit from failing on one machine and passing on another).
+listed there that costs less than a quarter of the limits fails the gate until it is removed. The
+band between keeps a shape near the limit from failing on one machine and passing on another
+(shapes scale differently across machines than the calibration shape does).
 
 Usage:
     python3 scripts/check_walk_shapes.py --heki target/release/heki
@@ -544,13 +545,13 @@ def main() -> int:
                     print(f"{family.name}/{placement} n={n} {mode}: {spent}", flush=True)
                     if cost[0] > limit_seconds or cost[1] > LIMIT_MIB or code not in (0, 1):
                         over.append(mode)
-                    if cost[0] > limit_seconds / 2 or cost[1] > LIMIT_MIB / 2 or code not in (0, 1):
+                    if cost[0] > limit_seconds / 4 or cost[1] > LIMIT_MIB / 4 or code not in (0, 1):
                         well_under = False
                 if over and not listed:
                     problems.append(f"{family.name}/{placement} at n={n} costs more than "
                                     f"{limit_seconds:.1f} s or {LIMIT_MIB:.0f} MiB ({', '.join(over)})")
                 if listed and well_under:
-                    problems.append(f"{family.name}/{placement} costs less than half the limits: "
+                    problems.append(f"{family.name}/{placement} costs less than a quarter of the limits: "
                                     "remove it from KNOWN_OVER")
                 if family.project is None and not over:
                     problems += step_growth(runner, family, placement, n, text)

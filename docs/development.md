@@ -166,7 +166,8 @@ private helpers) has a fixed size. Each runs with every rule and one contract of
 empty module. `heki check --walk-steps <path>` (hidden) writes the steps each owner's walks took
 per function as JSON: the gate also fails when an owner's steps grow more than 2.5 times from half
 the size to the full size, or when a budget is spent on a shape like real code. `KNOWN_OVER` in the
-script lists the shapes known to cost more, and only shrinks.
+script lists the shapes known to cost more, and only shrinks: a listed shape fails the gate once
+it costs under a quarter of the limits.
 
 Each bound comes with a shape in `crates/heki/tests/e2e_analysis_bounds.rs` that is slow without it,
 checked against a time limit: comparisons sharing an operand thirty deep, many `match` statements of
