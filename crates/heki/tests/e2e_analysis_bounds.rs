@@ -247,6 +247,291 @@ fn copies_around_a_loop_no_path_enters_form_no_cycle() {
     check_within(&p, Duration::from_secs(20));
 }
 
+/// `MUT112` selected (it reads the `is` tests of a function's branches).
+const MUT112_CONFIG: &str =
+    "[project]\nname = \"t\"\n\n[tool.heki.lint]\nextend-select = [\"MUT112\"]\n";
+
+/// Functions whose branches all test the last of a long chain of copies of one `is` test
+/// (`c3000 = c2999`, `if c3000:`): the test each copy is, through the chain, is found once per
+/// value for all the branches.
+#[test]
+fn branches_on_a_long_copy_chain_of_an_is_test_read_it_once() {
+    let links = 3_000;
+    let mut lines = Vec::new();
+    for k in 0..4 {
+        lines.push(format!("def chain{k}(x):"));
+        lines.push("    c0 = x is None".to_owned());
+        for i in 1..=links {
+            lines.push(format!("    c{i} = c{}", i - 1));
+        }
+        for _ in 0..links {
+            lines.push(format!("    if c{links}:"));
+            lines.push("        x = []".to_owned());
+        }
+        lines.push(String::new());
+        lines.push(String::new());
+    }
+    let p = Project::new("bounds_is_test_copy_chain");
+    p.write("pyproject.toml", MUT112_CONFIG)
+        .write("m.py", &(lines.join("\n") + "\n"));
+    check_within(&p, Duration::from_secs(20));
+}
+
+/// A function testing one value against `None` before each of many conditional expressions over
+/// the last of a long chain of its copies: each phi input finds the tests it is on a side of by
+/// the walk up the dominator tree from its edge, once per edge, and the value a copy copies
+/// once per chain.
+#[test]
+fn phi_inputs_after_many_is_tests_find_their_sides_once_per_edge() {
+    let tests = 600;
+    let mut lines = vec!["def guards(x, flag):".to_owned(), "    a0 = x".to_owned()];
+    for i in 1..=tests {
+        lines.push(format!("    a{i} = a{}", i - 1));
+    }
+    for k in 0..tests {
+        lines.push("    if x is None:".to_owned());
+        lines.push("        raise ValueError(\"x is required\")".to_owned());
+        lines.push(format!("    y{k} = [] if flag else a{tests}"));
+    }
+    lines.push(format!("    y{}.append(1)", tests - 1));
+    let p = Project::new("bounds_is_test_sides");
+    p.write("pyproject.toml", MUT112_CONFIG)
+        .write("m.py", &(lines.join("\n") + "\n"));
+    let found = check_within(&p, Duration::from_secs(20));
+    let lines: Vec<u64> = found
+        .iter()
+        .filter(|d| d["rule_code"] == "MUT112")
+        .map(|d| d["line"].as_u64().unwrap())
+        .collect();
+    assert_eq!(lines, vec![2 + tests as u64 + 3 * tests as u64 + 1]);
+}
+
+/// A function returning the last of a long chain of conditional expressions, each choosing
+/// between a call of the previous value and the previous value itself
+/// (`x200 = identity(x199) if flag else x199`): each phi is walked once and referred to by the
+/// walks that meet it, instead of every argument walking all the phis before it.
+#[test]
+fn returned_phis_of_calls_on_the_previous_value_are_walked_once() {
+    let links = 200;
+    let mut lines = vec![
+        "def identity(x):".to_owned(),
+        "    return x".to_owned(),
+        String::new(),
+        String::new(),
+        "def chain(x0, flag, other):".to_owned(),
+    ];
+    for i in 1..=links {
+        let prev = i - 1;
+        lines.push(format!("    x{i} = identity(x{prev}) if flag else x{prev}"));
+    }
+    lines.push(format!("    return x{links} if other else []"));
+    lines.extend(
+        [
+            "",
+            "",
+            "def use(shared, flag, other):",
+            "    x = chain(shared, flag, other)",
+            "    x.append(1)",
+        ]
+        .map(str::to_owned),
+    );
+    let p = Project::new("bounds_returned_phi_chain");
+    p.write("pyproject.toml", MUT112_CONFIG)
+        .write("m.py", &(lines.join("\n") + "\n"));
+    let found = check_within(&p, Duration::from_secs(20));
+    assert_eq!(
+        found
+            .iter()
+            .filter(|d| d["rule_code"] == "MUT112")
+            .map(|d| d["qualname"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["use"]
+    );
+}
+
+/// One returned call handed the last 256 of a long chain of item reads (`z2000 = z1999[0]`) as
+/// its arguments: each argument walks the chain, so past the budget of walked values
+/// proportional to the source what the function returns is unknown, and nothing is reported
+/// from it.
+#[test]
+fn origin_walks_past_their_budget_return_unknown() {
+    let (links, args) = (2_000, 256);
+    let mut lines = vec![
+        "def pick(*rows):".to_owned(),
+        "    return rows[0]".to_owned(),
+        String::new(),
+        String::new(),
+        "def deep(z0, flag):".to_owned(),
+    ];
+    for i in 1..=links {
+        lines.push(format!("    z{i} = z{}[0]", i - 1));
+    }
+    let picked: Vec<String> = (links - args + 1..=links)
+        .map(|i| format!("z{i}"))
+        .collect();
+    let picked = picked.join(", ");
+    lines.push(format!("    return pick({picked}) if flag else []"));
+    lines.extend(
+        [
+            "",
+            "",
+            "def use(shared, flag):",
+            "    x = deep(shared, flag)",
+            "    x.append(1)",
+        ]
+        .map(str::to_owned),
+    );
+    let p = Project::new("bounds_origin_walk_budget");
+    p.write("pyproject.toml", MUT112_CONFIG)
+        .write("m.py", &(lines.join("\n") + "\n"));
+    let found = check_within(&p, Duration::from_secs(20));
+    assert!(
+        found.iter().all(|d| d["rule_code"] != "MUT112"),
+        "{found:#?}"
+    );
+}
+
+/// A loop carrying a long chain of assignments in reverse (`v0 = v1`, ..., `v1499 = shared or []`,
+/// the names bound to `None` before it): the value moves one link per iteration, and the
+/// ownership fixpoint follows it in one sweep along the chain, visiting what a value grows
+/// into instead of every instruction again for each link.
+#[test]
+fn ownership_through_a_long_chain_a_loop_carries_in_reverse_is_found_in_one_sweep() {
+    let links = 1_500;
+    let mut lines = vec!["def carry(shared, items):".to_owned()];
+    for i in 0..=links {
+        lines.push(format!("    v{i} = None"));
+    }
+    lines.push("    for _ in items:".to_owned());
+    for i in 0..links {
+        lines.push(format!("        v{i} = v{}", i + 1));
+    }
+    lines.push(format!("        v{links} = shared or []"));
+    lines.push("    v0.append(1)".to_owned());
+    let p = Project::new("bounds_reverse_loop_chain");
+    p.write("pyproject.toml", MUT112_CONFIG)
+        .write("m.py", &(lines.join("\n") + "\n"));
+    let found = check_within(&p, Duration::from_secs(20));
+    assert_eq!(
+        found
+            .iter()
+            .filter(|d| d["rule_code"] == "MUT112")
+            .map(|d| d["line"].as_u64().unwrap())
+            .collect::<Vec<_>>(),
+        vec![2 * links as u64 + 5]
+    );
+}
+
+/// A function appending each alias of a long chain to a list (one list for all of them, or a new
+/// list per alias) and returning the last alias or its parameter, and a caller changing what it
+/// returns.
+fn alias_chain_stores(aliases: usize, one_list: bool) -> String {
+    let mut lines = vec![
+        "def keep(x, shared, flag):".to_owned(),
+        "    a0 = x".to_owned(),
+    ];
+    for i in 1..=aliases {
+        lines.push(format!("    a{i} = a{}", i - 1));
+        if one_list {
+            lines.push(format!("    shared.append(a{i})"));
+        } else {
+            lines.push(format!("    t{i} = []"));
+            lines.push(format!("    t{i}.append(a{i})"));
+        }
+    }
+    // Through the list's stores, or the parameter itself.
+    let returned = if one_list {
+        format!("a{aliases}")
+    } else {
+        "x".to_owned()
+    };
+    lines.push(format!("    return {returned} if flag else []"));
+    lines.extend(
+        [
+            "",
+            "",
+            "def use(given, shared, flag):",
+            "    x = keep(given, shared, flag)",
+            "    x.append(1)",
+        ]
+        .map(str::to_owned),
+    );
+    lines.join("\n") + "\n"
+}
+
+/// Each alias of a long chain appended to one list: what the function returns follows the
+/// stores of every alias in one walk, each value and place once, and the caller's change of the
+/// result (an element of `shared` on one path, new on the other) is reported.
+#[test]
+fn stores_of_a_long_alias_chain_into_one_list_keep_each_value_once() {
+    let p = Project::new("bounds_alias_chain_one_list");
+    p.write("pyproject.toml", MUT112_CONFIG)
+        .write("m.py", &alias_chain_stores(12_000, true));
+    let found = check_within(&p, Duration::from_secs(20));
+    assert_eq!(
+        found
+            .iter()
+            .filter(|d| d["rule_code"] == "MUT112")
+            .map(|d| d["qualname"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["use"]
+    );
+}
+
+/// Each alias of a long chain appended to a new list of its own: the pairs of value and place
+/// grow with the square of the chain, so past the budget proportional to the source what the
+/// function returns (its parameter, or a new list) is unknown, and nothing is reported from it.
+#[test]
+fn stores_of_a_long_alias_chain_into_many_lists_past_the_budget_return_unknown() {
+    let p = Project::new("bounds_alias_chain_many_lists");
+    p.write("pyproject.toml", MUT112_CONFIG)
+        .write("m.py", &alias_chain_stores(8_000, false));
+    let found = check_within(&p, Duration::from_secs(20));
+    assert!(
+        found.iter().all(|d| d["rule_code"] != "MUT112"),
+        "{found:#?}"
+    );
+}
+
+/// A function returning the last of a long chain of calls, each handed the previous call's
+/// result as two of its arguments (`x40 = choose(x39, x39, flag)`), with `choose` returning
+/// either: what each call returns is resolved once, not once per path down the chain.
+#[test]
+fn returned_calls_handed_the_previous_result_twice_resolve_each_call_once() {
+    let calls = 40;
+    let mut lines = vec![
+        "def choose(a, b, flag):".to_owned(),
+        "    return a if flag else b".to_owned(),
+        String::new(),
+        String::new(),
+        "def chain(x0, flag):".to_owned(),
+    ];
+    for i in 1..=calls {
+        lines.push(format!("    x{i} = choose(x{}, x{}, flag)", i - 1, i - 1));
+    }
+    lines.push(format!("    return x{calls}"));
+    lines.extend(
+        [
+            "",
+            "",
+            "def use(shared, flag):",
+            "    x = chain(shared, flag) if flag else []",
+            "    x.append(1)",
+        ]
+        .map(str::to_owned),
+    );
+    let p = Project::new("bounds_returned_call_chain");
+    p.write("pyproject.toml", MUT112_CONFIG)
+        .write("m.py", &(lines.join("\n") + "\n"));
+    let found = check_within(&p, Duration::from_secs(20));
+    let lines: Vec<u64> = found
+        .iter()
+        .filter(|d| d["rule_code"] == "MUT112")
+        .map(|d| d["line"].as_u64().unwrap())
+        .collect();
+    assert_eq!(lines, vec![6 + calls as u64 + 5]);
+}
+
 /// Comparisons whose two operands are one value (`b1 = b0 == b0`), under an invalidation
 /// contract: whether a branch depends on a flag, and the flag values on each edge, are decided
 /// once per value instead of once per path to it.

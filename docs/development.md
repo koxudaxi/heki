@@ -109,8 +109,15 @@ alias, a class with thousands of subclasses whose class constant as many functio
 instance, a strict `read-owners` target on such a class that as many functions read on an object of
 unknown class, as many calls of a method of such a class that a call target naming no class names, a
 module binding thousands of names each to an attribute of the one before, a function making twenty
-thousand calls of eight operands each, and a helper that types nothing making thousands of strict
-accesses of one name that one caller calls as many times.
+thousand calls of eight operands each, a helper that types nothing making thousands of strict
+accesses of one name that one caller calls as many times, a helper that types nothing reading,
+calling, or writing one strict target name thousands of times, which a caller calls as many times,
+many `is` tests each followed by a conditional expression on the tested parameter, many branches on
+a long chain of copies of one `is` test, a long chain of returned calls each handed the previous
+call's result as two of its arguments, a long chain of returned aliases each appended to one list or
+to a new list of its own, a long chain of conditional expressions each choosing between a call of
+the previous value and the value, one returned call handed the last of a long chain of item reads as
+each of its arguments, and a loop carrying a long chain of assignments in reverse.
 
 A change to the IR builder, a walk, a fixpoint, or a rule's state is also run over a large
 corpus of real projects before it is merged, every run under a memory cap and a timeout. No

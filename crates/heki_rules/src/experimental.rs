@@ -61,6 +61,15 @@ pub const EXPERIMENTAL_FEATURES: &[ExperimentalFeature] = &[
         tracking: None,
     },
     ExperimentalFeature {
+        id: "rule.MUT112",
+        kind: ExperimentalKind::Rule,
+        target: "MUT112",
+        since: "0.2.0",
+        reason: "Its precision on real code bases is still low: much of what it reports is code \
+            that changes a borrowed container on purpose.",
+        tracking: None,
+    },
+    ExperimentalFeature {
         id: "cli-option.profile",
         kind: ExperimentalKind::CliOption,
         target: "heki check --profile",
