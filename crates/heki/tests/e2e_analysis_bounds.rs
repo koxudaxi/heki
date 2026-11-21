@@ -1531,3 +1531,42 @@ fn a_long_chain_of_module_aliases_resolves_each_once() {
     assert_eq!(diags.len(), 1, "{diags:#?}");
     assert_eq!(diags[0]["qualname"], "mark");
 }
+
+/// A method returning one of thousands of copies of `self.items` behind as many tests: the
+/// value each copy copies is found once, not once per return.
+#[test]
+fn returns_of_a_long_copy_chain_find_its_root_once() {
+    let copies = 3_000;
+    let mut lines = vec![
+        "class Node:".to_owned(),
+        "    def __init__(self) -> None:".to_owned(),
+        "        self.items: list[int] = []".to_owned(),
+        String::new(),
+        "    def members(self, flags: list[bool]) -> list[int]:".to_owned(),
+        "        c0 = self.items".to_owned(),
+    ];
+    for i in 1..copies {
+        lines.push(format!("        c{i} = c{}", i - 1));
+        lines.push(format!("        if flags[{i}]:"));
+        lines.push(format!("            return c{i}"));
+    }
+    lines.push(format!("        return c{}", copies - 1));
+    lines.extend(
+        [
+            "",
+            "",
+            "def grow(node: Node) -> None:",
+            "    node.members([]).append(1)",
+        ]
+        .map(str::to_owned),
+    );
+    let p = Project::new("bounds_getter_copy_chain");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT201\"]\n\n[[tool.heki.write-owners]]\nname = \"items\"\ntargets = [\"Node.items\"]\nallowed-writers = [\"Node.*\"]\n",
+    )
+    .write("m.py", &(lines.join("\n") + "\n"));
+    let diags = check_within(&p, Duration::from_secs(20));
+    assert_eq!(diags.len(), 1, "{diags:#?}");
+    assert_eq!(diags[0]["qualname"], "grow");
+}

@@ -3054,12 +3054,28 @@ fn returned_param_attr(f: &IrFunction, decls: &ModuleDecls) -> Option<(u8, Strin
         .flat_map(|b| &b.insts)
         .filter_map(|i| Some((i.kind.dst()?, &i.kind)))
         .collect();
-    let copied_from = |mut var: VarId| {
-        // Copies of an SSA variable form a tree, so the walk ends.
-        while let Some(InstKind::Copy { src, .. }) = defs.get(&var) {
-            var = *src;
+    // The variable each copy copies in the end, found once per variable: returns of copies of
+    // one value share the walk. Copies of an SSA variable form a tree, so the walk ends.
+    let mut roots: FxHashMap<VarId, VarId> = FxHashMap::default();
+    let mut copied_from = |var: VarId| {
+        let mut walked = Vec::new();
+        let mut cur = var;
+        let root = loop {
+            if let Some(&root) = roots.get(&cur) {
+                break root;
+            }
+            match defs.get(&cur) {
+                Some(InstKind::Copy { src, .. }) => {
+                    walked.push(cur);
+                    cur = *src;
+                }
+                _ => break cur,
+            }
+        };
+        for v in walked {
+            roots.insert(v, root);
         }
-        var
+        root
     };
     let mut returned = None;
     for bb in &f.blocks {
@@ -3083,7 +3099,7 @@ fn returned_param_attr(f: &IrFunction, decls: &ModuleDecls) -> Option<(u8, Strin
 }
 
 /// How often the module's code stores or deletes each module global: in the module body, or
-/// in a function after `global name`.
+/// in a function after `global name` (deleting a local or a class-body name binds no global).
 fn module_store_counts<'i>(input: &'i ModuleInput<'_>) -> FxHashMap<&'i str, usize> {
     let mut out: FxHashMap<&str, usize> = FxHashMap::default();
     for inst in input
@@ -3092,7 +3108,11 @@ fn module_store_counts<'i>(input: &'i ModuleInput<'_>) -> FxHashMap<&'i str, usi
         .iter()
         .flat_map(|f| f.blocks.iter().flat_map(|b| &b.insts))
     {
-        if let InstKind::StoreGlobal { name, .. } | InstKind::Delete { name, .. } = &inst.kind {
+        if let InstKind::StoreGlobal { name, .. }
+        | InstKind::Delete {
+            name, global: true, ..
+        } = &inst.kind
+        {
             *out.entry(name.as_str()).or_default() += 1;
         }
     }

@@ -303,6 +303,14 @@ async def read() -> object:
 
 async def wait() -> None:
     nap(1)
+
+
+def cleanup(open: object) -> None:
+    del open
+
+
+async def builtin() -> object:
+    return open("data.txt")
 "#;
 
 #[test]
@@ -317,6 +325,8 @@ fn a_module_global_is_its_own_object_and_an_alias_the_one_it_names() {
             // An alias of the builtin `open`, and of `time.sleep` (a default rule).
             d("pkg/aliased.py", 8, "EFF105", "builtins.open"),
             d("pkg/aliased.py", 12, "EFF101", "time.sleep"),
+            // Deleting a local of the same name binds no global: `open` is still the builtin.
+            d("pkg/aliased.py", 20, "EFF105", "builtins.open"),
             // `open` bound by the module to something else is no builtin, nor is a global
             // bound to a choice between objects.
         ]
