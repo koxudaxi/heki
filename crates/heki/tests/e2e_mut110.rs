@@ -491,3 +491,37 @@ fn mut110_prefers_the_implementation_that_names_a_line() {
     assert_eq!(diags[0]["certainty"], "exact", "{diags:#?}");
     assert_eq!(chain(&diags[0]).last(), Some(&(a.into(), 12)));
 }
+
+/// A helper defined once per platform: the definitions' changes join, and the report names the
+/// first line.
+const PER_PLATFORM: &str = r#"import sys
+from collections.abc import Sequence
+
+if sys.platform == "win32":
+
+    def fill(values):
+        if isinstance(values, list):
+            values.append(1)
+
+else:
+
+    def fill(values):
+        if isinstance(values, list):
+            values.append(2)
+
+
+def use(values: Sequence[int]) -> None:
+    fill(values)
+"#;
+
+#[test]
+fn mut110_joins_the_changes_of_each_definition() {
+    let p = Project::new("mut110_per_platform");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/platform.py", PER_PLATFORM);
+    let diags = diagnostics(&p, &[]);
+    let a = "pkg/platform.py";
+    assert_eq!(found(&diags), vec![d(a, 18, "use", "values")]);
+    assert_eq!(diags[0]["certainty"], "exact", "{diags:#?}");
+    assert_eq!(chain(&diags[0]).last(), Some(&(a.into(), 8)));
+}
