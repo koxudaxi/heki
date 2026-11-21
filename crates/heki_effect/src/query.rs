@@ -389,33 +389,37 @@ impl ProjectIndex {
         })
     }
 
-    /// The nearest function whose own calls heki cannot all resolve (`unknown_calls`) among
-    /// `start` and the callees whose facts run in it (in its body, or in what iterating its
-    /// result runs), with the chain to it. A call cycle stopped at its recomputation budget is
-    /// unknown as a whole: its functions are their own nearest.
+    /// The nearest function whose own calls heki cannot all resolve (`unknown_calls`), or whose
+    /// body it does not know (defined only in a stub), among `start` and the callees whose facts
+    /// run in it (in its body, or in what iterating its result runs), with the chain to it. A
+    /// call cycle stopped at its recomputation budget is unknown as a whole: its functions are
+    /// their own nearest.
     pub fn first_unknown(&self, calls: &mut CallsByCaller<'_>, start: &FuncKey) -> ChangeChain {
         self.nearest(
             calls,
             start,
             |site, callee| self.delivery(site, callee).is_some(),
-            |key, _| self.summary(key).is_some_and(|s| s.unknown_calls),
+            |key, _| {
+                self.summary(key).is_some_and(|s| s.unknown_calls)
+                    || self.file_of(key).is_some_and(crate::is_stub)
+            },
         )
     }
 
-    /// The nearest function whose own body changes a module global (`cell` `None`) or the
-    /// closure cell `cell`, among `start` and the callees whose facts run in it and hand that
-    /// change on, with the chain to it.
-    pub fn first_state_change(
+    /// Every function whose own body changes a module global (`cell` `None`) or the closure
+    /// cell `cell`, or hands it to a callee that changes it, among `start` and the callees whose
+    /// facts run in it and hand that change on, each with the shortest chain to it.
+    pub fn state_changes(
         &self,
         calls: &mut CallsByCaller<'_>,
         start: &FuncKey,
         cell: Option<&CellChange>,
-    ) -> ChangeChain {
+    ) -> Vec<ChangeChain> {
         let hands_on = |s: &EffectSummary| match cell {
             Some(c) => s.changes_cells().contains(c),
             None => s.changes_globals(),
         };
-        self.nearest(
+        self.found_within(
             calls,
             start,
             |site, callee| hands_on(callee) && self.delivery(site, callee).is_some(),
@@ -431,6 +435,7 @@ impl ProjectIndex {
                     .iter()
                     .any(|h| h.state.is_change_of(cell))
             },
+            false,
         )
     }
 
@@ -518,6 +523,23 @@ impl ProjectIndex {
         enters: impl Fn(&CallSite, &EffectSummary) -> bool,
         found: impl Fn(&FuncKey, &[&CallSite]) -> bool,
     ) -> ChangeChain {
+        self.found_within(calls, start, enters, found, true)
+            .pop()
+            .unwrap_or_default()
+    }
+
+    /// Breadth first from `start` over the calls `enters` accepts, each function `found`
+    /// accepts with the shortest hops to it, in the order reached (only the first with
+    /// `first_only`). Each function is entered once.
+    fn found_within(
+        &self,
+        calls: &mut CallsByCaller<'_>,
+        start: &FuncKey,
+        enters: impl Fn(&CallSite, &EffectSummary) -> bool,
+        found: impl Fn(&FuncKey, &[&CallSite]) -> bool,
+        first_only: bool,
+    ) -> Vec<ChangeChain> {
+        let mut out = Vec::new();
         // (function, parent state, hop into it)
         let mut states: Vec<(FuncKey, Option<usize>, Option<CallHop>)> =
             vec![(start.clone(), None, None)];
@@ -537,11 +559,14 @@ impl ProjectIndex {
                     at = states[j].1;
                 }
                 hops.reverse();
-                return ChangeChain {
+                out.push(ChangeChain {
                     hops,
-                    changed_in: Some(func),
+                    changed_in: Some(func.clone()),
                     param: None,
-                };
+                });
+                if first_only {
+                    return out;
+                }
             }
             for &site in sites {
                 for bc in site.project_callees() {
@@ -561,6 +586,6 @@ impl ProjectIndex {
             }
             i += 1;
         }
-        ChangeChain::default()
+        out
     }
 }

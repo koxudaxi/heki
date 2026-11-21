@@ -18,7 +18,7 @@ use heki_effect::{
 };
 use heki_ir::IrFunction;
 use heki_kb::{EffectiveEcosystemKb, ExecEffectKind};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::Serialize;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -979,29 +979,25 @@ fn globals(b: &Builder<'_, '_>, key: &FuncKey, s: &EffectSummary) -> Vec<GlobalC
         })
         .map(|g| g.change)
         .collect::<Vec<_>>();
-    let listed = |cell: Option<&CellChange>, out: &[GlobalChange]| {
-        out.iter().any(|g| match cell {
-            None => g.cell_of.is_none(),
-            Some(c) => g.cell_of.is_some() && g.name == c.name,
-        })
-    };
-    // What reaches the function through calls: module globals, then each closure cell.
+    // What reaches the function through calls: every function changing a module global, then
+    // a closure cell, nearest first; one entry per global and cell, its first.
     let globals = s.changes_globals().then_some(None);
     let cells = s.changes_cells().iter().map(Some);
     for cell in globals.into_iter().chain(cells) {
-        if listed(cell, &out) {
-            continue;
-        }
-        let chain = index.first_state_change(&mut b.calls.borrow_mut(), key, cell);
-        let hops = b.hops(&chain.hops);
-        for end in chain.changed_in.iter().filter(|end| *end != key) {
-            out.extend(
-                changes_made_in(b, end, cell, hops.clone())
-                    .into_iter()
-                    .map(|g| g.change),
-            );
+        let chains = index.state_changes(&mut b.calls.borrow_mut(), key, cell);
+        for chain in chains {
+            let hops = b.hops(&chain.hops);
+            for end in chain.changed_in.iter().filter(|end| *end != key) {
+                out.extend(
+                    changes_made_in(b, end, cell, hops.clone())
+                        .into_iter()
+                        .map(|g| g.change),
+                );
+            }
         }
     }
+    let mut seen = FxHashSet::default();
+    out.retain(|g| seen.insert((g.name.clone(), g.cell_of.clone())));
     out
 }
 
@@ -1080,10 +1076,11 @@ fn returns(b: &Builder<'_, '_>, s: &EffectSummary, params: &[String]) -> Returns
         .unwrap_or_default();
     let known = o != heki_effect::Origins::default();
     Returns {
-        kind: if s.is_async {
-            "coroutine"
-        } else if s.is_generator {
+        // An async generator is iterated, never awaited.
+        kind: if s.is_generator {
             "generator"
+        } else if s.is_async {
+            "coroutine"
         } else {
             "value"
         },
@@ -1302,10 +1299,19 @@ fn purity(
             .first_object_write(&mut calls, key)
             .changed_in
             .is_some();
+    // The nearest function heki cannot follow: unresolved calls, or a body only a stub declares.
+    let stub_below = unresolved
+        .changed_in
+        .as_ref()
+        .and_then(|f| index.file_of(f))
+        .is_some_and(is_stub);
     let because: Vec<&'static str> = [
-        ("unresolved_calls", unresolved.changed_in.is_some()),
+        (
+            "unresolved_calls",
+            unresolved.changed_in.is_some() && !stub_below,
+        ),
         ("untracked_writes", untracked),
-        ("no_body", stub || s.is_abstract()),
+        ("no_body", stub || s.is_abstract() || stub_below),
     ]
     .into_iter()
     .filter_map(|(reason, holds)| holds.then_some(reason))

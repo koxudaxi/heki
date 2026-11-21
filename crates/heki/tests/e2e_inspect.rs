@@ -160,7 +160,11 @@ fn a_stub_and_conditional_definitions() {
         "import sys\n\nif sys.version_info >= (3, 12):\n    def f(x):\n        return x\nelse:\n    def f(x):\n        return [x]\n",
     )
     .write("m.pyi", "def f(x: int) -> int: ...\n")
-    .write("only.pyi", "def g() -> None: ...\n");
+    .write("only.pyi", "def g() -> None: ...\n")
+    .write(
+        "wrap.py",
+        "from only import g\nfrom m import f\n\n\ndef stubbed():\n    g()\n\n\ndef known():\n    return f(1)\n",
+    );
     let f = report(&p, "m.f");
     assert_eq!(f["function"]["path"], "m.py");
     assert_eq!(f["function"]["definitions"], serde_json::json!([4, 7]));
@@ -169,6 +173,13 @@ fn a_stub_and_conditional_definitions() {
     assert_eq!(g["function"]["stub"], true);
     assert_eq!(g["purity"]["verdict"], "unknown");
     assert_eq!(strings(&g["purity"]["because"]), ["no_body"]);
+    // A call into a body only a stub declares: unknown, not pure.
+    let stubbed = report(&p, "wrap.stubbed");
+    assert_eq!(stubbed["purity"]["verdict"], "unknown");
+    assert_eq!(strings(&stubbed["purity"]["because"]), ["no_body"]);
+    assert_eq!(stubbed["purity"]["unknown_at"]["fqn"], "only.g");
+    // The `.py` implementation next to a stub is a known body.
+    assert_eq!(report(&p, "wrap.known")["purity"]["verdict"], "pure");
 }
 
 #[test]
@@ -663,6 +674,30 @@ def refresh():
 def either(flag):
     target = A if flag else B
     target.clear()
+
+
+def clear_a():
+    A.clear()
+
+
+def clear_b():
+    B.clear()
+
+
+def both():
+    A.clear()
+    clear_b()
+    update()
+    clear_a()
+
+
+def two_helpers():
+    clear_a()
+    clear_b()
+
+
+async def rows():
+    yield 1
 "#;
 
 #[test]
@@ -711,6 +746,15 @@ fn shared_state_handed_to_callees_and_merged_and_at_import() {
     }
     // Every global a merged value may be.
     assert_eq!(names(&report(&p, "m.either")), ["A", "B"]);
+    // Every global changed, here and through each callee, once.
+    assert_eq!(names(&report(&p, "m.both")), ["A", "B", "CACHE"]);
+    assert_eq!(names(&report(&p, "m.two_helpers")), ["A", "B"]);
+    // An async generator is iterated, not awaited.
+    let rows = report(&p, "m.rows");
+    assert_eq!(
+        (&rows["returns"]["kind"], &rows["function"]["async"]),
+        (&Value::from("generator"), &Value::from(true))
+    );
     // The module body defines its names, and changes what it changes in place at import.
     assert_eq!(names(&report(&p, "m.<module>")), ["os"]);
 }
