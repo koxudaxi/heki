@@ -25,7 +25,7 @@ pub use heki_diagnostics::Certainty;
 pub use mut_rules::{
     CHAIN_RULES, ChainFacts, StaleWriteKey, chain_facts, family_readers, stale_writes_by_file,
 };
-pub use selection::{RuleSelection, SelectionError, Selectors};
+pub use selection::{RuleSelection, SelectionError, Selectors, heuristic_hint};
 pub use snapshot::{SNAPSHOT_FILE, SnapshotError, SummarySnapshot};
 
 use globset::{Glob, GlobMatcher};
@@ -91,6 +91,19 @@ impl RuleMeta {
             Activation::Default => heuristic || matches!(self.certainty, Certainty::Exact),
             Activation::Contract => true,
             Activation::OptIn => false,
+        }
+    }
+
+    /// Whether the enabled rule shows its heuristic reports, those of a heuristic rule or the
+    /// single heuristic reports of an exact one (an `OPT` report whose rewrite is not proven):
+    /// where a heuristic rule would run, that is with `lint.heuristic` (`heuristic`), when
+    /// `select` / `extend-select` names its code or name (`named`), or for a contract rule.
+    pub const fn shows_heuristic_reports(&self, named: bool, heuristic: bool) -> bool {
+        match self.activation {
+            Activation::Default => {
+                heuristic || named || matches!(self.certainty, Certainty::Heuristic)
+            }
+            Activation::OptIn | Activation::Contract => true,
         }
     }
 
@@ -975,18 +988,29 @@ mod registry_tests {
         use Activation::{Contract, OptIn};
         use Certainty::{Exact, Heuristic};
         let on = Activation::Default;
-        for (certainty, activation, plain, with_heuristic) in [
-            (Exact, on, true, true),
-            (Heuristic, on, false, true),
-            (Exact, Contract, true, true),
-            (Heuristic, Contract, true, true),
-            (Exact, OptIn, false, false),
-            (Heuristic, OptIn, false, false),
+        // Whether it runs without being named, and whether it shows its heuristic reports when
+        // it runs unnamed, both without and with `lint.heuristic`; named, every rule shows them.
+        for (certainty, activation, plain, with_heuristic, shows_plain) in [
+            (Exact, on, true, true, false),
+            (Heuristic, on, false, true, true),
+            (Exact, Contract, true, true, true),
+            (Heuristic, Contract, true, true, true),
+            (Exact, OptIn, false, false, true),
+            (Heuristic, OptIn, false, false, true),
         ] {
             let r = rule(certainty, activation);
             assert_eq!(
                 (r.runs_unnamed(false), r.runs_unnamed(true)),
                 (plain, with_heuristic),
+                "{certainty:?} {activation:?}"
+            );
+            assert_eq!(
+                [
+                    r.shows_heuristic_reports(false, false),
+                    r.shows_heuristic_reports(false, true),
+                    r.shows_heuristic_reports(true, false),
+                ],
+                [shows_plain, true, true],
                 "{certainty:?} {activation:?}"
             );
             assert_eq!(

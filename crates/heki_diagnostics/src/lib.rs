@@ -38,14 +38,16 @@ pub struct TextEdit {
     pub replacement: String,
 }
 
-/// Whether the reports of a rule can be wrong about the code (ADR-018).
+/// Whether a report can be wrong about the code (ADR-018). A report's claim is a conjunction of
+/// premises (its rule page lists them under "What a report states").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Certainty {
-    /// Hand-checked samples of at least 100 reports found none wrong about the code; a wrong
-    /// report found later is a bug.
+    /// Every premise of the claim was established, under the assumptions R1-R5, and the rule's
+    /// reports were checked on the measurement corpus with none wrong: a wrong one is a bug.
     Exact,
-    /// A report can be wrong about the code.
+    /// A premise of the claim may be unknown, which does not stop the report: it can be wrong
+    /// about the code.
     Heuristic,
 }
 
@@ -54,6 +56,17 @@ impl Certainty {
         match self {
             Self::Exact => "exact",
             Self::Heuristic => "heuristic",
+        }
+    }
+
+    /// The certainty of a report whose own premises give `self`, from a rule whose reports are
+    /// at most `rule`: a premise the report did not establish makes it heuristic, and so does
+    /// a rule that is not certified.
+    #[must_use]
+    pub const fn at_most(self, rule: Self) -> Self {
+        match (self, rule) {
+            (Self::Exact, Self::Exact) => Self::Exact,
+            _ => Self::Heuristic,
         }
     }
 
@@ -66,7 +79,7 @@ impl Certainty {
         }
     }
 
-    /// The label every output adds to a report of the rule: only heuristic rules get one.
+    /// The label every output adds to a report: only heuristic reports get one.
     pub const fn label(self) -> Option<&'static str> {
         match self {
             Self::Exact => None,
@@ -87,7 +100,9 @@ pub struct Diagnostic {
     pub rule_slug: String,
     pub target: String,
     pub severity: Severity,
-    /// The certainty of the rule, written by every output format.
+    /// The certainty of the report, written by every output format: its rule's, or heuristic
+    /// where the report did not establish a premise its rule's exact reports have (an `OPT`
+    /// report whose rewrite is not proven).
     pub certainty: Certainty,
     /// One sentence saying what happens, without advice.
     pub message: String,
@@ -384,9 +399,10 @@ fn render_github(diags: &[Diagnostic]) -> String {
 /// code units (SARIF's default `columnKind`), converted from the byte columns of diagnostics
 /// with `source_line(path, line)`. A result's help goes into its property bag
 /// (`properties.help`): `reportingDescriptor.help` is one text per rule, while help may name
-/// the reported object, and a result has no help property of its own. A rule's certainty goes
-/// into its descriptor's property bag as GitHub code scanning reads it: `precision`, and the tag
-/// `heuristic` for a heuristic rule.
+/// the reported object, and a result has no help property of its own. Certainty goes into the
+/// property bags as GitHub code scanning reads them: a rule descriptor's `precision` is that of
+/// the rule's least certain report, and a heuristic descriptor and a heuristic result get the
+/// tag `heuristic`.
 pub fn sarif(
     diags: &[Diagnostic],
     source_line: &dyn Fn(&Path, u32) -> Option<String>,
@@ -394,7 +410,10 @@ pub fn sarif(
     use serde_json::json;
     let mut rules: BTreeMap<&str, (&str, Certainty)> = BTreeMap::new();
     for d in diags {
-        rules.insert(&d.rule_code, (&d.rule_slug, d.certainty));
+        rules
+            .entry(&d.rule_code)
+            .and_modify(|(_, c)| *c = c.at_most(d.certainty))
+            .or_insert((&d.rule_slug, d.certainty));
     }
     let location = |path: &Path, line: u32, column: u32| {
         let column = source_line(path, line).map_or(column, |text| {
@@ -432,7 +451,10 @@ pub fn sarif(
                 }
             });
             if let Some(help) = &d.help {
-                result["properties"] = json!({ "help": help });
+                result["properties"]["help"] = json!(help);
+            }
+            if let Some(label) = d.certainty.label() {
+                result["properties"]["tags"] = json!([label]);
             }
             result
         })
@@ -1107,6 +1129,15 @@ mod tests {
         for certainty in [Certainty::Exact, Certainty::Heuristic] {
             assert_eq!(serde_json::json!(certainty), certainty.word());
         }
+        // A rule whose reports differ in certainty: its descriptor takes the least certain one,
+        // and only the heuristic result is tagged.
+        let mut proven = diag(4, "OPT110", "m");
+        proven.rule_slug = "loop-linear-membership".into();
+        proven.related.clear();
+        let mut unproven = proven.clone();
+        unproven.line = 5;
+        unproven.certainty = Certainty::Heuristic;
+        let diags = [diags[0].clone(), diags[1].clone(), proven, unproven];
         let s: serde_json::Value =
             serde_json::from_str(&render(&diags, OutputFormat::Sarif, &none)).unwrap();
         assert_eq!(
@@ -1121,9 +1152,36 @@ mod tests {
                     "id": "MUT201",
                     "name": "write-owner-violation",
                     "properties": { "precision": "very-high" }
+                },
+                {
+                    "id": "OPT110",
+                    "name": "loop-linear-membership",
+                    "properties": { "precision": "medium", "tags": ["heuristic"] }
                 }
             ])
         );
+        let tags: Vec<_> = (0..4)
+            .map(|i| &s["runs"][0]["results"][i]["properties"]["tags"])
+            .collect();
+        let heuristic = serde_json::json!(["heuristic"]);
+        assert_eq!(
+            tags,
+            [
+                &heuristic,
+                &serde_json::Value::Null,
+                &serde_json::Value::Null,
+                &heuristic
+            ]
+        );
+    }
+
+    #[test]
+    fn a_report_is_exact_only_when_its_premises_and_its_rule_are() {
+        use Certainty::{Exact, Heuristic};
+        assert_eq!(Exact.at_most(Exact), Exact);
+        assert_eq!(Exact.at_most(Heuristic), Heuristic);
+        assert_eq!(Heuristic.at_most(Exact), Heuristic);
+        assert_eq!(Heuristic.at_most(Heuristic), Heuristic);
     }
 
     #[test]

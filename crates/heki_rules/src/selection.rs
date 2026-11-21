@@ -10,9 +10,13 @@
 //!   (`EFF`, `MUT2`, `ALL`). A prefix enables only the rules that run without being named: opt-in
 //!   rules such as `EFF105`, and heuristic rules without `lint.heuristic`, need their exact code
 //!   or slug. `ignore` prefixes cover every matching rule.
+//! - An exact rule whose single reports can be heuristic (an `OPT` report whose rewrite is not
+//!   proven) shows those reports only where a heuristic rule would run: with `lint.heuristic`,
+//!   when its code or slug is selected, or for a contract rule.
 
-use crate::{CORE_RULES, RuleMeta};
+use crate::{CORE_RULES, Certainty, RuleMeta, find_rule};
 use globset::{Glob, GlobMatcher};
+use heki_diagnostics::Diagnostic;
 use heki_env::LintConfig;
 use std::collections::BTreeSet;
 use thiserror::Error;
@@ -45,6 +49,17 @@ pub struct RuleSelection {
     per_file: Vec<(GlobMatcher, BTreeSet<&'static str>)>,
     /// The rules `lint.heuristic` would add to `enabled`.
     heuristic_off: BTreeSet<&'static str>,
+    /// The enabled rules whose heuristic reports are withheld: exact rules that run without
+    /// being named while `lint.heuristic` is off.
+    exact_reports_only: BTreeSet<&'static str>,
+}
+
+/// The rule a code or slug names.
+fn named(selector: &str) -> Option<&'static RuleMeta> {
+    let s = selector.trim();
+    CORE_RULES
+        .iter()
+        .find(|r| r.code.eq_ignore_ascii_case(s) || r.slug.eq_ignore_ascii_case(s))
 }
 
 /// Rules a selector names: a code or slug names its rule, and a prefix or `ALL` the matching
@@ -54,10 +69,7 @@ fn resolve(
     admits: &dyn Fn(&RuleMeta) -> bool,
 ) -> Result<Vec<&'static RuleMeta>, SelectionError> {
     let s = selector.trim();
-    if let Some(r) = CORE_RULES
-        .iter()
-        .find(|r| r.code.eq_ignore_ascii_case(s) || r.slug.eq_ignore_ascii_case(s))
-    {
+    if let Some(r) = named(s) {
         return Ok(vec![r]);
     }
     let all = s.eq_ignore_ascii_case("ALL");
@@ -87,6 +99,20 @@ fn any_rule(_: &RuleMeta) -> bool {
     true
 }
 
+/// The effective `select` (the command line's over the configuration's; `None`: the default
+/// set) and the `extend-select` lists.
+fn selecting<'s>(
+    lint: &'s LintConfig,
+    cli: &'s Selectors,
+) -> (Option<&'s [String]>, [&'s [String]; 2]) {
+    let select = if cli.select.is_empty() {
+        lint.select.as_deref()
+    } else {
+        Some(cli.select.as_slice())
+    };
+    (select, [&lint.extend_select, &cli.extend_select])
+}
+
 /// The enabled rules before `ignore`, with `heuristic` as the value of `lint.heuristic`.
 fn enabled_before_ignore(
     lint: &LintConfig,
@@ -94,11 +120,7 @@ fn enabled_before_ignore(
     heuristic: bool,
 ) -> Result<BTreeSet<&'static str>, SelectionError> {
     let unnamed = |r: &RuleMeta| r.runs_unnamed(heuristic);
-    let select = if cli.select.is_empty() {
-        lint.select.as_deref()
-    } else {
-        Some(cli.select.as_slice())
-    };
+    let (select, extend) = selecting(lint, cli);
     let mut enabled: BTreeSet<&'static str> = match select {
         None => CORE_RULES
             .iter()
@@ -107,9 +129,21 @@ fn enabled_before_ignore(
             .collect(),
         Some(select) => codes(select, &unnamed)?,
     };
-    enabled.extend(codes(&lint.extend_select, &unnamed)?);
-    enabled.extend(codes(&cli.extend_select, &unnamed)?);
+    for list in extend {
+        enabled.extend(codes(list, &unnamed)?);
+    }
     Ok(enabled)
+}
+
+/// The rules `select` / `extend-select` name by their code or slug.
+fn named_rules(lint: &LintConfig, cli: &Selectors) -> BTreeSet<&'static str> {
+    let (select, extend) = selecting(lint, cli);
+    select
+        .into_iter()
+        .chain(extend)
+        .flatten()
+        .filter_map(|s| named(s).map(|r| r.code))
+        .collect()
 }
 
 impl RuleSelection {
@@ -130,6 +164,19 @@ impl RuleSelection {
                 .filter(|code| !enabled.contains(code) && !ignored.contains(code))
                 .collect()
         };
+        let named = named_rules(lint, cli);
+        let exact_reports_only = if heuristic {
+            BTreeSet::new()
+        } else {
+            enabled
+                .iter()
+                .copied()
+                .filter(|code| {
+                    find_rule(code)
+                        .is_some_and(|r| !r.shows_heuristic_reports(named.contains(code), false))
+                })
+                .collect()
+        };
         let mut per_file = Vec::new();
         for (pattern, rules) in &lint.per_file_ignores {
             let glob = Glob::new(pattern)
@@ -144,6 +191,7 @@ impl RuleSelection {
             enabled,
             per_file,
             heuristic_off,
+            exact_reports_only,
         })
     }
 
@@ -165,6 +213,38 @@ impl RuleSelection {
     pub fn heuristic_off(&self) -> &BTreeSet<&'static str> {
         &self.heuristic_off
     }
+
+    /// Remove the heuristic reports of the rules that show only their exact ones, and return
+    /// how many were removed. Callers apply it after inline suppressions and before baselines,
+    /// fixes, and folding, so that those see what is shown and the count is what
+    /// `lint.heuristic` would add.
+    pub fn withhold_heuristic(&self, diags: &mut Vec<Diagnostic>) -> usize {
+        let before = diags.len();
+        diags.retain(|d| {
+            d.certainty == Certainty::Exact
+                || !self.exact_reports_only.contains(d.rule_code.as_str())
+        });
+        before - diags.len()
+    }
+}
+
+/// The note a text output ends with when a run leaves out what `lint.heuristic` would add:
+/// `rules_off` rules that did not run, and `reports_withheld` heuristic reports of exact rules
+/// that did (as Ruff says how to apply the fixes it holds back).
+pub fn heuristic_hint(rules_off: usize, reports_withheld: usize) -> Option<String> {
+    let what = match (rules_off, reports_withheld) {
+        (0, 0) => return None,
+        (rules, 0) => format!("{rules} heuristic rule(s) are off"),
+        (0, reports) => format!("{reports} heuristic report(s) are not shown"),
+        (rules, reports) => {
+            format!(
+                "{rules} heuristic rule(s) are off and {reports} heuristic report(s) are not shown"
+            )
+        }
+    };
+    Some(format!(
+        "note: {what}; enable them with `--heuristic` or `lint.heuristic = true`"
+    ))
 }
 
 #[cfg(test)]
@@ -259,6 +339,73 @@ mod tests {
         );
         let off = RuleSelection::resolve(&with_heuristic(), &cli(false)).unwrap();
         assert!(!off.is_enabled(h) && off.heuristic_off().contains(h));
+    }
+
+    #[test]
+    fn heuristic_reports_of_exact_rules_are_withheld_and_counted() {
+        let report = |code: &str, certainty| Diagnostic {
+            path: "a.py".into(),
+            line: 1,
+            column: 1,
+            span: heki_ast::Span { start: 0, end: 1 },
+            qualname: "f".into(),
+            rule_code: code.into(),
+            rule_slug: String::new(),
+            target: String::new(),
+            severity: heki_env::Severity::Warning,
+            certainty,
+            message: String::new(),
+            help: None,
+            evidence: None,
+            blocker: None,
+            related: Vec::new(),
+            fix: None,
+            sites: 1,
+            fold_key: None,
+        };
+        let selection = RuleSelection {
+            enabled: BTreeSet::from(["OPT110", "OPT111"]),
+            per_file: Vec::new(),
+            heuristic_off: BTreeSet::new(),
+            exact_reports_only: BTreeSet::from(["OPT110"]),
+        };
+        let mut diags = vec![
+            report("OPT110", Certainty::Exact),
+            report("OPT110", Certainty::Heuristic),
+            report("OPT111", Certainty::Heuristic),
+        ];
+        assert_eq!(selection.withhold_heuristic(&mut diags), 1);
+        let left: Vec<_> = diags
+            .iter()
+            .map(|d| (d.rule_code.as_str(), d.certainty))
+            .collect();
+        assert_eq!(
+            left,
+            [
+                ("OPT110", Certainty::Exact),
+                ("OPT111", Certainty::Heuristic)
+            ]
+        );
+    }
+
+    #[test]
+    fn the_hint_names_rules_off_and_reports_withheld() {
+        let enable = "; enable them with `--heuristic` or `lint.heuristic = true`";
+        assert_eq!(heuristic_hint(0, 0), None);
+        for (rules, reports, what) in [
+            (3, 0, "3 heuristic rule(s) are off"),
+            (0, 2, "2 heuristic report(s) are not shown"),
+            (
+                3,
+                2,
+                "3 heuristic rule(s) are off and 2 heuristic report(s) are not shown",
+            ),
+        ] {
+            assert_eq!(
+                heuristic_hint(rules, reports).unwrap(),
+                format!("note: {what}{enable}")
+            );
+        }
     }
 
     #[test]

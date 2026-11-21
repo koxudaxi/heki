@@ -269,7 +269,13 @@ impl Watcher<'_> {
                 all.len(),
                 report.diags.len()
             );
-            crate::check::heuristic_hint(ws.map_or(0, |ws| ws.selection().heuristic_off().len()));
+            let (rules_off, withheld) = ws.map_or((0, 0), |ws| {
+                (
+                    ws.selection().heuristic_off().len(),
+                    ws.withheld_heuristic(),
+                )
+            });
+            crate::check::heuristic_hint(rules_off, withheld);
         }
         !all.is_empty()
     }

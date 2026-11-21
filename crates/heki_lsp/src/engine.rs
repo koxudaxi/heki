@@ -153,6 +153,9 @@ pub struct Workspace {
     /// call chain walks the own in-place changes and calls of functions in other files
     /// (`heki_rules::ChainFacts`).
     chain_reports: FxHashSet<PathBuf>,
+    /// The heuristic reports of exact rules the latest check of each file withheld
+    /// (`RuleSelection::withhold_heuristic`).
+    withheld: FxHashMap<PathBuf, usize>,
     /// What the latest check of each file read of the declarations (what its summary read is
     /// in its `FileSummary`).
     check_reads: CheckReads,
@@ -422,6 +425,7 @@ impl Workspace {
                 decls,
                 shown: FxHashMap::default(),
                 chain_reports: FxHashSet::default(),
+                withheld: FxHashMap::default(),
                 check_reads: CheckReads::default(),
                 patching_builtins,
                 stale_writes,
@@ -447,6 +451,11 @@ impl Workspace {
 
     pub fn selection(&self) -> &RuleSelection {
         &self.selection
+    }
+
+    /// The heuristic reports of exact rules the latest checks of the files withheld.
+    pub fn withheld_heuristic(&self) -> usize {
+        self.withheld.values().sum()
     }
 
     /// The files in the index.
@@ -505,13 +514,7 @@ impl Workspace {
             retain_unsuppressed(&mut diags, [parsed]);
             diags
         });
-        let shown = diags
-            .iter()
-            .flat_map(|d| &d.related)
-            .filter(|r| r.path != parsed.path)
-            .map(|r| r.path.clone())
-            .collect();
-        self.shown.insert(parsed.path.clone(), shown);
+        // A withheld report counts: an edit to its call chain can make it exact.
         let chains = diags
             .iter()
             .any(|d| CHAIN_RULES.contains(&d.rule_code.as_str()));
@@ -520,6 +523,15 @@ impl Workspace {
         } else {
             self.chain_reports.remove(&parsed.path);
         }
+        let withheld = self.selection.withhold_heuristic(&mut diags);
+        self.withheld.insert(parsed.path.clone(), withheld);
+        let shown = diags
+            .iter()
+            .flat_map(|d| &d.related)
+            .filter(|r| r.path != parsed.path)
+            .map(|r| r.path.clone())
+            .collect();
+        self.shown.insert(parsed.path.clone(), shown);
         self.check_reads.insert(parsed.path.clone(), &reads);
         // Baseline keys name the file, so the counts of one file are the counts of its keys.
         if let Some((_, baseline)) = &self.baseline {
@@ -1006,6 +1018,7 @@ impl Workspace {
     pub fn remove(&mut self, path: &Path) -> Vec<PathBuf> {
         self.shown.remove(path);
         self.chain_reports.remove(path);
+        self.withheld.remove(path);
         self.check_reads.remove(path);
         let Some(meta) = self.files.remove(path) else {
             return Vec::new();

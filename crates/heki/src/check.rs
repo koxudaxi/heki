@@ -108,6 +108,8 @@ struct Analyzed {
     hot: Option<HotFunctions>,
     /// The heuristic rules that did not run only because `lint.heuristic` is off.
     heuristic_off: usize,
+    /// The heuristic reports of exact rules withheld because `lint.heuristic` is off.
+    withheld: usize,
 }
 
 fn analyze(
@@ -141,6 +143,7 @@ fn analyze(
     drop(units);
     drop(inputs);
     retain_unsuppressed(&mut diags, &project.files);
+    let withheld = selection.withhold_heuristic(&mut diags);
     let hot = profile.map(|p| p.attribute(profiled_functions(&project)));
     annotate_hot(&mut diags, hot.as_ref());
     Ok(Analyzed {
@@ -149,6 +152,7 @@ fn analyze(
         diags,
         hot,
         heuristic_off: selection.heuristic_off().len(),
+        withheld,
     })
 }
 
@@ -328,10 +332,11 @@ pub(crate) fn run(args: &CheckArgs) -> Result<ExitCode> {
         index,
         diags,
         heuristic_off,
+        withheld,
         ..
     } = analyze(args, hot.as_ref(), None)?;
     project.errors.extend(conflicts);
-    let code = report(args, &project, diags, heuristic_off)?;
+    let code = report(args, &project, diags, heuristic_off, withheld)?;
     // The process ends here: freeing the index and the parsed files one allocation at a time
     // would only cost time.
     std::mem::forget(index);
@@ -363,12 +368,13 @@ fn write_fixed(files: &[FixedFile]) -> Result<(usize, usize, Vec<FileError>)> {
 }
 
 /// Baseline handling, rendering, summary, and exit code of one analyzed run, whose selection
-/// left `heuristic_off` rules off for being heuristic.
+/// left `heuristic_off` rules off and withheld `withheld` reports for being heuristic.
 pub(crate) fn report(
     args: &CheckArgs,
     project: &Project,
     mut diags: Vec<Diagnostic>,
     heuristic_off: usize,
+    withheld: usize,
 ) -> Result<ExitCode> {
     let root = &project.env.root;
     let by_path: FxHashMap<&Path, &ParsedFile> = project
@@ -490,7 +496,7 @@ pub(crate) fn report(
         OutputFormat::Full | OutputFormat::Concise
     ) {
         summary(&diags, project.files.len(), baseline_path.is_some());
-        heuristic_hint(heuristic_off);
+        heuristic_hint(heuristic_off, withheld);
     }
     let code = if diags.is_empty() {
         ExitCode::SUCCESS
@@ -572,13 +578,10 @@ fn summary(diags: &[Diagnostic], files: usize, baseline: bool) {
     }
 }
 
-/// After the summary of a text format: how to run the `heuristic_off` rules a selection left
-/// off for being heuristic (as Ruff says how to apply the fixes it holds back).
-pub(crate) fn heuristic_hint(heuristic_off: usize) {
-    if heuristic_off > 0 {
-        eprintln!(
-            "note: {heuristic_off} heuristic rule(s) are off; enable them with `--heuristic` or `lint.heuristic = true`"
-        );
+/// After the summary of a text format: what `lint.heuristic` would add ([`heki_rules::heuristic_hint`]).
+pub(crate) fn heuristic_hint(rules_off: usize, reports_withheld: usize) {
+    if let Some(note) = heki_rules::heuristic_hint(rules_off, reports_withheld) {
+        eprintln!("{note}");
     }
 }
 
