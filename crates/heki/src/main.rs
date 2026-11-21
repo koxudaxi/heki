@@ -42,6 +42,14 @@ enum OutputFormat {
     Sarif,
 }
 
+/// `--color`: when `heki check` colors what it prints to stdout (Ruff's `--color`).
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ColorChoice {
+    Auto,
+    Always,
+    Never,
+}
+
 /// `--fail-on`: the least severity whose reports make `heki check` fail.
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum FailOn {
@@ -119,6 +127,11 @@ struct CheckArgs {
     /// Output format.
     #[arg(long, value_enum, default_value_t = OutputFormat::Full)]
     output_format: OutputFormat,
+    /// When to color the `full` and `concise` output and `--diff`, as Ruff does: `auto` colors
+    /// them on a terminal unless `NO_COLOR` is set (`FORCE_COLOR` or `CLICOLOR_FORCE` color them
+    /// anywhere), `always`, or `never`.
+    #[arg(long, value_enum, value_name = "WHEN", default_value_t = ColorChoice::Auto)]
+    color: ColorChoice,
     /// Explicit configuration file: a `pyproject.toml` (its `[tool.heki]` table) or a file
     /// with the keys at its top level, like `heki.toml`.
     #[arg(long)]

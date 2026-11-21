@@ -57,6 +57,8 @@ Options:
           Exit with code 1 on reports of this severity or higher: `error` (the default), or `warning` to fail on warnings too (`lint.fail-on`) [possible values: error, warning]
       --output-format <OUTPUT_FORMAT>
           Output format [default: full] [possible values: full, concise, json, github, sarif]
+      --color <WHEN>
+          When to color the `full` and `concise` output and `--diff`, as Ruff does: `auto` colors them on a terminal unless `NO_COLOR` is set (`FORCE_COLOR` or `CLICOLOR_FORCE` color them anywhere), `always`, or `never` [default: auto] [possible values: auto, always, never]
       --config <CONFIG>
           Explicit configuration file: a `pyproject.toml` (its `[tool.heki]` table) or a file with the keys at its top level, like `heki.toml`
       --target-version <TARGET_VERSION>

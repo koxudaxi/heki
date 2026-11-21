@@ -133,6 +133,23 @@ Every format, `--diff`, and the errors of files that cannot be read or parsed pr
 path relative to the working directory when the file is inside it (otherwise as given), as Ruff
 does, and with `/` separators on every platform, Windows included.
 
+### Colors
+
+On a terminal, the `full` and `concise` output and `--diff` are colored as Ruff colors its
+output: paths in bold, rule codes in red, the severity, the source frame and its caret, and the
+lines a diff removes and adds. The same variables and option as Ruff's decide it, each row over
+the rows above it:
+
+| Setting | Colors |
+| ------- | ------ |
+| stdout is a terminal / a pipe or a file | on / off |
+| `NO_COLOR` set (to anything), or `CLICOLOR=0` | off |
+| `FORCE_COLOR` set to anything but the empty string, or `CLICOLOR_FORCE` to anything but `0` | on (for a CI log that shows colors) |
+| `--color always` / `--color never` | on / off |
+
+`json`, `github`, and `sarif` output never holds colors, and the summary and the errors heki
+writes to stderr are not colored.
+
 ## Exit codes
 
 | Code | Meaning |
