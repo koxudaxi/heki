@@ -69,6 +69,10 @@ release can change rules, configuration keys, diagnostics, and output formats.
   of `self` changed in place while a method iterates it: by another method of the class while a
   generator is suspended inside the iteration, or by a function the loop's body calls; the next
   step raises `RuntimeError`.
+- SARIF output lists every file heki could not read or parse as an `error` notification of the
+  run (`invocations[0].toolExecutionNotifications`, with its location), and then sets
+  `executionSuccessful` to `false`; the results of the other files are kept. JSON output is
+  unchanged: the errors stay on stderr, and the exit code is still `2`.
 
 ### Changed
 
@@ -107,6 +111,18 @@ release can change rules, configuration keys, diagnostics, and output formats.
 
 ### Fixed
 
+- A project module that cannot be read or does not parse still owns its module name: the names
+  under it resolve to nothing, never to a module of the same name the catalog lists. A broken
+  `requests.py` in the project no longer makes `requests.get` a blocking call. The language
+  server and `heki check --watch` keep such a file as the same unknown module while it does not
+  parse.
+- `heki check --fix` no longer rewrites `s = s | t` to `s |= t` (`OPT102`) where the set's
+  iteration order can be seen afterwards. Growing a set in place can order the same elements
+  differently from copying it, so a function that iterated, converted, formatted, or returned the
+  set could return another result after the fix. The set form is fixed only when the set is just
+  tested afterwards (`in`, `len`, truthiness, `==`); its other reports say
+  `[not auto-fixable: SetOrderUnobserved(...)]`. The dict forms keep their insertion order and
+  are fixed as before.
 - `EFF102` and `EFF103` no longer count a `functools.cached_property` getter as running on
   every read: it runs once per instance, like a lazy initialization of `self`, also when
   `cached_property` comes from a module that re-exports it (`kombu.utils.cached_property`). A
@@ -206,6 +222,13 @@ release can change rules, configuration keys, diagnostics, and output formats.
   `SCHEMA.split(";")` or `SCHEMA.splitlines()`).
 - `EFF101` no longer reports `socket.getaddrinfo` with the `AI_NUMERICHOST` flag, which parses
   a numeric address and never asks a resolver.
+- A file that is one definition, class, lambda, or generator expression with nothing after it
+  (no final newline) is checked: its function was taken for the module body, which has the same
+  span, so it was never analyzed, and `heki check` panicked on such a generator expression
+  (`(x async for x in xs)`).
+- `heki check` no longer overflows its stack on a loop no path enters (after a `return`,
+  `raise`, or `break`) that computes a value from itself (`d = d.x`, `d = d[mask]`): the value
+  was defined by itself, and the walks along definitions went around it forever.
 
 ## [0.1.2] - 2026-11-21
 
