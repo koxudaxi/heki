@@ -28,11 +28,15 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import re
+import signal
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 # Call-chain layers, functions per layer, and small modules of classes.
@@ -192,31 +196,63 @@ def generate(root: Path) -> int:
     return lines
 
 
-def peak_mib(heki: str, mode: str, root: Path) -> float:
-    """The peak of one run (see the module documentation)."""
-    args, extra_env = MODES[mode]
+def measure(
+    heki: str, args: list[str], root: Path, extra_env: dict[str, str], timeout: float | None = None
+) -> tuple[float, float, int, str]:
+    """One run of heki in `root`: its wall time in seconds, its peak in MiB (see the module
+    documentation), its exit code (`-9` when it ran past `timeout` and was killed), and its
+    standard error."""
     env = {**os.environ, **extra_env}
     darwin = sys.platform == "darwin"
     cmd = ["/usr/bin/time", "-l", heki, *args] if darwin else [heki, *args]
+    start = time.monotonic()
+    # Its own process group, so that a run past `timeout` is stopped with `time`'s child.
     proc = subprocess.Popen(
-        cmd, cwd=root, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
+        cmd,
+        cwd=root,
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
     )
+
+    def stop() -> None:
+        # The group may have ended between the deadline and the timer's cancellation.
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(proc.pid, signal.SIGKILL)
+
+    killer = threading.Timer(timeout, stop) if timeout is not None else None
+    if killer is not None:
+        killer.start()
     assert proc.stderr is not None
     stderr = proc.stderr.read().decode()
     proc.stderr.close()
     # `wait4` reaps the child and reports its own resource usage.
     _, status, usage = os.wait4(proc.pid, 0)
-    proc.returncode = os.waitstatus_to_exitcode(status)
-    # 0: clean, 1: diagnostics (the generated project has some); anything else is a failure.
-    if proc.returncode not in (0, 1):
-        sys.exit(f"heki {' '.join(args)} exited with {proc.returncode}:\n{stderr}")
+    seconds = time.monotonic() - start
+    if killer is not None:
+        killer.cancel()
+    code = os.waitstatus_to_exitcode(status)
     if darwin:
         found = re.search(r"(\d+)\s+peak memory footprint", stderr)
-        if not found:
-            sys.exit(f"`/usr/bin/time -l` printed no peak memory footprint:\n{stderr}")
-        return int(found.group(1)) / (1024 * 1024)
+        if found:
+            return seconds, int(found.group(1)) / (1024 * 1024), code, stderr
+        if code == -9:
+            # `time` itself was killed past `timeout`: no report.
+            return seconds, 0.0, code, stderr
+        sys.exit(f"`/usr/bin/time -l` printed no peak memory footprint:\n{stderr}")
     # `ru_maxrss` is in KiB on Linux.
-    return usage.ru_maxrss / 1024
+    return seconds, usage.ru_maxrss / 1024, code, stderr
+
+
+def peak_mib(heki: str, mode: str, root: Path) -> float:
+    """The peak of one run (see the module documentation)."""
+    args, extra_env = MODES[mode]
+    _, peak, code, stderr = measure(heki, args, root, extra_env)
+    # 0: clean, 1: diagnostics (the generated project has some); anything else is a failure.
+    if code not in (0, 1):
+        sys.exit(f"heki {' '.join(args)} exited with {code}:\n{stderr}")
+    return peak
 
 
 def main() -> int:

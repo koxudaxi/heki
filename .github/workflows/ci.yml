@@ -181,6 +181,11 @@ jobs:
       # generated project: fails when one's peak RSS exceeds its budget in the script.
       - name: Peak RSS within budget
         run: python3 scripts/check_memory.py --heki target/release/heki
+      # Generated shapes at the largest size heki models, in a function, a method, and a module
+      # body: fails when one costs more than 1 s or 1 GiB beyond an empty module, or when an
+      # owner's walk steps grow faster than linearly.
+      - name: Analysis cost of generated shapes
+        run: python3 scripts/check_walk_shapes.py --heki target/release/heki
 
   sdist:
     name: source distribution tests
