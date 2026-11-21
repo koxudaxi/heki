@@ -2334,7 +2334,6 @@ impl ProjectDecls {
         skip_self: bool,
         kb: &EffectiveEcosystemKb,
     ) -> Inherited {
-        let mut unknown_bases = false;
         for c in mro.iter().skip(usize::from(skip_self)) {
             if self.is_project_class(c) {
                 continue;
@@ -2342,12 +2341,14 @@ impl ProjectDecls {
             if external_defines(kb, c, name) {
                 return Inherited::External(format!("{c}.{name}"));
             }
-            unknown_bases |= !c.starts_with("builtins.");
+            // A base heki knows nothing of may define it, before any later base that does.
+            if !c.starts_with("builtins.") {
+                return Inherited::Unknown;
+            }
         }
-        match (unknown_bases, name) {
-            (true, _) => Inherited::Unknown,
-            (false, "__new__") => Inherited::External("builtins.object.__new__".to_owned()),
-            (false, _) => Inherited::Absent,
+        match name {
+            "__new__" => Inherited::External("builtins.object.__new__".to_owned()),
+            _ => Inherited::Absent,
         }
     }
 
@@ -2370,10 +2371,17 @@ impl ProjectDecls {
     /// The function an instance of the project class `class` takes `name` from: along its MRO,
     /// the first class whose body or methods bind `name` (`ClassDecl::members`) defines it.
     /// `None` when a plain class or instance attribute comes first (reading it runs nothing), a
-    /// base outside the project does (heki does not know what it binds), or none binds it.
+    /// class on the way stores the name outside its body, a base outside the project comes
+    /// first (heki does not know what it binds), or none binds it.
     pub(crate) fn function_taken(&self, class: &str, name: &str) -> Option<FuncKey> {
         for c in self.mro(class) {
-            if self.class(&c)?.members.contains(name) {
+            let decl = self.class(&c)?;
+            // Stored on the class object outside its body (`Child.view = []`), the name holds
+            // what was stored there from then on.
+            if decl.rebound_attrs.contains(name) {
+                return None;
+            }
+            if decl.members.contains(name) {
                 return self.own_method(&c, name);
             }
         }
@@ -3174,8 +3182,9 @@ fn external_defines(kb: &EffectiveEcosystemKb, base: &str, name: &str) -> bool {
 /// [`FunctionDecl::returns_param_attr`] of one definition: a function (not a generator or a
 /// coroutine, decorated by nothing but `staticmethod`, `classmethod`, `abstractmethod`,
 /// `override`, or `property`) whose every `return` returns the same attribute of the same
-/// positional parameter, read directly or through local copies. A `cached_property` is none:
-/// a read after the first returns what the instance holds, which an assignment can replace.
+/// positional parameter, read directly or through local copies, and which stores or deletes no
+/// attribute of that name. A `cached_property` is none: a read after the first returns what
+/// the instance holds, which an assignment can replace.
 fn returned_param_attr(f: &IrFunction, decls: &ModuleDecls) -> Option<(u8, String)> {
     let plain_decorators = f.decorators.iter().all(|d| {
         let (head, _) = decorator_parts(d);
@@ -3226,13 +3235,19 @@ fn returned_param_attr(f: &IrFunction, decls: &ModuleDecls) -> Option<(u8, Strin
         let param = f
             .params
             .iter()
-            .position(|p| p.var == holder && !p.is_vararg && !p.is_kwarg)?;
+            .position(|p| p.var == holder && !p.is_vararg && !p.is_kwarg && !p.kw_only)?;
         let this = (u8::try_from(param).ok()?, attr.clone());
         if returned.get_or_insert_with(|| this.clone()) != &this {
             return None;
         }
     }
-    returned
+    // A function storing or deleting the attribute (`items = self.items; self.items = [];
+    // return items`) may return what the attribute held before: no longer the attribute.
+    let (_, attr) = returned.as_ref()?;
+    let stores_it = f.blocks.iter().flat_map(|b| &b.insts).any(|i| {
+        matches!(&i.kind, InstKind::AttrStore { attr: a, .. } | InstKind::AttrDelete { attr: a, .. } if a == attr)
+    });
+    returned.filter(|_| !stores_it)
 }
 
 /// How often the module's code stores or deletes each module global: in the module body, or
@@ -4300,6 +4315,16 @@ impl<'a> TypeCtx<'a> {
         }
     }
 
+    /// What calling the name `fqn` calls ([`ProjectDecls::symbol`]): a module global that a
+    /// `[[tool.heki.ecosystem]]` entry declares (`get = functools.partial(...)` listed as
+    /// blocking, with its `return-type`) is the declared symbol.
+    fn called_symbol(&self, fqn: &str) -> Symbol<'a> {
+        match self.project.symbol(fqn) {
+            Symbol::Unknown if self.kb.declared(fqn).is_some() => Symbol::External,
+            symbol => symbol,
+        }
+    }
+
     /// Instance produced by calling the object `fqn`, if known; `arg` tells what the call
     /// passes (for the catalog's argument cases).
     pub(crate) fn call_result(
@@ -4307,7 +4332,7 @@ impl<'a> TypeCtx<'a> {
         fqn: &str,
         arg: impl FnMut(Option<u8>, Option<&str>) -> Option<ArgFact>,
     ) -> Option<Ty> {
-        match self.project.symbol(fqn) {
+        match self.called_symbol(fqn) {
             Symbol::Class(_) => return Some(Ty::inst(fqn)),
             Symbol::Function(_, decl) => {
                 return self
@@ -4367,15 +4392,10 @@ impl<'a> TypeCtx<'a> {
     /// finds. A class object that may be a subclass (`cls(...)`) runs any of theirs.
     pub(crate) fn call_targets(&self, callee: Option<Recv<'_>>) -> Callee {
         match callee {
-            Some(Recv::Ref(fqn)) => match self.project.symbol(fqn) {
+            Some(Recv::Ref(fqn)) => match self.called_symbol(fqn) {
                 Symbol::Function(key, _) => Callee::Project(vec![key], false),
                 Symbol::Class(_) => {
                     constructor(fqn, self.project.class_targets(fqn, "__init__", self.kb))
-                }
-                // A module global the project's configuration declares is what it declares
-                // (`fetch = functools.partial(...)` listed as blocking).
-                Symbol::Unknown if self.kb.declared(fqn).is_some() => {
-                    Callee::External(fqn.to_owned())
                 }
                 Symbol::Module | Symbol::Global(_) | Symbol::Unknown => Callee::Unresolved,
                 Symbol::External => Callee::External(fqn.to_owned()),

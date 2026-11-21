@@ -218,15 +218,17 @@ release can change rules, configuration keys, diagnostics, and output formats.
   outside the project that is not known to define it (`abc.ABC._copy_model_type`,
   `typing.Generic.result_type`): the call is unresolved, as a call heki cannot follow. Special
   methods, public methods of builtin types, and the members the catalog lists still come from
-  the base.
+  the base, when no base heki knows nothing of comes before it.
 - `getattr(obj, "attr"[, default])` with a constant name is a load of the attribute for the
   write contracts, also behind a walrus (`if (extras := getattr(self, "extras", None)) is not None:
   extras["k"] = 2` is a `MUT201` write of `Node.extras["k"]`).
 - A method, property, or function that returns an attribute of an argument on every `return`
   (`return self.items`) hands out that object: `node.members().append(1)` and
   `node.view.append(1)` are `MUT201` writes of `Node.items`. It does so on a class whose reads run
-  it: not through a `cached_property` (an assignment can replace what the instance keeps), and not
-  on a member of a union, or a class, whose own attribute of the name comes first.
+  it: not through a `cached_property` (an assignment can replace what the instance keeps), not on
+  a member of a union, or a class, whose own attribute of the name comes first or is stored on the
+  class outside its body, and not for a function that stores the attribute itself
+  (`items = self.items; self.items = []; return items`) or a keyword-only parameter.
 - `object.__new__(Node)`, also through an alias, and `Node.__new__(Node)` where no class of the
   MRO defines `__new__` construct a `Node`: the new object has its class, and with
   `fresh-objects = "allow"` a helper filling it is no `MUT201` report.
