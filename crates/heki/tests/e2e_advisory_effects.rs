@@ -242,15 +242,15 @@ fn eff101_resolves_receivers_through_imports_globals_annotations_and_classes() {
             // A function-local import.
             d(h, 63, "EFF101", "time.sleep"),
             // A class method calling a static method through `cls`.
-            d(h, 67, "EFF101", "app.models.K.make"),
+            d(h, 67, "EFF111", "app.models.K.make"),
             // A generator expression runs where it is consumed.
+            d(h, 71, "EFF102", "requests.get"),
             d(
                 h,
                 71,
-                "EFF101",
+                "EFF111",
                 "app.handlers.via_genexpr.<locals>.<genexpr>"
             ),
-            d(h, 71, "EFF102", "requests.get"),
         ],
         "{diags:#?}"
     );
@@ -371,7 +371,7 @@ fn eff101_resolves_pipe_and_optional_annotations_super_returns_and_overrides() {
             // A method's return annotation types its result.
             d(a, 52, "EFF101", "httpx.Client.get"),
             // CHA over a subclass overriding the method.
-            d(a, 56, "EFF101", "pkg.api.SlowJob.run"),
+            d(a, 56, "EFF111", "pkg.api.SlowJob.run"),
             // A Layer 2 constructor with a lowercase name (`boto3.client`) returns a client
             // whose methods the configuration catalogues.
             d(a, 61, "EFF101", "boto3.client.get_object"),
@@ -383,7 +383,7 @@ fn eff101_resolves_pipe_and_optional_annotations_super_returns_and_overrides() {
     p.write("pkg/many.py", &overrides(7));
     assert_eq!(
         found(&diagnostics(&p, &["pkg/many.py", "pkg/util.py"])),
-        vec![d("pkg/many.py", 45, "EFF101", "pkg.many.Sub0.go")]
+        vec![d("pkg/many.py", 45, "EFF111", "pkg.many.Sub0.go")]
     );
 }
 
@@ -402,7 +402,7 @@ fn eff101_merges_conditional_definitions_and_follows_python_311_comprehensions()
     let diags = diagnostics(&p, &["pkg/dup.py"]);
     assert_eq!(
         found(&diags),
-        vec![d("pkg/dup.py", 15, "EFF101", "pkg.dup.pause")]
+        vec![d("pkg/dup.py", 15, "EFF111", "pkg.dup.pause")]
     );
     let (_, stdout, _) = p.heki(&["snapshot", "pkg/dup.py"]);
     let snap: Value = serde_json::from_str(&stdout).unwrap();
@@ -448,8 +448,9 @@ fn eff101_merges_conditional_definitions_and_follows_python_311_comprehensions()
         ]
     );
     let diags = diagnostics(&p, &["pkg/comps.py", "--target-version", "py311"]);
+    // Through the comprehension's frame the call runs once per item: not on every path.
     let eff101 = &diags[0];
-    assert_eq!(eff101["rule_code"], "EFF101");
+    assert_eq!(eff101["rule_code"], "EFF111");
     assert_eq!(eff101["column"], 12, "at the comprehension call");
     assert_eq!(
         eff101["related"][0]["message"],
@@ -564,7 +565,7 @@ def ddl(cur: sqlite3.Cursor, names):
         cur.execute("  create table € (a int)")
 "#,
     );
-    let diags = diagnostics(&p, &["--select", "EFF103"]);
+    let diags = diagnostics(&p, &["--select", "EFF103,EFF113"]);
     let got: Vec<(&str, &str)> = diags
         .iter()
         .map(|d| {
@@ -687,7 +688,7 @@ def via_psycopg_and_sa(ids):
         sa_conn.execute("SELECT 3")
 "#,
     );
-    let diags = diagnostics(&p, &["--select", "EFF103"]);
+    let diags = diagnostics(&p, &["--select", "EFF103,EFF113"]);
     assert_eq!(
         found(&diags),
         vec![
@@ -783,7 +784,7 @@ fn each_effect_has_its_own_help() {
         .collect();
     let offload = "offload it with `asyncio.to_thread`, or";
     let client = "create one client or session before the loop and reuse it";
-    let batch = "batch the queries, or load the data once before the loop";
+    let batch = "load what it needs once before the loop";
     assert_eq!(
         reports,
         vec![
@@ -831,12 +832,12 @@ fn each_effect_has_its_own_help() {
             ),
             (
                 52,
-                "`sqlite3.Cursor.execute` runs a database query on every loop iteration (N+1)",
+                "every iteration over parameter `ids` sends a database statement: `sqlite3.Cursor.execute`",
                 batch
             ),
             (
                 53,
-                "`app.lookup` runs a database query (`sqlite3.Cursor.execute`) on every loop iteration (N+1)",
+                "every iteration over parameter `ids` sends a database statement: `sqlite3.Cursor.execute` (through `app.lookup`)",
                 batch
             ),
         ]

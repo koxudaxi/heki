@@ -129,7 +129,7 @@ fn requires_python_exclusions_move_the_target_version() {
             "pyproject.toml",
             &format!("[project]\nname = \"t\"\nrequires-python = \"{spec}\"\n"),
         );
-        let (code, stdout, stderr) = p.check(&["--select", "EFF101"]);
+        let (code, stdout, stderr) = p.check(&["--select", "EFF101,EFF111"]);
         assert_eq!(code, 1, "{spec}: {stderr}");
         stdout.contains("<listcomp>")
     };

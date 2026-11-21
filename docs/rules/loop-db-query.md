@@ -4,71 +4,59 @@
 
 Family: Execution Effects (EFF) · Heuristic · Off by default · Severity `warning` (slower code) · No automatic fix
 
-Explicit DB query / external RPC executed inside a loop (N+1).
+A loop over data whose every iteration sends a database statement.
 
 !!! note "Heuristic"
 
     This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 50 sampled reports (round 3, 2026-11-21), 74% were right about the code. See [Rule Precision](../precision.md).
 
 ## What it does
-Checks loops that run a database query on every iteration (the "N+1 queries" problem):
-`cursor.execute(...)`, `session.execute(...)` (awaited ones on async sessions and connections
-too), the SQLAlchemy `Query` methods that run the query (`all`, `first`, `one`, `count`, ...)
-and iterating a `Query` (`for row in session.query(User):` in an outer loop, a comprehension,
-`list(query)`),
-the Django `QuerySet` methods that run the query (`get`, `first`, `count`, ... and their `a*`
-variants), `pymongo`, `redis`, and DynamoDB commands, `pandas.read_sql`, and project functions
-that reach them, also when an offloading API runs them on a worker thread per item (`await
-asyncio.to_thread(load, i)`, a function decorated with `@sync_to_async`), including the getter of a property read in the loop and a generator iterated in
-the loop (its body runs where it is iterated, as for `EFF101`). A function a builtin calls once
-per item runs in a loop as long as the items (`sorted(users, key=lambda u: score(conn, u))`,
-`list(map(load, ids))`; see `EFF102` for the builtins and the items whose number the code fixes).
+Checks loops that send a database statement on every iteration that completes, over items whose
+number the data decides: a parameter (or an attribute or element of one), the rows of a query,
+the lines of a file, or the entries of a directory. The statement is sent by the call in the loop
+itself, or at the end of a chain of functions each of which makes the next call on every path on
+which it returns.
 
-It does not report reading the rows of a statement already executed (`cursor.fetchone()`),
-calls that only build a query (`session.query(User).filter(...)`, `QuerySet.filter(...)`,
-`Redis.pipeline()`), the bulk APIs, which send many rows in one statement and are called per
-batch by design (`QuerySet.bulk_create`, `in_bulk`, pymongo's `insert_many`, `bulk_write`), DDL
-statements (SQL starting with `CREATE`, `ALTER`, `DROP`, or `PRAGMA` run by a DB-API
-`execute` / `executemany` / `executescript` or SQLAlchemy's `exec_driver_sql`, also inside a
-helper the loop calls: a literal, an f-string, `%`, or `.format()` whose literal start is one,
-SQLAlchemy's `text()` of one, and the statements of a module's string constants: the items of a
-tuple, the pieces `.split(";")` / `.splitlines()` cut a schema into), migration code
-(`upgrade` / `downgrade` functions, files under `migrations/` or `alembic/`), the ORM packages'
-own implementation, or loops whose size the code fixes when no data-sized loop is around them
-(`for ident in enumerate((1, 2), 1)`, `zip(order, ["m1", "m2"])`, a name bound to a small
-display; see `EFF102`).
+Each step is established, not assumed:
 
-As for `EFF102`, a query that only runs while an attribute is unset, which the code then sets
-(`if self._columns is None: self._columns = cursor.execute(...)`), runs once per object and is
-not reported when the loop does not construct the object; so does one in a
-`functools.cached_property` getter, and one behind a module global runs once per process. A
-query that only runs while a local variable the loop carries is unset or a first-iteration flag
-holds (`if first: cursor.execute(...); first = False`), or that every way on from leaves the
-loop (`cursor.execute(...)` followed by `return`, `break`, or `raise`), runs once per run of the
-loop. A call whose arguments switch off the branch with the query (a constant, a literal
-default, a test the caller has made) is not followed into it.
+- the loop steps through items of such an origin, through wrappers that keep them (`sorted`,
+  `list`, `filter`, slices, dict views, the components of `enumerate` and `zip`); through `map`,
+  a comprehension's element, or a project function only their number carries, and that is not
+  an origin; a loop whose number of iterations the code fixes (a constant range, a display) is
+  not reported, whatever the number;
+- the call runs on every iteration that completes, exception edges included: an `except`
+  handler that `continue`s before it is an iteration without it;
+- every implementation each call on the chain can run is followed and makes the next call on
+  every path on which it returns, as for `EFF101`;
+- the last call sends a statement on every call, as the ecosystem catalog describes it: not a
+  `Session.get` the identity map may answer, a `flush()` / `commit()` that sends only pending
+  changes, or a Django query set's `count()` that may read its cache; DDL, bulk APIs, and calls
+  that only build a query are left out.
+
+Everything else the loop rules found is an `EFF113` report. Migration code and the ORM packages'
+own implementation are not reported.
 
 ## What a report states
 
-A report states that every iteration of the loop runs a database query (or a command of a database
-client) through the call shown: one round trip per item, the "N+1" of the message.
+A report states that every iteration of the loop that completes sends a database statement: the
+one named, or, when the implementations a call can run reach different ones, each with its
+implementation.
 
 Its premises:
 
-- **Resolves**: each call on the chain is to the function shown, through the calls heki resolves.
-  Open through a method call: one candidate implementation that leads on is enough.
-- **Reaches**: each function on the chain reaches the next call. Open: one path is enough, and a
-  branch heki cannot decide counts as taken; only the branches the caller's arguments switch off,
-  and the cases listed above, are left out.
-- **On every iteration**: the call runs on every iteration of the loop. Open: it counts as running
-  on every iteration unless heki shows that it runs once per object, per process, or per run of the
-  loop (the cases above).
-- **Data-sized**: the code does not fix the size of the loop at 16 or fewer. Open: a size heki
-  cannot bound counts as data-sized.
-- **Queries**: the call sends a statement to the database, as the ecosystem catalog describes it;
-  DDL, bulk APIs, and calls that only build a query are left out.
+- **Origin**: the loop steps through items of a parameter, the rows of a query, the lines of a
+  file, or the entries of a directory, and the code does not fix their number.
+- **Every iteration**: the call runs on every iteration that completes, exception edges into
+  handlers included.
+- **Every return**: each function on the chain has made the next call on every path on which it
+  returns normally.
+- **Every implementation**: each call on the chain has as its targets every implementation it
+  can run (assumptions R2 and R5), each with the fact.
+- **Sends**: the last call sends a statement on every call, as the ecosystem catalog describes it
+  (R3).
 
-Not part of the claim: how many items the loop has, and how slow the query is.
+Not part of the claim: how many items the loop has, how slow the statement is, and whether the
+statements could be batched.
 
 ## Why is this bad?
 One round trip per item makes the run time grow with the number of rows and with the network

@@ -798,18 +798,20 @@ fn eff103_counts_executed_and_iterated_queries_not_built_ones() {
     // generator expression. Comprehensions run in the function from Python 3.12 (PEP 709) and
     // in a function of their own before.
     for (target, comprehension) in [("py312", (38, 27)), ("py311", (38, 15))] {
-        let found: Vec<(u64, u64, String, String)> =
-            diagnostics(&p, &["--select", "EFF103", "--target-version", target])
-                .iter()
-                .map(|d| {
-                    (
-                        d["line"].as_u64().unwrap(),
-                        d["column"].as_u64().unwrap(),
-                        d["qualname"].as_str().unwrap().to_owned(),
-                        d["target"].as_str().unwrap().to_owned(),
-                    )
-                })
-                .collect();
+        let found: Vec<(u64, u64, String, String)> = diagnostics(
+            &p,
+            &["--select", "EFF103,EFF113", "--target-version", target],
+        )
+        .iter()
+        .map(|d| {
+            (
+                d["line"].as_u64().unwrap(),
+                d["column"].as_u64().unwrap(),
+                d["qualname"].as_str().unwrap().to_owned(),
+                d["target"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
         let r = |line, column, qualname: &str, target: &str| {
             (line, column, qualname.to_owned(), target.to_owned())
         };
@@ -837,7 +839,7 @@ fn eff103_counts_executed_and_iterated_queries_not_built_ones() {
         .collect();
     assert_eq!(
         messages[0],
-        "`sqlalchemy.orm.Query.all` runs a database query on every loop iteration (N+1)"
+        "every iteration over parameter `models` sends a database statement: `sqlalchemy.orm.Query.all`"
     );
 }
 
@@ -849,7 +851,7 @@ fn eff101_sees_a_query_iterated_on_the_event_loop() {
         "handler.py",
         "from sqlalchemy.orm import Session\n\n\nasync def handler(session: Session):\n    for row in session.query(object):\n        print(row)\n    return session.query(object).filter_by(id=1)\n",
     );
-    let found = reports(&p, "EFF101");
+    let found = reports(&p, "EFF111");
     assert_eq!(found.len(), 1, "{found:#?}");
     assert_eq!(found[0].0, 5);
     assert!(
@@ -860,7 +862,7 @@ fn eff101_sees_a_query_iterated_on_the_event_loop() {
     );
     // The help of a database call names an async driver.
     assert!(
-        helps(&p, "EFF101")[0].2.ends_with("or use an async driver"),
+        helps(&p, "EFF111")[0].2.ends_with("or use an async driver"),
         "{found:#?}"
     );
 }

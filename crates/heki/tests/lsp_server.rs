@@ -130,7 +130,7 @@ fn lsp_session_publishes_fixes_and_cuts_off_unchanged_summaries() {
     // hops, at the diagnostic itself.
     assert_eq!(
         eff["message"],
-        "`handler` reaches the blocking call `time.sleep` on the event loop [heuristic]"
+        "`pkg.util.helper` always runs the blocking call `time.sleep` on the event loop (1 call down, on every path) [heuristic]"
     );
     assert_eq!(related.len(), 3, "{related:#?}");
     assert_eq!(related[2]["location"]["uri"], api);

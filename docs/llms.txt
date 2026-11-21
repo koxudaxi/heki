@@ -19,7 +19,7 @@
 
 ## Docs
 
-- [Rules](https://heki.koxudaxi.dev/rules/): heki has 35 rules in four families
+- [Rules](https://heki.koxudaxi.dev/rules/): heki has 37 rules in four families
 - [Rule Precision](https://heki.koxudaxi.dev/precision/): A rule is exact once it is certified (below), and heuristic until then
 - [Experimental Features](https://heki.koxudaxi.dev/experimental/): Experimental features can still change in behavior or precision, or be removed, in any release, and each change is listed in the release notes
 
@@ -36,6 +36,7 @@
 
 - [async-blocking-call (EFF101)](https://heki.koxudaxi.dev/rules/async-blocking-call/): Family: Execution Effects (EFF) · Heuristic · Off by default · Severity warning (slower code) · No automatic fix
 - [async-blocking-fs (EFF105)](https://heki.koxudaxi.dev/rules/async-blocking-fs/): Family: Execution Effects (EFF) · Heuristic · Opt-in · Severity warning (slower code) · No automatic fix
+- [async-possibly-blocking-call (EFF111)](https://heki.koxudaxi.dev/rules/async-possibly-blocking-call/): Family: Execution Effects (EFF) · Heuristic · Off by default · Severity warning (slower code) · No automatic fix
 - [cached-property-stale-mutation (MUT101)](https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/): Family: Mutation & State (MUT) · Heuristic · Opt-in · Experimental · Severity error (a bug) · No automatic fix
 - [cached-property-stale-read (MUT111)](https://heki.koxudaxi.dev/rules/cached-property-stale-read/): Family: Mutation & State (MUT) · Heuristic · Opt-in · Experimental · Severity error (a bug) · No automatic fix
 - [call-owner-violation (MUT204)](https://heki.koxudaxi.dev/rules/call-owner-violation/): Family: Mutation & State (MUT) · Heuristic · Runs when its contract is declared · Severity error (a bug) · No automatic fix
@@ -55,6 +56,7 @@
 - [loop-linear-dedup (OPT111)](https://heki.koxudaxi.dev/rules/loop-linear-dedup/): Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity warning (slower code) · Proven-safe suggestion (--fix --include-size-dependent)
 - [loop-linear-list-lookup (OPT112)](https://heki.koxudaxi.dev/rules/loop-linear-list-lookup/): Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity warning (slower code) · No automatic fix
 - [loop-linear-membership (OPT110)](https://heki.koxudaxi.dev/rules/loop-linear-membership/): Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity warning (slower code) · Proven-safe suggestion (--fix --include-size-dependent)
+- [loop-possible-db-query (EFF113)](https://heki.koxudaxi.dev/rules/loop-possible-db-query/): Family: Execution Effects (EFF) · Heuristic · Off by default · Severity warning (slower code) · No automatic fix
 - [loop-unpooled-client (EFF102)](https://heki.koxudaxi.dev/rules/loop-unpooled-client/): Family: Execution Effects (EFF) · Heuristic · Off by default · Severity warning (slower code) · No automatic fix
 - [nested-loop-equijoin (OPT113)](https://heki.koxudaxi.dev/rules/nested-loop-equijoin/): Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity warning (slower code) · No automatic fix
 - [read-owner-violation (MUT203)](https://heki.koxudaxi.dev/rules/read-owner-violation/): Family: Mutation & State (MUT) · Heuristic · Runs when its contract is declared · Severity error (a bug) · No automatic fix

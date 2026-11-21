@@ -10,10 +10,10 @@ use crate::guards;
 use crate::iterations;
 use crate::scc::tarjan_scc;
 use crate::{
-    ArgOrigin, AttrKeyPath, BoundCallee, CallHop, CallSite, Construction, Delivery, EffectSummary,
-    Facts, FuncKey, LocalOrigins, NewArg, NewCond, NewKind, Origins, ProjectIndex, ProtectedReturn,
-    ReturnsNew, Runner, Shared, SharedChain, SharedLine, SiteRole, Slot, TypedFieldWriteSite,
-    UnresolvedWriteSite, WriteKind, cache_flow,
+    ArgOrigin, AttrKeyPath, BoundCallee, CallHop, CallSite, CallTarget, Construction, Delivery,
+    EffectSummary, Facts, FuncKey, LocalOrigins, NewArg, NewCond, NewKind, Origins, ProjectIndex,
+    ProtectedReturn, ReturnsNew, Runner, Shared, SharedChain, SharedLine, SiteRole, Slot,
+    TypedFieldWriteSite, UnresolvedWriteSite, WriteKind, cache_flow,
 };
 use heki_ast::Span;
 use heki_kb::ExecEffectKind;
@@ -287,6 +287,13 @@ fn recompute(
             &mut s,
         );
     }
+    if index.opt_in.must_effects {
+        must_through_calls(
+            index,
+            out.get(func).map(Vec::as_slice).unwrap_or(&[]),
+            &mut s,
+        );
+    }
     if !s.returns_self_attrs.is_empty() {
         drop_attrs_read_by_discarded_calls(index, &self_calls, local, &mut s);
     }
@@ -309,6 +316,113 @@ fn recompute(
     }
     s.refresh_typed_field_writes();
     s
+}
+
+/// The must-facts the function gets from the project calls it makes whenever it returns
+/// normally (`OnEveryReturn::returned`: a callee that raised may not have run its effect): an
+/// effect every target of a complete call has run whenever it returns ([`site_must_chain`]).
+fn must_through_calls(index: &ProjectIndex, sites: &[(PathBuf, usize)], s: &mut EffectSummary) {
+    if s.must_exec.as_ref().is_some_and(|m| m.bound_twice) {
+        return;
+    }
+    for (path, i) in sites {
+        let site = &index.files[path].call_sites[*i];
+        if !site.on_every_return.returned || site.project_callees().is_empty() {
+            continue;
+        }
+        let kinds: BTreeSet<ExecEffectKind> = site
+            .project_callees()
+            .iter()
+            .filter_map(|bc| index.summary(&bc.callee)?.must_exec.as_deref())
+            .flat_map(|m| m.effects.keys().copied())
+            .collect();
+        for e in kinds {
+            let Some(found) = site_must_chain(index, path, site, e) else {
+                continue;
+            };
+            let must = s.must_exec.get_or_insert_with(Box::default);
+            let shared: SharedChain = found.chain.into_iter().map(Arc::new).collect();
+            match must.effects.get(&e) {
+                Some(kept) if kept.len() <= shared.len() => {}
+                _ => {
+                    must.effects.insert(e, shared);
+                }
+            }
+        }
+    }
+}
+
+/// Whether every implementation the call at `site` (in `path`) can run has run effect `e`
+/// whenever the call returns ([`SiteMust`]): a Layer 2 call that has `e` whatever it does not
+/// show, or a complete set of project targets whose bodies run at the call, each run as
+/// written (its decorators call it each time), each having run `e` whenever it returns. An
+/// abstract method never runs (an override does); a target that never returns normally has
+/// run anything whenever it returns, and shows nothing.
+pub(crate) fn site_must_chain(
+    index: &ProjectIndex,
+    path: &Path,
+    site: &CallSite,
+    e: ExecEffectKind,
+) -> Option<SiteMust> {
+    // A callable an API runs on a worker or once per item does not run at the call.
+    if !site.complete || site.role != SiteRole::Call || site.runner != Runner::Caller {
+        return None;
+    }
+    match &site.target {
+        CallTarget::Layer2 {
+            symbol,
+            effects,
+            unconditional,
+            ..
+        } => {
+            (effects.contains(&e) && unconditional & crate::effect_bit(e) != 0).then(|| SiteMust {
+                chain: vec![site_hop(site, path, symbol.clone())],
+                witnesses: vec![(symbol.clone(), symbol.clone())],
+            })
+        }
+        CallTarget::Project(callees) => {
+            let mut out = SiteMust::default();
+            for bc in callees {
+                let callee = index.summary(&bc.callee)?;
+                if callee.is_abstract() {
+                    continue;
+                }
+                if !runs_at_call(callee, site)
+                    || !crate::summary::keeps_returned_value(&callee.decorators)
+                {
+                    return None;
+                }
+                let chain = callee.must_exec.as_deref()?.chain(e)?;
+                let Some(sink) = chain.last() else {
+                    continue;
+                };
+                out.witnesses.push((bc.callee.fqn(), sink.callee.clone()));
+                if out.chain.is_empty() || chain.len() + 1 < out.chain.len() {
+                    out.chain = std::iter::once(site_hop(site, path, bc.callee.fqn()))
+                        .chain(chain.iter().map(|h| CallHop::clone(h)))
+                        .collect();
+                }
+            }
+            (!out.chain.is_empty()).then_some(out)
+        }
+    }
+}
+
+/// What a call has run whenever it returns ([`site_must_chain`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SiteMust {
+    /// The shortest chain from the call to the effect.
+    pub chain: Vec<CallHop>,
+    /// Per implementation that returns normally (its fqn, or the Layer 2 symbol), the call
+    /// that has the effect at the end of its chain.
+    pub witnesses: Vec<(String, String)>,
+}
+
+impl SiteMust {
+    /// The calls with the effect at the end of the chains, each once.
+    pub fn sinks(&self) -> BTreeSet<&str> {
+        self.witnesses.iter().map(|(_, s)| s.as_str()).collect()
+    }
 }
 
 /// Takes from [`EffectSummary::returns_self_attrs`] of a cached property the attributes its

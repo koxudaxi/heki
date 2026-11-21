@@ -24,6 +24,9 @@ release can change rules, configuration keys, diagnostics, and output formats.
   heuristic report may not have established. `docs/precision.md` defines exact and heuristic
   reports, the assumptions R1-R7 exact claims rest on, how a rule is certified, and what each
   rule measured.
+- `EFF111` (`async-possibly-blocking-call`) and `EFF113` (`loop-possible-db-query`), heuristic:
+  the reports `EFF101` and `EFF103` made before, where the new exact claims are not established.
+  See the first entry under Changed.
 - The ecosystem catalog says when a call waits. A blocking effect waits for input or output or
   for another thread (`blocking_sync`), which can have done its part already. Every wait entry
   lists the arguments that end it at once: `time.sleep(0)`, `Popen.wait(timeout=0)`, a numeric
@@ -61,6 +64,17 @@ release can change rules, configuration keys, diagnostics, and output formats.
 
 ### Changed
 
+- `EFF101` and `EFF103` state exact claims, each premise established: `EFF101` that whenever
+  the reported call returns, a call that waits for the network, a database, a child process, or a
+  sleep has run on the event loop's thread, through functions that each make the next call on
+  every path on which they return (exception edges included), with every implementation of each
+  call followed (protocol receivers are not); `EFF103` that every iteration of a loop over a
+  parameter, the rows of a query, the lines of a file, or the entries of a directory sends a
+  database statement. Their messages state the claim and its witnesses only: a call whose
+  implementations reach different statements names each with its implementation, and "N+1" and
+  "batch the queries" are gone. Everything else they reported is `EFF111` / `EFF113`. Waits on
+  another thread (`Thread.join()`, `Event.wait()`, locks, `Queue.get()`, `Future.result()`) are
+  `EFF111` only. Both stay heuristic until the census certifies them.
 - Only exact reports are shown by default. A report is *exact* when every premise of its claim
   was established and its rule was certified (a false exact report is a bug), and *heuristic*
   when a premise can be open, so that it can be wrong about the code. A heuristic rule runs

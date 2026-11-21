@@ -535,6 +535,17 @@ const TALLY: &str = "class Tally:\n    def __init__(self):\n        self.counts 
 const TALLY_USE: &str = "from pkg.tally import Tally\n\n\ndef total(t: Tally):\n    n = 0\n    for k in t._walk():\n        n += 1\n    return n\n";
 const TALLY_COUNTING: &str = "from pkg.tally import Tally\n\n\ndef _counting(t: Tally):\n    n = 0\n    for k in t._walk():\n        n += 1\n    return n\n\n\ndef start(t: Tally):\n    t.cursor = _counting(t)\n";
 
+// Exact effect reports (`EFF101` / `EFF111`): an `async def` calls a method on a base class whose
+// implementation always blocks; a subclass in a third module starts overriding it without the
+// blocking call, then with another one, and the base's call becomes conditional.
+const EXACT_BASE: &str = "import requests\n\n\nclass Base:\n    def fetch(self, url):\n        return requests.get(url)\n";
+const EXACT_BASE_CONDITIONAL: &str = "import requests\n\n\nclass Base:\n    def fetch(self, url):\n        if url:\n            return requests.get(url)\n        return None\n";
+const EXACT_SUB: &str = "class Quiet:\n    def fetch(self, url):\n        return url\n";
+const EXACT_SUB_OVERRIDING: &str = "from pkg.exact_base import Base\n\n\nclass Quiet(Base):\n    def fetch(self, url):\n        return url\n";
+const EXACT_SUB_BLOCKING: &str = "import requests\n\nfrom pkg.exact_base import Base\n\n\nclass Quiet(Base):\n    def fetch(self, url):\n        return requests.post(url)\n";
+const EXACT_USE: &str =
+    "from pkg.exact_base import Base\n\n\nasync def serve(b: Base):\n    b.fetch(\"u\")\n";
+
 /// The project before the first step (every file is opened).
 fn initial_files() -> Vec<(&'static str, String)> {
     [
@@ -714,6 +725,9 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/sub_ops.py", SUB_OPS),
         ("pkg/tally.py", TALLY),
         ("pkg/tally_use.py", TALLY_USE),
+        ("pkg/exact_base.py", EXACT_BASE),
+        ("pkg/exact_sub.py", EXACT_SUB),
+        ("pkg/exact_use.py", EXACT_USE),
     ]
     .into_iter()
     .map(|(rel, text)| (rel, text.to_owned()))
@@ -776,6 +790,41 @@ impl Step {
         self.cutoff = true;
         self
     }
+}
+
+/// Exact effect reports follow every implementation of a call across modules (the targets of
+/// `CallSite::complete` read the subclasses of another file) and the must-facts of the callees
+/// (`EffectSummary::must_exec`, compared by Early Cutoff).
+fn steps_exact_effects() -> Vec<Step> {
+    vec![
+        Step::new(
+            "a subclass in another file overrides the method without blocking",
+            vec![save("pkg/exact_sub.py", EXACT_SUB_OVERRIDING)],
+        )
+        .present(&[("pkg/exact_use.py", "EFF111")])
+        .absent(&[("pkg/exact_use.py", "EFF101")]),
+        Step::new(
+            "the override blocks too",
+            vec![save("pkg/exact_sub.py", EXACT_SUB_BLOCKING)],
+        )
+        .present(&[("pkg/exact_use.py", "EFF101")])
+        .absent(&[("pkg/exact_use.py", "EFF111")]),
+        Step::new(
+            "the base method blocks only on some paths",
+            vec![save("pkg/exact_base.py", EXACT_BASE_CONDITIONAL)],
+        )
+        .present(&[("pkg/exact_use.py", "EFF111")])
+        .absent(&[("pkg/exact_use.py", "EFF101")]),
+        Step::new(
+            "the base method blocks on every path again, and the override stops overriding",
+            vec![
+                save("pkg/exact_base.py", EXACT_BASE),
+                save("pkg/exact_sub.py", EXACT_SUB),
+            ],
+        )
+        .present(&[("pkg/exact_use.py", "EFF101")])
+        .absent(&[("pkg/exact_use.py", "EFF111")]),
+    ]
 }
 
 fn save(rel: &'static str, text: &str) -> Action {
@@ -1105,13 +1154,13 @@ fn steps_body_runs() -> Vec<Step> {
                 WORKER_OPS.replace("    return i\n", "    return session.execute(i)\n"),
             )],
         )
-        .present(&[("pkg/worker_view.py", "EFF103")])
-        .absent(&[("pkg/worker_view.py", "EFF101")]),
+        .present(&[("pkg/worker_view.py", "EFF113")])
+        .absent(&[("pkg/worker_view.py", "EFF111")]),
         Step::new(
             "the worker's query is removed",
             vec![save("pkg/worker_ops.py", WORKER_OPS)],
         )
-        .absent(&[("pkg/worker_view.py", "EFF103")]),
+        .absent(&[("pkg/worker_view.py", "EFF113")]),
         // A function a builtin calls once per item: its caller is re-checked when the
         // function in another module starts or stops querying.
         Step::new(
@@ -1121,17 +1170,17 @@ fn steps_body_runs() -> Vec<Step> {
                 RANK_KEY.replace("    return i\n", "    return session.execute(i)\n"),
             )],
         )
-        .present(&[("pkg/rank_user.py", "EFF103")]),
+        .present(&[("pkg/rank_user.py", "EFF113")]),
         Step::new(
             "the sort key's query is removed",
             vec![save("pkg/rank_key.py", RANK_KEY)],
         )
-        .absent(&[("pkg/rank_user.py", "EFF103")]),
+        .absent(&[("pkg/rank_user.py", "EFF113")]),
         Step::new(
             "a helper becomes a generator: the report moves to the iteration",
             vec![save("pkg/feed.py", FEED_GENERATOR)],
         )
-        .present(&[("pkg/feed_user.py", "EFF101")]),
+        .present(&[("pkg/feed_user.py", "EFF111")]),
         Step::new(
             "the generator becomes a helper again",
             vec![save("pkg/feed.py", FEED)],
@@ -2056,8 +2105,8 @@ fn steps() -> Vec<Step> {
             ("pkg/guard_use.py", "EFF102"),
             ("pkg/guard_default_use.py", "EFF102"),
             ("pkg/guard_conn_use.py", "EFF102"),
-            ("pkg/buf_use.py", "EFF101"),
-            ("pkg/buf_default_use.py", "EFF101"),
+            ("pkg/buf_use.py", "EFF111"),
+            ("pkg/buf_default_use.py", "EFF111"),
             ("pkg/guard_global_use.py", "EFF102"),
             ("pkg/fill.py", "MUT201"),
             ("pkg/fill_main.py", "MUT201"),
@@ -2133,12 +2182,12 @@ fn steps() -> Vec<Step> {
             "a getter read from an async def in another file starts blocking",
             vec![save("pkg/remote.py", REMOTE_BLOCKING)],
         )
-        .present(&[("pkg/reader.py", "EFF101")]),
+        .present(&[("pkg/reader.py", "EFF111")]),
         Step::new(
             "the getter stops blocking",
             vec![save("pkg/remote.py", REMOTE)],
         )
-        .absent(&[("pkg/reader.py", "EFF101")]),
+        .absent(&[("pkg/reader.py", "EFF111")]),
         // Guarded effects across modules.
         Step::new(
             "a helper in another file gains the guard its caller's constant switches off",
@@ -2195,8 +2244,8 @@ fn steps() -> Vec<Step> {
             "a reader in another file gains the `hasattr` test a buffer argument decides",
             vec![save("pkg/buf_read.py", BUF_READ_HASATTR)],
         )
-        .present(&[("pkg/buf_default_use.py", "EFF101")])
-        .absent(&[("pkg/buf_use.py", "EFF101")]),
+        .present(&[("pkg/buf_default_use.py", "EFF111")])
+        .absent(&[("pkg/buf_use.py", "EFF111")]),
         Step::new(
             "the reader tests an attribute a buffer may lack",
             vec![save(
@@ -2204,22 +2253,22 @@ fn steps() -> Vec<Step> {
                 &BUF_READ_HASATTR.replace("\"read\")", "\"name\")"),
             )],
         )
-        .present(&[("pkg/buf_use.py", "EFF101")]),
+        .present(&[("pkg/buf_use.py", "EFF111")]),
         Step::new(
             "the reader rebinds a missing argument to a buffer before its `isinstance` test",
             vec![save("pkg/buf_read.py", BUF_READ_REBINDING)],
         )
         .absent(&[
-            ("pkg/buf_use.py", "EFF101"),
-            ("pkg/buf_default_use.py", "EFF101"),
+            ("pkg/buf_use.py", "EFF111"),
+            ("pkg/buf_default_use.py", "EFF111"),
         ]),
         Step::new(
             "the reader loses its tests",
             vec![save("pkg/buf_read.py", BUF_READ)],
         )
         .present(&[
-            ("pkg/buf_use.py", "EFF101"),
-            ("pkg/buf_default_use.py", "EFF101"),
+            ("pkg/buf_use.py", "EFF111"),
+            ("pkg/buf_default_use.py", "EFF111"),
         ]),
         Step::new(
             "a helper in another file keeps its connection in a module global",
@@ -2253,6 +2302,7 @@ fn steps() -> Vec<Step> {
     steps.extend(steps_mut113());
     steps.extend(steps_receiver_typing());
     steps.extend(steps_effect_index());
+    steps.extend(steps_exact_effects());
     steps.extend([
         // 5. Contracts: the reports of private helpers move between them and their callers.
         Step::new(
@@ -2462,12 +2512,12 @@ fn steps() -> Vec<Step> {
                 &SQUARE.replace("def side", "def area"),
             )],
         )
-        .present(&[("pkg/draw.py", "EFF101")]),
+        .present(&[("pkg/draw.py", "EFF111")]),
         Step::new(
             "the override is removed",
             vec![save("pkg/square.py", SQUARE)],
         )
-        .absent(&[("pkg/draw.py", "EFF101")]),
+        .absent(&[("pkg/draw.py", "EFF111")]),
         // Declarations reached through a re-export.
         Step::new(
             "a re-exported class's method becomes a property getter that blocks",
@@ -2476,7 +2526,7 @@ fn steps() -> Vec<Step> {
                 &UI_IMPL.replace("    def data", "    @property\n    def data"),
             )],
         )
-        .present(&[("pkg/consumer.py", "EFF101")]),
+        .present(&[("pkg/consumer.py", "EFF111")]),
         Step::new(
             "the getter `__hash__` reads becomes a property reading a mutated attribute",
             vec![save(
@@ -2500,7 +2550,7 @@ fn steps() -> Vec<Step> {
             "the re-exported classes are plain again",
             vec![save("pkg/ui/impl.py", UI_IMPL)],
         )
-        .absent(&[("pkg/consumer.py", "EFF101"), ("pkg/consumer.py", "MUT107")]),
+        .absent(&[("pkg/consumer.py", "EFF111"), ("pkg/consumer.py", "MUT107")]),
     ]);
     steps
 }

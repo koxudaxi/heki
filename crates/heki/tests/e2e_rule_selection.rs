@@ -36,7 +36,7 @@ fn an_empty_select_starts_from_no_rules() {
         "pyproject.toml",
         "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = []\n",
     );
-    assert_eq!(concise(&p, &["--select", "EFF101"]).len(), 1);
+    assert_eq!(concise(&p, &["--select", "EFF101,EFF111"]).len(), 1);
 }
 
 #[test]
@@ -95,7 +95,7 @@ fn heuristic_rules_run_when_named_or_with_lint_heuristic_and_contract_rules_when
     assert_eq!(plain(&p, &["--select", "EFF"]).1, Vec::<String>::new());
     assert_eq!(plain(&p, &["--select", "ALL"]).1, ["MUT201"]);
     // An exact code or name selects it.
-    assert_eq!(plain(&p, &["--select", "EFF101"]).1, ["EFF101"]);
+    assert_eq!(plain(&p, &["--select", "EFF101,EFF111"]).1, ["EFF101"]);
     assert_eq!(
         plain(&p, &["--extend-select", "async-blocking-call"]).1,
         ["EFF101", "MUT201"]
@@ -134,13 +134,13 @@ fn a_text_run_says_how_many_heuristic_rules_it_left_off() {
     }
     // Only the rules a selection would run with `lint.heuristic` count, not the ignored ones.
     let (_, _, stderr) = p.heki(&["check", "--select", "EFF"]);
-    assert!(stderr.ends_with(&note(3)), "{stderr}");
+    assert!(stderr.ends_with(&note(5)), "{stderr}");
     let (_, _, stderr) = p.heki(&["check", "--select", "EFF", "--ignore", "EFF102"]);
-    assert!(stderr.ends_with(&note(2)), "{stderr}");
+    assert!(stderr.ends_with(&note(4)), "{stderr}");
     // Nothing left off, nothing said.
     for args in [
         &["--heuristic"][..],
-        &["--select", "EFF101"],
+        &["--select", "EFF101,EFF111"],
         &["--select", "MUT201"],
     ] {
         let (_, _, stderr) = p.heki(&[&["check"][..], args].concat());

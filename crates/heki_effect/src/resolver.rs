@@ -14,6 +14,7 @@
 use crate::types::{Args, Elem, Generic, Ty, generic, typing_generic};
 use crate::{FuncKey, ModuleInput};
 use heki_ast::Span;
+use heki_ir::walk::{Answer, Budget, Visit, reach};
 use heki_ir::{
     BinOpKind, BlockId, ConstLiteral, FnIndex, FunctionKind, Inst, InstKind, IrFunction, ModuleIr,
     SmallDisplay, VarId,
@@ -56,6 +57,10 @@ const IMPLICIT_MEMBERS: &[&str] = &[
 
 /// CHA fan-out limit: more candidates than this leave the call unresolved (`unknown_calls`).
 pub const CHA_CANDIDATE_LIMIT: usize = 8;
+
+/// The classes whose implementations [`ProjectDecls::instance_targets_complete`] checks at most:
+/// a receiver class with more subclasses than this has no complete set of targets.
+pub const DISPATCH_CLASS_LIMIT: usize = 64;
 
 /// Upper bound on re-export alias chasing (`pkg.__init__` re-exporting `pkg.sub.Foo`).
 const MAX_ALIAS_CHASE: usize = 8;
@@ -2195,6 +2200,55 @@ impl ProjectDecls {
         Callee::Project(found, true)
     }
 
+    /// Whether `callee`, the targets of calling `method` on an instance of `class`, are every
+    /// implementation the call can run under R2 and R5: an instance of `class` or of any of
+    /// its project subclasses runs the definition its MRO finds, which must be a target (a
+    /// library one only as the call's single target). A protocol is implemented by classes
+    /// that do not name it, so its implementations are never complete; neither are more than
+    /// [`DISPATCH_CLASS_LIMIT`] classes.
+    pub(crate) fn instance_targets_complete(
+        &self,
+        class: &str,
+        method: &str,
+        callee: &Callee,
+    ) -> bool {
+        let class = self.canonical(class);
+        let budget =
+            Budget::unmetered("heki_effect::resolver::ProjectDecls::instance_targets_complete");
+        let mut visited = 0;
+        let missing = reach(
+            &budget,
+            [class.as_str()],
+            |c, out| out.extend(self.direct_subclasses(c).iter().map(String::as_str)),
+            |c| {
+                visited += 1;
+                if visited > DISPATCH_CLASS_LIMIT || !self.runs_a_target(c, method, callee) {
+                    Visit::Stop(())
+                } else {
+                    Visit::Expand
+                }
+            },
+        );
+        missing == Answer::Known(None)
+    }
+
+    /// Whether an instance of exactly `class` calling `method` runs one of `callee`: the
+    /// definition its MRO finds is a target (a library one only as the call's single target),
+    /// or it has none and the call raises. A protocol has implementations no class names.
+    fn runs_a_target(&self, class: &str, method: &str, callee: &Callee) -> bool {
+        if self.protocol(class).is_some() {
+            return false;
+        }
+        match self.definitions(class, method, false, false, |_| true) {
+            (found, _) if !found.is_empty() => {
+                matches!(callee, Callee::Project(keys, _) if keys.contains(&found[0]))
+            }
+            (_, Some(external)) => matches!(callee, Callee::External(s) if *s == external),
+            // An instance without the method raises at the call: it never returns from it.
+            (_, None) => true,
+        }
+    }
+
     /// Resolve `class.method` on the class object `class` itself (`Base.method(obj)`, and the
     /// `__init__` of constructing it): the definition its MRO finds first. The overrides of
     /// subclasses do not count: the class object is no subclass.
@@ -3655,6 +3709,8 @@ pub struct TypeCtx<'a> {
     import_by_span: FxHashMap<Span, String>,
     /// Inference state shared by the functions of the module (child scopes and their parents).
     pub(crate) scopes: crate::infer::Scopes,
+    /// The module's bindings for the path facts, built on first use.
+    bindings: std::cell::OnceCell<heki_ir::ModuleBindings>,
 }
 
 /// Declarations used when a module is missing from `ProjectDecls`.
@@ -3695,7 +3751,14 @@ impl<'a> TypeCtx<'a> {
             ir: input.ir,
             import_by_span,
             scopes: crate::infer::Scopes::default(),
+            bindings: std::cell::OnceCell::new(),
         }
+    }
+
+    /// The module's bindings ([`heki_ir::ModuleBindings`]).
+    pub(crate) fn bindings(&self) -> &heki_ir::ModuleBindings {
+        self.bindings
+            .get_or_init(|| heki_ir::ModuleBindings::of(self.ir))
     }
 
     pub fn module_name(&self) -> &str {
@@ -3835,6 +3898,49 @@ impl<'a> TypeCtx<'a> {
             }
             Some(Recv::Inst(class)) => self.project.method_targets(class, "__call__", false),
             Some(Recv::Super(_)) | None => Callee::Unresolved,
+        }
+    }
+
+    /// Whether `callee`, what [`Self::resolve_method`] resolves `recv.method(...)` to, is every
+    /// implementation the call can run (`CallSite::complete`): each member of a union resolves
+    /// and is complete, a protocol receiver never is, and a module member, a class object's
+    /// own attribute, or `super()` names one implementation.
+    pub fn method_targets_complete(
+        &self,
+        recv: Option<&Val>,
+        method: &str,
+        callee: &Callee,
+    ) -> bool {
+        match recv {
+            Some(Val::Union(classes)) => classes.iter().all(|c| {
+                let own = self.method_call_targets(Some(Recv::Inst(c)), method);
+                matches!(own, Callee::Project(..) | Callee::External(_))
+                    && self.project.instance_targets_complete(c, method, &own)
+            }),
+            Some(Val::Inst(class)) => self
+                .project
+                .instance_targets_complete(class, method, callee),
+            Some(Val::Class(class)) => {
+                self.project.is_project_class(class)
+                    && self
+                        .project
+                        .instance_targets_complete(class, method, callee)
+            }
+            Some(Val::Ref(_) | Val::Super(_)) => true,
+            None => false,
+        }
+    }
+
+    /// Whether `callee`, what [`Self::resolve_call`] resolves calling `value` to, is every
+    /// implementation the call can run: a function or class named exactly, or an instance's
+    /// `__call__` as for a method.
+    pub fn call_targets_complete(&self, value: Option<&Val>, callee: &Callee) -> bool {
+        match value {
+            Some(Val::Ref(_)) => true,
+            Some(Val::Inst(class)) => self
+                .project
+                .instance_targets_complete(class, "__call__", callee),
+            Some(Val::Union(_) | Val::Class(_) | Val::Super(_)) | None => false,
         }
     }
 

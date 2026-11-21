@@ -963,7 +963,33 @@ deep = true   # changes to attributes and nested containers below are forbidden 
   callers, with the same initializer and allowed-context rules as `MUT201`. Reads through
   parameters without a project-class type are not seen.
 
-### 2.4 Family 2 (`EFF101`–`EFF103`, `EFF105`–`EFF107`, `EFF201`, `DATA101`): precision, sanitizers, and aggregation
+### 2.4 Family 2 (`EFF101`–`EFF103`, `EFF105`–`EFF107`, `EFF111`, `EFF113`, `EFF201`, `DATA101`): precision, sanitizers, and aggregation
+0. **Must-facts and the exact tier** (`EffectSummary::must_exec`, computed only when `EFF101`,
+   `EFF111`, `EFF103`, or `EFF113` runs: `OptInFacts::must_effects`):
+   - Per call instruction, the path facts (`heki_ir::Paths`, with the reader of
+     `heki_effect::with_paths`: the module's bindings, the members of modules, and the context
+     managers whose exit never suppresses, `exit_suppresses`) say whether the function has made
+     the call whenever it returns normally (`CallSite::on_every_return`: made, returned, or
+     reachable at all).
+   - A call's targets are complete (`CallSite::complete`) when they are every implementation
+     the call can run under R2 and R5: for each of the receiver's class and its project
+     subclasses (at most `DISPATCH_CLASS_LIMIT`, 64), the definition its MRO finds is a target;
+     every member of a union resolves; a protocol receiver never is complete.
+   - A Layer 2 call has an effect unconditionally (`CallTarget::Layer2::unconditional`) when its
+     entry `emits` it on every call and no case of the entry tests an argument that may be a
+     parameter of the caller (R6 covers the arguments heki cannot evaluate).
+   - A function has run effect `e` whenever it returns when it makes, on every normal return,
+     an unconditional Layer 2 call with `e` (made, also if it raised), or a complete call whose
+     every non-abstract target runs at the call, as written (decorators that call the body each
+     time), on the caller's thread, and has run `e` whenever it returns (returned). A target
+     that never returns normally has run anything; a name bound twice has no facts. The facts
+     grow over each SCC with the summaries and take part in Early Cutoff.
+   - `EFF101` reports a boundary when its call has run a wait for input or output
+     (`ExecEffectKind::wait_kind`) whenever it returns, through synchronous targets
+     (`ProjectIndex::site_must`); `EFF103` when the call runs on every iteration that completes
+     of a loop over a parameter, a part of one, or a catalog call's `items`, whose trip count the
+     code does not fix (`heki_ir::ItemOrigins`, `FnIndex::fixed_trips`), and has sent a statement
+     whenever it returns. Everything else the heuristic tier finds is `EFF111` / `EFF113`.
 1. **Offload wrapper propagation** (from datamodel-code-generator `bodies.py:112`):
    - When a function `w(fn, *args)` calls `asyncio.to_thread(fn, ...)` (`offloads_blocking_arg =
      0`) or similar, the parameter index of `fn` is recorded in `w`'s `offloads_blocking_params`

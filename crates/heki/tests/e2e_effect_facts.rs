@@ -38,6 +38,15 @@ fn lines(p: &Project, rule: &str) -> Vec<u64> {
     reports(p, rule).into_iter().map(|(line, _)| line).collect()
 }
 
+/// The lines of the reports of a database query in a loop, established (`EFF103`) or not
+/// (`EFF113`).
+fn query_lines(p: &Project) -> Vec<u64> {
+    let mut out = lines(p, "EFF103");
+    out.extend(lines(p, "EFF113"));
+    out.sort_unstable();
+    out
+}
+
 #[test]
 fn ddl_is_recognized_where_the_statement_runs() {
     let p = Project::new("ddl_at_execution");
@@ -79,7 +88,7 @@ async def handler(cur: sqlite3.Cursor) -> None:
     );
     // A Redis key is no statement; a helper running only DDL runs no query; a DDL statement
     // still blocks the event loop.
-    assert_eq!(lines(&p, "EFF103"), vec![8, 22, 28]);
+    assert_eq!(query_lines(&p), vec![8, 22, 28]);
     assert_eq!(lines(&p, "EFF101"), vec![32]);
 }
 
@@ -200,7 +209,7 @@ fn ddl_built_at_run_time_or_taken_from_constants_is_ddl() {
         .filter(|(_, line)| line.ends_with("# reported"))
         .map(|(n, _)| n)
         .collect();
-    assert_eq!(lines(&p, "EFF103"), reported);
+    assert_eq!(query_lines(&p), reported);
 }
 
 const SCHEMA_OWNER: &str = r#"import sqlite3
@@ -226,13 +235,13 @@ fn a_constant_another_module_rebinds_is_no_fixed_statement() {
         "pkg/other.py",
         "from pkg import db\n\n\ndef peek():\n    return db.SQL, db.STATEMENTS\n",
     );
-    assert_eq!(lines(&p, "EFF103"), Vec::<u64>::new());
+    assert_eq!(query_lines(&p), Vec::<u64>::new());
     // Another module rebinding them may make them queries.
     p.write(
         "pkg/other.py",
         "from pkg import db\n\n\ndef reconfigure():\n    db.SQL = \"SELECT 1\"\n    db.STATEMENTS = (\"SELECT 1\",)\n",
     );
-    assert_eq!(lines(&p, "EFF103"), vec![9, 11]);
+    assert_eq!(query_lines(&p), vec![9, 11]);
 }
 
 #[test]

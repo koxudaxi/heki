@@ -183,12 +183,12 @@ fn docs_check_fails_where_a_page_marks_a_rule_differently_from_the_registry() {
     // The row of a stable rule does not, also among other rules in its cell.
     let (code, out) = docs.check_with(
         "README.md",
-        "| A database query, or a new HTTP client, on every loop iteration |",
-        "| An experimental database query, or a new HTTP client, on every loop iteration |",
+        "| A database query, or a new HTTP client, a loop can run on every iteration |",
+        "| An experimental database query, or a new HTTP client, a loop can run on every iteration |",
     );
     assert_eq!(code, 1);
     assert!(
-        out.contains(": the row of EFF102, EFF103 says experimental"),
+        out.contains(": the row of EFF102, EFF113 says experimental"),
         "{out}"
     );
     let (code, out) = docs.check_with(
@@ -264,8 +264,8 @@ fn docs_check_fails_where_a_page_marks_a_rule_heuristic_differently_from_the_rul
     for (rel, old, new) in [
         (
             "README.md",
-            "| A blocking call several helpers below an `async def` | `EFF101` | heuristic |",
-            "| A blocking call several helpers below an `async def` | `EFF101` | exact |",
+            "| A blocking call that a call in an `async def` always runs, several helpers below | `EFF101` | heuristic |",
+            "| A blocking call that a call in an `async def` always runs, several helpers below | `EFF101` | exact |",
         ),
         (
             "docs/precision.md",

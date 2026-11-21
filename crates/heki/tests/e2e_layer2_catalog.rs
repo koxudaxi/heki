@@ -10,7 +10,7 @@ use common::Project;
 use serde_json::Value;
 
 /// The family-2 rules the catalog feeds (the opt-in ones are selected where a test needs them).
-const RULES: &str = "EFF101,EFF102,EFF103,DATA101";
+const RULES: &str = "EFF101,EFF111,EFF102,EFF103,EFF113,DATA101";
 
 /// `(line, rule, qualname, target)` of every diagnostic of `heki check` on the one-file project
 /// `rel` holding `source`.
@@ -347,7 +347,7 @@ fn sqlalchemy_sync_apis_block_and_async_ones_only_count_queries() {
             // `Engine.connect()` / `begin()` connect; `begin()` types its connection.
             d(
                 29,
-                "EFF101",
+                "EFF111",
                 "tp_engine",
                 "sqlalchemy.engine.Engine.connect"
             ),
@@ -357,7 +357,7 @@ fn sqlalchemy_sync_apis_block_and_async_ones_only_count_queries() {
                 "tp_engine",
                 "sqlalchemy.engine.Connection.execute"
             ),
-            d(31, "EFF101", "tp_engine", "sqlalchemy.engine.Engine.begin"),
+            d(31, "EFF111", "tp_engine", "sqlalchemy.engine.Engine.begin"),
             d(
                 32,
                 "EFF101",
@@ -369,7 +369,7 @@ fn sqlalchemy_sync_apis_block_and_async_ones_only_count_queries() {
             d(38, "EFF101", "tp_session", "sqlmodel.Session.exec"),
             d(
                 43,
-                "EFF103",
+                "EFF113",
                 "tp_queries_in_loops",
                 "sqlalchemy.orm.Session.get"
             ),
@@ -382,7 +382,7 @@ fn sqlalchemy_sync_apis_block_and_async_ones_only_count_queries() {
             // Awaited async queries still count in loops, and so do new engines.
             d(
                 73,
-                "EFF103",
+                "EFF113",
                 "tp_async_queries_and_engines_in_loops",
                 "sqlalchemy.ext.asyncio.AsyncSession.get"
             ),
@@ -571,10 +571,10 @@ fn dbapi_drivers_block_on_connect_and_statements_but_not_on_row_reads() {
             d(22, "EFF101", "tp_psycopg", "psycopg.Connection.execute"),
             d(23, "EFF101", "tp_psycopg", "psycopg.connect"),
             d(25, "EFF101", "tp_psycopg", "psycopg.Cursor.executemany"),
-            d(26, "EFF101", "tp_psycopg", "psycopg.Connection.commit"),
+            d(26, "EFF111", "tp_psycopg", "psycopg.Connection.commit"),
             d(
                 27,
-                "EFF101",
+                "EFF111",
                 "tp_psycopg",
                 "psycopg_pool.ConnectionPool.connection"
             ),
@@ -690,7 +690,7 @@ fn dbapi_drivers_block_on_connect_and_statements_but_not_on_row_reads() {
             ),
             d(
                 119,
-                "EFF101",
+                "EFF111",
                 "tp_named_cursors_fetch_from_the_server",
                 "psycopg.ServerCursor.__iter__"
             ),
@@ -1020,7 +1020,7 @@ fn boto3_and_django_block_on_their_calls_and_lazy_querysets_do_not() {
             // Reported at the call that runs the query, not at the lazy `filter()`.
             d(
                 41,
-                "EFF101",
+                "EFF111",
                 "tp_django",
                 "django.db.models.query.QuerySet.first"
             ),
@@ -1146,7 +1146,7 @@ fn pandas_io_and_quadratic_concatenation() {
             "catalog_data",
             "app/frames.py",
             DATA,
-            "EFF101,EFF103,EFF105,DATA101"
+            "EFF101,EFF111,EFF103,EFF113,EFF105,DATA101"
         ),
         vec![
             // File readers are `EFF105` (opt-in); SQL readers and writers block on the database.
@@ -1222,7 +1222,7 @@ class Frontend(StaticFiles):
 #[test]
 fn file_metadata_and_name_lookups_block() {
     assert_eq!(
-        check("cat_metadata", "app.py", METADATA, "EFF101,EFF105"),
+        check("cat_metadata", "app.py", METADATA, "EFF101,EFF111,EFF105"),
         vec![
             d(10, "EFF105", "tp_metadata", "os.stat"),
             d(11, "EFF105", "tp_metadata", "os.path.exists"),
@@ -1234,8 +1234,8 @@ fn file_metadata_and_name_lookups_block() {
             d(20, "EFF105", "tp_paths", "pathlib.Path.is_file"),
             d(21, "EFF105", "tp_paths", "pathlib.Path.is_dir"),
             d(22, "EFF105", "tp_paths", "pathlib.Path.resolve"),
-            d(26, "EFF101", "tp_lookups", "socket.getaddrinfo"),
-            d(27, "EFF101", "tp_lookups", "socket.gethostbyname"),
+            d(26, "EFF111", "tp_lookups", "socket.getaddrinfo"),
+            d(27, "EFF111", "tp_lookups", "socket.gethostbyname"),
             d(28, "EFF101", "tp_lookups", "socket.getfqdn"),
             d(
                 47,
@@ -1280,9 +1280,9 @@ async def handler(host, ip):
     parse_passive(ip)
     resolve(host)
 "#,
-            "EFF101",
+            "EFF101,EFF111",
         ),
-        vec![d(25, "EFF101", "handler", "socket.getaddrinfo")]
+        vec![d(25, "EFF111", "handler", "socket.getaddrinfo")]
     );
 }
 
@@ -1331,10 +1331,10 @@ async def tp_lookup():
 async def tp_fetch():
     return urlopen("https://example.com").read()
 "#,
-            "EFF101",
+            "EFF101,EFF111",
         ),
         vec![
-            d(28, "EFF101", "tp_sleep", "time.sleep"),
+            d(28, "EFF111", "tp_sleep", "time.sleep"),
             d(32, "EFF101", "tp_lookup", "socket.getaddrinfo"),
             d(36, "EFF101", "tp_fetch", "urllib.request.urlopen"),
         ]
@@ -1411,7 +1411,7 @@ fn overrides_set_only_the_keys_they_list() {
             OVERRIDES,
             "app/overridden.py",
             OVERRIDDEN,
-            "EFF101,EFF102,EFF103,EFF106"
+            "EFF101,EFF111,EFF102,EFF103,EFF113,EFF106"
         ),
         vec![
             d(
@@ -1596,7 +1596,7 @@ fn pandas_readers_do_the_io_of_their_source() {
             "catalog_pandas_sources",
             "app/sources.py",
             PANDAS_SOURCES,
-            "EFF101,EFF105"
+            "EFF101,EFF111,EFF105"
         ),
         vec![
             d(8, "EFF101", "tp_downloads", "pandas.read_csv"),
@@ -1642,7 +1642,7 @@ fn connection_options_decide_where_the_connection_is_made() {
             "catalog_connection_options",
             "app/connect.py",
             CONNECTION_OPTIONS,
-            "EFF101"
+            "EFF101,EFF111"
         ),
         vec![
             d(
@@ -1709,20 +1709,25 @@ async def tn_waits_that_return_at_once(event: threading.Event, lock: threading.L
 #[test]
 fn synchronous_waits_block_unless_they_return_at_once() {
     assert_eq!(
-        check("catalog_sync_waits", "app/waits.py", SYNC_WAITS, "EFF101"),
+        check(
+            "catalog_sync_waits",
+            "app/waits.py",
+            SYNC_WAITS,
+            "EFF101,EFF111"
+        ),
         vec![
-            d(12, "EFF101", "tp_waits", "threading.Event.wait"),
-            d(13, "EFF101", "tp_waits", "threading.Lock.acquire"),
-            d(14, "EFF101", "tp_waits", "queue.Queue.get"),
-            d(15, "EFF101", "tp_waits", "threading.Thread.join"),
-            d(16, "EFF101", "tp_waits", "threading.Thread.join"),
+            d(12, "EFF111", "tp_waits", "threading.Event.wait"),
+            d(13, "EFF111", "tp_waits", "threading.Lock.acquire"),
+            d(14, "EFF111", "tp_waits", "queue.Queue.get"),
+            d(15, "EFF111", "tp_waits", "threading.Thread.join"),
+            d(16, "EFF111", "tp_waits", "threading.Thread.join"),
             d(
                 21,
-                "EFF101",
+                "EFF111",
                 "tp_futures",
                 "concurrent.futures.Future.result"
             ),
-            d(22, "EFF101", "tp_futures", "concurrent.futures.wait"),
+            d(22, "EFF111", "tp_futures", "concurrent.futures.wait"),
         ]
     );
 }
@@ -1750,7 +1755,7 @@ fn consuming_calls_iterate_catalog_iterables() {
             "catalog_consumed_queries",
             "app/consumed.py",
             CONSUMED_QUERIES,
-            "EFF101"
+            "EFF101,EFF111"
         ),
         vec![
             d(
@@ -1821,12 +1826,12 @@ fn lazy_iterators_do_their_io_when_iterated() {
             "catalog_lazy_iterators",
             "app/lazy.py",
             LAZY_ITERATORS,
-            "EFF101,EFF103,EFF105"
+            "EFF101,EFF111,EFF103,EFF113,EFF105"
         ),
         vec![
             d(
                 15,
-                "EFF101",
+                "EFF111",
                 "tp_iterated_on_the_loop",
                 "pymongo.cursor.Cursor.__iter__"
             ),
@@ -1850,7 +1855,7 @@ fn lazy_iterators_do_their_io_when_iterated() {
             ),
             d(
                 32,
-                "EFF103",
+                "EFF113",
                 "tp_async_cursors_run_per_item",
                 "pymongo.asynchronous.cursor.AsyncCursor.__aiter__"
             ),
@@ -2017,7 +2022,7 @@ fn declarations_of_project_functions_apply_to_their_callers() {
     assert_eq!(
         check_files("catalog_declared_project", &files, RULES),
         vec![
-            app(7, "EFF101", "tp_declared_effects", "pkg.db.run_query"),
+            app(7, "EFF111", "tp_declared_effects", "pkg.db.run_query"),
             app(
                 17,
                 "EFF102",
@@ -2099,7 +2104,7 @@ fn offloaded_callables_run_on_a_worker() {
             "catalog_worker_callbacks",
             "app/workers.py",
             WORKER_CALLBACKS,
-            "EFF101,EFF103,MUT202"
+            "EFF101,EFF111,EFF103,EFF113,MUT202"
         ),
         vec![
             d(
@@ -2110,19 +2115,19 @@ fn offloaded_callables_run_on_a_worker() {
             ),
             d(
                 33,
-                "EFF103",
+                "EFF113",
                 "tp_queries_per_item_on_a_worker",
                 "sqlalchemy.orm.Session.execute"
             ),
             d(
                 34,
-                "EFF103",
+                "EFF113",
                 "tp_queries_per_item_on_a_worker",
                 "sqlalchemy.orm.Session.execute"
             ),
             d(
                 35,
-                "EFF103",
+                "EFF113",
                 "tp_queries_per_item_on_a_worker",
                 "sqlalchemy.orm.Session.execute"
             ),
@@ -2209,13 +2214,13 @@ fn run_sync_callables_run_on_the_event_loop() {
             "catalog_sync_facades",
             "app/facades.py",
             SYNC_FACADES,
-            "EFF101,EFF103"
+            "EFF101,EFF111,EFF103,EFF113"
         ),
         vec![
-            d(15, "EFF101", "tp_blocking_call_in_run_sync", "requests.get"),
+            d(15, "EFF111", "tp_blocking_call_in_run_sync", "requests.get"),
             d(
                 25,
-                "EFF103",
+                "EFF113",
                 "tp_query_per_item_through_the_facade",
                 "sqlalchemy.orm.Session.execute"
             ),
@@ -2262,18 +2267,18 @@ fn forwarded_flags_are_decided_by_the_caller() {
             "catalog_forwarded_flags",
             "app/client.py",
             FORWARDED_FLAGS,
-            "EFF101"
+            "EFF101,EFF111"
         ),
         vec![
             d(
                 15,
-                "EFF101",
+                "EFF111",
                 "Client.aclose_and_wait",
                 "concurrent.futures.ThreadPoolExecutor.shutdown"
             ),
             d(
                 27,
-                "EFF101",
+                "EFF111",
                 "Configured.aclose",
                 "concurrent.futures.ThreadPoolExecutor.shutdown"
             ),

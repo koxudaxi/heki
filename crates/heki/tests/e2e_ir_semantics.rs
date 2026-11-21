@@ -22,7 +22,7 @@ fn diagnostics(p: &Project, args: &[&str]) -> Vec<Value> {
 fn reports(name: &str, source: &str, rules: &str) -> Vec<(String, String)> {
     let p = Project::new(name);
     p.write("case.py", source);
-    diagnostics(&p, &["--select", rules])
+    diagnostics(&p, &["--select", &common::select_with_siblings(rules)])
         .iter()
         .map(|d| {
             (
@@ -83,8 +83,8 @@ async def iterates():
     assert_eq!(function(&ir, "rows")["kind"], "generator");
     // Calling a generator function only creates the generator; iterating it runs the body.
     assert_eq!(
-        reports("ir_fstring_yield", src, "EFF101"),
-        pairs(&[("iterates", "EFF101")])
+        reports("ir_fstring_yield", src, "EFF111"),
+        pairs(&[("iterates", "EFF111")])
     );
 }
 
@@ -135,8 +135,8 @@ async def module_function(items):
     // Inside the comprehension `item` is its iteration variable (a cell of the frame), not
     // the module's blocking function.
     assert_eq!(
-        reports("ir_comprehension_cells", src, "EFF101"),
-        pairs(&[("module_function", "EFF101")])
+        reports("ir_comprehension_cells", src, "EFF111"),
+        pairs(&[("module_function", "EFF111")])
     );
     let ir = dump_ir("ir_comprehension_cells", src, "py315");
     let captured = function(&ir, "lambda_in_comprehension")["captured_vars"].clone();
@@ -171,11 +171,13 @@ async def attribute_target(pairs, holder):
     for version in ["py311", "py315"] {
         let p = Project::new(&format!("ir_comprehension_targets_{version}"));
         p.write("case.py", src);
-        let got: Vec<String> =
-            diagnostics(&p, &["--select", "EFF101", "--target-version", version])
-                .iter()
-                .map(|d| d["qualname"].as_str().unwrap().to_owned())
-                .collect();
+        let got: Vec<String> = diagnostics(
+            &p,
+            &["--select", "EFF101,EFF111", "--target-version", version],
+        )
+        .iter()
+        .map(|d| d["qualname"].as_str().unwrap().to_owned())
+        .collect();
         assert_eq!(got, ["starred_target", "attribute_target"], "{version}");
     }
 }
@@ -616,11 +618,11 @@ def merged(maps):
     // PEP 798: `[*it for ...]` extends the list with each `it`, `(*it for ...)` yields from it;
     // a plain element only holds the generator.
     assert_eq!(
-        reports("ir_unpacking_comprehensions", src, "EFF101"),
+        reports("ir_unpacking_comprehensions", src, "EFF111"),
         pairs(&[
-            ("flattened", "EFF101"),
-            ("flattened_set", "EFF101"),
-            ("yielded_from", "EFF101"),
+            ("flattened", "EFF111"),
+            ("flattened_set", "EFF111"),
+            ("yielded_from", "EFF111"),
         ])
     );
     let ir = dump_ir("ir_unpacking_comprehensions", src, "py315");
@@ -918,8 +920,8 @@ async def plain(query: sqlalchemy.orm.Query):
     // `iter(query)` runs when the generator expression is created, whatever its later
     // clauses are: the query executes on the event loop.
     assert_eq!(
-        reports("ir_genexpr_first_iteration", src, "EFF101"),
-        pairs(&[("later_async_clause", "EFF101"), ("plain", "EFF101")])
+        reports("ir_genexpr_first_iteration", src, "EFF111"),
+        pairs(&[("later_async_clause", "EFF111"), ("plain", "EFF111")])
     );
 }
 

@@ -19,6 +19,9 @@
 
 pub mod cache_flow;
 mod callgraph;
+pub use callgraph::SiteMust;
+mod paths;
+pub use paths::with_paths;
 mod construction;
 pub mod consumption;
 mod contracts;
@@ -138,6 +141,61 @@ pub type SharedLine = Arc<ClassLine>;
 
 /// [`EffectSummary::receiver_effects`].
 pub type ReceiverEffects = BTreeMap<ExecEffectKind, Vec<(SharedLine, SharedChain)>>;
+
+/// The execution effects a function has run whenever it returns normally, each by a chain on
+/// which every call is made on every path that returns (exception edges included), every
+/// call's targets are all the implementations it can run (R2, R5), and the last call is a
+/// catalog call that has the effect whatever its state and arguments heki cannot see (R3, R6).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MustExec {
+    /// No path returns normally (the function always raises, or never ends): whatever runs
+    /// "whenever it returns" holds of it.
+    pub never_returns: bool,
+    /// The function's name is bound to more than one definition (`def` under `if` and `else`):
+    /// a call runs one of them, and neither one's facts are the call's (R1 holds for names
+    /// bound once).
+    pub bound_twice: bool,
+    pub effects: BTreeMap<ExecEffectKind, SharedChain>,
+}
+
+impl MustExec {
+    /// The facts of a function whose name is bound to more than one definition.
+    pub fn of_name_bound_twice() -> Self {
+        Self {
+            bound_twice: true,
+            ..Self::default()
+        }
+    }
+
+    /// Whether every normal return of the function has run `e`, and the chain that shows it
+    /// (empty for a function that never returns normally).
+    pub fn chain(&self, e: ExecEffectKind) -> Option<&[Arc<CallHop>]> {
+        if self.bound_twice {
+            return None;
+        }
+        if self.never_returns {
+            return Some(&[]);
+        }
+        self.effects.get(&e).map(Vec::as_slice)
+    }
+}
+
+/// Whether a caller has made a call whenever it returns normally (`heki_ir::Paths`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct OnEveryReturn {
+    /// The call was made, also on a path where it raised.
+    pub called: bool,
+    /// The call returned.
+    pub returned: bool,
+    /// Some path reaches the call: it is not behind a branch the code decides against
+    /// (`if not _IS_SYNC:` with `_IS_SYNC = False`).
+    pub live: bool,
+}
+
+/// The bit of `e` in a mask of execution effects (`CallTarget::Layer2::unconditional`).
+pub const fn effect_bit(e: ExecEffectKind) -> u16 {
+    1 << (e as u16)
+}
 
 /// What a method call's receiver tells about the implementations its callees run
 /// ([`EffectSummary::receiver_effects`]).
@@ -467,6 +525,9 @@ pub struct EffectSummary {
     /// effect, each class providing one, with the shortest chain through it. A call on a
     /// receiver of known class runs only those of the classes related to it.
     pub receiver_effects: Option<Box<ReceiverEffects>>,
+    /// What the function has run whenever it returns normally ([`MustExec`]); `None` when it
+    /// established nothing, or when no enabled rule reads it ([`OptInFacts::must_effects`]).
+    pub must_exec: Option<Box<MustExec>>,
 
     // Family 1: Mutation & State Effect (MUT1xx / MUT2xx)
     pub mutates_params: u64,
@@ -742,6 +803,9 @@ impl EffectSummary {
             }
         }
         self.exec_guards.retain(|e, _| !hidden.contains(e));
+        if let Some(must) = &mut self.must_exec {
+            must.effects.retain(|e, _| !hidden.contains(e));
+        }
         if let Some(iterated) = &mut self.iterated {
             iterated.hide_exec_effects(hidden);
         }
@@ -752,6 +816,13 @@ impl EffectSummary {
     pub fn without_locations(&self) -> Self {
         let mut out = self.clone();
         for chain in out.exec_chains.values_mut() {
+            zero_hop_spans(chain);
+        }
+        for chain in out
+            .must_exec
+            .iter_mut()
+            .flat_map(|m| m.effects.values_mut())
+        {
             zero_hop_spans(chain);
         }
         for (_, chain) in out
@@ -1101,6 +1172,10 @@ pub enum CallTarget {
         effects: BTreeSet<ExecEffectKind>,
         offloads_blocking_arg: Option<u8>,
         async_safe: bool,
+        /// The effects the call has whatever the state and the arguments it does not show
+        /// ([`effect_bit`]s; computed with `CallSite::complete`): its entry `emits` them on
+        /// every call, and no argument a caller passes in can select a case of it.
+        unconditional: u16,
     },
 }
 
@@ -1198,6 +1273,13 @@ pub struct CallSite {
     /// suspended (`MUT113`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub result_held: bool,
+    /// The targets are every implementation the call can run under R2 and R5: the receiver
+    /// is no protocol, every member of a union resolves, and no project subclass's
+    /// implementation is missing. Computed with [`Self::on_every_return`].
+    pub complete: bool,
+    /// Whether the caller has made the call whenever it returns normally (computed when an
+    /// enabled rule reads [`EffectSummary::must_exec`]).
+    pub on_every_return: OnEveryReturn,
 }
 
 /// How an API runs a callable it is handed ([`CallSite::runner`]).
@@ -1479,6 +1561,8 @@ pub enum TypedWrites {
 pub struct OptInFacts {
     pub return_origins: bool,
     pub iterations: bool,
+    /// [`EffectSummary::must_exec`] and what computes it at call sites.
+    pub must_effects: bool,
 }
 
 impl OptInFacts {
@@ -1486,6 +1570,7 @@ impl OptInFacts {
     pub const ALL: Self = Self {
         return_origins: true,
         iterations: true,
+        must_effects: true,
     };
 }
 
@@ -1579,6 +1664,16 @@ impl ProjectIndex {
         callgraph::propagate(&mut index, &all);
         callgraph::recompute_sync_driven(&mut index);
         index
+    }
+
+    /// Whether every implementation the call at `site` (in `path`) can run has run `e`
+    /// whenever the call returns, with the chain and the witnesses that show it ([`SiteMust`];
+    /// `None` when that is not established, or when no enabled rule reads must-facts).
+    pub fn site_must(&self, path: &Path, site: &CallSite, e: ExecEffectKind) -> Option<SiteMust> {
+        if !self.opt_in.must_effects {
+            return None;
+        }
+        callgraph::site_must_chain(self, path, site, e)
     }
 
     /// Effects that run at `site` (in file `path`): the Layer 2 API's effects after the
