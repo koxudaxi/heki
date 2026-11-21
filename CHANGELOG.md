@@ -102,6 +102,14 @@ release can change rules, configuration keys, diagnostics, and output formats.
   SARIF level, and the language server's severity. `[tool.heki.lint.severity]` still overrides
   it. Each rule page shows its default severity, and `heki rule --output-format json` gives each
   rule's `consequence` (`bug` or `slowdown`).
+- `OPT` messages state their claim and nothing else: what the statement does each time it runs
+  in the loop (`` `rows = rows + [...]` copies the whole list each time it runs in the loop ``),
+  without "on every iteration", which heki does not establish, and without cost estimates
+  ("(quadratic)", "(O(n) per iteration)", "(O(n²))", "(O(n·m))"). `OPT110` names the container
+  it scans (a list or a tuple), and `OPT130` says the constructor builds a new container for
+  the membership test, not "the same container", which only a proven rewrite establishes. The
+  rule pages state the claim the same way: its premises are the container's builtin type, the
+  loop, and, for a rule's exact tier, the proven rewrite; no size is claimed.
 - `EFF102` and `EFF103` also report the function a builtin calls once per item: the function
   handed to `map`, `filter`, `itertools.starmap`, `itertools.filterfalse`, and
   `functools.reduce`, and the `key` of `sorted`, `list.sort`, `min`, `max`, and

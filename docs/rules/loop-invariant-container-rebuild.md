@@ -20,21 +20,26 @@ functions.
 
 ## What a report states
 
-A report states that the loop builds the same container (`set(keys)`, `list(...)`, `tuple(...)`,
-`dict(...)`) on every iteration to test membership in it.
+A report states that a builtin constructor (`set(keys)`, `list(...)`, `tuple(...)`, `dict(...)`),
+in a loop, builds a new container for a membership test each time it runs.
 
 Its premises:
 
-- **Loop-invariant**: what the container is built from does not change during the loop. Established
-  by the Soundness lane.
-- **On every iteration**: the statement runs on every iteration of the loop. Open: a statement under
-  a branch inside the loop counts.
-- **Data-sized**: the code does not fix the sizes the cost depends on (the loop's and the
-  container's) at 16 or fewer. Open: a size heki cannot bound counts as data-sized.
+- **Builtin container**: the constructor builds a builtin container of a known type. Established
+  only on a proven report: an unknown type is one of the obligations that block the rewrite.
+- **In a loop**: the statement is in the body of a loop. Established by the IR.
 - **Rewrite proven safe**: the help says `[safe fix: ...]`, `[proven-safe suggestion: ...]`, or
   `[proven safe; ...]`. A report whose help names a blocking obligation instead (`[not auto-fixable:
   ...]`) lacks this premise and is heuristic whatever the rule's certainty; the proven reports are
   the rule's exact tier.
+
+Not part of the claim: how many times the statement runs (one under a branch inside the loop
+counts), and how large the loop or the container is. The message claims no size and no cost
+estimate. A loop or a container that the code fixes at 16 or fewer items is not reported, since the
+rewrite would not pay off.
+
+The rewrite also needs what the container is built from to stay the same during the loop
+(`ValueLoopInvariant`), which only a proven report establishes.
 
 ## Why is this bad?
 The container is rebuilt from scratch on every iteration, which costs as much as the scan it

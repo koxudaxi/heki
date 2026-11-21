@@ -1123,7 +1123,7 @@ impl<'a, 'c> Rules<'a, 'c> {
             span,
             name.clone(),
             format!(
-                "`{name} = {name} + [...]` copies the whole list on every iteration (quadratic)"
+                "`{name} = {name} + [...]` copies the whole list each time it runs in the loop"
             ),
             format!("append in place with `{name}.append(...)` / `{name}.extend(...)`"),
             obs,
@@ -1196,7 +1196,7 @@ impl<'a, 'c> Rules<'a, 'c> {
             span,
             name.clone(),
             format!(
-                "`{name} = {{**{name}, ...}}` copies the whole dict on every iteration (quadratic)"
+                "`{name} = {{**{name}, ...}}` copies the whole dict each time it runs in the loop"
             ),
             format!("update `{name}` in place"),
             obs,
@@ -1381,7 +1381,7 @@ impl<'a, 'c> Rules<'a, 'c> {
             span,
             name.clone(),
             format!(
-                "`{name} = {name} | ...` copies the whole container on every iteration (quadratic)"
+                "`{name} = {name} | ...` copies the whole container each time it runs in the loop"
             ),
             format!("update it in place with `{name} |= ...`"),
             obs,
@@ -1752,7 +1752,9 @@ impl<'a, 'c> Rules<'a, 'c> {
             OptRule::Opt103,
             span,
             name.clone(),
-            format!("`{name}` grows by `{what}` concatenation on every iteration (quadratic)"),
+            format!(
+                "concatenating to `{name}` copies the whole `{what}` each time it runs in the loop"
+            ),
             "collect the pieces in a list and join them once after the loop".to_owned(),
             obs,
             capped.or_else(|| loop_bound_note(lp)),
@@ -1817,7 +1819,9 @@ impl<'a, 'c> Rules<'a, 'c> {
                 OptRule::Opt103,
                 binop.span,
                 target.clone(),
-                format!("`{target} += ...` re-copies the attribute on every iteration (quadratic)"),
+                format!(
+                    "`{target} += ...` copies the whole attribute each time it runs in the loop"
+                ),
                 "accumulate in a local list and assign the joined result once after the loop"
                     .to_owned(),
                 obs,
@@ -1953,6 +1957,7 @@ impl<'a, 'c> Rules<'a, 'c> {
         let lp = innermost_loop(f, at.0)?;
         let cmp = inst_at(f, at);
         let name = self.var(lst);
+        let kind = st.exact_type(lst).map_or("list", BuiltinKind::name);
         let mut obs = self.base();
         obs.push(self.ck.exact_type(&name, &st, lst, &[List, Tuple]));
         obs.push(
@@ -1998,7 +2003,7 @@ impl<'a, 'c> Rules<'a, 'c> {
             OptRule::Opt110,
             cmp.span,
             name.clone(),
-            format!("`... in {name}` scans the list on every iteration"),
+            format!("`... in {name}` scans the {kind} each time it runs in the loop"),
             format!("build `set({name})` once before the loop"),
             obs,
             not_profitable,
@@ -2127,12 +2132,12 @@ impl<'a, 'c> Rules<'a, 'c> {
             OptRule::Opt130,
             cmp.span,
             target,
-            format!("`{callee}(...)` rebuilds the same container on every iteration"),
+            format!("`{callee}(...)` builds a new container for the membership test each time it runs in the loop"),
             "build it once before the loop".to_owned(),
             obs,
             not_profitable,
             Some(format!(
-                "`{callee}(...)` builds a new container on every iteration"
+                "`{callee}(...)` builds a new container each time it runs"
             )),
             edits,
         ))
@@ -2314,7 +2319,7 @@ impl<'a, 'c> Rules<'a, 'c> {
             OptRule::Opt111,
             cmp.span,
             name.clone(),
-            format!("`if ... not in {name}: {name}.append(...)` scans the list on every iteration"),
+            format!("`if ... not in {name}: {name}.append(...)` scans the list each time it runs in the loop"),
             format!("keep a `set` of the items next to `{name}` and test membership in it"),
             obs,
             loop_bound_note(lp),
@@ -2708,23 +2713,29 @@ impl<'a, 'c> Rules<'a, 'c> {
         let (msg, help, span) = match form {
             Some(FrontForm::SliceRebind { copy }) => (
                 format!(
-                    "`{name} = {name}[1:]` copies the list to drop one element (O(n) per iteration)"
+                    "`{name} = {name}[1:]` copies the rest of the list each time it runs in the loop"
                 ),
                 popleft(),
                 self.assignment_span(copy, inst.span).unwrap_or(inst.span),
             ),
             Some(FrontForm::DelIndex) => (
-                format!("`del {name}[0]` shifts every element (O(n) per iteration)"),
+                format!(
+                    "`del {name}[0]` moves every remaining element each time it runs in the loop"
+                ),
                 popleft(),
                 inst.span,
             ),
             Some(FrontForm::PopCall) => (
-                format!("`{name}.pop(0)` shifts every element (O(n) per iteration)"),
+                format!(
+                    "`{name}.pop(0)` moves every remaining element each time it runs in the loop"
+                ),
                 popleft(),
                 inst.span,
             ),
             None => (
-                format!("`{name}.insert(0, ...)` shifts every element (O(n) per iteration)"),
+                format!(
+                    "`{name}.insert(0, ...)` moves every element each time it runs in the loop"
+                ),
                 format!("use `collections.deque` and `{name}.appendleft(...)`"),
                 inst.span,
             ),
