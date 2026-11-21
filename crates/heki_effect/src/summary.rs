@@ -5016,6 +5016,10 @@ impl<'a> Extractor<'a> {
                     let mut bound: Vec<(u8, VarId)> = Vec::new();
                     for &(slot, a) in &passing.slots {
                         let Some(slot) = decl.positional_param(slot) else {
+                            // The tuple `*args` holds it: the callee keeps it only by keeping
+                            // that parameter, and no parameter is the argument itself.
+                            let held = decl.varargs_param().and_then(|p| u8::try_from(p).ok());
+                            bound.extend(held.map(|p| (p, a)));
                             continue;
                         };
                         let mut o = self.origin(a);
@@ -6595,8 +6599,8 @@ struct Handed<'b> {
     /// The receiver, unless it is the object a constructor call creates.
     recv: Option<VarId>,
     /// `(parameter, argument)` of the positional arguments binding a positional parameter (`*`
-    /// unpacking binds the ones from `Call::star_from` on inexactly) and of the keywords
-    /// binding a parameter.
+    /// unpacking binds the ones from `Call::star_from` on inexactly), of those `*args` holds
+    /// (with its position), and of the keywords binding a parameter.
     bound: &'b [(u8, VarId)],
     /// The parameter of the first positional argument.
     offset: usize,

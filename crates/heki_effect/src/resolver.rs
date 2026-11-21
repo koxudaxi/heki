@@ -451,6 +451,16 @@ impl FunctionDecl {
         (slot < usize::from(self.positional_params)).then_some(slot)
     }
 
+    /// The position of `*args`, the tuple holding the positional arguments past the positional
+    /// parameters (it follows the named parameters, before `**kwargs`).
+    pub fn varargs_param(&self) -> Option<usize> {
+        let after = 1 + usize::from(self.has_kwargs);
+        self.param_names
+            .len()
+            .checked_sub(after)
+            .filter(|_| self.has_varargs)
+    }
+
     /// The parameter a keyword argument `name` binds: a named parameter past the
     /// positional-only ones. Any other keyword (one naming a positional-only parameter, `*args`,
     /// or `**kwargs`) lands in `**kwargs`, or the call raises `TypeError`.
