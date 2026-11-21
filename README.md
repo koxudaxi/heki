@@ -83,6 +83,7 @@ app/orders.py:11:37: EFF103 (loop-db-query) [warning] every iteration over param
    |                                     ^
   = related: app/orders.py:11:37: `order_summaries` calls `app.orders.customer_name`
   = related: app/orders.py:5:5: `customer_name` calls `sqlite3.Cursor.execute`
+  = help: batch the queries, or load the data once before the loop
 
 Found 1 diagnostic(s) in 1 file(s).
 ```

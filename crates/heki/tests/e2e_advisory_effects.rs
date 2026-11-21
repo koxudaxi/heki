@@ -899,8 +899,7 @@ fn each_effect_has_its_own_help() {
         .collect();
     let offload = "offload it with `asyncio.to_thread`, or";
     let client = "create one client or session before the loop and reuse it";
-    // An exact claim's report has no advice beyond the claim.
-    let none = "";
+    let query = "batch the queries, or load the data once before the loop";
     assert_eq!(
         reports,
         vec![
@@ -949,12 +948,12 @@ fn each_effect_has_its_own_help() {
             (
                 52,
                 "every iteration over parameter `ids` sends a database statement: `sqlite3.Cursor.execute`",
-                none
+                query
             ),
             (
                 53,
                 "every iteration over parameter `ids` sends a database statement: `sqlite3.Cursor.execute` (through `app.lookup`)",
-                none
+                query
             ),
         ]
     );
@@ -1335,6 +1334,25 @@ fn exact_claims_establish_each_premise() {
                 "every iteration over the rows of `sqlite3.Connection.execute` sends a database statement: `sqlite3.Connection.execute`"
             ),
         ]
+    );
+    // The advice is in the help of every query report, exact or heuristic.
+    let query_helps: Vec<(&str, &str)> = diags
+        .iter()
+        .filter(|d| d["rule_code"] == "EFF103" || d["rule_code"] == "EFF113")
+        .map(|d| {
+            (
+                d["rule_code"].as_str().unwrap(),
+                d["help"].as_str().unwrap_or_default(),
+            )
+        })
+        .collect();
+    assert!(
+        query_helps.iter().any(|(code, _)| *code == "EFF103")
+            && query_helps.iter().any(|(code, _)| *code == "EFF113")
+            && query_helps.iter().all(
+                |(_, help)| *help == "batch the queries, or load the data once before the loop"
+            ),
+        "{query_helps:?}"
     );
     // Each implementation's waiting call is named, and related, where it is: `Child.get` reaches
     // `requests.get` through `super().get`, in `Remote.get`.
