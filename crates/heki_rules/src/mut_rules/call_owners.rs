@@ -164,13 +164,14 @@ impl Families {
     }
 }
 
-/// The groups of [`CallTargets::called`] from the targets each candidate of a call matches.
+/// The groups of [`CallTargets::called`] from the targets each candidate of a call matches
+/// (each list ascending).
 fn groups(per_callee: &[Vec<usize>]) -> Vec<Vec<usize>> {
     let mut each = per_callee.iter();
     let mut every: BTreeSet<usize> = each.next().into_iter().flatten().copied().collect();
     let mut union = every.clone();
     for matching in each {
-        every.retain(|i| matching.contains(i));
+        every.retain(|i| matching.binary_search(i).is_ok());
         union.extend(matching);
     }
     if !every.is_empty() {
