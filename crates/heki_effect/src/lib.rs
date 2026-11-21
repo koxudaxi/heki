@@ -1412,8 +1412,8 @@ pub struct ProjectIndex {
 // `heki_ir::walk` that keep per-check state are not, so one stored in the index fails to compile
 // here: their memos live in their owner for one analysis (ADR-017).
 const _: () = {
-    const fn shared<T: Sync>() {}
-    shared::<ProjectIndex>();
+    struct Shared<T: Sync>(std::marker::PhantomData<T>);
+    let _ = Shared::<ProjectIndex>(std::marker::PhantomData);
 };
 
 /// True for `.pyi` typing stubs (prefer the sibling `.py` implementation when both exist).
