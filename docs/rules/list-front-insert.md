@@ -2,13 +2,9 @@
 
 # list-front-insert (OPT121)
 
-Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` (slower code) · Proven-safe suggestion (`--fix --include-size-dependent`)
+Family: Complexity Rewrites (OPT) · Exact · Enabled by default · Severity `warning` (slower code) · Proven-safe suggestion (`--fix --include-size-dependent`)
 
 Size-dependent `q.insert(0, v)` -> `collections.deque`.
-
-!!! note "Heuristic"
-
-    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 50 sampled reports (round 3, 2026-11-21), 84% were right about the code. See [Rule Precision](../precision.md).
 
 ## What it does
 Checks loops that insert at the front of a list, `q.insert(0, v)`, and suggests a

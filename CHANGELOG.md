@@ -56,9 +56,12 @@ release can change rules, configuration keys, diagnostics, and output formats.
   `[tool.heki.lint] heuristic = true` (`--heuristic`) also by default and for every prefix and
   `ALL`, as Ruff's `preview` does. An exact rule's heuristic reports (an `OPT` report whose
   rewrite is not proven) are shown under the same conditions. A contract rule runs when its
-  contract is declared, whatever its certainty. No rule is exact yet: `heki check` with no configuration runs only the contract
-  rules, and `heki check --fix` applies no fix, since `OPT101` and `OPT102` stay heuristic until
-  a measurement certifies them. `MUT202`, which also reports `@lru_cache` / `@cache` results
+  contract is declared, whatever its certainty. The proven tier of the eight `OPT` rewrite rules
+  (`OPT101`-`OPT103`, `OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130`) is exact: a census of
+  every one of its 234 reports on the Stage 0-A corpus, and a check of the 235 of one run on a
+  frozen holdout corpus of 100 packages, found none wrong. `heki check` with no
+  configuration runs these rules and the contract rules and shows the reports whose rewrite is
+  proven safe, and `heki check --fix` applies the proven fixes of `OPT101` and `OPT102`. `MUT202`, which also reports `@lru_cache` / `@cache` results
   without a contract, is selected like the other heuristic rules, so a `readonly-returns`
   contract needs it named or `lint.heuristic = true`. `lint.heuristic = true` restores the rules
   of 0.1; baselines keep their keys.

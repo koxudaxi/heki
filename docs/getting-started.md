@@ -12,9 +12,9 @@ $ heki check --heuristic
 ```
 
 The first command runs the exact rules (hand-checked samples of their reports found none wrong
-about the code) and the rules of the [contracts](configuration.md#contracts) you declare. No rule
-is exact yet, so without a contract it reports nothing for now, and says how many heuristic rules
-it left off. `--heuristic` runs those too; their reports can be wrong about the code, and every
+about the code) and the rules of the [contracts](configuration.md#contracts) you declare. In
+0.2.0 the exact rules are the proven tier of the `OPT` rewrite rules: the reports whose rewrite
+heki proves safe. A text run says how many heuristic rules it left off. `--heuristic` runs those too; their reports can be wrong about the code, and every
 output labels them ([Rule Precision](precision.md)).
 
 heki checks every Python file under the current directory, except the
@@ -52,10 +52,10 @@ app/api.py:5:12: EFF101 (async-blocking-call) [warning, heuristic] `handler` rea
 ## Fix what heki can prove
 
 `--fix` applies the rewrites heki proves safe and always faster (`OPT101`, `OPT102`), and
-`--diff` shows them first. Both rules are heuristic, so they run with `--heuristic`:
+`--diff` shows them first:
 
 ```console
-$ heki check --heuristic --diff
+$ heki check --diff
 --- a/app/report.py
 +++ b/app/report.py
 @@ -1,5 +1,5 @@
