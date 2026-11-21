@@ -127,6 +127,8 @@ def badges(rule: dict) -> str:
         marks.append("≈")
     if rule["activation"] == "opt-in":
         marks.append("🔌")
+    elif rule["activation"] == "selectable":
+        marks.append("➕")
     elif rule["activation"] == "contract":
         marks.append("📜")
     if rule["experimental"]:
@@ -139,6 +141,8 @@ def activation_label(rule: dict) -> str:
         return "Opt-in"
     if rule["activation"] == "contract":
         return "Runs when its contract is declared"
+    if rule["activation"] == "selectable":
+        return "Off by default, selected by its code or a prefix"
     if rule["default_enabled"]:
         return "Enabled by default"
     return "Off by default"
@@ -160,6 +164,9 @@ def rules_index(rules: list[dict], policy: str) -> str:
         "- A heuristic rule runs when `select` / `extend-select` names its code or name. With "
         "`lint.heuristic = true` (`--heuristic`), the heuristic rules that are not opt-in also "
         "run by default and for a prefix or `ALL`.",
+        "- The rules marked ➕ are left off by default: `select` / `extend-select` selects them "
+        "with their code or name, or, while they are exact, with a prefix such as `OPT` or "
+        "`ALL`. `lint.heuristic = true` runs them too.",
         "- The opt-in rules marked 🔌 run only when `select` / `extend-select` names their exact "
         "code or name.",
         "- The contract rules marked 📜 run when their contract is declared, whatever their "
@@ -172,6 +179,8 @@ def rules_index(rules: list[dict], policy: str) -> str:
         "functions a `--profile` dump shows hot (it can be slower for tiny inputs).",
         "- ≈ Heuristic rule: a report can be wrong about the code. Every output labels its "
         "reports `heuristic`.",
+        "- ➕ Selectable rule: right about the code but rarely harmful, so it runs only when "
+        "selected.",
         "- 🔌 Opt-in rule.",
         "- 📜 Contract rule: it reports only what a declared contract asks for.",
         f"- 🧪 Experimental rule. {policy} See [Experimental Features](../experimental.md).",

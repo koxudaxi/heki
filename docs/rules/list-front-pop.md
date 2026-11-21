@@ -2,13 +2,13 @@
 
 # list-front-pop (OPT120)
 
-Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` (slower code) · Proven-safe suggestion (`--fix --include-size-dependent`)
+Family: Complexity Rewrites (OPT) · Heuristic · Off by default, selected by its code or a prefix · Severity `warning` (slower code) · Proven-safe suggestion (`--fix --include-size-dependent`)
 
 Size-dependent `q.pop(0)` / `del q[0]` / `q = q[1:]` -> `collections.deque`.
 
 !!! note "Heuristic"
 
-    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 50 sampled reports (round 3, 2026-11-21), 94% were right about the code. See [Rule Precision](../precision.md).
+    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Once exact, it runs for its prefixes and `ALL` without the key, but still not by default. Of 50 sampled reports (round 3, 2026-11-21), 94% were right about the code. See [Rule Precision](../precision.md).
 
 ## What it does
 Checks loops that remove the first element of a list: `q.pop(0)`, `del q[0]`, and
