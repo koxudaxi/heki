@@ -330,6 +330,23 @@ def path_aliases(n: int) -> Body:
     return Body(("flag", "x"), lines)
 
 
+def merged_package_paths(n: int) -> Body:
+    """Merges each joining the paths of the packages before them and a new package's path."""
+    lines = ["v0 = requests.p0.__path__"]
+    lines += [f"v{i} = v{i - 1} if flag else requests.p{i}.__path__" for i in range(1, n + 1)]
+    return Body(("flag",), [*lines, f"return len(v{n})"])
+
+
+def package_paths_merged_in_functions(n: int) -> str:
+    """Functions each merging the paths of `n` packages, the first one's reaching every merge."""
+    lines = []
+    for f in range(16):
+        lines += [f"def merge{f}(flag):", f"    v0 = requests.f{f}_0.__path__"]
+        lines += [f"    v{i} = v{i - 1} if flag else requests.f{f}_{i}.__path__" for i in range(1, n + 1)]
+        lines += [f"    return len(v{n})", ""]
+    return "\n".join(lines)
+
+
 def wide_hierarchy(n: int) -> str:
     """Many subclasses overriding one method, and as many functions calling it on the base."""
     lines = []
@@ -427,12 +444,19 @@ FAMILIES = [
     Family("with_statements", with_statements),
     Family("attribute_chain", attribute_chain),
     Family("path_aliases", path_aliases),
+    Family("merged_package_paths", merged_package_paths),
     Family("lazy_init_sites", lazy_init_sites, placements=("method",)),
     Family("wide_hierarchy", project=wide_hierarchy, placements=("project",), size=4000),
     Family("helper_chain", project=helper_chain, placements=("project",), size=2000),
     Family("callers_of_one_helper", project=callers_of_one_helper, placements=("project",), size=4000),
     Family(
         "container_subclass_chain", project=container_subclass_chain, placements=("project",), size=1400
+    ),
+    Family(
+        "package_paths_merged_in_functions",
+        project=package_paths_merged_in_functions,
+        placements=("project",),
+        size=2000,
     ),
 ]
 
