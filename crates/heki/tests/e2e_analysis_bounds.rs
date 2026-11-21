@@ -2088,7 +2088,6 @@ fn path_facts_decide_each_region_once() {
     };
     let called =
         |qualname: &str, text: &str| call(qualname, text)["on_every_return"]["called"].clone();
-    assert_eq!(called("body", "db.fetch(0)"), json!({"known": "every"}));
     assert_eq!(called("body", "db.fetch(1)"), json!({"known": "not_every"}));
     assert_eq!(called("body", "db.done()"), json!({"known": "not_every"}));
     assert_eq!(called("tests", "sock.recv()"), json!({"known": "every"}));

@@ -233,8 +233,11 @@ Compound expressions are flattened into **basic instructions in explicit left-to
     exception arises (`KeyboardInterrupt`, `MemoryError`). A load of a module name the module
     body binds once on every path (`ModuleBindings`) or of a real builtin does not raise, nor does
     an attribute load of a member of a module a plain `import` binds once, nor a list or tuple
-    display without unpacking. Attribute loads of other objects, subscripts, set and dict
-    displays, imports, calls, `await`s, and operators do. A handler's type is not matched. A
+    display without unpacking. Attribute loads of other objects (unless the reader finds the
+    attribute on the object's class, `PathReader::attribute_found`), subscripts, set and dict
+    displays, imports, calls, `await`s, and operators do. A method call makes no call until its
+    lookup of the method returns, so where that lookup may raise, the call counts as made only
+    after it. A handler's type is not matched. A
     `with` body's exception goes on past the `with` (its `__exit__` may suppress it) unless the
     reader establishes that no manager of the statement suppresses (`PathReader::exit_suppresses`).
   - `Paths::on_every_return` (a point runs whenever the function returns normally) and
