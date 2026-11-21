@@ -644,9 +644,18 @@ impl<'a, 'u> FnCheck<'a, 'u> {
     }
 
     fn source(&self, inst: &'a Inst) -> Source<'a> {
+        let made_here = |v: VarId| {
+            ownership::made_here(self.copied_from(v), &self.defs, &|i, made_here| {
+                self.source_given(i, made_here)
+            })
+        };
+        self.source_given(inst, &made_here)
+    }
+
+    /// [`ownership::source`] of `inst`, where `made_here` tells the values that hold an object
+    /// the function makes itself.
+    fn source_given(&self, inst: &'a Inst, made_here: &dyn Fn(VarId) -> bool) -> Source<'a> {
         let kb = self.u.cx.kb;
-        let source_of = |i: &'a Inst| self.source(i);
-        let made_here = |v: VarId| ownership::made_here(v, &self.defs, &source_of);
         match &inst.kind {
             InstKind::AttrLoad { .. } if self.getter_call(inst).is_some() => Source::Project,
             InstKind::Call { .. } | InstKind::MethodCall { .. } => {
@@ -655,9 +664,9 @@ impl<'a, 'u> FnCheck<'a, 'u> {
                     .iter()
                     .any(|s| s.constructs.is_some());
                 let callee = self.call_of(inst).map(|c| c.callee);
-                ownership::source(&inst.kind, callee.as_ref(), constructs, kb, &made_here)
+                ownership::source(&inst.kind, callee.as_ref(), constructs, kb, made_here)
             }
-            kind => ownership::source(kind, None, false, kb, &made_here),
+            kind => ownership::source(kind, None, false, kb, made_here),
         }
     }
 

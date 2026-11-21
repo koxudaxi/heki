@@ -577,7 +577,8 @@ which module imports which.
    operator), an element of the operand (an item, `get` / `pop` / `setdefault`, an iteration
    step), an element or the default (`d.get(k, default)`, `getattr(o, n, default)`), or what the
    project callees return. An attribute of an object the function makes itself (through copies,
-   `ownership::made_here`) is an element of that object, of unknown origin. A parameter is
+   `ownership::made_here`, read from the definition alone: whether it makes a new object never
+   depends on its operands) is an element of that object, of unknown origin. A parameter is
    borrowed, `*args` / `**kwargs` are new with borrowed elements, and a method's `self` is its own
    object.
 2. **The summary fact**: `returns_origins` walks back from the returns a run can reach (plain

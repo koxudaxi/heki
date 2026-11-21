@@ -121,8 +121,9 @@ each of its arguments, a loop carrying a long chain of assignments in reverse, a
 aliases of many `self` containers, a chain of merges of many `self` containers, a loop over a
 generator whose body makes many calls, loops whose bodies hold many conditional blocks one after
 another, a function consuming a generator's result many times in a row, methods changing a typed
-dict of `self` thousands of times, and a method storing under a key after each of hundreds of tests
-that such a dict holds the key.
+dict of `self` thousands of times, a method storing under a key after each of hundreds of tests that
+such a dict holds the key, and a function reading attributes down a chain ten thousand deep (`x =
+x.child`).
 
 A change to the IR builder, a walk, a fixpoint, or a rule's state is also run over a large
 corpus of real projects before it is merged, every run under a memory cap and a timeout. No
