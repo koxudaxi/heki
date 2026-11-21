@@ -12,6 +12,12 @@ release can change rules, configuration keys, diagnostics, and output formats.
 - The `OPT` rules default to severity `warning` instead of `error`: they report slower code,
   not wrong code. The exit code does not change (a warning still makes `heki check` exit 1),
   only the output label and the SARIF level. `[tool.heki.lint.severity]` still overrides it.
+- `EFF102` and `EFF103` also report the function a builtin calls once per item: the function
+  handed to `map`, `filter`, `itertools.starmap`, `itertools.filterfalse`, and
+  `functools.reduce`, and the `key` of `sorted`, `list.sort`, `min`, `max`, and
+  `itertools.groupby` (`sorted(users, key=lambda u: score(conn, u))`), when the items are not a
+  fixed number. Its body runs at the call for every rule, so `EFF101` sees its blocking calls
+  too. A `functools.partial` handed to such a builtin is followed to the function it calls.
 
 ### Fixed
 

@@ -957,6 +957,12 @@ pub fn loop_bit(lp: &NaturalLoop) -> u64 {
     1u64 << lp.depth.saturating_sub(1).min(63)
 }
 
+/// The bit of the loop a builtin runs a callable in once per item (`Runner::PerItem`), at a
+/// call inside `depth` loops: it is one level deeper than every loop around the call.
+pub fn per_item_bit(depth: u16) -> u64 {
+    1u64 << depth.min(63)
+}
+
 /// Whether `var` may come from an object constructed inside `lp` (a constructor call there).
 fn fresh_in_loop(cx: &GuardInputs<'_, '_>, var: VarId, lp: &NaturalLoop) -> bool {
     let mut inside: FxHashSet<VarId> = FxHashSet::default();

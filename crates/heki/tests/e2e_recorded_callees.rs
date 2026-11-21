@@ -153,3 +153,41 @@ async def on_worker_step(items):
 fn a_callable_run_on_a_worker_takes_the_arguments_after_it() {
     check_marks("worker_callees", &[("pkg/worker.py", WORKER)], &["DATA101"]);
 }
+
+/// A worker's callable binds the arguments after it in the call (`MUT202` reads them so): a
+/// `functools.partial` handed to an offloading API is not followed, as the arguments it holds
+/// would come first.
+const WORKER_PARTIAL: &str = r#"import asyncio
+import functools
+from functools import lru_cache
+
+
+@lru_cache
+def cached():
+    return [1, 2]
+
+
+def change_first(first, second):
+    first.append(1)
+
+
+async def held_list_changed():
+    await asyncio.to_thread(functools.partial(change_first, []), cached())
+
+
+async def list_after_the_callable():
+    await asyncio.to_thread(change_first, [], cached())
+
+
+async def cached_list_changed():
+    await asyncio.to_thread(change_first, cached(), [])  # MUT202
+"#;
+
+#[test]
+fn a_partial_run_on_a_worker_is_not_bound_to_the_arguments_after_it() {
+    check_marks(
+        "worker_partial",
+        &[("pkg/worker_partial.py", WORKER_PARTIAL)],
+        &["MUT202"],
+    );
+}

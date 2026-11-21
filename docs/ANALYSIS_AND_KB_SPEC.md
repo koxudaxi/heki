@@ -409,7 +409,29 @@ changes to shared objects (`MUT202`, which reads the offloading call the same wa
 `EFF201` does not enter it. A callable a Layer 2 `sync_facade_arg` API runs
 (`AsyncSession.run_sync(fn)`) gets a site with `Runner::SyncFacade`: it runs on the caller's
 thread, so only its `blocking_db` (the database I/O through the synchronous facade it receives,
-awaited for it) is dropped; its arguments are left unbound.
+awaited for it) is dropped; its arguments are left unbound. The callable a builtin calls once
+per item (`consumption::per_item_callable`: the function handed to `map`, `filter`,
+`itertools.starmap`, `itertools.filterfalse`, and `functools.reduce`, and the `key` of `sorted`,
+`list.sort`, `min`, `max`, and `itertools.groupby`) gets a site with `Runner::PerItem` at the
+builtin's call: every fact of its body runs there, on the caller's thread (the lazy builtins run
+it where their result is consumed, almost always where they are written, as for a generator
+expression). Its parameters after the arguments a partial holds take the items, which are no
+value of the caller, and the ones after the items get their literal defaults when the builtin
+fixes how many it passes (one item, one per iterable of `map`, or the accumulated value and an
+item for `reduce`; not the elements of a `starmap` item); what the builtin returns is never what
+the callable returns.
+`CallSite::per_item` names the builtin and the arguments it takes the items from, and `EFF102` /
+`EFF103` count the site as inside one more loop, as long as the items, which they size as a
+`for` loop's iterable (`Sizes::items_data_sized`); the receiver, the arguments a partial holds,
+and the items stay the same objects through that loop (`ArgBinding::stays_in_loops`), so a lazy
+initialization on them runs once per object. A class handed to such a builtin is constructed per
+item, which is not modeled, and a lambda the function makes next to another lambda is not
+followed: every lambda of a function is `<function>.<locals>.<lambda>`, one key whose summary
+holds the facts of all of them. A builtin calling a
+callable per item and a sync-facade API resolve a `functools.partial` object to the function it
+calls, the arguments it holds binding the leading parameters (`partial(f, a)` handed to `map`
+calls `f(a, item)`); an offloading API's partial is not followed, since `MUT202` matches a
+worker's site to the arguments after the callable again (`site_call`).
 
 Early Cutoff compares summaries without their source positions, so an edit that only moves code
 changes no caller's facts. The positions callers copy (call chains, write sites) are still
@@ -665,7 +687,9 @@ deep = true   # changes to attributes and nested containers below are forbidden 
    - **`EFF101`**: calls with `is_awaited == true` excluded; `subprocess.Popen(...)` itself (a
      non-blocking spawn) excluded, while `.wait()` / `.communicate()` stay blocking.
    - **`EFF102`**: `for.iter` headers excluded; reconnects in `DaemonPolling` loops relaxed; a local
-     dict named `requests` is not mistaken for the package (type and name resolution).
+     dict named `requests` is not mistaken for the package (type and name resolution). A builtin
+     calling a function once per item (`map(fetch, urls)`, `sorted(xs, key=f)`) is a loop over
+     its items, relaxed as a `for` loop over the same iterable.
    - **`EFF103`**: `for.iter` headers excluded; a DB-API `execute` / `executemany` /
      `executescript` call whose literal statement is DDL (`CREATE` / `ALTER` / `DROP` /
      `PRAGMA`) records no `DbQuery` where it runs (it still blocks), so helpers running DDL run
