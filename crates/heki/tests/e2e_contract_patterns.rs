@@ -184,6 +184,14 @@ fn a_module_part_names_the_module_without_its_submodules() {
         callers("\"pkg.sub:decide\"", "allowed-callers = [\"pkg:*\"]"),
         vec![]
     );
+    // Targets sharing a glob module part.
+    assert_eq!(
+        callers(
+            "\"p*:decide\", \"p*:missing\"",
+            "allowed-callers = [\"pkg:*\"]"
+        ),
+        outside_pkg("p*:decide")
+    );
     // A module part naming no project module is no error; it names nothing.
     let mut everyone = vec![d(PKG_PY, 12, "root_user", t)];
     everyone.extend(outside_pkg(t));
