@@ -2,9 +2,13 @@
 
 # call-owner-violation (MUT204)
 
-Family: Mutation & State (MUT) · Enabled by default · Severity `error` · No automatic fix
+Family: Mutation & State (MUT) · Heuristic · Runs when its contract is declared · Severity `error` (a bug) · No automatic fix
 
 Calling a guarded function or method, or constructing a guarded class (directly, via a bound method, `getattr`, or a helper), outside declared `call-owners`.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when its contract is declared. It has not been measured yet. See [Rule Precision](../precision.md).
 
 ## What it does
 Checks calls of functions and methods, and constructions of classes, that a
@@ -56,6 +60,21 @@ coroutine's where it is awaited. Not reported either:
 - a target calling a target of the same contract (`remove_reference` calling
   `self.replace_reference(None)`, an override calling `super().replace_reference(...)`): the
   guarded operation is checked where it is called, so what it does inside is part of it.
+
+## What a report states
+
+A report states that the function calls a function or method, or constructs a class, that a
+`call-owners` contract reserves, outside the contract's call owners.
+
+Its premises:
+
+- **Target**: the receiver or the callee is an instance of a class the contract names, or of a
+  subclass, by construction or annotation (assumption R2). Open: an alias bound on one path is
+  enough.
+- **Outside the owners**: the function is not in the allowed modules and classes, nor runs only
+  inside allowed contexts. Established from the contract.
+- **Through helpers**: a helper's write, read, or call counts at its caller. Open: one path of the
+  helper is enough.
 
 ## Why is this bad?
 Some operations keep invariants only when one component runs them: a store that updates its

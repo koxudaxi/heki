@@ -8,8 +8,8 @@
 //! watcher report it (`workspace/didChangeWatchedFiles`). After it, the harness waits until the
 //! server is idle ([`Lsp::settle`]: `heki/stats` reports no work in flight, and every
 //! publication it counts has arrived; no sleeps) and compares, file by file, the range, code,
-//! severity, message, related locations, and help (the last related entry, at the diagnostic's
-//! own range) of every diagnostic. A step also names diagnostics
+//! severity, certainty, message (labelled for a heuristic rule), related locations, and help (the
+//! last related entry, at the diagnostic's own range) of every diagnostic. A step also names diagnostics
 //! the CLI must (or must not) report, so it exercises what it describes, and a step marked
 //! `cutoff` must stop at the edited files (Early Cutoff). A new step is a few lines.
 
@@ -1974,8 +1974,8 @@ fn steps_hash_writers() -> Vec<Step> {
 }
 
 /// `MUT112`: what a function returns reaches its callers through a wrapper in another module
-/// (`EffectSummary::returns_origins`), also when the wrapper hands it a call's result
-/// (`EffectSummary::returns_results`), and a store in `self.<attr>` follows the in-place changes
+/// (`EffectSummary::return_origins`), also when the wrapper hands it a call's result
+/// (`ReturnOrigins::returned`), and a store in `self.<attr>` follows the in-place changes
 /// that the methods of its class family make in other modules (`heki_rules::family_readers`).
 fn steps_mut112() -> Vec<Step> {
     vec![
@@ -2650,6 +2650,7 @@ struct Diag {
     range: Range,
     code: String,
     severity: u64,
+    certainty: String,
     message: String,
     related: Vec<(Range, String)>,
 }
@@ -2710,7 +2711,13 @@ fn cli(p: &Project) -> BTreeMap<String, Vec<Diag>> {
                 "warning" => 2,
                 other => panic!("severity {other}"),
             },
-            message: d["message"].as_str().unwrap().to_owned(),
+            certainty: d["certainty"].as_str().unwrap().to_owned(),
+            // The server labels a heuristic rule's message as the text formats do.
+            message: match d["certainty"].as_str().unwrap() {
+                "heuristic" => format!("{} [heuristic]", d["message"].as_str().unwrap()),
+                "exact" => d["message"].as_str().unwrap().to_owned(),
+                other => panic!("certainty {other}"),
+            },
             related,
         });
     }
@@ -2741,6 +2748,7 @@ fn published(lsp: &Lsp, root: &str) -> BTreeMap<String, Vec<Diag>> {
                 range: lsp_range(root, &json!(u), &d["range"]),
                 code: d["code"].as_str().unwrap().to_owned(),
                 severity: d["severity"].as_u64().unwrap(),
+                certainty: d["data"]["certainty"].as_str().unwrap().to_owned(),
                 message: d["message"].as_str().unwrap().to_owned(),
                 related: d["relatedInformation"]
                     .as_array()

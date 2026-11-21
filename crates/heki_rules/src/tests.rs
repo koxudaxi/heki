@@ -70,8 +70,7 @@ fn check_with(files: &[(&str, &str)], config: &HekiConfig, select: &[&str]) -> V
         })
         .collect();
     let index = analyze_project(&inputs, &kb);
-    let select: Vec<String> = select.iter().map(|s| (*s).to_owned()).collect();
-    let selection = RuleSelection::resolve(&config.lint, &select, &[], &[]).unwrap();
+    let selection = RuleSelection::resolve(&config.lint, &with_heuristic_rules(select)).unwrap();
     let soundness_kb = EffectiveSoundnessKb::load_builtin(PythonVersion::PY315).unwrap();
     let extras = CheckExtras {
         soundness_kb: &soundness_kb,
@@ -81,6 +80,16 @@ fn check_with(files: &[(&str, &str)], config: &HekiConfig, select: &[&str]) -> V
         text_of: None,
     };
     check_project(&units, config, &kb, &index, &selection, &extras).unwrap()
+}
+
+/// `select` with `lint.heuristic`: the rules tested here are heuristic, and without it they run
+/// only when named.
+fn with_heuristic_rules(select: &[&str]) -> Selectors {
+    Selectors {
+        select: select.iter().map(|s| (*s).to_owned()).collect(),
+        heuristic: Some(true),
+        ..Selectors::default()
+    }
 }
 
 fn check(src: &str, config: &HekiConfig) -> Vec<Diagnostic> {
@@ -450,7 +459,7 @@ fn mut201_glob_writers_and_bad_targets() {
         &kb,
     );
     let config = owners(&["nodot"], &[]);
-    let sel = RuleSelection::resolve(&config.lint, &[], &[], &[]).unwrap();
+    let sel = RuleSelection::resolve(&config.lint, &with_heuristic_rules(&[])).unwrap();
     assert!(matches!(
         check_project(
             std::slice::from_ref(&unit),
@@ -884,9 +893,8 @@ fn check_against(checked: &[Built], indexed: &[Built], select: &[&str]) -> Vec<D
         &kb,
     )
     .project_decls();
-    let select: Vec<String> = select.iter().map(|s| (*s).to_owned()).collect();
     let config = HekiConfig::default();
-    let selection = RuleSelection::resolve(&config.lint, &select, &[], &[]).unwrap();
+    let selection = RuleSelection::resolve(&config.lint, &with_heuristic_rules(select)).unwrap();
     let soundness_kb = EffectiveSoundnessKb::load_builtin(PythonVersion::PY315).unwrap();
     let extras = CheckExtras {
         soundness_kb: &soundness_kb,
