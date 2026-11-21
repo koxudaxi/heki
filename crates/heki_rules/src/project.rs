@@ -6,7 +6,7 @@ use crate::ModuleUnit;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use heki_ast::{LineIndex, Span};
 use heki_diagnostics::{Diagnostic, InlineIgnores};
-use heki_effect::{ModuleInput, ModuleLayout, module_name_for_path};
+use heki_effect::{ModuleInput, ModuleLayout, UnreadModule, module_name_for_path};
 use heki_env::{ConfigError, HekiConfig, PythonVersion, RuntimeProfile};
 use heki_ir::ModuleIr;
 use heki_kb::{EcosystemPatch, EffectiveEcosystemKb, EffectiveSoundnessKb, KbError};
@@ -335,15 +335,7 @@ pub fn parse_source(
             message: format!("syntax error: {} ({} error(s))", first.message, errs.len()),
         }
     })?;
-    let rel = rel_posix(path, root);
-    let (module_name, is_package) = module_name_for_path(Path::new(&rel), layout.src)
-        .unwrap_or_else(|| {
-            let stem = path
-                .file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            (stem, false)
-        });
+    let (rel, module_name, is_package) = module_identity(path, root, layout);
     let semantic = heki_semantic::analyze_module(&parsed, &source, runtime);
     let ir = heki_ir::build_module_ir(&parsed, &source, &semantic, runtime);
     Ok(ParsedFile {
@@ -357,6 +349,31 @@ pub fn parse_source(
         semantic,
         ir,
     })
+}
+
+/// The project-relative POSIX path of the file at `path`, the module it defines, and whether
+/// that module is a package. A file outside a module layout defines the module of its stem.
+fn module_identity(path: &Path, root: &Path, layout: ModuleLayout) -> (String, String, bool) {
+    let rel = rel_posix(path, root);
+    let (module_name, is_package) = module_name_for_path(Path::new(&rel), layout.src)
+        .unwrap_or_else(|| {
+            let stem = path
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            (stem, false)
+        });
+    (rel, module_name, is_package)
+}
+
+/// The file at `path` that heki could not read or parse, as the module it would define.
+pub fn unread_module(path: &Path, root: &Path, layout: ModuleLayout) -> UnreadModule {
+    let (_, module_name, is_package) = module_identity(path, root, layout);
+    UnreadModule {
+        path: display_path(path),
+        module_name,
+        is_package,
+    }
 }
 
 /// Where a run looks for files and configuration.
@@ -459,6 +476,8 @@ pub struct Project {
     pub env: ProjectEnv,
     pub files: Vec<ParsedFile>,
     pub errors: Vec<FileError>,
+    /// The files of `errors` that heki could not read or parse: modules it knows nothing about.
+    pub unread: Vec<UnreadModule>,
 }
 
 impl Project {
@@ -493,13 +512,22 @@ impl Project {
             .collect();
         let mut files = Vec::new();
         let mut errors = Vec::new();
-        for r in results {
+        let mut unread = Vec::new();
+        for (r, p) in results.into_iter().zip(&found) {
             match r {
-                Ok(p) => files.push(p),
-                Err(e) => errors.push(e),
+                Ok(parsed) => files.push(parsed),
+                Err(e) => {
+                    unread.push(unread_module(p, &env.root, env.layout));
+                    errors.push(e);
+                }
             }
         }
-        Ok(Self { env, files, errors })
+        Ok(Self {
+            env,
+            files,
+            errors,
+            unread,
+        })
     }
 
     pub fn inputs(&self) -> Vec<ModuleInput<'_>> {

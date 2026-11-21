@@ -4,6 +4,7 @@
 mod common;
 
 use common::Project;
+use serde_json::{Value, json};
 
 /// `import time` + a blocking helper.
 const BLOCKING_WAIT: &str = "import time\n\n\ndef wait():\n    time.sleep(1)\n";
@@ -97,6 +98,135 @@ fn a_typing_stub_importing_builtins_patches_nothing() {
     // The same import in a module that runs may rebind `list`.
     p.write("m.py", "import builtins\n");
     assert!(!concise(&p).1.contains("OPT101"));
+}
+
+#[test]
+fn a_file_that_does_not_parse_is_reported_and_the_others_are_checked() {
+    // A Python 2 file cannot run, so nothing it would do is assumed: the other files are checked
+    // as usual, its `builtins` patch blocks no fix, and the run fails with exit code 2.
+    let p = Project::new("disc_syntax_error_file");
+    p.write("pkg/__init__.py", "")
+        .write(
+            "pkg/api.py",
+            "import time\n\n\nasync def go():\n    time.sleep(1)\n",
+        )
+        .write(
+            "pkg/build.py",
+            "def build(items):\n    xs = []\n    for item in items:\n        xs = xs + [item]\n    return xs\n",
+        )
+        .write(
+            "pkg/py2.py",
+            "import builtins\nbuiltins.list = tuple\nprint \"done\"\n",
+        );
+    std::fs::write(p.dir.join("pkg/bytes.py"), b"x = '\xff'\n").unwrap();
+    let (code, stdout, stderr) = p.check(&["--output-format", "concise"]);
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stdout.contains("pkg/api.py:5:5: EFF101 "), "{stdout}");
+    assert!(stdout.contains("pkg/build.py:4:9: OPT101 "), "{stdout}");
+    assert!(
+        stderr.contains("error: pkg/py2.py:3:7: syntax error: "),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("error: pkg/bytes.py: stream did not contain valid UTF-8"),
+        "{stderr}"
+    );
+    // JSON holds the diagnostics only; SARIF also carries the file, as an error notification
+    // of a run that did not execute successfully.
+    let (_, stdout, _) = p.check(&["--output-format", "json"]);
+    let diags: Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(diags.as_array().map(Vec::len), Some(2), "{stdout}");
+    let (code, stdout, _) = p.check(&["--output-format", "sarif"]);
+    assert_eq!(code, 2);
+    let sarif: Value = serde_json::from_str(&stdout).unwrap();
+    let run = &sarif["runs"][0];
+    assert_eq!(run["results"].as_array().map(Vec::len), Some(2), "{stdout}");
+    let invocation = &run["invocations"][0];
+    assert_eq!(invocation["executionSuccessful"], false, "{stdout}");
+    // The unreadable file has no position.
+    assert_eq!(
+        invocation["toolExecutionNotifications"][0]["locations"][0],
+        json!({ "physicalLocation": { "artifactLocation": { "uri": "pkg/bytes.py" } } })
+    );
+    let notification = &invocation["toolExecutionNotifications"][1];
+    assert_eq!(notification["level"], "error");
+    assert!(
+        notification["message"]["text"]
+            .as_str()
+            .is_some_and(|m| m.starts_with("syntax error: ")),
+        "{stdout}"
+    );
+    let place = &notification["locations"][0]["physicalLocation"];
+    assert_eq!(place["artifactLocation"]["uri"], "pkg/py2.py");
+    assert_eq!(place["region"], json!({ "startLine": 3, "startColumn": 7 }));
+    let (code, _, stderr) = p.check(&["--fix"]);
+    assert_eq!(code, 2, "{stderr}");
+    assert!(p.read("pkg/build.py").contains("xs.append(item)"));
+    // Once every file reads and parses, the run executes successfully.
+    p.write("pkg/py2.py", "print(\"done\")\n")
+        .write("pkg/bytes.py", "x = 1\n");
+    let (code, stdout, _) = p.check(&["--output-format", "sarif"]);
+    assert_eq!(code, 1);
+    let sarif: Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(
+        sarif["runs"][0]["invocations"][0],
+        json!({ "executionSuccessful": true, "toolExecutionNotifications": [] })
+    );
+}
+
+#[test]
+fn a_module_that_does_not_parse_leaves_the_names_under_it_unresolved() {
+    // A project module owns its name over a module the catalog lists, also when it does not
+    // parse: then the names under it are unknown, never the catalog's.
+    let p = Project::new("disc_unread_module");
+    p.write(
+        "api.py",
+        "import requests\n\n\nclass Client(requests.Session):\n    pass\n\n\nasync def fetch(url):\n    return requests.get(url)\n\n\nasync def open_session(url):\n    return requests.Session().get(url)\n\n\nasync def derived(url):\n    return Client().get(url)\n",
+    );
+    let (code, stdout) = concise(&p);
+    assert_eq!(code, 1);
+    for line in [9, 13, 17] {
+        assert!(
+            stdout.contains(&format!("api.py:{line}:12: EFF101 ")),
+            "{stdout}"
+        );
+    }
+    p.write("requests.py", "def get(url):\n    return url\n");
+    assert!(!concise(&p).1.contains("api.py:9:12: "));
+    p.write(
+        "requests.py",
+        "def get(url):\n    return url\nprint \"done\"\n",
+    );
+    let (code, stdout, stderr) = p.check(&["--output-format", "concise"]);
+    assert_eq!((code, stdout.as_str()), (2, ""), "{stderr}");
+    assert!(
+        stderr.contains("error: requests.py:3:7: syntax error: "),
+        "{stderr}"
+    );
+    // A name imported from a project module that does not parse resolves to nothing either.
+    std::fs::remove_file(p.dir.join("requests.py")).unwrap();
+    std::fs::remove_file(p.dir.join("api.py")).unwrap();
+    let net = "import httpx\n\n\ndef pull(url):\n    return httpx.get(url)\n";
+    p.write("pkg/__init__.py", "")
+        .write("pkg/net.py", net)
+        .write(
+            "pkg/use.py",
+            "from pkg.net import pull\n\n\nasync def go(url):\n    return pull(url)\n",
+        );
+    assert!(concise(&p).1.contains("pkg/use.py:5:12: EFF101 "));
+    p.write("pkg/net.py", &format!("{net}print \"done\"\n"));
+    let (code, stdout, stderr) = p.check(&["--output-format", "concise"]);
+    assert_eq!((code, stdout.as_str()), (2, ""), "{stderr}");
+    // So is a class of it that an annotation names: iterating its instance runs no query.
+    std::fs::remove_dir_all(p.dir.join("pkg")).unwrap();
+    p.write(
+        "rows.py",
+        "import sqlalchemy.orm\n\n\nasync def rows(q: sqlalchemy.orm.Query):\n    for row in q:\n        pass\n",
+    );
+    assert!(concise(&p).1.contains("rows.py:5:16: EFF101 "));
+    p.write("sqlalchemy/orm.py", "print \"done\"\n");
+    let (code, stdout, stderr) = p.check(&["--output-format", "concise"]);
+    assert_eq!((code, stdout.as_str()), (2, ""), "{stderr}");
 }
 
 #[test]
