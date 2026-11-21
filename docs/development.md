@@ -108,22 +108,23 @@ chain of copies, a long chain of aliases of a class with an attribute store thro
 alias, a class with thousands of subclasses whose class constant as many functions read on an
 instance, a strict `read-owners` target on such a class that as many functions read on an object of
 unknown class, as many calls of a method of such a class that a call target naming no class names, a
-module binding thousands of names each to an attribute of the one before, a function making twenty
-thousand calls of eight operands each, a helper that types nothing making thousands of strict
-accesses of one name that one caller calls as many times, a helper that types nothing reading,
-calling, or writing one strict target name thousands of times, which a caller calls as many times,
-many `is` tests each followed by a conditional expression on the tested parameter, many branches on
-a long chain of copies of one `is` test, a long chain of returned calls each handed the previous
-call's result as two of its arguments, a long chain of returned aliases each appended to one list or
-to a new list of its own, a long chain of conditional expressions each choosing between a call of
-the previous value and the value, one returned call handed the last of a long chain of item reads as
-each of its arguments, a loop carrying a long chain of assignments in reverse, a loop rotating
-aliases of many `self` containers, a chain of merges of many `self` containers, a loop over a
-generator whose body makes many calls, loops whose bodies hold many conditional blocks one after
-another, a function consuming a generator's result many times in a row, methods changing a typed
-dict of `self` thousands of times, a method storing under a key after each of hundreds of tests that
-such a dict holds the key, and a function reading attributes down a chain ten thousand deep (`x =
-x.child`).
+module binding thousands of names each to an attribute of the one before, a module binding thousands
+of names each to the one before, a method returning one of thousands of copies of an attribute
+behind as many tests, a function making twenty thousand calls of eight operands each, a helper that
+types nothing making thousands of strict accesses of one name that one caller calls as many times, a
+helper that types nothing reading, calling, or writing one strict target name thousands of times,
+which a caller calls as many times, many `is` tests each followed by a conditional expression on the
+tested parameter, many branches on a long chain of copies of one `is` test, a long chain of returned
+calls each handed the previous call's result as two of its arguments, a long chain of returned
+aliases each appended to one list or to a new list of its own, a long chain of conditional
+expressions each choosing between a call of the previous value and the value, one returned call
+handed the last of a long chain of item reads as each of its arguments, a loop carrying a long chain
+of assignments in reverse, a loop rotating aliases of many `self` containers, a chain of merges of
+many `self` containers, a loop over a generator whose body makes many calls, loops whose bodies hold
+many conditional blocks one after another, a function consuming a generator's result many times in a
+row, methods changing a typed dict of `self` thousands of times, a method storing under a key after
+each of hundreds of tests that such a dict holds the key, and a function reading attributes down a
+chain ten thousand deep (`x = x.child`).
 
 A change to the IR builder, a walk, a fixpoint, or a rule's state is also run over a large
 corpus of real projects before it is merged, every run under a memory cap and a timeout. No
