@@ -35,16 +35,18 @@ pub(crate) struct CallTargetPattern {
 }
 
 impl CallTargetPattern {
-    /// What `site` calls of the target: the class it constructs, or the candidate the target
-    /// names (a group's targets each name one of the candidates).
-    fn called_at(&self, site: &CallSite) -> String {
-        site.constructs.clone().unwrap_or_else(|| {
-            site.project_callees()
+    /// What `site` calls of the target: the class it constructs, or every candidate the target
+    /// names.
+    fn called_at(&self, site: &CallSite) -> Vec<String> {
+        match &site.constructs {
+            Some(class) => vec![class.clone()],
+            None => site
+                .project_callees()
                 .iter()
-                .find(|bc| self.functions.matches(&bc.callee))
+                .filter(|bc| self.functions.matches(&bc.callee))
                 .map(|bc| bc.callee.fqn())
-                .unwrap_or_default()
-        })
+                .collect(),
+        }
     }
 
     /// Whether calling `name` on an instance of the project class `class` may call the target:
@@ -171,23 +173,27 @@ impl Families {
 
 /// The configured texts of a group of [`called_targets`]: the diagnostic target (`A.reset|B.reset`)
 /// and the message's name of what is called (``A.reset` or `B.reset``). With the call `site`,
-/// a glob target is named by the function or class the site calls ([`super::matched_name`]);
-/// an `EFF201` report stands for every site of its target and names the target.
+/// a glob target is named by the functions or the class the site calls of it
+/// ([`super::names_members`]); an `EFF201` report stands for every site of its target and
+/// names the target.
 pub(crate) fn group_texts(
     targets: &[CallTargetPattern],
     group: &[usize],
     site: Option<&CallSite>,
 ) -> (String, String) {
     let texts: Vec<&str> = group.iter().map(|&i| targets[i].text.as_str()).collect();
-    let mut named: Vec<String> = group
-        .iter()
-        .map(|&i| match site {
-            Some(site) => super::matched_name(&targets[i].text, || targets[i].called_at(site)),
-            None => targets[i].text.clone(),
-        })
-        .map(|n| format!("`{n}`"))
-        .collect();
-    named.dedup();
+    let mut named: Vec<String> = Vec::new();
+    for &i in group {
+        let names = match site {
+            Some(site) if super::names_members(&targets[i].text) => targets[i].called_at(site),
+            _ => vec![targets[i].text.clone()],
+        };
+        for name in names.into_iter().map(|n| format!("`{n}`")) {
+            if !named.contains(&name) {
+                named.push(name);
+            }
+        }
+    }
     (texts.join("|"), named.join(" or "))
 }
 

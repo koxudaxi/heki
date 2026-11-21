@@ -1542,13 +1542,17 @@ pub(crate) struct MergedReports<'u> {
 /// The name a report gives the target an access matched: the configured text, or, for a glob
 /// target, the member the access reaches (`pkg.types.DataType._flag` for `pkg.*._*`).
 pub(crate) fn matched_name(text: &str, member: impl FnOnce() -> String) -> String {
-    // The key of an entry target (`Class.attr["key"]`) is no glob.
-    let pattern = split_item(text).map_or(text, |(base, _)| base);
-    if has_glob_syntax(pattern) {
+    if names_members(text) {
         member()
     } else {
         text.to_owned()
     }
+}
+
+/// Whether a report of the target `text` names the members it matched ([`matched_name`]): it
+/// is a glob (the key of an entry target, `Class.attr["key"]`, is no glob).
+pub(crate) fn names_members(text: &str) -> bool {
+    has_glob_syntax(split_item(text).map_or(text, |(base, _)| base))
 }
 
 struct MergedReport<'u> {
