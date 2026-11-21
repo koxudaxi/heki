@@ -803,7 +803,7 @@ struct Boundary<'r> {
 }
 
 /// Whether a pattern names `key`, its qualname, or a module / class / function containing it.
-fn names_function(patterns: &[DottedPattern], key: &FuncKey) -> bool {
+pub(crate) fn names_function(patterns: &[DottedPattern], key: &FuncKey) -> bool {
     let fqn = key.fqn();
     patterns.iter().any(|p| p.names_within(&fqn, &key.qualname))
 }

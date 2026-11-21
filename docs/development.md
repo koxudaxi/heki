@@ -221,8 +221,10 @@ origins of a chain of thousands of wrappers, of a list filled by appends in a th
 a phi of sixty branches each choosing a different parameter, and thousands of `call-owners` targets,
 in one contract or in as many contracts, and thousands of references to a `call-owners` target that
 a long chain of phis carries to one `return`, an argument handed down through thousands of functions
-of one module to the one that changes it, and thousands of reports whose call chains enter one
-module.
+of one module to the one that changes it, thousands of reports whose call chains enter one module,
+the callers of the bottom of a lattice of calls thirty levels deep, the chains `heki inspect` walks
+down thousands of calls of one module, a value chosen among a thousand module globals before it is
+changed, and thousands of calls handing a global to a helper that changes it.
 
 A change to the IR builder, a walk, a fixpoint, or a rule's state is also run over a large
 corpus of real projects before it is merged, every run under a memory cap and a timeout. No

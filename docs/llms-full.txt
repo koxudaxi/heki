@@ -1918,6 +1918,7 @@ Commands:
   rule         Explain a rule, its Proof Obligations, and counterexamples (`ruff rule` style) [alias: explain]
   snapshot     Manage interprocedural effect summary snapshots (`MUT103`)
   assumptions  List Assumption A1 hazards (`eval`, `exec`, `locals()`, frame introspection, functions too large to model) in a project
+  inspect      Experimental: what heki knows about one function (its effects, what it changes, keeps, and returns, whether it is pure, its callers, reports, and contracts)
   help         Print this message or the help of the given subcommand(s)
 
 Options:
@@ -2040,6 +2041,44 @@ Options:
           Target Python version (`py311`, `py312`, `py313`, `py314`, `py315`)
       --json
           Output machine-readable JSON
+  -h, --help
+          Print help
+```
+
+## `heki inspect`
+
+```text
+Experimental: what heki knows about one function (its effects, what it changes, keeps, and returns, whether it is pure, its callers, reports, and contracts)
+
+Usage: heki inspect [OPTIONS] <SYMBOL> [PATHS]...
+
+Arguments:
+  <SYMBOL>    A dotted name (`pkg.mod.Class.method`, a dotted suffix such as `Class.method`, or a glob), `path.py:LINE`, or `path.py::NAME`
+  [PATHS]...  The project to analyze, as for `heki check` [default: .]
+
+Options:
+      --output-format <OUTPUT_FORMAT>
+          `text`, or `json` [default: text] [possible values: text, json]
+      --callers
+          List the callers transitively, and the reports above the function
+      --depth <DEPTH>
+          How many caller levels `--callers` lists [default: 3]
+      --select <SELECT>
+          Comma-separated rule codes, prefixes, or slugs to enable
+      --extend-select <EXTEND_SELECT>
+          Additional rules to enable on top of defaults/config
+      --ignore <IGNORE>
+          Comma-separated rule codes or slugs to ignore
+      --heuristic
+          Also run the heuristic rules, whose reports can be wrong about the code, by default and for every prefix and `ALL` (`lint.heuristic = true`)
+      --no-heuristic
+          Run a heuristic rule only when its code or name is selected (`lint.heuristic = false`)
+      --config <CONFIG>
+          Explicit configuration file: a `pyproject.toml` (its `[tool.heki]` table) or a file with the keys at its top level, like `heki.toml`
+      --target-version <TARGET_VERSION>
+          Target Python version (`py311`, `py312`, `py313`, `py314`, `py315`)
+      --baseline <BASELINE>
+          Ratchet baseline TOML file (line-number-independent)
   -h, --help
           Print help
 ```
@@ -2336,6 +2375,7 @@ An experimental rule is never enabled by default: it runs only when `select` or 
 | ID | Kind | Target | Since | Tracking |
 | -- | ---- | ------ | ----- | -------- |
 | `cli-option.profile` | cli-option | `heki check --profile` | 0.1.1 | - |
+| `command.inspect` | command | `heki inspect` | 0.2.1 | - |
 | `rule.EFF109` | rule | [`EFF109`](https://heki.koxudaxi.dev/rules/lock-reacquired-while-held/) | 0.2.1 | - |
 | `rule.EFF110` | rule | [`EFF110`](https://heki.koxudaxi.dev/rules/exclusive-object-fanout/) | 0.2.1 | - |
 | `rule.MUT101` | rule | [`MUT101`](https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/) | 0.1.0 | - |
@@ -2350,6 +2390,14 @@ An experimental rule is never enabled by default: it runs only when `select` or 
 - **Since:** 0.1.1
 
 It reads the output of CPython 3.15's sampling profiler, and that format can still change.
+
+## `command.inspect`
+
+- **Kind:** command
+- **Target:** `heki inspect`
+- **Since:** 0.2.1
+
+The facts it shows, its purity verdict, and its JSON object can still change as heki's summaries close gaps; the object's `version` changes when a field is removed or changes meaning.
 
 ## `rule.EFF109`
 
@@ -2590,9 +2638,48 @@ Source: https://heki.koxudaxi.dev/coding-agents/
 # Coding Agents
 
 heki gives coding agents (Claude Code, Codex, Cursor, and similar) the checks it gives people:
-every diagnostic says what was proven, where the evidence is, and what blocks a fix.
+every diagnostic says what was proven, where the evidence is, and what blocks a fix. `heki
+inspect` says what one function does, so an agent does not read its callees to find out.
 
-## Use the CLI in the agent's loop
+## Analyze the project, not one file
+
+heki follows calls across files. `heki check app/api.py` analyzes that file alone and misses what
+its callees do: run heki on the project (the default `.`) and filter the JSON by path.
+
+## Before an edit: `heki inspect` (experimental)
+
+```console
+$ heki inspect app.users.load_user --output-format json
+$ heki inspect app/users.py:42
+$ heki inspect app/users.py::load_user --callers --depth 3
+```
+
+| Field | Content |
+| ----- | ------- |
+| `effects` | the network, database, file, subprocess, sleep, and lock waits it reaches, and the clients and queries it creates, each with the shortest call chain |
+| `changes` | the parameters, `self` attributes, other objects' attributes, module globals, and closure cells it changes, directly or through calls, with the call chain to the change |
+| `retains` | the parameters it stores where they outlive the call |
+| `returns` | whether its result is a new object, a parameter, or state that outlives the call |
+| `purity` | `pure`, `impure` with the reasons, or `unknown` with the first function whose calls heki cannot resolve, and what the verdict assumes |
+| `callers` | who calls it, whether in a loop; with `--callers`, transitively |
+| `reports` | what `heki check` reports in it; with `--callers`, also above it |
+| `contracts` | the contracts that name it |
+
+- A name is a dotted name (`pkg.mod.Class.method`, or a suffix such as `Class.method`, or a
+  glob), `path.py:line`, or `path.py::name`. An ambiguous or unknown name exits with 2 and lists
+  the candidates (in JSON, under `error.candidates`).
+- `pure` means heki found no effect and no change of an input or of shared state, and resolved
+  every call below. Libraries the [catalog](https://heki.koxudaxi.dev/configuration/#ecosystem-knowledge-toolhekiecosystem)
+  does not list count as having no effects.
+- A field the configuration does not compute is `null`, with the setting that computes it.
+- Exit code 0 when the function was inspected, 2 otherwise or when a file could not be analyzed
+  (the report is still printed, with `complete: false`).
+
+Inspect the edited function again after the edit and compare `effects`, `changes`, `retains`, and
+`returns` with the run before it: a new entry is new behavior. Fact keys carry no line numbers, so
+a diff of the two JSON objects shows only what changed.
+
+## After an edit: `heki check`
 
 A typical instruction for the agent:
 
@@ -2867,8 +2954,10 @@ origins of a chain of thousands of wrappers, of a list filled by appends in a th
 a phi of sixty branches each choosing a different parameter, and thousands of `call-owners` targets,
 in one contract or in as many contracts, and thousands of references to a `call-owners` target that
 a long chain of phis carries to one `return`, an argument handed down through thousands of functions
-of one module to the one that changes it, and thousands of reports whose call chains enter one
-module.
+of one module to the one that changes it, thousands of reports whose call chains enter one module,
+the callers of the bottom of a lattice of calls thirty levels deep, the chains `heki inspect` walks
+down thousands of calls of one module, a value chosen among a thousand module globals before it is
+changed, and thousands of calls handing a global to a helper that changes it.
 
 A change to the IR builder, a walk, a fixpoint, or a rule's state is also run over a large
 corpus of real projects before it is merged, every run under a memory cap and a timeout. No

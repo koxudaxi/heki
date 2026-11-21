@@ -60,7 +60,7 @@ pub use iterations::{
 pub use locks::{LockAcquire, LockFacts, ObjRef, SiteLock, StateTests};
 pub use one_at_a_time::ExclusiveUse;
 pub use ownership::{LocalOrigins, Origins, ResultOf, ReturnOrigins};
-pub use query::{CallsByCaller, ChangeChain, ParamChange};
+pub use query::{CallerSite, Callers, CallsByCaller, ChangeChain, HandedChange, ParamChange};
 pub use readonly::{
     CacheDecorator, CachedResult, ContainerKind, ProtectedReturn, ReturnStep, Shared,
 };

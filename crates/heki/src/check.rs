@@ -18,8 +18,8 @@ use heki_rules::project::{
     FileError, ParsedFile, Project, ProjectOptions, canonical, retain_unsuppressed,
 };
 use heki_rules::{
-    CheckExtras, RuleSelection, SNAPSHOT_FILE, Selectors, SummarySnapshot, check_project,
-    find_rule, fold_root_causes,
+    CheckExtras, ModuleUnit, RuleSelection, SNAPSHOT_FILE, Selectors, SummarySnapshot,
+    check_project, find_rule, fold_root_causes,
 };
 use rustc_hash::FxHashMap;
 use std::collections::BTreeMap;
@@ -130,11 +130,14 @@ pub(crate) struct Indexed {
 
 /// Load the project at `paths` (with `overrides` in place of files' text) and build the index
 /// `heki check` builds for `analysis`. `format` is the output format the run's warnings follow.
+/// `inspect`: the index also holds the facts `heki inspect` reads besides the rules
+/// ([`heki_rules::inspect_facts`]), which no rule reads.
 pub(crate) fn load_and_index(
     paths: &[PathBuf],
     analysis: &AnalysisArgs,
     format: OutputFormat,
     overrides: Option<&FxHashMap<PathBuf, String>>,
+    inspect: bool,
 ) -> Result<Indexed> {
     let project = Project::load(&ProjectOptions {
         paths,
@@ -148,7 +151,11 @@ pub(crate) fn load_and_index(
     let env = &project.env;
     let contracts = heki_rules::summary_contracts(&env.cfg, &env.kb)?;
     let typed_writes = heki_rules::typed_writes(&env.cfg, &selection);
-    let opt_in = heki_rules::opt_in_facts(&selection);
+    let opt_in = if inspect {
+        heki_rules::inspect_facts(&selection)
+    } else {
+        heki_rules::opt_in_facts(&selection)
+    };
     let inputs = project.inputs();
     let index = analyze_project_for(
         &inputs,
@@ -171,24 +178,41 @@ impl Indexed {
     /// The diagnostics of every enabled rule in the project's files, after inline suppressions
     /// and without the heuristic reports the selection withholds, and how many those are.
     pub(crate) fn diagnose(&self) -> Result<(Vec<Diagnostic>, usize)> {
+        self.diagnose_units(&self.project.units())
+    }
+
+    /// [`Self::diagnose`] in `units` (some or all of the project's files): the rules read the
+    /// other files through the index only.
+    pub(crate) fn diagnose_units(
+        &self,
+        units: &[ModuleUnit<'_>],
+    ) -> Result<(Vec<Diagnostic>, usize)> {
         let env = &self.project.env;
-        let units = self.project.units();
+        let decls = self.index.project_decls();
+        let sources: FxHashMap<&Path, &str> = self
+            .project
+            .files
+            .iter()
+            .map(|f| (f.path.as_path(), f.source.as_str()))
+            .collect();
+        let text_of = |p: &Path| sources.get(p).map(|t| (*t).to_owned());
         let extras = CheckExtras {
             soundness_kb: &env.soundness_kb,
             snapshot: self.snapshot.as_ref(),
-            decls: None,
-            project_patches_builtins: None,
-            text_of: None,
+            decls: Some(&decls),
+            project_patches_builtins: Some(
+                self.project.files.iter().any(ParsedFile::patches_builtins),
+            ),
+            text_of: Some(&text_of),
         };
         let mut diags = check_project(
-            &units,
+            units,
             &env.cfg,
             &env.kb,
             &self.index,
             &self.selection,
             &extras,
         )?;
-        drop(units);
         retain_unsuppressed(&mut diags, &self.project.files);
         let withheld = self.selection.withhold_heuristic(&mut diags);
         Ok((diags, withheld))
@@ -213,7 +237,13 @@ fn analyze(
     profile: Option<&ProfileData>,
     overrides: Option<&FxHashMap<PathBuf, String>>,
 ) -> Result<Analyzed> {
-    let indexed = load_and_index(&args.paths, &args.analysis, args.output_format, overrides)?;
+    let indexed = load_and_index(
+        &args.paths,
+        &args.analysis,
+        args.output_format,
+        overrides,
+        false,
+    )?;
     let (mut diags, withheld) = indexed.diagnose()?;
     let Indexed {
         project,

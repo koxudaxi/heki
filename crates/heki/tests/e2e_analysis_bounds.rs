@@ -2411,6 +2411,175 @@ fn puts_along_a_chain_of_attributes_resolve_each_attribute_once() {
     );
 }
 
+/// `heki inspect <args> --output-format json` of the project, which must finish within
+/// `limit`.
+fn inspect_within(p: &Project, args: &[&str], limit: Duration) -> Value {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_heki"))
+        .arg("inspect")
+        .args(args)
+        .args(["--output-format", "json"])
+        .current_dir(&p.dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+    let reader = std::thread::spawn(move || {
+        let mut out = Vec::new();
+        stdout.read_to_end(&mut out).unwrap();
+        out
+    });
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if started.elapsed() > limit {
+            child.kill().unwrap();
+            panic!("heki inspect ran past {limit:?}");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(status.code(), Some(0));
+    serde_json::from_slice(&reader.join().unwrap()).unwrap()
+}
+
+/// A lattice thirty levels deep, two functions a level, each calling both of the level below
+/// (2^30 paths up from the bottom): the callers' walk lists each call once.
+#[test]
+fn callers_of_a_diamond_lattice_are_walked_once_each() {
+    let mut lines = vec!["def bottom():".to_owned(), "    return 1".to_owned()];
+    let below = |level: usize| {
+        if level == 0 {
+            vec!["bottom".to_owned()]
+        } else {
+            vec![format!("a{}", level - 1), format!("b{}", level - 1)]
+        }
+    };
+    for level in 0..30 {
+        for side in ["a", "b"] {
+            lines.extend([
+                String::new(),
+                String::new(),
+                format!("def {side}{level}():"),
+            ]);
+            lines.extend(below(level).iter().map(|f| format!("    {f}()")));
+        }
+    }
+    let p = Project::new("bounds_caller_lattice");
+    p.write("m.py", &(lines.join("\n") + "\n"));
+    let r = inspect_within(
+        &p,
+        &["m.bottom", "--callers", "--depth", "64"],
+        Duration::from_secs(20),
+    );
+    // Two calls of `bottom`, then four calls into each later level.
+    assert_eq!(r["callers"]["count"], 2 + 4 * 29);
+    assert_eq!(r["callers"]["truncated"], false);
+}
+
+/// Five thousand methods of one class, each calling the next on `self`, the last changing a
+/// `self` attribute; the call chain of the change, and the walks to an unresolved call and to
+/// a changed module global through as many functions, are walked once.
+#[test]
+fn chains_down_thousands_of_calls_of_one_module_are_walked_once() {
+    let mut lines = vec![
+        "G = 0".to_owned(),
+        String::new(),
+        String::new(),
+        "class C:".to_owned(),
+        "    def __init__(self):".to_owned(),
+        "        self.items = []".to_owned(),
+    ];
+    for i in 0..4_999 {
+        lines.extend([
+            String::new(),
+            format!("    def m{i}(self):"),
+            format!("        self.m{}()", i + 1),
+        ]);
+    }
+    lines.extend([
+        String::new(),
+        "    def m4999(self):".to_owned(),
+        "        self.items.append(1)".to_owned(),
+    ]);
+    for i in 0..4_999 {
+        lines.extend([
+            String::new(),
+            String::new(),
+            format!("def f{i}(x):"),
+            format!("    return f{}(x)", i + 1),
+        ]);
+    }
+    lines.extend([
+        String::new(),
+        String::new(),
+        "def f4999(x):".to_owned(),
+        "    global G".to_owned(),
+        "    G = 1".to_owned(),
+        "    return x.anything()".to_owned(),
+    ]);
+    let p = Project::new("bounds_inspect_chains");
+    p.write("m.py", &(lines.join("\n") + "\n"));
+    let r = inspect_within(&p, &["m.C.m0"], Duration::from_secs(20));
+    let items = &r["changes"]["self_attrs"][0];
+    assert_eq!(items["chain"].as_array().unwrap().len(), 4_999);
+    let f = inspect_within(&p, &["m.f0"], Duration::from_secs(20));
+    assert_eq!(
+        f["changes"]["globals"][0]["chain"]
+            .as_array()
+            .unwrap()
+            .len(),
+        4_999
+    );
+    // Impure: the unknown call does not decide the verdict, but `--callers` walks the module.
+    assert_eq!(f["purity"]["verdict"], "impure");
+    let last = inspect_within(
+        &p,
+        &["m.f4999", "--callers", "--depth", "100"],
+        Duration::from_secs(20),
+    );
+    assert_eq!(last["callers"]["count"], 100);
+}
+
+/// A function choosing one of a thousand module globals before changing it, and one making
+/// three thousand calls that each hand a global to a helper changing its argument: the roots of
+/// a merged value are kept up to a limit, and the calls' hand-offs are looked up by call.
+#[test]
+fn shared_state_of_thousands_of_globals_is_walked_once() {
+    let mut lines: Vec<String> = (0..1_000).map(|i| format!("G{i} = []")).collect();
+    lines.extend([
+        String::new(),
+        String::new(),
+        "def append(xs):".to_owned(),
+        "    xs.append(1)".to_owned(),
+        String::new(),
+        String::new(),
+        "def choose(k):".to_owned(),
+        "    x = G0".to_owned(),
+    ]);
+    for i in 1..1_000 {
+        lines.extend([format!("    if k == {i}:"), format!("        x = G{i}")]);
+    }
+    lines.extend([
+        "    x.append(1)".to_owned(),
+        String::new(),
+        String::new(),
+        "def hand():".to_owned(),
+    ]);
+    lines.extend((0..3_000).map(|i| format!("    append(G{})", i % 1_000)));
+    let p = Project::new("bounds_shared_state");
+    p.write("m.py", &(lines.join("\n") + "\n"));
+    let choose = inspect_within(&p, &["m.choose"], Duration::from_secs(20));
+    assert_eq!(
+        choose["purity"]["because"],
+        serde_json::json!(["changes_globals"])
+    );
+    let hand = inspect_within(&p, &["m.hand"], Duration::from_secs(20));
+    // One entry per global, at its first hand-off.
+    assert_eq!(hand["changes"]["globals"].as_array().unwrap().len(), 1_000);
+}
+
 /// `heki dump-facts` of the project's `m.py`, which must finish within `limit`.
 fn dump_facts_within(p: &Project, limit: Duration) -> Value {
     let started = Instant::now();
