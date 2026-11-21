@@ -672,10 +672,11 @@ them; a run without the rule computes none of them.
    `yield from` over the container, its `keys()` / `values()` / `items()` views, or a lazy wrapper
    of either (`iter`, `enumerate`, `zip`, `map`, `filter`, `reversed`, the lazy `itertools`
    functions, a generator expression), through copies and merges; a consuming call (`list`,
-   `tuple`, `sorted`, `.copy()`) makes a snapshot. Each records whether a generator suspends
-   inside it (a `yield` in a block of the loop from which its header is reachable without leaving
-   the loop, on normal or exception edges, or the `yield from` itself) and the spans of the call
-   sites in such blocks (`iterations::BetweenSteps`). The containers each value may iterate are a
+   `tuple`, `sorted`, `.copy()`) makes a snapshot. Each records the containers it may step, all
+   of them, whether a generator suspends inside it (a `yield` in a block of the loop from which
+   its header is reachable without leaving the loop, on normal or exception edges, or the
+   `yield from` itself), and the spans of the call sites in such blocks
+   (`iterations::BetweenSteps`), once for all the containers. The containers each value may iterate are a
    fixpoint over copies, phis, views, and wrappers, with a pass limit (24) and a budget of
    `(value, container)` facts (one per source byte, at least 4,096, at most 100,000): past either,
    as for a loop rotating aliases of hundreds of containers, the method has no iterations, and no

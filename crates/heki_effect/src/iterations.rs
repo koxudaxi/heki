@@ -283,14 +283,15 @@ pub(crate) fn method_change(method: &str) -> Option<ContainerChange> {
     }
 }
 
-/// A `for` loop or a `yield from` of a method over the container one of its instance's
-/// attributes holds, directly or through a view or a lazy wrapper (`self.items.values()`,
-/// `enumerate(self.items)`); a snapshot (`list(self.items)`, `self.items.copy()`) is a container
-/// of its own.
+/// A `for` loop or a `yield from` of a method over the containers its instance's attributes
+/// hold, directly or through a view or a lazy wrapper (`self.items.values()`,
+/// `enumerate(self.items)`, `zip(self.a, self.b)`); a snapshot (`list(self.items)`,
+/// `self.items.copy()`) is a container of its own.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ContainerIteration {
-    pub attr: String,
-    pub container: IteratedContainer,
+    /// The attributes and their containers the iteration may step, in order, at least one. The
+    /// loop keeps one record of what runs between its steps for all of them.
+    pub iterated: Vec<(String, IteratedContainer)>,
     /// The `for` loop's iterable, or the `yield from` expression.
     pub span: Span,
     pub between: BetweenSteps,
@@ -652,14 +653,11 @@ pub(crate) fn container_iterations(
         let (Some(iterated), Some(between)) = (iterated, between.filter(|b| !b.is_empty())) else {
             continue;
         };
-        for (attr, container) in iterated {
-            out.push(ContainerIteration {
-                attr: attr.clone(),
-                container: *container,
-                span: inst.span,
-                between: between.clone(),
-            });
-        }
+        out.push(ContainerIteration {
+            iterated: iterated.iter().cloned().collect(),
+            span: inst.span,
+            between,
+        });
     }
     out.sort();
     out.dedup();

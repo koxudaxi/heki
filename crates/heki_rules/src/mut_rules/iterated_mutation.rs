@@ -29,8 +29,8 @@ use heki_ast::Span;
 use heki_diagnostics::{Diagnostic, RelatedLocation};
 use heki_effect::iterations::changed_at;
 use heki_effect::{
-    CallSite, ContainerIteration, FileSummary, FuncKey, IteratedResult, ProjectIndex,
-    ResultIteration, SiteRole,
+    CallSite, ContainerChange, ContainerIteration, FileSummary, FuncKey, IteratedContainer,
+    IteratedResult, ProjectIndex, ResultIteration, SiteRole,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::cell::RefCell;
@@ -86,27 +86,113 @@ pub(super) fn run(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
         });
         for (g, unit, local) in checked {
             let mut exposure: Option<Exposure<'_>> = None;
-            for it in &local.iteration_facts().container_iterations {
-                if it.between.suspends && reported.insert((g.key.clone(), it.span, it.attr.clone()))
+            let loops = &local.iteration_facts().container_iterations;
+            let suspending = suspending_attrs(loops);
+            let mut loop_calls: Vec<Option<LoopCalls<'_>>> = loops.iter().map(|_| None).collect();
+            for (attr, container, i) in iterated_in_order(loops) {
+                let it = &loops[i];
+                if it.between.suspends && reported.insert((g.key.clone(), it.span, attr.to_owned()))
                 {
                     let exposure = exposure.get_or_insert_with(|| Exposure::of(cx, &uses, &g.key));
-                    let changing = changing_methods(cx, g, it, family, init_called, exposure);
-                    report_suspended(cx, unit, g, it, &changing, out);
+                    let changing =
+                        changing_methods(cx, g, attr, container, family, init_called, exposure);
+                    report_suspended(cx, unit, g, it.span, attr, &changing, out);
                 }
                 if it.between.calls.is_empty() {
                     continue;
                 }
-                let by_span = sites
-                    .entry(unit.input.path.as_path())
-                    .or_insert_with(|| cx.sites_by_span(unit));
-                for span in &it.between.calls {
-                    if reported.insert((g.key.clone(), *span, it.attr.clone())) {
-                        report_called(cx, unit, g, it, *span, by_span, out);
+                let calls = loop_calls[i].get_or_insert_with(|| {
+                    let by_span = sites
+                        .entry(unit.input.path.as_path())
+                        .or_insert_with(|| cx.sites_by_span(unit));
+                    LoopCalls::of(cx, g, it, by_span, &suspending)
+                });
+                for &call in calls.by_attr.get(attr).into_iter().flatten() {
+                    let span = it.between.calls[call];
+                    if reported.insert((g.key.clone(), span, attr.to_owned())) {
+                        let changes = &calls.changes[call];
+                        report_called(cx, unit, g, it.span, attr, container, span, changes, out);
                     }
                 }
             }
         }
     });
+}
+
+/// Each attribute a method's iterations step, with its container and the iteration (by index),
+/// by attribute, container, and iteration: the order in which the first report of a call or a
+/// suspension for an attribute is the one made.
+fn iterated_in_order(loops: &[ContainerIteration]) -> Vec<(&str, IteratedContainer, usize)> {
+    let mut out: Vec<(&str, IteratedContainer, usize)> = loops
+        .iter()
+        .enumerate()
+        .flat_map(|(i, it)| it.iterated.iter().map(move |(a, c)| (a.as_str(), *c, i)))
+        .collect();
+    out.sort_by(|a, b| {
+        (a.0, a.1, loops[a.2].span, &loops[a.2].between).cmp(&(
+            b.0,
+            b.1,
+            loops[b.2].span,
+            &loops[b.2].between,
+        ))
+    });
+    out
+}
+
+/// The attributes each suspending iteration of a method steps, by the iteration's span.
+fn suspending_attrs(loops: &[ContainerIteration]) -> FxHashMap<Span, FxHashSet<&str>> {
+    let mut out: FxHashMap<Span, FxHashSet<&str>> = FxHashMap::default();
+    for it in loops.iter().filter(|it| it.between.suspends) {
+        out.entry(it.span)
+            .or_default()
+            .extend(it.iterated.iter().map(|(a, _)| a.as_str()));
+    }
+    out
+}
+
+/// What the calls in an iteration's body change, read once for all the attributes it steps.
+struct LoopCalls<'a> {
+    /// Per call (by its index in `BetweenSteps::calls`), the containers of the method's own
+    /// instance its callees change, by callee ([`changed_at`]).
+    changes: Vec<Vec<(&'a FuncKey, String, ContainerChange)>>,
+    /// Per attribute, the calls a report about it may come from, in order: those changing it,
+    /// and those at a suspending iteration of it, which a report of the suspension shares.
+    by_attr: FxHashMap<String, Vec<usize>>,
+}
+
+impl<'a> LoopCalls<'a> {
+    fn of(
+        cx: &CheckContext<'a>,
+        g: &Method<'_>,
+        it: &ContainerIteration,
+        sites: &SitesBySpan<'a>,
+        suspending: &FxHashMap<Span, FxHashSet<&str>>,
+    ) -> Self {
+        let mut by_attr: FxHashMap<String, Vec<usize>> = FxHashMap::default();
+        let changes: Vec<_> = it
+            .between
+            .calls
+            .iter()
+            .enumerate()
+            .map(|(i, span)| {
+                let changes: Vec<_> = sites
+                    .get(&(g.key.qualname.clone(), *span))
+                    .into_iter()
+                    .flatten()
+                    .flat_map(|site| changed_at(cx.index, site))
+                    .collect();
+                let shared = suspending.get(span).into_iter().flatten().copied();
+                for attr in changes.iter().map(|(_, a, _)| a.as_str()).chain(shared) {
+                    let calls = by_attr.entry(attr.to_owned()).or_default();
+                    if calls.last() != Some(&i) {
+                        calls.push(i);
+                    }
+                }
+                changes
+            })
+            .collect();
+        Self { changes, by_attr }
+    }
 }
 
 /// What can run while a generator method is suspended, from where its generator objects go.
@@ -401,12 +487,14 @@ struct Changing<'a> {
     place: Option<(&'a Path, Span, String)>,
 }
 
-/// The methods of `family` that change the container `it` iterates and can run while the
-/// generator `g` is suspended in it (`exposure`): the class's own methods first.
+/// The methods of `family` that change the container `self.<attr>` holds (`container`) and can
+/// run while the generator `g` is suspended iterating it (`exposure`): the class's own methods
+/// first.
 fn changing_methods<'m, 'a: 'm>(
     cx: &CheckContext<'a>,
     g: &Method<'a>,
-    it: &ContainerIteration,
+    attr: &str,
+    container: IteratedContainer,
     family: &[&'m Method<'a>],
     init_called: &FxHashSet<FuncKey>,
     exposure: &Exposure<'a>,
@@ -414,8 +502,8 @@ fn changing_methods<'m, 'a: 'm>(
     let breaks = |key: &FuncKey| {
         cx.index
             .summary(key)
-            .and_then(|s| s.iteration_facts().changes_self_containers.get(&it.attr))
-            .is_some_and(|c| it.container.broken_by(*c))
+            .and_then(|s| s.iteration_facts().changes_self_containers.get(attr))
+            .is_some_and(|c| container.broken_by(*c))
     };
     let mut out: Vec<Changing<'m>> = Vec::new();
     let mut seen: FxHashSet<&FuncKey> = FxHashSet::default();
@@ -426,11 +514,11 @@ fn changing_methods<'m, 'a: 'm>(
             continue;
         }
         if seen.insert(&m.key) {
-            let place = change_site(cx, m, it).map(|span| {
+            let place = change_site(cx, m, attr, container).map(|span| {
                 (
                     m.path,
                     span,
-                    format!("`{}` changes `self.{}`", m.key.qualname, it.attr),
+                    format!("`{}` changes `self.{attr}`", m.key.qualname),
                 )
             });
             out.push(Changing { key: &m.key, place });
@@ -474,15 +562,16 @@ fn reads(cx: &CheckContext<'_>, m: &Method<'_>) -> bool {
             .is_some_and(|d| d.is_property)
 }
 
-/// Where `m` changes the container `it` iterates: its own first change, or else its first call
-/// that changes it.
-fn change_site(cx: &CheckContext<'_>, m: &Method<'_>, it: &ContainerIteration) -> Option<Span> {
+/// Where `m` changes the container `self.<attr>` holds (`container`): its own first change, or
+/// else its first call that changes it.
+fn change_site(
+    cx: &CheckContext<'_>,
+    m: &Method<'_>,
+    attr: &str,
+    container: IteratedContainer,
+) -> Option<Span> {
     if let Some(span) = local_summary(cx.index, m)
-        .and_then(|s| {
-            s.iteration_facts()
-                .self_container_change_sites
-                .get(&it.attr)
-        })
+        .and_then(|s| s.iteration_facts().self_container_change_sites.get(attr))
         .and_then(|spans| spans.first())
     {
         return Some(*span);
@@ -496,7 +585,7 @@ fn change_site(cx: &CheckContext<'_>, m: &Method<'_>, it: &ContainerIteration) -
         .filter(|s| {
             changed_at(cx.index, s)
                 .iter()
-                .any(|(_, attr, change)| *attr == it.attr && it.container.broken_by(*change))
+                .any(|(_, a, change)| a == attr && container.broken_by(*change))
         })
         .map(|s| s.span)
         .min()
@@ -513,14 +602,14 @@ fn report_suspended(
     cx: &CheckContext<'_>,
     unit: &ModuleUnit<'_>,
     g: &Method<'_>,
-    it: &ContainerIteration,
+    iteration: Span,
+    attr: &str,
     changing: &[Changing<'_>],
     out: &mut Vec<Diagnostic>,
 ) {
     let Some(named) = changing.first() else {
         return;
     };
-    let attr = &it.attr;
     let related: Vec<RelatedLocation> = changing
         .iter()
         .filter_map(|c| {
@@ -532,7 +621,7 @@ fn report_suspended(
         out,
         "MUT113",
         unit,
-        it.span,
+        iteration,
         &g.key.qualname,
         format!("{}.{attr}", class_of(&g.key)),
         format!(
@@ -549,23 +638,23 @@ fn report_suspended(
     }
 }
 
+/// `changes`: what the callees of the call at `span` change ([`LoopCalls::changes`]).
+#[allow(clippy::too_many_arguments)]
 fn report_called(
     cx: &CheckContext<'_>,
     unit: &ModuleUnit<'_>,
     g: &Method<'_>,
-    it: &ContainerIteration,
+    iteration: Span,
+    attr: &str,
+    container: IteratedContainer,
     span: Span,
-    sites: &SitesBySpan<'_>,
+    changes: &[(&FuncKey, String, ContainerChange)],
     out: &mut Vec<Diagnostic>,
 ) {
-    let attr = &it.attr;
-    let mut changing: Vec<&FuncKey> = sites
-        .get(&(g.key.qualname.clone(), span))
-        .into_iter()
-        .flatten()
-        .flat_map(|site| changed_at(cx.index, site))
-        .filter(|(_, a, change)| a == attr && it.container.broken_by(*change))
-        .map(|(callee, _, _)| callee)
+    let mut changing: Vec<&FuncKey> = changes
+        .iter()
+        .filter(|(_, a, change)| a == attr && container.broken_by(*change))
+        .map(|(callee, _, _)| *callee)
         .collect();
     changing.sort();
     changing.dedup();
@@ -574,7 +663,7 @@ fn report_called(
     };
     let related = cx.related_at(
         &unit.input.path,
-        it.span,
+        iteration,
         format!("`{}` iterates `self.{attr}` here", g.key.qualname),
     );
     if let Some(d) = cx.emit(

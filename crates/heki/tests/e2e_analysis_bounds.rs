@@ -1728,6 +1728,40 @@ fn a_loop_over_many_generator_results_is_summarized_once() {
     );
 }
 
+/// A loop over `zip(self.d0, ..., self.d1999)` whose body makes as many calls: the loop is one
+/// fact for every container it steps, and what each call changes is read once, not once per
+/// container.
+#[test]
+fn a_loop_over_many_self_containers_is_one_fact() {
+    let containers = 2_000;
+    let mut lines = vec![
+        "class Table:".to_owned(),
+        "    def __init__(self) -> None:".to_owned(),
+    ];
+    lines.extend((0..containers).map(|i| format!("        self.d{i}: dict[str, int] = {{}}")));
+    lines.extend(
+        [
+            "",
+            "    def touch(self) -> None:",
+            "        pass",
+            "",
+            "    def drop(self) -> None:",
+            "        self.d0.pop(\"x\", None)",
+            "",
+            "    def visit(self) -> None:",
+        ]
+        .map(str::to_owned),
+    );
+    let zipped: Vec<String> = (0..containers).map(|i| format!("self.d{i}")).collect();
+    lines.push(format!("        for row in zip({}):", zipped.join(", ")));
+    lines.extend((0..containers).map(|_| "            self.touch()".to_owned()));
+    lines.push("            self.drop()".to_owned());
+    assert_eq!(
+        iterated_mutations("bounds_zipped_containers", &(lines.join("\n") + "\n")),
+        1
+    );
+}
+
 /// A private generator handed on through five thousand private wrappers, each returning the one
 /// before's result (`def _w1(self): return self._w0()`), and a loop over the last one's result
 /// calling a method that changes the generator's container: the walk from the generator to the
