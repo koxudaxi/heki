@@ -93,7 +93,7 @@ release can change rules, configuration keys, diagnostics, and output formats.
   (`OPT101`-`OPT103`, `OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130`) is exact: a census of
   every one of its 234 reports on the Stage 0-A corpus, and a check of the 235 of one run on a
   frozen holdout corpus of 100 packages, found none wrong. `OPT113`'s exact tier is certified
-  too (9 reports in the census and 6 in the holdout run, none wrong) and runs by default. `heki check` with no
+  too (8 reports in the census and 6 in the holdout run, none wrong) and runs by default. `heki check` with no
   configuration runs these rules and the contract rules and shows the reports whose rewrite is
   proven safe, and `heki check --fix` applies the proven fixes of `OPT101` and `OPT102`. `MUT202`, which also reports `@lru_cache` / `@cache` results
   without a contract, is selected like the other heuristic rules, so a `readonly-returns`
