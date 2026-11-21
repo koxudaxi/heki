@@ -150,6 +150,22 @@ CHOSEN = [PICKED]
 
 def unpacked() -> object:
     return {**HANDLERS}
+
+
+# A class's own initialization hands its own method on, directly or through a private helper:
+# allowed, as calling it there is.
+class Registered(Rule):
+    def __init__(self) -> None:
+        register(self.check)
+
+
+class Delegated(Rule):
+    def __init__(self) -> None:
+        _register_check(self)
+
+
+def _register_check(rule: Rule) -> None:
+    register(rule.check)
 "#;
 
 fn project(name: &str, references: &str) -> Project {

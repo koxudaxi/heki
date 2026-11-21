@@ -1951,20 +1951,32 @@ impl<'a> Extractor<'a> {
     }
 
     /// The site at `span` of what calling `var`, loaded in block `bb`, calls: a project class it
-    /// constructs, or the project functions it calls (a bound method's included). An instance
-    /// of a class defining `__call__` is no function or class handed on.
+    /// constructs, or the project functions it calls (a bound method's included, with its
+    /// receiver's origin bound to `self`). An instance of a class defining `__call__` is no
+    /// function or class handed on.
     fn reference_site(&self, var: VarId, bb: BlockId, span: Span) -> Option<CallSite> {
         let constructs = self.class_called(var);
         let (callee, recv) = self.callable_callee(var);
         if constructs.is_none() && recv.is_none() && !matches!(self.val(var), Some(Val::Ref(_))) {
             return None;
         }
+        // A bound method binds its receiver to the method's `self`, as calling it does: the
+        // ownership exemptions (a class's own initialization) read where that object comes from.
+        let receiver = recv.map(|r| self.receiver(r, bb).0);
+        let binds_self = |key: &FuncKey| {
+            let decl = self.cx.project.function_decl(key);
+            decl.is_some_and(|d| !d.is_staticmethod && !d.is_classmethod)
+        };
         let callees: Vec<BoundCallee> = match callee {
-            Callee::Project(keys, _) => keys
+            Callee::Project(keys, binds) => keys
                 .into_iter()
                 .map(|callee| BoundCallee {
+                    params: receiver
+                        .iter()
+                        .filter(|_| binds && binds_self(&callee))
+                        .cloned()
+                        .collect(),
                     callee,
-                    params: Vec::new(),
                 })
                 .collect(),
             _ => Vec::new(),

@@ -72,7 +72,8 @@ coroutine's where it is awaited. Not reported either:
   callers above it starts in an allowed caller, an exempt method, or a class's own
   initialization (as for `MUT201`);
 - a class's own initialization: an initializer (`__init__`, `__post_init__`, ...) of a class of
-  the target's family calling a guarded method on its own `self` (for a target naming no class,
+  the target's family calling a guarded method on its own `self`, or handing it on with
+  `references = "calls"`, directly or through a private helper (for a target naming no class,
   `reset`, the family is the classes defining the methods it names and their subclasses);
 - a target calling a target of the same contract (`remove_reference` calling
   `self.replace_reference(None)`, an override calling `super().replace_reference(...)`): the
