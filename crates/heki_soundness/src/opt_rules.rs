@@ -1624,6 +1624,9 @@ impl<'a, 'c> Rules<'a, 'c> {
                 SetUse::Observes(format!("{who} is iterated (line {line})"))
             }
             InstKind::Yield { .. } => SetUse::Observes(format!("{who} is yielded (line {line})")),
+            InstKind::Convert { .. } | InstKind::Format { .. } => {
+                SetUse::Observes(format!("{who} is formatted (line {line})"))
+            }
             InstKind::AllocBuiltin { .. }
             | InstKind::DictLiteral { .. }
             | InstKind::AttrStore { .. }

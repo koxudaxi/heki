@@ -567,6 +567,13 @@ const ACCUMULATE: &[Expect] = &[
         )],
     ),
     (
+        "set_formatted",
+        &[(
+            "OPT102",
+            V::Blocked("SetOrderUnobserved(s): `s` is formatted (line"),
+        )],
+    ),
+    (
         "set_compared_with_parameter",
         &[(
             "OPT102",
