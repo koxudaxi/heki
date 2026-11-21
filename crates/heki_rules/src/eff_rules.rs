@@ -21,7 +21,7 @@ use heki_effect::{
     TypeCtx, WriteKind, anchors_call_site, boundary_reports_in,
 };
 use heki_ir::{InstKind, IrFunction};
-use heki_kb::{EnvironmentAccess, ExecEffectKind};
+use heki_kb::{EcosystemEntry, EnvironmentAccess, ExecEffectKind};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -562,7 +562,12 @@ impl Boundary<'_> {
     /// Whether `reads-environment` forbids `access`: a call or a read the ecosystem catalog
     /// tags as one of the environment, or an import probe with `import-probes = "report"`.
     fn forbids_environment(&self, cx: &CheckContext<'_>, access: &ExternalAccess) -> bool {
-        let tagged = |kind| cx.kb.lookup(&access.name).and_then(|e| e.environment) == Some(kind);
+        let tagged = |kind| {
+            cx.kb
+                .lookup(&access.name)
+                .and_then(EcosystemEntry::environment_access)
+                == Some(kind)
+        };
         self.reads_environment
             && match access.kind {
                 AccessKind::Call => tagged(EnvironmentAccess::Call),

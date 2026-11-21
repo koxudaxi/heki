@@ -2115,24 +2115,31 @@ fn many_calls(classes: usize, functions: usize, calls: usize) -> (String, String
 
 /// The targets a call matches are looked up from the callee's names, once per call for all
 /// `call-owners` contracts: thousands of targets, in one contract or in as many contracts,
-/// cost no more per call than one.
+/// dotted or sharing one module part (`pkg.m:X0._*`), cost no more per call than one.
 #[test]
 fn call_targets_are_looked_up_not_tried_one_by_one() {
     let (model, usage) = many_calls(10, 100, 100);
-    let targets: Vec<String> = (0..2000).map(|i| format!("\"pkg.m.X{i}._*\"")).collect();
-    let one_contract = format!(
-        "[[tool.heki.call-owners]]\nname = \"many\"\ntargets = [{}, \"pkg.m.C0._*\"]\nforbidden-callers = [\"pkg.use.f0\"]\n",
-        targets.join(", ")
-    );
-    let many_contracts: String = targets
-        .iter()
-        .chain(std::iter::once(&"\"pkg.m.C0._*\"".to_owned()))
-        .enumerate()
-        .map(|(i, t)| {
-            format!("[[tool.heki.call-owners]]\nname = \"c{i}\"\ntargets = [{t}]\nforbidden-callers = [\"pkg.use.f0\"]\n\n")
-        })
-        .collect();
-    for (name, contracts) in [("one", one_contract), ("many", many_contracts)] {
+    let mut configs = Vec::new();
+    for (form, module) in [("dotted", "pkg.m."), ("module", "pkg.m:")] {
+        let targets: Vec<String> = (0..2000)
+            .map(|i| format!("\"{module}X{i}._*\""))
+            .chain(std::iter::once(format!("\"{module}C0._*\"")))
+            .collect();
+        let one_contract = format!(
+            "[[tool.heki.call-owners]]\nname = \"many\"\ntargets = [{}]\nforbidden-callers = [\"pkg.use.f0\"]\n",
+            targets.join(", ")
+        );
+        let many_contracts: String = targets
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                format!("[[tool.heki.call-owners]]\nname = \"c{i}\"\ntargets = [{t}]\nforbidden-callers = [\"pkg.use.f0\"]\n\n")
+            })
+            .collect();
+        configs.push((format!("{form}_one"), one_contract));
+        configs.push((format!("{form}_many"), many_contracts));
+    }
+    for (name, contracts) in configs {
         let p = Project::new(&format!("bounds_call_targets_{name}"));
         p.write(
             "pyproject.toml",

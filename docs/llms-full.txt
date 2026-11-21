@@ -1280,7 +1280,8 @@ origin is not reported.
 `importlib.util.find_spec`, `importlib.import_module`, `importlib.metadata.version`,
 `importlib.metadata.distribution`, `shutil.which`, and `sysconfig.get_config_var`; and these
 reads: `os.environ`, `os.environb`, `os.name`, `sys.platform`, `sys.version`,
-`sys.version_info`, `sys.hexversion`, `sys.implementation`, and `sys.flags`. A call on
+`sys.version_info`, `sys.hexversion`, `sys.implementation`, and `sys.flags`. An entry set
+`excluded = true` (`[[tool.heki.ecosystem]]`, below) is never reported. A call on
 `os.environ` (`os.environ.get("X")`) is a read of `os.environ`. One report per scope function
 names the first read it reaches and counts every one.
 
@@ -2620,8 +2621,9 @@ follows these rules:
 - A rule that follows exception edges, one from each call that can raise, runs a dataflow over
   blocks with one fact per tracked value. It never enumerates paths.
 - A contract's targets are looked up from what an access names (the dotted suffixes of a
-  function's names, its module, its class), never tried one by one: the cost grows with the sites, not with
-  sites times targets, and the targets of every contract of a rule are indexed together.
+  function's names, its module and qualname, its class), never tried one by one: the cost grows
+  with the sites, not with sites times targets, and the targets of every contract of a rule are
+  indexed together.
 
 Each bound comes with a shape in `crates/heki/tests/e2e_analysis_bounds.rs` that is slow without it,
 checked against a time limit: comparisons sharing an operand thirty deep, many `match` statements of
@@ -6418,8 +6420,10 @@ allowed writers:
 - through a local alias (`fields = model.fields; fields.append(...)`), also one `getattr` with a
   constant name loads (`getattr(model, "fields").append(...)`), or what a method, property, or
   function returns when it returns the attribute itself on every `return`
-  (`model.field_list().append(...)` with `return self.fields`) and every class the object may be
-  runs it (no `cached_property`, no class attribute of the name coming first);
+  (`model.field_list().append(...)` with `return self.fields`), stores no attribute of that name
+  itself, and every class the object may be runs it (no `cached_property`, no class attribute of
+  the name coming first); the object must be passed by position (no keyword-only parameter, no
+  `*args` unpacking);
 - through `setattr(model, "fields", ...)` / `object.__setattr__` (also through a module-level
   name bound once to it: `_set = object.__setattr__`) or `model.__dict__["fields"]`,
   also with a string constant for the name (`model.__dict__[FIELDS_KEY]`, imported or not):

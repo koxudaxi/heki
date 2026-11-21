@@ -107,7 +107,7 @@ impl ExternalNames {
         let environment = if forbidding("reads-environment").next().is_some() {
             kb.entries
                 .values()
-                .filter_map(|e| Some((e.symbol.clone(), e.environment?)))
+                .filter_map(|e| Some((e.symbol.clone(), e.environment_access()?)))
                 .collect()
         } else {
             FxHashMap::default()

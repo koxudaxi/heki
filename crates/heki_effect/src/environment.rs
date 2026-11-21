@@ -7,7 +7,7 @@
 
 use heki_ast::Span;
 use heki_ir::{BlockId, InstKind, IrFunction, Terminator};
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 
 /// What an [`ExternalAccess`] does with its name.
@@ -49,6 +49,8 @@ pub struct ExternalAccess {
 pub(crate) fn import_probes(
     f: &IrFunction,
 ) -> impl Iterator<Item = (Span, Option<&str>, &str)> + '_ {
+    // The blocks of one `try` body share their handler: each handler is walked once.
+    let mut catches: FxHashMap<BlockId, bool> = FxHashMap::default();
     f.blocks.iter().flat_map(move |bb| {
         let mut imports = bb
             .insts
@@ -63,7 +65,12 @@ pub(crate) fn import_probes(
                 _ => None,
             })
             .peekable();
-        let probing = imports.peek().is_some() && catches_import_error(f, bb.exc_target);
+        let probing = imports.peek().is_some()
+            && bb.exc_target.is_some_and(|handler| {
+                *catches
+                    .entry(handler)
+                    .or_insert_with(|| catches_import_error(f, handler))
+            });
         imports.filter(move |_| probing)
     })
 }
@@ -72,8 +79,9 @@ pub(crate) fn import_probes(
 /// it tests in turn names it, or, when none does and it raises the exception again, an
 /// enclosing handler takes it (also after a `finally` body). Any other shape of handler (the
 /// exit of a `with` block, which may suppress the exception) is not followed.
-fn catches_import_error(f: &IrFunction, mut handler: Option<BlockId>) -> bool {
+fn catches_import_error(f: &IrFunction, handler: BlockId) -> bool {
     let mut seen: FxHashSet<BlockId> = FxHashSet::default();
+    let mut handler = Some(handler);
     while let Some(start) = handler.filter(|b| seen.insert(*b)) {
         let mut clause = f.block(start);
         handler = loop {

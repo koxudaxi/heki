@@ -263,10 +263,14 @@ A module-level name bound once to another object by name, not by an import state
 or in an annotation, in its module and imported from it (`ModuleDecls::aliases`,
 `ProjectDecls::object_named`), unless another module rebinds or deletes it. Any other global a
 module binds is the module's own object of unknown value (`Symbol::Unknown`), never the builtin
-of the same name: calling it is unresolved.
+of the same name: calling it is unresolved, unless a `[[tool.heki.ecosystem]]` entry declares it
+(`get = functools.partial(...)` listed as blocking, or with a `return-type`), which then
+describes it as it describes a library symbol. A name under a project module that the module
+does not bind (a compiled submodule, a star import) is what the catalog says of it.
 
 A method that no project class of the receiver's MRO defines comes from the first base outside
-the project that heki takes to define it: a special method (`__init__`, `__copy__`, ...), a
+the project, when heki takes it to define the method (a base it knows nothing of coming first
+leaves the call unresolved): a special method (`__init__`, `__copy__`, ...), a
 public method of a builtin type other than `object` (`dict.update`), or a member Layer 2 lists
 (`pydantic.BaseModel.model_copy`). Otherwise the call is unresolved (`abc.ABC._copy_model_type`
 and `typing.Generic.result_type` are no known symbols); on a union, a class whose bases are all
