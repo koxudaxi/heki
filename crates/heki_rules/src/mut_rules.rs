@@ -2300,7 +2300,9 @@ impl<'a> Mut202Fn<'a> {
                 }
                 !changed
             });
-            converged.then_some(state).unwrap_or_default()
+            // Past the limit no variable is known.
+            state.retain(|_, _| converged);
+            state
         })
     }
 
