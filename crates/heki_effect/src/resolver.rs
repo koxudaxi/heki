@@ -538,7 +538,7 @@ impl ModuleDecls {
 
     /// Resolve a dotted name written in this module (runtime imports, then local definitions,
     /// then builtin types). `type_checking` also consults `if TYPE_CHECKING:` imports.
-    fn resolve_dotted(&self, text: &str, type_checking: bool) -> Option<String> {
+    pub(crate) fn resolve_dotted(&self, text: &str, type_checking: bool) -> Option<String> {
         let (first, rest) = match text.split_once('.') {
             Some((f, r)) => (f, Some(r)),
             None => (text, None),

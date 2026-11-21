@@ -342,6 +342,10 @@ fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary) {
             .collect()
     };
     let read = [read_otherwise(into), read_otherwise(&other)];
+    // A must-fact: a cached container only when both definitions return one of the same kind.
+    if into.cached_result != other.cached_result {
+        into.cached_result = None;
+    }
     into.add_self_reads(&other);
     into.returns_self_attrs.extend(other.returns_self_attrs);
     into.returns_self_attrs
@@ -973,6 +977,19 @@ impl<'a> Extractor<'a> {
         }
         ex.build_aliases();
         ex.memo_fills = ex.memo_fills();
+        if ex.summary.is_lru_cache {
+            let module = ex.cx.module;
+            ex.summary.cached_result = readonly::cached_result(
+                f,
+                &ex.defs,
+                &ex.live,
+                |t| module.resolve_dotted(t, false),
+                |v| match ex.types.get(&v) {
+                    Some(Val::Inst(class)) => Some(class.as_str()),
+                    _ => None,
+                },
+            );
+        }
         let returned = readonly::returned_values(
             f,
             &ex.defs,

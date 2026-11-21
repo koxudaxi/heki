@@ -696,6 +696,13 @@ symbol = "builtins.frozenset"
 copy_sanitizer = "shallow"
 opaque_to_layer3 = true
 
+# --- Result types (MUT114: `html.escape(text).split("\n")` is a list by construction) ---
+
+[[entries]]
+symbol = "html.escape"
+return_type = "builtins.str"
+opaque_to_layer3 = true
+
 # --- HTTP ---
 
 [[entries]]

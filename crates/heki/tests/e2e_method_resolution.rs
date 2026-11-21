@@ -232,14 +232,14 @@ def via(p: Provider):
 
 
 def use(p: Provider):
-    via(Provider()).clear()  # MUT202
-    p().clear()  # MUT202
+    via(Provider()).clear()  # MUT114
+    p().clear()  # MUT114
     Holder().items.clear()
 "#;
 
 #[test]
 fn calling_an_instance_runs_its_call_method_on_it() {
-    check_marks("callable", &[("pkg/callable.py", CALLABLE)], &["MUT202"]);
+    check_marks("callable", &[("pkg/callable.py", CALLABLE)], &["MUT114"]);
 }
 
 /// Constructing a frozen dataclass through its module makes a new object, as importing it does.

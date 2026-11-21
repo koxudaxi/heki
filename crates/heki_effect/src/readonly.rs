@@ -226,6 +226,256 @@ pub fn deep_copy_requested(
         .all(|(k, _)| k.as_deref().is_some_and(|k| k != "update"))
 }
 
+/// The builtin container a cached function hands out on every live return (`MUT114`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContainerKind {
+    List,
+    Dict,
+    Set,
+}
+
+impl ContainerKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::List => "list",
+            Self::Dict => "dict",
+            Self::Set => "set",
+        }
+    }
+
+    /// Whether `method` changes a container of this kind in place.
+    pub fn mutator(self, method: &str) -> bool {
+        match self {
+            Self::List => matches!(
+                method,
+                "append" | "extend" | "insert" | "pop" | "remove" | "clear" | "sort" | "reverse"
+            ),
+            Self::Dict => matches!(
+                method,
+                "update" | "pop" | "popitem" | "clear" | "setdefault"
+            ),
+            Self::Set => matches!(
+                method,
+                "add"
+                    | "discard"
+                    | "remove"
+                    | "pop"
+                    | "clear"
+                    | "update"
+                    | "difference_update"
+                    | "intersection_update"
+                    | "symmetric_difference_update"
+            ),
+        }
+    }
+
+    /// Whether an item store or delete (`x[k] = v`, `del x[k]`) changes a container of this kind.
+    pub fn takes_item_stores(self) -> bool {
+        matches!(self, Self::List | Self::Dict)
+    }
+
+    /// Whether the augmented assignment `x <op>= y` changes a container of this kind in place.
+    pub fn in_place_op(self, op: heki_ir::BinOpKind) -> bool {
+        use heki_ir::BinOpKind::{Add, BitAnd, BitOr, BitXor, Mult, Sub};
+        match self {
+            Self::List => matches!(op, Add | Mult),
+            Self::Dict => matches!(op, BitOr),
+            Self::Set => matches!(op, BitOr | BitAnd | Sub | BitXor),
+        }
+    }
+}
+
+/// A function whose results a `functools` cache keeps and hands to every later call with the
+/// same arguments (`MUT114`'s producer): decorated with `functools.cache`, or with
+/// `functools.lru_cache` whose `maxsize` is not the literal `0`, resolved through the module's
+/// imports, and otherwise only with `staticmethod` / `classmethod`; it takes a parameter besides
+/// a method's `self` / `cls`, so the cache keys its results; and every return a run can reach
+/// hands out a builtin container of one kind, established by its return annotation (R2) or by
+/// construction (a display, a comprehension, `list(...)` / `dict(...)` / `set(...)` /
+/// `sorted(...)`, `str.split`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CachedResult {
+    /// `"lru_cache"` or `"cache"`.
+    pub decorator: CacheDecorator,
+    pub kind: ContainerKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheDecorator {
+    LruCache,
+    Cache,
+}
+
+impl CacheDecorator {
+    pub fn fqn(self) -> &'static str {
+        match self {
+            Self::LruCache => "functools.lru_cache",
+            Self::Cache => "functools.cache",
+        }
+    }
+}
+
+/// The function's [`CachedResult`], when it is one. `resolve` names a dotted name through the
+/// module's imports and definitions, and `type_of` is the class of a value's inferred type.
+pub(crate) fn cached_result<'t>(
+    f: &IrFunction,
+    defs: &FxHashMap<VarId, &Inst>,
+    live: &crate::ownership::Live,
+    resolve: impl Fn(&str) -> Option<String>,
+    type_of: impl Fn(VarId) -> Option<&'t str>,
+) -> Option<CachedResult> {
+    if !matches!(f.kind, heki_ir::FunctionKind::Sync) || crate::resolver::is_generator_function(f) {
+        return None;
+    }
+    let decorator = cache_decorator(&f.decorators, &resolve)?;
+    let receiver = f.owner_class_qualname.is_some() && !f.has_decorator(&["staticmethod"]);
+    if f.params.len() <= usize::from(receiver) {
+        return None;
+    }
+    let mut returned = Vec::new();
+    for b in f.blocks.iter().filter(|b| live.block(b.id)) {
+        match b.terminator {
+            Terminator::Return(Some(v)) => returned.push(v),
+            Terminator::Return(None) => return None,
+            _ => {}
+        }
+    }
+    if returned.is_empty() {
+        return None;
+    }
+    let annotated = f
+        .return_annotation
+        .as_deref()
+        .and_then(|a| annotated_kind(a, &resolve));
+    let kind = match annotated {
+        Some(kind) => kind,
+        None => constructed_kind(f, defs, live, &returned, &resolve, type_of)?,
+    };
+    Some(CachedResult { decorator, kind })
+}
+
+/// The container kind a return annotation names as a whole (`dict[str, Any]`, `typing.List`),
+/// not inside a union or `Optional`.
+fn annotated_kind(text: &str, resolve: &impl Fn(&str) -> Option<String>) -> Option<ContainerKind> {
+    let text = text.trim().trim_matches(|c| c == '"' || c == '\'');
+    let head = text.split_once('[').map_or(text, |(h, _)| h).trim();
+    if head.contains(|c: char| !(c.is_alphanumeric() || c == '_' || c == '.')) {
+        return None;
+    }
+    match resolve(head)?.as_str() {
+        "builtins.list" | "typing.List" | "typing_extensions.List" => Some(ContainerKind::List),
+        "builtins.dict" | "typing.Dict" | "typing_extensions.Dict" => Some(ContainerKind::Dict),
+        "builtins.set" | "typing.Set" | "typing_extensions.Set" => Some(ContainerKind::Set),
+        _ => None,
+    }
+}
+
+/// The one `functools` cache among the decorators, when the others are only `staticmethod` /
+/// `classmethod` and the cache keeps results (no `maxsize` of the literal `0`).
+fn cache_decorator(
+    decorators: &[String],
+    resolve: &impl Fn(&str) -> Option<String>,
+) -> Option<CacheDecorator> {
+    let mut found = None;
+    for d in decorators {
+        let (head, args) = match d.split_once('(') {
+            Some((h, rest)) => (h.trim(), Some(rest.trim_end().strip_suffix(')')?)),
+            None => (d.trim(), None),
+        };
+        let target = resolve(head);
+        let decorator = match target.as_deref() {
+            Some("functools.lru_cache") => CacheDecorator::LruCache,
+            Some("functools.cache") if args.is_none() => CacheDecorator::Cache,
+            Some("builtins.staticmethod" | "builtins.classmethod") if args.is_none() => continue,
+            None if matches!(head, "staticmethod" | "classmethod") && args.is_none() => continue,
+            _ => return None,
+        };
+        let keeps_nothing = args.is_some_and(|a| {
+            a.split(',').map(str::trim).enumerate().any(|(i, part)| {
+                let value = part
+                    .strip_prefix("maxsize")
+                    .map_or((i == 0 && !part.contains('=')).then_some(part), |rest| {
+                        rest.trim_start().strip_prefix('=').map(str::trim)
+                    });
+                value == Some("0")
+            })
+        });
+        if keeps_nothing || found.replace(decorator).is_some() {
+            return None;
+        }
+    }
+    found
+}
+
+/// The container kind every value in `returned` is built as, through copies and phis (along
+/// the edges a run can take).
+fn constructed_kind<'t>(
+    f: &IrFunction,
+    defs: &FxHashMap<VarId, &Inst>,
+    live: &crate::ownership::Live,
+    returned: &[VarId],
+    resolve: &impl Fn(&str) -> Option<String>,
+    type_of: impl Fn(VarId) -> Option<&'t str>,
+) -> Option<ContainerKind> {
+    let phis: FxHashMap<VarId, (heki_ir::BlockId, &PhiNode)> = f
+        .blocks
+        .iter()
+        .flat_map(|b| b.phis.iter().map(move |p| (p.dst, (b.id, p))))
+        .collect();
+    // `list` / `dict` / `set` / `sorted` the module does not rebind.
+    let builtin = |name: &str| resolve(name).is_none_or(|t| t == format!("builtins.{name}"));
+    let mut kind = None;
+    let mut seen: rustc_hash::FxHashSet<VarId> = rustc_hash::FxHashSet::default();
+    let mut work: Vec<VarId> = returned.to_vec();
+    while let Some(var) = work.pop() {
+        if !seen.insert(var) {
+            continue;
+        }
+        let built = match defs.get(&var).map(|i| &i.kind) {
+            Some(InstKind::Copy { src, .. }) => {
+                work.push(*src);
+                continue;
+            }
+            Some(InstKind::AllocBuiltin { kind, .. }) => match kind {
+                heki_ir::BuiltinKind::List => ContainerKind::List,
+                heki_ir::BuiltinKind::Dict => ContainerKind::Dict,
+                heki_ir::BuiltinKind::Set => ContainerKind::Set,
+                _ => return None,
+            },
+            Some(InstKind::DictLiteral { .. }) => ContainerKind::Dict,
+            Some(InstKind::Call { callee, .. }) if builtin(callee) => match callee.as_str() {
+                "list" | "sorted" => ContainerKind::List,
+                "dict" => ContainerKind::Dict,
+                "set" => ContainerKind::Set,
+                _ => return None,
+            },
+            Some(InstKind::MethodCall { recv, method, .. })
+                if matches!(method.as_str(), "split" | "rsplit" | "splitlines")
+                    && matches!(type_of(*recv), Some("builtins.str" | "builtins.bytes")) =>
+            {
+                ContainerKind::List
+            }
+            Some(_) => return None,
+            None => {
+                let (block, phi) = phis.get(&var)?;
+                work.extend(
+                    phi.incoming
+                        .iter()
+                        .filter(|(from, v)| *v != var && live.edge(*from, *block))
+                        .map(|(_, v)| *v),
+                );
+                continue;
+            }
+        };
+        if kind.replace(built).is_some_and(|k| k != built) {
+            return None;
+        }
+    }
+    kind
+}
+
 /// A function that may return (on some path) a value shared with a read-only producer's other
 /// callers: a declared `readonly-returns` producer's or an `@lru_cache` function's result, or a
 /// part of one, directly or through other such functions.

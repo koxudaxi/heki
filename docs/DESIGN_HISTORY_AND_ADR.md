@@ -444,8 +444,9 @@ incremental LSP design, and the Stage 0-A Wave 2 decisions.
       break `extend-select = ["EFF105"]`).
   11. **Contract rules** (D7): classified and labelled like the others; declaring the contract
       selects them, whatever their certainty. `MUT202`'s zero-configuration part (`@lru_cache` /
-      `@cache` producers) becomes a code of its own; until then `MUT202` is selected as a
-      heuristic `Default` rule. *Rejected*: exempting contract rules from the class (`EFF201`
+      `@cache` producers) is a code of its own, `MUT114`, a `Default` rule whose reports are
+      exact when the changed object is the list, dict, or set a cached function returned, the
+      same object on every path; `MUT202` keeps the declared producers. *Rejected*: exempting contract rules from the class (`EFF201`
       calls itself over-approximate); gating them on `heuristic` (a declared contract would
       report nothing).
   12. **Certification** (replaces the earlier D8 and D9): a rule becomes exact when (a) for

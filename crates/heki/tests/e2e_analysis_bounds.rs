@@ -901,7 +901,7 @@ fn task_factories_at_the_end_of_a_copy_chain_take_linear_time() {
 }
 
 /// A shared value copied along a long chain of assignments (`v1 = v0`, `v2 = v1`, ...) before
-/// `MUT202` reads which object each copy is: each copy's origin is found once.
+/// `MUT114` reads which object each copy is: each copy's origin is found once.
 #[test]
 fn a_long_copy_chain_of_a_shared_value_finds_each_origin_once() {
     let mut lines = vec![
@@ -925,7 +925,7 @@ fn a_long_copy_chain_of_a_shared_value_finds_each_origin_once() {
     let found = check_within(&p, Duration::from_secs(20));
     let reported: Vec<&str> = found
         .iter()
-        .filter(|d| d["rule_code"] == "MUT202")
+        .filter(|d| d["rule_code"] == "MUT114")
         .map(|d| d["qualname"].as_str().unwrap())
         .collect();
     assert_eq!(reported, vec!["extend"], "{found:#?}");
@@ -954,7 +954,7 @@ fn many_shared_values_read_their_memo_writes_in_one_walk() {
     let p = Project::new("bounds_many_shared_values");
     p.write("m.py", &(lines.join("\n") + "\n"));
     let found = check_within(&p, Duration::from_secs(20));
-    let reported = found.iter().filter(|d| d["rule_code"] == "MUT202").count();
+    let reported = found.iter().filter(|d| d["rule_code"] == "MUT114").count();
     assert_eq!(reported, 3000, "{found:#?}");
 }
 
@@ -984,7 +984,7 @@ fn lazy_initializations_past_the_budget_count_as_changes() {
     let found = check_within(&p, Duration::from_secs(20));
     let reported: Vec<&str> = found
         .iter()
-        .filter(|d| d["rule_code"] == "MUT202")
+        .filter(|d| d["rule_code"] == "MUT114")
         .map(|d| d["qualname"].as_str().unwrap())
         .collect();
     assert_eq!(reported, vec!["use"], "{found:#?}");
@@ -1209,7 +1209,7 @@ fn item_stores_in_many_branches_find_membership_tests_once() {
     let found = check_within(&p, Duration::from_secs(20));
     let reported: Vec<&str> = found
         .iter()
-        .filter(|d| d["rule_code"] == "MUT202")
+        .filter(|d| d["rule_code"] == "MUT114")
         .map(|d| d["qualname"].as_str().unwrap())
         .collect();
     assert_eq!(reported, vec!["use"], "{found:#?}");

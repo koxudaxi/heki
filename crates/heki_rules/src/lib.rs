@@ -1,8 +1,8 @@
 //! Rule registry spanning all 3 families derived from the single Effect & Alias theory.
 //!
 //! - Family 1 (`MUT`): Mutation & State Effect (`MUT101`, `MUT103`, `MUT106`, `MUT107`, `MUT108`,
-//!   `MUT109`, `MUT110`, `MUT111`, `MUT112`, `MUT113`, `MUT201`, `MUT202`, `MUT203`, `MUT204`,
-//!   `MUT205`, `MUT206`, `MUT207`)
+//!   `MUT109`, `MUT110`, `MUT111`, `MUT112`, `MUT113`, `MUT114`, `MUT201`, `MUT202`, `MUT203`,
+//!   `MUT204`, `MUT205`, `MUT206`, `MUT207`)
 //! - Family 2 (`EFF` / `DATA`): Execution Effect (`EFF101`, `EFF102`, `EFF103`, `EFF105`, `EFF106`,
 //!   `EFF107`, `EFF201`, `DATA101`)
 //! - Family 3 (`OPT`): Complexity Rewrite (`OPT101`, `OPT102`, `OPT103`, `OPT110`, `OPT111`,
@@ -282,6 +282,18 @@ pub const CORE_RULES: &[RuleMeta] = &[
         doc: include_str!("../rule-docs/MUT113.md"),
     },
     RuleMeta {
+        code: "MUT114",
+        slug: "cached-result-mutation",
+        family: RuleFamily::Mut,
+        certainty: Certainty::Heuristic,
+        activation: Activation::Default,
+        consequence: Consequence::Bug,
+        size_dependent_fix: false,
+        auto_fix_default: false,
+        summary: "Changing in place the list, dict, or set that a `functools.lru_cache` / `functools.cache` function returned (the cache hands the same object to later calls with the same arguments), directly or through the functions that return it.",
+        doc: include_str!("../rule-docs/MUT114.md"),
+    },
+    RuleMeta {
         code: "MUT201",
         slug: "write-owner-violation",
         family: RuleFamily::Mut,
@@ -298,12 +310,11 @@ pub const CORE_RULES: &[RuleMeta] = &[
         slug: "readonly-return-mutation",
         family: RuleFamily::Mut,
         certainty: Certainty::Heuristic,
-        // Not `Contract`: it also reports without one (`@lru_cache` / `@cache` results).
-        activation: Activation::Default,
+        activation: Activation::Contract,
         consequence: Consequence::Bug,
         size_dependent_fix: false,
         auto_fix_default: false,
-        summary: "Mutating a shared object returned by a declared `readonly-returns` producer or `@lru_cache`, directly or through the functions that return it.",
+        summary: "Mutating a shared object returned by a declared `readonly-returns` producer, directly or through the functions that return it.",
         doc: include_str!("../rule-docs/MUT202.md"),
     },
     RuleMeta {

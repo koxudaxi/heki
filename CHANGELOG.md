@@ -71,6 +71,16 @@ release can change rules, configuration keys, diagnostics, and output formats.
   (`items = given or []`, `d.get(k, {})`, a callee returning a memo or its argument), made
   directly, through a helper, or in a closure, and a store of such a value in `self.<attr>` that a
   method of the class family changes in place.
+- `MUT114` (`cached-result-mutation`) reports an in-place change of an object that a
+  `functools.lru_cache` / `functools.cache` function returned, which `MUT202` reported without
+  configuration before. A report states its full claim, exact once the rule is certified, when
+  the function changes in place the list, dict, or set that the cached function returned, the
+  same object on every path: the decorator resolves
+  through the imports to `functools` (a module's own `cache` decorator does not count), its
+  `maxsize` is not `0`, the function takes a parameter besides `self` / `cls`, and every return
+  a run can reach hands out that kind of container, by its return annotation or by construction
+  (`html.escape(text).split("\n")` included). Its other reports (through wrappers or helpers, an
+  object below the result, a class instance) are heuristic.
 - `MUT113` (`iterated-container-mutation`, opt-in, experimental) reports a dict, set, or deque
   of `self` changed in place while a method iterates it: by another method of the class while a
   generator is suspended inside the iteration, or by a function the loop's body calls; the next
@@ -91,10 +101,12 @@ release can change rules, configuration keys, diagnostics, and output formats.
   rewrite is not proven) are shown under the same conditions. A contract rule runs when its
   contract is declared, whatever its certainty. No rule is exact yet: `heki check` with no configuration runs only the contract
   rules, and `heki check --fix` applies no fix, since `OPT101` and `OPT102` stay heuristic until
-  a measurement certifies them. `MUT202`, which also reports `@lru_cache` / `@cache` results
-  without a contract, is selected like the other heuristic rules, so a `readonly-returns`
-  contract needs it named or `lint.heuristic = true`. `lint.heuristic = true` restores the rules
-  of 0.1; baselines keep their keys.
+  a measurement certifies them. `lint.heuristic = true` restores the rules of 0.1; baselines
+  keep their keys, except the reports that move to `MUT114` (below).
+- `MUT202` (`readonly-return-mutation`) is a contract rule: it reports the declared
+  `readonly-returns` producers, and runs when such a contract is declared. Changes of
+  `@lru_cache` / `@cache` results move to `MUT114` (`cached-result-mutation`): regenerate a
+  baseline that holds them, or add `MUT114` to `ignore`.
 - Every output labels heuristic reports: `[error, heuristic]` in `full`,
   `EFF102 [heuristic] ...` in `concise`, `title=heki EFF102 (heuristic)` in `github`, and
   ` [heuristic]` after the language server's message. `heki rule --all` lists each rule's
