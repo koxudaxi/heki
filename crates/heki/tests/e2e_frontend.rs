@@ -1928,7 +1928,8 @@ fn rule_and_explain_commands() {
     assert!(lines[0].starts_with("MUT101   cached-property-stale-mutation "));
     // Each rule's certainty and when it runs with no configuration.
     for (code, state) in [
-        ("OPT101", "[heuristic off      fix=true ]"),
+        ("OPT101", "[heuristic select   fix=true ]"),
+        ("EFF102", "[heuristic off      fix=false]"),
         ("EFF105", "[heuristic opt-in   fix=false]"),
         ("MUT201", "[heuristic contract fix=false]"),
     ] {
@@ -1995,7 +1996,7 @@ fn rule_and_explain_commands() {
             &one["activation"],
             &one["default_enabled"]
         ),
-        (&json!("heuristic"), &json!("default"), &json!(false))
+        (&json!("heuristic"), &json!("selectable"), &json!(false))
     );
     let contract: Value =
         serde_json::from_str(&heki(&["rule", "MUT201", "--output-format", "json"]).1).unwrap();

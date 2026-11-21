@@ -69,6 +69,10 @@ pub enum Activation {
     /// In the default selection, and matched by a prefix or `ALL`, while the rule is exact;
     /// whatever its certainty with `lint.heuristic`.
     Default,
+    /// Matched by a prefix or `ALL` as a `Default` rule is (`extend-select = ["OPT"]`), but in
+    /// the default selection only with `lint.heuristic`, which runs every rule that is not
+    /// opt-in: an exact rule whose reports are right but rarely harmful.
+    Selectable,
     /// Only by its exact code or name.
     OptIn,
     /// Selected as an exact `Default` rule is, whatever its certainty: it reports only what a
@@ -95,11 +99,23 @@ pub struct RuleMeta {
 }
 
 impl RuleMeta {
-    /// Whether the rule runs without being named: in the default selection and for a prefix or
-    /// `ALL`. `heuristic` is `lint.heuristic`.
-    pub const fn runs_unnamed(&self, heuristic: bool) -> bool {
+    /// Whether the rule is in the default selection. `heuristic` is `lint.heuristic`.
+    pub const fn runs_by_default(&self, heuristic: bool) -> bool {
         match self.activation {
-            Activation::Default => heuristic || matches!(self.certainty, Certainty::Exact),
+            Activation::Default => self.runs_for_prefix(heuristic),
+            Activation::Selectable => heuristic,
+            Activation::Contract => true,
+            Activation::OptIn => false,
+        }
+    }
+
+    /// Whether a prefix or `ALL` that matches the rule selects it. `heuristic` is
+    /// `lint.heuristic`.
+    pub const fn runs_for_prefix(&self, heuristic: bool) -> bool {
+        match self.activation {
+            Activation::Default | Activation::Selectable => {
+                heuristic || matches!(self.certainty, Certainty::Exact)
+            }
             Activation::Contract => true,
             Activation::OptIn => false,
         }
@@ -111,7 +127,7 @@ impl RuleMeta {
     /// `select` / `extend-select` names its code or name (`named`), or for a contract rule.
     pub const fn shows_heuristic_reports(&self, named: bool, heuristic: bool) -> bool {
         match self.activation {
-            Activation::Default => {
+            Activation::Default | Activation::Selectable => {
                 heuristic || named || matches!(self.certainty, Certainty::Heuristic)
             }
             Activation::OptIn | Activation::Contract => true,
@@ -129,6 +145,12 @@ impl RuleMeta {
                 "It runs when `select` or `extend-select` names its code or name, and with \
                  `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes \
                  and `ALL`."
+            }
+            Activation::Selectable => {
+                "It runs when `select` or `extend-select` names its code or name, and with \
+                 `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes \
+                 and `ALL`. Once exact, it runs for its prefixes and `ALL` without the key, but \
+                 still not by default."
             }
             Activation::OptIn => {
                 "It runs only when `select` or `extend-select` names its code or name."
@@ -473,7 +495,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         slug: "list-quadratic-concat",
         family: RuleFamily::Opt,
         certainty: PROVEN_OPT_TIER,
-        activation: Activation::Default,
+        activation: Activation::Selectable,
         consequence: Consequence::Slowdown,
         size_dependent_fix: false,
         auto_fix_default: true,
@@ -485,7 +507,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         slug: "set-dict-quadratic-merge",
         family: RuleFamily::Opt,
         certainty: PROVEN_OPT_TIER,
-        activation: Activation::Default,
+        activation: Activation::Selectable,
         consequence: Consequence::Slowdown,
         size_dependent_fix: false,
         auto_fix_default: true,
@@ -497,7 +519,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         slug: "immutable-quadratic-concat",
         family: RuleFamily::Opt,
         certainty: PROVEN_OPT_TIER,
-        activation: Activation::Default,
+        activation: Activation::Selectable,
         consequence: Consequence::Slowdown,
         size_dependent_fix: false,
         auto_fix_default: false,
@@ -509,7 +531,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         slug: "loop-linear-membership",
         family: RuleFamily::Opt,
         certainty: PROVEN_OPT_TIER,
-        activation: Activation::Default,
+        activation: Activation::Selectable,
         consequence: Consequence::Slowdown,
         size_dependent_fix: true,
         auto_fix_default: false,
@@ -521,7 +543,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         slug: "loop-linear-dedup",
         family: RuleFamily::Opt,
         certainty: PROVEN_OPT_TIER,
-        activation: Activation::Default,
+        activation: Activation::Selectable,
         consequence: Consequence::Slowdown,
         size_dependent_fix: true,
         auto_fix_default: false,
@@ -545,7 +567,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         slug: "nested-loop-equijoin",
         family: RuleFamily::Opt,
         certainty: Certainty::Heuristic,
-        activation: Activation::Default,
+        activation: Activation::Selectable,
         consequence: Consequence::Slowdown,
         size_dependent_fix: false,
         auto_fix_default: false,
@@ -557,7 +579,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         slug: "list-front-pop",
         family: RuleFamily::Opt,
         certainty: PROVEN_OPT_TIER,
-        activation: Activation::Default,
+        activation: Activation::Selectable,
         consequence: Consequence::Slowdown,
         size_dependent_fix: true,
         auto_fix_default: false,
@@ -569,7 +591,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         slug: "list-front-insert",
         family: RuleFamily::Opt,
         certainty: PROVEN_OPT_TIER,
-        activation: Activation::Default,
+        activation: Activation::Selectable,
         consequence: Consequence::Slowdown,
         size_dependent_fix: true,
         auto_fix_default: false,
@@ -581,7 +603,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         slug: "loop-invariant-container-rebuild",
         family: RuleFamily::Opt,
         certainty: PROVEN_OPT_TIER,
-        activation: Activation::Default,
+        activation: Activation::Selectable,
         consequence: Consequence::Slowdown,
         size_dependent_fix: true,
         auto_fix_default: false,
@@ -1038,23 +1060,29 @@ mod registry_tests {
             activation,
             ..*find_rule("EFF102").unwrap()
         };
-        use Activation::{Contract, OptIn};
+        use Activation::{Contract, OptIn, Selectable};
         use Certainty::{Exact, Heuristic};
         let on = Activation::Default;
-        // Whether it runs without being named, and whether it shows its heuristic reports when
-        // it runs unnamed, both without and with `lint.heuristic`; named, every rule shows them.
-        for (certainty, activation, plain, with_heuristic, shows_plain) in [
-            (Exact, on, true, true, false),
-            (Heuristic, on, false, true, true),
-            (Exact, Contract, true, true, true),
-            (Heuristic, Contract, true, true, true),
-            (Exact, OptIn, false, false, true),
-            (Heuristic, OptIn, false, false, true),
+        // Whether it runs by default, and for a prefix, both without and with `lint.heuristic`,
+        // and whether it shows its heuristic reports when it runs unnamed; named, every rule
+        // shows them.
+        for (certainty, activation, by_default, for_prefix, shows_plain) in [
+            (Exact, on, [true, true], [true, true], false),
+            (Heuristic, on, [false, true], [false, true], true),
+            (Exact, Selectable, [false, true], [true, true], false),
+            (Heuristic, Selectable, [false, true], [false, true], true),
+            (Exact, Contract, [true, true], [true, true], true),
+            (Heuristic, Contract, [true, true], [true, true], true),
+            (Exact, OptIn, [false, false], [false, false], true),
+            (Heuristic, OptIn, [false, false], [false, false], true),
         ] {
             let r = rule(certainty, activation);
             assert_eq!(
-                (r.runs_unnamed(false), r.runs_unnamed(true)),
-                (plain, with_heuristic),
+                (
+                    [r.runs_by_default(false), r.runs_by_default(true)],
+                    [r.runs_for_prefix(false), r.runs_for_prefix(true)]
+                ),
+                (by_default, for_prefix),
                 "{certainty:?} {activation:?}"
             );
             assert_eq!(

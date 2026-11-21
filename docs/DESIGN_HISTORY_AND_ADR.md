@@ -417,13 +417,15 @@ incremental LSP design, and the Stage 0-A Wave 2 decisions.
      `@precision` levels, Pylint's per-message confidence, and Semgrep's three confidence
      levels (heki's bar is binary).
   9. **Where the class lives** (D5): `RuleMeta::certainty`, and `activation` (`Default`,
-     `OptIn`, `Contract`) instead of `default_enabled`. A report's certainty is its rule's at
+     `Selectable`, `OptIn`, `Contract`) instead of `default_enabled`. A report's certainty is its rule's at
      most (`Certainty::at_most`). One claim is one code: an effect rule's heuristic side is a
      code of its own (`EFF101` "reaches on every path" beside `EFF111` "can reach", `EFF103`
      beside `EFF113`). An `OPT` rule keeps one code with a certainty per report: a report whose
      rewrite is proven safe is the rule's exact tier, the others are heuristic. A demoted rule
-     keeps `Default`, so `lint.heuristic = true` restores the earlier default set and a
-     promotion is a one-field change. Experimental stays its own axis and implies `OptIn`.
+     keeps `Default`, so `lint.heuristic = true` restores the earlier default set (it runs the
+     `Selectable` rules of decision 13 too) and a promotion is a one-field change; the eight
+     Soundness-lane `OPT` rules take their certainty from one constant, so that their proven
+     tier is certified as one change. Experimental stays its own axis and implies `OptIn`.
      *Rejected*: a second list of heuristic codes; one code with a per-report tier for the
      effect rules (their claims differ, and a rule is its claim); a selection that reads a
      per-report certainty (the selection stays per rule, and a filter withholds the heuristic
@@ -461,11 +463,16 @@ incremental LSP design, and the Stage 0-A Wave 2 decisions.
       `OPT101` and `OPT102` (they are certified like the others, so until then `heki check
       --fix` applies no fix without configuration).
   13. **The default set**: a rule runs by default when it is exact and its share of real harm
-      is worth the line it prints. For 0.2.0 that is `EFF101`, `EFF103`, `OPT113`, and the
-      proven tier of the `OPT` rules once each is certified; `MUT107`, `OPT112`, and `EFF102`
-      stay heuristic. *Rejected*: every exact rule by default (a rule whose reports are right but rarely
-      harmful, such as `MUT107` with 4% real harm in round 3, would print lines nobody acts
-      on); releasing 0.2.0 with the earlier default set.
+      is worth the line it prints. An exact rule below that bar is `Selectable`: its code, a
+      prefix, or `ALL` selects it, and the default selection only with `lint.heuristic`, which
+      runs every rule that is not opt-in. For 0.2.0 the default set has `EFF101` and `EFF103` once each is
+      certified; the proven tier of the `OPT` rules (2 of 100 sampled reports did real harm in
+      the pre-check of its exact claim) and `OPT113` (5 of 100) are `Selectable`; `MUT107`,
+      `OPT112`, and `EFF102` stay heuristic. *Rejected*: every exact rule by default (a rule
+      whose reports are right but rarely harmful, such as `MUT107` with 4% real harm in round
+      3, would print lines nobody acts on); an exact rule below the bar as `OptIn` (no prefix
+      would select it, so `extend-select = ["OPT"]` would not show the `OPT` suggestions);
+      releasing 0.2.0 with the earlier default set.
 - **Status**: the certainty and activation of every rule, a report's own certainty (the `OPT`
   reports whose rewrite is not proven are heuristic), the `heuristic` key and options, the
   withholding of an exact rule's heuristic reports, the note, the labels in every output, the

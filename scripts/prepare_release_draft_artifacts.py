@@ -56,6 +56,7 @@ RULE_ROW = re.compile(r"^\| ([A-Z]+[0-9]+) \| \[([a-z0-9-]+)\]\([^)]*\) \|(.*)\|
 OPT_IN_MARK = "\N{ELECTRIC PLUG}"
 HEURISTIC_MARK = "\N{ALMOST EQUAL TO}"
 CONTRACT_MARK = "\N{SCROLL}"
+SELECTABLE_MARK = "\N{HEAVY PLUS SIGN}"
 OPTION = re.compile(r"(?<![\w-])--[a-z0-9]+(?:-[a-z0-9]+)*(?![\w-])")
 CONFIGURATION_KEY = re.compile(r"^\| `([a-z][a-z0-9-]*)` \|", re.MULTILINE)
 EXPERIMENTAL_PAGE = "docs/experimental.md"
@@ -370,12 +371,14 @@ def rules(source: str) -> Names:
 
 def default_state(marks: str) -> str:
     """Whether a rule of the rules index runs by default, by the marks of its last cell: not an
-    opt-in rule, and not a heuristic one unless it is a contract rule (declaring the contract is
-    what selects it)."""
+    opt-in rule, not a heuristic one unless it is a contract rule (declaring the contract is
+    what selects it), and not one that only a selector names (its prefix or `ALL`)."""
     if OPT_IN_MARK in marks:
         return "opt-in"
     if HEURISTIC_MARK in marks and CONTRACT_MARK not in marks:
         return "heuristic, off by default"
+    if SELECTABLE_MARK in marks:
+        return "off by default, selected by its prefix"
     return "enabled by default"
 
 
