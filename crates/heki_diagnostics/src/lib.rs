@@ -1103,6 +1103,10 @@ mod tests {
             [&json[0]["certainty"], &json[1]["certainty"]],
             ["heuristic", "exact"]
         );
+        // `heki rule` prints the word the JSON output writes.
+        for certainty in [Certainty::Exact, Certainty::Heuristic] {
+            assert_eq!(serde_json::json!(certainty), certainty.word());
+        }
         let s: serde_json::Value =
             serde_json::from_str(&render(&diags, OutputFormat::Sarif, &none)).unwrap();
         assert_eq!(

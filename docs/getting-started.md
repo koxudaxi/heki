@@ -11,10 +11,11 @@ $ heki check
 $ heki check --heuristic
 ```
 
-The first command runs the exact rules: hand-checked samples of their reports found none wrong
-about the code. No rule is exact yet, so for now it reports nothing and says how many heuristic
-rules it left off. `--heuristic` runs those too; their reports can be wrong about the code, and
-every output labels them ([Rule Precision](precision.md)).
+The first command runs the exact rules (hand-checked samples of their reports found none wrong
+about the code) and the rules of the [contracts](configuration.md#contracts) you declare. No rule
+is exact yet, so without a contract it reports nothing for now, and says how many heuristic rules
+it left off. `--heuristic` runs those too; their reports can be wrong about the code, and every
+output labels them ([Rule Precision](precision.md)).
 
 heki checks every Python file under the current directory, except the
 [excluded and ignored ones](configuration.md#which-files-are-checked). Pass files or directories

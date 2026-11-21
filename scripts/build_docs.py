@@ -88,6 +88,11 @@ CLI_COMMANDS = [
 ]
 
 
+def shown(path: Path) -> str:
+    """A file of the repository as the messages name it: relative, with `/` on every platform."""
+    return path.relative_to(ROOT).as_posix()
+
+
 def run(heki: Path, *args: str) -> str:
     out = subprocess.run([str(heki), *args], capture_output=True, text=True, check=False)
     if out.returncode != 0:
@@ -331,7 +336,7 @@ def stale_opt_in_lists(rules: list[dict]) -> list[str]:
                 line = text.count("\n", 0, m.start()) + 1
                 missing = ", ".join(sorted(opt_in - listed)) or "-"
                 extra = ", ".join(sorted(listed - opt_in)) or "-"
-                stale.append(f"{page.relative_to(ROOT)}:{line}: missing {missing}; not opt-in {extra}")
+                stale.append(f"{shown(page)}:{line}: missing {missing}; not opt-in {extra}")
     return stale
 
 
@@ -386,7 +391,7 @@ def stale_row_marks(rules: list[dict], word: str, marked_codes: set[str]) -> lis
             if named and marked != bool(named & marked_codes):
                 listed = ", ".join(sorted(named))
                 wrong = f"says {word}" if marked else f"does not say {word}"
-                stale.append(f"{page.relative_to(ROOT)}:{number}: the row of {listed} {wrong}")
+                stale.append(f"{shown(page)}:{number}: the row of {listed} {wrong}")
     return stale
 
 
@@ -407,7 +412,7 @@ def stale_experimental_marks(rules: list[dict], registry: dict) -> list[str]:
             target.search(item) and "experimental" in item.lower() for item in list_items(section)
         ):
             stale.append(
-                f"{CHANGELOG.relative_to(ROOT)}: [{feature['since']}] does not call "
+                f"{shown(CHANGELOG)}: [{feature['since']}] does not call "
                 f"{feature['target']} experimental"
             )
     return stale
@@ -435,7 +440,7 @@ def main() -> int:
         "Heuristic rules are marked differently from the rules": (
             stale_row_marks(rules, "heuristic", heuristic)
         ),
-        f"Exact rules lack their measurement in {PRECISION_PAGE.relative_to(ROOT)}": (
+        f"Exact rules lack their measurement in {shown(PRECISION_PAGE)}": (
             unmeasured_exact_rules(rules, measurements)
         ),
     }
@@ -448,13 +453,13 @@ def main() -> int:
         return 1
     files = outputs(args.heki, rules, registry, measurements)
     stale = sorted(
-        str(p.relative_to(ROOT))
+        shown(p)
         for p, text in files.items()
         if not p.exists() or p.read_text(encoding="utf-8") != text
     )
     expected = {p.name for p in files if p.parent == RULES_DIR}
     extra = sorted(
-        str(p.relative_to(ROOT))
+        shown(p)
         for p in RULES_DIR.glob("*.md")
         if p.name not in expected
     ) if RULES_DIR.exists() else []
