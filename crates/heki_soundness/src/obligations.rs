@@ -32,6 +32,8 @@ pub enum ObligationKind {
     ExceptionStateSafe,
     /// `{**d, ...}`: the accumulator is the first entry and is not unpacked again.
     DictUnpackLeading,
+    /// Nothing observes the iteration order of the set that `s |= t` grows in place.
+    SetOrderUnobserved,
     ValueLoopInvariant,
     /// Hoisting `set(...)` cannot raise even when the loop runs zero times.
     ZeroTripExceptionSafe,

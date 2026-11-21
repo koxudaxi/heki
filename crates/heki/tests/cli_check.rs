@@ -673,3 +673,27 @@ fn folded_blocking_calls_are_suppressed_and_baselined_one_by_one() {
     assert_eq!(stdout.lines().count(), 1, "{stdout}");
     assert!(stdout.contains("(+11 more async call sites"), "{stdout}");
 }
+
+/// The hidden `--walk-steps` option writes, whatever the exit code, the steps each owner's walks
+/// took per function, for `scripts/check_walk_shapes.py`; a path it cannot write is an error.
+#[test]
+fn walk_steps_are_written_as_json_and_hidden_from_help() {
+    let p = Project::new("walk_steps");
+    p.write("m.py", BLOCKING);
+    let (code, _, stderr) = p.heki(&["--walk-steps", "steps.json", "."]);
+    assert_eq!(code, 1, "{stderr}");
+    let steps = std::fs::read_to_string(p.dir.join("steps.json")).unwrap();
+    let steps: serde_json::Value = serde_json::from_str(&steps).unwrap();
+    assert!(steps.is_array(), "{steps}");
+
+    let (code, _, stderr) = p.heki(&["--walk-steps", "missing/steps.json", "."]);
+    assert_eq!(code, 2);
+    assert!(
+        stderr.contains("cannot write `missing/steps.json`"),
+        "{stderr}"
+    );
+
+    let (code, help, _) = p.heki(&["--help"]);
+    assert_eq!(code, 0);
+    assert!(!help.contains("walk-steps"), "{help}");
+}

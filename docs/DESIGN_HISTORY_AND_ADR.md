@@ -204,6 +204,10 @@ incremental LSP design, and the Stage 0-A Wave 2 decisions.
   dependence on input size) are separate. `unconditional` (applied by the default `--fix`) is
   only `OPT101` and `OPT102`; `OPT103` and `OPT110`–`OPT130` are `size-dependent`; `OPT120` /
   `OPT121` forbid any index `q[i]` other than the ends.
+- **Amended in 0.2.0**: the default `--fix` rewrites `s = s | t` to `s |= t` only where nothing
+  observes the set's iteration order (`SetOrderUnobserved`): growing a set in place and copying
+  it into a new one can order the same elements differently, and the order of an `int` set is the
+  same in every run.
 
 <a id="adr-008"></a>
 ### ADR-008: Advisory precision (staging, boundary aggregation, offload wrapper propagation, sync-over-async relaxation, `EFF104` rejected)
