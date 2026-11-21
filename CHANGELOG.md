@@ -24,6 +24,12 @@ release can change rules, configuration keys, diagnostics, and output formats.
   current directory, not in `pkg`. Module names, the `path`s of a `--baseline` file, and the
   place of `.heki-summary-snapshot.json` move with the root; a configuration file keeps the
   root where it is.
+- Warnings no longer make `heki check` fail: a run that reports only `warning` diagnostics
+  (slower code, by default) prints them and exits 0; an `error` (a bug) still exits 1. The new
+  `[tool.heki.lint] fail-on = "warning"` and `heki check --fail-on warning` make warnings fail
+  the run again (`--fail-on error` overrides the configuration the other way), in every output
+  format and in `--watch`. With a baseline, the same threshold applies to the Ratchet
+  regressions; a refused `--update-baseline` and pending `--diff` changes still exit 1.
 
 ### Added
 
@@ -120,11 +126,11 @@ release can change rules, configuration keys, diagnostics, and output formats.
 - A rule's default severity follows what happens in the code it reports, not its family: a bug
   (a wrong result, an exception, a lost update, a deadlock, or a broken contract) is an
   `error`, slower code a `warning`. `EFF101`, `EFF102`, `EFF103`, `EFF105`, `DATA101`, and the
-  `OPT` rules default to `warning` instead of `error`; the other rules stay `error`. The exit
-  code does not change (a warning still makes `heki check` exit 1), only the output label, the
-  SARIF level, and the language server's severity. `[tool.heki.lint.severity]` still overrides
-  it. Each rule page shows its default severity, and `heki rule --output-format json` gives each
-  rule's `consequence` (`bug` or `slowdown`).
+  `OPT` rules default to `warning` instead of `error`; the other rules stay `error`. This
+  changes the output label, the SARIF level, the language server's severity, and the exit code
+  (see Breaking changes: a warning no longer fails the run). `[tool.heki.lint.severity]` still
+  overrides it. Each rule page shows its default severity, and `heki rule --output-format json`
+  gives each rule's `consequence` (`bug` or `slowdown`).
 - `EFF102` and `EFF103` also report the function a builtin calls once per item: the function
   handed to `map`, `filter`, `itertools.starmap`, `itertools.filterfalse`, and
   `functools.reduce`, and the `key` of `sorted`, `list.sort`, `min`, `max`, and
@@ -134,6 +140,13 @@ release can change rules, configuration keys, diagnostics, and output formats.
 
 ### Fixed
 
+- An f-string's replacement fields are reads of their values: each is converted and formatted
+  where it stands, as CPython does (which may run the value's `__str__`, `__repr__`, or
+  `__format__`), also in a format specification and in a template string's specifications,
+  and the f-string is computed from them. The Soundness lane no longer proves a
+  `collections.deque` rewrite safe for a list an f-string shows (`OPT120` / `OPT121`: the
+  text of a `deque` differs), and `OPT113` no longer reports a traversal whose inner collection
+  is computed from the outer element through an f-string (`index[f"{name}"]`).
 - A project module that cannot be read or does not parse still owns its module name: the names
   under it resolve to nothing, never to a module of the same name the catalog lists. A broken
   `requests.py` in the project no longer makes `requests.get` a blocking call. The language
@@ -158,6 +171,12 @@ release can change rules, configuration keys, diagnostics, and output formats.
   loop (followed by `return`, `break`, or `raise`): it runs once per run of the loop.
 - `EFF101` no longer reports `result()` or `exception()` of a `concurrent.futures.Future` known
   to be done: under `if f.done():`, or once `await asyncio.wrap_future(f)` has returned.
+- `EFF101` no longer reports `put()` on a `queue.Queue`, `LifoQueue`, or `PriorityQueue` that
+  is not known to be bounded: built without a positive `maxsize`, or one heki cannot follow to
+  where it is built. A `put` waits only while its queue is full. heki follows the queue into
+  local variables, the attributes its class family stores, module globals, and parameters
+  whose callers bind known queues; an `effect-boundaries` contract forbidding `blocking-sync`
+  counts a `put` the same way.
 - `EFF107` (`unretained-async-task`, opt-in) no longer reports a task whose bound method is
   passed to a call or stored, as in `self.addCleanup(task.cancel)` or
   `loop.call_later(1, task.cancel)`: the bound method holds the task.

@@ -222,6 +222,14 @@ pub struct EcosystemEntry {
     /// Calling the symbol (`os.getenv`) or reading it (`sys.platform`) depends on the
     /// environment the program runs in: the `reads-environment` effect boundaries forbid it.
     pub environment: Option<EnvironmentAccess>,
+    /// An instance of this class is a queue that the argument passed here bounds
+    /// (`queue.Queue(maxsize)`): a positive integer limits how many items it holds; leaving it
+    /// out, zero, or a negative integer leaves it unbounded.
+    pub bounded_by: Option<ArgSlot>,
+    /// The call waits only while its receiver, a queue, is full, which only a bounded one can be
+    /// (`queue.Queue.put`): it blocks only where the receiver is known to be bounded
+    /// ([`Self::bounded_by`]).
+    pub waits_while_full: bool,
 }
 
 /// How a symbol tagged `environment` reads the environment (`EcosystemEntry::environment`).
@@ -232,6 +240,15 @@ pub enum EnvironmentAccess {
     Call,
     /// Reading the module attribute does (`os.environ`, `sys.platform`).
     Read,
+}
+
+/// An argument of a catalogued call: the one at position `arg` (the receiver not counted), or
+/// the one passed by the keyword `param`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ArgSlot {
+    pub arg: Option<u8>,
+    pub param: Option<String>,
 }
 
 /// One case of an entry (`EcosystemEntry::cases`): when the argument at position `arg` (the
@@ -1934,8 +1951,21 @@ mod tests {
                 waits(vec![off(0, "block"), zero(1, "timeout")]),
             ),
             (
+                queues.iter().map(|q| (*q).to_owned()).collect(),
+                EcosystemEntry {
+                    bounded_by: Some(ArgSlot {
+                        arg: Some(0),
+                        param: Some("maxsize".into()),
+                    }),
+                    ..entry(&[])
+                },
+            ),
+            (
                 queues.iter().map(|q| format!("{q}.put")).collect(),
-                waits(vec![off(1, "block"), zero(2, "timeout")]),
+                EcosystemEntry {
+                    waits_while_full: true,
+                    ..waits(vec![off(1, "block"), zero(2, "timeout")])
+                },
             ),
             (
                 queues.iter().map(|q| format!("{q}.join")).collect(),

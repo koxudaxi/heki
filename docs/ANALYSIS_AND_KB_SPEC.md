@@ -76,7 +76,8 @@ Compound expressions are flattened into **basic instructions in explicit left-to
 | Constants and allocation | `Const`, `AllocBuiltin(kind, elems)`, `DictLiteral(entries)` | `list` / `dict` / `set` / `tuple` / `str` / `bytes` / number literals, comprehensions, unshadowed builtin constructors; `DictLiteral` keeps the order of `**` unpacking (`{**d, ...}` vs `{**other, **d}`) |
 | Names | `LoadGlobal`, `LoadName`, `LoadDeref`, `StoreGlobal`, `StoreDeref`, `Copy`, `Delete`, `Import` | `Copy` adds to the direct alias set, `Delete` removes by strong update and leaves the name possibly unbound (a `LoadName` is its value until it is bound again, also at the end of an `except E as e:` handler; `Delete.global` marks a module global); `Import` / `LoadGlobal` carry the PEP 810 `is_lazy` flag |
 | Operators | `BinOp(op, lhs, rhs, in_place)`, `UnaryOp`, `Compare(op, lhs, rhs)` | Augmented assignment is `BinOp` with `in_place`; `in` / `not in` are `Compare`; a chained comparison `a < b < c` branches after each link like `a < b and b < c`, with `b` evaluated once and each `Compare` spanning its own operands; until types are exact, any special method may run |
-| Attributes and items | `AttrLoad`, `AttrStore`, `AttrDelete`, `SubscriptLoad`, `SubscriptStore`, `SubscriptDelete` | Stores make the stored value `Shared`; `AttrDelete` recognizes `@cached_property` invalidation (`del self.prop`) and `MUT201` writes; subscripts keep constant keys and slice bounds; the slice object itself is the tuple `(lower, upper, step)` of its bounds (`None` where one is left out), since `__getitem__` may keep it; a template string builds the tuple of its fields' values (`Template.values`) and is otherwise opaque |
+| Strings | `Convert(value, conversion)`, `Format(value, spec)`, `BuildString(parts)` | As CPython compiles an f-string: each replacement field, left to right, evaluates its value, converts it (`!s` / `!r` / `!a`, and `{x=}` without a specification: `Convert`, which runs `__str__` / `__repr__`), evaluates its format specification (an f-string of its own), and formats the result (`Format`: `format(value, spec)`, which runs `__format__`); each runs code of the value's class unless that is a builtin, and may raise. A field alone is the f-string's result (`__format__` may return a `str` subclass); any other f-string is a `BuildString` of its formatted fields, a new `str` that keeps none of them. A template string keeps its values unconverted and unformatted, as the tuple `Template.values`, formats its specifications' fields, and is otherwise opaque |
+| Attributes and items | `AttrLoad`, `AttrStore`, `AttrDelete`, `SubscriptLoad`, `SubscriptStore`, `SubscriptDelete` | Stores make the stored value `Shared`; `AttrDelete` recognizes `@cached_property` invalidation (`del self.prop`) and `MUT201` writes; subscripts keep constant keys and slice bounds; the slice object itself is the tuple `(lower, upper, step)` of its bounds (`None` where one is left out), since `__getitem__` may keep it |
 | Calls | `Call(callee, args, kwargs, is_awaited)`, `MethodCall(recv, method, args, kwargs, is_awaited)` | `is_awaited` separates awaited calls from synchronous ones (a coroutine awaited after it is made runs at its `await`, which the effect summary follows); `star_from` is the index of the first `*` argument, so arguments bind to parameters exactly up to it |
 | ContainerIteration and generators | `MakeIter(iterable)`, `IterNext(iter)`, `MakeGenExpr(outer_iter, captured)`, `MakeClosure(captured)` | `MakeIter` and `MakeGenExpr` bind a **derived reference** of `iterable` / `outer_iter` to an explicit SSA variable; `MakeClosure` holds every value the function or class object keeps: its cells (free variables of nested scopes at any depth, the iteration variables of inlined comprehensions, the names read by lazily evaluated annotation and type-parameter scopes), its defaults, eagerly evaluated annotations, and a class's bases and keywords (a `type` alias is a `MakeClosure` without a lowered body) |
 | Suspension | `Await`, `Yield`, `YieldFrom` | `Await` lets other tasks run (`Unique` stays unique), as do the implicit awaits of `async for` and `async with` (`InstKind::suspends`); `Yield` makes the yielded value `Shared` |
@@ -215,13 +216,18 @@ Compound expressions are flattened into **basic instructions in explicit left-to
     import QUEUE` and `QUEUE.append(x)`, `cfg.QUEUE = []`; `ModuleDecls.grown_globals`, by the
     shared `FnIndex::grown_vars`) is not fixed for the Advisory rules, in its own module or
     any other (`ProjectDecls::grown_elsewhere`, a declaration key the language server tracks).
-  - `FnIndex::fixed_trips` gives the trip count the code fixes at any count, as
-    `Answer::Known(n)`: `range(1000)`, `rows[:100]`, `zip(rows, range(50))`, a tuple display or a
-    list or set display nothing grows, a module's string and string-tuple constants, a length
-    test every path to the loop passes (up to `LEN_CAP_MAX`), and a counted `while` loop.
+  - `FnIndex::fixed_trips` gives the most times a loop runs at any count, as a `Trips`:
+    `Fixed(n)` when the code fixes the count whatever the input (`range(1000)`, a tuple display or
+    a list or set display nothing grows, a module's string and string-tuple constants, a length
+    test that pins the length, `len(x) == 40` or `!= 40` leaving, and a counted `while` loop), and
+    `Capped(n)` when a constant only caps what may be input (a length cap such as `if len(x) >
+    1000: raise`, a slice `rows[:100]`, a `zip` with an iterable the code does not bound). A cap
+    is an upper bound, not a fixed count. A length test bounds the loop when it measures the
+    iterable or a read of the same access path from the same root (`len(report.get("runs", []))`
+    then `report["runs"]`; a `get` default counts when the test rejects its length), with nothing
+    on the way storing into the root, deleting from it, or passing it to a call.
     `LoopBound::ConstSmall` stays the view of counts up to `SMALL_MAX`. No claim rests on a size:
-    an exact report is silent for a loop with a fixed count of any size, and `Open` only leaves
-    the loop data-sized to the rules that read it so.
+    `Open` only leaves the loop data-sized to the rules that read it so.
 - **Path facts** (`heki_ir::facts::Paths`, Advisory and Profitability only), computed on demand
   for the rules that read them, over the walk facility's `FnShape` and the owner's `Budget`:
   - `FnIndex::decided` (`Decided`): a branch whose test the code fixes never takes its other
@@ -258,10 +264,11 @@ Compound expressions are flattened into **basic instructions in explicit left-to
     or the result of a call (`Call`), which the reader resolves against the catalog: a source is
     a catalog target, never a name. Items pass through `list`, `tuple`, `set`, `sorted`,
     `reversed`, `iter`, `filter`, `enumerate`, `zip`, slices, dict views, and a comprehension,
-    generator expression, or list filled only by appends that produces a loop's item (or a
-    component of it); through `map`, a comprehension's element expression, and `range(len(x))`
-    only the count carries (`Carries::Count`). `str.split` / `str.splitlines` give pieces of their
-    receiver's text (`ItemOrigin::text`). A phi takes the inputs along the edges that can run. An
+    generator expression, or list filled only by appends that produces a loop's item; through
+    `map`, a comprehension's element expression, a part of the loop's item (`r[0]`), and
+    `range(len(x))` only the count carries (`Carries::Count`). A set or dict of what carries only
+    a count merges equal results and has no source. `str.split` / `str.splitlines` give pieces
+    of their receiver's text (`ItemOrigin::text`). A phi takes the inputs along the edges that can run. An
     item of a call's result, a global that is no constant, and anything else are `Open`. The walk
     is a `Closure` over questions `(function, value, steps)`, the steps being what the way from
     the loop applies to the value's sources (an item, a count, pieces of text).
@@ -399,6 +406,8 @@ EffectSummary(f) = {
     unresolved_access_sites:  Set<UnresolvedAccess>,       // reads and method calls named like a strict
                                                            // contract's target on objects of unknown class;
                                                            // never propagated (MUT206, MUT207)
+    capacity_waits:           Vec<CapacityWait>,           // own waits on queues whose capacity the callers
+                                                           // of other functions decide (local)
 
     // Guards: when an effect runs
     exec_guards:              Map<ExecEffect, EffectGuards>, // input tests every occurrence needs; lazy
@@ -528,6 +537,49 @@ whose awaited result finishes a future (`done_when_awaited`: `asyncio.wrap_futur
 forward must-analysis with the input tests' (one atom per future, which only ever holds) knows
 a future done after `if f.done():` and after such an `await`. Anything not recognized keeps the
 effect.
+
+**Queue capacities** (`capacity`). A `put` waits only while its queue is full (`waits_while_full`:
+`queue.Queue.put`, `LifoQueue.put`, `PriorityQueue.put`), which only a queue its `maxsize` bounds
+can be (`bounded_by` on the classes: a positive integer bounds it; none, zero, a negative one, or
+`None` does not). Its blocking effects run only on a queue known to be bounded: `Capacity` is a
+`heki_ir::walk::Answer<Bound>`: `Open` when some path is not known, otherwise
+`Known(Bound::Unbounded)` or `Known(Bound::Bounded)` (some path bounded). The join is open when
+either side is, otherwise bounded when either is, and `None` (no queue) adds nothing. What a value
+gives a queue (`CapacityOf`; for an integer, the capacity of a queue built with it as `maxsize`) is
+the join over what it may come from through copies, phis, and a construction's `maxsize`, every
+value of a function walked once (Tarjan; a cycle's members share one answer): a construction, an
+integer constant (`FnIndex::const_int`), an attribute of `self` or of a typed project instance, a
+module global (also read as a module's attribute, or bound by an import statement, also one inside a
+function), a parameter, anything else unknown. The declarations record what a module's class bodies
+and methods store in `self` attributes (`ClassDecl::attr_capacities`) and what it binds its globals
+to (`ModuleDecls::global_capacities`), for the names one store of which is a queue (or, for a name a
+`maxsize` reads, an integer), naming the attributes, globals, and parameters they take the rest from
+(a module that neither imports a catalogued queue class or its module, at any scope, nor types an
+attribute or a global as one records nothing); `ProjectDecls::attr_capacity` resolves an attribute
+over every class whose stores an instance may hold (the class, its subclasses, and their MROs; a
+class defining the name without a record, or a name another module stores, is unknown) and
+`ProjectDecls::global_capacity` a global over its module (unknown without a record or when another
+module rebinds it), following what the records name (each attribute and global resolved once while
+the indexes stay, the names on one cycle sharing one answer), so a summary's capacities name
+parameters only. A wait the code decides is an effect like any other. A wait on the function's own
+parameter is an effect needing a bounded queue there (`EffectGuards::bounded_queue`): each call
+decides it by what it binds (a queue not known to be bounded prunes the effect there; the caller's
+own parameter carries the need on), so a helper waits only for the callers handing it a bounded
+queue. Any other wait is a `CapacityWait` of the summary, and every such call keeps it in
+`CallSite::queues` (`SiteQueues::while_full`). Before propagation, the index resolves the parameters
+these name, and those queue arguments name (`SiteQueues::handed`, every parameter a call's binding
+can name, so one pass over the calls finds every source), over the call sites binding them
+(`ParamCapacities`, a join fixpoint over a worklist of the parameters each one's value depends on, a
+value growing three times at most): the argument's capacity as its caller found it, or its constant
+(`ConstArg::positive`, also of a literal default); an argument not bound exactly, and a function
+without project callers, are unknown. Propagation adds the waits the parameters show bounded to the
+summary's effects (`ParamCapacities::realize`); a site's `while_full` effects run where the
+parameters show its queue bounded (`ProjectIndex::while_full_effects`, which Boundary-Only Reporting
+and `EFF201` read), and an `async def` reaching a wait that needs its own parameter bounded reports
+it only when its callers' join is bounded. An incremental update recomputes the parameters'
+capacities; the functions whose waits or calls name a parameter whose capacity changed are
+re-propagated and reported changed, also when their summary stays equal (the report at their own
+call moves).
 
 **Where a body runs.** A call site hands its caller one of a callee's two fact sets (one home,
 `ProjectIndex::delivery`): its *body* (`Body`), or what iterating the object it returns runs
@@ -1173,6 +1225,12 @@ struct FrameState {
   - a call with `*` arguments does not use its Layer 1 entry (the positions do not line up).
 - **Function objects**: creating one escapes every operand of `MakeClosure` (captured
   variables, and default values when the IR passes them).
+- **Formatting**: `Convert` or `Format` of a value that is an exact builtin on every path runs
+  builtin code only, which hands the value's items to their `__repr__` but never the value
+  itself, and gives a new exact `str`; of any other value it escapes the value and the
+  specification, whose class's `__str__` / `__repr__` / `__format__` may keep them. `BuildString` gives a new exact
+  `str`. A rewrite that changes a formatted value's type changes its text (`OPT120` /
+  `OPT121` block on it).
 - **`ValueLoopInvariant(v, loop)`**: besides `BindingLoopInvariant`, the value is an immutable
   builtin (a `tuple` whose elements are hash-consistent builtins too), or a mutable builtin that
   stays `Unique` for the whole loop and whose `alloc_id` (aliases and derived references included)
@@ -1217,8 +1275,9 @@ the caller's thread with a synchronous facade over an async connection), `exclud
 `copy.deepcopy`; `"shallow"`: `copy.copy`, `BaseModel.model_copy`, whose `deep=True` copies
 deeply unless `update=` hands it values by reference: `MUT202`), `return_type` (factories such as
 `sqlite3.connect`), `sync_lock_or_tx` (`threading.Lock`, `Session.begin`: `EFF106`),
-`environment` (`"call"`: calling the function reads the environment the program runs in,
-`os.getenv`, `platform.system`, `importlib.util.find_spec`; `"read"`: reading the module
+`waits_until_done` / `done_when_awaited` (futures), `bounded_by` / `waits_while_full` (queues:
+section 2.2), `environment` (`"call"`: calling the function reads the environment the program runs
+in, `os.getenv`, `platform.system`, `importlib.util.find_spec`; `"read"`: reading the module
 attribute does, `os.environ`, `sys.platform`, `sys.version_info`: what `EFF201`'s
 `reads-environment` forbids; such an entry has no other fact), and
 `opaque_to_layer3` (reserved for Layer 3), and `cases`: what the call does instead when one

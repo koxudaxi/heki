@@ -2191,6 +2191,124 @@ fn references_carried_by_a_long_phi_chain_are_found_in_one_walk() {
     assert_eq!(handed, rebindings);
 }
 
+/// Puts after each of many branches that may build a new unbounded queue: the queue of each put
+/// is a phi of the previous one and a new queue, back to a bounded one.
+fn queue_rebindings(steps: usize) -> String {
+    let mut lines = vec![
+        "import queue".to_owned(),
+        String::new(),
+        String::new(),
+        "async def fill(flags, item):".to_owned(),
+        "    q = queue.Queue(maxsize=1)".to_owned(),
+    ];
+    for i in 0..steps {
+        lines.push(format!("    if flags[{i}]:"));
+        lines.push("        q = queue.Queue()".to_owned());
+        lines.push("    q.put(item)".to_owned());
+    }
+    lines.join("\n") + "\n"
+}
+
+/// The capacity of a function's value is walked once: each put reads what the walks of the
+/// puts before it found instead of walking every rebinding again.
+#[test]
+fn puts_after_many_rebindings_of_a_queue_walk_each_value_once() {
+    let p = Project::new("bounds_queue_rebindings");
+    p.write("m.py", &queue_rebindings(1200));
+    let found = check_within(&p, Duration::from_secs(20));
+    assert!(
+        found
+            .iter()
+            .any(|d| d["rule_code"] == "EFF101" && d["qualname"] == "fill"),
+        "{found:#?}"
+    );
+}
+
+/// A chain of helpers each handing its queue parameter to the next, named so that their order
+/// is the opposite of the calls': the parameter of each takes what the one calling it binds.
+fn queue_forwarding_chain(helpers: usize) -> String {
+    let mut lines = vec![
+        "import queue".to_owned(),
+        String::new(),
+        String::new(),
+        "def f0(q: queue.Queue) -> None:".to_owned(),
+        "    q.put(1)".to_owned(),
+    ];
+    for i in 1..helpers {
+        lines.push(String::new());
+        lines.push(String::new());
+        lines.push(format!("def f{i}(q: queue.Queue) -> None:"));
+        lines.push(format!("    f{}(q)", i - 1));
+    }
+    lines.extend([
+        String::new(),
+        String::new(),
+        "async def entry() -> None:".to_owned(),
+        format!("    f{}(queue.Queue(1))", helpers - 1),
+    ]);
+    lines.join("\n") + "\n"
+}
+
+/// The capacities of parameters are a worklist over what each depends on: a change of one
+/// re-reads only the parameters it is passed to, whatever order they are in.
+#[test]
+fn queue_parameters_along_a_reversed_chain_of_helpers_resolve_in_linear_time() {
+    let p = Project::new("bounds_queue_forwarding");
+    p.write("m.py", &queue_forwarding_chain(6000));
+    let found = check_within(&p, Duration::from_secs(20));
+    assert!(
+        found
+            .iter()
+            .any(|d| d["rule_code"] == "EFF101" && d["qualname"] == "entry"),
+        "{found:#?}"
+    );
+}
+
+/// A class whose annotated queue attributes each store the one before, with a method putting on
+/// each: the capacity of every attribute names the one before it.
+fn queue_attribute_chain(attrs: usize) -> String {
+    let mut lines = vec![
+        "import queue".to_owned(),
+        String::new(),
+        String::new(),
+        "class Holder:".to_owned(),
+    ];
+    lines.extend((0..attrs).map(|i| format!("    a{i}: queue.Queue")));
+    lines.extend([
+        String::new(),
+        "    def __init__(self) -> None:".to_owned(),
+        "        self.a0 = queue.Queue(1)".to_owned(),
+    ]);
+    lines.extend((1..attrs).map(|i| format!("        self.a{i} = self.a{}", i - 1)));
+    for i in 0..attrs {
+        lines.push(String::new());
+        lines.push(format!("    def p{i}(self) -> None:"));
+        lines.push(format!("        self.a{i}.put(1)"));
+    }
+    lines.extend([
+        String::new(),
+        String::new(),
+        "async def entry(h: Holder) -> None:".to_owned(),
+        format!("    h.p{}()", attrs - 1),
+    ]);
+    lines.join("\n") + "\n"
+}
+
+/// The declarations keep the answer of each attribute and global they resolve: the puts on a
+/// long chain of attributes resolve each attribute once, not the chain once per put.
+#[test]
+fn puts_along_a_chain_of_attributes_resolve_each_attribute_once() {
+    let p = Project::new("bounds_queue_attribute_chain");
+    p.write("m.py", &queue_attribute_chain(6000));
+    let found = check_within(&p, Duration::from_secs(20));
+    assert!(
+        found
+            .iter()
+            .any(|d| d["rule_code"] == "EFF101" && d["qualname"] == "entry"),
+        "{found:#?}"
+    );
+}
+
 /// `heki dump-facts` of the project's `m.py`, which must finish within `limit`.
 fn dump_facts_within(p: &Project, limit: Duration) -> Value {
     let started = Instant::now();

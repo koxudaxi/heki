@@ -1378,12 +1378,28 @@ fn ir_expressions() {
             (json!(1), json!(-1)),
         ]
     );
-    // f-strings (nested format specs, implicit concatenation) build a `str`.
-    assert!(
-        of_kind(e, "AllocBuiltin")
-            .iter()
-            .any(|a| a["kind"] == "str")
+    // f-strings (nested format specs, implicit concatenation) convert and format each
+    // replacement field and build a `str`: `a!r` is converted, then formatted with its
+    // specification `>{width}.{precision}` (an f-string of its own), and `b=` shows `repr(b)`.
+    let converts: Vec<(Option<&str>, &str)> = of_kind(e, "Convert")
+        .iter()
+        .map(|c| (var_name(e, &c["value"]), c["conversion"].as_str().unwrap()))
+        .collect();
+    assert_eq!(converts, vec![(Some("a"), "repr"), (Some("b"), "repr")]);
+    let formats: Vec<(Option<&str>, bool)> = of_kind(e, "Format")
+        .iter()
+        .map(|f| (var_name(e, &f["value"]), !f["spec"].is_null()))
+        .collect();
+    assert_eq!(
+        formats,
+        vec![
+            (Some("width"), false),
+            (Some("precision"), false),
+            (None, true),
+            (None, false),
+        ]
     );
+    assert_eq!(of_kind(e, "BuildString").len(), 2);
     for name in ["width", "precision"] {
         assert!(e["var_names"].as_array().unwrap().iter().any(|v| v == name));
     }
@@ -1701,6 +1717,13 @@ fn ir_newer_syntax() {
         BTreeSet::from(["plain", "spec", "literal_only", "concatenated"])
     );
     assert!(of_kind(t, "Const").len() >= 4);
+    // A template keeps its values unconverted and unformatted; the replacement fields of a
+    // format specification are formatted into its text.
+    let formatted: BTreeSet<&str> = of_kind(t, "Format")
+        .iter()
+        .filter_map(|f| var_name(t, &f["value"]))
+        .collect();
+    assert_eq!(formatted, BTreeSet::from(["width", "precision"]));
     let handler = function(&ir, "unparenthesized_except");
     assert_eq!(
         strs(&of_kind(handler, "CatchException")[0]["exc_types"]),

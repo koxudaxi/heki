@@ -240,6 +240,7 @@ fn recompute(
     let file = &index.files[path];
     let local = &file.local_functions[func];
     let mut s = EffectSummary::clone(local);
+    index.param_capacities.realize(local, &mut s);
     s.sync_driven_only = file
         .functions
         .get(func)
@@ -665,6 +666,16 @@ enum Resolved {
     Node(u32),
 }
 
+/// One call of a project callee: the call site, the callee it binds, its summary, and the
+/// facts of it the site runs.
+#[derive(Clone, Copy)]
+struct Edge<'e> {
+    site: &'e CallSite,
+    bc: &'e BoundCallee,
+    callee: &'e EffectSummary,
+    facts: &'e EffectSummary,
+}
+
 /// Transfer the facts of one resolved callee across one call site into the caller: the facts
 /// the site runs ([`delivery`]), into the caller's body or into what iterating the caller's
 /// result runs. The caller's own writes through its parameters are `own_writes`. Returns the
@@ -714,7 +725,13 @@ fn apply_edge(
     // call hands over.
     let here = (d.from == Facts::Body && d.into == Facts::Body && runs_at_call(callee, site))
         .then_some(resolver);
-    transfer(target, own_writes, site, bc, callee, facts, &lead, rewrite);
+    let edge = Edge {
+        site,
+        bc,
+        callee,
+        facts,
+    };
+    transfer(index, target, own_writes, &edge, &lead, rewrite);
     if !index.skips_typed_writes
         && (!facts.typed_field_write_sites.is_empty() || !facts.mutated_param_paths.is_empty())
     {
@@ -733,17 +750,20 @@ fn apply_edge(
 
 /// Add `facts` (of the callee `callee`, bound by `bc` at `site`) to `t`; `lead` and `rewrite`
 /// build each chain ([`extend_chain`]).
-#[allow(clippy::too_many_arguments)]
 fn transfer(
+    index: &ProjectIndex,
     t: &mut EffectSummary,
     own_writes: &BTreeMap<u8, BTreeSet<String>>,
-    site: &CallSite,
-    bc: &BoundCallee,
-    callee: &EffectSummary,
-    facts: &EffectSummary,
+    edge: &Edge<'_>,
     lead: &[Arc<CallHop>],
     rewrite: bool,
 ) {
+    let Edge {
+        site,
+        bc,
+        callee,
+        facts,
+    } = *edge;
     let origin = |k: usize| bc.params.get(k);
 
     // a. Offload wrappers: a callee offloading its parameter k offloads the caller's
@@ -769,7 +789,9 @@ fn transfer(
         let Some(tail) = facts.effect_chain_for(*e, receiver) else {
             continue;
         };
-        let Some(mut through) = guards::through_call(site, bc, facts.exec_guards.get(e)) else {
+        let Some(mut through) =
+            guards::through_call(site, bc, facts.exec_guards.get(e), &index.param_capacities)
+        else {
             continue;
         };
         through.guards.inputs.retain(|g| {
