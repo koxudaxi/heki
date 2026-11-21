@@ -334,7 +334,7 @@ type CallerView = BTreeMap<FuncKey, (Vec<CallSite>, BTreeSet<String>)>;
 
 /// Per function of one file: its ecosystem (Layer 2) call sites and its accesses outside the
 /// project that effect boundaries forbid, without positions.
-type EcosystemView = BTreeMap<FuncKey, (Vec<CallSite>, Vec<(heki_effect::AccessKind, String)>)>;
+type EcosystemView = BTreeMap<FuncKey, (Vec<CallSite>, Vec<heki_effect::ExternalAccess>)>;
 
 impl Workspace {
     /// Index every Python file under `paths` (IR is dropped once the files are summarized, before
@@ -660,8 +660,11 @@ impl Workspace {
             out.entry(site.caller.clone()).or_default().0.push(site);
         }
         for (func, accesses) in file.into_iter().flat_map(|f| &f.external_accesses) {
-            let names = accesses.iter().map(|a| (a.kind, a.name.clone()));
-            out.entry(func.clone()).or_default().1.extend(names);
+            let unplaced = accesses.iter().map(|a| heki_effect::ExternalAccess {
+                span: heki_ast::Span { start: 0, end: 0 },
+                ..a.clone()
+            });
+            out.entry(func.clone()).or_default().1.extend(unplaced);
         }
         out
     }

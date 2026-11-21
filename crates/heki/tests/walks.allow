@@ -40,7 +40,6 @@ heki_effect::infer::Engine::passed  W4  def_inst: FnShape
 heki_effect::infer::Engine::run  W1,W4  recursion (through TypeCtx::child_output, Engine::step): Memo or Closure; rpo_blocks: FnShape
 heki_effect::infer::Engine::step  W1  recursion (through TypeCtx::child_output, Engine::run): Memo or Closure
 heki_effect::infer::TypeCtx::child_output  W1  recursion (through Engine::run, Engine::step): Memo or Closure
-heki_effect::infer::TypeCtx::seed_of  W1  recursion (through TypeCtx::infer_types): Memo or Closure
 heki_effect::invalidation::Flags::depends_on_flag  W1  recursion (calls itself): Memo or Closure
 heki_effect::invalidation::Flags::of  W3  passes until nothing changes: fixpoint
 heki_effect::invalidation::Flags::value_in  W1  recursion (calls itself): Memo or Closure

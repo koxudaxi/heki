@@ -104,7 +104,7 @@ invalidators = ["pkg.dials:recalibrate"]
 
 [[tool.heki.effect-boundaries]]
 name = "portable"
-scopes = ["pkg.portable"]
+scopes = ["pkg.portable", "pkg.portable_boot:<module>"]
 forbid = ["reads-environment"]
 
 [[tool.heki.effect-boundaries]]
@@ -191,10 +191,12 @@ const ACCT_OPS: &str =
     "from pkg.ledger import Ledger, Receipt\n\n\ndef _record(l: Ledger):\n    return None\n";
 const ACCOUNTS: &str = "from pkg.acct_ops import _record\nfrom pkg.ledger import Ledger\n\n\ndef settle(l: Ledger):\n    return _record(l)\n";
 const PURE_OPS: &str = "from pkg.ledger import Ledger, Receipt\nfrom pkg.model import Vault\n\n\ndef helper(v: Vault, l: Ledger):\n    return None\n\n\ndef grow(l: Ledger):\n    l.rows.append(1)\n";
-// A scope function of `reads-environment` and the helper below it, in another module.
+// A scope function of `reads-environment`, a module body the boundary names, and the helper
+// below both, in another module.
 const PORTABLE_OPS: &str = "import os\nimport sys\n\n\ndef choose():\n    return \"posix\"\n";
 const PORTABLE: &str =
     "from pkg.portable_ops import choose\n\n\ndef build():\n    return choose()\n";
+const PORTABLE_BOOT: &str = "from pkg.portable_ops import choose\n\nMODE = choose()\n";
 const PURE: &str = "from pkg.ledger import Ledger\nfrom pkg.model import Vault\nfrom pkg.pure_ops import grow, helper\n\n\ndef decide(v: Vault, l: Ledger):\n    return helper(v, l)\n\n\ndef tidy(l: Ledger):\n    grow(l)\n";
 const LAYER_OPS: &str = "from pkg.ledger import Ledger\n\n\ndef _bal(l: Ledger):\n    return 0\n";
 const LAYER_VIEW: &str = "from pkg.layer_ops import _bal\nfrom pkg.ledger import Ledger\n\n\ndef show(l: Ledger):\n    return _bal(l)\n";
@@ -286,6 +288,9 @@ const SEAL_USE: &str = "from pkg.seal_peek import crack, peek\n\n\nclass Plain:\
 // A call target naming no class (`reseal`): a helper that types nothing calls the method on an
 // object its caller in another module binds to a class defining it, in a third module.
 const SEALER: &str = "class Sealer:\n    def reseal(self):\n        return None\n";
+// The class of an object typed with a class of another module: `type(obj)` and a lambda's
+// closure cell.
+const SEAL_TYPE: &str = "from pkg.seal import Seal\n\n\ndef crack_type(s: Seal):\n    type(s).break_open(s)\n\n\ndef peek_later(s: Seal):\n    return lambda: s.code\n";
 const RESEAL_HELPER: &str = "def redo(s):\n    s.reseal()\n";
 const RESEAL_USE: &str = "from pkg.reseal_helper import redo\nfrom pkg.sealer import Sealer\n\n\ndef again(s: Sealer):\n    redo(s)\n";
 const STRICT_USE: &str = "from pkg.model import Registry\nfrom pkg.strict_ops import _reset\n\n\ndef run(r: Registry):\n    _reset(r)\n";
@@ -727,6 +732,7 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/pure.py", PURE),
         ("pkg/portable_ops.py", PORTABLE_OPS),
         ("pkg/portable.py", PORTABLE),
+        ("pkg/portable_boot.py", PORTABLE_BOOT),
         ("pkg/layer_ops.py", LAYER_OPS),
         ("pkg/layer/__init__.py", ""),
         ("pkg/layer/view.py", LAYER_VIEW),
@@ -1311,6 +1317,35 @@ fn steps_receiver_typing() -> Vec<Step> {
             vec![save("pkg/tagged.py", TAGGED)],
         )
         .present(&[("pkg/views.py", "MUT201"), ("pkg/view_handed.py", "MUT201")]),
+        Step::new(
+            "a module calls a method of `type(obj)` and reads its object in a lambda",
+            vec![Action::Create("pkg/seal_type.py", SEAL_TYPE.to_owned())],
+        )
+        .present(&[
+            ("pkg/seal_type.py", "MUT204"),
+            ("pkg/seal_type.py", "MUT203"),
+        ]),
+        Step::new(
+            "the object's class becomes a protocol: `type(obj)` is of unknown class",
+            vec![save(
+                "pkg/seal.py",
+                &SEAL.replace(
+                    "class Seal:",
+                    "from typing import Protocol\n\n\nclass Seal(Protocol):",
+                ),
+            )],
+        )
+        .present(&[("pkg/seal_type.py", "MUT207")])
+        .absent(&[("pkg/seal_type.py", "MUT204")]),
+        Step::new(
+            "the protocol is a class again",
+            vec![save("pkg/seal.py", SEAL)],
+        )
+        .present(&[("pkg/seal_type.py", "MUT204")]),
+        Step::new(
+            "the module is deleted",
+            vec![Action::Delete("pkg/seal_type.py")],
+        ),
     ]
 }
 
@@ -1501,9 +1536,10 @@ fn steps_contract_extensions() -> Vec<Step> {
 }
 
 /// Step 5c: environment reads below an effect boundary. No summary records them, so the report
-/// of the scope function above follows the helper's own accesses: a read of `sys.platform`, a
-/// call of `os.getenv` (whose call site the report's chain shows), the call moving down a line,
-/// and none.
+/// of the scope function above, and of the module body the boundary names, follows the helper's
+/// own accesses: a read of `sys.platform`, a call of `os.getenv` (whose call site the report's
+/// chain shows), the call moving down a line, an import of a module that is the project's only
+/// while its file exists, and none.
 fn steps_environment() -> Vec<Step> {
     let choose = |body: &str| PORTABLE_OPS.replace("    return \"posix\"\n", body);
     vec![
@@ -1514,7 +1550,7 @@ fn steps_environment() -> Vec<Step> {
                 choose("    return sys.platform\n"),
             )],
         )
-        .present(&[("pkg/portable.py", "EFF201")]),
+        .present(&[("pkg/portable.py", "EFF201"), ("pkg/portable_boot.py", "EFF201")]),
         Step::new(
             "the helper calls `os.getenv` instead",
             vec![Action::Save(
@@ -1522,7 +1558,7 @@ fn steps_environment() -> Vec<Step> {
                 choose("    return os.getenv(\"OS\")\n"),
             )],
         )
-        .present(&[("pkg/portable.py", "EFF201")]),
+        .present(&[("pkg/portable.py", "EFF201"), ("pkg/portable_boot.py", "EFF201")]),
         Step::new(
             "the call moves down a line",
             vec![Action::Save(
@@ -1530,12 +1566,35 @@ fn steps_environment() -> Vec<Step> {
                 choose("    name = \"OS\"\n    return os.getenv(name)\n"),
             )],
         )
-        .present(&[("pkg/portable.py", "EFF201")]),
+        .present(&[("pkg/portable.py", "EFF201"), ("pkg/portable_boot.py", "EFF201")]),
+        Step::new(
+            "the helper imports a module the project does not have",
+            vec![Action::Save(
+                "pkg/portable_ops.py",
+                choose(
+                    "    from importlib import import_module\n\n    return import_module(\"pkg.portable_plugin\")\n",
+                ),
+            )],
+        )
+        .present(&[("pkg/portable.py", "EFF201"), ("pkg/portable_boot.py", "EFF201")]),
+        Step::new(
+            "the module it imports is created in the project",
+            vec![Action::Create(
+                "pkg/portable_plugin.py",
+                "VALUE = 1\n".to_owned(),
+            )],
+        )
+        .absent(&[("pkg/portable.py", "EFF201"), ("pkg/portable_boot.py", "EFF201")]),
+        Step::new(
+            "the module is deleted again",
+            vec![Action::Delete("pkg/portable_plugin.py")],
+        )
+        .present(&[("pkg/portable.py", "EFF201"), ("pkg/portable_boot.py", "EFF201")]),
         Step::new(
             "the helper stops reading the environment",
             vec![save("pkg/portable_ops.py", PORTABLE_OPS)],
         )
-        .absent(&[("pkg/portable.py", "EFF201")]),
+        .absent(&[("pkg/portable.py", "EFF201"), ("pkg/portable_boot.py", "EFF201")]),
     ]
 }
 
