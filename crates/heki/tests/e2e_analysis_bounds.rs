@@ -413,15 +413,16 @@ fn returned_phis_of_calls_on_the_previous_value_are_walked_once() {
 }
 
 /// One returned call handed the last 256 of a long chain of item reads (`z2000 = z1999[0]`) as
-/// its arguments: each argument walks the chain, so past the budget of walked values
-/// proportional to the source what the function returns is unknown, and nothing is reported
-/// from it.
+/// the arguments of its 256 parameters: each argument walks the chain, so past the budget of
+/// walked values proportional to the source what the function returns is unknown, and nothing
+/// is reported from it.
 #[test]
 fn origin_walks_past_their_budget_return_unknown() {
     let (links, args) = (2_000, 256);
+    let params: Vec<String> = (0..args).map(|i| format!("r{i}")).collect();
     let mut lines = vec![
-        "def pick(*rows):".to_owned(),
-        "    return rows[0]".to_owned(),
+        format!("def pick({}):", params.join(", ")),
+        "    return r0".to_owned(),
         String::new(),
         String::new(),
         "def deep(z0, flag):".to_owned(),
