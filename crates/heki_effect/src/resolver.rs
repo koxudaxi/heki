@@ -18,12 +18,13 @@ use heki_ast::Span;
 use heki_env::HekiConfig;
 use heki_ir::{
     BinOpKind, BlockId, ConstLiteral, FnIndex, FunctionKind, Inst, InstKind, IrFunction, ModuleIr,
-    SmallDisplay, VarId,
+    SmallDisplay, Terminator, VarId,
 };
 use heki_kb::{ArgFact, EcosystemEntry, EffectiveEcosystemKb, ExecEffectKind, LiteralValue};
 use heki_semantic::{ModuleImport, ScopeKind, SemanticModel};
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -33,6 +34,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 struct Indexes {
     subclasses: FxHashMap<String, Vec<String>>,
     property_names: FxHashSet<String>,
+    returning_names: FxHashSet<String>,
     frozen: FxHashSet<String>,
     built: FxHashSet<String>,
     typed_dicts: FxHashSet<String>,
@@ -65,6 +67,10 @@ const MAX_ALIAS_CHASE: usize = 8;
 /// Upper bound on the attribute loads behind a module-level constant's value
 /// (`KEY = pkg.sub.keys.OTHER`: three): a dotted name a few modules deep takes a few.
 const MAX_CONSTANT_ATTRS: usize = 16;
+
+/// The most dotted segments past the first that a module alias's object may have
+/// ([`module_aliases`]).
+const MAX_ALIAS_SEGMENTS: usize = 8;
 
 /// Decorators that leave calling a function what its definition makes it: a generator function
 /// returns a generator, an `async def` a coroutine, a plain `def` what its body returns.
@@ -381,6 +387,11 @@ pub struct FunctionDecl {
     /// The return annotation of the getter of a property (`@property` / `cached_property`,
     /// with or without a setter): the type reading the attribute gives.
     pub property_type: Option<Ty>,
+    /// `(i, attr)` when every `return` of every definition returns attribute `attr` of
+    /// parameter `i` as itself (`return self.items`, [`returned_param_attr`]): calling the
+    /// function, or reading the property, gives that object of the argument.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub returns_param_attr: Option<(u8, String)>,
 }
 
 impl FunctionDecl {
@@ -419,6 +430,17 @@ pub struct ModuleDecls {
     pub functions: BTreeMap<String, Box<FunctionDecl>>,
     /// Module global `name -> type` of the instance it holds (`client = httpx.Client()`).
     pub global_types: BTreeMap<String, Ty>,
+    /// Module-level names bound once to another object by name (`_set = object.__setattr__`,
+    /// `run = helpers.run`), by the fqn of that object ([`module_aliases`]): as a value or in
+    /// an annotation, in the module or imported from it, the name is that object, unless
+    /// another module rebinds it ([`ProjectDecls::object_named`]).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub aliases: BTreeMap<String, String>,
+    /// The module globals the module stores or deletes (in its body, or in a function after
+    /// `global name`) that are no runtime import, class, or function of it: its own objects,
+    /// of a value heki may not know ([`Symbol::Unknown`]), never a builtin of the same name.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub unknown_globals: BTreeSet<String>,
     /// Module globals bound to a small display that no function of the module grows
     /// (`heki_ir::ModuleConstants::displays`): other modules read them through
     /// [`ProjectDecls::small_global`].
@@ -511,14 +533,15 @@ impl ModuleDecls {
 
     /// Whether the decorator `text` of a function of this module is one of `names`
     /// (`cached_property`, `lru_cache`, ...), known by what its head is bound to at module
-    /// scope: an import names the imported symbol, so an alias counts by that symbol's last
-    /// name (`from functools import cached_property as cached`); a function or class the module
+    /// scope: an import or a module alias names the imported symbol, so an alias counts by that
+    /// symbol's last name (`from functools import cached_property as cached`,
+    /// `cached = functools.cached_property`); a function or class the module
     /// defines is its own decorator and none of `names` (an identity `def cache(fn)` caches
     /// nothing); a head bound by neither (a builtin, a star import) counts by its spelling.
     pub fn decorator_is(&self, text: &str, names: &[&str]) -> bool {
         let (head, _) = decorator_parts(text);
         let first = head.split('.').next().unwrap_or(head);
-        let symbol = if self.imports.contains_key(first) {
+        let symbol = if self.imports.contains_key(first) || self.aliases.contains_key(first) {
             self.resolve_dotted(head, false)
         } else if self.classes.contains_key(first) || self.functions.contains_key(first) {
             None
@@ -528,8 +551,9 @@ impl ModuleDecls {
         symbol.is_some_and(|s| names.contains(&s.rsplit('.').next().unwrap_or(&s)))
     }
 
-    /// Resolve a dotted name written in this module (runtime imports, then local definitions,
-    /// then builtin types). `type_checking` also consults `if TYPE_CHECKING:` imports.
+    /// Resolve a dotted name written in this module (runtime imports, then aliases and local
+    /// definitions, then builtin types). `type_checking` also consults `if TYPE_CHECKING:`
+    /// imports.
     fn resolve_dotted(&self, text: &str, type_checking: bool) -> Option<String> {
         let (first, rest) = match text.split_once('.') {
             Some((f, r)) => (f, Some(r)),
@@ -543,6 +567,9 @@ impl ModuleDecls {
             return Some(join(t));
         }
         if type_checking && let Some(t) = self.type_checking_imports.get(first) {
+            return Some(join(t));
+        }
+        if let Some(t) = self.aliases.get(first) {
             return Some(join(t));
         }
         if self.classes.contains_key(first) || self.functions.contains_key(first) {
@@ -1045,6 +1072,10 @@ pub struct DeclKeys {
     pub subclasses: BTreeSet<String>,
     /// Attribute names looked up among the project's property getter names.
     pub property_names: BTreeSet<String>,
+    /// Names looked up among the names of the project functions returning an attribute of a
+    /// parameter (`FunctionDecl::returns_param_attr`).
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub returning_names: BTreeSet<String>,
     /// Classes whose project-wide derived facts were looked up: whether they are frozen (a
     /// `dataclass_transform` or a base in another module can make them so) or a `TypedDict`.
     pub class_facts: BTreeSet<String>,
@@ -1063,6 +1094,7 @@ impl DeclKeys {
         self.modules.is_empty()
             && self.subclasses.is_empty()
             && self.property_names.is_empty()
+            && self.returning_names.is_empty()
             && self.class_facts.is_empty()
             && self.protocols.is_empty()
             && self.grown_globals.is_empty()
@@ -1072,6 +1104,7 @@ impl DeclKeys {
         self.modules.extend(other.modules);
         self.subclasses.extend(other.subclasses);
         self.property_names.extend(other.property_names);
+        self.returning_names.extend(other.returning_names);
         self.class_facts.extend(other.class_facts);
         self.protocols.extend(other.protocols);
         self.grown_globals.extend(other.grown_globals);
@@ -1083,6 +1116,7 @@ impl DeclKeys {
         !self.modules.is_disjoint(&other.modules)
             || !self.subclasses.is_disjoint(&other.subclasses)
             || !self.property_names.is_disjoint(&other.property_names)
+            || !self.returning_names.is_disjoint(&other.returning_names)
             || !self.class_facts.is_disjoint(&other.class_facts)
             || !self.protocols.is_disjoint(&other.protocols)
             || !self.grown_globals.is_disjoint(&other.grown_globals)
@@ -1175,6 +1209,10 @@ pub struct ProjectDecls {
     /// Names of the property getters (`FunctionDecl::is_property`) of every class: an
     /// attribute read with another name runs no getter, without walking any class hierarchy.
     property_names: FxHashSet<String>,
+    /// Names of the functions, methods, and getters returning an attribute of a parameter
+    /// (`FunctionDecl::returns_param_attr`): a call or a read with another name hands out no
+    /// such attribute, without resolving it.
+    returning_names: FxHashSet<String>,
     /// Every project class deriving (transitively) from `TypedDict`.
     typed_dicts: FxHashSet<String>,
     /// Every frozen project class (`Self::transform_builds`).
@@ -1227,6 +1265,10 @@ pub(crate) enum Symbol<'a> {
     Class(&'a ClassDecl),
     Function(FuncKey, &'a FunctionDecl),
     Global(&'a Ty),
+    /// A name a project module binds itself that heki has no declaration for, or a name under
+    /// one: a module global it holds no type of ([`ModuleDecls::unknown_globals`]). Calling it
+    /// is unresolved.
+    Unknown,
     /// A name under a project module heki could not read.
     Unread,
     External,
@@ -1297,6 +1339,7 @@ impl ProjectDecls {
             a.symmetric_difference(b).cloned().collect()
         };
         out.property_names = differ(&before.property_names, &self.property_names);
+        out.returning_names = differ(&before.returning_names, &self.returning_names);
         out.class_facts = differ(&before.frozen, &self.frozen);
         out.class_facts.extend(differ(&before.built, &self.built));
         out.class_facts
@@ -1316,6 +1359,7 @@ impl ProjectDecls {
         Indexes {
             subclasses: self.subclasses.clone(),
             property_names: self.property_names.clone(),
+            returning_names: self.returning_names.clone(),
             frozen: self.frozen.clone(),
             built: self.built.clone(),
             typed_dicts: self.typed_dicts.clone(),
@@ -1352,6 +1396,7 @@ impl ProjectDecls {
         let out = &*self;
         let mut subclasses: FxHashMap<String, Vec<String>> = FxHashMap::default();
         let mut property_names = FxHashSet::default();
+        let mut returning_names = FxHashSet::default();
         for m in out.modules.values() {
             for (qualname, class) in &m.classes {
                 let fqn = format!("{}.{qualname}", m.module_name);
@@ -1363,9 +1408,12 @@ impl ProjectDecls {
                 }
             }
             for (qualname, f) in &m.functions {
+                let name = qualname.rsplit('.').next().unwrap_or(qualname);
                 if f.is_property || f.property_type.is_some() {
-                    let name = qualname.rsplit('.').next().unwrap_or(qualname);
                     property_names.insert(name.to_owned());
+                }
+                if f.returns_param_attr.is_some() {
+                    returning_names.insert(name.to_owned());
                 }
             }
         }
@@ -1375,6 +1423,7 @@ impl ProjectDecls {
         }
         self.subclasses = subclasses;
         self.property_names = property_names;
+        self.returning_names = returning_names;
         self.typed_dicts = TYPED_DICT_BASES
             .iter()
             .flat_map(|b| self.subclasses_of(b))
@@ -1614,6 +1663,12 @@ impl ProjectDecls {
 
     /// Chase re-exports (`pkg.Foo` where `pkg/__init__.py` does `from .sub import Foo`).
     pub fn canonical(&self, fqn: &str) -> String {
+        self.chase(fqn, false)
+    }
+
+    /// `fqn` through re-exports and, with `aliases`, the module aliases it names (at most
+    /// `MAX_ALIAS_CHASE` steps).
+    fn chase(&self, fqn: &str, aliases: bool) -> String {
         let mut cur = fqn.to_owned();
         for _ in 0..MAX_ALIAS_CHASE {
             let Some((m, rest)) = self.split_module(&cur) else {
@@ -1629,8 +1684,13 @@ impl ProjectDecls {
             // `imports` holds the names an import binds once the module has run
             // (`ModuleImport::rebound_at`): a class or function of the same name is shadowed by
             // it.
-            let Some(target) = m.imports.get(first) else {
-                break;
+            let target = match m.imports.get(first) {
+                Some(target) => target,
+                None if aliases => match m.aliases.get(first) {
+                    Some(target) if !self.alias_rebound(&m.module_name, first) => target,
+                    _ => break,
+                },
+                None => break,
             };
             let next = match tail {
                 Some(t) => format!("{target}.{t}"),
@@ -1642,6 +1702,21 @@ impl ProjectDecls {
             cur = next;
         }
         cur
+    }
+
+    /// Whether another module rebinds or deletes the module alias `name` of `module`
+    /// ([`ModuleDecls::aliases`]): it is then no longer the object its module binds.
+    fn alias_rebound(&self, module: &str, name: &str) -> bool {
+        let fqn = format!("{module}.{name}");
+        self.read(|k| note(&mut k.grown_globals, &fqn));
+        self.rebound_elsewhere.contains(&fqn)
+    }
+
+    /// The object the name `fqn` stands for: through re-exports, as [`Self::canonical`], and
+    /// through the module aliases it names (`pkg.model._set` for `_set = object.__setattr__` in
+    /// `pkg.model`). The name itself stays the alias's: only values are the object.
+    pub(crate) fn object_named(&self, fqn: &str) -> String {
+        self.chase(fqn, true)
     }
 
     /// The value of the string constant `fqn` (`pkg.keys.KEY`, `pkg.model.Model.KEY`), through
@@ -1913,7 +1988,18 @@ impl ProjectDecls {
         if let Some(t) = m.global_types.get(rest) {
             return Symbol::Global(t);
         }
-        Symbol::External
+        // A name the module does not bind is bound where heki does not read the module: a
+        // submodule it does not index (a compiled extension) or a name a star import binds,
+        // which only the catalog describes.
+        let head = rest.split('.').next().unwrap_or(rest);
+        if m.unknown_globals.contains(head)
+            || m.classes.contains_key(head)
+            || m.functions.contains_key(head)
+        {
+            Symbol::Unknown
+        } else {
+            Symbol::External
+        }
     }
 
     /// Whether `fqn` is a name under a project module heki could not read.
@@ -2305,6 +2391,24 @@ impl ProjectDecls {
         None
     }
 
+    /// Whether `class.__new__` (found past `class` itself with `skip_self`, as for `super()`)
+    /// is `object.__new__`: no class of the MRO defines `__new__`, and no base outside the
+    /// project but `object` may ([`Self::inherited_external`]).
+    pub(crate) fn new_is_object_new(
+        &self,
+        class: &str,
+        skip_self: bool,
+        kb: &EffectiveEcosystemKb,
+    ) -> bool {
+        let mro = self.mro(class);
+        self.definitions_along(&mro, class, "__new__", skip_self, false, |_| true)
+            .is_empty()
+            && matches!(
+                self.inherited_external(&mro, "__new__", skip_self, kb),
+                Inherited::External(symbol) if symbol == "builtins.object.__new__"
+            )
+    }
+
     /// The definition of method `name` a call on an instance of `class` finds first along the
     /// MRO (past `class` itself with `skip_self`): what a type checker takes the call's type
     /// from, whatever subclasses override it with.
@@ -2327,7 +2431,7 @@ impl ProjectDecls {
     /// project package) stays as it is.
     pub(crate) fn declared_ty(&self, ty: &Ty) -> Option<Ty> {
         ty.map_members(|o| {
-            let class = self.canonical(&o.class);
+            let class = self.object_named(&o.class);
             if let Some((m, rest)) = self.split_module(&class)
                 && !rest.contains('.')
                 && !m.classes.contains_key(rest)
@@ -2353,8 +2457,7 @@ impl ProjectDecls {
     /// The project functions `name` names on an instance of the canonical project class
     /// `class`: the first definition along the MRO (past `class` itself with `skip_self`, for
     /// `super()`) and, with `overrides`, the definitions of every overriding project subclass
-    /// (Priority 4 CHA), each one kept when `keep` accepts it (sorted, deduplicated). Also
-    /// returns the first external base the MRO walk meets before a definition.
+    /// (Priority 4 CHA), each one kept when `keep` accepts it (sorted, deduplicated).
     fn definitions(
         &self,
         class: &str,
@@ -2362,21 +2465,29 @@ impl ProjectDecls {
         skip_self: bool,
         overrides: bool,
         keep: impl Fn(&FuncKey) -> bool,
-    ) -> (Vec<FuncKey>, Option<String>) {
-        let mro = self.mro(class);
+    ) -> Vec<FuncKey> {
+        self.definitions_along(&self.mro(class), class, name, skip_self, overrides, keep)
+    }
+
+    /// [`Self::definitions`] with the MRO of `class` given.
+    fn definitions_along(
+        &self,
+        mro: &[String],
+        class: &str,
+        name: &str,
+        skip_self: bool,
+        overrides: bool,
+        keep: impl Fn(&FuncKey) -> bool,
+    ) -> Vec<FuncKey> {
         let start = usize::from(skip_self);
         let mut found = Vec::new();
-        let mut external = None;
-        for c in mro.iter().skip(start) {
-            if let Some(k) = self.own_method(c, name) {
-                if keep(&k) {
-                    found.push(k);
-                }
-                break;
-            }
-            if !self.is_project_class(c) && external.is_none() {
-                external = Some(format!("{c}.{name}"));
-            }
+        if let Some(k) = mro
+            .iter()
+            .skip(start)
+            .find_map(|c| self.own_method(c, name))
+            && keep(&k)
+        {
+            found.push(k);
         }
         if overrides {
             let mut stack = vec![class.to_owned()];
@@ -2396,22 +2507,98 @@ impl ProjectDecls {
         }
         found.sort();
         found.dedup();
-        (found, external)
+        found
+    }
+
+    /// Where a project class with the MRO `mro` takes `name` from, past the class itself with
+    /// `skip_self`, when no project class of the MRO defines it: the first base outside the
+    /// project that heki knows defines it ([`external_defines`]), else a base heki knows
+    /// nothing of may, else none does. Every class takes `__new__` from `object` when no base
+    /// outside the project but builtin types may define it.
+    fn inherited_external(
+        &self,
+        mro: &[String],
+        name: &str,
+        skip_self: bool,
+        kb: &EffectiveEcosystemKb,
+    ) -> Inherited {
+        for c in mro.iter().skip(usize::from(skip_self)) {
+            if self.is_project_class(c) {
+                continue;
+            }
+            if external_defines(kb, c, name) {
+                return Inherited::External(format!("{c}.{name}"));
+            }
+            // A base heki knows nothing of may define it, before any later base that does.
+            if !c.starts_with("builtins.") {
+                return Inherited::Unknown;
+            }
+        }
+        match name {
+            "__new__" => Inherited::External("builtins.object.__new__".to_owned()),
+            _ => Inherited::Absent,
+        }
+    }
+
+    /// Whether no class of the MRO of the project class `class` has the member `name`: no
+    /// project class defines it, and every base outside the project is a builtin type that
+    /// does not ([`Self::inherited_external`]).
+    pub(crate) fn lacks_member(&self, class: &str, name: &str, kb: &EffectiveEcosystemKb) -> bool {
+        let class = self.canonical(class);
+        self.is_project_class(&class) && {
+            let mro = self.mro(&class);
+            self.definitions_along(&mro, &class, name, false, false, |_| true)
+                .is_empty()
+                && matches!(
+                    self.inherited_external(&mro, name, false, kb),
+                    Inherited::Absent
+                )
+        }
+    }
+
+    /// The function an instance of the project class `class` takes `name` from: along its MRO,
+    /// the first class whose body or methods bind `name` (`ClassDecl::members`) defines it.
+    /// `None` when a plain class or instance attribute comes first (reading it runs nothing), a
+    /// class on the way stores the name outside its body, a base outside the project comes
+    /// first (heki does not know what it binds), or none binds it.
+    pub(crate) fn function_taken(&self, class: &str, name: &str) -> Option<FuncKey> {
+        for c in self.mro(class) {
+            let decl = self.class(&c)?;
+            // Stored on the class object outside its body (`Child.view = []`), the name holds
+            // what was stored there from then on.
+            if decl.rebound_attrs.contains(name) {
+                return None;
+            }
+            if decl.members.contains(name) {
+                return self.own_method(&c, name);
+            }
+        }
+        None
     }
 
     /// Resolve `instance_of(class).method(...)`: MRO definition plus overriding project
-    /// subclasses (Priority 4 CHA). External bases supply a Layer 2 symbol fallback.
-    pub(crate) fn method_targets(&self, class: &str, method: &str, skip_self: bool) -> Callee {
+    /// subclasses (Priority 4 CHA). A method no project class defines is the symbol of the
+    /// base outside the project that defines it ([`Self::inherited_external`]), or unresolved.
+    pub(crate) fn method_targets(
+        &self,
+        class: &str,
+        method: &str,
+        skip_self: bool,
+        kb: &EffectiveEcosystemKb,
+    ) -> Callee {
         let class = self.canonical(class);
         if !self.is_project_class(&class) {
             return self.outside(format!("{class}.{method}"));
         }
-        let (found, external) = self.definitions(&class, method, skip_self, !skip_self, |_| true);
+        let mro = self.mro(&class);
+        let found = self.definitions_along(&mro, &class, method, skip_self, !skip_self, |_| true);
         if found.len() > CHA_CANDIDATE_LIMIT {
             return Callee::TooMany;
         }
         if found.is_empty() {
-            return external.map_or(Callee::Unresolved, |e| self.outside(e));
+            return self
+                .inherited_external(&mro, method, skip_self, kb)
+                .callee(self);
         }
         Callee::Project(found, true)
     }
@@ -2419,21 +2606,36 @@ impl ProjectDecls {
     /// Resolve `class.method` on the class object `class` itself (`Base.method(obj)`, and the
     /// `__init__` of constructing it): the definition its MRO finds first. The overrides of
     /// subclasses do not count: the class object is no subclass.
-    pub(crate) fn class_targets(&self, class: &str, method: &str) -> Callee {
+    pub(crate) fn class_targets(
+        &self,
+        class: &str,
+        method: &str,
+        kb: &EffectiveEcosystemKb,
+    ) -> Callee {
         let class = self.canonical(class);
-        match self.definitions(&class, method, false, false, |_| true) {
-            (found, _) if !found.is_empty() => Callee::Project(found, true),
-            (_, external) => external.map_or(Callee::Unresolved, |e| self.outside(e)),
+        let mro = self.mro(&class);
+        let found = self.definitions_along(&mro, &class, method, false, false, |_| true);
+        if found.is_empty() {
+            return self
+                .inherited_external(&mro, method, false, kb)
+                .callee(self);
         }
+        Callee::Project(found, true)
     }
 
     /// The project method `name` that the MRO of the class `class` finds first (what calling it
     /// on an instance of exactly `class` runs; overrides of subclasses do not count).
     pub fn mro_method(&self, class: &str, name: &str) -> Option<FuncKey> {
         let class = self.canonical(class);
-        self.definitions(&class, name, false, false, |_| true)
-            .0
-            .pop()
+        self.definitions(&class, name, false, false, |_| true).pop()
+    }
+
+    /// Whether a project function named `name` (its last name) may return an attribute of a
+    /// parameter (`FunctionDecl::returns_param_attr`): no call or read with another name hands
+    /// one out.
+    pub(crate) fn may_return_param_attr(&self, name: &str) -> bool {
+        self.read(|k| note(&mut k.returning_names, name));
+        self.returning_names.contains(name)
     }
 
     /// Resolve reading `instance_of(class).attr` as calls of the property getters it may run
@@ -2458,7 +2660,7 @@ impl ProjectDecls {
             return None;
         }
         let is_getter = |k: &FuncKey| self.function_decl(k).is_some_and(|d| d.is_property);
-        let (found, _) = self.definitions(&class, attr, skip_self, !skip_self, is_getter);
+        let found = self.definitions(&class, attr, skip_self, !skip_self, is_getter);
         match found.len() {
             0 => None,
             n if n > CHA_CANDIDATE_LIMIT => Some(Callee::TooMany),
@@ -2660,6 +2862,8 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
             decls.functions.insert(f.qualname.clone(), Box::default());
         }
     }
+    decls.aliases = module_aliases(input, &decls);
+    decls.unknown_globals = unknown_globals(input, &decls);
     // Qualnames whose every definition is a property getter (a setter, a deleter, or any other
     // function with the same qualname shares its summary).
     let mut getters_only: FxHashMap<&str, bool> = FxHashMap::default();
@@ -2797,6 +3001,24 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
         let slot = transforms.entry(&f.qualname).or_insert(None);
         *slot = (*slot).max(t);
     }
+    // Definitions sharing a qualname (a property's setter, conditional definitions) must agree.
+    let mut returned_attrs: FxHashMap<&str, Option<(u8, String)>> = FxHashMap::default();
+    for f in input
+        .ir
+        .functions
+        .iter()
+        .filter(|f| is_summarized_function(f))
+    {
+        let returned = returned_param_attr(f, &decls);
+        returned_attrs
+            .entry(&f.qualname)
+            .and_modify(|r| {
+                if *r != returned {
+                    *r = None;
+                }
+            })
+            .or_insert(returned);
+    }
     // The return annotation of a property's getter (its setter shares the qualname).
     let mut getter_types: FxHashMap<&str, Ty> = FxHashMap::default();
     for f in &input.ir.functions {
@@ -2851,6 +3073,7 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
             offloaded_by: None,
             is_abstract: crate::is_abstract_method(&f.decorators),
             property_type: getter_types.get(f.qualname.as_str()).cloned(),
+            returns_param_attr: returned_attrs[f.qualname.as_str()].clone(),
         };
         decls.functions.insert(f.qualname.clone(), Box::new(decl));
     }
@@ -3056,17 +3279,7 @@ fn str_constants(input: &ModuleInput<'_>, decls: &ModuleDecls) -> BTreeMap<Strin
         .iter()
         .filter_map(|imp| Some((imp.span, import_target(imp, input)?)))
         .collect();
-    let mut module_stores: FxHashMap<&str, usize> = FxHashMap::default();
-    for inst in input
-        .ir
-        .functions
-        .iter()
-        .flat_map(|f| f.blocks.iter().flat_map(|b| &b.insts))
-    {
-        if let InstKind::StoreGlobal { name, .. } | InstKind::Delete { name, .. } = &inst.kind {
-            *module_stores.entry(name.as_str()).or_default() += 1;
-        }
-    }
+    let module_stores = module_store_counts(input);
     let mut out = BTreeMap::new();
     for f in input
         .ir
@@ -3141,6 +3354,274 @@ fn str_constants(input: &ModuleInput<'_>, decls: &ModuleDecls) -> BTreeMap<Strin
         }
     }
     out
+}
+
+/// Whether heki takes `name` to be defined by `base`, a class outside the project: a special
+/// method (`__init__`, `__copy__`, ...), whose meaning the protocol fixes; a public method of a
+/// builtin type other than `object` (`dict.update`); or a member the ecosystem knowledge base
+/// lists (`pydantic.BaseModel.model_copy`). Any other member (`abc.ABC._copy_model_type`,
+/// `typing.Generic.result_type`) is not known to be there.
+fn external_defines(kb: &EffectiveEcosystemKb, base: &str, name: &str) -> bool {
+    let special = name.len() > 4 && name.starts_with("__") && name.ends_with("__");
+    let builtin_method = base
+        .strip_prefix("builtins.")
+        .is_some_and(|t| t != "object" && !name.starts_with('_'));
+    special || builtin_method || kb.lookup(&format!("{base}.{name}")).is_some()
+}
+
+/// [`FunctionDecl::returns_param_attr`] of one definition: a function (not a generator or a
+/// coroutine, decorated by nothing but `staticmethod`, `classmethod`, `abstractmethod`,
+/// `override`, or `property`) whose every `return` returns the same attribute of the same
+/// positional parameter, read directly or through local copies, and which stores or deletes no
+/// attribute of that name. A `cached_property` is none: a read after the first returns what
+/// the instance holds, which an assignment can replace.
+fn returned_param_attr(f: &IrFunction, decls: &ModuleDecls) -> Option<(u8, String)> {
+    let plain_decorators = f.decorators.iter().all(|d| {
+        let (head, _) = decorator_parts(d);
+        CALL_KEEPING_DECORATORS.contains(&head.rsplit('.').next().unwrap_or(head))
+            || decls.decorator_is(d, &["property"])
+    });
+    if f.kind != FunctionKind::Sync || !plain_decorators {
+        return None;
+    }
+    let defs: FxHashMap<VarId, &InstKind> = f
+        .blocks
+        .iter()
+        .flat_map(|b| &b.insts)
+        .filter_map(|i| Some((i.kind.dst()?, &i.kind)))
+        .collect();
+    // The variable each copy copies in the end, found once per variable: returns of copies of
+    // one value share the walk. Copies of an SSA variable form a tree, so the walk ends.
+    let mut roots: FxHashMap<VarId, VarId> = FxHashMap::default();
+    let mut copied_from = |var: VarId| {
+        let mut walked = Vec::new();
+        let mut cur = var;
+        let root = loop {
+            if let Some(&root) = roots.get(&cur) {
+                break root;
+            }
+            match defs.get(&cur) {
+                Some(InstKind::Copy { src, .. }) => {
+                    walked.push(cur);
+                    cur = *src;
+                }
+                _ => break cur,
+            }
+        };
+        for v in walked {
+            roots.insert(v, root);
+        }
+        root
+    };
+    let mut returned = None;
+    for bb in &f.blocks {
+        let Terminator::Return(value) = &bb.terminator else {
+            continue;
+        };
+        let Some(InstKind::AttrLoad { obj, attr, .. }) = defs.get(&copied_from((*value)?)) else {
+            return None;
+        };
+        let holder = copied_from(*obj);
+        let param = f
+            .params
+            .iter()
+            .position(|p| p.var == holder && !p.is_vararg && !p.is_kwarg && !p.kw_only)?;
+        let this = (u8::try_from(param).ok()?, attr.clone());
+        if returned.get_or_insert_with(|| this.clone()) != &this {
+            return None;
+        }
+    }
+    // A function storing or deleting the attribute (`items = self.items; self.items = [];
+    // return items`) may return what the attribute held before: no longer the attribute.
+    let (_, attr) = returned.as_ref()?;
+    let stores_it = f.blocks.iter().flat_map(|b| &b.insts).any(|i| {
+        matches!(&i.kind, InstKind::AttrStore { attr: a, .. } | InstKind::AttrDelete { attr: a, .. } if a == attr)
+    });
+    returned.filter(|_| !stores_it)
+}
+
+/// How often the module's code stores or deletes each module global: in the module body, or
+/// in a function after `global name` (deleting a local or a class-body name binds no global).
+fn module_store_counts<'i>(input: &'i ModuleInput<'_>) -> FxHashMap<&'i str, usize> {
+    let mut out: FxHashMap<&str, usize> = FxHashMap::default();
+    for inst in input
+        .ir
+        .functions
+        .iter()
+        .flat_map(|f| f.blocks.iter().flat_map(|b| &b.insts))
+    {
+        if let InstKind::StoreGlobal { name, .. }
+        | InstKind::Delete {
+            name, global: true, ..
+        } = &inst.kind
+        {
+            *out.entry(name.as_str()).or_default() += 1;
+        }
+    }
+    out
+}
+
+/// [`ModuleDecls::unknown_globals`]: the globals the module stores or deletes that are no
+/// runtime import, class, or function of it.
+fn unknown_globals(input: &ModuleInput<'_>, decls: &ModuleDecls) -> BTreeSet<String> {
+    module_store_counts(input)
+        .into_keys()
+        .filter(|name| {
+            !decls.imports.contains_key(*name)
+                && !decls.classes.contains_key(*name)
+                && !decls.functions.contains_key(*name)
+        })
+        .map(str::to_owned)
+        .collect()
+}
+
+/// [`ModuleDecls::aliases`]: the module-level names bound exactly once, not by an import
+/// statement (also none under `if TYPE_CHECKING:`), to a name the module reads as another
+/// object at run time (an import, a builtin, a class or function the module defines) or to an
+/// attribute of one (`object.__setattr__`, `helpers.run`). A name bound in two places or
+/// deleted is none, and neither is one bound to anything else (a call's result, a decorated
+/// function, a choice between two objects).
+fn module_aliases(input: &ModuleInput<'_>, decls: &ModuleDecls) -> BTreeMap<String, String> {
+    let module = module_scope(input.semantic);
+    let module_imports = || {
+        input
+            .semantic
+            .imports
+            .iter()
+            .filter(move |imp| Some(imp.scope) == module)
+    };
+    // What a runtime import binds; an `if TYPE_CHECKING:` import binds nothing at run time.
+    let imports: FxHashMap<Span, String> = module_imports()
+        .filter(|imp| !imp.in_type_checking)
+        .filter_map(|imp| Some((imp.span, import_target(imp, input)?)))
+        .collect();
+    let imported: FxHashSet<&str> = module_imports()
+        .map(|imp| imp.bound_name.as_str())
+        .collect();
+    // A star import may bind any name the module reads: then none is known to be a builtin.
+    let builtins: FxHashSet<&str> = input
+        .semantic
+        .scopes
+        .iter()
+        .filter(|sc| sc.kind == ScopeKind::Module)
+        .flat_map(|sc| &sc.reads)
+        .filter(|(_, how)| *how == heki_semantic::NameResolution::Builtin)
+        .map(|(name, _)| name.as_str())
+        .collect();
+    let stores = module_store_counts(input);
+    let insts = || {
+        input
+            .ir
+            .functions
+            .iter()
+            .filter(|f| f.is_module_body)
+            .flat_map(|f| f.blocks.iter().flat_map(|b| &b.insts))
+    };
+    let defs: FxHashMap<VarId, &Inst> = insts().filter_map(|i| Some((i.kind.dst()?, i))).collect();
+    let named = Named {
+        input,
+        decls,
+        defs: &defs,
+        imports: &imports,
+        builtins: &builtins,
+    };
+    let mut known = FxHashMap::default();
+    let mut out = BTreeMap::new();
+    for inst in insts() {
+        let InstKind::StoreGlobal { name, value } = &inst.kind else {
+            continue;
+        };
+        if stores.get(name.as_str()) != Some(&1) || imported.contains(name.as_str()) {
+            continue;
+        }
+        let Some(target) = named.object(*value, &mut known) else {
+            continue;
+        };
+        // `def f` and `class C` bind their own name.
+        if target != format!("{}.{name}", decls.module_name) {
+            out.insert(name.clone(), target);
+        }
+    }
+    out
+}
+
+/// What the module body knows of its names, for [`module_aliases`].
+struct Named<'n> {
+    input: &'n ModuleInput<'n>,
+    decls: &'n ModuleDecls,
+    defs: &'n FxHashMap<VarId, &'n Inst>,
+    /// `Import` instruction span -> bound fqn.
+    imports: &'n FxHashMap<Span, String>,
+    /// The names the module body reads as builtins.
+    builtins: &'n FxHashSet<&'n str>,
+}
+
+impl Named<'_> {
+    /// The fqn of the object the module-body variable `var` holds when it is a name or an
+    /// attribute of one. Each variable is resolved once (`known`): a chain of aliases bound to
+    /// one another (`a1 = a0`, `a2 = a1`, ...) shares the walk.
+    fn object(&self, var: VarId, known: &mut FxHashMap<VarId, Option<String>>) -> Option<String> {
+        // The variables walked through, each with the attribute it loads (`None`: a copy).
+        let mut walked: Vec<(VarId, Option<&str>)> = Vec::new();
+        let mut cur = var;
+        // SSA definitions form no cycle without a phi, which ends the walk.
+        let mut object = loop {
+            if let Some(object) = known.get(&cur) {
+                break object.clone();
+            }
+            let Some(inst) = self.defs.get(&cur) else {
+                break None;
+            };
+            let base = match &inst.kind {
+                InstKind::Copy { src, .. } => {
+                    walked.push((cur, None));
+                    cur = *src;
+                    continue;
+                }
+                InstKind::AttrLoad { obj, attr, .. } => {
+                    walked.push((cur, Some(attr.as_str())));
+                    cur = *obj;
+                    continue;
+                }
+                InstKind::Import { .. } => self.imports.get(&inst.span).cloned(),
+                // A module body loads the names it never binds (and lazily imported ones).
+                InstKind::LoadGlobal {
+                    name,
+                    is_lazy_import: false,
+                    ..
+                } if self.builtins.contains(name.as_str()) => Some(format!("builtins.{name}")),
+                InstKind::MakeClosure {
+                    func_id: Some(id), ..
+                } if self.defines(*id) => {
+                    let f = self.input.ir.function(*id);
+                    Some(format!("{}.{}", self.decls.module_name, f.qualname))
+                }
+                _ => None,
+            };
+            known.insert(cur, base.clone());
+            break base;
+        };
+        for (v, attr) in walked.into_iter().rev() {
+            if let (Some(base), Some(attr)) = (&object, attr) {
+                // A name of more than a few dotted segments is no alias anyone writes; the cap
+                // keeps a chain of attribute loads (`a2 = a1.x`) linear.
+                object = (base.matches('.').count() < MAX_ALIAS_SEGMENTS)
+                    .then(|| format!("{base}.{attr}"));
+            }
+            known.insert(v, object.clone());
+        }
+        object
+    }
+
+    /// Whether the function or class body `id` is a module-level `def` or `class` statement
+    /// (not a lambda, whose name all lambdas of the module share).
+    fn defines(&self, id: heki_ir::FunctionId) -> bool {
+        let qualname = &self.input.ir.function(id).qualname;
+        !qualname.contains('.')
+            && !qualname.starts_with('<')
+            && (self.decls.classes.contains_key(qualname)
+                || self.decls.functions.contains_key(qualname))
+    }
 }
 
 /// The class attributes the module stores into or deletes outside their class bodies, as
@@ -3796,9 +4277,13 @@ impl Val {
 
 /// The targets of a call on a value of one of `classes` (`each` resolves it on one class): the
 /// project functions of every class resolving it, or the one external function they all
-/// resolve it to; a class not resolving it adds nothing (it has no such member), and project
-/// and external targets together leave it unresolved.
-fn union_targets(classes: &[String], each: impl Fn(&str) -> Callee) -> Callee {
+/// resolve it to; a class not resolving it adds nothing when it has no such member (`absent`),
+/// and leaves the call unresolved otherwise, as project and external targets together do.
+fn union_targets(
+    classes: &[String],
+    each: impl Fn(&str) -> Callee,
+    absent: impl Fn(&str) -> bool,
+) -> Callee {
     let mut keys: Vec<FuncKey> = Vec::new();
     let mut binds = None;
     let mut external: Option<String> = None;
@@ -3821,7 +4306,8 @@ fn union_targets(classes: &[String], each: impl Fn(&str) -> Callee) -> Callee {
                 external = Some(symbol);
             }
             Callee::TooMany => return Callee::TooMany,
-            Callee::Unresolved => {}
+            Callee::Unresolved if absent(class) => {}
+            Callee::Unresolved => return Callee::Unresolved,
         }
     }
     match (binds, external) {
@@ -3843,6 +4329,28 @@ impl Ty {
             Ty::Super(c) => Some(Val::Super(c.clone())),
             Ty::Union(os) => Some(Val::Union(os.iter().map(|o| o.class.clone()).collect())),
             Ty::SelfType | Ty::Partial(_) | Ty::Coroutine(_) => None,
+        }
+    }
+}
+
+/// Where a member no project class of an MRO defines comes from
+/// ([`ProjectDecls::inherited_external`]).
+enum Inherited {
+    /// The symbol of the base outside the project that defines it.
+    External(String),
+    /// A base outside the project that heki knows nothing of may define it.
+    Unknown,
+    /// No class of the MRO has it.
+    Absent,
+}
+
+impl Inherited {
+    /// The call targets of the member: unresolved unless a known base defines it
+    /// ([`ProjectDecls::outside`]: none under a project module heki could not read).
+    fn callee(self, project: &ProjectDecls) -> Callee {
+        match self {
+            Self::External(symbol) => project.outside(symbol),
+            Self::Unknown | Self::Absent => Callee::Unresolved,
         }
     }
 }
@@ -3877,6 +4385,9 @@ pub struct TypeCtx<'a> {
     import_by_span: FxHashMap<Span, String>,
     /// Inference state shared by the functions of the module (child scopes and their parents).
     pub(crate) scopes: crate::infer::Scopes,
+    /// [`ProjectDecls::function_taken`] by class and name, asked once per module (the module's
+    /// summaries are one recording, which the first answer's reads join).
+    taken: RefCell<FxHashMap<(String, String), Option<FuncKey>>>,
 }
 
 /// Declarations used when a module is missing from `ProjectDecls`.
@@ -3888,6 +4399,8 @@ static EMPTY_DECLS: ModuleDecls = ModuleDecls {
     classes: BTreeMap::new(),
     functions: BTreeMap::new(),
     global_types: BTreeMap::new(),
+    aliases: BTreeMap::new(),
+    unknown_globals: BTreeSet::new(),
     small_globals: BTreeMap::new(),
     grown_globals: BTreeSet::new(),
     rebound_globals: BTreeSet::new(),
@@ -3919,6 +4432,7 @@ impl<'a> TypeCtx<'a> {
             ir: input.ir,
             import_by_span,
             scopes: crate::infer::Scopes::default(),
+            taken: RefCell::default(),
         }
     }
 
@@ -3953,6 +4467,15 @@ impl<'a> TypeCtx<'a> {
         {
             return t;
         }
+        if let Some(target) = self.module.aliases.get(name)
+            && !self.project.alias_rebound(self.module_name(), name)
+        {
+            return self.named(target);
+        }
+        // A global the module binds is its own, of no known value ([`Symbol::Unknown`]).
+        if self.module.unknown_globals.contains(name) {
+            return Ty::Ref(format!("{}.{name}", self.module_name()));
+        }
         Ty::Ref(format!("builtins.{name}"))
     }
 
@@ -3976,12 +4499,23 @@ impl<'a> TypeCtx<'a> {
         }
     }
 
-    /// A named fqn: a project global holding an instance becomes that instance.
+    /// A named fqn: a project global holding an instance becomes that instance, a module
+    /// alias the object it names.
     pub(crate) fn named(&self, fqn: &str) -> Ty {
-        let fqn = self.project.canonical(fqn);
+        let fqn = self.project.object_named(fqn);
         match self.project.symbol(&fqn) {
             Symbol::Global(t) => self.project.declared_ty(t).unwrap_or(Ty::Ref(fqn)),
             _ => Ty::Ref(fqn),
+        }
+    }
+
+    /// What calling the name `fqn` calls ([`ProjectDecls::symbol`]): a module global that a
+    /// `[[tool.heki.ecosystem]]` entry declares (`get = functools.partial(...)` listed as
+    /// blocking, with its `return-type`) is the declared symbol.
+    fn called_symbol(&self, fqn: &str) -> Symbol<'a> {
+        match self.project.symbol(fqn) {
+            Symbol::Unknown if self.kb.declared(fqn).is_some() => Symbol::External,
+            symbol => symbol,
         }
     }
 
@@ -3992,7 +4526,7 @@ impl<'a> TypeCtx<'a> {
         fqn: &str,
         arg: impl FnMut(Option<u8>, Option<&str>) -> Option<ArgFact>,
     ) -> Option<Ty> {
-        match self.project.symbol(fqn) {
+        match self.called_symbol(fqn) {
             Symbol::Class(_) => return Some(Ty::inst(fqn)),
             Symbol::Function(_, decl) => {
                 return self
@@ -4005,7 +4539,7 @@ impl<'a> TypeCtx<'a> {
                     })
                     .map(|t| decl.call_type(t));
             }
-            Symbol::Module | Symbol::Global(_) | Symbol::Unread => return None,
+            Symbol::Module | Symbol::Global(_) | Symbol::Unknown | Symbol::Unread => return None,
             Symbol::External => {}
         }
         if let Some(b) = fqn.strip_prefix("builtins.") {
@@ -4028,7 +4562,11 @@ impl<'a> TypeCtx<'a> {
     /// Resolve calling a value (`f(...)`).
     pub fn resolve_call(&self, callee: Option<&Val>) -> Callee {
         match self.dispatch_classes(callee) {
-            Some(classes) => union_targets(classes, |c| self.call_targets(Some(Recv::Inst(c)))),
+            Some(classes) => union_targets(
+                classes,
+                |c| self.call_targets(Some(Recv::Inst(c))),
+                |c| self.project.lacks_member(c, "__call__", self.kb),
+            ),
             None => self.call_targets(callee.and_then(Val::recv)),
         }
     }
@@ -4048,22 +4586,27 @@ impl<'a> TypeCtx<'a> {
     /// finds. A class object that may be a subclass (`cls(...)`) runs any of theirs.
     pub(crate) fn call_targets(&self, callee: Option<Recv<'_>>) -> Callee {
         match callee {
-            Some(Recv::Ref(fqn)) => match self.project.symbol(fqn) {
+            Some(Recv::Ref(fqn)) => match self.called_symbol(fqn) {
                 Symbol::Function(key, _) => Callee::Project(vec![key], false),
                 Symbol::Class(_) => constructor(
                     self.project,
                     fqn,
-                    self.project.class_targets(fqn, "__init__"),
+                    self.project.class_targets(fqn, "__init__", self.kb),
                 ),
-                Symbol::Module | Symbol::Global(_) | Symbol::Unread => Callee::Unresolved,
+                Symbol::Module | Symbol::Global(_) | Symbol::Unknown | Symbol::Unread => {
+                    Callee::Unresolved
+                }
                 Symbol::External => Callee::External(fqn.to_owned()),
             },
             Some(Recv::Class(class)) => constructor(
                 self.project,
                 class,
-                self.project.method_targets(class, "__init__", false),
+                self.project
+                    .method_targets(class, "__init__", false, self.kb),
             ),
-            Some(Recv::Inst(class)) => self.project.method_targets(class, "__call__", false),
+            Some(Recv::Inst(class)) => self
+                .project
+                .method_targets(class, "__call__", false, self.kb),
             Some(Recv::Super(_)) | None => Callee::Unresolved,
         }
     }
@@ -4071,9 +4614,11 @@ impl<'a> TypeCtx<'a> {
     /// Resolve `recv.method(...)`.
     pub fn resolve_method(&self, recv: Option<&Val>, method: &str) -> Callee {
         match self.dispatch_classes(recv) {
-            Some(classes) => union_targets(classes, |c| {
-                self.method_call_targets(Some(Recv::Inst(c)), method)
-            }),
+            Some(classes) => union_targets(
+                classes,
+                |c| self.method_call_targets(Some(Recv::Inst(c)), method),
+                |c| self.project.lacks_member(c, method, self.kb),
+            ),
             None => self.method_call_targets(recv.and_then(Val::recv), method),
         }
     }
@@ -4082,16 +4627,18 @@ impl<'a> TypeCtx<'a> {
         match recv {
             Some(Recv::Ref(fqn)) => {
                 if self.project.is_project_class(fqn) {
-                    return self.through_class(self.project.class_targets(fqn, method));
+                    return self.through_class(self.project.class_targets(fqn, method, self.kb));
                 }
-                let target = self.project.canonical(&format!("{fqn}.{method}"));
+                // A module alias called through its module (`aliased.nap(1)`) is the object it
+                // names, as the name imported from the module is.
+                let target = self.project.object_named(&format!("{fqn}.{method}"));
                 self.call_targets(Some(Recv::Ref(&target)))
             }
             Some(Recv::Class(class)) => {
-                self.through_class(self.project.method_targets(class, method, false))
+                self.through_class(self.project.method_targets(class, method, false, self.kb))
             }
-            Some(Recv::Inst(class)) => self.project.method_targets(class, method, false),
-            Some(Recv::Super(class)) => self.project.method_targets(class, method, true),
+            Some(Recv::Inst(class)) => self.project.method_targets(class, method, false, self.kb),
+            Some(Recv::Super(class)) => self.project.method_targets(class, method, true, self.kb),
             None => Callee::Unresolved,
         }
     }
@@ -4113,17 +4660,49 @@ impl<'a> TypeCtx<'a> {
         }
     }
 
+    /// Whether a read or call of `name` on `recv` runs one of `keys` whatever class `recv` is:
+    /// every class of a union or implementation of a protocol, as a class of its own, takes
+    /// `name` from one of them ([`ProjectDecls::function_taken`]). A module function, a class
+    /// object, and `super()` dispatch on no instance: they run what they name.
+    pub(crate) fn runs_on_every_class(
+        &self,
+        recv: Option<&Val>,
+        name: &str,
+        keys: &[FuncKey],
+    ) -> bool {
+        let classes = match recv {
+            Some(Val::Union(classes)) => classes.as_slice(),
+            Some(Val::Inst(class)) => self
+                .project
+                .protocol_implementers(class)
+                .unwrap_or(std::slice::from_ref(class)),
+            Some(Val::Ref(_) | Val::Class(_) | Val::Super(_)) | None => return true,
+        };
+        classes.iter().all(|class| {
+            let key = (class.clone(), name.to_owned());
+            let known = self.taken.borrow().get(&key).cloned();
+            let taken = known.unwrap_or_else(|| {
+                let taken = self.project.function_taken(class, name);
+                self.taken.borrow_mut().insert(key, taken.clone());
+                taken
+            });
+            taken.is_some_and(|k| keys.contains(&k))
+        })
+    }
+
     /// Resolve reading `recv.attr` (`AttrLoad`): the property getters it runs, which bind the
     /// receiver (`super().attr` runs the next getter along the MRO); `None` when it runs no
     /// project getter (see [`ProjectDecls::property_targets`]). Reading an attribute of a class
     /// or module object (`Val::Ref`) runs none: it yields the property object itself.
     pub fn resolve_attr_load(&self, recv: Option<&Val>, attr: &str) -> Option<Callee> {
         if let Some(classes) = self.dispatch_classes(recv) {
-            return match union_targets(classes, |c| {
+            // A class whose read of `attr` runs no getter adds none.
+            let getters = |c: &str| {
                 self.project
                     .property_targets(c, attr, false)
                     .unwrap_or(Callee::Unresolved)
-            }) {
+            };
+            return match union_targets(classes, getters, |_| true) {
                 Callee::Unresolved => None,
                 callee => Some(callee),
             };

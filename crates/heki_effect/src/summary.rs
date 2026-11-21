@@ -1154,7 +1154,8 @@ impl<'a> Extractor<'a> {
         }
     }
 
-    /// Alias maps through `AttrLoad`, `Copy`, and agreeing phis (iterated to a fixpoint).
+    /// Alias maps through `AttrLoad`, `Copy`, agreeing phis, and the calls and property reads
+    /// that return an attribute of what they are handed (iterated to a fixpoint).
     fn build_aliases(&mut self) {
         for (i, p) in self.f.params.iter().enumerate() {
             if let Ok(i) = u8::try_from(i)
@@ -1164,6 +1165,15 @@ impl<'a> Extractor<'a> {
             }
         }
         let rebound = Rebound::of(self.f);
+        let mut returned_attrs: FxHashMap<VarId, (VarId, String)> = FxHashMap::default();
+        for bb in &self.f.blocks {
+            self.pos = (bb.id, 0);
+            for inst in &bb.insts {
+                if let Some((dst, holder, attr)) = self.returned_attr(&inst.kind) {
+                    returned_attrs.insert(dst, (holder, attr));
+                }
+            }
+        }
         loop {
             let before = (
                 self.param_alias.len(),
@@ -1220,36 +1230,17 @@ impl<'a> Extractor<'a> {
                                 self.item_alias.insert(*dst, i);
                             }
                         }
-                        InstKind::AttrLoad { dst, obj, attr } if attr == "__dict__" => {
-                            let owner = self.owner_of(*obj);
-                            self.dict_of.insert(*dst, owner);
-                        }
-                        InstKind::AttrLoad { dst, obj, attr } => {
-                            // An attribute of a shallow copy holds what the original's does,
-                            // unless the function may have rebound it on the copy.
-                            let copied = || {
-                                rebound
-                                    .keeps_attr(attr)
-                                    .then(|| self.param_copy_alias.get(obj))
-                                    .flatten()
-                            };
-                            if let Some((i, path)) =
-                                self.param_alias.get(obj).or_else(copied).cloned()
+                        kind @ (InstKind::AttrLoad { .. }
+                        | InstKind::Call { .. }
+                        | InstKind::MethodCall { .. }
+                        | InstKind::DictLiteral { .. }
+                        | InstKind::AllocBuiltin { .. }) => {
+                            if let Some((dst, obj, attr)) = self.attr_load(kind) {
+                                self.alias_attr_load(dst, obj, &attr, &rebound);
+                            } else if let Some(original) = self.shallow_copied_param(kind)
+                                && let Some(dst) = kind.dst()
                             {
-                                if path.is_none() {
-                                    self.param_slot_alias
-                                        .insert(*dst, (i, Slot::Attr(attr.clone())));
-                                }
-                                self.param_alias
-                                    .insert(*dst, (i, Some(path.unwrap_or_else(|| attr.clone()))));
-                            }
-                            if self.self_vars.contains(obj) {
-                                self.self_attr_alias.insert(*dst, attr.clone());
-                            }
-                            let classes = self.project_classes(*obj);
-                            if !classes.is_empty() {
-                                let load = self.obj_attr(classes, *obj, attr);
-                                self.obj_attr_alias.insert(*dst, load);
+                                self.param_copy_alias.insert(dst, original);
                             }
                         }
                         InstKind::SubscriptLoad {
@@ -1309,15 +1300,14 @@ impl<'a> Extractor<'a> {
                                 }
                             }
                         }
-                        InstKind::Call { dst, .. }
-                        | InstKind::MethodCall { dst, .. }
-                        | InstKind::DictLiteral { dst, .. }
-                        | InstKind::AllocBuiltin { dst, .. } => {
-                            if let Some(original) = self.shallow_copied_param(&inst.kind) {
-                                self.param_copy_alias.insert(*dst, original);
-                            }
-                        }
                         _ => {}
+                    }
+                    // What a getter returns is the attribute it reads (after the property's own
+                    // load above, which it replaces).
+                    if let Some(dst) = inst.kind.dst()
+                        && let Some((holder, attr)) = returned_attrs.get(&dst)
+                    {
+                        self.alias_attr_load(dst, *holder, attr, &rebound);
                     }
                 }
             }
@@ -1333,6 +1323,161 @@ impl<'a> Extractor<'a> {
             if after == before {
                 break;
             }
+        }
+    }
+
+    /// `(dst, obj, attr)` of an instruction loading attribute `attr` of `obj`: `obj.attr`, or
+    /// `getattr(obj, "attr"[, default])` with a constant name (a default only stands in for a
+    /// missing attribute).
+    fn attr_load(&self, kind: &InstKind) -> Option<(VarId, VarId, String)> {
+        match kind {
+            InstKind::AttrLoad { dst, obj, attr } => Some((*dst, *obj, attr.clone())),
+            InstKind::Call {
+                dst,
+                callee_var: Some(f),
+                args,
+                star_from: None,
+                ..
+            } if matches!(self.val(*f), Some(Val::Ref(s)) if s == "builtins.getattr")
+                && (2..=3).contains(&args.len()) =>
+            {
+                Some((*dst, args[0], self.const_str(args[1])?))
+            }
+            _ => None,
+        }
+    }
+
+    /// `(dst, holder, attr)` of a call or property read that returns attribute `attr` of an
+    /// object it is handed (`node.members()`, `node.view`, `items_of(node)` returning
+    /// `node.items`): every project function it may run returns that attribute of the same
+    /// parameter ([`crate::FunctionDecl::returns_param_attr`]), bound here to `holder`, and
+    /// every class the value it dispatches on may be runs one of them
+    /// ([`resolver::TypeCtx::runs_on_every_class`]).
+    fn returned_attr(&self, kind: &InstKind) -> Option<(VarId, VarId, String)> {
+        let project = &self.cx.project;
+        let (dst, callee, recv, args, star_from, dispatch) = match kind {
+            InstKind::AttrLoad { dst, obj, attr } if project.may_return_param_attr(attr) => {
+                let getters = self.cx.resolve_attr_load(self.val(*obj), attr)?;
+                (
+                    *dst,
+                    getters,
+                    Some(*obj),
+                    &[][..],
+                    None,
+                    (*obj, attr.as_str()),
+                )
+            }
+            InstKind::MethodCall {
+                dst,
+                recv,
+                method,
+                args,
+                star_from,
+                ..
+            } if project.may_return_param_attr(method) => {
+                let callee = self.cx.resolve_method(self.val(*recv), method);
+                let dispatch = (*recv, method.as_str());
+                (
+                    *dst,
+                    callee,
+                    Some(*recv),
+                    args.as_slice(),
+                    *star_from,
+                    dispatch,
+                )
+            }
+            InstKind::Call {
+                dst,
+                callee_var: Some(c),
+                args,
+                star_from,
+                ..
+            } => {
+                // Calling a class makes a new object; a named function is the one declared.
+                let returns_attr = match self.val(*c)? {
+                    Val::Ref(fqn) => matches!(
+                        project.symbol(fqn),
+                        resolver::Symbol::Function(_, decl) if decl.returns_param_attr.is_some()
+                    ),
+                    Val::Inst(_) | Val::Union(_) => project.may_return_param_attr("__call__"),
+                    Val::Class(_) | Val::Super(_) => false,
+                };
+                if !returns_attr {
+                    return None;
+                }
+                let callee = self.cx.resolve_call(self.val(*c));
+                (
+                    *dst,
+                    callee,
+                    None,
+                    args.as_slice(),
+                    *star_from,
+                    (*c, "__call__"),
+                )
+            }
+            _ => return None,
+        };
+        let Callee::Project(keys, binds_recv) = callee else {
+            return None;
+        };
+        // The argument each callee returns the attribute of: `None` for the receiver, else
+        // the position among the call's arguments (a static method binds no receiver).
+        let mut returned: Option<(Option<usize>, &str)> = None;
+        for key in &keys {
+            let decl = self.cx.project.function_decl(key)?;
+            let (param, attr) = decl.returns_param_attr.as_ref()?;
+            let binds = binds_recv && !decl.is_staticmethod;
+            let this = (
+                usize::from(*param).checked_sub(usize::from(binds)),
+                attr.as_str(),
+            );
+            if *returned.get_or_insert(this) != this {
+                return None;
+            }
+        }
+        let (position, attr) = returned?;
+        let (value, name) = dispatch;
+        if !self.cx.runs_on_every_class(self.val(value), name, &keys) {
+            return None;
+        }
+        let holder = match position {
+            None => recv?,
+            Some(i) if star_from.is_none_or(|s| i < usize::from(s)) => *args.get(i)?,
+            Some(_) => return None,
+        };
+        Some((dst, holder, attr.to_owned()))
+    }
+
+    /// The alias maps of `dst = obj.<attr>` ([`Self::build_aliases`]).
+    fn alias_attr_load(&mut self, dst: VarId, obj: VarId, attr: &str, rebound: &Rebound<'_>) {
+        if attr == "__dict__" {
+            let owner = self.owner_of(obj);
+            self.dict_of.insert(dst, owner);
+            return;
+        }
+        // An attribute of a shallow copy holds what the original's does, unless the function
+        // may have rebound it on the copy.
+        let copied = || {
+            rebound
+                .keeps_attr(attr)
+                .then(|| self.param_copy_alias.get(&obj))
+                .flatten()
+        };
+        if let Some((i, path)) = self.param_alias.get(&obj).or_else(copied).cloned() {
+            if path.is_none() {
+                self.param_slot_alias
+                    .insert(dst, (i, Slot::Attr(attr.to_owned())));
+            }
+            self.param_alias
+                .insert(dst, (i, Some(path.unwrap_or_else(|| attr.to_owned()))));
+        }
+        if self.self_vars.contains(&obj) {
+            self.self_attr_alias.insert(dst, attr.to_owned());
+        }
+        let classes = self.project_classes(obj);
+        if !classes.is_empty() {
+            let load = self.obj_attr(classes, obj, attr);
+            self.obj_attr_alias.insert(dst, load);
         }
     }
 
@@ -1420,23 +1565,55 @@ impl<'a> Extractor<'a> {
     }
 
     /// The project class a call constructs: a call of a class object (`Model(...)`,
-    /// `cls(...)`), or of a class reached through a module or class (`models.Model(...)`).
+    /// `cls(...)`), or of a class reached through a module or class (`models.Model(...)`), or
+    /// an allocation by `object.__new__` ([`Self::bare_allocation`]).
     fn construction(&self, kind: &InstKind) -> Option<String> {
         let project = self.cx.project;
         match kind {
             InstKind::Call {
                 callee_var: Some(c),
+                args,
                 ..
-            } => self.class_called(*c),
-            InstKind::MethodCall { recv, method, .. } => match self.val(*recv)? {
+            } => match self.val(*c)? {
+                Val::Ref(fqn) if fqn == "builtins.object.__new__" => self.bare_allocation(args),
+                _ => self.class_called(*c),
+            },
+            InstKind::MethodCall {
+                recv, method, args, ..
+            } => match self.val(*recv)? {
                 Val::Ref(owner) => {
                     let fqn = project.canonical(&format!("{owner}.{method}"));
+                    if fqn == "builtins.object.__new__"
+                        || method == "__new__"
+                            && project.is_project_class(owner)
+                            && project.new_is_object_new(owner, false, self.cx.kb)
+                    {
+                        return self.bare_allocation(args);
+                    }
                     project.is_project_class(&fqn).then_some(fqn)
+                }
+                Val::Class(owner)
+                    if method == "__new__"
+                        && project.new_is_object_new(owner, false, self.cx.kb) =>
+                {
+                    self.bare_allocation(args)
+                }
+                Val::Super(owner)
+                    if method == "__new__"
+                        && project.new_is_object_new(owner, true, self.cx.kb) =>
+                {
+                    self.bare_allocation(args)
                 }
                 _ => None,
             },
             _ => None,
         }
+    }
+
+    /// The project class `object.__new__(cls, ...)` allocates an instance of, without running
+    /// its `__init__`: the class object passed first.
+    fn bare_allocation(&self, args: &[VarId]) -> Option<String> {
+        self.class_called(*args.first()?)
     }
 
     /// The project class calling `callee` constructs (`Model`, `cls` in a class method).
@@ -2981,21 +3158,14 @@ impl<'a> Extractor<'a> {
         while let Some(InstKind::Copy { src, .. }) = self.defs.get(&cur).map(|i| &i.kind) {
             cur = *src;
         }
-        match &self.defs.get(&cur)?.kind {
-            InstKind::AttrLoad { obj, attr, .. } => {
-                let getter = self.cx.resolve_attr_load(self.val(*obj), attr).is_some();
-                (!getter).then(|| (*obj, attr.clone()))
+        let kind = &self.defs.get(&cur)?.kind;
+        let (_, obj, attr) = self.attr_load(kind)?;
+        match kind {
+            InstKind::AttrLoad { .. } => {
+                let getter = self.cx.resolve_attr_load(self.val(obj), &attr).is_some();
+                (!getter).then_some((obj, attr))
             }
-            InstKind::Call {
-                callee_var: Some(f),
-                args,
-                ..
-            } if matches!(self.val(*f), Some(Val::Ref(s)) if s == "builtins.getattr")
-                && (2..=3).contains(&args.len()) =>
-            {
-                Some((args[0], self.const_str(args[1])?))
-            }
-            _ => None,
+            _ => Some((obj, attr)),
         }
     }
 

@@ -222,8 +222,8 @@ the target.
 
 With `fresh-objects = "allow"`, a write is no violation when it constructs the object it writes:
 
-- the object was allocated in the same call chain: by calling its class, by a copy, or by a
-  project function returning a new object;
+- the object was allocated in the same call chain: by calling its class, by `object.__new__`
+  (`object.__new__(Node)`), by a copy, or by a project function returning a new object;
 - nothing can hold it yet: no store, `yield`, closure, or call that may keep it ran before the
   write.
 
