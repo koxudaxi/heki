@@ -163,9 +163,9 @@ impl Watcher<'_> {
     fn opts(&self) -> ProjectOptions<'_> {
         ProjectOptions {
             paths: &self.args.paths,
-            config: self.args.config.as_deref(),
+            config: self.args.analysis.config.as_deref(),
             working_dir: None,
-            target_version: self.args.target_version.as_deref(),
+            target_version: self.args.analysis.target_version.as_deref(),
             overrides: None,
         }
     }
@@ -179,8 +179,8 @@ impl Watcher<'_> {
         let files = self.scan(&env, earlier.0)?;
         let (ws, errors) = Workspace::load(
             &self.opts(),
-            &crate::check::selectors(self.args),
-            self.args.baseline.as_deref(),
+            &crate::check::selectors(&self.args.analysis),
+            self.args.analysis.baseline.as_deref(),
         )?;
         Ok(Loaded {
             ws,
@@ -196,9 +196,10 @@ impl Watcher<'_> {
     fn config_files(&self, env: &ProjectEnv) -> Vec<PathBuf> {
         let root = &env.root;
         let mut config: Vec<PathBuf> = CONFIG_FILES.iter().map(|n| root.join(n)).collect();
-        config.extend(self.args.config.clone());
+        config.extend(self.args.analysis.config.clone());
         config.extend(
             self.args
+                .analysis
                 .baseline
                 .clone()
                 .or_else(|| env.cfg.baseline.as_ref().map(|b| root.join(b))),

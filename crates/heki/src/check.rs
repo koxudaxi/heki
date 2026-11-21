@@ -4,7 +4,7 @@
 //! are reported), a baseline update refused, or pending `--diff` changes, 2 configuration / I/O /
 //! unknown rule / syntax errors.
 
-use crate::{CheckArgs, ColorChoice, OutputFormat, SnapshotArgs};
+use crate::{AnalysisArgs, CheckArgs, ColorChoice, OutputFormat, SnapshotArgs};
 use anyhow::{Context, Result, bail};
 use heki_ast::LineIndex;
 use heki_diagnostics::{
@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 /// The selection options of the command line.
-pub(crate) fn selectors(args: &CheckArgs) -> Selectors {
+pub(crate) fn selectors(args: &AnalysisArgs) -> Selectors {
     Selectors {
         select: args.select.clone(),
         extend_select: args.extend_select.clone(),
@@ -39,7 +39,7 @@ pub(crate) fn selectors(args: &CheckArgs) -> Selectors {
 
 /// Rule selection of a run (the command line over the config), with `lint.severity` keys
 /// validated.
-pub(crate) fn selection(args: &CheckArgs, project: &Project) -> Result<RuleSelection> {
+fn selection(args: &AnalysisArgs, project: &Project) -> Result<RuleSelection> {
     let cfg = &project.env.cfg;
     let selection = RuleSelection::resolve(&cfg.lint, &selectors(args))?;
     for key in cfg.lint.severity.keys() {
@@ -66,7 +66,7 @@ pub(crate) fn any_failing(diags: &[Diagnostic], fail_on: Severity) -> bool {
 }
 
 /// The saved summary snapshot when `MUT103` is enabled (`None` with a warning if missing).
-pub(crate) fn snapshot_for(
+fn snapshot_for(
     selection: &RuleSelection,
     root: &Path,
     format: OutputFormat,
@@ -118,6 +118,83 @@ pub(crate) fn annotate_hot(diags: &mut [Diagnostic], hot: Option<&HotFunctions>)
     }
 }
 
+/// A loaded project with the analysis `heki check` runs on it: the rule selection, the saved
+/// summary snapshot `MUT103` compares with, and the index built with the configuration's
+/// contracts and the selection's typed-write mode.
+pub(crate) struct Indexed {
+    pub project: Project,
+    pub selection: RuleSelection,
+    pub snapshot: Option<SummarySnapshot>,
+    pub index: ProjectIndex,
+}
+
+/// Load the project at `paths` (with `overrides` in place of files' text) and build the index
+/// `heki check` builds for `analysis`. `format` is the output format the run's warnings follow.
+pub(crate) fn load_and_index(
+    paths: &[PathBuf],
+    analysis: &AnalysisArgs,
+    format: OutputFormat,
+    overrides: Option<&FxHashMap<PathBuf, String>>,
+) -> Result<Indexed> {
+    let project = Project::load(&ProjectOptions {
+        paths,
+        config: analysis.config.as_deref(),
+        working_dir: None,
+        target_version: analysis.target_version.as_deref(),
+        overrides,
+    })?;
+    let selection = selection(analysis, &project)?;
+    let snapshot = snapshot_for(&selection, &project.env.root, format)?;
+    let env = &project.env;
+    let contracts = heki_rules::summary_contracts(&env.cfg, &env.kb)?;
+    let typed_writes = heki_rules::typed_writes(&env.cfg, &selection);
+    let opt_in = heki_rules::opt_in_facts(&selection);
+    let inputs = project.inputs();
+    let index = analyze_project_for(
+        &inputs,
+        &project.unread,
+        &env.kb,
+        contracts,
+        typed_writes,
+        opt_in,
+    );
+    drop(inputs);
+    Ok(Indexed {
+        project,
+        selection,
+        snapshot,
+        index,
+    })
+}
+
+impl Indexed {
+    /// The diagnostics of every enabled rule in the project's files, after inline suppressions
+    /// and without the heuristic reports the selection withholds, and how many those are.
+    pub(crate) fn diagnose(&self) -> Result<(Vec<Diagnostic>, usize)> {
+        let env = &self.project.env;
+        let units = self.project.units();
+        let extras = CheckExtras {
+            soundness_kb: &env.soundness_kb,
+            snapshot: self.snapshot.as_ref(),
+            decls: None,
+            project_patches_builtins: None,
+            text_of: None,
+        };
+        let mut diags = check_project(
+            &units,
+            &env.cfg,
+            &env.kb,
+            &self.index,
+            &self.selection,
+            &extras,
+        )?;
+        drop(units);
+        retain_unsuppressed(&mut diags, &self.project.files);
+        let withheld = self.selection.withhold_heuristic(&mut diags);
+        Ok((diags, withheld))
+    }
+}
+
 /// One analysis pass: the project, its index, its diagnostics after inline suppressions, and
 /// the shares of its functions in the profile.
 struct Analyzed {
@@ -136,41 +213,14 @@ fn analyze(
     profile: Option<&ProfileData>,
     overrides: Option<&FxHashMap<PathBuf, String>>,
 ) -> Result<Analyzed> {
-    let project = Project::load(&ProjectOptions {
-        paths: &args.paths,
-        config: args.config.as_deref(),
-        working_dir: None,
-        target_version: args.target_version.as_deref(),
-        overrides,
-    })?;
-    let selection = selection(args, &project)?;
-    let snapshot = snapshot_for(&selection, &project.env.root, args.output_format)?;
-    let env = &project.env;
-    let inputs = project.inputs();
-    let contracts = heki_rules::summary_contracts(&env.cfg, &env.kb)?;
-    let typed_writes = heki_rules::typed_writes(&env.cfg, &selection);
-    let opt_in = heki_rules::opt_in_facts(&selection);
-    let index = analyze_project_for(
-        &inputs,
-        &project.unread,
-        &env.kb,
-        contracts,
-        typed_writes,
-        opt_in,
-    );
-    let units = project.units();
-    let extras = CheckExtras {
-        soundness_kb: &env.soundness_kb,
-        snapshot: snapshot.as_ref(),
-        decls: None,
-        project_patches_builtins: None,
-        text_of: None,
-    };
-    let mut diags = check_project(&units, &env.cfg, &env.kb, &index, &selection, &extras)?;
-    drop(units);
-    drop(inputs);
-    retain_unsuppressed(&mut diags, &project.files);
-    let withheld = selection.withhold_heuristic(&mut diags);
+    let indexed = load_and_index(&args.paths, &args.analysis, args.output_format, overrides)?;
+    let (mut diags, withheld) = indexed.diagnose()?;
+    let Indexed {
+        project,
+        index,
+        selection,
+        ..
+    } = indexed;
     let hot = profile.map(|p| p.attribute(profiled_functions(&project)));
     annotate_hot(&mut diags, hot.as_ref());
     Ok(Analyzed {
@@ -446,6 +496,7 @@ pub(crate) fn report(
             .expect("diagnostics are emitted for the project's files")
     };
     let baseline_path = args
+        .analysis
         .baseline
         .clone()
         .or_else(|| project.env.cfg.baseline.clone().map(|b| root.join(b)));

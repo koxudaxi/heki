@@ -53,18 +53,18 @@ Options:
           Also run the heuristic rules, whose reports can be wrong about the code, by default and for every prefix and `ALL` (`lint.heuristic = true`)
       --no-heuristic
           Run a heuristic rule only when its code or name is selected (`lint.heuristic = false`)
-      --fail-on <FAIL_ON>
-          Exit with code 1 on reports of this severity or higher: `error` (the default), or `warning` to fail on warnings too (`lint.fail-on`) [possible values: error, warning]
-      --output-format <OUTPUT_FORMAT>
-          Output format [default: full] [possible values: full, concise, json, github, sarif]
-      --color <WHEN>
-          When to color the `full` and `concise` output and `--diff`, as Ruff does: `auto` colors them on a terminal unless `NO_COLOR` is set (`FORCE_COLOR` or `CLICOLOR_FORCE` color them anywhere), `always`, or `never` [default: auto] [possible values: auto, always, never]
       --config <CONFIG>
           Explicit configuration file: a `pyproject.toml` (its `[tool.heki]` table) or a file with the keys at its top level, like `heki.toml`
       --target-version <TARGET_VERSION>
           Target Python version (`py311`, `py312`, `py313`, `py314`, `py315`)
       --baseline <BASELINE>
           Ratchet baseline TOML file (line-number-independent)
+      --fail-on <FAIL_ON>
+          Exit with code 1 on reports of this severity or higher: `error` (the default), or `warning` to fail on warnings too (`lint.fail-on`) [possible values: error, warning]
+      --output-format <OUTPUT_FORMAT>
+          Output format [default: full] [possible values: full, concise, json, github, sarif]
+      --color <WHEN>
+          When to color the `full` and `concise` output and `--diff`, as Ruff does: `auto` colors them on a terminal unless `NO_COLOR` is set (`FORCE_COLOR` or `CLICOLOR_FORCE` color them anywhere), `always`, or `never` [default: auto] [possible values: auto, always, never]
       --update-baseline
           Generate or shrink-update the Ratchet baseline file
       --profile <PROFILE>

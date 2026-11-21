@@ -35,6 +35,7 @@ pub mod iterations;
 pub mod locks;
 pub mod one_at_a_time;
 pub mod ownership;
+mod query;
 pub mod readonly;
 mod report;
 pub mod resolver;
@@ -59,6 +60,7 @@ pub use iterations::{
 pub use locks::{LockAcquire, LockFacts, ObjRef, SiteLock, StateTests};
 pub use one_at_a_time::ExclusiveUse;
 pub use ownership::{LocalOrigins, Origins, ResultOf, ReturnOrigins};
+pub use query::{CallsByCaller, ChangeChain, ParamChange};
 pub use readonly::{
     CacheDecorator, CachedResult, ContainerKind, ProtectedReturn, ReturnStep, Shared,
 };
