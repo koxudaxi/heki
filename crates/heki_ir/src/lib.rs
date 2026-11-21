@@ -18,7 +18,8 @@ pub use builder::build_module_ir;
 pub use dominators::{Dominated, DominatorTree, immediate_dominators};
 pub use facts::{
     Carries, Decided, FnIndex, ItemOrigin, ItemOrigins, ItemSource, LEN_CAP_MAX, ModuleBindings,
-    ModuleConstants, Must, PathReader, Paths, Progress, SMALL_MAX, SmallDisplay, comprehension_id,
+    ModuleConstants, Must, PathReader, Paths, Progress, SMALL_MAX, SmallDisplay, Trips,
+    comprehension_id,
 };
 
 use heki_ast::Span;
@@ -224,6 +225,15 @@ pub enum UnaryOpKind {
     USub,
 }
 
+/// The conversion of a replacement field: `!s` calls `str()`, `!r` `repr()`, `!a` `ascii()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Conversion {
+    Str,
+    Repr,
+    Ascii,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CompareOpKind {
@@ -316,6 +326,31 @@ pub enum InstKind {
         op: CompareOpKind,
         lhs: VarId,
         rhs: VarId,
+    },
+    /// The conversion of a replacement field (`!s`, `!r`, `!a`): `str(value)`, `repr(value)`,
+    /// or `ascii(value)`, which run the value's `__str__` / `__repr__`, code of its class unless
+    /// that is a builtin. The result is a `str`, of a subclass if `__str__` / `__repr__` returns
+    /// one.
+    Convert {
+        dst: VarId,
+        value: VarId,
+        conversion: Conversion,
+    },
+    /// A replacement field of an f-string or of a format specification, after its conversion:
+    /// `format(value, spec)`, with `""` for a missing `spec`, which runs the value's `__format__`,
+    /// code of its class unless that is a builtin. The result is a `str`, of a subclass if
+    /// `__format__` returns one.
+    Format {
+        dst: VarId,
+        value: VarId,
+        spec: Option<VarId>,
+    },
+    /// An f-string other than one replacement field alone: a new `str` of its literal text and
+    /// its formatted fields (`parts`, each a `Format`'s result), in order. It copies the text of
+    /// its parts and keeps none of them.
+    BuildString {
+        dst: VarId,
+        parts: Vec<VarId>,
     },
     AttrLoad {
         dst: VarId,
@@ -447,6 +482,9 @@ impl InstKind {
             | Self::BinOp { dst, .. }
             | Self::UnaryOp { dst, .. }
             | Self::Compare { dst, .. }
+            | Self::Convert { dst, .. }
+            | Self::Format { dst, .. }
+            | Self::BuildString { dst, .. }
             | Self::AttrLoad { dst, .. }
             | Self::SubscriptLoad { dst, .. }
             | Self::MakeIter { dst, .. }
@@ -511,6 +549,8 @@ impl InstKind {
             | Self::CatchException { .. }
             | Self::Import { .. } => Vec::new(),
             Self::AllocBuiltin { elems, .. } => elems.clone(),
+            Self::BuildString { parts, .. } => parts.clone(),
+            Self::Format { value, spec, .. } => std::iter::once(*value).chain(*spec).collect(),
             Self::DictLiteral { entries, .. } => {
                 let mut out = Vec::new();
                 for e in entries {
@@ -528,6 +568,7 @@ impl InstKind {
             | Self::StoreDeref { value, .. }
             | Self::Copy { src: value, .. }
             | Self::UnaryOp { operand: value, .. }
+            | Self::Convert { value, .. }
             | Self::AttrLoad { obj: value, .. }
             | Self::AttrDelete { obj: value, .. }
             | Self::MakeIter {

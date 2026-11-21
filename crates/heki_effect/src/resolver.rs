@@ -11,6 +11,7 @@
 //! Reading a property (`obj.attr` on a project-class instance whose `attr` is a getter) runs
 //! its getter, so `resolve_attr_load` resolves it like a method call.
 
+use crate::capacity::CapacityOf;
 use crate::types::{Args, Elem, Generic, Ty, generic, typing_generic};
 use crate::{FuncKey, ModuleInput};
 use heki_ast::Span;
@@ -296,6 +297,14 @@ pub struct ClassDecl {
     /// attributes of a class family through [`ProjectDecls::small_attr`]).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub attr_displays: BTreeMap<String, Option<SmallDisplay>>,
+    /// What the class's own body and methods store in its attributes (`attr = v` in the body,
+    /// `self.attr = v` in a method), for the attributes one store of which is a queue (a
+    /// construction of a catalogued queue class, or a parameter annotated with one) or, for a
+    /// name the module reads as a queue's `maxsize`, an integer constant: the join of every store
+    /// (`crate::capacity`). An attribute the class defines without an entry has an unknown
+    /// capacity ([`ProjectDecls::attr_capacity`]).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub attr_capacities: BTreeMap<String, CapacityOf>,
     /// `typing.Protocol` is one of the bases (PEP 544: the class is a protocol, not an
     /// implementation of one).
     pub is_protocol: bool,
@@ -433,6 +442,11 @@ pub struct ModuleDecls {
     /// `obj.attr[KEY]`, as its literal would.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub str_constants: BTreeMap<String, StrConstant>,
+    /// What the module binds its globals to (in its body, and in functions declaring them
+    /// `global`), for the globals one binding of which is a queue: the join of every binding
+    /// (`crate::capacity`). Any other global has an unknown capacity.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub global_capacities: BTreeMap<String, CapacityOf>,
     /// A file of the project that heki could not read or parse: the module exists, and heki
     /// knows nothing it defines ([`Self::unread_module`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -479,17 +493,19 @@ impl ModuleDecls {
     }
 
     /// The pass-1 declarations these were completed from (`project_decls_for`): without the
-    /// inferred instance attribute and module global types, and without the offloading
-    /// decorators resolved through the project (`FunctionDecl::offloaded_by`).
+    /// inferred instance attribute and module global types, the queue capacities, and the
+    /// offloading decorators resolved through the project (`FunctionDecl::offloaded_by`).
     pub fn structural(&self) -> Self {
         let mut out = self.clone();
         for class in out.classes.values_mut() {
             class.attr_types.clear();
+            class.attr_capacities.clear();
         }
         for function in out.functions.values_mut() {
             function.offloaded_by = None;
         }
         out.global_types.clear();
+        out.global_capacities.clear();
         out
     }
 
@@ -1141,6 +1157,13 @@ struct KnownConstant {
     reads: Option<Arc<DeclKeys>>,
 }
 
+/// An answer of [`ProjectDecls::capacity`], with what computing it read, as [`KnownConstant`].
+#[derive(Debug, Clone)]
+struct KnownCapacity {
+    value: CapacityOf,
+    reads: Option<Arc<DeclKeys>>,
+}
+
 /// Declarations of every project module plus derived indexes.
 #[derive(Debug, Default)]
 pub struct ProjectDecls {
@@ -1175,6 +1198,8 @@ pub struct ProjectDecls {
     /// The answers of [`Self::class_str_constant`] so far, by class, name, and whether the
     /// object may be of a subclass; cleared with the indexes.
     class_constants: RwLock<FxHashMap<(String, String, ConstantRead), KnownConstant>>,
+    /// The answers of [`Self::capacity`] so far; cleared with the indexes.
+    capacities: RwLock<FxHashMap<CapacityOf, KnownCapacity>>,
 }
 
 /// Why an attribute (or `TypedDict` key) of a project class is read-only (`MUT108`).
@@ -1310,6 +1335,10 @@ impl ProjectDecls {
             .unwrap_or_else(PoisonError::into_inner)
             .clear();
         self.class_constants
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+        self.capacities
             .get_mut()
             .unwrap_or_else(PoisonError::into_inner)
             .clear();
@@ -1691,6 +1720,115 @@ impl ProjectDecls {
             .unwrap_or_else(PoisonError::into_inner)
             .insert(key, known);
         value
+    }
+
+    /// What attribute `attr` of an instance of the project class `class` gives a queue
+    /// (`crate::capacity`): what the declarations record of every store an instance may hold,
+    /// with the attributes and globals the records name followed, in terms of parameters only.
+    pub fn attr_capacity(&self, class: &str, attr: &str) -> CapacityOf {
+        self.capacity(CapacityOf {
+            attrs: BTreeSet::from([(class.to_owned(), attr.to_owned())]),
+            ..CapacityOf::default()
+        })
+    }
+
+    /// What the module global `fqn` gives a queue, as [`Self::attr_capacity`].
+    pub fn global_capacity(&self, fqn: &str) -> CapacityOf {
+        self.capacity(CapacityOf {
+            globals: BTreeSet::from([fqn.to_owned()]),
+            ..CapacityOf::default()
+        })
+    }
+
+    /// `start` resolved through the declarations ([`crate::capacity::resolve_in_decls`], which
+    /// keeps the answer of each attribute and global until the indexes change).
+    fn capacity(&self, start: CapacityOf) -> CapacityOf {
+        crate::capacity::resolve_in_decls(self, start)
+    }
+
+    /// The answer kept for an attribute or a global (`name`, a `CapacityOf` naming only it), with
+    /// what computing it read. One kept without its reads is no answer while recording: it is
+    /// computed again, to record them.
+    pub(crate) fn known_capacity(
+        &self,
+        name: &CapacityOf,
+    ) -> Option<(CapacityOf, Option<Arc<DeclKeys>>)> {
+        let recording = self.recorder.on.load(Ordering::Relaxed);
+        self.capacities
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(name)
+            .filter(|k| !recording || k.reads.is_some())
+            .map(|k| (k.value.clone(), k.reads.clone()))
+    }
+
+    pub(crate) fn keep_capacity(
+        &self,
+        name: CapacityOf,
+        value: CapacityOf,
+        reads: Option<Arc<DeclKeys>>,
+    ) {
+        self.capacities
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(name, KnownCapacity { value, reads });
+    }
+
+    /// Run `f`, and return with its result what it read of these declarations while recording
+    /// (`None` when not recording), apart from what the recording read before.
+    pub(crate) fn reads_of<T>(&self, f: impl FnOnce() -> T) -> (T, Option<DeclKeys>) {
+        if !self.recorder.on.load(Ordering::Relaxed) {
+            return (f(), None);
+        }
+        let before = std::mem::take(&mut *self.recorded());
+        let out = f();
+        let reads = std::mem::replace(&mut *self.recorded(), before).into_keys();
+        (out, Some(reads))
+    }
+
+    /// Add what computing a kept answer read to the recording.
+    pub(crate) fn replay(&self, reads: Arc<DeclKeys>) {
+        if self.recorder.on.load(Ordering::Relaxed) {
+            self.recorded().replayed.push(reads);
+        }
+    }
+
+    /// What the classes whose stores an instance of `class` may hold record of `attr`
+    /// (`ClassDecl::attr_capacities`): `class`, its project subclasses, and the project classes
+    /// along their MROs. A class defining the attribute without a record, or whose attribute
+    /// another module stores, adds an unknown capacity.
+    pub(crate) fn stored_attr_capacities(&self, class: &str, attr: &str) -> Vec<CapacityOf> {
+        let class = self.canonical(class);
+        let mut instances = self.subclasses_of(&class);
+        instances.push(class);
+        let family: BTreeSet<String> = instances
+            .iter()
+            .flat_map(|c| self.mro(c))
+            .filter(|c| self.is_project_class(c))
+            .collect();
+        let mut out = Vec::new();
+        for c in &family {
+            let decl = self.class(c).expect("a project class has a declaration");
+            let defined = decl.members.contains(attr) || decl.rebound_attrs.contains(attr);
+            let elsewhere = self.rebound_elsewhere(&format!("{c}.{attr}"));
+            match decl.attr_capacities.get(attr) {
+                Some(stored) if !elsewhere => out.push(stored.clone()),
+                None if !defined && !elsewhere => {}
+                _ => out.push(CapacityOf::unknown()),
+            }
+        }
+        out
+    }
+
+    /// What the module of the global `fqn` records of it (`ModuleDecls::global_capacities`);
+    /// unknown without a record, or when another module rebinds it.
+    pub(crate) fn stored_global_capacity(&self, fqn: &str) -> CapacityOf {
+        let fqn = self.canonical(fqn);
+        let stored = self
+            .split_module(&fqn)
+            .and_then(|(m, rest)| m.global_capacities.get(rest))
+            .filter(|_| !self.rebound_elsewhere(&fqn));
+        stored.cloned().unwrap_or_else(CapacityOf::unknown)
     }
 
     /// [`Self::class_str_constant`], computed.
@@ -3440,6 +3578,7 @@ fn complete_decls(
             }
         }
     }
+    crate::capacity::record(input, &cx, &mut decls);
     decls
 }
 
@@ -3753,6 +3892,7 @@ static EMPTY_DECLS: ModuleDecls = ModuleDecls {
     grown_globals: BTreeSet::new(),
     rebound_globals: BTreeSet::new(),
     str_constants: BTreeMap::new(),
+    global_capacities: BTreeMap::new(),
     unread: false,
 };
 

@@ -159,6 +159,8 @@ See [Rule precision](precision.md) for how a rule becomes exact and what each on
 
 - Under a second for a 200,000-line project.
 - A report needs evidence: when heki cannot tell, [it stays quiet](scope.md#when-heki-cannot-tell).
+- Bugs fail the run; slower code is reported as a warning that does not, unless you ask for
+  [`--fail-on warning`](configuration.md#rule-selection-toolhekilint).
 - Configuration, suppression comments, and output formats follow Ruff, and a [baseline](adoption.md#ratchet-baselines) fails CI
   only on new findings.
 

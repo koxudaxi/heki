@@ -241,12 +241,13 @@ pub(crate) fn through_call(
     lead: &[Arc<CallHop>],
     rewrite: bool,
     own_writes: &BTreeMap<u8, BTreeSet<String>>,
+    capacities: &crate::capacity::ParamCapacities,
 ) -> Option<(ObjRef, LockAcquire)> {
     if site.runner == Runner::Worker {
         return None;
     }
     let mapped = lock.through(bc)?;
-    let mut through = guards::through_call(site, bc, Some(&acq.guards))?;
+    let mut through = guards::through_call(site, bc, Some(&acq.guards), capacities)?;
     through.guards.once_per = None;
     through.guards.inputs.retain(|g| !assigned(g, own_writes));
     Some((
@@ -302,9 +303,16 @@ impl crate::ProjectIndex {
                 if may_rebind(facts, lock) {
                     continue;
                 }
-                let Some((lock, acq)) =
-                    through_call(site, bc, lock, acq, &lead, rewrite, &BTreeMap::new())
-                else {
+                let Some((lock, acq)) = through_call(
+                    site,
+                    bc,
+                    lock,
+                    acq,
+                    &lead,
+                    rewrite,
+                    &BTreeMap::new(),
+                    &self.param_capacities,
+                ) else {
                     continue;
                 };
                 out.push(SiteLock {
