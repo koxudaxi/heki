@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Unit tests of the oracle's checkers: for each claim kind, a synthetic trace that confirms the
-claim and one that refutes it, in the event format `monitor.py` writes.
+claim and one that refutes it, in the event format `monitor.py` writes; and of the recorder on
+real loops of the running interpreter.
 
 `python3.15 tests/oracle/test_checkers.py`
 """
@@ -380,7 +381,7 @@ class Opt113(unittest.TestCase):
     }
 
     def body(self, item, outer_key, inner_key):
-        return {"a.k": [outer_key, True], "b.k": [inner_key, True], "b": [item, "B", {}]}
+        return {"key:a.k": [outer_key, True], "key:b.k": [inner_key, True], "b": [item, "B", {}]}
 
     def test_an_idle_mismatch_confirms(self):
         trace = run(
@@ -473,6 +474,81 @@ class Helpers(unittest.TestCase):
         before = monitor.snapshot(items)
         items[1].add(3)
         self.assertNotEqual(before, monitor.snapshot(items))
+
+
+class Ins:
+    """An instruction as `dis` gives it, for the loop matcher."""
+
+    def __init__(self, offset, opname):
+        self.offset = offset
+        self.opname = opname
+
+
+class LoopMatching(unittest.TestCase):
+    loop = {"id": "L0", "pos": [4, 13, 4, 18], "alt_pos": [[4, 4, 5, 20]]}
+    code = [Ins(8, "GET_ITER"), Ins(10, "FOR_ITER"), Ins(14, "UNPACK_SEQUENCE"), Ins(16, "STORE_FAST"), Ins(18, "STORE_FAST"), Ins(20, "LOAD_FAST")]
+
+    def test_the_iterable_s_position_finds_the_loop(self):
+        pos_of = {8: (4, 13, 4, 18), 10: (4, 13, 4, 18), 20: (5, 8, 5, 9)}
+        self.assertEqual(monitor.match_loop(self.code, pos_of, self.loop), (8, 10, 20))
+
+    def test_the_statement_s_position_finds_it_on_earlier_cpython_3_12(self):
+        pos_of = {8: (4, 4, 5, 20), 10: (4, 4, 5, 20), 20: (5, 8, 5, 9)}
+        self.assertEqual(monitor.match_loop(self.code, pos_of, self.loop), (8, 10, 20))
+
+    def test_another_loop_is_not_found(self):
+        self.assertIsNone(monitor.match_loop(self.code, {10: (9, 1, 9, 2)}, self.loop))
+
+
+class Recorder(unittest.TestCase):
+    """The recorder on loops of the running interpreter: iterations of a `for` statement, and
+    the items of a comprehension whose target and body share one line."""
+
+    SOURCE = (
+        "def run(items, rights):\n"
+        "    out = []\n"
+        "    for x in items:\n"
+        "        out.append(x)\n"
+        "    for a in items:\n"
+        "        out.extend([(a, b) for b in rights if a == b])\n"
+        "    return out\n"
+    )
+
+    def test_iterations_and_comprehension_items_are_recorded(self):
+        import ast
+        import importlib
+        import tempfile
+
+        import plan
+
+        root = os.path.realpath(tempfile.mkdtemp(prefix="oracle-recorder-"))
+        with open(os.path.join(root, "loops_mod.py"), "w", encoding="utf-8") as f:
+            f.write(self.SOURCE)
+        tree = ast.parse(self.SOURCE)
+        fors = [n for n in ast.walk(tree) if isinstance(n, ast.For)]
+        comp = next(n for n in ast.walk(tree) if isinstance(n, ast.ListComp))
+        loops = [
+            plan._loop_entry("Lfor", fors[0], "loops_mod.py"),
+            plan._loop_entry("Lcomp", (comp.generators[0], comp), "loops_mod.py", capture_body=["b"], keys=["a", "b"]),
+        ]
+        recorder = monitor.Recorder(root, {"loops": loops})
+        sys.path.insert(0, root)
+        try:
+            module = importlib.import_module("loops_mod")
+            recorder.install()
+            recorder.begin_run()
+            module.run([1, 2, 3], [2, 5])
+            events = recorder.end_run()
+        finally:
+            recorder.uninstall()
+            sys.path.remove(root)
+        self.assertEqual(recorder.errors, [])
+        plain = [e for e in events if e[0] == "iter" and e[1] == "Lfor"]
+        self.assertEqual([e[6] for e in plain], [True, True, True])
+        items = [e[8]["b"][2] for e in events if e[0] == "iter" and e[1] == "Lcomp"]
+        self.assertEqual(items, [2, 5] * 3)
+        keys = [(e[8]["key:a"][0], e[8]["key:b"][0]) for e in events if e[0] == "iter" and e[1] == "Lcomp"]
+        self.assertEqual(keys[:2], [(1, 2), (1, 5)])
 
 
 def _source(text):
