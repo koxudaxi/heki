@@ -241,32 +241,6 @@ release can change rules, configuration keys, diagnostics, and output formats.
   `SCHEMA.split(";")` or `SCHEMA.splitlines()`).
 - `EFF101` no longer reports `socket.getaddrinfo` with the `AI_NUMERICHOST` flag, which parses
   a numeric address and never asks a resolver.
-- A module-level name bound once to another object by name is that object, in its module and
-  imported from it, unless another module rebinds it: `_set = object.__setattr__` makes
-  `_set(node, "kind", v)` a `MUT201` write, and `sleep = time.sleep` makes `sleep(1)` in an
-  `async def` an `EFF101` report. Any other global a module binds is never the builtin of the same
-  name: after `open = functools.partial(...)`, `open(path)` is no blocking `builtins.open`
-  (`EFF105`), and a call of it is unresolved unless a `[[tool.heki.ecosystem]]` entry declares it.
-  A name heki does not see the module bind (a compiled submodule, a star import of one) keeps
-  what the catalog says of it (`mypkg._native.read`).
-- A method that no project class of the receiver's MRO defines is no longer taken from a base
-  outside the project that is not known to define it (`abc.ABC._copy_model_type`,
-  `typing.Generic.result_type`): the call is unresolved, as a call heki cannot follow. Special
-  methods, public methods of builtin types, and the members the catalog lists still come from
-  the base, when no base heki knows nothing of comes before it.
-- `getattr(obj, "attr"[, default])` with a constant name is a load of the attribute for the
-  write contracts, also behind a walrus (`if (extras := getattr(self, "extras", None)) is not None:
-  extras["k"] = 2` is a `MUT201` write of `Node.extras["k"]`).
-- A method, property, or function that returns an attribute of an argument on every `return`
-  (`return self.items`) hands out that object: `node.members().append(1)` and
-  `node.view.append(1)` are `MUT201` writes of `Node.items`. It does so on a class whose reads run
-  it: not through a `cached_property` (an assignment can replace what the instance keeps), not on
-  a member of a union, or a class, whose own attribute of the name comes first or is stored on the
-  class outside its body, and not for a function that stores the attribute itself
-  (`items = self.items; self.items = []; return items`) or a keyword-only parameter.
-- `object.__new__(Node)`, also through an alias, and `Node.__new__(Node)` where no class of the
-  MRO defines `__new__` construct a `Node`: the new object has its class, and with
-  `fresh-objects = "allow"` a helper filling it is no `MUT201` report.
 - A file that is one definition, class, lambda, or generator expression with nothing after it
   (no final newline) is checked: its function was taken for the module body, which has the same
   span, so it was never analyzed, and `heki check` panicked on such a generator expression
