@@ -53,6 +53,53 @@ CI runs them on CPython 3.11 to 3.15 (`ir_counterexamples.py` on 3.15 only).
 | `soundness_e2e_counterexamples.py` | that the rewrites earlier versions of heki made of these shapes change behavior; the end-to-end tests check that heki now blocks or disproves each |
 | `ir_counterexamples.py` | that the rewrites heki made before the IR modeled a shape (a binding, an alias, a path) change behavior; needs CPython 3.15 |
 
+### Run-time oracle
+
+```console
+$ cargo build --release -p heki
+$ python3.15 tests/oracle/test_checkers.py
+$ python3.15 tests/oracle/run_oracle.py --heki target/release/heki --seeds 2000 --time-limit 600 --out /tmp/oracle --minimize
+```
+
+The oracle checks heki's exact reports against what the code does when it runs, step 4 of [How
+a rule becomes exact](precision.md#how-a-rule-becomes-exact):
+
+1. `generator.py` composes small multi-file projects, one seed each, from a grammar of the shapes
+   the exact claims' premises talk about: helpers several calls deep, dispatch over subclasses,
+   unions, protocols, and mixins, loads that may raise (a property whose getter raises, a
+   subscript, a call) inside and outside `try`, early returns, loops with `break` and
+   `continue`, `with` blocks whose manager suppresses or not, functions handed to `map` and
+   `sorted(key=)`, `functools` caches, module constants against parameters, and project
+   subclasses of the builtin containers. Each project has a `heki.toml` and the entry points
+   with their inputs, which make the loads raise one at a time.
+2. `driver.py` runs `heki check --output-format json` on the project and keeps the reports whose
+   certainty is `exact`. `plan.py` turns each into a claim and the places to watch.
+3. `child.py` runs every entry point on its inputs with recording fakes of the catalog calls
+   (`fakes.py`: `time.sleep`, `requests`, `sqlite3`, `socket`, `subprocess`, `urllib`, queues,
+   `numpy`, `pandas`), so the program runs offline. `monitor.py` records with `sys.monitoring`
+   which call was running, which iteration of a loop, and which line, when each fake was called,
+   and what each line changed.
+4. `checkers.py` refutes a claim from the runs: an `EFF101` call that returned without a waiting
+   call during it, an `EFF103` iteration that completed without a statement, a `DATA101`
+   iteration whose new value was not built from the previous one, a `MUT110` or `MUT114` line
+   that ran without changing the object the report names, an `OPT` accumulator of another type,
+   or an `OPT113` inner item with a different key that ran more than the comparison. For the
+   `OPT` rewrites, the driver applies `heki check --fix --include-size-dependent` to a copy and
+   compares results, exceptions, arguments, output, and library calls on the same inputs.
+5. `minimize.py` shrinks a refuting project, running heki again on every candidate, until no
+   statement can go.
+
+A refutation is a heki bug unless the program breaks one of the assumptions R1 to R7; the oracle
+reports such a case as a violation instead (for example a library call whose deciding argument is
+computed, R6), and the generator keeps its programs inside them. The output directory holds
+`summary.json` and one folder per refutation with the project, `finding.json`, and with
+`--minimize` the shrunk repro in `min/`. Runs take a seed range (`--seeds`, `--start`), stop
+starting new seeds after `--time-limit` seconds, and use `--jobs` processes.
+`--fail-on-refutation` makes a refutation fail the run; an oracle error always does (heki
+failing on a project, a child process that crashed or timed out, the recorder failing). The programs need CPython 3.12 or newer;
+CI runs the checker tests and seeds 0 to 199 with `--fail-on-refutation` on CPython 3.12 to
+3.15.
+
 ## Memory
 
 ```console
