@@ -4,8 +4,9 @@
 //! - `initialized`: index the workspace in the background, then publish diagnostics of every
 //!   open document; register file watchers when the client supports them.
 //! - `didOpen` / `didChange` / `didSave` / `didClose` change the documents in message order;
-//!   the analyses run after, on the documents as they are then. Closing a document with
-//!   unsaved changes re-analyzes the file from the disk.
+//!   the analyses run after, one at a time and in message order too (`Backend::blocking`), on
+//!   the documents as they are then. Closing a document with unsaved changes re-analyzes the
+//!   file from the disk.
 //! - `didChange`: after a 250 ms debounce, re-analyze only the edited document (its summary
 //!   update uses Early Cutoff); files it affects are queued.
 //! - `didSave`: re-analyze the document, then every queued file and, in turn, what those
@@ -99,6 +100,9 @@ struct Published {
 struct Activity {
     in_flight: AtomicUsize,
     published: AtomicU64,
+    /// Analyses run one at a time, in the order of the messages that asked for them (see
+    /// `Backend::blocking`).
+    turn: Arc<tokio::sync::Mutex<()>>,
     /// Publications go out one at a time (see `Backend::send`).
     gate: tokio::sync::Mutex<()>,
 }
@@ -509,16 +513,29 @@ impl Backend {
         }
     }
 
-    /// Run `f` on the state in a blocking task. A panic in `f` yields `T::default()` (nothing
-    /// to publish).
+    /// Run the analysis `f` on the state in a blocking task, once the analyses asked for before
+    /// it have run. A panic in `f` yields `T::default()` (nothing to publish).
+    ///
+    /// Each analysis leaves the index the next one reads, and the files it affects wait for a
+    /// save, so the order of the analyses decides what is published: a document opened after a
+    /// module it imports has to be analyzed after that module entered the index. The blocking
+    /// pool takes the state lock in no particular order; the turn is a fair lock that a handler
+    /// queues for before its first other `await`, and handlers are first polled in message order
+    /// (a debounced edit queues when its delay ends). The blocking task holds the turn until `f`
+    /// returns.
     async fn blocking<T: Default + Send + 'static>(
+        work: &Work,
         state: &Arc<Mutex<State>>,
         f: impl FnOnce(&mut State) -> T + Send + 'static,
     ) -> T {
+        let turn = Arc::clone(&work.0.turn).lock_owned().await;
         let state = Arc::clone(state);
-        tokio::task::spawn_blocking(move || f(&mut lock(&state)))
-            .await
-            .unwrap_or_default()
+        tokio::task::spawn_blocking(move || {
+            let _turn = turn;
+            f(&mut lock(&state))
+        })
+        .await
+        .unwrap_or_default()
     }
 
     /// `heki/stats`: engine counters plus whether the index is ready, how many documents are
@@ -614,24 +631,20 @@ impl LanguageServer for Backend {
                     .await;
             });
         }
-        let state = Arc::clone(&self.state);
-        let client = self.client.clone();
-        tokio::spawn(async move {
-            let started = Instant::now();
-            let (pubs, errors, indexed) = Self::blocking(&state, State::load).await;
-            if let Some(n) = indexed {
-                client
-                    .log_message(
-                        MessageType::INFO,
-                        format!(
-                            "heki: indexed {n} file(s) in {} ms",
-                            started.elapsed().as_millis()
-                        ),
-                    )
-                    .await;
-            }
-            Self::send(&work, &client, &state, pubs, errors).await;
-        });
+        let started = Instant::now();
+        let (pubs, errors, indexed) = Self::blocking(&work, &self.state, State::load).await;
+        if let Some(n) = indexed {
+            self.client
+                .log_message(
+                    MessageType::INFO,
+                    format!(
+                        "heki: indexed {n} file(s) in {} ms",
+                        started.elapsed().as_millis()
+                    ),
+                )
+                .await;
+        }
+        Self::send(&work, &self.client, &self.state, pubs, errors).await;
     }
 
     async fn shutdown(&self) -> RpcResult<()> {
@@ -654,7 +667,7 @@ impl LanguageServer for Backend {
                 version: params.text_document.version,
             },
         );
-        let (pubs, errors) = Self::blocking(&self.state, move |st| {
+        let (pubs, errors) = Self::blocking(&work, &self.state, move |st| {
             let text = st.docs.get(&path).map(|d| d.text.clone());
             let (p, e) = text
                 .map(|text| st.reanalyze(&path, &text))
@@ -690,7 +703,7 @@ impl LanguageServer for Backend {
         let client = self.client.clone();
         tokio::spawn(async move {
             tokio::time::sleep(DEBOUNCE).await;
-            let (pubs, errors) = Self::blocking(&state, move |st| {
+            let (pubs, errors) = Self::blocking(&work, &state, move |st| {
                 if st.generation.get(&path) != Some(&generation) {
                     return (Vec::new(), Vec::new());
                 }
@@ -713,7 +726,7 @@ impl LanguageServer for Backend {
         if let (Some(text), Some(doc)) = (params.text, lock(&self.state).docs.get_mut(&path)) {
             doc.text = text;
         }
-        let (pubs, errors) = Self::blocking(&self.state, move |st| {
+        let (pubs, errors) = Self::blocking(&work, &self.state, move |st| {
             if st.layout_changed() {
                 let (pubs, errors, _) = st.load();
                 return (pubs, errors);
@@ -735,8 +748,10 @@ impl LanguageServer for Backend {
 
     async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
         let work = Work::start(&self.activity);
-        let (pubs, errors) =
-            Self::blocking(&self.state, move |st| st.files_changed(params.changes)).await;
+        let (pubs, errors) = Self::blocking(&work, &self.state, move |st| {
+            st.files_changed(params.changes)
+        })
+        .await;
         Self::send(&work, &self.client, &self.state, pubs, errors).await;
     }
 
@@ -748,7 +763,7 @@ impl LanguageServer for Backend {
         let closed = lock(&self.state).docs.remove(&path).map(|d| d.text);
         let uri = params.text_document.uri;
         let (pubs, errors) =
-            Self::blocking(&self.state, move |st| st.closed(&path, uri, closed)).await;
+            Self::blocking(&work, &self.state, move |st| st.closed(&path, uri, closed)).await;
         Self::send(&work, &self.client, &self.state, pubs, errors).await;
     }
 

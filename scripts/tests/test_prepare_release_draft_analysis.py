@@ -23,6 +23,7 @@ def record(path: str, previous_path: str | None = None) -> str:
         ("scripts/tests/test_update_release_draft.py", True),
         ("docs/configuration.md", True),
         ("README.md", True),
+        ("scripts/ansi_svg.py", True),
         (".github/workflows/ci.yml", True),
         (".github/workflows/release-draft.yml", True),
         (".github/workflows/release-sync.yml", True),
