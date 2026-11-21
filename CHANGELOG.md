@@ -116,7 +116,9 @@ release can change rules, configuration keys, diagnostics, and output formats.
   it scans (a list or a tuple), and `OPT130` says the constructor builds a new container for
   the membership test, not "the same container", which only a proven rewrite establishes. The
   rule pages state the claim the same way: its premises are the container's builtin type, the
-  loop, and, for a rule's exact tier, the proven rewrite; no size is claimed.
+  loop, and, for a rule's exact tier, the proven rewrite; no size is claimed. A proven report of
+  a size-dependent `OPT` rule in a loop whose trip count the code fixes past 16 (`range(50)`,
+  `rows[:100]`, a display of 20 items) is heuristic: true, but no evidence either way.
 - `EFF102` and `EFF103` also report the function a builtin calls once per item: the function
   handed to `map`, `filter`, `itertools.starmap`, `itertools.filterfalse`, and
   `functools.reduce`, and the `key` of `sorted`, `list.sort`, `min`, `max`, and

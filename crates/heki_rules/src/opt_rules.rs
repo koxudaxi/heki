@@ -5,7 +5,9 @@
 //! (`OptCandidate::is_reportable`). A diagnostic carries `fix` only when the rewrite is `Safe`;
 //! whether `--fix` applies it by default is the rule's `auto_fix_default` (`OPT101` / `OPT102`).
 //! A report whose rewrite is not `Safe` has a premise it did not establish, so it is heuristic
-//! whatever its rule's certainty (ADR-018: the proven reports are the rule's exact tier).
+//! whatever its rule's certainty (ADR-018: the proven reports are the rule's exact tier), and so
+//! is a size-dependent one in a loop whose trip count the code fixes past 16
+//! (`OptCandidate::in_exact_tier`).
 //!
 //! `OPT112` / `OPT113` are Advisory-lane reports without a rewrite: they use the Advisory
 //! receiver types (`heki_effect::TypeCtx`, PEP 484 annotations included), which the Soundness
@@ -76,11 +78,12 @@ pub(crate) fn opt(
             // This `OPT` rule is not selected for the file.
             continue;
         };
-        let proven = match c.verdict.tier {
-            SafetyTier::Safe => Certainty::Exact,
-            _ => Certainty::Heuristic,
+        let tier = if c.in_exact_tier() {
+            Certainty::Exact
+        } else {
+            Certainty::Heuristic
         };
-        d.certainty = proven.at_most(d.certainty);
+        d.certainty = tier.at_most(d.certainty);
         d.evidence = c.cost_evidence.clone().map(|cost| match c.verdict.tier {
             SafetyTier::Safe => format!("{cost}; established: {}", c.verdict.evidence()),
             _ => cost,
