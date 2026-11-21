@@ -551,3 +551,235 @@ fn import_probes_without_reads_environment_is_a_configuration_error() {
         assert_eq!(code, 0, "{stdout}{stderr}");
     }
 }
+
+/// The project's own modules, which an import names in `IMPORTS`: a package, its modules, a
+/// directory without `__init__.py` inside it, and a package whose `__init__` lets installed
+/// distributions add modules to it.
+const OWN_MODULES: &[(&str, &str)] = &[
+    ("pkg/names.py", "CONFIG = \"pkg.config\"\n"),
+    ("pkg/config.py", "VALUE = 1\n"),
+    ("pkg/parser/__init__.py", ""),
+    ("pkg/parser/base.py", "VALUE = 1\n"),
+    ("pkg/ns/mod.py", "VALUE = 1\n"),
+    (
+        "pkg/plugins/__init__.py",
+        "from pkgutil import extend_path\n\n__path__ = extend_path(__path__, __name__)\n",
+    ),
+    ("pkg/generate/steps.py", "VALUE = 1\n"),
+];
+
+const IMPORTS: &str = r#"import importlib
+import importlib.util
+from importlib import import_module
+
+from pkg.names import CONFIG
+
+PARSER = "pkg.parser"
+OUTSIDE = "yaml"
+PACKAGE = "pkg"
+
+
+def whole() -> object:
+    return import_module("pkg.config")
+
+
+def package() -> object:
+    return importlib.import_module(name="pkg.parser")
+
+
+def constants() -> tuple[object, object]:
+    return import_module(PARSER), import_module(CONFIG)
+
+
+def under_a_package(name: str) -> tuple[object, ...]:
+    return (
+        import_module(f"pkg.parser.{name}"),
+        import_module("pkg.parser." + name),
+        import_module("pkg.%s" % name),
+        import_module("pkg.{}".format(name)),
+        import_module(f"pkg.ns.{name}"),
+    )
+
+
+def either(flag: bool) -> object:
+    return import_module("pkg.config" if flag else "pkg.parser.base")
+
+
+def relative(name: str) -> tuple[object, ...]:
+    return (
+        import_module(".steps", __name__),
+        import_module(".steps", package=__package__),
+        import_module("..config", "pkg.parser"),
+        import_module(f"..parser.{name}", __package__),
+        import_module(".config", PACKAGE),
+    )
+
+
+def found() -> tuple[object, object]:
+    return importlib.util.find_spec("pkg.config"), importlib.util.find_spec(".config", "pkg")
+
+
+def outside() -> object:
+    return import_module(OUTSIDE)
+
+
+def missing() -> object:
+    return import_module("pkg.missing")
+
+
+def one_outside(flag: bool) -> object:
+    return import_module("pkg.config" if flag else "yaml")
+
+
+def no_dot(name: str) -> object:
+    return import_module("pkg" + name)
+
+
+def unknown(name: str) -> object:
+    return import_module(name)
+
+
+def case_changed() -> object:
+    return import_module("pkg.config".upper())
+
+
+def namespace() -> object:
+    return import_module("pkg.ns")
+
+
+def extended(name: str) -> object:
+    return import_module(f"pkg.plugins.{name}")
+
+
+def beyond() -> object:
+    return import_module("...config", "pkg.parser")
+
+
+def no_package() -> object:
+    return import_module(".config")
+
+
+def unknown_package(package: str) -> object:
+    return import_module(".config", package)
+
+
+def dots_only(name: str) -> object:
+    return import_module(f".{name}", "pkg.parser")
+
+
+def package_head(name: str) -> object:
+    return import_module(".config", f"pkg.{name}")
+
+
+def probing() -> object:
+    try:
+        return import_module("pkg.config")
+    except ImportError:
+        return None
+"#;
+
+/// The tree of `OWN_MODULES` with `IMPORTS` in `pkg/generate/__init__.py`, and `extra`.
+fn importing_tree<'t>(extra: &[(&'t str, &'t str)]) -> Vec<(&'t str, &'t str)> {
+    let mut tree = OWN_MODULES.to_vec();
+    tree.push(("pkg/generate/__init__.py", IMPORTS));
+    tree.extend_from_slice(extra);
+    tree
+}
+
+#[test]
+fn importing_the_projects_own_modules_reads_no_environment() {
+    let loader = r#"from importlib import import_module
+
+
+def sibling() -> object:
+    return import_module(".steps", __package__)
+"#;
+    // The module binds `__package__` itself: what it holds is not known.
+    let rebinding = r#"from importlib import import_module
+
+__package__ = str(__name__)
+
+
+def sibling() -> object:
+    return import_module(".steps", __package__)
+"#;
+    let found = reports(
+        "env_own_modules",
+        "forbid = [\"reads-environment\"]\n",
+        &importing_tree(&[
+            ("pkg/generate/loader.py", loader),
+            ("pkg/generate/rebinding.py", rebinding),
+        ]),
+    );
+    let reported: Vec<(u64, String)> = found
+        .iter()
+        .map(|(line, _, message, _)| {
+            let calls = message
+                .ends_with("reads the environment (calls `importlib.import_module`), which effect boundary `env` forbids");
+            assert!(calls, "{message}");
+            (*line, message.split('`').nth(1).unwrap().to_owned())
+        })
+        .collect();
+    let expected = [
+        (53, "outside"),
+        (57, "missing"),
+        (61, "one_outside"),
+        (65, "no_dot"),
+        (69, "unknown"),
+        (73, "case_changed"),
+        (77, "namespace"),
+        (81, "extended"),
+        (85, "beyond"),
+        (89, "no_package"),
+        (93, "unknown_package"),
+        (97, "dots_only"),
+        (101, "package_head"),
+        (106, "probing"),
+        (7, "sibling"),
+    ];
+    let expected: Vec<(u64, String)> = expected
+        .iter()
+        .map(|(line, f)| (*line, (*f).to_owned()))
+        .collect();
+    assert_eq!(reported, expected);
+}
+
+#[test]
+fn calls_of_importlib_stay_calls_for_call_targets() {
+    let found = reports(
+        "env_own_modules_calls",
+        "forbid = [\"calls\", \"reads-environment\"]\ncall-targets = [\"importlib.import_module\"]\n",
+        &importing_tree(&[]),
+    );
+    let whole: Vec<(&str, &str)> = found
+        .iter()
+        .filter(|(line, ..)| *line == 13)
+        .map(|(_, target, message, _)| (target.as_str(), message.as_str()))
+        .collect();
+    assert_eq!(
+        whole,
+        [(
+            "env:calls:importlib.import_module",
+            "`whole` calls `importlib.import_module`, which effect boundary `env` forbids"
+        )]
+    );
+}
+
+#[test]
+fn a_package_heki_cannot_read_may_hold_modules_of_other_distributions() {
+    let p = Project::new("env_own_modules_unread");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"EFF201\"]\n\n[[tool.heki.effect-boundaries]]\nname = \"env\"\nscopes = [\"pkg.generate.*\"]\nforbid = [\"reads-environment\"]\n",
+    )
+    .write("pkg/__init__.py", "")
+    .write("pkg/legacy/__init__.py", "# -*- coding: cp1252 -*-\nVALUE = 1\n")
+    .write(
+        "pkg/generate.py",
+        "from importlib import import_module\n\n\ndef legacy(name: str) -> object:\n    return import_module(f\"pkg.legacy.{name}\")\n\n\ndef whole() -> object:\n    return import_module(\"pkg.legacy\")\n",
+    );
+    let (code, stdout, stderr) = p.check(&["--output-format", "concise"]);
+    assert_eq!(code, 2, "{stdout}{stderr}");
+    assert!(stdout.contains("pkg/generate.py:5:12: EFF201"), "{stdout}");
+    assert!(!stdout.contains("pkg/generate.py:9:"), "{stdout}");
+}

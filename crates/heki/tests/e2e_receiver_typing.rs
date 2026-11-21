@@ -1,6 +1,7 @@
 //! Receiver typing end to end through the real binary: which writes and reads of guarded
 //! attributes (`MUT201` / `MUT203`) heki sees through receivers whose class comes from
-//! annotations, the items of containers, return types, flow, and structural typing.
+//! annotations, the items of containers, return types, flow, structural typing, the closure
+//! cells of enclosing functions, and `type(obj)`.
 
 mod common;
 
@@ -1195,4 +1196,378 @@ fn a_protocol_target_covers_the_writes_of_helpers_handed_a_protocol_typed_object
         .map(|(q, r)| ((*q).to_owned(), (*r).to_owned()))
         .collect();
     assert_eq!(reported(&p, &[], "pkg/handed.py"), expected);
+}
+
+const CELLS_CONFIG: &str = r#"[project]
+name = "t"
+
+[tool.heki.lint]
+select = ["MUT203", "MUT204", "MUT206", "MUT207"]
+
+[[tool.heki.read-owners]]
+name = "given"
+targets = ["pkg.model.Model._given"]
+forbidden-readers = ["pkg.cells:*"]
+unresolved = "report"
+
+[[tool.heki.call-owners]]
+name = "private"
+targets = ["pkg.model.Model._*", "pkg.model.Schema._*"]
+forbidden-callers = ["pkg.cells:*", "pkg.classes:*"]
+unresolved = "report"
+"#;
+
+const CELLS_MODEL: &str = r#"from __future__ import annotations
+
+
+class Model:
+    def __init__(self) -> None:
+        self._given = {"a"}
+
+    def _takes(self, name: str) -> bool:
+        return bool(name)
+
+
+class Other:
+    def __init__(self) -> None:
+        self._given = {"b"}
+
+
+class Factory:
+    def build(self, name: str) -> Model:
+        return Model()
+
+
+class Schema:
+    @classmethod
+    def _first_typed(cls, value: object) -> object:
+        return value
+
+
+class SubSchema(Schema):
+    @classmethod
+    def _first_typed(cls, value: object) -> object:
+        return value
+
+
+class Plain:
+    pass
+
+
+def untyped():
+    return object()
+"#;
+
+/// Variables of an enclosing function read by the scopes nested in it, through their closure
+/// cells: `self` of a class with no target, a parameter typed with the target's class, and
+/// cells that hold more than one binding.
+const CELLS: &str = r#"from __future__ import annotations
+
+from pkg.model import Factory, Model, Other, untyped
+
+
+class Allocation:
+    def __init__(self) -> None:
+        self._given: set[str] = set()
+
+    def _takes(self, name: str) -> bool:
+        return name in self._given
+
+    def listcomp(self, names: list[str]) -> list[str]:
+        return [n for n in names if n in self._given]
+
+    def setcomp(self, names: list[str]) -> set[str]:
+        return {n for n in names if self._takes(n)}
+
+    def dictcomp(self, names: list[str]) -> dict[str, bool]:
+        return {n: n in self._given for n in names}
+
+    def genexpr(self, names: list[str]) -> bool:
+        return any(n in self._given for n in names)
+
+    def lambda_(self, names: list[str]) -> list[str]:
+        return list(filter(lambda n: self._takes(n), names))
+
+    def nested_def(self, names: list[str]) -> list[str]:
+        def keep(n: str) -> bool:
+            return n in self._given
+
+        return [n for n in names if keep(n)]
+
+    def nested_comprehensions(self, groups: list[list[str]]) -> list[list[str]]:
+        return [[n for n in group if n in self._given] for group in groups]
+
+    def genexpr_in_listcomp(self, groups: list[list[str]]) -> list[bool]:
+        return [any(self._takes(n) for n in group) for group in groups]
+
+
+def listcomp(model: Model, names: list[str]) -> list[str]:
+    return [n for n in names if n in model._given]
+
+
+def setcomp(model: Model, names: list[str]) -> set[str]:
+    return {n for n in names if model._takes(n)}
+
+
+def dictcomp(model: Model, names: list[str]) -> dict[str, bool]:
+    return {n: n in model._given for n in names}
+
+
+def genexpr(model: Model, names: list[str]) -> list[object]:
+    return list(model._given for _ in names)
+
+
+def lambda_(model: Model) -> object:
+    return lambda: model._given
+
+
+def nested_def(model: Model) -> object:
+    def inner() -> object:
+        return model._given
+
+    return inner
+
+
+def two_levels(model: Model) -> object:
+    def outer() -> list[str]:
+        return [n for n in "ab" if n in model._given]
+
+    return outer
+
+
+def class_body(model: Model) -> object:
+    class Local:
+        seen = model._given
+
+    return Local
+
+
+def iteration_variable(models: list[Model]) -> list[object]:
+    return [lambda: m._given for m in models]
+
+
+def generator_in_comprehension(models: list[Model], names: list[str]) -> list[bool]:
+    return [any(n in m._given for n in names) for m in models]
+
+
+def same_name(model: Model, others: list[Other]) -> object:
+    readers = [lambda: model._given for model in others]
+    return readers, lambda: model._given
+
+
+def bound_later() -> object:
+    f = lambda: m._given
+    m = Model()
+    return f
+
+
+def rebound_known(model: Model) -> object:
+    f = lambda: model._given
+    model = Other()
+    return f
+
+
+def outputs(factory: Factory, names: list[str]) -> None:
+    for built in [factory.build(n) for n in names]:
+        print(built._given)
+
+
+def bound_after_generator(names: list[str]) -> object:
+    gen = (factory.build(n) for n in names)
+    factory = Factory()
+    return next(gen)._given
+
+
+def rebound_unknown(model: Model) -> object:
+    f = lambda: model._given
+    model = untyped()
+    return f
+
+
+def nonlocal_store(model: Model) -> object:
+    def reset() -> None:
+        nonlocal model
+        model = untyped()
+
+    reset()
+    return lambda: model._given, list(model._given for _ in "ab")
+
+
+def walrus(names: list[str]) -> object:
+    found = Model()
+    [(found := untyped()) for _ in names]
+    return lambda: found._given
+
+
+def shadowed(model: Model, models: list[Model]) -> object:
+    readers = [lambda: model for model in models]
+
+    def reset() -> None:
+        nonlocal model
+        model = untyped()
+
+    reset()
+    return readers, lambda: model._given
+"#;
+
+/// A function whose nested function is too large to model and rebinds a variable of the
+/// function through `nonlocal`: nothing heki sees creates that nested function.
+fn unmodeled_rebinding() -> String {
+    let mut lines = vec![
+        "def unmodeled(model: Model) -> object:".to_owned(),
+        "    def huge(xs):".to_owned(),
+        "        def reset() -> None:".to_owned(),
+        "            nonlocal model".to_owned(),
+        "            model = untyped()".to_owned(),
+        String::new(),
+        "        reset()".to_owned(),
+    ];
+    let mut pad = "        ".to_owned();
+    for i in 0..14 {
+        lines.push(format!("{pad}try:"));
+        lines.push(format!("{pad}    if xs:"));
+        lines.push(format!("{pad}        return {i}"));
+        lines.push(format!("{pad}    print(xs)"));
+        lines.push(format!("{pad}finally:"));
+        pad.push_str("    ");
+    }
+    lines.push(format!("{pad}print(xs)"));
+    lines.push(String::new());
+    lines.push("    return huge, lambda: model._given".to_owned());
+    format!("\n\n{}\n", lines.join("\n"))
+}
+
+/// `type(obj)` and the objects whose class it cannot tie to one class.
+const CLASS_OF: &str = r#"from __future__ import annotations
+
+from typing import Protocol
+
+from pkg.model import Plain, Schema
+
+
+class HasFirst(Protocol):
+    def _first_typed(self, value: object) -> object: ...
+
+
+def call(schema: Schema) -> object:
+    return type(schema)._first_typed(schema)
+
+
+def constructed(schema: Schema) -> object:
+    return type(schema)()._first_typed(schema)
+
+
+def protocol(value: HasFirst) -> object:
+    return type(value)._first_typed(value)
+
+
+def union(value: Schema | Plain) -> object:
+    return type(value)._first_typed(value)
+
+
+def unknown(value) -> object:
+    return type(value)._first_typed(value)
+
+
+def created(value: Schema) -> object:
+    return type("Made", (Schema,), {})._first_typed(value)
+"#;
+
+fn cells_project(name: &str) -> Project {
+    let p = Project::new(name);
+    p.write("pyproject.toml", CELLS_CONFIG)
+        .write("pkg/__init__.py", "")
+        .write("pkg/model.py", CELLS_MODEL)
+        .write("pkg/cells.py", &format!("{CELLS}{}", unmodeled_rebinding()))
+        .write("pkg/classes.py", CLASS_OF);
+    p
+}
+
+fn pairs(items: &[(&str, &str)]) -> BTreeSet<(String, String)> {
+    items
+        .iter()
+        .map(|(q, r)| ((*q).to_owned(), (*r).to_owned()))
+        .collect()
+}
+
+/// A closure cell holds every value the function owning it binds to it: a scope nested in a
+/// function (a comprehension or generator expression with a scope of its own, a lambda, a
+/// nested function or class) reads `self` and the function's other variables with their
+/// class, in a comprehension before 3.12 as in an inlined one. A variable a nested scope
+/// rebinds, or bound to a value of unknown class, stays of unknown class.
+#[test]
+fn closure_cells_hold_the_values_the_enclosing_function_binds() {
+    let p = cells_project("closure_cells");
+    for version in ["py311", "py312"] {
+        let mut expected = pairs(&[
+            // `self` is an `Allocation`, which has no target: no shape reports.
+            ("listcomp", "MUT203"),
+            ("setcomp", "MUT204"),
+            ("dictcomp", "MUT203"),
+            ("genexpr", "MUT203"),
+            ("lambda_.<locals>.<lambda>", "MUT203"),
+            ("nested_def.<locals>.inner", "MUT203"),
+            ("two_levels.<locals>.outer", "MUT203"),
+            ("class_body", "MUT203"),
+            // A comprehension's iteration variable, in a comprehension's own scope before 3.12
+            // and a cell of the function from 3.12, read by the scopes nested in the
+            // comprehension; the function's own variable of the name, read by a scope outside
+            // it.
+            ("generator_in_comprehension", "MUT203"),
+            ("same_name.<locals>.<lambda>", "MUT203"),
+            // Read once bound, whenever the lambda runs.
+            ("bound_later.<locals>.<lambda>", "MUT203"),
+            // A `Model` or an `Other`.
+            ("rebound_known.<locals>.<lambda>", "MUT203"),
+            // What the comprehension builds, and the generator yields from a cell bound after
+            // the generator is made: `Model`s.
+            ("outputs", "MUT203"),
+            ("bound_after_generator", "MUT203"),
+            ("rebound_unknown.<locals>.<lambda>", "MUT206"),
+            ("nonlocal_store.<locals>.<lambda>", "MUT206"),
+            ("nonlocal_store.<locals>.<genexpr>", "MUT206"),
+            ("walrus.<locals>.<lambda>", "MUT206"),
+            // `reset` rebinds the function's `model`, not the comprehension's.
+            ("shadowed.<locals>.<lambda>", "MUT206"),
+            ("unmodeled.<locals>.<lambda>", "MUT206"),
+        ]);
+        // The lambda is nested in the comprehension's own scope before 3.12.
+        expected.extend(pairs(&[if version == "py311" {
+            (
+                "iteration_variable.<locals>.<listcomp>.<locals>.<lambda>",
+                "MUT203",
+            )
+        } else {
+            ("iteration_variable.<locals>.<lambda>", "MUT203")
+        }]));
+        assert_eq!(
+            reported(&p, &["--target-version", version], "pkg/cells.py"),
+            expected,
+            "{version}"
+        );
+    }
+}
+
+/// `type(obj)` of an instance of a project class is a class object that may be a subclass, as
+/// `cls` in a class method is: calling a method on it dispatches to the overrides too. It is
+/// unknown for a protocol, a union, an object of unknown class, and a class `type` creates.
+#[test]
+fn type_of_an_instance_is_its_class_or_a_subclass() {
+    let p = cells_project("type_of_instance");
+    let expected = pairs(&[
+        ("call", "MUT204"),
+        ("constructed", "MUT204"),
+        ("protocol", "MUT207"),
+        ("union", "MUT207"),
+        ("unknown", "MUT207"),
+        ("created", "MUT207"),
+    ]);
+    assert_eq!(reported(&p, &[], "pkg/classes.py"), expected);
+    let (_, stdout, _) = p.check(&["--output-format", "concise"]);
+    assert!(
+        stdout.contains(
+            "`call` calls `pkg.model.Schema._first_typed` or `pkg.model.SubSchema._first_typed`"
+        ),
+        "{stdout}"
+    );
 }

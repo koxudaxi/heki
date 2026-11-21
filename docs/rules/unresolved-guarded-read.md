@@ -17,8 +17,9 @@ reports the reads outside the read owners that `MUT203` cannot tie to a target c
 (`children` for `Reference.children`, any name for `Reference.*`) is reported once, at the read,
 when its object is of unknown class: an unannotated parameter, a loop variable, the result of a
 call heki does not resolve, a value annotated `Any` or `object` (unless an `isinstance` test
-around the read narrows it to a class), or a protocol whose implementations heki cannot list (one
-without members, or implemented by more than eight classes). `obj.children`, a local alias of it,
+around the read narrows it to a class), a protocol whose implementations heki cannot list (one
+without members, or implemented by more than eight classes), or a variable of an enclosing
+function that a nested scope rebinds (`nonlocal`). `obj.children`, a local alias of it,
 `getattr(obj, "children")` with a constant name, and `obj.__dict__["children"]` count, as for
 `MUT203`.
 
@@ -28,6 +29,9 @@ only run inside allowed readers, and `forbidden-readers` (the reading function m
 decide for such a parameter: the read is reported unless every caller path binds an instance of
 a project class outside the targets' classes to it. A parameter some caller binds to an instance
 of a target class is reported here: that read is a read of the target that no other rule sees.
+With `attribution = "lexical"`, a function that only runs inside allowed readers is not allowed,
+and a caller path through an allowed reader counts like any other: the read is the function's
+own, and its callers only tell the object's class.
 
 ## What a report states
 
@@ -40,7 +44,8 @@ Its premises:
 - **Unknown class**: heki did not resolve the class of the object. Established: the claim is about
   heki's own resolution.
 - **Outside the owners**: the function is not in the allowed modules and classes, nor runs only
-  inside allowed contexts. Established from the contract.
+  inside allowed contexts (with `attribution = "lexical"`: the function holding the access is not
+  allowed). Established from the contract.
 
 ## Why is this bad?
 `MUT203` reports what it can back with a class: a read through an object it cannot type is not
@@ -79,5 +84,5 @@ No automatic fix.
 ## Options
 - `[[tool.heki.read-owners]]`:
   - `unresolved`: `"ignore"` (default) or `"report"`.
-  - `targets`, `allowed-readers`, `forbidden-readers`, `exempt-methods`, `message`: as for
-    `MUT203`.
+  - `targets`, `allowed-readers`, `forbidden-readers`, `exempt-methods`, `attribution`,
+    `message`: as for `MUT203`.

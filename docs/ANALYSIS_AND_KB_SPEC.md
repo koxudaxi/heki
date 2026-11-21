@@ -19,7 +19,10 @@ resolution are heki's own (`heki_semantic`).
 - **Version-dependent scope rules (driven by `RuntimeProfile`)**:
   - **3.12+ PEP 709**: `list` / `set` / `dict` comprehensions are inlined into the enclosing
     function or module scope (with the exact exceptions, such as directly in a class body).
-    Before 3.12 a comprehension is a function of its own.
+    Their iteration variables stay apart from the scope's own variables of the same name; one
+    that a scope nested in the comprehension reads is a cell of the enclosing scope, named
+    `.comp<n>_<name>` in `captured_vars` and in `var_names` of the values bound to it. Before
+    3.12 a comprehension is a function of its own.
   - **3.14+ PEP 649**: annotations without `from __future__ import annotations` are evaluated
     lazily in `__annotate__` scopes.
   - **3.15+ PEP 810 (checked on CPython 3.15.0)**: `lazy import m` / `lazy from m import x`
@@ -293,7 +296,9 @@ A method called on an instance is the definition the class's MRO (Python's C3 li
 its project bases) finds first, plus the overrides of its project subclasses (Priority 4). A
 named class is exactly that class: constructing it runs the `__init__` its MRO finds, and
 `Base.method(obj)` the `method` it finds; `cls` in a class method may be any subclass, so
-`cls()` and `cls.method()` dispatch like a call on an instance. A method's calls on its own
+`cls()` and `cls.method()` dispatch like a call on an instance, and so is `type(obj)` of an
+instance of a project class that is not a protocol (`obj.__class__` is not: a class or a
+subclass may rebind it). A method's calls on its own
 `self` run the overrides of every subclass, so a mixin's summary holds the effects of every
 class sharing it; an execution effect reached only through the override of a subclass records
 that class (`EffectSummary::receiver_effects`), and a call on a receiver of known class runs it
@@ -303,6 +308,16 @@ Calling an `async def` that no decorator replaces gives a coroutine (`Ty::Corout
 annotation is what awaiting it gives (`await`, and the target of `async with`), and awaiting a
 future or a task gives an untracked result. The catalog types an external awaitable by what
 awaiting it gives.
+
+A scope nested in a function (a comprehension or generator expression with a scope of its own, a
+lambda, a nested function or class) reads the function's variables through their closure cells.
+A cell holds every value the function binds to the variable, its parameter's and each
+assignment's, so whenever the nested scope runs the cell has the join of their types (`self` in
+a method has its class). A scope created in an inlined comprehension (3.12 and later) reads the
+comprehension's iteration variable, a cell of the enclosing frame apart from the frame's own
+variable of the name, which the scopes created outside the comprehension read. A cell that a
+nested scope may rebind (`nonlocal`, an assignment expression in a comprehension scope before
+3.12, any scope nested in a function too large to model) is of unknown type.
 
 Module names come from the paths below a source root (`pkg/mod.py` → `pkg.mod`,
 `pkg/__init__.py` → `pkg`), the deepest one holding the file, else the project root. The `src`
@@ -406,6 +421,24 @@ EffectSummary(f) = {
     unresolved_access_sites:  Set<UnresolvedAccess>,       // reads and method calls named like a strict
                                                            // contract's target on objects of unknown class;
                                                            // never propagated (MUT206, MUT207)
+    shared_state:             Option<SharedStateFacts>,    // None for a function that changes no shared state
+                                                           // (only with OptInFacts::shared_state: heki inspect
+                                                           // and the language server, never heki check):
+      changed:                [(SharedState, Span)],       // module globals and enclosing functions' closure
+                                                           // cells the own body rebinds, deletes, or changes
+                                                           // in place (from every root a merged value may
+                                                           // have), first change of each (local); the
+                                                           // module body's bindings define its names and
+                                                           // do not count, its in-place changes do
+      handed:                 [HandedState],               // shared state its calls hand to a project callee
+                                                           // as an argument or the receiver (local)
+      globals:                bool,                        // a module global changed by the body, a body
+                                                           // running in it, or a callee changing what it is
+                                                           // handed (propagated)
+      cells:                  [CellChange],                // closure cells changed so, except the own
+                                                           // variables whose change stays inside the call:
+                                                           // rebound by a nested function, or bound only
+                                                           // to new containers (new_cells) (propagated)
     capacity_waits:           Vec<CapacityWait>,           // own waits on queues whose capacity the callers
                                                            // of other functions decide (local)
 
@@ -417,10 +450,26 @@ EffectSummary(f) = {
     // Offloading and the sync-driven context
     offloads_blocking_params: Bitset,                      // wrapper running the callable in parameter i on a thread
     sync_driven_only:         bool,                        // internal async def driven only by a sync driver
-    unknown_calls:            bool,
+    unknown_calls:            bool,                        // an own call heki cannot resolve, more than 8
+                                                           // CHA candidates, or an A1 hazard (eval, exec,
+                                                           // locals(), frame introspection, unmodeled)
 
     // What iterating the returned object runs (a plain function returning a generator)
     iterated:                 Option<EffectSummary>,       // in the function's own parameters
+
+    // Locks (EFF109; propagated; only with EFF109 selected, OptInFacts::locks)
+    locks:                    Option<LockFacts>,           // acquires: non-reentrant locks taken on the
+                                                           // function's thread or task (ObjRef =
+                                                           // parameter i or its attribute, a global, a
+                                                           // closure variable; chain, input guards,
+                                                           // tests of state on the way); rebinds: the
+                                                           // globals and closure variables it may bind
+    exclusive:                Option<Map<ObjRef, ExclusiveUse>>, // objects used one operation at a
+                                                           // time on the function's task (EFF110;
+                                                           // propagated, never through a call made
+                                                           // while a lock is held,
+                                                           // CallSite::under_lock; only with EFF110
+                                                           // selected, OptInFacts::exclusive)
 
     // Metadata
     is_async, is_generator, is_cached_property, is_lru_cache, owner_class_qualname, decorators,
@@ -475,10 +524,19 @@ callable a library API runs at the call (`CallSite::handed_callable`, also throu
 of `super`, of the typing forms `cast`, `TypeVar`, and `NewType`, and of `contextlib.suppress`; a
 receiver, an operand, a subscript, a dict key, a closure's captures (defaults and eagerly
 evaluated annotations are not told apart, nor a class's bases and keywords), and a module
-binding a name to the value itself (an import, a module alias). The class bodies a module runs
-add their references to the module body's (their other facts are not the module's). Like
-`call_sites`, they are local facts: the language server compares a function's references with
+binding a name to the value itself (an import, a module alias). With `references =
+"calls-and-bases"` (`Contracts::reference_bases`), the bases of a class statement are reference
+sites too (`CallSite::is_base`): one per base its declaration resolves to a project class,
+constructing that class, at the captured value naming it when the statement loads it there,
+else at the class statement. The class bodies a module runs add their references to the module
+body's (their other facts are not the module's). Like `call_sites`, they are local facts: the language server compares a function's references with
 its call sites (`Workspace::caller_view`) and shows them in call chains.
+
+`CallSite.arguments` holds, only when a call target has an argument list
+(`Contracts::marked_params`), the constants the call passes for the parameters those lists name:
+by keyword, else by position or as a default decided by its class and truthiness for every
+callee the call binds (the parameter binding of the extraction), a keyword only for a class
+without a project `__init__`.
 
 `CallSite.returned` (whether the call's result may be returned, and how) is computed at
 extraction for every project call. `CallSite.flow` (the invalidation contracts announced after
@@ -1083,7 +1141,7 @@ deep = true   # changes to attributes and nested containers below are forbidden 
   callers, with the same initializer and allowed-context rules as `MUT201`. Reads through
   parameters without a project-class type are not seen.
 
-### 2.4 Family 2 (`EFF101`–`EFF103`, `EFF105`–`EFF107`, `EFF111`, `EFF113`, `EFF201`, `DATA101`): precision, sanitizers, and aggregation
+### 2.4 Family 2 (`EFF101`–`EFF103`, `EFF105`–`EFF107`, `EFF109`, `EFF110`, `EFF111`, `EFF113`, `EFF201`, `DATA101`): precision, sanitizers, and aggregation
 0. **Must-facts and the exact tier** (`EffectSummary::must_exec`, computed only when `EFF101`,
    `EFF111`, `EFF103`, or `EFF113` runs: `OptInFacts::must_effects`):
    - Per call instruction, the path facts (`heki_ir::Paths`, with the reader of
@@ -1171,10 +1229,83 @@ deep = true   # changes to attributes and nested containers below are forbidden 
    that no decorator replaces, `FunctionDecl::called_as_defined`; never a class's `__init__`),
    or a value typed as one of `heki_kb::FUTURE_CLASSES` (an annotation, or a Layer 2
    `return_type` such as `loop.run_in_executor` / `asyncio.gather` → `asyncio.Future`).
-8. **`EFF201`** (contract): a breadth-first search over the IR-free call graph from each scope
-   function finds the shortest chain to each forbidden effect, without entering
-   `allowed-callees`, other scope functions, or bodies that do not run at the call (`async def`
-   bodies not awaited, generators not iterated). Its nodes are `(function, Body | Result)`: a
+8. **`EFF109`** (opt-in): a non-reentrant lock taken again while it is held.
+   - A lock is an instance of a Layer 2 class flagged `non_reentrant_lock` (`threading.Lock`,
+     `asyncio.Lock`, `asyncio.Condition`, `multiprocessing.Lock`), named by where the function
+     reaches it (`heki_effect::locks::ObjRef`): parameter `i` or its attribute (`self._lock`), a
+     module global (by fully qualified name, read by name, through imports, or on its module),
+     or a variable of an enclosing function its closures capture (typed from what that function
+     binds to it, `TypeCtx::captured`). An acquisition is a `with` / `async with` over
+     it, an awaited `acquire()` without arguments, or a blocking `acquire()` the catalog lists
+     (`threading.Lock.acquire`) without a timeout or `blocking=False`.
+   - The facts are in `EffectSummary::locks` (`locks::LockFacts`, absent for the many functions
+     with none) and `CallSite::state_tests`; the summaries carry them only with `EFF109` selected
+     (`OptInFacts::locks`), and a run without the rule computes none of them.
+   - The tests of state on every path to a block (`locks::BlockTests`, one pass over the
+     dominator tree of the edges a run can take): the attributes of the parameters, the project
+     methods called on a parameter, and the module globals that the conditions of the branches
+     ending its dominators read; at most 16 tests, past that the answer is open
+     (`heki_ir::walk::Answer`) and every test may be one. Each call site keeps those of its block
+     (`CallSite::state_tests`).
+   - `LockFacts::acquires` holds the function's own acquisitions (a hop to the lock's class at
+     the acquisition), each with the input guards every acquisition needs and the tests of state
+     on every path to every acquisition of the lock (those of the acquisitions' common
+     dominator): the module globals, and, for a lock a parameter holds, the attributes of that
+     object and the project methods called on it (`LockAcquire::tests`; open past 16 tests,
+     where the acquisition counts as guarded). Propagation adds the acquisitions of each callee whose body runs at the call on
+     the caller's thread or task (not on a worker), with the lock mapped through the argument
+     bound to the parameter, the call in front of the chain, the guards mapped by
+     `guards::through_call` (a constant argument deciding one against it drops it), and the
+     tests of state of the call site added; several acquisitions of one lock keep the guards and
+     tests all of them have and the shortest chain.
+   - `LockFacts::rebinds` holds the module globals and closure variables the function may bind
+     or delete (`global`, `nonlocal`, an attribute of a module, a variable its closures capture),
+     itself or through its calls; `mutated_param_paths` has the attributes of parameters. A
+     callee that may bind a lock's name takes no lock under that name at the call
+     (`locks::may_rebind`): the name may reach another object by then.
+   - The rule runs a forward must-hold dataflow (`heki_effect::held`, shared with `EFF106`: a bit
+     per acquisition, an `ExitWith` giving back those of its statement, a `release()` the
+     acquisitions of its lock, also a `with`'s, and binding a lock's name, by the holder or by a
+     call whose callees may bind it (`ProjectIndex::site_rebinds`), those of that name) and
+     reports, while a lock is held, its own acquisition again and a call site whose callees take
+     it (`ProjectIndex::site_locks`), unless that acquisition is behind a test of state the
+     holder changes (an attribute of the lock's owner, tested by the acquiring function or by a
+     function on the way, that the holder's summary changes, `mutated_param_paths`,
+     `mutates_self_attrs`, a tested method counting with the attributes it reads; a module global
+     the holder stores; the holder's own tests do not count), or some function of the module
+     releases the lock where it does not hold it (a signal between threads).
+9. **`EFF110`** (opt-in): an object allowing one operation at a time, used by tasks started
+   together.
+   - A use is a call of a Layer 2 method flagged `one_at_a_time` on an instance of its class, or
+     an `async for` over one (`__anext__`): `"always"` (`asyncio.StreamReader.readline`,
+     asyncpg's `Connection.fetch`, websockets `recv`, aiohttp `receive`) or, for an object that
+     raises only while it holds no connection, `"when_unbound"` (SQLAlchemy's `AsyncSession`
+     operations) and `"unbinds"` (`commit`, `rollback`, `close`).
+     `EffectSummary::exclusive_uses` holds the function's own uses and those of the calls running
+     in its body, in its own names (`ObjRef`, mapped through the arguments as for
+     `acquires_locks`); a use while the function certainly holds a lock (`locks::lock_steps`,
+     `held::at_entry`), and the uses of a call made while it holds one
+     (`CallSite::under_lock`), are left out.
+   - The rule (`eff_rules::fanout_exclusive`) finds the fan-outs of a function: the arguments of
+     `asyncio.gather` (also a generator expression or a comprehension unpacked into it, whose
+     element is started once per item), the display `asyncio.wait` waits on, and the
+     `create_task` / `start_soon` calls of one task group (in a loop, started once per
+     iteration). A task is a coroutine a project call creates, `asyncio.create_task` of one, a
+     call a task group starts, or a one-at-a-time call. Its callees' uses map through the call's
+     receiver, positions before any `*` unpacking, and keywords to what the fan-out function
+     names: a parameter or its attribute, a global, a closure variable, or a local variable
+     (its value before copies, or an attribute of one); a generator expression's own values are
+     per item, the variables it captures the function's, and a value the loop starting the task
+     defines is per iteration. Two tasks, or one started several times, on the same object are
+     reported. For `"when_unbound"` objects, a one-bit must-dataflow over the function (gen at
+     an operation on the object, its own, an awaited call reaching one, or a fan-out whose
+     tasks use it; kill at `"unbinds"`) leaves out a fan-out that every path reaches after a
+     use.
+10. **`EFF201`** (contract): a breadth-first search over the IR-free call graph from each scope
+   function (and each module body a scope names as `<module>`,
+   `DottedPattern::names_module_bodies`) finds the shortest chain to each forbidden effect,
+   without entering `allowed-callees`, other scope functions, or bodies that do not run at the
+   call (`async def` bodies not awaited, generators not iterated). Its nodes are `(function, Body | Result)`: a
    function returning a generator is entered as what iterating its result runs. The search
    reads no guards: an argument switching off a callee's branch does not stop it. At each node
    whose body runs, it also reads the function's accesses outside the project
@@ -1187,10 +1318,21 @@ deep = true   # changes to attributes and nested containers below are forbidden 
    the enclosing handler). An access is kept only when a boundary forbids it
    (`Contracts::external_call`, `external_read`, `import_probes`): a `call-targets` or
    `read-targets` entry names it by its full dotted name (its first name not a glob), or
-   `reads-environment` and the Layer 2 tag `environment` name it. Without such a boundary the
-   map stays empty. The language server compares a file's accesses before and after an edit,
-   without positions, and re-checks the files above a function whose accesses changed, as it
-   does for its Layer 2 call sites.
+   `reads-environment` and the Layer 2 tag `environment` name it. A call of a function tagged
+   `environment = "import"` records whether it imports a module of the project
+   (`ExternalAccess::imports_project_module`, no read of the environment): outside a `try`
+   taking an `ImportError`, every text its `name` argument may hold (as for `EFF103`'s
+   statements, `summary/statements.rs`, a `str` method changing the case or the blanks giving
+   none) names a project module, or starts with one and a dot whose longest project module is
+   a regular package that heki read and that rebinds no `__path__`
+   (`ProjectDecls::holds_modules_starting_with`); a relative name is anchored at the texts of
+   `package`, or at the module's own `__package__` or `__name__`. The project modules it looks
+   up are declaration reads, so a module created or deleted re-summarizes the function.
+   A module body's accesses include those of the class bodies it runs, as its reference sites
+   do, when a scope names a module body (`Contracts::checks_module_bodies`) or reference sites
+   are kept. Without such a boundary the map stays empty. The language server compares a
+   file's accesses before and after an edit, without positions, and re-checks the files above
+   a function whose accesses changed, as it does for its Layer 2 call sites.
 
 ### 2.5 Layer 3: on-demand analysis of unregistered dependencies (planned)
 - **Boundary (strict)**: **never enter the standard library or packages registered in Layer 2**
@@ -1308,13 +1450,20 @@ the caller's thread with a synchronous facade over an async connection), `exclud
 `copy.deepcopy`; `"shallow"`: `copy.copy`, `BaseModel.model_copy`, whose `deep=True` copies
 deeply unless `update=` hands it values by reference: `MUT202`), `return_type` (factories such as
 `sqlite3.connect`), `sync_lock_or_tx` (`threading.Lock`, `Session.begin`: `EFF106`),
+`non_reentrant_lock` (`threading.Lock`, `asyncio.Lock`: `EFF109`), `one_at_a_time`
+(`asyncio.StreamReader.readline`, `AsyncSession.execute`: `EFF110`),
 `waits_until_done` / `done_when_awaited` (futures), `bounded_by` / `waits_while_full` (queues:
 section 2.2), `environment` (`"call"`: calling the function reads the environment the program runs
-in, `os.getenv`, `platform.system`, `importlib.util.find_spec`; `"read"`: reading the module
-attribute does, `os.environ`, `sys.platform`, `sys.version_info`: what `EFF201`'s
-`reads-environment` forbids; such an entry has no other fact), and
+in, `os.getenv`, `platform.system`, `shutil.which`; `"read"`: reading the module attribute does,
+`os.environ`, `sys.platform`, `sys.version_info`; `"import"`: calling the function imports or
+finds the module its argument `name` names, a relative name anchored at its argument
+`package`, which reads the environment unless the module is the project's,
+`importlib.import_module`, `importlib.util.find_spec`: what `EFF201`'s `reads-environment`
+forbids; such an entry has no other fact), and
 `opaque_to_layer3` (reserved for Layer 3), and `cases`: what the call does instead when one
-argument (by position, the receiver not counted, or by keyword) is a given literal, a string
+argument (by position, the receiver not counted, or by keyword) is a given literal (an
+argument is the literal it is, or the one a module constant bound once holds:
+`TypeCtx::global_literal`, `ModuleDecls::str_constants` and `literal_constants`), a string
 literal with a given prefix, equal to one of given strings (`one_of`), containing one
 (`contains`), an IPv4 or IPv6 address (`numeric_address`), or not empty, a value established to
 name a file (`names_file`: a literal or module constant without an in-memory form, or a path
@@ -1327,7 +1476,8 @@ through `*` / `**` unpacking, selects none. A boolean flag case (`equals = false
 is a parameter of the calling function (`shutdown(wait=wait)`) becomes a guard: the effects it
 switches off need the parameter to be true, which the callers decide (`close(wait=False)`). A file lists its `opaque_packages`. Projects add or
 override entries with `[[tool.heki.ecosystem]]` (`symbol`, `effects`, `async-safe`,
-`offloads-blocking-arg`, `excluded`, `copy-sanitizer`, `return-type`, `sync-lock-or-tx`): an
+`offloads-blocking-arg`, `excluded`, `copy-sanitizer`, `return-type`, `sync-lock-or-tx`,
+`non-reentrant-lock`, `one-at-a-time`): an
 override sets the keys it lists and keeps the built-in entry's others. A `[[tool.heki.ecosystem]]`
 entry naming a project function applies to its summary (the built-in catalog never does: a
 package's own source is followed through its bodies): its `effects` are direct effects (chain: the function itself),

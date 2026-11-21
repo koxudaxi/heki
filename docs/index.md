@@ -1,5 +1,9 @@
 # heki
 
+<p align="center">
+  <img src="assets/heki-banner.png" alt="heki: a snake in front of a brick wall" width="600">
+</p>
+
 🧱 heki (壁, "wall") is a static checker for Python, written in Rust. It tracks side effects and
 mutations across function calls.
 
@@ -250,7 +254,7 @@ report names the missing obligation instead of offering a fix. See [Fixes and sa
 - 🎯 See what heki [covers and does not cover](scope.md).
 - 📦 [Install heki](installation.md) and 🚀 [run it on a project](getting-started.md).
 - ⚙️ [Configure](configuration.md) rule selection, contracts, and the Python version.
-- 📏 Browse the [38 rules](rules/index.md), and see [how precise each one is](precision.md).
+- 📏 Browse the [40 rules](rules/index.md), and see [how precise each one is](precision.md).
 - 🔧 Read how [fixes are proven safe](fixes.md).
 - 🪜 [Adopt it gradually](adoption.md) with a Ratchet baseline in CI.
 - 🖥️ Use it from [your editor](lsp.md) or 🤖 [a coding agent](coding-agents.md).

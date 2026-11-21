@@ -216,6 +216,29 @@ pub enum BinOpKind {
     MatMult,
 }
 
+impl BinOpKind {
+    /// The method an augmented assignment with this operator calls (`x += y` calls
+    /// `x.__iadd__(y)`).
+    pub fn in_place_method(self) -> &'static str {
+        const METHODS: [&str; 13] = [
+            "__iadd__",
+            "__isub__",
+            "__imul__",
+            "__itruediv__",
+            "__ifloordiv__",
+            "__imod__",
+            "__ipow__",
+            "__ior__",
+            "__iand__",
+            "__ixor__",
+            "__ilshift__",
+            "__irshift__",
+            "__imatmul__",
+        ];
+        METHODS[self as usize]
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UnaryOpKind {
@@ -307,6 +330,9 @@ pub enum InstKind {
         /// The name is a module global (`del` in the module body or after `global name`).
         #[serde(default)]
         global: bool,
+        /// The name is an enclosing function's variable (`del` after `nonlocal name`).
+        #[serde(default)]
+        nonlocal: bool,
     },
     BinOp {
         dst: VarId,
@@ -642,6 +668,22 @@ pub struct Inst {
 /// ([`IrFunction::is_unpacked`]).
 pub const UNPACKED: &str = ".unpacked";
 
+/// The name an inlined comprehension (PEP 709) gives its iteration variable `name` in the
+/// enclosing frame, apart from the frame's own `name`: when a scope nested in the comprehension
+/// reads it, the frame keeps it as a cell ([`IrFunction::captured_vars`]) and the values bound
+/// to it carry the name ([`IrFunction::var_names`]).
+pub(crate) fn comprehension_target(comprehension: u32, name: &str) -> String {
+    format!(".comp{comprehension}_{name}")
+}
+
+/// The source name of an inlined comprehension's iteration variable named by
+/// [`comprehension_target`] (`x` of `.comp3_x`); `None` for any other name.
+pub fn comprehension_target_source(name: &str) -> Option<&str> {
+    let (comprehension, source) = name.strip_prefix(".comp")?.split_once('_')?;
+    (!comprehension.is_empty() && comprehension.bytes().all(|b| b.is_ascii_digit()))
+        .then_some(source)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Terminator {
     Jump(BlockId),
@@ -850,6 +892,12 @@ impl IrFunction {
             .binary_search_by_key(&var, |(v, _)| *v)
             .ok()?;
         Some(self.str_heads[i].1.as_str())
+    }
+
+    /// Whether the function's body is left unmodeled ([`UNMODELED`]): the scopes it creates are
+    /// lowered, but nothing in the body creates them.
+    pub fn is_unmodeled(&self) -> bool {
+        self.a1_hazards.iter().any(|h| h.kind == UNMODELED)
     }
 
     /// Check whether any decorator ends with one of the provided names (e.g. `cached_property`).

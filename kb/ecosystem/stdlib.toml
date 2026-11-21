@@ -292,11 +292,12 @@ opaque_to_layer3 = true
 
 # --- Synchronous locks (EFF106, opt-in) ---
 # A `with` block over an instance holds the lock. The `asyncio` / `anyio` locks are async-safe
-# and deliberately NOT registered.
+# and deliberately NOT flagged.
 
 [[entries]]
 symbol = "threading.Lock"
 sync_lock_or_tx = true
+non_reentrant_lock = true
 exit_suppresses = false
 opaque_to_layer3 = true
 
@@ -322,6 +323,62 @@ opaque_to_layer3 = true
 symbol = "threading.Condition"
 sync_lock_or_tx = true
 exit_suppresses = false
+opaque_to_layer3 = true
+
+# --- One operation at a time (EFF110, opt-in) ---
+# A stream reader reads in one task at a time: a second read while another waits raises
+# `RuntimeError` (`readuntil() called while another coroutine is already waiting for incoming
+# data`). `async for` over a reader reads its lines.
+
+[[entries]]
+symbol = "asyncio.StreamReader.read"
+async_safe = true
+one_at_a_time = "always"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncio.StreamReader.readline"
+async_safe = true
+one_at_a_time = "always"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncio.StreamReader.readexactly"
+async_safe = true
+one_at_a_time = "always"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncio.StreamReader.readuntil"
+async_safe = true
+one_at_a_time = "always"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncio.StreamReader.__anext__"
+async_safe = true
+one_at_a_time = "always"
+opaque_to_layer3 = true
+
+# --- Non-reentrant locks (EFF109, opt-in) ---
+# Acquiring one of these (`with`, `async with`, a blocking `acquire()`) while the same thread or
+# task holds it waits forever (`threading.Lock` above too). `threading.RLock` is reentrant, a
+# `threading.Condition` uses an `RLock` unless it is given another lock, and a semaphore's class
+# does not say its count. An `asyncio.Condition` always uses an `asyncio.Lock`.
+
+[[entries]]
+symbol = "asyncio.Lock"
+non_reentrant_lock = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncio.Condition"
+non_reentrant_lock = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "multiprocessing.Lock"
+non_reentrant_lock = true
 opaque_to_layer3 = true
 
 # --- Blocking synchronization (waits on the calling thread) ---
@@ -1004,7 +1061,8 @@ opaque_to_layer3 = true
 
 # --- Environment reads ---
 # What the program finds where it runs: `reads-environment` effect boundaries forbid calling the
-# functions (`environment = "call"`) and reading the module attributes (`environment = "read"`).
+# functions (`environment = "call"`), reading the module attributes (`environment = "read"`), and
+# importing or finding a module that is not the project's own (`environment = "import"`).
 
 [[entries]]
 symbol = "os.getenv"
@@ -1138,12 +1196,12 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "importlib.util.find_spec"
-environment = "call"
+environment = "import"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "importlib.import_module"
-environment = "call"
+environment = "import"
 opaque_to_layer3 = true
 
 [[entries]]

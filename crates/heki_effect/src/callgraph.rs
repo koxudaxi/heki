@@ -10,15 +10,15 @@ use crate::guards;
 use crate::iterations;
 use crate::scc::tarjan_scc;
 use crate::{
-    ArgOrigin, AttrKeyPath, BoundCallee, CallHop, CallSite, CallTarget, Construction, Delivery,
-    EffectSummary, Facts, FuncKey, LocalOrigins, NewArg, NewCond, NewKind, Origins, ProjectIndex,
-    ProtectedReturn, ReturnsNew, Runner, Shared, SharedChain, SharedLine, SiteRole, Slot,
-    TypedFieldWriteSite, UnresolvedWriteSite, WriteKind, cache_flow,
+    ArgOrigin, AttrKeyPath, BoundCallee, CallHop, CallSite, CallTarget, CellChange, Construction,
+    Delivery, EffectSummary, Facts, FuncKey, LocalOrigins, NewArg, NewCond, NewKind, Origins,
+    ProjectIndex, ProtectedReturn, ReturnsNew, Runner, Shared, SharedChain, SharedLine,
+    SharedState, SiteRole, Slot, TypedFieldWriteSite, UnresolvedWriteSite, WriteKind, cache_flow,
 };
 use heki_ast::Span;
 use heki_kb::ExecEffectKind;
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -264,15 +264,7 @@ fn recompute(
                 self_calls.push((site, callee));
             }
             let here = apply_edge(
-                index,
-                &mut s,
-                &local.mutated_param_paths,
-                func,
-                site,
-                bc,
-                callee,
-                site_path,
-                &resolver,
+                index, &mut s, local, func, site, bc, callee, site_path, &resolver,
             );
             if !callee.is_abstract() {
                 consumed = Some(consumed.map_or(here, |c| c & here));
@@ -342,16 +334,14 @@ fn must_through_calls(index: &ProjectIndex, sites: &[(PathBuf, usize)], s: &mut 
                 continue;
             };
             let must = s.must_exec.get_or_insert_with(Box::default);
-            let shared: SharedChain = found.chain.into_iter().map(Arc::new).collect();
             match must.effects.get(&e) {
-                Some(kept) if kept.len() <= shared.len() => {}
+                Some(kept) if kept.len() <= found.chain.len() => {}
                 _ => {
-                    must.effects.insert(e, shared);
+                    must.effects.insert(e, found.chain);
                     // The claim names every call the implementations end in, not only the
                     // kept chain's.
                     if found.witnesses.len() > 1 {
-                        let every = found.witnesses.into_iter().map(Arc::new).collect();
-                        must.alternatives.insert(e, every);
+                        must.alternatives.insert(e, found.witnesses);
                     } else {
                         must.alternatives.remove(&e);
                     }
@@ -384,9 +374,9 @@ pub(crate) fn site_must_chain(
             unconditional,
             ..
         } => (effects.contains(&e) && unconditional & crate::effect_bit(e) != 0).then(|| {
-            let hop = site_hop(site, path, symbol.clone());
+            let hop = Arc::new(site_hop(site, path, symbol.clone()));
             SiteMust {
-                chain: vec![hop.clone()],
+                chain: vec![Arc::clone(&hop)],
                 witnesses: vec![hop],
             }
         }),
@@ -417,12 +407,14 @@ pub(crate) fn site_must_chain(
                     .map_or(std::slice::from_ref(sink), Vec::as_slice);
                 for end in ends {
                     if !out.witnesses.contains(end) {
-                        out.witnesses.push(CallHop::clone(end));
+                        out.witnesses.push(Arc::clone(end));
                     }
                 }
                 if out.chain.is_empty() || chain.len() + 1 < out.chain.len() {
-                    out.chain = std::iter::once(site_hop(site, path, bc.callee.fqn()))
-                        .chain(chain.iter().map(|h| CallHop::clone(h)))
+                    // The callee's hops are shared, not copied: a chain through every caller up
+                    // a call chain adds one hop per caller.
+                    out.chain = std::iter::once(Arc::new(site_hop(site, path, bc.callee.fqn())))
+                        .chain(chain.iter().cloned())
                         .collect();
                 }
             }
@@ -434,11 +426,12 @@ pub(crate) fn site_must_chain(
 /// What a call has run whenever it returns ([`site_must_chain`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct SiteMust {
-    /// The shortest chain from the call to the effect.
-    pub chain: Vec<CallHop>,
+    /// The shortest chain from the call to the effect: the call's own hop, then the hops of the
+    /// callee's kept chain, shared with its summary.
+    pub chain: SharedChain,
     /// Per implementation that returns normally, the call that has the effect at the end of its
     /// chain, where that call is (each call once).
-    pub witnesses: Vec<CallHop>,
+    pub witnesses: SharedChain,
 }
 
 impl SiteMust {
@@ -455,7 +448,11 @@ impl SiteMust {
     /// The related locations of a report: the shortest chain, then each witness off it.
     pub fn related(&self) -> Vec<CallHop> {
         let off_chain = self.witnesses.iter().filter(|w| !self.chain.contains(w));
-        self.chain.iter().chain(off_chain).cloned().collect()
+        self.chain
+            .iter()
+            .chain(off_chain)
+            .map(|h| CallHop::clone(h))
+            .collect()
     }
 }
 
@@ -832,14 +829,14 @@ struct Edge<'e> {
 
 /// Transfer the facts of one resolved callee across one call site into the caller: the facts
 /// the site runs ([`delivery`]), into the caller's body or into what iterating the caller's
-/// result runs. The caller's own writes through its parameters are `own_writes`. Returns the
+/// result runs. The caller's local summary is `local`. Returns the
 /// caller's parameters the callee consumes at the call (`MUT106`, a must-fact the caller
 /// takes only when every candidate of the call consumes them).
 #[allow(clippy::too_many_arguments)]
 fn apply_edge(
     index: &ProjectIndex,
     s: &mut EffectSummary,
-    own_writes: &BTreeMap<u8, BTreeSet<String>>,
+    local: &EffectSummary,
     caller: &FuncKey,
     site: &CallSite,
     bc: &BoundCallee,
@@ -885,7 +882,7 @@ fn apply_edge(
         callee,
         facts,
     };
-    transfer(index, target, own_writes, &edge, &lead, rewrite);
+    transfer(index, target, local, &edge, &lead, rewrite);
     if !index.skips_typed_writes
         && (!facts.typed_field_write_sites.is_empty() || !facts.mutated_param_paths.is_empty())
     {
@@ -902,12 +899,73 @@ fn apply_edge(
     consumed
 }
 
-/// Add `facts` (of the callee `callee`, bound by `bc` at `site`) to `t`; `lead` and `rewrite`
-/// build each chain ([`extend_chain`]).
+/// Add the closure cells the callee's `facts` change to `t` (of the caller whose local summary
+/// is `local`), except the caller's own variables whose change stays inside its call: one the
+/// callee rebinds, or one the caller binds only to new containers.
+fn add_cell_changes(
+    t: &mut EffectSummary,
+    local: &EffectSummary,
+    site: &CallSite,
+    bc: &BoundCallee,
+    facts: &EffectSummary,
+) {
+    let leaving: Vec<&CellChange> = facts
+        .changes_cells()
+        .iter()
+        .filter(|cell| {
+            let own = cell.owner == site.caller.qualname
+                && bc.callee.module == site.caller.module
+                && (cell.rebinds || local.new_cells().contains(&cell.name));
+            !own
+        })
+        .collect();
+    if !leaving.is_empty() {
+        t.change_shared_state(|f| f.cells.extend(leaving.into_iter().cloned()));
+    }
+}
+
+/// Add to `t` the shared state the caller (whose local summary is `local`) hands to the callee
+/// `bc` at `site` when the callee's `facts` change that argument (`helper(CACHE)`, a method of a
+/// module-level object changing `self`).
+fn add_handed_changes(
+    t: &mut EffectSummary,
+    local: &EffectSummary,
+    site: &CallSite,
+    bc: &BoundCallee,
+    facts: &EffectSummary,
+) {
+    if local.shared_state.is_none() {
+        return;
+    }
+    let ci = site
+        .project_callees()
+        .iter()
+        .position(|b| std::ptr::eq(b, bc))
+        .expect("an edge's callee is one of its call site's callees");
+    let changed: Vec<&SharedState> = local
+        .handed_at(site.span, ci)
+        .filter(|h| facts.changes_argument(h.param))
+        .map(|h| &h.state)
+        .collect();
+    if changed.is_empty() {
+        return;
+    }
+    t.change_shared_state(|f| {
+        for state in changed {
+            match state {
+                SharedState::Global(_) => f.globals = true,
+                SharedState::Cell(cell) => f.cells.push(cell.clone()),
+            }
+        }
+    });
+}
+
+/// Add the facts of `edge` to `t`, a summary of the caller whose local summary is `local`;
+/// `lead` and `rewrite` build each chain ([`extend_chain`]).
 fn transfer(
     index: &ProjectIndex,
     t: &mut EffectSummary,
-    own_writes: &BTreeMap<u8, BTreeSet<String>>,
+    local: &EffectSummary,
     edge: &Edge<'_>,
     lead: &[Arc<CallHop>],
     rewrite: bool,
@@ -924,6 +982,13 @@ fn transfer(
     //    parameter p when argument k is p. The offloaded callable is never called here,
     //    so its blocking effects never reach the caller.
     t.offloads_blocking_params |= caller_params(facts.offloads_blocking_params, bc);
+
+    // Shared state that outlives the call.
+    if facts.changes_globals() && !t.changes_globals() {
+        t.change_shared_state(|f| f.globals = true);
+    }
+    add_cell_changes(t, local, site, bc, facts);
+    add_handed_changes(t, local, site, bc, facts);
 
     // b. Execution effects, with the shortest chain to each. An effect whose guard the call
     //    decides against does not run here; the others take the call's guards and the
@@ -950,7 +1015,8 @@ fn transfer(
         };
         through.guards.inputs.retain(|g| {
             g.subject.attr.as_ref().is_none_or(|a| {
-                !own_writes
+                !local
+                    .mutated_param_paths
                     .get(&g.subject.param)
                     .is_some_and(|paths| paths.contains(a))
             })
@@ -1076,6 +1142,42 @@ fn transfer(
     }
     // A generator passed to a callee that iterates it runs there.
     t.iterates_params |= caller_params(facts.iterates_params, bc);
+
+    // d. The locks the callee takes on the caller's thread or task, in the caller's names,
+    //    behind the tests of state on every path to the call too; and the names it may bind.
+    if let Some(callee) = facts.locks.as_deref() {
+        for (lock, acq) in &callee.acquires {
+            if let Some((lock, mut acq)) = crate::locks::through_call(
+                site,
+                bc,
+                lock,
+                acq,
+                lead,
+                rewrite,
+                &local.mutated_param_paths,
+                &index.param_capacities,
+            ) {
+                if let Some(tests) = &site.state_tests {
+                    crate::locks::add_owner_tests(&mut acq, &lock, tests);
+                }
+                crate::locks::add_acquisition(&mut t.lock_facts_mut().acquires, lock, acq);
+            }
+        }
+        let rebinds: Vec<_> = (callee.rebinds.iter())
+            .filter_map(|name| name.through(bc))
+            .collect();
+        if !rebinds.is_empty() {
+            t.lock_facts_mut().rebinds.extend(rebinds);
+        }
+    }
+
+    // e. The objects the callee uses one operation at a time, in the caller's names.
+    for (obj, u) in facts.exclusive_uses() {
+        if let Some((obj, u)) = crate::one_at_a_time::through_call(site, bc, obj, u, lead, rewrite)
+        {
+            crate::one_at_a_time::add_use(t.exclusive_uses_mut(), obj, u);
+        }
+    }
 }
 
 /// The typed writes a call hands its caller: an `IndirectHelper` site for each typed field or

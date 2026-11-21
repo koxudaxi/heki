@@ -114,6 +114,15 @@ pub trait Contracts: Debug + Send + Sync {
     /// summaries then carry `FileSummary::reference_sites`.
     fn references(&self) -> bool;
 
+    /// Whether such a contract also counts a class statement naming one of its targets among
+    /// its bases (`references = "calls-and-bases"`): the reference sites then include the bases
+    /// of class statements (`CallSite::is_base`).
+    fn reference_bases(&self) -> bool;
+
+    /// The parameters the argument lists of call targets name (`DataType(is_dict=True)`), sorted:
+    /// the summaries then keep the constants each call passes for them (`CallSite::arguments`).
+    fn marked_params(&self) -> &[String];
+
     /// Whether an effect boundary forbids calling `symbol`, a function or class outside the
     /// project (a `call-targets` entry names it, or `reads-environment` with the ecosystem
     /// catalog): its calls are kept (`FileSummary::external_accesses`).
@@ -130,4 +139,9 @@ pub trait Contracts: Debug + Send + Sync {
     /// Whether an effect boundary reports the imports that probe whether a module is installed
     /// (`import-probes = "report"`).
     fn import_probes(&self) -> bool;
+
+    /// Whether an effect boundary checks a module body (a scope naming `<module>`): what the
+    /// bodies of its classes take from outside the project is then the module body's
+    /// (`FileSummary::external_accesses`).
+    fn checks_module_bodies(&self) -> bool;
 }

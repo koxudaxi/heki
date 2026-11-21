@@ -334,16 +334,19 @@ type CallerView = BTreeMap<FuncKey, (Vec<CallSite>, BTreeSet<String>)>;
 
 /// Per function of one file: its ecosystem (Layer 2) call sites and its accesses outside the
 /// project that effect boundaries forbid, without positions.
-type EcosystemView = BTreeMap<FuncKey, (Vec<CallSite>, Vec<(heki_effect::AccessKind, String)>)>;
+type EcosystemView = BTreeMap<FuncKey, (Vec<CallSite>, Vec<heki_effect::ExternalAccess>)>;
 
 impl Workspace {
     /// Index every Python file under `paths` (IR is dropped once the files are summarized, before
     /// propagation). `overrides` replaces the disk text of open documents. `baseline` replaces
-    /// the Ratchet baseline of the configuration (`--baseline`).
+    /// the Ratchet baseline of the configuration (`--baseline`). `inspect`: the index also holds
+    /// what `heki inspect` reads besides the rules ([`heki_rules::inspect_facts`]), for the
+    /// language server; `heki check --watch` leaves it out.
     pub fn load(
         opts: &ProjectOptions<'_>,
         selectors: &Selectors,
         baseline: Option<&Path>,
+        inspect: bool,
     ) -> Result<(Self, Vec<FileError>), EngineError> {
         let project = Project::load(opts).map_err(EngineError::Project)?;
         let env_cfg = &project.env.cfg;
@@ -384,7 +387,11 @@ impl Workspace {
         let contracts =
             heki_rules::summary_contracts(env_cfg, &project.env.kb).map_err(EngineError::Rules)?;
         let typed_writes = heki_rules::typed_writes(env_cfg, &selection);
-        let opt_in = heki_rules::opt_in_facts(&selection);
+        let opt_in = if inspect {
+            heki_rules::inspect_facts(&selection)
+        } else {
+            heki_rules::opt_in_facts(&selection)
+        };
         let summaries = summarize_project_with_reads(
             &project.inputs(),
             &project.unread,
@@ -660,8 +667,11 @@ impl Workspace {
             out.entry(site.caller.clone()).or_default().0.push(site);
         }
         for (func, accesses) in file.into_iter().flat_map(|f| &f.external_accesses) {
-            let names = accesses.iter().map(|a| (a.kind, a.name.clone()));
-            out.entry(func.clone()).or_default().1.extend(names);
+            let unplaced = accesses.iter().map(|a| heki_effect::ExternalAccess {
+                span: heki_ast::Span { start: 0, end: 0 },
+                ..a.clone()
+            });
+            out.entry(func.clone()).or_default().1.extend(unplaced);
         }
         out
     }
@@ -1193,7 +1203,7 @@ mod tests {
             paths: &paths,
             ..ProjectOptions::default()
         };
-        let (mut ws, errors) = Workspace::load(&opts, &Selectors::default(), None).unwrap();
+        let (mut ws, errors) = Workspace::load(&opts, &Selectors::default(), None, false).unwrap();
         assert!(errors.is_empty(), "{errors:?}");
         // After indexing (a race a process cannot set up portably), `b.py` stops being UTF-8
         // and `c.py` stops parsing: both errors are reported, `a.py` is still checked.

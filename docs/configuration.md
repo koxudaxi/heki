@@ -142,9 +142,9 @@ supported version that every clause admits:
   `heuristic = true`, or when its code or name is selected.
 - A run of `full` or `concise` output that leaves heuristic rules off, or heuristic reports out,
   says how many.
-- A prefix or `ALL` never enables the opt-in rules (`EFF105`, `EFF106`, `EFF107`, `MUT101`,
-  `MUT103`, `MUT106`, `MUT107`, `MUT108`, `MUT111`, `MUT112`, `MUT113`): they need their exact
-  code or name. In `ignore`, a prefix covers every rule it matches.
+- A prefix or `ALL` never enables the opt-in rules (`EFF105`, `EFF106`, `EFF107`, `EFF109`,
+  `EFF110`, `MUT101`, `MUT103`, `MUT106`, `MUT107`, `MUT108`, `MUT111`, `MUT112`, `MUT113`): they
+  need their exact code or name. In `ignore`, a prefix covers every rule it matches.
 - The command line wins: `--select` replaces `select`, `--extend-select` and `--ignore` add to the
   configured lists, and `--heuristic` / `--no-heuristic` replace `heuristic`.
 
@@ -193,8 +193,9 @@ Contracts declare what no type can say. Each kind is an array of tables with its
 - A `Class.attr` target covers the subclasses of the class too.
 - A contract heki cannot use is a configuration error: a target that is not `Class.attr`, an
   invalid glob, a name with more than one colon or an empty module or qualified name, call
-  targets whose globs are too many to match together (tens of thousands of complex ones), or an
-  unknown value of `forbid`, `fresh-objects`, `unresolved`, or `references`.
+  targets whose globs are too many to match together (tens of thousands of complex ones), an
+  argument list heki cannot read, or an unknown value of `forbid`, `fresh-objects`, `unresolved`,
+  `references`, or `attribution`.
 - With `unresolved = "report"`, a contract also reports the accesses it cannot tie to a class,
   each under its own rule (`MUT205` writes, `MUT206` reads, `MUT207` calls): an attribute or
   method named like a target, accessed on an object of unknown class (an unannotated parameter,
@@ -228,6 +229,7 @@ unresolved = "report"
 | `message` | none | The help of every report of the contract: where to write instead. |
 | `fresh-objects` | `"allow"` | `"allow"` or `"report"`: whether a write that constructs the object it writes is reported. |
 | `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the writes the contract cannot tie to a class are reported under [`MUT205`](rules/unresolved-guarded-write.md). |
+| `attribution` | `"call-graph"` | `"call-graph"` or `"lexical"`: which function a write is judged in. See [How contracts report](#how-contracts-report). |
 
 A container entry (`Class.attr["key"]`):
 
@@ -284,6 +286,7 @@ a value still writes the implementations' attribute.
 | `exempt-methods` | `[]` | Methods allowed to read the targets, matched as in `write-owners`. |
 | `message` | none | The help of every report of the contract. |
 | `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the reads of a target's attribute name on an object of unknown class are reported under [`MUT206`](rules/unresolved-guarded-read.md). |
+| `attribution` | `"call-graph"` | `"call-graph"` or `"lexical"`, as in `write-owners`. |
 
 `MUT203` does not see a read through a parameter without a project-class annotation; with
 `unresolved = "report"`, `MUT206` reports it unless every caller binds the parameter to an
@@ -306,14 +309,15 @@ The call side of `write-owners`.
 | Key | Default | Meaning |
 | --- | ------- | ------- |
 | `name` | `""` | The contract's name in reports. |
-| `targets` | `[]` | Functions, methods, or classes. A `Class.method` target covers the method's overrides in subclasses; a class target means constructing the class or a subclass. |
+| `targets` | `[]` | Functions, methods, or classes. A `Class.method` target covers the method's overrides in subclasses; a class target means constructing the class or a subclass. A target may end in an argument list (`DataType(is_dict=True)`, below). |
 | `subclasses` | `true` | `false`: a class target means constructing exactly the class, not a subclass (an exception class whose subclasses anyone may raise). `Class.method` targets keep covering overrides. |
 | `allowed-callers` | `[]` | Functions allowed to call the targets. |
 | `forbidden-callers` | `[]` | When set, only calls by these functions are reported. |
 | `exempt-methods` | `[]` | Methods allowed to call the targets, matched as in `write-owners`. |
 | `message` | none | The help of every report of the contract. |
 | `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the calls of a method named like a target (its last name) on an object of unknown class are reported under [`MUT207`](rules/unresolved-guarded-call.md). |
-| `references` | `"ignore"` | `"ignore"` or `"calls"`: whether a reference handing a target on to be called later counts as a call of it (`[decide]`, `return decide`, `partial(decide)`, `field(default_factory=Rule)`, `obj.callback = self.decide`). |
+| `references` | `"ignore"` | `"ignore"`, `"calls"`, or `"calls-and-bases"`: whether a reference handing a target on to be called later counts as a call of it (`[decide]`, `return decide`, `partial(decide)`, `field(default_factory=Rule)`, `obj.callback = self.decide`), and with `"calls-and-bases"` a class statement naming a class target among its bases too (`class Derived(Base)`). |
+| `attribution` | `"call-graph"` | `"call-graph"` or `"lexical"`, as in `write-owners`. |
 
 - A call is reported only when every function it may call (each candidate in the class
   hierarchy) is a target: `text.replace(...)` on a `str` is never a call of
@@ -332,6 +336,25 @@ The call side of `write-owners`.
   annotation of a function; a subscript (`Optional[Rule]`), a comparison, a receiver
   (`Rule.of(...)`), and a module binding another name to it (an import, `run = core.decide`). A
   callable a builtin calls once per item (`sorted(xs, key=decide)`) is a call already.
+- A target ending in an argument list, `name(parameter=value, ...)`, names the calls of `name`
+  that pass each value: `"DataType(is_dict=True)"`, `'container_flags(kind="dict")'`. A value is
+  `True`, `False`, `None`, an integer, or a string in single or double quotes (no escapes). A call
+  passes it when heki establishes that the argument bound to the parameter is that constant (a
+  literal, or a string constant bound once, such as a module's `Final` name): passed by keyword
+  (also to a class without a project `__init__`, a dataclass or a pydantic model), by position
+  where every function the call may run binds that position to the parameter, or left out where
+  every such function's default is the value and only `True`, `False`, `None`, `0`, or `""`
+  (heki keeps defaults by class and truthiness). Any other argument (a variable, a call, `*` or
+  `**` unpacking) is not established, and the call is not reported. A reference passes no
+  arguments, so it never matches. A target with an argument list names no symbol outside the
+  project; `unresolved = "report"` matches its last name before the list, whatever the arguments
+  of a call on an object of unknown class.
+- With `references = "calls-and-bases"`, a class statement whose declaration resolves a base to a
+  class target is reported too ("`<module>` subclasses `pkg.core.Base`"), at the base, or at the
+  class statement for a name an import or the module body binds: the class it makes holds the
+  base, and constructing it runs the base's initialization unless it overrides it. A base is
+  matched as a construction is (with `subclasses = false`, the class itself only), and a keyword
+  (`metaclass=Base`) is no base.
 
 ### Allowed and forbidden functions
 
@@ -356,7 +379,8 @@ allowed-readers = ["pkg.parser.index.*"]
 | set | set | accesses by the forbidden functions, except the allowed ones |
 
 - An access counts as one by a forbidden function when the function that is reported, a private
-  helper it hands the access through, or the function making the access is forbidden.
+  helper it hands the access through, or the function making the access is forbidden (with
+  `attribution = "lexical"`, the function holding the access).
 - `allowed-*` and `exempt-methods` win wherever they apply on that path, as does the rule for
   functions that [only run inside allowed functions](#how-contracts-report).
 
@@ -394,16 +418,16 @@ import-probes = "report"
 | Key | Default | Meaning |
 | --- | ------- | ------- |
 | `name` | `""` | The boundary's name in reports. |
-| `scopes` | `[]` | Modules, classes, or functions whose functions must stay inside the boundary; nested functions are included. |
+| `scopes` | `[]` | Modules, classes, or functions whose functions must stay inside the boundary; nested functions are included. A module body is included only where a pattern names `<module>` (`pkg.gen:<module>`, below). |
 | `forbid` | `[]` | What the scope functions must not reach (tokens below). |
 | `write-targets` | `[]` | `Class.attr` targets of `writes-targets`, required with it. `Class.attr["key"]` names one entry, as in `write-owners`. |
 | `read-targets` | `[]` | `Class.attr` targets of `reads-targets`, required with it: reads as `read-owners` sees them, also inside property getters. A container entry is a configuration error. An entry can also name an attribute of a module outside the project by its full name (`sys.platform`, `os.environ`, below). |
-| `call-targets` | `[]` | Functions, methods, or classes of `calls`, required with it, matched as the `targets` of `call-owners`. An entry can also name a function or class outside the project by its full name (`os.getenv`, `platform.*`, below). |
+| `call-targets` | `[]` | Functions, methods, or classes of `calls`, required with it, matched as the `targets` of `call-owners` (also with an argument list). An entry can also name a function or class outside the project by its full name (`os.getenv`, `platform.*`, below). |
 | `write-universe` | `[]` | `Class.attr` entries: a reached write of one that `allow-writes` does not name is reported, once per written `Class.attr`. |
 | `allow-writes` | `[]` | `Class.attr` writes the boundary allows, exempt from `write-targets` too. Needs `write-universe`. |
 | `allowed-callees` | `[]` | Functions, classes, modules, or ecosystem symbols whose effects are allowed: paths through them are not followed, and calls of them are no `calls` violation. |
 | `fresh-objects` | `"allow"` | `"allow"` or `"report"`: whether a write that constructs the object it writes (as in `write-owners`) counts as a write of the boundary. |
-| `references` | `"ignore"` | `"ignore"` or `"calls"`, as for `call-owners`: whether a reference handing a `call-targets` entry on counts for `calls`. |
+| `references` | `"ignore"` | `"ignore"`, `"calls"`, or `"calls-and-bases"`, as for `call-owners`: whether a reference handing a `call-targets` entry on (and a class statement naming one among its bases) counts for `calls`. |
 | `import-probes` | `"allow"` | `"allow"` or `"report"`: whether `reads-environment` also forbids an import probe, an `import` inside a `try` with an `except` clause naming `ImportError` or `ModuleNotFoundError`. `"report"` without `reads-environment` is a configuration error. |
 | `message` | none | The help of every report of the boundary. |
 
@@ -437,7 +461,32 @@ reads: `os.environ`, `os.environb`, `os.name`, `sys.platform`, `sys.version`,
 `os.environ` (`os.environ.get("X")`) is a read of `os.environ`. One report per scope function
 names the first read it reaches and counts every one.
 
+`importlib.import_module(name, package)` and `importlib.util.find_spec(name, package)` read the
+environment unless the module they import is established to be the project's own:
+
+- every text `name` may hold names a module of the project (`"pkg.config"`, a module constant,
+  either of two such texts), or starts with a package of the project and a dot
+  (`f"pkg.parser.{name}"`, `"pkg.parser." + name`, `"pkg.%s" % name`). The longest project
+  module before that dot must be a regular package whose `__init__.py` heki reads and does not
+  rebind `__path__` (`pkgutil.extend_path` lets installed distributions add modules to it);
+- a relative name (`".config"`, `f"..parser.{name}"`) is anchored at `package`: a text the code
+  fixes, or the module's own `__package__` or `__name__`;
+- the call is not inside a `try` with an `except` clause naming `ImportError` or
+  `ModuleNotFoundError`: the code expects the import to fail.
+
+A name heki cannot tell (a parameter, `"pkg" + name`, a namespace package without
+`__init__.py`) stays a read of the environment, and so does an import of a module the project
+does not have. A `call-targets` entry naming `importlib.import_module` matches every call of it.
+
 - Each scope function is checked through any number of calls.
+- A module body, what runs when the module is imported, is checked only where a scope names
+  `<module>` itself: `pkg.gen:<module>` (the body of `pkg.gen`), `pkg.*:<module>` (of every
+  module under `pkg`), `pkg.gen.<module>`, or `<module>` (of every module). `pkg.*` and
+  `pkg.gen:*` keep naming the functions only. The body is checked as a scope function is (its
+  module-level reads, calls, import probes, and writes), and the bodies of its classes, which
+  run with it, count for what they take from outside the project (environment reads, import
+  probes, and the external `call-targets` and `read-targets`), not for their other effects.
+  Reports name it `<module>`.
 - A violation inside another scope function is reported there only, once.
 - One report per scope function and forbidden kind (or target) stands for every distinct site of
   it that the function reaches.
@@ -513,6 +562,16 @@ holds for `invalidation` too:
 - **A private helper reports at its callers.** An access in a private helper (`_name`) with
   project callers is reported at the call sites of its first non-private callers. A private
   function called only by its own recursion reports its accesses itself.
+- **`attribution = "lexical"` judges the code where it is written.** The two rules above do not
+  apply: an access is judged in the function whose code holds it, whoever calls that function.
+  A lambda, comprehension, or generator expression is part of the function it is written in, a
+  class body's code part of the function running the class statement, and a nested `def` a
+  function of its own. For `write-owners`, a call handing a typed object to a helper that
+  changes it without knowing its class is the caller's write. With `unresolved = "report"`, the
+  callers binding a parameter only tell its object's class, allowed callers included. A class's
+  own initialization, `exempt-methods`, `fresh-objects`, and the targets of a call contract
+  calling each other stay allowed. Effect boundaries have no such key: they judge what their
+  scope functions reach through any number of calls.
 - **One report stands for every site behind it.** A report at a call stands for every access
   behind the call, and an effect boundary's report for every site its scope function reaches.
   JSON output gives their number as `sites`, and a
@@ -549,6 +608,8 @@ excluded = true               # never reported
 | `copy-sanitizer` | Returns a copy of its first argument (or receiver), ending `MUT202` protection: `"deep"` copies everything below it too; `"shallow"` (or `true`) copies only the object itself, so the values below it stay protected. |
 | `return-type` | The class of the objects the call returns (a factory: `mypkg.db.open` returning `sqlite3.Connection`), whose methods are then looked up in the catalog. |
 | `sync-lock-or-tx` | A `with` over an instance of this class, or over the result of this call, holds a synchronous lock or a database transaction (`EFF106`). |
+| `non-reentrant-lock` | An instance of this class is a lock its holder cannot take again: acquiring it while the same thread or task holds it waits forever (`EFF109`). |
+| `one-at-a-time` | Tasks may not be inside this method on one object at once (`EFF110`): `"always"` (a second task's call raises), `"when_unbound"` (only while the object holds no connection, as an `AsyncSession`), or `"unbinds"` (as `"when_unbound"`, and the object holds no connection after the call: `commit`). |
 
 - An override sets the keys it lists on the built-in entry for the same symbol. The keys it leaves
   out keep their built-in values; `effects = []` removes every effect.
@@ -564,7 +625,7 @@ For a project function:
 | `async-safe` | keeps the blocking effects of the body from its callers |
 | `return-type` | types its result, over its annotation |
 | `offloads-blocking-arg` | the parameter the body offloads, counted as for a library method |
-| `copy-sanitizer`, `sync-lock-or-tx` | not read: library symbols only |
+| `copy-sanitizer`, `sync-lock-or-tx`, `non-reentrant-lock`, `one-at-a-time` | not read: library symbols only |
 
 ## Inline suppressions
 

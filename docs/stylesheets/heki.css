@@ -1,0 +1,39 @@
+/* The theme colors come from the snake in the logo (docs/assets/heki-icon.png): its body is #91ede1,
+   its outline #484858. The header uses the body color with dark text; links use a darker shade of
+   the same hue on the light scheme, where the body color would be too pale to read. */
+
+:root > * {
+  --heki-snake: #91ede1;
+  --heki-snake-light: #b9f4ec;
+  --heki-snake-dark: #5fd8c8;
+  --heki-ink: #33344a;
+  --heki-teal-text: #0e766b;
+}
+
+[data-md-color-primary="custom"] {
+  --md-primary-fg-color: var(--heki-snake);
+  --md-primary-fg-color--light: var(--heki-snake-light);
+  --md-primary-fg-color--dark: var(--heki-snake-dark);
+  --md-primary-bg-color: var(--heki-ink);
+  --md-primary-bg-color--light: rgb(51 52 74 / 70%);
+}
+
+[data-md-color-accent="custom"] {
+  --md-accent-fg-color: var(--heki-teal-text);
+  --md-accent-fg-color--transparent: rgb(14 118 107 / 10%);
+  --md-accent-bg-color: #ffffff;
+  --md-accent-bg-color--light: rgb(255 255 255 / 70%);
+}
+
+[data-md-color-scheme="default"][data-md-color-primary="custom"] {
+  --md-typeset-a-color: var(--heki-teal-text);
+}
+
+[data-md-color-scheme="slate"][data-md-color-primary="custom"] {
+  --md-typeset-a-color: var(--heki-snake);
+}
+
+[data-md-color-scheme="slate"][data-md-color-accent="custom"] {
+  --md-accent-fg-color: var(--heki-snake);
+  --md-accent-fg-color--transparent: rgb(145 237 225 / 10%);
+}

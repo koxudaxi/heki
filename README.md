@@ -1,5 +1,9 @@
 # heki
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/koxudaxi/heki/main/docs/assets/heki-banner.png" alt="heki: a snake in front of a brick wall" width="600">
+</p>
+
 🧱 heki (壁, "wall") is a static checker for Python, written in Rust. It tracks side effects and
 mutations across function calls.
 
@@ -310,7 +314,7 @@ step keeps findings as alerts and fails only on a configuration, read, or syntax
 - 🚀 [Getting started](https://heki.koxudaxi.dev/getting-started/) - run heki on a project, read a diagnostic, apply a fix
 - 🎯 [Scope and limitations](https://heki.koxudaxi.dev/scope/) - what heki checks and what it leaves to other tools
 - ⚙️ [Configuration](https://heki.koxudaxi.dev/configuration/) - rule selection, contracts, the Python version
-- 📏 [Rules](https://heki.koxudaxi.dev/rules/) - all 38 rules
+- 📏 [Rules](https://heki.koxudaxi.dev/rules/) - all 40 rules
 - 📐 [Rule precision](https://heki.koxudaxi.dev/precision/) - exact and heuristic rules, and how they are measured
 - 🔧 [Fixes and safety](https://heki.koxudaxi.dev/fixes/) - how rewrites are proven safe
 - 🪜 [Adopting heki](https://heki.koxudaxi.dev/adoption/) - Ratchet baselines, pre-commit, CI

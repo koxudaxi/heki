@@ -1,8 +1,8 @@
 //! Family 2 execution-effect rules: `EFF101`, `EFF105`, `EFF102`, `EFF103`, `EFF106`,
-//! `EFF107`, `EFF201` (docs/ANALYSIS_AND_KB_SPEC.md section 2.4).
+//! `EFF107`, `EFF109`, `EFF110`, `EFF201` (docs/ANALYSIS_AND_KB_SPEC.md section 2.4).
 
 use crate::mut_rules::{
-    CallTargets, ContractTarget, FunctionMatcher, FunctionMatchers, SiteId, Subclasses,
+    CallTargets, ContractTarget, FunctionMatcher, FunctionMatchers, References, SiteId, Subclasses,
     allows_fresh, call_verb, counts_references, group_texts, helper_changes_field,
     initializes_itself, parse_call_targets, parse_read_targets, parse_targets, patterns,
     project_classes, reports_import_probes, site_callee, write_hits,
@@ -22,13 +22,13 @@ use heki_effect::{
     SiteMust, TypeCtx, WriteKind, anchors_call_site, boundary_reports_in,
 };
 pub(crate) use heki_ir::ItemOrigins;
-use heki_ir::walk::{Answer, Budget};
+use heki_ir::walk::{Answer, Budget, FnShape};
 use heki_ir::{BlockId, Carries, InstKind, IrFunction, ItemOrigin, ItemSource, Must, Progress};
 use heki_kb::{EcosystemEntry, EnvironmentAccess, ExecEffectKind, ResultItems, WaitKind};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
 /// The rules whose reports are split by the must-facts of execution effects
 /// (`heki_effect::EffectSummary::must_exec`): an established report is the exact rule's, the
@@ -121,7 +121,7 @@ fn always_waits(function: &str, must: &SiteMust) -> String {
 
 /// The calls of several implementations' chains with the effect, each named with the function
 /// that makes it.
-fn each_witness(witnesses: &[CallHop]) -> String {
+fn each_witness(witnesses: &[Arc<CallHop>]) -> String {
     witnesses
         .iter()
         .map(|w| format!("`{}` (in `{}`)", w.callee, w.caller.qualname))
@@ -352,14 +352,14 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
             ExecEffectKind::DbQuery => want103 && !migration_fn,
             _ => false,
         };
-        // Built when a call has an effect to report.
-        let mut sizes: Option<Sizes<'_, '_>> = None;
+        let sizes = Sizes::new(cx, &tcx, &no_types, FnShape::new(f), unit, &constants);
+        let shape = &sizes.ix.shape;
         let mut data_sized: Vec<Option<bool>> = vec![None; f.loops.len()];
         // An iteration shares its span with the call producing the iterable: one report.
         let mut seen: FxHashSet<Span> = FxHashSet::default();
         let mut queries: Vec<LoopQuery<'_>> = Vec::new();
         for bb in &f.blocks {
-            let depth = f.block_loop_depth(bb.id);
+            let depth = shape.loop_depth(bb.id);
             if depth == 0 && !per_item_calls {
                 continue;
             }
@@ -404,14 +404,12 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
                 if effects.is_empty() {
                     continue;
                 }
-                let sizes = sizes
-                    .get_or_insert_with(|| Sizes::new(cx, &tcx, &no_types, f, unit, &constants));
                 let around = *data_loops.get_or_insert_with(|| {
                     f.loops
                         .iter()
                         .enumerate()
                         .filter(|(i, lp)| {
-                            lp.body.contains(&bb.id)
+                            shape.in_loop(*i, bb.id)
                                 && *data_sized[*i].get_or_insert_with(|| sizes.data_sized(lp))
                         })
                         .fold(0, |mask, (_, lp)| mask | loop_bit(lp))
@@ -623,7 +621,7 @@ fn established_queries(
                     CallTarget::Project(_) => Progress::Returned,
                 };
                 f.loops.iter().enumerate().find_map(|(li, lp)| {
-                    if !ix.shape().in_loop(li, q.at.0)
+                    if !ix.shape.in_loop(li, q.at.0)
                         || paths.on_every_iteration(li, q.at, progress)
                             != Answer::Known(Must::Every)
                         || !ix.fixed_trips(lp, &mut |_| None).is_open()
@@ -722,7 +720,9 @@ impl Repeats<'_> {
     }
 }
 
+mod fanout_exclusive;
 mod held_across_io;
+mod lock_retaken;
 mod unretained_task;
 
 /// `EFF106` (opt-in): `await` / blocking network I/O while a sync lock or DB transaction is
@@ -734,6 +734,17 @@ pub(crate) fn eff106(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
 /// `EFF107` (opt-in): a locally bound `asyncio.create_task` result that is never retained.
 pub(crate) fn eff107(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Diagnostic>) {
     unretained_task::run(cx, unit, out);
+}
+
+/// `EFF109` (opt-in): a non-reentrant lock taken again while it is held.
+pub(crate) fn eff109(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Diagnostic>) {
+    lock_retaken::run(cx, unit, out);
+}
+
+/// `EFF110` (opt-in): an object allowing one operation at a time, used by tasks started
+/// together.
+pub(crate) fn eff110(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Diagnostic>) {
+    fanout_exclusive::run(cx, unit, out);
 }
 
 /// `forbid` tokens of `[[tool.heki.effect-boundaries]]` and the execution effects each one
@@ -780,8 +791,8 @@ struct Boundary<'r> {
     external_reads: FunctionMatchers,
     calls: bool,
     call_targets: CallTargets,
-    /// `references = "calls"`: a reference handing a call target on counts for `calls`.
-    counts_references: bool,
+    /// The references that count for `calls` (`references`).
+    references: References,
     allowed_callees: Vec<DottedPattern>,
     note: Option<&'r str>,
     /// `fresh-objects = "allow"`: writes constructing the object they write are allowed.
@@ -792,15 +803,22 @@ struct Boundary<'r> {
 }
 
 /// Whether a pattern names `key`, its qualname, or a module / class / function containing it.
-fn names_function(patterns: &[DottedPattern], key: &FuncKey) -> bool {
+pub(crate) fn names_function(patterns: &[DottedPattern], key: &FuncKey) -> bool {
     let fqn = key.fqn();
     patterns.iter().any(|p| p.names_within(&fqn, &key.qualname))
 }
 
 impl Boundary<'_> {
-    /// A function of the boundary's scopes (module bodies are not functions).
+    /// A function of the boundary's scopes, or a module body a scope names as `<module>`
+    /// (`pkg.gen:<module>`): a scope naming its module (`pkg.*`, `pkg.gen:*`) does not cover it.
     fn in_scope(&self, key: &FuncKey) -> bool {
-        key.qualname != "<module>" && names_function(&self.scopes, key)
+        if key.qualname != "<module>" {
+            return names_function(&self.scopes, key);
+        }
+        let fqn = key.fqn();
+        self.scopes
+            .iter()
+            .any(|p| p.names_module_bodies() && p.names_within(&fqn, &key.qualname))
     }
 
     /// A Layer 2 symbol (or one of its modules / classes) that `allowed-callees` names.
@@ -879,7 +897,8 @@ impl Boundary<'_> {
     }
 
     /// Whether `reads-environment` forbids `access`: a call or a read the ecosystem catalog
-    /// tags as one of the environment, or an import probe with `import-probes = "report"`.
+    /// tags as one of the environment, an import of a module not established to be the
+    /// project's, or an import probe with `import-probes = "report"`.
     fn forbids_environment(&self, cx: &CheckContext<'_>, access: &ExternalAccess) -> bool {
         let tagged = |kind| {
             cx.kb
@@ -889,7 +908,10 @@ impl Boundary<'_> {
         };
         self.reads_environment
             && match access.kind {
-                AccessKind::Call => tagged(EnvironmentAccess::Call),
+                AccessKind::Call => {
+                    tagged(EnvironmentAccess::Call)
+                        || tagged(EnvironmentAccess::Import) && !access.imports_project_module
+                }
                 AccessKind::Read => tagged(EnvironmentAccess::Read),
                 AccessKind::ImportProbe => self.import_probes,
             }
@@ -971,11 +993,7 @@ fn boundaries<'a>(cx: &CheckContext<'a>) -> Result<Vec<Boundary<'a>>, RuleConfig
                 "effect-boundaries.call-targets",
                 Subclasses::Covered,
             )?,
-            counts_references: counts_references(
-                b.references.as_deref(),
-                "effect-boundaries",
-                &b.name,
-            )?,
+            references: counts_references(b.references.as_deref(), "effect-boundaries", &b.name)?,
             allowed_callees: patterns(&b.allowed_callees, "effect-boundaries.allowed-callees")?,
             note: b.message.as_deref(),
             allow_fresh: allows_fresh(b.fresh_objects.as_deref(), "effect-boundaries", &b.name)?,
@@ -1000,7 +1018,10 @@ pub(crate) fn eff201(
     }
     let boundaries = boundaries(cx)?;
     let sites = cx.sites_by_caller();
-    let references = if boundaries.iter().any(|b| b.calls && b.counts_references) {
+    let references = if boundaries
+        .iter()
+        .any(|b| b.calls && b.references != References::Ignored)
+    {
         cx.reference_sites_by_caller()
     } else {
         SitesByCaller::default()
@@ -1008,7 +1029,7 @@ pub(crate) fn eff201(
     for unit in cx.units {
         let mut done: FxHashSet<(FuncKey, usize)> = FxHashSet::default();
         for f in &unit.input.ir.functions {
-            if f.is_class_body || f.is_module_body {
+            if f.is_class_body {
                 continue;
             }
             let key = CheckContext::key(unit, f);
@@ -1231,9 +1252,12 @@ impl<'a> Reach<'a> {
                     }
                 }
             }
-            if b.calls && b.counts_references && runs_body {
+            if b.calls && runs_body {
                 let handed = references.get(&func).map_or(&[][..], Vec::as_slice);
-                for &entry in handed.iter().filter(|(_, site)| !b.allows_call(cx, site)) {
+                let counted = handed
+                    .iter()
+                    .filter(|(_, site)| b.references.counts(site) && !b.allows_call(cx, site));
+                for &entry in counted {
                     reach.note_calls(b, i, &func, entry, true);
                 }
             }

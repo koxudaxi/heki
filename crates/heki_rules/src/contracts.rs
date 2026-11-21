@@ -7,10 +7,14 @@
 //! `heki check` and the LSP engine hand them to the analysis, so a wrapper of a producer and an
 //! invalidator reached through calls are known across files without IR.
 
+use crate::inspect::ContractRole;
 use crate::mut_rules::{
-    Allowance, AllowanceKeys, FunctionMatcher, FunctionMatchers, ReadOnlyProducers,
+    Allowance, AllowanceKeys, FunctionMatcher, FunctionMatchers, ReadOnlyProducers, References,
+    patterns, split_arguments,
 };
-use crate::{DottedPattern, RuleConfigError, RuleSelection, last_name, split_last_dot};
+use crate::{
+    CheckContext, DottedPattern, RuleConfigError, RuleSelection, last_name, split_last_dot,
+};
 use heki_effect::{ContractClass, Contracts, FuncKey, OptInFacts, TypedWrites};
 use heki_env::HekiConfig;
 use heki_kb::{EffectiveEcosystemKb, EnvironmentAccess};
@@ -71,8 +75,10 @@ pub(crate) struct ConfigContracts {
     unresolved_reads: Vec<DottedPattern>,
     /// The last names of the `call-owners` targets with `unresolved = "report"`.
     unresolved_calls: Vec<DottedPattern>,
-    /// [`Contracts::references`].
-    references: bool,
+    /// [`Contracts::references`] and [`Contracts::reference_bases`].
+    references: References,
+    /// [`Contracts::marked_params`].
+    marked_params: Vec<String>,
     external: ExternalNames,
 }
 
@@ -87,6 +93,8 @@ struct ExternalNames {
     /// The catalog's environment calls and reads, when a boundary forbids `reads-environment`.
     environment: FxHashMap<String, EnvironmentAccess>,
     probes: bool,
+    /// [`Contracts::checks_module_bodies`].
+    module_bodies: bool,
 }
 
 impl ExternalNames {
@@ -99,9 +107,11 @@ impl ExternalNames {
                 .iter()
                 .filter(move |b| b.forbid.iter().any(|t| t == token))
         };
+        // A call target with an argument list names project functions only.
         let matchers = |texts: Vec<&String>, context: &'static str| {
             let named = texts
                 .into_iter()
+                .filter(|t| matches!(split_arguments(t, context), Ok((_, None))))
                 .filter_map(|t| FunctionMatcher::named(t, context).ok())
                 .collect();
             FunctionMatchers::new(named, context).ok()
@@ -128,6 +138,12 @@ impl ExternalNames {
             environment,
             probes: forbidding("reads-environment")
                 .any(|b| b.import_probes.as_deref() == Some("report")),
+            module_bodies: config.effect_boundaries.iter().any(|b| {
+                b.scopes.iter().any(|s| {
+                    DottedPattern::new(s, "effect-boundaries.scopes")
+                        .is_ok_and(|p| p.names_module_bodies())
+                })
+            }),
         }
     }
 
@@ -231,11 +247,42 @@ impl ConfigContracts {
             writers,
             writer_contexts: NameMasks::default(),
             unresolved_reads: last_names(reads.flat_map(|r| &r.targets), "read-owners.targets")?,
-            unresolved_calls: last_names(calls.flat_map(|r| &r.targets), "call-owners.targets")?,
+            unresolved_calls: call_last_names(calls.flat_map(|r| &r.targets))?,
             references: counts_references(config),
+            marked_params: marked_params(config),
             external: ExternalNames::new(config, kb),
         })
     }
+}
+
+/// [`last_names`] of call targets, whose argument lists name no function.
+fn call_last_names<'t>(
+    targets: impl Iterator<Item = &'t String>,
+) -> Result<Vec<DottedPattern>, RuleConfigError> {
+    let context = "call-owners.targets";
+    targets
+        .map(|t| DottedPattern::new(last_name(split_arguments(t, context)?.0), context))
+        .collect()
+}
+
+/// [`Contracts::marked_params`] of `config`. A bad argument list is left out: it is a
+/// configuration error of the rule of its contract, which parses it before it reports.
+fn marked_params(config: &HekiConfig) -> Vec<String> {
+    let calls = config.call_owners.iter().flat_map(|r| &r.targets);
+    let boundaries = config
+        .effect_boundaries
+        .iter()
+        .filter(|b| b.forbid.iter().any(|t| t == "calls"))
+        .flat_map(|b| &b.call_targets);
+    let mut names: Vec<String> = calls
+        .chain(boundaries)
+        .filter_map(|t| split_arguments(t, "call-targets").ok()?.1)
+        .flatten()
+        .map(|(name, _)| name)
+        .collect();
+    names.sort();
+    names.dedup();
+    names
 }
 
 /// The patterns of the last dotted names of `targets` (`children` of `pkg.Reference.children`).
@@ -310,6 +357,7 @@ impl Contracts for ConfigContracts {
 
     fn external_call(&self, symbol: &str) -> bool {
         self.external.environment(symbol, EnvironmentAccess::Call)
+            || self.external.environment(symbol, EnvironmentAccess::Import)
             || self
                 .external
                 .calls
@@ -339,19 +387,38 @@ impl Contracts for ConfigContracts {
         self.external.probes
     }
 
+    fn checks_module_bodies(&self) -> bool {
+        self.external.module_bodies
+    }
+
     fn references(&self) -> bool {
-        self.references
+        self.references != References::Ignored
+    }
+
+    fn reference_bases(&self) -> bool {
+        self.references == References::CallsAndBases
+    }
+
+    fn marked_params(&self) -> &[String] {
+        &self.marked_params
     }
 }
 
-/// [`Contracts::references`] of `config` (the value is checked where the rules parse it).
-fn counts_references(config: &HekiConfig) -> bool {
-    let calls = |references: &Option<String>| references.as_deref() == Some("calls");
-    config.call_owners.iter().any(|r| calls(&r.references))
-        || config
-            .effect_boundaries
-            .iter()
-            .any(|b| calls(&b.references) && b.forbid.iter().any(|t| t == "calls"))
+/// The most a contract of `config` counts as calls ([`Contracts::references`],
+/// [`Contracts::reference_bases`]; the values are checked where the rules parse them).
+fn counts_references(config: &HekiConfig) -> References {
+    let counted = |references: &Option<String>| match references.as_deref() {
+        Some("calls") => References::Calls,
+        Some("calls-and-bases") => References::CallsAndBases,
+        _ => References::Ignored,
+    };
+    let calls = config.call_owners.iter().map(|r| counted(&r.references));
+    let boundaries = config
+        .effect_boundaries
+        .iter()
+        .filter(|b| b.forbid.iter().any(|t| t == "calls"))
+        .map(|b| counted(&b.references));
+    calls.chain(boundaries).max().unwrap_or(References::Ignored)
 }
 
 /// Bit `i` set for every contract `i` that `has` holds for.
@@ -375,15 +442,16 @@ pub fn summary_contracts(
         && !contracts.ownership
         && contracts.unresolved_reads.is_empty()
         && contracts.unresolved_calls.is_empty()
-        && !contracts.references
+        && contracts.references == References::Ignored
+        && contracts.marked_params.is_empty()
     {
         return Ok(None);
     }
     Ok(Some(Arc::new(contracts)))
 }
 
-/// [`Contracts::ownership`] of `config`.
-fn declares_ownership(config: &HekiConfig) -> bool {
+/// [`Contracts::ownership`] of `config`: an ownership contract is declared.
+pub fn declares_ownership(config: &HekiConfig) -> bool {
     !(config.write_owners.is_empty()
         && config.read_owners.is_empty()
         && config.effect_boundaries.is_empty()
@@ -407,15 +475,139 @@ pub fn typed_writes(config: &HekiConfig, selection: &RuleSelection) -> TypedWrit
 }
 
 /// The opt-in facts the rules `selection` runs read: `MUT112`'s return origins, `MUT113`'s
-/// iteration facts, and the must-facts of the effect rules whose reports are split by them,
-/// each only with its rules. The readers assert it
-/// ([`heki_effect::ProjectIndex::opt_in_facts`]).
+/// iteration facts, `EFF109`'s lock facts, `EFF110`'s one-at-a-time uses, and the must-facts of
+/// the effect rules whose reports are split by them, each only with its rules. The readers assert
+/// it ([`heki_effect::ProjectIndex::opt_in_facts`]).
 pub fn opt_in_facts(selection: &RuleSelection) -> OptInFacts {
     OptInFacts {
         return_origins: selection.is_enabled("MUT112"),
         iterations: selection.is_enabled("MUT113"),
+        locks: selection.is_enabled("EFF109"),
+        exclusive: selection.is_enabled("EFF110"),
         must_effects: crate::eff_rules::MUST_EFFECT_RULES
             .iter()
             .any(|code| selection.is_enabled(code)),
+        shared_state: false,
     }
+}
+
+/// [`opt_in_facts`] with the facts `heki inspect` reads besides the rules: the shared state
+/// functions change, and what they return (`returns.origins`). `heki check` computes them only
+/// for the rules it runs.
+pub fn inspect_facts(selection: &RuleSelection) -> OptInFacts {
+    OptInFacts {
+        return_origins: true,
+        shared_state: true,
+        ..opt_in_facts(selection)
+    }
+}
+
+/// The roles `key` has in the declared contracts, in configuration order, and in the ecosystem
+/// catalog: the matchers the rules use, compiled as they compile them.
+pub(crate) fn roles_of(
+    cx: &CheckContext<'_>,
+    key: &FuncKey,
+) -> Result<Vec<ContractRole>, RuleConfigError> {
+    let config = cx.config;
+    let mut out = Vec::new();
+    let mut add = |kind: &'static str, name: &str, roles: Vec<&'static str>| {
+        if !roles.is_empty() {
+            out.push(ContractRole {
+                kind,
+                name: name.to_owned(),
+                roles,
+            });
+        }
+    };
+    let owner_roles = |a: &Allowance, allowed: &'static str, forbidden: &'static str| {
+        let mut roles = Vec::new();
+        if a.names_allowed(key) {
+            roles.push(allowed);
+        }
+        if a.exempts(key) {
+            roles.push("exempt-method");
+        }
+        if a.has_forbidden() && a.in_scope(key) {
+            roles.push(forbidden);
+        }
+        roles
+    };
+    for rule in &config.write_owners {
+        let a = Allowance::new(&AllowanceKeys {
+            allowed: (&rule.allowed_writers, "write-owners.allowed-writers"),
+            forbidden: (&rule.forbidden_writers, "write-owners.forbidden-writers"),
+            exempt: (&rule.exempt_methods, "write-owners.exempt-methods"),
+        })?;
+        add(
+            "write-owners",
+            &rule.name,
+            owner_roles(&a, "allowed-writer", "forbidden-writer"),
+        );
+    }
+    for rule in &config.read_owners {
+        let a = Allowance::new(&AllowanceKeys {
+            allowed: (&rule.allowed_readers, "read-owners.allowed-readers"),
+            forbidden: (&rule.forbidden_readers, "read-owners.forbidden-readers"),
+            exempt: (&rule.exempt_methods, "read-owners.exempt-methods"),
+        })?;
+        add(
+            "read-owners",
+            &rule.name,
+            owner_roles(&a, "allowed-reader", "forbidden-reader"),
+        );
+    }
+    let all_classes = crate::mut_rules::project_classes(cx);
+    for rule in &config.call_owners {
+        let a = Allowance::new(&AllowanceKeys {
+            allowed: (&rule.allowed_callers, "call-owners.allowed-callers"),
+            forbidden: (&rule.forbidden_callers, "call-owners.forbidden-callers"),
+            exempt: (&rule.exempt_methods, "call-owners.exempt-methods"),
+        })?;
+        let mut roles = Vec::new();
+        for t in &rule.targets {
+            if FunctionMatcher::new(cx, &all_classes, t, "call-owners.targets")?.matches(key) {
+                roles.push("call-target");
+                break;
+            }
+        }
+        roles.extend(owner_roles(&a, "allowed-caller", "forbidden-caller"));
+        add("call-owners", &rule.name, roles);
+    }
+    for rule in &config.effect_boundaries {
+        let scopes = patterns(&rule.scopes, "effect-boundaries.scopes")?;
+        let callees = patterns(&rule.allowed_callees, "effect-boundaries.allowed-callees")?;
+        let mut roles = Vec::new();
+        if key.qualname != "<module>" && crate::eff_rules::names_function(&scopes, key) {
+            roles.push("boundary-scope");
+        }
+        if crate::eff_rules::names_function(&callees, key) {
+            roles.push("allowed-callee");
+        }
+        add("effect-boundaries", &rule.name, roles);
+    }
+    let fqn = key.fqn();
+    for rule in &config.readonly_returns {
+        let producers = patterns(&rule.producers, "readonly-returns.producers")?;
+        let roles = if producers.iter().any(|p| p.matches(&fqn)) {
+            vec!["read-only-producer"]
+        } else {
+            Vec::new()
+        };
+        add("readonly-returns", &rule.name, roles);
+    }
+    let compiled = ConfigContracts::new(config, cx.kb)?;
+    for (rule, names) in config.invalidation.iter().zip(&compiled.invalidations) {
+        let mut roles = Vec::new();
+        if names.names_invalidator(&fqn, &key.qualname) {
+            roles.push("invalidator");
+        }
+        if names.names_exempt_writer(&fqn, &key.qualname) {
+            roles.push("exempt-writer");
+        }
+        add("invalidation", &rule.name, roles);
+    }
+    if cx.kb.lookup(&fqn).is_some() {
+        add("ecosystem", &fqn, vec!["catalog-entry"]);
+    }
+    Ok(out)
 }
