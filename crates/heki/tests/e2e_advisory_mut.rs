@@ -1,6 +1,6 @@
 //! Mutation rules end to end: `MUT101` filters (aliases, deletions, memo caches, `__dict__`
 //! invalidation, overriding properties, `per-file-ignores`), `MUT201` write owners (helpers,
-//! cycles, shortest chains, `setattr`, deletions, phis), and `MUT202` read-only producers
+//! cycles, shortest chains, `setattr`, deletions, phis), and `MUT114` / `MUT202` shared values
 //! (unpacking, properties, phis, in-place operators, helper calls, shallow copies).
 
 mod common;
@@ -544,7 +544,7 @@ fn mut202_tracks_read_only_values_through_unpacking_phis_and_calls() {
         "[project]\nname = \"t\"\n\n[[tool.heki.readonly-returns]]\nname = \"schema\"\nproducers = [\"Schema.fields\", \"settings_lib.get_settings\"]\n",
     )
     .write("ro.py", READONLY);
-    let diags = diagnostics(&p, &["--select", "MUT202"]);
+    let diags = diagnostics(&p, &["--select", "MUT202,MUT114"]);
     let r = "ro.py";
     // Not reported: mutating the top level of a shallow copy (`mutate(c)`), and passing a
     // read-only value to a function that does not mutate it (`touch`). In-place operators
@@ -553,17 +553,17 @@ fn mut202_tracks_read_only_values_through_unpacking_phis_and_calls() {
     assert_eq!(
         found(&diags),
         vec![
-            d(r, 57, "MUT202", "unpack"),
+            d(r, 57, "MUT114", "unpack"),
             d(r, 61, "MUT202", "prop"),
-            d(r, 69, "MUT202", "phi"),
-            d(r, 74, "MUT202", "delete"),
-            d(r, 79, "MUT202", "inplace"),
-            d(r, 83, "MUT202", "via_method"),
-            d(r, 88, "MUT202", "via_bound"),
-            d(r, 92, "MUT202", "via_kwargs"),
-            d(r, 98, "MUT202", "shallow"),
-            d(r, 124, "MUT202", "typed_alias"),
-            d(r, 129, "MUT202", "typed_star"),
+            d(r, 69, "MUT114", "phi"),
+            d(r, 74, "MUT114", "delete"),
+            d(r, 79, "MUT114", "inplace"),
+            d(r, 83, "MUT114", "via_method"),
+            d(r, 88, "MUT114", "via_bound"),
+            d(r, 92, "MUT114", "via_kwargs"),
+            d(r, 98, "MUT114", "shallow"),
+            d(r, 124, "MUT114", "typed_alias"),
+            d(r, 129, "MUT114", "typed_star"),
             d(r, 134, "MUT202", "external"),
             d(r, 135, "MUT202", "external"),
         ],
@@ -657,13 +657,13 @@ def narrowed(b: Base):
 "#;
 
 #[test]
-fn mut202_follows_a_call_on_a_narrowed_receiver() {
-    let p = Project::new("mut202_narrowed");
+fn mut114_follows_a_call_on_a_narrowed_receiver() {
+    let p = Project::new("mut114_narrowed");
     p.write("app.py", NARROWED_RECEIVERS);
-    let diags = diagnostics(&p, &["--select", "MUT202"]);
+    let diags = diagnostics(&p, &["--select", "MUT114"]);
     assert_eq!(
         found(&diags),
-        vec![d("app.py", 21, "MUT202", "narrowed")],
+        vec![d("app.py", 21, "MUT114", "narrowed")],
         "{diags:#?}"
     );
 }

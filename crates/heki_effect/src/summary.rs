@@ -367,6 +367,10 @@ fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary) {
             .collect()
     };
     let read = [read_otherwise(into), read_otherwise(&other)];
+    // A must-fact: a cached container only when both definitions return one of the same kind.
+    if into.cached_result != other.cached_result {
+        into.cached_result = None;
+    }
     into.add_self_reads(&other);
     into.returns_self_attrs.extend(other.returns_self_attrs);
     into.returns_self_attrs
@@ -425,10 +429,12 @@ fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary) {
             producer,
             shared,
             chain,
+            declared,
         } = o;
         ProtectedReturn::add(
             &mut into.returns_protected,
             producer,
+            declared,
             shared,
             ReturnStep::ITSELF,
             chain,
@@ -1025,16 +1031,22 @@ impl<'a> Extractor<'a> {
         }
         ex.build_aliases();
         ex.memo_fills = ex.memo_fills();
-        let returned = readonly::returned_values(
-            f,
-            &ex.defs,
-            &ex.live,
-            |kind| ex.derivations(kind),
-            |v| match ex.types.get(&v) {
-                Some(Val::Inst(class)) => Some(class.as_str()),
-                _ => None,
-            },
-        );
+        let class_of = |v: VarId| match ex.types.get(&v) {
+            Some(Val::Inst(class)) => Some(class.as_str()),
+            _ => None,
+        };
+        if ex.summary.is_lru_cache {
+            let module = ex.cx.module;
+            ex.summary.cached_result = readonly::cached_result(
+                f,
+                &ex.defs,
+                &ex.live,
+                |t| module.resolve_dotted(t, false),
+                class_of,
+            );
+        }
+        let returned =
+            readonly::returned_values(f, &ex.defs, &ex.live, |kind| ex.derivations(kind), class_of);
         ex.returned = returned;
         ex.summary.typed_params = (0..64u32)
             .zip(&f.params)
@@ -5590,6 +5602,7 @@ impl<'a> Extractor<'a> {
         ProtectedReturn::add(
             &mut self.summary.returns_protected,
             producer,
+            true,
             Shared::produced(deep),
             step,
             chain,

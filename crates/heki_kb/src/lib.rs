@@ -1360,6 +1360,8 @@ mod tests {
                 excluded,
             ),
             (s(&["copy.deepcopy"]), copy_sanitizer(CopyDepth::Deep)),
+            // `MUT114`: `html.escape(text).split("\n")` is a list by construction.
+            (s(&["html.escape"]), returning("builtins.str", entry(&[]))),
             (
                 // `model_copy(deep=True)` copies deeply (`heki_effect::readonly`).
                 s(&[
@@ -2594,7 +2596,8 @@ mod tests {
 
     /// A `return_type` naming a class without catalogued methods would leave the factory's
     /// result unresolved without any sign (a typo, or a class spelled another way), unless the
-    /// class itself is the fact ([`FUTURE_CLASSES`]). A call of a capitalized name is typed as
+    /// class itself is the fact ([`FUTURE_CLASSES`]) or a builtin type, whose methods the
+    /// receiver typing knows. A call of a capitalized name is typed as
     /// an instance of that name (`TypeCtx::call_result`), so a `return_type` there would be
     /// ignored: aliases such as `redis.StrictRedis` cannot be declared this way.
     #[test]
@@ -2605,7 +2608,8 @@ mod tests {
                 let methods = format!("{class}.");
                 assert!(
                     kb.entries.keys().any(|k| k.starts_with(&methods))
-                        || FUTURE_CLASSES.contains(&class.as_str()),
+                        || FUTURE_CLASSES.contains(&class.as_str())
+                        || class.starts_with("builtins."),
                     "{symbol} -> {class}"
                 );
                 let name = symbol.rsplit('.').next().unwrap_or(symbol);

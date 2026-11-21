@@ -6,7 +6,7 @@ use crate::{
     split_last_dot,
 };
 use heki_ast::Span;
-use heki_diagnostics::Diagnostic;
+use heki_diagnostics::{Certainty, Diagnostic};
 use heki_effect::readonly::{self, Derivation};
 use heki_effect::{
     AttrKeyPath, BoundCallee, CONTAINER_MUTATORS, CacheEvent, CacheFlow, CallHop, CallSite, Callee,
@@ -15,7 +15,7 @@ use heki_effect::{
     TypedFieldWriteSite, Val, WriteKind, attr_writes, self_attr_writes,
 };
 use heki_env::HekiConfig;
-use heki_ir::walk::{Budget, Visit, reach};
+use heki_ir::walk::{Budget, FnShape, Visit, reach};
 use heki_ir::{BlockId, FnIndex, Inst, InstKind, IrFunction, VarId};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{BTreeMap, BTreeSet};
@@ -2158,15 +2158,19 @@ struct Ro {
     /// How the function got the value from the producer: the call of a function that returns
     /// it (a wrapper), then the wrapper's calls down to the producer (empty: a direct call).
     via: Vec<CallHop>,
+    /// `producer` is declared in `readonly-returns` (`MUT202`), not an `@lru_cache` function
+    /// (`MUT114`).
+    declared: bool,
 }
 
 impl Ro {
-    fn new(producer: String, shared: Shared, via: Vec<CallHop>) -> Option<Self> {
+    fn new(producer: String, declared: bool, shared: Shared, via: Vec<CallHop>) -> Option<Self> {
         shared.any().then_some(Self {
             producer,
             deep: shared.elements,
             shallow_copy: !shared.object,
             via,
+            declared,
         })
     }
 
@@ -2191,6 +2195,7 @@ impl Ro {
             deep: shared.elements,
             shallow_copy: !shared.object,
             via: named.via.clone(),
+            declared: named.declared,
         }
     }
 
@@ -2198,6 +2203,7 @@ impl Ro {
     fn derive(&self, step: ReturnStep) -> Option<Self> {
         Self::new(
             self.producer.clone(),
+            self.declared,
             step.apply(self.shared()),
             self.via.clone(),
         )
@@ -2368,7 +2374,7 @@ pub(crate) fn mut202(
     returns: &ReadOnlyReturns,
     out: &mut Vec<Diagnostic>,
 ) {
-    if !cx.enabled("MUT202", unit) {
+    if !cx.enabled("MUT202", unit) && !cx.enabled("MUT114", unit) {
         return;
     }
     let tcx = TypeCtx::new(&unit.input, cx.decls, cx.kb);
@@ -2393,6 +2399,45 @@ struct Mut202Fn<'a> {
     ro: FxHashMap<VarId, Ro>,
     /// The function's call sites in the index, every role (built on the first need).
     sites: std::cell::OnceCell<Vec<&'a CallSite>>,
+    /// The cached function whose result each variable is on every path ([`Self::must_results`],
+    /// built on the first need).
+    cached: std::cell::OnceCell<FxHashMap<VarId, MustResult<'a>>>,
+    /// The function's tables of definitions and block order (built on the first need).
+    shape: std::cell::OnceCell<FnShape<'a>>,
+}
+
+/// The passes of [`Mut202Fn::must_results`] before it gives up.
+const MUST_RESULT_PASSES: usize = 64;
+
+/// The cached function whose result a variable is on every path (`MUT114`'s identity premise).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MustResult<'k> {
+    /// No value reaches it yet.
+    Unset,
+    /// On every path, the result of a direct call of this cached function.
+    Of(&'k FuncKey),
+    /// Something else on some path.
+    Other,
+}
+
+impl MustResult<'_> {
+    fn join(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Unset, x) | (x, Self::Unset) => x,
+            (Self::Of(a), Self::Of(b)) if a == b => self,
+            _ => Self::Other,
+        }
+    }
+}
+
+/// How an instruction changes its operand in place, for `MUT114`'s claim.
+enum Change<'i> {
+    /// `x[k] = v`, `del x[k]`.
+    Item,
+    /// `x.append(...)`.
+    Method(&'i str),
+    /// `x += y`.
+    InPlace(heki_ir::BinOpKind),
 }
 
 impl<'a> Mut202Fn<'a> {
@@ -2414,7 +2459,117 @@ impl<'a> Mut202Fn<'a> {
             types: tcx.infer(f),
             ro: FxHashMap::default(),
             sites: std::cell::OnceCell::new(),
+            cached: std::cell::OnceCell::new(),
+            shape: std::cell::OnceCell::new(),
         }
+    }
+
+    fn shape(&self) -> &FnShape<'a> {
+        self.shape.get_or_init(|| FnShape::new(self.f))
+    }
+
+    /// The cached function whose result each variable is on every path: a direct call of one
+    /// project function with a [`heki_effect::CachedResult`], through copies, and through phis
+    /// whose every input is a result of the same function. An optimistic fixpoint: a variable
+    /// starts unset and only moves down (unset, then one function, then other), so a loop
+    /// passing the value around keeps it. In reverse postorder each pass carries the values
+    /// across one more back edge, so the passes follow the nesting of loops, which Python limits
+    /// to 20 blocks; past [`MUST_RESULT_PASSES`] no variable is known.
+    fn must_results(&self) -> &FxHashMap<VarId, MustResult<'a>> {
+        self.cached.get_or_init(|| {
+            let f = self.f;
+            let defined: FxHashSet<VarId> = f
+                .blocks
+                .iter()
+                .flat_map(|b| {
+                    b.phis
+                        .iter()
+                        .map(|p| p.dst)
+                        .chain(b.insts.iter().filter_map(|i| i.kind.dst()))
+                })
+                .collect();
+            // A variable no instruction or phi defines (a parameter) is no cached result.
+            let mut state: FxHashMap<VarId, MustResult<'a>> = defined
+                .into_iter()
+                .map(|v| (v, MustResult::Unset))
+                .collect();
+            let get = |state: &FxHashMap<VarId, MustResult<'a>>, v: VarId| {
+                state.get(&v).copied().unwrap_or(MustResult::Other)
+            };
+            let rpo = self.shape().rpo();
+            let converged = (0..MUST_RESULT_PASSES).any(|_| {
+                let mut changed = false;
+                for &bb in rpo {
+                    let block = f.block(bb);
+                    for phi in &block.phis {
+                        let joined = phi
+                            .incoming
+                            .iter()
+                            .filter(|(_, v)| *v != phi.dst)
+                            .fold(MustResult::Unset, |acc, (_, v)| acc.join(get(&state, *v)));
+                        changed |= state.insert(phi.dst, joined) != Some(joined);
+                    }
+                    for inst in &block.insts {
+                        let Some(dst) = inst.kind.dst() else {
+                            continue;
+                        };
+                        let value = match &inst.kind {
+                            InstKind::Copy { src, .. } => get(&state, *src),
+                            _ => self
+                                .cached_callee(inst)
+                                .map_or(MustResult::Other, MustResult::Of),
+                        };
+                        changed |= state.insert(dst, value) != Some(value);
+                    }
+                }
+                !changed
+            });
+            // Past the limit no variable is known.
+            state.retain(|_, _| converged);
+            state
+        })
+    }
+
+    /// The one project function the call instruction `inst` runs, when a `functools` cache
+    /// keeps its results ([`heki_effect::CachedResult`]).
+    fn cached_callee(&self, inst: &'a Inst) -> Option<&'a FuncKey> {
+        let shape = self.shape();
+        let call = site_call(&|v| shape.inst(v), self.function_sites(), inst, false)?;
+        let callees = call.site?.project_callees();
+        let bc = callees.first().filter(|_| callees.len() == 1)?;
+        let summary = self.cx.index.summary(&bc.callee)?;
+        summary.cached_result.is_some().then_some(&bc.callee)
+    }
+
+    /// `MUT114`'s exact claim at `inst`: it changes in place the list, dict, or set that a cached
+    /// function returned, the same object on every path. The cached function and its result.
+    fn changes_cached_result(
+        &self,
+        inst: &'a Inst,
+    ) -> Option<(&'a FuncKey, heki_effect::CachedResult)> {
+        let (operand, change) = match &inst.kind {
+            InstKind::SubscriptStore { obj, .. } | InstKind::SubscriptDelete { obj, .. } => {
+                (*obj, Change::Item)
+            }
+            InstKind::MethodCall { recv, method, .. } => (*recv, Change::Method(method)),
+            InstKind::BinOp {
+                lhs,
+                op,
+                in_place: true,
+                ..
+            } => (*lhs, Change::InPlace(*op)),
+            _ => return None,
+        };
+        let MustResult::Of(key) = self.must_results().get(&operand).copied()? else {
+            return None;
+        };
+        let cached = self.cx.index.summary(key)?.cached_result?;
+        let changes = match change {
+            Change::Item => cached.kind.takes_item_stores(),
+            Change::Method(m) => cached.kind.mutator(m),
+            Change::InPlace(op) => cached.kind.in_place_op(op),
+        };
+        changes.then_some((key, cached))
     }
 
     /// The function's call sites in the index, every role.
@@ -2477,17 +2632,18 @@ impl<'a> Mut202Fn<'a> {
     /// `@lru_cache` function, or a project function that returns one's value (its summary's
     /// `returns_protected`), reached through the call at `span`.
     fn producer(&self, callee: &Callee, span: Span) -> Option<Ro> {
-        let direct =
-            |producer: String, deep: bool| Ro::new(producer, Shared::produced(deep), vec![]);
+        let direct = |producer: String, declared: bool, deep: bool| {
+            Ro::new(producer, declared, Shared::produced(deep), vec![])
+        };
         match callee {
             Callee::Project(keys, _) => keys.iter().find_map(|k| {
                 let fqn = k.fqn();
                 let summary = self.cx.index.summary(k);
                 if summary.is_some_and(|s| s.is_lru_cache) {
-                    return direct(fqn, true);
+                    return direct(fqn, false, true);
                 }
                 if let Some(d) = self.returns.producers.deep_for(&fqn, &k.qualname) {
-                    return direct(fqn, d);
+                    return direct(fqn, true, d);
                 }
                 let r = summary?.returns_protected.as_ref()?;
                 let mut via = vec![CallHop {
@@ -2497,13 +2653,13 @@ impl<'a> Mut202Fn<'a> {
                     path: self.unit.input.path.clone(),
                 }];
                 via.extend(heki_effect::owned_chain(&r.chain));
-                Ro::new(r.producer.clone(), r.shared, via)
+                Ro::new(r.producer.clone(), r.declared, r.shared, via)
             }),
             Callee::External(sym) => self
                 .returns
                 .producers
                 .deep_for(sym, sym)
-                .and_then(|d| direct(sym.clone(), d)),
+                .and_then(|d| direct(sym.clone(), true, d)),
             Callee::TooMany | Callee::Unresolved => None,
         }
     }
@@ -2533,7 +2689,7 @@ impl<'a> Mut202Fn<'a> {
                     };
                     let (fqn, qualname) = class.member(attr);
                     if let Some(deep) = self.returns.producers.deep_for(&fqn, &qualname) {
-                        return Ro::new(fqn, Shared::produced(deep), vec![]);
+                        return Ro::new(fqn, true, Shared::produced(deep), vec![]);
                     }
                 }
                 // A property getter that returns a read-only producer's value.
@@ -2668,32 +2824,84 @@ impl<'a> Mut202Fn<'a> {
                 if let Some(r) = hit
                     && reported.insert(inst.span)
                 {
-                    // A value from a wrapper: the wrapper called here, then the hops down to the
-                    // producer, then the hop to the mutating helper.
-                    let through = r
-                        .via
-                        .first()
-                        .map(|h| format!(" through `{}`", h.callee))
-                        .unwrap_or_default();
-                    let mut related = r.via.clone();
-                    related.extend(chain);
-                    self.cx.emit(
-                        out,
-                        "MUT202",
-                        self.unit,
-                        inst.span,
-                        &self.key.qualname,
-                        r.producer.clone(),
-                        format!(
-                            "`{}` mutates the shared object returned by read-only producer `{}`{through}",
-                            self.key.qualname, r.producer
-                        ),
-                        Some("change a copy (`copy.deepcopy(...)`) instead".to_owned()),
-                        &related,
-                    );
+                    self.report(out, inst, &r, chain);
                 }
             }
         }
+    }
+
+    /// Report the change `inst` makes to the shared value `r` (through the helper calls
+    /// `chain`): under `MUT202` for a declared producer, else under `MUT114`, exact when its
+    /// narrowed claim holds ([`Self::changes_cached_result`]).
+    fn report(&self, out: &mut Vec<Diagnostic>, inst: &'a Inst, r: &Ro, chain: Vec<CallHop>) {
+        // A value from a wrapper: the wrapper called here, then the hops down to the producer,
+        // then the hop to the mutating helper.
+        let through = r
+            .via
+            .first()
+            .map(|h| format!(" through `{}`", h.callee))
+            .unwrap_or_default();
+        let mut related = r.via.clone();
+        related.extend(chain.iter().cloned());
+        if r.declared {
+            self.cx.emit(
+                out,
+                "MUT202",
+                self.unit,
+                inst.span,
+                &self.key.qualname,
+                r.producer.clone(),
+                format!(
+                    "`{}` mutates the shared object returned by read-only producer `{}`{through}",
+                    self.key.qualname, r.producer
+                ),
+                Some("change a copy (`copy.deepcopy(...)`) instead".to_owned()),
+                &related,
+            );
+            return;
+        }
+        let exact = self
+            .changes_cached_result(inst)
+            .filter(|_| chain.is_empty() && r.via.is_empty());
+        let (message, help) = match exact {
+            Some((key, cached)) => (
+                format!(
+                    "`{}` changes in place the {kind} that `{}` returned; `{}` is cached by `{}`",
+                    self.key.qualname,
+                    key.qualname,
+                    key.qualname,
+                    cached.decorator.fqn(),
+                    kind = cached.kind.as_str(),
+                ),
+                format!("change a copy (`{}(...)`) instead", cached.kind.as_str()),
+            ),
+            None => (
+                format!(
+                    "`{}` mutates the shared object returned by cached function `{}`{through}",
+                    self.key.qualname, r.producer
+                ),
+                "change a copy (`copy.deepcopy(...)`) instead".to_owned(),
+            ),
+        };
+        let Some(d) = self.cx.emit(
+            out,
+            "MUT114",
+            self.unit,
+            inst.span,
+            &self.key.qualname,
+            exact.map_or_else(|| r.producer.clone(), |(key, _)| key.fqn()),
+            message,
+            Some(help),
+            &related,
+        ) else {
+            return;
+        };
+        let tier = if exact.is_some() {
+            Certainty::Exact
+        } else {
+            Certainty::Heuristic
+        };
+        d.certainty = tier.at_most(d.certainty);
     }
 
     fn violation(&self, inst: &Inst) -> (Option<Ro>, Vec<CallHop>) {

@@ -1,11 +1,12 @@
-//! `MUT202` return flow and `MUT109` `write-without-invalidation` end to end.
+//! `MUT202` and `MUT114` return flow and `MUT109` `write-without-invalidation` end to end.
 //!
-//! - `MUT202`: a function returning a read-only producer's value (or a part of it) is a producer
-//!   itself, without configuration: wrappers several levels deep and through recursion, a copy
-//!   on one path (protected) or on every path (not), attributes of deep and shallow producers,
-//!   shallow copies, a mutating method on the call result itself, external and attribute
-//!   producers, `@lru_cache` wrappers and property getters; generators, coroutines, and values
-//!   stored in an attribute are not followed.
+//! - `MUT202` (declared producers) and `MUT114` (`@lru_cache` / `@cache` functions): a function
+//!   returning a protected value (or a part of it) is a producer itself, without configuration:
+//!   wrappers several levels deep and through recursion, a copy on one path (protected) or on
+//!   every path (not), attributes of deep and shallow producers, shallow copies, a mutating
+//!   method on the call result itself, external and attribute producers, cached wrappers and
+//!   property getters; generators, coroutines, and values stored in an attribute are not
+//!   followed.
 //! - `MUT109`: writes to `invalidation` targets (direct, through an alias, through private
 //!   helpers) must reach an invalidator on every normal path, directly or through a helper
 //!   that announces on all of its paths; not before the write, not only on one branch, not
@@ -378,7 +379,7 @@ fn mut202_follows_protected_values_through_returns() {
         .write("pkg/graph.py", GRAPH)
         .write("pkg/readers.py", READERS)
         .write("pkg/cached.py", CACHED);
-    let diags = diagnostics(&p, &["--select", "MUT202"]);
+    let diags = diagnostics(&p, &["--select", "MUT202,MUT114"]);
     let (r, c) = ("pkg/readers.py", "pkg/cached.py");
     // Not reported: a deep copy of a wrapper's value (`reader_ok`), a wrapper that copies on
     // every path, an element of a shallow producer's value, a shallow copy's own attribute
@@ -392,9 +393,9 @@ fn mut202_follows_protected_values_through_returns() {
     assert_eq!(
         found(&diags),
         vec![
-            d(c, 14, "MUT202", "lru_wrapper"),
-            d(c, 27, "MUT202", "Holder.via_property"),
-            d(c, 49, "MUT202", "unpacked_wrapper"),
+            d(c, 14, "MUT114", "lru_wrapper"),
+            d(c, 27, "MUT114", "Holder.via_property"),
+            d(c, 49, "MUT114", "unpacked_wrapper"),
             d(r, 20, "MUT202", "reader"),
             d(r, 37, "MUT202", "two_levels"),
             d(r, 47, "MUT202", "copy_on_one_path"),
@@ -429,6 +430,11 @@ fn mut202_follows_protected_values_through_returns() {
         ]
     );
     assert_eq!(by_name("lru_wrapper")["target"], "pkg.cached.load_table");
+    assert_eq!(by_name("lru_wrapper")["rule_code"], "MUT114");
+    assert_eq!(
+        by_name("lru_wrapper")["message"],
+        "`lru_wrapper` mutates the shared object returned by cached function `pkg.cached.load_table` through `pkg.cached.table`"
+    );
     assert_eq!(
         by_name("external_wrapper")["target"],
         "settings_lib.get_settings"
@@ -437,15 +443,16 @@ fn mut202_follows_protected_values_through_returns() {
         by_name("attribute_wrapper")["target"],
         "pkg.readers.Model.fields"
     );
-    // `@lru_cache` wrappers need no configuration.
+    // `@lru_cache` wrappers need no configuration; `MUT202` reports nothing without a declared
+    // producer.
     p.write("pyproject.toml", "[project]\nname = \"t\"\n");
-    let unconfigured = diagnostics(&p, &["--select", "MUT202"]);
+    let unconfigured = diagnostics(&p, &["--select", "MUT202,MUT114"]);
     assert_eq!(
         found(&unconfigured),
         vec![
-            d(c, 14, "MUT202", "lru_wrapper"),
-            d(c, 27, "MUT202", "Holder.via_property"),
-            d(c, 49, "MUT202", "unpacked_wrapper"),
+            d(c, 14, "MUT114", "lru_wrapper"),
+            d(c, 27, "MUT114", "Holder.via_property"),
+            d(c, 49, "MUT114", "unpacked_wrapper"),
         ],
         "{unconfigured:#?}"
     );

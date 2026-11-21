@@ -1034,7 +1034,14 @@ deep = true   # changes to attributes and nested containers below are forbidden 
   3. A direct attribute write or container mutation of a tagged value, or passing it in a
      parameter position the callee changes (`mutated_param_paths` minus `memo_param_paths`; for a
      shallow copy, below the attributes `changed_param_attrs` names), is reported as **`MUT202`**
-     with the call hop. Filling a memo of the shared object or initializing one of its attributes
+     with the call hop, or as **`MUT114`** when the value comes from an `@lru_cache` / `@cache`
+     function rather than a declared producer. A `MUT114` report is exact when the cached
+     function carries a `CachedResult` (a `functools` cache resolved by import, with a `maxsize`
+     other than `0`, a parameter besides `self` / `cls`, and a builtin list, dict, or set on every
+     live return, by its return annotation or by construction), the changed value is that one
+     function's result on every path (`MustResult`, an optimistic fixpoint over copies and phis:
+     a value starts unset and moves only down, to one cached function, then to anything else),
+     and the instruction changes a container of that kind in place. Filling a memo of the shared object or initializing one of its attributes
      lazily (`SelfAttrWrite::fills_memo`, `lazy_init`, on any object a parameter or a tagged value
      holds; through a call, a change of the object a memo-named attribute holds) is no change:
      what the object computes stays the same. A change below a shallow copy

@@ -1947,13 +1947,15 @@ fn rule_and_explain_commands() {
     let (code, all, _) = heki(&["rule", "--all"]);
     assert_eq!(code, 0);
     let lines: Vec<&str> = all.lines().collect();
-    assert_eq!(lines.len(), 37, "{all}");
+    assert_eq!(lines.len(), 38, "{all}");
     assert!(lines[0].starts_with("MUT101   cached-property-stale-mutation "));
     // Each rule's certainty and when it runs with no configuration.
     for (code, state) in [
         ("OPT101", "[exact     on       fix=true ]"),
         ("EFF105", "[heuristic opt-in   fix=false]"),
+        ("MUT114", "[heuristic off      fix=false]"),
         ("MUT201", "[heuristic contract fix=false]"),
+        ("MUT202", "[heuristic contract fix=false]"),
     ] {
         assert!(
             all.lines()
@@ -1984,7 +1986,7 @@ fn rule_and_explain_commands() {
     let (code, stdout, _) = heki(&["rule", "--all", "--output-format", "json"]);
     assert_eq!(code, 0);
     let rules: Vec<Value> = serde_json::from_str(&stdout).unwrap();
-    assert_eq!(rules.len(), 37);
+    assert_eq!(rules.len(), 38);
     for r in &rules {
         let doc = r["doc"].as_str().unwrap();
         // Every page has Ruff's sections, in order.
@@ -2220,7 +2222,7 @@ def flag_true():
             got,
             vec![
                 ("loops.py", 14, "OPT101", "accumulate.<locals>.run"),
-                ("shared.py", 15, "MUT202", "flag_unknown"),
+                ("shared.py", 15, "MUT114", "flag_unknown"),
             ],
             "{version}: {stdout}"
         );

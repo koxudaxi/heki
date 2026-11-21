@@ -380,19 +380,24 @@ const FILLS: &str = "from pkg.model import Registry\n\n\ndef _fill(r: Registry):
 const DRAIN: &str = "def drain(g):\n    for _ in g:\n        pass\n";
 const DRAIN_RETURNING: &str = "def drain(g):\n    return g\n";
 const HANDOFF: &str = "from pkg.drain import drain\nfrom pkg.fills import _fill\nfrom pkg.model import Registry\n\n\ndef hand(r: Registry):\n    drain(_fill(r))\n";
-// `MUT202`: a wrapper in another module starts returning a declared producer's value (or an
-// `@lru_cache` result), and stops again. `MUT109`: a helper in another module stops announcing a
-// change its caller makes, and a caller in another module stops announcing after calling a
-// public writer.
+// `MUT202` / `MUT114`: a wrapper in another module starts returning a declared producer's value
+// (or an `@lru_cache` result), and stops again. `MUT109`: a helper in another module stops
+// announcing a change its caller makes, and a caller in another module stops announcing after
+// calling a public writer.
 const CATALOG: &str = "from functools import lru_cache\n\n\nclass Catalog:\n    def entry(self, key) -> dict:\n        return {}\n\n    def fresh(self, key) -> dict:\n        return {}\n\n\n@lru_cache\ndef defaults() -> dict:\n    return {}\n";
 const LOOKUP: &str = "from pkg.catalog import Catalog, defaults\n\n\ndef find(c: Catalog, key) -> dict:\n    return c.fresh(key)\n";
 const LOOKUP_SHARED: &str = "from pkg.catalog import Catalog, defaults\n\n\ndef find(c: Catalog, key) -> dict:\n    return c.entry(key)\n";
 const LOOKUP_CACHED: &str = "from pkg.catalog import Catalog, defaults\n\n\ndef find(c: Catalog, key) -> dict:\n    return defaults()\n";
-// `MUT202`: a method of a cached object in another module fills the object's own memo, then
+// `MUT114`: a method of a cached object in another module fills the object's own memo, then
 // changes its state instead.
 const GLYPHS: &str = "from functools import lru_cache\n\n\nclass Glyphs:\n    def __init__(self):\n        self._width_cache = {}\n        self.seen = []\n\n    def width(self, ch):\n        if ch not in self._width_cache:\n            self._width_cache[ch] = len(ch)\n        return self._width_cache[ch]\n\n\n@lru_cache\ndef shared_glyphs() -> Glyphs:\n    return Glyphs()\n";
 const GLYPHS_RECORDING: &str = "from functools import lru_cache\n\n\nclass Glyphs:\n    def __init__(self):\n        self._width_cache = {}\n        self.seen = []\n\n    def width(self, ch):\n        self.seen.append(ch)\n        return len(ch)\n\n\n@lru_cache\ndef shared_glyphs() -> Glyphs:\n    return Glyphs()\n";
 const GLYPH_USER: &str = "from pkg.glyphs import shared_glyphs\n\n\ndef measure(text):\n    return sum(shared_glyphs().width(ch) for ch in text)\n\n\ndef first(text):\n    return shared_glyphs().width(text[0])\n";
+// `MUT114`: whether a cached function in another module hands out a list on every return
+// (`EffectSummary::cached_result`) decides which claim the caller's report states.
+const FIELDS: &str = "from functools import lru_cache\n\n\n@lru_cache\ndef fields(name):\n    return [name, \"id\"]\n";
+const FIELDS_MAYBE: &str = "from functools import lru_cache\n\n\n@lru_cache\ndef fields(name):\n    if not name:\n        return None\n    return [name, \"id\"]\n";
+const FIELDS_USER: &str = "from pkg.fields import fields\n\n\ndef extended(name):\n    result = fields(name)\n    result.append(\"extra\")\n    return result\n";
 const TAGGER: &str = "from pkg.catalog import Catalog\nfrom pkg.lookup import find\n\n\ndef tag(c: Catalog):\n    find(c, \"k\")[\"tag\"] = 1\n";
 const NODES: &str = "class Node:\n    def __init__(self):\n        self.kids = []\n\n\nclass Index:\n    def refresh(self):\n        self.stale = False\n\n\ndef attach(node: Node, kid):\n    node.kids.append(kid)\n";
 // A class an `invalidation` target names by its module (`pkg.dials:*.level`): written in
@@ -744,6 +749,8 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/catalog.py", CATALOG),
         ("pkg/lookup.py", LOOKUP),
         ("pkg/tagger.py", TAGGER),
+        ("pkg/fields.py", FIELDS),
+        ("pkg/fields_user.py", FIELDS_USER),
         ("pkg/glyphs.py", GLYPHS),
         ("pkg/glyph_user.py", GLYPH_USER),
         ("pkg/nodes.py", NODES),
@@ -2028,21 +2035,31 @@ fn steps_mut110() -> Vec<Step> {
     ]
 }
 
-/// `MUT202` return flow and `MUT109`: facts of a function in another module that a caller's
-/// report reads (the wrapper's protected return, the helper's announcement), and a caller's
-/// announcement after a call that a callee's report reads.
-fn steps_mut202_mut109() -> Vec<Step> {
+/// `MUT202` / `MUT114` return flow and `MUT109`: facts of a function in another module that a
+/// caller's report reads (the wrapper's protected return, the helper's announcement), and a
+/// caller's announcement after a call that a callee's report reads.
+fn steps_mut114_mut202_mut109() -> Vec<Step> {
     vec![
         Step::new(
             "a cached object's method in another module stops filling a memo and records",
             vec![save("pkg/glyphs.py", GLYPHS_RECORDING)],
         )
-        .present(&[("pkg/glyph_user.py", "MUT202")]),
+        .present(&[("pkg/glyph_user.py", "MUT114")]),
         Step::new(
             "the method fills its memo again",
             vec![save("pkg/glyphs.py", GLYPHS)],
         )
-        .absent(&[("pkg/glyph_user.py", "MUT202")]),
+        .absent(&[("pkg/glyph_user.py", "MUT114")]),
+        Step::new(
+            "a cached function in another module may return `None`: the report states less",
+            vec![save("pkg/fields.py", FIELDS_MAYBE)],
+        )
+        .present(&[("pkg/fields_user.py", "MUT114")]),
+        Step::new(
+            "the cached function returns a list on every path again",
+            vec![save("pkg/fields.py", FIELDS)],
+        )
+        .present(&[("pkg/fields_user.py", "MUT114")]),
         Step::new(
             "a wrapper in another module starts returning a declared producer's value",
             vec![save("pkg/lookup.py", LOOKUP_SHARED)],
@@ -2052,12 +2069,13 @@ fn steps_mut202_mut109() -> Vec<Step> {
             "the wrapper returns an `@lru_cache` result instead",
             vec![save("pkg/lookup.py", LOOKUP_CACHED)],
         )
-        .present(&[("pkg/tagger.py", "MUT202")]),
+        .present(&[("pkg/tagger.py", "MUT114")])
+        .absent(&[("pkg/tagger.py", "MUT202")]),
         Step::new(
             "the wrapper returns a fresh value again",
             vec![save("pkg/lookup.py", LOOKUP)],
         )
-        .absent(&[("pkg/tagger.py", "MUT202")]),
+        .absent(&[("pkg/tagger.py", "MUT202"), ("pkg/tagger.py", "MUT114")]),
         Step::new(
             "a helper in another module stops calling the invalidator",
             vec![save("pkg/announce.py", ANNOUNCE_SILENT)],
@@ -2752,7 +2770,7 @@ fn steps() -> Vec<Step> {
     steps.extend(steps_task_arguments());
     steps.extend(steps_small_displays());
     steps.extend(steps_queue_capacity());
-    steps.extend(steps_mut202_mut109());
+    steps.extend(steps_mut114_mut202_mut109());
     steps.extend(steps_module_patterns());
     steps.extend(steps_indirect_helpers());
     steps.extend(steps_inherited_writers());

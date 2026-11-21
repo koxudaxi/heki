@@ -79,7 +79,7 @@ fn semantic_fixtures_gate_json() {
         (73, "MUT201"),
         (76, "MUT201"),
         (78, "MUT201"),
-        (92, "MUT202"),
+        (92, "MUT114"),
         (108, "EFF101"),
         (143, "EFF102"),
     ]

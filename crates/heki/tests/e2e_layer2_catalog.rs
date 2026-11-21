@@ -2002,11 +2002,11 @@ fn copy_sanitizers_copy_as_deeply_as_declared() {
             SANITIZERS,
             "app/sanitized.py",
             SANITIZED,
-            "MUT202"
+            "MUT114"
         ),
         vec![d(
             16,
-            "MUT202",
+            "MUT114",
             "tp_shallow_sanitizer_keeps_the_items_shared",
             "app.sanitized.cached"
         )]
@@ -2056,18 +2056,18 @@ fn model_copy_with_update_is_a_shallow_copy() {
             "catalog_model_copy",
             "app/models.py",
             MODEL_COPIES,
-            "MUT202"
+            "MUT114"
         ),
         vec![
             d(
                 23,
-                "MUT202",
+                "MUT114",
                 "tp_update_values_are_kept_by_reference",
                 "app.models.cached"
             ),
             d(
                 32,
-                "MUT202",
+                "MUT114",
                 "tp_caller_of_the_update_copy",
                 "app.models.cached"
             ),
@@ -2623,12 +2623,12 @@ fn offloaded_callables_run_on_a_worker() {
             "catalog_worker_callbacks",
             "app/workers.py",
             WORKER_CALLBACKS,
-            "EFF101,EFF111,EFF103,EFF113,MUT202"
+            "EFF101,EFF111,EFF103,EFF113,MUT114"
         ),
         vec![
             d(
                 27,
-                "MUT202",
+                "MUT114",
                 "tp_worker_mutates_a_shared_list",
                 "app.workers.cached"
             ),
@@ -2652,7 +2652,7 @@ fn offloaded_callables_run_on_a_worker() {
             ),
             d(
                 49,
-                "MUT202",
+                "MUT114",
                 "tp_worker_method_mutates_a_shared_list",
                 "app.workers.cached"
             ),

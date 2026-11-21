@@ -54,7 +54,9 @@ pub use iterations::{
     IterationFacts, ResultIteration,
 };
 pub use ownership::{LocalOrigins, Origins, ResultOf, ReturnOrigins};
-pub use readonly::{ProtectedReturn, ReturnStep, Shared};
+pub use readonly::{
+    CacheDecorator, CachedResult, ContainerKind, ProtectedReturn, ReturnStep, Shared,
+};
 pub use report::{BoundaryReport, boundary_reports, boundary_reports_in};
 pub use resolver::{
     Callee, ClassDecl, DeclKeys, DeclPasses, FunctionDecl, ModuleDecls, ModuleLayout, ProjectDecls,
@@ -703,6 +705,10 @@ pub struct EffectSummary {
     pub is_generator: bool,
     pub is_cached_property: bool,
     pub is_lru_cache: bool,
+    /// A `functools` cache keeps the function's results, each a builtin container of one kind
+    /// (`MUT114`; a local fact, never propagated).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_result: Option<readonly::CachedResult>,
     /// Module-relative class qualname of a method (`Outer.Inner`), as in `IrFunction`.
     pub owner_class_qualname: Option<String>,
     pub decorators: Vec<String>,

@@ -166,11 +166,9 @@ Contracts declare what no type can say. Each kind is an array of tables with its
 | [`readonly-returns`](#readonly-returns) | results every caller shares | `MUT202` | heuristic |
 | [`invalidation`](#invalidation) | writes that must be announced | `MUT109` | heuristic |
 
-- These rules report nothing until a contract exists, except `MUT202`, which also protects the
-  results of `@lru_cache` / `@cache` functions.
-- Declaring a contract selects its rule, whatever its certainty. `MUT202`, which also reports
-  without a contract, is selected like the heuristic rules that are not opt-in: by its code or
-  name, or with `lint.heuristic = true`.
+- These rules report nothing until a contract exists. The results of `functools.lru_cache` /
+  `functools.cache` functions are checked without one by `MUT114` (`cached-result-mutation`).
+- Declaring a contract selects its rule, whatever its certainty.
 - Every name in a contract is a dotted pattern. It matches the full name or any dotted suffix
   (`DataModel.fields` matches `pkg.model.DataModel.fields`, not `pkg.BigModel.fields`), and it
   may be a glob (`*`, `?`, `[...]`, `{a,b}`).
