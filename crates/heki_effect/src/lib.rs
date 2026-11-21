@@ -1260,7 +1260,7 @@ pub struct CallSite {
     /// a test of state the holder changes is not reported; only computed while the rule runs,
     /// `None` when there is none).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub state_tests: Option<Box<heki_ir::walk::Answer<StateTests>>>,
+    pub state_tests: Option<Arc<heki_ir::walk::Answer<StateTests>>>,
     /// The caller certainly holds a lock at the call: what the callees use one operation at a
     /// time is kept to one task at a time (`EFF110`; only computed while the rule runs).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
