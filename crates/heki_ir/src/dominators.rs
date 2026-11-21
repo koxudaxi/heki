@@ -97,6 +97,15 @@ impl DominatorTree {
         Self { idom, subtree }
     }
 
+    /// Whether every path from the entry to `b` runs through `d` (`b` itself included): `false`
+    /// when the entry does not reach one of them.
+    pub fn dominates(&self, d: BlockId, b: BlockId) -> bool {
+        match (self.subtree[d.0 as usize], self.subtree[b.0 as usize]) {
+            (Some((start, end)), Some((at, _))) => start <= at && at < end,
+            _ => false,
+        }
+    }
+
     /// The nearest block other than `b` that dominates it.
     pub fn strict_dominator(&self, b: BlockId) -> Option<BlockId> {
         self.idom[b.0 as usize].filter(|d| *d != b)

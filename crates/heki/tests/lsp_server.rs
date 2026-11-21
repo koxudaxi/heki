@@ -362,7 +362,8 @@ fn lsp_debounce_close_and_pending_refresh_of_unopened_files() {
         .write("pkg/util.py", UTIL)
         .write("pkg/api.py", caller)
         .write("pkg/gone.py", caller)
-        .write("pkg/bad.py", caller);
+        .write("pkg/bad.py", caller)
+        .write("pkg/latin.py", caller);
     let util = uri(&p.dir.join("pkg/util.py"));
     let api = uri(&p.dir.join("pkg/api.py"));
     let mut lsp = Lsp::start(&p.dir, &["server", "--stdio"]);
@@ -388,9 +389,11 @@ fn lsp_debounce_close_and_pending_refresh_of_unopened_files() {
         stats["edited_reanalyses"], 2,
         "open + one debounced edit: {stats}"
     );
-    // Before the save, one queued caller disappears and another stops parsing.
+    // Before the save, one queued caller disappears, another stops parsing, and a third can no
+    // longer be read.
     std::fs::remove_file(p.dir.join("pkg/gone.py")).unwrap();
     p.write("pkg/bad.py", "def handler(:\n");
+    std::fs::write(p.dir.join("pkg/latin.py"), b"\xff\xfe").unwrap();
     // A save without text re-reads the open document; queued callers come from the disk.
     lsp.notify(
         "textDocument/didSave",
@@ -420,10 +423,10 @@ fn lsp_debounce_close_and_pending_refresh_of_unopened_files() {
     lsp.diagnostics(&util, <[Value]>::is_empty);
     let stats = lsp.settle();
     assert_eq!(stats["edited_reanalyses"], 3, "{stats}");
-    // `api.py`, then `util.py`: the callers that left the project (`gone.py`, `bad.py`) took
-    // their calls of `helper` with them.
+    // `api.py`, then `util.py`: the callers `gone.py` (deleted), `bad.py`, and `latin.py` (now
+    // modules heki cannot parse or read, still indexed) took their calls of `helper` with them.
     assert_eq!(stats["dependent_reanalyses"], 2, "{stats}");
-    assert_eq!(stats["indexed_files"], 3, "{stats}");
+    assert_eq!(stats["indexed_files"], 5, "{stats}");
     lsp.stop(true);
 }
 

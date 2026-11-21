@@ -22,7 +22,7 @@ struct Built {
 }
 
 fn build(rel: &str, src: &str) -> Built {
-    let (module_name, is_package) = module_name_for_path(std::path::Path::new(rel), false).unwrap();
+    let (module_name, is_package) = module_name_for_path(std::path::Path::new(rel)).unwrap();
     let parsed = parse_module(src).expect("valid python");
     let profile = RuntimeProfile::from(PythonVersion::PY315);
     let semantic = analyze_module(&parsed, src, profile);

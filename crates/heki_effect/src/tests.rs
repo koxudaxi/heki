@@ -20,7 +20,7 @@ struct Built {
 }
 
 fn build(rel: &str, src: &str) -> Built {
-    let (module_name, is_package) = module_name_for_path(Path::new(rel), false).unwrap();
+    let (module_name, is_package) = module_name_for_path(Path::new(rel)).unwrap();
     let parsed = parse_module(src).expect("valid python");
     let profile = RuntimeProfile::from(PythonVersion::PY315);
     let semantic = analyze_module(&parsed, src, profile);
@@ -1047,22 +1047,37 @@ fn cha_priority_4_limit() {
 
 #[test]
 fn module_names_and_relative_imports() {
-    let name = |p: &str, src| module_name_for_path(Path::new(p), src);
-    assert_eq!(name("pkg/mod.py", false), Some(("pkg.mod".into(), false)));
-    assert_eq!(name("pkg/__init__.py", false), Some(("pkg".into(), true)));
+    let name = |p: &str, roots: &[&str]| {
+        let layout = ModuleLayout {
+            source_roots: roots.iter().map(|r| (*r).to_owned()).collect(),
+            root_is_package: false,
+        };
+        layout.module_name(Path::new(p))
+    };
+    assert_eq!(name("pkg/mod.py", &[]), Some(("pkg.mod".into(), false)));
+    assert_eq!(name("pkg/__init__.py", &[]), Some(("pkg".into(), true)));
     assert_eq!(
-        name("src/pkg/mod.py", true),
+        name("src/pkg/mod.py", &["src"]),
         Some(("pkg.mod".into(), false))
     );
     assert_eq!(
-        name("src/pkg/mod.py", false),
+        name("src/pkg/mod.py", &[]),
         Some(("src.pkg.mod".into(), false))
     );
-    assert_eq!(name("pkg/data.txt", false), None);
+    // The deepest source root holding the file names it; a file below none keeps its path.
+    assert_eq!(
+        name("src/plugins/x/mod.py", &["src/plugins", "src"]),
+        Some(("x.mod".into(), false))
+    );
+    assert_eq!(
+        name("srcs/pkg/mod.py", &["src"]),
+        Some(("srcs.pkg.mod".into(), false))
+    );
+    assert_eq!(name("pkg/data.txt", &[]), None);
     // `heki_rules::project::rel_posix` keeps normal components only; others are refused.
-    assert_eq!(name("../escape.py", false), None);
+    assert_eq!(name("../escape.py", &[]), None);
     // A root `__init__.py` names no module.
-    assert_eq!(name("__init__.py", false), None);
+    assert_eq!(name("__init__.py", &[]), None);
 
     let rel = |m: &str, pkg, level, module| resolve_relative_module(m, pkg, level, module, false);
     assert_eq!(rel("pkg.a", false, 1, Some("sub")), Some("pkg.sub".into()));
@@ -1089,17 +1104,29 @@ fn module_names_and_relative_imports() {
 }
 
 #[test]
-fn src_layout_detection() {
+fn source_root_detection() {
     let root = std::env::temp_dir().join(format!("heki_effect_src_layout_{}", std::process::id()));
-    assert!(!detect_src_layout(&root));
+    let detected = |name: Option<&str>| detect_source_roots(&root, name);
+    assert!(detected(None).is_empty());
     // A namespace package (no `__init__.py`) under `src/` is laid out like a regular one.
     std::fs::create_dir_all(root.join("src/pkg")).unwrap();
-    assert!(detect_src_layout(&root));
+    assert_eq!(detected(None), ["src"]);
     std::fs::write(root.join("src/pkg/__init__.py"), "").unwrap();
-    assert!(detect_src_layout(&root));
+    assert_eq!(detected(None), ["src"]);
     // `src` itself a package: imported as `src.pkg`.
     std::fs::write(root.join("src/__init__.py"), "").unwrap();
-    assert!(!detect_src_layout(&root));
+    assert!(detected(None).is_empty());
+    // `python/` (maturin), and `<project-name>/` holding `<project-name>/`, in ty's order.
+    std::fs::create_dir_all(root.join("python/acme")).unwrap();
+    std::fs::create_dir_all(root.join("acme/acme")).unwrap();
+    assert_eq!(detected(None), ["python"]);
+    assert_eq!(detected(Some("acme")), ["acme", "python"]);
+    std::fs::write(root.join("acme/__init__.py"), "").unwrap();
+    assert_eq!(detected(Some("acme")), ["python"]);
+    // Without `project.name`, the project is named after its root.
+    let own = root.file_name().unwrap().to_str().unwrap();
+    std::fs::create_dir_all(root.join(own).join(own)).unwrap();
+    assert_eq!(detected(None), [own, "python"]);
     std::fs::remove_dir_all(&root).unwrap();
 }
 
