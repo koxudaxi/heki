@@ -391,6 +391,11 @@ pub struct ModuleDecls {
     /// another module rebinds it ([`ProjectDecls::object_named`]).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub aliases: BTreeMap<String, String>,
+    /// The module globals the module stores or deletes (in its body, or in a function after
+    /// `global name`) that are no runtime import, class, or function of it: its own objects,
+    /// of a value heki may not know ([`Symbol::Unknown`]), never a builtin of the same name.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub unknown_globals: BTreeSet<String>,
     /// Module globals bound to a small display that no function of the module grows
     /// (`heki_ir::ModuleConstants::displays`): other modules read them through
     /// [`ProjectDecls::small_global`].
@@ -1183,8 +1188,9 @@ pub(crate) enum Symbol<'a> {
     Class(&'a ClassDecl),
     Function(FuncKey, &'a FunctionDecl),
     Global(&'a Ty),
-    /// A name of a project module heki has no declaration for: a module global it holds no
-    /// type of, a name a star import binds. Calling it is unresolved.
+    /// A name a project module binds itself that heki has no declaration for, or a name under
+    /// one: a module global it holds no type of ([`ModuleDecls::unknown_globals`]). Calling it
+    /// is unresolved.
     Unknown,
     External,
 }
@@ -1800,7 +1806,18 @@ impl ProjectDecls {
         if let Some(t) = m.global_types.get(rest) {
             return Symbol::Global(t);
         }
-        Symbol::Unknown
+        // A name the module does not bind is bound where heki does not read the module: a
+        // submodule it does not index (a compiled extension) or a name a star import binds,
+        // which only the catalog describes.
+        let head = rest.split('.').next().unwrap_or(rest);
+        if m.unknown_globals.contains(head)
+            || m.classes.contains_key(head)
+            || m.functions.contains_key(head)
+        {
+            Symbol::Unknown
+        } else {
+            Symbol::External
+        }
     }
 
     fn class(&self, fqn: &str) -> Option<&ClassDecl> {
@@ -2313,16 +2330,32 @@ impl ProjectDecls {
     /// does not ([`Self::inherited_external`]).
     pub(crate) fn lacks_member(&self, class: &str, name: &str, kb: &EffectiveEcosystemKb) -> bool {
         let class = self.canonical(class);
-        if !self.is_project_class(&class) {
-            return false;
+        self.is_project_class(&class) && {
+            let mro = self.mro(&class);
+            self.definitions_along(&mro, &class, name, false, false, |_| true)
+                .is_empty()
+                && matches!(
+                    self.inherited_external(&mro, name, false, kb),
+                    Inherited::Absent
+                )
         }
-        let mro = self.mro(&class);
-        self.definitions_along(&mro, &class, name, false, false, |_| true)
-            .is_empty()
-            && matches!(
-                self.inherited_external(&mro, name, false, kb),
-                Inherited::Absent
-            )
+    }
+
+    /// Whether reading or calling `name` on an instance of the project class `class` runs one
+    /// of `keys`: along its MRO, the first class whose body or methods bind `name`
+    /// (`ClassDecl::members`) defines one of them, and no base outside the project comes first
+    /// (heki does not know what such a base binds). A plain class or instance attribute coming
+    /// first is read itself, and no getter runs.
+    pub(crate) fn takes_from(&self, class: &str, name: &str, keys: &[FuncKey]) -> bool {
+        for c in self.mro(class) {
+            let Some(decl) = self.class(&c) else {
+                return false;
+            };
+            if decl.members.contains(name) {
+                return self.own_method(&c, name).is_some_and(|k| keys.contains(&k));
+            }
+        }
+        false
     }
 
     /// Resolve `instance_of(class).method(...)`: MRO definition plus overriding project
@@ -2614,6 +2647,7 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
         }
     }
     decls.aliases = module_aliases(input, &decls);
+    decls.unknown_globals = unknown_globals(input, &decls);
     // Qualnames whose every definition is a property getter (a setter, a deleter, or any other
     // function with the same qualname shares its summary).
     let mut getters_only: FxHashMap<&str, bool> = FxHashMap::default();
@@ -3121,13 +3155,14 @@ fn external_defines(kb: &EffectiveEcosystemKb, base: &str, name: &str) -> bool {
 
 /// [`FunctionDecl::returns_param_attr`] of one definition: a function (not a generator or a
 /// coroutine, decorated by nothing but `staticmethod`, `classmethod`, `abstractmethod`,
-/// `override`, `property`, or `cached_property`) whose every `return` returns the same
-/// attribute of the same positional parameter, read directly or through local copies.
+/// `override`, or `property`) whose every `return` returns the same attribute of the same
+/// positional parameter, read directly or through local copies. A `cached_property` is none:
+/// a read after the first returns what the instance holds, which an assignment can replace.
 fn returned_param_attr(f: &IrFunction, decls: &ModuleDecls) -> Option<(u8, String)> {
     let plain_decorators = f.decorators.iter().all(|d| {
         let (head, _) = decorator_parts(d);
         CALL_KEEPING_DECORATORS.contains(&head.rsplit('.').next().unwrap_or(head))
-            || decls.decorator_is(d, PROPERTY_DECORATORS)
+            || decls.decorator_is(d, &["property"])
     });
     if f.kind != FunctionKind::Sync || !plain_decorators {
         return None;
@@ -3201,6 +3236,20 @@ fn module_store_counts<'i>(input: &'i ModuleInput<'_>) -> FxHashMap<&'i str, usi
         }
     }
     out
+}
+
+/// [`ModuleDecls::unknown_globals`]: the globals the module stores or deletes that are no
+/// runtime import, class, or function of it.
+fn unknown_globals(input: &ModuleInput<'_>, decls: &ModuleDecls) -> BTreeSet<String> {
+    module_store_counts(input)
+        .into_keys()
+        .filter(|name| {
+            !decls.imports.contains_key(*name)
+                && !decls.classes.contains_key(*name)
+                && !decls.functions.contains_key(*name)
+        })
+        .map(str::to_owned)
+        .collect()
 }
 
 /// [`ModuleDecls::aliases`]: the module-level names bound exactly once, not by an import
@@ -4109,8 +4158,6 @@ pub struct TypeCtx<'a> {
     ir: &'a ModuleIr,
     /// `Import` instruction span -> bound fqn (relative imports resolved).
     import_by_span: FxHashMap<Span, String>,
-    /// The names the module stores as globals: none of them is a builtin.
-    bound_globals: FxHashSet<&'a str>,
     /// Inference state shared by the functions of the module (child scopes and their parents).
     pub(crate) scopes: crate::infer::Scopes,
 }
@@ -4125,6 +4172,7 @@ static EMPTY_DECLS: ModuleDecls = ModuleDecls {
     functions: BTreeMap::new(),
     global_types: BTreeMap::new(),
     aliases: BTreeMap::new(),
+    unknown_globals: BTreeSet::new(),
     small_globals: BTreeMap::new(),
     grown_globals: BTreeSet::new(),
     rebound_globals: BTreeSet::new(),
@@ -4153,7 +4201,6 @@ impl<'a> TypeCtx<'a> {
             module_name: input.module_name.clone(),
             ir: input.ir,
             import_by_span,
-            bound_globals: module_store_counts(input).into_keys().collect(),
             scopes: crate::infer::Scopes::default(),
         }
     }
@@ -4195,7 +4242,7 @@ impl<'a> TypeCtx<'a> {
             return self.named(target);
         }
         // A global the module binds is its own, of no known value ([`Symbol::Unknown`]).
-        if self.bound_globals.contains(name) {
+        if self.module.unknown_globals.contains(name) {
             return Ty::Ref(format!("{}.{name}", self.module_name()));
         }
         Ty::Ref(format!("builtins.{name}"))
@@ -4303,6 +4350,11 @@ impl<'a> TypeCtx<'a> {
                 Symbol::Class(_) => {
                     constructor(fqn, self.project.class_targets(fqn, "__init__", self.kb))
                 }
+                // A module global the project's configuration declares is what it declares
+                // (`fetch = functools.partial(...)` listed as blocking).
+                Symbol::Unknown if self.kb.declared(fqn).is_some() => {
+                    Callee::External(fqn.to_owned())
+                }
                 Symbol::Module | Symbol::Global(_) | Symbol::Unknown => Callee::Unresolved,
                 Symbol::External => Callee::External(fqn.to_owned()),
             },
@@ -4336,7 +4388,9 @@ impl<'a> TypeCtx<'a> {
                 if self.project.is_project_class(fqn) {
                     return self.through_class(self.project.class_targets(fqn, method, self.kb));
                 }
-                let target = self.project.canonical(&format!("{fqn}.{method}"));
+                // A module alias called through its module (`aliased.nap(1)`) is the object it
+                // names, as the name imported from the module is.
+                let target = self.project.object_named(&format!("{fqn}.{method}"));
                 self.call_targets(Some(Recv::Ref(&target)))
             }
             Some(Recv::Class(class)) => {
@@ -4363,6 +4417,29 @@ impl<'a> TypeCtx<'a> {
             }
             other => other,
         }
+    }
+
+    /// Whether a read or call of `name` on `recv` runs one of `keys` whatever class `recv` is:
+    /// on every class of a union or every implementation of a protocol, as on a class of its
+    /// own ([`ProjectDecls::takes_from`]). A module function, a class object, and `super()`
+    /// dispatch on no instance: they run what they name.
+    pub(crate) fn runs_on_every_class(
+        &self,
+        recv: Option<&Val>,
+        name: &str,
+        keys: &[FuncKey],
+    ) -> bool {
+        let classes = match recv {
+            Some(Val::Union(classes)) => classes.as_slice(),
+            Some(Val::Inst(class)) => self
+                .project
+                .protocol_implementers(class)
+                .unwrap_or(std::slice::from_ref(class)),
+            Some(Val::Ref(_) | Val::Class(_) | Val::Super(_)) | None => return true,
+        };
+        classes
+            .iter()
+            .all(|class| self.project.takes_from(class, name, keys))
     }
 
     /// Resolve reading `recv.attr` (`AttrLoad`): the property getters it runs, which bind the
