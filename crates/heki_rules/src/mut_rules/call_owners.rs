@@ -1,15 +1,16 @@
 //! `MUT204` call ownership (`[[tool.heki.call-owners]]`), and the call-target matcher it shares
 //! with the `calls` effect boundary of `EFF201`.
 //!
-//! Call sites are local facts of the index (`FileSummary::call_sites`); a call in a private
-//! helper is reported at its callers by the walk `MUT203` uses (`delegated_reports`), so no
-//! summary carries call facts.
+//! Call sites are local facts of the index (`FileSummary::call_sites`, and the references that
+//! count as calls, `FileSummary::reference_sites`); a call in a private helper is reported at
+//! its callers by the walk `MUT203` uses (`delegated_reports`), so no summary carries call
+//! facts.
 
 use super::{
-    Allowance, AllowanceKeys, FunctionMatcher, MergedReports, delegated_reports, project_classes,
-    reports_unresolved,
+    Allowance, AllowanceKeys, FunctionMatcher, MergedReports, counts_references, delegated_reports,
+    project_classes, reports_unresolved,
 };
-use crate::{CheckContext, DottedPattern, RuleConfigError};
+use crate::{CheckContext, DottedPattern, RuleConfigError, SitesByCaller};
 use globset::{GlobSet, GlobSetBuilder};
 use heki_diagnostics::Diagnostic;
 use heki_effect::{CallHop, CallSite, FuncKey, SiteRole};
@@ -451,6 +452,18 @@ pub(crate) fn site_callee(site: &CallSite) -> String {
     })
 }
 
+/// What a report says `site` does with its target: hands it on (a reference site), constructs
+/// it, or calls it.
+pub(crate) fn call_verb(site: &CallSite, reference: bool) -> &'static str {
+    if reference {
+        "hands on"
+    } else if site.constructs.is_some() {
+        "constructs"
+    } else {
+        "calls"
+    }
+}
+
 /// Parameters of the caller the receiver of `site` may be (`self.m()`: bit 0); none for a
 /// construction, whose object is fresh.
 fn receiver_params(site: &CallSite) -> u64 {
@@ -470,6 +483,8 @@ pub(super) struct CallOwnerRule<'r> {
     pub(super) note: Option<&'r str>,
     /// `unresolved = "report"`: calls heki cannot tie to a class are reported (`MUT207`).
     pub(super) report_unresolved: bool,
+    /// `references = "calls"`: a reference handing a target on counts as a call of it.
+    pub(super) counts_references: bool,
 }
 
 /// `MUT204`: calls of `call-owners` targets outside their allowed callers, reported like the
@@ -513,6 +528,11 @@ pub(crate) fn mut204(
                 "call-owners",
                 &rule.name,
             )?,
+            counts_references: counts_references(
+                rule.references.as_deref(),
+                "call-owners",
+                &rule.name,
+            )?,
         });
     }
     super::unresolved::mut207(cx, &rules, out);
@@ -520,14 +540,23 @@ pub(crate) fn mut204(
         return Ok(());
     }
     let sites = cx.sites_by_caller();
-    let mut callers: Vec<&FuncKey> = sites.keys().copied().collect();
+    let references = if rules.iter().any(|r| r.counts_references) {
+        cx.reference_sites_by_caller()
+    } else {
+        SitesByCaller::default()
+    };
+    let mut callers: Vec<&FuncKey> = sites.keys().chain(references.keys()).copied().collect();
     callers.sort();
+    callers.dedup();
     let contracts = ContractCalls::new(rules.iter().map(|r| &r.targets))?;
     let mut reports = MergedReports::default();
     let mut families: Vec<Families> = rules.iter().map(|_| Families::default()).collect();
     for key in callers {
-        for &(path, site) in &sites[key] {
-            for (c, groups) in contracts.called(site) {
+        let calls = sites.get(key).into_iter().flatten().map(|s| (s, false));
+        let handed = references.get(key).into_iter().flatten().map(|s| (s, true));
+        for (&(path, site), reference) in calls.chain(handed) {
+            let called = contracts.called(site).into_iter();
+            for (c, groups) in called.filter(|(c, _)| !reference || rules[*c].counts_references) {
                 let rule = &rules[c];
                 for group in groups {
                     let (target, called) = group_texts(&rule.targets, &group, Some(site));
@@ -553,11 +582,7 @@ pub(crate) fn mut204(
                             (key.fqn(), site.span),
                             rule.note,
                             || {
-                                let what = if site.constructs.is_some() {
-                                    "constructs"
-                                } else {
-                                    "calls"
-                                };
+                                let what = call_verb(site, reference);
                                 let via = if r.chain.is_empty() {
                                     String::new()
                                 } else {

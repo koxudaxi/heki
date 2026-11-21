@@ -164,7 +164,8 @@ Contracts declare what no type can say. Each kind is an array of tables with its
 - A `Class.attr` target covers the subclasses of the class too.
 - A contract heki cannot use is a configuration error: a target that is not `Class.attr`, an
   invalid glob, call targets whose globs are too many to match together (tens of thousands of
-  complex ones), or an unknown value of `forbid`, `fresh-objects`, or `unresolved`.
+  complex ones), or an unknown value of `forbid`, `fresh-objects`, `unresolved`, or
+  `references`.
 - With `unresolved = "report"`, a contract also reports the accesses it cannot tie to a class,
   each under its own rule (`MUT205` writes, `MUT206` reads, `MUT207` calls): an attribute or
   method named like a target, accessed on an object of unknown class (an unannotated parameter,
@@ -283,6 +284,7 @@ The call side of `write-owners`.
 | `exempt-methods` | `[]` | Methods allowed to call the targets, matched as in `write-owners`. |
 | `message` | none | The help of every report of the contract. |
 | `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the calls of a method named like a target (its last name) on an object of unknown class are reported under [`MUT207`](rules/unresolved-guarded-call.md). |
+| `references` | `"ignore"` | `"ignore"` or `"calls"`: whether a reference handing a target on to be called later counts as a call of it (`[decide]`, `return decide`, `partial(decide)`, `field(default_factory=Rule)`, `obj.callback = self.decide`). |
 
 - A call is reported only when every function it may call (each candidate in the class
   hierarchy) is a target: `text.replace(...)` on a `str` is never a call of
@@ -291,6 +293,16 @@ The call side of `write-owners`.
   with a constant name are followed.
 - The targets of a contract may call each other: a call of the guarded operation is checked where
   it is made, so what the operation does inside is part of it.
+- With `references = "calls"`, a target handed on is reported where it is named ("`f` hands on
+  `pkg.core.decide`"; a name an import or the module body binds, at the statement handing it
+  on): passed to a call, stored in an attribute, an item, or a global, returned,
+  yielded, raised, or held by a display that is. A use that only names it is no reference: an
+  argument of `isinstance`, `issubclass`, another builtin that only inspects its arguments
+  (`print`, `getattr`, `type`), `super`, `typing.cast`, `typing.TypeVar`, `typing.NewType`, or
+  `contextlib.suppress`; an `except` clause, a class's bases and keywords, a default or an
+  annotation of a function; a subscript (`Optional[Rule]`), a comparison, a receiver
+  (`Rule.of(...)`), and a module binding another name to it (an import, `run = core.decide`). A
+  callable a builtin calls once per item (`sorted(xs, key=decide)`) is a call already.
 
 ### Allowed and forbidden functions
 
@@ -356,6 +368,7 @@ write-universe = ["DataModel.*", "DataModelFieldBase.*", "DataType.*"]
 | `allow-writes` | `[]` | `Class.attr` writes the boundary allows, exempt from `write-targets` too. Needs `write-universe`. |
 | `allowed-callees` | `[]` | Functions, classes, modules, or ecosystem symbols whose effects are allowed: paths through them are not followed, and calls of them are no `calls` violation. |
 | `fresh-objects` | `"allow"` | `"allow"` or `"report"`: whether a write that constructs the object it writes (as in `write-owners`) counts as a write of the boundary. |
+| `references` | `"ignore"` | `"ignore"` or `"calls"`, as for `call-owners`: whether a reference handing a `call-targets` entry on counts for `calls`. |
 | `message` | none | The help of every report of the boundary. |
 
 | `forbid` token | Forbids |

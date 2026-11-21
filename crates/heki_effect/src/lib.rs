@@ -1343,6 +1343,13 @@ pub struct FileSummary {
     /// Local (one-function) summaries before propagation.
     pub local_functions: FxHashMap<FuncKey, Arc<EffectSummary>>,
     pub call_sites: Vec<CallSite>,
+    /// The references handing a project function, method, or class on to be called later
+    /// (passed, stored, returned, yielded, or raised), each as the site of what calling the
+    /// value calls, at the load (local, IR-free; empty unless a call contract sets
+    /// `references = "calls"`, [`Contracts::references`]). None is a call: no call edge,
+    /// effect, or binding comes from them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reference_sites: Vec<CallSite>,
     /// Declarations other modules need for name and receiver resolution (shared with the
     /// project declarations built from the index).
     pub decls: Arc<ModuleDecls>,

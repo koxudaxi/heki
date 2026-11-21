@@ -27,6 +27,12 @@ release can change rules, configuration keys, diagnostics, and output formats.
 - `call-owners` takes `subclasses = false`: a class target then means constructing exactly the
   class, so raising a subclass of a guarded exception class is no `MUT204` report. `Class.method`
   targets keep covering overrides.
+- `call-owners` and effect boundaries (for `calls`) take `references = "calls"`: a reference
+  handing a target on to be called later counts as a call of it, reported as "`f` hands on
+  `pkg.core.decide`": passed to a call (`partial(decide)`, `field(default_factory=Rule)`),
+  stored, returned, yielded, raised, or held by such a display, also through an import or a
+  module alias. Uses that only name a class (`isinstance`, `except`, a base class, `cast`, a
+  typing subscript, an annotation, a comparison) are no reference.
 - `MUT206` (`unresolved-guarded-read`) and `MUT207` (`unresolved-guarded-call`): `read-owners`
   and `call-owners` contracts take `unresolved = "report"`, as `write-owners` does, and then
   report the reads of an attribute and the calls of a method named like a target on an object of

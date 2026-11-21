@@ -1,7 +1,8 @@
 //! Declared contracts that summaries depend on: the producers of `[[tool.heki.readonly-returns]]`
 //! (`MUT202`), the `[[tool.heki.invalidation]]` contracts (`MUT109`), whether any ownership
-//! contract is declared, and the names whose unresolved reads and calls the strict contracts
-//! count (`MUT206`, `MUT207`).
+//! contract is declared, the names whose unresolved reads and calls the strict contracts count
+//! (`MUT206`, `MUT207`), and whether a call contract counts references as calls (`MUT204`,
+//! `EFF201`).
 //!
 //! The rules layer implements [`Contracts`] from the configuration and hands it to
 //! [`crate::analyze_project_with`]; the index keeps it for incremental updates. Facts that depend
@@ -58,4 +59,9 @@ pub trait Contracts: Debug + Send + Sync {
     /// or class whose last name is `name`: a call of a method so named on an object of unknown
     /// class is an unresolved access (`MUT207`).
     fn unresolved_call(&self, name: &str) -> bool;
+
+    /// Whether a `call-owners` contract, or an effect boundary forbidding `calls`, counts a
+    /// reference handing one of its targets on as a call of it (`references = "calls"`): the
+    /// summaries then carry `FileSummary::reference_sites`.
+    fn references(&self) -> bool;
 }

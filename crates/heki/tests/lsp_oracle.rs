@@ -820,6 +820,77 @@ fn save(rel: &'static str, text: &str) -> Action {
     Action::Save(rel, text.to_owned())
 }
 
+/// `references = "calls"` on the `ledger` call contract and the `pure` boundary: a private
+/// helper's reference handing a guarded class on is reported at its caller in another module,
+/// and below the boundary, while no summary changes; it turns into a call and back, and the key
+/// leaves the configuration again (the summaries then carry no reference sites).
+fn steps_references() -> Vec<Step> {
+    let counting = CONFIG
+        .replace(
+            "targets = [\"Ledger.post\", \"Receipt\"]\nallowed-callers = [\"Store.*\"]\n",
+            "targets = [\"Ledger.post\", \"Receipt\"]\nallowed-callers = [\"Store.*\"]\nreferences = \"calls\"\n",
+        )
+        .replace(
+            "call-targets = [\"Ledger.post\", \"Receipt\"]\n",
+            "call-targets = [\"Ledger.post\", \"Receipt\"]\nreferences = \"calls\"\n",
+        );
+    let record = |body: &str| ACCT_OPS.replace("    return None\n", body);
+    let helper = |body: &str| PURE_OPS.replace("    return None\n", body);
+    vec![
+        Step::new(
+            "the call contracts count references as calls, and a private helper hands a guarded dataclass on",
+            vec![
+                Action::Configure(counting),
+                save("pkg/acct_ops.py", &record("    return Receipt\n")),
+            ],
+        )
+        .present(&[("pkg/accounts.py", "MUT204")]),
+        Step::new(
+            "the helper constructs it instead",
+            vec![save("pkg/acct_ops.py", &record("    return Receipt(1)\n"))],
+        )
+        .present(&[("pkg/accounts.py", "MUT204")]),
+        Step::new(
+            "the helper hands it on again, from a display",
+            vec![save("pkg/acct_ops.py", &record("    return [Receipt]\n"))],
+        )
+        .present(&[("pkg/accounts.py", "MUT204")]),
+        Step::new(
+            "a helper below the boundary hands the dataclass on",
+            vec![save("pkg/pure_ops.py", &helper("    return Receipt\n"))],
+        )
+        .present(&[("pkg/pure.py", "EFF201"), ("pkg/pure_ops.py", "MUT204")]),
+        Step::new(
+            "the helper below the boundary only tests an instance of it",
+            vec![save(
+                "pkg/pure_ops.py",
+                &helper("    return isinstance(v, Receipt)\n"),
+            )],
+        )
+        .absent(&[("pkg/pure.py", "EFF201"), ("pkg/pure_ops.py", "MUT204")]),
+        Step::new(
+            "the helper hands it on again, and the key leaves the configuration",
+            vec![
+                save("pkg/pure_ops.py", &helper("    return Receipt\n")),
+                Action::Configure(CONFIG.to_owned()),
+            ],
+        )
+        .absent(&[
+            ("pkg/accounts.py", "MUT204"),
+            ("pkg/pure.py", "EFF201"),
+            ("pkg/pure_ops.py", "MUT204"),
+        ]),
+        Step::new(
+            "the helpers are restored",
+            vec![
+                save("pkg/acct_ops.py", ACCT_OPS),
+                save("pkg/pure_ops.py", PURE_OPS),
+            ],
+        )
+        .absent(&[("pkg/accounts.py", "MUT204")]),
+    ]
+}
+
 /// Step 4: `MUT108` (opt-in, enabled in the project's configuration). The frozen-ness of a class
 /// comes from a decorator in another module, and the in-place change from a helper in a third.
 /// The helper then moves the change of the field to a function of its own and back while its
@@ -2412,6 +2483,7 @@ fn steps() -> Vec<Step> {
         .present(&[("pkg/ops.py", "MUT201"), ("pkg/ops.py", "MUT203")]),
     ]);
     steps.extend(steps_contract_extensions());
+    steps.extend(steps_references());
     steps.extend(steps_keys_fresh_strict());
     steps.extend([
         // 7. Files.

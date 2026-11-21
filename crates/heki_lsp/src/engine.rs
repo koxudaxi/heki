@@ -84,8 +84,8 @@ enum ShownAt {
 }
 
 /// The places in its text `source` of the spans of `file` that other files' diagnostics can
-/// show: its call sites (the hops of call chains) and the changes its methods make to their own
-/// containers (the methods `MUT113` names).
+/// show: its call and reference sites (the hops of call chains) and the changes its methods make
+/// to their own containers (the methods `MUT113` names).
 fn shown_places(file: &heki_effect::FileSummary, source: &str) -> Vec<SitePlace> {
     let lines = heki_ast::LineIndex::from_source(source);
     let place = |offset: u32| {
@@ -107,10 +107,14 @@ fn shown_places(file: &heki_effect::FileSummary, source: &str) -> Vec<SitePlace>
         })
         .collect();
     changes.sort();
-    let calls = file.call_sites.iter().map(|s| {
-        let callees = s.project_callees().iter().map(|bc| bc.callee.clone());
-        (s.span, ShownAt::Call(callees.collect()))
-    });
+    let calls = file
+        .call_sites
+        .iter()
+        .chain(&file.reference_sites)
+        .map(|s| {
+            let callees = s.project_callees().iter().map(|bc| bc.callee.clone());
+            (s.span, ShownAt::Call(callees.collect()))
+        });
     calls
         .chain(changes)
         .map(|(span, at)| (span, [place(span.start), place(span.end)], at))
@@ -576,8 +580,8 @@ impl Workspace {
     }
 
     /// What the callees of `path`'s functions see of them: per function, its project call
-    /// sites and constructions of project classes (without positions) and the cached
-    /// properties it invalidates.
+    /// sites and constructions of project classes, and its references handing one on (without
+    /// positions), and the cached properties it invalidates.
     fn caller_view(&self, path: &Path) -> CallerView {
         let mut out = CallerView::new();
         let Some(file) = self.index.files.get(path) else {
@@ -587,6 +591,7 @@ impl Workspace {
             .call_sites
             .iter()
             .filter(|s| !s.project_callees().is_empty() || s.constructs.is_some())
+            .chain(&file.reference_sites)
         {
             let mut site = site.clone();
             site.span = heki_ast::Span { start: 0, end: 0 };

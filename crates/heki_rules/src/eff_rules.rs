@@ -2,8 +2,8 @@
 //! `EFF107`, `EFF201` (docs/ANALYSIS_AND_KB_SPEC.md section 2.4).
 
 use crate::mut_rules::{
-    CallTargets, ContractTarget, SiteId, Subclasses, allows_fresh, group_texts,
-    helper_changes_field, initializes_itself, parse_call_targets, parse_read_targets,
+    CallTargets, ContractTarget, SiteId, Subclasses, allows_fresh, call_verb, counts_references,
+    group_texts, helper_changes_field, initializes_itself, parse_call_targets, parse_read_targets,
     parse_targets, patterns, project_classes, site_callee, write_hits,
 };
 use crate::opt_rules::Sizes;
@@ -456,6 +456,8 @@ struct Boundary<'r> {
     read_targets: Vec<ContractTarget>,
     calls: bool,
     call_targets: CallTargets,
+    /// `references = "calls"`: a reference handing a call target on counts for `calls`.
+    counts_references: bool,
     allowed_callees: Vec<DottedPattern>,
     note: Option<&'r str>,
     /// `fresh-objects = "allow"`: writes constructing the object they write are allowed.
@@ -614,6 +616,11 @@ fn boundaries<'a>(cx: &CheckContext<'a>) -> Result<Vec<Boundary<'a>>, RuleConfig
                 "effect-boundaries.call-targets",
                 Subclasses::Covered,
             )?,
+            counts_references: counts_references(
+                b.references.as_deref(),
+                "effect-boundaries",
+                &b.name,
+            )?,
             allowed_callees: patterns(&b.allowed_callees, "effect-boundaries.allowed-callees")?,
             note: b.message.as_deref(),
             allow_fresh: allows_fresh(b.fresh_objects.as_deref(), "effect-boundaries", &b.name)?,
@@ -636,6 +643,11 @@ pub(crate) fn eff201(
     }
     let boundaries = boundaries(cx)?;
     let sites = cx.sites_by_caller();
+    let references = if boundaries.iter().any(|b| b.calls && b.counts_references) {
+        cx.reference_sites_by_caller()
+    } else {
+        SitesByCaller::default()
+    };
     for unit in cx.units {
         let mut done: FxHashSet<(FuncKey, usize)> = FxHashSet::default();
         for f in &unit.input.ir.functions {
@@ -645,7 +657,7 @@ pub(crate) fn eff201(
             let key = CheckContext::key(unit, f);
             for (bi, b) in boundaries.iter().enumerate() {
                 if b.in_scope(&key) && done.insert((key.clone(), bi)) {
-                    let reach = Reach::search(cx, &sites, b, &key);
+                    let reach = Reach::search(cx, (&sites, &references), b, &key);
                     reach.report(cx, b, unit, f, &key, out);
                 }
             }
@@ -738,12 +750,15 @@ struct Reach<'a> {
 }
 
 impl<'a> Reach<'a> {
+    /// Search from `start` over the call sites of `sites.0`; `sites.1` holds the reference
+    /// sites, which count for `calls` with `references = "calls"`.
     fn search(
         cx: &CheckContext<'_>,
-        sites: &SitesByCaller<'a>,
+        sites: (&SitesByCaller<'a>, &SitesByCaller<'_>),
         b: &Boundary<'_>,
         start: &FuncKey,
     ) -> Self {
+        let (sites, references) = sites;
         let start_facts = cx
             .index
             .summary(start)
@@ -787,19 +802,7 @@ impl<'a> Reach<'a> {
                     path: path.to_path_buf(),
                 };
                 if b.calls && runs_body && !b.allows_call(site) {
-                    for group in b.call_targets.called(site) {
-                        let nodes = &reach.nodes;
-                        note(&mut reach.calls, group, (func.fqn(), site.span), || {
-                            let mut chain = chain_to(nodes, i);
-                            chain.push(hop(&func, site_callee(site)));
-                            let kind = if site.constructs.is_some() {
-                                "constructs"
-                            } else {
-                                "calls"
-                            };
-                            (chain, site.span, kind)
-                        });
-                    }
+                    reach.note_calls(b, i, &func, (path, site), false);
                 }
                 match &site.target {
                     CallTarget::Layer2 {
@@ -838,9 +841,40 @@ impl<'a> Reach<'a> {
                     }
                 }
             }
+            if b.calls && b.counts_references && runs_body {
+                let handed = references.get(&func).map_or(&[][..], Vec::as_slice);
+                for &entry in handed.iter().filter(|(_, site)| !b.allows_call(site)) {
+                    reach.note_calls(b, i, &func, entry, true);
+                }
+            }
             i += 1;
         }
         reach
+    }
+
+    /// Note the `call-targets` groups `site` of node `i` (function `func`, in `path`) calls, or
+    /// hands on (`reference`).
+    fn note_calls(
+        &mut self,
+        b: &Boundary<'_>,
+        i: usize,
+        func: &FuncKey,
+        (path, site): (&Path, &CallSite),
+        reference: bool,
+    ) {
+        for group in b.call_targets.called(site) {
+            let nodes = &self.nodes;
+            note(&mut self.calls, group, (func.fqn(), site.span), || {
+                let mut chain = chain_to(nodes, i);
+                chain.push(CallHop {
+                    caller: func.clone(),
+                    callee: site_callee(site),
+                    span: site.span,
+                    path: path.to_path_buf(),
+                });
+                (chain, site.span, call_verb(site, reference))
+            });
+        }
     }
 
     /// Writes node `i` performs: its own writes, and `IndirectHelper` writes created at its own

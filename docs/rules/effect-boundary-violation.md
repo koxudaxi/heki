@@ -40,7 +40,9 @@ count for a read.
   - `calls`: calls of the `call-targets` entries, matched as the targets of `MUT204`: a function,
     a method (with its overrides in subclasses, through bound-method aliases and `getattr` with a
     constant name), or a class (constructing it); a call is one only when every function it may
-    call is a target;
+    call is a target. With `references = "calls"`, a reached function handing a target on to be
+    called later (passed, stored, returned, yielded, raised, or held by such a display) counts
+    too, as for `MUT204` ("`render` hands on `pkg.core.decide`");
   - `mutates-params`: mutating a parameter, its attributes, or its contents. For a method,
     parameter 0 is `self`, so a method writing `self.x` mutates a parameter.
 - `write-universe` with `allow-writes` states the writes a scope may make positively: a reached
@@ -96,7 +98,9 @@ Its premises:
 - **Reaches**: each function on the chain reaches the next call. Open: one path is enough, and the
   rule reads no branch at all: a call under any test counts.
 - **Forbidden effect**: the last call has an effect `forbid` lists, as the ecosystem catalog or the
-  boundary's own entries describe it.
+  boundary's own entries describe it. With `references = "calls"`, a target handed on is one for
+  `calls`: the value is the target, and it reaches a use handing it on. Established; whether the
+  code it is handed to calls it is not part of the claim.
 
 ## Why is this bad?
 Some parts of a code base promise to be pure: rendering a model must not mutate it, domain code
@@ -159,6 +163,8 @@ No automatic fix.
   - `allow-writes`: `Class.attr` writes the boundary allows (needs `write-universe`).
   - `fresh-objects`: `"allow"` (default) or `"report"`: whether writes that construct the object
     they write count, as for `[[tool.heki.write-owners]]`.
+  - `references`: `"ignore"` (default) or `"calls"`: whether a reference handing a
+    `call-targets` entry on counts for `calls`, as for `[[tool.heki.call-owners]]`.
   - `allowed-callees`: functions, classes, modules, or ecosystem symbols whose effects are
     allowed.
   - `message`: the help of every report of the boundary.
