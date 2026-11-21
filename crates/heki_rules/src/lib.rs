@@ -1108,6 +1108,14 @@ pub(crate) struct NamePart {
 impl NamePart {
     /// A bad glob is reported with the configured `pattern` the part belongs to.
     fn new(text: &str, pattern: &str, context: &'static str) -> Result<Self, RuleConfigError> {
+        // Building a matcher compiles a regex: a plain name is compared as a string, and only text
+        // with a character the glob syntax gives a meaning is compiled (and so validated).
+        if !text.contains(['*', '?', '[', ']', '{', '}', '\\']) {
+            return Ok(Self {
+                text: text.to_owned(),
+                glob: None,
+            });
+        }
         let glob = Glob::new(text)
             .map_err(|cause| RuleConfigError::Glob {
                 pattern: pattern.to_owned(),
