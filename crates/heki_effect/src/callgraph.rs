@@ -1104,6 +1104,14 @@ fn transfer(
             t.lock_facts_mut().rebinds.extend(rebinds);
         }
     }
+
+    // e. The objects the callee uses one operation at a time, in the caller's names.
+    for (obj, u) in facts.exclusive_uses() {
+        if let Some((obj, u)) = crate::one_at_a_time::through_call(site, bc, obj, u, lead, rewrite)
+        {
+            crate::one_at_a_time::add_use(t.exclusive_uses_mut(), obj, u);
+        }
+    }
 }
 
 /// The typed writes a call hands its caller: an `IndirectHelper` site for each typed field or

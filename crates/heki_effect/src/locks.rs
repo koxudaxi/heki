@@ -138,7 +138,7 @@ impl LockAcquire {
 }
 
 /// A function's `EFF109` facts (`EffectSummary::locks`; computed only while the rule runs,
-/// `OptInFacts::locks`). Both are propagated to callers.
+/// `OptInFacts::locks`, and `rebinds` while `EFF110` does too). Both are propagated to callers.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LockFacts {
     /// The locks the function takes when its body runs, itself or through the calls that run
@@ -178,9 +178,9 @@ impl LockFacts {
 }
 
 /// Whether the function with facts `facts` may bind the name `lock` (its own names): then the
-/// lock its body takes under that name may be another object than the one the name reached
-/// at the call.
-pub(crate) fn may_rebind(facts: &crate::EffectSummary, lock: &ObjRef) -> bool {
+/// lock its body takes (or the object it uses, `EFF110`) under that name may be another object
+/// than the one the name reached at the call.
+pub fn may_rebind(facts: &crate::EffectSummary, lock: &ObjRef) -> bool {
     match lock {
         ObjRef::Param {
             param,
@@ -372,10 +372,10 @@ pub struct LockSteps {
 
 /// The lock acquisitions of `f` (the function `key`) in the blocks a run reaches, and what
 /// each instruction does to them: a `with` or an `acquire()` takes one, a `release()` gives
-/// back the acquisitions of its lock, an `ExitWith` those of its `with` statement, and binding
-/// the name of a lock (`self._lock = threading.Lock()`, [`rebound_name`]) those of that name,
-/// which no longer reaches the held object. `rebound_by_call` gives the names the calls
-/// anchored at an instruction may bind (`ProjectIndex::site_rebinds`).
+/// back the acquisitions of its lock, an `ExitWith` those of its `with` statement, and an
+/// instruction binding the name of a lock those of that name, which no longer reaches the held
+/// object: `rebound` gives the names an instruction binds ([`rebound_name`]) and its calls may
+/// bind (`ProjectIndex::site_rebinds`), empty where only whether a lock is held matters.
 pub fn lock_steps<'i>(
     tcx: &TypeCtx<'_>,
     f: &IrFunction,
@@ -383,7 +383,7 @@ pub fn lock_steps<'i>(
     types: &FxHashMap<VarId, Val>,
     def: &dyn Fn(VarId) -> Option<&'i Inst>,
     live: &Live,
-    rebound_by_call: &dyn Fn(&Inst) -> Vec<ObjRef>,
+    rebound: &dyn Fn(&Inst) -> Vec<ObjRef>,
 ) -> LockSteps {
     let class_of = |v: VarId| lock_class(tcx, f, types, def, v);
     let mut steps = LockSteps {
@@ -392,7 +392,7 @@ pub fn lock_steps<'i>(
         takes: FxHashMap::default(),
         releases: FxHashMap::default(),
     };
-    let mut rebound = Vec::new();
+    let mut bound = Vec::new();
     for bb in f.blocks.iter().filter(|b| live.block(b.id)) {
         for (i, inst) in bb.insts.iter().enumerate() {
             match lock_step(tcx, &inst.kind, def, &class_of) {
@@ -417,16 +417,15 @@ pub fn lock_steps<'i>(
                     }
                 }
                 None => {
-                    let mut names = rebound_by_call(inst);
-                    names.extend(rebound_name(tcx, f, key, types, def, &inst.kind));
+                    let names = rebound(inst);
                     if !names.is_empty() {
-                        rebound.push(((bb.id, i), names));
+                        bound.push(((bb.id, i), names));
                     }
                 }
             }
         }
     }
-    for (at, names) in rebound {
+    for (at, names) in bound {
         let given = steps.taken.released(|t| names.contains(&t.lock));
         steps.changes.insert(at, Change::Give(given));
     }

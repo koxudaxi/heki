@@ -264,6 +264,9 @@ pub struct EcosystemOverride {
     pub sync_lock_or_tx: Option<bool>,
     /// `EFF109`: an instance of this class is a lock its holder cannot take again.
     pub non_reentrant_lock: Option<bool>,
+    /// `EFF110`: tasks may not be inside this method on one object at once (`"always"`,
+    /// `"when_unbound"`, `"unbinds"`, validated by `heki_kb`).
+    pub one_at_a_time: Option<String>,
 }
 
 /// `copy-sanitizer`: the depth of the copy the call returns (`"shallow"` / `"deep"`, validated
@@ -944,6 +947,10 @@ sync-lock-or-tx = true
 [[tool.heki.ecosystem]]
 symbol = "mypkg.sync.Mutex"
 non-reentrant-lock = true
+
+[[tool.heki.ecosystem]]
+symbol = "mypkg.wire.Channel.recv"
+one-at-a-time = "always"
 "#;
         let wrapper: PyProjectWrapper = toml::from_str(raw).unwrap();
         let cfg = wrapper.tool.heki.unwrap();
@@ -990,6 +997,11 @@ non-reentrant-lock = true
                 EcosystemOverride {
                     symbol: "mypkg.sync.Mutex".into(),
                     non_reentrant_lock: Some(true),
+                    ..EcosystemOverride::default()
+                },
+                EcosystemOverride {
+                    symbol: "mypkg.wire.Channel.recv".into(),
+                    one_at_a_time: Some("always".into()),
                     ..EcosystemOverride::default()
                 },
             ]

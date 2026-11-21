@@ -211,18 +211,16 @@ fn lock_steps<'f>(
     let def = |v: VarId| defs.get(&v).copied();
     let types = tcx.infer(f);
     let live = ownership::Live::of(f, &defs);
-    let rebound_by_call = |inst: &Inst| -> Vec<ObjRef> {
-        if !anchors_call_site(&inst.kind) {
-            return Vec::new();
+    let rebound = |inst: &Inst| -> Vec<ObjRef> {
+        let own = locks::rebound_name(tcx, f, key, &types, &def, &inst.kind);
+        let mut names: Vec<ObjRef> = own.into_iter().collect();
+        if anchors_call_site(&inst.kind) {
+            let here = sites.get(&(key.qualname.clone(), inst.span));
+            names.extend((here.into_iter().flatten()).flat_map(|site| cx.index.site_rebinds(site)));
         }
-        (sites
-            .get(&(key.qualname.clone(), inst.span))
-            .into_iter()
-            .flatten())
-        .flat_map(|site| cx.index.site_rebinds(site))
-        .collect()
+        names
     };
-    let locks = locks::lock_steps(tcx, f, key, &types, &def, &live, &rebound_by_call);
+    let locks = locks::lock_steps(tcx, f, key, &types, &def, &live, &rebound);
     Steps {
         shape: FnShape::new(f),
         live,

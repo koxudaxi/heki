@@ -26,7 +26,7 @@ const CONFIG: &str = r#"[project]
 name = "t"
 
 [tool.heki.lint]
-extend-select = ["MUT101", "MUT107", "MUT108", "MUT111", "EFF107", "MUT112", "MUT113", "EFF109"]
+extend-select = ["MUT101", "MUT107", "MUT108", "MUT111", "EFF107", "MUT112", "MUT113", "EFF109", "EFF110"]
 
 [[tool.heki.write-owners]]
 name = "registry"
@@ -658,6 +658,14 @@ const LOCK_POOL_PLAIN: &str = "import threading\n\nLOCK = threading.Lock()\n\n\n
 const LOCK_USE: &str = "from pkg.lock_pool import LOCK, Pool, refill\n\n\nclass Spool(Pool):\n    def grow(self):\n        with self._lock:\n            return self.size()\n\n\ndef drain():\n    with LOCK:\n        return refill()\n";
 const LOCK_USE_FORCED: &str = "from pkg.lock_pool import LOCK, Pool, refill\n\n\nclass Spool(Pool):\n    def grow(self):\n        return self.size()\n\n\ndef drain():\n    with LOCK:\n        return refill(force=True)\n";
 
+// One reader two tasks use (`EFF110`): the coroutine in another module that reads it, and a
+// function gathering two of them.
+const FAN_READ: &str = "import asyncio\n\n\nasync def read_line(reader: asyncio.StreamReader):\n    return await reader.readline()\n";
+const FAN_READ_NOTHING: &str =
+    "import asyncio\n\n\nasync def read_line(reader: asyncio.StreamReader):\n    return b\"\"\n";
+const FAN_READ_LOCKED: &str = "import asyncio\n\nLOCK = asyncio.Lock()\n\n\nasync def read_line(reader: asyncio.StreamReader):\n    async with LOCK:\n        return await reader.readline()\n";
+const FAN_USE: &str = "import asyncio\n\nfrom pkg.fan_read import read_line\n\n\nasync def both(reader: asyncio.StreamReader):\n    return await asyncio.gather(read_line(reader), read_line(reader))\n";
+
 /// The project before the first step (every file is opened).
 fn initial_files() -> Vec<(&'static str, String)> {
     [
@@ -727,6 +735,8 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/own_sub.py", OWN_SUB),
         ("pkg/lock_pool.py", LOCK_POOL),
         ("pkg/lock_use.py", LOCK_USE),
+        ("pkg/fan_read.py", FAN_READ),
+        ("pkg/fan_use.py", FAN_USE),
         ("pkg/plot.py", RO_PLOT),
         ("pkg/loops.py", LOOPS),
         ("pkg/compat.py", COMPAT),
@@ -2653,7 +2663,7 @@ fn steps_eff109() -> Vec<Step> {
         Step::new(
             "EFF109 is no longer selected, and the helper's module changes",
             vec![
-                Action::Configure(CONFIG.replace(", \"EFF109\"]", "]")),
+                Action::Configure(CONFIG.replace(", \"EFF109\"", "")),
                 Action::Save("pkg/lock_pool.py", format!("# Pools.\n{LOCK_POOL}")),
             ],
         )
@@ -2711,6 +2721,34 @@ fn steps_eff109() -> Vec<Step> {
     ]
 }
 
+/// `EFF110`: the fan-out follows what the coroutines it starts use in another module
+/// (`EffectSummary::exclusive_uses`): the coroutine stops reading, reads again, and reads under a
+/// lock.
+fn steps_eff110() -> Vec<Step> {
+    vec![
+        Step::new(
+            "the coroutine in another module stops reading the reader",
+            vec![save("pkg/fan_read.py", FAN_READ_NOTHING)],
+        )
+        .absent(&[("pkg/fan_use.py", "EFF110")]),
+        Step::new(
+            "the coroutine reads it again",
+            vec![save("pkg/fan_read.py", FAN_READ)],
+        )
+        .present(&[("pkg/fan_use.py", "EFF110")]),
+        Step::new(
+            "the coroutine reads it under a lock",
+            vec![save("pkg/fan_read.py", FAN_READ_LOCKED)],
+        )
+        .absent(&[("pkg/fan_use.py", "EFF110")]),
+        Step::new(
+            "the coroutine reads it without the lock again",
+            vec![save("pkg/fan_read.py", FAN_READ)],
+        )
+        .present(&[("pkg/fan_use.py", "EFF110")]),
+    ]
+}
+
 fn steps() -> Vec<Step> {
     let mut steps = vec![
         // 1. The initial index.
@@ -2732,6 +2770,7 @@ fn steps() -> Vec<Step> {
             ("pkg/listing_use.py", "MUT201"),
             ("pkg/natives_use.py", "EFF101"),
             ("pkg/lock_use.py", "EFF109"),
+            ("pkg/fan_use.py", "EFF110"),
         ]),
         // 2. A sync helper two modules below an `async def` starts and stops blocking.
         Step::new(
@@ -2962,6 +3001,7 @@ fn steps() -> Vec<Step> {
     steps.extend(steps_mut112());
     steps.extend(steps_eff109());
     steps.extend(steps_mut113());
+    steps.extend(steps_eff110());
     steps.extend(steps_receiver_typing());
     steps.extend(steps_effect_index());
     steps.extend(steps_exact_effects());
@@ -3061,8 +3101,8 @@ fn steps() -> Vec<Step> {
         Step::new(
             "the configuration becomes invalid",
             vec![Action::Configure(CONFIG.replace(
-                "extend-select = [\"MUT101\", \"MUT107\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\", \"MUT113\", \"EFF109\"]",
-                "extend-select = [\"MUT101\", \"MUT107\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\", \"MUT113\", \"EFF109\"]\nselect = [\"NOPE1\"]",
+                "extend-select = [\"MUT101\", \"MUT107\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\", \"MUT113\", \"EFF109\", \"EFF110\"]",
+                "extend-select = [\"MUT101\", \"MUT107\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\", \"MUT113\", \"EFF109\", \"EFF110\"]\nselect = [\"NOPE1\"]",
             ))],
         )
         .absent(&[("pkg/svc_user.py", "EFF101")]),

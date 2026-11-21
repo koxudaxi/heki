@@ -9,11 +9,13 @@ use crate::construction::{Escape, Pos, Recorder};
 use crate::consumption::{ItemArgs, IterFlow, PerItemCall, Roots, param_iteration};
 use crate::environment::{self, AccessKind, ExternalAccess};
 use crate::guards::{self, GuardInputs, LocalGuards, per_item_bit};
+use crate::held;
 use crate::invalidation::{self, Events, FlowWrite, FuncFlow, Reach, SiteFlow};
 use crate::iterations::{
     self, BetweenSteps, ContainerChange, IteratedContainer, IteratedResult, ResultIteration,
 };
 use crate::locks::{self, LockStep, ObjRef};
+use crate::one_at_a_time;
 use crate::ownership::{self, LocalOrigins, Origins, ParamRole, ReturnOrigins, Source};
 use crate::readonly::{self, Derivation, ProtectedReturn, ReturnStep, Shared};
 use crate::resolver::{
@@ -312,6 +314,7 @@ fn absorb_class_body(into: &mut EffectSummary, body: EffectSummary) {
     into.unknown_calls |= body.unknown_calls;
     into.capacity_waits.extend(body.capacity_waits);
     into.absorb_lock_facts(body.locks);
+    into.absorb_exclusive_uses(body.exclusive.into_iter().flat_map(|uses| *uses));
     into.refresh_typed_field_writes();
 }
 
@@ -472,6 +475,7 @@ fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary) {
         .extend(other.unresolved_access_sites);
     into.capacity_waits.extend(other.capacity_waits);
     into.absorb_lock_facts(other.locks);
+    into.absorb_exclusive_uses(other.exclusive.into_iter().flat_map(|uses| *uses));
     into.refresh_typed_field_writes();
 }
 
@@ -647,6 +651,8 @@ struct Extractor<'a> {
     capacity_walks: RefCell<capacity::Walks>,
     /// The loops around each block.
     around: OnceCell<Vec<Vec<&'a NaturalLoop>>>,
+    /// The positions where the function certainly holds a lock ([`Self::lock_held_at`]).
+    lock_held: OnceCell<FxHashSet<Position>>,
     /// The blocks acquiring each lock (`locks::BlockTests::common`).
     lock_blocks: std::collections::BTreeMap<ObjRef, BTreeSet<BlockId>>,
     /// The tests of state on every path to each block (`EFF109`).
@@ -992,6 +998,7 @@ impl<'a> Extractor<'a> {
             capacity_walks: RefCell::default(),
             around: OnceCell::new(),
             lock_blocks: std::collections::BTreeMap::new(),
+            lock_held: OnceCell::new(),
             state_tests: OnceCell::new(),
             guards: LocalGuards::default(),
             summary,
@@ -2089,6 +2096,7 @@ impl<'a> Extractor<'a> {
             result_held: false,
             queues: None,
             state_tests: None,
+            under_lock: false,
             // Handing a function on does not run it: no must-fact goes through the reference.
             complete: false,
             on_every_return: OnEveryReturn::default(),
@@ -3027,7 +3035,12 @@ impl<'a> Extractor<'a> {
         self.store_escapes(kind);
         if self.opt_in.locks {
             self.lock_acquired(bb, kind, span);
+        }
+        if self.opt_in.locks || self.opt_in.exclusive {
             self.name_rebound(kind);
+        }
+        if self.opt_in.exclusive {
+            self.exclusive_use(bb, index, kind, span);
         }
         match kind {
             InstKind::AttrLoad { dst, obj, attr } if attr != "__dict__" => {
@@ -3347,6 +3360,31 @@ impl<'a> Extractor<'a> {
             let global = |name: &str| self.cx.global_fqn(name);
             locks::BlockTests::of(self.shape, dom, &def, &resolve, &global)
         })
+    }
+
+    /// An object `kind` uses one operation at a time (`EffectSummary::exclusive_uses`), unless
+    /// the function holds a lock there.
+    fn exclusive_use(&mut self, bb: BlockId, index: usize, kind: &InstKind, span: Span) {
+        if !matches!(
+            kind,
+            InstKind::MethodCall { .. } | InstKind::MakeIter { is_async: true, .. }
+        ) || !self.live.block(bb)
+        {
+            return;
+        }
+        let class_of = |v: VarId| one_at_a_time::instance_class(&self.types, v);
+        let Some((obj, method, one)) = one_at_a_time::use_step(self.cx, kind, &class_of) else {
+            return;
+        };
+        let def = |v: VarId| self.defs.get(&v).copied();
+        let Some(obj) = locks::obj_ref(self.cx, self.f, self.key, &self.types, &def, obj) else {
+            return;
+        };
+        if self.lock_held_at((bb, index)) {
+            return;
+        }
+        let u = one_at_a_time::own_use(self.key, self.path, method, one, span);
+        one_at_a_time::add_use(self.summary.exclusive_uses_mut(), obj, u);
     }
 
     /// The tests of state on every path to every acquisition of each lock
@@ -4439,6 +4477,7 @@ impl<'a> Extractor<'a> {
                         queues: None,
                         result_held: false,
                         state_tests: None,
+                        under_lock: false,
                         complete: false,
                         on_every_return: crate::OnEveryReturn::default(),
                     });
@@ -5145,6 +5184,7 @@ impl<'a> Extractor<'a> {
             } else {
                 None
             },
+            under_lock: self.opt_in.exclusive && self.lock_held_at(self.pos),
             complete,
             on_every_return,
         }
@@ -5225,6 +5265,45 @@ impl<'a> Extractor<'a> {
                 ..MustExec::default()
             }));
         }
+    }
+
+    /// Whether the function certainly holds a lock before the instruction at `at`: a `with` or
+    /// an `acquire()` of a catalog lock (`locks::lock_steps`), computed once per function.
+    fn lock_held_at(&self, at: Position) -> bool {
+        self.lock_held
+            .get_or_init(|| {
+                let def = |v: VarId| self.defs.get(&v).copied();
+                let steps =
+                    // A name bound again still leaves its lock held: only whether one is matters.
+                    locks::lock_steps(
+                        self.cx,
+                        self.f,
+                        self.key,
+                        &self.types,
+                        &def,
+                        &self.live,
+                        &|_| Vec::new(),
+                    );
+                let mut out = FxHashSet::default();
+                if steps.taken.is_empty() {
+                    return out;
+                }
+                let entry = held::at_entry(self.shape, steps.taken.len(), |b, i| {
+                    steps.changes.get(&(b, i))
+                });
+                let reached = (entry.into_iter().enumerate())
+                    .filter_map(|(b, state)| Some((BlockId(b as u32), state?)));
+                for (bb, mut state) in reached {
+                    for i in 0..self.f.block(bb).insts.len() {
+                        if !state.is_empty() {
+                            out.insert((bb, i));
+                        }
+                        state.apply(steps.changes.get(&(bb, i)));
+                    }
+                }
+                out
+            })
+            .contains(&at)
     }
 
     /// The allocation a call makes and the escapes of what it is handed, before its callees
@@ -6064,6 +6143,7 @@ fn role_site(
         queues: site.queues.clone(),
         result_held: false,
         state_tests: site.state_tests.clone(),
+        under_lock: site.under_lock,
         complete: false,
         on_every_return: crate::OnEveryReturn::default(),
     }

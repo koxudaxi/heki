@@ -429,6 +429,12 @@ EffectSummary(f) = {
                                                            // closure variable; chain, input guards,
                                                            // tests of state on the way); rebinds: the
                                                            // globals and closure variables it may bind
+    exclusive:                Option<Map<ObjRef, ExclusiveUse>>, // objects used one operation at a
+                                                           // time on the function's task (EFF110;
+                                                           // propagated, never through a call made
+                                                           // while a lock is held,
+                                                           // CallSite::under_lock; only with EFF110
+                                                           // selected, OptInFacts::exclusive)
 
     // Metadata
     is_async, is_generator, is_cached_property, is_lru_cache, owner_class_qualname, decorators,
@@ -1091,7 +1097,7 @@ deep = true   # changes to attributes and nested containers below are forbidden 
   callers, with the same initializer and allowed-context rules as `MUT201`. Reads through
   parameters without a project-class type are not seen.
 
-### 2.4 Family 2 (`EFF101`–`EFF103`, `EFF105`–`EFF107`, `EFF109`, `EFF111`, `EFF113`, `EFF201`, `DATA101`): precision, sanitizers, and aggregation
+### 2.4 Family 2 (`EFF101`–`EFF103`, `EFF105`–`EFF107`, `EFF109`, `EFF110`, `EFF111`, `EFF113`, `EFF201`, `DATA101`): precision, sanitizers, and aggregation
 0. **Must-facts and the exact tier** (`EffectSummary::must_exec`, computed only when `EFF101`,
    `EFF111`, `EFF103`, or `EFF113` runs: `OptInFacts::must_effects`):
    - Per call instruction, the path facts (`heki_ir::Paths`, with the reader of
@@ -1224,7 +1230,34 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      `mutates_self_attrs`, a tested method counting with the attributes it reads; a module global
      the holder stores; the holder's own tests do not count), or some function of the module
      releases the lock where it does not hold it (a signal between threads).
-9. **`EFF201`** (contract): a breadth-first search over the IR-free call graph from each scope
+9. **`EFF110`** (opt-in): an object allowing one operation at a time, used by tasks started
+   together.
+   - A use is a call of a Layer 2 method flagged `one_at_a_time` on an instance of its class, or
+     an `async for` over one (`__anext__`): `"always"` (`asyncio.StreamReader.readline`,
+     asyncpg's `Connection.fetch`, websockets `recv`, aiohttp `receive`) or, for an object that
+     raises only while it holds no connection, `"when_unbound"` (SQLAlchemy's `AsyncSession`
+     operations) and `"unbinds"` (`commit`, `rollback`, `close`).
+     `EffectSummary::exclusive_uses` holds the function's own uses and those of the calls running
+     in its body, in its own names (`ObjRef`, mapped through the arguments as for
+     `acquires_locks`); a use while the function certainly holds a lock (`locks::lock_steps`,
+     `held::at_entry`), and the uses of a call made while it holds one
+     (`CallSite::under_lock`), are left out.
+   - The rule (`eff_rules::fanout_exclusive`) finds the fan-outs of a function: the arguments of
+     `asyncio.gather` (also a generator expression or a comprehension unpacked into it, whose
+     element is started once per item), the display `asyncio.wait` waits on, and the
+     `create_task` / `start_soon` calls of one task group (in a loop, started once per
+     iteration). A task is a coroutine a project call creates, `asyncio.create_task` of one, a
+     call a task group starts, or a one-at-a-time call. Its callees' uses map through the call's
+     receiver, positions before any `*` unpacking, and keywords to what the fan-out function
+     names: a parameter or its attribute, a global, a closure variable, or a local variable
+     (its value before copies, or an attribute of one); a generator expression's own values are
+     per item, the variables it captures the function's, and a value the loop starting the task
+     defines is per iteration. Two tasks, or one started several times, on the same object are
+     reported. For `"when_unbound"` objects, a one-bit must-dataflow over the function (gen at
+     an operation on the object, its own, an awaited call reaching one, or a fan-out whose
+     tasks use it; kill at `"unbinds"`) leaves out a fan-out that every path reaches after a
+     use.
+10. **`EFF201`** (contract): a breadth-first search over the IR-free call graph from each scope
    function finds the shortest chain to each forbidden effect, without entering
    `allowed-callees`, other scope functions, or bodies that do not run at the call (`async def`
    bodies not awaited, generators not iterated). Its nodes are `(function, Body | Result)`: a
@@ -1361,7 +1394,8 @@ the caller's thread with a synchronous facade over an async connection), `exclud
 `copy.deepcopy`; `"shallow"`: `copy.copy`, `BaseModel.model_copy`, whose `deep=True` copies
 deeply unless `update=` hands it values by reference: `MUT202`), `return_type` (factories such as
 `sqlite3.connect`), `sync_lock_or_tx` (`threading.Lock`, `Session.begin`: `EFF106`),
-`non_reentrant_lock` (`threading.Lock`, `asyncio.Lock`: `EFF109`),
+`non_reentrant_lock` (`threading.Lock`, `asyncio.Lock`: `EFF109`), `one_at_a_time`
+(`asyncio.StreamReader.readline`, `AsyncSession.execute`: `EFF110`),
 `waits_until_done` / `done_when_awaited` (futures), `bounded_by` / `waits_while_full` (queues:
 section 2.2), `environment` (`"call"`: calling the function reads the environment the program runs
 in, `os.getenv`, `platform.system`, `importlib.util.find_spec`; `"read"`: reading the module
@@ -1382,7 +1416,7 @@ is a parameter of the calling function (`shutdown(wait=wait)`) becomes a guard: 
 switches off need the parameter to be true, which the callers decide (`close(wait=False)`). A file lists its `opaque_packages`. Projects add or
 override entries with `[[tool.heki.ecosystem]]` (`symbol`, `effects`, `async-safe`,
 `offloads-blocking-arg`, `excluded`, `copy-sanitizer`, `return-type`, `sync-lock-or-tx`,
-`non-reentrant-lock`): an
+`non-reentrant-lock`, `one-at-a-time`): an
 override sets the keys it lists and keeps the built-in entry's others. A `[[tool.heki.ecosystem]]`
 entry naming a project function applies to its summary (the built-in catalog never does: a
 package's own source is followed through its bodies): its `effects` are direct effects (chain: the function itself),
