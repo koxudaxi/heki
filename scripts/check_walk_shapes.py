@@ -10,7 +10,8 @@ in one function is placed three ways (a function, a method, and a module body) a
 largest n whose function the IR budget still models: n doubles, then bisects, with
 `heki assumptions --json` telling a modeled function from an unmodeled one, so a change to the
 builder moves the size with it. A family spread over a project (a wide class hierarchy, a chain
-of private helpers) has a fixed size.
+of private helpers) has a fixed size, and so has a family in one function whose cost already
+shows at a smaller size, where the walks it does not gate stay cheap.
 
 Each shape is checked with every rule selected and one contract of each kind naming the classes
 and functions the shapes define, through `heki check` and through the `--watch` engine. The cost
@@ -105,14 +106,6 @@ KNOWN_OVER: dict[tuple[str, str], str] = {
     "block",
     ("reverse_chain_in_loop", "module"): "dense alias passes take one pass per link of a chain "
     "laid against block order (`grown_vars`, `aliases`)",
-    **{
-        (family, p): "MUT202 lists each function's call sites by a scan of the file's "
-        "(`Mut202Fn::function_sites`) and looks up each call's site in a scan of the function's "
-        "(`mut_rules::site_call`), and the bound of each generator expression's loop indexes its "
-        "creator again (`facts::refine_round`)"
-        for family in ("cell_reads", "cell_reads_of_several_names")
-        for p in ("function", "method")
-    },
     ("wide_hierarchy", "project"): "each method call walks the whole subclass family of its "
     "receiver's class (`ProjectDecls::definitions`)",
     ("callers_of_one_helper", "project"): "MUT201 walks the helper's callers again per caller",
@@ -329,7 +322,12 @@ def attribute_chain(n: int) -> Body:
     return Body(("p",), [*lines, f"return a{n}"])
 
 
-CELL_TYPE = "dict[str, list[tuple[Base, Base, Base]]]"
+# The declared type of the cell families' names: a wide container, so that joining the values bound
+# to a cell costs more than the rest of the work per binding, and the families show a quadratic
+# join at a size where the walks they do not gate stay cheap.
+CELL_TYPE = f"dict[str, list[tuple[{', '.join(['Base'] * 16)}]]]"
+# The size of the cell families.
+CELL_BINDINGS = 1024
 
 
 def cell_reads(n: int) -> Body:
@@ -384,7 +382,8 @@ class Family:
     body: Callable[[int], Body] | None = None
     project: Callable[[int], str] | None = None
     placements: tuple[str, ...] = PLACED
-    # The size of a project family.
+    # The size of a project family, or of a family in one function whose cost shows at a smaller
+    # size than the largest the IR budget models (0: that largest size).
     size: int = 0
     # Adversarial: its budgets may be spent.
     real_code: bool = True
@@ -409,8 +408,13 @@ FAMILIES = [
     Family("with_statements", with_statements),
     Family("attribute_chain", attribute_chain),
     # A module body's names are globals, not closure cells.
-    Family("cell_reads", cell_reads, placements=("function", "method")),
-    Family("cell_reads_of_several_names", cell_reads_of_several_names, placements=("function", "method")),
+    Family("cell_reads", cell_reads, placements=("function", "method"), size=CELL_BINDINGS),
+    Family(
+        "cell_reads_of_several_names",
+        cell_reads_of_several_names,
+        placements=("function", "method"),
+        size=CELL_BINDINGS,
+    ),
     Family("lazy_init_sites", lazy_init_sites, placements=("method",)),
     Family("wide_hierarchy", project=wide_hierarchy, placements=("project",), size=4000),
     Family("helper_chain", project=helper_chain, placements=("project",), size=2000),
@@ -596,6 +600,10 @@ def main() -> int:
                 shape = (family.name, placement)
                 if family.project is not None:
                     n, failed = family.size, None
+                elif family.size:
+                    n = family.size
+                    modeled = runner.modeled(source(family, placement, n))
+                    failed = None if modeled is True else modeled or "leaves the function unmodeled"
                 else:
                     n, failed = runner.largest_modeled(family, placement)
                 text = source(family, placement, n)

@@ -165,7 +165,8 @@ $ python3 scripts/check_walk_shapes.py --heki target/release/heki
 the memory gate. A shape that lives in one function is placed in a function, a method, and a module
 body, and grown to the largest size whose function the IR budget still models, so a builder change
 moves the size with it; a shape spread over a project (a wide class hierarchy, a chain of private
-helpers) has a fixed size. Each runs with every rule and one contract of each kind, through `heki
+helpers) has a fixed size, and so has a shape in one function whose cost already shows at a smaller
+size, where the walks it does not gate stay cheap. Each runs with every rule and one contract of each kind, through `heki
 check` and the `--watch` engine, and fails when it costs more than 1 s (on the machine the limits
 were measured on, scaled to the machine running the gate by linear shapes of calls and of loops) or
 1 GiB beyond an empty module. `heki check --walk-steps <path>` (hidden) writes the steps each
