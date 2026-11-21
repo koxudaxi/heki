@@ -10,7 +10,7 @@
 use crate::{CheckArgs, OutputFormat};
 use anyhow::Result;
 use heki_ast::LineIndex;
-use heki_diagnostics::{Diagnostic, render, sort_diagnostics};
+use heki_diagnostics::{Diagnostic, Stylesheet, render, sort_diagnostics};
 use heki_effect::ModuleLayout;
 use heki_env::LintConfig;
 use heki_lsp::{CONFIG_FILES, EditOutcome, Workspace};
@@ -146,6 +146,7 @@ fn stamps_of<'p>(paths: impl IntoIterator<Item = &'p PathBuf>, earlier: &Stamps)
 struct Watcher<'a> {
     args: &'a CheckArgs,
     hot: Option<&'a ProfileData>,
+    styles: &'a Stylesheet,
 }
 
 /// A loaded workspace with what it was loaded from.
@@ -260,6 +261,7 @@ impl Watcher<'_> {
                 &all,
                 &failures,
                 crate::check::format_of(self.args.output_format),
+                self.styles,
                 &source_line
             )
         );
@@ -398,13 +400,17 @@ impl Report {
     }
 }
 
-pub(crate) fn run(args: &CheckArgs, hot: Option<&ProfileData>) -> Result<ExitCode> {
+pub(crate) fn run(
+    args: &CheckArgs,
+    hot: Option<&ProfileData>,
+    styles: &Stylesheet,
+) -> Result<ExitCode> {
     if args.fix || args.diff || args.update_baseline {
         eprintln!(
             "warning: `--watch` only reports diagnostics; `--fix`, `--diff`, and `--update-baseline` are ignored."
         );
     }
-    let w = Watcher { args, hot };
+    let w = Watcher { args, hot, styles };
     let max_runs: Option<usize> = std::env::var(MAX_RUNS_ENV)
         .ok()
         .and_then(|v| v.parse().ok());

@@ -16,6 +16,7 @@ use crate::{
     AllocId, ElemKinds, EscapeWitness, ExactTypeVal, FrameState, KindMask, UniqueState, join_unique,
 };
 use heki_ast::Span;
+use heki_ir::walk::{self, FnShape};
 use heki_ir::{
     BinOpKind, BlockId, BuiltinKind, CompareOpKind, ConstLiteral, DictEntry, Inst, InstKind,
     IrFunction, ModuleIr, Terminator, UnaryOpKind, VarId,
@@ -81,15 +82,6 @@ impl BuiltinScope {
     }
 }
 
-/// Definition point of an SSA variable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Def {
-    Param,
-    Phi(BlockId),
-    Inst(BlockId, usize),
-    Undefined,
-}
-
 /// One use of an SSA variable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum UseSite {
@@ -105,12 +97,11 @@ pub(crate) enum UseSite {
 /// Per-function facts shared by the interpreter, liveness, and the obligations.
 pub(crate) struct FnCtx<'a> {
     pub f: &'a IrFunction,
+    /// The function's tables: definitions, predecessors, reverse postorder, loops.
+    pub shape: &'a FnShape<'a>,
     pub kb: &'a EffectiveSoundnessKb,
     pub builtins: &'a BuiltinScope,
-    pub defs: Vec<Def>,
     pub uses: Vec<Vec<UseSite>>,
-    pub rpo: Vec<BlockId>,
-    pub preds: Vec<Vec<BlockId>>,
     site_base: Vec<u32>,
     captured: Vec<bool>,
     name_groups: Vec<Vec<VarId>>,
@@ -439,27 +430,19 @@ fn binop_result(op: BinOpKind, l: BuiltinKind, r: BuiltinKind) -> Option<Builtin
 
 impl<'a> FnCtx<'a> {
     pub fn new(
-        f: &'a IrFunction,
+        shape: &'a FnShape<'a>,
         kb: &'a EffectiveSoundnessKb,
         builtins: &'a BuiltinScope,
     ) -> Self {
+        let f = shape.f;
         let nvars = f.var_names.len();
-        let mut defs = vec![Def::Undefined; nvars];
         let mut uses: Vec<Vec<UseSite>> = vec![Vec::new(); nvars];
-        for p in &f.params {
-            if let Some(d) = defs.get_mut(p.var.0 as usize) {
-                *d = Def::Param;
-            }
-        }
         let mut site_base = Vec::with_capacity(f.blocks.len());
         let mut next = 0u32;
         for bb in &f.blocks {
             site_base.push(next);
             next += bb.insts.len() as u32;
             for phi in &bb.phis {
-                if let Some(d) = defs.get_mut(phi.dst.0 as usize) {
-                    *d = Def::Phi(bb.id);
-                }
                 for &(pred, v) in &phi.incoming {
                     if let Some(u) = uses.get_mut(v.0 as usize) {
                         u.push(UseSite::Phi { block: bb.id, pred });
@@ -467,11 +450,6 @@ impl<'a> FnCtx<'a> {
                 }
             }
             for (i, inst) in bb.insts.iter().enumerate() {
-                if let Some(d) = inst.kind.dst()
-                    && let Some(slot) = defs.get_mut(d.0 as usize)
-                {
-                    *slot = Def::Inst(bb.id, i);
-                }
                 for op in inst.kind.operands() {
                     if let Some(u) = uses.get_mut(op.0 as usize) {
                         u.push(UseSite::Inst(bb.id, i));
@@ -496,29 +474,13 @@ impl<'a> FnCtx<'a> {
         let name_groups = by_name.into_values().filter(|g| g.len() > 1).collect();
         Self {
             f,
+            shape,
             kb,
             builtins,
-            defs,
             uses,
-            rpo: f.rpo_blocks(),
-            preds: f.predecessors(),
             site_base,
             captured,
             name_groups,
-        }
-    }
-
-    pub fn def(&self, v: VarId) -> Def {
-        self.defs
-            .get(v.0 as usize)
-            .copied()
-            .unwrap_or(Def::Undefined)
-    }
-
-    pub fn def_inst(&self, v: VarId) -> Option<(BlockId, usize, &'a Inst)> {
-        match self.def(v) {
-            Def::Inst(bb, i) => Some((bb, i, &self.f.block(bb).insts[i])),
-            _ => None,
         }
     }
 
@@ -549,7 +511,7 @@ impl<'a> FnCtx<'a> {
     /// Builtin function called by `Call { callee_var, callee }`, if it is the real builtin.
     pub fn builtin_callee(&self, callee_var: Option<VarId>, callee: &str) -> Option<&'a str> {
         let cv = callee_var?;
-        let (_, _, inst) = self.def_inst(cv)?;
+        let inst = self.shape.inst(cv)?;
         match &inst.kind {
             InstKind::LoadGlobal {
                 name,
@@ -591,7 +553,7 @@ impl<'a> FnCtx<'a> {
         if depth > 8 {
             return None;
         }
-        let (_, _, inst) = self.def_inst(v)?;
+        let inst = self.shape.inst(v)?;
         match &inst.kind {
             InstKind::Copy { src, .. } => self.possible_kinds_depth(st, *src, depth + 1),
             InstKind::IterNext { iter, .. } => self.yielded_kinds(st, *iter),
@@ -617,7 +579,7 @@ impl<'a> FnCtx<'a> {
     fn yielded_kinds(&self, st: &FrameState, it: VarId) -> Option<KindMask> {
         // The IR makes every loop's iterator with `MakeIter`, whose one operand is the
         // iterated object.
-        let (_, _, made) = self.def_inst(it)?;
+        let made = self.shape.inst(it)?;
         let iterable =
             matches!(made.kind, InstKind::MakeIter { .. }).then(|| made.kind.operands()[0])?;
         match self.iterable_elems(st, iterable) {
@@ -1487,7 +1449,7 @@ impl<'a> FnCtx<'a> {
         if st.exact_type(v).is_some() {
             return true;
         }
-        let Def::Phi(b) = self.def(v) else {
+        let walk::Def::Phi(b, _) = self.shape.def(v) else {
             return false;
         };
         if let Some(&known) = decided.get(&(v, depth)) {
@@ -1596,10 +1558,10 @@ impl<'a> FnCtx<'a> {
         let mut converged = false;
         for _ in 0..MAX_PASSES {
             let mut changed = false;
-            for &b in &self.rpo {
+            for &b in self.shape.rpo() {
                 let bi = b.0 as usize;
                 let mut new_in: Option<FrameState> = (b.0 == 0).then(|| entry.clone());
-                for &p in &self.preds[bi] {
+                for &p in self.shape.preds(b) {
                     let pi = p.0 as usize;
                     let pb = self.f.block(p);
                     if pb.terminator.successors().contains(&b)
@@ -1653,7 +1615,8 @@ impl<'a> FnCtx<'a> {
         &'s self,
         an: &'s Analysis,
     ) -> impl Iterator<Item = (BlockId, FrameState)> + 's {
-        self.rpo
+        self.shape
+            .rpo()
             .iter()
             .filter_map(|&b| Some((b, an.block_in[b.0 as usize].clone()?)))
     }

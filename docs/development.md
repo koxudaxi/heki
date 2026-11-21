@@ -127,6 +127,10 @@ follows these rules:
   (`y = x; x = y`) can close a cycle. A walk along copies ends on such a cycle.
 - A rule that follows exception edges, one from each call that can raise, runs a dataflow over
   blocks with one fact per tracked value. It never enumerates paths.
+- A contract's targets are looked up from what an access names (the dotted suffixes of a
+  function's names, its module and qualname, its class), never tried one by one: the cost grows
+  with the sites, not with sites times targets, and the targets of every contract of a rule are
+  indexed together.
 
 The engines of `heki_ir::walk` apply these rules by construction, and every walk over IR ids,
 the call graph, or the class hierarchy goes through them:
@@ -152,8 +156,23 @@ and the linear lookups `FnShape` answers from a table (W4). `crates/heki/tests/w
 the functions it still allows, each with its reason. The test fails on a finding the list does
 not allow and on an entry that finds nothing any more, so the list only shrinks as walks move.
 
-`heki check --walk-steps <path>` (hidden) writes the steps each owner's walks took per function as
-JSON: growth across sizes of a shape is then checked without timing noise.
+```console
+$ cargo build --release
+$ python3 scripts/check_walk_shapes.py --heki target/release/heki
+```
+
+`scripts/check_walk_shapes.py` runs generated shapes on the release binary, and CI runs it next to
+the memory gate. A shape that lives in one function is placed in a function, a method, and a
+module body, and grown to the largest size whose function the IR budget still models, so a builder
+change moves the size with it; a shape spread over a project (a wide class hierarchy, a chain of
+private helpers) has a fixed size. Each runs with every rule and one contract of each kind, through
+`heki check` and the `--watch` engine, and fails when it costs more than 1 s or 1 GiB beyond an
+empty module. `heki check --walk-steps <path>` (hidden) writes the steps each owner's walks took
+per function as JSON: the gate also fails when an owner's steps grow more than 2.5 times from half
+the size to the full size, or when a budget is spent on a shape like real code. `KNOWN_OVER` in the
+script lists the shapes known to cost more, and only shrinks: a listed shape fails the gate once
+it costs under a quarter of the limits. `KNOWN_STEPS` lists, the same way, the shapes whose steps
+are known to grow faster than linearly or to spend a budget.
 
 Each bound comes with a shape in `crates/heki/tests/e2e_analysis_bounds.rs` that is slow without it,
 checked against a time limit: comparisons sharing an operand thirty deep, many `match` statements of
@@ -165,34 +184,39 @@ chain of copies, a long chain of aliases of a class with an attribute store thro
 alias, a class with thousands of subclasses whose class constant as many functions read on an
 instance, a strict `read-owners` target on such a class that as many functions read on an object of
 unknown class, as many calls of a method of such a class that a call target naming no class names, a
-module binding thousands of names each to an attribute of the one before, a function making twenty
-thousand calls of eight operands each, a helper that types nothing making thousands of strict
-accesses of one name that one caller calls as many times, a helper that types nothing reading,
-calling, or writing one strict target name thousands of times, which a caller calls as many times,
-many `is` tests each followed by a conditional expression on the tested parameter, many branches on
-a long chain of copies of one `is` test, a long chain of returned calls each handed the previous
-call's result as two of its arguments, a long chain of returned aliases each appended to one list or
-to a new list of its own, a long chain of conditional expressions each choosing between a call of
-the previous value and the value, one returned call handed the last of a long chain of item reads as
-each of its arguments, a loop carrying a long chain of assignments in reverse, a loop rotating
-aliases of many `self` containers, a chain of merges of many `self` containers, a loop over a
-generator whose body makes many calls, loops whose bodies hold many conditional blocks one after
-another, a function consuming a generator's result many times in a row, a loop over a `zip` of many
-generator results whose body makes as many calls, a loop over a `zip` of thousands of `self`
-containers whose body makes as many calls, one `zip` of thousands of `self` containers stepped by as
-many `yield from`s, a generator handed on through thousands of private wrappers, each returning the
-one before's result, an edit through the language server changing every method of a class of
-thousands of methods, methods changing a typed dict of `self` thousands of times, a method storing
-under a key after each of hundreds of tests that such a dict holds the key, and a function reading
-attributes down a chain ten thousand deep (`x = x.child`), many queue puts each after a branch that
-may build a new queue, a long chain of helpers handing a queue on, named in the opposite order of
-the calls, a class whose thousands of queue attributes each store the one before, with a put on
-each, and the path facts of a `try` body of thousands of calls whose handler returns, of loops
-nested twenty deep with a call at each depth, of a thousand loops one after another, and of a chain
-of hundreds of `and` tests of module constants, and the item origins of a chain of thousands of
-wrappers, of a list filled by appends in a thousand loops, and of a phi of sixty branches each
-choosing a different parameter, an argument handed down through thousands of functions of one
-module to the one that changes it, and thousands of reports whose call chains enter one module.
+module binding thousands of names each to an attribute of the one before, a module binding thousands
+of names each to the one before, a method returning one of thousands of copies of an attribute
+behind as many tests, a function making twenty thousand calls of eight operands each, a helper that
+types nothing making thousands of strict accesses of one name that one caller calls as many times, a
+helper that types nothing reading, calling, or writing one strict target name thousands of times,
+which a caller calls as many times, many `is` tests each followed by a conditional expression on the
+tested parameter, many branches on a long chain of copies of one `is` test, a long chain of returned
+calls each handed the previous call's result as two of its arguments, a function of twelve thousand
+calls each handed the previous call's result, with every rule selected, a long chain of returned
+aliases each appended to one list or to a new list of its own, a long chain of conditional
+expressions each choosing between a call of the previous value and the value, one returned call
+handed the last of a long chain of item reads as each of its arguments, a loop carrying a long chain
+of assignments in reverse, a loop rotating aliases of many `self` containers, a chain of merges of
+many `self` containers, a loop over a generator whose body makes many calls, loops whose bodies hold
+many conditional blocks one after another, a function consuming a generator's result many times in a
+row, a loop over a `zip` of many generator results whose body makes as many calls, a loop over a
+`zip` of thousands of `self` containers whose body makes as many calls, one `zip` of thousands of
+`self` containers stepped by as many `yield from`s, a generator handed on through thousands of
+private wrappers, each returning the one before's result, an edit through the language server
+changing every method of a class of thousands of methods, methods changing a typed dict of `self`
+thousands of times, a method storing under a key after each of hundreds of tests that such a dict
+holds the key, and a function reading attributes down a chain ten thousand deep (`x = x.child`),
+many queue puts each after a branch that may build a new queue, a long chain of helpers handing a
+queue on, named in the opposite order of the calls, a class whose thousands of queue attributes each
+store the one before, with a put on each, and the path facts of a `try` body of thousands of calls
+whose handler returns, of loops nested twenty deep with a call at each depth, of a thousand loops
+one after another, and of a chain of hundreds of `and` tests of module constants, and the item
+origins of a chain of thousands of wrappers, of a list filled by appends in a thousand loops, and of
+a phi of sixty branches each choosing a different parameter, and thousands of `call-owners` targets,
+in one contract or in as many contracts, and thousands of references to a `call-owners` target that
+a long chain of phis carries to one `return`, an argument handed down through thousands of functions
+of one module to the one that changes it, and thousands of reports whose call chains enter one
+module.
 
 A change to the IR builder, a walk, a fixpoint, or a rule's state is also run over a large
 corpus of real projects before it is merged, every run under a memory cap and a timeout. No

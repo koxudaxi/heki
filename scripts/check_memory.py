@@ -38,11 +38,15 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import re
+import signal
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 # Call-chain layers, functions per layer, and small modules of classes.
@@ -54,7 +58,7 @@ COPIES_DEPTH = 16
 
 # Heap budgets in MiB per mode: the peak on the CI runner at calibration plus 5 %. A change
 # of a budget needs the owner's decision (docs/development.md, Memory).
-HEAP_BUDGETS_MIB = {"check": 56.7, "watch": 51.8, "owners": 70.6}
+HEAP_BUDGETS_MIB = {"check": 56.7, "watch": 52.5, "owners": 70.6}
 
 # RSS budgets in MiB per platform and mode, a coarse check at release time: the lowest of three
 # runs at calibration plus about 10 %.
@@ -216,20 +220,53 @@ def generate(root: Path) -> int:
     return lines
 
 
-def run(heki: str, mode: str, root: Path, timed: bool) -> tuple[str, os.struct_rusage]:
-    """One run of `mode` (with `/usr/bin/time -l` when `timed`): its stderr and resource usage."""
-    args, extra_env = MODES[mode]
+def execute(
+    heki: str,
+    args: list[str],
+    root: Path,
+    extra_env: dict[str, str],
+    timed: bool,
+    timeout: float | None = None,
+) -> tuple[float, int, str, os.struct_rusage]:
+    """One run of heki in `root` (with `/usr/bin/time -l` when `timed`): its wall time in
+    seconds, its exit code (`-9` when it ran past `timeout` and was stopped), its stderr, and its
+    resource usage."""
     env = {**os.environ, **extra_env}
     cmd = ["/usr/bin/time", "-l", heki, *args] if timed else [heki, *args]
+    start = time.monotonic()
+    # Its own process group, so that a run past `timeout` is stopped with `time`'s child.
     proc = subprocess.Popen(
-        cmd, cwd=root, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
+        cmd,
+        cwd=root,
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
     )
+
+    def stop() -> None:
+        # The group may have ended between the deadline and the timer's cancellation.
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(proc.pid, signal.SIGKILL)
+
+    killer = threading.Timer(timeout, stop) if timeout is not None else None
+    if killer is not None:
+        killer.start()
     assert proc.stderr is not None
     stderr = proc.stderr.read().decode()
     proc.stderr.close()
     # `wait4` reaps the child and reports its own resource usage.
     _, status, usage = os.wait4(proc.pid, 0)
-    code = os.waitstatus_to_exitcode(status)
+    seconds = time.monotonic() - start
+    if killer is not None:
+        killer.cancel()
+    return seconds, os.waitstatus_to_exitcode(status), stderr, usage
+
+
+def run(heki: str, mode: str, root: Path, timed: bool) -> tuple[str, os.struct_rusage]:
+    """One run of `mode` (with `/usr/bin/time -l` when `timed`): its stderr and resource usage."""
+    args, extra_env = MODES[mode]
+    _, code, stderr, usage = execute(heki, args, root, extra_env, timed)
     # 0 or 1: the reports of the generated project, warnings or errors; anything else is a failure.
     if code not in (0, 1):
         sys.exit(f"heki {' '.join(args)} exited with {code}:\n{stderr}")

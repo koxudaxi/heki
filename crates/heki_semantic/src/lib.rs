@@ -91,6 +91,10 @@ pub struct ClassInfo {
     /// The class whose body holds this class statement directly.
     pub parent_class: Option<ClassId>,
     pub bases: Vec<String>,
+    /// A positional base is no dotted name (`with_metaclass(Meta)`, `*bases`), so `bases` leaves
+    /// it out: heki cannot name the class it evaluates to.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unnamed_bases: bool,
     /// Class keywords with the source text of their value (`metaclass=Meta`, `frozen=False`);
     /// `**kwargs` is left out.
     pub keywords: Vec<(String, String)>,
@@ -972,11 +976,13 @@ impl<'a> Analyzer<'a> {
             self.push_type_params_scope(cls.type_params.as_deref(), cls.name.as_str(), line);
 
         let mut bases = Vec::new();
+        let mut unnamed_bases = false;
         let mut keywords = Vec::new();
         if let Some(args) = &cls.arguments {
             for arg in &args.args {
-                if let Some(b) = expr_dotted_name(arg) {
-                    bases.push(b);
+                match expr_dotted_name(arg) {
+                    Some(b) => bases.push(b),
+                    None => unnamed_bases = true,
                 }
                 self.visit_expr(arg);
             }
@@ -1001,6 +1007,7 @@ impl<'a> Analyzer<'a> {
             qualname,
             parent_class,
             bases,
+            unnamed_bases,
             keywords,
             methods: Vec::new(),
             span: Span::from(cls.range),

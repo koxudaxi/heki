@@ -2,13 +2,9 @@
 
 # immutable-quadratic-concat (OPT103)
 
-Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` (slower code) · No automatic fix
+Family: Complexity Rewrites (OPT) · Exact · Enabled by default · Severity `warning` (slower code) · No automatic fix
 
 Size-dependent immutable quadratic accumulation (`bytes`/`tuple`/attr `str`).
-
-!!! note "Heuristic"
-
-    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 50 sampled reports (round 3, 2026-11-21), 92% were right about the code. See [Rule Precision](../precision.md).
 
 ## What it does
 Checks quadratic accumulation of immutable values in a loop:
@@ -28,21 +24,25 @@ no other reference. Neither are:
 
 ## What a report states
 
-A report states that an immutable value (`bytes`, a `tuple`, a `str` attribute) grows by
-concatenation on every iteration of the loop, so each iteration copies all of it.
+A report states that concatenating to an immutable value (`bytes`, a `tuple`, a `str` attribute),
+in a loop, copies all of it each time it runs.
 
 Its premises:
 
 - **Immutable type**: the value's exact type is known from its construction. Established.
-- **Loop-carried**: the result is the value of the next iteration. Established by the IR.
-- **On every iteration**: the statement runs on every iteration of the loop. Open: a statement under
-  a branch inside the loop counts.
-- **Data-sized**: the code does not fix the sizes the cost depends on (the loop's and the
-  container's) at 16 or fewer. Open: a size heki cannot bound counts as data-sized.
+- **Loop-carried**: the result is the value the next iteration starts from. Established by the IR.
+- **In a loop**: the statement is in the body of a loop. Established by the IR.
 - **Rewrite proven safe**: the help says `[safe fix: ...]`, `[proven-safe suggestion: ...]`, or
   `[proven safe; ...]`. A report whose help names a blocking obligation instead (`[not auto-fixable:
   ...]`) lacks this premise and is heuristic whatever the rule's certainty; the proven reports are
   the rule's exact tier.
+
+Not part of the claim: how many times the statement runs (one under a branch inside the loop
+counts), and how large the loop or the value is. The message claims no size and no cost estimate. A
+loop or a value that the code fixes at 16 or fewer items is not reported, since the rewrite would
+not pay off. A proven report in a loop whose trip count the code fixes at more, or caps with a
+length test every path to the loop passes, is heuristic: it is true, but a fixed count is no
+evidence either way, so the exact tier leaves it out.
 
 ## Why is this bad?
 Each concatenation copies everything accumulated so far.

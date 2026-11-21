@@ -2,13 +2,9 @@
 
 # nested-loop-equijoin (OPT113)
 
-Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` (slower code) · No automatic fix
+Family: Complexity Rewrites (OPT) · Exact · Enabled by default · Severity `warning` (slower code) · No automatic fix
 
 Size-dependent nested-loop equi-join (`for a in A: for b in B: if a.k == b.k`) -> `dict` index.
-
-!!! note "Heuristic"
-
-    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 50 sampled reports (round 3, 2026-11-21), 92% were right about the code. See [Rule Precision](../precision.md).
 
 ## What it does
 Checks nested loops that join two collections by comparing a key of each with `==`:
@@ -28,8 +24,8 @@ its first matching comparison. It does not report:
   (`if a == b: continue` in an all-pairs loop), or a comparison whose false side does work:
   an `else` / `elif` body, the failure of an `assert a == b`, a `break` / `return` on a
   mismatch, or statements that only the mismatches run because a match `break`s. They run for
-  the pairs an index would skip, so every pair is needed; statements after the `if` that every
-  pair runs do not count;
+  the pairs an index would skip, so every pair is needed. Statements after the `if` that every
+  pair runs do not stop a report, but it is then heuristic (below);
 - joins where the code fixes the size of either loop, so that the cost grows with one side
   only: a display of at most 16 items (`for b in ("x", "y")`, also through a name or a module
   constant of this or another module (`NAME`, `module.NAME`, also read in a module body) when
@@ -40,18 +36,61 @@ its first matching comparison. It does not report:
 
 ## What a report states
 
-A report states that, for every pair of items of the nested loops, the code tests an equality
-between a key of the outer item and a key of the inner item.
+A report of the rule's exact tier states that, for each item of the outer loop, the inner loop
+compares a key of the outer item with a key of the inner item and does nothing else for an inner
+item that does not match. Its message says so: "for each item of `orders`, the loop over
+`customers` compares `order.customer_id == customer.id` and does nothing else for an item that
+does not match".
 
 Its premises:
 
 - **Equality of keys**: the comparison is `==` between keys of the two items (the items, their
-  components, attributes, or constant subscripts). Established.
-- **Independent loops**: the inner iterable is not computed from the outer item. Established.
-- **Every pair**: the comparison runs for every pair. Open: a comparison under a branch of the inner
-  loop counts, and so does other work for each pair besides it.
-- **Data-sized**: the code does not fix the size of either loop at 16 or fewer. Open: a size heki
-  cannot bound counts as data-sized.
+  components, attributes, or constant subscripts). Established. Each key that the inner loop loads
+  runs no code of the project: an attribute is a plain one of an item whose class heki knows (a
+  dataclass, `attrs`, or `NamedTuple` field, a slot, or what the class body or a method stores, with
+  no property, method, other descriptor, `__getattr__`, or `__getattribute__` of that name along the
+  class's MRO or in a project subclass, every base a project class, and no metaclass heki does not
+  know), and a subscript reads a builtin container or a component of a tuple the inner loop's
+  builtin step makes. An attribute of an item of unknown class may be a property, so the report is
+  then heuristic.
+- **Steps through inputs**: each loop steps through items of the function's inputs: every source
+  of its items is a parameter, or an attribute or an item of one (`orders`, `req.rows`,
+  `sorted(customers)`), also through a list the function fills only by appending items of such a
+  source (`for row in rows: results.append((key, row))`). A call's result, a method's receiver
+  (`self.rows`), a module constant, or a display leaves it open.
+- **Idle on a mismatch**: an inner item whose key differs runs only the loads of the two keys and
+  the comparison: no statement before the test or after the `if`, no `else` or `elif`, no earlier
+  `and` operand (`b.active and a.k == b.k`), and no code of the project to advance the inner loop.
+  The inner iterable is a builtin container by its type (`customers: list[Customer]`; an annotation
+  counts, assumption R2, unless a project subclass of the container defines its own `__iter__`), a
+  display, `sorted(...)` or another builtin that builds a container, a view of a `dict`, or the
+  pieces of a `str` (with the same condition on `items` and `split`). A value of unknown type may be
+  a generator, and a generator, `map`, `filter`, or another call runs code for each item.
+- **Same collection, same keys**: the inner loop steps through the same collection on every
+  iteration of the outer loop: its iterable is bound before the outer loop, or computed inside it
+  only from values bound before it, and the outer loop does not change those values through their
+  names, every name a copy binds to them (`rows = ys` makes `ys` one): no changing method, store,
+  `del`, call that receives one (a builtin counts too when it is handed a function, as `sorted(ys,
+  key=f)` is; a method of a builtin container only stores or reads its arguments), closure that
+  captures one, `yield`, or `await`. Nor does it change the compared key of an inner item: no store
+  into or deletion of what the key loads (`b.k = ...` for the key `b.k`), and no such call or
+  closure that reaches the item or the key's object.
+
+Not part of the claim: any count or size. A loop whose trip count the code fixes or caps (a
+constant `range`, a constant slice, a display, or a length test every path to the loop passes,
+`if len(rows) > 100: raise ...`) has no report in the exact tier: one of 16 or fewer is not
+reported at all, and a larger one is no evidence either way.
+
+A report without one of these premises is heuristic, and its message says only "nested loops
+join `orders` and `customers` on `order.customer_id == customer.id`". It rests on the open
+premise that both loops are data-sized: the code does not fix the size of either loop at 16 or
+fewer, and a size heki cannot bound counts as data-sized.
+
+No message claims a size or a cost. The help names a `set` or a `dict` only for keys known to be
+hashable, and an index built before the outer loop only for an inner collection that is the same,
+with the same keys, on every outer iteration; otherwise it states the condition ("if the keys are
+hashable, ..."). For a mapping the inner loop steps through by its own keys (`for k, v in
+d.items()` with the key `k`), it says to look each outer key up in the mapping instead.
 
 ## Why is this bad?
 The inner loop runs completely for every outer element, so the join costs O(n·m) comparisons.

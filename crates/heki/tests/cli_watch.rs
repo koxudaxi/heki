@@ -182,7 +182,7 @@ fn watch_full_output_idle_polls_and_a_clean_exit() {
     assert_eq!(out.status.code(), Some(0), "the last report is clean");
     let stdout = String::from_utf8(out.stdout).unwrap();
     assert!(
-        stdout.starts_with("a.py:5:5: EFF101 (async-blocking-call) [warning, heuristic]")
+        stdout.starts_with("a.py:5:5: EFF101 (async-blocking-call) [warning] ")
             && stdout.contains("5 |     time.sleep(1)")
             && stdout.contains("\n  = help: use `await asyncio.sleep(...)`"),
         "full output with the source line:\n{stdout}"
@@ -212,9 +212,7 @@ fn watch_rechecks_a_coroutine_that_stops_being_sync_driven() {
     assert_eq!(out.status.code(), Some(0));
     let stdout = String::from_utf8(out.stdout).unwrap();
     assert!(
-        stdout.contains(
-            "pkg/jobs.py:17:5: EFF101 [heuristic] `_job` reaches the blocking call `time.sleep`"
-        ),
+        stdout.contains("pkg/jobs.py:17:5: EFF101 `_job` runs the waiting call `time.sleep`"),
         "{stdout}"
     );
 }
@@ -432,6 +430,32 @@ fn watch_reports_what_check_reports() {
     assert_eq!(json(&watch.stdout), json(check.as_bytes()));
 }
 
+/// `--watch` colors its reports as `heki check` colors them.
+#[test]
+fn watch_colors_its_reports_like_check() {
+    let p = Project::new("watch_color");
+    p.write(
+        "app.py",
+        "import time\n\n\nasync def handler():\n    time.sleep(1)\n",
+    );
+    let stdout = |watch: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_heki"))
+            .args(["check", "--heuristic", "--color", "always"])
+            .args(watch)
+            .current_dir(&p.dir)
+            .env("HEKI_WATCH_MAX_RUNS", "0")
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap()
+    };
+    let watched = stdout(&["--watch"]);
+    assert!(
+        watched.contains("\x1b[1m\x1b[31mEFF101\x1b[0m"),
+        "{watched:?}"
+    );
+    assert_eq!(watched, stdout(&[]));
+}
+
 const LEVELS: &str = "LEVELS = [\"low\", \"mid\", \"high\"]\n";
 const LEVELS_GROWN: &str =
     "LEVELS = [\"low\", \"mid\", \"high\"]\n\n\ndef add(level):\n    LEVELS.append(level)\n";
@@ -485,6 +509,8 @@ fn watch_rechecks_a_call_chain_whose_end_moves() {
     wait_for(&rx, "[heki watch] 1 diagnostic(s) in 4 file(s)");
     let (code, check, _) = p.check(&[]);
     assert_eq!(code, 1, "{check}");
+    // The helpers type nothing, so the report names no line (it is heuristic): its chain is
+    // the call into `relay` alone.
     assert_eq!(
         check.matches("  = related: ").count(),
         1,
