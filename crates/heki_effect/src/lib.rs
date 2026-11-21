@@ -820,6 +820,46 @@ pub struct ConstArg {
     pub positive: Option<bool>,
 }
 
+/// A constant a call passes for a parameter ([`CallSite::arguments`]), in the kinds a call
+/// target's argument list names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ArgValue {
+    None,
+    Bool(bool),
+    Int(i64),
+    Str(String),
+}
+
+impl ArgValue {
+    /// The value of a literal (`None` for a literal of another kind).
+    pub fn of_literal(literal: &heki_ir::ConstLiteral) -> Option<Self> {
+        use heki_ir::ConstLiteral;
+        match literal {
+            ConstLiteral::None => Some(Self::None),
+            ConstLiteral::Bool(b) => Some(Self::Bool(*b)),
+            ConstLiteral::Int(n) => Some(Self::Int(*n)),
+            ConstLiteral::Str(s) => Some(Self::Str(s.clone())),
+            _ => None,
+        }
+    }
+
+    /// The value a constant's class and truthiness decide: `None`, `True`, `False`, `0`, `""`.
+    pub fn decided(c: &ConstArg) -> Option<Self> {
+        match (c.class, c.truthy) {
+            (ConstClass::None, _) => Some(Self::None),
+            (ConstClass::Bool, Some(b)) => Some(Self::Bool(b)),
+            (ConstClass::Int, Some(false)) => Some(Self::Int(0)),
+            (ConstClass::Str, Some(false)) => Some(Self::Str(String::new())),
+            _ => None,
+        }
+    }
+}
+
+/// [`CallSite::arguments`]: each parameter a call target's argument list names
+/// ([`Contracts::marked_params`]) that the call binds to a constant it establishes, with it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArgumentValues(pub Vec<(String, ArgValue)>);
+
 /// What a caller knows about the value of a callee parameter at one call, when the argument
 /// binds the parameter exactly: the receiver, a keyword, a position before any `*` unpacking,
 /// or the literal default of an omitted parameter.
@@ -1341,6 +1381,10 @@ pub struct CallSite {
     /// unless it overrides it ([`Contracts::reference_bases`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_base: bool,
+    /// The constants the call passes for the parameters a call target's argument list names
+    /// (computed only for those, [`Contracts::marked_params`]; boxed: few calls have any).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<Box<ArgumentValues>>,
     /// The targets are every implementation the call can run under R2 and R5: the receiver
     /// is no protocol, every member of a union resolves, and no project subclass's
     /// implementation is missing. Computed with [`Self::on_every_return`].
@@ -1408,6 +1452,12 @@ impl CallSite {
     /// The method the protocol typing the receiver declares ([`Dispatch::declared`]).
     pub fn declared(&self) -> Option<&FuncKey> {
         self.dispatch.as_ref()?.declared.as_ref()
+    }
+
+    /// The constant the call passes for the parameter `name` ([`Self::arguments`]).
+    pub fn argument(&self, name: &str) -> Option<&ArgValue> {
+        let values = &self.arguments.as_ref()?.0;
+        values.iter().find(|(n, _)| n == name).map(|(_, v)| v)
     }
 
     /// The class of the receiver ([`Dispatch::receiver`]).

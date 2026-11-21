@@ -25,6 +25,16 @@ the allowed callers and resolves to a target:
   `cls(...)` in a class method), also for a dataclass or another class without an `__init__` of
   its own; with `subclasses = false`, constructing exactly the class.
 
+A target ending in an argument list names only the calls passing those constants:
+`DataType(is_dict=True)` is `DataType(is_dict=True)`, not `DataType(is_list=True)`, and
+`container_flags(kind="dict")` is `container_flags(dt, "dict")`, not `container_flags(dt, "list")`.
+A call passes a constant when heki establishes it: the argument is a literal or a string constant
+bound once (a module's `Final` name), passed by keyword, by position where every function the call
+may run binds that position to the parameter, or left out where every such function's default is
+`True`, `False`, `None`, `0`, or `""` and the value. A variable, a call result, `*` or `**`
+unpacking, or a position of a class without a project `__init__` establishes nothing, and the call
+is not reported. A reference passes nothing, so it never matches such a target.
+
 With `references = "calls"` (or `"calls-and-bases"`), a reference handing a target on to be
 called later counts as a call of it, reported where the target is named ("`f` hands on `pkg.core.decide`"; a name an import or
 the module body binds is read without a position of its own, so it is reported at the statement
@@ -119,6 +129,8 @@ Its premises:
 - **Subclasses** (`references = "calls-and-bases"`): the class statement's declaration resolves
   a base to the target class. Established from the declarations. Whether the subclass is
   constructed is not part of the claim.
+- **Arguments** (a target with an argument list): the call binds each parameter the list names to
+  its constant. Established: an argument heki cannot tell is no match.
 
 ## Why is this bad?
 Some operations keep invariants only when one component runs them: a store that updates its
@@ -168,7 +180,9 @@ No automatic fix.
     qualified name and any dotted suffix (`DataType.replace_reference`, `pkg.util.reset_cache`,
     `FinalFacts`, `Parser._*`). A `Class.method` target covers the method's overrides in
     subclasses; a class target covers constructing the class and its subclasses; a target
-    naming no class (`reset`) covers every project function and method of that name.
+    naming no class (`reset`) covers every project function and method of that name. A target
+    may end in an argument list of `parameter=value` entries (`DataType(is_dict=True)`), each
+    value `True`, `False`, `None`, an integer, or a quoted string.
   - `allowed-callers`: functions allowed to call the targets, as dotted names or globs matched
     against the function's qualified name and its `Class.method` qualname (`pkg.store.*`). A
     module part names one module without its submodules: `pkg:*` allows what `pkg/__init__.py`

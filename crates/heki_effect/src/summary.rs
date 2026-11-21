@@ -20,12 +20,12 @@ use crate::resolver::{
     is_generator_function, self_aliases,
 };
 use crate::{
-    Access, ArgBinding, ArgOrigin, ArgTargets, AttrKeyPath, BoundCallee, CallHop, CallSite,
-    CallTarget, Construction, ContractClass, Contracts, Dispatch, EffectSummary, FileSummary,
-    FuncKey, GuardSubject, Implementers, Items, ModuleInput, MustExec, NewArg, NewCond, NewKind,
-    OnEveryReturn, OptInFacts, PerItem, ProjectDecls, ReadKind, ReturnsNew, Runner, SharedLine,
-    SiteRole, Slot, TypedFieldReadSite, TypedFieldWriteSite, Unresolved, UnresolvedAccessSite,
-    UnresolvedWriteSite, WriteKind,
+    Access, ArgBinding, ArgOrigin, ArgTargets, ArgValue, ArgumentValues, AttrKeyPath, BoundCallee,
+    CallHop, CallSite, CallTarget, Construction, ContractClass, Contracts, Dispatch, EffectSummary,
+    FileSummary, FuncKey, GuardSubject, Implementers, Items, ModuleInput, MustExec, NewArg,
+    NewCond, NewKind, OnEveryReturn, OptInFacts, PerItem, ProjectDecls, ReadKind, ReturnsNew,
+    Runner, SharedLine, SiteRole, Slot, TypedFieldReadSite, TypedFieldWriteSite, Unresolved,
+    UnresolvedAccessSite, UnresolvedWriteSite, WriteKind,
 };
 use heki_ast::Span;
 use heki_ir::walk::Answer;
@@ -2162,6 +2162,7 @@ impl<'a> Extractor<'a> {
             result_discarded: false,
             result_held: false,
             is_base: false,
+            arguments: None,
             queues: None,
             // Handing a function on does not run it: no must-fact goes through the reference.
             complete: false,
@@ -4313,6 +4314,83 @@ impl<'a> Extractor<'a> {
         false
     }
 
+    /// [`CallSite::arguments`]: the constants `call` passes for the parameters an argument list
+    /// names ([`Contracts::marked_params`]): by keyword, else by position or as the default for
+    /// each callee of `signatures` (with the parameter its first positional argument binds). A
+    /// class without a project `__init__` has none: only a keyword names a parameter there.
+    /// A builtin calling the callees per item passes them no constant of the caller.
+    fn marked_arguments(
+        &self,
+        call: &Call<'_>,
+        signatures: &[(&FunctionDecl, usize)],
+    ) -> Option<Box<ArgumentValues>> {
+        let marked = self.contracts?.marked_params();
+        if marked.is_empty() || call.per_item.is_some() {
+            return None;
+        }
+        let mut values = Vec::new();
+        for name in marked {
+            let keyword = call.kwargs.iter().find(|(k, _)| k.as_ref() == Some(name));
+            let value = match keyword {
+                Some((_, v)) => self.arg_value(*v),
+                None => {
+                    let mut each = signatures
+                        .iter()
+                        .map(|(decl, offset)| self.bound_value(call, decl, *offset, name));
+                    each.next()
+                        .flatten()
+                        .filter(|first| each.all(|v| v.as_ref() == Some(first)))
+                }
+            };
+            if let Some(value) = value {
+                values.push((name.clone(), value));
+            }
+        }
+        (!values.is_empty()).then(|| Box::new(ArgumentValues(values)))
+    }
+
+    /// The constant `call` passes by position for the parameter `name` of `decl` (whose first
+    /// positional argument binds parameter `offset`), or its default when no argument can bind
+    /// it, as far as the default's class and truthiness decide it ([`ArgValue::decided`]).
+    fn bound_value(
+        &self,
+        call: &Call<'_>,
+        decl: &FunctionDecl,
+        offset: usize,
+        name: &str,
+    ) -> Option<ArgValue> {
+        let param = decl.param_names.iter().position(|p| p == name)?;
+        if param < usize::from(decl.positional_params)
+            && let Some((_, v)) = self
+                .positional_slots(call, offset)
+                .into_iter()
+                .find(|(slot, _)| *slot == param)
+        {
+            return self.arg_value(v);
+        }
+        // `*` or `**` unpacking may pass it.
+        if call.star_from.is_some() || call.kwargs.iter().any(|(k, _)| k.is_none()) {
+            return None;
+        }
+        let (_, default) = decl
+            .defaults
+            .iter()
+            .find(|(p, _)| usize::from(*p) == param)?;
+        ArgValue::decided(default)
+    }
+
+    /// The constant `var` holds ([`ArgValue`]): a literal through copies, or a string constant
+    /// bound to a name ([`TypeCtx::str_constant_with`]).
+    fn arg_value(&self, var: VarId) -> Option<ArgValue> {
+        let def = |v: VarId| self.defs.get(&v).copied();
+        resolver::const_literal(def, var)
+            .and_then(ArgValue::of_literal)
+            .or_else(|| {
+                let text = self.cx.str_constant_with(var, &def, &self.types)?;
+                Some(ArgValue::Str(text))
+            })
+    }
+
     /// The positional arguments of `call` with the parameter slot each one binds, counted from
     /// `offset` (a bound receiver): an argument unpacked with `*` binds the items of a display
     /// of known length one by one (`*(a, b)`, `*()`); past one of unknown length, no argument
@@ -4416,6 +4494,7 @@ impl<'a> Extractor<'a> {
                 // A project class without a project `__init__` (a dataclass, a pydantic model):
                 // its construction is still a call site, with no project callees.
                 if let Some(class) = &call.constructs {
+                    let arguments = self.marked_arguments(call, &[]);
                     self.sites.push(CallSite {
                         caller: self.key.clone(),
                         target: CallTarget::Project(Vec::new()),
@@ -4440,6 +4519,7 @@ impl<'a> Extractor<'a> {
                         queues: None,
                         result_held: false,
                         is_base: false,
+                        arguments,
                         complete: false,
                         on_every_return: crate::OnEveryReturn::default(),
                     });
@@ -4466,6 +4546,8 @@ impl<'a> Extractor<'a> {
                 let loops = self.loops_around(bb);
                 // `(callee, its index, receiver, bound arguments, offset)` for `Self::hand_over`.
                 let mut handovers = Vec::new();
+                // `(callee, offset)` of the callees running here, for `Self::marked_arguments`.
+                let mut signatures: Vec<(&FunctionDecl, usize)> = Vec::new();
                 // A constructor call binds the object it creates, unless the class may return
                 // an existing instance.
                 let new_recv = call
@@ -4597,6 +4679,9 @@ impl<'a> Extractor<'a> {
                     if self.ownership && !offloaded {
                         handovers.push((decl, callees.len(), handed_recv, bound.clone(), offset));
                     }
+                    if !offloaded {
+                        signatures.push((decl, offset));
+                    }
                     // A copy of the exact length; the buffer keeps its room for the next call.
                     let mut exact = Vec::with_capacity(params.len());
                     exact.append(&mut params);
@@ -4656,8 +4741,10 @@ impl<'a> Extractor<'a> {
                             .push((self.pos.0, self.pos.1, invalidates));
                     }
                 }
+                let arguments = self.marked_arguments(call, &signatures);
                 let site = self.site(bb, CallTarget::Project(callees), call.is_awaited, call.span);
                 self.sites.push(CallSite {
+                    arguments,
                     recv_is_self: call.recv_is_self,
                     // A builtin calling the callees per item uses what they return.
                     result_discarded: call.recv_is_self
@@ -5142,6 +5229,7 @@ impl<'a> Extractor<'a> {
             queues: None,
             result_held: false,
             is_base: false,
+            arguments: None,
             complete,
             on_every_return,
         }
@@ -6060,6 +6148,7 @@ fn role_site(
         queues: site.queues.clone(),
         result_held: false,
         is_base: false,
+        arguments: None,
         complete: false,
         on_every_return: crate::OnEveryReturn::default(),
     }

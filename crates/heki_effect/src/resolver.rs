@@ -4470,20 +4470,27 @@ pub(crate) fn literal<'i>(
     def: impl Fn(VarId) -> Option<&'i Inst>,
     var: VarId,
 ) -> Option<LiteralValue> {
+    match const_literal(def, var)? {
+        ConstLiteral::Bool(b) => Some(LiteralValue::Bool(*b)),
+        ConstLiteral::Int(n) => Some(LiteralValue::Int(*n)),
+        ConstLiteral::Float(f) => f.parse().ok().map(LiteralValue::Float),
+        ConstLiteral::Str(s) => Some(LiteralValue::Str(s.clone())),
+        _ => None,
+    }
+}
+
+/// The literal of the constant `var` holds (through copies), with `def` giving each variable's
+/// definition.
+pub(crate) fn const_literal<'i>(
+    def: impl Fn(VarId) -> Option<&'i Inst>,
+    var: VarId,
+) -> Option<&'i ConstLiteral> {
     let mut cur = var;
     // Copies of an SSA variable form a tree, so the walk ends.
     loop {
         match &def(cur)?.kind {
             InstKind::Copy { src, .. } => cur = *src,
-            InstKind::Const { literal, .. } => {
-                return match literal {
-                    ConstLiteral::Bool(b) => Some(LiteralValue::Bool(*b)),
-                    ConstLiteral::Int(n) => Some(LiteralValue::Int(*n)),
-                    ConstLiteral::Float(f) => f.parse().ok().map(LiteralValue::Float),
-                    ConstLiteral::Str(s) => Some(LiteralValue::Str(s.clone())),
-                    _ => None,
-                };
-            }
+            InstKind::Const { literal, .. } => return Some(literal),
             _ => return None,
         }
     }

@@ -774,6 +774,7 @@ fn gate_5_handbuilt_file_summaries() {
         queues: None,
         result_held: false,
         is_base: false,
+        arguments: None,
         complete: false,
         on_every_return: crate::OnEveryReturn::default(),
     });
@@ -1424,6 +1425,7 @@ fn callers_left_without_a_defining_file_are_skipped() {
         queues: None,
         result_held: false,
         is_base: false,
+        arguments: None,
         complete: false,
         on_every_return: crate::OnEveryReturn::default(),
     });
@@ -1456,6 +1458,7 @@ fn callers_left_without_a_defining_file_are_skipped() {
         queues: None,
         result_held: false,
         is_base: false,
+        arguments: None,
         complete: false,
         on_every_return: crate::OnEveryReturn::default(),
     });
@@ -1486,6 +1489,7 @@ fn callers_left_without_a_defining_file_are_skipped() {
         queues: None,
         result_held: false,
         is_base: false,
+        arguments: None,
         complete: false,
         on_every_return: crate::OnEveryReturn::default(),
     });

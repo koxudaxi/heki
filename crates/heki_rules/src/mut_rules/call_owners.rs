@@ -15,7 +15,7 @@ use crate::{
 };
 use globset::{GlobSet, GlobSetBuilder};
 use heki_diagnostics::Diagnostic;
-use heki_effect::{CallHop, CallSite, ContractClass, FuncKey, SiteRole};
+use heki_effect::{ArgValue, CallHop, CallSite, ContractClass, FuncKey, SiteRole};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
@@ -33,6 +33,10 @@ pub(crate) struct CallTargetPattern {
     /// The last name of the text (`replace_reference` of `DataType.replace_reference`): what a
     /// call on an object of unknown class names (`MUT207`).
     pub name: DottedPattern,
+    /// The argument list of the text (`(is_dict=True)`, empty without one), as configured.
+    list: String,
+    /// The constants the list names: a call matches only when it passes each.
+    arguments: Arguments,
 }
 
 /// The call targets of one contract (`call-owners.targets`, `effect-boundaries.call-targets`),
@@ -61,12 +65,26 @@ impl CallTargets {
         }
         if let Some(class) = &site.constructs {
             let hits = self.constructors.get(class).map_or(&[][..], Vec::as_slice);
-            return hits.iter().map(|&i| vec![i]).collect();
+            let passing = hits.iter().filter(|&&i| self.passed(i, site));
+            return passing.map(|&i| vec![i]).collect();
         }
         let per_callee: Vec<Vec<usize>> = judged_callees(site)
-            .map(|callee| self.functions.matching(callee))
+            .map(|callee| {
+                let mut matching = self.functions.matching(callee);
+                matching.retain(|&i| self.passed(i, site));
+                matching
+            })
             .collect();
         groups(&per_callee)
+    }
+
+    /// Whether `site` passes every constant the argument list of target `i` names (a target
+    /// without one: always).
+    fn passed(&self, i: usize, site: &CallSite) -> bool {
+        self.patterns[i]
+            .arguments
+            .iter()
+            .all(|(name, value)| site.argument(name) == Some(value))
     }
 
     /// What `site` calls of target `i`: the method the protocol typing the receiver declares
@@ -198,20 +216,23 @@ fn groups(per_callee: &[Vec<usize>]) -> Vec<Vec<usize>> {
 
 /// The call targets of every `call-owners` contract, indexed together: the targets a call
 /// matches are looked up once per call, whatever the number of contracts.
-struct ContractCalls {
+struct ContractCalls<'t> {
     functions: FunctionMatchers,
     /// `(contract, target)` of each matcher of `functions`.
     owners: Vec<(usize, usize)>,
     /// The `(contract, target)` pairs constructing each class calls.
     constructors: FxHashMap<String, Vec<(usize, usize)>>,
+    /// The targets of each contract (the constants their argument lists name).
+    contracts: Vec<&'t CallTargets>,
 }
 
-impl ContractCalls {
-    fn new<'t>(contracts: impl Iterator<Item = &'t CallTargets>) -> Result<Self, RuleConfigError> {
+impl<'t> ContractCalls<'t> {
+    fn new(contracts: impl Iterator<Item = &'t CallTargets>) -> Result<Self, RuleConfigError> {
+        let contracts: Vec<&CallTargets> = contracts.collect();
         let mut matchers = Vec::new();
         let mut owners = Vec::new();
         let mut constructors: FxHashMap<String, Vec<(usize, usize)>> = FxHashMap::default();
-        for (c, targets) in contracts.enumerate() {
+        for (c, targets) in contracts.iter().enumerate() {
             for (t, m) in targets.functions.matchers.iter().enumerate() {
                 matchers.push(m.clone());
                 owners.push((c, t));
@@ -225,6 +246,7 @@ impl ContractCalls {
             functions: FunctionMatchers::new(matchers, "call-owners.targets")?,
             owners,
             constructors,
+            contracts,
         })
     }
 
@@ -234,8 +256,15 @@ impl ContractCalls {
             return Vec::new();
         }
         let mut by_contract: BTreeMap<usize, Vec<Vec<usize>>> = BTreeMap::new();
+        let passed = |&(c, t): &(usize, usize)| self.contracts[c].passed(t, site);
         if let Some(class) = &site.constructs {
-            for &(c, t) in self.constructors.get(class).into_iter().flatten() {
+            for &(c, t) in self
+                .constructors
+                .get(class)
+                .into_iter()
+                .flatten()
+                .filter(|p| passed(p))
+            {
                 by_contract.entry(c).or_default().push(vec![t]);
             }
             return by_contract.into_iter().collect();
@@ -244,6 +273,9 @@ impl ContractCalls {
         for (k, callee) in callees.iter().enumerate() {
             for m in self.functions.matching(callee) {
                 let (c, t) = self.owners[m];
+                if !passed(&(c, t)) {
+                    continue;
+                }
                 let per_callee = by_contract
                     .entry(c)
                     .or_insert_with(|| vec![Vec::new(); callees.len()]);
@@ -493,8 +525,14 @@ pub(crate) fn group_texts(
     let mut named: Vec<String> = Vec::new();
     let mut seen: FxHashSet<String> = FxHashSet::default();
     for &i in group {
+        let pattern = &targets.patterns[i];
         let names = match site {
-            Some(site) if super::names_members(text(i)) => targets.called_at(i, site),
+            Some(site) if super::names_members(pattern.name_part()) => {
+                let called = targets.called_at(i, site).into_iter();
+                called
+                    .map(|name| format!("{name}{}", pattern.list))
+                    .collect()
+            }
             _ => vec![text(i).to_owned()],
         };
         for name in names {
@@ -515,6 +553,85 @@ pub(crate) enum Subclasses {
     Excluded,
 }
 
+impl CallTargetPattern {
+    /// The text without its argument list: the name of what it calls.
+    fn name_part(&self) -> &str {
+        &self.text[..self.text.len() - self.list.len()]
+    }
+}
+
+/// The constants an argument list names, by parameter.
+pub(crate) type Arguments = Vec<(String, ArgValue)>;
+
+/// A call target's text split into the name it matches and the constants its argument list
+/// names (`pkg.types.DataType(is_dict=True)`; none for a text without a list). The name never
+/// holds a parenthesis (no dotted name or glob does), so the list starts at the first one.
+pub(crate) fn split_arguments<'t>(
+    text: &'t str,
+    context: &'static str,
+) -> Result<(&'t str, Option<Arguments>), RuleConfigError> {
+    let Some(open) = text.find('(') else {
+        return Ok((text, None));
+    };
+    let invalid = |reason: &'static str| RuleConfigError::InvalidArguments {
+        target: text.to_owned(),
+        context,
+        reason,
+    };
+    let mut rest = text[open + 1..]
+        .strip_suffix(')')
+        .ok_or_else(|| invalid("the list does not end the text"))?
+        .trim_start();
+    let mut arguments: Arguments = Vec::new();
+    loop {
+        let (name, after) = rest
+            .split_once('=')
+            .filter(|(name, _)| is_identifier(name.trim()))
+            .ok_or_else(|| invalid("an entry is not `parameter=value`"))?;
+        let name = name.trim();
+        if arguments.iter().any(|(n, _)| n == name) {
+            return Err(invalid("a parameter is named twice"));
+        }
+        let (value, after) =
+            literal_prefix(after.trim_start()).ok_or_else(|| invalid("a value is no constant"))?;
+        arguments.push((name.to_owned(), value));
+        let after = after.trim_start();
+        if after.is_empty() {
+            return Ok((&text[..open], Some(arguments)));
+        }
+        rest = after
+            .strip_prefix(',')
+            .ok_or_else(|| invalid("entries are not separated by commas"))?
+            .trim_start();
+    }
+}
+
+/// Whether `name` is an identifier of ASCII letters, digits, and underscores.
+fn is_identifier(name: &str) -> bool {
+    name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// The constant at the start of `text` and what follows it: `True`, `False`, `None`, an integer,
+/// or a string in single or double quotes without a backslash.
+fn literal_prefix(text: &str) -> Option<(ArgValue, &str)> {
+    if let Some(quote) = text.chars().next().filter(|c| matches!(c, '"' | '\'')) {
+        let (value, rest) = text[1..].split_once(quote)?;
+        return (!value.contains('\\')).then(|| (ArgValue::Str(value.to_owned()), rest));
+    }
+    let end = text
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+        .unwrap_or(text.len());
+    let (word, rest) = text.split_at(end);
+    let value = match word {
+        "True" => ArgValue::Bool(true),
+        "False" => ArgValue::Bool(false),
+        "None" => ArgValue::None,
+        _ => ArgValue::Int(word.parse().ok()?),
+    };
+    Some((value, rest))
+}
+
 /// Parse call targets (`call-owners.targets`, `effect-boundaries.call-targets`).
 pub(crate) fn parse_call_targets(
     cx: &CheckContext<'_>,
@@ -526,11 +643,17 @@ pub(crate) fn parse_call_targets(
     let mut patterns = Vec::new();
     let mut matchers = Vec::new();
     for text in texts {
-        let functions = FunctionMatcher::new(cx, all_classes, text, context)?;
+        let (name, arguments) = split_arguments(text, context)?;
+        let mut functions = FunctionMatcher::new(cx, all_classes, name, context)?;
+        if arguments.is_some() {
+            functions = functions.project_only();
+        }
         patterns.push(CallTargetPattern {
             text: text.clone(),
             family: functions.method_family().cloned().unwrap_or_default(),
-            name: DottedPattern::new(last_name(text), context)?,
+            name: DottedPattern::new(last_name(name), context)?,
+            list: text[name.len()..].to_owned(),
+            arguments: arguments.unwrap_or_default(),
         });
         matchers.push(functions);
     }
@@ -746,4 +869,58 @@ pub(crate) fn mut204(
     }
     reports.emit(cx, "MUT204", out);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_arguments;
+    use heki_effect::ArgValue;
+
+    #[test]
+    fn an_argument_list_names_constants_by_parameter() {
+        let text = |t: &str| ArgValue::Str(t.to_owned());
+        for (target, name, arguments) in [
+            ("pkg.DataType", "pkg.DataType", None),
+            ("pkg:*", "pkg:*", None),
+            (
+                "pkg.DataType(is_dict=True)",
+                "pkg.DataType",
+                Some(vec![("is_dict", ArgValue::Bool(true))]),
+            ),
+            (
+                "f( a = False , b=None,c=-3, d=42 )",
+                "f",
+                Some(vec![
+                    ("a", ArgValue::Bool(false)),
+                    ("b", ArgValue::None),
+                    ("c", ArgValue::Int(-3)),
+                    ("d", ArgValue::Int(42)),
+                ]),
+            ),
+            (
+                r#"f(kind="a, b=(c)", other='say "x"')"#,
+                "f",
+                Some(vec![
+                    ("kind", text("a, b=(c)")),
+                    ("other", text(r#"say "x""#)),
+                ]),
+            ),
+            (
+                r#"pkg.*_flags(_kind="")"#,
+                "pkg.*_flags",
+                Some(vec![("_kind", text(""))]),
+            ),
+        ] {
+            let expected = arguments.map(|list| {
+                list.into_iter()
+                    .map(|(n, v)| (n.to_owned(), v))
+                    .collect::<Vec<_>>()
+            });
+            assert_eq!(
+                split_arguments(target, "call-owners.targets").unwrap(),
+                (name, expected),
+                "{target}"
+            );
+        }
+    }
 }

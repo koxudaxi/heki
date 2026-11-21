@@ -9,6 +9,7 @@
 
 use crate::mut_rules::{
     Allowance, AllowanceKeys, FunctionMatcher, FunctionMatchers, ReadOnlyProducers, References,
+    split_arguments,
 };
 use crate::{DottedPattern, RuleConfigError, RuleSelection, last_name, split_last_dot};
 use heki_effect::{ContractClass, Contracts, FuncKey, OptInFacts, TypedWrites};
@@ -73,6 +74,8 @@ pub(crate) struct ConfigContracts {
     unresolved_calls: Vec<DottedPattern>,
     /// [`Contracts::references`] and [`Contracts::reference_bases`].
     references: References,
+    /// [`Contracts::marked_params`].
+    marked_params: Vec<String>,
     external: ExternalNames,
 }
 
@@ -99,9 +102,11 @@ impl ExternalNames {
                 .iter()
                 .filter(move |b| b.forbid.iter().any(|t| t == token))
         };
+        // A call target with an argument list names project functions only.
         let matchers = |texts: Vec<&String>, context: &'static str| {
             let named = texts
                 .into_iter()
+                .filter(|t| matches!(split_arguments(t, context), Ok((_, None))))
                 .filter_map(|t| FunctionMatcher::named(t, context).ok())
                 .collect();
             FunctionMatchers::new(named, context).ok()
@@ -231,11 +236,42 @@ impl ConfigContracts {
             writers,
             writer_contexts: NameMasks::default(),
             unresolved_reads: last_names(reads.flat_map(|r| &r.targets), "read-owners.targets")?,
-            unresolved_calls: last_names(calls.flat_map(|r| &r.targets), "call-owners.targets")?,
+            unresolved_calls: call_last_names(calls.flat_map(|r| &r.targets))?,
             references: counts_references(config),
+            marked_params: marked_params(config),
             external: ExternalNames::new(config, kb),
         })
     }
+}
+
+/// [`last_names`] of call targets, whose argument lists name no function.
+fn call_last_names<'t>(
+    targets: impl Iterator<Item = &'t String>,
+) -> Result<Vec<DottedPattern>, RuleConfigError> {
+    let context = "call-owners.targets";
+    targets
+        .map(|t| DottedPattern::new(last_name(split_arguments(t, context)?.0), context))
+        .collect()
+}
+
+/// [`Contracts::marked_params`] of `config`. A bad argument list is left out: it is a
+/// configuration error of the rule of its contract, which parses it before it reports.
+fn marked_params(config: &HekiConfig) -> Vec<String> {
+    let calls = config.call_owners.iter().flat_map(|r| &r.targets);
+    let boundaries = config
+        .effect_boundaries
+        .iter()
+        .filter(|b| b.forbid.iter().any(|t| t == "calls"))
+        .flat_map(|b| &b.call_targets);
+    let mut names: Vec<String> = calls
+        .chain(boundaries)
+        .filter_map(|t| split_arguments(t, "call-targets").ok()?.1)
+        .flatten()
+        .map(|(name, _)| name)
+        .collect();
+    names.sort();
+    names.dedup();
+    names
 }
 
 /// The patterns of the last dotted names of `targets` (`children` of `pkg.Reference.children`).
@@ -346,6 +382,10 @@ impl Contracts for ConfigContracts {
     fn reference_bases(&self) -> bool {
         self.references == References::CallsAndBases
     }
+
+    fn marked_params(&self) -> &[String] {
+        &self.marked_params
+    }
 }
 
 /// The most a contract of `config` counts as calls ([`Contracts::references`],
@@ -387,6 +427,7 @@ pub fn summary_contracts(
         && contracts.unresolved_reads.is_empty()
         && contracts.unresolved_calls.is_empty()
         && contracts.references == References::Ignored
+        && contracts.marked_params.is_empty()
     {
         return Ok(None);
     }
