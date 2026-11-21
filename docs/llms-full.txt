@@ -3249,7 +3249,9 @@ Each step of the chain is established, not assumed:
 - the waiting call is in the ecosystem catalog, waits on every call (a database call that may be
   answered by a session's identity map, a cache, an open connection, or that sends only pending
   changes does not), and no argument that may come from the caller can make it return at once
-  (`time.sleep(delay)` with `delay` a parameter is not established). An argument heki cannot
+  (`time.sleep(delay)` with `delay` a parameter is not established). A literal argument, and
+  a module constant bound once to one (`PAUSE = 0`, also imported from another module, unless
+  a module rebinds it), is evaluated: `time.sleep(PAUSE)` does not wait. An argument heki cannot
   evaluate counts as one the call waits on (assumption R6), the URL or name a database
   connection was opened from included: a statement on a SQLAlchemy engine or another DB-API
   connection opened from a value heki does not know waits. `sqlite3.connect` is the one
@@ -3828,7 +3830,8 @@ set that a cached function returned:
   line, through assignments, with no copy;
 - the line is an in-place change of a container of that kind: an item store or delete on a list
   or dict, a method that changes it (`append`, `update`, `pop`, `add`, ...), or an augmented
-  assignment that changes it in place (`+=` on a list, `|=` on a dict or set).
+  assignment that changes it in place (`+=` on a list, `|=` on a dict or set), and no project
+  subclass of that container overrides the method or operator.
 
 The other changes of a cached function's result are heuristic reports: an object below the
 result (`cached(k)["rows"].append(x)`), an instance of a class, a value handed out through
@@ -3853,7 +3856,11 @@ Its premises:
   kind, by its return annotation (R2) or by construction. Established.
 - **Same object**: the changed object is that call's result on every path, with no copy.
   Established.
-- **Changed in place**: the line is an in-place change of a container of that kind. Established.
+- **Changed in place**: the line is an in-place change of a container of that kind. When only
+  the return annotation names the kind, no project subclass of that container overrides the
+  method or operator, has a metaclass that may install it, or, for a method called by name,
+  defines `__getattribute__` (under R2 the result may be an instance of one, whose `sort` or
+  `__ior__` may change nothing). Established.
 
 A heuristic report states that the function changes an object that a cached function returned,
 or an object below it. Open: the value may be the cached one on some paths only, and the object
@@ -6640,7 +6647,9 @@ It does not report:
 - a helper parameter annotated with a mutable type (`list[int]`, `dict[str, int]`,
   `MutableSequence[int]`, `deque[int]`, ...): the type checker reports the argument;
 - a helper parameter annotated read-only: that helper is checked in turn (its own handing over is
-  reported, a change in its own body is a type error);
+  reported, a change in its own body is a type error); a change reached only through such a
+  helper, or through one whose parameter is annotated with a mutable type, further down the
+  calls, is no report of the outer call either;
 - variadic parameters (`*items: Sequence[int]`).
 
 ## What a report states
@@ -6659,10 +6668,14 @@ Its premises:
 - **Changed at the line**: the named line changes in place the object bound to the parameter of
   the function it is in, on every path to the line, a builtin container there (`list`, `dict`,
   `set`, `bytearray`, `deque`, ... by annotation, construction, or an `isinstance` test), and
-  that parameter receives the argument through the calls shown, each handing it on as itself.
+  that parameter receives the argument through the calls shown, each handing it on as itself,
+  none of them annotated. No project subclass of that container overrides the changing method
+  (`reverse`, `__setitem__`, `__iadd__`, ...), has a metaclass that may install it, or, for a
+  method called by name, defines `__getattribute__`: under R2 the value may be an instance of
+  one.
   Established. Open: a change of a value of another class (a `Sequence` whose `append` returns a
-  new one), and one made where a generator that another function returns is iterated; such a
-  report names no line and is heuristic.
+  new one), a change by a method a project subclass overrides, and one made where a generator
+  that another function returns is iterated; such a report names no line and is heuristic.
 
 ## Why is this bad?
 A `Sequence` or `Mapping` annotation promises the caller that the function only reads its
