@@ -461,9 +461,7 @@ impl<'c, 'a> ValueCapacity<'c, 'a> {
                 | InstKind::LoadName { name, .. } => break self.cx.global(name),
                 // What the import statement binds, also one inside a function, which the
                 // module's own imports do not hold.
-                InstKind::Import { is_lazy: false, .. } => {
-                    break self.cx.named(self.cx.import_target(inst.span)?);
-                }
+                InstKind::Import { is_lazy: false, .. } => break self.cx.import_type(inst.span)?,
                 _ => return None,
             }
         };
