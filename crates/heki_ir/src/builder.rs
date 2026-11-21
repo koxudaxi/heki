@@ -423,6 +423,7 @@ impl<'a> ModuleLowerer<'a> {
             span: spec.span,
             is_module_body: spec.is_module_body,
             is_class_body: spec.is_class_body,
+            passed_from: None,
         };
         let fn_id = self.alloc_function_slot(placeholder);
         self.lowered_at.insert(spec.span, fn_id);
@@ -3808,6 +3809,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             span: self.span,
             is_module_body: self.is_module_body,
             is_class_body: self.is_class_body,
+            passed_from: None,
         }
     }
 }

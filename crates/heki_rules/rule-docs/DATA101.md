@@ -12,7 +12,9 @@ something else and returns its argument unchanged does not. One-off
 concatenations inside a loop are not reported, also on a branch that leaves the variable
 unchanged otherwise (`if step: x = np.append(edges, last)`), nor is writing into a buffer passed
 as `out=` (`out = np.concatenate(([a], [b]), out=out)` reuses the same buffer): the previous
-value must be among the data that is combined.
+value must be among the data that is combined. A loop whose trip count the code fixes is not
+reported either (`for is_p_wave in [False, True]`, `for _ in range(steps)` with `steps = 8`):
+it copies a fixed number of times, whatever the input.
 
 ## Why is this bad?
 Every concatenation copies everything accumulated so far, so the loop is quadratic in the total

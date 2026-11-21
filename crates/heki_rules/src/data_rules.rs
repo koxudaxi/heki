@@ -2,9 +2,10 @@
 
 use crate::eff_rules::shortest;
 use crate::mut_rules::{CallInst, site_call};
+use crate::opt_rules::Sizes;
 use crate::{CheckContext, ModuleUnit};
 use heki_diagnostics::Diagnostic;
-use heki_effect::{CallSite, SiteEffect};
+use heki_effect::{CallSite, SiteEffect, TypeCtx};
 use heki_ir::{Inst, InstKind, IrFunction, LoopCarriedInfo, NaturalLoop, VarId};
 use heki_kb::ExecEffectKind;
 use rustc_hash::FxHashMap;
@@ -15,24 +16,31 @@ use rustc_hash::FxHashMap;
 /// value reaches it through the data it combines, not only as the `out=` buffer it writes into
 /// (`out = np.concatenate(parts, out=out)` reuses the buffer). One-shot concatenations inside a
 /// loop, also on a branch that leaves the variable unchanged otherwise, are not updates and are
-/// never reported.
+/// never reported, and neither is a loop whose trip count the code fixes (`Sizes::data_sized`).
 pub(crate) fn data101(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Diagnostic>) {
     if !cx.enabled("DATA101", unit) {
         return;
     }
     let sites = cx.sites_by_span(unit);
+    let tcx = TypeCtx::new(&unit.input, cx.decls, cx.kb);
+    let no_types = FxHashMap::default();
+    let constants = cx.fixed_constants(unit);
     for f in &unit.input.ir.functions {
         if f.is_class_body || f.loop_carried.iter().all(|lc| !lc.self_accumulating) {
             continue;
         }
         let key = CheckContext::key(unit, f);
+        let sizes = Sizes::new(cx, &tcx, &no_types, f, unit, &constants);
         let mut defs: FxHashMap<VarId, &Inst> = FxHashMap::default();
         for inst in f.blocks.iter().flat_map(|b| &b.insts) {
             if let Some(d) = inst.kind.dst() {
                 defs.insert(d, inst);
             }
         }
-        for (lc, _) in accumulating_loops(f) {
+        for (lc, _) in accumulating_loops(f)
+            .into_iter()
+            .filter(|(_, lp)| sizes.data_sized(lp))
+        {
             // The first update (in block order) that is a quadratic reallocation of the previous
             // value: the reallocating call itself, or a project call returning one of the
             // argument that carries it (`acc = grow(acc)`, not `acc = step(acc)` where `step`

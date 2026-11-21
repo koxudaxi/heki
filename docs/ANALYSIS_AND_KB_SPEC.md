@@ -146,13 +146,21 @@ Compound expressions are flattened into **basic instructions in explicit left-to
   - `ConstSmall(k)`: a `for` over a small display (below) or `range(...)` (the builtin, by
     name resolution) spanning at most 16 (`SMALL_MAX`), also through `enumerate`, `zip`, `reversed`, `sorted`, `map`,
     `filter`, and `.items()` / `.keys()` / `.values()`, and with range bounds that are constant
-    integer expressions (`+`, `-`, `*`, module constants included); and a `while` loop over a
-    counter that runs at most 16 times (`FnIndex::counted_trips`): its test compares a header
-    phi with a constant (`==`, `!=`, `<`, `<=`, `>`, `>=`, either side) or tests the phi itself
-    (a count down to zero), the test's false side leaves the loop (an operand of `and` bounds
-    it, one of `or` does not), the phi enters the loop as an integer constant, and every input
-    along a path back is the phi plus one and the same nonzero constant (`i += 1`), so `i = 1`
-    ... `while i < 6:` runs 5 times.
+    integer expressions (`+`, `-`, `*`, module constants included); or over an iterable that a
+    `len(x) <= N` test on every path to the loop caps at `N <= 16` (`if not 1 <= len(x) <= 6:
+    raise`, `assert len(x) <= 3`, the exit of `while len(x) > 3: x.pop()`), when nothing in a
+    block that reaches the loop grows `x` or lets it escape (returning it after the loop is
+    fine). `FnIndex::guarded_len` reads the outcome of the test on the edge into a block whose
+    one predecessor branches on it, through `not`, `and` / `or`, and comparison chains, and the
+    tests on the single-predecessor way to each operand. A generator expression's or a
+    comprehension function's loop over `.0` takes the bound of the iterable its creator passes
+    (`IrFunction::passed_from`); and a `while` loop over a counter that runs at most 16 times
+    (`FnIndex::counted_trips`): its test compares a header phi with a constant (`==`, `!=`,
+    `<`, `<=`, `>`, `>=`, either side) or tests the phi itself (a count down to zero), the
+    test's false side leaves the loop (an operand of `and` bounds it, one of `or` does not), the
+    phi enters the loop as an integer constant, and every input along a path back is the phi
+    plus one and the same nonzero constant (`i += 1`), so `i = 1` ... `while i < 6:` runs 5
+    times.
   - `RetryPattern`: a retry body (a `try` that leaves the loop on success and sleeps in a
     handler) over a small constant range or a target named like `retry` / `attempt` (also one
     name of a tuple target), or a `while` loop with a retry body that sleeps; and a paced loop
@@ -173,10 +181,22 @@ Compound expressions are flattened into **basic instructions in explicit left-to
   - `Unbounded`: everything else.
 - **Size facts** (`heki_ir::facts`, the one home of size and trip-count facts; profitability and
   Advisory noise only, never Soundness premises):
-  - A **small display** (`SmallDisplay`) is a list, tuple, set, or dict display of at most 16
-    items (`SMALL_MAX`) without `*` / `**` unpacking that nothing grows or lets escape.
-    Shrinking it and passing it to read-only builtins are fine; a store at an unknown index
-    (`xs[k] = v`, possibly a slice) counts as growth.
+  - A **small display** (`SmallDisplay`) holds at most 16 items (`SMALL_MAX`) and nothing
+    grows it past that or lets it escape: a list, tuple, set, or dict display without `*` /
+    `**` unpacking, a string constant, a builtin constructor (`list`, `tuple`, `set`,
+    `frozenset`, `dict`, `sorted`) of an iterable the code fixes, a slice with constant bounds
+    (of a container of unknown kind it has a size but no kind, so it bounds loops and scans but
+    is no module or attribute display), or what a comprehension function returns
+    (`ModuleConstants::comprehensions`, Python 3.11). Shrinking it and passing it to read-only
+    builtins are fine; a store at an unknown index (`xs[k] = v`, possibly a slice) counts as
+    growth. A new object may gain items a fixed number of times: an `append` / `add` /
+    `insert` / `setdefault`, or an item store into a dict, adds one per run of its block, and
+    `extend(x)` / `update(x)` as many as `x` yields; a block runs once per iteration of each
+    loop around it that the object outlives (it is made outside the loop, or a header phi
+    carries it), so a comprehension or a list filled in a fixed loop is small. A module
+    constant's object gains none (every call shares it). Tuples and strings are fixed whatever
+    their uses, also in other modules, unless another module rebinds or deletes the name
+    (`ModuleDecls.rebound_globals`, `ProjectDecls::changed_elsewhere`).
   - `NaturalLoop.len_caps` (`LenCap`) records `while len(x) < N` caps up to 4096
     (`LEN_CAP_MAX`); `LoopCarriedInfo.updates` lists the real updates of a loop-carried value.
   - `IrFunction.starred` marks starred display elements, `BasicBlock.term_span` the source of a
@@ -413,7 +433,29 @@ changes to shared objects (`MUT202`, which reads the offloading call the same wa
 `EFF201` does not enter it. A callable a Layer 2 `sync_facade_arg` API runs
 (`AsyncSession.run_sync(fn)`) gets a site with `Runner::SyncFacade`: it runs on the caller's
 thread, so only its `blocking_db` (the database I/O through the synchronous facade it receives,
-awaited for it) is dropped; its arguments are left unbound.
+awaited for it) is dropped; its arguments are left unbound. The callable a builtin calls once
+per item (`consumption::per_item_callable`: the function handed to `map`, `filter`,
+`itertools.starmap`, `itertools.filterfalse`, and `functools.reduce`, and the `key` of `sorted`,
+`list.sort`, `min`, `max`, and `itertools.groupby`) gets a site with `Runner::PerItem` at the
+builtin's call: every fact of its body runs there, on the caller's thread (the lazy builtins run
+it where their result is consumed, almost always where they are written, as for a generator
+expression). Its parameters after the arguments a partial holds take the items, which are no
+value of the caller, and the ones after the items get their literal defaults when the builtin
+fixes how many it passes (one item, one per iterable of `map`, or the accumulated value and an
+item for `reduce`; not the elements of a `starmap` item); what the builtin returns is never what
+the callable returns.
+`CallSite::per_item` names the builtin and the arguments it takes the items from, and `EFF102` /
+`EFF103` count the site as inside one more loop, as long as the items, which they size as a
+`for` loop's iterable (`Sizes::items_data_sized`); the receiver, the arguments a partial holds,
+and the items stay the same objects through that loop (`ArgBinding::stays_in_loops`), so a lazy
+initialization on them runs once per object. A class handed to such a builtin is constructed per
+item, which is not modeled, and a lambda the function makes next to another lambda is not
+followed: every lambda of a function is `<function>.<locals>.<lambda>`, one key whose summary
+holds the facts of all of them. A builtin calling a
+callable per item and a sync-facade API resolve a `functools.partial` object to the function it
+calls, the arguments it holds binding the leading parameters (`partial(f, a)` handed to `map`
+calls `f(a, item)`); an offloading API's partial is not followed, since `MUT202` matches a
+worker's site to the arguments after the callable again (`site_call`).
 
 Early Cutoff compares summaries without their source positions, so an edit that only moves code
 changes no caller's facts. The positions callers copy (call chains, write sites) are still
@@ -647,7 +689,9 @@ deep = true   # changes to attributes and nested containers below are forbidden 
    - **`EFF101`**: calls with `is_awaited == true` excluded; `subprocess.Popen(...)` itself (a
      non-blocking spawn) excluded, while `.wait()` / `.communicate()` stay blocking.
    - **`EFF102`**: `for.iter` headers excluded; reconnects in `DaemonPolling` loops relaxed; a local
-     dict named `requests` is not mistaken for the package (type and name resolution).
+     dict named `requests` is not mistaken for the package (type and name resolution). A builtin
+     calling a function once per item (`map(fetch, urls)`, `sorted(xs, key=f)`) is a loop over
+     its items, relaxed as a `for` loop over the same iterable.
    - **`EFF103`**: `for.iter` headers excluded; a DB-API `execute` / `executemany` /
      `executescript` call (or SQLAlchemy's `exec_driver_sql`) whose statement is DDL (`CREATE`
      / `ALTER` / `DROP` / `PRAGMA`) records no `DbQuery` where it runs (it still blocks), so

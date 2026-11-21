@@ -322,8 +322,8 @@ ASCII. A file declaring any other encoding is reported as an error and not check
 
 ### Sizes known only at run time
 
-Whether a collection is small is decided from the code: a list built at run time counts as
-large, even when it always holds three items. The rules this affects are marked size-dependent;
+Whether a collection is small is decided from the code: a list whose size depends on the
+input counts as large, even when it always holds three items. The rules this affects are marked size-dependent;
 [Fixes and Safety](fixes.md#when-the-size-is-fixed) lists what counts as a fixed size.
 
 ### Callers outside the checked files

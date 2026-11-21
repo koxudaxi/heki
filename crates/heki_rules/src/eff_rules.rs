@@ -12,11 +12,11 @@ use crate::{
 };
 use heki_ast::Span;
 use heki_diagnostics::Diagnostic;
-use heki_effect::guards::loop_bit;
+use heki_effect::guards::{loop_bit, per_item_bit};
 use heki_effect::{
     BLOCKING_EFFECTS, BoundCallee, BoundaryReport, CallHop, CallSite, CallTarget, Construction,
-    EffectSummary, Facts, FuncKey, Runner, SiteEffect, TypeCtx, WriteKind, anchors_call_site,
-    boundary_reports_in,
+    EffectSummary, Facts, FuncKey, PerItem, Runner, SiteEffect, TypeCtx, WriteKind,
+    anchors_call_site, boundary_reports_in,
 };
 use heki_ir::{InstKind, IrFunction};
 use heki_kb::ExecEffectKind;
@@ -223,42 +223,50 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
         return;
     }
     let sites = cx.sites_by_span(unit);
+    // The functions where a builtin calls a project callable once per item: their calls outside
+    // loops may repeat too.
+    let per_item_callers: FxHashSet<&str> = sites
+        .values()
+        .flatten()
+        .filter(|s| s.per_item.is_some())
+        .map(|s| s.caller.qualname.as_str())
+        .collect();
     let tcx = TypeCtx::new(&unit.input, cx.decls, cx.kb);
     let no_types = FxHashMap::default();
     let constants = cx.fixed_constants(unit);
     for f in &unit.input.ir.functions {
-        if f.is_class_body || f.loops.is_empty() {
+        if f.is_class_body {
             continue;
         }
         let key = CheckContext::key(unit, f);
+        let per_item_calls = per_item_callers.contains(key.qualname.as_str());
+        if f.loops.is_empty() && !per_item_calls {
+            continue;
+        }
         let migration_fn = f.name == "upgrade" || f.name == "downgrade";
-        // Built when a block of a loop has an effect to report.
+        let wanted = |e: &SiteEffect| match e.effect {
+            ExecEffectKind::UnpooledClientAlloc => want102,
+            ExecEffectKind::DbQuery => want103 && !migration_fn,
+            _ => false,
+        };
+        // Built when a call has an effect to report.
         let mut sizes: Option<Sizes<'_, '_>> = None;
         let mut data_sized: Vec<Option<bool>> = vec![None; f.loops.len()];
         // An iteration shares its span with the call producing the iterable: one report.
         let mut seen: FxHashSet<Span> = FxHashSet::default();
         for bb in &f.blocks {
-            if f.block_loop_depth(bb.id) == 0 {
+            let depth = f.block_loop_depth(bb.id);
+            if depth == 0 && !per_item_calls {
                 continue;
             }
             // `for.iter` / `MakeIter` live in the preheader (depth 0), so they never get here.
             // Loops whose size the code fixes (small constant ranges and displays, retries,
             // daemon polling) are relaxed: a call is reported when some loop around it is
             // data-sized (the mask of those loops, as `SiteEffect::once_loops`), and the effect
-            // does not run once per object across that loop (lazy initialization).
-            let mut data_loops = || {
-                let sizes = sizes
-                    .get_or_insert_with(|| Sizes::new(cx, &tcx, &no_types, f, unit, &constants));
-                f.loops
-                    .iter()
-                    .enumerate()
-                    .filter(|(i, lp)| {
-                        lp.body.contains(&bb.id)
-                            && *data_sized[*i].get_or_insert_with(|| sizes.data_sized(lp))
-                    })
-                    .fold(0, |mask, (_, lp)| mask | loop_bit(lp))
-            };
-            let mut checked: Option<u64> = None;
+            // does not run once per object across that loop (lazy initialization). A builtin
+            // calling a callable once per item is one more loop, inside the others, as long as
+            // the items it iterates.
+            let mut data_loops: Option<u64> = None;
             for inst in &bb.insts {
                 // Reading a property runs its getter (a call site at the read); iterating a
                 // generator runs its body and iterating an object of a catalogued class its
@@ -272,29 +280,55 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
                 let Some(list) = sites.get(&(key.qualname.clone(), inst.span)) else {
                     continue;
                 };
+                if depth == 0 && list.iter().all(|s| s.per_item.is_none()) {
+                    continue;
+                }
                 if !seen.insert(inst.span) {
                     continue;
                 }
-                let effects: Vec<SiteEffect> = list
+                let effects: Vec<(SiteEffect, Option<&PerItem>)> = list
                     .iter()
                     .filter(|s| !iteration || s.project_callees().is_empty())
-                    .flat_map(|s| cx.index.site_effects(&unit.input.path, s))
+                    .flat_map(|s| {
+                        cx.index
+                            .site_effects(&unit.input.path, s)
+                            .into_iter()
+                            .map(|e| (e, s.per_item.as_deref()))
+                    })
+                    .filter(|(e, _)| wanted(e))
                     .collect();
-                let mut hot = || *checked.get_or_insert_with(&mut data_loops);
+                if effects.is_empty() {
+                    continue;
+                }
+                let sizes = sizes
+                    .get_or_insert_with(|| Sizes::new(cx, &tcx, &no_types, f, unit, &constants));
+                let around = *data_loops.get_or_insert_with(|| {
+                    f.loops
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, lp)| {
+                            lp.body.contains(&bb.id)
+                                && *data_sized[*i].get_or_insert_with(|| sizes.data_sized(lp))
+                        })
+                        .fold(0, |mask, (_, lp)| mask | loop_bit(lp))
+                });
                 // The shortest chain of an effect of `kind` that some data-sized loop runs on
-                // every iteration.
-                let mut per_iteration = |kind: ExecEffectKind| {
-                    if !effects.iter().any(|e| e.effect == kind) {
-                        return None;
-                    }
-                    let data = hot();
+                // every iteration, and the builtin whose loop over its items does.
+                let per_iteration = |kind: ExecEffectKind| {
                     effects
                         .iter()
-                        .filter(|e| e.effect == kind && data & !e.once_loops != 0)
-                        .map(|e| e.chain.as_slice())
-                        .min_by_key(|c| c.len())
+                        .filter(|(e, _)| e.effect == kind)
+                        .filter_map(|(e, per_item)| {
+                            let items = per_item
+                                .filter(|p| sizes.items_data_sized(inst, &p.items))
+                                .map_or(0, |_| per_item_bit(depth));
+                            let repeated = (around | items) & !e.once_loops;
+                            let by = per_item.filter(|_| repeated & items != 0);
+                            (repeated != 0).then_some((e.chain.as_slice(), Repeats(by)))
+                        })
+                        .min_by_key(|(chain, _)| chain.len())
                 };
-                if want102 && let Some(chain) = per_iteration(ExecEffectKind::UnpooledClientAlloc) {
+                if let Some((chain, repeats)) = per_iteration(ExecEffectKind::UnpooledClientAlloc) {
                     let root = chain.last().map(|h| h.callee.clone()).unwrap_or_default();
                     cx.emit(
                         out,
@@ -304,20 +338,19 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
                         &key.qualname,
                         root.clone(),
                         format!(
-                            "`{}` allocates an unpooled client{} on every loop iteration",
+                            "`{}` allocates an unpooled client{} {}",
                             chain[0].callee,
-                            through_helpers(chain)
+                            through_helpers(chain),
+                            repeats.every()
                         ),
-                        Some(
-                            "create one client or session before the loop and reuse it".to_owned(),
-                        ),
+                        Some(format!(
+                            "create one client or session before the {} and reuse it",
+                            repeats.ahead_of()
+                        )),
                         chain,
                     );
                 }
-                if want103
-                    && !migration_fn
-                    && let Some(chain) = per_iteration(ExecEffectKind::DbQuery)
-                {
+                if let Some((chain, repeats)) = per_iteration(ExecEffectKind::DbQuery) {
                     let root = chain.last().map(|h| h.callee.clone()).unwrap_or_default();
                     cx.emit(
                         out,
@@ -327,15 +360,43 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
                         &key.qualname,
                         root.clone(),
                         format!(
-                            "`{}` runs a database query{} on every loop iteration (N+1)",
+                            "`{}` runs a database query{} {} (N+1)",
                             chain[0].callee,
-                            through_helpers(chain)
+                            through_helpers(chain),
+                            repeats.every()
                         ),
-                        Some("batch the queries, or load the data once before the loop".to_owned()),
+                        Some(format!(
+                            "batch the queries, or load the data once before the {}",
+                            repeats.ahead_of()
+                        )),
                         chain,
                     );
                 }
             }
+        }
+    }
+}
+
+/// What repeats an effect `EFF102` / `EFF103` report: a data-sized loop around the call, or the
+/// builtin calling the callee once per item (`sorted(xs, key=f)`).
+struct Repeats<'s>(Option<&'s PerItem>);
+
+impl Repeats<'_> {
+    fn every(&self) -> String {
+        match self.0 {
+            Some(p) => format!(
+                "for every item `{}` calls it with",
+                p.api.strip_prefix("builtins.").unwrap_or(&p.api)
+            ),
+            None => "on every loop iteration".to_owned(),
+        }
+    }
+
+    /// What the help moves the work in front of.
+    fn ahead_of(&self) -> &'static str {
+        match self.0 {
+            Some(_) => "call",
+            None => "loop",
         }
     }
 }

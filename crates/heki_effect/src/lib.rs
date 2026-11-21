@@ -1010,10 +1010,15 @@ pub struct CallSite {
     /// their first parameter (a static method's binding aside), as the resolution of the call
     /// says (`Callee::Project`).
     pub binds_recv: bool,
-    /// For a callable a library API runs (`Runner::Worker`, `Runner::SyncFacade`): its position
-    /// among the call's arguments. Run on a worker, the callees take the positional arguments
-    /// after it; through a sync facade, none of the call's.
+    /// For a callable a library API runs (`Runner::Worker`, `Runner::SyncFacade`,
+    /// `Runner::PerItem`): its position among the call's arguments (`None` for a keyword:
+    /// `sorted(xs, key=f)`). Run on a worker, the callees take the positional arguments after
+    /// it; through a sync facade or per item, none of the call's.
     pub handed_callable: Option<u8>,
+    /// For a callable a builtin calls once per item (`Runner::PerItem`): the builtin and where
+    /// it takes the items from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub per_item: Option<Box<PerItem>>,
     /// What the receiver tells about the implementations the callees run (`None`: nothing).
     pub dispatch: Option<Box<Dispatch>>,
     /// A call on `self` whose result nothing reads (`self.prepare()` as a statement): it
@@ -1037,13 +1042,40 @@ pub enum Runner {
     /// (SQLAlchemy's `AsyncSession.run_sync(f)`, Layer 2 `sync_facade_arg`): its database I/O
     /// through the facade is awaited for it; its other blocking calls block.
     SyncFacade,
+    /// On the caller's thread, once per item of what a builtin iterates (`map(f, xs)`,
+    /// `sorted(xs, key=f)`: [`CallSite::per_item`]). The items are its arguments, none of them a
+    /// value of the caller.
+    PerItem,
+}
+
+/// A builtin calling the callees of a site once per item ([`Runner::PerItem`]): `EFF102` and
+/// `EFF103` count it as a loop as long as the items, which they size as a `for` loop's
+/// iterable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PerItem {
+    /// The builtin (`builtins.sorted`).
+    pub api: String,
+    pub items: Items,
+}
+
+/// Where a builtin takes the items it calls a callable with ([`PerItem::items`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Items {
+    /// The call's positional arguments at these positions, walked together: as many items as
+    /// the shortest has (`map(f, xs, ys)`). None when the builtin compares the arguments
+    /// themselves (`max(a, b, key=f)`).
+    Args(Vec<u8>),
+    /// The receiver (`xs.sort(key=f)`).
+    Receiver,
+    /// `*` unpacking hides which values they are (`map(f, *columns)`).
+    Unpacked,
 }
 
 impl CallSite {
     /// Whether the effect `e` of the callees does not block the caller's thread here.
     pub fn hides(&self, e: ExecEffectKind) -> bool {
         match self.runner {
-            Runner::Caller => false,
+            Runner::Caller | Runner::PerItem => false,
             Runner::Worker => e.blocks(),
             Runner::SyncFacade => e == ExecEffectKind::BlockingDb,
         }

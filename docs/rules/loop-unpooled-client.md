@@ -16,35 +16,36 @@ directly or through project functions,
 including the getter of a property read in the loop (`self.client.get(url)` where the `client`
 getter builds a new client).
 
+A function a builtin calls once per item runs in a loop too: the function handed to `map`,
+`filter`, `itertools.starmap`, `itertools.filterfalse`, and `functools.reduce`, and the `key` of
+`sorted`, `list.sort`, `min`, `max`, and `itertools.groupby` (`list(map(fetch, urls))`), whether
+it is a lambda, a project function, a bound method, or a `functools.partial` of one. The loop is
+as long as the items, which are sized as a `for` loop's iterable: `map(fetch, ("a", "b"))` is
+not reported, nor is `max(a, b, key=fetch)`, which compares two values. A lambda written in the
+same function as another lambda is not followed: every lambda of a function has the same name
+(`f.<locals>.<lambda>`), and heki keeps one summary per name.
+
 The iterable of a `for` loop is evaluated once and is not reported; neither are calls in
 loops whose size the code fixes, when no data-sized loop is around them: displays of at most 16
 items (also through a name or a module constant bound to one that nothing in the project
-grows, and through `enumerate` / `zip` / `reversed` / `sorted` / `.items()`), `range` of integer
-constants with at most 16 steps (`range(ATTEMPTS - 1)`), a `while` loop over a counter the code
-starts, steps, and limits with constants (`i = 1` ... `while i < 6:` ... `i += 1`, at most 16
-times), retry loops, and daemon polling loops.
-
-A retry loop repeats one attempt: its body leaves the loop on success or sleeps in an exception
-handler, and it runs over a small constant range or a target named like `attempt` / `retry`
-(also one name of a tuple target: `for attempt, proxy in enumerate(proxies)`). A loop that
-waits on every path back to its test is paced by time, as polls and retries are: a `while` loop,
-or a `for` loop whose body never reads its target (`for _ in range(30):`), in which every
-iteration sleeps or waits with a timeout (`time.sleep(5)`, `stop.wait(1)`, in a coroutine
-`await asyncio.sleep(5)`; `sleep(0)` only yields, and a sleep an exception can skip or a
-coroutine does not await does not count). A daemon polling loop runs until a
-flag or an event says to stop (`while self._running:`, `while not self._stopped:`, `while not
-stop_event.is_set():`), or is a `while True:` loop that waits on every iteration. A `for` loop
-reading its target steps through items, also when it sleeps per item.
+grows, a tuple whatever other code does with it short of rebinding it, and through
+`enumerate` / `zip` / `reversed` / `sorted` / `.items()`), `range` of integer constants with at
+most 16 steps (`range(ATTEMPTS - 1)`), what a builtin constructor, a comprehension, or a fixed
+loop of `append`s makes of those (`list(range(7))`, `[n.upper() for n in ("a", "b")]`), slices
+with a constant bound (`for case in cases[:3]`), iterables a length test on every path to the
+loop caps (`if len(cases) > 3: raise ...`), retry loops, and daemon polling loops.
 
 A client that is only created while an attribute is unset, which the code then sets (lazy
 initialization: `if not self._sock: self._sock = connect()`, or `if self._sock: return`
 before connecting), is created once per object, not on every iteration: the call is not
 reported unless a data-sized loop around it constructs the object in each iteration
 (`Connection().send(cmd)`); `conn.send(cmd)` on a connection made before the loop, taken from
-a pool, or held by the receiver is not reported. A `functools.cached_property` getter (also
-imported through a module that re-exports it, such as `kombu.utils.cached_property`) runs once
-per instance in the same way, and a lazy initialization of a module global (`global _session`)
-once per process.
+a pool, or held by the receiver is not reported. The receiver of a bound method, the arguments a
+`functools.partial` holds, and the items a builtin passes are no new objects either:
+`map(self.fetch, urls)`, where `fetch` sets `self._session` once, is not reported. A
+`functools.cached_property` getter (also imported through a module that re-exports it, such as
+`kombu.utils.cached_property`) runs once per instance in the same way, and a lazy
+initialization of a module global (`global _session`) once per process.
 
 A client created only while a local variable the loop carries is unset (`if conn is None: conn
 = connect()`, `conn = conn or connect()`), or only while a first-iteration flag holds (`if

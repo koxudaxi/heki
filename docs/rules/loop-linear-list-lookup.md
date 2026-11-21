@@ -26,8 +26,10 @@ not reported. Neither are:
   `remove()` / `pop()` or replace its items), in the function, as a module global (also of
   another module: `LEVELS = ["low", "mid", "high"]`), or as an attribute its class and
   subclasses only ever assign such a display (`self.preferred = [",", ";"]`, a class
-  attribute). A display handed to code that may grow it (any call but read-only builtins; a
-  `*items` argument passes the items only) is not small;
+  attribute); also a list the code builds from a fixed iterable (`list(range(7))`, `[c for c
+  in LABELS if overflow.get(c)]`) or fills a fixed number of times (`ids.append(card["id"])`
+  for each of at most 6 cards a test allowed). A display handed to code that may grow it (any
+  call but read-only builtins; a `*items` argument passes the items only) is not small;
 - calls after which the loop always ends (`return items.index(x)`, a `break` on every path);
 - `index(x, start)`, which scans from a position that usually moves forward.
 

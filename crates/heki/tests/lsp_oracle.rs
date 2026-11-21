@@ -257,6 +257,9 @@ const VIEW: &str = "from pkg.offload import fetch_profile\n\n\nasync def view():
 // A function run on a worker thread, awaited per item in another module (`EFF103`).
 const WORKER_OPS: &str = "from asgiref.sync import sync_to_async\nfrom sqlalchemy.orm import Session\n\n\n@sync_to_async\ndef load(session: Session, i):\n    return i\n";
 const WORKER_VIEW: &str = "from pkg.worker_ops import load\n\n\nasync def load_all(session, ids):\n    for i in ids:\n        await load(session, i)\n";
+const RANK_KEY: &str =
+    "from sqlalchemy.orm import Session\n\n\ndef rank(session: Session, i):\n    return i\n";
+const RANK_USER: &str = "from functools import partial\n\nfrom pkg.rank_key import rank\n\n\ndef ordered(session, ids):\n    return sorted(ids, key=partial(rank, session))\n";
 const FEED: &str =
     "import httpx\n\n\ndef rows():\n    return [httpx.get(\"https://example.com\")]\n";
 const FEED_GENERATOR: &str =
@@ -354,7 +357,18 @@ const QUEUE_FEEDER: &str =
 const QUEUE_FEEDER_GROWING: &str =
     "from pkg import queue_cfg\n\n\ndef feed(items):\n    queue_cfg.QUEUE.extend(items)\n";
 const QUEUE_READER: &str = "import httpx\n\nfrom pkg.queue_cfg import QUEUE\n\n\ndef each():\n    for item in QUEUE:\n        httpx.Client()\n";
+const QUEUE_MAPPER: &str = "import httpx\n\nfrom pkg.queue_cfg import QUEUE\n\n\ndef each():\n    return list(map(lambda item: httpx.Client(), QUEUE))\n";
 const LEVELS_USER: &str = "from pkg.levels import LEVELS\n\n\ndef ranks(xs):\n    out = []\n    for x in xs:\n        out.append(LEVELS.index(x))\n    return out\n";
+// A module body reads an imported name as a copy of its `Import`: its loop over the list is
+// fixed while the list is.
+const LEVELS_DOCS: &str =
+    "import httpx\n\nfrom pkg.levels import LEVELS\n\nfor level in LEVELS:\n    httpx.Client()\n";
+// A module-level tuple stays fixed whatever another module does with it (`chain` puts it in a
+// list); a list another module hands to code that may grow it does not.
+const STMTS: &str = "STATEMENTS = (\"create a\", \"create b\")\n";
+const STMTS_LIST: &str = "STATEMENTS = [\"create a\", \"create b\"]\n";
+const STMTS_CHAIN: &str = "from pkg.stmts import STATEMENTS\n\n\ndef chain():\n    out = []\n    out.append(STATEMENTS)\n    return out\n";
+const STMTS_RUN: &str = "import httpx\n\nfrom pkg.stmts import STATEMENTS\n\n\ndef run():\n    for statement in STATEMENTS:\n        httpx.Client()\n";
 const SNIFF: &str =
     "class Sniffer:\n    def __init__(self):\n        self.preferred = [\",\", \";\"]\n";
 const SNIFF_MORE: &str = "from pkg.sniff import Sniffer\n\n\nclass Wider(Sniffer):\n    pass\n";
@@ -490,6 +504,8 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/offload.py", OFFLOAD),
         ("pkg/view.py", VIEW),
         ("pkg/worker_ops.py", WORKER_OPS),
+        ("pkg/rank_key.py", RANK_KEY),
+        ("pkg/rank_user.py", RANK_USER),
         ("pkg/worker_view.py", WORKER_VIEW),
         ("pkg/feed.py", FEED),
         ("pkg/feed_user.py", FEED_USER),
@@ -500,9 +516,14 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/handoff.py", HANDOFF),
         ("pkg/levels.py", LEVELS),
         ("pkg/levels_user.py", LEVELS_USER),
+        ("pkg/levels_docs.py", LEVELS_DOCS),
+        ("pkg/stmts.py", STMTS),
+        ("pkg/stmts_chain.py", STMTS_CHAIN),
+        ("pkg/stmts_run.py", STMTS_RUN),
         ("pkg/queue_cfg.py", QUEUE_CFG),
         ("pkg/queue_feeder.py", QUEUE_FEEDER),
         ("pkg/queue_reader.py", QUEUE_READER),
+        ("pkg/queue_mapper.py", QUEUE_MAPPER),
         ("pkg/sniff.py", SNIFF),
         ("pkg/sniff_more.py", SNIFF_MORE),
         ("pkg/sniff_user.py", SNIFF_USER),
@@ -954,6 +975,21 @@ fn steps_body_runs() -> Vec<Step> {
             vec![save("pkg/worker_ops.py", WORKER_OPS)],
         )
         .absent(&[("pkg/worker_view.py", "EFF103")]),
+        // A function a builtin calls once per item: its caller is re-checked when the
+        // function in another module starts or stops querying.
+        Step::new(
+            "the sort key in another module starts a query per item",
+            vec![Action::Save(
+                "pkg/rank_key.py",
+                RANK_KEY.replace("    return i\n", "    return session.execute(i)\n"),
+            )],
+        )
+        .present(&[("pkg/rank_user.py", "EFF103")]),
+        Step::new(
+            "the sort key's query is removed",
+            vec![save("pkg/rank_key.py", RANK_KEY)],
+        )
+        .absent(&[("pkg/rank_user.py", "EFF103")]),
         Step::new(
             "a helper becomes a generator: the report moves to the iteration",
             vec![save("pkg/feed.py", FEED_GENERATOR)],
@@ -1008,21 +1044,36 @@ fn steps_task_arguments() -> Vec<Step> {
 
 /// `OPT112`'s small displays in other files, read through the declarations
 /// (`ModuleDecls::small_globals`, `ClassDecl::attr_displays`): the user of a module-level list
-/// is re-checked when another function starts growing the list, and the user of an attribute
-/// when a subclass in a third module starts growing it; `EFF102`'s fixed loops over a
-/// module-level list another module grows (`ModuleDecls::grown_globals`).
+/// (also a module body's loop over it) is re-checked when another function starts growing the
+/// list, and the user of an attribute when a subclass in a third module starts growing it;
+/// `EFF102`'s fixed loops over a module-level list another module grows
+/// (`ModuleDecls::grown_globals`), also as the items of a builtin calling a function once per
+/// item, and over a tuple, which nothing grows.
 fn steps_small_displays() -> Vec<Step> {
     vec![
         Step::new(
             "a module-level list another file scans in a loop starts growing",
             vec![save("pkg/levels.py", LEVELS_GROWN)],
         )
-        .present(&[("pkg/levels_user.py", "OPT112")]),
+        .present(&[
+            ("pkg/levels_user.py", "OPT112"),
+            ("pkg/levels_docs.py", "EFF102"),
+        ]),
         Step::new(
             "the module-level list is a small display again",
             vec![save("pkg/levels.py", LEVELS)],
         )
-        .absent(&[("pkg/levels_user.py", "OPT112")]),
+        .absent(&[
+            ("pkg/levels_user.py", "OPT112"),
+            ("pkg/levels_docs.py", "EFF102"),
+        ]),
+        Step::new(
+            "a module-level tuple another module puts in a list becomes a list",
+            vec![save("pkg/stmts.py", STMTS_LIST)],
+        )
+        .present(&[("pkg/stmts_run.py", "EFF102")]),
+        Step::new("it is a tuple again", vec![save("pkg/stmts.py", STMTS)])
+            .absent(&[("pkg/stmts_run.py", "EFF102")]),
         Step::new(
             "a subclass in another module grows an attribute another file scans",
             vec![save("pkg/sniff_more.py", SNIFF_MORE_GROWING)],
@@ -1042,6 +1093,7 @@ fn steps_small_displays() -> Vec<Step> {
         .present(&[
             ("pkg/queue_cfg.py", "EFF102"),
             ("pkg/queue_reader.py", "EFF102"),
+            ("pkg/queue_mapper.py", "EFF102"),
         ]),
         Step::new(
             "it only reads the list again",
@@ -1050,6 +1102,7 @@ fn steps_small_displays() -> Vec<Step> {
         .absent(&[
             ("pkg/queue_cfg.py", "EFF102"),
             ("pkg/queue_reader.py", "EFF102"),
+            ("pkg/queue_mapper.py", "EFF102"),
         ]),
     ]
 }

@@ -678,6 +678,10 @@ pub struct IrFunction {
     pub span: Span,
     pub is_module_body: bool,
     pub is_class_body: bool,
+    /// A generator expression, or a comprehension before 3.12, receives its outermost iterable
+    /// as `.0` from the function creating it: that function and the iterable there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub passed_from: Option<(FunctionId, VarId)>,
 }
 
 impl IrFunction {

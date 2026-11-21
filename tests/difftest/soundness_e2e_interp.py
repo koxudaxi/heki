@@ -94,8 +94,9 @@ def compares(items, limit):
 # Subscripts
 # ==============================================================================
 def vowels_seen(n):
-    """`list("...")` holds `str` elements; indexing an exact `str` gives a `str` probe."""
-    vowels = list("aeiouAEIOU")
+    """`list("...")` holds `str` elements; indexing an exact `str` gives a `str` probe (more
+    than 16 of them: a smaller list is not worth a `set`)."""
+    vowels = list("aeiouAEIOUaeiouAEIOU")
     text = "heki checks effects and aliases"
     out = []
     for i in range(n):

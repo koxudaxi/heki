@@ -1,6 +1,7 @@
 //! The cost of the analyses past the IR, end to end through the real binary: `isinstance`
 //! narrowing through phis, the passes of the type inference, the size of the Soundness lane's
-//! proof state, and the values `EFF107` follows from a task factory.
+//! proof state, the values `EFF107` follows from a task factory, and the walk to the callable a
+//! builtin calls once per item.
 
 mod common;
 
@@ -483,4 +484,126 @@ fn task_factories_at_the_end_of_a_copy_chain_take_linear_time() {
         .collect();
     assert_eq!(tasks.len(), 1, "{tasks:?}");
     assert_eq!(tasks[0]["target"], "asyncio.create_task->t0");
+}
+
+/// Each list copies the one before (`x1 = list(x0)`): the size of the last is not followed
+/// past a few constructors, and each is decided once.
+#[test]
+fn chains_of_builtin_constructors_are_followed_a_bounded_depth() {
+    let mut lines = vec![
+        "import httpx".to_owned(),
+        String::new(),
+        String::new(),
+        "def copies():".to_owned(),
+        "    x0 = [1, 2]".to_owned(),
+    ];
+    for i in 1..=3000 {
+        lines.push(format!("    x{i} = list(x{})", i - 1));
+    }
+    lines.push("    for _ in x4:".to_owned());
+    lines.push("        httpx.Client()".to_owned());
+    lines.push("    for _ in x3000:".to_owned());
+    lines.push("        httpx.Client()".to_owned());
+    let p = Project::new("bounds_constructor_chain");
+    p.write("m.py", &(lines.join("\n") + "\n"));
+    // Four copies keep two items; three thousand are past the depth the sizes follow.
+    let diags = check_within(&p, Duration::from_secs(20));
+    let lines: Vec<u64> = diags.iter().map(|d| d["line"].as_u64().unwrap()).collect();
+    assert_eq!(lines, [3009], "{diags:#?}");
+}
+
+/// Two lists that extend each other: the size of each asks for the other's at the same store,
+/// and the question is answered once, as not fixed, instead of recursing until the stack ends.
+#[test]
+fn lists_that_extend_each_other_are_not_fixed() {
+    let p = Project::new("bounds_mutual_extend");
+    p.write(
+        "m.py",
+        "import sqlite3\n\n\ndef f(conn: sqlite3.Connection):\n    a = []\n    b = []\n    a.extend(b)\n    b.extend(a)\n    for x in a:\n        conn.execute(\"SELECT ?\", (x,))\n",
+    );
+    let found = check_within(&p, Duration::from_secs(20));
+    let queries: Vec<&Value> = found
+        .iter()
+        .filter(|d| d["rule_code"] == "EFF103")
+        .collect();
+    assert_eq!(queries.len(), 1, "{found:#?}");
+}
+
+/// A length test repeated through `steps` assignments, each `and` of the one before with its
+/// double negation: every value implies the same one cap, kept once, so the caps stay one per
+/// measured value instead of doubling at each step.
+fn repeated_length_test(steps: usize) -> String {
+    let mut lines = vec![
+        "import sqlite3".to_owned(),
+        String::new(),
+        String::new(),
+        "def f(conn: sqlite3.Connection, xs):".to_owned(),
+        "    b0 = len(xs) <= 6".to_owned(),
+    ];
+    for i in 1..=steps {
+        lines.push(format!("    b{i} = b{} and not not b{}", i - 1, i - 1));
+    }
+    lines.push(format!("    if not b{steps}:"));
+    lines.push("        raise ValueError(xs)".to_owned());
+    lines.push("    for x in xs:".to_owned());
+    lines.push("        conn.execute(\"SELECT ?\", (x,))".to_owned());
+    lines.join("\n") + "\n"
+}
+
+#[test]
+fn length_tests_repeated_through_assignments_keep_one_cap() {
+    for steps in [4, 40] {
+        let p = Project::new(&format!("bounds_repeated_len_{steps}"));
+        p.write("m.py", &repeated_length_test(steps));
+        let found = check_within(&p, Duration::from_secs(20));
+        // The loop runs at most six times, so it is no N+1.
+        assert!(
+            !found.iter().any(|d| d["rule_code"] == "EFF103"),
+            "{found:#?}"
+        );
+    }
+}
+
+/// A query a sort key runs, the key reached through `depth` nested `functools.partial` objects
+/// and `copies` copies before the call.
+fn partial_chain(depth: usize, copies: usize) -> String {
+    let mut out = vec![
+        "import functools".to_owned(),
+        "import sqlite3".to_owned(),
+        String::new(),
+        String::new(),
+        "def score(conn: sqlite3.Connection, uid):".to_owned(),
+        "    return conn.execute(\"SELECT ?\", (uid,))".to_owned(),
+        String::new(),
+        String::new(),
+        "def rank(conn: sqlite3.Connection, ids):".to_owned(),
+        "    k0 = functools.partial(score, conn)".to_owned(),
+    ];
+    for k in 1..=depth {
+        out.push(format!("    k{k} = functools.partial(k{})", k - 1));
+    }
+    out.push(format!("    c0 = k{depth}"));
+    for c in 1..=copies {
+        out.push(format!("    c{c} = c{}", c - 1));
+    }
+    out.push(format!("    return sorted(ids, key=c{copies})"));
+    out.join("\n") + "\n"
+}
+
+/// The callable a builtin calls once per item is followed through at most 16 copies and 16
+/// nested partial objects, a walk at every call handing one: past either bound the sort key is
+/// not resolved, so its query is not reported.
+#[test]
+fn callables_past_the_partial_and_copy_bounds_are_not_followed() {
+    let queries = |depth: usize, copies: usize| -> usize {
+        let p = Project::new(&format!("bounds_partials_{depth}_{copies}"));
+        p.write("m.py", &partial_chain(depth, copies));
+        check_within(&p, Duration::from_secs(20))
+            .iter()
+            .filter(|d| d["rule_code"] == "EFF103")
+            .count()
+    };
+    assert_eq!(queries(3, 3), 1);
+    assert_eq!(queries(30, 3), 0);
+    assert_eq!(queries(3, 30), 0);
 }

@@ -12,6 +12,12 @@ release can change rules, configuration keys, diagnostics, and output formats.
 - The `OPT` rules default to severity `warning` instead of `error`: they report slower code,
   not wrong code. The exit code does not change (a warning still makes `heki check` exit 1),
   only the output label and the SARIF level. `[tool.heki.lint.severity]` still overrides it.
+- `EFF102` and `EFF103` also report the function a builtin calls once per item: the function
+  handed to `map`, `filter`, `itertools.starmap`, `itertools.filterfalse`, and
+  `functools.reduce`, and the `key` of `sorted`, `list.sort`, `min`, `max`, and
+  `itertools.groupby` (`sorted(users, key=lambda u: score(conn, u))`), when the items are not a
+  fixed number. Its body runs at the call for every rule, so `EFF101` sees its blocking calls
+  too. A `functools.partial` handed to such a builtin is followed to the function it calls.
 
 ### Fixed
 
@@ -39,6 +45,19 @@ release can change rules, configuration keys, diagnostics, and output formats.
   longer resolves on the function's return annotation, so the rules stop following it there.
   `await` and `async with` still give the annotated type, and awaiting a future gives what it
   holds, not the future.
+- Sizes the code states are no longer taken as data-sized (`EFF102`, `EFF103`, `DATA101`, and
+  the `OPT` rules): a builtin constructor of a fixed iterable (`list(range(7))`,
+  `tuple(".;:")`), a string constant, a comprehension over fixed iterables or a new list filled
+  a fixed number of times (`[c for c in LABELS if c in seen]`, `ids.append(...)` for each of a
+  few cards), a slice with constant bounds (`cases[:3]`), and an iterable a length test on every
+  path to the loop caps (`if not 1 <= len(cards) <= 6: raise ...`, `assert len(xs) <= 3`). A
+  module body's loops and comprehensions over imported constants, and generator expressions
+  and comprehensions before 3.12 over constants of other modules, get the same sizes as the
+  code of a function.
+- A module-level tuple or string stays fixed when other code puts it in a list or passes it to
+  a function (an `EFF103` report on a loop of `CREATE TABLE` statements).
+- `DATA101` no longer reports an accumulation in a loop whose trip count the code fixes
+  (`for is_p_wave in [False, True]`, `range(4)`).
 - Polls and retries are no longer taken for loops over data (`EFF102`, `EFF103`, and the
   size-dependent rules): a loop that sleeps or waits with a timeout on every path back to its
   test (`while not job_done(): time.sleep(5)`, `for _ in range(30): ... sleep(1)`), a `while`

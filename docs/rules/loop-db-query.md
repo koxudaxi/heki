@@ -16,7 +16,9 @@ the Django `QuerySet` methods that run the query (`get`, `first`, `count`, ... a
 variants), `pymongo`, `redis`, and DynamoDB commands, `pandas.read_sql`, and project functions
 that reach them, also when an offloading API runs them on a worker thread per item (`await
 asyncio.to_thread(load, i)`, a function decorated with `@sync_to_async`), including the getter of a property read in the loop and a generator iterated in
-the loop (its body runs where it is iterated, as for `EFF101`).
+the loop (its body runs where it is iterated, as for `EFF101`). A function a builtin calls once
+per item runs in a loop as long as the items (`sorted(users, key=lambda u: score(conn, u))`,
+`list(map(load, ids))`; see `EFF102` for the builtins and the items whose number the code fixes).
 
 It does not report reading the rows of a statement already executed (`cursor.fetchone()`),
 calls that only build a query (`session.query(User).filter(...)`, `QuerySet.filter(...)`,
