@@ -2267,5 +2267,6 @@ fn shared_state_of_thousands_of_globals_is_walked_once() {
         serde_json::json!(["changes_globals"])
     );
     let hand = inspect_within(&p, &["m.hand"], Duration::from_secs(20));
-    assert_eq!(hand["changes"]["globals"].as_array().unwrap().len(), 3_000);
+    // One entry per global, at its first hand-off.
+    assert_eq!(hand["changes"]["globals"].as_array().unwrap().len(), 1_000);
 }
