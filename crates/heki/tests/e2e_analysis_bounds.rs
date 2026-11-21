@@ -2445,6 +2445,54 @@ fn item_origins_decide_each_question_once() {
     );
 }
 
+/// `MUT107` reads what a `__hash__` reads on the instances of each writer's class, following its
+/// `self` calls along that class's MRO: a hash calling a long chain of `self` helpers, and
+/// hundreds of subclasses each changing the attribute the chain's end reads. The walk runs once per
+/// writer class and visits each method once, as the family of each class lists the methods it
+/// inherits.
+#[test]
+fn hash_reads_per_writer_class_visit_each_method_once() {
+    let (helpers, classes) = (600, 600);
+    let mut lines = vec![
+        "class Node:".to_owned(),
+        "    def __init__(self):".to_owned(),
+        "        self.key = 0".to_owned(),
+        String::new(),
+        "    def __hash__(self):".to_owned(),
+        "        return hash(self.h0())".to_owned(),
+    ];
+    for i in 0..helpers {
+        let next = if i + 1 < helpers {
+            format!("self.h{}()", i + 1)
+        } else {
+            "self.key".to_owned()
+        };
+        lines.extend([
+            String::new(),
+            format!("    def h{i}(self):"),
+            format!("        return {next}"),
+        ]);
+    }
+    for i in 0..classes {
+        lines.extend([
+            String::new(),
+            String::new(),
+            format!("class Sub{i}(Node):"),
+            "    def touch(self):".to_owned(),
+            "        self.key = 1".to_owned(),
+        ]);
+    }
+    let p = Project::new("bounds_hash_reads_per_class");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nextend-select = [\"MUT107\"]\n",
+    )
+    .write("m.py", &(lines.join("\n") + "\n"));
+    let found = check_within(&p, Duration::from_secs(20));
+    let reported = found.iter().filter(|d| d["rule_code"] == "MUT107").count();
+    assert_eq!(reported, classes);
+}
+
 /// The implementations of a call are checked over at most 64 classes (the receiver's class and
 /// its project subclasses): a receiver class with more subclasses has no complete set of targets,
 /// so a call that blocks through every one of them is not established (`EFF111`, not `EFF101`).

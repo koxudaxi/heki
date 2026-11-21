@@ -15,6 +15,7 @@ use heki_effect::{
     TypedFieldWriteSite, Val, WriteKind, attr_writes, self_attr_writes,
 };
 use heki_env::HekiConfig;
+use heki_ir::walk::{Budget, Visit, reach};
 use heki_ir::{BlockId, FnIndex, Inst, InstKind, IrFunction, VarId};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{BTreeMap, BTreeSet};
@@ -276,13 +277,15 @@ fn stale_writes<'m, 'a>(
             if covered_by_callers {
                 continue;
             }
+            let receiver = receiver_class(decls, m, p);
             for (&attr, read_keys) in &reads {
                 let writes: Vec<&AttrKeyPath> = local
                     .mutates_self_attrs
                     .iter()
                     .filter(|w| w.attr == attr)
                     .collect();
-                if writes.is_empty() {
+                // The write is a plain store.
+                if writes.is_empty() || decls.attr_write_runs_code(&receiver, attr) {
                     continue;
                 }
                 let first = flows.iter().zip(&invalidations).find_map(|(flow, points)| {
@@ -2762,9 +2765,9 @@ impl<'a> Mut202Fn<'a> {
 
 // ==================================================================================== MUT107
 
-/// `MUT107`: a method of the class (or of a subclass) mutates an attribute `__hash__` reads
-/// after initialization, so instances already stored in a `set` or as `dict` keys can no longer
-/// be found. Reported at the method's first own write of the attribute, once per method and
+/// `MUT107`: a method of the class (or of a subclass) other than the initializers rebinds or
+/// changes in place, with a plain store, an attribute that the `__hash__` of its instances
+/// reads. Reported at the method's first own write of the attribute, once per method and
 /// attribute; the filters are `MUT101`'s (two-phase initialization, memo dictionaries,
 /// disjoint constant keys) plus lazy initialization and `__hash__`'s own cache.
 pub(crate) fn mut107(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
@@ -2772,6 +2775,7 @@ pub(crate) fn mut107(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
         return;
     }
     let mut seen = FxHashSet::default();
+    let mut sites: Option<SitesByCaller<'_>> = None;
     for_each_class_family(cx, |methods, family, init_called| {
         let hashes: Vec<_> = methods
             .iter()
@@ -2781,6 +2785,7 @@ pub(crate) fn mut107(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
         if hashes.is_empty() {
             return;
         }
+        let sites = sites.get_or_insert_with(|| cx.sites_by_caller());
         let init_helpers = private_methods_named_in_initializers(cx, family);
         for (h, hs) in hashes {
             // Filter 5: what the hash computation writes itself (`self._hash = ...`, also
@@ -2811,16 +2816,30 @@ pub(crate) fn mut107(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
                         && !hashes_otherwise(cx.decls, m, h)
                 })
                 .filter_map(|(m, checked)| Some((m, checked, local_summary(cx.index, m)?)));
+            // What the hash reads on the instances of each writer's class, decided once per
+            // class.
+            // What the hash reads on the instances of each writer's class, decided once per
+            // class.
+            let mut reads_on: FxHashMap<String, FxHashSet<&str>> = FxHashMap::default();
             for (m, Checked { unit, f }, local) in writers {
+                let receiver = receiver_class(cx.decls, m, h);
                 for (attr, read_keys) in &reads {
                     let writes: Vec<&AttrKeyPath> = local
                         .mutates_self_attrs
                         .iter()
                         .filter(|w| w.attr == *attr)
                         .collect();
+                    if writes.is_empty() {
+                        continue;
+                    }
+                    let read_on_receiver = reads_on
+                        .entry(receiver.clone())
+                        .or_insert_with(|| self_reads_on(cx, sites, &h.key, &receiver));
                     // Filter 4: stored hashes (`self._hash`, which a deserialization hook
-                    // recomputes), disjoint constant keys.
-                    if writes.is_empty()
+                    // recomputes), disjoint constant keys. The write is a plain store, and
+                    // the hash reads the attribute on the writer's instances.
+                    if !read_on_receiver.contains(*attr)
+                        || cx.decls.attr_write_runs_code(&receiver, attr)
                         || is_stored_hash(attr)
                         || disjoint_keys(
                             read_keys.iter().copied(),
@@ -2849,6 +2868,11 @@ pub(crate) fn mut107(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
                         continue;
                     }
                     let class_qualname = hs.owner_class_qualname.as_deref().unwrap_or_default();
+                    let change = if write.rebinds {
+                        "rebinds"
+                    } else {
+                        "changes in place"
+                    };
                     cx.emit(
                         out,
                         "MUT107",
@@ -2857,7 +2881,7 @@ pub(crate) fn mut107(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
                         &m.key.qualname,
                         format!("{class_qualname}.{attr}->__hash__"),
                         format!(
-                            "`{}` mutates `self.{attr}`, which `{}` reads, so instances already stored in a `set` or used as `dict` keys can no longer be found",
+                            "`{}` {change} `self.{attr}` outside initialization, and `{}` reads it",
                             m.key.qualname, h.key.qualname
                         ),
                         Some(
@@ -2870,6 +2894,72 @@ pub(crate) fn mut107(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
             }
         }
     });
+}
+
+/// The class of the instances both `writer` and `reader` run on: the writer's class when it
+/// is the reader's class or a subclass of it, else the reader's class (the writer is inherited
+/// from an ancestor).
+fn receiver_class(decls: &ProjectDecls, writer: &Method<'_>, reader: &Method<'_>) -> String {
+    let (class, reader_class) = (writer.class(), reader.class());
+    if class == reader_class || decls.ancestors_of(&class).contains(&reader_class) {
+        class
+    } else {
+        reader_class
+    }
+}
+
+/// The `self` attributes `method` reads when it runs on an instance of `receiver`: its own
+/// reads, and those of the `self` methods and properties it calls, each call running the
+/// definition `receiver`'s MRO finds. The summary of `method` joins the reads of every
+/// definition a `self` call may run, those overriding it in other subclasses too. Each method
+/// is visited once, and only methods of the classes along `receiver`'s MRO are; the walk is
+/// over the project index, so its budget is unmetered (`heki check` and the language server
+/// visit the same methods).
+fn self_reads_on<'s, 'k>(
+    cx: &CheckContext<'s>,
+    sites: &SitesByCaller<'k>,
+    method: &'k FuncKey,
+    receiver: &str,
+) -> FxHashSet<&'s str> {
+    let mro: Vec<String> = std::iter::once(receiver.to_owned())
+        .chain(cx.decls.ancestors_of(receiver))
+        .collect();
+    let mro_position = |k: &FuncKey| {
+        let class = format!("{}.{}", k.module, k.qualname.rsplit_once('.')?.0);
+        mro.iter().position(|c| *c == class)
+    };
+    let next = |k: &'k FuncKey, out: &mut Vec<&'k FuncKey>| {
+        let self_calls = sites.get(k).into_iter().flatten();
+        out.extend(
+            self_calls
+                .filter(|(_, s)| s.recv_is_self)
+                .filter_map(|(_, site)| {
+                    let runs = site
+                        .project_callees()
+                        .iter()
+                        .filter_map(|bc| Some((mro_position(&bc.callee)?, &bc.callee)))
+                        .min_by_key(|(at, _)| *at);
+                    runs.map(|(_, callee)| callee)
+                }),
+        );
+    };
+    let mut reads = FxHashSet::default();
+    let visit = |k: &'k FuncKey| {
+        let local = cx
+            .index
+            .file_of(k)
+            .and_then(|p| cx.index.files.get(p))
+            .and_then(|f| f.local_functions.get(k));
+        reads.extend(
+            local
+                .into_iter()
+                .flat_map(|l| l.reads_self_attrs.iter().map(|r| r.attr.as_str())),
+        );
+        Visit::<()>::Expand
+    };
+    let budget = Budget::unmetered("MUT107 hash reads");
+    reach(&budget, [method], next, visit).open_means(None);
+    reads
 }
 
 /// Dunder methods Python makes class methods without a decorator.

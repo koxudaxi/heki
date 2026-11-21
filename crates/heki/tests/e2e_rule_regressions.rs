@@ -593,6 +593,195 @@ fn mut101_and_mut107_stay_quiet_on_classes_a_metaclass_may_give_descriptors() {
     assert_eq!(lines(&p, "MUT107"), vec![at(54, "Plain.turn_on")]);
 }
 
+// ================================================ MUT101 / MUT107: writes that run code
+
+/// A store or delete of `self.<attr>` that is no plain store: a metaclass given through the bases
+/// (a call building the base, or a module variable holding one), a property of that name (with
+/// a setter, a raising deleter, or none, when the store raises), and `__setattr__`. The write
+/// rules claim a plain store, so they stay quiet; `Plain` is reported.
+const WRITES_THAT_RUN_CODE: &str = r#"from functools import cached_property
+
+
+class _Meta(type):
+    pass
+
+
+def with_metaclass(meta, *bases):
+    return meta("NewBase", bases, {})
+
+
+Made = with_metaclass(_Meta)
+
+
+class Proxy(with_metaclass(_Meta)):
+    def __init__(self, wrapped):
+        self.wrapped = wrapped
+
+    def __hash__(self):
+        return hash(self.wrapped)
+
+    def __iadd__(self, other):
+        self.wrapped += other
+        return self
+
+
+class ViaVariable(Made):
+    def __init__(self, v):
+        self.v = v
+
+    def __hash__(self):
+        return hash(self.v)
+
+    def bump(self):
+        self.v += 1
+
+
+class ResourceId:
+    def __init__(self, value):
+        self.__dict__["id"] = value
+
+    @property
+    def id(self):
+        return self.__dict__["id"]
+
+    @id.deleter
+    def id(self):
+        raise Exception("The resource id cannot be deleted.")
+
+    def __hash__(self):
+        return hash(self.id)
+
+    def forget(self):
+        del self.id
+
+
+class Settable:
+    def __init__(self, x):
+        self._x = x
+
+    x = property(lambda self: self._x)
+
+    @cached_property
+    def doubled(self):
+        return self.x * 2
+
+    def __hash__(self):
+        return hash(self.x)
+
+    def change(self):
+        self.x = 1
+
+
+class Frozen:
+    def __init__(self, x):
+        object.__setattr__(self, "x", x)
+
+    def __setattr__(self, name, value):
+        raise AttributeError(name)
+
+    @cached_property
+    def doubled(self):
+        return self.x * 2
+
+    def __hash__(self):
+        return hash(self.x)
+
+    def change(self):
+        self.x = 1
+
+
+class Plain:
+    def __init__(self, v):
+        self.v = v
+
+    @cached_property
+    def doubled(self):
+        return self.v * 2
+
+    def __hash__(self):
+        return hash(self.v)
+
+    def bump(self):
+        self.v += 1
+"#;
+
+#[test]
+fn mut101_and_mut107_stay_quiet_on_writes_that_run_code() {
+    let p = Project::new("regr_mut107_writes_run_code");
+    p.write("shapes.py", WRITES_THAT_RUN_CODE);
+    assert_eq!(lines(&p, "MUT101"), vec![at(104, "Plain.bump")]);
+    assert_eq!(lines(&p, "MUT107"), vec![at(104, "Plain.bump")]);
+}
+
+/// The `__hash__` the writer's instances use reads the attribute through `self.identity`, each
+/// call running the definition their class's MRO finds: `Combined` runs `Expression.identity`,
+/// which reads only `self.args`, although `Lookup` overrides `identity` to read `self.lhs`.
+const HASH_READS_PER_CLASS: &str = r#"class Expression:
+    def __init__(self, *args):
+        self.args = args
+
+    @property
+    def identity(self):
+        return (type(self), self.args)
+
+    def __eq__(self, other):
+        return isinstance(other, Expression) and other.identity == self.identity
+
+    def __hash__(self):
+        return hash(self.identity)
+
+
+class Combined(Expression):
+    def __init__(self, lhs, rhs):
+        super().__init__(lhs, rhs)
+        self.lhs = lhs
+        self.rhs = rhs
+
+    def set_source_expressions(self, exprs):
+        self.lhs, self.rhs = exprs
+
+
+class Lookup(Expression):
+    def __init__(self, lhs, rhs):
+        super().__init__()
+        self.lhs = lhs
+        self.rhs = rhs
+
+    @property
+    def identity(self):
+        return type(self), self.lhs, self.rhs
+
+    def __eq__(self, other):
+        return isinstance(other, Lookup) and self.identity == other.identity
+
+    def __hash__(self):
+        return hash(self.identity)
+
+
+class LookupChild(Lookup):
+    def set_lhs(self, v):
+        self.lhs = v
+
+
+class Tagged(Expression):
+    @property
+    def identity(self):
+        return (self.tag,)
+
+    def retag(self, t):
+        self.tag = t
+"#;
+
+#[test]
+fn mut107_reads_the_hash_the_writers_instances_use() {
+    let p = Project::new("regr_mut107_hash_per_class");
+    p.write("expressions.py", HASH_READS_PER_CLASS);
+    assert_eq!(
+        lines(&p, "MUT107"),
+        vec![at(45, "LookupChild.set_lhs"), at(54, "Tagged.retag")]
+    );
+}
+
 // ============================================================= MUT101: lazy initialization
 
 /// Lazy initializations (`if self._conn is None: self._conn = ...`, `if not self.finalized:`, in

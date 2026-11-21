@@ -289,7 +289,9 @@ pub struct ClassDecl {
     /// The resolved `metaclass=` of the class statement.
     pub metaclass: Option<String>,
     /// The class statement names a metaclass other than `type` and `abc.ABCMeta`, also one heki
-    /// cannot resolve ([`ProjectDecls::has_custom_metaclass`]).
+    /// cannot resolve, or has a base heki names no class for, whose metaclass is unknown
+    /// (`with_metaclass(Meta)`, a module variable such as `Base = declarative_base()`)
+    /// ([`ProjectDecls::has_custom_metaclass`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub custom_metaclass: bool,
     /// The `frozen=` keyword of the class statement (`class C(Base, frozen=False)`).
@@ -322,6 +324,12 @@ pub struct ClassDecl {
     /// The names the class defines: class-body names (methods, annotations, assignments) and
     /// the attributes its methods set or annotate on `self` (structural typing, `Protocol`).
     pub members: BTreeSet<String>,
+    /// The class-body names bound to a `property` (`@property`, `@x.setter`, `@x.deleter`,
+    /// `x = property(...)`): storing or deleting the attribute on an instance runs the
+    /// property's setter or deleter, or raises without one, instead of changing the instance's
+    /// own attribute ([`ProjectDecls::attr_write_runs_code`]).
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub properties: BTreeSet<String>,
     /// The attributes its module stores on the class object or deletes outside the class body
     /// (`Keys.KEY = "x"`, `cls.KEY = "x"`, [`class_attrs_rebound`]): the class's own value of
     /// the name from then on, which no string constant of the class or its bases fixes.
@@ -2135,7 +2143,8 @@ impl ProjectDecls {
     }
 
     /// Whether a project class along the MRO of `class` names a metaclass other than `type` and
-    /// `abc.ABCMeta` (`metaclass=Meta`, also one heki cannot resolve). Python creates every
+    /// `abc.ABCMeta` (`metaclass=Meta`, also one heki cannot resolve) or has a base heki names
+    /// no class for (`ClassDecl::custom_metaclass`). Python creates every
     /// subclass with it too, and it may replace any attribute of the class with a descriptor
     /// (`setattr(cls, f"_attr_{name}", property(...))` in its `__init__`), so writing an
     /// attribute of an instance may run code heki does not see.
@@ -2144,6 +2153,23 @@ impl ProjectDecls {
             self.read(|k| note(&mut k.class_facts, &c));
             self.class(&c).is_some_and(|decl| decl.custom_metaclass)
         })
+    }
+
+    /// Whether storing or deleting `attr` on an instance of the project class `class` may run
+    /// code instead of changing the instance's own attribute: a class along its MRO defines
+    /// `__setattr__` or `__delattr__`, binds `attr` to a property (`ClassDecl::properties`), or
+    /// has a metaclass other than `type` ([`Self::has_custom_metaclass`]), which may install a
+    /// descriptor.
+    pub fn attr_write_runs_code(&self, class: &str, attr: &str) -> bool {
+        self.has_custom_metaclass(class)
+            || self.mro(class).into_iter().any(|c| {
+                self.read(|k| note(&mut k.class_facts, &c));
+                self.class(&c).is_some_and(|decl| {
+                    decl.properties.contains(attr)
+                        || decl.members.contains("__setattr__")
+                        || decl.members.contains("__delattr__")
+                })
+            })
     }
 
     /// Whether reading `attr` on an instance of the project class `class` (or, under assumption
@@ -3002,6 +3028,14 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
                 .any(|d| decls.decorator_is(d, PROPERTY_DECORATORS));
         *getters_only.entry(&f.qualname).or_insert(true) &= getter;
     }
+    // The module scope's bindings are sorted by name.
+    let module_binds = |name: &str| {
+        semantic.scopes.first().is_some_and(|sc| {
+            sc.bindings
+                .binary_search_by(|b| b.name.as_str().cmp(name))
+                .is_ok()
+        })
+    };
     // Resolve bases, class keywords, and annotations now that local names are known.
     for class in &semantic.classes {
         // A module-level class statement evaluates its bases before it binds its own name: a
@@ -3015,6 +3049,9 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
                 .filter(|_| !class.qualname.contains('.'))
                 .map(|(_, target, _, _)| target)
         };
+        // A base heki names no class for: an expression (`with_metaclass(Meta)`), or a module
+        // variable (`Base = declarative_base()`, `Alias = Real`). Its metaclass is unknown.
+        let mut unknown_base = class.unnamed_bases;
         let bases: Vec<String> = class
             .bases
             .iter()
@@ -3024,7 +3061,11 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
                 match imported_here(first) {
                     Some(target) if rest.is_empty() => Some(target.clone()),
                     Some(target) => Some(format!("{target}.{rest}")),
-                    None => decls.resolve_dotted(head, false),
+                    None => {
+                        let resolved = decls.resolve_dotted(head, false);
+                        unknown_base |= resolved.is_none() && module_binds(first);
+                        resolved
+                    }
                 }
             })
             .collect();
@@ -3038,12 +3079,13 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
         let metaclass_text = keyword("metaclass");
         let metaclass = metaclass_text.and_then(|m| decls.resolve_dotted(m, false));
         // `type` is no name the module binds: it stays the builtin unless the module rebinds it.
-        let custom_metaclass = metaclass_text.is_some_and(|text| {
-            !matches!(
-                metaclass.as_deref().unwrap_or(text),
-                "type" | "builtins.type" | "abc.ABCMeta"
-            )
-        });
+        let custom_metaclass = unknown_base
+            || metaclass_text.is_some_and(|text| {
+                !matches!(
+                    metaclass.as_deref().unwrap_or(text),
+                    "type" | "builtins.type" | "abc.ABCMeta"
+                )
+            });
         let frozen_keyword = keyword("frozen").and_then(bool_literal);
         let is_protocol = bases
             .iter()
@@ -3107,6 +3149,7 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
             }
         }
     }
+    class_properties(input, &mut decls);
     // PEP 681 `dataclass_transform` on a decorator function: any definition (an overload or the
     // implementation) carries it; `Some(true)` (`frozen_default`) wins.
     let mut transforms: FxHashMap<&str, Option<bool>> = FxHashMap::default();
@@ -4066,6 +4109,66 @@ fn readonly_metadata(input: &ModuleInput<'_>, decls: &mut ModuleDecls) {
             c.readonly_attrs.extend(f.readonly);
             c.decorators.extend(f.decorators);
             c.transform = c.transform.max(f.transform);
+        }
+    }
+}
+
+/// `ClassDecl::properties` of the module's classes: their methods decorated with `property`
+/// (`abc.abstractproperty`) or with an accessor of one (`@x.setter`, `@x.deleter`,
+/// `@x.getter`), and the class-body names bound to a call of the builtin `property`.
+/// `functools.cached_property` is no data descriptor: a store sets the instance's attribute.
+fn class_properties(input: &ModuleInput<'_>, decls: &mut ModuleDecls) {
+    let builtin_property = !decls.imports.contains_key("property")
+        && !decls.functions.contains_key("property")
+        && !decls.classes.contains_key("property");
+    let mut found: Vec<(String, String)> = Vec::new();
+    for f in &input.ir.functions {
+        if f.is_class_body {
+            let calls: FxHashSet<VarId> = f
+                .blocks
+                .iter()
+                .flat_map(|b| &b.insts)
+                .filter_map(|i| match &i.kind {
+                    InstKind::Call { dst, callee, .. }
+                        if builtin_property && callee == "property" =>
+                    {
+                        Some(*dst)
+                    }
+                    _ => None,
+                })
+                .collect();
+            for inst in f.blocks.iter().flat_map(|b| &b.insts) {
+                if let InstKind::Copy { dst, src } = &inst.kind
+                    && calls.contains(src)
+                    && let Some(name) = f.var_name(*dst).filter(|n| !n.starts_with('.'))
+                {
+                    found.push((f.qualname.clone(), name.to_owned()));
+                }
+            }
+            continue;
+        }
+        // A method defined directly in its class (`C.m`, not `C.m.<locals>.f`).
+        let method = f.owner_class_qualname.as_deref().and_then(|owner| {
+            let name = f.qualname.strip_prefix(owner)?.strip_prefix('.')?;
+            (!name.contains('.')).then_some((owner, name))
+        });
+        let Some((owner, name)) = method else {
+            continue;
+        };
+        let is_property = f.decorators.iter().any(|d| {
+            let (head, _) = decorator_parts(d);
+            decls.decorator_is(d, &["property", "abstractproperty"])
+                || head
+                    .rsplit_once('.')
+                    .is_some_and(|(_, a)| matches!(a, "setter" | "deleter" | "getter"))
+        });
+        if is_property {
+            found.push((owner.to_owned(), name.to_owned()));
+        }
+    }
+    for (class, name) in found {
+        if let Some(c) = decls.classes.get_mut(&class) {
+            c.properties.insert(name);
         }
     }
 }

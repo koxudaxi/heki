@@ -436,7 +436,7 @@ class Tag:
 fn cached_properties_and_hashes_read_through_properties() {
     let p = Project::new("property_reads_state");
     p.write("pkg/__init__.py", "").write("pkg/state.py", STATE);
-    let diags = diagnostics(&p, &["--extend-select", "MUT101"]);
+    let diags = diagnostics(&p, &["--extend-select", "MUT101,MUT107"]);
     let s = "pkg/state.py";
     assert_eq!(
         found(&diags),

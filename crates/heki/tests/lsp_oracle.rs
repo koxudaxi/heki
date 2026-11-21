@@ -26,7 +26,7 @@ const CONFIG: &str = r#"[project]
 name = "t"
 
 [tool.heki.lint]
-extend-select = ["MUT101", "MUT108", "MUT111", "EFF107", "MUT112", "MUT113"]
+extend-select = ["MUT101", "MUT107", "MUT108", "MUT111", "EFF107", "MUT112", "MUT113"]
 
 [[tool.heki.write-owners]]
 name = "registry"
@@ -133,6 +133,11 @@ const TOP: &str =
 const SHAPES: &str = "from functools import cached_property\n\n\nclass Box:\n    def __init__(self):\n        self.items = []\n        self.size = 0\n\n    @cached_property\n    def total(self):\n        return self.size\n\n    def add(self, x):\n        self.items.append(x)\n";
 const SHAPES_READING: &str = "from functools import cached_property\n\n\nclass Box:\n    def __init__(self):\n        self.items = []\n        self.size = 0\n\n    @cached_property\n    def total(self):\n        return len(self.items)\n\n    def add(self, x):\n        self.items.append(x)\n";
 const KEYS: &str = "class Key:\n    def __init__(self, code, name):\n        self.code = code\n        self.name = name\n\n    @property\n    def ident(self):\n        return self.code\n\n    def __hash__(self):\n        return hash(self.ident)\n\n    def rename(self, name):\n        self.name = name\n";
+// `MUT107` in a subclass in another module: whether a store of `self.key` is a plain store
+// comes from the base class's declarations (`ClassDecl::properties`, its `__setattr__`, and a
+// base heki names no class for, `ClassDecl::custom_metaclass`).
+const TOKEN_BASE: &str = "class Token:\n    def __init__(self, key):\n        self.key = key\n\n    def __hash__(self):\n        return hash(self.key)\n";
+const TOKEN_USER: &str = "from pkg.token_base import Token\n\n\nclass Renamed(Token):\n    def rename(self, key):\n        self.key = key\n";
 const KEYS_BY_NAME: &str = "class Key:\n    def __init__(self, code, name):\n        self.code = code\n        self.name = name\n\n    @property\n    def ident(self):\n        return self.name\n\n    def __hash__(self):\n        return hash(self.ident)\n\n    def rename(self, name):\n        self.name = name\n";
 const REMOTE: &str =
     "import requests\n\n\nclass Client:\n    @property\n    def data(self):\n        return {}\n";
@@ -631,6 +636,8 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/top.py", TOP),
         ("pkg/shapes.py", SHAPES),
         ("pkg/keys.py", KEYS),
+        ("pkg/token_base.py", TOKEN_BASE),
+        ("pkg/token_user.py", TOKEN_USER),
         ("pkg/remote.py", REMOTE),
         ("pkg/reader.py", READER),
         ("pkg/guard_net.py", GUARD_NET),
@@ -2592,6 +2599,42 @@ fn steps() -> Vec<Step> {
         )
         .absent(&[("pkg/keys.py", "MUT107")]),
         Step::new(
+            "the base class in another module makes `key` a property: the subclass's store runs its setter",
+            vec![Action::Save(
+                "pkg/token_base.py",
+                format!(
+                    "{TOKEN_BASE}\n    @property\n    def key(self):\n        return self.__dict__[\"key\"]\n\n    @key.setter\n    def key(self, value):\n        self.__dict__[\"key\"] = value\n"
+                ),
+            )],
+        )
+        .absent(&[("pkg/token_user.py", "MUT107")]),
+        Step::new(
+            "the base class defines `__setattr__` instead",
+            vec![Action::Save(
+                "pkg/token_base.py",
+                format!(
+                    "{TOKEN_BASE}\n    def __setattr__(self, name, value):\n        object.__setattr__(self, name, value)\n"
+                ),
+            )],
+        )
+        .absent(&[("pkg/token_user.py", "MUT107")]),
+        Step::new(
+            "the base class is built on a base heki names no class for",
+            vec![Action::Save(
+                "pkg/token_base.py",
+                format!(
+                    "def make_base():\n    return object\n\n\n{}",
+                    TOKEN_BASE.replace("class Token:", "class Token(make_base()):")
+                ),
+            )],
+        )
+        .absent(&[("pkg/token_user.py", "MUT107")]),
+        Step::new(
+            "the base class is plain again",
+            vec![save("pkg/token_base.py", TOKEN_BASE)],
+        )
+        .present(&[("pkg/token_user.py", "MUT107")]),
+        Step::new(
             "a getter read from an async def in another file starts blocking",
             vec![save("pkg/remote.py", REMOTE_BLOCKING)],
         )
@@ -2815,8 +2858,8 @@ fn steps() -> Vec<Step> {
         Step::new(
             "the configuration becomes invalid",
             vec![Action::Configure(CONFIG.replace(
-                "extend-select = [\"MUT101\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\", \"MUT113\"]",
-                "extend-select = [\"MUT101\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\", \"MUT113\"]\nselect = [\"NOPE1\"]",
+                "extend-select = [\"MUT101\", \"MUT107\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\", \"MUT113\"]",
+                "extend-select = [\"MUT101\", \"MUT107\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\", \"MUT113\"]\nselect = [\"NOPE1\"]",
             ))],
         )
         .absent(&[("pkg/svc_user.py", "EFF101")]),

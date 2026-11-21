@@ -27,7 +27,7 @@ Shared state written behind its owner's back: stale caches, write-ownership cont
 | MUT101 | [cached-property-stale-mutation](cached-property-stale-mutation.md) | Mutating an attribute read by `@cached_property` without invalidating the cache. | ≈ 🔌 🧪 |
 | MUT103 | [summary-effect-regression](summary-effect-regression.md) | Interprocedural mutation/escape/effect regression against saved summary snapshot. | ≈ 🔌 |
 | MUT106 | [iterator-double-consumption](iterator-double-consumption.md) | Opt-in: consuming a single-pass iterator or generator a second time (the second pass sees no items). | ≈ 🔌 |
-| MUT107 | [hash-attr-mutation](hash-attr-mutation.md) | Mutating an attribute read by `__hash__` after initialization (stored `set` / `dict` entries become unreachable). | ≈ |
+| MUT107 | [hash-attr-mutation](hash-attr-mutation.md) | Opt-in: a method other than the initializers rebinds or changes in place an attribute that the `__hash__` of its instances reads. | ≈ 🔌 |
 | MUT108 | [readonly-type-mutation](readonly-type-mutation.md) | Opt-in: changing in place a field that a standard type declares read-only (frozen dataclass / `NamedTuple` / `dataclass_transform` fields, `Final` / `ReadOnly` attributes, `ReadOnly` `TypedDict` keys), directly, through an alias, or in a helper. | ≈ 🔌 |
 | MUT109 | [write-without-invalidation](write-without-invalidation.md) | Writing a declared `invalidation` target (directly, via alias, or via helper) without reaching one of its invalidators on every path to the function's return. | ≈ 📜 |
 | MUT110 | [readonly-param-mutation](readonly-param-mutation.md) | Handing a `Sequence` / `Mapping` / `ReadOnly` parameter to a function that changes it in place (directly, through an alias, or through helpers). | ≈ |
