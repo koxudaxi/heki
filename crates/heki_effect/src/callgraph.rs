@@ -17,7 +17,7 @@ use crate::{
 use heki_ast::Span;
 use heki_kb::ExecEffectKind;
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -262,15 +262,7 @@ fn recompute(
                 self_calls.push((site, callee));
             }
             let here = apply_edge(
-                index,
-                &mut s,
-                &local.mutated_param_paths,
-                func,
-                site,
-                bc,
-                callee,
-                site_path,
-                &resolver,
+                index, &mut s, local, func, site, bc, callee, site_path, &resolver,
             );
             if !callee.is_abstract() {
                 consumed = Some(consumed.map_or(here, |c| c & here));
@@ -658,7 +650,7 @@ enum Resolved {
 fn apply_edge(
     index: &ProjectIndex,
     s: &mut EffectSummary,
-    own_writes: &BTreeMap<u8, BTreeSet<String>>,
+    local: &EffectSummary,
     caller: &FuncKey,
     site: &CallSite,
     bc: &BoundCallee,
@@ -698,7 +690,7 @@ fn apply_edge(
     // call hands over.
     let here = (d.from == Facts::Body && d.into == Facts::Body && runs_at_call(callee, site))
         .then_some(resolver);
-    transfer(target, own_writes, site, bc, callee, facts, &lead, rewrite);
+    transfer(target, local, site, bc, callee, facts, &lead, rewrite);
     if !index.skips_typed_writes
         && (!facts.typed_field_write_sites.is_empty() || !facts.mutated_param_paths.is_empty())
     {
@@ -715,12 +707,32 @@ fn apply_edge(
     consumed
 }
 
-/// Add `facts` (of the callee `callee`, bound by `bc` at `site`) to `t`; `lead` and `rewrite`
-/// build each chain ([`extend_chain`]).
+/// Add the closure cells the callee's `facts` change to `t` (of the caller whose local summary
+/// is `local`), except the caller's own variables whose change stays inside its call: one the
+/// callee rebinds, or one the caller binds only to new containers.
+fn add_cell_changes(
+    t: &mut EffectSummary,
+    local: &EffectSummary,
+    site: &CallSite,
+    bc: &BoundCallee,
+    facts: &EffectSummary,
+) {
+    for cell in &facts.changes_cells {
+        let own = cell.owner == site.caller.qualname
+            && bc.callee.module == site.caller.module
+            && (cell.rebinds || local.new_cells.contains(&cell.name));
+        if !own {
+            t.changes_cells.insert(cell.clone());
+        }
+    }
+}
+
+/// Add `facts` (of the callee `callee`, bound by `bc` at `site`) to `t`, a summary of the caller
+/// whose local summary is `local`; `lead` and `rewrite` build each chain ([`extend_chain`]).
 #[allow(clippy::too_many_arguments)]
 fn transfer(
     t: &mut EffectSummary,
-    own_writes: &BTreeMap<u8, BTreeSet<String>>,
+    local: &EffectSummary,
     site: &CallSite,
     bc: &BoundCallee,
     callee: &EffectSummary,
@@ -734,6 +746,10 @@ fn transfer(
     //    parameter p when argument k is p. The offloaded callable is never called here,
     //    so its blocking effects never reach the caller.
     t.offloads_blocking_params |= caller_params(facts.offloads_blocking_params, bc);
+
+    // Shared state that outlives the call.
+    t.changes_globals |= facts.changes_globals;
+    add_cell_changes(t, local, site, bc, facts);
 
     // b. Execution effects, with the shortest chain to each. An effect whose guard the call
     //    decides against does not run here; the others take the call's guards and the
@@ -758,7 +774,8 @@ fn transfer(
         };
         through.guards.inputs.retain(|g| {
             g.subject.attr.as_ref().is_none_or(|a| {
-                !own_writes
+                !local
+                    .mutated_param_paths
                     .get(&g.subject.param)
                     .is_some_and(|paths| paths.contains(a))
             })

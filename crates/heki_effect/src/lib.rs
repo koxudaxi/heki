@@ -582,9 +582,31 @@ pub struct EffectSummary {
     // Async offload & Sync-over-Async relaxation (dcg empirical findings)
     pub offloads_blocking_params: u64,
     pub sync_driven_only: bool,
-    /// A call in this function (not its callees) could not be resolved, or CHA exceeded
-    /// `resolver::CHA_CANDIDATE_LIMIT` candidates.
+    /// A call in this function (not its callees) could not be resolved, CHA exceeded
+    /// `resolver::CHA_CANDIDATE_LIMIT` candidates, or the function has an A1 hazard (`eval`,
+    /// `exec`, `locals()`, frame introspection, a body too large to model).
     pub unknown_calls: bool,
+    /// The module globals and the closure cells of enclosing functions the function's own body
+    /// rebinds, deletes, or changes in place (an object reached from one through attributes,
+    /// items, iteration, and element accessors: `CACHE.clear()`, `REGISTRY[k] = v`,
+    /// `settings.DEBUG = True`), each with the span of its first change. A local fact, never
+    /// propagated.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub changed_state: BTreeMap<SharedState, Span>,
+    /// The function's body, or a body that runs in it, changes a module global
+    /// ([`Self::changed_state`]; propagated).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub changes_globals: bool,
+    /// The closure cells the function's body, or a body that runs in it, changes, except those
+    /// of its own variables that stay inside its call: a variable it rebinds through a nested
+    /// function, or one it binds only to new containers ([`Self::new_cells`]; propagated).
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub changes_cells: BTreeSet<CellChange>,
+    /// The function's variables that nested functions capture and that it binds only to new
+    /// containers (`out = []`): a nested function changing them in place changes an object of
+    /// this call. A local fact.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub new_cells: BTreeSet<String>,
 
     /// What iterating the object this plain function returns runs: the bodies of the
     /// generators it returns (directly, through lazy wrappers, or through the functions whose
@@ -611,6 +633,25 @@ pub struct EffectSummary {
     /// one when it is `excluded`, the blocking ones when it is `async_safe` (applied to the
     /// final summary, whatever the callees bring).
     pub declared_hidden: BTreeSet<ExecEffectKind>,
+}
+
+/// State that outlives a call: a module global, or the closure cell of a variable of an
+/// enclosing function (`EffectSummary::changed_state`).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SharedState {
+    Global(String),
+    Cell(CellChange),
+}
+
+/// A change of the closure cell of variable `name` of the function `owner` (a qualname in the
+/// changing function's module), made by a function nested in it.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct CellChange {
+    pub owner: String,
+    pub name: String,
+    /// The variable is rebound (`nonlocal n; n += 1`), not its object changed in place.
+    pub rebinds: bool,
 }
 
 /// An input of a function that a guard tests: parameter `param` itself, or its attribute
@@ -753,6 +794,9 @@ impl EffectSummary {
             })
             .collect();
         out.param_change_sites.clear();
+        for span in out.changed_state.values_mut() {
+            *span = Span { start: 0, end: 0 };
+        }
         out.iterated = out.iterated.map(|i| Box::new(i.without_locations()));
         if let Some(r) = &mut out.returns_protected {
             zero_hop_spans(&mut r.chain);
@@ -793,12 +837,13 @@ impl EffectSummary {
 
     /// Equality of everything callers copy into their own summaries: the facts, and the
     /// positions of call chains and write sites. Only the positions of the function's own read
-    /// sites, parameter changes, and unresolved accesses are left out: those are never
-    /// propagated.
+    /// sites, parameter and global changes, and unresolved accesses are left out: those are
+    /// never propagated.
     pub fn same_for_callers(&self, other: &Self) -> bool {
         let without_local = |s: &Self| Self {
             typed_field_read_sites: BTreeSet::new(),
             param_change_sites: BTreeMap::new(),
+            changed_state: BTreeMap::new(),
             unresolved_write_sites: BTreeSet::new(),
             unresolved_access_sites: BTreeSet::new(),
             ..s.clone()

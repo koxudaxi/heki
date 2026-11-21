@@ -282,7 +282,9 @@ EffectSummary(f) = {
     iterates_params:          Bitset,               // stepped by an iteration: a generator passed there runs there
     iterated:                 Option<EffectSummary>, // what iterating the returned object runs
     sync_driven_only:         bool,                 // driven only through a sync driver such as run_sync(coro)
-    unknown_calls:            bool,
+    unknown_calls:            bool,                 // unresolved own call, CHA past 8, or an A1 hazard
+    changes_globals:          bool,                 // module globals changed, here or in a body run here
+    changes_cells:            Set<CellChange>,      // enclosing functions' closure cells changed so
 
     // Metadata: is_async, is_generator, is_cached_property, is_lru_cache, owner class, decorators
 }

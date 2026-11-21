@@ -697,6 +697,9 @@ struct Step {
     absent: &'static [(&'static str, &'static str)],
     /// Early Cutoff: no other file is re-analyzed or re-published.
     cutoff: bool,
+    /// The edit changes a fact callers read, though no diagnostic shows it: the server
+    /// re-analyzes a caller's file (the opposite of `cutoff`).
+    propagates: bool,
 }
 
 impl Step {
@@ -707,6 +710,7 @@ impl Step {
             present: &[],
             absent: &[],
             cutoff: false,
+            propagates: false,
         }
     }
 
@@ -722,6 +726,11 @@ impl Step {
 
     fn cutoff(mut self) -> Self {
         self.cutoff = true;
+        self
+    }
+
+    fn propagates(mut self) -> Self {
+        self.propagates = true;
         self
     }
 }
@@ -1823,6 +1832,15 @@ fn steps_mut111() -> Vec<Step> {
     ]
 }
 
+/// The blocking helper of `pkg/low.py` with a module-level cache that it reads (`False`) or
+/// clears (`True`) after its blocking call, so that the call keeps its position.
+fn low_with_cache(clears: bool) -> String {
+    let use_cache = if clears { "clear()" } else { "get(url)" };
+    format!(
+        "# network helpers\nimport requests\n\nCACHE = {{}}\n\n\ndef fetch(url):\n    response = requests.get(url)\n    CACHE.{use_cache}\n    return response\n# done\n"
+    )
+}
+
 fn steps() -> Vec<Step> {
     let mut steps = vec![
         // 1. The initial index.
@@ -1858,6 +1876,33 @@ fn steps() -> Vec<Step> {
         .cutoff(),
         Step::new(
             "a comment above the blocking call moves the chain's last hop",
+            vec![save(
+                "pkg/low.py",
+                &format!("# network helpers\n{LOW_BLOCKING}# done\n"),
+            )],
+        )
+        .present(&[("pkg/top.py", "EFF101")]),
+        // A callee starts and stops changing a module global: no rule reports it, but the
+        // callers' summaries carry it (`heki inspect`'s purity), so the edit is no Early Cutoff.
+        Step::new(
+            "the helper's module gains a cache",
+            vec![save("pkg/low.py", &low_with_cache(false))],
+        )
+        .present(&[("pkg/top.py", "EFF101")]),
+        Step::new(
+            "the helper below the async def starts clearing the module's cache",
+            vec![save("pkg/low.py", &low_with_cache(true))],
+        )
+        .present(&[("pkg/top.py", "EFF101")])
+        .propagates(),
+        Step::new(
+            "the helper stops clearing the cache",
+            vec![save("pkg/low.py", &low_with_cache(false))],
+        )
+        .present(&[("pkg/top.py", "EFF101")])
+        .propagates(),
+        Step::new(
+            "the cache goes away",
             vec![save(
                 "pkg/low.py",
                 &format!("# network helpers\n{LOW_BLOCKING}# done\n"),
@@ -2542,6 +2587,12 @@ impl Session {
             .into_iter()
             .map(|d| format!("step `{}`: {d}", step.name))
             .collect();
+        if step.propagates && after["dependent_reanalyses"] == before["dependent_reanalyses"] {
+            out.push(format!(
+                "step `{}`: no caller's file was re-analyzed: stats before {before}, after {after}",
+                step.name
+            ));
+        }
         if step.cutoff {
             let edited: BTreeSet<String> = step
                 .actions

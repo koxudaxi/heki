@@ -320,6 +320,15 @@ EffectSummary(f) = {
     unresolved_access_sites:  Set<UnresolvedAccess>,       // reads and method calls named like a strict
                                                            // contract's target on objects of unknown class;
                                                            // never propagated (MUT206, MUT207)
+    changed_state:            Map<SharedState, Span>,      // module globals and enclosing functions' closure
+                                                           // cells the own body rebinds, deletes, or changes
+                                                           // in place, first change of each (local)
+    changes_globals:          bool,                        // a module global changed by the body or a body
+                                                           // running in it (propagated)
+    changes_cells:            Set<CellChange>,             // closure cells changed so, except the own
+                                                           // variables whose change stays inside the call:
+                                                           // rebound by a nested function, or bound only
+                                                           // to new containers (new_cells) (propagated)
 
     // Guards: when an effect runs
     exec_guards:              Map<ExecEffect, EffectGuards>, // input tests every occurrence needs; lazy
@@ -329,7 +338,9 @@ EffectSummary(f) = {
     // Offloading and the sync-driven context
     offloads_blocking_params: Bitset,                      // wrapper running the callable in parameter i on a thread
     sync_driven_only:         bool,                        // internal async def driven only by a sync driver
-    unknown_calls:            bool,
+    unknown_calls:            bool,                        // an own call heki cannot resolve, more than 8
+                                                           // CHA candidates, or an A1 hazard (eval, exec,
+                                                           // locals(), frame introspection, unmodeled)
 
     // What iterating the returned object runs (a plain function returning a generator)
     iterated:                 Option<EffectSummary>,       // in the function's own parameters

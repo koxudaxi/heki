@@ -3645,6 +3645,11 @@ static EMPTY_DECLS: ModuleDecls = ModuleDecls {
 };
 
 impl<'a> TypeCtx<'a> {
+    /// The IR of the module the context resolves names in.
+    pub(crate) fn module_ir(&self) -> &'a ModuleIr {
+        self.ir
+    }
+
     pub fn new(
         input: &'a ModuleInput<'a>,
         project: &'a ProjectDecls,
