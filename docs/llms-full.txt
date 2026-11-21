@@ -2091,18 +2091,19 @@ release, or the rule becomes heuristic in that release and needs a new certifica
 
 A certified rule has a row here: the release that certified it, and the reports of its census
 and of its holdout run with the false claims among them. The census of the proven `OPT` tier
-checked every exact report on the Stage 0-A corpus by hand (with the build of 2026-11-21); the
-holdout run is one run on the frozen holdout corpus.
+checked by hand every exact report on the Stage 0-A corpus with the build of 2026-11-21 (one
+report, whose rewrite needed the set-order obligation, left the tier); the holdout run checked
+every exact report of one run on the 100 packages of the frozen holdout corpus.
 
 | Rule | Certified | Census: reports / false | Holdout: reports / false |
 | ---- | --------- | ----------------------: | -----------------------: |
-| `OPT101` | 0.2.0 | 7 / 0 | 0 / 0 |
+| `OPT101` | 0.2.0 | 7 / 0 | 2 / 0 |
 | `OPT102` | 0.2.0 | 1 / 0 | 0 / 0 |
-| `OPT103` | 0.2.0 | 128 / 0 | 0 / 0 |
+| `OPT103` | 0.2.0 | 128 / 0 | 188 / 0 |
 | `OPT110` | 0.2.0 | 8 / 0 | 0 / 0 |
-| `OPT111` | 0.2.0 | 7 / 0 | 0 / 0 |
-| `OPT120` | 0.2.0 | 70 / 0 | 0 / 0 |
-| `OPT121` | 0.2.0 | 12 / 0 | 0 / 0 |
+| `OPT111` | 0.2.0 | 7 / 0 | 7 / 0 |
+| `OPT120` | 0.2.0 | 70 / 0 | 33 / 0 |
+| `OPT121` | 0.2.0 | 12 / 0 | 5 / 0 |
 | `OPT130` | 0.2.0 | 1 / 0 | 0 / 0 |
 
 ## Measurements
