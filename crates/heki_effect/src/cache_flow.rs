@@ -7,7 +7,7 @@
 //! decided from these facts and the summaries alone, also for a method of a file that is not
 //! checked (the language server checks one file).
 
-use crate::{CONTAINER_MUTATORS, CallSite, FuncKey, TypeCtx, aliases_of, guards, self_aliases};
+use crate::{CallSite, FuncKey, TypeCtx, aliases_of, container_mutator, guards, self_aliases};
 use heki_ast::Span;
 use heki_ir::walk::FnShape;
 use heki_ir::{BlockId, CompareOpKind, InstKind, IrFunction, Terminator, VarId};
@@ -274,13 +274,9 @@ pub fn attr_writes<'f>(
                 InstKind::SubscriptDelete { obj, .. } => {
                     alias.get(obj).map(|&held| (held, false, false))
                 }
-                InstKind::MethodCall { recv, method, .. }
-                    if CONTAINER_MUTATORS.contains(&method.as_str()) =>
-                {
-                    alias
-                        .get(recv)
-                        .map(|&held| (held, method == "setdefault", false))
-                }
+                InstKind::MethodCall { recv, method, .. } if container_mutator(method) => alias
+                    .get(recv)
+                    .map(|&held| (held, method == "setdefault", false)),
                 _ => None,
             };
             if let Some((held, memo_shaped, rebinds)) = w {

@@ -620,6 +620,14 @@ const EXACT_SUB_BLOCKING: &str = "import requests\n\nfrom pkg.exact_base import 
 const EXACT_USE: &str =
     "from pkg.exact_base import Base\n\n\nasync def serve(b: Base):\n    b.fetch(\"u\")\n";
 
+// Method lookups (`ProjectDecls::method_read_runs_no_code`): a helper looks up a method before it
+// sleeps, inside a `try` whose handler goes on; a subclass in another module comes and goes.
+const ML_BASE: &str = "class Steady:\n    def ready(self):\n        return True\n";
+const ML_USE: &str = "import time\n\nfrom pkg.ml_base import Steady\n\n\ndef wait_ready(s: Steady):\n    try:\n        s.ready\n        time.sleep(1)\n    except ValueError:\n        pass\n\n\nasync def serve(s: Steady):\n    wait_ready(s)\n";
+const ML_SHADOW_GETTER: &str = "from pkg.ml_base import Steady\n\n\nclass Shadow(Steady):\n    @property\n    def ready(self):\n        raise ValueError(\"not ready\")\n";
+const ML_SHADOW_METHOD: &str = "from pkg.ml_base import Steady\n\n\nclass Shadow(Steady):\n    def ready(self):\n        return False\n";
+const ML_SHADOW_HOOKED: &str = "from pkg.ml_base import Steady\n\n\nclass Shadow(Steady):\n    def __getattribute__(self, name):\n        return object.__getattribute__(self, name)\n";
+
 // Imported literal constants (`TypeCtx::global_literal`): an `async def` sleeps for a constant
 // another module binds; the constant switches between no time and a wait, and a third module
 // starts and stops rebinding it.
@@ -905,6 +913,8 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/exact_use.py", EXACT_USE),
         ("pkg/lc_settings.py", LC_SETTINGS),
         ("pkg/lc_use.py", LC_USE),
+        ("pkg/ml_base.py", ML_BASE),
+        ("pkg/ml_use.py", ML_USE),
         ("pkg/lc_rebind.py", LC_REBIND),
         ("pkg/wit_repo.py", WIT_REPO),
         ("pkg/wit_local.py", WIT_LOCAL),
@@ -1043,6 +1053,41 @@ fn steps_imported_constants() -> Vec<Step> {
             vec![save("pkg/lc_rebind.py", LC_REBIND)],
         )
         .absent(&[("pkg/lc_use.py", "EFF101")]),
+    ]
+}
+
+/// Looking up a method raises nothing only when no class the value may be runs code on the read
+/// (`ProjectDecls::method_read_runs_no_code`): a subclass in another module shadowing the method
+/// with a getter, or defining `__getattribute__`, puts an exception edge before the wait.
+fn steps_method_lookups() -> Vec<Step> {
+    vec![
+        Step::new(
+            "a subclass in another module shadows the method with a getter",
+            vec![Action::Create(
+                "pkg/ml_shadow.py",
+                ML_SHADOW_GETTER.to_owned(),
+            )],
+        )
+        .present(&[("pkg/ml_use.py", "EFF111")])
+        .absent(&[("pkg/ml_use.py", "EFF101")]),
+        Step::new(
+            "the subclass overrides it with a method",
+            vec![save("pkg/ml_shadow.py", ML_SHADOW_METHOD)],
+        )
+        .present(&[("pkg/ml_use.py", "EFF101")])
+        .absent(&[("pkg/ml_use.py", "EFF111")]),
+        Step::new(
+            "the subclass defines `__getattribute__`",
+            vec![save("pkg/ml_shadow.py", ML_SHADOW_HOOKED)],
+        )
+        .present(&[("pkg/ml_use.py", "EFF111")])
+        .absent(&[("pkg/ml_use.py", "EFF101")]),
+        Step::new(
+            "the subclass is deleted",
+            vec![Action::Delete("pkg/ml_shadow.py")],
+        )
+        .present(&[("pkg/ml_use.py", "EFF101")])
+        .absent(&[("pkg/ml_use.py", "EFF111")]),
     ]
 }
 
@@ -3985,6 +4030,7 @@ sessions!(editing, Session::start, {
     exact_effects: steps_exact_effects,
     helper_witnesses: steps_helper_witnesses,
     imported_constants: steps_imported_constants,
+    method_lookups: steps_method_lookups,
     contracts: steps_contracts,
     contract_extensions: steps_contract_extensions,
     references: steps_references,

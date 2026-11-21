@@ -1476,6 +1476,21 @@ class Desc:
     k = described()
 
 
+class KeyMixin:
+    @property
+    def k(self):
+        return 3
+
+
+class Keyed:
+    def __init__(self, k):
+        self.k = k
+
+
+class MixedKeyed(KeyMixin, Keyed):
+    pass
+
+
 def plain_items(xs: list[Plain], ys: list[Plain]):
     out = []
     for a in xs:
@@ -1887,6 +1902,15 @@ def yielding(xs: list[Row], ys: list[Row]):
             if a.k == b.k:
                 print(b)
         yield a
+
+
+def mixin_property(xs: list[Keyed], ys: list[Keyed]):
+    out = []
+    for a in xs:
+        for b in ys:
+            if a.k == b.k:
+                out.append(b)
+    return out
 "#;
 
 #[test]
@@ -1964,6 +1988,7 @@ fn opt113_states_its_exact_claim_only_when_every_premise_holds() {
             ("lambda_in_loop", false, tier(false)),
             ("extended_alias", false, tier(false)),
             ("yielding", false, tier(false)),
+            ("mixin_property", false, tier(false)),
         ],
         "{json}{stderr}"
     );

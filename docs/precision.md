@@ -59,6 +59,12 @@ The premises the rules use:
   is open whenever no bound is found. An exact report never claims a size: a bound of 16 or
   fewer only removes reports, and a larger fixed bound is no evidence either way.
 
+Each exact rule's premises are rows of one table, `crates/heki_rules/src/premises.rs`: what each
+states and where heki decides it, the one place every rule reading it goes through. A rule page
+lists its claim's premises under "What a report states" by those names (the documentation build
+checks it), `heki rule --output-format json` prints them, and a report is exact only when every
+premise of its rule's row is established.
+
 An exact report's message states its claim and the witnesses of its premises, nothing else: no
 cost estimate such as "(N+1)", and no advice (that goes into the help).
 

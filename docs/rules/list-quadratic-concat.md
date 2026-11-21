@@ -17,7 +17,7 @@ each time it runs, where appending would change it in place.
 
 Its premises:
 
-- **Builtin list**: the value is a builtin `list` by its construction (a display, a comprehension,
+- **Builtin type by construction**: the value is a builtin `list` by its construction (a display, a comprehension,
   `list(...)`). Established: the Soundness lane takes types from constructions only, never from
   annotations.
 - **Loop-carried**: the result is the value the next iteration starts from. Established by the IR.

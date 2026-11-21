@@ -16,6 +16,7 @@ pub mod experimental;
 pub mod inspect;
 mod mut_rules;
 mod opt_rules;
+pub mod premises;
 pub mod project;
 pub mod selection;
 pub mod snapshot;

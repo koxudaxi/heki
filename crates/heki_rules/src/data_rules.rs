@@ -4,7 +4,7 @@ use crate::eff_rules::{DataOrigins, ItemOrigins, shortest};
 use crate::mut_rules::{CallInst, site_call};
 use crate::opt_rules::Sizes;
 use crate::{CheckContext, ModuleUnit};
-use heki_diagnostics::{Certainty, Diagnostic};
+use heki_diagnostics::Diagnostic;
 use heki_effect::{CallHop, CallSite, CallTarget, SiteEffect, TypeCtx, with_paths};
 use heki_ir::walk::{Answer, Budget, Def, FnShape, Visit, reach};
 use heki_ir::{
@@ -114,21 +114,17 @@ pub(crate) fn data101(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Ve
             let root = chain.last().map(|h| h.callee.clone()).unwrap_or_default();
             // An established report states the claim only: the advice does not fit a loop that
             // reads the value on every iteration.
-            let (every, help, premises) = match &established {
-                Some(origins) => (
-                    format!("on {}", origins.every_iteration()),
-                    None,
-                    Certainty::Exact,
-                ),
+            let (every, help) = match &established {
+                Some(origins) => (format!("on {}", origins.every_iteration()), None),
                 None => (
                     "on every loop iteration".to_owned(),
                     Some(
                         "collect the parts in a list and combine them once after the loop"
                             .to_owned(),
                     ),
-                    Certainty::Heuristic,
                 ),
             };
+            let premises = crate::premises::tier("DATA101", established.is_some());
             cx.emit(
                 out,
                 "DATA101",
