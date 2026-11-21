@@ -4,6 +4,8 @@
 
 Exit codes: `0` no diagnostics, `1` diagnostics (or Ratchet regressions, or pending `--diff` changes), `2` configuration / I/O / syntax errors.
 
+A file that cannot be read or does not parse does not stop the run: `heki check` reports its error, checks and reports the other files, and exits with `2`, also when it reports diagnostics. A file that does not parse cannot run either, so nothing it would do is assumed; the names under its module resolve to nothing. SARIF output lists such files as `error` notifications of a run that did not execute successfully (`invocations[0].toolExecutionNotifications`, `executionSuccessful: false`); JSON output holds the diagnostics only.
+
 ## `heki`
 
 ```text

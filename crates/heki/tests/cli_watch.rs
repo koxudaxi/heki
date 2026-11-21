@@ -229,7 +229,8 @@ fn watch_notices_replacements_that_keep_the_modification_time() {
     let (child, rx) = spawn_watch(&p, &["--output-format", "concise"], "4");
     wait_for(&rx, "syntax error");
     wait_for(&rx, "[heki watch] 0 diagnostic(s) in 4 file(s)");
-    // The file with the syntax error was never indexed; deleting it changes nothing else.
+    // The file with the syntax error is a module heki knows nothing about; deleting it changes
+    // nothing else.
     std::fs::remove_file(p.dir.join("pkg/broken.py")).unwrap();
     wait_for(&rx, "[heki watch] 0 diagnostic(s) in 4 file(s)");
     // The helper is replaced by a blocking one with the old modification time.
@@ -565,8 +566,8 @@ fn watch_keeps_reporting_errors_of_unchanged_files_and_forgets_unreadable_ones()
             .any(|l| l.starts_with("error: pkg/bad.py:1:7: syntax error")),
         "{lines:#?}"
     );
-    // The helper can no longer be read: like `heki check`, the project goes on without it, and
-    // the caller no longer reaches the blocking call.
+    // The helper can no longer be read: like `heki check`, the project goes on with a module it
+    // knows nothing about in its place, and the caller no longer reaches the blocking call.
     std::fs::write(p.dir.join("pkg/util.py"), b"\xff\xfe").unwrap();
     let lines = wait_for(&rx, "[heki watch] 0 diagnostic(s) in 2 file(s)");
     assert!(
