@@ -805,7 +805,12 @@ impl<'a> Reach<'a> {
                         if !runs_body || b.allows_symbol(symbol) {
                             continue;
                         }
-                        for e in effects.iter().filter(|e| b.effects.contains(*e)) {
+                        let on_full = cx.index.while_full_effects(site).into_iter().flatten();
+                        for e in effects
+                            .iter()
+                            .chain(on_full)
+                            .filter(|e| b.effects.contains(*e))
+                        {
                             let nodes = &reach.nodes;
                             note(&mut reach.exec, *e, (func.fqn(), site.span), || {
                                 let mut chain = chain_to(nodes, i);
