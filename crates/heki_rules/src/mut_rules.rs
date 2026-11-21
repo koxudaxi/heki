@@ -14,7 +14,7 @@ use heki_effect::{
     WriteKind, attr_writes, self_attr_writes,
 };
 use heki_env::HekiConfig;
-use heki_ir::{BlockId, Inst, InstKind, IrFunction, VarId};
+use heki_ir::{BlockId, FnIndex, Inst, InstKind, IrFunction, VarId};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -1231,7 +1231,7 @@ pub(crate) fn helper_changes_field<'s>(
             .is_some_and(|(class, attr)| *class == w.class_qualname && *attr == w.attr)
         {
             ParamChange::Itself
-        } else if o.typed_instance.as_ref() == Some(&w.class_qualname) {
+        } else if o.instance_classes().any(|c| *c == w.class_qualname) {
             ParamChange::Attr(&w.attr)
         } else {
             return false;
@@ -1536,6 +1536,22 @@ const UNRESOLVED: &[&str] = &["ignore", "report"];
 /// violation).
 const FRESH_OBJECTS: &[&str] = &["allow", "report"];
 
+/// Whether a contract reports the accesses heki cannot tie to a class (`unresolved`).
+pub(crate) fn reports_unresolved(
+    value: Option<&str>,
+    section: &'static str,
+    contract: &str,
+) -> Result<bool, RuleConfigError> {
+    Ok(mode(
+        value,
+        UNRESOLVED,
+        "`ignore` or `report`",
+        section,
+        contract,
+        "unresolved",
+    )? == "report")
+}
+
 /// Whether a contract allows the writes that construct the object they write (`fresh-objects`).
 pub(crate) fn allows_fresh(
     value: Option<&str>,
@@ -1631,14 +1647,11 @@ pub(crate) fn mut201(
             forbid_cached,
             note: rule.message.as_deref(),
             allow_fresh: allows_fresh(rule.fresh_objects.as_deref(), "write-owners", &rule.name)?,
-            report_unresolved: mode(
+            report_unresolved: reports_unresolved(
                 rule.unresolved.as_deref(),
-                UNRESOLVED,
-                "`ignore` or `report`",
                 "write-owners",
                 &rule.name,
-                "unresolved",
-            )? == "report",
+            )?,
         });
     }
 
@@ -1982,14 +1995,15 @@ impl CallParts<'_> {
     }
 }
 
-/// The project call the call instruction `inst` of `f` makes as its call site records it
-/// (among `f`'s `sites`): the callees the summaries resolved, with the values the
-/// `isinstance` tests around it narrow, which a resolution with `f`'s inferred values would
-/// not see. `worker`: instead the callable an offloading API runs on a worker thread
-/// (`asyncio.to_thread(grow, acc)` runs `grow(acc)`), which takes the positional arguments
-/// after it, keyword arguments left unbound.
+/// The project call the call instruction `inst` of a function makes as its call site records
+/// it (among the function's `sites`; `def` gives each variable's defining instruction): the
+/// callees the summaries resolved, with the values the `isinstance` tests around it narrow,
+/// which a resolution with the function's inferred values would not see. `worker`: instead
+/// the callable an offloading API runs on a worker thread (`asyncio.to_thread(grow, acc)` runs
+/// `grow(acc)`), which takes the positional arguments after it, keyword arguments left
+/// unbound.
 pub(crate) fn site_call<'i>(
-    f: &'i IrFunction,
+    def: &dyn Fn(VarId) -> Option<&'i Inst>,
     sites: &[&'i CallSite],
     inst: &'i Inst,
     worker: bool,
@@ -2006,6 +2020,9 @@ pub(crate) fn site_call<'i>(
             && s.runner == runner
             && !s.project_callees().is_empty()
     })?;
+    if wraps_call_at_own_span(def, inst, &call) {
+        return None;
+    }
     let callee = Callee::Project(
         site.project_callees()
             .iter()
@@ -2024,7 +2041,7 @@ pub(crate) fn site_call<'i>(
     }
     let k = usize::from(site.handed_callable?);
     let callable = *call.args.get(k)?;
-    let recv = match f.def_inst(callable).map(|(_, i)| &i.kind) {
+    let recv = match def(callable).map(|i| &i.kind) {
         Some(InstKind::AttrLoad { obj, attr, .. }) if site.binds_recv => {
             Some((*obj, attr.as_str()))
         }
@@ -2070,6 +2087,24 @@ fn copy_origins(f: &IrFunction, vars: impl Iterator<Item = VarId>) -> FxHashMap<
     origin
 }
 
+/// Whether the call instruction `inst` consumes the result of another call instruction with
+/// the same span. Only an instruction the IR builder synthesizes around a source expression
+/// shares its span (a comprehension's `acc.append(elt)` carries the span of `elt`); when that
+/// expression is a call, the call site at the span is the expression's, not the synthesized
+/// instruction's.
+fn wraps_call_at_own_span<'i>(
+    def: &dyn Fn(VarId) -> Option<&'i Inst>,
+    inst: &Inst,
+    call: &CallInst<'_>,
+) -> bool {
+    call.recv
+        .map(|(recv, _)| recv)
+        .into_iter()
+        .chain(call.args.iter().copied())
+        .chain(call.kwargs.iter().map(|(_, v)| *v))
+        .any(|v| def(v).is_some_and(|d| d.span == inst.span && CallInst::of(&d.kind).is_some()))
+}
+
 const MUTABLE_BUILTINS: &[&str] = &[
     "builtins.list",
     "builtins.dict",
@@ -2101,6 +2136,8 @@ struct Mut202Fn<'a> {
     tcx: &'a TypeCtx<'a>,
     returns: &'a ReadOnlyReturns,
     f: &'a IrFunction,
+    /// The defining instruction of each of `f`'s variables, looked up per call operand.
+    ix: FnIndex<'a>,
     key: FuncKey,
     types: FxHashMap<VarId, Val>,
     ro: FxHashMap<VarId, Ro>,
@@ -2122,6 +2159,7 @@ impl<'a> Mut202Fn<'a> {
             tcx,
             returns,
             f,
+            ix: FnIndex::new(f, &unit.input.ir.constants),
             key: CheckContext::key(unit, f),
             types: tcx.infer(f),
             ro: FxHashMap::default(),
@@ -2171,7 +2209,8 @@ impl<'a> Mut202Fn<'a> {
         'a: 'i,
     {
         // A project call as the summaries resolved it; any other call by the inferred values.
-        if let Some(call) = site_call(self.f, self.function_sites(), inst, false) {
+        if let Some(call) = site_call(&|v| self.ix.def_inst(v), self.function_sites(), inst, false)
+        {
             return Some(call);
         }
         let call = CallInst::of(&inst.kind)?;
@@ -2426,8 +2465,9 @@ impl<'a> Mut202Fn<'a> {
         }
         // Passing a read-only value to a project function that mutates that parameter, also
         // through an offloading API that calls it on a worker thread.
-        let Some(call) = site_call(self.f, self.function_sites(), inst, false)
-            .or_else(|| site_call(self.f, self.function_sites(), inst, true))
+        let def = |v| self.ix.def_inst(v);
+        let Some(call) = site_call(&def, self.function_sites(), inst, false)
+            .or_else(|| site_call(&def, self.function_sites(), inst, true))
         else {
             return (None, Vec::new());
         };
@@ -2663,6 +2703,8 @@ struct ReadOwnerRule<'r> {
     targets: Vec<ContractTarget>,
     allowance: Allowance,
     note: Option<&'r str>,
+    /// `unresolved = "report"`: reads heki cannot tie to a class are reported (`MUT206`).
+    report_unresolved: bool,
 }
 
 /// Where one access (a read, a call) is reported.
@@ -2680,7 +2722,11 @@ pub(crate) fn mut203(
     cx: &CheckContext<'_>,
     out: &mut Vec<Diagnostic>,
 ) -> Result<(), RuleConfigError> {
-    if !cx.selection.is_enabled("MUT203") || cx.config.read_owners.is_empty() {
+    let (reads, unresolved) = (
+        cx.selection.is_enabled("MUT203"),
+        cx.selection.is_enabled("MUT206"),
+    );
+    if !reads && !unresolved || cx.config.read_owners.is_empty() {
         return Ok(());
     }
     let all_classes = project_classes(cx);
@@ -2701,7 +2747,16 @@ pub(crate) fn mut203(
                 exempt: (&rule.exempt_methods, "read-owners.exempt-methods"),
             })?,
             note: rule.message.as_deref(),
+            report_unresolved: reports_unresolved(
+                rule.unresolved.as_deref(),
+                "read-owners",
+                &rule.name,
+            )?,
         });
+    }
+    unresolved::mut206(cx, &rules, out);
+    if !reads {
+        return Ok(());
     }
     let sites = cx.sites_by_caller();
     let mut reports = MergedReports::default();

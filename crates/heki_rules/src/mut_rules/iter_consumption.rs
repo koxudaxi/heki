@@ -27,12 +27,13 @@ pub(super) fn run(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Di
     for f in unit.input.ir.functions.iter().filter(|f| !f.is_class_body) {
         let types = tcx.infer(f);
         let qualname = CheckContext::key(unit, f).qualname;
+        let ix = heki_ir::FnIndex::new(f, &unit.input.ir.constants);
         // The project callees the call sites record (`site_call`).
         let recorded = |inst: &heki_ir::Inst| {
             let at = sites
                 .get(&(qualname.clone(), inst.span))
                 .map_or(&[][..], Vec::as_slice);
-            Some(super::site_call(f, at, inst, false)?.callee)
+            Some(super::site_call(&|v| ix.def_inst(v), at, inst, false)?.callee)
         };
         let mut flow = IterFlow::new(f, &tcx, &types, Roots::SinglePass, &recorded);
         if flow.root_of.is_empty() {

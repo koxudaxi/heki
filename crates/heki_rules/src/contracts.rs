@@ -1,7 +1,9 @@
 //! The declared contracts the summaries depend on ([`heki_effect::Contracts`]), built from the
 //! configuration: the `readonly-returns` producers (`MUT202`), the `invalidation` contracts
-//! (`MUT109`), and whether any ownership contract is declared. `heki check` and the LSP engine hand them to the analysis, so a wrapper of a
-//! producer and an invalidator reached through calls are known across files without IR.
+//! (`MUT109`), whether any ownership contract is declared, and the names the strict
+//! `read-owners` and `call-owners` contracts count unresolved accesses of (`MUT206`, `MUT207`).
+//! `heki check` and the LSP engine hand them to the analysis, so a wrapper of a producer and an
+//! invalidator reached through calls are known across files without IR.
 
 use crate::mut_rules::{Allowance, AllowanceKeys, ReadOnlyProducers};
 use crate::{DottedPattern, RuleConfigError, RuleSelection};
@@ -60,6 +62,10 @@ pub(crate) struct ConfigContracts {
     writers: Vec<Allowance>,
     /// The masks of [`Contracts::writer_contexts`] by name.
     writer_contexts: NameMasks,
+    /// The attribute patterns of the `read-owners` targets with `unresolved = "report"`.
+    unresolved_reads: Vec<DottedPattern>,
+    /// The last names of the `call-owners` targets with `unresolved = "report"`.
+    unresolved_calls: Vec<DottedPattern>,
 }
 
 /// Contract masks memoized by `(fqn, qualname)`: a mask depends on the name alone, and the
@@ -135,6 +141,9 @@ impl ConfigContracts {
                 })
             })
             .collect::<Result<_, _>>()?;
+        let strict = |mode: &Option<String>| mode.as_deref() == Some("report");
+        let reads = config.read_owners.iter().filter(|r| strict(&r.unresolved));
+        let calls = config.call_owners.iter().filter(|r| strict(&r.unresolved));
         Ok(Self {
             ownership: declares_ownership(config),
             producers: ReadOnlyProducers::new(config)?,
@@ -142,8 +151,25 @@ impl ConfigContracts {
             invalidators: NameMasks::default(),
             writers,
             writer_contexts: NameMasks::default(),
+            unresolved_reads: last_names(reads.flat_map(|r| &r.targets), "read-owners.targets")?,
+            unresolved_calls: last_names(calls.flat_map(|r| &r.targets), "call-owners.targets")?,
         })
     }
+}
+
+/// The patterns of the last dotted names of `targets` (`children` of `pkg.Reference.children`).
+fn last_names<'t>(
+    targets: impl Iterator<Item = &'t String>,
+    context: &'static str,
+) -> Result<Vec<DottedPattern>, RuleConfigError> {
+    targets
+        .map(|t| {
+            DottedPattern::new(
+                t.rsplit_once('.').map_or(t.as_str(), |(_, last)| last),
+                context,
+            )
+        })
+        .collect()
 }
 
 impl Contracts for ConfigContracts {
@@ -193,6 +219,14 @@ impl Contracts for ConfigContracts {
                 .any(|(_, class, _)| classes.iter().any(|name| class.matches(name)))
         })
     }
+
+    fn unresolved_read(&self, attr: &str) -> bool {
+        self.unresolved_reads.iter().any(|p| p.matches(attr))
+    }
+
+    fn unresolved_call(&self, name: &str) -> bool {
+        self.unresolved_calls.iter().any(|p| p.matches(name))
+    }
 }
 
 /// Bit `i` set for every contract `i` that `has` holds for.
@@ -204,13 +238,17 @@ fn mask(contracts: &[InvalidationNames], has: impl Fn(&InvalidationNames) -> boo
         .fold(0, |acc, (i, _)| acc | (1u64 << i))
 }
 
-/// The contracts of `config` the summaries depend on (`None` when it declares no producer and no
-/// ownership contract, so nothing is computed for them).
+/// The contracts of `config` the summaries depend on (`None` when it declares no producer, no
+/// ownership contract, and no strict `call-owners` contract, so nothing is computed for them).
 pub fn summary_contracts(
     config: &HekiConfig,
 ) -> Result<Option<Arc<dyn Contracts>>, RuleConfigError> {
     let contracts = ConfigContracts::new(config)?;
-    if contracts.producers.is_empty() && !contracts.ownership {
+    if contracts.producers.is_empty()
+        && !contracts.ownership
+        && contracts.unresolved_reads.is_empty()
+        && contracts.unresolved_calls.is_empty()
+    {
         return Ok(None);
     }
     Ok(Some(Arc::new(contracts)))

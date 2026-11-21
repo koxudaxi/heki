@@ -195,7 +195,7 @@ report names the missing obligation instead of offering a fix. See [Fixes and sa
 - 🎯 See what heki [covers and does not cover](scope.md).
 - 📦 [Install heki](installation.md) and 🚀 [run it on a project](getting-started.md).
 - ⚙️ [Configure](configuration.md) rule selection, contracts, and the Python version.
-- 📏 Browse the [31 rules](rules/index.md).
+- 📏 Browse the [33 rules](rules/index.md).
 - 🔧 Read how [fixes are proven safe](fixes.md).
 - 🪜 [Adopt it gradually](adoption.md) with a Ratchet baseline in CI.
 - 🖥️ Use it from [your editor](lsp.md) or 🤖 [a coding agent](coding-agents.md).

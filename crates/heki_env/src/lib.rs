@@ -135,6 +135,9 @@ pub struct ReadOwnerRule {
     pub exempt_methods: Vec<String>,
     /// The help of every `MUT203` report of this contract.
     pub message: Option<String>,
+    /// `"report"`: also report (`MUT206`) reads of an attribute named like a target on an
+    /// object of unknown class; `"ignore"` (default) does not.
+    pub unresolved: Option<String>,
 }
 
 /// `[[tool.heki.call-owners]]` contract for `MUT204`: who may call a function or method, or
@@ -153,6 +156,9 @@ pub struct CallOwnerRule {
     pub exempt_methods: Vec<String>,
     /// The help of every `MUT204` report of this contract.
     pub message: Option<String>,
+    /// `"report"`: also report (`MUT207`) calls of a method named like a target on an object
+    /// of unknown class; `"ignore"` (default) does not.
+    pub unresolved: Option<String>,
 }
 
 /// `[[tool.heki.effect-boundaries]]` contract for `EFF201`: effects that must not be reached,
@@ -629,6 +635,7 @@ allowed-readers = ["*GenerationIndex*"]
 forbidden-readers = ["pkg.parser.*"]
 exempt-methods = ["__deepcopy__"]
 message = "read children through GenerationIndex instead"
+unresolved = "report"
 
 [[tool.heki.call-owners]]
 name = "reference-mutators"
@@ -637,6 +644,7 @@ allowed-callers = ["pkg.parser.generation.*"]
 forbidden-callers = ["pkg.parser.*"]
 exempt-methods = ["__deepcopy__"]
 message = "use a GenerationStore operation instead"
+unresolved = "ignore"
 
 [[tool.heki.readonly-returns]]
 name = "shared-schema"
@@ -685,6 +693,7 @@ fresh-objects = "allow"
                 forbidden_readers: vec!["pkg.parser.*".into()],
                 exempt_methods: vec!["__deepcopy__".into()],
                 message: Some("read children through GenerationIndex instead".into()),
+                unresolved: Some("report".into()),
             }
         );
         assert_eq!(
@@ -696,6 +705,7 @@ fresh-objects = "allow"
                 forbidden_callers: vec!["pkg.parser.*".into()],
                 exempt_methods: vec!["__deepcopy__".into()],
                 message: Some("use a GenerationStore operation instead".into()),
+                unresolved: Some("ignore".into()),
             }
         );
         assert_eq!(

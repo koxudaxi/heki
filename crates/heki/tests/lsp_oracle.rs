@@ -50,6 +50,21 @@ name = "ledger"
 targets = ["Ledger.post", "Receipt"]
 allowed-callers = ["Store.*"]
 
+[[tool.heki.read-owners]]
+name = "seal"
+targets = ["Seal.code"]
+unresolved = "report"
+
+[[tool.heki.call-owners]]
+name = "seal-break"
+targets = ["Seal.break_open"]
+unresolved = "report"
+
+[[tool.heki.call-owners]]
+name = "reseal"
+targets = ["reseal"]
+unresolved = "report"
+
 [[tool.heki.effect-boundaries]]
 name = "pure"
 scopes = ["pkg.pure"]
@@ -193,9 +208,40 @@ const ASYNC_USER: &str = "from pkg.async_client import AsyncClient\n\n\nasync de
 // object its caller hands it; a helper writes a target on a parameter its caller types.
 const KEY_CONSTS: &str = "from typing import Final\n\nKEY: Final = \"entries\"\n";
 const KEY_WRITER: &str = "from pkg.key_consts import KEY\nfrom pkg.model import Registry\n\n\ndef mark(r: Registry):\n    r.__dict__[KEY] = []\n";
+// A class constant names the guarded attribute for the class's own methods.
+const KEY_CLASS: &str = "from typing import ClassVar\n\nfrom pkg.model import Registry\n\n\nclass Keys:\n    KEY: ClassVar[str] = \"entries\"\n\n    def mark(self, r: Registry):\n        r.__dict__[self.KEY] = []\n";
+const KEY_REBIND: &str =
+    "from pkg import key_consts\n\n\ndef reset():\n    key_consts.KEY = \"other\"\n";
+const KEY_SUBCLASS: &str =
+    "from pkg.key_class import Keys\n\n\nclass OtherKeys(Keys):\n    KEY = \"other\"\n";
+const KEY_CLASS_REBIND: &str =
+    "from pkg.key_class import Keys\n\n\ndef reset():\n    Keys.KEY = \"other\"\n";
+const KEY_SUBCLASS_REBIND: &str = "from pkg.key_class import Keys\n\n\nclass QuietKeys(Keys):\n    pass\n\n\nQuietKeys.KEY = \"other\"\n";
+// Another module reads the class constant on an instance, as the class's own method does.
+const KEY_CLASS_READER: &str = "from pkg.key_class import Keys\nfrom pkg.model import Registry\n\n\ndef mark_with(keys: Keys, r: Registry):\n    r.__dict__[keys.KEY] = []\n";
+// A `Final` class constant of a class a decorator of another module builds; a third module
+// reads it on the class object. With `dataclass_transform` on the decorator, the class's
+// annotations declare fields, whose class attribute the transform's runtime decides.
+const FIELD_DECO: &str = "def model(cls):\n    return cls\n";
+const FIELD_DECO_TRANSFORM: &str = "from typing import dataclass_transform\n\n\n@dataclass_transform()\ndef model(cls):\n    return cls\n";
+const FIELD_KEYS: &str = "from typing import Final\n\nfrom pkg.field_deco import model\n\n\n@model\nclass FieldKeys:\n    KEY: Final[str] = \"entries\"\n";
+const FIELD_READER: &str = "from pkg.field_keys import FieldKeys\nfrom pkg.model import Registry\n\n\ndef mark_fields(r: Registry):\n    r.__dict__[FieldKeys.KEY] = []\n";
+// A subclass lists a base defining the name before the class: its MRO finds the base's value.
+const KEY_OTHER_FIRST: &str = "from typing import ClassVar\n\nfrom pkg.key_class import Keys\n\n\nclass OtherKey:\n    KEY: ClassVar[str] = \"other\"\n\n\nclass OtherFirstKeys(OtherKey, Keys):\n    pass\n";
 const FRESH_OPS: &str = "from pkg.model import Registry\n\nKEPT = []\n\n\ndef _fill(r: Registry):\n    r.entries.append(1)\n";
 const FRESH_BUILD: &str = "from pkg.fresh_ops import _fill\nfrom pkg.model import Registry\n\n\ndef build():\n    r = Registry()\n    _fill(r)\n    return r\n";
 const STRICT_OPS: &str = "def _reset(r):\n    r.entries = []\n";
+// The strict reads and calls: helpers that type nothing read and call a guarded attribute and
+// method; a caller in another module binds their object to another class, then to the guarded
+// one.
+const SEAL: &str = "class Seal:\n    def __init__(self):\n        self.code = \"\"\n\n    def break_open(self):\n        return None\n";
+const SEAL_PEEK: &str = "def peek(s):\n    return s.code\n\n\ndef crack(s):\n    s.break_open()\n";
+const SEAL_USE: &str = "from pkg.seal_peek import crack, peek\n\n\nclass Plain:\n    code = \"\"\n\n    def break_open(self):\n        return None\n\n\ndef use(p: Plain):\n    peek(p)\n    crack(p)\n";
+// A call target naming no class (`reseal`): a helper that types nothing calls the method on an
+// object its caller in another module binds to a class defining it, in a third module.
+const SEALER: &str = "class Sealer:\n    def reseal(self):\n        return None\n";
+const RESEAL_HELPER: &str = "def redo(s):\n    s.reseal()\n";
+const RESEAL_USE: &str = "from pkg.reseal_helper import redo\nfrom pkg.sealer import Sealer\n\n\ndef again(s: Sealer):\n    redo(s)\n";
 const STRICT_USE: &str = "from pkg.model import Registry\nfrom pkg.strict_ops import _reset\n\n\ndef run(r: Registry):\n    _reset(r)\n";
 
 // Files: a module a caller already imports is created, then deleted; a stub, then a package of
@@ -439,6 +485,8 @@ const FILL: &str = "from pkg.shelf import Shelf\n\n\ndef fill(shelf: Shelf, x):\
 const FILL_MAIN: &str = "from pkg.shelf import Shelf\n\n\ndef fill_main(shelf: Shelf, x):\n    shelf.again().main.entries.append(x)\n";
 // A protocol in one module, the class implementing it structurally in another.
 const VIEWS: &str = "from typing import Protocol\n\n\nclass EntriesView(Protocol):\n    entries: list\n    tag: str\n\n\ndef fill_view(view: EntriesView, x):\n    view.entries.append(x)\n";
+// A helper that does not type its parameter, handed a protocol-typed object.
+const VIEW_HANDED: &str = "from pkg.views import EntriesView\n\n\ndef add(obj, x):\n    obj.entries.append(x)\n\n\ndef fill_handed(view: EntriesView, x):\n    add(view, x)\n";
 // The class body only declares names (no function changes): only the protocol's
 // implementations change.
 const TAGGED: &str =
@@ -591,6 +639,7 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/fill.py", FILL),
         ("pkg/fill_main.py", FILL_MAIN),
         ("pkg/views.py", VIEWS),
+        ("pkg/view_handed.py", VIEW_HANDED),
         ("pkg/tagged.py", TAGGED),
         ("pkg/drive_a.py", DRIVE_A),
         ("pkg/drive_b.py", DRIVE_B),
@@ -607,6 +656,16 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/async_user.py", ASYNC_USER),
         ("pkg/key_consts.py", KEY_CONSTS),
         ("pkg/key_writer.py", KEY_WRITER),
+        ("pkg/key_class.py", KEY_CLASS),
+        ("pkg/key_class_reader.py", KEY_CLASS_READER),
+        ("pkg/field_deco.py", FIELD_DECO),
+        ("pkg/field_keys.py", FIELD_KEYS),
+        ("pkg/field_reader.py", FIELD_READER),
+        ("pkg/seal.py", SEAL),
+        ("pkg/seal_peek.py", SEAL_PEEK),
+        ("pkg/sealer.py", SEALER),
+        ("pkg/reseal_helper.py", RESEAL_HELPER),
+        ("pkg/reseal_use.py", RESEAL_USE),
         ("pkg/journal.py", JOURNAL),
         ("pkg/headline.py", HEADLINE),
         ("pkg/safe_journal.py", SAFE_JOURNAL),
@@ -789,12 +848,12 @@ fn steps_receiver_typing() -> Vec<Step> {
             "the class stops implementing the protocol",
             vec![save("pkg/tagged.py", UNTAGGED)],
         )
-        .absent(&[("pkg/views.py", "MUT201")]),
+        .absent(&[("pkg/views.py", "MUT201"), ("pkg/view_handed.py", "MUT201")]),
         Step::new(
             "the class implements the protocol again",
             vec![save("pkg/tagged.py", TAGGED)],
         )
-        .present(&[("pkg/views.py", "MUT201")]),
+        .present(&[("pkg/views.py", "MUT201"), ("pkg/view_handed.py", "MUT201")]),
     ]
 }
 
@@ -1156,10 +1215,16 @@ fn steps_small_displays() -> Vec<Step> {
     ]
 }
 
-/// Constant keys, objects under construction, and the strict mode. A `Final` key
-/// constant is a declaration another module's summary resolves names through; whether a helper
-/// keeps the object its caller hands it is a summary fact of the helper; whether a parameter is
-/// typed is a fact of the callers the strict mode walks.
+/// Constant keys, objects under construction, and the strict modes. A key constant is a
+/// declaration another module's summary resolves names through: one without `Final` stops
+/// being one when a third module rebinds it, and a class constant when a subclass in another
+/// module defines the name again or lists a base defining it first, or code rebinds it on the
+/// class or a subclass, and a `Final` one when a decorator in another module building its class
+/// becomes a `dataclass_transform` (a project-wide fact); whether a helper keeps the object its caller hands it is a summary fact
+/// of the helper; whether a parameter is typed, and with which class, is a fact of
+/// the callers the strict modes walk (`MUT205` writes, `MUT206` reads, `MUT207` calls), and
+/// whether that class defines a method a call target naming no class names is a declaration of
+/// the class's module.
 fn steps_keys_fresh_strict() -> Vec<Step> {
     let storing = FRESH_OPS.replace(
         "    r.entries.append(1)\n",
@@ -1179,6 +1244,126 @@ fn steps_keys_fresh_strict() -> Vec<Step> {
             vec![save("pkg/key_consts.py", KEY_CONSTS)],
         )
         .present(&[("pkg/key_writer.py", "MUT201")]),
+        Step::new(
+            "the key constant loses `Final`: bound once, it still names the attribute",
+            vec![Action::Save(
+                "pkg/key_consts.py",
+                KEY_CONSTS.replace("KEY: Final = ", "KEY = "),
+            )],
+        )
+        .present(&[("pkg/key_writer.py", "MUT201")]),
+        Step::new(
+            "another module rebinds the constant",
+            vec![Action::Create("pkg/key_rebind.py", KEY_REBIND.to_owned())],
+        )
+        .absent(&[("pkg/key_writer.py", "MUT201")]),
+        Step::new(
+            "the module rebinding it is deleted",
+            vec![Action::Delete("pkg/key_rebind.py")],
+        )
+        .present(&[("pkg/key_writer.py", "MUT201")]),
+        Step::new(
+            "the key constant is `Final` again",
+            vec![save("pkg/key_consts.py", KEY_CONSTS)],
+        )
+        .present(&[("pkg/key_writer.py", "MUT201")]),
+        Step::new(
+            "a subclass in another module defines the class constant again",
+            vec![Action::Create(
+                "pkg/key_subclass.py",
+                KEY_SUBCLASS.to_owned(),
+            )],
+        )
+        .absent(&[
+            ("pkg/key_class.py", "MUT201"),
+            ("pkg/key_class_reader.py", "MUT201"),
+        ]),
+        Step::new(
+            "the subclass is deleted",
+            vec![Action::Delete("pkg/key_subclass.py")],
+        )
+        .present(&[
+            ("pkg/key_class.py", "MUT201"),
+            ("pkg/key_class_reader.py", "MUT201"),
+        ]),
+        Step::new(
+            "another module rebinds the `ClassVar` constant on its class",
+            vec![Action::Create(
+                "pkg/key_class_rebind.py",
+                KEY_CLASS_REBIND.to_owned(),
+            )],
+        )
+        .absent(&[
+            ("pkg/key_class.py", "MUT201"),
+            ("pkg/key_class_reader.py", "MUT201"),
+        ]),
+        Step::new(
+            "the module rebinding it is deleted",
+            vec![Action::Delete("pkg/key_class_rebind.py")],
+        )
+        .present(&[
+            ("pkg/key_class.py", "MUT201"),
+            ("pkg/key_class_reader.py", "MUT201"),
+        ]),
+        Step::new(
+            "a subclass in another module is given its own value of the class constant",
+            vec![Action::Create(
+                "pkg/key_subclass_rebind.py",
+                KEY_SUBCLASS_REBIND.to_owned(),
+            )],
+        )
+        .absent(&[
+            ("pkg/key_class.py", "MUT201"),
+            ("pkg/key_class_reader.py", "MUT201"),
+        ]),
+        Step::new(
+            "the subclass storing it is deleted",
+            vec![Action::Delete("pkg/key_subclass_rebind.py")],
+        )
+        .present(&[
+            ("pkg/key_class.py", "MUT201"),
+            ("pkg/key_class_reader.py", "MUT201"),
+        ]),
+        Step::new(
+            "a reader of the class constant is edited, its declarations unchanged",
+            vec![Action::Save(
+                "pkg/key_class_reader.py",
+                format!("{KEY_CLASS_READER}# The class constant names the attribute.\n"),
+            )],
+        )
+        .present(&[("pkg/key_class_reader.py", "MUT201")])
+        .cutoff(),
+        Step::new(
+            "a subclass in another module lists a base defining the name before the class",
+            vec![Action::Create(
+                "pkg/key_other_first.py",
+                KEY_OTHER_FIRST.to_owned(),
+            )],
+        )
+        .absent(&[
+            ("pkg/key_class.py", "MUT201"),
+            ("pkg/key_class_reader.py", "MUT201"),
+        ]),
+        Step::new(
+            "the subclass listing the other base is deleted",
+            vec![Action::Delete("pkg/key_other_first.py")],
+        )
+        .present(&[
+            ("pkg/key_class.py", "MUT201"),
+            ("pkg/key_class_reader.py", "MUT201"),
+        ]),
+        Step::new(
+            "the decorator building the class becomes a `dataclass_transform`",
+            vec![save("pkg/field_deco.py", FIELD_DECO_TRANSFORM)],
+        )
+        .present(&[("pkg/field_reader.py", "MUT205")])
+        .absent(&[("pkg/field_reader.py", "MUT201")]),
+        Step::new(
+            "the decorator is a plain function again",
+            vec![save("pkg/field_deco.py", FIELD_DECO)],
+        )
+        .present(&[("pkg/field_reader.py", "MUT201")])
+        .absent(&[("pkg/field_reader.py", "MUT205")]),
         Step::new(
             "a helper starts storing the fresh object before writing it",
             vec![Action::Save("pkg/fresh_ops.py", storing)],
@@ -1204,6 +1389,59 @@ fn steps_keys_fresh_strict() -> Vec<Step> {
         )
         .present(&[("pkg/strict_use.py", "MUT201")])
         .absent(&[("pkg/strict_ops.py", "MUT205")]),
+        Step::new(
+            "a caller in another module binds the helpers' object to another class",
+            vec![Action::Create("pkg/seal_use.py", SEAL_USE.to_owned())],
+        )
+        .absent(&[
+            ("pkg/seal_peek.py", "MUT206"),
+            ("pkg/seal_peek.py", "MUT207"),
+        ]),
+        Step::new(
+            "the caller binds a guarded object",
+            vec![Action::Save(
+                "pkg/seal_use.py",
+                SEAL_USE
+                    .replace("def use(p: Plain):", "def use(p: Seal):")
+                    .replace(
+                        "import crack, peek\n",
+                        "import crack, peek\nfrom pkg.seal import Seal\n",
+                    ),
+            )],
+        )
+        .present(&[
+            ("pkg/seal_peek.py", "MUT206"),
+            ("pkg/seal_peek.py", "MUT207"),
+        ]),
+        Step::new(
+            "the caller binds the other class again",
+            vec![save("pkg/seal_use.py", SEAL_USE)],
+        )
+        .absent(&[
+            ("pkg/seal_peek.py", "MUT206"),
+            ("pkg/seal_peek.py", "MUT207"),
+        ]),
+        Step::new(
+            "the caller is deleted",
+            vec![Action::Delete("pkg/seal_use.py")],
+        )
+        .present(&[
+            ("pkg/seal_peek.py", "MUT206"),
+            ("pkg/seal_peek.py", "MUT207"),
+        ]),
+        Step::new(
+            "the class bound to the helper's object renames the method a target names",
+            vec![save(
+                "pkg/sealer.py",
+                &SEALER.replace("def reseal(self):", "def close(self):"),
+            )],
+        )
+        .absent(&[("pkg/reseal_helper.py", "MUT207")]),
+        Step::new(
+            "the class defines the method again",
+            vec![save("pkg/sealer.py", SEALER)],
+        )
+        .present(&[("pkg/reseal_helper.py", "MUT207")]),
     ]
 }
 

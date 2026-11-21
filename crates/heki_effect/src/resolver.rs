@@ -32,6 +32,7 @@ struct Indexes {
     subclasses: FxHashMap<String, Vec<String>>,
     property_names: FxHashSet<String>,
     frozen: FxHashSet<String>,
+    built: FxHashSet<String>,
     typed_dicts: FxHashSet<String>,
     protocols: FxHashMap<String, Option<Vec<String>>>,
     grown_elsewhere: FxHashSet<String>,
@@ -58,6 +59,10 @@ pub const CHA_CANDIDATE_LIMIT: usize = 8;
 
 /// Upper bound on re-export alias chasing (`pkg.__init__` re-exporting `pkg.sub.Foo`).
 const MAX_ALIAS_CHASE: usize = 8;
+
+/// Upper bound on the attribute loads behind a module-level constant's value
+/// (`KEY = pkg.sub.keys.OTHER`: three): a dotted name a few modules deep takes a few.
+const MAX_CONSTANT_ATTRS: usize = 16;
 
 /// Decorators that leave calling a function what its definition makes it: a generator function
 /// returns a generator, an `async def` a coroutine, a plain `def` what its body returns.
@@ -247,6 +252,10 @@ pub struct ClassDecl {
     /// `@dataclass_transform(...)` on this class (as a base class or metaclass of the classes it
     /// builds): `Some(frozen_default)`.
     pub transform: Option<bool>,
+    /// `@dataclass` / `@dataclasses.dataclass` on the class: its class-body annotations declare
+    /// instance fields ([`ProjectDecls::field_defaults`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dataclass: Option<Dataclass>,
     /// What the class's own body and methods store in its attributes (`attr = [...]` in the
     /// body, `self.attr = ...` in a method): `Some` when every store is a small display that
     /// none of them grows (`heki_ir::FnIndex::stored_display`), `None` when an attribute is
@@ -260,6 +269,21 @@ pub struct ClassDecl {
     /// The names the class defines: class-body names (methods, annotations, assignments) and
     /// the attributes its methods set or annotate on `self` (structural typing, `Protocol`).
     pub members: BTreeSet<String>,
+    /// The attributes its module stores on the class object or deletes outside the class body
+    /// (`Keys.KEY = "x"`, `cls.KEY = "x"`, [`class_attrs_rebound`]): the class's own value of
+    /// the name from then on, which no string constant of the class or its bases fixes.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub rebound_attrs: BTreeSet<String>,
+}
+
+/// What `@dataclass` makes of the class attributes of a class's fields ([`ClassDecl::dataclass`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Dataclass {
+    /// Each field's default stays the class attribute.
+    Defaults,
+    /// `slots=True`: a slot descriptor replaces the class attribute of every field, the class's
+    /// own and those of its dataclass bases.
+    Slots,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -363,25 +387,42 @@ pub struct ModuleDecls {
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub grown_globals: BTreeSet<String>,
     /// The `grown_globals` this module rebinds or deletes (`cfg.QUEUE = []`, `del
-    /// cfg.QUEUE`): bound to another object, so not even a tuple keeps its display
-    /// ([`ProjectDecls::rebound_elsewhere`]).
+    /// cfg.QUEUE`): bound to another object, so not even a tuple keeps its display, and no
+    /// longer the string constant their own module binds ([`ProjectDecls::rebound_elsewhere`]).
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub rebound_globals: BTreeSet<String>,
-    /// Module-level string constants declared `Final` (`KEY: Final = "_key"`), by name: a
-    /// constant names an attribute in `obj.__dict__[KEY]`, `getattr(obj, KEY)`, and
-    /// `setattr(obj, KEY, v)`, and a key in `obj.attr[KEY]`, as its literal would.
+    /// String constants, by name: module-level names bound once (`KEY = "_key"`,
+    /// `KEY: Final = "_key"`), and class-body names declared `ClassVar` or `Final` and bound
+    /// once (`KEY: ClassVar[str] = "_key"`), under `Class.KEY`. A constant names an attribute in
+    /// `obj.__dict__[KEY]`, `getattr(obj, KEY)`, and `setattr(obj, KEY, v)`, and a key in
+    /// `obj.attr[KEY]`, as its literal would.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub str_constants: BTreeMap<String, StrConstant>,
 }
 
-/// The value of a module-level `Final` string constant ([`ModuleDecls::str_constants`]).
+/// A string constant of a module or class ([`ModuleDecls::str_constants`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum StrConstant {
-    /// `KEY: Final = "_key"`.
-    Value(String),
-    /// `KEY: Final = OTHER` / `KEY: Final = keys.OTHER`: the fully qualified name of the
-    /// constant it is bound to, resolved within the module (chased by
-    /// [`ProjectDecls::str_constant`]).
+pub struct StrConstant {
+    pub value: StrValue,
+    /// A name without `Final`: another module rebinding it (`keys.KEY = "x"`,
+    /// `Keys.KEY = "x"`, [`ProjectDecls::rebound_elsewhere`]) makes it no constant.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub rebindable: bool,
+    /// A class-body name declared `Final` without `ClassVar`: in a class whose annotations
+    /// declare instance fields (a dataclass, a class a `dataclass_transform` builds) it is a
+    /// field, which each instance holds itself ([`ProjectDecls::field_defaults`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub declares_field: bool,
+}
+
+/// What a string constant is bound to ([`StrConstant`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StrValue {
+    /// `KEY = "_key"`; a module-level one shares its text with the module's constants
+    /// (`heki_ir::ModuleConstants::strs`), and with the names bound to it there.
+    Literal(Arc<str>),
+    /// `KEY = OTHER` / `KEY = keys.OTHER`: the fully qualified name of the constant it is
+    /// bound to, resolved within the module (chased by [`ProjectDecls::str_constant`]).
     Alias(String),
 }
 
@@ -991,7 +1032,62 @@ fn note(keys: &mut BTreeSet<String>, key: &str) {
 #[derive(Debug, Default)]
 struct Recorder {
     on: AtomicBool,
-    keys: Mutex<DeclKeys>,
+    keys: Mutex<Recorded>,
+}
+
+/// What a recording has read so far.
+#[derive(Debug, Default)]
+struct Recorded {
+    keys: DeclKeys,
+    /// What computing each kept answer read, once per time the answer is read again
+    /// ([`ProjectDecls::class_str_constant`]): merged into `keys` once per answer when the
+    /// recording ends, so reading an answer again copies no keys.
+    replayed: Vec<Arc<DeclKeys>>,
+}
+
+impl Recorded {
+    fn into_keys(self) -> DeclKeys {
+        let mut keys = self.keys;
+        let mut merged = FxHashSet::default();
+        for reads in self.replayed {
+            if merged.insert(Arc::as_ptr(&reads)) {
+                keys.extend(DeclKeys::clone(&reads));
+            }
+        }
+        keys
+    }
+}
+
+/// What a class-level constant is read on ([`ProjectDecls::class_str_constant`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ConstantRead {
+    /// The class object the code names (`Model.KEY`).
+    Class,
+    /// A class object that may be a subclass (`cls.KEY`).
+    ClassOrSubclass,
+    /// An instance of the class or of a subclass (`self.KEY`).
+    Instance,
+}
+
+/// What the class object of a class holds for its fields, the class-body names its annotations
+/// declare as instance fields ([`ProjectDecls::field_defaults`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FieldDefaults {
+    /// The class has no fields: its class-body annotations declare class attributes.
+    NoFields,
+    /// A dataclass: each field's default stays the class attribute.
+    Kept,
+    /// A dataclass with `slots=True`, whose slot descriptors replace the defaults, or a class
+    /// a `dataclass_transform` builds, whose runtime decides.
+    Replaced,
+}
+
+/// A kept answer of [`ProjectDecls::class_str_constant`], with what computing it read of the
+/// declarations (`None`: it was computed without recording).
+#[derive(Debug, Clone)]
+struct KnownConstant {
+    value: Option<String>,
+    reads: Option<Arc<DeclKeys>>,
 }
 
 /// Declarations of every project module plus derived indexes.
@@ -1007,8 +1103,10 @@ pub struct ProjectDecls {
     property_names: FxHashSet<String>,
     /// Every project class deriving (transitively) from `TypedDict`.
     typed_dicts: FxHashSet<String>,
-    /// Every frozen project class (`Self::frozen_classes`).
+    /// Every frozen project class (`Self::transform_builds`).
     frozen: FxHashSet<String>,
+    /// Every project class a PEP 681 `dataclass_transform` builds (`Self::transform_builds`).
+    built: FxHashSet<String>,
     /// Every project protocol with the project classes implementing it structurally
     /// (`Self::protocol_implementations`), `None` past `CHA_CANDIDATE_LIMIT`.
     protocols: FxHashMap<String, Option<Vec<String>>>,
@@ -1023,6 +1121,9 @@ pub struct ProjectDecls {
     linearized: RwLock<FxHashMap<String, Vec<String>>>,
     /// One shared [`crate::ClassLine`] per class (`Self::lineage`); cleared with the indexes.
     lines: RwLock<FxHashMap<String, crate::SharedLine>>,
+    /// The answers of [`Self::class_str_constant`] so far, by class, name, and whether the
+    /// object may be of a subclass; cleared with the indexes.
+    class_constants: RwLock<FxHashMap<(String, String, ConstantRead), KnownConstant>>,
 }
 
 /// Why an attribute (or `TypedDict` key) of a project class is read-only (`MUT108`).
@@ -1085,11 +1186,11 @@ impl ProjectDecls {
         self.recorder.on.store(true, Ordering::SeqCst);
         let out = f();
         self.recorder.on.store(false, Ordering::SeqCst);
-        let keys = std::mem::take(&mut *self.recorded());
+        let keys = std::mem::take(&mut *self.recorded()).into_keys();
         (out, keys)
     }
 
-    fn recorded(&self) -> MutexGuard<'_, DeclKeys> {
+    fn recorded(&self) -> MutexGuard<'_, Recorded> {
         self.recorder
             .keys
             .lock()
@@ -1099,7 +1200,7 @@ impl ProjectDecls {
     /// Note a key read during [`Self::record`].
     fn read(&self, note: impl FnOnce(&mut DeclKeys)) {
         if self.recorder.on.load(Ordering::Relaxed) {
-            note(&mut self.recorded());
+            note(&mut self.recorded().keys);
         }
     }
 
@@ -1119,6 +1220,7 @@ impl ProjectDecls {
         };
         out.property_names = differ(&before.property_names, &self.property_names);
         out.class_facts = differ(&before.frozen, &self.frozen);
+        out.class_facts.extend(differ(&before.built, &self.built));
         out.class_facts
             .extend(differ(&before.typed_dicts, &self.typed_dicts));
         for p in before.protocols.keys().chain(self.protocols.keys()) {
@@ -1137,6 +1239,7 @@ impl ProjectDecls {
             subclasses: self.subclasses.clone(),
             property_names: self.property_names.clone(),
             frozen: self.frozen.clone(),
+            built: self.built.clone(),
             typed_dicts: self.typed_dicts.clone(),
             protocols: self.protocols.clone(),
             grown_elsewhere: self.grown_elsewhere.clone(),
@@ -1150,6 +1253,10 @@ impl ProjectDecls {
             .unwrap_or_else(PoisonError::into_inner)
             .clear();
         self.lines
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+        self.class_constants
             .get_mut()
             .unwrap_or_else(PoisonError::into_inner)
             .clear();
@@ -1190,7 +1297,7 @@ impl ProjectDecls {
             .iter()
             .flat_map(|b| self.subclasses_of(b))
             .collect();
-        self.frozen = self.frozen_classes();
+        (self.frozen, self.built) = self.transform_builds();
         self.protocols = self.protocol_implementations();
         self.grown_elsewhere = self.globals_changed_elsewhere(|m| &m.grown_globals);
         self.rebound_elsewhere = self.globals_changed_elsewhere(|m| &m.rebound_globals);
@@ -1224,7 +1331,8 @@ impl ProjectDecls {
         self.grown_elsewhere.contains(&fqn)
     }
 
-    /// Whether another project module rebinds or deletes the module global `fqn`.
+    /// Whether another project module rebinds or deletes the module global `fqn` (a string
+    /// its own module binds once is then no constant).
     pub fn rebound_elsewhere(&self, fqn: &str) -> bool {
         let fqn = self.canonical(fqn);
         self.read(|k| note(&mut k.grown_globals, &fqn));
@@ -1308,31 +1416,46 @@ impl ProjectDecls {
     /// The project classes implementing the project protocol `class` structurally
     /// (`Self::protocol_implementations`); `None` when `class` is no protocol or too many do.
     pub(crate) fn protocol_implementers(&self, class: &str) -> Option<&[String]> {
-        self.read(|k| note(&mut k.protocols, class));
-        self.protocols.get(class)?.as_deref()
+        self.protocol(class).flatten()
     }
 
-    /// The frozen project classes: `ClassDecl::is_frozen` (`@dataclass(frozen=True)`,
-    /// `NamedTuple`), and the classes a PEP 681 `dataclass_transform(frozen_default=True)`
-    /// builds unless they pass `frozen=False`: through a decorator function carrying it, or
-    /// through a base class or metaclass carrying it (the classes deriving from it, or using it
-    /// or a subclass of it as their metaclass, and their subclasses).
-    fn frozen_classes(&self) -> FxHashSet<String> {
+    /// `Some` when the project class `class` is a protocol: with the project classes
+    /// implementing it structurally, or `None` inside when heki cannot list them (too many, a
+    /// protocol without members).
+    pub(crate) fn protocol(&self, class: &str) -> Option<Option<&[String]>> {
+        self.read(|k| note(&mut k.protocols, class));
+        self.protocols.get(class).map(Option::as_deref)
+    }
+
+    /// The frozen project classes, and the project classes a PEP 681 `dataclass_transform`
+    /// builds: through a decorator function carrying it, or through a base class or metaclass
+    /// carrying it (the classes deriving from it, or using it or a subclass of it as their
+    /// metaclass, and their subclasses). Frozen are `ClassDecl::is_frozen`
+    /// (`@dataclass(frozen=True)`, `NamedTuple`), and the classes a
+    /// `dataclass_transform(frozen_default=True)` builds unless they pass `frozen=False`.
+    fn transform_builds(&self) -> (FxHashSet<String>, FxHashSet<String>) {
         let mut frozen = FxHashSet::default();
+        let mut built = FxHashSet::default();
         let mut transforms = Vec::new();
         let mut metaclass_users = Vec::new();
         for m in self.modules.values() {
             for (q, c) in &m.classes {
-                let by_decorator = c.decorators.iter().any(|(dec, frozen_arg)| {
-                    match self.symbol(&self.canonical(dec)) {
-                        Symbol::Function(_, d) => {
-                            d.transform.is_some_and(|t| frozen_arg.unwrap_or(t))
-                        }
-                        _ => false,
-                    }
-                });
+                // Whether a decorator function carrying a transform builds the class frozen.
+                let decorated = c
+                    .decorators
+                    .iter()
+                    .filter_map(
+                        |(dec, frozen_arg)| match self.symbol(&self.canonical(dec)) {
+                            Symbol::Function(_, d) => d.transform.map(|t| frozen_arg.unwrap_or(t)),
+                            _ => None,
+                        },
+                    )
+                    .reduce(|a, b| a || b);
                 let fqn = || format!("{}.{q}", m.module_name);
-                if c.is_frozen || by_decorator {
+                if decorated.is_some() {
+                    built.insert(fqn());
+                }
+                if c.is_frozen || decorated == Some(true) {
                     frozen.insert(fqn());
                 }
                 if let Some(t) = c.transform {
@@ -1344,28 +1467,43 @@ impl ProjectDecls {
             }
         }
         for (t, default) in transforms {
-            let mut built = self.subclasses_of(&t);
+            let mut built_by = self.subclasses_of(&t);
             let users: Vec<String> = metaclass_users
                 .iter()
-                .filter(|(_, meta)| *meta == t || built.binary_search(meta).is_ok())
+                .filter(|(_, meta)| *meta == t || built_by.binary_search(meta).is_ok())
                 .map(|(fqn, _)| fqn.clone())
                 .collect();
             for u in users {
-                built.extend(self.subclasses_of(&u));
-                built.push(u);
+                built_by.extend(self.subclasses_of(&u));
+                built_by.push(u);
             }
-            for b in built {
+            for b in built_by {
                 // The first `frozen=` class keyword along the MRO decides.
                 let keyword = self
                     .mro(&b)
                     .iter()
                     .find_map(|c| self.class(c)?.frozen_keyword);
                 if keyword.unwrap_or(default) {
-                    frozen.insert(b);
+                    frozen.insert(b.clone());
                 }
+                built.insert(b);
             }
         }
-        frozen
+        (frozen, built)
+    }
+
+    /// What the class object of the project class `class` holds for the class-body names its
+    /// annotations declare as instance fields.
+    fn field_defaults(&self, class: &str) -> FieldDefaults {
+        self.read(|k| note(&mut k.class_facts, class));
+        if self.built.contains(class) {
+            return FieldDefaults::Replaced;
+        }
+        match self.class(class).and_then(|d| d.dataclass) {
+            Some(Dataclass::Defaults) => FieldDefaults::Kept,
+            Some(Dataclass::Slots) => FieldDefaults::Replaced,
+            None => FieldDefaults::NoFields,
+        }
     }
 
     pub fn module(&self, name: &str) -> Option<&ModuleDecls> {
@@ -1424,18 +1562,141 @@ impl ProjectDecls {
         cur
     }
 
-    /// The value of the module-level `Final` string constant `fqn` (`pkg.keys.KEY`), through
+    /// The value of the string constant `fqn` (`pkg.keys.KEY`, `pkg.model.Model.KEY`), through
     /// re-exports and constants bound to other constants (at most `MAX_ALIAS_CHASE` steps).
     pub fn str_constant(&self, fqn: &str) -> Option<&str> {
         let mut cur = self.canonical(fqn);
         for _ in 0..MAX_ALIAS_CHASE {
             let (m, rest) = self.split_module(&cur)?;
-            match m.str_constants.get(rest)? {
-                StrConstant::Value(v) => return Some(v),
-                StrConstant::Alias(next) => cur = self.canonical(next),
+            let constant = m.str_constants.get(rest)?;
+            if constant.rebindable && self.rebound_elsewhere(&cur) {
+                return None;
+            }
+            match &constant.value {
+                StrValue::Literal(v) => return Some(v),
+                StrValue::Alias(next) => cur = self.canonical(next),
             }
         }
         None
+    }
+
+    /// The value of the class-level string constant `attr` read on an instance of the project
+    /// class `class` or on the class object (`self.KEY`, `cls.KEY`, `Model.KEY`): the
+    /// definition of `attr` the MRO finds first must be a constant. Read on anything but the
+    /// class object the code names, the object may be of a subclass, and the MRO of each must
+    /// find the same definition: a subclass defining `attr` again, or listing a base that
+    /// defines it before `class` (`class Child(Other, Model)`), reads its own value. A class
+    /// that code stores `attr` on (`Child.KEY = "x"`, in its module or another) defines it too:
+    /// its own value then hides the inherited constant. A field (`KEY: Final[str] = "x"` in a
+    /// dataclass) is no constant on an instance, which holds the value it was given, and on a
+    /// class object only while the default stays its class attribute along the way: no class
+    /// with `slots=True` or built by a `dataclass_transform`. An instance of a protocol is one
+    /// of its structural implementations, which define the name themselves: each must hold the
+    /// same constant.
+    ///
+    /// The answer is kept for the life of the indexes: a read of it while recording reads
+    /// what computing it read.
+    pub fn class_str_constant(
+        &self,
+        class: &str,
+        attr: &str,
+        read: ConstantRead,
+    ) -> Option<String> {
+        let key = (class.to_owned(), attr.to_owned(), read);
+        let recording = self.recorder.on.load(Ordering::Relaxed);
+        // An answer kept without its reads is computed again while recording, to record them.
+        let known = self
+            .class_constants
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&key)
+            .filter(|k| !recording || k.reads.is_some())
+            .cloned();
+        if let Some(known) = known {
+            if let Some(reads) = known.reads.filter(|_| recording) {
+                self.recorded().replayed.push(reads);
+            }
+            return known.value;
+        }
+        let (value, reads) = if recording {
+            // What this computation reads, apart from what the recording read before.
+            let before = std::mem::take(&mut *self.recorded());
+            let value = self.find_class_str_constant(class, attr, read);
+            let mut recorded = self.recorded();
+            let reads = Arc::new(std::mem::replace(&mut *recorded, before).into_keys());
+            recorded.replayed.push(Arc::clone(&reads));
+            (value, Some(reads))
+        } else {
+            (self.find_class_str_constant(class, attr, read), None)
+        };
+        let known = KnownConstant {
+            value: value.clone(),
+            reads,
+        };
+        self.class_constants
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(key, known);
+        value
+    }
+
+    /// [`Self::class_str_constant`], computed.
+    fn find_class_str_constant(
+        &self,
+        class: &str,
+        attr: &str,
+        read: ConstantRead,
+    ) -> Option<String> {
+        let defines = |c: &str| {
+            self.class(c)
+                .is_some_and(|d| d.members.contains(attr) || d.rebound_attrs.contains(attr))
+                || self.rebound_elsewhere(&format!("{c}.{attr}"))
+        };
+        let class = self.canonical(class);
+        let owner = self.mro(&class).into_iter().find(|m| defines(m))?;
+        let fqn = format!("{owner}.{attr}");
+        let value = self.str_constant(&fqn)?;
+        let defaults = self.field_defaults(&owner);
+        let field = self.declares_field(&fqn) && defaults != FieldDefaults::NoFields;
+        if field && (read == ConstantRead::Instance || defaults == FieldDefaults::Replaced) {
+            return None;
+        }
+        let mut family = vec![class.clone()];
+        if read != ConstantRead::Class {
+            family.extend(self.subclasses_of(&class));
+        }
+        for c in &family {
+            let mro = self.mro(c);
+            let at = mro.iter().position(|m| defines(m))?;
+            // A class with `slots=True` (or built by a transform) ahead of the owner replaces
+            // the field's default with its own class attribute.
+            let replaced = || {
+                mro[..at]
+                    .iter()
+                    .any(|m| self.field_defaults(m) == FieldDefaults::Replaced)
+            };
+            if mro[at] != owner || field && replaced() {
+                return None;
+            }
+        }
+        if read != ConstantRead::Class
+            && let Some(implementers) = self.protocol(&class)
+        {
+            let same =
+                |i: &String| self.class_str_constant(i, attr, read).as_deref() == Some(value);
+            if !implementers?.iter().all(same) {
+                return None;
+            }
+        }
+        Some(value.to_owned())
+    }
+
+    /// Whether the class-level string constant `fqn` declares a field where its class's
+    /// annotations declare instance fields (`StrConstant::declares_field`).
+    fn declares_field(&self, fqn: &str) -> bool {
+        self.split_module(fqn)
+            .and_then(|(m, rest)| m.str_constants.get(rest))
+            .is_some_and(|c| c.declares_field)
     }
 
     pub(crate) fn symbol(&self, fqn: &str) -> Symbol<'_> {
@@ -1940,6 +2201,15 @@ impl ProjectDecls {
         }
     }
 
+    /// The project method `name` that the MRO of the class `class` finds first (what calling it
+    /// on an instance of exactly `class` runs; overrides of subclasses do not count).
+    pub fn mro_method(&self, class: &str, name: &str) -> Option<FuncKey> {
+        let class = self.canonical(class);
+        self.definitions(&class, name, false, false, |_| true)
+            .0
+            .pop()
+    }
+
     /// Resolve reading `instance_of(class).attr` as calls of the property getters it may run
     /// (`FunctionDecl::is_property`), found like [`Self::method_targets`]' candidates: the MRO
     /// definition when it is a getter, plus the getters of overriding project subclasses
@@ -2366,7 +2636,16 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
     decls.small_globals = input.ir.constants.displays.clone();
     (decls.grown_globals, decls.rebound_globals) = foreign_grown_globals(input, &decls.imports);
     attr_displays(input, &mut decls);
-    decls.str_constants = final_str_constants(input, &decls);
+    let rebound: Vec<(String, String)> = class_attrs_rebound(input, &decls)
+        .into_iter()
+        .map(|(class, attr)| (class.to_owned(), attr.to_owned()))
+        .collect();
+    for (class, attr) in rebound {
+        if let Some(c) = decls.classes.get_mut(&class) {
+            c.rebound_attrs.insert(attr);
+        }
+    }
+    decls.str_constants = str_constants(input, &decls);
     decls
 }
 
@@ -2537,44 +2816,17 @@ fn count_u8<T>(items: impl Iterator<Item = T>) -> u8 {
     u8::try_from(items.count()).unwrap_or(u8::MAX)
 }
 
-/// [`ModuleDecls::str_constants`]: module-level names annotated `Final` (`typing` /
-/// `typing_extensions`, also `Final[str]`) and bound exactly once in the module, to a string
-/// literal or to another name. A name the module stores twice (`global KEY` in a function, two
-/// branches) is no constant.
-fn final_str_constants(
-    input: &ModuleInput<'_>,
-    decls: &ModuleDecls,
-) -> BTreeMap<String, StrConstant> {
-    let mut out = BTreeMap::new();
-    let body = input.ir.functions.iter().filter(|f| f.is_module_body);
+/// [`ModuleDecls::str_constants`]: the module-level names bound exactly once in the module and
+/// the class-body names declared `ClassVar` or `Final` (`typing` / `typing_extensions`, also
+/// subscripted) bound exactly once in the class body, each to a string literal or to another
+/// name (`constant_source`). A module-level literal is the text of one of the module's
+/// constants (`heki_ir::ModuleConstants::strs`), shared with it, and a name those leave out is
+/// no constant. A name stored twice (`global KEY` in a function, two branches) or deleted is no
+/// constant, and neither is a name an import statement binds: it resolves through the imports.
+/// A class attribute the module also stores or deletes outside the class body
+/// (`ClassDecl::rebound_attrs`) is none either.
+fn str_constants(input: &ModuleInput<'_>, decls: &ModuleDecls) -> BTreeMap<String, StrConstant> {
     let resolve = |name: &str| decls.resolve_dotted(name, true);
-    let finals: FxHashSet<&str> = body
-        .clone()
-        .flat_map(|f| &f.local_annotations)
-        .filter(|a| !a.target.contains('.') && qualifiers(&a.annotation, &resolve).0.is_final)
-        .map(|a| a.target.as_str())
-        .collect();
-    if finals.is_empty() {
-        return out;
-    }
-    let mut stores: FxHashMap<&str, usize> = FxHashMap::default();
-    for inst in input
-        .ir
-        .functions
-        .iter()
-        .flat_map(|f| f.blocks.iter().flat_map(|b| &b.insts))
-    {
-        if let InstKind::StoreGlobal { name, .. } | InstKind::Delete { name, .. } = &inst.kind
-            && finals.contains(name.as_str())
-        {
-            *stores.entry(name.as_str()).or_default() += 1;
-        }
-    }
-    let insts = || {
-        body.clone()
-            .flat_map(|f| f.blocks.iter().flat_map(|b| &b.insts))
-    };
-    let defs: FxHashMap<VarId, &Inst> = insts().filter_map(|i| Some((i.kind.dst()?, i))).collect();
     // A module body reads an imported name as a copy of its `Import`.
     let imports: FxHashMap<Span, String> = input
         .semantic
@@ -2582,51 +2834,222 @@ fn final_str_constants(
         .iter()
         .filter_map(|imp| Some((imp.span, import_target(imp, input)?)))
         .collect();
-    for inst in insts() {
-        let InstKind::StoreGlobal { name, value } = &inst.kind else {
-            continue;
-        };
-        if stores.get(name.as_str()) != Some(&1) {
-            continue;
+    let mut module_stores: FxHashMap<&str, usize> = FxHashMap::default();
+    for inst in input
+        .ir
+        .functions
+        .iter()
+        .flat_map(|f| f.blocks.iter().flat_map(|b| &b.insts))
+    {
+        if let InstKind::StoreGlobal { name, .. } | InstKind::Delete { name, .. } = &inst.kind {
+            *module_stores.entry(name.as_str()).or_default() += 1;
         }
-        let value = match constant_source(&defs, &imports, *value) {
-            Some(Ok(s)) => StrConstant::Value(s.to_owned()),
-            Some(Err(fqn)) => StrConstant::Alias(fqn),
-            None => continue,
-        };
-        out.insert(name.clone(), value);
+    }
+    let mut out = BTreeMap::new();
+    for f in input
+        .ir
+        .functions
+        .iter()
+        .filter(|f| f.is_module_body || f.is_class_body)
+    {
+        let declared: FxHashMap<&str, Qualifiers> = f
+            .local_annotations
+            .iter()
+            .filter(|a| !a.target.contains('.'))
+            .map(|a| (a.target.as_str(), qualifiers(&a.annotation, &resolve).0))
+            .collect();
+        let insts = || f.blocks.iter().flat_map(|b| &b.insts);
+        // A module body binds a global by storing it; a class body binds a name as a named copy.
+        let bindings: Vec<(&str, VarId)> = insts()
+            .filter_map(|inst| match &inst.kind {
+                InstKind::StoreGlobal { name, value } if f.is_module_body => {
+                    Some((name.as_str(), *value))
+                }
+                InstKind::Copy { dst, src } if f.is_class_body => Some((f.var_name(*dst)?, *src)),
+                _ => None,
+            })
+            .collect();
+        let mut class_stores: FxHashMap<&str, usize> = FxHashMap::default();
+        if f.is_class_body {
+            for (name, _) in &bindings {
+                *class_stores.entry(name).or_default() += 1;
+            }
+            for inst in insts() {
+                if let InstKind::Delete { name, .. } = &inst.kind {
+                    *class_stores.entry(name.as_str()).or_default() += 1;
+                }
+            }
+        }
+        let defs: FxHashMap<VarId, &Inst> =
+            insts().filter_map(|i| Some((i.kind.dst()?, i))).collect();
+        for (name, value) in bindings {
+            let q = declared.get(name).copied().unwrap_or_default();
+            let (key, once, rebindable) = if f.is_module_body {
+                let once = module_stores.get(name) == Some(&1) && !decls.imports.contains_key(name);
+                (name.to_owned(), once, !q.is_final)
+            } else {
+                let once = (q.class_var || q.is_final)
+                    && class_stores.get(name) == Some(&1)
+                    && !decls
+                        .classes
+                        .get(f.qualname.as_str())
+                        .is_some_and(|c| c.rebound_attrs.contains(name));
+                (format!("{}.{name}", f.qualname), once, !q.is_final)
+            };
+            if !once {
+                continue;
+            }
+            let value = match constant_source(&defs, &imports, value) {
+                // A module-level name holds the text of one of the module's constants, or no
+                // constant (one bound in a loop, or that a star import or `exec` may rebind).
+                Some(Ok(_)) if f.is_module_body => match input.ir.constants.strs.get(name) {
+                    Some(text) => StrValue::Literal(Arc::clone(text)),
+                    None => continue,
+                },
+                Some(Ok(s)) => StrValue::Literal(Arc::from(s)),
+                Some(Err(fqn)) => StrValue::Alias(fqn),
+                None => continue,
+            };
+            let constant = StrConstant {
+                value,
+                rebindable,
+                declares_field: f.is_class_body && q.is_final && !q.class_var,
+            };
+            out.insert(key, constant);
+        }
     }
     out
+}
+
+/// The class attributes the module stores into or deletes outside their class bodies, as
+/// `(class qualname, attribute)`: on the class object (`Keys.KEY = "x"` in a function, or in
+/// the module body after the `class` statement, where the name holds the class it made;
+/// `cls.KEY = "x"` in a class method) or on an instance in a method of the class
+/// (`self.KEY = "x"`, which shadows the class attribute for that instance).
+fn class_attrs_rebound<'i>(
+    input: &'i ModuleInput<'_>,
+    decls: &ModuleDecls,
+) -> FxHashSet<(&'i str, &'i str)> {
+    let mut out = FxHashSet::default();
+    for f in &input.ir.functions {
+        let insts = || f.blocks.iter().flat_map(|b| &b.insts);
+        let defs: FxHashMap<VarId, &InstKind> = insts()
+            .filter_map(|i| Some((i.kind.dst()?, &i.kind)))
+            .collect();
+        let mut roots: FxHashMap<VarId, VarId> = FxHashMap::default();
+        let receiver = match (&f.owner_class_qualname, f.params.first()) {
+            (Some(owner), Some(p))
+                if is_summarized_function(f) && !f.has_decorator(&["staticmethod"]) =>
+            {
+                Some((owner.as_str(), self_aliases(f, p.var)))
+            }
+            _ => None,
+        };
+        for inst in insts() {
+            let (InstKind::AttrStore { obj, attr, .. } | InstKind::AttrDelete { obj, attr }) =
+                &inst.kind
+            else {
+                continue;
+            };
+            let class = match defs.get(&copy_root(&defs, &mut roots, *obj)) {
+                Some(InstKind::LoadGlobal { name, .. } | InstKind::LoadName { name, .. })
+                    if decls.classes.contains_key(name.as_str()) =>
+                {
+                    Some(name.as_str())
+                }
+                Some(InstKind::MakeClosure {
+                    func_id: Some(id), ..
+                }) if input.ir.function(*id).is_class_body => {
+                    Some(input.ir.function(*id).qualname.as_str())
+                }
+                _ => receiver
+                    .as_ref()
+                    .filter(|(_, selfs)| selfs.contains(obj))
+                    .map(|(owner, _)| *owner),
+            };
+            if let Some(class) = class {
+                out.insert((class, attr.as_str()));
+            }
+        }
+    }
+    out
+}
+
+/// The value `var` copies, through any number of copies. Each value's root is kept in `roots`,
+/// so the stores through one long chain of aliases walk it once.
+fn copy_root(
+    defs: &FxHashMap<VarId, &InstKind>,
+    roots: &mut FxHashMap<VarId, VarId>,
+    var: VarId,
+) -> VarId {
+    let mut chain = Vec::new();
+    let mut cur = var;
+    let root = loop {
+        if let Some(root) = roots.get(&cur) {
+            break *root;
+        }
+        match defs.get(&cur) {
+            Some(InstKind::Copy { src, .. }) => {
+                chain.push(cur);
+                cur = *src;
+            }
+            _ => break cur,
+        }
+    };
+    for v in chain {
+        roots.insert(v, root);
+    }
+    root
 }
 
 /// What a module-level constant is bound to, behind `var` (through copies): a string literal
 /// (`Ok`), or the fully qualified name of another constant (`Err`): an imported name
 /// (`from pkg.keys import OTHER`) or an attribute of an imported module (`keys.OTHER`). A
 /// name the module body loads by name instead of by its value is not bound on every path
-/// before (a star import, a branch), so it is no constant.
+/// before (a star import, a branch), so it is no constant. The walk takes at most
+/// `MAX_ALIAS_CHASE` instructions before and between attribute loads, and at most
+/// `MAX_CONSTANT_ATTRS` of those (`a1 = a0.x`, `a2 = a1.x`, ...): past either the value is no
+/// constant, so each binding costs a bounded walk and keeps a bounded name.
 fn constant_source<'a>(
     defs: &FxHashMap<VarId, &'a Inst>,
     imports: &FxHashMap<Span, String>,
     var: VarId,
 ) -> Option<Result<&'a str, String>> {
+    // The attributes loaded on the way, the last one first.
+    let mut attrs: Vec<&str> = Vec::new();
     let mut cur = var;
-    for _ in 0..MAX_ALIAS_CHASE {
+    let mut steps = 0;
+    loop {
+        if steps == MAX_ALIAS_CHASE {
+            return None;
+        }
+        steps += 1;
         let inst = defs.get(&cur)?;
         match &inst.kind {
             InstKind::Const {
                 literal: heki_ir::ConstLiteral::Str(s),
                 ..
-            } => return Some(Ok(s)),
+            } => return attrs.is_empty().then_some(Ok(s)),
             InstKind::Copy { src, .. } => cur = *src,
-            InstKind::Import { .. } => return imports.get(&inst.span).cloned().map(Err),
+            InstKind::Import { .. } => {
+                let mut fqn = imports.get(&inst.span)?.clone();
+                for attr in attrs.iter().rev() {
+                    fqn.push('.');
+                    fqn.push_str(attr);
+                }
+                return Some(Err(fqn));
+            }
             InstKind::AttrLoad { obj, attr, .. } => {
-                let base = constant_source(defs, imports, *obj)?.err()?;
-                return Some(Err(format!("{base}.{attr}")));
+                if attrs.len() == MAX_CONSTANT_ATTRS {
+                    return None;
+                }
+                attrs.push(attr);
+                cur = *obj;
+                steps = 0;
             }
             _ => return None,
         }
     }
-    None
 }
 
 /// `FunctionDecl::readonly_params` and `FunctionDecl::mutable_params` of `f`.
@@ -2654,6 +3077,7 @@ fn readonly_metadata(input: &ModuleInput<'_>, decls: &mut ModuleDecls) {
     struct Found {
         qualname: String,
         is_frozen: bool,
+        dataclass: Option<Dataclass>,
         fields: BTreeSet<String>,
         readonly: BTreeSet<String>,
         decorators: Vec<(String, Option<bool>)>,
@@ -2662,10 +3086,11 @@ fn readonly_metadata(input: &ModuleInput<'_>, decls: &mut ModuleDecls) {
     let resolve = |name: &str| decls.resolve_dotted(name, true);
     let mut found: Vec<Found> = Vec::new();
     for body in input.ir.functions.iter().filter(|f| f.is_class_body) {
-        let dataclass = body
+        let decorator = body
             .decorators
             .iter()
-            .find_map(|d| dataclass_decorator(d, &resolve));
+            .find_map(|d| Some((d, dataclass_decorator(d, &resolve)?)));
+        let dataclass = decorator.map(|(_, frozen)| frozen);
         let named_tuple = decls.classes.get(&body.qualname).is_some_and(|c| {
             c.bases
                 .iter()
@@ -2696,6 +3121,13 @@ fn readonly_metadata(input: &ModuleInput<'_>, decls: &mut ModuleDecls) {
         found.push(Found {
             qualname: body.qualname.clone(),
             is_frozen: named_tuple || dataclass == Some(true),
+            dataclass: decorator.map(|(text, _)| {
+                if keyword_bool(decorator_parts(text).1, "slots") == Some(true) {
+                    Dataclass::Slots
+                } else {
+                    Dataclass::Defaults
+                }
+            }),
             fields,
             readonly,
             decorators,
@@ -2725,6 +3157,7 @@ fn readonly_metadata(input: &ModuleInput<'_>, decls: &mut ModuleDecls) {
             found.push(Found {
                 qualname: owner.clone(),
                 is_frozen: false,
+                dataclass: None,
                 fields: BTreeSet::new(),
                 readonly,
                 decorators: Vec::new(),
@@ -2735,6 +3168,7 @@ fn readonly_metadata(input: &ModuleInput<'_>, decls: &mut ModuleDecls) {
     for f in found {
         if let Some(c) = decls.classes.get_mut(&f.qualname) {
             c.is_frozen |= f.is_frozen;
+            c.dataclass = c.dataclass.or(f.dataclass);
             c.container_fields.extend(f.fields);
             c.readonly_attrs.extend(f.readonly);
             c.decorators.extend(f.decorators);
@@ -3297,17 +3731,23 @@ impl<'a> TypeCtx<'a> {
         Ty::Ref(format!("builtins.{name}"))
     }
 
-    /// The value of the module-level `Final` string constant `name` read inside this module:
-    /// one of its own constants, or one it imports (`from pkg.keys import KEY`).
+    /// The value of the module-level string constant `name` read inside this module: one of
+    /// its own constants, or one it imports (`from pkg.keys import KEY`).
     pub fn global_str(&self, name: &str) -> Option<&'a str> {
-        match self.module.str_constants.get(name) {
-            Some(StrConstant::Value(v)) => Some(v),
-            Some(StrConstant::Alias(fqn)) => self.project.str_constant(fqn),
-            None => self
+        let Some(constant) = self.module.str_constants.get(name) else {
+            return self
                 .module
                 .imports
                 .get(name)
-                .and_then(|fqn| self.project.str_constant(fqn)),
+                .and_then(|fqn| self.project.str_constant(fqn));
+        };
+        let fqn = || format!("{}.{name}", self.module.module_name);
+        if constant.rebindable && self.project.rebound_elsewhere(&fqn()) {
+            return None;
+        }
+        match &constant.value {
+            StrValue::Literal(v) => Some(v),
+            StrValue::Alias(next) => self.project.str_constant(next),
         }
     }
 
@@ -3522,12 +3962,12 @@ impl<'a> TypeCtx<'a> {
         )
     }
 
-    /// The fully qualified name the import at `span` binds.
     /// The string constant `var` holds (through copies; `def` gives each variable's defining
-    /// instruction, `types` the inferred values): a string literal, or a module-level `Final`
-    /// string constant of this module or of another project module (`KEY`, `keys.KEY`,
-    /// `from pkg.keys import KEY`). The one resolution of the attribute names and keys every
-    /// rule follows (`self.__dict__.pop(TOTAL)`, `setattr(obj, KEY, v)`, `obj.__dict__[KEY]`).
+    /// instruction, `types` the inferred values): a string literal, a module-level string
+    /// constant of this module or of another project module (`KEY`, `keys.KEY`,
+    /// `from pkg.keys import KEY`), or a class-level one (`self.KEY`, `cls.KEY`, `Model.KEY`).
+    /// The one resolution of the attribute names and keys every rule follows
+    /// (`self.__dict__.pop(TOTAL)`, `setattr(obj, KEY, v)`, `obj.__dict__[KEY]`).
     pub(crate) fn str_constant_with<'i>(
         &self,
         var: VarId,
@@ -3552,13 +3992,24 @@ impl<'a> TypeCtx<'a> {
                     return self.project.str_constant(fqn).map(str::to_owned);
                 }
                 InstKind::AttrLoad { obj, attr, .. } => {
-                    let Some(Val::Ref(module)) = types.get(obj) else {
-                        return None;
+                    let project = self.project;
+                    let (class, read) = match types.get(obj)? {
+                        Val::Ref(class) if project.is_project_class(class) => {
+                            (class, ConstantRead::Class)
+                        }
+                        Val::Ref(module) => {
+                            let fqn = format!("{module}.{attr}");
+                            return project.str_constant(&fqn).map(str::to_owned);
+                        }
+                        Val::Inst(class) if project.is_project_class(class) => {
+                            (class, ConstantRead::Instance)
+                        }
+                        Val::Class(class) if project.is_project_class(class) => {
+                            (class, ConstantRead::ClassOrSubclass)
+                        }
+                        _ => return None,
                     };
-                    return self
-                        .project
-                        .str_constant(&format!("{module}.{attr}"))
-                        .map(str::to_owned);
+                    return project.class_str_constant(class, attr, read);
                 }
                 _ => return None,
             }

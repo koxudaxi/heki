@@ -69,7 +69,7 @@ pub(crate) fn data101(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Ve
                     .collect();
                 let chain = shortest(&effects, ExecEffectKind::QuadraticRealloc)?;
                 let reallocates =
-                    chain.len() == 1 || reallocates_argument(cx, at, f, inst, lc.phi_var);
+                    chain.len() == 1 || reallocates_argument(cx, at, f, &defs, inst, lc.phi_var);
                 reallocates.then(|| (inst.span, chain.to_vec()))
             });
             let Some((span, chain)) = hit else {
@@ -103,14 +103,16 @@ pub(crate) fn data101(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Ve
 /// on the caller's thread, or on a worker an offloading API runs it on) returns a quadratic
 /// reallocation of an argument that carries `previous` (as itself, through copies, or in a
 /// display): a callee's `reallocates_params`.
-fn reallocates_argument(
+fn reallocates_argument<'i>(
     cx: &CheckContext<'_>,
-    sites: &[&CallSite],
+    sites: &[&'i CallSite],
     f: &IrFunction,
-    inst: &Inst,
+    defs: &FxHashMap<VarId, &'i Inst>,
+    inst: &'i Inst,
     previous: VarId,
 ) -> bool {
-    let call = site_call(f, sites, inst, false).or_else(|| site_call(f, sites, inst, true));
+    let def = |v| defs.get(&v).copied();
+    let call = site_call(&def, sites, inst, false).or_else(|| site_call(&def, sites, inst, true));
     call.iter()
         .flat_map(|c| c.bound_arguments(cx))
         .any(|(_, summary, pos, v)| {

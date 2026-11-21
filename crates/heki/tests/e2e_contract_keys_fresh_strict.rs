@@ -174,12 +174,21 @@ name = "secrets"
 targets = ["DataModelFieldBase._secret"]
 "#;
 
+/// Rebinds `keys.PLAIN`, which is then no constant.
+const REBIND: &str = r#"from pkg import keys
+
+
+def reset() -> None:
+    keys.PLAIN = "_other"
+"#;
+
 fn keys_project(name: &str) -> Project {
     let p = Project::new(name);
     p.write("pyproject.toml", C2_CONFIG)
         .write("pkg/__init__.py", KEYS_INIT)
         .write("pkg/model.py", MODEL)
         .write("pkg/keys.py", KEYS)
+        .write("pkg/rebind.py", REBIND)
         .write("pkg/use.py", USE);
     p
 }
@@ -295,6 +304,511 @@ write-universe = ["DataModelFieldBase.*"]
         .find(|x| x["target"] == "pure:DataModelFieldBase.extras[\"init\"]")
         .unwrap();
     assert_eq!(pure["sites"].as_u64(), Some(3));
+}
+
+// ======================================================= constants without `Final`
+
+const ONCE_KEYS: &str = r#"ONCE = "_forced_field_assignment"
+ALIASED = ONCE
+TWICE = "_forced_field_assignment"
+TWICE = "_forced_field_assignment"
+MOVED = "_forced_field_assignment"
+
+from pkg.model import DataModelFieldBase
+
+
+def write_moved(field: DataModelFieldBase) -> None:
+    field.__dict__[MOVED] = True
+"#;
+
+const ONCE_USE: &str = r#"from typing import ClassVar, Final, Protocol
+
+from pkg import once
+from pkg.model import DataModelFieldBase
+from pkg.once import ALIASED, MOVED, ONCE, TWICE
+
+LOCAL = "_forced_field_assignment"
+
+
+def module_constants(field: DataModelFieldBase) -> None:
+    field.__dict__[ONCE] = True
+    field.__dict__[ALIASED] = True
+    field.__dict__[once.ONCE] = True
+    field.__dict__[LOCAL] = True
+    field.__dict__[TWICE] = True
+    field.__dict__[MOVED] = True
+
+
+def move() -> None:
+    once.MOVED = "_other"
+
+
+class Keyed:
+    KEY: ClassVar[str] = "_forced_field_assignment"
+    FINAL_KEY: Final = "_forced_field_assignment"
+    PLAIN_KEY = "_forced_field_assignment"
+    TWICE_KEY: ClassVar[str] = "_forced_field_assignment"
+    TWICE_KEY = "_forced_field_assignment"
+
+    def write(self, field: DataModelFieldBase) -> None:
+        field.__dict__[self.KEY] = True
+        field.__dict__[self.FINAL_KEY] = True
+        field.__dict__[Keyed.KEY] = True
+        field.__dict__[self.PLAIN_KEY] = True
+        field.__dict__[self.TWICE_KEY] = True
+
+    @classmethod
+    def write_on_class(cls, field: DataModelFieldBase) -> None:
+        field.__dict__[cls.KEY] = True
+
+
+class Child(Keyed):
+    def write_inherited(self, field: DataModelFieldBase) -> None:
+        field.__dict__[self.KEY] = True
+        field.__dict__[Child.KEY] = True
+
+
+class Overridden:
+    KEY: ClassVar[str] = "_forced_field_assignment"
+
+    def write(self, field: DataModelFieldBase) -> None:
+        field.__dict__[self.KEY] = True
+        field.__dict__[Overridden.KEY] = True
+
+
+class Override(Overridden):
+    KEY: ClassVar[str] = "_other"
+
+
+class Deleted:
+    KEY: ClassVar[str] = "_forced_field_assignment"
+    del KEY
+
+    def write(self, field: DataModelFieldBase) -> None:
+        field.__dict__[Deleted.KEY] = True
+
+
+class Configured:
+    KEY: ClassVar[str] = "_forced_field_assignment"
+
+    def write(self, field: DataModelFieldBase) -> None:
+        field.__dict__[self.KEY] = True
+
+
+class Reconfigured:
+    KEY: ClassVar[str] = "_forced_field_assignment"
+
+    @classmethod
+    def configure(cls) -> None:
+        cls.KEY = "_other"
+
+    def write(self, field: DataModelFieldBase) -> None:
+        field.__dict__[self.KEY] = True
+
+
+class Switched:
+    KEY: ClassVar[str] = "_forced_field_assignment"
+
+    def write(self, field: DataModelFieldBase) -> None:
+        field.__dict__[self.KEY] = True
+
+
+def switch() -> None:
+    Switched.KEY = "_other"
+
+
+class Retitled:
+    KEY: ClassVar[str] = "_forced_field_assignment"
+
+    def write(self, field: DataModelFieldBase) -> None:
+        field.__dict__[self.KEY] = True
+
+
+Retitled.KEY = "_other"
+
+
+class Base:
+    KEY: ClassVar[str] = "_forced_field_assignment"
+
+    def write(self, field: DataModelFieldBase) -> None:
+        field.__dict__[self.KEY] = True
+
+
+class Inheriting(Base):
+    def write_own(self, field: DataModelFieldBase) -> None:
+        field.__dict__[Inheriting.KEY] = True
+
+
+class ForeignInheriting(Base):
+    def write_own(self, field: DataModelFieldBase) -> None:
+        field.__dict__[ForeignInheriting.KEY] = True
+
+
+class Untouched(Base):
+    def write_own(self, field: DataModelFieldBase) -> None:
+        field.__dict__[Untouched.KEY] = True
+
+
+Inheriting.KEY = "_other"
+
+
+class KeyProto(Protocol):
+    KEY: ClassVar[str] = "_forced_field_assignment"
+
+    def label(self) -> str: ...
+
+
+class SecretKeys:
+    KEY: ClassVar[str] = "_other"
+
+    def label(self) -> str:
+        return "secret"
+
+
+def write_through_protocol(keys: KeyProto, field: DataModelFieldBase) -> None:
+    field.__dict__[keys.KEY] = True
+
+
+class SameProto(Protocol):
+    KEY: ClassVar[str] = "_forced_field_assignment"
+
+    def tag(self) -> str: ...
+
+
+class SameKeys:
+    KEY: ClassVar[str] = "_forced_field_assignment"
+
+    def tag(self) -> str:
+        return "same"
+
+
+def write_through_same(keys: SameProto, field: DataModelFieldBase) -> None:
+    field.__dict__[keys.KEY] = True
+
+
+class Aliased:
+    KEY: ClassVar[str] = "_forced_field_assignment"
+    LABEL: ClassVar[str] = "_forced_field_assignment"
+
+    def write(self, field: DataModelFieldBase) -> None:
+        field.__dict__[self.KEY] = True
+
+
+def realias() -> None:
+    keys = Aliased
+    same = keys
+    same.LABEL = "_other"
+    same.KEY = "_other"
+
+
+def via_builtin(field: DataModelFieldBase, keys: dict) -> None:
+    field.__dict__[keys.KEY] = True
+"#;
+
+#[test]
+fn constants_bound_once_and_class_constants_name_attributes() {
+    let p = Project::new("keys_bound_once");
+    p.write(
+        "pyproject.toml",
+        r#"[project]
+name = "t"
+
+[tool.heki.lint]
+select = ["MUT201", "MUT205"]
+
+[[tool.heki.write-owners]]
+name = "store"
+targets = ["DataModelFieldBase._forced_field_assignment"]
+allowed-writers = ["pkg.store.*"]
+unresolved = "report"
+"#,
+    )
+    .write("pkg/__init__.py", "")
+    .write("pkg/model.py", MODEL)
+    .write("pkg/once.py", ONCE_KEYS)
+    // Handing a constant to a call is no rebinding of it.
+    .write(
+        "pkg/reader.py",
+        "from pkg.once import ONCE\n\n\ndef drop(d: dict) -> None:\n    d.pop(ONCE, None)\n",
+    )
+    // Another module rebinds a `ClassVar` constant on its class, and a `Final` one.
+    .write(
+        "pkg/settings.py",
+        "from pkg.use import Configured, ForeignInheriting, Keyed\n\n\ndef configure() -> None:\n    Configured.KEY = \"_other\"\n    Keyed.FINAL_KEY = \"_other\"\n    ForeignInheriting.KEY = \"_other\"\n",
+    )
+    .write("pkg/use.py", ONCE_USE);
+    let u = "pkg/use.py";
+    let forced = "DataModelFieldBase._forced_field_assignment";
+    let class = "DataModelFieldBase";
+    assert_eq!(
+        found(&diagnostics(&p, &[])),
+        vec![
+            // Rebound by another module: the name is computed in its own module too.
+            d("pkg/once.py", 11, "MUT205", "write_moved", class),
+            // A module-level name bound once, also through another such name, a module
+            // attribute, and in the module itself.
+            d(u, 11, "MUT201", "module_constants", forced),
+            d(u, 12, "MUT201", "module_constants", forced),
+            d(u, 13, "MUT201", "module_constants", forced),
+            d(u, 14, "MUT201", "module_constants", forced),
+            // Bound twice, or rebound by another module: the name is computed.
+            d(u, 15, "MUT205", "module_constants", class),
+            d(u, 16, "MUT205", "module_constants", class),
+            // `ClassVar` and `Final` class constants on `self`, on the class, and on `cls`; a
+            // plain class attribute (an instance may shadow it) and one bound twice are not.
+            d(u, 31, "MUT201", "Keyed.write", forced),
+            d(u, 32, "MUT201", "Keyed.write", forced),
+            d(u, 33, "MUT201", "Keyed.write", forced),
+            d(u, 34, "MUT205", "Keyed.write", class),
+            d(u, 35, "MUT205", "Keyed.write", class),
+            d(u, 39, "MUT201", "Keyed.write_on_class", forced),
+            // Inherited along the MRO.
+            d(u, 44, "MUT201", "Child.write_inherited", forced),
+            d(u, 45, "MUT201", "Child.write_inherited", forced),
+            // A subclass defines the name again: `self` may be one, the class itself is not.
+            d(u, 52, "MUT205", "Overridden.write", class),
+            d(u, 53, "MUT201", "Overridden.write", forced),
+            // A class constant the class body deletes is no constant, nor one stored on its
+            // class elsewhere (a `Final` one stays: line 32), also through `cls` and in its
+            // own module, in a function or in the module body.
+            d(u, 65, "MUT205", "Deleted.write", class),
+            d(u, 72, "MUT205", "Configured.write", class),
+            d(u, 83, "MUT205", "Reconfigured.write", class),
+            d(u, 90, "MUT205", "Switched.write", class),
+            d(u, 101, "MUT205", "Retitled.write", class),
+            // A subclass that code stores the name on holds its own value: the inherited
+            // constant does not name it there, nor on `self` of the base, whose instance may be
+            // of that subclass. One no code stores on keeps the base's constant.
+            d(u, 111, "MUT205", "Base.write", class),
+            d(u, 116, "MUT205", "Inheriting.write_own", class),
+            d(u, 121, "MUT205", "ForeignInheriting.write_own", class),
+            d(u, 126, "MUT201", "Untouched.write_own", forced),
+            // An instance of a protocol is one of its implementations: the constant holds only
+            // when each of them holds the same one.
+            d(u, 146, "MUT205", "write_through_protocol", class),
+            d(u, 163, "MUT201", "write_through_same", forced),
+            // Stored through a chain of aliases of the class.
+            d(u, 171, "MUT205", "Aliased.write", class),
+            // An attribute of a value of no project class names no constant.
+            d(u, 182, "MUT205", "via_builtin", class),
+        ]
+    );
+}
+
+/// A project guarding `DataModelFieldBase._forced_field_assignment` in strict mode, with
+/// `pkg/use.py` reading class constants.
+fn class_keys_project(name: &str, use_src: &str) -> Project {
+    let p = Project::new(name);
+    p.write(
+        "pyproject.toml",
+        r#"[project]
+name = "t"
+
+[tool.heki.lint]
+select = ["MUT201", "MUT205"]
+
+[[tool.heki.write-owners]]
+name = "store"
+targets = ["DataModelFieldBase._forced_field_assignment"]
+unresolved = "report"
+"#,
+    )
+    .write("pkg/__init__.py", "")
+    .write("pkg/model.py", MODEL)
+    .write("pkg/use.py", use_src);
+    p
+}
+
+const MRO_KEYS: &str = r#"from typing import ClassVar
+
+from pkg.model import DataModelFieldBase
+
+
+class Forced:
+    KEY: ClassVar[str] = "_forced_field_assignment"
+
+
+class Other:
+    KEY: ClassVar[str] = "_other"
+
+
+class OtherFirst(Other, Forced):
+    pass
+
+
+def write_forced(keys: Forced, field: DataModelFieldBase) -> None:
+    field.__dict__[keys.KEY] = True
+
+
+def write_other_first(field: DataModelFieldBase) -> None:
+    field.__dict__[OtherFirst.KEY] = True
+
+
+class Listed:
+    KEY: ClassVar[str] = "_forced_field_assignment"
+
+
+class ListedFirst(Listed, Other):
+    pass
+
+
+def write_listed(keys: Listed, field: DataModelFieldBase) -> None:
+    field.__dict__[keys.KEY] = True
+"#;
+
+/// A subclass finds a class attribute along its own MRO: a base it lists before the class
+/// (`class OtherFirst(Other, Forced)`) defines `KEY` first, so an instance of `Forced` may read
+/// `Other`'s value, and the subclass itself reads it. A subclass listing the class first reads
+/// the class's constant.
+#[test]
+fn a_subclass_listing_another_base_first_reads_that_base_constant() {
+    let p = class_keys_project("keys_subclass_mro", MRO_KEYS);
+    let u = "pkg/use.py";
+    let class = "DataModelFieldBase";
+    let forced = "DataModelFieldBase._forced_field_assignment";
+    assert_eq!(
+        found(&diagnostics(&p, &[])),
+        vec![
+            d(u, 19, "MUT205", "write_forced", class),
+            d(u, 35, "MUT201", "write_listed", forced),
+        ]
+    );
+}
+
+const FIELD_TRANSFORMS: &str = r#"from typing import dataclass_transform
+
+
+@dataclass_transform()
+class ModelBase:
+    pass
+
+
+@dataclass_transform()
+def model(cls):
+    return cls
+"#;
+
+const FIELD_KEYS: &str = r#"from dataclasses import dataclass
+from typing import ClassVar, Final
+
+from pkg.model import DataModelFieldBase
+from pkg.transforms import ModelBase, model
+
+
+@dataclass
+class Keys:
+    KEY: Final[str] = "_forced_field_assignment"
+    CONST: ClassVar[str] = "_forced_field_assignment"
+
+    @classmethod
+    def write_cls(cls, field: DataModelFieldBase) -> None:
+        field.__dict__[cls.KEY] = True
+
+
+def write_keys(keys: Keys, field: DataModelFieldBase) -> None:
+    field.__dict__[keys.KEY] = True
+    field.__dict__[keys.CONST] = True
+    field.__dict__[Keys.KEY] = True
+
+
+@dataclass
+class Base:
+    KEY: Final[str] = "_forced_field_assignment"
+
+    @classmethod
+    def write_cls(cls, field: DataModelFieldBase) -> None:
+        field.__dict__[cls.KEY] = True
+
+
+@dataclass(slots=True)
+class Slotted(Base):
+    pass
+
+
+@dataclass(slots=True)
+class SlotKeys:
+    KEY: Final[str] = "_forced_field_assignment"
+
+
+class Built(ModelBase):
+    KEY: Final[str] = "_forced_field_assignment"
+
+
+@model
+class Decorated:
+    KEY: Final[str] = "_forced_field_assignment"
+
+
+def write_classes(field: DataModelFieldBase) -> None:
+    field.__dict__[Base.KEY] = True
+    field.__dict__[Slotted.KEY] = True
+    field.__dict__[SlotKeys.KEY] = True
+    field.__dict__[Built.KEY] = True
+    field.__dict__[Decorated.KEY] = True
+"#;
+
+/// A `Final` name with a default in a dataclass is a field: an instance holds the value it was
+/// constructed with (`Keys("x").KEY`), so it is no constant there, unlike a `ClassVar`. The
+/// class object keeps the default as its attribute, unless a class along the way replaces it:
+/// `slots=True` (also on a subclass that `cls` may be) puts a slot descriptor there, and a
+/// class a `dataclass_transform` builds, through a base class or a decorator, holds what the
+/// transform's runtime makes of it.
+#[test]
+fn a_final_dataclass_field_is_a_constant_only_where_the_class_keeps_its_default() {
+    let p = class_keys_project("keys_dataclass_fields", FIELD_KEYS);
+    p.write("pkg/transforms.py", FIELD_TRANSFORMS);
+    let u = "pkg/use.py";
+    let class = "DataModelFieldBase";
+    let forced = "DataModelFieldBase._forced_field_assignment";
+    assert_eq!(
+        found(&diagnostics(&p, &[])),
+        vec![
+            d(u, 15, "MUT201", "Keys.write_cls", forced),
+            d(u, 19, "MUT205", "write_keys", class),
+            d(u, 20, "MUT201", "write_keys", forced),
+            d(u, 21, "MUT201", "write_keys", forced),
+            d(u, 30, "MUT205", "Base.write_cls", class),
+            d(u, 53, "MUT201", "write_classes", forced),
+            d(u, 54, "MUT205", "write_classes", class),
+            d(u, 55, "MUT205", "write_classes", class),
+            d(u, 56, "MUT205", "write_classes", class),
+            d(u, 57, "MUT205", "write_classes", class),
+        ]
+    );
+}
+
+const STARRED_KEYS: &str = r#"from pkg.model import DataModelFieldBase
+
+STARRED = "_forced_field_assignment"
+_PRIVATE = "_forced_field_assignment"
+
+from pkg.helpers import *
+
+AFTER = "_forced_field_assignment"
+
+
+def write(field: DataModelFieldBase) -> None:
+    field.__dict__[STARRED] = True
+    field.__dict__[_PRIVATE] = True
+    field.__dict__[AFTER] = True
+"#;
+
+/// A star import may rebind the public names the module bound before it, so they hold no
+/// constant there; it imports no `_private` name, and a name bound after it keeps its value.
+#[test]
+fn a_star_import_after_a_module_constant_may_rebind_it() {
+    let p = class_keys_project("keys_star_import", STARRED_KEYS);
+    p.write("pkg/helpers.py", "def helper() -> None:\n    pass\n");
+    let u = "pkg/use.py";
+    let forced = "DataModelFieldBase._forced_field_assignment";
+    assert_eq!(
+        found(&diagnostics(&p, &[])),
+        vec![
+            d(u, 12, "MUT205", "write", "DataModelFieldBase"),
+            d(u, 13, "MUT201", "write", forced),
+            d(u, 14, "MUT201", "write", forced),
+        ]
+    );
 }
 
 #[test]
@@ -726,6 +1240,41 @@ fn strict_mode_reports_the_writes_heki_cannot_tie_to_a_class() {
             "writes an attribute named at run time (set_attr) on `DataModel` outside the write owners of `store`: heki cannot tell whether it writes `DataModel.fields` or `DataModel.name`"
         ),
         "{diags:#?}"
+    );
+}
+
+/// Objects of unknown class that `isinstance` tests narrow to a class of the standard library.
+const NARROWED: &str = r#"from dataclasses import Field
+
+
+def narrowed(default: object, name: str) -> None:
+    if isinstance(default, Field):
+        default.name = name
+
+
+def returns_unless(default, name: str) -> None:
+    if not isinstance(default, Field):
+        return
+    default.name = name
+
+
+def not_narrowed(default: object, name: str) -> None:
+    if isinstance(default, Field):
+        pass
+    default.name = name
+"#;
+
+#[test]
+fn strict_mode_knows_the_class_an_isinstance_test_narrows_to() {
+    let p = strict_project("strict_narrowed", true);
+    p.write("pkg/narrowed.py", NARROWED);
+    let narrowed: Vec<_> = found(&diagnostics(&p, &[]))
+        .into_iter()
+        .filter(|x| x.0 == "pkg/narrowed.py")
+        .collect();
+    assert_eq!(
+        narrowed,
+        vec![d("pkg/narrowed.py", 18, "MUT205", "not_narrowed", "name")]
     );
 }
 
@@ -1640,4 +2189,350 @@ write-universe = ['DataModel.meta["kw"]']
     );
     let pass = diags.iter().find(|x| x["rule_code"] == "EFF201").unwrap();
     assert_eq!(pass["sites"].as_u64(), Some(2));
+}
+
+// ==================================================== strict reads and calls (MUT206, MUT207)
+
+const STRICT_ACCESS_MODEL: &str = r#"class Reference:
+    def __init__(self) -> None:
+        self.children: list["Reference"] = []
+
+
+class DataType:
+    def __init__(self) -> None:
+        self.ref: Reference | None = None
+
+    def replace_reference(self, ref: Reference) -> None:
+        self.ref = ref
+
+
+class Other:
+    def __init__(self) -> None:
+        self.children: list[str] = []
+
+    def replace_reference(self, ref: Reference) -> None:
+        pass
+"#;
+
+const STRICT_ACCESS_USE: &str = r#"from typing import Any, Protocol
+
+from pkg.model import DataType, Other, Reference
+
+
+class Opaque(Protocol):
+    pass
+
+
+def kids(ref):
+    return ref.children
+
+
+def kids_any(ref: Any):
+    return getattr(ref, "children"), ref.__dict__["children"]
+
+
+def kids_typed(ref: Reference):
+    return ref.children
+
+
+def kids_of_other(obj):
+    return obj.children
+
+
+def call_kids_of_other(o: Other) -> None:
+    kids_of_other(o)
+
+
+def kids_handed(ref):
+    return ref.children
+
+
+def call_kids_handed(r: Reference) -> None:
+    kids_handed(r)
+
+
+def kids_opaque(ref: Opaque):
+    return ref.children
+
+
+def swap(dt, ref: Reference) -> None:
+    dt.replace_reference(ref)
+
+
+def swap_alias(dt, ref: Reference) -> None:
+    replace = dt.replace_reference
+    replace(ref)
+
+
+def swap_getattr(dt, ref: Reference) -> None:
+    getattr(dt, "replace_reference")(ref)
+
+
+def swap_typed(dt: DataType, ref: Reference) -> None:
+    dt.replace_reference(ref)
+
+
+def swap_other(o: Other, ref: Reference) -> None:
+    o.replace_reference(ref)
+
+
+def call_unknown(callback) -> None:
+    callback()
+
+
+def narrowed(obj: object, ref: Reference) -> None:
+    if isinstance(obj, DataType):
+        obj.replace_reference(ref)
+
+
+def kids_of_each(refs):
+    out = []
+    for ref in refs:
+        out.append(ref.children)
+    return out
+"#;
+
+const STRICT_ACCESS_STORE: &str = r#"class GenerationStore:
+    def swap(self, dt, ref) -> None:
+        dt.replace_reference(ref)
+
+    def kids(self, ref):
+        return ref.children
+"#;
+
+fn strict_access_project(name: &str, mode: &str) -> Project {
+    let p = Project::new(name);
+    p.write(
+        "pyproject.toml",
+        &format!(
+            r#"[project]
+name = "t"
+
+[tool.heki.lint]
+select = ["MUT203", "MUT204", "MUT206", "MUT207"]
+
+[[tool.heki.read-owners]]
+name = "children"
+targets = ["Reference.children"]
+allowed-readers = ["pkg.store.*"]
+{mode}
+[[tool.heki.call-owners]]
+name = "mutators"
+targets = ["DataType.replace_reference"]
+allowed-callers = ["pkg.store.*"]
+{mode}"#
+        ),
+    )
+    .write("pkg/__init__.py", "")
+    .write("pkg/model.py", STRICT_ACCESS_MODEL)
+    .write("pkg/use.py", STRICT_ACCESS_USE)
+    .write("pkg/store.py", STRICT_ACCESS_STORE);
+    p
+}
+
+#[test]
+fn strict_modes_report_the_reads_and_calls_heki_cannot_tie_to_a_class() {
+    let u = "pkg/use.py";
+    let typed = vec![
+        d(u, 19, "MUT203", "kids_typed", "Reference.children"),
+        d(u, 56, "MUT204", "swap_typed", "DataType.replace_reference"),
+        d(u, 69, "MUT204", "narrowed", "DataType.replace_reference"),
+    ];
+    // Off by default: the typed rules alone.
+    let p = strict_access_project("strict_access_off", "");
+    assert_eq!(found(&diagnostics(&p, &[])), typed);
+    let p = strict_access_project("strict_access_on", "unresolved = \"report\"\n");
+    let diags = diagnostics(&p, &[]);
+    assert_eq!(
+        found(&diags),
+        vec![
+            // An unannotated parameter, `Any` (also through `getattr` and `__dict__`).
+            d(u, 11, "MUT206", "kids", "children"),
+            d(u, 15, "MUT206", "kids_any", "children"),
+            d(u, 15, "MUT206", "kids_any", "children"),
+            typed[0].clone(),
+            // A parameter its only caller binds to a `Reference`: no other rule sees that read.
+            // One bound to an `Other` reads no target.
+            d(u, 31, "MUT206", "kids_handed", "children"),
+            // A protocol without members.
+            d(u, 39, "MUT206", "kids_opaque", "children"),
+            // A method call, a bound-method alias, `getattr`; not a typed call (`MUT204`), a
+            // method of another class, a value of unknown origin, or a narrowed receiver.
+            d(u, 43, "MUT207", "swap", "replace_reference"),
+            d(u, 48, "MUT207", "swap_alias", "replace_reference"),
+            d(u, 52, "MUT207", "swap_getattr", "replace_reference"),
+            typed[1].clone(),
+            typed[2].clone(),
+            // A loop variable, which no caller binds.
+            d(u, 75, "MUT206", "kids_of_each", "children"),
+        ]
+    );
+    assert_eq!(
+        message_at(&diags, u, 11),
+        "`kids` reads `children` (direct_attr) on an object of unknown class outside the read owners of `children`: heki cannot tell whether it reads `Reference.children`"
+    );
+    assert_eq!(
+        message_at(&diags, u, 43),
+        "`swap` calls `replace_reference` on an object of unknown class outside the call owners of `mutators`: heki cannot tell whether it calls `DataType.replace_reference`"
+    );
+    // The rules can be ignored like any other, and run without the typed rules.
+    assert_eq!(
+        found(&diagnostics(&p, &["--ignore", "MUT206,MUT207"])),
+        typed
+    );
+    let strict: Vec<_> = found(&diags)
+        .into_iter()
+        .filter(|x| x.2 == "MUT206" || x.2 == "MUT207")
+        .collect();
+    assert_eq!(
+        found(&diagnostics(&p, &["--ignore", "MUT203,MUT204"])),
+        strict
+    );
+}
+
+#[test]
+fn strict_reads_and_calls_honor_the_contract_scopes_and_values() {
+    let p = strict_access_project("strict_access_scopes", "unresolved = \"report\"\n");
+    // `forbidden-*`: only the functions they name report.
+    p.write(
+        "pyproject.toml",
+        &p.read("pyproject.toml").replace(
+            "allowed-readers = [\"pkg.store.*\"]\n",
+            "allowed-readers = [\"pkg.store.*\"]\nforbidden-readers = [\"pkg.use.kids_any\"]\n",
+        ),
+    );
+    let reads: Vec<_> = found(&diagnostics(&p, &[]))
+        .into_iter()
+        .filter(|x| x.2 == "MUT206")
+        .collect();
+    assert_eq!(
+        reads,
+        vec![
+            d("pkg/use.py", 15, "MUT206", "kids_any", "children"),
+            d("pkg/use.py", 15, "MUT206", "kids_any", "children"),
+        ]
+    );
+    let strict = p.read("pyproject.toml");
+    for (section, contract) in [("read-owners", "children"), ("call-owners", "mutators")] {
+        let at = strict.find(&format!("name = \"{contract}\"")).unwrap();
+        let (head, tail) = strict.split_at(at);
+        let config = format!(
+            "{head}{}",
+            tail.replacen("unresolved = \"report\"", "unresolved = \"maybe\"", 1)
+        );
+        p.write("pyproject.toml", &config);
+        let (code, stdout, stderr) = p.check(&[]);
+        assert_eq!(code, 2, "{stdout}{stderr}");
+        assert!(
+            stderr.contains(&format!(
+                "unknown `unresolved` value `maybe` in {section} `{contract}` (expected `ignore` or `report`)"
+            )),
+            "{stderr}"
+        );
+    }
+}
+
+const DOTLESS_MODEL: &str = r#"import codecs
+
+
+class Model:
+    def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        pass
+
+    def rewind(self) -> None:
+        pass
+
+
+class SubModel(Model):
+    def __init__(self) -> None:
+        super().__init__()
+        self.reset()
+
+
+class Decoder(codecs.IncrementalDecoder):
+    pass
+"#;
+
+const DOTLESS_USE: &str = r#"from pkg.model import Decoder, Model, SubModel
+
+
+def redo(obj) -> None:
+    obj.reset()
+
+
+def redo_model(model: Model) -> None:
+    redo(model)
+
+
+def redo_sub(obj) -> None:
+    obj.reset()
+
+
+def redo_submodel(sub: SubModel) -> None:
+    redo_sub(sub)
+
+
+def redo_decoder(obj) -> None:
+    obj.reset()
+
+
+def decode(decoder: Decoder) -> None:
+    redo_decoder(decoder)
+
+
+def rewind_any(obj) -> None:
+    obj.rewind()
+
+
+def rewind_model(model: Model) -> None:
+    rewind_any(model)
+
+
+def typed(model: Model) -> None:
+    model.reset()
+"#;
+
+/// A call target naming no class (`reset`) names the methods of that name: an instance of a
+/// class whose MRO finds such a method calls the target, so a helper calling it on an object
+/// its callers bind to one is reported (`MUT207`), and an initializer of such a class calling
+/// it on its own `self` initializes itself (`MUT204`). A `reset` inherited from a library base
+/// is none, and neither is a method a target naming a function (`util.rewind`) does not name.
+#[test]
+fn a_call_target_naming_no_class_covers_the_classes_defining_the_method() {
+    let p = Project::new("strict_dotless_call_target");
+    p.write(
+        "pyproject.toml",
+        r#"[project]
+name = "t"
+
+[tool.heki.lint]
+select = ["MUT204", "MUT207"]
+
+[[tool.heki.call-owners]]
+name = "resets"
+targets = ["reset"]
+unresolved = "report"
+
+[[tool.heki.call-owners]]
+name = "rewinds"
+targets = ["util.rewind"]
+unresolved = "report"
+"#,
+    )
+    .write("pkg/__init__.py", "")
+    .write("pkg/model.py", DOTLESS_MODEL)
+    .write("pkg/util.py", "def rewind() -> None:\n    pass\n")
+    .write("pkg/use.py", DOTLESS_USE);
+    let u = "pkg/use.py";
+    assert_eq!(
+        found(&diagnostics(&p, &[])),
+        vec![
+            d(u, 5, "MUT207", "redo", "reset"),
+            d(u, 13, "MUT207", "redo_sub", "reset"),
+            d(u, 37, "MUT204", "typed", "reset"),
+        ]
+    );
 }

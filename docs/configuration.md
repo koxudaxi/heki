@@ -125,8 +125,8 @@ Contracts declare what no type can say. Each kind is an array of tables with its
 | Contract | Declares | Rule |
 | -------- | -------- | ---- |
 | [`write-owners`](#write-owners) | who may write an attribute | `MUT201`; `MUT205` with `unresolved = "report"` |
-| [`read-owners`](#read-owners) | who may read an attribute | `MUT203` |
-| [`call-owners`](#call-owners) | who may call a function or construct a class | `MUT204` |
+| [`read-owners`](#read-owners) | who may read an attribute | `MUT203`; `MUT206` with `unresolved = "report"` |
+| [`call-owners`](#call-owners) | who may call a function or construct a class | `MUT204`; `MUT207` with `unresolved = "report"` |
 | [`effect-boundaries`](#effect-boundaries) | what a scope must not reach: I/O, writes, reads, or calls | `EFF201` |
 | [`readonly-returns`](#readonly-returns) | results every caller shares | `MUT202` |
 | [`invalidation`](#invalidation) | writes that must be announced | `MUT109` |
@@ -139,6 +139,11 @@ Contracts declare what no type can say. Each kind is an array of tables with its
 - A `Class.attr` target covers the subclasses of the class too.
 - A contract heki cannot use is a configuration error: a target that is not `Class.attr`, an
   invalid glob, or an unknown value of `forbid`, `fresh-objects`, or `unresolved`.
+- With `unresolved = "report"`, a contract also reports the accesses it cannot tie to a class,
+  each under its own rule (`MUT205` writes, `MUT206` reads, `MUT207` calls): an attribute or
+  method named like a target, accessed on an object of unknown class (an unannotated parameter,
+  a loop variable, an untyped call result, `Any`, a protocol whose implementations heki cannot
+  list). A baseline counts them apart from the violations the typed rules prove.
 - An attribute named through a string (`setattr`, `getattr`, `__dict__`) is followed when the
   string is a constant: see [Dynamic names](scope.md#dynamic-names).
 
@@ -170,7 +175,7 @@ unresolved = "report"
 
 A container entry (`Class.attr["key"]`):
 
-- matches the writes of that constant key (a literal or a `Final` constant), not a write of the
+- matches the writes of that constant key (a literal or a string constant), not a write of the
   whole container or with a computed key;
 - is reported once, under the entry, when its container is a target too.
 
@@ -201,6 +206,7 @@ targets = ["pkg.reference.Reference.children"]
 allowed-readers = ["*GenerationIndex*", "*GenerationStore*"]
 exempt-methods = ["__deepcopy__"]
 message = "read children through GenerationIndex instead"
+unresolved = "report"
 ```
 
 The read side of `write-owners`. A read is `ref.children`, a read through a local alias,
@@ -214,8 +220,11 @@ The read side of `write-owners`. A read is `ref.children`, a read through a loca
 | `forbidden-readers` | `[]` | When set, only reads by these functions are reported. |
 | `exempt-methods` | `[]` | Methods allowed to read the targets, matched as in `write-owners`. |
 | `message` | none | The help of every report of the contract. |
+| `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the reads of a target's attribute name on an object of unknown class are reported under [`MUT206`](rules/unresolved-guarded-read.md). |
 
-Reads through a parameter without a project-class annotation are not seen.
+`MUT203` does not see a read through a parameter without a project-class annotation; with
+`unresolved = "report"`, `MUT206` reports it unless every caller binds the parameter to an
+instance of a project class outside the targets' classes.
 
 ### `call-owners`
 
@@ -226,6 +235,7 @@ targets = ["DataType.replace_reference", "pkg.util.reset_cache", "FinalFacts"]
 allowed-callers = ["pkg.parser.generation.*"]
 exempt-methods = ["__deepcopy__"]
 message = "use a GenerationStore operation instead"
+unresolved = "report"
 ```
 
 The call side of `write-owners`.
@@ -238,6 +248,7 @@ The call side of `write-owners`.
 | `forbidden-callers` | `[]` | When set, only calls by these functions are reported. |
 | `exempt-methods` | `[]` | Methods allowed to call the targets, matched as in `write-owners`. |
 | `message` | none | The help of every report of the contract. |
+| `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the calls of a method named like a target (its last name) on an object of unknown class are reported under [`MUT207`](rules/unresolved-guarded-call.md). |
 
 - A call is reported only when every function it may call (each candidate in the class
   hierarchy) is a target: `text.replace(...)` on a `str` is never a call of

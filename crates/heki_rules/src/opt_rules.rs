@@ -472,8 +472,9 @@ impl<'d, 'a> ListUse<'d, 'a> {
             .flat_map(|file| &file.call_sites)
             .filter(|s| s.caller == key)
             .collect();
+        let def = |v| self.defs.insts.get(&v).map(|(_, i)| *i);
         self.insts().any(|i| {
-            let call = site_call(f, &sites, i, false);
+            let call = site_call(&def, &sites, i, false);
             call.iter()
                 .flat_map(|c| c.bound_arguments(cx))
                 .any(|(_, summary, pos, v)| {
