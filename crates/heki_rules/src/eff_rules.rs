@@ -495,7 +495,7 @@ impl Boundary<'_> {
     /// the receiver declares ([`CallSite::declared`], what the call targets judge the call by),
     /// the class it constructs, or each of its project callees.
     fn allows_call(&self, site: &CallSite) -> bool {
-        if let Some(declared) = &site.declared {
+        if let Some(declared) = site.declared() {
             return names_function(&self.allowed_callees, declared);
         }
         match &site.constructs {

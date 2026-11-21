@@ -1167,7 +1167,7 @@ impl Handover {
     fn hands_over(self, c: &Caller<'_>) -> bool {
         match self {
             Self::Every => true,
-            Self::ByImplementation => c.site.declared.is_none(),
+            Self::ByImplementation => c.site.declared().is_none(),
         }
     }
 }

@@ -69,7 +69,7 @@ impl CallTargets {
     /// What `site` calls of target `i`: the method the protocol typing the receiver declares
     /// ([`CallSite::declared`]), the class it constructs, or every candidate the target names.
     fn called_at(&self, i: usize, site: &CallSite) -> Vec<String> {
-        if let Some(declared) = &site.declared {
+        if let Some(declared) = site.declared() {
             return vec![declared.fqn()];
         }
         match &site.constructs {
@@ -168,7 +168,7 @@ impl Families {
 /// The functions a call contract judges `site` by: the method the protocol typing the
 /// receiver declares ([`CallSite::declared`]), else the project functions it may call.
 fn judged_callees(site: &CallSite) -> Box<dyn Iterator<Item = &FuncKey> + '_> {
-    match &site.declared {
+    match site.declared() {
         Some(declared) => Box::new(std::iter::once(declared)),
         None => Box::new(site.project_callees().iter().map(|bc| &bc.callee)),
     }

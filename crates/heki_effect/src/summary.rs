@@ -3011,11 +3011,12 @@ impl<'a> Extractor<'a> {
         }
         // A read through a protocol declaring the attribute is one of every class implementing
         // it; the read contracts judge it by the protocol, the type the code reads it through.
-        let declared_by = match owner.var.and_then(|v| self.val(v)) {
+        let protocol = match owner.var.and_then(|v| self.val(v)) {
             Some(Val::Inst(p)) if self.cx.project.protocol_declares(p, attr) => Some(p.clone()),
             _ => None,
         };
         for class in owner.typed_classes {
+            let through_protocol = protocol.as_ref().is_some_and(|p| *p != class);
             self.summary
                 .typed_field_read_sites
                 .insert(TypedFieldReadSite {
@@ -3024,7 +3025,7 @@ impl<'a> Extractor<'a> {
                     kind,
                     obj_params: owner.may_params,
                     span,
-                    declared_by: declared_by.clone(),
+                    through_protocol,
                 });
         }
     }
@@ -3762,7 +3763,6 @@ impl<'a> Extractor<'a> {
                         handed_callable: None,
                         per_item: None,
                         dispatch: None,
-                        declared: None,
                         result_discarded: false,
                         result_held: false,
                     });
@@ -3985,7 +3985,6 @@ impl<'a> Extractor<'a> {
                     drives_coroutine_manually: drives,
                     binds_recv: *binds_recv,
                     dispatch: self.dispatch(call, site.project_callees()),
-                    declared: self.declared_method(call, site.project_callees()),
                     constructs: call.constructs.clone(),
                     returned: if constructor || call.per_item.is_some() {
                         None
@@ -4018,11 +4017,7 @@ impl<'a> Extractor<'a> {
             .clone()
     }
 
-    /// What the receiver of `call` tells about the implementations `callees` run
-    /// ([`Dispatch`]): the receiver's class (the method's own `self`, a receiver of one project
-    /// class, or the class a constructor call makes) when a callee is inherited from a proper
-    /// base of it, and, on `self`, the callees that are overrides of subclasses.
-    /// [`CallSite::declared`]: the definition of the called method in the project protocol the
+    /// [`Dispatch::declared`]: the definition of the called method in the project protocol the
     /// receiver is typed with, when the protocol declares it.
     fn declared_method(&self, call: &Call<'_>, callees: &[BoundCallee]) -> Option<FuncKey> {
         let Some(Val::Inst(protocol)) = self.val(call.recv_var?) else {
@@ -4035,6 +4030,10 @@ impl<'a> Extractor<'a> {
             .then(|| project.mro_method(protocol, name))?
     }
 
+    /// What the receiver of `call` tells about the implementations `callees` run
+    /// ([`Dispatch`]): the receiver's class (the method's own `self`, a receiver of one project
+    /// class, or the class a constructor call makes) when a callee is inherited from a proper
+    /// base of it, and, on `self`, the callees that are overrides of subclasses.
     fn dispatch(&self, call: &Call<'_>, callees: &[BoundCallee]) -> Option<Box<Dispatch>> {
         let project = self.cx.project;
         let own;
@@ -4084,10 +4083,12 @@ impl<'a> Extractor<'a> {
                 }
             }
         }
-        (receiver.is_some() || !providers.is_empty()).then(|| {
+        let declared = self.declared_method(call, callees);
+        (receiver.is_some() || !providers.is_empty() || declared.is_some()).then(|| {
             Box::new(Dispatch {
                 receiver,
                 providers,
+                declared,
             })
         })
     }
@@ -4432,7 +4433,6 @@ impl<'a> Extractor<'a> {
             handed_callable: None,
             per_item: None,
             dispatch: None,
-            declared: None,
             result_discarded: false,
             result_held: false,
         }
@@ -4966,7 +4966,6 @@ fn role_site(
         handed_callable: site.handed_callable,
         per_item: site.per_item.clone(),
         dispatch: site.dispatch.clone(),
-        declared: site.declared.clone(),
         result_discarded: false,
         result_held: false,
     }

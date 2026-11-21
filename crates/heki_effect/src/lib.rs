@@ -148,6 +148,11 @@ pub struct Dispatch {
     /// For a call on the caller's own `self`: the callees (by index) that are overrides of
     /// subclasses, each with its class (it runs only when `self` is an instance of it).
     pub providers: Vec<(u16, SharedLine)>,
+    /// The method a project protocol declares, when the receiver is typed with the protocol
+    /// (`h._helper()` with `h: Host`): the call contracts judge the call by that declaration,
+    /// the type the code calls it through, while the callees are the implementations it runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declared: Option<FuncKey>,
 }
 
 /// The hops of a kept chain, owned (what a report shows).
@@ -380,20 +385,18 @@ pub struct TypedFieldReadSite {
     /// Parameters of the reading function the read object may be, as itself (bit 0: `self`).
     pub obj_params: u64,
     pub span: Span,
-    /// The project protocol the object is typed with, when it declares the attribute: the read
-    /// is one of every class implementing it, but the read and call contracts judge it by the
-    /// protocol ([`Self::counts_for_contracts`]).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub declared_by: Option<String>,
+    /// The read is one of a class implementing the project protocol the object is typed with,
+    /// which declares the attribute: the read and call contracts judge it by the protocol
+    /// ([`Self::counts_for_contracts`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub through_protocol: bool,
 }
 
 impl TypedFieldReadSite {
     /// Whether the read and call contracts count the read: one through a protocol declaring
     /// the attribute counts as a read of the protocol only, not of its implementations.
     pub fn counts_for_contracts(&self) -> bool {
-        self.declared_by
-            .as_ref()
-            .is_none_or(|p| *p == self.class_qualname)
+        !self.through_protocol
     }
 }
 
@@ -1152,11 +1155,6 @@ pub struct CallSite {
     pub per_item: Option<Box<PerItem>>,
     /// What the receiver tells about the implementations the callees run (`None`: nothing).
     pub dispatch: Option<Box<Dispatch>>,
-    /// The method a project protocol declares, when the receiver is typed with the protocol
-    /// (`h._helper()` with `h: Host`): the call contracts judge the call by that declaration,
-    /// the type the code calls it through, while the callees are the implementations it runs.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub declared: Option<FuncKey>,
     /// A call on `self` whose result nothing reads (`self.prepare()` as a statement): it
     /// reaches what its caller computes only through the attributes it writes (`MUT101`,
     /// [`EffectSummary::returns_self_attrs`]).
@@ -1226,6 +1224,11 @@ impl CallSite {
 }
 
 impl CallSite {
+    /// The method the protocol typing the receiver declares ([`Dispatch::declared`]).
+    pub fn declared(&self) -> Option<&FuncKey> {
+        self.dispatch.as_ref()?.declared.as_ref()
+    }
+
     /// The class of the receiver ([`Dispatch::receiver`]).
     pub fn receiver(&self) -> Option<&ClassLine> {
         self.dispatch.as_ref()?.receiver.as_deref()
