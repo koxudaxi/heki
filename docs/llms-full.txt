@@ -412,6 +412,12 @@ Two more cases stay quiet by design:
 - A blocking wait on a `concurrent.futures.Future` known to be done (`if f.done():`, after
   `await asyncio.wrap_future(f)`) returns at once.
 
+A file that cannot be read or does not parse is reported (exit code 2), and every other file is
+checked as usual. A file that does not parse cannot run either, so heki assumes nothing it would
+do: it calls nothing, defines no subclass, and patches no `builtins`. Its module still owns its
+name: `import requests` reaches a project's own `requests.py`, and while that file does not
+parse, the names under it resolve to nothing, never to the `requests` of the catalog.
+
 A function whose model would pass its size budget (4 units per byte of its source, at most
 50,000; real code stays below one unit per byte) is left unmodeled: heki rewrites nothing in it
 and treats its body as one call it cannot resolve. `heki assumptions` lists it with the hazard
@@ -589,7 +595,9 @@ oldest version `requires-python` admits.
 ### Source encodings
 
 heki reads the encoding a PEP 263 declaration names: UTF-8 (with or without a BOM), Latin-1, and
-ASCII. A file declaring any other encoding is reported as an error and not checked.
+ASCII. A file declaring any other encoding is reported as an error and not checked. Unlike a file
+that does not parse, such a file runs: what it defines and does stays unknown to the analysis of
+the other files.
 
 ### Sizes known only at run time
 
@@ -1590,7 +1598,7 @@ The recorded set can only shrink:
 | No baseline file yet | an error (exit code 2) | records today's findings |
 | A finding was fixed | a note that the entry can shrink | records the smaller entry |
 | An entry grew, or a new finding appeared | reports it, with a note on the allowed and found counts (exit code 1) | reports it the same way and leaves the file as it is (exit code 1) |
-| A file could not be analyzed (a syntax error, an unreadable file) | reports the error (exit code 2) | writes nothing, so the entries of that file are not lost (exit code 2) |
+| A file could not be analyzed (a syntax error, an unreadable file) | reports the error and the other files' findings (exit code 2) | writes nothing, so the entries of that file are not lost (exit code 2) |
 
 To record new findings on purpose, delete the baseline and record it again.
 
@@ -1672,8 +1680,10 @@ With a baseline configured, the hook fails only on new findings.
 With SARIF:
 
 - findings (exit code `1`) become code-scanning alerts and keep the step green;
-- a configuration, read, or syntax error (exit code `2`) still fails the step: heki then writes
-  SARIF only for the files it could analyze, which would hide the others;
+- a configuration, read, or syntax error (exit code `2`) still fails the step; a file heki could
+  not read or parse is an `error` notification of the run
+  (`invocations[0].toolExecutionNotifications`, with `executionSuccessful: false`), and the
+  results of the other files are kept;
 - results carry the message, the location, the call chain (`relatedLocations`), and the help
   (`properties.help`; SARIF's `rules[].help` is one text per rule, and a report's help can name
   the object it is about).
@@ -1740,6 +1750,8 @@ Source: https://heki.koxudaxi.dev/cli-reference/
 # CLI Reference
 
 Exit codes: `0` no diagnostics, `1` diagnostics (or Ratchet regressions, or pending `--diff` changes), `2` configuration / I/O / syntax errors.
+
+A file that cannot be read or does not parse does not stop the run: `heki check` reports its error, checks and reports the other files, and exits with `2`, also when it reports diagnostics. A file that does not parse cannot run either, so nothing it would do is assumed; the names under its module resolve to nothing. SARIF output lists such files as `error` notifications of a run that did not execute successfully (`invocations[0].toolExecutionNotifications`, `executionSuccessful: false`); JSON output holds the diagnostics only.
 
 ## `heki`
 
@@ -2274,7 +2286,8 @@ Code actions edit the version of the document their diagnostics were computed on
   an entry that grew).
 - A file belongs to the project when `heki check` would find it. A file that an ignore file, a
   hidden directory, or `exclude` leaves out is not analyzed, also when it is created or opened.
-- A file that does not parse is left out of the project until it parses again.
+- A file that does not parse is a module heki knows nothing about until it parses again, as in
+  `heki check`: the names under it resolve to nothing in the other files.
 - A configuration `heki check` rejects (an unknown rule, a contract target that is not
   `Class.attr`, an invalid pattern) is logged as a warning, and the server analyzes nothing until
   it is fixed.
