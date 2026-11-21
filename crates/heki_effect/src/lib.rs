@@ -38,7 +38,7 @@ pub mod types;
 pub use cache_flow::{
     CacheEvent, CacheFlow, FlowBlock, SelfAttrWrite, attr_writes, self_attr_writes,
 };
-pub use capacity::{Capacity, CapacityOf, CapacityWait, ParamOf, SiteQueues, WhileFull};
+pub use capacity::{Bound, Capacity, CapacityOf, CapacityWait, ParamOf, SiteQueues, WhileFull};
 pub use contracts::Contracts;
 pub use invalidation::{
     FlowWrite, FuncFlow, INITIALIZERS, Reach, SiteFlow, UnmetWrite, body_runs_at,

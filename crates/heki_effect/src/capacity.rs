@@ -25,6 +25,7 @@ use crate::{
     BoundCallee, CallHop, CallSite, ConstClass, EffectGuards, EffectSummary, FuncKey, ModuleInput,
     ProjectIndex, SiteRole, guards,
 };
+use heki_ir::walk::Answer;
 use heki_ir::{BlockId, ConstLiteral, FnIndex, Inst, InstKind, IrFunction, PhiNode, VarId};
 use heki_kb::{ArgSlot, EffectiveEcosystemKb, ExecEffectKind};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -33,27 +34,38 @@ use std::cell::{OnceCell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-/// What the code fixes about how many items a queue holds. The variants are ordered by the
-/// join: a value that may be either is the greater.
+/// What the code establishes about how many items a queue holds. The variants are ordered by
+/// the join: a queue that may be either is bounded on some path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Capacity {
+pub enum Bound {
     /// No limit: no `maxsize`, or one that is not above zero.
     Unbounded,
-    /// A limit on some path, every path known.
+    /// A limit on some path.
     Bounded,
-    /// Some path is not known.
-    Unknown,
 }
 
-impl Capacity {
-    /// The capacity of a queue built with a `maxsize` that is above zero, or not.
+impl Bound {
+    /// The bound of a queue built with a `maxsize` that is above zero, or not.
     fn of_positive(positive: bool) -> Self {
         if positive {
             Self::Bounded
         } else {
             Self::Unbounded
         }
+    }
+}
+
+/// The capacity of a queue: established over every path that may reach it, or open when some
+/// path is not known.
+pub type Capacity = Answer<Bound>;
+
+/// What the paths of `a` and `b` together give a queue (`None`: no queue on them): open when
+/// either is, since one unknown path leaves the queue unknown, otherwise bounded when either is.
+fn join(a: Option<Capacity>, b: Option<Capacity>) -> Option<Capacity> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.join_with(b, Bound::max)),
+        (one, None) | (None, one) => one,
     }
 }
 
@@ -88,16 +100,16 @@ impl CapacityOf {
     }
 
     pub fn unknown() -> Self {
-        Self::fixed(Capacity::Unknown)
+        Self::fixed(Answer::Open)
     }
 
     pub fn is_unknown(&self) -> bool {
-        self.fixed == Some(Capacity::Unknown)
+        matches!(self.fixed, Some(Answer::Open))
     }
 
     /// What either value gives. An unknown path makes it unknown, whatever the others are.
     pub fn join(&mut self, other: &Self) {
-        self.fixed = self.fixed.max(other.fixed);
+        self.fixed = join(self.fixed, other.fixed);
         self.params.extend(other.params.iter().cloned());
         self.attrs.extend(other.attrs.iter().cloned());
         self.globals.extend(other.globals.iter().cloned());
@@ -277,7 +289,7 @@ impl<'c, 'a> ValueCapacity<'c, 'a> {
             (Some(n), _) => {
                 let own = Walked {
                     int: true,
-                    ..Walked::of(CapacityOf::fixed(Capacity::of_positive(n > 0)))
+                    ..Walked::of(CapacityOf::fixed(Answer::Known(Bound::of_positive(n > 0))))
                 };
                 (own, Vec::new())
             }
@@ -349,9 +361,8 @@ impl<'c, 'a> ValueCapacity<'c, 'a> {
         }
     }
 
-    /// The fqn of the global object a read of a name gives: a function's read of a module
-    /// global, a module or class body's read of a name it has not bound itself, or an import
-    /// statement's binding (wherever it is, also inside a function), which names what it
+    /// The fqn of the global object a read of a name gives: a read of a module global, or an
+    /// import statement's binding (wherever it is, also inside a function), which names what it
     /// imports.
     fn global_read(&self, inst: &Inst) -> Option<String> {
         match &inst.kind {
@@ -359,8 +370,7 @@ impl<'c, 'a> ValueCapacity<'c, 'a> {
                 name,
                 is_lazy_import: false,
                 ..
-            }
-            | InstKind::LoadName { name, .. } => {
+            } => {
                 let fqn = self.cx.module.imports.get(name).cloned();
                 Some(fqn.unwrap_or_else(|| format!("{}.{name}", self.cx.module_name())))
             }
@@ -480,8 +490,8 @@ fn construction(
     let unpacked = star_from.is_some() || kwargs.iter().any(|(k, _)| k.is_none());
     let fixed = match (maxsize, unpacked) {
         (Some(_), _) => None,
-        (None, true) => Some(Capacity::Unknown),
-        (None, false) => Some(Capacity::Unbounded),
+        (None, true) => Some(Answer::Open),
+        (None, false) => Some(Answer::Known(Bound::Unbounded)),
     };
     let own = Walked {
         queue: true,
@@ -526,7 +536,7 @@ pub(crate) fn bound_capacity(site: &CallSite, bc: &BoundCallee, p: usize) -> Cap
     }
     match b.constant.map(|c| (c.class, c.positive)) {
         Some((ConstClass::None, _)) => CapacityOf::default(),
-        Some((ConstClass::Int, Some(p))) => CapacityOf::fixed(Capacity::of_positive(p)),
+        Some((ConstClass::Int, Some(p))) => CapacityOf::fixed(Answer::Known(Bound::of_positive(p))),
         _ => CapacityOf::unknown(),
     }
 }
@@ -534,11 +544,8 @@ pub(crate) fn bound_capacity(site: &CallSite, bc: &BoundCallee, p: usize) -> Cap
 /// The join of what `c` fixes and what `value` gives its parameters (`None`: no queue). A value
 /// still naming an attribute or a global, which only declarations hold, is not known.
 fn resolve_with(c: &CapacityOf, value: impl Fn(&ParamOf) -> Option<Capacity>) -> Option<Capacity> {
-    let named = (!c.attrs.is_empty() || !c.globals.is_empty()).then_some(Capacity::Unknown);
-    c.params
-        .iter()
-        .map(value)
-        .fold(c.fixed.max(named), Option::max)
+    let named = (!c.attrs.is_empty() || !c.globals.is_empty()).then_some(Answer::Open);
+    c.params.iter().map(value).fold(join(c.fixed, named), join)
 }
 
 impl ParamCapacities {
@@ -589,9 +596,9 @@ impl ParamCapacities {
         let mut queued: FxHashSet<&ParamOf> = queue.iter().copied().collect();
         while let Some(k) = queue.pop() {
             queued.remove(k);
-            let now = sources.get(k).map_or(Some(Capacity::Unknown), |srcs| {
+            let now = sources.get(k).map_or(Some(Answer::Open), |srcs| {
                 let value = |p: &ParamOf| values.get(p).copied().flatten();
-                srcs.iter().map(|c| resolve_with(c, value)).max().flatten()
+                srcs.iter().map(|c| resolve_with(c, value)).fold(None, join)
             });
             if values.insert(k, now) == Some(now) {
                 continue;
@@ -639,7 +646,7 @@ impl ParamCapacities {
     }
 
     pub(crate) fn bounded(&self, c: &CapacityOf) -> bool {
-        self.resolve(c) == Some(Capacity::Bounded)
+        self.resolve(c) == Some(Answer::Known(Bound::Bounded))
     }
 
     /// The parameters whose capacities differ between `self` and `other`.
@@ -731,7 +738,7 @@ pub(crate) fn resolve_in_decls(project: &ProjectDecls, start: CapacityOf) -> Cap
         stack.push(project.stored_global_capacity(fqn));
     }
     while let Some(c) = stack.pop() {
-        out.fixed = out.fixed.max(c.fixed);
+        out.fixed = join(out.fixed, c.fixed);
         out.params.extend(c.params);
         for (class, attr) in c.attrs {
             if attrs.insert((class.clone(), attr.clone())) {

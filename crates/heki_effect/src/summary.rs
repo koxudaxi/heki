@@ -4,7 +4,7 @@
 //! fixpoint (`callgraph`) maps callee facts through. No IR survives this module.
 
 use crate::cache_flow;
-use crate::capacity::{self, Capacity, CapacityOf, CapacityWait, SiteQueues, WhileFull};
+use crate::capacity::{self, Bound, CapacityOf, CapacityWait, SiteQueues, WhileFull};
 use crate::construction::{Escape, Pos, Recorder};
 use crate::consumption::{ItemArgs, IterFlow, PerItemCall, Roots, param_iteration};
 use crate::guards::{self, GuardInputs, LocalGuards, per_item_bit};
@@ -26,6 +26,7 @@ use crate::{
     TypedFieldWriteSite, Unresolved, UnresolvedAccessSite, UnresolvedWriteSite, WriteKind,
 };
 use heki_ast::Span;
+use heki_ir::walk::Answer;
 use heki_ir::{
     BinOpKind, BlockId, BuiltinKind, CompareOpKind, ConstLiteral, DictEntry, FunctionId,
     FunctionKind, Inst, InstKind, IrFunction, ModuleIr, NaturalLoop, PhiNode, Terminator,
@@ -4808,7 +4809,7 @@ impl<'a> Extractor<'a> {
                     .map_or_else(CapacityOf::unknown, |r| self.capacity_of(r).capacity);
                 effects.retain(|e| !waits.contains(e));
                 match capacity.decided() {
-                    Some(Some(Capacity::Bounded)) => effects.extend(waits),
+                    Some(Some(Answer::Known(Bound::Bounded))) => effects.extend(waits),
                     Some(_) => {}
                     None => {
                         while_full = Some(WhileFull {
@@ -4852,7 +4853,9 @@ impl<'a> Extractor<'a> {
         let own_param = while_full.as_ref().and_then(|w| {
             let c = &w.capacity;
             match (c.fixed, c.params.iter().collect::<Vec<_>>().as_slice()) {
-                (None | Some(Capacity::Unbounded), [(f, p)]) if f == self.key => Some(*p),
+                (None | Some(Answer::Known(Bound::Unbounded)), [(f, p)]) if f == self.key => {
+                    Some(*p)
+                }
                 _ => None,
             }
         });
