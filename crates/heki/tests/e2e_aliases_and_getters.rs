@@ -251,6 +251,40 @@ fn aliases_getattr_and_getters_reach_the_guarded_attribute() {
     );
 }
 
+const CALLABLE: &str = r#"class Node:
+    def __init__(self) -> None:
+        self.items: list[int] = []
+
+
+class Picker:
+    def __call__(self, node: Node) -> list[int]:
+        return node.items
+
+
+class Copier:
+    def __call__(self, node: Node) -> list[int]:
+        return list(node.items)
+
+
+def grow(node: Node, pick: Picker, copy: Copier) -> None:
+    pick(node).append(1)
+    copy(node).append(1)
+"#;
+
+/// Calling an instance whose `__call__` returns an attribute of its argument hands out that
+/// object; one returning a copy does not.
+#[test]
+fn a_callable_instance_returning_an_attribute_hands_it_out() {
+    let p = Project::new("callable_getter");
+    p.write("pyproject.toml", CONFIG)
+        .write("pkg/__init__.py", "")
+        .write("pkg/model.py", CALLABLE);
+    assert_eq!(
+        found(&diagnostics(&p, &[])),
+        vec![d("pkg/model.py", 17, "MUT201", "Node.items")]
+    );
+}
+
 #[test]
 fn object_new_allocates_an_instance_nothing_holds() {
     let p = project("object_new");

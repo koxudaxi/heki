@@ -31,6 +31,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 struct Indexes {
     subclasses: FxHashMap<String, Vec<String>>,
     property_names: FxHashSet<String>,
+    returning_names: FxHashSet<String>,
     frozen: FxHashSet<String>,
     built: FxHashSet<String>,
     typed_dicts: FxHashSet<String>,
@@ -998,6 +999,10 @@ pub struct DeclKeys {
     pub subclasses: BTreeSet<String>,
     /// Attribute names looked up among the project's property getter names.
     pub property_names: BTreeSet<String>,
+    /// Names looked up among the names of the project functions returning an attribute of a
+    /// parameter (`FunctionDecl::returns_param_attr`).
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub returning_names: BTreeSet<String>,
     /// Classes whose project-wide derived facts were looked up: whether they are frozen (a
     /// `dataclass_transform` or a base in another module can make them so) or a `TypedDict`.
     pub class_facts: BTreeSet<String>,
@@ -1016,6 +1021,7 @@ impl DeclKeys {
         self.modules.is_empty()
             && self.subclasses.is_empty()
             && self.property_names.is_empty()
+            && self.returning_names.is_empty()
             && self.class_facts.is_empty()
             && self.protocols.is_empty()
             && self.grown_globals.is_empty()
@@ -1025,6 +1031,7 @@ impl DeclKeys {
         self.modules.extend(other.modules);
         self.subclasses.extend(other.subclasses);
         self.property_names.extend(other.property_names);
+        self.returning_names.extend(other.returning_names);
         self.class_facts.extend(other.class_facts);
         self.protocols.extend(other.protocols);
         self.grown_globals.extend(other.grown_globals);
@@ -1036,6 +1043,7 @@ impl DeclKeys {
         !self.modules.is_disjoint(&other.modules)
             || !self.subclasses.is_disjoint(&other.subclasses)
             || !self.property_names.is_disjoint(&other.property_names)
+            || !self.returning_names.is_disjoint(&other.returning_names)
             || !self.class_facts.is_disjoint(&other.class_facts)
             || !self.protocols.is_disjoint(&other.protocols)
             || !self.grown_globals.is_disjoint(&other.grown_globals)
@@ -1121,6 +1129,10 @@ pub struct ProjectDecls {
     /// Names of the property getters (`FunctionDecl::is_property`) of every class: an
     /// attribute read with another name runs no getter, without walking any class hierarchy.
     property_names: FxHashSet<String>,
+    /// Names of the functions, methods, and getters returning an attribute of a parameter
+    /// (`FunctionDecl::returns_param_attr`): a call or a read with another name hands out no
+    /// such attribute, without resolving it.
+    returning_names: FxHashSet<String>,
     /// Every project class deriving (transitively) from `TypedDict`.
     typed_dicts: FxHashSet<String>,
     /// Every frozen project class (`Self::transform_builds`).
@@ -1242,6 +1254,7 @@ impl ProjectDecls {
             a.symmetric_difference(b).cloned().collect()
         };
         out.property_names = differ(&before.property_names, &self.property_names);
+        out.returning_names = differ(&before.returning_names, &self.returning_names);
         out.class_facts = differ(&before.frozen, &self.frozen);
         out.class_facts.extend(differ(&before.built, &self.built));
         out.class_facts
@@ -1261,6 +1274,7 @@ impl ProjectDecls {
         Indexes {
             subclasses: self.subclasses.clone(),
             property_names: self.property_names.clone(),
+            returning_names: self.returning_names.clone(),
             frozen: self.frozen.clone(),
             built: self.built.clone(),
             typed_dicts: self.typed_dicts.clone(),
@@ -1293,6 +1307,7 @@ impl ProjectDecls {
         let out = &*self;
         let mut subclasses: FxHashMap<String, Vec<String>> = FxHashMap::default();
         let mut property_names = FxHashSet::default();
+        let mut returning_names = FxHashSet::default();
         for m in out.modules.values() {
             for (qualname, class) in &m.classes {
                 let fqn = format!("{}.{qualname}", m.module_name);
@@ -1304,9 +1319,12 @@ impl ProjectDecls {
                 }
             }
             for (qualname, f) in &m.functions {
+                let name = qualname.rsplit('.').next().unwrap_or(qualname);
                 if f.is_property || f.property_type.is_some() {
-                    let name = qualname.rsplit('.').next().unwrap_or(qualname);
                     property_names.insert(name.to_owned());
+                }
+                if f.returns_param_attr.is_some() {
+                    returning_names.insert(name.to_owned());
                 }
             }
         }
@@ -1316,6 +1334,7 @@ impl ProjectDecls {
         }
         self.subclasses = subclasses;
         self.property_names = property_names;
+        self.returning_names = returning_names;
         self.typed_dicts = TYPED_DICT_BASES
             .iter()
             .flat_map(|b| self.subclasses_of(b))
@@ -2101,9 +2120,6 @@ impl ProjectDecls {
         None
     }
 
-    /// The definition of method `name` a call on an instance of `class` finds first along the
-    /// MRO (past `class` itself with `skip_self`): what a type checker takes the call's type
-    /// from, whatever subclasses override it with.
     /// Whether `class.__new__` (found past `class` itself with `skip_self`, as for `super()`)
     /// is `object.__new__`: no class of the MRO defines `__new__`, and no base outside the
     /// project but `object` may ([`Self::inherited_external`]).
@@ -2113,14 +2129,18 @@ impl ProjectDecls {
         skip_self: bool,
         kb: &EffectiveEcosystemKb,
     ) -> bool {
-        self.definitions(class, "__new__", skip_self, false, |_| true)
+        let mro = self.mro(class);
+        self.definitions_along(&mro, class, "__new__", skip_self, false, |_| true)
             .is_empty()
             && matches!(
-                self.inherited_external(class, "__new__", skip_self, kb),
+                self.inherited_external(&mro, "__new__", skip_self, kb),
                 Inherited::External(symbol) if symbol == "builtins.object.__new__"
             )
     }
 
+    /// The definition of method `name` a call on an instance of `class` finds first along the
+    /// MRO (past `class` itself with `skip_self`): what a type checker takes the call's type
+    /// from, whatever subclasses override it with.
     pub(crate) fn mro_definition(
         &self,
         class: &str,
@@ -2175,7 +2195,19 @@ impl ProjectDecls {
         overrides: bool,
         keep: impl Fn(&FuncKey) -> bool,
     ) -> Vec<FuncKey> {
-        let mro = self.mro(class);
+        self.definitions_along(&self.mro(class), class, name, skip_self, overrides, keep)
+    }
+
+    /// [`Self::definitions`] with the MRO of `class` given.
+    fn definitions_along(
+        &self,
+        mro: &[String],
+        class: &str,
+        name: &str,
+        skip_self: bool,
+        overrides: bool,
+        keep: impl Fn(&FuncKey) -> bool,
+    ) -> Vec<FuncKey> {
         let start = usize::from(skip_self);
         let mut found = Vec::new();
         if let Some(k) = mro
@@ -2207,20 +2239,20 @@ impl ProjectDecls {
         found
     }
 
-    /// Where the project class `class` takes `name` from, past `class` itself with
-    /// `skip_self`, when no project class of its MRO defines it: the first base outside the
+    /// Where a project class with the MRO `mro` takes `name` from, past the class itself with
+    /// `skip_self`, when no project class of the MRO defines it: the first base outside the
     /// project that heki knows defines it ([`external_defines`]), else a base heki knows
     /// nothing of may, else none does. Every class takes `__new__` from `object` when no base
     /// outside the project but builtin types may define it.
     fn inherited_external(
         &self,
-        class: &str,
+        mro: &[String],
         name: &str,
         skip_self: bool,
         kb: &EffectiveEcosystemKb,
     ) -> Inherited {
         let mut unknown_bases = false;
-        for c in self.mro(class).iter().skip(usize::from(skip_self)) {
+        for c in mro.iter().skip(usize::from(skip_self)) {
             if self.is_project_class(c) {
                 continue;
             }
@@ -2241,12 +2273,14 @@ impl ProjectDecls {
     /// does not ([`Self::inherited_external`]).
     pub(crate) fn lacks_member(&self, class: &str, name: &str, kb: &EffectiveEcosystemKb) -> bool {
         let class = self.canonical(class);
-        self.is_project_class(&class)
-            && self
-                .definitions(&class, name, false, false, |_| true)
-                .is_empty()
+        if !self.is_project_class(&class) {
+            return false;
+        }
+        let mro = self.mro(&class);
+        self.definitions_along(&mro, &class, name, false, false, |_| true)
+            .is_empty()
             && matches!(
-                self.inherited_external(&class, name, false, kb),
+                self.inherited_external(&mro, name, false, kb),
                 Inherited::Absent
             )
     }
@@ -2265,13 +2299,14 @@ impl ProjectDecls {
         if !self.is_project_class(&class) {
             return Callee::External(format!("{class}.{method}"));
         }
-        let found = self.definitions(&class, method, skip_self, !skip_self, |_| true);
+        let mro = self.mro(&class);
+        let found = self.definitions_along(&mro, &class, method, skip_self, !skip_self, |_| true);
         if found.len() > CHA_CANDIDATE_LIMIT {
             return Callee::TooMany;
         }
         if found.is_empty() {
             return self
-                .inherited_external(&class, method, skip_self, kb)
+                .inherited_external(&mro, method, skip_self, kb)
                 .callee();
         }
         Callee::Project(found, true)
@@ -2287,9 +2322,10 @@ impl ProjectDecls {
         kb: &EffectiveEcosystemKb,
     ) -> Callee {
         let class = self.canonical(class);
-        let found = self.definitions(&class, method, false, false, |_| true);
+        let mro = self.mro(&class);
+        let found = self.definitions_along(&mro, &class, method, false, false, |_| true);
         if found.is_empty() {
-            return self.inherited_external(&class, method, false, kb).callee();
+            return self.inherited_external(&mro, method, false, kb).callee();
         }
         Callee::Project(found, true)
     }
@@ -2299,6 +2335,14 @@ impl ProjectDecls {
     pub fn mro_method(&self, class: &str, name: &str) -> Option<FuncKey> {
         let class = self.canonical(class);
         self.definitions(&class, name, false, false, |_| true).pop()
+    }
+
+    /// Whether a project function named `name` (its last name) may return an attribute of a
+    /// parameter (`FunctionDecl::returns_param_attr`): no call or read with another name hands
+    /// one out.
+    pub(crate) fn may_return_param_attr(&self, name: &str) -> bool {
+        self.read(|k| note(&mut k.returning_names, name));
+        self.returning_names.contains(name)
     }
 
     /// Resolve reading `instance_of(class).attr` as calls of the property getters it may run

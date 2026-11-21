@@ -1226,8 +1226,9 @@ impl<'a> Extractor<'a> {
     /// `node.items`): every project function it may run returns that attribute of the same
     /// parameter ([`crate::FunctionDecl::returns_param_attr`]), bound here to `holder`.
     fn returned_attr(&self, kind: &InstKind) -> Option<(VarId, VarId, String)> {
+        let project = &self.cx.project;
         let (dst, callee, recv, args, star_from) = match kind {
-            InstKind::AttrLoad { dst, obj, attr } => {
+            InstKind::AttrLoad { dst, obj, attr } if project.may_return_param_attr(attr) => {
                 let getters = self.cx.resolve_attr_load(self.val(*obj), attr)?;
                 (*dst, getters, Some(*obj), &[][..], None)
             }
@@ -1238,7 +1239,7 @@ impl<'a> Extractor<'a> {
                 args,
                 star_from,
                 ..
-            } => {
+            } if project.may_return_param_attr(method) => {
                 let callee = self.cx.resolve_method(self.val(*recv), method);
                 (*dst, callee, Some(*recv), args.as_slice(), *star_from)
             }
@@ -1249,6 +1250,18 @@ impl<'a> Extractor<'a> {
                 star_from,
                 ..
             } => {
+                // Calling a class makes a new object; a named function is the one declared.
+                let returns_attr = match self.val(*c)? {
+                    Val::Ref(fqn) => matches!(
+                        project.symbol(fqn),
+                        resolver::Symbol::Function(_, decl) if decl.returns_param_attr.is_some()
+                    ),
+                    Val::Inst(_) | Val::Union(_) => project.may_return_param_attr("__call__"),
+                    Val::Class(_) | Val::Super(_) => false,
+                };
+                if !returns_attr {
+                    return None;
+                }
                 let callee = self.cx.resolve_call(self.val(*c));
                 (*dst, callee, None, args.as_slice(), *star_from)
             }

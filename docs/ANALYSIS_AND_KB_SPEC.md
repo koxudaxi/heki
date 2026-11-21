@@ -521,7 +521,8 @@ the language server re-checks the files showing a change site that moved, as for
 
 The incremental index also records what summarizing each file read of the project declarations
 (`FileSummary::decl_reads`: the modules looked up, the classes whose subclasses were listed, the
-property getter names tried), and the language server records what each check read. An update of a
+property getter names tried, the names tried among the functions returning an attribute of a
+parameter), and the language server records what each check read. An update of a
 module's declarations reports the keys it changed (the module, and the hierarchy indexes that
 differ); every file that read one of them is re-analyzed. This covers names resolved through
 re-exports, class hierarchy analysis across modules, and property getters, without depending on

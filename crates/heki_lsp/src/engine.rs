@@ -171,18 +171,22 @@ pub struct Workspace {
 #[derive(Debug, Default)]
 struct CheckReads {
     /// Key ids, per `DeclKeys` field.
-    ids: [FxHashMap<String, u32>; 6],
+    ids: [FxHashMap<String, u32>; DECL_KEY_KINDS],
     files: FxHashMap<PathBuf, KeySet>,
 }
 
+/// The number of fields of [`DeclKeys`].
+const DECL_KEY_KINDS: usize = 7;
+
 impl CheckReads {
     /// Every field of `keys` (destructured without `..`: a new kind of key does not compile
-    /// until it is kept here too).
-    fn fields(keys: &DeclKeys) -> [&BTreeSet<String>; 6] {
+    /// until it is kept here too, and the table of ids has one map per field).
+    fn fields(keys: &DeclKeys) -> [&BTreeSet<String>; DECL_KEY_KINDS] {
         let DeclKeys {
             modules,
             subclasses,
             property_names,
+            returning_names,
             class_facts,
             protocols,
             grown_globals,
@@ -191,6 +195,7 @@ impl CheckReads {
             modules,
             subclasses,
             property_names,
+            returning_names,
             class_facts,
             protocols,
             grown_globals,
