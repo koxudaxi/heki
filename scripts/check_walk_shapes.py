@@ -75,11 +75,8 @@ PLACED = ("function", "method", "module")
 
 # Shapes known to cost more than the limits, with the walk that costs: (family, placement).
 KNOWN_OVER: dict[tuple[str, str], str] = {
-    **{
-        ("call_chain", p): "the slice behind each call argument is walked again per call "
-        "(`guards::derived`)"
-        for p in PLACED
-    },
+    ("call_chain", "module"): "MUT202 looks up each call's site in a scan of the function's call "
+    "sites (`mut_rules::site_call`)",
     **{
         ("returned_merge_chain", p): "the roots of each merged value are listed again per merge, "
         "with the call sites through them (summary `iterations`)"

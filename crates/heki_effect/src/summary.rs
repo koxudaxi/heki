@@ -642,8 +642,6 @@ struct Extractor<'a> {
     ints: OnceCell<heki_ir::FnIndex<'a>>,
     /// What the queue capacity walks of the function's values found so far.
     capacity_walks: RefCell<capacity::Walks>,
-    /// Buffers of the guard analysis's backward walks (`GuardInputs::scratch`).
-    scratch: RefCell<(FxHashSet<VarId>, Vec<VarId>)>,
     /// The loops around each block.
     around: OnceCell<Vec<Vec<&'a NaturalLoop>>>,
     guards: LocalGuards,
@@ -985,7 +983,6 @@ impl<'a> Extractor<'a> {
             phis: OnceCell::new(),
             ints: OnceCell::new(),
             capacity_walks: RefCell::default(),
-            scratch: RefCell::default(),
             around: OnceCell::new(),
             guards: LocalGuards::default(),
             summary,
@@ -1069,7 +1066,6 @@ impl<'a> Extractor<'a> {
             stored_attrs: &self.stored_attrs,
             fresh: &self.fresh,
             phis: &self.phis,
-            scratch: &self.scratch,
             kb: self.cx.kb,
             project: self.cx.project,
         }
