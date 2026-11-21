@@ -636,6 +636,10 @@ pub enum RuleConfigError {
     },
     #[error("effect-boundaries `{0}` sets `allow-writes` but no `write-universe`")]
     AllowWritesWithoutUniverse(String),
+    #[error(
+        "effect-boundaries `{0}` sets `import-probes = \"report\"` but does not forbid `reads-environment`"
+    )]
+    ImportProbesWithoutEnvironment(String),
     /// A mode key of a contract (`fresh-objects`, `unresolved`) with an unknown value.
     #[error("unknown `{key}` value `{value}` in {section} `{contract}` (expected {expected})")]
     UnknownMode {
@@ -1075,6 +1079,13 @@ impl DottedPattern {
     /// project definitions only.
     pub fn matches(&self, name: &str) -> bool {
         self.module.is_none() && self.name.matches_suffix(name)
+    }
+
+    /// Whether the pattern names all of `name`, a symbol or attribute outside the project known
+    /// by its full dotted name (`os.getenv`, `sys.platform`), never one of its suffixes. A
+    /// pattern with a module part names project definitions only.
+    pub fn matches_whole(&self, name: &str) -> bool {
+        self.module.is_none() && self.name.is_match(name)
     }
 
     /// Whether the pattern names a project function or class (`fqn` is `module.qualname`), or an

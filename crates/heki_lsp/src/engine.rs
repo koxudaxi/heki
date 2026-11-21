@@ -80,13 +80,16 @@ type SitePlace = (heki_ast::Span, [(u32, u32, u32); 2], ShownAt);
 enum ShownAt {
     /// A call site, with its project callees.
     Call(Vec<FuncKey>),
+    /// A call of a function outside the project that an effect boundary forbids.
+    ExternalCall(String),
     /// A method's own change of the container a `self` attribute holds.
     Change(String),
 }
 
 /// The places in its text `source` of the spans of `file` that other files' diagnostics can
-/// show: its call sites (the hops of call chains) and the changes its methods make to their own
-/// containers (the methods `MUT113` names).
+/// show: its call sites and the calls outside the project an effect boundary forbids (the hops
+/// of call chains), and the changes its methods make to their own containers (the methods
+/// `MUT113` names).
 fn shown_places(file: &heki_effect::FileSummary, source: &str) -> Vec<SitePlace> {
     let lines = heki_ast::LineIndex::from_source(source);
     let place = |offset: u32| {
@@ -112,7 +115,16 @@ fn shown_places(file: &heki_effect::FileSummary, source: &str) -> Vec<SitePlace>
         let callees = s.project_callees().iter().map(|bc| bc.callee.clone());
         (s.span, ShownAt::Call(callees.collect()))
     });
+    let mut external: Vec<(heki_ast::Span, ShownAt)> = file
+        .external_accesses
+        .values()
+        .flatten()
+        .filter(|a| a.kind == heki_effect::AccessKind::Call)
+        .map(|a| (a.span, ShownAt::ExternalCall(a.name.clone())))
+        .collect();
+    external.sort();
     calls
+        .chain(external)
         .chain(changes)
         .map(|(span, at)| (span, [place(span.start), place(span.end)], at))
         .collect()
@@ -295,9 +307,10 @@ struct ContractReach {
     /// any number of calls above it, and a call of a function without effects changes no
     /// summary.
     calls: bool,
-    /// An effect boundary: a scope function's report names the ecosystem calls it reaches any
-    /// number of calls below (which `allowed-callees` may allow one by one) and counts them,
-    /// while the summaries keep the effects with one chain each.
+    /// An effect boundary: a scope function's report names the ecosystem calls and the
+    /// accesses outside the project it reaches any number of calls below (which
+    /// `allowed-callees` may allow one by one) and counts them, while the summaries keep the
+    /// effects with one chain each and no such access.
     ecosystem_calls: bool,
 }
 
@@ -305,8 +318,9 @@ struct ContractReach {
 /// properties it invalidates (see `Workspace::callee_files`).
 type CallerView = BTreeMap<FuncKey, (Vec<CallSite>, BTreeSet<String>)>;
 
-/// Per function of one file: its ecosystem (Layer 2) call sites without positions.
-type EcosystemView = BTreeMap<FuncKey, Vec<CallSite>>;
+/// Per function of one file: its ecosystem (Layer 2) call sites and its accesses outside the
+/// project that effect boundaries forbid, without positions.
+type EcosystemView = BTreeMap<FuncKey, (Vec<CallSite>, Vec<(heki_effect::AccessKind, String)>)>;
 
 impl Workspace {
     /// Index every Python file under `paths` (IR is dropped once the files are summarized, before
@@ -353,7 +367,8 @@ impl Workspace {
             .filter(|f| f.patches_builtins())
             .map(|f| f.path.clone())
             .collect();
-        let contracts = heki_rules::summary_contracts(env_cfg).map_err(EngineError::Rules)?;
+        let contracts =
+            heki_rules::summary_contracts(env_cfg, &project.env.kb).map_err(EngineError::Rules)?;
         let typed_writes = heki_rules::typed_writes(env_cfg, &selection);
         let opt_in = heki_rules::opt_in_facts(&selection);
         let summaries = summarize_project_with_reads(
@@ -615,20 +630,23 @@ impl Workspace {
         out
     }
 
-    /// What the functions of `path` call of the ecosystem (`EcosystemView`).
+    /// What the functions of `path` call of the ecosystem and access outside the project
+    /// (`EcosystemView`).
     fn ecosystem_view(&self, path: &Path) -> EcosystemView {
         let mut out = EcosystemView::new();
-        for site in self
-            .index
-            .files
-            .get(path)
+        let file = self.index.files.get(path);
+        for site in file
             .into_iter()
             .flat_map(|f| &f.call_sites)
             .filter(|s| matches!(s.target, heki_effect::CallTarget::Layer2 { .. }))
         {
             let mut site = site.clone();
             site.span = heki_ast::Span { start: 0, end: 0 };
-            out.entry(site.caller.clone()).or_default().push(site);
+            out.entry(site.caller.clone()).or_default().0.push(site);
+        }
+        for (func, accesses) in file.into_iter().flat_map(|f| &f.external_accesses) {
+            let names = accesses.iter().map(|a| (a.kind, a.name.clone()));
+            out.entry(func.clone()).or_default().1.extend(names);
         }
         out
     }

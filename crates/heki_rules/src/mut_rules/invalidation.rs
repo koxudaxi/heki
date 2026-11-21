@@ -24,7 +24,7 @@ pub(crate) fn run(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) -> Result<()
     if !cx.selection.is_enabled("MUT109") || cx.config.invalidation.is_empty() {
         return Ok(());
     }
-    let names = ConfigContracts::new(cx.config)?;
+    let names = ConfigContracts::new(cx.config, cx.kb)?;
     let sites = cx.sites_by_caller();
     let mut paths: Vec<_> = cx.index.files.keys().collect();
     paths.sort();
