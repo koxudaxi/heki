@@ -30,10 +30,11 @@ pub(super) fn mut205(cx: &CheckContext<'_>, rules: &[OwnerRule<'_>], out: &mut V
         return;
     }
     let sites = cx.sites_by_caller();
+    let mut classified: Classified<'_, &Unresolved> = Classified::default();
     let mut reports = MergedReports::default();
     for (key, s) in cx.defined_functions() {
         for w in &s.unresolved_write_sites {
-            for rule in &strict {
+            for (r, rule) in strict.iter().enumerate() {
                 let hits: Vec<_> = rule
                     .targets
                     .iter()
@@ -62,7 +63,12 @@ pub(super) fn mut205(cx: &CheckContext<'_>, rules: &[OwnerRule<'_>], out: &mut V
                     func: key,
                     obj: w.obj_params,
                 };
-                if !access.counts(cx, &sites, &rule.allowance, &family, callers) {
+                let counts = *classified
+                    .entry((r, key, w.obj_params, &w.what))
+                    .or_insert_with(|| {
+                        access.counts(cx, &sites, &rule.allowance, &family, callers)
+                    });
+                if !counts {
                     continue;
                 }
                 let target = match &w.what {
@@ -99,6 +105,12 @@ pub(super) fn mut205(cx: &CheckContext<'_>, rules: &[OwnerRule<'_>], out: &mut V
 /// The targets of a rule that an attribute name matches, and the classes they cover.
 type MatchedTargets<'r> = (Vec<&'r ContractTarget>, FxHashSet<&'r str>);
 
+/// Whether an access is a finding of a strict rule ([`Unseen::counts`]), by the rule, the
+/// function, the parameters its object may be, and what is accessed (`N`: the name read or
+/// called, the attribute or class written, which decides the targets it matches): the accesses
+/// of one name in one function share it, and each would walk the same callers.
+type Classified<'k, N> = FxHashMap<(usize, &'k FuncKey, u64, N), bool>;
+
 /// `MUT206`: reads of an attribute named like a target of a strict `read-owners` contract on
 /// an object of unknown class.
 pub(super) fn mut206(
@@ -116,6 +128,7 @@ pub(super) fn mut206(
     // The targets of each rule an attribute name matches, and the classes they cover, found once
     // per rule and name rather than once per read.
     let mut matched: FxHashMap<(usize, &str), MatchedTargets<'_>> = FxHashMap::default();
+    let mut classified: Classified<'_, &str> = Classified::default();
     let mut reports = MergedReports::default();
     for (key, s) in cx.defined_functions() {
         for a in &s.unresolved_access_sites {
@@ -142,7 +155,11 @@ pub(super) fn mut206(
                 };
                 let callers = Callers::LeaveTargetClasses(&reads_target);
                 if hits.is_empty()
-                    || !access.counts(cx, &sites, &rule.allowance, &no_class, callers)
+                    || !*classified
+                        .entry((r, key, a.obj_params, a.name.as_str()))
+                        .or_insert_with(|| {
+                            access.counts(cx, &sites, &rule.allowance, &no_class, callers)
+                        })
                 {
                     continue;
                 }
@@ -177,6 +194,7 @@ pub(super) fn mut207(
     let sites = cx.sites_by_caller();
     // An object of unknown class is no class's own `self`.
     let no_class = FxHashSet::default();
+    let mut classified: Classified<'_, &str> = Classified::default();
     let mut reports = MergedReports::default();
     for (key, s) in cx.defined_functions() {
         for a in s
@@ -184,7 +202,7 @@ pub(super) fn mut207(
             .iter()
             .filter(|a| a.access == Access::Call)
         {
-            for rule in &strict {
+            for (r, rule) in strict.iter().enumerate() {
                 let hits: Vec<_> = rule
                     .targets
                     .iter()
@@ -198,7 +216,11 @@ pub(super) fn mut207(
                 };
                 let callers = Callers::LeaveTargetClasses(&calls_target);
                 if hits.is_empty()
-                    || !access.counts(cx, &sites, &rule.allowance, &no_class, callers)
+                    || !*classified
+                        .entry((r, key, a.obj_params, a.name.as_str()))
+                        .or_insert_with(|| {
+                            access.counts(cx, &sites, &rule.allowance, &no_class, callers)
+                        })
                 {
                     continue;
                 }

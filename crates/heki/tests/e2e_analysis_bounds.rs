@@ -843,3 +843,95 @@ fn many_calls_in_one_function_look_up_their_operands_once() {
     .write("m.py", &(lines.join("\n") + "\n"));
     assert!(check_within(&p, Duration::from_secs(20)).is_empty());
 }
+
+/// A helper that types nothing making `accesses` times the access `access` of a contract
+/// section `owners` on `Guarded` (`read-owners` for `obj.secret`, `call-owners` for
+/// `obj.open()`, `write-owners` for `obj.secret = 1`), in strict mode, and a caller handing it
+/// an instance of an unrelated class `calls` times.
+fn strict_accesses(
+    name: &str,
+    owners: &str,
+    access: &str,
+    accesses: usize,
+    calls: usize,
+) -> Project {
+    let target = if owners == "call-owners" {
+        "Guarded.open"
+    } else {
+        "Guarded.secret"
+    };
+    let contract = format!(
+        "[[tool.heki.{owners}]]\nname = \"guarded\"\ntargets = [\"{target}\"]\nunresolved = \"report\"\n"
+    );
+    let mut lines = Vec::new();
+    for class in ["Guarded", "Other"] {
+        lines.extend([
+            format!("class {class}:"),
+            "    def __init__(self):".to_owned(),
+            "        self.secret = 0".to_owned(),
+            String::new(),
+            "    def open(self):".to_owned(),
+            "        return None".to_owned(),
+            String::new(),
+            String::new(),
+        ]);
+    }
+    lines.push("def peek(obj):".to_owned());
+    lines.extend((0..accesses).map(|_| format!("    {access}")));
+    lines.extend([
+        String::new(),
+        String::new(),
+        "def use(o: Other):".to_owned(),
+    ]);
+    lines.extend((0..calls).map(|_| "    peek(o)".to_owned()));
+    let p = Project::new(name);
+    p.write(
+        "pyproject.toml",
+        &format!(
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT205\", \"MUT206\", \"MUT207\"]\n\n{contract}"
+        ),
+    )
+    .write("m.py", &(lines.join("\n") + "\n"));
+    p
+}
+
+/// Thousands of strict reads in a helper whose caller calls it thousands of times: whether a
+/// read is a finding is decided once per rule, function, object, and name, not once per read,
+/// each walking the same callers.
+#[test]
+fn strict_reads_of_one_name_in_a_helper_walk_its_callers_once() {
+    let p = strict_accesses(
+        "bounds_strict_helper_reads",
+        "read-owners",
+        "obj.secret",
+        4_000,
+        4_000,
+    );
+    assert!(check_within(&p, Duration::from_secs(20)).is_empty());
+}
+
+/// The same for strict calls (`MUT207`).
+#[test]
+fn strict_calls_of_one_name_in_a_helper_walk_its_callers_once() {
+    let p = strict_accesses(
+        "bounds_strict_helper_calls",
+        "call-owners",
+        "obj.open()",
+        4_000,
+        4_000,
+    );
+    assert!(check_within(&p, Duration::from_secs(20)).is_empty());
+}
+
+/// The same for strict writes (`MUT205`).
+#[test]
+fn strict_writes_of_one_name_in_a_helper_walk_its_callers_once() {
+    let p = strict_accesses(
+        "bounds_strict_helper_writes",
+        "write-owners",
+        "obj.secret = 1",
+        4_000,
+        4_000,
+    );
+    assert!(check_within(&p, Duration::from_secs(20)).is_empty());
+}
