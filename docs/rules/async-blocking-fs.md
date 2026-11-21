@@ -2,9 +2,13 @@
 
 # async-blocking-fs (EFF105)
 
-Family: Execution Effects (EFF) · Opt-in · Severity `error` · No automatic fix
+Family: Execution Effects (EFF) · Heuristic · Opt-in · Severity `error` · No automatic fix
 
 Opt-in: blocking local filesystem I/O reachable from `async def`.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs only when `select` or `extend-select` names its code or name. It has not been measured yet. See [Rule Precision](../precision.md).
 
 ## What it does
 Checks `async def` functions that reach blocking local filesystem I/O: `open(...)`,
@@ -23,6 +27,21 @@ is false, or `save(text)` when it opens it only where `isinstance(buf, str)` hol
 
 This rule is opt-in: enable it with `--extend-select EFF105` or `extend-select = ["EFF105"]`.
 Selecting the `EFF` prefix does not enable it.
+
+## What a report states
+
+A report states that the `async def` reaches the blocking filesystem call at the end of the chain on
+the event loop.
+
+Its premises:
+
+- **Resolves**: each call on the chain is to the function shown, through the calls heki resolves.
+  Open through a method call: one candidate implementation that leads on is enough.
+- **Reaches**: each function on the chain reaches the next call. Open: one path is enough, and a
+  branch heki cannot decide counts as taken; only the branches the caller's arguments switch off,
+  and the cases listed above, are left out.
+- **Filesystem I/O**: the last call reads or writes the filesystem, as the ecosystem catalog
+  describes it.
 
 ## Why is this bad?
 Local file I/O is usually fast, which is why it is opt-in, but on network file systems, large

@@ -2,9 +2,13 @@
 
 # loop-linear-dedup (OPT111)
 
-Family: Complexity Rewrites (OPT) · Enabled by default · Severity `warning` · Proven-safe suggestion (`--fix --include-size-dependent`)
+Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` · Proven-safe suggestion (`--fix --include-size-dependent`)
 
 Size-dependent `if v not in seen: seen.append(v)` -> auxiliary `set`.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 50 sampled reports (round 3, 2026-11-21), 88% were right about the code. See [Rule Precision](../precision.md).
 
 ## What it does
 Checks the de-duplication idiom `if v not in seen: seen.append(v)` inside a loop and suggests
@@ -12,6 +16,25 @@ keeping an auxiliary `set` next to the list.
 
 Size-dependent: applied only with `--fix --include-size-dependent` or in profiled hot
 functions.
+
+## What a report states
+
+A report states that `if v not in seen: seen.append(v)` scans the list on every iteration of the
+loop.
+
+Its premises:
+
+- **Builtin list**: the value is a builtin `list` by its construction (a display, a comprehension,
+  `list(...)`). Established: the Soundness lane takes types from constructions only, never from
+  annotations.
+- **On every iteration**: the statement runs on every iteration of the loop. Open: a statement under
+  a branch inside the loop counts.
+- **Data-sized**: the code does not fix the sizes the cost depends on (the loop's and the
+  container's) at 16 or fewer. Open: a size heki cannot bound counts as data-sized.
+- **Rewrite proven safe**: the help says `[safe fix: ...]`, `[proven-safe suggestion: ...]`, or
+  `[proven safe; ...]`. A report whose help names a blocking obligation instead (`[not auto-fixable:
+  ...]`) lacks this premise and is heuristic whatever the rule's certainty; the proven reports are
+  the rule's exact tier.
 
 ## Why is this bad?
 The membership test scans the list, so de-duplicating `n` items costs `n²` comparisons.

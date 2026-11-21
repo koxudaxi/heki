@@ -2,9 +2,13 @@
 
 # write-owner-violation (MUT201)
 
-Family: Mutation & State (MUT) · Enabled by default · Severity `error` · No automatic fix
+Family: Mutation & State (MUT) · Heuristic · Runs when its contract is declared · Severity `error` · No automatic fix
 
 Writing a guarded attribute/container (directly, via alias, or via helper) outside declared `write-owners`.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when its contract is declared. It has not been measured yet. See [Rule Precision](../precision.md).
 
 ## What it does
 Checks writes to attributes and containers that a `[[tool.heki.write-owners]]` contract
@@ -116,6 +120,21 @@ that a helper makes to a new object its caller hands it count as well. A shallow
 containers with the original, so only rebinding its attributes constructs it
 (`copied.data_types = [...]`); `copied.data_types.append(x)` changes the original's list and is
 reported. `fresh-objects = "report"` reports these writes like any other.
+
+## What a report states
+
+A report states that the function writes a target of a `write-owners` contract (an attribute, or the
+container it holds) outside the contract's write owners, directly, through an alias, or through the
+helpers shown.
+
+Its premises:
+
+- **Target**: the object is an instance of a class the contract names, or of a subclass, by
+  construction or annotation (assumption R2). Open: an alias bound on one path is enough.
+- **Outside the owners**: the function is not in the allowed modules and classes, nor runs only
+  inside allowed contexts. Established from the contract.
+- **Through helpers**: a helper's write, read, or call counts at its caller. Open: one path of the
+  helper is enough.
 
 ## Why is this bad?
 Large code bases often have one component that owns a piece of shared state (a store, a

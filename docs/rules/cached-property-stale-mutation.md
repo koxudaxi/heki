@@ -2,9 +2,13 @@
 
 # cached-property-stale-mutation (MUT101)
 
-Family: Mutation & State (MUT) · Opt-in · Experimental · Severity `error` · No automatic fix
+Family: Mutation & State (MUT) · Heuristic · Opt-in · Experimental · Severity `error` · No automatic fix
 
 Mutating an attribute read by `@cached_property` without invalidating the cache.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs only when `select` or `extend-select` names its code or name. It has not been measured yet. See [Rule Precision](../precision.md).
 
 !!! warning "Experimental"
 
@@ -20,6 +24,21 @@ is checked against the class's cached properties (reported in the base class).
 A decorator is known by what its name is bound to in the module: an import alias counts
 (`from functools import cached_property as cached`), a decorator the module defines itself does
 not (a `def cache(fn)` of its own), and a name bound by neither counts by its spelling.
+
+## What a report states
+
+A report states that a method that can run after initialization rebinds or changes an attribute that
+a `@cached_property` of the class family reads, and that a path after the write leaves the cached
+value in place.
+
+Its premises:
+
+- **Reads**: the cached property reads the attribute, directly or through calls and property reads.
+  Open through a call: one path of the callee is enough.
+- **After initialization**: the method is not an initialization hook. Open: hooks are recognized by
+  their names (listed above).
+- **Not invalidated**: some path from the write to the method's return clears no cache. Established
+  on the method's control flow.
 
 ## Why is this bad?
 A `cached_property` computes its value once and stores it in the instance `__dict__`. Once the

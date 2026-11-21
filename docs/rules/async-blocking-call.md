@@ -2,9 +2,13 @@
 
 # async-blocking-call (EFF101)
 
-Family: Execution Effects (EFF) · Enabled by default · Severity `error` · No automatic fix
+Family: Execution Effects (EFF) · Heuristic · Off by default · Severity `error` · No automatic fix
 
 Direct or indirect blocking network/DB/subprocess/sleep call reachable from `async def`.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 50 sampled reports (round 3, 2026-11-21), 82% were right about the code. See [Rule Precision](../precision.md).
 
 ## What it does
 Checks `async def` functions that reach a blocking call on the event loop, directly or through
@@ -90,6 +94,26 @@ It does not report:
   where blocking stops the tasks it starts;
 - CLI commands (`@click.command`, `@app.command`), ASGI lifespan handlers, and tests
   (`test_*` functions and files under `tests/`, see the option below).
+
+## What a report states
+
+A report states that the `async def` reaches the blocking call at the end of the chain on the event
+loop: the reported call (or property read, or iteration) leads, through the calls shown, to a call
+that blocks the thread.
+
+Its premises:
+
+- **Resolves**: each call on the chain is to the function shown, through the calls heki resolves.
+  Open through a method call: one candidate implementation that leads on is enough.
+- **Reaches**: each function on the chain reaches the next call. Open: one path is enough, and a
+  branch heki cannot decide counts as taken; only the branches the caller's arguments switch off,
+  and the cases listed above, are left out.
+- **Blocks**: the last call blocks the thread, as the ecosystem catalog describes it. An argument
+  heki cannot evaluate counts as one the call waits on (assumption R6). Open for an effect with a
+  condition heki does not know: `queue.Queue.put` counts as blocking on a queue whose bound heki
+  cannot see.
+
+Not part of the claim: how long the call blocks, and how often the path runs.
 
 ## Why is this bad?
 A blocking call inside a coroutine stops the whole event loop: every other request, timer, and

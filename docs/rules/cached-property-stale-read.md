@@ -2,9 +2,13 @@
 
 # cached-property-stale-read (MUT111)
 
-Family: Mutation & State (MUT) · Opt-in · Experimental · Severity `error` · No automatic fix
+Family: Mutation & State (MUT) · Heuristic · Opt-in · Experimental · Severity `error` · No automatic fix
 
 Opt-in: reading a `@cached_property` that a method of its class family can leave stale (a write `MUT101` reports).
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs only when `select` or `extend-select` names its code or name. It has not been measured yet. See [Rule Precision](../precision.md).
 
 !!! warning "Experimental"
 
@@ -34,6 +38,16 @@ The writes count whatever is selected: `MUT101` need not be enabled, and a `MUT1
 suppressed at the write still counts. It does not report what `MUT101` does not: a property
 whose writers invalidate it on every path, whose inputs are set only during two-phase
 initialization, or that no method changes.
+
+## What a report states
+
+A report states that the function reads a `@cached_property` that a write `MUT101` reports can leave
+stale on the instances the object may be.
+
+Its premises:
+
+- **Stale**: the premises of the `MUT101` report behind it, which are open where its page says so.
+- **Reads**: the function's own body reads the property. Established.
 
 ## Why is this bad?
 A `cached_property` computes its value once and keeps it in the instance `__dict__`. After a

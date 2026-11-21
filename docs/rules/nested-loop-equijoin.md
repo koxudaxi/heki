@@ -2,9 +2,13 @@
 
 # nested-loop-equijoin (OPT113)
 
-Family: Complexity Rewrites (OPT) · Enabled by default · Severity `warning` · No automatic fix
+Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` · No automatic fix
 
 Size-dependent nested-loop equi-join (`for a in A: for b in B: if a.k == b.k`) -> `dict` index.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 50 sampled reports (round 3, 2026-11-21), 92% were right about the code. See [Rule Precision](../precision.md).
 
 ## What it does
 Checks nested loops that join two collections by comparing a key of each with `==`:
@@ -33,6 +37,21 @@ its first matching comparison. It does not report:
   through `enumerate` / `zip` / `sorted` / `.items()` ...), `range` of integer constants with
   at most 16 steps (`range(10)`, `range(LIMIT)`), and an iterable a length test on every path
   caps (`if len(groups) > 8: raise ...`).
+
+## What a report states
+
+A report states that, for every pair of items of the nested loops, the code tests an equality
+between a key of the outer item and a key of the inner item.
+
+Its premises:
+
+- **Equality of keys**: the comparison is `==` between keys of the two items (the items, their
+  components, attributes, or constant subscripts). Established.
+- **Independent loops**: the inner iterable is not computed from the outer item. Established.
+- **Every pair**: the comparison runs for every pair. Open: a comparison under a branch of the inner
+  loop counts, and so does other work for each pair besides it.
+- **Data-sized**: the code does not fix the size of either loop at 16 or fewer. Open: a size heki
+  cannot bound counts as data-sized.
 
 ## Why is this bad?
 The inner loop runs completely for every outer element, so the join costs O(n·m) comparisons.

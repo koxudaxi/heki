@@ -17,7 +17,7 @@ use heki_rules::experimental::{
     EXPERIMENTAL_FEATURES, EXPERIMENTAL_POLICY, ExperimentalFeature, experimental_rule,
 };
 use heki_rules::project::{Project, ProjectOptions};
-use heki_rules::{CORE_RULES, RuleMeta, find_rule};
+use heki_rules::{Activation, CORE_RULES, RuleMeta, find_rule};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -90,6 +90,8 @@ struct CheckArgs {
     /// Comma-separated rule codes or slugs to ignore.
     #[arg(long, value_delimiter = ',')]
     ignore: Vec<String>,
+    #[command(flatten)]
+    heuristic: HeuristicArgs,
     /// Output format.
     #[arg(long, value_enum, default_value_t = OutputFormat::Full)]
     output_format: OutputFormat,
@@ -121,6 +123,31 @@ struct ServerArgs {
     /// Use stdio transport (default LSP mode).
     #[arg(long, default_value_t = true)]
     stdio: bool,
+    #[command(flatten)]
+    heuristic: HeuristicArgs,
+}
+
+/// `--heuristic` / `--no-heuristic`, over `lint.heuristic`; the last one given wins.
+#[derive(Debug, Args)]
+struct HeuristicArgs {
+    /// Also run the heuristic rules, whose reports can be wrong about the code, by default and
+    /// for every prefix and `ALL` (`lint.heuristic = true`).
+    #[arg(long, overrides_with = "no_heuristic")]
+    heuristic: bool,
+    /// Run a heuristic rule only when its code or name is selected (`lint.heuristic = false`).
+    #[arg(long, overrides_with = "heuristic")]
+    no_heuristic: bool,
+}
+
+impl HeuristicArgs {
+    /// `None`: the configuration decides.
+    fn value(&self) -> Option<bool> {
+        match (self.heuristic, self.no_heuristic) {
+            (true, _) => Some(true),
+            (_, true) => Some(false),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Args)]
@@ -145,6 +172,9 @@ enum RuleFormat {
 struct RuleRecord {
     #[serde(flatten)]
     rule: &'static RuleMeta,
+    /// Whether the rule runs with no configuration.
+    default_enabled: bool,
+    heuristic_note: Option<String>,
     experimental: Option<&'static ExperimentalFeature>,
     default_severity: heki_env::Severity,
 }
@@ -153,9 +183,22 @@ impl RuleRecord {
     fn new(rule: &'static RuleMeta) -> Self {
         Self {
             rule,
+            default_enabled: rule.runs_unnamed(false),
+            heuristic_note: rule.heuristic_note(),
             experimental: experimental_rule(rule.code),
             default_severity: rule.default_severity(),
         }
+    }
+}
+
+/// When a rule runs with no configuration, as `heki rule --all` lists it: `off` for a heuristic
+/// rule that would be on once exact.
+fn activation_word(rule: &RuleMeta) -> &'static str {
+    match rule.activation {
+        Activation::Default if rule.runs_unnamed(false) => "on",
+        Activation::Default => "off",
+        Activation::OptIn => "opt-in",
+        Activation::Contract => "contract",
     }
 }
 
@@ -199,11 +242,17 @@ struct DumpSemanticArgs {
 fn run(cli: Cli) -> Result<ExitCode> {
     match cli.command {
         Commands::Check(args) => check::run(&args),
-        Commands::Server(_args) => Ok(if heki_lsp::run_stdio()? {
-            ExitCode::SUCCESS
-        } else {
-            ExitCode::from(1)
-        }),
+        Commands::Server(args) => {
+            let selectors = heki_lsp::Selectors {
+                heuristic: args.heuristic.value(),
+                ..heki_lsp::Selectors::default()
+            };
+            Ok(if heki_lsp::run_stdio(selectors)? {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(1)
+            })
+        }
         Commands::Rule(args) => {
             let json = args.output_format == RuleFormat::Json;
             let Some(q) = args.rule.as_deref().filter(|_| !args.all) else {
@@ -213,8 +262,13 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 } else {
                     for r in CORE_RULES {
                         println!(
-                            "{:<8} {:<34} [default={:<5} fix={:<5}] {}",
-                            r.code, r.slug, r.default_enabled, r.auto_fix_default, r.summary
+                            "{:<8} {:<34} [{:<9} {:<8} fix={:<5}] {}",
+                            r.code,
+                            r.slug,
+                            r.certainty.word(),
+                            activation_word(r),
+                            r.auto_fix_default,
+                            r.summary
                         );
                     }
                 }
@@ -227,16 +281,20 @@ fn run(cli: Cli) -> Result<ExitCode> {
             if json {
                 println!("{}", serde_json::to_string_pretty(&RuleRecord::new(r))?);
             } else {
-                // `ruff rule` layout: the rule's Markdown page, with an experimental rule's note
-                // before its documentation.
-                let note = experimental_rule(r.code)
-                    .map(|f| {
-                        format!(
-                            "This rule is experimental. {} {EXPERIMENTAL_POLICY}\n\n",
-                            f.reason
-                        )
-                    })
-                    .unwrap_or_default();
+                // `ruff rule` layout: the rule's Markdown page, with a heuristic rule's note and
+                // an experimental rule's note before its documentation.
+                let heuristic = r.heuristic_note().map(|n| format!("{n}\n\n"));
+                let experimental = experimental_rule(r.code).map(|f| {
+                    format!(
+                        "This rule is experimental. {} {EXPERIMENTAL_POLICY}\n\n",
+                        f.reason
+                    )
+                });
+                let note = format!(
+                    "{}{}",
+                    heuristic.unwrap_or_default(),
+                    experimental.unwrap_or_default()
+                );
                 print!(
                     "# {} ({})\n\n{}\n\n{note}{}",
                     r.slug, r.code, r.summary, r.doc
@@ -381,10 +439,10 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::Cli;
+    use super::{Cli, activation_word};
     use clap::CommandFactory;
-    use heki_rules::CORE_RULES;
     use heki_rules::experimental::{EXPERIMENTAL_FEATURES, ExperimentalKind};
+    use heki_rules::{Activation, CORE_RULES, Certainty, RuleMeta, find_rule};
     use std::collections::BTreeSet;
 
     type Target = (ExperimentalKind, String);
@@ -439,6 +497,23 @@ mod tests {
                 f.kind,
                 f.target
             );
+        }
+    }
+
+    #[test]
+    fn the_rule_listing_says_when_each_rule_runs_with_no_configuration() {
+        let rule = |certainty, activation| RuleMeta {
+            certainty,
+            activation,
+            ..*find_rule("EFF102").unwrap()
+        };
+        for (certainty, activation, word) in [
+            (Certainty::Exact, Activation::Default, "on"),
+            (Certainty::Heuristic, Activation::Default, "off"),
+            (Certainty::Heuristic, Activation::OptIn, "opt-in"),
+            (Certainty::Heuristic, Activation::Contract, "contract"),
+        ] {
+            assert_eq!(activation_word(&rule(certainty, activation)), word);
         }
     }
 }

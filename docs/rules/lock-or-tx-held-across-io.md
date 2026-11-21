@@ -2,9 +2,13 @@
 
 # lock-or-tx-held-across-io (EFF106)
 
-Family: Execution Effects (EFF) · Opt-in · Severity `error` · No automatic fix
+Family: Execution Effects (EFF) · Heuristic · Opt-in · Severity `error` · No automatic fix
 
 Opt-in: `await` or blocking network I/O while holding a `threading` lock or a DB transaction.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs only when `select` or `extend-select` names its code or name. It has not been measured yet. See [Rule Precision](../precision.md).
 
 ## What it does
 Checks for an `await` (also the implicit ones of `async for` and `async with`), or a call
@@ -33,6 +37,22 @@ It does not report:
 - calls offloaded to a thread (`asyncio.to_thread`, `loop.run_in_executor`, ...);
 - database queries inside a transaction, local file I/O, or `time.sleep`;
 - CLI commands, ASGI lifespan handlers, and tests, as for `EFF101`.
+
+## What a report states
+
+A report states that, while a `with` block holds a synchronous lock or a database transaction, the
+statement awaits or reaches blocking network I/O.
+
+Its premises:
+
+- **Holds**: the resource is a `threading` lock or a transaction of the kinds listed above.
+  Established: its type is certain (constructed, or an annotated parameter).
+- **Inside the block**: the `await` or the call is in the body of the `with` block. Established.
+- **Resolves**: each call on the chain is to the function shown, through the calls heki resolves.
+  Open through a method call: one candidate implementation that leads on is enough.
+- **Reaches**: each function on the chain reaches the next call. Open: one path is enough, and a
+  branch heki cannot decide counts as taken; only the branches the caller's arguments switch off,
+  and the cases listed above, are left out.
 
 ## Why is this bad?
 A synchronous lock held across an `await` blocks every thread that wants it until the coroutine

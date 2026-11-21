@@ -2,9 +2,13 @@
 
 # loop-linear-membership (OPT110)
 
-Family: Complexity Rewrites (OPT) · Enabled by default · Severity `warning` · Proven-safe suggestion (`--fix --include-size-dependent`)
+Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` · Proven-safe suggestion (`--fix --include-size-dependent`)
 
 Size-dependent `e in lst` inside a loop -> hoist `set` outside loop.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 50 sampled reports (round 3, 2026-11-21), 78% were right about the code. See [Rule Precision](../precision.md).
 
 ## What it does
 Checks membership tests against a list or tuple inside a loop, `e in lst`, where the list does
@@ -18,6 +22,28 @@ hot. Not reported:
   (`x in ("a", "b")`, `x in [b"1", b"2"]`, also through a name bound to one, a comprehension
   over one, or `list(range(5))`);
 - lists whose elements are dicts, lists, or sets: no `set` can hold them.
+
+## What a report states
+
+A report states that the membership test `e in lst` scans the list on every iteration of the loop.
+
+Its premises:
+
+- **Builtin list**: the value is a builtin `list` or `tuple` by its construction (a display, a
+  comprehension, `list(...)`). Established: the Soundness lane takes types from constructions only,
+  never from annotations.
+- **On every iteration**: the statement runs on every iteration of the loop. Open: a statement under
+  a branch inside the loop counts.
+- **Data-sized**: the code does not fix the sizes the cost depends on (the loop's and the
+  container's) at 16 or fewer. Open: a size heki cannot bound counts as data-sized.
+- **Rewrite proven safe**: the help says `[safe fix: ...]`, `[proven-safe suggestion: ...]`, or
+  `[proven safe; ...]`. A report whose help names a blocking obligation instead (`[not auto-fixable:
+  ...]`) lacks this premise and is heuristic whatever the rule's certainty; the proven reports are
+  the rule's exact tier.
+
+Not part of the claim: whether a `set` can replace the list. Elements that cannot be hashed, or a
+list that changes during the loop, block the rewrite (the help names the obligation); the scan
+happens either way.
 
 ## Why is this bad?
 `e in lst` scans the list, so the loop costs the product of both sizes. A set lookup is

@@ -6,7 +6,7 @@
 > Wave 1/2 corpora of 19 million lines, counterexample experiments, a study of
 > datamodel-code-generator's 196,000 lines and its 20,000 lines of in-house checkers, and checks
 > of CPython 3.15 PEP 810 and `ruff_python_parser` 0.17.5), the reasons for every revision from
-> v1.0 to v4.1, and every major decision (ADR-001 to ADR-017). The project's working name was
+> v1.0 to v4.1, and every major decision (ADR-001 to ADR-018). The project's working name was
 > `pyopt`; crate names below use the current `heki_*` names.
 
 ---
@@ -58,7 +58,8 @@ Lean 4.
 ### 2.2 Stage 0-A measurement (339 repositories / 56,629 files / 18,108,143 lines, all 171 samples reviewed by hand)
 - **Corpus**: 118 mature open-source repositories (12.42 million lines) and 221 new GitHub
   repositories of 2026 (5.68 million lines), scanned with 8 workers (62.8 s); 171 samples of 8
-  rules reviewed by hand.
+  rules reviewed by hand. These figures describe that analysis; each rule's certainty and its
+  current rates are in [docs/precision.md](precision.md).
 - **Adopted as the core**:
   - `EFF101`: **37.6%** of web/async repositories (82.3% indirect), **68% real harm** (including
     a real `time.sleep` in redis-py `redis/asyncio/cluster.py:1613` reached in 4–5 hops). The
@@ -68,7 +69,8 @@ Lean 4.
   - `EFF103`: **47.6%** of database repositories (74.2% indirect). The need to exclude
     `for.iter`, DDL, migrations, and ORM internals was identified.
   - `DATA101`: **19.5%** of data/ML repositories. The 60% false positives of a naive AST check
-    were all non-`LoopCarried` padding; with the SSA `LoopCarried` check precision is about 90%.
+    were all non-`LoopCarried` padding; with the SSA `LoopCarried` check (Stage 0-A audit,
+    2026-11) about 90% of reports were right about the shape.
 - **Made strict or rejected**:
   - `MUT101`: **16.1%** of mature repositories (real hits in datamodel-code-generator, mkdocs,
     wagtail, textual, ...). The three noise sources of the naive version (two-phase
@@ -223,6 +225,10 @@ incremental LSP design, and the Stage 0-A Wave 2 decisions.
   zero unsafe rewrites, a strict Advisory false-positive rate below 5%, practical noise below
   20%, a convincing finding in at least 30% of the target projects (shown on
   datamodel-code-generator for the contract rules), and 100,000 lines analyzed in a few seconds.
+- **Superseded in part by [ADR-018](#adr-018)**: the false-positive and noise gates give way to
+  rule certainty (a rule runs by default only when its reports are built from established
+  premises and its certification found no false claim), and the 30% measure is published as a
+  measure of value, not a gate.
 
 <a id="adr-011"></a>
 ### ADR-011: Derived references, invariance of object contents, and the unpacking order of `OPT102`
@@ -317,9 +323,10 @@ incremental LSP design, and the Stage 0-A Wave 2 decisions.
      callers through Early Cutoff.
   4. **Stage 0-A Wave 2 (339 repositories, 19 million lines, 30.5 s, with a manual audit)**:
      - **First v1.x rules**: `MUT107` (attributes `__hash__` depends on: 21.2% of mature
-       projects, about 83% precise), `OPT112` (`list.index` / `remove` in loops: 81.4% of mature
-       projects, restricted by type), `OPT113` (nested-loop equi-joins: 10.2% of mature projects,
-       about 90% precise).
+       projects; Wave 2 audit, 2026-11: about 83% of reports right about the shape), `OPT112`
+       (`list.index` / `remove` in loops: 81.4% of mature projects, restricted by type), `OPT113`
+       (nested-loop equi-joins: 10.2% of mature projects; Wave 2 audit, 2026-11: about 90% of
+       reports right about the shape).
      - **Adopted when narrow and strict (v1.x opt-in)**: `EFF106` (`await` / HTTP while a
        type-certain synchronous lock or a database `.begin()` is held), `MUT106` (single-pass
        iterators that SSA does not rebind, consumed twice), `EFF107` (tasks bound to a local
@@ -329,6 +336,143 @@ incremental LSP design, and the Stage 0-A Wave 2 decisions.
        registries or caches; mutation of `@lru_cache` results was folded into `MUT202`),
        `EFF108` (duplicates Ruff's `SIM115` and is noisy), `MUT105` (very sparse under SSA).
 - **Status**: all of the above is implemented (the v1.x rules on 2026-11-20).
+
+<a id="adr-018"></a>
+### ADR-018: Exact and heuristic rules
+- **Background**: the third precision review (2026-11-21) hand-checked up to 50 reports of every
+  rule that ran by default. Every rule had reports wrong about the code, and none had 100 checked
+  reports; the old gate (strict false positives below 5%) let rules with known wrong reports run
+  by default. The goal is that every rule running by default is right about what it reports.
+  The cause is the polarity of "unknown": `docs/scope.md` promised "no report, never a guess",
+  which the code kept where a callee does not resolve and nowhere else. For a branch, the
+  repetition of a call in a loop, a size, the meaning of an attribute write, a library effect
+  with a condition, or a dispatch to several overrides, unknown led to a report, and each fix
+  round added recognizers of harmless shapes to an open list. By the third review's ranking,
+  94% of the estimated false reports came from two such premises: "the effect runs on this
+  path, every time" and "the loop is data-sized". A review of the design by three independent
+  analyses agreed on this cause and on the decisions below.
+- **Decision**:
+  1. **The claim** (D1): a report states what its message says about the code, in the terms its
+     rule page defines under "What a report states"; it is wrong when that statement is false.
+     Harm and usefulness (small by domain, deliberate, a memo heki does not recognize, a blocked
+     rewrite) are not part of it. *Rejected*: every documented exclusion as part of the claim
+     (each exclusion heki cannot recognize in every form becomes a permanent wrong-report class,
+     and documenting less is rewarded); harm-based precision (harm and shape are separate
+     questions).
+  2. **A claim is a conjunction of premises, each established or open.** A premise is a fact of
+     one home: a call resolves; a function reaches the next call on every path on which it
+     returns; a statement runs on every iteration that completes; a loop steps through a named
+     input; a library call has its effect under its condition; a store is a plain store; two
+     names hold the same object. A premise fact answers with the bounded walks' `Answer`
+     (`Known(A)` / `Open`), with no second type for "unknown". An **exact** report is built from
+     established premises only: `Open`, a budget that runs out, or a fact heki lacks stops it. A
+     **heuristic** report may rest on an open premise, and its rule page names which. A false
+     exact report is a defect of one premise's fact, fixed there with a counterexample, never by
+     an exclusion list in the rule. *Rejected*: recognizing more harmless shapes (the list does
+     not converge: round 3 found 36 groups where round 2 had 13, and 62 of round 2's 100 wrong
+     samples still failed after five fix pull requests).
+  3. **The claim is anchored at the report.** "Whenever the reported call returns, the effect
+     has run": the first hop is the reported call, so a branch around it in its own function
+     does not matter, and each later function must reach the next call on every path on which
+     it returns. *Rejected*: requiring the whole `async def` to reach the effect on every path
+     (it keeps 17% of `EFF101`'s reports instead of 37%, and 1 of its 16 harmful samples
+     instead of 5).
+  4. **Size is never claimed by an exact report** (replaces the earlier D2). A bound of 16 or
+     fewer that the code states only removes reports; a larger fixed trip count is silent, and an
+     exact loop claim names the input the loop steps through (a parameter, an attribute of one,
+     the rows of a query, the lines of a file). A heuristic report may still rest on
+     "data-sized", the code not fixing the size at 16 or fewer, which its rule page states in
+     plain words. *Rejected*: "data-sized" as part of the exact claim (a complete size evaluator
+     does not exist, so every bound heki cannot read would be a false report); reporting a fixed
+     count with its count ("on each of 50 iterations"), true but not worth the line.
+  5. **Assumptions R1–R7** ([ARCHITECTURE.md §3.4](../ARCHITECTURE.md)): static bindings,
+     annotations (R2), the catalog, imports as configured, the checked files as the project
+     (R5: a receiver typed by a `Protocol` stays unresolved, as its implementers are never a
+     complete set), and a library call's argument as a waiting value unless heki establishes
+     otherwise (R6: a catalog entry that waits lists the values for which it returns at once),
+     and no asynchronous or resource-exhaustion exception (R7: `MemoryError`,
+     `KeyboardInterrupt`, a signal; without it nothing runs "whenever" anything else does).
+     An exact claim holds in every run consistent with them; "a branch heki cannot decide can go
+     both ways" is not one of them. A context manager heki does not resolve may suppress
+     exceptions: exact facts do not pass through its body after an instruction that may raise,
+     a choice of silence rather than an assumption. R2 is for the reporting rules only: the Soundness lane and
+     `--fix` never rely on annotations (ADR-004, A4). R2 grants an instance of `C` or of a
+     project subclass, so a premise through a method call holds only when every candidate
+     implementation has it: an override in a project subclass, of a project class or of a
+     library class, leaves it open. A type fact keeps its provenance (constructed here, or an
+     annotation under R2), so that reports resting on R2 can be dropped where annotations are
+     not trusted.
+  6. **Rewrite validity is fix safety** (D3): an `OPT` report's cost claim (what runs in the
+     loop) does not include whether the rewrite is valid; the help names the obligation that
+     blocks it. A proven rewrite is a premise of the rule's exact tier (decision 9).
+     *Rejected*: silence until `ValueLoopInvariant` and `HashConsistentProbe` are established
+     for every report (at least 19% of `OPT110`).
+  7. **Messages**: an exact report's message states its claim and the witnesses of its
+     premises only (the chain's calls, the input a loop steps through); a cost estimate such as
+     "(N+1)" and advice such as "batch the queries" leave it (advice goes into the help). Where
+     the candidates of a dispatch reach different effects, the message names each per candidate.
+  8. **Names** (D4): `exact` and `heuristic`, on an axis called `certainty`; only heuristic
+     reports are labelled in output, as Ruff labels preview rules. *Rejected*: `proven` (a
+     report needs evidence, a rewrite a proof), `precise`, `certain`, CodeQL's four
+     `@precision` levels, Pylint's per-message confidence, and Semgrep's three confidence
+     levels (heki's bar is binary).
+  9. **Where the class lives** (D5): `RuleMeta::certainty`, and `activation` (`Default`,
+     `OptIn`, `Contract`) instead of `default_enabled`. A report's certainty is its rule's at
+     most (`Certainty::at_most`). One claim is one code: an effect rule's heuristic side is a
+     code of its own (`EFF101` "reaches on every path" beside `EFF111` "can reach", `EFF103`
+     beside `EFF113`). An `OPT` rule keeps one code with a certainty per report: a report whose
+     rewrite is proven safe is the rule's exact tier, the others are heuristic. A demoted rule
+     keeps `Default`, so `lint.heuristic = true` restores the earlier default set and a
+     promotion is a one-field change. Experimental stays its own axis and implies `OptIn`.
+     *Rejected*: a second list of heuristic codes; one code with a per-report tier for the
+     effect rules (their claims differ, and a rule is its claim); a selection that reads a
+     per-report certainty (the selection stays per rule, and a filter withholds the heuristic
+     reports of an exact rule).
+  10. **Selecting the heuristic rules and reports** (D6): `[tool.heki.lint] heuristic = true` and
+      `--heuristic` / `--no-heuristic` (on `check` and `server`), modelled on Ruff's `preview`:
+      prefixes and `ALL` then also select the heuristic `Default` rules, and an exact code or name
+      selects any rule either way. The heuristic reports of an exact rule are shown where a
+      heuristic rule would run: with the key, when its code or name is selected, or for a
+      contract rule. They are withheld after inline suppressions and before baselines, fixes, and
+      folding, and a text run ends with a note counting the rules left off and the reports
+      withheld (Ruff's note for the fixes it holds back). *Rejected*: a pseudo-selector
+      (`extend-select = ["HEURISTIC"]`); requiring the key even for an exact code (it would
+      break `extend-select = ["EFF105"]`).
+  11. **Contract rules** (D7): classified and labelled like the others; declaring the contract
+      selects them, whatever their certainty. `MUT202`'s zero-configuration part (`@lru_cache` /
+      `@cache` producers) becomes a code of its own; until then `MUT202` is selected as a
+      heuristic `Default` rule. *Rejected*: exempting contract rules from the class (`EFF201`
+      calls itself over-approximate); gating them on `heuristic` (a declared contract would
+      report nothing).
+  12. **Certification** (replaces the earlier D8 and D9): a rule becomes exact when (a) for
+      each premise a counterexample in the tests is reported once that premise is taken as
+      established, and not otherwise (premise stripping); (b) a census checks by hand every
+      report the rule has on the development corpus, each false claim fixed as a premise
+      defect, never by an exclusion list; (c) one run on a frozen holdout corpus of 100
+      packages, never looked at during design and fixes, finds no false claim outside a
+      violation of R1–R7; and (d) a run-time oracle (`sys.monitoring`) on the differential test
+      suite and on datamodel-code-generator finds every claimed event where the code ran.
+      Every report a release adds or changes in an exact rule is checked; a confirmed false
+      claim blocks the release until it is fixed or the rule is demoted in that release. The
+      certifications are in [docs/precision.md](precision.md), and `build_docs.py` fails for an
+      exact rule without one. *Rejected*: a sample of 100 reports with no wrong one as the bar
+      (it bounds the rate below 3%, but cannot establish the contract, and the wrong-report
+      classes cluster by package); a rate threshold (wrong reports below 5%); an exception for
+      `OPT101` and `OPT102` (they are certified like the others, so until then `heki check
+      --fix` applies no fix without configuration).
+  13. **The default set**: a rule runs by default when it is exact and its share of real harm
+      is worth the line it prints. For 0.2.0 that is `EFF101`, `EFF103`, `OPT113`, and the
+      proven tier of the `OPT` rules once each is certified; `MUT107`, `OPT112`, and `EFF102`
+      stay heuristic. *Rejected*: every exact rule by default (a rule whose reports are right but rarely
+      harmful, such as `MUT107` with 4% real harm in round 3, would print lines nobody acts
+      on); releasing 0.2.0 with the earlier default set.
+- **Status**: the certainty and activation of every rule, a report's own certainty (the `OPT`
+  reports whose rewrite is not proven are heuristic), the `heuristic` key and options, the
+  withholding of an exact rule's heuristic reports, the note, the labels in every output, the
+  "What a report states" section of every rule page, and the certification check are
+  implemented. Every rule is heuristic until certified. The measurements are in
+  [docs/precision.md](precision.md), and release gate 3 of
+  [ARCHITECTURE.md](../ARCHITECTURE.md) is the certification.
 
 ---
 

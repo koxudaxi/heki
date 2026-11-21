@@ -2,9 +2,13 @@
 
 # unresolved-guarded-call (MUT207)
 
-Family: Mutation & State (MUT) · Enabled by default · Severity `error` · No automatic fix
+Family: Mutation & State (MUT) · Heuristic · Runs when its contract is declared · Severity `error` · No automatic fix
 
 Strict mode of a `call-owners` contract (`unresolved = "report"`): calling a method named like a target on an object of unknown class.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when its contract is declared. It has not been measured yet. See [Rule Precision](../precision.md).
 
 ## What it does
 The strict mode of a `[[tool.heki.call-owners]]` contract that sets `unresolved = "report"`:
@@ -28,6 +32,19 @@ reported unless every caller path binds to it an instance of a project class who
 name is no target: a class outside the target's family (`DataType` and its subclasses for
 `DataType.replace_reference`) whose MRO finds no method the target names either (for the target
 `reset`, any project class's `reset`; a `reset` inherited from a library base is none).
+
+## What a report states
+
+A report states that, outside the call owners, the function calls a method named like a target of
+the `call-owners` contract on an object whose class heki does not know.
+
+Its premises:
+
+- **Named like a target**: the method's name matches a target's. Established.
+- **Unknown class**: heki did not resolve the class of the object. Established: the claim is about
+  heki's own resolution.
+- **Outside the owners**: the function is not in the allowed modules and classes, nor runs only
+  inside allowed contexts. Established from the contract.
 
 ## Why is this bad?
 `MUT204` reports a call only when every function it may call is a target, which needs the

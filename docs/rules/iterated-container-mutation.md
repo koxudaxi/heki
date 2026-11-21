@@ -2,9 +2,13 @@
 
 # iterated-container-mutation (MUT113)
 
-Family: Mutation & State (MUT) · Opt-in · Experimental · Severity `error` · No automatic fix
+Family: Mutation & State (MUT) · Heuristic · Opt-in · Experimental · Severity `error` · No automatic fix
 
 Opt-in: a dict, set, or deque of the instance changed while a method iterates it, by another method while a generator is suspended in the loop or by a function the loop's body calls (the next step raises `RuntimeError`).
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs only when `select` or `extend-select` names its code or name. It has not been measured yet. See [Rule Precision](../precision.md).
 
 !!! warning "Experimental"
 
@@ -74,6 +78,21 @@ A change written in the loop's body itself is the linters' check (Ruff's `B909` 
 `PLE4703`), and not reported. The rule reports one diagnostic per iteration of a suspended
 generator, at the iteration, naming one changing method and listing each one as a related
 location, and one per call in a loop's body that changes the container, at the call.
+
+## What a report states
+
+A report states that a `dict`, `set`, or `deque` held in `self.<attr>` is changed in place by code
+that can run while a method iterates it, so the next step of the iteration raises `RuntimeError`.
+
+Its premises:
+
+- **Container**: the attribute holds one of these containers, by its assignment in `__init__` or
+  its annotation (assumption R2).
+- **Iterated**: a `for` loop or `yield from` steps through it, or through a view or lazy wrapper of
+  it. Established.
+- **Can run meanwhile**: the change is in a function the loop's body calls, or in a method that can
+  run while a generator is suspended in the loop. Open: what can run while a generator is suspended
+  follows where its object goes, as described above, not the calls the program makes.
 
 ## Why is this bad?
 A dict or set iterator raises `RuntimeError: dictionary changed size during iteration` (or

@@ -69,10 +69,17 @@ RSS_RUNS = 3
 MIB = 1024 * 1024
 HEAP_LINE = re.compile(r"^heki heap: peak (\d+) bytes, total (\d+) bytes$", re.MULTILINE)
 
+# `--heuristic`: every rule that is not opt-in runs, the heuristic ones too.
 MODES = {
-    "check": (["check", "--output-format", "json", "."], {}),
-    "watch": (["check", "--watch", "--output-format", "json", "."], {"HEKI_WATCH_MAX_RUNS": "0"}),
-    "owners": (["check", "--output-format", "json", "--config", "owners.toml", "."], {}),
+    "check": (["check", "--heuristic", "--output-format", "json", "."], {}),
+    "watch": (
+        ["check", "--heuristic", "--watch", "--output-format", "json", "."],
+        {"HEKI_WATCH_MAX_RUNS": "0"},
+    ),
+    "owners": (
+        ["check", "--heuristic", "--output-format", "json", "--config", "owners.toml", "."],
+        {},
+    ),
 }
 
 

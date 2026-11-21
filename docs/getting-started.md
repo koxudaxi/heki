@@ -8,7 +8,14 @@ From the root of a project (the directory with `pyproject.toml`):
 
 ```console
 $ heki check
+$ heki check --heuristic
 ```
+
+The first command runs the exact rules (hand-checked samples of their reports found none wrong
+about the code) and the rules of the [contracts](configuration.md#contracts) you declare. No rule
+is exact yet, so without a contract it reports nothing for now, and says how many heuristic rules
+it left off. `--heuristic` runs those too; their reports can be wrong about the code, and every
+output labels them ([Rule Precision](precision.md)).
 
 heki checks every Python file under the current directory, except the
 [excluded and ignored ones](configuration.md#which-files-are-checked). Pass files or directories
@@ -21,7 +28,7 @@ $ heki check src/ tests/test_api.py
 ## Read a diagnostic
 
 ```console
-app/api.py:5:12: EFF101 (async-blocking-call) [error] `handler` reaches the blocking call `requests.get` on the event loop
+app/api.py:5:12: EFF101 (async-blocking-call) [error, heuristic] `handler` reaches the blocking call `requests.get` on the event loop
   |
 5 |     user = load_user(user_id)
   |            ^
@@ -34,7 +41,7 @@ app/api.py:5:12: EFF101 (async-blocking-call) [error] `handler` reaches the bloc
 | ---- | ------- |
 | `app/api.py:5:12` | where to look |
 | `EFF101 (async-blocking-call)` | the rule's code and name |
-| `[error]` | its severity: `error`, or `warning` for the `OPT` rules (slower code, not wrong code); both make `heki check` fail |
+| `[error, heuristic]` | its severity: `error`, or `warning` for the `OPT` rules (slower code, not wrong code); both make `heki check` fail. `heuristic` marks a report that can be wrong about the code: a premise of its claim can be open |
 | the message | what heki proved, in one sentence: here, an `async def` reaches a blocking network call |
 | `related` lines | the hops of the chain of calls behind it, to follow it across files; editors show them as related information you can jump to |
 | `help` line | what to do about it |
@@ -45,10 +52,10 @@ app/api.py:5:12: EFF101 (async-blocking-call) [error] `handler` reaches the bloc
 ## Fix what heki can prove
 
 `--fix` applies the rewrites heki proves safe and always faster (`OPT101`, `OPT102`), and
-`--diff` shows them first:
+`--diff` shows them first. Both rules are heuristic, so they run with `--heuristic`:
 
 ```console
-$ heki check --diff
+$ heki check --heuristic --diff
 --- a/app/report.py
 +++ b/app/report.py
 @@ -1,5 +1,5 @@
@@ -101,7 +108,8 @@ $ heki check --ignore OPT110         # everything except one rule
 ```
 
 Codes, code prefixes, and rule names (`async-blocking-call`) are accepted. A prefix does not
-enable the opt-in rules: see [Rule selection](configuration.md#rule-selection-toolhekilint).
+enable the opt-in rules, nor the heuristic ones without `--heuristic`: see
+[Rule selection](configuration.md#rule-selection-toolhekilint).
 
 ## Output formats
 

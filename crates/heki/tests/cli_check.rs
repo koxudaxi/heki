@@ -28,7 +28,7 @@ impl Project {
 
     fn heki(&self, args: &[&str]) -> (i32, String, String) {
         let out = Command::new(env!("CARGO_BIN_EXE_heki"))
-            .arg("check")
+            .args(["check", "--heuristic"])
             .args(args)
             .current_dir(&self.dir)
             .output()
@@ -103,7 +103,7 @@ fn exit_codes_and_clean_runs() {
     let (code, stdout, stderr) = p.heki(&[]);
     assert_eq!(code, 1);
     assert!(
-        stdout.starts_with("pkg/bad.py:4:5: EFF101 (async-blocking-call) [error]"),
+        stdout.starts_with("pkg/bad.py:4:5: EFF101 (async-blocking-call) [error, heuristic]"),
         "{stdout}"
     );
     assert!(stdout.contains("4 |     time.sleep(1)"));
@@ -232,11 +232,14 @@ fn output_formats_and_config_selection() {
     assert_eq!(
         stdout.lines().collect::<Vec<_>>(),
         vec![format!(
-            "::warning file=src/pkg/api.py,line=4,col=5,title=heki EFF101::{message}"
+            "::warning file=src/pkg/api.py,line=4,col=5,title=heki EFF101 (heuristic)::{message}"
         )]
     );
     let (_, stdout, _) = p.heki(&["--output-format", "concise"]);
-    assert_eq!(stdout, format!("src/pkg/api.py:4:5: EFF101 {message}\n"));
+    assert_eq!(
+        stdout,
+        format!("src/pkg/api.py:4:5: EFF101 [heuristic] {message}\n")
+    );
     let (_, stdout, _) = p.heki(&[]);
     assert!(
         stdout.ends_with(&format!(
@@ -321,7 +324,7 @@ fn opt_rules_default_to_warning_and_still_fail_the_check() {
     let (code, stdout, _) = p.heki(&["--select", "OPT"]);
     assert_eq!(code, 1, "{stdout}");
     assert!(
-        stdout.starts_with("app.py:7:9: OPT101 (list-quadratic-concat) [warning] "),
+        stdout.starts_with("app.py:7:9: OPT101 (list-quadratic-concat) [warning, heuristic] "),
         "{stdout}"
     );
     let (_, stdout, _) = p.heki(&["--output-format", "sarif", "--select", "OPT113"]);

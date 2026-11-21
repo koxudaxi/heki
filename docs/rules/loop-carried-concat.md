@@ -2,9 +2,13 @@
 
 # loop-carried-concat (DATA101)
 
-Family: Data Pipelines (DATA) · Enabled by default · Severity `error` · No automatic fix
+Family: Data Pipelines (DATA) · Heuristic · Off by default · Severity `error` · No automatic fix
 
 Loop-carried quadratic `pandas.concat` / `numpy.vstack` / `numpy.append` accumulation.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 28 sampled reports (round 3, 2026-11-21), 71% were right about the code. See [Rule Precision](../precision.md).
 
 ## What it does
 Checks loops that grow a DataFrame or array by re-concatenating it on every iteration:
@@ -27,6 +31,23 @@ iteration already works in proportion to the value's size, and there are no unch
 collect and combine once. A loop whose trip count the code fixes is not reported either
 (`for is_p_wave in [False, True]`, `for _ in range(steps)` with `steps = 8`): it copies a fixed
 number of times, whatever the input.
+
+## What a report states
+
+A report states that the value is rebuilt from its previous value by the reallocating call on every
+iteration of the loop, so each iteration copies all of it.
+
+Its premises:
+
+- **Loop-carried**: the new value is computed from the previous one and feeds the next iteration.
+  Established by the IR, except that the exception edge of a `with` block counts as carrying the
+  previous value for every context manager.
+- **On every iteration**: the reallocation runs on every iteration. Open: one that runs on some
+  iterations only counts.
+- **Data-sized**: the code does not fix the trip count. Open: a trip count heki cannot bound counts
+  as data-sized.
+- **Reallocates**: the call copies all of its inputs into a new value, as the ecosystem catalog
+  describes it.
 
 ## Why is this bad?
 Every concatenation copies everything accumulated so far, so the loop is quadratic in the total

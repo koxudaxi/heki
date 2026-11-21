@@ -2,9 +2,13 @@
 
 # loop-linear-list-lookup (OPT112)
 
-Family: Complexity Rewrites (OPT) · Enabled by default · Severity `warning` · No automatic fix
+Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` · No automatic fix
 
 Size-dependent `list.index` / `list.remove` / `list.count` inside a loop (repeated linear scans).
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 50 sampled reports (round 3, 2026-11-21), 90% were right about the code. See [Rule Precision](../precision.md).
 
 ## What it does
 Checks `list.index()`, `list.remove()`, and `list.count()` calls that run on every iteration
@@ -32,6 +36,19 @@ not reported. Neither are:
   call but read-only builtins; a `*items` argument passes the items only) is not small;
 - calls after which the loop always ends (`return items.index(x)`, a `break` on every path);
 - `index(x, start)`, which scans from a position that usually moves forward.
+
+## What a report states
+
+A report states that `xs.index(...)`, `xs.remove(...)`, or `xs.count(...)` scans the whole list on
+every iteration of the loop.
+
+Its premises:
+
+- **List**: the receiver is a `list`, by construction or annotation (assumption R2).
+- **On every iteration**: the statement runs on every iteration of the loop. Open: a statement under
+  a branch inside the loop counts.
+- **Data-sized**: the code does not fix the sizes the cost depends on (the loop's and the
+  container's) at 16 or fewer. Open: a size heki cannot bound counts as data-sized.
 
 ## Why is this bad?
 Each call scans the list from the start (and `remove()` also shifts the elements after the
