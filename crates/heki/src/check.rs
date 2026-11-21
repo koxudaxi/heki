@@ -6,10 +6,10 @@ use crate::{CheckArgs, OutputFormat, SnapshotArgs};
 use anyhow::{Context, Result, bail};
 use heki_ast::LineIndex;
 use heki_diagnostics::{
-    BASELINE_VERSION, CountUnit, Diagnostic, RatchetBaseline, baseline_counts, fix_python_source,
-    github_escape, path_text, render, unified_diff,
+    BASELINE_VERSION, CountUnit, Diagnostic, FileFailure, RatchetBaseline, baseline_counts,
+    fix_python_source, github_escape, path_text, render, unified_diff,
 };
-use heki_effect::{ProjectIndex, analyze_project, analyze_project_for, func_qualname};
+use heki_effect::{OptInFacts, ProjectIndex, TypedWrites, analyze_project_for, func_qualname};
 use heki_profile::{HotFunctions, ProfileData, ProfiledFunction};
 use heki_rules::project::{
     FileError, ParsedFile, Project, ProjectOptions, canonical, retain_unsuppressed,
@@ -120,6 +120,7 @@ fn analyze(
     let project = Project::load(&ProjectOptions {
         paths: &args.paths,
         config: args.config.as_deref(),
+        working_dir: None,
         target_version: args.target_version.as_deref(),
         overrides,
     })?;
@@ -130,7 +131,14 @@ fn analyze(
     let contracts = heki_rules::summary_contracts(&env.cfg)?;
     let typed_writes = heki_rules::typed_writes(&env.cfg, &selection);
     let opt_in = heki_rules::opt_in_facts(&selection);
-    let index = analyze_project_for(&inputs, &env.kb, contracts, typed_writes, opt_in);
+    let index = analyze_project_for(
+        &inputs,
+        &project.unread,
+        &env.kb,
+        contracts,
+        typed_writes,
+        opt_in,
+    );
     let units = project.units();
     let extras = CheckExtras {
         soundness_kb: &env.soundness_kb,
@@ -213,6 +221,20 @@ pub(crate) fn shown_errors<'a>(errors: impl IntoIterator<Item = &'a FileError>) 
         .collect()
 }
 
+/// File errors as SARIF output carries them, with the paths `heki check` prints.
+pub(crate) fn shown_failures<'a>(
+    errors: impl IntoIterator<Item = &'a FileError>,
+) -> Vec<FileFailure> {
+    errors
+        .into_iter()
+        .map(|e| FileFailure {
+            path: shown_path(&e.path),
+            position: e.position,
+            message: e.message.clone(),
+        })
+        .collect()
+}
+
 /// What `--fix` / `--diff` would do.
 struct FixRun {
     fixes: usize,
@@ -288,6 +310,18 @@ fn fix_in_memory(args: &CheckArgs, hot: Option<&ProfileData>) -> Result<FixRun> 
 }
 
 pub(crate) fn run(args: &CheckArgs) -> Result<ExitCode> {
+    let Some(path) = &args.walk_steps else {
+        return run_check(args);
+    };
+    heki_ir::walk::record_steps();
+    let code = run_check(args)?;
+    let steps = serde_json::to_string_pretty(&heki_ir::walk::recorded_steps())?;
+    std::fs::write(path, steps + "\n")
+        .with_context(|| format!("cannot write `{}`", path.display()))?;
+    Ok(code)
+}
+
+fn run_check(args: &CheckArgs) -> Result<ExitCode> {
     let hot = args
         .profile
         .as_deref()
@@ -481,15 +515,25 @@ pub(crate) fn report(
         .iter()
         .map(|p| (shown_path(&p.path), (p, LineIndex::from_source(&p.source))))
         .collect();
-    let source_line = |p: &Path, line: u32| {
-        by_shown
-            .get(p)
-            .and_then(|(f, lines)| lines.line_text(&f.source, line))
-            .map(str::to_owned)
+    // A file that did not parse is read again for the line of its syntax error.
+    let source_line = |p: &Path, line: u32| match by_shown.get(p) {
+        Some((f, lines)) => lines.line_text(&f.source, line).map(str::to_owned),
+        None => {
+            let text = heki_ast::read_source(p).ok()?;
+            LineIndex::from_source(&text)
+                .line_text(&text, line)
+                .map(str::to_owned)
+        }
     };
+    let failures = shown_failures(&project.errors);
     print!(
         "{}",
-        render(&diags, format_of(args.output_format), &source_line)
+        render(
+            &diags,
+            &failures,
+            format_of(args.output_format),
+            &source_line
+        )
     );
     if matches!(
         args.output_format,
@@ -519,11 +563,19 @@ pub(crate) fn run_snapshot(args: &SnapshotArgs) -> Result<ExitCode> {
     let project = Project::load(&ProjectOptions {
         paths: &paths,
         config: args.config.as_deref(),
+        working_dir: None,
         target_version: args.target_version.as_deref(),
         overrides: None,
     })?;
     let inputs = project.inputs();
-    let index = analyze_project(&inputs, &project.env.kb);
+    let index = analyze_project_for(
+        &inputs,
+        &project.unread,
+        &project.env.kb,
+        None,
+        TypedWrites::Propagated,
+        OptInFacts::ALL,
+    );
     let units = project.units();
     let snap = SummarySnapshot::build(&units, &index);
     if args.write {

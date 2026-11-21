@@ -144,6 +144,13 @@ A Soundness-lane rewrite preserves meaning when these four agree before and afte
 of allocations, reference counts, the values of `id()`, traceback line numbers, and the message
 strings of built-in exceptions (their types are preserved).
 
+**Observed, although the language leaves it open**: the iteration order of a `set`. CPython fixes
+it for given elements and history (an `int` hashes to itself in every run), and whatever
+iterates, converts, formats, or returns the set shows it. Copying a set into a new table
+(`s | t`) and growing its table in place (`s |= t`) can order the same elements differently, so a
+rewrite from one to the other proves that nothing observes the order (`SetOrderUnobserved`). A
+dict iterates in insertion order, which both keep.
+
 ### 3.2 Assumptions (A1–A5)
 
 | ID | Name | Content | How heki treats it |
@@ -273,6 +280,11 @@ resolution (`heki_semantic`); then an SSA-CFG IR is built for every function.
   through the declarations (`ModuleDecls.small_globals`, `ClassDecl.attr_displays`).
 - **Original byte spans**: fixes are produced as minimal `TextEdit`s, never by regenerating code
   from the IR, so formatting and comments survive.
+- **Bounded walks in one home** (`heki_ir::walk`): the engines every analysis walk goes through
+  (`Memo`, `Closure`, `reach`, `fixpoint`, and `SharedMemo` over the declarations), a step
+  `Budget` per owner, the tables of one function (`FnShape`), and `Answer` (`Known | Open`),
+  heki's one type for an answer that is established or unknown. Their memos live in their owner
+  for one analysis, never in `ProjectIndex`, which stays `Sync` (ADR-017).
 
 ### 4.2 Advisory / Effect lane (`heki_effect`): families 1 and 2
 
@@ -505,7 +517,7 @@ single-expression lints.)*
 | Rule ID | Default | Pattern → rewrite | Profitability | `heki check --fix` | Main safety obligations / profitability conditions |
 |---|---|---|---|---|---|
 | **OPT101** | Off (heuristic) | `x = x + [e]`, `x = x + [e1, *it]` (a list display on the right) → `x.append(e)` / `x.extend([...])` | `unconditional` | **Applied (when `safe`)** | Safety: `Unique(x)`, `ExclusiveAccessAtWrite(x)` (every alias and derived reference dead), `ExactType(x / rhs, list)`, `ExceptionStateSafe`, `EvalOrderPreserved` / Profit: `LoopCarried(x)` |
-| **OPT102** | Off (heuristic) | `s = s \| {e}`, `d = {**d, k: v}`, `d = {**d, **other}` → `s.add(e)`, `d[k] = v`, `d.update(other)` | `unconditional` | **Applied (when `safe`)** | Safety: as above (dict views and iterators dead; **the accumulated dict `d` comes first: `{**other, **d}` would reverse the override order**, `DictUnpackLeading`) / Profit: `LoopCarried` |
+| **OPT102** | Off (heuristic) | `s = s \| {e}`, `d = {**d, k: v}`, `d = {**d, **other}` → `s \|= {e}`, `d[k] = v`, `d.update(other)` | `unconditional` | **Applied (when `safe`)** | Safety: as above (dict views and iterators dead; **the accumulated dict `d` comes first: `{**other, **d}` would reverse the override order**, `DictUnpackLeading`; **the set is only tested afterwards, with `in`, `len`, truthiness, or `==`, since growing it in place can change its iteration order**, `SetOrderUnobserved`) / Profit: `LoopCarried` |
 | **OPT103** | Off (heuristic) | Quadratic accumulation of immutable values (`tuple +=`, `bytes +=`, `self.s +=`, ...) → a buffer and one final conversion | `size-dependent` | Suggestion only | Safety: `Unique`, `ExclusiveAccessAtWrite`, `ExactType(lhs / rhs)`, no intermediate reads (`NoIntermediateReads`), `ExceptionStateSafe` / Profit: `LoopCarried`, `NotConstSmall` (local `s += x` excluded: CPython already appends in place) |
 | **OPT110** | Off (heuristic) | `e in lst` in a loop → a `set` built before the loop | `size-dependent` | With `--include-size-dependent` | Safety: `ValueLoopInvariant(lst)`, `ExactType(lst, list \| tuple)`, hash-consistent builtin elements (`HashConsistentProbe`), `ZeroTripExceptionSafe` / Profit: `NotConstSmall(lst)` |
 | **OPT111** | Off (heuristic) | `if v not in seen: seen.append(v)` in a loop → an auxiliary `set` | `size-dependent` | With `--include-size-dependent` | Safety: `Unique(seen)`, `ExclusiveAccessAtWrite`, `ExactType(seen, list)`, hash-consistent builtin elements, no removals (`OnlyPairedAppends`) / Profit: `NotConstSmall` |
@@ -639,8 +651,9 @@ heki/
   that only moved; those positions are re-propagated into the callers' summaries without changing
   facts. Files changed on disk and configuration changes are followed.
   `crates/heki/tests/lsp_oracle.rs` compares the server with `heki check` after every step of an
-  editing session (112 steps, and a second session of 20 steps over file, layout, buffer, and
-  baseline changes).
+  editing session (206 steps, a second session of 28 steps over file, layout, source root,
+  buffer, and baseline changes, and a third of 3 steps in a project below a Git working tree
+  without a configuration file).
   Measured on datamodel-code-generator: p90 of about 45 ms per file edit.
 - **LSP features**: the call chains of `EFF101` / `MUT201` and others, and each diagnostic's
   help, are `DiagnosticRelatedInformation`; `OPT101` / `OPT102` are quick fixes and the proven
@@ -676,6 +689,7 @@ heki assumptions [PATHS...]                   # list the A1 violations of a proj
 [tool.heki]
 target-version = "py312"             # default: inferred from project.requires-python
 extend-exclude = ["generated"]       # .gitignore and .hekiignore are honored
+src = ["src", "lib"]                 # source roots (default: src/, python/, <project-name>/ as ty detects them)
 baseline = "heki-baseline.toml"      # optional Ratchet baseline
 
 [tool.heki.lint]
