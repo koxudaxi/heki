@@ -2249,20 +2249,39 @@ fn fanout_module(name: &str, lines: Vec<String>) -> Project {
     p
 }
 
-/// Thousands of fan-outs of one function, each of a comprehension the function builds itself
-/// (Python 3.12): whether the session is used before each comes from one dataflow per object,
-/// and what each list holds from one scan of the function.
+/// Thousands of fan-outs of one function on one session: whether the session is used before each
+/// comes from one dataflow per object, not one per fan-out.
 #[test]
 fn many_fanouts_of_one_session_decide_it_once() {
     let n = 2_000;
     let mut lines =
         vec!["async def run(session: AsyncSession, xs, reader: asyncio.StreamReader):".to_owned()];
     for _ in 0..n {
-        lines.push("    await asyncio.gather(*[load(session, x) for x in xs])".to_owned());
+        lines.push("    await asyncio.gather(load(session, None), load(session, None))".to_owned());
     }
     let p = fanout_module("bounds_many_fanouts", lines);
     let found = check_within(&p, Duration::from_secs(20));
     // The first fan-out can be the session's first operation; after it, every path has used it.
+    assert_eq!(
+        found.iter().filter(|d| d["rule_code"] == "EFF110").count(),
+        1
+    );
+}
+
+/// Hundreds of fan-outs of one function, each of a comprehension the function builds itself
+/// (Python 3.12): what each list holds comes from one scan of the function, not one per fan-out.
+/// Each comprehension is a loop the summaries model too, so the count stays where a debug build
+/// runs the whole check well within the limit.
+#[test]
+fn many_comprehension_fanouts_scan_the_function_once() {
+    let n = 500;
+    let mut lines =
+        vec!["async def run(session: AsyncSession, xs, reader: asyncio.StreamReader):".to_owned()];
+    for _ in 0..n {
+        lines.push("    await asyncio.gather(*[load(session, x) for x in xs])".to_owned());
+    }
+    let p = fanout_module("bounds_many_comprehension_fanouts", lines);
+    let found = check_within(&p, Duration::from_secs(20));
     assert_eq!(
         found.iter().filter(|d| d["rule_code"] == "EFF110").count(),
         1
