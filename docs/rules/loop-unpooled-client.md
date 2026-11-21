@@ -33,7 +33,21 @@ grows, a tuple whatever other code does with it short of rebinding it, and throu
 most 16 steps (`range(ATTEMPTS - 1)`), what a builtin constructor, a comprehension, or a fixed
 loop of `append`s makes of those (`list(range(7))`, `[n.upper() for n in ("a", "b")]`), slices
 with a constant bound (`for case in cases[:3]`), iterables a length test on every path to the
-loop caps (`if len(cases) > 3: raise ...`), retry loops, and daemon polling loops.
+loop caps (`if len(cases) > 3: raise ...`), a `while` loop over a counter the code starts,
+steps, and limits with constants (`i = 1` ... `while i < 6:` ... `i += 1`, at most 16 times),
+retry loops, and daemon polling loops.
+
+A retry loop repeats one attempt: its body leaves the loop on success or sleeps in an exception
+handler, and it runs over a small constant range or a target named like `attempt` / `retry`
+(also one name of a tuple target: `for attempt, proxy in enumerate(proxies)`). A loop that
+waits on every path back to its test is paced by time, as polls and retries are: a `while` loop,
+or a `for` loop whose body never reads its target (`for _ in range(30):`), in which every
+iteration sleeps or waits with a timeout (`time.sleep(5)`, `stop.wait(1)`, in a coroutine
+`await asyncio.sleep(5)`; `sleep(0)` only yields, and a sleep an exception can skip or a
+coroutine does not await does not count). A daemon polling loop runs until a
+flag or an event says to stop (`while self._running:`, `while not self._stopped:`, `while not
+stop_event.is_set():`), or is a `while True:` loop that waits on every iteration. A `for` loop
+reading its target steps through items, also when it sleeps per item.
 
 A client that is only created while an attribute is unset, which the code then sets (lazy
 initialization: `if not self._sock: self._sock = connect()`, or `if self._sock: return`

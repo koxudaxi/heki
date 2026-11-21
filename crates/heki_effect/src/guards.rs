@@ -778,7 +778,7 @@ impl<'a> GuardInputs<'_, 'a> {
         self.defs.get(&v).map(|i| &i.kind)
     }
 
-    fn phi(&self, v: VarId) -> Option<(BlockId, &'a PhiNode)> {
+    pub(crate) fn phi(&self, v: VarId) -> Option<(BlockId, &'a PhiNode)> {
         self.phis
             .get_or_init(|| {
                 let mut phis = FxHashMap::default();

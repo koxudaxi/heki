@@ -1247,6 +1247,45 @@ fn file_metadata_and_name_lookups_block() {
     );
 }
 
+#[test]
+fn a_numeric_host_is_parsed_not_resolved() {
+    // `AI_NUMERICHOST` (alone, through a local, or among other flags) never asks a resolver.
+    assert_eq!(
+        check(
+            "cat_numeric_host",
+            "app.py",
+            r#"import socket
+
+
+def parse(ip, port):
+    flags = socket.AI_NUMERICHOST
+    return socket.getaddrinfo(ip, port, flags=flags)
+
+
+def parse_stream(ip):
+    return socket.getaddrinfo(ip, 0, socket.AF_UNSPEC, socket.SOCK_STREAM, 0, socket.AI_NUMERICHOST)
+
+
+def parse_passive(ip):
+    return socket.getaddrinfo(ip, 0, flags=socket.AI_PASSIVE | socket.AI_NUMERICHOST)
+
+
+def resolve(host):
+    return socket.getaddrinfo(host, 0, flags=socket.AI_PASSIVE)
+
+
+async def handler(host, ip):
+    parse(ip, 0)
+    parse_stream(ip)
+    parse_passive(ip)
+    resolve(host)
+"#,
+            "EFF101",
+        ),
+        vec![d(25, "EFF101", "handler", "socket.getaddrinfo")]
+    );
+}
+
 const OVERRIDES: &str = r#"
 [[tool.heki.ecosystem]]
 symbol = "sqlite3.connect"

@@ -239,6 +239,9 @@ pub struct ArgCase {
     pub nonempty: bool,
     /// An instance of one of these classes.
     pub instance_of: Vec<String>,
+    /// An integer that sets one of these named flags: the flag itself, or a `|` with it as an
+    /// operand (`socket.AI_PASSIVE | socket.AI_NUMERICHOST`).
+    pub flag: Vec<String>,
     pub effects: Option<Vec<ExecEffectKind>>,
     pub return_type: Option<String>,
 }
@@ -257,6 +260,9 @@ pub struct ArgFact {
     pub literal: Option<LiteralValue>,
     /// The class of the value, when it is an instance of a known one.
     pub class: Option<String>,
+    /// The named constants the value sets with `|` (one name alone sets itself): each flag is
+    /// set whatever the other operands are.
+    pub flags: Vec<String>,
 }
 
 /// A constant argument.
@@ -289,7 +295,8 @@ impl ArgCase {
                 .class
                 .as_ref()
                 .is_some_and(|c| self.instance_of.contains(c));
-        equals && prefix && nonempty && instance
+        let flag = self.flag.is_empty() || fact.flags.iter().any(|f| self.flag.contains(f));
+        equals && prefix && nonempty && instance && flag
     }
 }
 
@@ -1005,8 +1012,22 @@ mod tests {
                 entry(&[BlockingFs]),
             ),
             (
-                with_prefix("socket", &["getaddrinfo", "gethostbyname", "getfqdn"]),
+                with_prefix("socket", &["gethostbyname", "getfqdn"]),
                 entry(&[BlockingNet]),
+            ),
+            // A numeric host is parsed, never resolved.
+            (
+                s(&["socket.getaddrinfo"]),
+                with_cases(
+                    vec![ArgCase {
+                        arg: Some(5),
+                        param: Some("flags".into()),
+                        flag: s(&["socket.AI_NUMERICHOST", "socket.AddressInfo.AI_NUMERICHOST"]),
+                        effects: Some(Vec::new()),
+                        ..ArgCase::default()
+                    }],
+                    entry(&[BlockingNet]),
+                ),
             ),
             (
                 with_prefix("asyncio", &["StreamWriter.write", "sleep", "wait_for"]),
@@ -2041,7 +2062,8 @@ mod tests {
                     case.equals.is_some()
                         || !case.prefix.is_empty()
                         || case.nonempty
-                        || !case.instance_of.is_empty(),
+                        || !case.instance_of.is_empty()
+                        || !case.flag.is_empty(),
                     "{symbol}"
                 );
                 assert!(
@@ -2154,14 +2176,14 @@ mod tests {
     /// A case holds when the argument passes every test it sets; the first case that holds
     /// decides the effects and the return type, and an unknown argument selects none.
     #[test]
-    fn argument_cases_select_by_literal_prefix_and_class() {
+    fn argument_cases_select_by_literal_prefix_class_and_flag() {
         let lit = |v: LiteralValue| ArgFact {
             literal: Some(v),
-            class: None,
+            ..ArgFact::default()
         };
         let inst = |c: &str| ArgFact {
-            literal: None,
             class: Some(c.into()),
+            ..ArgFact::default()
         };
         let off = ArgCase {
             arg: Some(0),
@@ -2194,6 +2216,17 @@ mod tests {
             effects: Some(Vec::new()),
             ..ArgCase::default()
         };
+        let numeric = ArgCase {
+            arg: Some(5),
+            param: Some("flags".into()),
+            flag: s(&["socket.AI_NUMERICHOST"]),
+            effects: Some(Vec::new()),
+            ..ArgCase::default()
+        };
+        let flags = |names: &[&str]| ArgFact {
+            flags: s(names),
+            ..ArgFact::default()
+        };
         for (case, fact, holds) in [
             (&off, lit(LiteralValue::Int(0)), true),
             (&off, lit(LiteralValue::Float(0.0)), true),
@@ -2209,6 +2242,14 @@ mod tests {
             (&named, lit(LiteralValue::Str(String::new())), false),
             (&buffer, inst("io.StringIO"), true),
             (&buffer, inst("io.BytesIO"), false),
+            (&numeric, flags(&["socket.AI_NUMERICHOST"]), true),
+            (
+                &numeric,
+                flags(&["socket.AI_PASSIVE", "socket.AI_NUMERICHOST"]),
+                true,
+            ),
+            (&numeric, flags(&["socket.AI_PASSIVE"]), false),
+            (&numeric, lit(LiteralValue::Int(4)), false),
         ] {
             assert_eq!(case.holds(&fact), holds, "{case:?} {fact:?}");
         }

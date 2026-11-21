@@ -409,6 +409,47 @@ fn waits_on_a_future_look_up_the_awaits_before_them_once() {
     }
 }
 
+/// A statement rebuilt `steps` times, each time one of two ways, then run; and a flag set
+/// through `steps` assignments each `|` of the one before with itself.
+fn rebuilt_statement_and_flags(steps: usize) -> String {
+    let mut lines = vec![
+        "import socket".to_owned(),
+        "import sqlite3".to_owned(),
+        String::new(),
+        String::new(),
+        "def migrate(conn: sqlite3.Connection, ids, flag):".to_owned(),
+        "    sql = \"CREATE TABLE t (x)\"".to_owned(),
+    ];
+    for _ in 0..steps {
+        lines.push("    sql = sql.upper() if flag else sql.lower()".to_owned());
+    }
+    lines.push("    for i in ids:".to_owned());
+    lines.push("        conn.execute(sql)".to_owned());
+    lines.extend(["".to_owned(), "".to_owned()]);
+    lines.push("async def resolve(ip):".to_owned());
+    lines.push("    f0 = socket.AI_NUMERICHOST".to_owned());
+    for i in 1..=steps {
+        lines.push(format!("    f{i} = f{} | f{}", i - 1, i - 1));
+    }
+    lines.push(format!(
+        "    return socket.getaddrinfo(ip, 0, flags=f{steps})"
+    ));
+    lines.join("\n") + "\n"
+}
+
+/// The DDL walk decides each value once, and the flags of an argument visit each value once:
+/// both are linear in the steps, not exponential.
+#[test]
+fn statements_and_flags_rebuilt_from_shared_values_are_decided_once() {
+    for steps in [4, 40] {
+        let p = Project::new(&format!("bounds_rebuilt_{steps}"));
+        p.write("m.py", &rebuilt_statement_and_flags(steps));
+        let diags = check_within(&p, Duration::from_secs(20));
+        // The statement stays DDL and the host numeric.
+        assert!(diags.is_empty(), "{diags:#?}");
+    }
+}
+
 /// Task factories at the end of a long chain of copies of one coroutine (`EFF107`): what each
 /// call's argument is, and the values its task reaches, are indexed once per function instead of
 /// searched once per call.
@@ -565,4 +606,36 @@ fn callables_past_the_partial_and_copy_bounds_are_not_followed() {
     assert_eq!(queries(3, 3), 1);
     assert_eq!(queries(30, 3), 0);
     assert_eq!(queries(3, 30), 0);
+}
+
+/// A string constant of `bytes` bytes and `aliases` names bound one to the next, the last run
+/// as a statement in a loop.
+fn aliased_schema(bytes: usize, aliases: usize) -> String {
+    let mut lines = vec![
+        "import sqlite3".to_owned(),
+        String::new(),
+        format!("S0 = \"CREATE TABLE t (x{})\"", "x".repeat(bytes)),
+    ];
+    for i in 1..=aliases {
+        lines.push(format!("S{i} = S{}", i - 1));
+    }
+    lines.extend([
+        String::new(),
+        String::new(),
+        "def setup(conn: sqlite3.Connection, rows):".to_owned(),
+        "    for row in rows:".to_owned(),
+        format!("        conn.execute(S{aliases})"),
+    ]);
+    lines.join("\n") + "\n"
+}
+
+/// The module's string constants keep one copy of each text, however many names alias it: a
+/// 1 MiB schema with 1,000 aliases is no gigabyte of copies.
+#[test]
+fn aliases_of_a_large_string_constant_share_its_text() {
+    let p = Project::new("bounds_aliased_schema");
+    p.write("m.py", &aliased_schema(1 << 20, 1000));
+    // The statement is DDL: no query runs per row.
+    let diags = check_within(&p, Duration::from_secs(20));
+    assert!(diags.is_empty(), "{diags:#?}");
 }

@@ -356,6 +356,10 @@ const QUEUE_FEEDER: &str =
     "from pkg import queue_cfg\n\n\ndef peek():\n    return len(queue_cfg.QUEUE)\n";
 const QUEUE_FEEDER_GROWING: &str =
     "from pkg import queue_cfg\n\n\ndef feed(items):\n    queue_cfg.QUEUE.extend(items)\n";
+const SCHEMA: &str = "import sqlite3\n\nSQL = \"CREATE TABLE t (x)\"\n\n\ndef setup(conn: sqlite3.Connection, rows):\n    for row in rows:\n        conn.execute(SQL)\n";
+const SCHEMA_READER: &str = "from pkg import schema\n\n\ndef peek():\n    return schema.SQL\n";
+const SCHEMA_REBINDING: &str =
+    "from pkg import schema\n\n\ndef reconfigure():\n    schema.SQL = \"SELECT 1\"\n";
 const QUEUE_READER: &str = "import httpx\n\nfrom pkg.queue_cfg import QUEUE\n\n\ndef each():\n    for item in QUEUE:\n        httpx.Client()\n";
 const QUEUE_MAPPER: &str = "import httpx\n\nfrom pkg.queue_cfg import QUEUE\n\n\ndef each():\n    return list(map(lambda item: httpx.Client(), QUEUE))\n";
 const LEVELS_USER: &str = "from pkg.levels import LEVELS\n\n\ndef ranks(xs):\n    out = []\n    for x in xs:\n        out.append(LEVELS.index(x))\n    return out\n";
@@ -523,6 +527,8 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/queue_cfg.py", QUEUE_CFG),
         ("pkg/queue_feeder.py", QUEUE_FEEDER),
         ("pkg/queue_reader.py", QUEUE_READER),
+        ("pkg/schema.py", SCHEMA),
+        ("pkg/schema_reader.py", SCHEMA_READER),
         ("pkg/queue_mapper.py", QUEUE_MAPPER),
         ("pkg/sniff.py", SNIFF),
         ("pkg/sniff_more.py", SNIFF_MORE),
@@ -1104,6 +1110,18 @@ fn steps_small_displays() -> Vec<Step> {
             ("pkg/queue_reader.py", "EFF102"),
             ("pkg/queue_mapper.py", "EFF102"),
         ]),
+        // `ModuleDecls::rebound_globals`: a DDL constant is a query statement no longer once
+        // another module rebinds it, and DDL again once that module only reads it.
+        Step::new(
+            "another module rebinds a module's DDL constant",
+            vec![save("pkg/schema_reader.py", SCHEMA_REBINDING)],
+        )
+        .present(&[("pkg/schema.py", "EFF103")]),
+        Step::new(
+            "it only reads the constant again",
+            vec![save("pkg/schema_reader.py", SCHEMA_READER)],
+        )
+        .absent(&[("pkg/schema.py", "EFF103")]),
     ]
 }
 

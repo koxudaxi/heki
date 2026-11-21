@@ -15,7 +15,7 @@ use crate::types::{Args, Elem, Generic, Ty, generic, typing_generic};
 use crate::{FuncKey, ModuleInput};
 use heki_ast::Span;
 use heki_ir::{
-    BlockId, ConstLiteral, FnIndex, FunctionKind, Inst, InstKind, IrFunction, ModuleIr,
+    BinOpKind, BlockId, ConstLiteral, FnIndex, FunctionKind, Inst, InstKind, IrFunction, ModuleIr,
     SmallDisplay, VarId,
 };
 use heki_kb::{ArgFact, EffectiveEcosystemKb, ExecEffectKind, LiteralValue};
@@ -3024,16 +3024,53 @@ pub(crate) fn literal<'i>(
     }
 }
 
-/// [`ArgFact`] of `var`: its constant, and the class `class_of` gives it.
+/// [`ArgFact`] of `var`: its constant, the class `class_of` gives it, and the flags it sets
+/// through the named objects `name_of` gives its operands.
 pub(crate) fn arg_fact<'i>(
     def: impl Fn(VarId) -> Option<&'i Inst>,
     class_of: impl Fn(VarId) -> Option<String>,
+    name_of: impl Fn(VarId) -> Option<String>,
     var: VarId,
 ) -> ArgFact {
     ArgFact {
-        literal: literal(def, var),
+        literal: literal(&def, var),
         class: class_of(var),
+        flags: set_flags(&def, &name_of, var),
     }
+}
+
+/// The named objects `var` sets with `|` (`ArgFact::flags`), through copies. Each value is
+/// visited once: `f1 = f0 | f0` shares its operands.
+fn set_flags<'i>(
+    def: &impl Fn(VarId) -> Option<&'i Inst>,
+    name_of: &impl Fn(VarId) -> Option<String>,
+    var: VarId,
+) -> Vec<String> {
+    let mut flags: Vec<String> = Vec::new();
+    let mut seen: FxHashSet<VarId> = FxHashSet::default();
+    let mut stack = vec![var];
+    while let Some(v) = stack.pop() {
+        if !seen.insert(v) {
+            continue;
+        }
+        match def(v).map(|i| &i.kind) {
+            Some(InstKind::Copy { src, .. }) => stack.push(*src),
+            Some(InstKind::BinOp {
+                op: BinOpKind::BitOr,
+                lhs,
+                rhs,
+                ..
+            }) => stack.extend([*lhs, *rhs]),
+            _ => {
+                if let Some(name) = name_of(v)
+                    && !flags.contains(&name)
+                {
+                    flags.push(name);
+                }
+            }
+        }
+    }
+    flags
 }
 
 /// Inferred value of an SSA variable.

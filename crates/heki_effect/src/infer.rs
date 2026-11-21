@@ -866,7 +866,17 @@ impl<'e, 'a> Engine<'e, 'a> {
             call.kwargs,
             call.star_from,
             (index, keyword),
-            |v| resolver::arg_fact(|d| self.f.def_inst(d).map(|(_, i)| i), class, v),
+            |v| {
+                resolver::arg_fact(
+                    |d| self.f.def_inst(d).map(|(_, i)| i),
+                    class,
+                    |n| match self.need(n).ok().flatten()? {
+                        Ty::Ref(fqn) => Some(fqn.clone()),
+                        _ => None,
+                    },
+                    v,
+                )
+            },
         )
     }
 

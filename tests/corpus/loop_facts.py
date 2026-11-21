@@ -233,6 +233,215 @@ def drained_active(active_users):
         active_users.pop()
 
 
+def counted_up(get):
+    i = 1
+    while i < 6:
+        try:
+            return get()
+        except OSError:
+            pass
+        i += 1
+
+
+def counted_inclusive():
+    i = 0
+    while i <= 10:
+        i += 2
+
+
+def counted_down():
+    tries = 3
+    while tries:
+        tries -= 1
+
+
+def counted_mirrored():
+    n = 10
+    while 0 < n:
+        n -= 3
+
+
+def counted_down_inclusive():
+    n = 3
+    while n >= 0:
+        n -= 1
+
+
+def counted_once():
+    i = 0
+    while i == 0:
+        i = 1 + i
+
+
+def counted_down_strict():
+    n = 5
+    while n > 2:
+        n -= 1
+
+
+def counter_tested_by_identity():
+    i = 0
+    while i is not 3:
+        i += 1
+
+
+def counter_doubled():
+    i = 1
+    while i < 9:
+        i = i * 2
+
+
+def counter_steps_differ(c):
+    i = 0
+    while i < 9:
+        if c():
+            i += 1
+            continue
+        i += 2
+
+
+def counter_merged_before(c):
+    if c:
+        i = 1
+    else:
+        i = 2
+    while i < 3:
+        c()
+
+
+def counted_past_small():
+    i = 0
+    while i < 100:
+        i += 1
+
+
+def counter_skipped(skip):
+    i = 0
+    while i < 3:
+        if skip():
+            continue
+        i += 1
+
+
+def counter_from_parameter(start):
+    while start < 3:
+        start += 1
+
+
+def countdown_past_zero():
+    n = 5
+    while n:
+        n -= 2
+
+
+def paced_until(done, time):
+    while not done():
+        time.sleep(5)
+
+
+def paced_attempts(get, sleep):
+    for _ in range(30):
+        try:
+            if get():
+                break
+        except OSError:
+            pass
+        sleep(1)
+
+
+def paced_forever(get, time):
+    while True:
+        if get():
+            break
+        time.sleep(15)
+
+
+def paced_by_timed_wait(stop, get):
+    while True:
+        get()
+        stop.wait(0.5)
+
+
+def paced_by_timeout(stop, get, delay):
+    while True:
+        get()
+        stop.wait(timeout=delay)
+
+
+def zero_timeout(stop, get):
+    while True:
+        get()
+        stop.wait(timeout=0)
+
+
+async def paced_by_awaited_sleep(get, asyncio):
+    while True:
+        get()
+        await asyncio.sleep(1)
+
+
+async def sleep_only_scheduled(get, asyncio):
+    while True:
+        get()
+        asyncio.create_task(asyncio.sleep(1))
+
+
+def paced_by_computed_delay(get, time, delay):
+    while not get():
+        time.sleep(delay)
+
+
+def paced_over_items(items, get, time):
+    for item in items:
+        get(item)
+        time.sleep(1)
+
+
+def sleeps_on_one_path(get, time):
+    while True:
+        if get():
+            continue
+        time.sleep(1)
+
+
+def sleeps_after_a_raise(get, time):
+    while True:
+        try:
+            get()
+            time.sleep(1)
+        except OSError:
+            pass
+
+
+def zero_sleep(get, asyncio):
+    while True:
+        get()
+        asyncio.sleep(0)
+
+
+def waits_for_tasks(get, asyncio, tasks):
+    while True:
+        get()
+        asyncio.wait(tasks)
+
+
+def unpacked_targets(get, rows, holder):
+    for first, *rest in rows:
+        get(rest)
+        sleep(1)
+    for holder.current in rows:
+        get()
+        sleep(1)
+
+
+def attempt_in_a_tuple(get, proxies):
+    for attempt, proxy in enumerate(proxies):
+        try:
+            return get(proxy)
+        except OSError:
+            pass
+
+
 class Worker:
     def serve(self):
         while self._isRunning:
@@ -240,4 +449,12 @@ class Worker:
 
     def until_shutdown(self):
         while not self.shutdown_requested:
+            pass
+
+    def until_stop_event(self):
+        while not self._stop_event.is_set():
+            pass
+
+    def until_ready_event(self):
+        while not self.ready.is_set():
             pass
