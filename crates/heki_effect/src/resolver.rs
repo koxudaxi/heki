@@ -415,9 +415,9 @@ pub struct FunctionDecl {
     /// default a default too, so these are the positional parameters without one.
     pub required_positional: u8,
     /// The keyword-only parameters without a default, one bit each from the first keyword-only
-    /// parameter (`positional_params`) on; past the 32nd none counts (a mask, not a list: every
+    /// parameter (`positional_params`) on; past the 8th none counts (one byte, not a list: every
     /// declaration of the project keeps it).
-    pub required_keyword_only: u32,
+    pub required_keyword_only: u8,
     /// How many leading parameters have a name a keyword can give (all but `*args` /
     /// `**kwargs`, which come last); a keyword binds those past the positional-only ones
     /// ([`Self::keyword_param`]).
@@ -3596,7 +3596,7 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
                 .params
                 .iter()
                 .filter(|p| p.kw_only)
-                .take(32)
+                .take(8)
                 .enumerate()
                 .filter(|(_, p)| !p.has_default)
                 .fold(0, |mask, (j, _)| mask | 1 << j),

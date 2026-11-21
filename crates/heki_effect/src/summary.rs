@@ -6317,7 +6317,7 @@ impl Bindings<'_> {
         let first_keyword_only = usize::from(decl.positional_params);
         let keyword_only = |p: usize| {
             p.checked_sub(first_keyword_only)
-                .is_some_and(|j| j < 32 && decl.required_keyword_only >> j & 1 == 1)
+                .is_some_and(|j| j < 8 && decl.required_keyword_only >> j & 1 == 1)
         };
         // The receiver and the positions bind the leading parameters, the keywords the others.
         let (mut bound, mut bound_keyword_only) = (passed.min(required), 0);
