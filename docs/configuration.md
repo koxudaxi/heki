@@ -174,6 +174,13 @@ Contracts declare what no type can say. Each kind is an array of tables with its
 - Every name in a contract is a dotted pattern. It matches the full name or any dotted suffix
   (`DataModel.fields` matches `pkg.model.DataModel.fields`, not `pkg.BigModel.fields`), and it
   may be a glob (`*`, `?`, `[...]`, `{a,b}`).
+- A glob's `*` spans dots (`pkg.parser.*` covers the functions of every module under
+  `pkg.parser`), except in the last segment of a target, which names the attribute, function,
+  method, or class: `pkg.*._*` names the private members of everything in `pkg`, and no function
+  of a private module whose own name is public; `pkg.api_*` names `pkg.api_commit`, not
+  `pkg.api_helpers.api_reset`.
+- A report of a glob target names the member it matched (`reads
+  `pkg.types.DataType._flag``); one report standing for several members lists the others.
 - A `Class.attr` target covers the subclasses of the class too.
 - A contract heki cannot use is a configuration error: a target that is not `Class.attr`, an
   invalid glob, or an unknown value of `forbid`, `fresh-objects`, or `unresolved`.

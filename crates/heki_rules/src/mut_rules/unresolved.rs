@@ -257,7 +257,7 @@ fn add<'u>(
         unit,
         key,
         span,
-        target,
+        (target, target),
         (key.fqn(), span),
         note,
         message,

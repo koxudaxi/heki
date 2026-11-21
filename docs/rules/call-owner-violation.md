@@ -25,6 +25,11 @@ the allowed callers and resolves to a target:
   `cls(...)` in a class method), also for a dataclass or another class without an `__init__` of
   its own.
 
+A target's last segment names the function, method, or class: a glob there matches within that
+name only (`pkg.*._*` is every private member in `pkg`, not every function of a private module,
+and `pkg.api_*` is `pkg.api_commit`, not `pkg.api_helpers.api_reset`), and the report names the
+function the call reaches.
+
 A call is reported only when every function it may call is a target: when the receiver's class
 hierarchy also offers a method that is no target (a receiver typed with a base class whose own
 `replace_reference` is not guarded), the call is not reported. The functions it may call can be

@@ -72,6 +72,8 @@ pub(crate) fn run(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) -> Result<()
                 // diagnostic target names the contract: two contracts announcing one write are
                 // two reports, and two baseline entries.
                 let report_target = format!("{}:{target}", rule.name);
+                let named =
+                    super::matched_name(&target, || format!("{}.{}", u.class_qualname, u.attr));
                 let writer = u
                     .via_chain
                     .last()
@@ -85,12 +87,12 @@ pub(crate) fn run(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) -> Result<()
                     unit,
                     key,
                     u.span,
-                    &report_target,
+                    (&report_target, &named),
                     (writer, u.origin),
                     rule.message.as_deref(),
                     || {
                         format!(
-                            "`{}` writes `{target}` ({}){via} and returns on some path without calling an invalidator of `{}`",
+                            "`{}` writes `{named}` ({}){via} and returns on some path without calling an invalidator of `{}`",
                             key.qualname,
                             u.kind.as_str(),
                             rule.name

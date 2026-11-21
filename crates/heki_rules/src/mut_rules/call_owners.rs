@@ -35,6 +35,20 @@ pub(crate) struct CallTargetPattern {
 }
 
 impl CallTargetPattern {
+    /// What `site` calls of the target: the class it constructs, or every candidate the target
+    /// names.
+    fn called_at(&self, site: &CallSite) -> Vec<String> {
+        match &site.constructs {
+            Some(class) => vec![class.clone()],
+            None => site
+                .project_callees()
+                .iter()
+                .filter(|bc| self.functions.matches(&bc.callee))
+                .map(|bc| bc.callee.fqn())
+                .collect(),
+        }
+    }
+
     /// Whether calling `name` on an instance of the project class `class` may call the target:
     /// `class` is of the target's family, or the method `name` its MRO finds first is the
     /// target (`Model.reset` for the target `reset`).
@@ -158,10 +172,30 @@ impl Families {
 }
 
 /// The configured texts of a group of [`called_targets`]: the diagnostic target (`A.reset|B.reset`)
-/// and the message's name of what is called (``A.reset` or `B.reset``).
-pub(crate) fn group_texts(targets: &[CallTargetPattern], group: &[usize]) -> (String, String) {
+/// and the message's name of what is called (``A.reset` or `B.reset``). With the call `site`,
+/// a glob target is named by the functions or the class the site calls of it
+/// ([`super::names_members`]); an `EFF201` report stands for every site of its target and
+/// names the target.
+pub(crate) fn group_texts(
+    targets: &[CallTargetPattern],
+    group: &[usize],
+    site: Option<&CallSite>,
+) -> (String, String) {
     let texts: Vec<&str> = group.iter().map(|&i| targets[i].text.as_str()).collect();
-    let named: Vec<String> = texts.iter().map(|t| format!("`{t}`")).collect();
+    // In the order first named, each once.
+    let mut named: Vec<String> = Vec::new();
+    let mut seen: FxHashSet<String> = FxHashSet::default();
+    for &i in group {
+        let names = match site {
+            Some(site) if super::names_members(&targets[i].text) => targets[i].called_at(site),
+            _ => vec![targets[i].text.clone()],
+        };
+        for name in names {
+            if seen.insert(name.clone()) {
+                named.push(format!("`{name}`"));
+            }
+        }
+    }
     (texts.join("|"), named.join(" or "))
 }
 
@@ -278,7 +312,7 @@ pub(crate) fn mut204(
         for &(path, site) in &sites[key] {
             for (rule, families) in rules.iter().zip(&mut families) {
                 for group in called_targets(&rule.targets, site) {
-                    let (target, called) = group_texts(&rule.targets, &group);
+                    let (target, called) = group_texts(&rule.targets, &group, Some(site));
                     let family = families.at(cx, &rule.targets, &group, site);
                     let found = delegated_reports(
                         cx,
@@ -297,7 +331,7 @@ pub(crate) fn mut204(
                             unit,
                             &r.func,
                             r.span,
-                            &target,
+                            (&target, &called),
                             (key.fqn(), site.span),
                             rule.note,
                             || {

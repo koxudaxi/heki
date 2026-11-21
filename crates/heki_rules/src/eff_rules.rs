@@ -1075,7 +1075,7 @@ impl<'a> Reach<'a> {
             emit(found, format!("reads:{target}"), message);
         }
         for (group, found) in &self.calls {
-            let (target, called) = group_texts(&b.call_targets, group);
+            let (target, called) = group_texts(&b.call_targets, group, None);
             let via = match found.chain.as_slice() {
                 [first, _, ..] => format!(" (via `{}`)", first.callee),
                 _ => String::new(),

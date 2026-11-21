@@ -857,8 +857,17 @@ pub(crate) fn project_classes(cx: &CheckContext<'_>) -> Vec<String> {
 }
 
 fn class_set(cx: &CheckContext<'_>, pattern: &DottedPattern, all: &[String]) -> FxHashSet<String> {
+    class_family(cx, all, |c| pattern.matches(c))
+}
+
+/// The project classes of `all` that `names` accepts, plus all their subclasses.
+fn class_family(
+    cx: &CheckContext<'_>,
+    all: &[String],
+    names: impl Fn(&str) -> bool,
+) -> FxHashSet<String> {
     let mut out = FxHashSet::default();
-    for c in all.iter().filter(|c| pattern.matches(c)) {
+    for c in all.iter().filter(|c| names(c)) {
         out.insert(c.clone());
         out.extend(cx.decls.subclasses_of(c));
     }
@@ -943,10 +952,16 @@ pub(crate) struct Allowance {
 
 /// Project functions a `call-owners` / `call-targets` entry names: the whole text by fqn or
 /// qualname (dotted suffixes, globs), and, for `Class.method`, the overrides of the method in
-/// the class family the class part names.
+/// the class family the class part names. The last segment of the text names the function,
+/// method, or class: a glob there matches within that name only (`pkg.*._*` names the private
+/// members of everything in `pkg`, not every function of a private module), as the attribute of
+/// a `Class.attr` target does.
 #[derive(Debug)]
 pub(crate) struct FunctionMatcher {
     whole: DottedPattern,
+    /// The text split at its last dot when the last segment is a glob: what holds the member
+    /// (none for a text without a dot), and the member's name.
+    member: Option<(Option<DottedPattern>, DottedPattern)>,
     method: Option<(FxHashSet<String>, DottedPattern)>,
 }
 
@@ -957,22 +972,50 @@ impl FunctionMatcher {
         text: &str,
         context: &'static str,
     ) -> Result<Self, RuleConfigError> {
+        // The whole text first, so that a bad glob is reported as configured.
+        let whole = DottedPattern::new(text, context)?;
+        let (holder, last) = match text.rsplit_once('.') {
+            Some((holder, last)) => (Some(DottedPattern::new(holder, context)?), last),
+            None => (None, text),
+        };
         let mut method = None;
-        if let Some((class, name)) = text.rsplit_once('.') {
-            let owners = class_set(cx, &DottedPattern::new(class, context)?, all_classes);
+        if let Some(class) = &holder {
+            let owners = class_set(cx, class, all_classes);
             if !owners.is_empty() {
-                method = Some((owners, DottedPattern::new(name, context)?));
+                method = Some((owners, DottedPattern::new(last, context)?));
             }
         }
+        let member = if has_glob_syntax(last) {
+            Some((holder, DottedPattern::new(last, context)?))
+        } else {
+            None
+        };
         Ok(Self {
-            whole: DottedPattern::new(text, context)?,
+            whole,
+            member,
             method,
         })
     }
 
+    /// Whether the whole text names `name` (a function's fqn or qualname, a class's fqn). A
+    /// glob in the last segment matches the last name only, and the rest of the text what holds
+    /// it: `pkg.api_*` names `pkg.api_commit`, not `pkg.api_helpers.api_reset`.
+    fn names(&self, name: &str) -> bool {
+        let Some((holder, member)) = &self.member else {
+            return self.whole.matches(name);
+        };
+        match (holder, name.rsplit_once('.')) {
+            (None, split) => member.matches(split.map_or(name, |(_, last)| last)),
+            (Some(holder), Some((held_by, last))) => {
+                member.matches(last) && holder.matches(held_by)
+            }
+            (Some(_), None) => false,
+        }
+    }
+
     pub(crate) fn matches(&self, key: &FuncKey) -> bool {
-        self.whole.matches(&key.fqn())
-            || self.whole.matches(&key.qualname)
+        self.names(&key.fqn())
+            || self.names(&key.qualname)
             || self.method.as_ref().is_some_and(|(family, name)| {
                 key.qualname.rsplit_once('.').is_some_and(|(owner, last)| {
                     name.matches(last) && family.contains(&format!("{}.{owner}", key.module))
@@ -991,7 +1034,7 @@ impl FunctionMatcher {
         cx: &CheckContext<'_>,
         all_classes: &[String],
     ) -> FxHashSet<String> {
-        class_set(cx, &self.whole, all_classes)
+        class_family(cx, all_classes, |c| self.names(c))
     }
 }
 
@@ -1499,54 +1542,86 @@ pub(crate) fn facts_run_at<'s>(
 pub(crate) type SiteId = (String, Span);
 
 /// The reports of a contract rule, merged by `(reporting function, span, target)`: the first
-/// report of a key gives the message, the help, and the related chain, and every distinct violation site
-/// behind the key counts (`Diagnostic::sites`), so a second write inside a private helper that is
-/// reported at its caller is visible to the Ratchet baseline.
+/// report of a key gives the message, the help, and the related chain, and every distinct
+/// violation site behind the key counts (`Diagnostic::sites`), so a second write inside a
+/// private helper that is reported at its caller is visible to the Ratchet baseline. The
+/// message names the member the first report matched ([`matched_name`]) and lists the other
+/// members of a glob target the key stands for.
 #[derive(Default)]
 pub(crate) struct MergedReports<'u> {
     reports: BTreeMap<(FuncKey, Span, String), MergedReport<'u>>,
 }
 
+/// The name a report gives the target an access matched: the configured text, or, for a glob
+/// target, the member the access reaches (`pkg.types.DataType._flag` for `pkg.*._*`).
+pub(crate) fn matched_name(text: &str, member: impl FnOnce() -> String) -> String {
+    if names_members(text) {
+        member()
+    } else {
+        text.to_owned()
+    }
+}
+
+/// Whether a report of the target `text` names the members it matched ([`matched_name`]): it
+/// is a glob (the key of an entry target, `Class.attr["key"]`, is no glob).
+pub(crate) fn names_members(text: &str) -> bool {
+    has_glob_syntax(split_item(text).map_or(text, |(base, _)| base))
+}
+
 struct MergedReport<'u> {
     unit: &'u ModuleUnit<'u>,
     message: String,
+    /// The member the message names, and the other members behind the key.
+    named: String,
+    also: BTreeSet<String>,
     help: Option<String>,
     chain: Vec<CallHop>,
     sites: BTreeSet<SiteId>,
 }
 
 impl<'u> MergedReports<'u> {
-    /// Add a report of `func` at `span` for `target`, standing for `site`, with the contract's
-    /// `message` as its help (`note`); `message` and `chain` are only built for the first
-    /// report of the key.
+    /// Add a report of `func` at `span` for `target` (the configured text) and the member it
+    /// matched (`named`, [`matched_name`]), standing for `site`, with the contract's `message`
+    /// as its help (`note`); `message` and `chain` are only built for the first report of the
+    /// key.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn add(
         &mut self,
         unit: &'u ModuleUnit<'u>,
         func: &FuncKey,
         span: Span,
-        target: &str,
+        (target, named): (&str, &str),
         site: SiteId,
         note: Option<&str>,
         message: impl FnOnce() -> String,
         chain: impl FnOnce() -> Vec<CallHop>,
     ) {
-        self.reports
+        let report = self
+            .reports
             .entry((func.clone(), span, target.to_owned()))
             .or_insert_with(|| MergedReport {
                 unit,
                 message: message(),
+                named: named.to_owned(),
+                also: BTreeSet::new(),
                 help: note.map(str::to_owned),
                 chain: chain(),
                 sites: BTreeSet::new(),
-            })
-            .sites
-            .insert(site);
+            });
+        if report.named != named {
+            report.also.insert(named.to_owned());
+        }
+        report.sites.insert(site);
     }
 
     pub(crate) fn emit(self, cx: &CheckContext<'_>, code: &'static str, out: &mut Vec<Diagnostic>) {
         for ((func, span, target), r) in self.reports {
             let sites = u32::try_from(r.sites.len()).unwrap_or(u32::MAX);
+            let mut message = r.message;
+            if !r.also.is_empty() {
+                let also: Vec<String> = r.also.iter().map(|m| format!("`{m}`")).collect();
+                message.push_str(&format!(" (also {})", also.join(", ")));
+            }
             if let Some(d) = cx.emit(
                 out,
                 code,
@@ -1554,7 +1629,7 @@ impl<'u> MergedReports<'u> {
                 span,
                 &func.qualname,
                 target,
-                r.message,
+                message,
                 r.help,
                 &r.chain,
             ) {
@@ -1784,11 +1859,20 @@ pub(crate) fn mut201(
                             .via_chain
                             .last()
                             .map_or_else(|| key.fqn(), |h| h.callee.clone());
+                        let named = matched_name(&t.text, || {
+                            let entry = t.key.as_ref().map(|k| format!("[\"{k}\"]"));
+                            format!(
+                                "{}.{}{}",
+                                site.class_qualname,
+                                site.attr,
+                                entry.unwrap_or_default()
+                            )
+                        });
                         reports.add(
                             unit,
                             key,
                             span,
-                            &t.text,
+                            (&t.text, &named),
                             (writer, site.span),
                             rule.note,
                             || {
@@ -1798,9 +1882,8 @@ pub(crate) fn mut201(
                                     .map(|h| format!(" via `{}`", h.callee))
                                     .unwrap_or_default();
                                 format!(
-                                    "`{}` writes `{}` ({}){via} {}",
+                                    "`{}` writes `{named}` ({}){via} {}",
                                     key.qualname,
-                                    t.text,
                                     site.kind.as_str(),
                                     rule.allowance.where_text(
                                         "write owners",
@@ -2837,11 +2920,14 @@ pub(crate) fn mut203(
                         let Some(unit) = cx.index.file_of(&r.func).and_then(|p| cx.unit(p)) else {
                             continue;
                         };
+                        let named = matched_name(&t.text, || {
+                            format!("{}.{}", read.class_qualname, read.attr)
+                        });
                         reports.add(
                             unit,
                             &r.func,
                             r.span,
-                            &t.text,
+                            (&t.text, &named),
                             (key.fqn(), read.span),
                             rule.note,
                             || {
@@ -2851,9 +2937,8 @@ pub(crate) fn mut203(
                                     format!(" via `{}`", key.fqn())
                                 };
                                 format!(
-                                    "`{}` reads `{}` ({}){via} {}",
+                                    "`{}` reads `{named}` ({}){via} {}",
                                     r.func.qualname,
-                                    t.text,
                                     read.kind.as_str(),
                                     rule.allowance.where_text(
                                         "read owners",
