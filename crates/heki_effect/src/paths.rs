@@ -49,17 +49,12 @@ pub fn with_paths<R>(
             .or_else(by_factory)
             .map_or(Answer::Open, Answer::Known)
     };
-    // A method of the value's class, by the catalog (R3) or the project's code (R2). A project
-    // definition counts only when no decorator replaces it: reading a property runs its getter,
-    // which may raise.
+    // A method of the value's class, by the catalog (R3) or the project's code (R2, which also
+    // reads the project subclasses the value may be an instance of).
     let attribute = |obj: VarId, attr: &str| match types.get(&obj) {
         Some(Val::Inst(class)) => {
             cx.kb.lookup(&format!("{class}.{attr}")).is_some()
-                || cx
-                    .project
-                    .mro_method(class, attr)
-                    .and_then(|k| cx.project.function_decl(&k))
-                    .is_some_and(|d| d.called_as_defined)
+                || cx.project.method_read_runs_no_code(class, attr)
         }
         _ => false,
     };
