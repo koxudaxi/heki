@@ -3632,7 +3632,8 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             collect_target_names(&g.target, &mut raw_targets);
             let mut rename_map = FxHashMap::default();
             for name in raw_targets {
-                rename_map.insert(name.clone(), format!(".comp{comp_id}_{name}"));
+                let isolated = crate::comprehension_target(comp_id, &name);
+                rename_map.insert(name, isolated);
             }
             self.comp_target_renames.push(rename_map);
         }
@@ -3859,6 +3860,25 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
 
         let loop_carried =
             compute_loop_carried(&self.blocks, &self.finished_loops, &self.var_names);
+
+        // A scope nested in an inlined comprehension reads its iteration variable through a
+        // cell of this frame: the values bound to the variable carry the cell's name, as the
+        // bindings of other names do.
+        let comprehension_bindings: Vec<(VarId, String)> = self
+            .current_def
+            .iter()
+            .filter(|((_, name), _)| {
+                self.captured_by_children.contains(name)
+                    && crate::comprehension_target_source(name).is_some()
+            })
+            .map(|((_, name), v)| (self.canonical_var(*v), name.clone()))
+            .collect();
+        for (var, name) in comprehension_bindings {
+            let slot = &mut self.var_names[var.0 as usize];
+            if slot.is_none() {
+                *slot = Some(name);
+            }
+        }
 
         let mut captured_vars: Vec<String> = self.captured_by_children.into_iter().collect();
         captured_vars.sort();

@@ -613,11 +613,8 @@ fn shared_state_changed_directly_through_calls_and_in_closures() {
             .unwrap()
             .is_empty()
     );
-    // `out.append` on a variable of an enclosing function is a call heki cannot resolve.
-    assert_eq!(
-        accumulate["purity"]["because"],
-        serde_json::json!(["unresolved_calls"])
-    );
+    // `out` in `add` is the list `accumulate` binds: `out.append` changes a new object.
+    assert_eq!(accumulate["purity"]["verdict"], "pure");
     let add = report(&c, "fill.<locals>.add");
     assert_eq!(add["changes"]["globals"][0]["direct"], true);
 }

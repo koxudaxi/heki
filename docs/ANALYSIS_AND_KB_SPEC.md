@@ -19,7 +19,10 @@ resolution are heki's own (`heki_semantic`).
 - **Version-dependent scope rules (driven by `RuntimeProfile`)**:
   - **3.12+ PEP 709**: `list` / `set` / `dict` comprehensions are inlined into the enclosing
     function or module scope (with the exact exceptions, such as directly in a class body).
-    Before 3.12 a comprehension is a function of its own.
+    Their iteration variables stay apart from the scope's own variables of the same name; one
+    that a scope nested in the comprehension reads is a cell of the enclosing scope, named
+    `.comp<n>_<name>` in `captured_vars` and in `var_names` of the values bound to it. Before
+    3.12 a comprehension is a function of its own.
   - **3.14+ PEP 649**: annotations without `from __future__ import annotations` are evaluated
     lazily in `__annotate__` scopes.
   - **3.15+ PEP 810 (checked on CPython 3.15.0)**: `lazy import m` / `lazy from m import x`
@@ -293,7 +296,9 @@ A method called on an instance is the definition the class's MRO (Python's C3 li
 its project bases) finds first, plus the overrides of its project subclasses (Priority 4). A
 named class is exactly that class: constructing it runs the `__init__` its MRO finds, and
 `Base.method(obj)` the `method` it finds; `cls` in a class method may be any subclass, so
-`cls()` and `cls.method()` dispatch like a call on an instance. A method's calls on its own
+`cls()` and `cls.method()` dispatch like a call on an instance, and so is `type(obj)` of an
+instance of a project class that is not a protocol (`obj.__class__` is not: a class or a
+subclass may rebind it). A method's calls on its own
 `self` run the overrides of every subclass, so a mixin's summary holds the effects of every
 class sharing it; an execution effect reached only through the override of a subclass records
 that class (`EffectSummary::receiver_effects`), and a call on a receiver of known class runs it
@@ -303,6 +308,16 @@ Calling an `async def` that no decorator replaces gives a coroutine (`Ty::Corout
 annotation is what awaiting it gives (`await`, and the target of `async with`), and awaiting a
 future or a task gives an untracked result. The catalog types an external awaitable by what
 awaiting it gives.
+
+A scope nested in a function (a comprehension or generator expression with a scope of its own, a
+lambda, a nested function or class) reads the function's variables through their closure cells.
+A cell holds every value the function binds to the variable, its parameter's and each
+assignment's, so whenever the nested scope runs the cell has the join of their types (`self` in
+a method has its class). A scope created in an inlined comprehension (3.12 and later) reads the
+comprehension's iteration variable, a cell of the enclosing frame apart from the frame's own
+variable of the name, which the scopes created outside the comprehension read. A cell that a
+nested scope may rebind (`nonlocal`, an assignment expression in a comprehension scope before
+3.12, any scope nested in a function too large to model) is of unknown type.
 
 Module names come from the paths below a source root (`pkg/mod.py` → `pkg.mod`,
 `pkg/__init__.py` → `pkg`), the deepest one holding the file, else the project root. The `src`
