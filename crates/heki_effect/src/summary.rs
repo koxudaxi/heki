@@ -995,6 +995,7 @@ impl<'a> Extractor<'a> {
             phis: &self.phis,
             scratch: &self.scratch,
             kb: self.cx.kb,
+            project: self.cx.project,
         }
     }
 
@@ -2848,7 +2849,7 @@ impl<'a> Extractor<'a> {
         }
         let protocol = if is_async { "__aiter__" } else { "__iter__" };
         let symbol = format!("{class}.{protocol}");
-        if self.cx.kb.lookup(&symbol).is_some() {
+        if self.cx.catalog(&symbol).is_some() {
             self.external_call(bb, symbol, Passed::NOTHING, false, span);
         }
     }
@@ -4208,7 +4209,7 @@ impl<'a> Extractor<'a> {
     /// (`Self::passed_items`).
     fn handed_callable(&mut self, bb: BlockId, symbol: &str, call: &Call<'_>) {
         let facade = || {
-            let k = usize::from(self.cx.kb.lookup(symbol)?.sync_facade_arg?);
+            let k = usize::from(self.cx.catalog(symbol)?.sync_facade_arg?);
             if call.star_from.is_some_and(|s| usize::from(s) <= k) {
                 return None;
             }
@@ -4710,7 +4711,7 @@ impl<'a> Extractor<'a> {
             }
             return;
         }
-        let Some(entry) = self.cx.kb.lookup(&symbol) else {
+        let Some(entry) = self.cx.catalog(&symbol) else {
             return;
         };
         if entry.excluded {
