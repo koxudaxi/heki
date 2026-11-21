@@ -4,6 +4,7 @@ use heki_ast::parse_module;
 use heki_env::{PythonVersion, RuntimeProfile};
 use heki_semantic::analyze_module;
 use std::cell::Cell;
+use std::rc::Rc;
 use std::sync::Arc;
 
 fn build(src: &str) -> ModuleIr {
@@ -256,6 +257,10 @@ fn singleton(n: u32) -> KeySet<u32> {
     std::iter::once(n).collect()
 }
 
+fn keys(keys: impl IntoIterator<Item = u32>) -> Answer<Rc<KeySet<u32>>> {
+    Answer::Known(Rc::new(keys.into_iter().collect()))
+}
+
 #[test]
 fn a_closure_joins_what_each_node_reaches_and_expands_each_once() {
     let graph: &[&[u32]] = &[&[1, 2], &[2], &[], &[0]];
@@ -266,17 +271,10 @@ fn a_closure_joins_what_each_node_reaches_and_expands_each_once() {
         expanded.set(expanded.get() + 1);
         singleton(n)
     };
-    let all: KeySet<u32> = [0, 1, 2].into_iter().collect();
-    assert_eq!(closure.ask(&b, 0, own, edges(graph)), Answer::Known(all));
-    assert_eq!(
-        closure.ask(&b, 1, own, edges(graph)),
-        Answer::Known([1, 2].into_iter().collect())
-    );
+    assert_eq!(closure.ask(&b, 0, own, edges(graph)), keys([0, 1, 2]));
+    assert_eq!(closure.ask(&b, 1, own, edges(graph)), keys([1, 2]));
     // 3 reaches the component of 0, already complete: only 3 is expanded.
-    assert_eq!(
-        closure.ask(&b, 3, own, edges(graph)),
-        Answer::Known([0, 1, 2, 3].into_iter().collect())
-    );
+    assert_eq!(closure.ask(&b, 3, own, edges(graph)), keys([0, 1, 2, 3]));
     assert_eq!(expanded.get(), 4);
 }
 
@@ -286,21 +284,65 @@ fn the_members_of_a_cycle_share_one_fact() {
     let graph: &[&[u32]] = &[&[1], &[2], &[0, 3], &[], &[1]];
     let closure = Closure::new();
     let b = budget(100);
-    let cycle: KeySet<u32> = [0, 1, 2, 3].into_iter().collect();
     for start in [1, 0, 2] {
         assert_eq!(
             closure.ask(&b, start, singleton, edges(graph)),
-            Answer::Known(cycle.clone())
+            keys([0, 1, 2, 3])
         );
     }
-    assert_eq!(
-        closure.ask(&b, 3, singleton, edges(graph)),
-        Answer::Known(singleton(3))
-    );
+    assert_eq!(closure.ask(&b, 3, singleton, edges(graph)), keys([3]));
     assert_eq!(
         closure.ask(&b, 4, singleton, edges(graph)),
-        Answer::Known([0, 1, 2, 3, 4].into_iter().collect())
+        keys([0, 1, 2, 3, 4])
     );
+}
+
+#[test]
+fn a_large_cycle_costs_steps_linear_in_its_facts() {
+    // n nodes in one cycle, each with a fact of its own: the members' facts are joined into
+    // the component's once each, never into a growing copy.
+    let n: u32 = 100_000;
+    let next = |k: u32, out: &mut Vec<u32>| out.push((k + 1) % n);
+    let closure = Closure::new();
+    let b = budget(usize::MAX);
+    let fact = match closure.ask(&b, 0, singleton, next) {
+        Answer::Known(fact) => fact,
+        Answer::Open => panic!("the budget is not spent"),
+    };
+    assert_eq!(fact.len(), n as usize);
+    // One step and the own fact's weight per node; the component reaches no other.
+    assert_eq!(b.taken(), 2 * n as usize);
+    // Every member shares the fact.
+    for k in [1, n / 2, n - 1] {
+        let Answer::Known(shared) = closure.ask(&b, k, singleton, next) else {
+            panic!("the fact is kept");
+        };
+        assert!(Rc::ptr_eq(&shared, &fact));
+    }
+}
+
+#[test]
+fn each_component_takes_the_weight_of_the_facts_it_joins() {
+    // 1 and 2 each reach 0, whose own fact holds five keys.
+    let graph: &[&[u32]] = &[&[], &[0], &[0, 0]];
+    let own = |k: u32| match k {
+        0 => (10..15).collect(),
+        _ => singleton(k),
+    };
+    let closure = Closure::new();
+    let b = budget(100);
+    assert_eq!(closure.ask(&b, 0, own, edges(graph)), keys(10..15));
+    assert_eq!(b.taken(), 1 + 5);
+    assert_eq!(
+        closure.ask(&b, 1, own, edges(graph)),
+        keys([1, 10, 11, 12, 13, 14])
+    );
+    // Node 2 lists 0 twice and joins its fact once.
+    assert_eq!(
+        closure.ask(&b, 2, own, edges(graph)),
+        keys([2, 10, 11, 12, 13, 14])
+    );
+    assert_eq!(b.taken(), (1 + 5) + 2 * ((1 + 1) + 5));
 }
 
 #[test]
@@ -313,19 +355,19 @@ fn a_closure_past_its_budget_is_open() {
         closure.ask(&spent, 0, singleton, edges(graph)),
         Answer::Open
     );
-    // No step for the root.
-    assert_eq!(
-        closure.ask(&budget(0), 0, singleton, edges(graph)),
-        Answer::Open
-    );
-    // No step for the second node.
+    // No steps for the root.
     assert_eq!(
         closure.ask(&budget(1), 0, singleton, edges(graph)),
         Answer::Open
     );
-    // Steps for every node, not for keeping the first component's fact.
+    // Steps for the root only.
     assert_eq!(
-        closure.ask(&budget(3), 0, singleton, edges(graph)),
+        closure.ask(&budget(2), 0, singleton, edges(graph)),
+        Answer::Open
+    );
+    // Steps for every node, not for joining the fact of 2 into the component of 1.
+    assert_eq!(
+        closure.ask(&budget(6), 0, singleton, edges(graph)),
         Answer::Open
     );
 }
@@ -461,10 +503,15 @@ fn a_fixpoint_past_its_limits_is_open() {
     let spent = budget(1);
     spent.spend();
     assert_eq!(fixpoint(&spent, spec(3), grows), Answer::Open);
-    // A step for the visit, none for keeping the fact.
+    // A step for the first visit, none for the fact it joins.
     assert_eq!(fixpoint(&budget(1), spec(3), grows), Answer::Open);
-    // Steps for the first visit and fact, none for the second visit.
+    // Steps for the first visit and its fact, none for the second visit.
     assert_eq!(fixpoint(&budget(2), spec(3), grows), Answer::Open);
+    // Each visit takes one step and the weight of the fact it joins (1 + 1, 1 + 2, 1 + 3); the
+    // fourth passes the visit limit before taking any.
+    let b = budget(100);
+    assert_eq!(fixpoint(&b, spec(3), grows), Answer::Open);
+    assert_eq!(b.taken(), 2 + 3 + 4);
 }
 
 // ------------------------------------------------------------------------------ shared memo
@@ -564,7 +611,7 @@ fn joins_report_growth() {
 #[test]
 fn a_key_set_is_sorted_without_duplicates() {
     let mut set: KeySet<u32> = [3, 1, 3, 2].into_iter().collect();
-    assert_eq!(set.as_slice(), [1, 2, 3]);
+    assert_eq!(set.iter().copied().collect::<Vec<_>>(), [1, 2, 3]);
     assert!(!set.insert(2));
     assert!(set.insert(0));
     assert!(set.contains(&0));
@@ -575,7 +622,10 @@ fn a_key_set_is_sorted_without_duplicates() {
     assert!(set.join(&[2, 5, 6].into_iter().collect()));
     assert!(!set.join(&[0, 6].into_iter().collect()));
     assert!(set.join(&[4].into_iter().collect()));
-    assert_eq!(set.as_slice(), [0, 1, 2, 3, 4, 5, 6]);
+    assert_eq!(
+        set.iter().copied().collect::<Vec<_>>(),
+        [0, 1, 2, 3, 4, 5, 6]
+    );
     assert_eq!(set.weight(), 7);
     let empty = KeySet::<u32>::new();
     assert!(empty.is_empty());

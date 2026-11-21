@@ -41,6 +41,7 @@ use std::cell::{Cell, RefCell};
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::hash::Hash;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
@@ -334,7 +335,8 @@ enum Slot<A> {
 /// uses [`Closure`] or [`fixpoint`] instead, whose answers do not depend on the order.
 ///
 /// A depth-limited question keeps the remaining depth in its key: a node first reached near the
-/// limit must not answer for a caller asking it from the top.
+/// limit must not answer for a caller asking it from the top. An answer is cloned on every ask
+/// that finds it: keep a large one behind an `Rc`.
 pub struct Memo<K, A> {
     slots: RefCell<FxHashMap<K, Slot<A>>>,
 }
@@ -387,11 +389,13 @@ impl<K: Clone + Eq + Hash, A: Clone> Memo<K, A> {
 
 /// Per node, its own fact joined with the facts of every node it reaches. The members of a cycle
 /// share one fact: the one a visited-set walk from any of them finds. Each node is expanded once
-/// per `Closure` (one step), however many starts are asked, and each component's fact is kept
-/// once (its [`Join::weight`] in steps).
+/// per `Closure`, however many starts are asked, for one step and the [`Join::weight`] of its
+/// own fact. A component's fact joins its members' own facts and, once each, the facts of the
+/// components they reach, whose weights it takes too: the work and the memory of the facts are
+/// those steps, whatever the shape of the graph.
 pub struct Closure<K, S> {
     component_of: RefCell<FxHashMap<K, usize>>,
-    facts: RefCell<Vec<S>>,
+    facts: RefCell<Vec<Rc<S>>>,
 }
 
 impl<K, S> Default for Closure<K, S> {
@@ -419,19 +423,20 @@ impl<K: Copy + Eq + Hash, S: Join + Default> Closure<K, S> {
     }
 
     /// The fact of `start`: `own` of every node it reaches, `next` listing the nodes one step
-    /// from a node. Neither may ask this closure again.
+    /// from a node. Neither may ask this closure again. The members of a component share one
+    /// fact, so it is handed out behind an `Rc`.
     pub fn ask(
         &self,
         budget: &Budget,
         start: K,
         mut own: impl FnMut(K) -> S,
         mut next: impl FnMut(K, &mut Vec<K>),
-    ) -> Answer<S> {
+    ) -> Answer<Rc<S>> {
         if budget.spent() {
             return Answer::Open;
         }
         if let Some(&c) = self.component_of.borrow().get(&start) {
-            return Answer::Known(self.facts.borrow()[c].clone());
+            return Answer::Known(Rc::clone(&self.facts.borrow()[c]));
         }
         // Iterative Tarjan: the frames hold each node of the current path and its next
         // successor; the stack holds the nodes whose component is not complete yet.
@@ -440,7 +445,8 @@ impl<K: Copy + Eq + Hash, S: Join + Default> Closure<K, S> {
         let mut stack: Vec<usize> = Vec::new();
         let mut frames: Vec<(usize, usize)> = Vec::new();
         let mut expand = |key: K, nodes: &mut Vec<Expanded<K, S>>| {
-            if !budget.take(1) {
+            let own = own(key);
+            if !budget.take(1 + own.weight()) {
                 return None;
             }
             let id = nodes.len();
@@ -448,7 +454,7 @@ impl<K: Copy + Eq + Hash, S: Join + Default> Closure<K, S> {
             next(key, &mut successors);
             nodes.push(Expanded {
                 key,
-                own: own(key),
+                own,
                 next: successors,
                 low: id,
                 on_stack: true,
@@ -493,7 +499,7 @@ impl<K: Copy + Eq + Hash, S: Join + Default> Closure<K, S> {
             }
         }
         let c = self.component_of.borrow()[&start];
-        Answer::Known(self.facts.borrow()[c].clone())
+        Answer::Known(Rc::clone(&self.facts.borrow()[c]))
     }
 
     /// Pop the component `root` heads off `stack` and keep its fact: the own facts of its
@@ -517,20 +523,24 @@ impl<K: Copy + Eq + Hash, S: Join + Default> Closure<K, S> {
             nodes[m].on_stack = false;
             component_of.insert(nodes[m].key, c);
         }
+        let mut reached: Vec<usize> = members
+            .iter()
+            .flat_map(|&m| nodes[m].next.iter().map(|w| component_of[w]))
+            .filter(|&cw| cw != c)
+            .collect();
+        reached.sort_unstable();
+        reached.dedup();
+        if !budget.take(reached.iter().map(|&cw| facts[cw].weight()).sum()) {
+            return false;
+        }
         let mut fact = S::default();
         for &m in &members {
             fact.join(&nodes[m].own);
-            for w in &nodes[m].next {
-                let cw = component_of[w];
-                if cw != c {
-                    fact.join(&facts[cw]);
-                }
-            }
         }
-        if !budget.take(fact.weight()) {
-            return false;
+        for &cw in &reached {
+            fact.join(&facts[cw]);
         }
-        facts.push(fact);
+        facts.push(Rc::new(fact));
         true
     }
 }
@@ -608,10 +618,10 @@ impl<L> Facts<L> {
     }
 }
 
-/// The facts of nodes `0..spec.nodes` to a fixpoint. Each node is visited once in order (one
-/// step), then again only when a fact it reads grows, the earliest pending node first;
-/// `transfer` gives a node's new fact (`None`: none yet), which is joined into the one it has,
-/// never put in its place (each growth takes the fact's [`Join::weight`] in steps). A
+/// The facts of nodes `0..spec.nodes` to a fixpoint. Each node is visited once in order, then
+/// again only when a fact it reads grows, the earliest pending node first; `transfer` gives a
+/// node's new fact (`None`: none yet), which is joined into the one it has, never put in its
+/// place. A visit takes one step and the [`Join::weight`] of the fact it joins. A
 /// must-question starts from every fact and only loses facts: its `Join` is the intersection.
 /// Past `max_visits` visits of one node, or past the budget, the facts are open, and no finding
 /// may come from them.
@@ -637,6 +647,9 @@ pub fn fixpoint<L: Join>(
         let Some(new) = transfer(i, &facts) else {
             continue;
         };
+        if !budget.take(new.weight()) {
+            return Answer::Open;
+        }
         let slot = &mut facts.0[i];
         let grew = match slot {
             Some(old) => old.join(&new),
@@ -647,9 +660,6 @@ pub fn fixpoint<L: Join>(
         };
         if !grew {
             continue;
-        }
-        if !budget.take(slot.as_ref().map_or(0, Join::weight)) {
-            return Answer::Open;
         }
         readers.clear();
         (spec.readers)(i, &mut readers);

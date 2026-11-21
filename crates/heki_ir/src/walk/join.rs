@@ -1,10 +1,11 @@
 //! Facts that only grow, for [`super::Closure`] and [`super::fixpoint`].
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// A fact that only grows: `join` takes in `other` and returns whether `self` grew. `weight` is
-/// what keeping the fact costs, taken from the budget when it is kept, so the memory of kept
-/// facts is bounded by the budget too.
+/// the size of the fact: joining it into another costs about its weight (never the size of the
+/// fact it is joined into), and keeping it as much memory. The engines take the weight of every
+/// fact they join from the budget, so both the work and the memory of facts are bounded by it.
 pub trait Join: Clone + PartialEq {
     fn join(&mut self, other: &Self) -> bool;
 
@@ -61,13 +62,14 @@ impl Join for Or {
     }
 }
 
-/// A set of keys, sorted without duplicates: a result listing a key twice cannot be built.
+/// A set of keys, ordered without duplicates: a result listing a key twice cannot be built,
+/// and joining a set costs about its own size.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct KeySet<K>(Vec<K>);
+pub struct KeySet<K>(BTreeSet<K>);
 
 impl<K> Default for KeySet<K> {
     fn default() -> Self {
-        Self(Vec::new())
+        Self(BTreeSet::new())
     }
 }
 
@@ -78,17 +80,11 @@ impl<K: Ord + Clone> KeySet<K> {
 
     /// `true` when `key` was not in the set.
     pub fn insert(&mut self, key: K) -> bool {
-        match self.0.binary_search(&key) {
-            Ok(_) => false,
-            Err(at) => {
-                self.0.insert(at, key);
-                true
-            }
-        }
+        self.0.insert(key)
     }
 
     pub fn contains(&self, key: &K) -> bool {
-        self.0.binary_search(key).is_ok()
+        self.0.contains(key)
     }
 
     pub fn len(&self) -> usize {
@@ -99,50 +95,24 @@ impl<K: Ord + Clone> KeySet<K> {
         self.0.is_empty()
     }
 
-    pub fn as_slice(&self) -> &[K] {
-        &self.0
-    }
-
-    pub fn iter(&self) -> std::slice::Iter<'_, K> {
+    /// The keys in increasing order.
+    pub fn iter(&self) -> std::collections::btree_set::Iter<'_, K> {
         self.0.iter()
     }
 }
 
 impl<K: Ord> FromIterator<K> for KeySet<K> {
     fn from_iter<I: IntoIterator<Item = K>>(keys: I) -> Self {
-        let mut keys: Vec<K> = keys.into_iter().collect();
-        keys.sort();
-        keys.dedup();
-        Self(keys)
+        Self(keys.into_iter().collect())
     }
 }
 
 impl<K: Ord + Clone> Join for KeySet<K> {
     fn join(&mut self, other: &Self) -> bool {
-        let (mine, theirs) = (&self.0, &other.0);
-        let mut merged = Vec::with_capacity(mine.len() + theirs.len());
-        let (mut i, mut j) = (0, 0);
-        while i < mine.len() && j < theirs.len() {
-            match mine[i].cmp(&theirs[j]) {
-                std::cmp::Ordering::Less => {
-                    merged.push(mine[i].clone());
-                    i += 1;
-                }
-                std::cmp::Ordering::Greater => {
-                    merged.push(theirs[j].clone());
-                    j += 1;
-                }
-                std::cmp::Ordering::Equal => {
-                    merged.push(mine[i].clone());
-                    i += 1;
-                    j += 1;
-                }
-            }
+        let mut grew = false;
+        for key in &other.0 {
+            grew |= self.0.insert(key.clone());
         }
-        merged.extend_from_slice(&mine[i..]);
-        merged.extend_from_slice(&theirs[j..]);
-        let grew = merged.len() > mine.len();
-        self.0 = merged;
         grew
     }
 
