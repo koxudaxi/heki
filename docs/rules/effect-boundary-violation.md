@@ -2,9 +2,13 @@
 
 # effect-boundary-violation (EFF201)
 
-Family: Execution Effects (EFF) · Enabled by default · Severity `error` · No automatic fix
+Family: Execution Effects (EFF) · Heuristic · Runs when its contract is declared · Severity `error` (a bug) · No automatic fix
 
 Reaching a forbidden effect (directly or through calls) from a declared `effect-boundaries` scope.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when its contract is declared. It has not been measured yet. See [Rule Precision](../precision.md).
 
 ## What it does
 Checks the functions of a declared effect boundary (`[[tool.heki.effect-boundaries]]`): they
@@ -78,6 +82,21 @@ heki cannot tell apart from a write of the pass's input is reported: state that 
 getter writes while rendering, or a store operation whose writes depend on its arguments. A
 write that constructs the object it writes is not (`fresh-objects = "allow"`). Treat its
 reports as candidates to review, or narrow the universe, rather than gating on it.
+
+## What a report states
+
+A report states that a function of a declared effect boundary reaches a forbidden effect, directly
+or through the calls shown.
+
+Its premises:
+
+- **In scope**: the function matches the boundary's `scopes`. Established.
+- **Resolves**: each call on the chain is to the function shown, through the calls heki resolves.
+  Open through a method call: one candidate implementation that leads on is enough.
+- **Reaches**: each function on the chain reaches the next call. Open: one path is enough, and the
+  rule reads no branch at all: a call under any test counts.
+- **Forbidden effect**: the last call has an effect `forbid` lists, as the ecosystem catalog or the
+  boundary's own entries describe it.
 
 ## Why is this bad?
 Some parts of a code base promise to be pure: rendering a model must not mutate it, domain code

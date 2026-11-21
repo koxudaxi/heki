@@ -2,9 +2,13 @@
 
 # loop-unpooled-client (EFF102)
 
-Family: Execution Effects (EFF) · Enabled by default · Severity `error` · No automatic fix
+Family: Execution Effects (EFF) · Heuristic · Off by default · Severity `warning` (slower code) · No automatic fix
 
 Allocating an unpooled HTTP/DB/RPC client or sessionless request inside a loop.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 50 sampled reports (round 3, 2026-11-21), 54% were right about the code. See [Rule Precision](../precision.md).
 
 ## What it does
 Checks loops that allocate a network or database client on every iteration: module-level
@@ -75,6 +79,27 @@ it: `load(name, cache=False)` does not reach the `urlopen` under `if cache:` in 
 covers constant arguments and the literal defaults of omitted ones (`False`, `None`, `0`, `""`,
 empty displays), tests the caller has already made on the same value (`isinstance`, `is None`,
 truthiness), and wrappers that pass the value on.
+
+## What a report states
+
+A report states that every iteration of the loop allocates a new client (or opens a new connection)
+through the call shown.
+
+Its premises:
+
+- **Resolves**: each call on the chain is to the function shown, through the calls heki resolves.
+  Open through a method call: one candidate implementation that leads on is enough.
+- **Reaches**: each function on the chain reaches the next call. Open: one path is enough, and a
+  branch heki cannot decide counts as taken; only the branches the caller's arguments switch off,
+  and the cases listed above, are left out.
+- **On every iteration**: the call runs on every iteration of the loop. Open: it counts as running
+  on every iteration unless heki shows that it runs once per object, per process, or per run of the
+  loop (the cases above).
+- **Data-sized**: the code does not fix the size of the loop at 16 or fewer. Open: a size heki
+  cannot bound counts as data-sized.
+- **Allocates**: the call builds a client, as the ecosystem catalog describes it.
+
+Not part of the claim: how many items the loop has, and what a client costs.
 
 ## Why is this bad?
 Each new client pays for DNS, TCP, and TLS setup again and throws its connection pool away.
