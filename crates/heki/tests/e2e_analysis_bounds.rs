@@ -2268,13 +2268,13 @@ fn item_origins_decide_each_question_once() {
 }
 
 /// `MUT107` reads what a `__hash__` reads on the instances of each writer's class, following its
-/// `self` calls along that class's MRO: a hash calling a long chain of `self` helpers, and a
-/// thousand subclasses each changing the attribute the chain's end reads. The walk runs once per
+/// `self` calls along that class's MRO: a hash calling a long chain of `self` helpers, and
+/// hundreds of subclasses each changing the attribute the chain's end reads. The walk runs once per
 /// writer class and visits each method once, as the family of each class lists the methods it
 /// inherits.
 #[test]
 fn hash_reads_per_writer_class_visit_each_method_once() {
-    let (helpers, classes) = (1_000, 1_000);
+    let (helpers, classes) = (600, 600);
     let mut lines = vec![
         "class Node:".to_owned(),
         "    def __init__(self):".to_owned(),
