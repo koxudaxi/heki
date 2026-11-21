@@ -67,10 +67,20 @@ struct FileMeta {
     shown_places: Vec<SitePlace>,
 }
 
-/// A span and the line and columns of both its ends: `(line, byte column, UTF-16 column)`, as
-/// the CLI and the LSP show a related location. A span can keep its bytes while its line
-/// changes (a comment above it turned into a blank line).
-type SitePlace = (heki_ast::Span, [(u32, u32, u32); 2]);
+/// A span, the line and columns of both its ends (`(line, byte column, UTF-16 column)`, as the
+/// CLI and the LSP show a related location), and what is there. A span can keep its bytes while
+/// its line changes (a comment above it turned into a blank line), and two calls of one length
+/// that swap keep every span while each call moves.
+type SitePlace = (heki_ast::Span, [(u32, u32, u32); 2], ShownAt);
+
+/// What is at a place other files' diagnostics can show.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum ShownAt {
+    /// A call site, with its project callees.
+    Call(Vec<FuncKey>),
+    /// A method's own change of the container a `self` attribute holds.
+    Change(String),
+}
 
 /// The places in its text `source` of the spans of `file` that other files' diagnostics can
 /// show: its call sites (the hops of call chains) and the changes its methods make to their own
@@ -85,23 +95,24 @@ fn shown_places(file: &heki_effect::FileSummary, source: &str) -> Vec<SitePlace>
             .map_or(0, |t| t.encode_utf16().count());
         (line, column, u32::try_from(utf16).unwrap_or(u32::MAX))
     };
-    let mut changes: Vec<heki_ast::Span> = file
+    let mut changes: Vec<(heki_ast::Span, ShownAt)> = file
         .local_functions
         .values()
-        .flat_map(|s| {
-            s.iteration_facts()
-                .self_container_change_sites
-                .values()
-                .flatten()
-                .copied()
+        .flat_map(|s| &s.iteration_facts().self_container_change_sites)
+        .flat_map(|(attr, spans)| {
+            spans
+                .iter()
+                .map(|span| (*span, ShownAt::Change(attr.clone())))
         })
         .collect();
     changes.sort();
-    file.call_sites
-        .iter()
-        .map(|s| s.span)
+    let calls = file.call_sites.iter().map(|s| {
+        let callees = s.project_callees().iter().map(|bc| bc.callee.clone());
+        (s.span, ShownAt::Call(callees.collect()))
+    });
+    calls
         .chain(changes)
-        .map(|span| (span, [place(span.start), place(span.end)]))
+        .map(|(span, at)| (span, [place(span.start), place(span.end)], at))
         .collect()
 }
 
@@ -352,8 +363,13 @@ impl Workspace {
             .collect();
         let contracts = heki_rules::summary_contracts(env_cfg).map_err(EngineError::Rules)?;
         let typed_writes = heki_rules::typed_writes(env_cfg, &selection);
-        let summaries =
-            summarize_project_with_reads(&project.inputs(), &project.env.kb, contracts.as_deref());
+        let opt_in = heki_rules::opt_in_facts(&selection);
+        let summaries = summarize_project_with_reads(
+            &project.inputs(),
+            &project.env.kb,
+            contracts.as_deref(),
+            opt_in,
+        );
         let files = project
             .files
             .iter()
@@ -387,7 +403,7 @@ impl Workspace {
             errors,
         } = project;
         drop(parsed);
-        let index = ProjectIndex::build_for(summaries, contracts, typed_writes);
+        let index = ProjectIndex::build_for(summaries, contracts, typed_writes, opt_in);
         let decls = index.decl_passes();
         // The options of the rules (contract targets and patterns) are read by every check, and
         // an invalid one fails them all: the workspace fails to load, as `heki check` fails

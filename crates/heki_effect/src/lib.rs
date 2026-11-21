@@ -34,15 +34,17 @@ mod scc;
 mod summary;
 pub mod types;
 
-pub use cache_flow::{CacheEvent, CacheFlow, FlowBlock, SelfAttrWrite, self_attr_writes};
+pub use cache_flow::{
+    CacheEvent, CacheFlow, FlowBlock, SelfAttrWrite, attr_writes, self_attr_writes,
+};
 pub use contracts::Contracts;
 pub use invalidation::{
     FlowWrite, FuncFlow, INITIALIZERS, Reach, SiteFlow, UnmetWrite, body_runs_at,
     builds_written_object, delegates_to_callers, is_initializer, reach_across,
 };
 pub use iterations::{
-    BetweenSteps, ContainerChange, ContainerIteration, IteratedContainer, IterationFacts,
-    ResultIteration,
+    BetweenSteps, ContainerChange, ContainerIteration, IteratedContainer, IteratedResult,
+    IterationFacts, ResultIteration,
 };
 pub use ownership::{LocalOrigins, Origins, ResultOf};
 pub use readonly::{ProtectedReturn, ReturnStep, Shared};
@@ -510,6 +512,16 @@ pub struct EffectSummary {
     /// `param index -> paths`: `""` = container mutation of the argument itself,
     /// `"a"` = write to / mutation of the argument's attribute `a`.
     pub mutated_param_paths: BTreeMap<u8, BTreeSet<String>>,
+    /// `param index -> paths` of `mutated_param_paths` that every change, in the function and
+    /// through its calls, only fills a memo or initializes lazily
+    /// ([`cache_flow::SelfAttrWrite::fills_memo`], `lazy_init`): an in-place change of an
+    /// attribute named as a memo or cache (`p._cache[k] = v`, also by a call changing the object
+    /// it holds: `p._cache.set(k, v)`), a memo-shaped store
+    /// (`setdefault`, a store under `if k not in p.<attr>:`), or a store of `p.<attr>` where a
+    /// `None` / falsy test of it found it unset. What the object computes stays the same
+    /// (`MUT202`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memo_param_paths: Option<Box<BTreeMap<u8, BTreeSet<String>>>>,
     /// `param index -> attributes` of the argument whose objects are changed, in place or
     /// deeper (`p.a.append(...)`, `p.a.b = v`), also through local copies and calls: the
     /// `mutated_param_paths` that are not just a rebinding of the attribute (`p.a = v`). A
@@ -543,6 +555,15 @@ pub struct EffectSummary {
     /// leaves such an attribute set (`MUT101`).
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub lazily_read_self_attrs: BTreeSet<String>,
+    /// `__hash__` methods only: the `self` attributes whose value every read hands, as itself,
+    /// to `hash()` (alone or as an element of a tuple display it hashes) or calls `__hash__`
+    /// on, and that no `self` method or property it calls reads; it hands `self` to no other
+    /// code. The hash is then the value's own: changing that value in place (an item store, a
+    /// mutator method) changes it only through the value's own `__hash__`, which its class
+    /// answers for, and a builtin container that can change in place cannot be hashed at all
+    /// (`MUT107`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hashed_whole_self_attrs: Option<Box<BTreeSet<String>>>,
     pub mutates_self_attrs: BTreeSet<AttrKeyPath>,
     /// `MUT113`: what the function changes in place of its instance's containers and how it
     /// iterates them and the objects its project calls return (`None` when it does none of
@@ -657,6 +678,8 @@ pub enum GuardTest {
     IsNone,
     /// `isinstance(x, C)` / `isinstance(x, (C, D))`: the fully qualified classes, sorted.
     IsInstance(Vec<String>),
+    /// `hasattr(x, "name")` with a string literal.
+    HasAttr(String),
 }
 
 /// A test of an input, and the outcome (`holds`) an effect needs to run.
@@ -680,7 +703,8 @@ pub struct EffectGuards {
     pub once_per: Option<u64>,
 }
 
-/// The builtin class of a constant or display argument.
+/// The exact class of a value a function knows: a constant, a display or comprehension, or a
+/// buffer it constructs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConstClass {
@@ -694,12 +718,16 @@ pub enum ConstClass {
     Tuple,
     Set,
     Dict,
+    /// `io.StringIO(...)`.
+    StringIo,
+    /// `io.BytesIO(...)`.
+    BytesIo,
     /// `...`, a complex number.
     Other,
 }
 
-/// A constant or display argument (or a literal default): its class and, where the value
-/// decides it, its truthiness (`False`, `None`, `0`, `""`, and empty displays are falsy).
+/// An argument (or a literal default) whose class the caller knows: its class and, where the
+/// value decides it, its truthiness (`False`, `None`, `0`, `""`, and empty displays are falsy).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ConstArg {
     pub class: ConstClass,
@@ -863,24 +891,47 @@ impl EffectSummary {
         }
     }
 
-    /// Add the `self` attributes `other` reads to the ones this summary reads (its own or a
-    /// `self` call's facts): an attribute stays read only lazily when neither reads it
-    /// otherwise ([`Self::lazily_read_self_attrs`]).
-    pub(crate) fn add_self_reads(&mut self, other: &EffectSummary) {
-        if !self.lazily_read_self_attrs.is_empty() || !other.lazily_read_self_attrs.is_empty() {
-            let eager = |s: &EffectSummary| -> BTreeSet<String> {
-                s.reads_self_attrs
-                    .iter()
-                    .filter(|r| !s.lazily_read_self_attrs.contains(&r.attr))
-                    .map(|r| r.attr.clone())
-                    .collect()
-            };
-            let eager = [eager(self), eager(other)];
-            self.lazily_read_self_attrs
-                .extend(other.lazily_read_self_attrs.iter().cloned());
-            self.lazily_read_self_attrs
-                .retain(|a| !eager.iter().any(|e| e.contains(a)));
+    /// Record that the function changes parameter `p` at `path` (`mutated_param_paths`);
+    /// `memo`: this change only fills a memo or initializes lazily. A path stays in
+    /// `memo_param_paths` only while every change of it does.
+    pub(crate) fn note_param_change(&mut self, p: u8, path: String, memo: bool) {
+        let paths = self.mutated_param_paths.entry(p).or_default();
+        let all_memos = self.memo_param_paths.get_or_insert_with(Box::default);
+        let memos = all_memos.entry(p).or_default();
+        let changed_otherwise = paths.contains(&path) && !memos.contains(&path);
+        if memo && !changed_otherwise {
+            memos.insert(path.clone());
+        } else {
+            memos.remove(&path);
         }
+        if memos.is_empty() {
+            all_memos.remove(&p);
+        }
+        if all_memos.is_empty() {
+            self.memo_param_paths = None;
+        }
+        paths.insert(path);
+        self.mutates_params |= 1u64 << p;
+    }
+
+    /// Whether the function changes parameter `p` other than by filling a memo or initializing
+    /// lazily (`memo_param_paths`); `attrs`: only below those of its attributes.
+    pub fn changes_param_state(&self, p: u8, attrs: Option<&BTreeSet<String>>) -> bool {
+        let memos = self.memo_param_paths.as_deref().and_then(|m| m.get(&p));
+        let paths = self.mutated_param_paths.get(&p).into_iter().flatten();
+        paths
+            .filter(|path| attrs.is_none_or(|a| a.contains(*path)))
+            .any(|path| memos.is_none_or(|m| !m.contains(path)))
+    }
+
+    /// Add the `self` attributes `other` reads to the ones this summary reads (its own or a
+    /// `self` call's facts): an attribute stays read only lazily
+    /// ([`Self::lazily_read_self_attrs`]) or only as the value hashed
+    /// ([`Self::hashed_whole_self_attrs`]) when neither reads it otherwise.
+    pub(crate) fn add_self_reads(&mut self, other: &EffectSummary) {
+        self.lazily_read_self_attrs = read_only_as(self, other, |s| &s.lazily_read_self_attrs);
+        let hashed = read_only_as(self, other, hashed_whole);
+        self.hashed_whole_self_attrs = (!hashed.is_empty()).then(|| Box::new(hashed));
         self.reads_self_attrs
             .extend(other.reads_self_attrs.iter().cloned());
     }
@@ -1375,6 +1426,9 @@ pub struct ProjectIndex {
     /// of their callees, nor their write facts, nor `IndirectHelper` sites. Set when no
     /// enabled rule reads them; every function keeps its own.
     pub(crate) skips_typed_writes: bool,
+    /// The opt-in facts the summaries carry ([`OptInFacts`]); incremental updates extract the
+    /// same.
+    pub(crate) opt_in: OptInFacts,
 }
 
 /// True for `.pyi` typing stubs (prefer the sibling `.py` implementation when both exist).
@@ -1403,18 +1457,26 @@ pub fn analyze_project_with(
     kb: &EffectiveEcosystemKb,
     contracts: Option<Arc<dyn Contracts>>,
 ) -> ProjectIndex {
-    analyze_project_for(modules, kb, contracts, TypedWrites::Propagated)
+    analyze_project_for(
+        modules,
+        kb,
+        contracts,
+        TypedWrites::Propagated,
+        OptInFacts::ALL,
+    )
 }
 
-/// [`analyze_project_with`], propagating typed writes only when a rule reads them.
+/// [`analyze_project_with`], propagating typed writes and extracting the opt-in facts only when
+/// a rule reads them.
 pub fn analyze_project_for(
     modules: &[ModuleInput<'_>],
     kb: &EffectiveEcosystemKb,
     contracts: Option<Arc<dyn Contracts>>,
     typed_writes: TypedWrites,
+    opt_in: OptInFacts,
 ) -> ProjectIndex {
-    let files = summarize(modules, kb, false, contracts.as_deref());
-    ProjectIndex::build_for(files, contracts, typed_writes)
+    let files = summarize(modules, kb, false, contracts.as_deref(), opt_in);
+    ProjectIndex::build_for(files, contracts, typed_writes, opt_in)
 }
 
 /// Whether propagation carries typed writes (`EffectSummary::typed_field_write_sites` and
@@ -1426,6 +1488,31 @@ pub enum TypedWrites {
     Local,
 }
 
+/// The facts of the opt-in rules that summaries and propagation compute only when a rule
+/// reads them: `MUT112`'s return origins (`EffectSummary::returns_origins`, `returns_results`,
+/// `returns_nodes`, `origin_nodes`, `ArgOrigin::origins`) and `MUT113`'s iteration facts
+/// (`EffectSummary::iterations`, `CallSite::result_held`). `CallSite::returned`, which `MUT202`
+/// reads too, is always computed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OptInFacts {
+    pub return_origins: bool,
+    pub iterations: bool,
+}
+
+impl OptInFacts {
+    /// Every opt-in fact.
+    pub const ALL: Self = Self {
+        return_origins: true,
+        iterations: true,
+    };
+}
+
+impl Default for OptInFacts {
+    fn default() -> Self {
+        Self::ALL
+    }
+}
+
 /// The local summaries of every module of a project with `contracts`, recording what each read
 /// of the project declarations (`FileSummary::decl_reads`), for an index that incremental
 /// updates keep current. [`ProjectIndex::build_with`] propagates them; it needs no IR, so the
@@ -1434,8 +1521,9 @@ pub fn summarize_project_with_reads(
     modules: &[ModuleInput<'_>],
     kb: &EffectiveEcosystemKb,
     contracts: Option<&dyn Contracts>,
+    opt_in: OptInFacts,
 ) -> Vec<FileSummary> {
-    summarize(modules, kb, true, contracts)
+    summarize(modules, kb, true, contracts, opt_in)
 }
 
 fn summarize(
@@ -1443,6 +1531,7 @@ fn summarize(
     kb: &EffectiveEcosystemKb,
     track: bool,
     contracts: Option<&dyn Contracts>,
+    opt_in: OptInFacts,
 ) -> Vec<FileSummary> {
     let (decls, own) = resolver::project_decls_for(modules, kb, None, track);
     if track {
@@ -1450,7 +1539,7 @@ fn summarize(
         return modules
             .iter()
             .zip(own)
-            .map(|(m, own)| summary::summarize_module(m, &decls, kb, own, track, contracts))
+            .map(|(m, own)| summary::summarize_module(m, &decls, kb, own, track, contracts, opt_in))
             .collect();
     }
     // A module's local summary depends on it and the declarations only (indexed collect: input
@@ -1458,7 +1547,7 @@ fn summarize(
     modules
         .par_iter()
         .zip(own)
-        .map(|(m, own)| summary::summarize_module(m, &decls, kb, own, track, contracts))
+        .map(|(m, own)| summary::summarize_module(m, &decls, kb, own, track, contracts, opt_in))
         .collect()
 }
 
@@ -1473,23 +1562,30 @@ impl ProjectIndex {
         !self.skips_typed_writes
     }
 
-    /// [`Self::build`] for summaries extracted with `contracts`.
-    pub fn build_with(files: Vec<FileSummary>, contracts: Option<Arc<dyn Contracts>>) -> Self {
-        Self::build_for(files, contracts, TypedWrites::Propagated)
+    /// The opt-in facts the summaries carry.
+    pub fn opt_in_facts(&self) -> OptInFacts {
+        self.opt_in
     }
 
-    /// [`Self::build_with`], propagating typed writes as `typed_writes` says; incremental
-    /// updates keep doing so.
+    /// [`Self::build`] for summaries extracted with `contracts`.
+    pub fn build_with(files: Vec<FileSummary>, contracts: Option<Arc<dyn Contracts>>) -> Self {
+        Self::build_for(files, contracts, TypedWrites::Propagated, OptInFacts::ALL)
+    }
+
+    /// [`Self::build_with`], propagating typed writes as `typed_writes` says, for summaries that
+    /// carry the opt-in facts `opt_in`; incremental updates keep doing so.
     pub fn build_for(
         mut files: Vec<FileSummary>,
         contracts: Option<Arc<dyn Contracts>>,
         typed_writes: TypedWrites,
+        opt_in: OptInFacts,
     ) -> Self {
         // The owners of shared module names last (`add_file_links` keeps them either way).
         files.sort_by(|a, b| module_precedence(&a.path).cmp(&module_precedence(&b.path)));
         let mut index = Self {
             contracts,
             skips_typed_writes: typed_writes == TypedWrites::Local,
+            opt_in,
             ..Self::default()
         };
         for mut file in files {
@@ -1635,8 +1731,15 @@ impl ProjectIndex {
         let (decls, own) =
             resolver::project_decls_for(std::slice::from_ref(input), kb, Some(others), true);
         let own = own.into_iter().next().expect("one module in, one out");
-        let file =
-            summary::summarize_module(input, &decls, kb, own, true, self.contracts.as_deref());
+        let file = summary::summarize_module(
+            input,
+            &decls,
+            kb,
+            own,
+            true,
+            self.contracts.as_deref(),
+            self.opt_in,
+        );
         self.update_file(file)
     }
 
@@ -1672,6 +1775,7 @@ impl ProjectIndex {
             own,
             true,
             self.contracts.as_deref(),
+            self.opt_in,
         );
         (self.update_file(file), changed)
     }
@@ -1900,6 +2004,40 @@ impl ProjectIndex {
             }
         }
     }
+}
+
+/// No attributes (a fact a summary does not carry).
+static NO_ATTRS: BTreeSet<String> = BTreeSet::new();
+
+/// [`EffectSummary::hashed_whole_self_attrs`], none when the summary carries none.
+fn hashed_whole(s: &EffectSummary) -> &BTreeSet<String> {
+    s.hashed_whole_self_attrs.as_deref().unwrap_or(&NO_ATTRS)
+}
+
+/// The `self` attributes `a` and `b` together read only in the way `kind` holds: those either
+/// holds, minus those either reads otherwise.
+fn read_only_as(
+    a: &EffectSummary,
+    b: &EffectSummary,
+    kind: impl Fn(&EffectSummary) -> &BTreeSet<String>,
+) -> BTreeSet<String> {
+    if kind(a).is_empty() && kind(b).is_empty() {
+        return BTreeSet::new();
+    }
+    let otherwise = |s: &EffectSummary| -> BTreeSet<String> {
+        s.reads_self_attrs
+            .iter()
+            .filter(|r| !kind(s).contains(&r.attr))
+            .map(|r| r.attr.clone())
+            .collect()
+    };
+    let otherwise = [otherwise(a), otherwise(b)];
+    kind(a)
+        .iter()
+        .chain(kind(b))
+        .filter(|attr| !otherwise.iter().any(|o| o.contains(*attr)))
+        .cloned()
+        .collect()
 }
 
 /// Whether `decorators` make a function an abstract method (`@abc.abstractmethod`).

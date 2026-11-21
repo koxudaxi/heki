@@ -95,6 +95,34 @@ release can change rules, configuration keys, diagnostics, and output formats.
   attribute (`self.xref = {}`, then `self.xref[k] = v`), nor a store or a `defaultdict` read under
   a key the container holds (past `if self.items.get(k) is None: raise KeyError(k)`, inside
   `if k in self.items:` at any depth).
+- `MUT107` (`hash-attr-mutation`) no longer reports a write that cannot change a hash a `set` or
+  `dict` has filed: an in-place change (an item store, `append`) of an attribute `__hash__`
+  hands whole to `hash()` (`hash(self.items)`: a list or `bytearray` there cannot be hashed, and
+  a project value answers for its own hash), a writer whose class defines its own `__hash__`
+  (or `__eq__` alone) below the hash's class, and a private helper that only `__init__` and
+  other such helpers call (`__init__` -> `self._load()` -> `self._decode()`). A writer in a
+  subclass with its own `__hash__` is now reported against that hash.
+- `MUT202` (`readonly-return-mutation`) no longer reports a shared object filling its own memo
+  (a cache-named attribute changed in place, a store under `if k not in ...`, `setdefault`, a
+  lazy initialization), also in a method or helper it is handed to, nor a change of a copy a
+  project class's own `copy()` makes (it copies as deeply as its body does).
+- `MUT202` reports a change below a shallow copy made with `dict(...)`, `list(...)`,
+  `tuple(...)`, `set(...)`, `frozenset(...)`, or a display that only unpacks the shared value
+  (`{**shared}`, `[*rows]`), as for `.copy()`; they shared the values below and were taken as new
+  objects. A helper changing an attribute's object below its own shallow copy of a parameter
+  (`draft = copy.copy(post); draft.tags.append(t)`) now changes that parameter (`MUT202`,
+  `MUT108`, `EFF201` `mutates-params`).
+- `DATA101` no longer reports a value rebuilt from arithmetic on the previous one, such as a
+  recursion that computes `x = np.concatenate((x - np.outer(d, a), [a]))` or a fixed-size
+  quaternion product: every entry of the new array changed, so there are no unchanged parts to
+  collect and combine once. A list that holds the previous value (`pd.concat([df] + parts)`)
+  is still reported.
+- A helper taking a path or a buffer is no longer taken to open the file (or fetch the URL) when
+  its caller hands it a buffer or `None` (`EFF101`, `EFF102`, `EFF103`, `EFF105`, `EFF106`,
+  `DATA101`): `hasattr(buf, "write")` and `isinstance` with the `io` classes are guards too, an
+  `io.StringIO` / `io.BytesIO` the caller constructs, a display, or a comprehension decides
+  them, and a test of a parameter the helper rebinds on some paths (`if buf is None: buf =
+  StringIO()`) is decided per path. `EFF201` still reads no guards.
 - Sizes the code states are no longer taken as data-sized (`EFF102`, `EFF103`, `DATA101`, and
   the `OPT` rules): a builtin constructor of a fixed iterable (`list(range(7))`,
   `tuple(".;:")`), a string constant, a comprehension over fixed iterables or a new list filled
