@@ -4824,7 +4824,7 @@ impl<'a> Extractor<'a> {
                         Val::Ref(fqn) => Some(fqn.clone()),
                         _ => None,
                     },
-                    (&|x, next| self.phi_inputs(x, next), &|x| self.is_param(x)),
+                    &|n| self.cx.global_str(n).map(str::to_owned),
                     v,
                 )
             })
@@ -4887,7 +4887,7 @@ impl<'a> Extractor<'a> {
         // The catalog describes the library's class: a project subclass may override the
         // method, and then the call runs no catalogued implementation.
         let unconditional = if self.opt_in.must_effects && self.targets_complete() {
-            self.unconditional(entry, passed, &effects)
+            self.unconditional(entry, case, passed, &effects)
         } else {
             0
         };
@@ -4927,6 +4927,7 @@ impl<'a> Extractor<'a> {
     fn unconditional(
         &self,
         entry: &heki_kb::EcosystemEntry,
+        case: Option<&heki_kb::ArgCase>,
         passed: Passed<'_>,
         effects: &BTreeSet<ExecEffectKind>,
     ) -> u16 {
@@ -4951,7 +4952,7 @@ impl<'a> Extractor<'a> {
         }
         effects
             .iter()
-            .filter(|e| match entry.emits {
+            .filter(|e| match entry.emits_in(case) {
                 heki_kb::Emits::Always => true,
                 // A connection that may be in memory sends its statements without waiting.
                 heki_kb::Emits::IfOnDisk => **e != ExecEffectKind::BlockingDb,

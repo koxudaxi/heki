@@ -3574,29 +3574,122 @@ pub(crate) fn literal<'i>(
 }
 
 /// [`ArgFact`] of `var`: its constant, the class `class_of` gives it, the flags it sets
-/// through the named objects `name_of` gives its operands, and whether it may be computed from
-/// a parameter ([`from_parameter`]; `phi_inputs` and `is_param` as there).
+/// through the named objects `name_of` gives its operands, and whether it names a file
+/// ([`names_a_file`], with the module's string constants `global_str`).
 pub(crate) fn arg_fact<'i>(
     def: impl Fn(VarId) -> Option<&'i Inst>,
     class_of: impl Fn(VarId) -> Option<String>,
     name_of: impl Fn(VarId) -> Option<String>,
-    parameters: ParameterFacts<'_>,
+    global_str: &dyn Fn(&str) -> Option<String>,
     var: VarId,
 ) -> ArgFact {
     ArgFact {
         literal: literal(&def, var),
-        from_parameter: from_parameter(&def, parameters.0, parameters.1, var),
+        names_file: names_a_file(&def, global_str, var),
         class: class_of(var),
         flags: set_flags(&def, &name_of, var),
     }
 }
 
-/// What [`from_parameter`] reads of a function: the inputs of a phi (pushed, with whether the
-/// value is one) and whether a value is a parameter.
-pub(crate) type ParameterFacts<'p> = (
-    &'p dyn Fn(VarId, &mut Vec<VarId>) -> bool,
-    &'p dyn Fn(VarId) -> bool,
-);
+/// Whether a database name opens a database in memory (`sqlite3.connect`), or opens none that
+/// heki can name: the empty name is a temporary database.
+fn in_memory_name(text: &str) -> bool {
+    text.is_empty()
+        || text == ":memory:"
+        || text.starts_with("file::memory:")
+        || text.contains("mode=memory")
+}
+
+/// `os.path` functions whose result is a path made from their arguments.
+const OS_PATH_BUILDERS: &[&str] = &["join", "abspath", "dirname", "realpath", "normpath"];
+
+/// `pathlib.Path` methods whose result is a path made from the receiver and the arguments.
+const PATH_METHODS: &[&str] = &[
+    "joinpath",
+    "with_suffix",
+    "with_name",
+    "resolve",
+    "absolute",
+];
+
+/// Builtins and constructors whose result is a path or text made from their arguments.
+const PATH_CONSTRUCTORS: &[&str] = &["Path", "pathlib.Path", "PurePath", "str", "os.fspath"];
+
+/// Whether `var` is established to name a file (`ArgFact::names_file`): every part it is built
+/// from is a string literal or a module string constant bound once (`global_str`) with no
+/// in-memory form ([`in_memory_name`]), or `__file__`, through copies, `+` and `/`,
+/// [`PATH_CONSTRUCTORS`], [`OS_PATH_BUILDERS`], [`PATH_METHODS`], and `.parent`. Anything else
+/// (a parameter, a phi, an f-string, an environment lookup, an attribute) may name an in-memory
+/// database.
+pub(crate) fn names_a_file<'i>(
+    def: &impl Fn(VarId) -> Option<&'i Inst>,
+    global_str: &dyn Fn(&str) -> Option<String>,
+    var: VarId,
+) -> bool {
+    let budget = Budget::unmetered("heki_effect::resolver::names_a_file");
+    let mut steps = 0usize;
+    let mut leaves = 0usize;
+    let not_a_file = reach(
+        &budget,
+        [var],
+        |v, next| match def(v).map(|i| &i.kind) {
+            Some(InstKind::Copy { src, .. }) => next.push(*src),
+            Some(InstKind::BinOp { lhs, rhs, .. }) => next.extend([*lhs, *rhs]),
+            Some(InstKind::AttrLoad { obj, .. }) => next.push(*obj),
+            Some(InstKind::Call { args, .. }) => next.extend(args.iter().copied()),
+            Some(InstKind::MethodCall {
+                recv, method, args, ..
+            }) => {
+                if PATH_METHODS.contains(&method.as_str()) {
+                    next.push(*recv);
+                }
+                next.extend(args.iter().copied());
+            }
+            _ => {}
+        },
+        |v| {
+            steps += 1;
+            let part = match def(v).map(|i| &i.kind) {
+                Some(InstKind::Const {
+                    literal: ConstLiteral::Str(text),
+                    ..
+                }) => Some(!in_memory_name(text)),
+                Some(InstKind::LoadGlobal { name, .. }) if name == "__file__" => Some(true),
+                Some(InstKind::LoadGlobal { name, .. }) => {
+                    Some(global_str(name).is_some_and(|text| !in_memory_name(&text)))
+                }
+                Some(InstKind::Copy { .. }) => None,
+                Some(InstKind::BinOp {
+                    op: BinOpKind::Add | BinOpKind::Div,
+                    ..
+                }) => None,
+                Some(InstKind::AttrLoad { attr, .. }) if attr == "parent" => None,
+                Some(InstKind::Call { callee, .. })
+                    if PATH_CONSTRUCTORS.contains(&callee.as_str()) =>
+                {
+                    None
+                }
+                Some(InstKind::MethodCall { method, .. })
+                    if OS_PATH_BUILDERS.contains(&method.as_str())
+                        || PATH_METHODS.contains(&method.as_str()) =>
+                {
+                    None
+                }
+                _ => Some(false),
+            };
+            match part {
+                _ if steps > MAX_PARAMETER_STEPS => Visit::Stop(()),
+                Some(true) => {
+                    leaves += 1;
+                    Visit::Prune
+                }
+                Some(false) => Visit::Stop(()),
+                None => Visit::Expand,
+            }
+        },
+    );
+    not_a_file == Answer::Known(None) && leaves > 0
+}
 
 /// Builtins whose result is text made from their argument (`str(path)`, `os.fspath(path)`).
 const TEXT_OF_ARGUMENT: &[&str] = &["str", "os.fspath", "Path", "pathlib.Path"];

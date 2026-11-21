@@ -51,9 +51,12 @@ release can change rules, configuration keys, diagnostics, and output formats.
   the reports `EFF101` and `EFF103` made before, where the new exact claims are not established.
   See the first entry under Changed.
 - `sqlite3.connect` of an in-memory database (`":memory:"`, `file::memory:`, `mode=memory`) does
-  not wait, and neither do the statements on that connection; a connection opened from a
-  parameter of the function, or only named by an annotation, may be in memory, so its waits are
-  not established (`EFF111`; its statements still count for `EFF103`). Reports name such
+  not wait, and neither do the statements on that connection. A connection waits only where
+  heki establishes that it was opened on a file (a literal or a module constant without an
+  in-memory form, or a path built from such parts and `__file__`); any other, one opened from a
+  parameter, an f-string, or an environment lookup, or only named by an annotation, may be in
+  memory, so its waits are not established (`EFF111`; its statements still count for
+  `EFF103`). Reports name such
   connections' methods by the library's API (`sqlite3.Connection.execute`). A
   pragma that only reads or sets an option of the connection (`PRAGMA busy_timeout = 5000`)
   does not wait.
