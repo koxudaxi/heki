@@ -52,7 +52,9 @@ Its premises:
   `set`, `bytearray`, `deque`, ... by annotation, construction, or an `isinstance` test), and
   that parameter receives the argument through the calls shown, each handing it on as itself,
   none of them annotated. No project subclass of that container overrides the changing method
-  (`reverse`, `__setitem__`, `__iadd__`, ...): under R2 the value may be an instance of one.
+  (`reverse`, `__setitem__`, `__iadd__`, ...), has a metaclass that may install it, or, for a
+  method called by name, defines `__getattribute__`: under R2 the value may be an instance of
+  one.
   Established. Open: a change of a value of another class (a `Sequence` whose `append` returns a
   new one), a change by a method a project subclass overrides, and one made where a generator
   that another function returns is iterated; such a report names no line and is heuristic.

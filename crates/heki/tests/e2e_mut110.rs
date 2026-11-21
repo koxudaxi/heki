@@ -587,3 +587,63 @@ fn mut110_does_not_follow_a_change_through_annotated_helpers() {
         .write("pkg/annotated.py", THROUGH_ANNOTATED);
     assert!(diagnostics(&p, &[]).is_empty());
 }
+
+/// A metaclass may install `reverse` (or `__iadd__`) on the subclass it creates, and
+/// `__getattribute__` decides what `xs.reverse` is: both leave the line open. An augmented
+/// assignment calls `__iadd__` without `__getattribute__`, so beside `__getattribute__` its line
+/// stays named.
+const HELPERS: &str = r#"from collections.abc import Sequence
+
+
+def reverse_lists(xs):
+    if isinstance(xs, list):
+        xs.reverse()
+        xs.reverse()
+
+
+def extend_lists(xs):
+    if isinstance(xs, list):
+        xs += [1]
+
+
+def by_name(xs: Sequence[int]) -> None:
+    reverse_lists(xs)
+
+
+def by_operator(xs: Sequence[int]) -> None:
+    extend_lists(xs)
+"#;
+
+#[test]
+fn mut110_leaves_open_a_metaclass_or_getattribute_but_not_an_operator() {
+    let subclasses = [
+        (
+            "metaclass",
+            "class Meta(type):\n    pass\n\n\nclass Made(list, metaclass=Meta):\n    pass\n",
+            ["heuristic", "heuristic"],
+        ),
+        (
+            "getattribute",
+            "class Lazy(list):\n    def __getattribute__(self, name):\n        return object.__getattribute__(self, name)\n",
+            ["heuristic", "exact"],
+        ),
+    ];
+    for (name, subclass, certainties) in subclasses {
+        let p = Project::new(&format!("mut110_customized_{name}"));
+        p.write("pkg/__init__.py", "")
+            .write("pkg/helpers.py", HELPERS)
+            .write("pkg/subclass.py", subclass);
+        let diags = diagnostics(&p, &[]);
+        let a = "pkg/helpers.py";
+        assert_eq!(
+            found(&diags),
+            vec![d(a, 16, "by_name", "xs"), d(a, 20, "by_operator", "xs")],
+            "{name}"
+        );
+        let got: Vec<&str> = diags
+            .iter()
+            .map(|d| d["certainty"].as_str().unwrap())
+            .collect();
+        assert_eq!(got, certainties, "{name}: {diags:#?}");
+    }
+}

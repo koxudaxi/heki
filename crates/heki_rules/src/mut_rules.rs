@@ -2544,17 +2544,20 @@ impl<'a> Mut202Fn<'a> {
             return None;
         };
         let cached = self.cx.index.summary(key)?.cached_result?;
+        let by_name = matches!(change, Change::Method(_));
         let changes = match change {
             Change::Item => cached.kind.takes_item_stores(),
             Change::Method(m) => cached.kind.mutator(m),
             Change::InPlace(op) => cached.kind.in_place_op(op),
         };
-        // Under R2 the result may be an instance of a project subclass of the builtin, whose
-        // own `method` runs instead.
-        let builtin = self
-            .cx
-            .decls
-            .method_not_overridden(cached.kind.class(), method);
+        // Under R2 a result the return annotation names may be an instance of a project subclass
+        // of the builtin, whose own `method` runs instead; one built in the function (a display,
+        // `list(...)`) is the builtin itself.
+        let builtin = cached.built
+            || self
+                .cx
+                .decls
+                .method_not_overridden(cached.kind.class(), method, by_name);
         (changes && builtin).then_some((key, cached))
     }
 

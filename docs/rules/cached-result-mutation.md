@@ -54,9 +54,11 @@ Its premises:
   kind, by its return annotation (R2) or by construction. Established.
 - **Same object**: the changed object is that call's result on every path, with no copy.
   Established.
-- **Changed in place**: the line is an in-place change of a container of that kind, by a method
-  or operator no project subclass of that container overrides (under R2 the result may be an
-  instance of one, whose `sort` or `__ior__` may change nothing). Established.
+- **Changed in place**: the line is an in-place change of a container of that kind. When only
+  the return annotation names the kind, no project subclass of that container overrides the
+  method or operator, has a metaclass that may install it, or, for a method called by name,
+  defines `__getattribute__` (under R2 the result may be an instance of one, whose `sort` or
+  `__ior__` may change nothing). Established.
 
 A heuristic report states that the function changes an object that a cached function returned,
 or an object below it. Open: the value may be the cached one on some paths only, and the object
