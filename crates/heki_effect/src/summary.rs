@@ -8,7 +8,9 @@ use crate::construction::{Escape, Pos, Recorder};
 use crate::consumption::{ItemArgs, IterFlow, PerItemCall, Roots, param_iteration};
 use crate::guards::{self, GuardInputs, LocalGuards, per_item_bit};
 use crate::invalidation::{self, Events, FlowWrite, FuncFlow, Reach, SiteFlow};
-use crate::iterations::{self, BetweenSteps, ContainerChange, IteratedContainer, ResultIteration};
+use crate::iterations::{
+    self, BetweenSteps, ContainerChange, IteratedContainer, IteratedResult, ResultIteration,
+};
 use crate::ownership::{self, LocalOrigins, Origins, ParamRole, Source};
 use crate::readonly::{self, Derivation, ProtectedReturn, ReturnStep, Shared};
 use crate::resolver::{
@@ -30,7 +32,7 @@ use heki_ir::{
 use heki_kb::{EffectiveEcosystemKb, ExecEffectKind};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::cell::{OnceCell, RefCell};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -640,8 +642,11 @@ struct ProjectCall {
     recv: Option<VarId>,
 }
 
-/// The project calls of a function by span, and the object each of its values holds, for
-/// `ResultIteration::on_arguments`: built once per function, each value's object found once.
+/// The object a value holds ([`CallObjects::object_of`]): a value, or an attribute read of one.
+type Object<'s> = (VarId, Option<&'s str>);
+
+/// The project calls of a function by span, and the object each of its values holds, for the
+/// objects of a `ResultIteration`: built once per function, each value's object found once.
 struct CallObjects<'x> {
     calls_at: FxHashMap<Span, Vec<&'x ProjectCall>>,
     /// The values a project call returns: a property read among them runs a getter, which may
@@ -673,23 +678,26 @@ impl<'x> CallObjects<'x> {
         }
     }
 
-    /// For each call site at `calls`, the parameters (bit `p`) that `iterated` binds to the
-    /// object the site's call binds to its callees' first parameter.
-    fn on_arguments(&self, iterated: &ProjectCall, calls: &[Span]) -> Vec<u64> {
-        let arguments: Vec<(u8, (VarId, Option<&str>))> = iterated
-            .recv
-            .map(|r| (0, r))
-            .into_iter()
-            .chain(
-                iterated
+    /// The iteration `between` steps the results of `calls`, with the objects of the loop's calls
+    /// that the iterated calls bind to a parameter (numbered by their first loop call).
+    fn iteration(&self, between: BetweenSteps, calls: &[(Span, &ProjectCall)]) -> ResultIteration {
+        let arguments: Vec<Vec<(u8, Object<'_>)>> = calls
+            .iter()
+            .map(|(_, call)| {
+                let bound = call
                     .params
                     .iter()
-                    .flat_map(|(_, bound)| bound.iter().copied()),
-            )
-            .filter(|(p, _)| *p < 64)
-            .map(|(p, v)| (p, self.object_of(v)))
+                    .flat_map(|(_, bound)| bound.iter().copied());
+                let all = call.recv.map(|r| (0, r)).into_iter().chain(bound);
+                all.filter(|(p, _)| *p < 64)
+                    .map(|(p, v)| (p, self.object_of(v)))
+                    .collect()
+            })
             .collect();
-        let on: Vec<u64> = calls
+        let bound: FxHashSet<Object<'_>> = arguments.iter().flatten().map(|(_, o)| *o).collect();
+        let mut numbers: FxHashMap<Object<'_>, u32> = FxHashMap::default();
+        let receivers: Vec<Option<u32>> = between
+            .calls
             .iter()
             .map(|span| {
                 let at = self.calls_at.get(span).into_iter().flatten();
@@ -702,26 +710,41 @@ impl<'x> CallObjects<'x> {
                             .map(|(_, v)| *v)
                     })
                 });
-                firsts.fold(0, |bits, first| {
-                    let object = self.object_of(first);
-                    arguments
-                        .iter()
-                        .filter(|(_, o)| *o == object)
-                        .fold(bits, |bits, (p, _)| bits | 1u64 << p)
-                })
+                let object = firsts
+                    .map(|v| self.object_of(v))
+                    .find(|o| bound.contains(o))?;
+                let next = u32::try_from(numbers.len()).unwrap_or(u32::MAX);
+                Some(*numbers.entry(object).or_insert(next))
             })
             .collect();
-        if on.iter().all(|bits| *bits == 0) {
+        let mut results: Vec<IteratedResult> = calls
+            .iter()
+            .zip(arguments)
+            .map(|((call, _), arguments)| IteratedResult {
+                call: *call,
+                arguments: arguments
+                    .into_iter()
+                    .filter_map(|(p, o)| Some((p, *numbers.get(&o)?)))
+                    .collect(),
+            })
+            .collect();
+        results.sort();
+        let receivers = if receivers.iter().all(Option::is_none) {
             Vec::new()
         } else {
-            on
+            receivers
+        };
+        ResultIteration {
+            between,
+            receivers,
+            results,
         }
     }
 
     /// The object `var` holds, as far as the function's code tells: the value it copies, or an
     /// attribute read of one that runs no property getter (`self.registry` read twice is one
     /// object, as the containers `MUT113` checks are attributes of `self`).
-    fn object_of(&self, var: VarId) -> (VarId, Option<&'x str>) {
+    fn object_of(&self, var: VarId) -> Object<'x> {
         let value = self.copied_value(var);
         match self.defs.get(&value).map(|inst| &inst.kind) {
             Some(InstKind::AttrLoad { obj, attr, .. }) if !self.results.contains(&value) => {
@@ -1580,20 +1603,21 @@ impl<'a> Extractor<'a> {
         }
         let site_spans: FxHashSet<Span> = self.sites.iter().map(|s| s.span).collect();
         let objects = CallObjects::new(self);
-        let mut found = Vec::new();
+        // The calls whose results each iteration steps, by its position: one fact per iteration.
+        let mut stepping: BTreeMap<Position, Vec<(Span, &ProjectCall)>> = BTreeMap::new();
         for (call, uses) in self.project_calls.iter().zip(iterated) {
-            for &(_, _, (block, index)) in uses {
-                let inst = &self.f.block(block).insts[index];
-                if let Some(between) =
-                    BetweenSteps::of(self.f, inst, &site_spans, self.summary.is_generator)
-                {
-                    let on_arguments = objects.on_arguments(call, &between.calls);
-                    found.push(ResultIteration {
-                        call: self.sites[call.site].span,
-                        between,
-                        on_arguments,
-                    });
-                }
+            for &(_, _, at) in uses {
+                let span = self.sites[call.site].span;
+                stepping.entry(at).or_default().push((span, call));
+            }
+        }
+        let mut found = Vec::new();
+        for ((block, index), calls) in stepping {
+            let inst = &self.f.block(block).insts[index];
+            if let Some(between) =
+                BetweenSteps::of(self.f, inst, &site_spans, self.summary.is_generator)
+            {
+                found.push(objects.iteration(between, &calls));
             }
         }
         self.summary

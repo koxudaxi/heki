@@ -29,7 +29,8 @@ use heki_ast::Span;
 use heki_diagnostics::{Diagnostic, RelatedLocation};
 use heki_effect::iterations::changed_at;
 use heki_effect::{
-    CallSite, ContainerIteration, FileSummary, FuncKey, ProjectIndex, ResultIteration, SiteRole,
+    CallSite, ContainerIteration, FileSummary, FuncKey, IteratedResult, ProjectIndex,
+    ResultIteration, SiteRole,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::cell::RefCell;
@@ -165,7 +166,7 @@ impl<'a> Exposure<'a> {
     /// [`Self::follow`] at the calls of `func` in `caller`, a function of the file at `path` whose
     /// uses of its calls' results are `of_caller`. A loop over a call's result runs its calls on
     /// the generator's instance where they bind the object the call binds to `instance`
-    /// (`ResultIteration::on_arguments`).
+    /// (`ResultIteration::receivers`, `IteratedResult::arguments`).
     fn follow_calls(
         &mut self,
         cx: &CheckContext<'a>,
@@ -175,19 +176,25 @@ impl<'a> Exposure<'a> {
         visited: &mut FxHashSet<Reached>,
     ) {
         let calls = of_caller.calling.get(func).into_iter().flatten();
+        // The iterations, and the objects in them, whose loop calls are added already: a loop
+        // over `zip(a(), b())` is one iteration of both results.
+        let mut added: FxHashSet<(usize, u32)> = FxHashSet::default();
         for call in calls.filter(|s| s.role == SiteRole::Call) {
             if of_caller.handed_on.contains(&call.span) {
                 let in_caller = instance.and_then(|p| bound_parameter(call, func, p));
                 self.follow(cx, uses, (caller, in_caller), visited);
             }
             self.held |= call.result_held;
-            for used in of_caller.iterations.get(&call.span).into_iter().flatten() {
+            for &(n, used, result) in of_caller.iterations.get(&call.span).into_iter().flatten() {
+                let objects: Vec<u32> = result
+                    .arguments
+                    .iter()
+                    .filter(|(p, o)| Some(*p) == instance && added.insert((n, *o)))
+                    .map(|(_, o)| *o)
+                    .collect();
                 let on_instance = |i: usize| {
-                    instance.is_some_and(|p| {
-                        used.on_arguments
-                            .get(i)
-                            .is_some_and(|bits| (bits >> p) & 1 == 1)
-                    })
+                    let receiver = used.receivers.get(i).copied().flatten();
+                    receiver.is_some_and(|o| objects.contains(&o))
                 };
                 let calls = used.between.calls.iter().enumerate();
                 for (_, span) in calls.filter(|(i, _)| on_instance(*i)) {
@@ -207,8 +214,9 @@ struct CallerUses<'i> {
     calling: FxHashMap<&'i FuncKey, Vec<&'i CallSite>>,
     /// Its call sites by span.
     at: FxHashMap<Span, Vec<&'i CallSite>>,
-    /// Its iterations of each call's result, by the call's span.
-    iterations: FxHashMap<Span, Vec<&'i ResultIteration>>,
+    /// Its iterations of each call's result, by the call's span, with their positions among its
+    /// `result_iterations`.
+    iterations: FxHashMap<Span, Vec<(usize, &'i ResultIteration, &'i IteratedResult)>>,
     /// The spans of the calls whose result it hands on: it returns the object, or iterates it
     /// while suspending (a generator delegating to it). Its own callers then run while a
     /// generator that object holds is suspended.
@@ -255,15 +263,15 @@ fn file_uses(file: &FileSummary) -> FileUses<'_> {
         }
     }
     for (key, summary) in &file.local_functions {
-        for used in &summary.iteration_facts().result_iterations {
+        let iterations = summary.iteration_facts().result_iterations.iter();
+        for (n, used) in iterations.enumerate() {
             let of_caller = out.entry(key).or_default();
-            of_caller
-                .iterations
-                .entry(used.call)
-                .or_default()
-                .push(used);
-            if used.between.suspends {
-                of_caller.handed_on.insert(used.call);
+            for result in &used.results {
+                let at = of_caller.iterations.entry(result.call).or_default();
+                at.push((n, used, result));
+                if used.between.suspends {
+                    of_caller.handed_on.insert(result.call);
+                }
             }
         }
     }

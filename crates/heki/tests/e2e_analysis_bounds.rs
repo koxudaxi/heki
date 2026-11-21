@@ -1695,3 +1695,34 @@ fn repeated_consumptions_of_a_generator_read_each_call_once() {
         0
     );
 }
+
+/// A loop over `zip(node._walk(), ...)` of `results` generator calls whose body makes as many
+/// calls: the loop is one fact shared by every result it steps, and what it does to them is found
+/// once per instruction, not once per result.
+#[test]
+fn a_loop_over_many_generator_results_is_summarized_once() {
+    let results = 8_000;
+    let mut lines = vec![
+        "class Node:".to_owned(),
+        "    def __init__(self) -> None:".to_owned(),
+        "        self.items: dict[str, int] = {}".to_owned(),
+        String::new(),
+        "    def _walk(self):".to_owned(),
+        "        for k in self.items:".to_owned(),
+        "            yield k".to_owned(),
+        String::new(),
+        "    def touch(self) -> None:".to_owned(),
+        "        self.items.pop(\"x\", None)".to_owned(),
+        String::new(),
+        String::new(),
+        "def visit(node: Node):".to_owned(),
+        "    for row in zip(".to_owned(),
+    ];
+    lines.extend((0..results).map(|_| "        node._walk(),".to_owned()));
+    lines.push("    ):".to_owned());
+    lines.extend((0..results).map(|_| "        node.touch()".to_owned()));
+    assert_eq!(
+        iterated_mutations("bounds_zipped_results", &(lines.join("\n") + "\n")),
+        1
+    );
+}

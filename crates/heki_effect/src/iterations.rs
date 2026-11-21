@@ -45,7 +45,7 @@ pub struct IterationFacts {
     pub container_iterations: Vec<ContainerIteration>,
     /// Where the function iterates the objects its project calls return (a generator, or one a
     /// plain function hands on), with what runs between their steps: what can run while such a
-    /// generator is suspended.
+    /// generator is suspended. One per iteration, with every call whose result it steps.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub result_iterations: Vec<ResultIteration>,
 }
@@ -72,8 +72,10 @@ impl IterationFacts {
             it.between.calls.fill(zero);
         }
         for used in &mut out.result_iterations {
-            used.call = zero;
             used.between.calls.fill(zero);
+            for result in &mut used.results {
+                result.call = zero;
+            }
         }
         out
     }
@@ -294,20 +296,32 @@ pub struct ContainerIteration {
     pub between: BetweenSteps,
 }
 
-/// An iteration of the object a project call returns, in the calling function: a `for` loop, a
-/// `yield from`, or a call consuming it (`list(...)`, `"".join(...)`).
+/// An iteration of the objects project calls return, in the calling function: a `for` loop, a
+/// `yield from`, or a call consuming them (`list(...)`, `"".join(...)`), with the calls whose
+/// results it steps (`zip(a(), b())` steps both).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ResultIteration {
+    pub between: BetweenSteps,
+    /// For each call in `between.calls`, the object it binds to its own callees' first
+    /// parameter (a method's `self`, a property's object), numbered as the objects of
+    /// `results`' arguments are (`None`: none of them). Empty when no call is on such an object.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub receivers: Vec<Option<u32>>,
+    /// The calls whose results it steps, by span.
+    pub results: Vec<IteratedResult>,
+}
+
+/// A call whose result a [`ResultIteration`] steps.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct IteratedResult {
     /// The call.
     pub call: Span,
-    pub between: BetweenSteps,
-    /// For each call in `between.calls`, the parameters of the iterated call's callees (bit `p`)
-    /// bound to the object the call binds to its own callees' first parameter (a method's
-    /// `self`, a property's object): the same value through copies (`super()` is `self`), or the
-    /// same attribute of one. A generator iterating a container of that parameter's object runs
-    /// the call on its own instance. Empty when no call is on such an object.
+    /// The parameters of the call's callees bound to an object one of the iteration's
+    /// `receivers` is, with its number: the same value through copies (`super()` is `self`), or
+    /// the same attribute of one. A generator iterating a container of that parameter's object
+    /// runs those calls on its own instance.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub on_arguments: Vec<u64>,
+    pub arguments: Vec<(u8, u32)>,
 }
 
 /// What runs between two steps of an iteration.
@@ -377,7 +391,7 @@ enum ResultUse {
 }
 
 /// Where the code after a step that may leave a generator suspended starts.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum Resume {
     /// After the instruction at `(block, index)`.
     After(BlockId, usize),
@@ -418,17 +432,26 @@ pub(crate) fn held_results(
     let mut steps: FxHashMap<VarId, Vec<Resume>> = FxHashMap::default();
     for bb in &f.blocks {
         for (index, inst) in bb.insts.iter().enumerate() {
-            let at = events.get(&(bb.id, index)).map_or(&[][..], Vec::as_slice);
+            let at = (bb.id, index);
+            let mut facts: Option<InstFacts> = None;
             for v in inst.kind.operands() {
                 for r in carried(v) {
-                    match result_use(f, flow, (bb.id, index), inst, at, v, r) {
+                    let facts = facts.get_or_insert_with(|| {
+                        InstFacts::of(
+                            f,
+                            flow,
+                            inst,
+                            events.get(&at).map_or(&[][..], Vec::as_slice),
+                        )
+                    });
+                    match result_use(flow, at, inst, facts, v, r) {
                         ResultUse::Inert => {}
                         ResultUse::Escapes => {
                             held.insert(r);
                         }
-                        ResultUse::Uses => uses.entry(r).or_default().push((bb.id, index)),
+                        ResultUse::Uses => uses.entry(r).or_default().push(at),
                         ResultUse::Steps(resume) => {
-                            uses.entry(r).or_default().push((bb.id, index));
+                            uses.entry(r).or_default().push(at);
                             steps.entry(r).or_default().push(resume);
                         }
                     }
@@ -445,48 +468,96 @@ pub(crate) fn held_results(
             }
         }
     }
+    // Results stepped by one instruction share their steps and uses: each walk is made once.
+    let mut walked: FxHashMap<Walk<'_>, bool> = FxHashMap::default();
     for (r, resumes) in &steps {
-        let later = &uses[r];
-        if resumes.iter().any(|resume| resumed(f, *resume, later)) {
+        let later = uses[r].as_slice();
+        let resumes_later = |resume: &Resume| {
+            *walked
+                .entry((*resume, later))
+                .or_insert_with(|| resumed(f, *resume, later))
+        };
+        if resumes.iter().any(resumes_later) {
             held.insert(*r);
         }
     }
     held
 }
 
+/// A walk of [`resumed`]: from a step, to the later uses of a result.
+type Walk<'u> = (Resume, &'u [(BlockId, usize)]);
+
+/// A `for` loop's header, with the edge it takes once the iterator ends.
+type LoopHeader = (BlockId, Option<BlockId>);
+
+/// What one instruction does to the project call results its operands carry, found once for all
+/// of them: a `zip(...)` of many results is one instruction.
+struct InstFacts {
+    /// Its iterations (`flow.events` there): the results each steps, those it exhausts, and whether
+    /// it runs to exhaustion.
+    events: Vec<(FxHashSet<VarId>, FxHashSet<VarId>, bool)>,
+    /// The results the value it defines steps when that is iterated (a lazy wrapper of them).
+    wrapped: FxHashSet<VarId>,
+    /// A `for` loop's: the results its end exhausts, and its header with the edge taken at the
+    /// end (`None` without a natural loop).
+    loop_end: Option<(FxHashSet<VarId>, Option<LoopHeader>)>,
+}
+
+impl InstFacts {
+    fn of(f: &IrFunction, flow: &IterFlow, inst: &Inst, events: &[&Consumption]) -> Self {
+        let set = |roots: Vec<VarId>| -> FxHashSet<VarId> { roots.into_iter().collect() };
+        let loop_end = match &inst.kind {
+            InstKind::MakeIter { dst, iterable, .. } => {
+                Some((set(flow.expand(&[*iterable])), loop_header(f, *dst)))
+            }
+            _ => None,
+        };
+        Self {
+            events: events
+                .iter()
+                .map(|e| (set(e.stepped.clone()), set(e.roots.clone()), e.full))
+                .collect(),
+            wrapped: inst
+                .kind
+                .dst()
+                .map(|d| set(flow.expand_steps(&[d])))
+                .unwrap_or_default(),
+            loop_end,
+        }
+    }
+}
+
 /// What the instruction `inst` at `(block, index)` does with the project call result `r`, which
-/// its operand `v` carries; `events` are the flow's iterations there.
+/// its operand `v` carries (`facts`: what it does to all of them).
 fn result_use(
-    f: &IrFunction,
     flow: &IterFlow,
     (block, index): (BlockId, usize),
     inst: &Inst,
-    events: &[&Consumption],
+    facts: &InstFacts,
     v: VarId,
     r: VarId,
 ) -> ResultUse {
     let after = Resume::After(block, index);
-    if let InstKind::MakeIter { dst, iterable, .. } = &inst.kind {
-        let exhausts = flow.expand(&[*iterable]).contains(&r);
-        return ResultUse::Steps(loop_resume(f, *dst, exhausts).unwrap_or(after));
+    if let Some((exhausted, header)) = &facts.loop_end {
+        let resume = header.map(|(header, end)| Resume::Loop {
+            header,
+            exhausted: end.filter(|_| exhausted.contains(&r)),
+        });
+        return ResultUse::Steps(resume.unwrap_or(after));
     }
-    if let Some(e) = events.iter().find(|e| e.stepped.contains(&r)) {
-        return if e.full && e.roots.contains(&r) {
+    if let Some((_, exhausted, full)) = facts.events.iter().find(|(s, _, _)| s.contains(&r)) {
+        return if *full && exhausted.contains(&r) {
             ResultUse::Uses
         } else {
             ResultUse::Steps(after)
         };
     }
-    let wraps = inst
-        .kind
-        .dst()
-        .is_some_and(|d| flow.expand_steps(&[d]).contains(&r));
     match &inst.kind {
         InstKind::Copy { .. }
         | InstKind::Compare { .. }
         | InstKind::UnaryOp { .. }
         | InstKind::Delete { .. } => ResultUse::Inert,
-        _ if wraps => ResultUse::Inert,
+        _ if facts.wrapped.contains(&r) => ResultUse::Inert,
         // A generator's own methods step it (`send()`, `throw()`).
         InstKind::MethodCall { recv, .. } if *recv == v => ResultUse::Steps(after),
         InstKind::Call { .. } | InstKind::MethodCall { .. } => {
@@ -500,22 +571,16 @@ fn result_use(
     }
 }
 
-/// [`Resume::Loop`] for the `for` loop stepping the iterator `iter`, whose end exhausts the
-/// object (`exhausts`) or may leave it suspended (`zip(range(3), it)`); `None` without one.
-fn loop_resume(f: &IrFunction, iter: VarId, exhausts: bool) -> Option<Resume> {
+/// The header of the `for` loop stepping the iterator `iter`, with the edge it takes once the
+/// iterator ends (`None` without such a loop).
+fn loop_header(f: &IrFunction, iter: VarId) -> Option<LoopHeader> {
     let header = f.blocks.iter().find(|b| {
         b.insts
             .iter()
             .any(|i| matches!(i.kind, InstKind::IterNext { iter: it, .. } if it == iter))
     })?;
-    let exhausted = match header.terminator {
-        Terminator::Branch { else_bb, .. } if exhausts => Some(else_bb),
-        _ => None,
-    };
-    Some(Resume::Loop {
-        header: header.id,
-        exhausted,
-    })
+    // The header branches to the loop's body, else to where the loop ends.
+    Some((header.id, header.terminator.successors().get(1).copied()))
 }
 
 /// Whether one of `uses` (positions; a block's terminator is at its instruction count) can run

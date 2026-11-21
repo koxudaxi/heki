@@ -689,8 +689,9 @@ functions with none).
    `ProjectIndex::delivery`) is reported at the call, with the iteration as a related location.
    A change written in the body itself is the linters' loop-iterator-mutation check.
 5. Suspended generators: what can run while a generator method `g` is suspended follows where its
-   objects go, from the uses its callers record (`result_iterations`: for each
-   project call whose result a function iterates, what runs between its steps). At each call of
+   objects go, from the uses its callers record (`result_iterations`: for each iteration of
+   project calls' results in a function, what runs between its steps and the calls whose results
+   it steps; one fact for a loop over `zip(a(), b())`, not one per call). At each call of
    `g`, its result is returned (follow the returning function), iterated (the calls in the loop's
    body run; a generator suspending inside the loop is followed), or passed to a project function
    (not followed); whatever else its caller does, it is **held** when it outlives one of these
@@ -707,8 +708,9 @@ functions with none).
      class's interface, as `dict.items()` and `dict.pop()` are;
    - the family methods the project's loops over `g` call on `g`'s instance count: a call whose
      first argument (a method's `self`) is the object the loop's call binds to the parameter
-     holding the instance (`ResultIteration::on_arguments`: the same value through copies,
-     `super()` being `self`, or the same attribute of one that runs no property getter). The
+     holding the instance (`ResultIteration::receivers` and `IteratedResult::arguments`, which
+     number these objects within the iteration: the same value through copies, `super()` being
+     `self`, or the same attribute of one that runs no property getter). The
      instance is followed through the functions returning `g` or suspending in it as the
      caller's parameter their call binds to it, and is unknown otherwise. A call on another
      object, another parameter included, does not count.

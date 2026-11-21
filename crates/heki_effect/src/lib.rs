@@ -43,8 +43,8 @@ pub use invalidation::{
     builds_written_object, delegates_to_callers, is_initializer, reach_across,
 };
 pub use iterations::{
-    BetweenSteps, ContainerChange, ContainerIteration, IteratedContainer, IterationFacts,
-    ResultIteration,
+    BetweenSteps, ContainerChange, ContainerIteration, IteratedContainer, IteratedResult,
+    IterationFacts, ResultIteration,
 };
 pub use ownership::{LocalOrigins, Origins, ResultOf};
 pub use readonly::{ProtectedReturn, ReturnStep, Shared};
