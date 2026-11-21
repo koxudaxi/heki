@@ -1550,6 +1550,19 @@ impl ProjectDecls {
         self.protocol(class).flatten()
     }
 
+    /// Whether `class` is a project protocol that declares the member `name` itself or through
+    /// its protocol bases: an access through a value typed with it is an access of the
+    /// protocol's member, whatever class implements it.
+    pub(crate) fn protocol_declares(&self, class: &str, name: &str) -> bool {
+        // The class's own declaration tells whether it is a protocol: its implementations,
+        // which any module can change, do not matter here.
+        self.class(class).is_some_and(|d| d.is_protocol)
+            && self.mro(class).iter().any(|c| {
+                self.class(c)
+                    .is_some_and(|d| d.is_protocol && d.members.contains(name))
+            })
+    }
+
     /// `Some` when the project class `class` is a protocol: with the project classes
     /// implementing it structurally, or `None` inside when heki cannot list them (too many, a
     /// protocol without members).

@@ -37,7 +37,7 @@ message = "add entries through `Store`"
 
 [[tool.heki.read-owners]]
 name = "vault"
-targets = ["Vault.secret"]
+targets = ["Vault.secret", "Locker.secret"]
 allowed-readers = ["Store.*"]
 
 [[tool.heki.read-owners]]
@@ -220,6 +220,10 @@ const KEY_CLASS: &str = "from typing import ClassVar\n\nfrom pkg.model import Re
 const ALIAS_SRC: &str = "_set = object.__setattr__\n";
 const ALIAS_USE: &str = "from pkg.alias_src import _set\nfrom pkg.model import Registry\n\n\ndef mark(r: Registry):\n    _set(r, \"entries\", [])\n";
 const ALIAS_REBIND: &str = "from pkg import alias_src\n\nalias_src._set = print\n";
+// A read through a protocol declaring the attribute is judged by the protocol; once the
+// protocol no longer declares it, by the class implementing it.
+const PROTO: &str = "from typing import Protocol\n\n\nclass Safe(Protocol):\n    secret: str\n\n\nclass Locker:\n    def __init__(self):\n        self.secret = \"\"\n        self.size = 0\n";
+const PROTO_USE: &str = "from pkg.proto import Safe\n\n\ndef peek(s: Safe):\n    return s.secret\n";
 const GETTER_SRC: &str =
     "from pkg.model import Registry\n\n\ndef entries_of(r: Registry):\n    return r.entries\n";
 const GETTER_USE: &str = "from pkg.getter_src import entries_of\nfrom pkg.model import Registry\n\n\ndef grow(r: Registry):\n    entries_of(r).append(1)\n";
@@ -738,6 +742,8 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/alias_use.py", ALIAS_USE),
         ("pkg/getter_src.py", GETTER_SRC),
         ("pkg/getter_use.py", GETTER_USE),
+        ("pkg/proto.py", PROTO),
+        ("pkg/proto_use.py", PROTO_USE),
         ("pkg/listing_base.py", LISTING_BASE),
         ("pkg/listing_cls.py", LISTING_CLS),
         ("pkg/listing_use.py", LISTING_USE),
@@ -1629,6 +1635,24 @@ fn steps_aliases_and_getters() -> Vec<Step> {
     ]
 }
 
+fn steps_protocol_reads() -> Vec<Step> {
+    vec![
+        Step::new(
+            "the protocol no longer declares the attribute read through it",
+            vec![Action::Save(
+                "pkg/proto.py",
+                PROTO.replace("    secret: str\n", "    size: int\n"),
+            )],
+        )
+        .present(&[("pkg/proto_use.py", "MUT203")]),
+        Step::new(
+            "the protocol declares the attribute again",
+            vec![save("pkg/proto.py", PROTO)],
+        )
+        .absent(&[("pkg/proto_use.py", "MUT203")]),
+    ]
+}
+
 fn steps_mut110() -> Vec<Step> {
     let callers_mutable = RO_CALLERS
         .replace("items: Sequence[int]", "items: list[int]")
@@ -2441,6 +2465,7 @@ fn steps() -> Vec<Step> {
     steps.extend(steps_mut108());
     steps.extend(steps_mut110());
     steps.extend(steps_aliases_and_getters());
+    steps.extend(steps_protocol_reads());
     steps.extend(steps_body_runs());
     steps.extend(steps_task_arguments());
     steps.extend(steps_small_displays());

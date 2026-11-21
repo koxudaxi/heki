@@ -491,9 +491,13 @@ impl Boundary<'_> {
             .any(|p| with_prefixes(symbol).any(|n| p.matches(n)))
     }
 
-    /// Whether `allowed-callees` names everything `site` calls: the class it constructs, or
-    /// each of its project callees.
+    /// Whether `allowed-callees` names everything `site` calls: the method the protocol typing
+    /// the receiver declares ([`CallSite::declared`], what the call targets judge the call by),
+    /// the class it constructs, or each of its project callees.
     fn allows_call(&self, site: &CallSite) -> bool {
+        if let Some(declared) = site.declared() {
+            return names_function(&self.allowed_callees, declared);
+        }
         match &site.constructs {
             Some(class) => self.allows_symbol(class),
             None => site
@@ -935,7 +939,8 @@ impl<'a> Reach<'a> {
             .index
             .summary(func)
             .into_iter()
-            .flat_map(|s| &s.typed_field_read_sites);
+            .flat_map(|s| &s.typed_field_read_sites)
+            .filter(|r| r.counts_for_contracts());
         for r in reads {
             for (ti, _) in b.read_targets.iter().enumerate().filter(|(_, t)| {
                 t.matches(&r.class_qualname, &r.attr)

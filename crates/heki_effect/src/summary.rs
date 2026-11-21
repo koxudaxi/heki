@@ -3335,7 +3335,14 @@ impl<'a> Extractor<'a> {
         if let Some(var) = owner.var {
             self.unresolved_access(attr, Access::Read(kind), var, span);
         }
+        // A read through a protocol declaring the attribute is one of every class implementing
+        // it; the read contracts judge it by the protocol, the type the code reads it through.
+        let protocol = match owner.var.and_then(|v| self.val(v)) {
+            Some(Val::Inst(p)) if self.cx.project.protocol_declares(p, attr) => Some(p.clone()),
+            _ => None,
+        };
         for class in owner.typed_classes {
+            let through_protocol = protocol.as_ref().is_some_and(|p| *p != class);
             self.summary
                 .typed_field_read_sites
                 .insert(TypedFieldReadSite {
@@ -3344,6 +3351,7 @@ impl<'a> Extractor<'a> {
                     kind,
                     obj_params: owner.may_params,
                     span,
+                    through_protocol,
                 });
         }
     }
@@ -4349,6 +4357,19 @@ impl<'a> Extractor<'a> {
             .clone()
     }
 
+    /// [`Dispatch::declared`]: the definition of the called method in the project protocol the
+    /// receiver is typed with, when the protocol declares it.
+    fn declared_method(&self, call: &Call<'_>, callees: &[BoundCallee]) -> Option<FuncKey> {
+        let Some(Val::Inst(protocol)) = self.val(call.recv_var?) else {
+            return None;
+        };
+        let name = callees.first()?.callee.qualname.rsplit('.').next()?;
+        let project = self.cx.project;
+        project
+            .protocol_declares(protocol, name)
+            .then(|| project.mro_method(protocol, name))?
+    }
+
     /// What the receiver of `call` tells about the implementations `callees` run
     /// ([`Dispatch`]): the receiver's class (the method's own `self`, a receiver of one project
     /// class, or the class a constructor call makes) when a callee is inherited from a proper
@@ -4402,10 +4423,12 @@ impl<'a> Extractor<'a> {
                 }
             }
         }
-        (receiver.is_some() || !providers.is_empty()).then(|| {
+        let declared = self.declared_method(call, callees);
+        (receiver.is_some() || !providers.is_empty() || declared.is_some()).then(|| {
             Box::new(Dispatch {
                 receiver,
                 providers,
+                declared,
             })
         })
     }

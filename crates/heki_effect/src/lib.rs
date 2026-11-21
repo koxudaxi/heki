@@ -153,6 +153,11 @@ pub struct Dispatch {
     /// For a call on the caller's own `self`: the callees (by index) that are overrides of
     /// subclasses, each with its class (it runs only when `self` is an instance of it).
     pub providers: Vec<(u16, SharedLine)>,
+    /// The method a project protocol declares, when the receiver is typed with the protocol
+    /// (`h._helper()` with `h: Host`): the call contracts judge the call by that declaration,
+    /// the type the code calls it through, while the callees are the implementations it runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declared: Option<FuncKey>,
 }
 
 /// The hops of a kept chain, owned (what a report shows).
@@ -385,6 +390,19 @@ pub struct TypedFieldReadSite {
     /// Parameters of the reading function the read object may be, as itself (bit 0: `self`).
     pub obj_params: u64,
     pub span: Span,
+    /// The read is one of a class implementing the project protocol the object is typed with,
+    /// which declares the attribute: the read and call contracts judge it by the protocol
+    /// ([`Self::counts_for_contracts`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub through_protocol: bool,
+}
+
+impl TypedFieldReadSite {
+    /// Whether the read and call contracts count the read: one through a protocol declaring
+    /// the attribute counts as a read of the protocol only, not of its implementations.
+    pub fn counts_for_contracts(&self) -> bool {
+        !self.through_protocol
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -1277,6 +1295,11 @@ impl CallSite {
 }
 
 impl CallSite {
+    /// The method the protocol typing the receiver declares ([`Dispatch::declared`]).
+    pub fn declared(&self) -> Option<&FuncKey> {
+        self.dispatch.as_ref()?.declared.as_ref()
+    }
+
     /// The class of the receiver ([`Dispatch::receiver`]).
     pub fn receiver(&self) -> Option<&ClassLine> {
         self.dispatch.as_ref()?.receiver.as_deref()

@@ -25,6 +25,11 @@ the allowed callers and resolves to a target:
   `cls(...)` in a class method), also for a dataclass or another class without an `__init__` of
   its own.
 
+A call through a value typed with a project `Protocol` that declares the method is judged by the
+protocol's declaration (`h._helper()` with `h: Host` calls `Host._helper`), not by the
+implementations it runs, and what an implementation's private method calls inside stays with it
+(also when other callers call the method through the class and take its calls over).
+
 A target's last segment names the function, method, or class: a glob there matches within that
 name only (`pkg.*._*` is every private member in `pkg`, not every function of a private module,
 and `pkg.api_*` is `pkg.api_commit`, not `pkg.api_helpers.api_reset`), and the report names the

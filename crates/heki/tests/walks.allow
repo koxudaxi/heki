@@ -202,7 +202,7 @@ heki_rules::mut_rules::iterated_mutation::generators_reached  W2  worklist: reac
 heki_rules::mut_rules::private_methods_called_from_init  W2  worklist: reach, Closure, or fixpoint
 heki_rules::mut_rules::reachable_blocks  W2  worklist: reach, Closure, or fixpoint
 heki_rules::mut_rules::readonly_mutation::Rule::emit  W1  not recursive: `cx.emit` is `CheckContext::emit`, of the same name
-heki_rules::mut_rules::runs_inside_allowed  W2  worklist: reach, Closure, or fixpoint
+heki_rules::mut_rules::runs_inside_allowed_through  W2  worklist: reach, Closure, or fixpoint; stage-2 migration debt
 heki_rules::mut_rules::unresolved::unknown_above  W2  worklist: reach, Closure, or fixpoint
 heki_rules::opt_rules::Defs::continues  W4  body.contains: FnShape
 heki_rules::opt_rules::Defs::derived  W3  passes until nothing changes: fixpoint
