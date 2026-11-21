@@ -70,6 +70,14 @@ pub const EXPERIMENTAL_FEATURES: &[ExperimentalFeature] = &[
         tracking: None,
     },
     ExperimentalFeature {
+        id: "rule.MUT113",
+        kind: ExperimentalKind::Rule,
+        target: "MUT113",
+        since: "0.2.0",
+        reason: "It has few reports, and most of them are still false.",
+        tracking: None,
+    },
+    ExperimentalFeature {
         id: "rule.EFF109",
         kind: ExperimentalKind::Rule,
         target: "EFF109",

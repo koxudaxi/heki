@@ -13,7 +13,7 @@
 use crate::readonly::{COPY_METHODS, SLICE_COPYING_TYPES};
 use crate::resolver::Callee;
 use heki_ast::Span;
-use heki_ir::{BlockId, Inst, InstKind, IrFunction, PhiNode, VarId};
+use heki_ir::{Inst, InstKind, PhiNode, VarId};
 use heki_kb::EffectiveEcosystemKb;
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
@@ -188,12 +188,15 @@ const CASTS: &[&str] = &["typing.cast", "typing_extensions.cast"];
 
 /// What the instruction `kind` makes of the object its result holds. A call's resolution is
 /// `callee` (`None` for any other instruction); `constructs` says the call constructs a project
-/// class.
+/// class. `made_here` tells the values holding an object the function makes itself
+/// ([`made_here`]): an attribute of such an object is one of its elements, of unknown origin,
+/// not state that outlives the call.
 pub fn source<'i>(
     kind: &'i InstKind,
     callee: Option<&Callee>,
     constructs: bool,
     kb: &EffectiveEcosystemKb,
+    made_here: &dyn Fn(VarId) -> bool,
 ) -> Source<'i> {
     match kind {
         InstKind::AllocBuiltin { .. } | InstKind::DictLiteral { .. } => Source::New,
@@ -206,6 +209,7 @@ pub fn source<'i>(
         InstKind::Copy { src, .. } => Source::Same(*src),
         InstKind::LoadGlobal { name, .. } => Source::Held(Holder::Global(name)),
         InstKind::LoadDeref { name, .. } => Source::Held(Holder::Cell(name)),
+        InstKind::AttrLoad { obj, .. } if made_here(*obj) => Source::Element(*obj),
         InstKind::AttrLoad { obj, attr, .. } => Source::Held(Holder::Attr { obj: *obj, attr }),
         InstKind::SubscriptLoad {
             obj,
@@ -245,9 +249,11 @@ pub fn source<'i>(
                     obj: *obj,
                     name: *name,
                 };
-                return match args.get(2) {
-                    Some(default) => Source::HeldOr(held, *default),
-                    None => Source::Held(held),
+                return match (args.get(2), made_here(*obj)) {
+                    (Some(default), true) => Source::ElementOr(*obj, *default),
+                    (Some(default), false) => Source::HeldOr(held, *default),
+                    (None, true) => Source::Element(*obj),
+                    (None, false) => Source::Held(held),
                 };
             }
             match kind {
@@ -257,6 +263,68 @@ pub fn source<'i>(
         }
         _ => Source::Unknown,
     }
+}
+
+/// Calls of these with one argument return a copy of it.
+const COPYING_CALLS: &[&str] = &[
+    "builtins.list",
+    "builtins.dict",
+    "builtins.set",
+    "builtins.bytearray",
+    "collections.OrderedDict",
+    "collections.deque",
+    "copy.copy",
+    "copy.deepcopy",
+];
+
+/// The operand whose copy the instruction `kind` makes (with the call's resolution `callee`): the
+/// receiver of a copy method (`x.copy()`), or the argument of a copying call with that argument
+/// alone (`list(x)`, `dict(x)`, `copy.copy(x)`, a copy sanitizer of the catalog).
+pub fn copied_operand(
+    kind: &InstKind,
+    callee: Option<&Callee>,
+    kb: &EffectiveEcosystemKb,
+) -> Option<VarId> {
+    match kind {
+        InstKind::MethodCall {
+            recv,
+            method,
+            args,
+            kwargs,
+            ..
+        } if args.is_empty() && kwargs.is_empty() && COPY_METHODS.contains(&method.as_str()) => {
+            Some(*recv)
+        }
+        InstKind::Call { args, kwargs, .. } if args.len() == 1 && kwargs.is_empty() => {
+            let Some(Callee::External(symbol)) = callee else {
+                return None;
+            };
+            let copies = COPYING_CALLS.contains(&symbol.as_str())
+                || kb
+                    .lookup(symbol)
+                    .is_some_and(|e| e.copy_sanitizer.is_some());
+            copies.then_some(args[0])
+        }
+        _ => None,
+    }
+}
+
+/// The [`source`] of an instruction, given the values that hold an object the function makes
+/// itself ([`made_here`]).
+pub type SourceGiven<'i, 'f> = dyn Fn(&'i Inst, &dyn Fn(VarId) -> bool) -> Source<'i> + 'f;
+
+/// Whether the object a variable holds is one the function makes itself: `root`, the value the
+/// variable copies through any number of copies, is defined as a new object. Whether an
+/// instruction makes a new object never depends on what its operands hold, so `source_of` is
+/// asked with none made here, and the question does not go on through the operands
+/// (`x = x.child`, thousands deep).
+pub fn made_here<'i>(
+    root: VarId,
+    defs: &FxHashMap<VarId, &'i Inst>,
+    source_of: &SourceGiven<'i, '_>,
+) -> bool {
+    defs.get(&root)
+        .is_some_and(|inst| matches!(source_of(inst, &|_| false), Source::New))
 }
 
 /// [`source`] of a method call outside the project, by the method's name.
@@ -327,14 +395,14 @@ pub fn stores(kind: &InstKind) -> Vec<(VarId, Place<'_>)> {
 /// edge leads to never runs. Exception edges are taken.
 pub struct Live {
     blocks: Vec<bool>,
-    dead: FxHashSet<(BlockId, BlockId)>,
+    dead: FxHashSet<(heki_ir::BlockId, heki_ir::BlockId)>,
 }
 
 impl Live {
-    pub fn of(f: &IrFunction, defs: &FxHashMap<VarId, &Inst>) -> Self {
+    pub fn of(f: &heki_ir::IrFunction, defs: &FxHashMap<VarId, &Inst>) -> Self {
         let dead = dead_edges(f, defs);
         let mut blocks = vec![false; f.blocks.len()];
-        let mut stack: Vec<BlockId> = f.blocks.first().map(|b| b.id).into_iter().collect();
+        let mut stack: Vec<heki_ir::BlockId> = f.blocks.first().map(|b| b.id).into_iter().collect();
         while let Some(b) = stack.pop() {
             let i = b.0 as usize;
             if i >= blocks.len() || blocks[i] {
@@ -355,68 +423,50 @@ impl Live {
     }
 
     /// Whether a run can reach `b`.
-    pub fn block(&self, b: BlockId) -> bool {
+    pub fn block(&self, b: heki_ir::BlockId) -> bool {
         self.blocks[b.0 as usize]
     }
 
     /// Whether a run can take the edge `from -> to`.
-    pub fn edge(&self, from: BlockId, to: BlockId) -> bool {
+    pub fn edge(&self, from: heki_ir::BlockId, to: heki_ir::BlockId) -> bool {
         self.block(from) && !self.dead.contains(&(from, to))
     }
 }
 
-/// The immediate dominator of each block a run reaches over the edges it can take (`None` for
-/// the other blocks), from one pass in reverse postorder. One pass is exact: in the reducible
-/// graphs Python's statements make, an edge to an earlier block goes back to a loop header that
-/// dominates the edge's source, and leaving such an edge out changes no dominator.
-pub fn immediate_dominators(
-    f: &IrFunction,
-    live: &Live,
-    preds: &[Vec<BlockId>],
-) -> Vec<Option<BlockId>> {
-    let rpo: Vec<BlockId> = f
-        .rpo_blocks()
-        .into_iter()
-        .filter(|b| live.block(*b))
-        .collect();
-    let mut order = vec![usize::MAX; f.blocks.len()];
-    for (i, b) in rpo.iter().enumerate() {
-        order[b.0 as usize] = i;
-    }
-    let mut idom: Vec<Option<BlockId>> = vec![None; f.blocks.len()];
-    idom[rpo[0].0 as usize] = Some(rpo[0]);
-    let up = |b: BlockId, idom: &[Option<BlockId>]| {
-        idom[b.0 as usize].expect("a block before in reverse postorder has a dominator")
-    };
-    for &b in &rpo[1..] {
-        let mut found: Option<BlockId> = None;
-        for &p in &preds[b.0 as usize] {
-            if idom[p.0 as usize].is_none() || !live.edge(p, b) {
-                continue;
-            }
-            found = Some(match found {
-                None => p,
-                Some(mut d) => {
-                    let mut q = p;
-                    while d != q {
-                        while order[d.0 as usize] > order[q.0 as usize] {
-                            d = up(d, &idom);
-                        }
-                        while order[q.0 as usize] > order[d.0 as usize] {
-                            q = up(q, &idom);
-                        }
-                    }
-                    d
-                }
-            });
+/// The value each copy among `defs` copies, through any number of copies: each chain is walked
+/// once (`heki_ir` closes no cycle of copies).
+pub fn copy_roots(defs: &FxHashMap<VarId, &Inst>) -> FxHashMap<VarId, VarId> {
+    let mut roots: FxHashMap<VarId, VarId> = FxHashMap::default();
+    for (&start, inst) in defs {
+        if !matches!(inst.kind, InstKind::Copy { .. }) {
+            continue;
         }
-        idom[b.0 as usize] = found;
+        let mut passed = Vec::new();
+        let mut cur = start;
+        let root = loop {
+            if let Some(&root) = roots.get(&cur) {
+                break root;
+            }
+            match defs.get(&cur).map(|i| &i.kind) {
+                Some(InstKind::Copy { src, .. }) => {
+                    passed.push(cur);
+                    cur = *src;
+                }
+                _ => break cur,
+            }
+        };
+        for v in passed {
+            roots.insert(v, root);
+        }
     }
-    idom
+    roots
 }
 
 /// The edges of `f` a branch on a constant never takes, by `(from, to)` block.
-fn dead_edges(f: &IrFunction, defs: &FxHashMap<VarId, &Inst>) -> FxHashSet<(BlockId, BlockId)> {
+fn dead_edges(
+    f: &heki_ir::IrFunction,
+    defs: &FxHashMap<VarId, &Inst>,
+) -> FxHashSet<(heki_ir::BlockId, heki_ir::BlockId)> {
     let mut out = FxHashSet::default();
     for b in &f.blocks {
         let heki_ir::Terminator::Branch {
@@ -466,7 +516,7 @@ pub(crate) enum Part {
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn origins_of<'i>(
     defs: &FxHashMap<VarId, &'i Inst>,
-    phis: &FxHashMap<VarId, (BlockId, &PhiNode)>,
+    phis: &FxHashMap<VarId, (heki_ir::BlockId, &PhiNode)>,
     live: &Live,
     roots: &[(VarId, Part)],
     source_of: impl Fn(&'i Inst) -> Source<'i>,

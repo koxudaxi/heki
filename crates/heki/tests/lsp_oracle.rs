@@ -26,7 +26,7 @@ const CONFIG: &str = r#"[project]
 name = "t"
 
 [tool.heki.lint]
-extend-select = ["MUT101", "MUT108", "MUT111", "EFF107", "MUT112", "EFF109"]
+extend-select = ["MUT101", "MUT108", "MUT111", "EFF107", "MUT112", "MUT113", "EFF109"]
 
 [[tool.heki.write-owners]]
 name = "registry"
@@ -518,6 +518,22 @@ const OWN_BASE: &str =
     "class Box:\n    def __init__(self, items=None):\n        self.items = items or []\n";
 const OWN_SUB: &str = "from pkg.own_base import Box\n\n\nclass Bag(Box):\n    def order(self):\n        return sorted(self.items)\n";
 const OWN_SUB_SORTING: &str = "from pkg.own_base import Box\n\n\nclass Bag(Box):\n    def order(self):\n        self.items.sort()\n";
+// Containers changed while iterated (`MUT113`): a generator kept on the instance iterates a dict
+// that a subclass in another module starts changing (the change then moves a line down, the
+// generator takes a snapshot and stops, the subclass hands the dict to a helper of a third module
+// that changes it, and the helper stops changing it), and a private generator whose consumer in
+// another module starts changing the dict in its loop, then changes another instance's dict
+// instead, then keeps the generator, then only counts again, then steps it by hand before
+// counting the rest, then counts again; then a helper there iterating the generator, whose
+// result a function keeps, starts suspending inside its loop (its calls stay the same).
+const SUBSCRIPTIONS: &str = "class Subscriptions:\n    def __init__(self):\n        self.by_node = {}\n        self._cursor = self._cycle()\n\n    def _cycle(self):\n        while True:\n            yield from self.by_node.values()\n\n    def next_subscriber(self):\n        return next(self._cursor)\n";
+const SUB_DROP: &str = "from pkg.subscriptions import Subscriptions\n\n\nclass Dropping(Subscriptions):\n    def size(self):\n        return len(self.by_node)\n";
+const SUB_DROP_CHANGING: &str = "from pkg.subscriptions import Subscriptions\n\n\nclass Dropping(Subscriptions):\n    def drop(self, node):\n        self.by_node.pop(node, None)\n";
+const SUB_DROP_HANDING: &str = "from pkg.sub_ops import forget\nfrom pkg.subscriptions import Subscriptions\n\n\nclass Dropping(Subscriptions):\n    def drop(self, node):\n        forget(self.by_node, node)\n";
+const SUB_OPS: &str = "def forget(table, node):\n    table.pop(node, None)\n";
+const TALLY: &str = "class Tally:\n    def __init__(self):\n        self.counts = {}\n\n    def _walk(self):\n        for k in self.counts:\n            yield k\n\n    def remove(self, k):\n        del self.counts[k]\n";
+const TALLY_USE: &str = "from pkg.tally import Tally\n\n\ndef total(t: Tally):\n    n = 0\n    for k in t._walk():\n        n += 1\n    return n\n";
+const TALLY_COUNTING: &str = "from pkg.tally import Tally\n\n\ndef _counting(t: Tally):\n    n = 0\n    for k in t._walk():\n        n += 1\n    return n\n\n\ndef start(t: Tally):\n    t.cursor = _counting(t)\n";
 
 // Locks taken again (`EFF109`): a subclass method holding the lock its base class's helper in
 // another module takes, and a function holding a module global that a helper takes only when
@@ -703,6 +719,11 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/fresh_build.py", FRESH_BUILD),
         ("pkg/strict_ops.py", STRICT_OPS),
         ("pkg/strict_use.py", STRICT_USE),
+        ("pkg/subscriptions.py", SUBSCRIPTIONS),
+        ("pkg/sub_drop.py", SUB_DROP),
+        ("pkg/sub_ops.py", SUB_OPS),
+        ("pkg/tally.py", TALLY),
+        ("pkg/tally_use.py", TALLY_USE),
     ]
     .into_iter()
     .map(|(rel, text)| (rel, text.to_owned()))
@@ -1839,6 +1860,21 @@ fn steps_hash_writers() -> Vec<Step> {
 /// that the methods of its class family make in other modules (`heki_rules::family_readers`).
 fn steps_mut112() -> Vec<Step> {
     vec![
+        // The summaries carry the facts of `MUT112` and `MUT113` only while a rule reads them
+        // (`OptInFacts`): a configuration selecting them again re-indexes with the facts.
+        Step::new(
+            "MUT112 and MUT113 are no longer selected, and the function two modules below stops copying its argument",
+            vec![
+                Action::Configure(CONFIG.replace(", \"MUT112\", \"MUT113\"", "")),
+                save("pkg/own_prepare.py", OWN_PREPARE_SAME),
+            ],
+        )
+        .absent(&[("pkg/own_use.py", "MUT112")]),
+        Step::new(
+            "MUT112 and MUT113 are selected again",
+            vec![Action::Configure(CONFIG.to_owned())],
+        )
+        .present(&[("pkg/own_use.py", "MUT112")]),
         Step::new(
             "the function two modules below stops copying its argument",
             vec![save("pkg/own_prepare.py", OWN_PREPARE_SAME)],
@@ -1915,6 +1951,108 @@ fn steps_mut111() -> Vec<Step> {
             vec![save("pkg/safe_journal.py", SAFE_JOURNAL)],
         )
         .present(&[("pkg/headline.py", "MUT111")]),
+    ]
+}
+
+/// `MUT113`: a generator's report follows the methods of its class family in other modules that
+/// change the container it iterates (`heki_rules::family_readers`), where they change it (the
+/// places other files show, `shown_places`), and what its callers in other modules do with it
+/// (`EffectSummary::result_iterations`, `CallSite::result_held`).
+fn steps_mut113() -> Vec<Step> {
+    let moved = SUB_DROP_CHANGING.replace(
+        "        self.by_node.pop",
+        "        # Forget the node.\n        self.by_node.pop",
+    );
+    let snapshot = SUBSCRIPTIONS.replace(
+        "yield from self.by_node.values()",
+        "yield from list(self.by_node.values())",
+    );
+    let reading = SUB_OPS.replace("    table.pop(node, None)", "    return table.get(node)");
+    let pruning = TALLY_USE.replace("        n += 1\n", "        t.remove(k)\n");
+    let pruning_another = TALLY_USE
+        .replace("def total(t: Tally):", "def total(t: Tally, other: Tally):")
+        .replace("        n += 1\n", "        other.remove(k)\n");
+    let suspending =
+        TALLY_COUNTING.replace("        n += 1\n", "        n += 1\n        yield n\n");
+    let keeping = TALLY_USE.replace(
+        "    n = 0\n    for k in t._walk():\n        n += 1\n    return n\n",
+        "    t.cursor = t._walk()\n    return 0\n",
+    );
+    let stepping = TALLY_USE.replace(
+        "    for k in t._walk():\n",
+        "    g = t._walk()\n    next(g)\n    for k in g:\n",
+    );
+    vec![
+        Step::new(
+            "a subclass in another module changes the dict a kept generator iterates",
+            vec![save("pkg/sub_drop.py", SUB_DROP_CHANGING)],
+        )
+        .present(&[("pkg/subscriptions.py", "MUT113")]),
+        Step::new(
+            "a comment above the subclass's change moves it a line down",
+            vec![Action::Save("pkg/sub_drop.py", moved)],
+        )
+        .present(&[("pkg/subscriptions.py", "MUT113")]),
+        Step::new(
+            "the generator iterates a snapshot",
+            vec![Action::Save("pkg/subscriptions.py", snapshot)],
+        )
+        .absent(&[("pkg/subscriptions.py", "MUT113")]),
+        Step::new(
+            "the generator iterates the dict itself again",
+            vec![save("pkg/subscriptions.py", SUBSCRIPTIONS)],
+        )
+        .present(&[("pkg/subscriptions.py", "MUT113")]),
+        Step::new(
+            "the subclass hands the dict to a helper of a third module that changes it",
+            vec![save("pkg/sub_drop.py", SUB_DROP_HANDING)],
+        )
+        .present(&[("pkg/subscriptions.py", "MUT113")]),
+        Step::new(
+            "the helper only reads the dict",
+            vec![Action::Save("pkg/sub_ops.py", reading)],
+        )
+        .absent(&[("pkg/subscriptions.py", "MUT113")]),
+        Step::new(
+            "a loop in another module over a private generator changes the dict it iterates",
+            vec![Action::Save("pkg/tally_use.py", pruning)],
+        )
+        .present(&[("pkg/tally.py", "MUT113")]),
+        Step::new(
+            "the loop removes the keys from another tally instead",
+            vec![Action::Save("pkg/tally_use.py", pruning_another)],
+        )
+        .absent(&[("pkg/tally.py", "MUT113")]),
+        Step::new(
+            "the other module keeps the generator instead",
+            vec![Action::Save("pkg/tally_use.py", keeping)],
+        )
+        .present(&[("pkg/tally.py", "MUT113")]),
+        Step::new(
+            "the other module only counts the items again",
+            vec![save("pkg/tally_use.py", TALLY_USE)],
+        )
+        .absent(&[("pkg/tally.py", "MUT113")]),
+        Step::new(
+            "the other module steps the generator by hand before counting the rest",
+            vec![Action::Save("pkg/tally_use.py", stepping)],
+        )
+        .present(&[("pkg/tally.py", "MUT113")]),
+        Step::new(
+            "the other module counts every item again",
+            vec![save("pkg/tally_use.py", TALLY_USE)],
+        )
+        .absent(&[("pkg/tally.py", "MUT113")]),
+        Step::new(
+            "a helper iterates the generator and a function keeps the helper's result",
+            vec![save("pkg/tally_use.py", TALLY_COUNTING)],
+        )
+        .absent(&[("pkg/tally.py", "MUT113")]),
+        Step::new(
+            "the helper suspends inside its loop",
+            vec![Action::Save("pkg/tally_use.py", suspending)],
+        )
+        .present(&[("pkg/tally.py", "MUT113")]),
     ]
 }
 
@@ -2168,6 +2306,7 @@ fn steps() -> Vec<Step> {
     steps.extend(steps_mut111());
     steps.extend(steps_mut112());
     steps.extend(steps_eff109());
+    steps.extend(steps_mut113());
     steps.extend(steps_receiver_typing());
     steps.extend(steps_effect_index());
     steps.extend([
@@ -2263,8 +2402,8 @@ fn steps() -> Vec<Step> {
         Step::new(
             "the configuration becomes invalid",
             vec![Action::Configure(CONFIG.replace(
-                "extend-select = [\"MUT101\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\", \"EFF109\"]",
-                "extend-select = [\"MUT101\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\", \"EFF109\"]\nselect = [\"NOPE1\"]",
+                "extend-select = [\"MUT101\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\", \"MUT113\", \"EFF109\"]",
+                "extend-select = [\"MUT101\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\", \"MUT113\", \"EFF109\"]\nselect = [\"NOPE1\"]",
             ))],
         )
         .absent(&[("pkg/svc_user.py", "EFF101")]),
@@ -2765,7 +2904,7 @@ const EDGE_CONFIG: &str = r#"[project]
 name = "t"
 
 [tool.heki.lint]
-extend-select = ["MUT103"]
+extend-select = ["MUT103", "MUT113"]
 
 [[tool.heki.effect-boundaries]]
 name = "net"
@@ -2793,6 +2932,20 @@ const DUP_USER: &str = "from app.dup import two\n\n\nasync def use():\n    two()
 const SRC_UTIL: &str = "import time\n\n\ndef wait():\n    time.sleep(1)\n";
 const SRC_CALLER: &str = "from pkg.util import wait\n\n\nasync def call():\n    wait()\n";
 const GENERATED: &str = "import time\n\n\nasync def tick():\n    time.sleep(1)\n";
+// The private generator of `TALLY` (`MUT113`), returned by a function of a second module and
+// consumed in a third. No owner contract is declared here: the server re-checks no file below
+// an edited function for one.
+const TALLY_FORWARD: &str =
+    "from app.tally import Tally\n\n\ndef _forward(t: Tally):\n    return t._walk()\n";
+// A deque a kept generator iterates (`MUT113`), changed by a helper of another module it is
+// handed to.
+const RING: &str = "from collections import deque\n\nfrom app.ring_ops import turn\n\n\nclass Ring:\n    def __init__(self) -> None:\n        self.ring: deque[int] = deque()\n        self._cursor = self._cycle()\n\n    def _cycle(self):\n        while True:\n            yield from self.ring\n\n    def spin(self) -> None:\n        turn(self.ring)\n";
+const RING_OPS: &str = "def turn(q):\n    q.rotate(1)\n";
+// A dict a kept generator iterates (`MUT113`), changed by subclass methods of another module:
+// through the first of two calls of one length on a line, and directly, before another dict.
+const SPOOL: &str = "class Spool:\n    def __init__(self):\n        self.entries = {}\n        self.backlog = {}\n        self._cursor = self._cycle()\n\n    def _cycle(self):\n        while True:\n            yield from self.entries\n";
+const SPOOL_SUB: &str = "from app.spool import Spool\n\n\nclass Pruned(Spool):\n    def prune(self):\n        self._drop(); self._seen()\n\n    def _drop(self):\n        self.entries.clear()\n\n    def _seen(self):\n        return len(self.entries)\n\n    def trim(self):\n        self.entries.clear(); self.backlog.clear()\n";
+const TALLY_LISTED: &str = "from app.tally import Tally\nfrom app.tally_forward import _forward\n\n\ndef listed(t: Tally):\n    return list(_forward(t))\n";
 
 fn edge_files() -> Vec<(&'static str, String)> {
     [
@@ -2808,6 +2961,13 @@ fn edge_files() -> Vec<(&'static str, String)> {
         ("app/dup_user.py", DUP_USER),
         ("src/pkg/util.py", SRC_UTIL),
         ("caller.py", SRC_CALLER),
+        ("app/tally.py", TALLY),
+        ("app/tally_forward.py", TALLY_FORWARD),
+        ("app/tally_listed.py", TALLY_LISTED),
+        ("app/ring.py", RING),
+        ("app/ring_ops.py", RING_OPS),
+        ("app/spool.py", SPOOL),
+        ("app/spool_sub.py", SPOOL_SUB),
     ]
     .into_iter()
     .map(|(rel, text)| (rel, text.to_owned()))
@@ -2831,8 +2991,81 @@ fn edge_steps() -> Vec<Step> {
     steps.extend(steps_discarded_buffer());
     steps.extend(steps_src_layout());
     steps.extend(steps_ignore_files());
+    steps.extend(steps_forwarded_generator());
+    steps.extend(steps_swapped_calls());
     steps.extend(steps_baseline());
     steps
+}
+
+/// `MUT113`: a module steps by hand, then consumes, a private generator of another module that a
+/// function of a third one returns. The generator's report follows its object through the
+/// function returning it (`heki_rules::family_readers`), while no summary changes; then the
+/// module stops calling that function, which only the calls before the edit lead from to the
+/// generator. Then a helper
+/// a kept generator's method hands its deque to stores an item of it instead of rotating it
+/// (`IterationFacts::changes_param_containers`), and rotates it again.
+fn steps_forwarded_generator() -> Vec<Step> {
+    let stepping = TALLY_LISTED.replace(
+        "    return list(_forward(t))\n",
+        "    g = _forward(t)\n    next(g)\n    return list(g)\n",
+    );
+    let stopped = TALLY_LISTED.replace("    return list(_forward(t))\n", "    return []\n");
+    vec![
+        Step::new(
+            "a module steps by hand the generator a function of another module returns",
+            vec![Action::Save("app/tally_listed.py", stepping)],
+        )
+        .present(&[("app/tally.py", "MUT113")]),
+        Step::new(
+            "the module stops calling the forwarding function",
+            vec![Action::Save("app/tally_listed.py", stopped)],
+        )
+        .absent(&[("app/tally.py", "MUT113")]),
+        Step::new(
+            "the module lists the forwarded generator again",
+            vec![save("app/tally_listed.py", TALLY_LISTED)],
+        )
+        .absent(&[("app/tally.py", "MUT113")]),
+        Step::new(
+            "a helper of another module only stores an item of the deque it is handed",
+            vec![save("app/ring_ops.py", "def turn(q):\n    q[0] = 0\n")],
+        )
+        .absent(&[("app/ring.py", "MUT113")]),
+        Step::new(
+            "the helper rotates the deque again",
+            vec![save("app/ring_ops.py", RING_OPS)],
+        )
+        .present(&[("app/ring.py", "MUT113")]),
+    ]
+}
+
+/// `MUT113`: two calls of one length on a line swap, so every call site keeps its span while the
+/// call changing the dict a kept generator of another module iterates moves to the other one;
+/// then two changes of one length swap the same way. The generator's report shows where each
+/// method changes the dict.
+fn steps_swapped_calls() -> Vec<Step> {
+    let swapped = SPOOL_SUB.replace("self._drop(); self._seen()", "self._seen(); self._drop()");
+    let changes_swapped = SPOOL_SUB.replace(
+        "self.entries.clear(); self.backlog.clear()",
+        "self.backlog.clear(); self.entries.clear()",
+    );
+    vec![
+        Step::new(
+            "two calls of one length on a line swap, the change moving to the second",
+            vec![Action::Save("app/spool_sub.py", swapped)],
+        )
+        .present(&[("app/spool.py", "MUT113")]),
+        Step::new(
+            "the calls swap back",
+            vec![save("app/spool_sub.py", SPOOL_SUB)],
+        )
+        .present(&[("app/spool.py", "MUT113")]),
+        Step::new(
+            "two changes of one length on a line swap, the dict's moving to the second",
+            vec![Action::Save("app/spool_sub.py", changes_swapped)],
+        )
+        .present(&[("app/spool.py", "MUT113")]),
+    ]
 }
 
 /// A module file and a package sharing one name: the package wins, whichever is edited.

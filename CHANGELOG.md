@@ -27,6 +27,10 @@ release can change rules, configuration keys, diagnostics, and output formats.
   (`items = given or []`, `d.get(k, {})`, a callee returning a memo or its argument), made
   directly, through a helper, or in a closure, and a store of such a value in `self.<attr>` that a
   method of the class family changes in place.
+- `MUT113` (`iterated-container-mutation`, opt-in, experimental) reports a dict, set, or deque
+  of `self` changed in place while a method iterates it: by another method of the class while a
+  generator is suspended inside the iteration, or by a function the loop's body calls; the next
+  step raises `RuntimeError`.
 - `EFF109` (`lock-reacquired-while-held`, opt-in, experimental) reports a non-reentrant lock
   (`threading.Lock`, `asyncio.Lock`, `asyncio.Condition`, `multiprocessing.Lock`) taken again
   while it is held: by a nested `with` or `acquire()`, or by a function the holder calls on its
@@ -92,6 +96,13 @@ release can change rules, configuration keys, diagnostics, and output formats.
   `if False:`) is not what the function returns: a wrapper returning a cached or
   `readonly-returns` value only there is no producer, and changing its result is no `MUT202`
   report.
+- `MUT112` no longer counts an attribute of an object the function makes itself
+  (`visitor = Visitor()`, then `visitor.errors`) as borrowed state, nor a value that a flag
+  parameter copies (`if not in_place: x = x.copy()`).
+- `MUT113` no longer counts the changes a function makes to a container it has just bound to the
+  attribute (`self.xref = {}`, then `self.xref[k] = v`), nor a store or a `defaultdict` read under
+  a key the container holds (past `if self.items.get(k) is None: raise KeyError(k)`, inside
+  `if k in self.items:` at any depth).
 - `MUT107` (`hash-attr-mutation`) no longer reports a write that cannot change a hash a `set` or
   `dict` has filed: an in-place change (an item store, `append`) of an attribute `__hash__`
   hands whole to `hash()` (`hash(self.items)`: a list or `bytearray` there cannot be hashed, and

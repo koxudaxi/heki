@@ -699,10 +699,11 @@ fn expand_through(
     values: &[VarId],
 ) -> Vec<VarId> {
     let mut out = Vec::new();
+    let mut seen: FxHashSet<VarId> = FxHashSet::default();
     let mut stack: Vec<VarId> = values.iter().rev().copied().collect();
     while let Some(v) = stack.pop() {
         if let Some(&r) = root_of.get(&v)
-            && !out.contains(&r)
+            && seen.insert(r)
         {
             out.push(r);
             stack.extend(edges.get(&r).into_iter().flatten().rev());
