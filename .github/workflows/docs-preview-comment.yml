@@ -1,0 +1,55 @@
+name: Docs preview comment
+
+# Comments the docs preview URL on a pull request after the Docs workflow deployed it. It is a
+# workflow of its own because docs.yml is also called by release.yml, and a called workflow may
+# not ask for more permissions than its caller grants: `pull-requests: write` in docs.yml made
+# every release run fail to start. This workflow runs no code of the pull request.
+
+on:
+  workflow_run:
+    workflows: [Docs]
+    types: [completed]
+
+permissions: {}
+
+jobs:
+  comment:
+    if: >-
+      github.repository == 'koxudaxi/heki'
+      && github.event.workflow_run.event == 'pull_request'
+      && github.event.workflow_run.conclusion == 'success'
+      && github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-24.04
+    permissions:
+      pull-requests: write
+    steps:
+      - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const pulls = await github.rest.pulls.list({
+              owner, repo, state: "open", head: `${owner}:${process.env.HEAD_BRANCH}`,
+            });
+            const pr = pulls.data.find((p) => p.head.sha === process.env.HEAD_SHA);
+            if (!pr) {
+              core.notice("No open pull request for this run; no preview comment.");
+              return;
+            }
+            // The Pages project's branch alias for `wrangler pages deploy --branch=pr-<number>`.
+            const url = `https://pr-${pr.number}.heki-5ih.pages.dev`;
+            const marker = "Docs preview:";
+            const body = `📚 **${marker}** ${url}`;
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner, repo, issue_number: pr.number,
+            });
+            const existing = comments.find(
+              (c) => c.user.type === "Bot" && c.body.includes(marker),
+            );
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number: pr.number, body });
+            }

@@ -11,6 +11,8 @@ It catches blocking I/O in `async` code, database queries and HTTP clients in lo
 quadratic loops. You can also add rules in `pyproject.toml` to restrict which functions may
 mutate state or reach I/O.
 
+![heki check in a terminal: EFF101 reports a blocking call two helpers below an async def, and EFF103 a database query one helper below a loop, each with its call chain](https://raw.githubusercontent.com/koxudaxi/heki/main/docs/assets/example-check.svg)
+
 By default, heki shows only *exact* reports: reports of a certified rule, built only from facts
 heki established. To certify a rule, two reviewers check by hand every exact report it makes on
 the development corpus (378 packages and 30.75 million lines, plus packages added for rules with
@@ -266,6 +268,19 @@ $ heki server                                   # LSP server for editors
 ## 🪜 pre-commit and CI
 
 A pre-commit hook (heki follows calls across files, so it checks the whole project):
+
+```yaml
+# .pre-commit-config.yaml
+repos:
+  - repo: https://github.com/koxudaxi/heki
+    rev: v0.2.2
+    hooks:
+      - id: heki
+```
+
+pre-commit builds heki from that release's source with cargo on the first run, which takes a few
+minutes, and installs Rust for the build when cargo is missing. A local hook that runs the wheel
+from PyPI needs no compile:
 
 ```yaml
 # .pre-commit-config.yaml
