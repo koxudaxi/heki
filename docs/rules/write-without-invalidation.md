@@ -2,9 +2,13 @@
 
 # write-without-invalidation (MUT109)
 
-Family: Mutation & State (MUT) · Enabled by default · Severity `error` · No automatic fix
+Family: Mutation & State (MUT) · Heuristic · Runs when its contract is declared · Severity `error` (a bug) · No automatic fix
 
 Writing a declared `invalidation` target (directly, via alias, or via helper) without reaching one of its invalidators on every path to the function's return.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when its contract is declared. It has not been measured yet. See [Rule Precision](../precision.md).
 
 ## What it does
 Checks writes to attributes declared in an `[[tool.heki.invalidation]]` contract: after the
@@ -45,6 +49,20 @@ It does not report:
   a caller, at any distance);
 - paths that leave the function by raising: exception edges are not followed and only normal
   returns count.
+
+## What a report states
+
+A report states that, after a write to a target of an `invalidation` contract, some path to the
+function's normal return calls none of the contract's invalidators.
+
+Its premises:
+
+- **Target**: the object is an instance of a class the contract names, or of a subclass, by
+  construction or annotation (assumption R2). Open: an alias bound on one path is enough.
+- **Writes**: a store, a container method, `setattr` / `__dict__`, or a helper's write. Open through
+  a helper: a write on one of its paths is enough.
+- **Not announced**: some path from the write to the normal return reaches no invalidator.
+  Established on the function's control flow.
 
 ## Why is this bad?
 Code that keeps derived facts (an index of a model graph, a memo, a cached rendering) relies on

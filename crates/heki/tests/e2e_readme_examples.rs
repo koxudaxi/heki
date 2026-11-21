@@ -1,6 +1,6 @@
 //! The examples at the top of `README.md` and `docs/index.md`, run through the binary: each
-//! example's files are written to a project of their own, and `heki check` must print exactly
-//! the console block that follows them.
+//! example's files are written to a project of their own, and the `heki check` command of the
+//! console block that follows them must print exactly the rest of the block.
 
 mod common;
 
@@ -55,8 +55,14 @@ fn the_readme_examples_print_what_the_readme_shows() {
             }
         }
         let console = console.expect("a console block");
-        let expected = console.strip_prefix("$ heki check\n").unwrap();
-        let (code, stdout, stderr) = p.check(&[]);
+        let (command, expected) = console.split_once('\n').unwrap();
+        let args: Vec<&str> = command
+            .strip_prefix("$ heki ")
+            .unwrap()
+            .split_whitespace()
+            .collect();
+        assert_eq!(args[0], "check", "{command}");
+        let (code, stdout, stderr) = p.heki(&args);
         assert_eq!(code, 1, "{stderr}");
         assert_eq!(format!("{stdout}{stderr}"), expected, "{section}");
     }

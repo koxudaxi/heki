@@ -19,9 +19,14 @@ fn rule_command_says_that_a_rule_is_experimental() {
     assert_eq!(code, 0);
     let summary = "# cached-property-stale-mutation (MUT101)\n\nMutating an attribute read by \
         `@cached_property` without invalidating the cache.\n\n";
+    let heuristic = "This rule is heuristic: a premise of its claim can be open (\"What a report \
+        states\" lists them), so a report can be wrong about the code. It runs only when `select` \
+        or `extend-select` names its code or name.\n\n";
     let note = "This rule is experimental. Its precision outside a few code bases is still low.";
     assert!(
-        doc.starts_with(&format!("{summary}{note} {POLICY}\n\n## What it does\n")),
+        doc.starts_with(&format!(
+            "{summary}{heuristic}{note} {POLICY}\n\n## What it does\n"
+        )),
         "{doc}"
     );
     let (_, reader, _) = p.heki(&["rule", "MUT111"]);
@@ -118,13 +123,13 @@ fn docs_check_fails_on_a_stale_experimental_page() {
     let index = docs.0.read("docs/rules/index.md");
     assert!(
         index.contains(&format!(
-            " Opt-in rule.\n- \u{1f9ea} Experimental rule. {POLICY} See "
+            " for.\n- \u{1f9ea} Experimental rule. {POLICY} See "
         )),
         "{index}"
     );
     let rule_page = docs.0.read("docs/rules/cached-property-stale-mutation.md");
     assert!(
-        rule_page.contains("· Opt-in · Experimental · ")
+        rule_page.contains("· Heuristic · Opt-in · Experimental · ")
             && rule_page.contains("!!! warning \"Experimental\"\n\n    Its precision"),
         "{rule_page}"
     );
@@ -188,16 +193,16 @@ fn docs_check_fails_where_a_page_marks_a_rule_differently_from_the_registry() {
     );
     let (code, out) = docs.check_with(
         "ARCHITECTURE.md",
-        "| **MUT101** | Opt-in (experimental) |",
-        "| **MUT101** | Opt-in |",
+        "| **MUT101** | Opt-in (experimental, heuristic) |",
+        "| **MUT101** | Opt-in (heuristic) |",
     );
     assert_eq!(code, 1);
     assert!(out.contains("ARCHITECTURE.md:"), "{out}");
     // A rule named in the text of a cell is not the row's rule.
     let (code, out) = docs.check_with(
         "ARCHITECTURE.md",
-        "| **MUT106** | Opt-in |",
-        "| **MUT106** | Opt-in (see `MUT101`) |",
+        "| **MUT106** | Opt-in (heuristic) |",
+        "| **MUT106** | Opt-in (heuristic; see `MUT101`) |",
     );
     assert_eq!(code, 0, "{out}");
 
@@ -223,6 +228,74 @@ fn docs_check_fails_where_a_page_marks_a_rule_differently_from_the_registry() {
     assert!(
         out.contains("CHANGELOG.md: [0.1.1] does not call heki check --profile experimental")
             && !out.contains("MUT111"),
+        "{out}"
+    );
+}
+
+#[test]
+fn docs_check_fails_where_a_page_marks_a_rule_heuristic_differently_from_the_rules() {
+    let docs = DocsTree::new("heuristic_marks");
+    assert_eq!(docs.build_docs(&[]).0, 0);
+    let heading = "Heuristic rules are marked differently from the rules (edit them by hand):";
+    let index = docs.0.read("docs/rules/index.md");
+    assert!(
+        index.contains("| EFF101 | [async-blocking-call](async-blocking-call.md) | ")
+            && index.contains(" | ≈ |\n")
+            && index.contains(" | ≈ 📜 |\n")
+            && index.contains(" | ≈ 🔌 🧪 |\n"),
+        "{index}"
+    );
+    let page = docs.0.read("docs/rules/async-blocking-call.md");
+    assert!(
+        page.contains("· Heuristic · Off by default · ")
+            && page.contains("!!! note \"Heuristic\"\n\n    This rule is heuristic: ")
+            && page.contains("Of 50 sampled reports (round 3, 2026-11-21), 82% were right"),
+        "{page}"
+    );
+    let contract = docs.0.read("docs/rules/write-owner-violation.md");
+    assert!(
+        contract.contains("· Heuristic · Runs when its contract is declared · ")
+            && contract
+                .contains("It runs when its contract is declared. It has not been measured yet."),
+        "{contract}"
+    );
+
+    // The row of a heuristic rule says so, in the guides, the README, and the measurements.
+    for (rel, old, new) in [
+        (
+            "README.md",
+            "| A blocking call several helpers below an `async def` | `EFF101` | heuristic |",
+            "| A blocking call several helpers below an `async def` | `EFF101` | exact |",
+        ),
+        (
+            "docs/precision.md",
+            "| `EFF101` | heuristic | round 3",
+            "| `EFF101` | exact | round 3",
+        ),
+        (
+            "ARCHITECTURE.md",
+            "| **EFF101** | Off (heuristic) |",
+            "| **EFF101** | On |",
+        ),
+    ] {
+        let (code, out) = docs.check_with(rel, old, new);
+        assert_eq!(code, 1, "{rel}");
+        assert!(
+            out.starts_with(heading)
+                && out.contains(&format!("{rel}:"))
+                && out.contains(": the row of EFF101 does not say heuristic"),
+            "{rel}: {out}"
+        );
+    }
+    // A heuristic rule's measurement is read into its page: a stale page fails.
+    let (code, out) = docs.check_with(
+        "docs/precision.md",
+        "| 50 | 3 / 13 / 25 / 9 | 82% |",
+        "| 50 | 3 / 13 / 26 / 8 | 84% |",
+    );
+    assert_eq!(code, 1);
+    assert!(
+        out.starts_with("Generated docs are out of date") && out.contains("async-blocking-call.md"),
         "{out}"
     );
 }
