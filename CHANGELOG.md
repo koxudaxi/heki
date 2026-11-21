@@ -52,7 +52,8 @@ release can change rules, configuration keys, diagnostics, and output formats.
   anyio task group, through helpers and keyword arguments. SQLAlchemy's `AsyncSession` is
   reported only where the fan-out can be its first operation since it was made or committed.
   It does not report different objects (a process's `stdout` and `stderr`), uses under a lock,
-  an object each task gets for itself, or a task started again only once it is done.
+  an object each task gets for itself, a task started again only once it is done, or a task
+  that may bind the object's name first. Its facts are computed only while it is selected.
   `[[tool.heki.ecosystem]]` takes `one-at-a-time` for other methods.
 
 ### Changed

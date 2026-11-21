@@ -67,10 +67,6 @@ fn stronger(a: OneAtATime, b: OneAtATime) -> OneAtATime {
 
 /// Add one more use of `obj`: the stronger kind, and the shortest chain.
 pub(crate) fn add_use(uses: &mut BTreeMap<ObjRef, ExclusiveUse>, obj: ObjRef, u: ExclusiveUse) {
-    let u = ExclusiveUse {
-        kind: stronger(u.kind, u.kind),
-        ..u
-    };
     match uses.entry(obj) {
         Entry::Vacant(e) => {
             e.insert(u);

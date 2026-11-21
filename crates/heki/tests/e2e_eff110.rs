@@ -554,3 +554,209 @@ fn eff110_selection_and_rule_page() {
         .collect();
     assert!(positions.is_sorted(), "{doc}");
 }
+
+/// More ways to start and to name: a module global (also read by a generator expression), an
+/// attribute of `self` a generator expression reads, `async for`, bound methods an anyio task
+/// group starts, two paths of different depth to one read, and tasks appended to a list in a
+/// loop are reported. Not reported: an attribute of a global object (two names deep), tasks
+/// handed in or stored, a coroutine from a plain function, arguments after `*` unpacking, a
+/// session used before the fan-out through a method, a fan-out no run reaches, a process's
+/// stdout and stderr appended under tests, and a list gathered in the loop that fills it.
+const SHAPES: &str = r#"import asyncio
+
+import anyio
+from sqlalchemy.ext.asyncio import AsyncSession
+
+_READER: asyncio.StreamReader = asyncio.StreamReader()
+
+
+class Client:
+    def __init__(self, reader: asyncio.StreamReader) -> None:
+        self.reader = reader
+        self.task_a = asyncio.ensure_future(self.line())
+        self.task_b = asyncio.ensure_future(self.line())
+
+    async def line(self) -> bytes:
+        return await self.reader.readline()
+
+    async def per_item(self) -> list[bytes]:
+        return await asyncio.gather(*(drain(self.reader) for _ in range(3)))
+
+    async def soon(self) -> None:
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(self.line)
+            tg.start_soon(self.line)
+
+    async def stored(self) -> list[bytes]:
+        return await asyncio.gather(self.task_a, self.task_b)
+
+    async def prepare(self, session: AsyncSession) -> None:
+        await session.execute("select 1")
+
+    async def prepared(self, session: AsyncSession) -> object:
+        await self.prepare(session)
+        return await asyncio.gather(load(session), load(session))
+
+
+_CLIENT = Client(_READER)
+
+
+async def drain(stream: asyncio.StreamReader) -> bytes:
+    return await stream.read()
+
+
+async def read_global() -> bytes:
+    return await _READER.readline()
+
+
+async def lines(reader: asyncio.StreamReader) -> None:
+    async for line in reader:
+        print(line)
+
+
+async def mid(reader: asyncio.StreamReader) -> bytes:
+    return await reader.readline()
+
+
+async def deep(reader: asyncio.StreamReader) -> bytes:
+    return await mid(reader)
+
+
+async def both_paths(reader: asyncio.StreamReader) -> bytes:
+    await deep(reader)
+    return await mid(reader)
+
+
+async def via(client: Client) -> bytes:
+    return await client.reader.readline()
+
+
+async def load(session: AsyncSession) -> object:
+    return await session.get(object, 1)
+
+
+def make(reader: asyncio.StreamReader):
+    return drain(reader)
+
+
+async def globals_together() -> list[bytes]:
+    return await asyncio.gather(read_global(), read_global())
+
+
+async def globals_per_item() -> list[bytes]:
+    return await asyncio.gather(*(drain(_READER) for _ in range(3)))
+
+
+async def iterated(reader: asyncio.StreamReader) -> None:
+    await asyncio.gather(lines(reader), lines(reader))
+
+
+async def two_paths(reader: asyncio.StreamReader) -> None:
+    await asyncio.gather(both_paths(reader), both_paths(reader))
+
+
+async def through_global_client() -> None:
+    await asyncio.gather(via(_CLIENT), via(_CLIENT))
+
+
+async def given_tasks(tasks: set[asyncio.Task]) -> None:
+    await asyncio.wait(tasks)
+
+
+async def with_sleep(reader: asyncio.StreamReader) -> None:
+    await asyncio.gather(asyncio.sleep(1), drain(reader))
+
+
+async def handed(callback, pending) -> None:
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(callback)
+    async with asyncio.TaskGroup() as group:
+        group.create_task(pending)
+        group.create_task(pending)
+
+
+async def made(reader: asyncio.StreamReader) -> None:
+    await asyncio.gather(make(reader), make(reader))
+
+
+async def unpacked(streams: list[asyncio.StreamReader]) -> None:
+    await asyncio.gather(drain(*streams), drain(*streams))
+
+
+async def never(reader: asyncio.StreamReader) -> None:
+    if False:
+        await asyncio.gather(drain(reader), drain(reader))
+
+
+async def piped(proc: asyncio.subprocess.Process) -> None:
+    tasks = []
+    if proc.stdout:
+        tasks.append(drain(proc.stdout))
+    if proc.stderr:
+        tasks.append(drain(proc.stderr))
+    await asyncio.gather(*tasks)
+
+
+async def looped_appends(reader: asyncio.StreamReader, n: int) -> None:
+    tasks = []
+    for _ in range(n):
+        tasks.append(drain(reader))
+    await asyncio.gather(*tasks)
+
+
+async def batch_per_round(readers: list[asyncio.StreamReader], reader: asyncio.StreamReader) -> None:
+    for _ in readers:
+        tasks = []
+        tasks.append(drain(reader))
+        await asyncio.gather(*tasks)
+"#;
+
+#[test]
+fn eff110_follows_more_ways_to_start_and_name_tasks() {
+    let p = Project::new("eff110_shapes");
+    p.write("shapes.py", SHAPES);
+    let read = "asyncio.StreamReader.read";
+    let readline = "asyncio.StreamReader.readline";
+    assert_eq!(
+        found(&diagnostics(&p, SELECT)),
+        vec![
+            d(
+                "shapes.py",
+                19,
+                "Client.per_item",
+                &format!("self.reader->{read}")
+            ),
+            d(
+                "shapes.py",
+                22,
+                "Client.soon",
+                &format!("self.reader->{readline}")
+            ),
+            d(
+                "shapes.py",
+                79,
+                "globals_together",
+                &format!("shapes._READER->{readline}")
+            ),
+            d(
+                "shapes.py",
+                83,
+                "globals_per_item",
+                &format!("shapes._READER->{read}")
+            ),
+            d(
+                "shapes.py",
+                87,
+                "iterated",
+                "reader->asyncio.StreamReader.__anext__"
+            ),
+            d("shapes.py", 91, "two_paths", &format!("reader->{readline}")),
+            d(
+                "shapes.py",
+                140,
+                "looped_appends",
+                &format!("reader->{read}")
+            ),
+        ]
+    );
+}

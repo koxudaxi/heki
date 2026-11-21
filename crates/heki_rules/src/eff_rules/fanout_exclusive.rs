@@ -23,6 +23,7 @@ use heki_effect::consumption::resolve_inst;
 use heki_effect::held::{self, Change};
 use heki_effect::locks::{self, ObjRef};
 use heki_effect::one_at_a_time::{self, ExclusiveUse};
+use heki_effect::ownership::Live;
 use heki_effect::{CallHop, Callee, FuncKey, TypeCtx, Val, owned_chain};
 use heki_ir::{BlockId, FunctionId, Inst, InstKind, IrFunction, VarId};
 use heki_kb::OneAtATime;
@@ -254,19 +255,23 @@ impl<'a> Check<'_, 'a> {
         let f = self.top().f;
         let mut groups: BTreeMap<VarId, Fanout> = BTreeMap::new();
         let mut fanouts: Vec<Fanout> = Vec::new();
-        for bb in &f.blocks {
+        // A fan-out a run never reaches starts nothing.
+        let live = Live::of(f, &self.top().defs);
+        for bb in f.blocks.iter().filter(|b| live.block(b.id)) {
             for (index, inst) in bb.insts.iter().enumerate() {
+                let Some((args, _, _)) = call_parts(&inst.kind) else {
+                    continue;
+                };
                 let Some(symbol) = self.external(0, &inst.kind) else {
                     continue;
                 };
-                let args = call_args(&inst.kind);
                 match symbol.as_str() {
                     GATHER => {
                         let mut siblings = Vec::new();
                         let dst = inst.kind.dst().expect("calls define their result");
                         for (i, a) in args.iter().enumerate() {
                             if f.is_starred(dst, i) {
-                                self.elements(*a, &mut siblings);
+                                self.elements(*a, bb.id, &mut siblings);
                             } else {
                                 self.element(0, *a, None, &mut siblings);
                             }
@@ -276,35 +281,19 @@ impl<'a> Check<'_, 'a> {
                     WAIT => {
                         let mut siblings = Vec::new();
                         if let Some(a) = args.first() {
-                            self.elements(*a, &mut siblings);
+                            self.elements(*a, bb.id, &mut siblings);
                         }
                         fanouts.push((inst.span, (bb.id, index), "asyncio.wait", siblings));
                     }
                     TASK_GROUP_CREATE | ANYIO_START_SOON => {
-                        let InstKind::MethodCall { recv, .. } = inst.kind else {
+                        let looped = self.loop_of(bb.id);
+                        let deferred = symbol == ANYIO_START_SOON;
+                        let (InstKind::MethodCall { recv, .. }, Some(start)) =
+                            (&inst.kind, self.group_start(deferred, args, looped))
+                        else {
                             continue;
                         };
-                        let group = self.top().root(recv);
-                        let looped = self.loop_of(bb.id);
-                        let start = if symbol == ANYIO_START_SOON {
-                            let Some((func, rest)) = args.split_first() else {
-                                continue;
-                            };
-                            Start::Deferred {
-                                func: *func,
-                                args: rest.to_vec(),
-                            }
-                        } else {
-                            let Some(coro) = args.first() else {
-                                continue;
-                            };
-                            let mut one = Vec::new();
-                            self.element(0, *coro, looped, &mut one);
-                            let Some(s) = one.pop() else {
-                                continue;
-                            };
-                            s.start
-                        };
+                        let group = self.top().root(*recv);
                         // The group starts its tasks where it is entered.
                         let top = self.top();
                         let entered = top.def(group).map_or(inst.span, |d| d.span);
@@ -354,9 +343,11 @@ impl<'a> Check<'_, 'a> {
         self.top().f.innermost_loop(bb).map(|lp| lp.header)
     }
 
-    /// The tasks the iterable `v` holds: the items of a display, the element of a generator
-    /// expression or of a comprehension (started once per item), or of a variable bound to one.
-    fn elements(&mut self, v: VarId, out: &mut Vec<Sibling>) {
+    /// The tasks the iterable `v` holds for the fan-out in block `at`: the items of a display,
+    /// the element of a generator expression or of a comprehension (started once per item), or
+    /// of a variable bound to one, and what is appended to a list (once per iteration of a loop
+    /// the fan-out is not in).
+    fn elements(&mut self, v: VarId, at: BlockId, out: &mut Vec<Sibling>) {
         let top = self.top();
         let v = top.root(v);
         match top.def(v).map(|i| &i.kind) {
@@ -365,7 +356,7 @@ impl<'a> Check<'_, 'a> {
                     self.element(0, *e, None, out);
                 }
             }
-            // A comprehension built in the function (Python 3.12+): what its loop appends.
+            // A list the function fills (also a comprehension built in it, Python 3.12+).
             Some(InstKind::AllocBuiltin { .. }) => {
                 let appended = self.appends.get_or_init(|| {
                     let mut out: FxHashMap<VarId, Vec<(BlockId, VarId)>> = FxHashMap::default();
@@ -384,10 +375,10 @@ impl<'a> Check<'_, 'a> {
                     out
                 });
                 for &(b, item) in appended.get(&v).into_iter().flatten() {
-                    let looped = self.loop_of(b);
-                    let mut one = Vec::new();
-                    self.element(0, item, looped, &mut one);
-                    out.extend(one.into_iter().map(|s| Sibling { many: true, ..s }));
+                    let looped = (top.f.innermost_loop(b))
+                        .filter(|lp| !lp.body.contains(&at))
+                        .map(|lp| lp.header);
+                    self.element(0, item, looped, out);
                 }
             }
             Some(InstKind::MakeGenExpr {
@@ -408,6 +399,26 @@ impl<'a> Check<'_, 'a> {
             }
             _ => {}
         }
+    }
+
+    /// What a task group's `create_task(coro)` (or anyio's `start_soon(func, *args)`, `deferred`)
+    /// starts, inside the loop `looped`.
+    fn group_start(
+        &self,
+        deferred: bool,
+        args: &[VarId],
+        looped: Option<BlockId>,
+    ) -> Option<Start> {
+        let (first, rest) = args.split_first()?;
+        if deferred {
+            return Some(Start::Deferred {
+                func: *first,
+                args: rest.to_vec(),
+            });
+        }
+        let mut one = Vec::new();
+        self.element(0, *first, looped, &mut one);
+        one.pop().map(|s| s.start)
     }
 
     /// The tasks a generator expression or a comprehension of the fan-out function yields or
@@ -431,11 +442,10 @@ impl<'a> Check<'_, 'a> {
             for inst in &b.insts {
                 let item = match &inst.kind {
                     InstKind::Yield { value: Some(v), .. } => *v,
-                    InstKind::MethodCall { method, args, .. } if method == "append" => {
-                        let [v] = args.as_slice() else {
-                            continue;
-                        };
-                        *v
+                    InstKind::MethodCall { method, args, .. }
+                        if method == "append" && args.len() == 1 =>
+                    {
+                        args[0]
                     }
                     _ => continue,
                 };
@@ -463,7 +473,7 @@ impl<'a> Check<'_, 'a> {
         if let Some(symbol) = self.external(k, &inst.kind)
             && TASK_FACTORIES.contains(&symbol.as_str())
         {
-            if let Some(coro) = call_args(&inst.kind).first() {
+            if let Some(coro) = call_parts(&inst.kind).and_then(|(args, _, _)| args.first()) {
                 self.element(k, *coro, looped, out);
             }
             return;
@@ -537,7 +547,7 @@ impl<'a> Check<'_, 'a> {
                 let Callee::Project(keys, binds_recv) = callee else {
                     return out;
                 };
-                let (args, kwargs, star_from) = call_parts(&inst.kind);
+                let (args, kwargs, star_from) = call_parts(&inst.kind).unwrap_or_default();
                 let recv = recv.filter(|_| binds_recv);
                 (keys, Binding::new(recv, args, kwargs, star_from))
             }
@@ -556,13 +566,14 @@ impl<'a> Check<'_, 'a> {
                 (keys, Binding::new(recv, args, &[], None))
             }
         };
-        for key in callees {
-            let (Some(summary), Some(decl)) = (
-                self.cx.index.summary(&key),
-                self.cx.decls.function_decl(&key),
-            ) else {
-                continue;
-            };
+        let found = callees.iter().filter_map(|key| {
+            Some((
+                key,
+                self.cx.index.summary(key)?,
+                self.cx.decls.function_decl(key)?,
+            ))
+        });
+        for (key, summary, decl) in found {
             // The task runs the coroutine's body.
             if !summary.is_async || summary.is_generator {
                 continue;
@@ -575,7 +586,7 @@ impl<'a> Check<'_, 'a> {
                 let Some(holder) = self.through(s, &bound, decl, obj) else {
                     continue;
                 };
-                out.push(self.used(i, s, &key, holder, u));
+                out.push(self.used(i, s, key, holder, u));
             }
         }
         out
@@ -695,9 +706,7 @@ impl<'a> Check<'_, 'a> {
             .entry(holder.clone())
             .or_insert_with(|| self.bound_flow(holder));
         let (b, i) = at;
-        let Some(mut state) = bound.entry[b.0 as usize].clone() else {
-            return false;
-        };
+        let mut state = (bound.entry[b.0 as usize].clone()).expect("a run reaches a fan-out");
         for j in 0..i {
             state.apply(bound.changes.get(&(b, j)));
         }
@@ -757,14 +766,15 @@ impl<'a> Check<'_, 'a> {
             InstKind::MethodCall { recv, .. } => binds_recv.then_some(recv),
             _ => None,
         };
-        let (args, kwargs, star_from) = call_parts(&inst.kind);
+        let (args, kwargs, star_from) = call_parts(&inst.kind).unwrap_or_default();
         let bound = Binding::new(recv, args, kwargs, star_from);
-        keys.iter().any(|key| {
-            let (Some(summary), Some(decl)) =
-                (self.cx.index.summary(key), self.cx.decls.function_decl(key))
-            else {
-                return false;
-            };
+        let found = keys.iter().filter_map(|key| {
+            Some((
+                self.cx.index.summary(key)?,
+                self.cx.decls.function_decl(key)?,
+            ))
+        });
+        found.into_iter().any(|(summary, decl)| {
             // A coroutine runs where it is awaited; a plain function where it is called.
             (is_awaited || !summary.is_async)
                 && !summary.is_generator
@@ -876,24 +886,17 @@ impl<'v> Binding<'v> {
             return Some(*v);
         }
         let i = p.checked_sub(offset)?;
-        if p >= usize::from(decl.positional_params)
-            || self.star_from.is_some_and(|s| i >= usize::from(s))
-        {
-            return None;
-        }
-        self.args.get(i).copied()
+        // Past the positional parameters, or from a `*` unpacking on, nothing is known.
+        let positional = p < usize::from(decl.positional_params)
+            && self.star_from.is_none_or(|s| i < usize::from(s));
+        positional.then(|| self.args.get(i).copied()).flatten()
     }
-}
-
-/// The positional arguments of a call instruction.
-fn call_args(kind: &InstKind) -> &[VarId] {
-    call_parts(kind).0
 }
 
 /// A call's positional arguments, keyword arguments, and where `*` unpacking starts.
 type CallParts<'k> = (&'k [VarId], &'k [(Option<String>, VarId)], Option<u8>);
 
-fn call_parts(kind: &InstKind) -> CallParts<'_> {
+fn call_parts(kind: &InstKind) -> Option<CallParts<'_>> {
     match kind {
         InstKind::Call {
             args,
@@ -906,8 +909,8 @@ fn call_parts(kind: &InstKind) -> CallParts<'_> {
             kwargs,
             star_from,
             ..
-        } => (args, kwargs, *star_from),
-        _ => (&[], &[], None),
+        } => Some((args, kwargs, *star_from)),
+        _ => None,
     }
 }
 
