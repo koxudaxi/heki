@@ -27,7 +27,8 @@ hierarchy also offers a method that is no target (a receiver typed with a base c
 targets of different entries of one contract: with `A.reset` and `B.reset` both listed, `obj.reset()`
 on `obj: Base`, whose subclasses `A` and `B` implement `reset`, is one report for
 `A.reset|B.reset`. A call on a receiver whose class heki does not know (an unannotated
-parameter, `Any`) is not seen.
+parameter, `Any`) is not seen; with `unresolved = "report"`,
+`MUT207` reports it.
 
 A private helper (`_name`, or a comprehension, generator expression, or lambda scope) with project
 callers hands its calls to its callers: the call is reported at the call sites of the first
@@ -40,7 +41,8 @@ coroutine's where it is awaited. Not reported either:
   callers above it starts in an allowed caller, an exempt method, or a class's own
   initialization (as for `MUT201`);
 - a class's own initialization: an initializer (`__init__`, `__post_init__`, ...) of a class of
-  the target's family calling a guarded method on its own `self`;
+  the target's family calling a guarded method on its own `self` (for a target naming no class,
+  `reset`, the family is the classes defining the methods it names and their subclasses);
 - a target calling a target of the same contract (`remove_reference` calling
   `self.replace_reference(None)`, an override calling `super().replace_reference(...)`): the
   guarded operation is checked where it is called, so what it does inside is part of it.
@@ -92,7 +94,8 @@ No automatic fix.
   - `targets`: functions, methods, or classes, as dotted names or globs matched against the fully
     qualified name and any dotted suffix (`DataType.replace_reference`, `pkg.util.reset_cache`,
     `FinalFacts`, `Parser._*`). A `Class.method` target covers the method's overrides in
-    subclasses; a class target covers constructing the class and its subclasses.
+    subclasses; a class target covers constructing the class and its subclasses; a target
+    naming no class (`reset`) covers every project function and method of that name.
   - `allowed-callers`: functions allowed to call the targets, as dotted names or globs matched
     against the function's qualified name and its `Class.method` qualname (`pkg.store.*`).
   - `forbidden-callers`: when set, only calls by these functions are reported (matched like
@@ -104,3 +107,5 @@ No automatic fix.
     any function or method of that name, an entry with a dot or a glob is matched like
     `allowed-callers`.
   - `message`: the help of every report of the contract.
+  - `unresolved`: `"ignore"` (default) or `"report"`: also report the calls the contract cannot
+    tie to a class, under `MUT207`.

@@ -204,7 +204,7 @@ report names the missing obligation instead of offering a fix. See [Fixes and sa
 - 🎯 See what heki [covers and does not cover](https://heki.koxudaxi.dev/scope/).
 - 📦 [Install heki](https://heki.koxudaxi.dev/installation/) and 🚀 [run it on a project](https://heki.koxudaxi.dev/getting-started/).
 - ⚙️ [Configure](https://heki.koxudaxi.dev/configuration/) rule selection, contracts, and the Python version.
-- 📏 Browse the [31 rules](https://heki.koxudaxi.dev/rules/).
+- 📏 Browse the [33 rules](https://heki.koxudaxi.dev/rules/).
 - 🔧 Read how [fixes are proven safe](https://heki.koxudaxi.dev/fixes/).
 - 🪜 [Adopt it gradually](https://heki.koxudaxi.dev/adoption/) with a Ratchet baseline in CI.
 - 🖥️ Use it from [your editor](https://heki.koxudaxi.dev/lsp/) or 🤖 [a coding agent](https://heki.koxudaxi.dev/coding-agents/).
@@ -421,17 +421,29 @@ Missed findings close as heki learns more:
 `setattr(obj, "fields", v)`, `getattr(obj, "fields")`, `getattr(obj, "method")(...)`, and
 `obj.__dict__["fields"]`:
 
-- **Followed** when the name is a constant: a literal, or a module-level `Final` string
-  (`KEY: Final = "_key"`), also when imported, re-exported, or bound to another `Final` name.
-- **Not followed** for a module-level name without `Final` (any code can rebind it), a
-  class-level constant, or a computed name.
+- **Followed** when the name is a constant: a literal, a module-level `Final` string
+  (`KEY: Final = "_key"`), also when imported, re-exported, or bound to another `Final` name, a
+  module-level string bound once in its module, or a class constant declared `ClassVar` or
+  `Final` and bound once (`Model.KEY`, `self.KEY`, `cls.KEY`).
+- **Not followed** for a module-level name without `Final` that another module rebinds or deletes,
+  one bound in a loop or before a star import that may rebind it, a class constant stored on its
+  class or an instance outside the class body (`Model.KEY = "x"`; from another module, only one
+  without `Final`), a class constant a subclass defines again, is given its own value
+  (`Child.KEY = "x"`), or inherits first from another base it lists before the class
+  (`class Child(Other, Model)`; read on that subclass, or on an instance or `cls` that may be one),
+  a `Final` field of a dataclass or of a class a `dataclass_transform` builds read on an instance
+  (`Keys("x").KEY` is `"x"`), or on a class object whose default a class with `slots=True` or built
+  by a transform replaces, or a computed name.
 - A `write-owners` contract with `unresolved = "report"` reports the writes heki cannot tie to a
   class ([`MUT205`](https://heki.koxudaxi.dev/rules/unresolved-guarded-write/)).
 
 ### Objects without a known class
 
 - Reads and writes through `Any` or unannotated parameters are not tied to a class, so contracts
-  on that class do not see them.
+  on that class do not see them. A contract with `unresolved = "report"` reports them by name:
+  writes under [`MUT205`](https://heki.koxudaxi.dev/rules/unresolved-guarded-write/), reads under
+  [`MUT206`](https://heki.koxudaxi.dev/rules/unresolved-guarded-read/), and method calls under
+  [`MUT207`](https://heki.koxudaxi.dev/rules/unresolved-guarded-call/).
 - A write in an unannotated helper is still found where a caller passes it an object of a known
   class. A read is not.
 - Not typed: values declared `Any`, generics substituted through `TypeVar`s, and calls of
@@ -915,8 +927,8 @@ Contracts declare what no type can say. Each kind is an array of tables with its
 | Contract | Declares | Rule |
 | -------- | -------- | ---- |
 | [`write-owners`](https://heki.koxudaxi.dev/configuration/#write-owners) | who may write an attribute | `MUT201`; `MUT205` with `unresolved = "report"` |
-| [`read-owners`](https://heki.koxudaxi.dev/configuration/#read-owners) | who may read an attribute | `MUT203` |
-| [`call-owners`](https://heki.koxudaxi.dev/configuration/#call-owners) | who may call a function or construct a class | `MUT204` |
+| [`read-owners`](https://heki.koxudaxi.dev/configuration/#read-owners) | who may read an attribute | `MUT203`; `MUT206` with `unresolved = "report"` |
+| [`call-owners`](https://heki.koxudaxi.dev/configuration/#call-owners) | who may call a function or construct a class | `MUT204`; `MUT207` with `unresolved = "report"` |
 | [`effect-boundaries`](https://heki.koxudaxi.dev/configuration/#effect-boundaries) | what a scope must not reach: I/O, writes, reads, or calls | `EFF201` |
 | [`readonly-returns`](https://heki.koxudaxi.dev/configuration/#readonly-returns) | results every caller shares | `MUT202` |
 | [`invalidation`](https://heki.koxudaxi.dev/configuration/#invalidation) | writes that must be announced | `MUT109` |
@@ -929,6 +941,11 @@ Contracts declare what no type can say. Each kind is an array of tables with its
 - A `Class.attr` target covers the subclasses of the class too.
 - A contract heki cannot use is a configuration error: a target that is not `Class.attr`, an
   invalid glob, or an unknown value of `forbid`, `fresh-objects`, or `unresolved`.
+- With `unresolved = "report"`, a contract also reports the accesses it cannot tie to a class,
+  each under its own rule (`MUT205` writes, `MUT206` reads, `MUT207` calls): an attribute or
+  method named like a target, accessed on an object of unknown class (an unannotated parameter,
+  a loop variable, an untyped call result, `Any`, a protocol whose implementations heki cannot
+  list). A baseline counts them apart from the violations the typed rules prove.
 - An attribute named through a string (`setattr`, `getattr`, `__dict__`) is followed when the
   string is a constant: see [Dynamic names](https://heki.koxudaxi.dev/scope/#dynamic-names).
 
@@ -960,7 +977,7 @@ unresolved = "report"
 
 A container entry (`Class.attr["key"]`):
 
-- matches the writes of that constant key (a literal or a `Final` constant), not a write of the
+- matches the writes of that constant key (a literal or a string constant), not a write of the
   whole container or with a computed key;
 - is reported once, under the entry, when its container is a target too.
 
@@ -991,6 +1008,7 @@ targets = ["pkg.reference.Reference.children"]
 allowed-readers = ["*GenerationIndex*", "*GenerationStore*"]
 exempt-methods = ["__deepcopy__"]
 message = "read children through GenerationIndex instead"
+unresolved = "report"
 ```
 
 The read side of `write-owners`. A read is `ref.children`, a read through a local alias,
@@ -1004,8 +1022,11 @@ The read side of `write-owners`. A read is `ref.children`, a read through a loca
 | `forbidden-readers` | `[]` | When set, only reads by these functions are reported. |
 | `exempt-methods` | `[]` | Methods allowed to read the targets, matched as in `write-owners`. |
 | `message` | none | The help of every report of the contract. |
+| `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the reads of a target's attribute name on an object of unknown class are reported under [`MUT206`](https://heki.koxudaxi.dev/rules/unresolved-guarded-read/). |
 
-Reads through a parameter without a project-class annotation are not seen.
+`MUT203` does not see a read through a parameter without a project-class annotation; with
+`unresolved = "report"`, `MUT206` reports it unless every caller binds the parameter to an
+instance of a project class outside the targets' classes.
 
 ### `call-owners`
 
@@ -1016,6 +1037,7 @@ targets = ["DataType.replace_reference", "pkg.util.reset_cache", "FinalFacts"]
 allowed-callers = ["pkg.parser.generation.*"]
 exempt-methods = ["__deepcopy__"]
 message = "use a GenerationStore operation instead"
+unresolved = "report"
 ```
 
 The call side of `write-owners`.
@@ -1028,6 +1050,7 @@ The call side of `write-owners`.
 | `forbidden-callers` | `[]` | When set, only calls by these functions are reported. |
 | `exempt-methods` | `[]` | Methods allowed to call the targets, matched as in `write-owners`. |
 | `message` | none | The help of every report of the contract. |
+| `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the calls of a method named like a target (its last name) on an object of unknown class are reported under [`MUT207`](https://heki.koxudaxi.dev/rules/unresolved-guarded-call/). |
 
 - A call is reported only when every function it may call (each candidate in the class
   hierarchy) is a target: `text.replace(...)` on a `str` is never a call of
@@ -1754,7 +1777,7 @@ Source: https://heki.koxudaxi.dev/rules/
 
 # Rules
 
-heki has 31 rules in four families. Every rule is enabled by default except the opt-in rules marked 🔌, which need their exact code or name in `select` / `extend-select` (a prefix such as `EFF` does not enable them).
+heki has 33 rules in four families. Every rule is enabled by default except the opt-in rules marked 🔌, which need their exact code or name in `select` / `extend-select` (a prefix such as `EFF` does not enable them).
 
 ## Legend
 
@@ -1782,6 +1805,8 @@ Shared state written behind its owner's back: stale caches, write-ownership cont
 | MUT203 | [read-owner-violation](https://heki.koxudaxi.dev/rules/read-owner-violation/) | Reading a guarded attribute (directly, via alias, `getattr`, or `__dict__`) outside declared `read-owners`. |  |
 | MUT204 | [call-owner-violation](https://heki.koxudaxi.dev/rules/call-owner-violation/) | Calling a guarded function or method, or constructing a guarded class (directly, via a bound method, `getattr`, or a helper), outside declared `call-owners`. |  |
 | MUT205 | [unresolved-guarded-write](https://heki.koxudaxi.dev/rules/unresolved-guarded-write/) | Strict mode of a `write-owners` contract (`unresolved = "report"`): writing an attribute named like a target on an object of unknown class, or a computed attribute name on a guarded class. |  |
+| MUT206 | [unresolved-guarded-read](https://heki.koxudaxi.dev/rules/unresolved-guarded-read/) | Strict mode of a `read-owners` contract (`unresolved = "report"`): reading an attribute named like a target on an object of unknown class. |  |
+| MUT207 | [unresolved-guarded-call](https://heki.koxudaxi.dev/rules/unresolved-guarded-call/) | Strict mode of a `call-owners` contract (`unresolved = "report"`): calling a method named like a target on an object of unknown class. |  |
 
 ## Execution Effects (EFF)
 
@@ -2196,13 +2221,19 @@ follows these rules:
 - A rule that follows exception edges, one from each call that can raise, runs a dataflow over
   blocks with one fact per tracked value. It never enumerates paths.
 
-Each bound comes with a shape in `crates/heki/tests/e2e_analysis_bounds.rs` that is slow without
-it, checked against a time limit: comparisons sharing an operand thirty deep, many `match`
-statements of slicing or pass-through cases, `t1 = t0[t0]` chains in a loop, a loop with many
-`continue`s and `isinstance` tests, a long chain of assignments a loop carries, many loops one
-after another, each with a lazy initialization (the blocks each covers count toward a budget
-proportional to the source), many waits on one future before many `await`s of it, and task
-factories at the end of a long chain of copies.
+Each bound comes with a shape in `crates/heki/tests/e2e_analysis_bounds.rs` that is slow without it,
+checked against a time limit: comparisons sharing an operand thirty deep, many `match` statements of
+slicing or pass-through cases, `t1 = t0[t0]` chains in a loop, a loop with many `continue`s and
+`isinstance` tests, a long chain of assignments a loop carries, many loops one after another, each
+with a lazy initialization (the blocks each covers count toward a budget proportional to the
+source), many waits on one future before many `await`s of it, task factories at the end of a long
+chain of copies, a long chain of aliases of a class with an attribute store through the last one per
+alias, a class with thousands of subclasses whose class constant as many functions read on an
+instance, a strict `read-owners` target on such a class that as many functions read on an object of
+unknown class, as many calls of a method of such a class that a call target naming no class names, a
+module binding thousands of names each to an attribute of the one before, a function making twenty
+thousand calls of eight operands each, and a helper that types nothing making thousands of strict
+accesses of one name that one caller calls as many times.
 
 A change to the IR builder, a walk, a fixpoint, or a rule's state is also run over a large
 corpus of real projects before it is merged, every run under a memory cap and a timeout. No
@@ -2620,9 +2651,9 @@ It does not report:
 - constant dictionary keys the property never reads (`self.params["proxy"]` while the property
   reads `self.params["outtmpl"]`);
 - writes after which every path invalidates the property (`del self.prop`,
-  `self.__dict__.pop("prop", None)`, also with the key in a `Final` string constant, a `self`
-  method that does), or before which every path
-  already did and nothing read it since; an invalidation under a condition, such as
+  `self.__dict__.pop("prop", None)`, also with the key in a string constant as `MUT201` follows
+  it, a `self` method that does), or before which every path already did and nothing read it
+  since; an invalidation under a condition, such as
   `if clear:`, leaves the other path stale and is reported;
 - private helpers whose every caller invalidates the property;
 - lazy initialization: a write where a `None` / falsy test of the attribute found it unset
@@ -2787,7 +2818,8 @@ hierarchy also offers a method that is no target (a receiver typed with a base c
 targets of different entries of one contract: with `A.reset` and `B.reset` both listed, `obj.reset()`
 on `obj: Base`, whose subclasses `A` and `B` implement `reset`, is one report for
 `A.reset|B.reset`. A call on a receiver whose class heki does not know (an unannotated
-parameter, `Any`) is not seen.
+parameter, `Any`) is not seen; with `unresolved = "report"`,
+`MUT207` reports it.
 
 A private helper (`_name`, or a comprehension, generator expression, or lambda scope) with project
 callers hands its calls to its callers: the call is reported at the call sites of the first
@@ -2800,7 +2832,8 @@ coroutine's where it is awaited. Not reported either:
   callers above it starts in an allowed caller, an exempt method, or a class's own
   initialization (as for `MUT201`);
 - a class's own initialization: an initializer (`__init__`, `__post_init__`, ...) of a class of
-  the target's family calling a guarded method on its own `self`;
+  the target's family calling a guarded method on its own `self` (for a target naming no class,
+  `reset`, the family is the classes defining the methods it names and their subclasses);
 - a target calling a target of the same contract (`remove_reference` calling
   `self.replace_reference(None)`, an override calling `super().replace_reference(...)`): the
   guarded operation is checked where it is called, so what it does inside is part of it.
@@ -2852,7 +2885,8 @@ No automatic fix.
   - `targets`: functions, methods, or classes, as dotted names or globs matched against the fully
     qualified name and any dotted suffix (`DataType.replace_reference`, `pkg.util.reset_cache`,
     `FinalFacts`, `Parser._*`). A `Class.method` target covers the method's overrides in
-    subclasses; a class target covers constructing the class and its subclasses.
+    subclasses; a class target covers constructing the class and its subclasses; a target
+    naming no class (`reset`) covers every project function and method of that name.
   - `allowed-callers`: functions allowed to call the targets, as dotted names or globs matched
     against the function's qualified name and its `Class.method` qualname (`pkg.store.*`).
   - `forbidden-callers`: when set, only calls by these functions are reported (matched like
@@ -2864,6 +2898,8 @@ No automatic fix.
     any function or method of that name, an entry with a dot or a glob is matched like
     `allowed-callers`.
   - `message`: the help of every report of the contract.
+  - `unresolved`: `"ignore"` (default) or `"report"`: also report the calls the contract cannot
+    tie to a class, under `MUT207`.
 
 
 ---
@@ -4084,8 +4120,8 @@ the allowed readers:
 
 - directly (`ref.children`), also on `self` and through local aliases;
 - through `getattr(ref, "children"[, default])` or `object.__getattribute__(ref, "children")`
-  with a constant name: a string literal or a module-level `Final` string constant;
-- through `ref.__dict__["children"]` or `ref.__dict__.get("children")`, also with a `Final`
+  with a constant name: a string literal or a string constant, as for `MUT201`;
+- through `ref.__dict__["children"]` or `ref.__dict__.get("children")`, also with a string
   constant for the key.
 
 A target names a class and an attribute; it covers the class's subclasses too. A container
@@ -4183,10 +4219,13 @@ No automatic fix.
     name matches any function or method of that name, an entry with a dot or a glob is matched
     like `allowed-readers`.
   - `message`: the help of every report of the contract.
+  - `unresolved`: `"ignore"` (default) or `"report"`: also report the reads the contract cannot
+    tie to a class, under `MUT206`.
 
 Known limitation: a read through a parameter without a project-class annotation
 (`def helper(ref): return ref.children`) is not seen, since the read object's class is unknown
-there; unlike a write, a read is not handed to the caller that knows it.
+there; unlike a write, a read is not handed to the caller that knows it. With
+`unresolved = "report"`, `MUT206` reports it.
 
 
 ---
@@ -4575,6 +4614,150 @@ No automatic fix.
 
 ---
 
+Source: https://heki.koxudaxi.dev/rules/unresolved-guarded-call/
+
+# unresolved-guarded-call (MUT207)
+
+Family: Mutation & State (MUT) · Enabled by default · Severity `error` · No automatic fix
+
+Strict mode of a `call-owners` contract (`unresolved = "report"`): calling a method named like a target on an object of unknown class.
+
+## What it does
+The strict mode of a `[[tool.heki.call-owners]]` contract that sets `unresolved = "report"`:
+reports the calls outside the call owners that `MUT204` cannot tie to a target, so a clean
+`MUT204` run says how much it did not check. A call of a method named like a target (the last
+name of the target: `replace_reference` for `DataType.replace_reference`, also for a function or
+class target) is reported once, at the call, when its receiver is of unknown class: an
+unannotated parameter, a loop variable, the result of a call heki does not resolve, a value
+annotated `Any` or `object` (unless an `isinstance` test around the call narrows it to a class),
+or a protocol whose implementations heki cannot list (one without members, or implemented by
+more than eight classes). `obj.replace_reference(...)`, a bound-method alias of it
+(`replace = obj.replace_reference`), and `getattr(obj, "replace_reference")(...)` with a
+constant name count. A call of a value of unknown origin (`callback()`) names nothing and is not
+reported.
+
+The rules of `MUT204` for what is allowed apply: allowed callers, exempt methods, the targets
+themselves (they may call each other), functions that only run inside allowed callers, and
+`forbidden-callers` (the calling function must be one). `MUT204` does not follow a call into a
+parameter that its function does not type, so the callers decide for such a receiver: the call is
+reported unless every caller path binds to it an instance of a project class whose method of that
+name is no target: a class outside the target's family (`DataType` and its subclasses for
+`DataType.replace_reference`) whose MRO finds no method the target names either (for the target
+`reset`, any project class's `reset`; a `reset` inherited from a library base is none).
+
+## Why is this bad?
+`MUT204` reports a call only when every function it may call is a target, which needs the
+receiver's class: a call on an object it cannot type is not seen, so a contract that passes says
+nothing about those calls. Name-based checkers report them all; heki reports them separately,
+under their own code, so they can be counted, ratcheted with a baseline, and reduced by
+annotating the receivers, without mixing them with the violations `MUT204` proves.
+
+## Example
+```toml
+[[tool.heki.call-owners]]
+name = "reference-mutators"
+targets = ["DataType.replace_reference"]
+allowed-callers = ["pkg.store.GenerationStore.*"]
+unresolved = "report"
+```
+
+```python
+def swap(data_type, ref) -> None:  # no annotation: heki cannot tell what `data_type` is
+    data_type.replace_reference(ref)  # MUT207
+
+
+def rename(text: str) -> str:
+    return text.replace("a", "b")  # not reported: a `str`
+```
+
+Use instead:
+```python
+def swap(store: GenerationStore, data_type: DataType, ref: Reference) -> None:
+    store.replace_data_type_ref(data_type, ref)
+```
+
+## Fix safety
+No automatic fix.
+
+## Options
+- `[[tool.heki.call-owners]]`:
+  - `unresolved`: `"ignore"` (default) or `"report"`.
+  - `targets`, `allowed-callers`, `forbidden-callers`, `exempt-methods`, `message`: as for
+    `MUT204`.
+
+
+---
+
+Source: https://heki.koxudaxi.dev/rules/unresolved-guarded-read/
+
+# unresolved-guarded-read (MUT206)
+
+Family: Mutation & State (MUT) · Enabled by default · Severity `error` · No automatic fix
+
+Strict mode of a `read-owners` contract (`unresolved = "report"`): reading an attribute named like a target on an object of unknown class.
+
+## What it does
+The strict mode of a `[[tool.heki.read-owners]]` contract that sets `unresolved = "report"`:
+reports the reads outside the read owners that `MUT203` cannot tie to a target class, so a clean
+`MUT203` run says how much it did not check. A read of an attribute named like a target attribute
+(`children` for `Reference.children`, any name for `Reference.*`) is reported once, at the read,
+when its object is of unknown class: an unannotated parameter, a loop variable, the result of a
+call heki does not resolve, a value annotated `Any` or `object` (unless an `isinstance` test
+around the read narrows it to a class), or a protocol whose implementations heki cannot list (one
+without members, or implemented by more than eight classes). `obj.children`, a local alias of it,
+`getattr(obj, "children")` with a constant name, and `obj.__dict__["children"]` count, as for
+`MUT203`.
+
+The rules of `MUT203` for what is allowed apply: allowed readers, exempt methods, functions that
+only run inside allowed readers, and `forbidden-readers` (the reading function must be one).
+`MUT203` does not follow a read into a parameter that its function does not type, so the callers
+decide for such a parameter: the read is reported unless every caller path binds an instance of
+a project class outside the targets' classes to it. A parameter some caller binds to an instance
+of a target class is reported here: that read is a read of the target that no other rule sees.
+
+## Why is this bad?
+`MUT203` reports what it can back with a class: a read through an object it cannot type is not
+followed, so a contract that passes says nothing about those reads. Name-based checkers report
+them all; heki reports them separately, under their own code, so they can be counted, ratcheted
+with a baseline, and reduced by annotating the objects, without mixing them with the violations
+`MUT203` proves.
+
+## Example
+```toml
+[[tool.heki.read-owners]]
+name = "reference-children"
+targets = ["Reference.children"]
+allowed-readers = ["*GenerationIndex*"]
+unresolved = "report"
+```
+
+```python
+def render(ref) -> str:  # no annotation: heki cannot tell what `ref` is
+    return ", ".join(map(str, ref.children))  # MUT206
+
+
+def size(ref: Reference) -> int:
+    return len(ref.children)  # MUT203: a typed read
+```
+
+Use instead:
+```python
+def render(ref: Reference, index: GenerationIndex) -> str:
+    return ", ".join(map(str, index.children_of(ref)))
+```
+
+## Fix safety
+No automatic fix.
+
+## Options
+- `[[tool.heki.read-owners]]`:
+  - `unresolved`: `"ignore"` (default) or `"report"`.
+  - `targets`, `allowed-readers`, `forbidden-readers`, `exempt-methods`, `message`: as for
+    `MUT203`.
+
+
+---
+
 Source: https://heki.koxudaxi.dev/rules/unresolved-guarded-write/
 
 # unresolved-guarded-write (MUT205)
@@ -4592,12 +4775,19 @@ write:
 - an attribute named like a target attribute (`fields` for `Model.fields`, any name for
   `Model.*`) written on an object of unknown class: an unannotated parameter that no project
   caller binds to an instance of a known class, a loop variable, the result of a call heki does
-  not resolve, a value annotated `Any` or `object`. Rebinding (`obj.fields = []`), deleting,
-  `setattr` with a constant name, and changing the container the attribute holds
-  (`obj.fields.append(x)`, `obj.meta["k"][name] = v`) count;
+  not resolve, a value annotated `Any` or `object` (unless an `isinstance` test around the write
+  narrows it to a class: `if isinstance(obj, Field): ...`), or a protocol whose implementations
+  heki cannot list (one without members, or implemented by more than eight classes). Rebinding
+  (`obj.fields = []`), deleting, `setattr` with a constant name, and changing the container the
+  attribute holds (`obj.fields.append(x)`, `obj.meta["k"][name] = v`) count;
 - an attribute name computed at run time written on an instance of a target class:
   `setattr(model, name, v)`, `model.__dict__[name] = v`, `model.__dict__.update(...)`, and a
-  `__dict__` key that is a module constant not declared `Final`.
+  `__dict__` key in a name that is no constant: a module-level name bound twice, in a loop, or
+  before a star import, or rebound by another module, a class attribute without `ClassVar` or
+  `Final` (an instance may hold its own), one a subclass defines again or inherits first from
+  another base, a `Final` field of a dataclass read on an instance (or on a class object with
+  `slots=True` along the way), and one stored on its class, a subclass, or an instance outside
+  the class body (`Model.KEY = "x"`).
 
 The rules of `MUT201` for what is allowed apply: allowed writers, exempt methods, a class's own
 initialization (`setattr(self, name, v)` in `__init__`), functions that only run inside allowed
@@ -4749,8 +4939,18 @@ allowed writers:
 - directly (`model.fields = [...]`, `model.fields.append(...)`, `del model.fields`);
 - through a local alias (`fields = model.fields; fields.append(...)`);
 - through `setattr(model, "fields", ...)` / `object.__setattr__` or `model.__dict__["fields"]`,
-  also with a module-level `Final` string constant for the name (`model.__dict__[FIELDS_KEY]`,
-  imported or not);
+  also with a string constant for the name (`model.__dict__[FIELDS_KEY]`, imported or not):
+  a module-level name declared `Final` or bound once in its module and rebound by no other, or
+  a class-body name declared `ClassVar` or `Final` and bound once (`self.KEY`, `cls.KEY`,
+  `Model.KEY`), which every subclass of the object's class finds along its MRO in the same
+  class (none defines it again or lists another base defining it first,
+  `class Child(Other, Model)`) and no code stores on the class, a subclass, or an instance
+  (`Model.KEY = "x"`; another module may store it on the defining class only for a `Final`
+  one); on an instance of a protocol, every class implementing it must hold the same constant.
+  A `Final` name of a dataclass (or of a class a `dataclass_transform` builds) is a field, which
+  each instance holds itself (`Keys("x").KEY`): it names an attribute only when read on the
+  class object of a dataclass whose default no class along the way replaces (one with
+  `slots=True` or built by a transform);
 - into the entries of the container the attribute holds (`model.meta["kw"][name] = v`,
   `model.meta["kw"].append(v)`, through a local alias of the entry): an `item_mut` write;
 - through a helper that mutates the container or object it receives (`helper(model.fields)`),
@@ -4764,7 +4964,7 @@ allowed writers:
 A target names a class and an attribute; it covers the class's subclasses too (the target's
 class family). A target can also name one entry of the container an attribute holds,
 `Class.attr["key"]`: it matches the writes of that key (`field.extras["init"] = v`,
-`field.extras[INIT]` with a `Final` constant, `field.extras.pop("init")`,
+`field.extras[INIT]` with a string constant, `field.extras.pop("init")`,
 `del field.extras["init"]`, `field.extras["init"].append(v)`), not a write of the whole
 container (`field.extras = {}`, `field.extras.update(...)`) or with a computed key, which are
 writes of `Class.attr`. When a contract names both a container and one of its entries, a write of
@@ -4787,10 +4987,13 @@ wrapped function returns, and `typing.cast` names the class. A variable rebound 
 classes of the values reaching it; a value of two or three classes (`Model | Node`, from an
 annotation or from different assignments) is each of them, and an `isinstance` check narrows it
 in the code it guards (`if isinstance(x, Model): ...`, `if not isinstance(x, Model): return`,
-also inside `and` / `or`). A value typed with a project `Protocol` is an instance of the project
-classes that implement it structurally (having every member it defines; at most eight, counting
-a class and not its subclasses). An object whose class heki cannot see (an unannotated parameter
-or return, `Any`, a value of more than three classes) is not tied to the target.
+also inside `and` / `or`). A value typed with a project `Protocol` is an instance of the protocol
+and of the project classes that implement it structurally (having every member it defines; at
+most eight, counting a class and not its subclasses), also when it is handed to a helper that
+does not type it: a target on the protocol and one on an implementation both cover its writes. An
+object whose class heki cannot see (an unannotated parameter or return, `Any`, a value of more
+than three classes, a protocol without members or with more implementations) is not tied to the
+target.
 
 A private helper (`_name`, or a comprehension, generator expression, or lambda scope) with
 project callers hands the responsibility to its callers: the write is reported at the call
@@ -4933,7 +5136,9 @@ counts each of them: `sites` in JSON output). A private generator's writes run w
 iterated, or inside the function it is handed to that iterates it, and are reported there. A
 helper changing an argument it does not type (`_add(xs): xs.append(1)` called as
 `_add(model.items)`, `_set(o): o.x = 1` called as `_set(model)`) writes the field or instance
-the caller binds to it: the caller's call is the write. An invalidator counts when it is called directly, in each branch, or through
+the caller binds to it: the caller's call is the write, once for each class the instance may be
+(a protocol-typed one is the protocol and each implementation), against that class's targets.
+An invalidator counts when it is called directly, in each branch, or through
 calls (a helper that calls an invalidator on every path to its own return), also behind a
 boolean flag set after the write (`changed = True ... if changed: notify()`); one called before
 the write does not count, nor an `async` invalidator that is not awaited. A call of a method

@@ -639,3 +639,299 @@ fn aliases_of_a_large_string_constant_share_its_text() {
     let diags = check_within(&p, Duration::from_secs(20));
     assert!(diags.is_empty(), "{diags:#?}");
 }
+
+/// A function with a long chain of aliases of a class and as many attribute stores through the
+/// last one (`a4000.x0 = 0`, ...): whether a store rebinds a class attribute follows each copy
+/// once.
+#[test]
+fn stores_through_a_long_alias_chain_resolve_each_copy_once() {
+    let links = 4_000;
+    let mut lines = vec![
+        "class K:".to_owned(),
+        "    pass".to_owned(),
+        String::new(),
+        String::new(),
+        "def configure():".to_owned(),
+        "    a0 = K".to_owned(),
+    ];
+    for i in 1..=links {
+        lines.push(format!("    a{i} = a{}", i - 1));
+    }
+    for i in 0..links {
+        lines.push(format!("    a{links}.x{i} = 0"));
+    }
+    let p = Project::new("bounds_alias_chain_stores");
+    p.write("m.py", &(lines.join("\n") + "\n"));
+    assert!(check_within(&p, Duration::from_secs(20)).is_empty());
+}
+
+/// A strict `read-owners` target on a class with thousands of subclasses and as many functions
+/// reading the attribute on an object of unknown class: the classes the target covers are found
+/// once per rule and name, not once per read. Every read but one is in an allowed reader.
+#[test]
+fn strict_reads_of_a_target_with_many_subclasses_find_its_classes_once() {
+    let classes = 3_000;
+    let mut lines = vec![
+        "class Base:".to_owned(),
+        "    def __init__(self):".to_owned(),
+        "        self.secret = 0".to_owned(),
+    ];
+    for i in 0..classes {
+        lines.extend([
+            String::new(),
+            String::new(),
+            format!("class Sub{i}(Base):"),
+            "    pass".to_owned(),
+        ]);
+    }
+    for i in 0..=classes {
+        let name = if i == classes {
+            "peek".to_owned()
+        } else {
+            format!("allowed{i}")
+        };
+        lines.extend([
+            String::new(),
+            String::new(),
+            format!("def {name}(obj):"),
+            "    return obj.secret".to_owned(),
+        ]);
+    }
+    let p = Project::new("bounds_strict_reads");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[[tool.heki.read-owners]]\nname = \"m\"\ntargets = [\"Base.secret\"]\nallowed-readers = [\"m.allowed*\", \"m.Base.*\"]\nunresolved = \"report\"\n",
+    )
+    .write("m.py", &(lines.join("\n") + "\n"));
+    let found = check_within(&p, Duration::from_secs(20));
+    let reported: Vec<&str> = found
+        .iter()
+        .filter(|d| d["rule_code"] == "MUT206")
+        .map(|d| d["qualname"].as_str().unwrap())
+        .collect();
+    assert_eq!(reported, vec!["peek"]);
+}
+
+/// A class with thousands of subclasses and as many functions reading its class constant on an
+/// instance (`field.__dict__[keys.KEY]`): whether the constant holds on every class the instance
+/// may be is decided once per class and name, not once per read. The contract allows every
+/// writer but one, which is reported through the constant.
+#[test]
+fn class_constant_reads_on_a_class_with_many_subclasses_decide_it_once() {
+    let classes = 3_000;
+    let mut lines = vec![
+        "from typing import ClassVar".to_owned(),
+        String::new(),
+        String::new(),
+        "class Field:".to_owned(),
+        "    def __init__(self):".to_owned(),
+        "        self.public = 0".to_owned(),
+        String::new(),
+        String::new(),
+        "class Keys:".to_owned(),
+        "    KEY: ClassVar[str] = \"public\"".to_owned(),
+    ];
+    for i in 0..classes {
+        lines.extend([
+            String::new(),
+            String::new(),
+            format!("class Keys{i}(Keys):"),
+            "    pass".to_owned(),
+        ]);
+    }
+    for i in 0..=classes {
+        let name = if i == classes {
+            "write".to_owned()
+        } else {
+            format!("allowed{i}")
+        };
+        lines.extend([
+            String::new(),
+            String::new(),
+            format!("def {name}(keys: Keys, field: Field):"),
+            "    field.__dict__[keys.KEY] = 1".to_owned(),
+        ]);
+    }
+    let p = Project::new("bounds_class_constant_reads");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[[tool.heki.write-owners]]\nname = \"m\"\ntargets = [\"Field.public\"]\nallowed-writers = [\"m.allowed*\"]\n",
+    )
+    .write("m.py", &(lines.join("\n") + "\n"));
+    let found = check_within(&p, Duration::from_secs(20));
+    let reported: Vec<&Value> = found
+        .iter()
+        .filter(|d| d["rule_code"] == "MUT201")
+        .collect();
+    assert_eq!(reported.len(), 1, "{found:#?}");
+    assert_eq!(reported[0]["qualname"], "write");
+}
+
+/// A class with thousands of subclasses whose `reset` a call target naming no class names, and
+/// a function calling `Base.reset(obj)` as many times: the class family of each call (the
+/// classes defining the method it reaches, with their subclasses) is expanded once per target
+/// and defining class, not once per call. Only one call is outside the allowed callers.
+#[test]
+fn calls_of_a_method_with_many_subclasses_expand_its_family_once() {
+    let size = 5_000;
+    let mut lines = vec![
+        "class Base:".to_owned(),
+        "    def reset(self):".to_owned(),
+        "        pass".to_owned(),
+    ];
+    for i in 0..size {
+        lines.extend([
+            String::new(),
+            String::new(),
+            format!("class Sub{i}(Base):"),
+            "    pass".to_owned(),
+        ]);
+    }
+    lines.extend([String::new(), String::new(), "def run(obj):".to_owned()]);
+    lines.extend((0..size).map(|_| "    Base.reset(obj)".to_owned()));
+    lines.extend(["", "", "def other(obj):", "    Base.reset(obj)"].map(str::to_owned));
+    let p = Project::new("bounds_call_target_families");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT204\"]\n\n[[tool.heki.call-owners]]\nname = \"resets\"\ntargets = [\"reset\"]\nallowed-callers = [\"m.run\"]\n",
+    )
+    .write("m.py", &(lines.join("\n") + "\n"));
+    let found = check_within(&p, Duration::from_secs(20));
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert_eq!(found[0]["qualname"], "other");
+}
+
+/// Modules binding twelve thousand names, each to an attribute of the one before
+/// (`a1 = a0.x`, `a2 = a1.x`, ...), about as many as a module body's IR budget models: whether
+/// a binding is a string constant takes a bounded walk of copies and attribute loads, past
+/// which it is none, not a walk down the whole chain.
+#[test]
+fn module_names_bound_along_a_long_attribute_chain_take_a_bounded_walk() {
+    let links = 12_000;
+    let mut lines = vec!["a0 = \"s\"".to_owned()];
+    lines.extend((1..=links).map(|i| format!("a{i} = a{}.x", i - 1)));
+    let source = lines.join("\n") + "\n";
+    let p = Project::new("bounds_constant_attribute_chain");
+    for module in ["m0.py", "m1.py", "m2.py", "m3.py"] {
+        p.write(module, &source);
+    }
+    assert!(check_within(&p, Duration::from_secs(20)).is_empty());
+}
+
+/// One function making twenty thousand project calls (`Base.reset(obj, ...)` with eight
+/// operands each), about as many as its IR budget models: `MUT202` maps each call instruction
+/// to its call site and tests its operands' definitions, which it looks up in the function's
+/// definitions once built, not by walking the function per operand.
+#[test]
+fn many_calls_in_one_function_look_up_their_operands_once() {
+    let mut lines = vec![
+        "class Base:".to_owned(),
+        "    def reset(self, *args):".to_owned(),
+        "        pass".to_owned(),
+        String::new(),
+        String::new(),
+        "def run(obj):".to_owned(),
+    ];
+    lines.extend(
+        (0..20_000).map(|_| "    Base.reset(obj, obj, obj, obj, obj, obj, obj, obj)".to_owned()),
+    );
+    let p = Project::new("bounds_many_call_operands");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT202\"]\n",
+    )
+    .write("m.py", &(lines.join("\n") + "\n"));
+    assert!(check_within(&p, Duration::from_secs(20)).is_empty());
+}
+
+/// A helper that types nothing making `accesses` times the access `access` of a contract
+/// section `owners` on `Guarded` (`read-owners` for `obj.secret`, `call-owners` for
+/// `obj.open()`, `write-owners` for `obj.secret = 1`), in strict mode, and a caller handing it
+/// an instance of an unrelated class `calls` times.
+fn strict_accesses(
+    name: &str,
+    owners: &str,
+    access: &str,
+    accesses: usize,
+    calls: usize,
+) -> Project {
+    let target = if owners == "call-owners" {
+        "Guarded.open"
+    } else {
+        "Guarded.secret"
+    };
+    let contract = format!(
+        "[[tool.heki.{owners}]]\nname = \"guarded\"\ntargets = [\"{target}\"]\nunresolved = \"report\"\n"
+    );
+    let mut lines = Vec::new();
+    for class in ["Guarded", "Other"] {
+        lines.extend([
+            format!("class {class}:"),
+            "    def __init__(self):".to_owned(),
+            "        self.secret = 0".to_owned(),
+            String::new(),
+            "    def open(self):".to_owned(),
+            "        return None".to_owned(),
+            String::new(),
+            String::new(),
+        ]);
+    }
+    lines.push("def peek(obj):".to_owned());
+    lines.extend((0..accesses).map(|_| format!("    {access}")));
+    lines.extend([
+        String::new(),
+        String::new(),
+        "def use(o: Other):".to_owned(),
+    ]);
+    lines.extend((0..calls).map(|_| "    peek(o)".to_owned()));
+    let p = Project::new(name);
+    p.write(
+        "pyproject.toml",
+        &format!(
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT205\", \"MUT206\", \"MUT207\"]\n\n{contract}"
+        ),
+    )
+    .write("m.py", &(lines.join("\n") + "\n"));
+    p
+}
+
+/// Thousands of strict reads in a helper whose caller calls it thousands of times: whether a
+/// read is a finding is decided once per rule, function, object, and name, not once per read,
+/// each walking the same callers.
+#[test]
+fn strict_reads_of_one_name_in_a_helper_walk_its_callers_once() {
+    let p = strict_accesses(
+        "bounds_strict_helper_reads",
+        "read-owners",
+        "obj.secret",
+        4_000,
+        4_000,
+    );
+    assert!(check_within(&p, Duration::from_secs(20)).is_empty());
+}
+
+/// The same for strict calls (`MUT207`).
+#[test]
+fn strict_calls_of_one_name_in_a_helper_walk_its_callers_once() {
+    let p = strict_accesses(
+        "bounds_strict_helper_calls",
+        "call-owners",
+        "obj.open()",
+        4_000,
+        4_000,
+    );
+    assert!(check_within(&p, Duration::from_secs(20)).is_empty());
+}
+
+/// The same for strict writes (`MUT205`).
+#[test]
+fn strict_writes_of_one_name_in_a_helper_walk_its_callers_once() {
+    let p = strict_accesses(
+        "bounds_strict_helper_writes",
+        "write-owners",
+        "obj.secret = 1",
+        4_000,
+        4_000,
+    );
+    assert!(check_within(&p, Duration::from_secs(20)).is_empty());
+}

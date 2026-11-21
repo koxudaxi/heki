@@ -15,12 +15,19 @@ write:
 - an attribute named like a target attribute (`fields` for `Model.fields`, any name for
   `Model.*`) written on an object of unknown class: an unannotated parameter that no project
   caller binds to an instance of a known class, a loop variable, the result of a call heki does
-  not resolve, a value annotated `Any` or `object`. Rebinding (`obj.fields = []`), deleting,
-  `setattr` with a constant name, and changing the container the attribute holds
-  (`obj.fields.append(x)`, `obj.meta["k"][name] = v`) count;
+  not resolve, a value annotated `Any` or `object` (unless an `isinstance` test around the write
+  narrows it to a class: `if isinstance(obj, Field): ...`), or a protocol whose implementations
+  heki cannot list (one without members, or implemented by more than eight classes). Rebinding
+  (`obj.fields = []`), deleting, `setattr` with a constant name, and changing the container the
+  attribute holds (`obj.fields.append(x)`, `obj.meta["k"][name] = v`) count;
 - an attribute name computed at run time written on an instance of a target class:
   `setattr(model, name, v)`, `model.__dict__[name] = v`, `model.__dict__.update(...)`, and a
-  `__dict__` key that is a module constant not declared `Final`.
+  `__dict__` key in a name that is no constant: a module-level name bound twice, in a loop, or
+  before a star import, or rebound by another module, a class attribute without `ClassVar` or
+  `Final` (an instance may hold its own), one a subclass defines again or inherits first from
+  another base, a `Final` field of a dataclass read on an instance (or on a class object with
+  `slots=True` along the way), and one stored on its class, a subclass, or an instance outside
+  the class body (`Model.KEY = "x"`).
 
 The rules of `MUT201` for what is allowed apply: allowed writers, exempt methods, a class's own
 initialization (`setattr(self, name, v)` in `__init__`), functions that only run inside allowed

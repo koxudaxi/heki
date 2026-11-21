@@ -20,7 +20,9 @@ counts each of them: `sites` in JSON output). A private generator's writes run w
 iterated, or inside the function it is handed to that iterates it, and are reported there. A
 helper changing an argument it does not type (`_add(xs): xs.append(1)` called as
 `_add(model.items)`, `_set(o): o.x = 1` called as `_set(model)`) writes the field or instance
-the caller binds to it: the caller's call is the write. An invalidator counts when it is called directly, in each branch, or through
+the caller binds to it: the caller's call is the write, once for each class the instance may be
+(a protocol-typed one is the protocol and each implementation), against that class's targets.
+An invalidator counts when it is called directly, in each branch, or through
 calls (a helper that calls an invalidator on every path to its own return), also behind a
 boolean flag set after the write (`changed = True ... if changed: notify()`); one called before
 the write does not count, nor an `async` invalidator that is not awaited. A call of a method

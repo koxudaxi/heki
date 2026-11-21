@@ -312,6 +312,9 @@ EffectSummary(f) = {
                                                            // holding it (fresh-objects)
     unresolved_write_sites:   Set<UnresolvedWrite>,        // target-named writes on objects of unknown class,
                                                            // computed names on guarded classes (MUT205)
+    unresolved_access_sites:  Set<UnresolvedAccess>,       // reads and method calls named like a strict
+                                                           // contract's target on objects of unknown class;
+                                                           // never propagated (MUT206, MUT207)
 
     // Guards: when an effect runs
     exec_guards:              Map<ExecEffect, EffectGuards>, // input tests every occurrence needs; lazy
@@ -336,11 +339,29 @@ its head is bound to at module scope (`ModuleDecls::decorator_is`): an import by
 symbol's last name (aliases included), a function or class of the module itself never, an
 unbound name by its spelling.
 
-Contract-only facts (`Final` string keys through `ModuleDecls::str_constants`, container
-entries and `WriteKind::ItemMut`, construction through `ArgOrigin::new_object` and
+String constants (`ModuleDecls::str_constants`) name attributes and keys for every rule:
+the module's string constants (`heki_ir::ModuleConstants::strs`, whose texts they share), and
+module-level names bound once to a constant of another module, each rebound by no other module
+unless declared `Final` (`StrConstant::rebindable`, checked against
+`ProjectDecls::rebound_elsewhere` where a constant is read), and class-body names declared `ClassVar` or `Final` and bound once, stored on the class or
+an instance by no other code of their module (and, without `Final`, by no other module), read
+through the MRO when the MRO of every subclass finds the same definition (none defines the name
+again or lists another base defining it first); a class that code stores the name on
+(`ClassDecl::rebound_attrs` in its module, `ProjectDecls::rebound_elsewhere` from another)
+defines it too, and on an instance of a protocol every structural implementation must hold the
+same constant (`ProjectDecls::class_str_constant`). A `Final` name without `ClassVar`
+(`StrConstant::declares_field`) in a class whose annotations declare instance fields (a
+`ClassDecl::dataclass`, or a class a `dataclass_transform` builds) is a field: no constant on an
+instance, and on a class object only where each class from it to the field's class keeps the
+default as its attribute (`Dataclass::Slots` and transform builds replace it). Each answer is
+kept until the indexes change; a recording that reads one again adds what computing it read. Contract-only facts
+(container entries and `WriteKind::ItemMut`, construction through `ArgOrigin::new_object` and
 `TypedFieldWriteSite::construction`, `unresolved_write_sites`) are computed only when
 `Contracts::ownership()` is true, that is when write-owners, read-owners, effect-boundaries, or
 invalidation contracts are declared. `TypedFieldWriteSite::key` names the entry a write goes to.
+`unresolved_access_sites` hold only the names a `read-owners` or `call-owners` contract with
+`unresolved = "report"` ends a target with (`Contracts::unresolved_read`,
+`Contracts::unresolved_call`), so a summary keeps no read or call no rule asks for.
 
 `CallSite.returned` (whether the call's result may be returned, and how) and `CallSite.flow` (the
 invalidation contracts announced after the call on every normal path, and the next call; set on
@@ -661,7 +682,8 @@ deep = true   # changes to attributes and nested containers below are forbidden 
   A write a callee makes through an argument it does not type (an in-place change of `obj.attr`,
   an attribute of `obj`) is the caller's write at the call: the caller's argument binding ties
   it to a class (`ArgOrigin::targets`, the same `callgraph::indirect_writes` the ownership rules
-  use). The written object's identity (`obj_params`, the parameters it may be as itself) decides
+  use), or to the classes implementing the protocol the argument is typed with
+  (`ArgOrigin::implementers`, `ArgOrigin::instance_classes`). The written object's identity (`obj_params`, the parameters it may be as itself) decides
   an initializer's own construction: its `self`, not the objects reached through `self`.
 - Reporting: private helpers never report and pass the obligation to their callers; a public
   function is relieved when every caller path announces the change after the call (a

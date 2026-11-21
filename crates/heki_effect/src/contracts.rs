@@ -1,6 +1,7 @@
 //! Declared contracts that summaries depend on: the producers of `[[tool.heki.readonly-returns]]`
-//! (`MUT202`), the `[[tool.heki.invalidation]]` contracts (`MUT109`), and whether any ownership
-//! contract is declared.
+//! (`MUT202`), the `[[tool.heki.invalidation]]` contracts (`MUT109`), whether any ownership
+//! contract is declared, and the names whose unresolved reads and calls the strict contracts
+//! count (`MUT206`, `MUT207`).
 //!
 //! The rules layer implements [`Contracts`] from the configuration and hands it to
 //! [`crate::analyze_project_with`]; the index keeps it for incremental updates. Facts that depend
@@ -48,4 +49,13 @@ pub trait Contracts: Debug + Send + Sync {
     /// Whether a target of some contract names an attribute of class `classes[0]` or of one of
     /// its bases (`classes` as for [`Contracts::target_of`]).
     fn names_class(&self, classes: &[String]) -> bool;
+
+    /// Whether a `read-owners` contract with `unresolved = "report"` names attribute `attr`: a
+    /// read of it on an object of unknown class is an unresolved access (`MUT206`).
+    fn unresolved_read(&self, attr: &str) -> bool;
+
+    /// Whether a `call-owners` contract with `unresolved = "report"` names a function, method,
+    /// or class whose last name is `name`: a call of a method so named on an object of unknown
+    /// class is an unresolved access (`MUT207`).
+    fn unresolved_call(&self, name: &str) -> bool;
 }

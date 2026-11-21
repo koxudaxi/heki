@@ -14,11 +14,11 @@ use crate::resolver::{
     is_generator_function, self_aliases,
 };
 use crate::{
-    ArgBinding, ArgOrigin, ArgTargets, AttrKeyPath, BoundCallee, CallHop, CallSite, CallTarget,
-    Construction, Contracts, Dispatch, EffectSummary, FileSummary, FuncKey, GuardSubject, Items,
-    ModuleInput, NewArg, NewCond, NewKind, PerItem, ProjectDecls, ReadKind, ReturnsNew, Runner,
-    SharedLine, SiteRole, Slot, TypedFieldReadSite, TypedFieldWriteSite, Unresolved,
-    UnresolvedWriteSite, WriteKind,
+    Access, ArgBinding, ArgOrigin, ArgTargets, AttrKeyPath, BoundCallee, CallHop, CallSite,
+    CallTarget, Construction, Contracts, Dispatch, EffectSummary, FileSummary, FuncKey,
+    GuardSubject, Implementers, Items, ModuleInput, NewArg, NewCond, NewKind, PerItem,
+    ProjectDecls, ReadKind, ReturnsNew, Runner, SharedLine, SiteRole, Slot, TypedFieldReadSite,
+    TypedFieldWriteSite, Unresolved, UnresolvedAccessSite, UnresolvedWriteSite, WriteKind,
 };
 use heki_ast::Span;
 use heki_ir::{
@@ -359,6 +359,8 @@ fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary) {
     };
     into.unresolved_write_sites
         .extend(other.unresolved_write_sites);
+    into.unresolved_access_sites
+        .extend(other.unresolved_access_sites);
     into.refresh_typed_field_writes();
 }
 
@@ -540,6 +542,10 @@ struct Extractor<'a> {
     pending_sites: Vec<PendingSite>,
     /// `(call site, callee, parameter, query)`: arguments waiting for `ArgOrigin::new_object`.
     pending_args: Vec<(usize, usize, usize, usize)>,
+    /// The origins of a callee's parameters while a call binds them, kept from call to call:
+    /// each bound callee takes a copy of its exact length, so no call allocates room it then
+    /// gives back (`release_spare_capacity`).
+    param_origins: Vec<ArgOrigin>,
     /// Unresolved writes waiting for the answer of their construction query.
     pending_unresolved: Vec<(UnresolvedWriteSite, usize)>,
     /// Whether the construction queries can be answered with anything but "no": the function
@@ -655,6 +661,7 @@ impl<'a> Extractor<'a> {
             rec: Recorder::default(),
             pending_sites: Vec::new(),
             pending_args: Vec::new(),
+            param_origins: Vec::new(),
             pending_unresolved: Vec::new(),
             track: false,
             maybe_new: FxHashSet::default(),
@@ -1133,27 +1140,39 @@ impl<'a> Extractor<'a> {
             .filter(|a| a.classes.len() == 1)
             .map(|a| (a.classes[0].clone(), a.attr.clone()));
         let typed_instance = self.project_class(var);
-        ArgOrigin {
+        let implementers = typed_instance
+            .as_deref()
+            .filter(|_| self.contracts.is_some())
+            .and_then(|class| self.cx.project.protocol(class))
+            .map(|listed| match listed {
+                Some(classes) => Implementers::Listed(classes.to_vec()),
+                None => Implementers::Unlisted,
+            });
+        let mut origin = ArgOrigin {
             param: self.param_alias.get(&var).cloned(),
             param_slot: self.param_slot_alias.get(&var).cloned(),
             self_attr: self.self_attr_alias.get(&var).cloned(),
-            targets: self.arg_targets(typed_field.as_ref(), typed_instance.as_deref()),
+            targets: None,
             typed_field,
             typed_instance,
+            implementers,
             may_params: self.may_params.get(&var).copied().unwrap_or(0),
             fresh: self.is_fresh(var) || field.is_some_and(|a| a.fresh),
             reach: self.reach_of(var),
             binding: None,
             new_object: NewArg::Old,
-        }
+        };
+        let instances: Vec<&String> = origin.instance_classes().collect();
+        origin.targets = self.arg_targets(origin.typed_field.as_ref(), &instances);
+        origin
     }
 
-    /// [`ArgOrigin::targets`] of an argument that is the field `field` and an instance of
-    /// `instance` (`None` without an `invalidation` contract naming either).
+    /// [`ArgOrigin::targets`] of an argument that is the field `field` and an instance of one
+    /// of `instances` (`None` without an `invalidation` contract naming either).
     fn arg_targets(
         &self,
         field: Option<&(String, String)>,
-        instance: Option<&str>,
+        instances: &[&String],
     ) -> Option<Box<ArgTargets>> {
         let c = self.contracts.filter(|_| self.events.is_some())?;
         let with_bases = |class: &str| {
@@ -1162,10 +1181,12 @@ impl<'a> Extractor<'a> {
             classes
         };
         let field = field.map_or(0, |(class, attr)| c.target_of(&with_bases(class), attr));
-        let classes = instance
-            .map(with_bases)
-            .filter(|classes| c.names_class(classes))
-            .unwrap_or_default();
+        let classes: Vec<Vec<String>> = instances.iter().map(|c| with_bases(c)).collect();
+        let classes = if classes.iter().any(|line| c.names_class(line)) {
+            classes
+        } else {
+            Vec::new()
+        };
         (field != 0 || !classes.is_empty()).then(|| Box::new(ArgTargets { field, classes }))
     }
 
@@ -1881,6 +1902,7 @@ impl<'a> Extractor<'a> {
                     self.summary.private_calls.insert(method.clone());
                 }
                 let callee = self.cx.resolve_method(self.val(*recv), method);
+                self.unresolved_access(method, Access::Call, *recv, span);
                 // A container method changes its receiver in place, unless the receiver's
                 // class defines the method itself: then what that method does is in its
                 // summary (`Stats.clear()` may change nothing).
@@ -1945,6 +1967,7 @@ impl<'a> Extractor<'a> {
                     && let Some((recv, method)) = callee_var.and_then(|v| self.bound_method(v))
                 {
                     let target = self.cx.resolve_method(self.val(recv), &method);
+                    self.unresolved_access(&method, Access::Call, recv, span);
                     let (recv_origin, recv_is_self) = self.receiver(recv, bb);
                     let call = Call {
                         dst: *dst,
@@ -2330,6 +2353,9 @@ impl<'a> Extractor<'a> {
 
     /// Read of attribute `attr` on the object `owner`, when it has a project class.
     fn typed_read(&mut self, owner: Owner, attr: &str, kind: ReadKind, span: Span) {
+        if let Some(var) = owner.var {
+            self.unresolved_access(attr, Access::Read(kind), var, span);
+        }
         for class in owner.typed_classes {
             self.summary
                 .typed_field_read_sites
@@ -2357,28 +2383,56 @@ impl<'a> Extractor<'a> {
             Some((i, Some(path))) => self.change_below_param_attr(i, path, span),
             None => {}
         }
-        let unknown = owner.typed_classes.is_empty();
         for class in owner.typed_classes {
             self.typed_site(class, attr, None, kind, span, written);
         }
-        if unknown && let Some(var) = owner.var.filter(|v| self.unknown_class(*v)) {
+        if let Some(var) = owner.var.filter(|v| self.unknown_class(*v)) {
             self.unresolved(Unresolved::Receiver(attr.to_owned()), var, kind, span);
         }
     }
 
-    /// Whether heki knows nothing of the class of `var`'s object: no inferred value, or an
-    /// annotation that says nothing (`Any`, `object`).
+    /// Whether heki knows nothing of the class of `var`'s object here: no inferred value, an
+    /// annotation that says nothing (`Any`, `object`) that no `isinstance` test narrows, or a
+    /// project protocol whose implementations heki cannot list.
     fn unknown_class(&self, var: VarId) -> bool {
-        match self.types.get(&var) {
+        match self.val(var) {
             None => true,
             Some(Val::Inst(c)) => {
                 matches!(
                     c.as_str(),
                     "typing.Any" | "typing_extensions.Any" | "builtins.object"
-                )
+                ) || self.cx.project.protocol(c) == Some(None)
             }
             Some(_) => false,
         }
+    }
+
+    /// Record a read or a call of `name` heki cannot tie to a class (`MUT206`, `MUT207`) on the
+    /// object `obj` holds, when a strict contract names it: the object counts as a parameter
+    /// only when it is one on every path.
+    fn unresolved_access(&mut self, name: &str, access: Access, obj: VarId, span: Span) {
+        let Some(c) = self.contracts else {
+            return;
+        };
+        let named = match access {
+            Access::Read(_) => c.unresolved_read(name),
+            Access::Call => c.unresolved_call(name),
+        };
+        if !named || !self.unknown_class(obj) {
+            return;
+        }
+        let obj_params = match self.param_alias.get(&obj) {
+            Some((i, None)) => 1u64 << i,
+            _ => 0,
+        };
+        self.summary
+            .unresolved_access_sites
+            .insert(UnresolvedAccessSite {
+                name: name.to_owned(),
+                access,
+                span,
+                obj_params,
+            });
     }
 
     /// Record a write heki cannot tie to a class (`MUT205`) of the object `obj` holds: the
@@ -2754,6 +2808,7 @@ impl<'a> Extractor<'a> {
                 let mut on_worker = Vec::new();
                 let mut any_async = false;
                 let unknown = FunctionDecl::default();
+                let mut buffer = std::mem::take(&mut self.param_origins);
                 let loops = self.loops_around(bb);
                 // `(callee, its index, receiver, bound arguments, offset)` for `Self::hand_over`.
                 let mut handovers = Vec::new();
@@ -2786,7 +2841,7 @@ impl<'a> Extractor<'a> {
                         invalidates = Some(invalidates.map_or(here, |i| i & here));
                     }
                     let offset = usize::from(*binds_recv && !decl.is_staticmethod);
-                    let mut params: Vec<ArgOrigin> = Vec::new();
+                    let mut params = std::mem::take(&mut buffer);
                     // The receiver the call hands over (a constructor's is its new object).
                     let mut handed_recv = None;
                     if offset == 1 {
@@ -2886,10 +2941,14 @@ impl<'a> Extractor<'a> {
                     if self.ownership && !offloaded {
                         handovers.push((decl, callees.len(), handed_recv, bound.clone(), offset));
                     }
+                    // A copy of the exact length; the buffer keeps its room for the next call.
+                    let mut exact = Vec::with_capacity(params.len());
+                    exact.append(&mut params);
                     let bc = BoundCallee {
                         callee: key.clone(),
-                        params,
+                        params: exact,
                     };
+                    buffer = params;
                     if offloaded {
                         on_worker.push(bc);
                     } else {
@@ -2897,6 +2956,7 @@ impl<'a> Extractor<'a> {
                         bindings.push((key.clone(), bound));
                     }
                 }
+                self.param_origins = buffer;
                 for (decl, i, recv, bound, offset) in handovers {
                     let bound = &bound;
                     self.hand_over(

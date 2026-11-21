@@ -435,6 +435,79 @@ fn mut202_follows_protected_values_through_returns() {
     );
 }
 
+/// Comprehensions collecting what wrappers of a shared value return.
+const COLLECTING: &str = r#"from __future__ import annotations
+
+from collections.abc import Sequence
+from functools import lru_cache
+
+from pkg.graph import Graph, Schema
+
+
+def load(graph: Graph, raw: object) -> Schema:
+    return graph.schema(raw)
+
+
+def own_or_loaded(graph: Graph, item: Schema, raw: object) -> Schema:
+    if raw is not None:
+        return load(graph, raw)
+    return item
+
+
+def collect(graph: Graph, items: list[Schema], raw: object) -> list[Schema]:
+    return [own_or_loaded(graph, item, raw) for item in items]
+
+
+def collect_set(graph: Graph, items: Sequence[Schema], raw: object) -> set[Schema]:
+    return {load(graph, raw) for _ in items}
+
+
+def changed(schema: Schema) -> Schema:
+    schema.items.append(1)
+    return schema
+
+
+def change_each(graph: Graph, raws: Sequence[object]) -> list[Schema]:
+    return [changed(load(graph, raw)) for raw in raws]
+
+
+@lru_cache
+def table(name: str) -> dict[str, int]:
+    return {name: 1}
+
+
+def filled(acc: list[int]) -> dict[str, int]:
+    acc.append(1)
+    return table("a")
+
+
+def collect_tables(accs: list[list[int]]) -> list[dict[str, int]]:
+    return [filled(acc) for acc in accs]
+"#;
+
+#[test]
+fn mut202_comprehension_collecting_wrapper_results_mutates_nothing() {
+    let p = Project::new("mut202_collecting");
+    p.write("pyproject.toml", RO_CONFIG)
+        .write("pkg/__init__.py", "")
+        .write("pkg/graph.py", GRAPH)
+        .write("pkg/collecting.py", COLLECTING);
+    // A comprehension appends its element, the result of the element's own call: no argument of
+    // that call. Handing the shared value to a helper that changes it is a mutation. Python 3.11
+    // runs a comprehension in a frame of its own, 3.12 inlines it (PEP 709).
+    for (version, qualname) in [
+        ("py311", "change_each.<locals>.<listcomp>"),
+        ("py312", "change_each"),
+    ] {
+        let diags = diagnostics(&p, &["--select", "MUT202", "--target-version", version]);
+        assert_eq!(
+            found(&diags),
+            vec![d("pkg/collecting.py", 33, "MUT202", qualname)],
+            "{version}: {diags:#?}"
+        );
+    }
+}
+
 // ============================================================================== MUT109
 
 const INV_CONFIG: &str = r#"[project]
@@ -1121,6 +1194,17 @@ def set_x(m: Model) -> None:
 def set_x_ok(m: Model) -> None:
     _set_x(m)
     notify(m)
+
+
+import typing
+
+
+class Positioned(typing.Protocol):
+    x: int
+
+
+def set_positioned(p: Positioned) -> None:
+    _set_x(p)
 "#;
 
 #[test]
@@ -1132,14 +1216,16 @@ fn mut109_follows_the_fields_and_instances_bound_to_untyped_helper_arguments() {
     let diags = diagnostics(&p, &["--select", "MUT109"]);
     let m = "pkg/models.py";
     // A helper changing an argument it does not type writes the field or the instance the
-    // caller binds to it (`fill`, `set_x`, and `other.items` in `Model.__init__`); the
-    // initializer's own fields are its construction.
+    // caller binds to it (`fill`, `set_x`, `set_positioned`, and `other.items` in
+    // `Model.__init__`); the initializer's own fields are its construction.
     assert_eq!(
         found(&diags),
         vec![
             d(m, 11, "MUT109", "Model.__init__"),
             d(m, 32, "MUT109", "fill"),
             d(m, 41, "MUT109", "set_x"),
+            // An object typed with a protocol `Model` implements.
+            d(m, 57, "MUT109", "set_positioned"),
         ],
         "{diags:#?}"
     );
@@ -1148,6 +1234,64 @@ fn mut109_follows_the_fields_and_instances_bound_to_untyped_helper_arguments() {
             .as_str()
             .unwrap()
             .starts_with("`fill` writes `Model.items` (indirect_helper) via `pkg.models._fill`"),
+        "{diags:#?}"
+    );
+}
+
+const PROTOCOL_BINDING: &str = r#"import typing
+
+
+class Positioned(typing.Protocol):
+    x: int
+
+
+class Model:
+    def __init__(self) -> None:
+        self.x = 0
+
+
+class Point:
+    def __init__(self) -> None:
+        self.x = 0
+
+
+def notify(o) -> None:
+    pass
+
+
+def _set_x(o) -> None:
+    o.x = 1
+
+
+def set_positioned(p: Positioned) -> None:
+    _set_x(p)
+"#;
+
+/// A helper writing an attribute of an object typed with a protocol writes it on the protocol
+/// and on each implementation: each write is matched against the targets of its own class
+/// (`Model.x` once, not once per class the object may be), and a target on the protocol covers
+/// the write too.
+#[test]
+fn mut109_ties_a_helper_write_through_a_protocol_to_each_class_once() {
+    let p = Project::new("mut109_protocol_binding");
+    p.write(
+        "pyproject.toml",
+        "[[tool.heki.invalidation]]\nname = \"model\"\ntargets = [\"Model.x\"]\ninvalidators = [\"notify\"]\n\n[[tool.heki.invalidation]]\nname = \"positioned\"\ntargets = [\"Positioned.x\"]\ninvalidators = [\"notify\"]\n",
+    )
+    .write("pkg/__init__.py", "")
+    .write("pkg/models.py", PROTOCOL_BINDING);
+    let diags = diagnostics(&p, &["--select", "MUT109"]);
+    let mut messages: Vec<&str> = diags
+        .iter()
+        .map(|d| d["message"].as_str().unwrap())
+        .collect();
+    messages.sort_unstable();
+    assert_eq!(
+        messages,
+        vec![
+            "`set_positioned` writes `Model.x` (indirect_helper) via `pkg.models._set_x` and returns on some path without calling an invalidator of `model`",
+            "`set_positioned` writes `Positioned.x` (indirect_helper) via `pkg.models._set_x` and returns on some path without calling an invalidator of `positioned`",
+        ],
         "{diags:#?}"
     );
 }
