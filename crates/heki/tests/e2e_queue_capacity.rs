@@ -805,3 +805,119 @@ fn constructor_arguments_helpers_and_module_globals_decide() {
         ]
     );
 }
+
+const SHARED: &str = r#"import queue
+from queue import Queue
+
+EVENTS = queue.Queue(maxsize=8)
+FREE = queue.Queue()
+"#;
+const IMPORTED: &str = r#"import queue
+
+from app.shared import EVENTS, FREE
+
+MINE: queue.Queue = EVENTS
+LOOSE: queue.Queue = FREE
+
+
+class Holder:
+    events: queue.Queue = EVENTS
+
+    def post(self) -> None:
+        self.events.put(1)
+
+
+async def tp_module_copy() -> None:
+    MINE.put(1)
+
+
+async def tn_module_copy_unbounded() -> None:
+    LOOSE.put(1)
+
+
+async def tp_class_attribute(h: Holder) -> None:
+    h.post()
+
+
+async def tp_imported_in_the_function() -> None:
+    from app.shared import EVENTS as events
+
+    events.put(1)
+
+
+async def tn_imported_in_the_function_unbounded() -> None:
+    from app.shared import FREE as free
+
+    free.put(1)
+
+
+async def tp_module_imported_in_the_function() -> None:
+    import app.shared as shared
+
+    shared.EVENTS.put(1)
+
+
+async def tp_queue_module_imported_in_the_function() -> None:
+    import queue as q
+
+    q.Queue(4).put(1)
+
+
+async def tn_queue_module_imported_in_the_function_unbounded() -> None:
+    import queue as q
+
+    q.Queue().put(1)
+"#;
+const TYPED: &str = r#"from app import shared
+
+
+class Relay:
+    def __init__(self) -> None:
+        self.events: shared.Queue = shared.EVENTS
+        self.free: shared.Queue = shared.FREE
+
+    def post(self) -> None:
+        self.events.put(1)
+
+    def post_free(self) -> None:
+        self.free.put(1)
+
+
+async def tp_typed_attribute(r: Relay) -> None:
+    r.post()
+
+
+async def tn_typed_attribute_unbounded(r: Relay) -> None:
+    r.post_free()
+"#;
+
+/// A queue another module builds is followed wherever a name binds it: a module or class body's
+/// copy of an imported queue, an import inside the function (of the queue, of its module, or of
+/// the `queue` module), and an attribute a class types as a queue through a project module that
+/// imports the class, in a module importing no queue class itself.
+#[test]
+fn imported_queues_are_followed_wherever_a_name_binds_them() {
+    assert_eq!(
+        eff101(
+            "queue_imported_instances",
+            &[
+                ("app/__init__.py", ""),
+                ("app/shared.py", SHARED),
+                ("app/imported.py", IMPORTED),
+                ("app/typed.py", TYPED),
+            ]
+        ),
+        vec![
+            r("app/imported.py", 17, "tp_module_copy"),
+            r("app/imported.py", 25, "tp_class_attribute"),
+            r("app/imported.py", 31, "tp_imported_in_the_function"),
+            r("app/imported.py", 43, "tp_module_imported_in_the_function"),
+            r(
+                "app/imported.py",
+                49,
+                "tp_queue_module_imported_in_the_function"
+            ),
+            r("app/typed.py", 17, "tp_typed_attribute"),
+        ]
+    );
+}

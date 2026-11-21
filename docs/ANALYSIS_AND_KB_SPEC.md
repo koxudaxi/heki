@@ -428,44 +428,45 @@ forward must-analysis with the input tests' (one atom per future, which only eve
 a future done after `if f.done():` and after such an `await`. Anything not recognized keeps the
 effect.
 
-**Queue capacities** (`capacity`). A `put` waits only while its queue is full
-(`waits_while_full`: `queue.Queue.put`, `LifoQueue.put`, `PriorityQueue.put`), which only a queue
-its `maxsize` bounds can be (`bounded_by` on the classes: a positive integer bounds it; none,
-zero, a negative one, or `None` does not). Its blocking effects run only on a queue known to be
-bounded: `Capacity` is `Unbounded` < `Bounded` (some path bounded, every path known) <
-`Unknown` (some path not known), joined by the maximum, and `None` adds nothing. What a value
-gives a queue (`CapacityOf`; for an integer, the capacity of a queue built with it as
-`maxsize`) is the join over what it may come from through copies, phis, and a construction's
-`maxsize`, every value of a function walked once (Tarjan; a cycle's members share one answer):
-a construction, an integer constant (`FnIndex::const_int`), an attribute of `self` or of a typed
-project instance, a module global (also read as a module's attribute), a parameter, anything
-else unknown. The declarations record what a module's class bodies and methods store in `self`
-attributes (`ClassDecl::attr_capacities`) and what it binds its globals to
-(`ModuleDecls::global_capacities`), for the names one store of which is a queue (or, for a name a
-`maxsize` reads, an integer), naming the attributes, globals, and parameters they take the rest
-from; `ProjectDecls::attr_capacity` resolves an attribute over every class whose stores an
-instance may hold (the class, its subclasses, and their MROs; a class defining the name without
-a record, or a name another module stores, is unknown) and `ProjectDecls::global_capacity` a
-global over its module (unknown without a record or when another module rebinds it), following
-what the records name, so a summary's capacities name parameters only. A wait the code decides
-is an effect like any other. A wait on the function's own parameter is an effect needing a
-bounded queue there (`EffectGuards::bounded_queue`): each call decides it by what it binds (a
-queue not known to be bounded prunes the effect there; the caller's own parameter carries the
-need on), so a helper waits only for the callers handing it a bounded queue. Any other wait is a
-`CapacityWait` of the summary, and every such call keeps `CallTarget::Layer2::while_full`.
-Before propagation, the index resolves the parameters these name, and those queue arguments name
-(`ArgBinding::capacity`), over the call sites binding them (`ParamCapacities`, a join fixpoint
-whose values grow three times at most, found one round of callers at a time): the argument's
-capacity as its caller found it, or its constant (`ConstArg::positive`, also of a literal
-default); an argument not bound exactly, and a function without project callers, are unknown.
-Propagation adds the waits the parameters show bounded to the summary's effects
-(`ParamCapacities::realize`); a site's `while_full` effects run where the parameters show its
-queue bounded (`ProjectIndex::while_full_effects`, which Boundary-Only Reporting and `EFF201`
-read), and an `async def` reaching a wait that needs its own parameter bounded reports it only
-when its callers' join is bounded. An incremental update recomputes the parameters'
-capacities; the functions whose waits or calls name a parameter whose capacity changed are
-re-propagated and reported changed, also when their summary stays equal (the report at their own
-call moves).
+**Queue capacities** (`capacity`). A `put` waits only while its queue is full (`waits_while_full`:
+`queue.Queue.put`, `LifoQueue.put`, `PriorityQueue.put`), which only a queue its `maxsize` bounds
+can be (`bounded_by` on the classes: a positive integer bounds it; none, zero, a negative one, or
+`None` does not). Its blocking effects run only on a queue known to be bounded: `Capacity` is
+`Unbounded` < `Bounded` (some path bounded, every path known) < `Unknown` (some path not known),
+joined by the maximum, and `None` adds nothing. What a value gives a queue (`CapacityOf`; for an
+integer, the capacity of a queue built with it as `maxsize`) is the join over what it may come from
+through copies, phis, and a construction's `maxsize`, every value of a function walked once (Tarjan;
+a cycle's members share one answer): a construction, an integer constant (`FnIndex::const_int`), an
+attribute of `self` or of a typed project instance, a module global (also read as a module's
+attribute, or bound by an import statement, also one inside a function), a parameter, anything else
+unknown. The declarations record what a module's class bodies and methods store in `self` attributes
+(`ClassDecl::attr_capacities`) and what it binds its globals to (`ModuleDecls::global_capacities`),
+for the names one store of which is a queue (or, for a name a `maxsize` reads, an integer), naming
+the attributes, globals, and parameters they take the rest from (a module that neither imports a
+catalogued queue class or its module, at any scope, nor types an attribute or a global as one
+records nothing); `ProjectDecls::attr_capacity` resolves an attribute over every class whose stores
+an instance may hold (the class, its subclasses, and their MROs; a class defining the name without a
+record, or a name another module stores, is unknown) and `ProjectDecls::global_capacity` a global
+over its module (unknown without a record or when another module rebinds it), following what the
+records name, so a summary's capacities name parameters only. A wait the code decides is an effect
+like any other. A wait on the function's own parameter is an effect needing a bounded queue there
+(`EffectGuards::bounded_queue`): each call decides it by what it binds (a queue not known to be
+bounded prunes the effect there; the caller's own parameter carries the need on), so a helper waits
+only for the callers handing it a bounded queue. Any other wait is a `CapacityWait` of the summary,
+and every such call keeps it in `CallSite::queues` (`SiteQueues::while_full`). Before propagation,
+the index resolves the parameters these name, and those queue arguments name (`SiteQueues::handed`,
+every parameter a call's binding can name, so one pass over the calls finds every source), over the
+call sites binding them (`ParamCapacities`, a join fixpoint over a worklist of the parameters each
+one's value depends on, a value growing three times at most): the argument's capacity as its caller
+found it, or its constant (`ConstArg::positive`, also of a literal default); an argument not bound
+exactly, and a function without project callers, are unknown. Propagation adds the waits the
+parameters show bounded to the summary's effects (`ParamCapacities::realize`); a site's `while_full`
+effects run where the parameters show its queue bounded (`ProjectIndex::while_full_effects`, which
+Boundary-Only Reporting and `EFF201` read), and an `async def` reaching a wait that needs its own
+parameter bounded reports it only when its callers' join is bounded. An incremental update
+recomputes the parameters' capacities; the functions whose waits or calls name a parameter whose
+capacity changed are re-propagated and reported changed, also when their summary stays equal (the
+report at their own call moves).
 
 **Where a body runs.** A call site hands its caller one of a callee's two fact sets (one home,
 `ProjectIndex::delivery`): its *body* (`Body`), or what iterating the object it returns runs

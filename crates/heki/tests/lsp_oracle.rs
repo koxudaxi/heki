@@ -549,6 +549,10 @@ const Q_SMALL: &str =
     "from pkg.q_runner import Runner\n\n\nclass SmallRunner(Runner):\n    label = \"small\"\n";
 const Q_HALT: &str =
     "from pkg.q_runner import Runner\n\n\nasync def halt(r: Runner):\n    r.stop()\n";
+const Q_EVENTS: &str = "import queue\n\nEVENTS = queue.Queue()\n";
+const Q_MIRROR: &str = "import queue\n\nfrom pkg.q_events import EVENTS\n\nMINE: queue.Queue = EVENTS\n\n\nasync def mirror():\n    MINE.put(1)\n";
+const Q_LOCAL: &str =
+    "async def local():\n    from pkg.q_events import EVENTS\n\n    EVENTS.put(1)\n";
 
 /// The project before the first step (every file is opened).
 fn initial_files() -> Vec<(&'static str, String)> {
@@ -732,6 +736,9 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/q_runner.py", Q_RUNNER),
         ("pkg/q_small.py", Q_SMALL),
         ("pkg/q_halt.py", Q_HALT),
+        ("pkg/q_events.py", Q_EVENTS),
+        ("pkg/q_mirror.py", Q_MIRROR),
+        ("pkg/q_local.py", Q_LOCAL),
         ("pkg/subscriptions.py", SUBSCRIPTIONS),
         ("pkg/sub_drop.py", SUB_DROP),
         ("pkg/sub_ops.py", SUB_OPS),
@@ -2011,6 +2018,19 @@ fn steps_queue_capacity() -> Vec<Step> {
             vec![save("pkg/q_small.py", Q_SMALL)],
         )
         .present(&[("pkg/q_halt.py", "EFF101")]),
+        Step::new(
+            "the module a global copies its queue from, and a function imports it from, bounds it",
+            vec![save(
+                "pkg/q_events.py",
+                &Q_EVENTS.replace("queue.Queue()", "queue.Queue(4)"),
+            )],
+        )
+        .present(&[("pkg/q_mirror.py", "EFF101"), ("pkg/q_local.py", "EFF101")]),
+        Step::new(
+            "it builds the queue unbounded again",
+            vec![save("pkg/q_events.py", Q_EVENTS)],
+        )
+        .absent(&[("pkg/q_mirror.py", "EFF101"), ("pkg/q_local.py", "EFF101")]),
     ]
 }
 

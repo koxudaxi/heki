@@ -273,7 +273,7 @@ impl<'c, 'a> ValueCapacity<'c, 'a> {
         let ints = self
             .ints
             .get_or_init(|| FnIndex::new(self.f, &self.cx.ir().constants));
-        let (own, sources) = match (ints.const_int(v), self.defs.get(&v).map(|i| &i.kind)) {
+        let (own, sources) = match (ints.const_int(v), self.defs.get(&v)) {
             (Some(n), _) => {
                 let own = Walked {
                     int: true,
@@ -281,8 +281,7 @@ impl<'c, 'a> ValueCapacity<'c, 'a> {
                 };
                 (own, Vec::new())
             }
-            (None, Some(InstKind::Copy { src, .. })) => (Walked::default(), vec![*src]),
-            (None, Some(kind)) => self.defined(kind),
+            (None, Some(inst)) => self.defined(inst),
             (None, None) => match self.phis.get(&v) {
                 Some((_, phi)) => (
                     Walked::default(),
@@ -304,10 +303,14 @@ impl<'c, 'a> ValueCapacity<'c, 'a> {
     }
 
     /// What the value an instruction defines is itself, and the values it comes from (the
-    /// `maxsize` of a construction).
-    fn defined(&self, kind: &InstKind) -> (Walked, Vec<VarId>) {
+    /// source of a copy, the `maxsize` of a construction).
+    fn defined(&self, inst: &Inst) -> (Walked, Vec<VarId>) {
         let unknown = || (Walked::of(CapacityOf::unknown()), Vec::new());
-        match kind {
+        if let Some(fqn) = self.global_read(inst) {
+            return (self.global_fact(fqn), Vec::new());
+        }
+        match &inst.kind {
+            InstKind::Copy { src, .. } => (Walked::default(), vec![*src]),
             InstKind::Const {
                 literal: ConstLiteral::None,
                 ..
@@ -342,16 +345,29 @@ impl<'c, 'a> ValueCapacity<'c, 'a> {
                 };
                 (fact, Vec::new())
             }
+            _ => unknown(),
+        }
+    }
+
+    /// The fqn of the global object a read of a name gives: a function's read of a module
+    /// global, a module or class body's read of a name it has not bound itself, or an import
+    /// statement's binding (wherever it is, also inside a function), which names what it
+    /// imports.
+    fn global_read(&self, inst: &Inst) -> Option<String> {
+        match &inst.kind {
             InstKind::LoadGlobal {
                 name,
                 is_lazy_import: false,
                 ..
-            } => {
-                let fqn = self.cx.module.imports.get(name).cloned();
-                let fqn = fqn.unwrap_or_else(|| format!("{}.{name}", self.cx.module_name()));
-                (self.global_fact(fqn), Vec::new())
             }
-            _ => unknown(),
+            | InstKind::LoadName { name, .. } => {
+                let fqn = self.cx.module.imports.get(name).cloned();
+                Some(fqn.unwrap_or_else(|| format!("{}.{name}", self.cx.module_name())))
+            }
+            InstKind::Import { is_lazy: false, .. } => {
+                self.cx.import_target(inst.span).map(str::to_owned)
+            }
+            _ => None,
         }
     }
 
@@ -419,8 +435,9 @@ impl<'c, 'a> ValueCapacity<'c, 'a> {
     fn named(&self, v: VarId) -> Option<String> {
         let mut v = v;
         let mut attrs: Vec<&str> = Vec::new();
-        let name = loop {
-            match &self.defs.get(&v)?.kind {
+        let ty = loop {
+            let inst = self.defs.get(&v)?;
+            match &inst.kind {
                 InstKind::Copy { src, .. } => v = *src,
                 InstKind::AttrLoad { obj, attr, .. } => {
                     attrs.push(attr);
@@ -431,13 +448,16 @@ impl<'c, 'a> ValueCapacity<'c, 'a> {
                     is_lazy_import: false,
                     ..
                 }
-                | InstKind::LoadName { name, .. } => break name.as_str(),
-                // A module body binds its imports as its own variables.
-                InstKind::Import { dst, .. } => break self.f.var_name(*dst)?,
+                | InstKind::LoadName { name, .. } => break self.cx.global(name),
+                // What the import statement binds, also one inside a function, which the
+                // module's own imports do not hold.
+                InstKind::Import { is_lazy: false, .. } => {
+                    break self.cx.named(self.cx.import_target(inst.span)?);
+                }
                 _ => return None,
             }
         };
-        let (Ty::Ref(mut fqn) | Ty::Class(mut fqn)) = self.cx.global(name) else {
+        let (Ty::Ref(mut fqn) | Ty::Class(mut fqn)) = ty else {
             return None;
         };
         for a in attrs.iter().rev() {
@@ -734,10 +754,12 @@ pub(crate) fn resolve_in_decls(project: &ProjectDecls, start: CapacityOf) -> Cap
 
 /// `ClassDecl::attr_capacities` and `ModuleDecls::global_capacities` of a module: what its class
 /// bodies and methods store in attributes, and what it binds its globals to. A module that
-/// neither imports a catalogued queue class (nor its module) nor types an attribute or a global
-/// as one builds no queue and holds none a `put` can be resolved on, and records nothing.
+/// neither imports a catalogued queue class (nor its module, at any scope) nor types an
+/// attribute or a global as one builds no queue and holds none a `put` can be resolved on, and
+/// records nothing.
 pub(crate) fn record(input: &ModuleInput<'_>, cx: &TypeCtx<'_>, decls: &mut ModuleDecls) {
-    if input.ir.constants.dynamic || !(imports_a_queue(cx, decls) || types_a_queue(cx, decls)) {
+    let holds_a_queue = || imports_a_queue(input, cx, decls) || types_a_queue(cx, decls);
+    if input.ir.constants.dynamic || !holds_a_queue() {
         return;
     }
     let mut attrs: BTreeMap<(String, String), Walked> = BTreeMap::new();
@@ -916,9 +938,9 @@ fn types_a_queue(cx: &TypeCtx<'_>, decls: &ModuleDecls) -> bool {
         .any(|t| names_a_queue(cx, t))
 }
 
-/// Whether the module imports (also for annotations only) a catalogued queue class or a module
-/// holding one.
-fn imports_a_queue(cx: &TypeCtx<'_>, decls: &ModuleDecls) -> bool {
+/// Whether the module imports (also for annotations only, or inside a function) a catalogued
+/// queue class or a module holding one.
+fn imports_a_queue(input: &ModuleInput<'_>, cx: &TypeCtx<'_>, decls: &ModuleDecls) -> bool {
     let queues: Vec<&str> = cx
         .kb
         .entries
@@ -926,10 +948,17 @@ fn imports_a_queue(cx: &TypeCtx<'_>, decls: &ModuleDecls) -> bool {
         .filter(|e| e.bounded_by.is_some())
         .map(|e| e.symbol.as_str())
         .collect();
+    let anywhere = input
+        .semantic
+        .imports
+        .iter()
+        .filter_map(|imp| cx.import_target(imp.span));
     decls
         .imports
         .values()
         .chain(decls.type_checking_imports.values())
+        .map(String::as_str)
+        .chain(anywhere)
         .any(|fqn| {
             let fqn = cx.project.canonical(fqn);
             queues.iter().any(|q| {
