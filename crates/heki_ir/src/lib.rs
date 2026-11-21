@@ -124,6 +124,8 @@ pub struct ParamInfo {
     pub default: Option<ConstLiteral>,
     /// Keyword-only (after `*` or `*args`): never bound by position.
     pub kw_only: bool,
+    /// Positional-only (before `/`): never bound by keyword.
+    pub pos_only: bool,
     pub is_vararg: bool,
     pub is_kwarg: bool,
     /// PEP 484 annotation text (Advisory lane ONLY; `heki_soundness` MUST ignore this).

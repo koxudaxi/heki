@@ -4494,6 +4494,68 @@ fn lsp_diagnostics_equal_a_full_check_below_a_git_working_tree() {
     s.lsp.stop(true);
 }
 
+// ------------------------------------------------- argument lists across modules (session 4)
+
+// A call target with an argument list, passed a number constant of another module by keyword:
+// the constant's value and whether a keyword binds the parameter come from the other modules'
+// declarations (`ModuleDecls::literal_constants`, `FunctionDecl::positional_only`).
+const MARKED_CONFIG: &str = "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT204\"]\n\n[[tool.heki.call-owners]]\nname = \"levels\"\ntargets = [\"pkg.sig.levels(level=0)\"]\n";
+const MARKED_LEVELS: &str = "def levels(level=None, **options):\n    return level\n";
+const MARKED_POSITIONAL: &str = "def levels(level=None, /, **options):\n    return level\n";
+const MARKED_USE: &str = "from pkg.limits import LIMIT\nfrom pkg.sig import levels\n\n\ndef use():\n    return levels(level=LIMIT)\n";
+const MARKED_REBIND: &str = "from pkg import limits\n\n\ndef reset():\n    limits.LIMIT = 0\n";
+
+#[test]
+fn lsp_diagnostics_equal_a_full_check_through_argument_lists_across_modules() {
+    let files = vec![
+        ("pkg/__init__.py", String::new()),
+        ("pkg/sig.py", MARKED_LEVELS.to_owned()),
+        ("pkg/limits.py", "LIMIT = 0\n".to_owned()),
+        ("pkg/use.py", MARKED_USE.to_owned()),
+    ];
+    let mut s = Session::start_with("lsp_oracle_argument_lists", MARKED_CONFIG, files, false);
+    let reported: &[(&str, &str)] = &[("pkg/use.py", "MUT204")];
+    let steps = [
+        Step::new("initial index", Vec::new()).present(reported),
+        Step::new(
+            "the constant's module binds it to another number",
+            vec![save("pkg/limits.py", "LIMIT = 1\n")],
+        )
+        .absent(reported),
+        Step::new(
+            "it binds the number of the list again",
+            vec![save("pkg/limits.py", "LIMIT = 0\n")],
+        )
+        .present(reported),
+        Step::new(
+            "a third module starts rebinding it",
+            vec![Action::Create("pkg/rebind.py", MARKED_REBIND.to_owned())],
+        )
+        .absent(reported),
+        Step::new(
+            "the third module is deleted",
+            vec![Action::Delete("pkg/rebind.py")],
+        )
+        .present(reported),
+        Step::new(
+            "the parameter becomes positional-only: the keyword lands in `**options`",
+            vec![save("pkg/sig.py", MARKED_POSITIONAL)],
+        )
+        .absent(reported),
+        Step::new(
+            "a keyword binds it again",
+            vec![save("pkg/sig.py", MARKED_LEVELS)],
+        )
+        .present(reported),
+    ];
+    let mut failures = Vec::new();
+    for step in &steps {
+        failures.extend(s.run(step));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+    s.lsp.stop(true);
+}
+
 // ---------------------------------------------- class bases named in their scope (session 4)
 
 const SCOPED_BASES_CONFIG: &str = r#"[project]
@@ -4636,6 +4698,51 @@ fn lsp_diagnostics_equal_a_full_check_while_package_paths_change() {
             )],
         )
         .absent(&[("app/loader.py", "EFF201")]),
+    ];
+    let mut failures = Vec::new();
+    for step in &steps {
+        failures.extend(s.run(step));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+    s.lsp.stop(true);
+}
+
+// A constant passed by keyword through a package re-exporting it: whether the package binds the
+// name again (`ModuleDecls::rebound_imports`) decides whether the import still holds the
+// constant there.
+const RELAYED_USE: &str = "from pkg.relay import LIMIT\nfrom pkg.sig import levels\n\n\ndef use():\n    return levels(level=LIMIT)\n";
+const RELAY_REBINDS: &str =
+    "from pkg.limits import LIMIT\n\n\ndef reset():\n    global LIMIT\n    LIMIT = 3\n";
+
+#[test]
+fn lsp_diagnostics_equal_a_full_check_through_a_re_export_its_package_binds_again() {
+    let files = vec![
+        ("pkg/__init__.py", String::new()),
+        ("pkg/sig.py", MARKED_LEVELS.to_owned()),
+        ("pkg/limits.py", "LIMIT = 0\n".to_owned()),
+        (
+            "pkg/relay/__init__.py",
+            "from pkg.limits import LIMIT\n".to_owned(),
+        ),
+        ("pkg/use.py", RELAYED_USE.to_owned()),
+    ];
+    let mut s = Session::start_with("lsp_oracle_rebound_imports", MARKED_CONFIG, files, false);
+    let reported: &[(&str, &str)] = &[("pkg/use.py", "MUT204")];
+    let steps = [
+        Step::new("initial index", Vec::new()).present(reported),
+        Step::new(
+            "the package re-exporting the constant binds the name again",
+            vec![save("pkg/relay/__init__.py", RELAY_REBINDS)],
+        )
+        .absent(reported),
+        Step::new(
+            "it only re-exports it again",
+            vec![save(
+                "pkg/relay/__init__.py",
+                "from pkg.limits import LIMIT\n",
+            )],
+        )
+        .present(reported),
     ];
     let mut failures = Vec::new();
     for step in &steps {

@@ -407,9 +407,27 @@ pub struct FunctionDecl {
     pub param_names: Vec<String>,
     /// How many leading parameters a position binds (the receiver included).
     pub positional_params: u8,
-    /// How many leading parameters a keyword binds (all but `*args` / `**kwargs`, which come
-    /// last).
+    /// How many leading parameters only a position binds (those before `/`, the receiver
+    /// included).
+    pub positional_only: u8,
+    /// How many leading parameters have no default (the receiver included): a call leaving one
+    /// unbound raises `TypeError`. Python gives every positional parameter after one with a
+    /// default a default too, so these are the positional parameters without one.
+    pub required_positional: u8,
+    /// The keyword-only parameters without a default, one bit each from the first keyword-only
+    /// parameter (`positional_params`) on; past the 8th none counts (one byte, not a list: every
+    /// declaration of the project keeps it).
+    pub required_keyword_only: u8,
+    /// How many leading parameters have a name a keyword can give (all but `*args` /
+    /// `**kwargs`, which come last); a keyword binds those past the positional-only ones
+    /// ([`Self::keyword_param`]).
     pub named_params: u8,
+    /// It takes `*args`: positions past the positional parameters land there, where the call
+    /// would otherwise raise `TypeError`.
+    pub has_varargs: bool,
+    /// It takes `**kwargs`: a keyword binding no parameter lands there, where the call would
+    /// otherwise raise `TypeError`.
+    pub has_kwargs: bool,
     /// The literal defaults, by parameter position (`guards`: an omitted argument).
     pub defaults: Vec<(u8, crate::ConstArg)>,
     /// Calling it returns a fresh (async) generator: a generator function without decorators
@@ -473,6 +491,34 @@ impl FunctionDecl {
     pub fn makes_no_coroutine(&self) -> bool {
         self.called_as_defined && (!self.is_async || self.is_generator)
     }
+
+    /// The parameter a positional argument binds in `slot` (counted from the receiver): one of
+    /// the positional parameters. A position past them lands in `*args`, a new tuple holding
+    /// it, or the call raises `TypeError`; it never binds a keyword-only parameter.
+    pub fn positional_param(&self, slot: usize) -> Option<usize> {
+        (slot < usize::from(self.positional_params)).then_some(slot)
+    }
+
+    /// The position of `*args`, the tuple holding the positional arguments past the positional
+    /// parameters (it follows the named parameters, before `**kwargs`).
+    pub fn varargs_param(&self) -> Option<usize> {
+        let after = 1 + usize::from(self.has_kwargs);
+        self.param_names
+            .len()
+            .checked_sub(after)
+            .filter(|_| self.has_varargs)
+    }
+
+    /// The parameter a keyword argument `name` binds: a named parameter past the
+    /// positional-only ones. Any other keyword (one naming a positional-only parameter, `*args`,
+    /// or `**kwargs`) lands in `**kwargs`, or the call raises `TypeError`.
+    pub fn keyword_param(&self, name: &str) -> Option<usize> {
+        let first = usize::from(self.positional_only);
+        let named = self
+            .param_names
+            .get(first..usize::from(self.named_params))?;
+        Some(first + named.iter().position(|p| p == name)?)
+    }
 }
 
 /// Per-module declarations other modules need (stored in `FileSummary`, IR-free).
@@ -503,6 +549,13 @@ pub struct ModuleDecls {
     /// of a value heki may not know ([`Symbol::Unknown`]), never a builtin of the same name.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub unknown_globals: BTreeSet<String>,
+    /// The runtime imports the module binds again (another module-level store, a store or
+    /// `del` in a function declaring the name `global`), and all of them when a star import,
+    /// `exec`, or `globals()` may rebind its names: such a name may hold another object than
+    /// the import, so no constant of the imported module ([`Self::fixed_import`]).
+    /// Boxed: few modules bind an import again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rebound_imports: Option<Box<BTreeSet<String>>>,
     /// Module globals bound to a small display that no function of the module grows
     /// (`heki_ir::ModuleConstants::displays`): other modules read them through
     /// [`ProjectDecls::small_global`].
@@ -601,6 +654,17 @@ pub enum StrValue {
 }
 
 impl ModuleDecls {
+    /// The fqn the runtime import of `name` binds, when nothing else in the module binds the
+    /// name ([`Self::rebound_imports`]): reading it gives what the import bound.
+    pub fn fixed_import(&self, name: &str) -> Option<&String> {
+        self.imports.get(name).filter(|_| {
+            !self
+                .rebound_imports
+                .as_ref()
+                .is_some_and(|names| names.contains(name))
+        })
+    }
+
     /// The declarations of a module heki could not read or parse: none. A name under it is
     /// unresolved ([`ProjectDecls::outside`]), never looked up in the catalog: the module may
     /// shadow a module the catalog lists, as any project module does.
@@ -1889,9 +1953,22 @@ impl ProjectDecls {
         self.chase(fqn, false)
     }
 
+    /// [`Self::canonical`] for a value read through the name (a constant, a small display):
+    /// `None` when a module on the way binds the name it re-exports again
+    /// ([`ModuleDecls::fixed_import`]).
+    pub fn canonical_value(&self, fqn: &str) -> Option<String> {
+        self.follow(fqn, false, true)
+    }
+
     /// `fqn` through re-exports and, with `aliases`, the module aliases it names (at most
     /// `MAX_ALIAS_CHASE` steps).
     fn chase(&self, fqn: &str, aliases: bool) -> String {
+        self.follow(fqn, aliases, false)
+            .unwrap_or_else(|| fqn.to_owned())
+    }
+
+    /// [`Self::chase`]; with `values`, `None` past a re-export its module binds again.
+    fn follow(&self, fqn: &str, aliases: bool, values: bool) -> Option<String> {
         let mut cur = fqn.to_owned();
         for _ in 0..MAX_ALIAS_CHASE {
             let Some((m, rest)) = self.split_module(&cur) else {
@@ -1908,6 +1985,7 @@ impl ProjectDecls {
             // (`ModuleImport::rebound_at`): a class or function of the same name is shadowed by
             // it.
             let target = match m.imports.get(first) {
+                Some(_) if values && m.fixed_import(first).is_none() => return None,
                 Some(target) => target,
                 None if aliases => match m.aliases.get(first) {
                     Some(target) if !self.alias_rebound(&m.module_name, first) => target,
@@ -1924,7 +2002,7 @@ impl ProjectDecls {
             }
             cur = next;
         }
-        cur
+        Some(cur)
     }
 
     /// Whether another module rebinds or deletes the module alias `name` of `module`
@@ -1943,9 +2021,9 @@ impl ProjectDecls {
     }
 
     /// The value of the number or boolean constant `fqn` (`pkg.settings.PAUSE`), through
-    /// re-exports, unless another module rebinds it.
+    /// re-exports ([`Self::canonical_value`]), unless another module rebinds it.
     pub fn literal_constant(&self, fqn: &str) -> Option<LiteralValue> {
-        let fqn = self.canonical(fqn);
+        let fqn = self.canonical_value(fqn)?;
         let (m, rest) = self.split_module(&fqn)?;
         let constant = m.literal_constants.get(rest)?;
         (!(constant.rebindable && self.rebound_elsewhere(&fqn)))
@@ -1954,9 +2032,10 @@ impl ProjectDecls {
     }
 
     /// The value of the string constant `fqn` (`pkg.keys.KEY`, `pkg.model.Model.KEY`), through
-    /// re-exports and constants bound to other constants (at most `MAX_ALIAS_CHASE` steps).
+    /// re-exports ([`Self::canonical_value`]) and constants bound to other constants (at most
+    /// `MAX_ALIAS_CHASE` steps).
     pub fn str_constant(&self, fqn: &str) -> Option<&str> {
-        let mut cur = self.canonical(fqn);
+        let mut cur = self.canonical_value(fqn)?;
         for _ in 0..MAX_ALIAS_CHASE {
             let (m, rest) = self.split_module(&cur)?;
             let constant = m.str_constants.get(rest)?;
@@ -1965,7 +2044,7 @@ impl ProjectDecls {
             }
             match &constant.value {
                 StrValue::Literal(v) => return Some(v),
-                StrValue::Alias(next) => cur = self.canonical(next),
+                StrValue::Alias(next) => cur = self.canonical_value(next)?,
             }
         }
         None
@@ -2283,10 +2362,11 @@ impl ProjectDecls {
     }
 
     /// The small display the module global `fqn` of a project module holds
-    /// (`ModuleDecls::small_globals`), through re-exports, when no other module changes it
+    /// (`ModuleDecls::small_globals`), through re-exports ([`Self::canonical_value`]), when no
+    /// other module changes it
     /// ([`Self::changed_elsewhere`]).
     pub fn small_global(&self, fqn: &str) -> Option<&SmallDisplay> {
-        let fqn = self.canonical(fqn);
+        let fqn = self.canonical_value(fqn)?;
         let (m, rest) = self.split_module(&fqn)?;
         let display = m.small_globals.get(rest)?;
         (!self.changed_elsewhere(&fqn, display)).then_some(display)
@@ -3295,7 +3375,10 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
         }
     }
     decls.aliases = module_aliases(input, &decls);
-    decls.unknown_globals = unknown_globals(input, &decls);
+    let stores = module_store_counts(input);
+    decls.unknown_globals = unknown_globals(&stores, &decls);
+    let rebound = rebound_imports(input, &stores, &decls);
+    decls.rebound_imports = (!rebound.is_empty()).then(|| Box::new(rebound));
     // Qualnames whose every definition is a property getter (a setter, a deleter, or any other
     // function with the same qualname shares its summary).
     let mut getters_only: FxHashMap<&str, bool> = FxHashMap::default();
@@ -3503,7 +3586,23 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
                     .iter()
                     .take_while(|p| !p.kw_only && !p.is_vararg && !p.is_kwarg),
             ),
+            positional_only: count_u8(f.params.iter().filter(|p| p.pos_only)),
+            required_positional: count_u8(
+                f.params
+                    .iter()
+                    .take_while(|p| !p.kw_only && !p.is_vararg && !p.is_kwarg && !p.has_default),
+            ),
+            required_keyword_only: f
+                .params
+                .iter()
+                .filter(|p| p.kw_only)
+                .take(8)
+                .enumerate()
+                .filter(|(_, p)| !p.has_default)
+                .fold(0, |mask, (j, _)| mask | 1 << j),
             named_params: count_u8(f.params.iter().filter(|p| !p.is_vararg && !p.is_kwarg)),
+            has_varargs: f.params.iter().any(|p| p.is_vararg),
+            has_kwargs: f.params.iter().any(|p| p.is_kwarg),
             defaults: f
                 .params
                 .iter()
@@ -4030,17 +4129,35 @@ fn module_store_counts<'i>(input: &'i ModuleInput<'_>) -> FxHashMap<&'i str, usi
     out
 }
 
-/// [`ModuleDecls::unknown_globals`]: the globals the module stores or deletes that are no
-/// runtime import, class, or function of it.
-fn unknown_globals(input: &ModuleInput<'_>, decls: &ModuleDecls) -> BTreeSet<String> {
-    module_store_counts(input)
-        .into_keys()
+/// [`ModuleDecls::unknown_globals`]: the globals the module stores or deletes (`stores`) that are
+/// no runtime import, class, or function of it.
+fn unknown_globals(stores: &FxHashMap<&str, usize>, decls: &ModuleDecls) -> BTreeSet<String> {
+    stores
+        .keys()
+        .copied()
         .filter(|name| {
             !decls.imports.contains_key(*name)
                 && !decls.classes.contains_key(*name)
                 && !decls.functions.contains_key(*name)
         })
         .map(str::to_owned)
+        .collect()
+}
+
+/// [`ModuleDecls::rebound_imports`]: the import's own store is one of the module's stores of
+/// the name (`stores`).
+fn rebound_imports(
+    input: &ModuleInput<'_>,
+    stores: &FxHashMap<&str, usize>,
+    decls: &ModuleDecls,
+) -> BTreeSet<String> {
+    let unfixed = input.ir.constants.dynamic || input.ir.has_star_import;
+    let rebound = |name: &str| unfixed || stores.get(name).is_some_and(|&n| n > 1);
+    decls
+        .imports
+        .keys()
+        .filter(|name| rebound(name))
+        .cloned()
         .collect()
 }
 
@@ -4766,16 +4883,17 @@ pub(crate) fn passed_var(
     args.get(usize::from(i)).copied()
 }
 
-/// The constant `var` holds (through copies), with `def` giving each variable's definition.
+/// The constant `var` holds (through copies), with `def` giving each variable's definition: a
+/// literal, or the module constant `globals` gives the read of ([`TypeCtx::module_constant`]).
 pub(crate) fn literal<'i>(
     def: impl Fn(VarId) -> Option<&'i Inst>,
-    globals: &dyn Fn(&str) -> Option<LiteralValue>,
+    globals: &dyn Fn(&Inst) -> Option<LiteralValue>,
     var: VarId,
 ) -> Option<LiteralValue> {
-    match copy_root_kind(def, var)? {
+    let inst = copy_root(def, var)?;
+    match &inst.kind {
         InstKind::Const { literal, .. } => literal_value(literal),
-        InstKind::LoadGlobal { name, .. } => globals(name),
-        _ => None,
+        _ => globals(inst),
     }
 }
 
@@ -4793,12 +4911,18 @@ pub(crate) fn const_literal<'i>(
 
 /// What defines the value `var` copies, through local copies.
 fn copy_root_kind<'i>(def: impl Fn(VarId) -> Option<&'i Inst>, var: VarId) -> Option<&'i InstKind> {
+    copy_root(def, var).map(|inst| &inst.kind)
+}
+
+/// The instruction defining the value `var` copies, through local copies.
+fn copy_root<'i>(def: impl Fn(VarId) -> Option<&'i Inst>, var: VarId) -> Option<&'i Inst> {
     let mut cur = var;
     // Copies of an SSA variable form a tree, so the walk ends.
     loop {
-        match &def(cur)?.kind {
+        let inst = def(cur)?;
+        match &inst.kind {
             InstKind::Copy { src, .. } => cur = *src,
-            other => return Some(other),
+            _ => return Some(inst),
         }
     }
 }
@@ -4815,14 +4939,14 @@ fn literal_value(literal: &ConstLiteral) -> Option<LiteralValue> {
 }
 
 /// [`ArgFact`] of `var`: its constant (a literal, or a module constant bound once that
-/// `globals` gives, [`TypeCtx::global_literal`]), the class `class_of` gives it, the flags it
+/// `globals` gives, [`TypeCtx::module_constant`]), the class `class_of` gives it, the flags it
 /// sets through the named objects `name_of` gives its operands, and whether it names a file
 /// ([`names_a_file`]).
 pub(crate) fn arg_fact<'i>(
     def: impl Fn(VarId) -> Option<&'i Inst>,
     class_of: impl Fn(VarId) -> Option<String>,
     name_of: impl Fn(VarId) -> Option<String>,
-    globals: &dyn Fn(&str) -> Option<LiteralValue>,
+    globals: &dyn Fn(&Inst) -> Option<LiteralValue>,
     var: VarId,
 ) -> ArgFact {
     ArgFact {
@@ -4874,7 +4998,7 @@ enum FilePart {
 }
 
 /// What `var` is built from: a string literal or a module string constant bound once
-/// (`globals`) names a file unless it has an in-memory form ([`in_memory_name`]), and so does
+/// (`globals`, read by name, through an import, or as a module's attribute) names a file unless it has an in-memory form ([`in_memory_name`]), and so does
 /// `__file__`; a copy, `+`, `/`, and `.parent` are made from their operands, a [`PATH_FUNCTIONS`]
 /// call (the called object or receiver resolved by `name_of`) from its arguments, and a
 /// [`PATH_METHODS`] call from its receiver and arguments. Anything else (a parameter, a phi, an
@@ -4882,20 +5006,19 @@ enum FilePart {
 fn file_part<'i>(
     def: &impl Fn(VarId) -> Option<&'i Inst>,
     name_of: &impl Fn(VarId) -> Option<String>,
-    globals: &dyn Fn(&str) -> Option<LiteralValue>,
+    globals: &dyn Fn(&Inst) -> Option<LiteralValue>,
     var: VarId,
 ) -> FilePart {
     let path_function =
         |name: Option<String>| name.is_some_and(|n| PATH_FUNCTIONS.contains(&n.as_str()));
-    match def(var).map(|i| &i.kind) {
+    let inst = def(var);
+    let names_file = |inst: &Inst| matches!(globals(inst), Some(LiteralValue::Str(text)) if !in_memory_name(&text));
+    match inst.map(|i| &i.kind) {
         Some(InstKind::Const {
             literal: ConstLiteral::Str(text),
             ..
         }) => FilePart::Leaf(!in_memory_name(text)),
-        Some(InstKind::LoadGlobal { name, .. }) => FilePart::Leaf(
-            name == "__file__"
-                || matches!(globals(name), Some(LiteralValue::Str(text)) if !in_memory_name(&text)),
-        ),
+        Some(InstKind::LoadGlobal { name, .. }) if name == "__file__" => FilePart::Leaf(true),
         Some(InstKind::Copy { src, .. }) => FilePart::Made(vec![*src]),
         Some(InstKind::BinOp {
             op: BinOpKind::Add | BinOpKind::Div,
@@ -4919,7 +5042,7 @@ fn file_part<'i>(
         }) if PATH_METHODS.contains(&method.as_str()) => {
             FilePart::Made(std::iter::once(*recv).chain(args.iter().copied()).collect())
         }
-        _ => FilePart::Leaf(false),
+        _ => FilePart::Leaf(inst.is_some_and(names_file)),
     }
 }
 
@@ -4928,7 +5051,7 @@ fn file_part<'i>(
 pub(crate) fn names_a_file<'i>(
     def: &impl Fn(VarId) -> Option<&'i Inst>,
     name_of: &impl Fn(VarId) -> Option<String>,
-    globals: &dyn Fn(&str) -> Option<LiteralValue>,
+    globals: &dyn Fn(&Inst) -> Option<LiteralValue>,
     var: VarId,
 ) -> bool {
     let budget = Budget::unmetered("heki_effect::resolver::names_a_file");
@@ -5201,6 +5324,14 @@ pub struct TypeCtx<'a> {
 }
 
 /// Declarations used when a module is missing from `ProjectDecls`.
+/// Where the value of a module global a function reads is decided ([`TypeCtx::global_read`]).
+pub(crate) enum GlobalRead<'i> {
+    /// A module-level name read in the reading module.
+    Own(&'i str),
+    /// A name of another module, by its fqn.
+    Other(String),
+}
+
 static EMPTY_DECLS: ModuleDecls = ModuleDecls {
     module_name: String::new(),
     is_package: false,
@@ -5211,6 +5342,7 @@ static EMPTY_DECLS: ModuleDecls = ModuleDecls {
     global_types: BTreeMap::new(),
     aliases: BTreeMap::new(),
     unknown_globals: BTreeSet::new(),
+    rebound_imports: None,
     small_globals: BTreeMap::new(),
     grown_globals: BTreeSet::new(),
     rebound_globals: BTreeSet::new(),
@@ -5338,7 +5470,7 @@ impl<'a> TypeCtx<'a> {
             return Some(LiteralValue::Str(text.to_owned()));
         }
         let fqn = match self.module.imports.get(name) {
-            Some(fqn) => fqn.clone(),
+            Some(_) => self.module.fixed_import(name)?.clone(),
             None => format!("{}.{name}", self.module.module_name),
         };
         self.project.literal_constant(&fqn)
@@ -5350,8 +5482,7 @@ impl<'a> TypeCtx<'a> {
         let Some(constant) = self.module.str_constants.get(name) else {
             return self
                 .module
-                .imports
-                .get(name)
+                .fixed_import(name)
                 .and_then(|fqn| self.project.str_constant(fqn));
         };
         let fqn = || format!("{}.{name}", self.module.module_name);
@@ -5681,6 +5812,58 @@ impl<'a> TypeCtx<'a> {
         )
     }
 
+    /// The module global the instruction `inst` reads, where its value is decided: a
+    /// module-level name read in this module, or a name of another module by its fqn, which an
+    /// import binds (a module body's copy of its `Import`, a function's own import) or which is
+    /// an attribute of a module object (`settings.PAUSE`; `module_of` names the object's module,
+    /// `None` for any other object).
+    pub(crate) fn global_read<'i>(
+        &self,
+        inst: &'i Inst,
+        module_of: &dyn Fn(VarId) -> Option<String>,
+    ) -> Option<GlobalRead<'i>> {
+        match &inst.kind {
+            InstKind::LoadGlobal { name, .. } | InstKind::LoadName { name, .. } => {
+                Some(GlobalRead::Own(name))
+            }
+            InstKind::Import { .. } => {
+                Some(GlobalRead::Other(self.import_target(inst.span)?.to_owned()))
+            }
+            InstKind::AttrLoad { obj, attr, .. } => {
+                let module = module_of(*obj).filter(|m| self.project.module(m).is_some())?;
+                Some(GlobalRead::Other(format!("{module}.{attr}")))
+            }
+            _ => None,
+        }
+    }
+
+    /// The string constant the global read `read` gives ([`Self::global_str`],
+    /// [`ProjectDecls::str_constant`]).
+    fn global_read_str(&self, read: GlobalRead<'_>) -> Option<&'a str> {
+        match read {
+            GlobalRead::Own(name) => self.global_str(name),
+            GlobalRead::Other(fqn) => self.project.str_constant(&fqn),
+        }
+    }
+
+    /// The module constant `inst` reads ([`Self::global_read`]): a string, a number, or a
+    /// boolean bound once, under the rules on rebinding and imports of [`Self::global_literal`]
+    /// and [`ProjectDecls::literal_constant`].
+    pub(crate) fn module_constant(
+        &self,
+        inst: &Inst,
+        module_of: &dyn Fn(VarId) -> Option<String>,
+    ) -> Option<LiteralValue> {
+        match self.global_read(inst, module_of)? {
+            GlobalRead::Own(name) => self.global_literal(name),
+            GlobalRead::Other(fqn) => self
+                .project
+                .str_constant(&fqn)
+                .map(|text| LiteralValue::Str(text.to_owned()))
+                .or_else(|| self.project.literal_constant(&fqn)),
+        }
+    }
+
     /// The string constant `var` holds (through copies; `def` gives each variable's defining
     /// instruction, `types` the inferred values): a string literal, a module-level string
     /// constant of this module or of another project module (`KEY`, `keys.KEY`,
@@ -5702,13 +5885,11 @@ impl<'a> TypeCtx<'a> {
                     ..
                 } => return Some(s.clone()),
                 InstKind::Copy { src, .. } => cur = *src,
-                InstKind::LoadGlobal { name, .. } | InstKind::LoadName { name, .. } => {
-                    return self.global_str(name).map(str::to_owned);
-                }
-                // A module body reads an imported name as a copy of its `Import`.
-                InstKind::Import { .. } => {
-                    let fqn = self.import_target(inst.span)?;
-                    return self.project.str_constant(fqn).map(str::to_owned);
+                InstKind::LoadGlobal { .. }
+                | InstKind::LoadName { .. }
+                | InstKind::Import { .. } => {
+                    let read = self.global_read(inst, &|_| None)?;
+                    return self.global_read_str(read).map(str::to_owned);
                 }
                 InstKind::AttrLoad { obj, attr, .. } => {
                     let project = self.project;
@@ -5717,8 +5898,8 @@ impl<'a> TypeCtx<'a> {
                             (class, ConstantRead::Class)
                         }
                         Val::Ref(module) => {
-                            let fqn = format!("{module}.{attr}");
-                            return project.str_constant(&fqn).map(str::to_owned);
+                            let read = self.global_read(inst, &|_| Some(module.clone()))?;
+                            return self.global_read_str(read).map(str::to_owned);
                         }
                         Val::Inst(class) if project.is_project_class(class) => {
                             (class, ConstantRead::Instance)

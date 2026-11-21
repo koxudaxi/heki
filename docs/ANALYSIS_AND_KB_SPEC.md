@@ -499,7 +499,15 @@ same constant (`ProjectDecls::class_str_constant`). A `Final` name without `Clas
 `ClassDecl::dataclass`, or a class a `dataclass_transform` builds) is a field: no constant on an
 instance, and on a class object only where each class from it to the field's class keeps the
 default as its attribute (`Dataclass::Slots` and transform builds replace it). Each answer is
-kept until the indexes change; a recording that reads one again adds what computing it read. Contract-only facts
+kept until the indexes change; a recording that reads one again adds what computing it read.
+A module's import holds the constant of the imported module (a string, a number or boolean of
+`ModuleDecls::literal_constants`, a small display of `ModuleDecls::small_globals`) only where the
+module binds the name nowhere else (`ModuleDecls::fixed_import`): `ModuleDecls::rebound_imports`
+lists the imports it binds again (another module-level store, a store or `del` in a function
+declaring the name `global`), and all of them when a star import, `exec`, or `globals()` may
+rebind its names. `TypeCtx::global_literal` and `TypeCtx::global_str` read through it, and so do
+re-exports (`ProjectDecls::canonical_value`, which `literal_constant`, `str_constant`, and
+`small_global` follow). Contract-only facts
 (container entries and `WriteKind::ItemMut`, construction through `ArgOrigin::new_object` and
 `TypedFieldWriteSite::construction`, `unresolved_write_sites`) are computed only when
 `Contracts::ownership()` is true, that is when write-owners, read-owners, effect-boundaries, or
@@ -538,10 +546,24 @@ module's). Like `call_sites`, they are local facts: the language server compares
 its call sites (`Workspace::caller_view`) and shows them in call chains.
 
 `CallSite.arguments` holds, only when a call target has an argument list
-(`Contracts::marked_params`), the constants the call passes for the parameters those lists name:
-by keyword, else by position or as a default decided by its class and truthiness for every
-callee the call binds (the parameter binding of the extraction), a keyword only for a class
-without a project `__init__`.
+(`Contracts::marked_params`), the constants the call passes for the parameters those lists name,
+those every callee the call may run agrees on: by keyword, by position, or as a default decided
+by its class and truthiness, as the parameter binding of the extraction binds them, a keyword
+only for a class without a project `__init__`. That binding (`BoundCallee::params`, and the rules'
+`bind_arguments`) follows Python's: a position binds the parameter of its slot only among the
+positional parameters (`FunctionDecl::positional_param`; one past them lands in `*args`, a new
+tuple, and binds no parameter, never a keyword-only one: only a hand-over asks whether the callee
+keeps `*args`, which holds it), and a keyword never binds a positional-only parameter
+(`FunctionDecl::keyword_param`; one binding no parameter is, for the argument lists, a parameter
+of its own name in `**kwargs`); the receiver is the first position. A callee the call raises
+`TypeError` for instead of running (`Bindings::raises`: a parameter bound twice, a keyword without
+`**kwargs`, a position past the parameters without `*args`, a parameter without a default left
+unbound where no unpacking may bind it, counted from `FunctionDecl::required_positional` and
+`required_keyword_only` in the work of the call's arguments) is passed nothing. The constants are
+literals, string constants (`TypeCtx::str_constant_with`), and modules' number and boolean
+constants (`TypeCtx::module_constant`: a module-level name, an import, or a module's attribute,
+`TypeCtx::global_read`, the reads catalog cases follow too). The marked names are looked up for the parameters a call binds, so
+the work per call is that of binding it, whatever the number of argument lists.
 
 `CallSite.returned` (whether the call's result may be returned, and how) is computed at
 extraction for every project call. `CallSite.flow` (the invalidation contracts announced after
@@ -1491,7 +1513,8 @@ forbids; such an entry has no other fact), and
 `opaque_to_layer3` (reserved for Layer 3), and `cases`: what the call does instead when one
 argument (by position, the receiver not counted, or by keyword) is a given literal (an
 argument is the literal it is, or the one a module constant bound once holds:
-`TypeCtx::global_literal`, `ModuleDecls::str_constants` and `literal_constants`), a string
+`TypeCtx::global_literal`, `ModuleDecls::str_constants` and `literal_constants`, also imported
+unless the importing module binds the name again, `ModuleDecls::fixed_import`), a string
 literal with a given prefix, equal to one of given strings (`one_of`), containing one
 (`contains`), an IPv4 or IPv6 address (`numeric_address`), or not empty, a value established to
 name a file (`names_file`: a literal or module constant without an in-memory form, or a path
