@@ -145,6 +145,19 @@ impl ProjectIndex {
         param: u8,
         what: &ParamChange,
     ) -> ChangeChain {
+        self.param_change_chain_entering(calls, start, param, what, &|_, _| true)
+    }
+
+    /// [`Self::param_change_chain`] entering only the callee parameters `enters` admits (`MUT110`
+    /// leaves out a helper whose parameter is annotated, which is checked on its own).
+    pub fn param_change_chain_entering(
+        &self,
+        calls: &mut CallsByCaller<'_>,
+        start: &FuncKey,
+        param: u8,
+        what: &ParamChange,
+        enters: &dyn Fn(&FuncKey, u8) -> bool,
+    ) -> ChangeChain {
         let hop = |caller: &FuncKey, callee: &FuncKey, site: &CallSite, path: &Path| CallHop {
             caller: caller.clone(),
             callee: callee.fqn(),
@@ -201,6 +214,7 @@ impl ProjectIndex {
                             .then_some(None),
                         };
                         if let Some(next) = next
+                            && enters(&c.callee, j2)
                             && visited.insert((c.callee.clone(), j2, next.clone()))
                         {
                             states.push(ChainState {
