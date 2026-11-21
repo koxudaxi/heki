@@ -2158,15 +2158,19 @@ struct Ro {
     /// How the function got the value from the producer: the call of a function that returns
     /// it (a wrapper), then the wrapper's calls down to the producer (empty: a direct call).
     via: Vec<CallHop>,
+    /// `producer` is declared in `readonly-returns` (`MUT202`), not an `@lru_cache` function
+    /// (`MUT114`).
+    declared: bool,
 }
 
 impl Ro {
-    fn new(producer: String, shared: Shared, via: Vec<CallHop>) -> Option<Self> {
+    fn new(producer: String, declared: bool, shared: Shared, via: Vec<CallHop>) -> Option<Self> {
         shared.any().then_some(Self {
             producer,
             deep: shared.elements,
             shallow_copy: !shared.object,
             via,
+            declared,
         })
     }
 
@@ -2191,6 +2195,7 @@ impl Ro {
             deep: shared.elements,
             shallow_copy: !shared.object,
             via: named.via.clone(),
+            declared: named.declared,
         }
     }
 
@@ -2198,6 +2203,7 @@ impl Ro {
     fn derive(&self, step: ReturnStep) -> Option<Self> {
         Self::new(
             self.producer.clone(),
+            self.declared,
             step.apply(self.shared()),
             self.via.clone(),
         )
@@ -2626,17 +2632,18 @@ impl<'a> Mut202Fn<'a> {
     /// `@lru_cache` function, or a project function that returns one's value (its summary's
     /// `returns_protected`), reached through the call at `span`.
     fn producer(&self, callee: &Callee, span: Span) -> Option<Ro> {
-        let direct =
-            |producer: String, deep: bool| Ro::new(producer, Shared::produced(deep), vec![]);
+        let direct = |producer: String, declared: bool, deep: bool| {
+            Ro::new(producer, declared, Shared::produced(deep), vec![])
+        };
         match callee {
             Callee::Project(keys, _) => keys.iter().find_map(|k| {
                 let fqn = k.fqn();
                 let summary = self.cx.index.summary(k);
                 if summary.is_some_and(|s| s.is_lru_cache) {
-                    return direct(fqn, true);
+                    return direct(fqn, false, true);
                 }
                 if let Some(d) = self.returns.producers.deep_for(&fqn, &k.qualname) {
-                    return direct(fqn, d);
+                    return direct(fqn, true, d);
                 }
                 let r = summary?.returns_protected.as_ref()?;
                 let mut via = vec![CallHop {
@@ -2646,13 +2653,13 @@ impl<'a> Mut202Fn<'a> {
                     path: self.unit.input.path.clone(),
                 }];
                 via.extend(heki_effect::owned_chain(&r.chain));
-                Ro::new(r.producer.clone(), r.shared, via)
+                Ro::new(r.producer.clone(), r.declared, r.shared, via)
             }),
             Callee::External(sym) => self
                 .returns
                 .producers
                 .deep_for(sym, sym)
-                .and_then(|d| direct(sym.clone(), d)),
+                .and_then(|d| direct(sym.clone(), true, d)),
             Callee::TooMany | Callee::Unresolved => None,
         }
     }
@@ -2682,7 +2689,7 @@ impl<'a> Mut202Fn<'a> {
                     };
                     let (fqn, qualname) = class.member(attr);
                     if let Some(deep) = self.returns.producers.deep_for(&fqn, &qualname) {
-                        return Ro::new(fqn, Shared::produced(deep), vec![]);
+                        return Ro::new(fqn, true, Shared::produced(deep), vec![]);
                     }
                 }
                 // A property getter that returns a read-only producer's value.
@@ -2836,8 +2843,7 @@ impl<'a> Mut202Fn<'a> {
             .unwrap_or_default();
         let mut related = r.via.clone();
         related.extend(chain.iter().cloned());
-        let declared = self.returns.producers.deep_for(&r.producer).is_some();
-        if declared {
+        if r.declared {
             self.cx.emit(
                 out,
                 "MUT202",

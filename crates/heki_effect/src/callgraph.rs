@@ -626,14 +626,14 @@ fn return_flow_edge(
         return;
     }
     let fqn = bc.callee.fqn();
-    let (producer, produced, tail) = if callee.is_lru_cache {
-        (fqn, Shared::produced(true), Vec::new())
+    let (producer, declared, produced, tail) = if callee.is_lru_cache {
+        (fqn, false, Shared::produced(true), Vec::new())
     } else if let Some(deep) =
         contracts.and_then(|c| c.readonly_producer(&fqn, &bc.callee.qualname))
     {
-        (fqn, Shared::produced(deep), Vec::new())
+        (fqn, true, Shared::produced(deep), Vec::new())
     } else if let Some(r) = &callee.returns_protected {
-        (r.producer.clone(), r.shared, r.chain.clone())
+        (r.producer.clone(), r.declared, r.shared, r.chain.clone())
     } else {
         return;
     };
@@ -644,7 +644,14 @@ fn return_flow_edge(
         path: path.to_path_buf(),
     })];
     chain.extend(tail);
-    ProtectedReturn::add(&mut s.returns_protected, producer, produced, step, chain);
+    ProtectedReturn::add(
+        &mut s.returns_protected,
+        producer,
+        declared,
+        produced,
+        step,
+        chain,
+    );
 }
 
 /// `MUT112` return flow: what the project calls whose results the function may return

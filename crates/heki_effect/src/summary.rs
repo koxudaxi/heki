@@ -429,10 +429,12 @@ fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary) {
             producer,
             shared,
             chain,
+            declared,
         } = o;
         ProtectedReturn::add(
             &mut into.returns_protected,
             producer,
+            declared,
             shared,
             ReturnStep::ITSELF,
             chain,
@@ -5600,6 +5602,7 @@ impl<'a> Extractor<'a> {
         ProtectedReturn::add(
             &mut self.summary.returns_protected,
             producer,
+            true,
             Shared::produced(deep),
             step,
             chain,

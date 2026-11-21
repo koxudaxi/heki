@@ -2,7 +2,7 @@
 
 # Rules
 
-heki has 37 rules in four families. A rule is exact when it reports only what it established and was certified on the corpus, and heuristic (≈) when a report can be wrong about the code: [Rule Precision](../precision.md) says how a rule is certified and what each one measured. Each rule's page says what a report states.
+heki has 38 rules in four families. A rule is exact when it reports only what it established and was certified on the corpus, and heuristic (≈) when a report can be wrong about the code: [Rule Precision](../precision.md) says how a rule is certified and what each one measured. Each rule's page says what a report states.
 
 - The exact rules run by default, and for a prefix such as `EFF` or `ALL`. A report of an exact rule that did not establish every premise (an `OPT` report whose rewrite is not proven) is shown where a heuristic rule would run.
 - A heuristic rule runs when `select` / `extend-select` names its code or name. With `lint.heuristic = true` (`--heuristic`), the heuristic rules that are not opt-in also run by default and for a prefix or `ALL`.
@@ -34,8 +34,9 @@ Shared state written behind its owner's back: stale caches, write-ownership cont
 | MUT111 | [cached-property-stale-read](cached-property-stale-read.md) | Opt-in: reading a `@cached_property` that a method of its class family can leave stale (a write `MUT101` reports). | ≈ 🔌 🧪 |
 | MUT112 | [conditional-ownership-mutation](conditional-ownership-mutation.md) | Opt-in: changing in place a value that is a new object on one path and borrowed state (a parameter, an attribute, a global, or what a function returns of such state) on another. | ≈ 🔌 🧪 |
 | MUT113 | [iterated-container-mutation](iterated-container-mutation.md) | Opt-in: a dict, set, or deque of the instance changed while a method iterates it, by another method while a generator is suspended in the loop or by a function the loop's body calls (the next step raises `RuntimeError`). | ≈ 🔌 🧪 |
+| MUT114 | [cached-result-mutation](cached-result-mutation.md) | Changing in place the list, dict, or set that a `functools.lru_cache` / `functools.cache` function returned (the cache hands the same object to later calls with the same arguments), directly or through the functions that return it. | ≈ |
 | MUT201 | [write-owner-violation](write-owner-violation.md) | Writing a guarded attribute/container (directly, via alias, or via helper) outside declared `write-owners`. | ≈ 📜 |
-| MUT202 | [readonly-return-mutation](readonly-return-mutation.md) | Mutating a shared object returned by a declared `readonly-returns` producer or `@lru_cache`, directly or through the functions that return it. | ≈ |
+| MUT202 | [readonly-return-mutation](readonly-return-mutation.md) | Mutating a shared object returned by a declared `readonly-returns` producer, directly or through the functions that return it. | ≈ 📜 |
 | MUT203 | [read-owner-violation](read-owner-violation.md) | Reading a guarded attribute (directly, via alias, `getattr`, or `__dict__`) outside declared `read-owners`. | ≈ 📜 |
 | MUT204 | [call-owner-violation](call-owner-violation.md) | Calling a guarded function or method, or constructing a guarded class (directly, via a bound method, `getattr`, or a helper), outside declared `call-owners`. | ≈ 📜 |
 | MUT205 | [unresolved-guarded-write](unresolved-guarded-write.md) | Strict mode of a `write-owners` contract (`unresolved = "report"`): writing an attribute named like a target on an object of unknown class, or a computed attribute name on a guarded class. | ≈ 📜 |
