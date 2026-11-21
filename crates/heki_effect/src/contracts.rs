@@ -130,4 +130,9 @@ pub trait Contracts: Debug + Send + Sync {
     /// Whether an effect boundary reports the imports that probe whether a module is installed
     /// (`import-probes = "report"`).
     fn import_probes(&self) -> bool;
+
+    /// Whether an effect boundary checks a module body (a scope naming `<module>`): what the
+    /// bodies of its classes take from outside the project is then the module body's
+    /// (`FileSummary::external_accesses`).
+    fn checks_module_bodies(&self) -> bool;
 }

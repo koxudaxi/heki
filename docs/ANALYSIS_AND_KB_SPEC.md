@@ -1187,9 +1187,10 @@ deep = true   # changes to attributes and nested containers below are forbidden 
    or a value typed as one of `heki_kb::FUTURE_CLASSES` (an annotation, or a Layer 2
    `return_type` such as `loop.run_in_executor` / `asyncio.gather` → `asyncio.Future`).
 8. **`EFF201`** (contract): a breadth-first search over the IR-free call graph from each scope
-   function finds the shortest chain to each forbidden effect, without entering
-   `allowed-callees`, other scope functions, or bodies that do not run at the call (`async def`
-   bodies not awaited, generators not iterated). Its nodes are `(function, Body | Result)`: a
+   function (and each module body a scope names as `<module>`,
+   `DottedPattern::names_module_bodies`) finds the shortest chain to each forbidden effect,
+   without entering `allowed-callees`, other scope functions, or bodies that do not run at the
+   call (`async def` bodies not awaited, generators not iterated). Its nodes are `(function, Body | Result)`: a
    function returning a generator is entered as what iterating its result runs. The search
    reads no guards: an argument switching off a callee's branch does not stop it. At each node
    whose body runs, it also reads the function's accesses outside the project
@@ -1202,10 +1203,21 @@ deep = true   # changes to attributes and nested containers below are forbidden 
    the enclosing handler). An access is kept only when a boundary forbids it
    (`Contracts::external_call`, `external_read`, `import_probes`): a `call-targets` or
    `read-targets` entry names it by its full dotted name (its first name not a glob), or
-   `reads-environment` and the Layer 2 tag `environment` name it. Without such a boundary the
-   map stays empty. The language server compares a file's accesses before and after an edit,
-   without positions, and re-checks the files above a function whose accesses changed, as it
-   does for its Layer 2 call sites.
+   `reads-environment` and the Layer 2 tag `environment` name it. A call of a function tagged
+   `environment = "import"` records whether it imports a module of the project
+   (`ExternalAccess::imports_project_module`, no read of the environment): outside a `try`
+   taking an `ImportError`, every text its `name` argument may hold (as for `EFF103`'s
+   statements, `summary/statements.rs`, a `str` method changing the case or the blanks giving
+   none) names a project module, or starts with one and a dot whose longest project module is
+   a regular package that heki read and that rebinds no `__path__`
+   (`ProjectDecls::holds_modules_starting_with`); a relative name is anchored at the texts of
+   `package`, or at the module's own `__package__` or `__name__`. The project modules it looks
+   up are declaration reads, so a module created or deleted re-summarizes the function.
+   A module body's accesses include those of the class bodies it runs, as its reference sites
+   do, when a scope names a module body (`Contracts::checks_module_bodies`) or reference sites
+   are kept. Without such a boundary the map stays empty. The language server compares a
+   file's accesses before and after an edit, without positions, and re-checks the files above
+   a function whose accesses changed, as it does for its Layer 2 call sites.
 
 ### 2.5 Layer 3: on-demand analysis of unregistered dependencies (planned)
 - **Boundary (strict)**: **never enter the standard library or packages registered in Layer 2**
@@ -1325,9 +1337,12 @@ deeply unless `update=` hands it values by reference: `MUT202`), `return_type` (
 `sqlite3.connect`), `sync_lock_or_tx` (`threading.Lock`, `Session.begin`: `EFF106`),
 `waits_until_done` / `done_when_awaited` (futures), `bounded_by` / `waits_while_full` (queues:
 section 2.2), `environment` (`"call"`: calling the function reads the environment the program runs
-in, `os.getenv`, `platform.system`, `importlib.util.find_spec`; `"read"`: reading the module
-attribute does, `os.environ`, `sys.platform`, `sys.version_info`: what `EFF201`'s
-`reads-environment` forbids; such an entry has no other fact), and
+in, `os.getenv`, `platform.system`, `shutil.which`; `"read"`: reading the module attribute does,
+`os.environ`, `sys.platform`, `sys.version_info`; `"import"`: calling the function imports or
+finds the module its argument `name` names, a relative name anchored at its argument
+`package`, which reads the environment unless the module is the project's,
+`importlib.import_module`, `importlib.util.find_spec`: what `EFF201`'s `reads-environment`
+forbids; such an entry has no other fact), and
 `opaque_to_layer3` (reserved for Layer 3), and `cases`: what the call does instead when one
 argument (by position, the receiver not counted, or by keyword) is a given literal, a string
 literal with a given prefix, equal to one of given strings (`one_of`), containing one
