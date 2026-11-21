@@ -4,7 +4,7 @@
 //!   `MUT109`, `MUT110`, `MUT111`, `MUT112`, `MUT113`, `MUT114`, `MUT201`, `MUT202`, `MUT203`,
 //!   `MUT204`, `MUT205`, `MUT206`, `MUT207`)
 //! - Family 2 (`EFF` / `DATA`): Execution Effect (`EFF101`, `EFF102`, `EFF103`, `EFF105`, `EFF106`,
-//!   `EFF107`, `EFF201`, `DATA101`)
+//!   `EFF107`, `EFF109`, `EFF110`, `EFF201`, `DATA101`)
 //! - Family 3 (`OPT`): Complexity Rewrite (`OPT101`, `OPT102`, `OPT103`, `OPT110`, `OPT111`,
 //!   `OPT112`, `OPT113`, `OPT120`, `OPT121`, `OPT130`); `OPT112` / `OPT113` are Advisory-lane
 //!   reports without a rewrite.
@@ -13,13 +13,17 @@ mod contracts;
 mod data_rules;
 mod eff_rules;
 pub mod experimental;
+pub mod inspect;
 mod mut_rules;
 mod opt_rules;
 pub mod project;
 pub mod selection;
 pub mod snapshot;
 
-pub use contracts::{MAX_INVALIDATIONS, opt_in_facts, summary_contracts, typed_writes};
+pub use contracts::{
+    MAX_INVALIDATIONS, declares_ownership, inspect_facts, opt_in_facts, summary_contracts,
+    typed_writes,
+};
 pub use eff_rules::{ROOT_CAUSE_GROUP_THRESHOLD, fold_root_causes};
 pub use heki_diagnostics::Certainty;
 pub use mut_rules::{
@@ -485,6 +489,30 @@ pub const CORE_RULES: &[RuleMeta] = &[
         doc: include_str!("../rule-docs/EFF107.md"),
     },
     RuleMeta {
+        code: "EFF109",
+        slug: "lock-reacquired-while-held",
+        family: RuleFamily::Eff,
+        certainty: Certainty::Heuristic,
+        activation: Activation::OptIn,
+        consequence: Consequence::Bug,
+        size_dependent_fix: false,
+        auto_fix_default: false,
+        summary: "Opt-in: a non-reentrant lock (`threading.Lock`, `asyncio.Lock`) taken again, directly or through a call, while it is held (the thread or task waits for itself).",
+        doc: include_str!("../rule-docs/EFF109.md"),
+    },
+    RuleMeta {
+        code: "EFF110",
+        slug: "exclusive-object-fanout",
+        family: RuleFamily::Eff,
+        certainty: Certainty::Heuristic,
+        activation: Activation::OptIn,
+        consequence: Consequence::Bug,
+        size_dependent_fix: false,
+        auto_fix_default: false,
+        summary: "Opt-in: an object allowing one operation at a time (`asyncio.StreamReader`, an asyncpg connection, a WebSocket) used by tasks started together (`asyncio.gather`, a task group).",
+        doc: include_str!("../rule-docs/EFF110.md"),
+    },
+    RuleMeta {
         code: "EFF201",
         slug: "effect-boundary-violation",
         family: RuleFamily::Eff,
@@ -741,11 +769,11 @@ pub struct CheckExtras<'a> {
     pub project_patches_builtins: Option<bool>,
     /// The text of a file that is not checked, for the positions of the call-chain hops in it
     /// (the LSP engine checks one file).
-    pub text_of: Option<&'a TextOf>,
+    pub text_of: Option<&'a TextOf<'a>>,
 }
 
 /// Reads the text of a file by path.
-pub type TextOf = dyn Fn(&Path) -> Option<String> + Sync;
+pub type TextOf<'a> = dyn Fn(&Path) -> Option<String> + Sync + 'a;
 
 /// `caller -> [(defining file, call site)]` (see [`CheckContext::sites_by_caller`]).
 pub(crate) type SitesByCaller<'a> = FxHashMap<&'a FuncKey, Vec<(&'a Path, &'a CallSite)>>;
@@ -760,7 +788,7 @@ pub(crate) struct CheckContext<'a> {
     pub units: &'a [ModuleUnit<'a>],
     pub selection: &'a RuleSelection,
     unit_by_path: FxHashMap<&'a Path, usize>,
-    text_of: Option<&'a TextOf>,
+    text_of: Option<&'a TextOf<'a>>,
 }
 
 /// Run every enabled rule over an analyzed project.
@@ -830,6 +858,8 @@ pub fn check_project(
             eff_rules::eff102_103(&cx, u, &mut d);
             eff_rules::eff106(&cx, u, &mut d);
             eff_rules::eff107(&cx, u, &mut d);
+            eff_rules::eff109(&cx, u, &mut d);
+            eff_rules::eff110(&cx, u, &mut d);
             data_rules::data101(&cx, u, &mut d);
             opt_rules::opt(&cx, u, &opt_opts, &mut d);
             opt_rules::opt112(&cx, u, &mut d);
@@ -843,6 +873,31 @@ pub fn check_project(
         a.path == b.path && a.span == b.span && a.rule_code == b.rule_code && a.target == b.target
     });
     Ok(out)
+}
+
+/// The roles `key` has in the contracts of `config` and in the ecosystem catalog
+/// (`heki inspect`), from the matchers the rules compile.
+pub fn contract_roles(
+    config: &HekiConfig,
+    kb: &EffectiveEcosystemKb,
+    soundness_kb: &EffectiveSoundnessKb,
+    index: &ProjectIndex,
+    decls: &ProjectDecls,
+    selection: &RuleSelection,
+    key: &FuncKey,
+) -> Result<Vec<inspect::ContractRole>, RuleConfigError> {
+    let cx = CheckContext {
+        config,
+        kb,
+        soundness: soundness_kb,
+        index,
+        decls,
+        units: &[],
+        selection,
+        unit_by_path: FxHashMap::default(),
+        text_of: None,
+    };
+    contracts::roles_of(&cx, key)
 }
 
 impl<'a> CheckContext<'a> {

@@ -31,7 +31,7 @@ pub fn with_paths<R>(
             _ => None,
         };
         let by_factory = || {
-            let callee = match &ix.shape().inst(mgr)?.kind {
+            let callee = match &ix.shape.inst(mgr)?.kind {
                 InstKind::Call { callee_var, .. } => {
                     cx.resolve_call(callee_var.and_then(|v| types.get(&v)))
                 }

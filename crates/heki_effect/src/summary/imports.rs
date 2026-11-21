@@ -51,7 +51,11 @@ impl Extractor<'_> {
     /// the module's own names.
     fn package_texts(&self, package: VarId) -> Option<Vec<Text>> {
         let module = self.cx.module;
-        let global = match self.defs.get(&self.copied_from(package)).map(|i| &i.kind) {
+        let global = match self
+            .defs
+            .get(&self.shape.copy_root(package))
+            .map(|i| &i.kind)
+        {
             Some(InstKind::LoadGlobal { name, .. }) if !module.unknown_globals.contains(name) => {
                 name.as_str()
             }
