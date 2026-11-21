@@ -310,11 +310,12 @@ EffectSummary(f) = {
     retains_params:           Bitset,                      // parameters the function keeps (stores, returns)
     returns_new:              bool,                        // returns an object it constructs, nothing else
                                                            // holding it (fresh-objects)
-    returns_origins:          Origins,                     // what the returned object may be, path by path:
-                                                           // new, held state, parameter i, or an element of
-                                                           // parameter i (MUT112; propagated)
-    returns_results:          Vec<ResultOf>,               // the project calls whose results (or elements of
-                                                           // them) it may return, by span (MUT112; local)
+    return_origins:           Option<Box<ReturnOrigins>>,  // MUT112, absent for most functions: what the
+                                                           // returned object may be, path by path (new, held
+                                                           // state, parameter i, or an element of parameter i;
+                                                           // propagated), the project calls whose results (or
+                                                           // elements of them) it may return, by span, and the
+                                                           // phis its origin walks met (local)
     unresolved_write_sites:   Set<UnresolvedWrite>,        // target-named writes on objects of unknown class,
                                                            // computed names on guarded classes (MUT205)
     unresolved_access_sites:  Set<UnresolvedAccess>,       // reads and method calls named like a strict
@@ -595,7 +596,7 @@ which module imports which.
    depends on its operands) is an element of that object, of unknown origin. A parameter is
    borrowed, `*args` / `**kwargs` are new with borrowed elements, and a method's `self` is its own
    object.
-2. **The summary fact**: `returns_origins` walks back from the returns a run can reach (plain
+2. **The summary fact**: `return_origins` walks back from the returns a run can reach (plain
    sync functions; a memoizing decorator makes the result held, another decorator unknown):
    new, held, parameter `i`, or an element of parameter `i`. A run reaches what
    `ownership::Live` leaves once each branch on a constant takes its one side (`while True:`
@@ -605,14 +606,14 @@ which module imports which.
    held. One walk takes each stored value and the values it copies (through copies and phis)
    with each place once, for all the stores; past a budget of such pairs proportional to the
    function's source, what the function returns is unknown. A project call's result the walk
-   reaches is one of `returns_results` (the call's span, and whether the object is the result or
+   reaches is one of `ReturnOrigins::returned.results` (the call's span, and whether the object is the result or
    an element of it), and each argument of such a call gets `ArgOrigin::origins` from the same
    walk: its own origins and, in turn, the calls whose results it may be. A phi the walk meets
-   (other than where it starts) is a node of `origin_nodes`, as itself or as an element, walked
-   once and referred to by every walk that meets it (`returns_nodes`, `LocalOrigins::nodes`);
+   (other than where it starts) is a node of `ReturnOrigins::nodes`, as itself or as an element, walked
+   once and referred to by every walk that meets it (`LocalOrigins::nodes`);
    past a budget of walked values proportional to the function's source, what the function
    returns is unknown. Propagation (`returned_results`) adds what those calls return: each
-   callee's `returns_origins` without its parameters, and the origins of the arguments bound to
+   callee's returned origins without its parameters, and the origins of the arguments bound to
    the parameters it returns (or an element of them), through any number of nested calls
    (`identity(identity(x))`). Each call's result and each node is resolved once, to a fixpoint
    over the calls and nodes it depends on (a loop makes a call or a phi depend on itself): the
@@ -621,7 +622,7 @@ which module imports which.
    part in Early Cutoff like every summary field.
 3. **The forward analysis** (`heki_rules`, per function, to a fixpoint that visits each phi and
    instruction once, then again only when a value it reads grows) joins the kinds of a value at
-   phis, maps a project call's result through its callees' `returns_origins` and the
+   phis, maps a project call's result through its callees' returned origins and the
    bound arguments, and takes a closure's variable from what the enclosing function bound to it
    (`MakeClosure` captures; functions are analyzed enclosing first). It follows the blocks and
    edges of `ownership::Live` only. A side of an `is` test (of the branch it decides) is the
@@ -658,9 +659,9 @@ which module imports which.
    of the family); with `MUT112` selected, propagation carries typed writes, and the language
    server re-checks the family of every changed method (`family_readers`).
 6. **Only when selected** (`OptInFacts::return_origins`, `heki_rules::opt_in_facts`): the
-   summaries carry `returns_origins`, `returns_results`, `returns_nodes`, `origin_nodes`, and
-   `ArgOrigin::origins`, and propagation resolves them, only with `MUT112` selected; a run
-   without it computes none of them. A configuration change re-indexes the language server's
+   summaries carry `return_origins` and `ArgOrigin::origins`, and propagation resolves them, only
+   with `MUT112` selected; a run without it computes none of them, and its summaries hold no
+   room for them (`return_origins` is `None`). A configuration change re-indexes the language server's
    project with the facts the new selection reads.
 
 #### `MUT113`: containers changed while a method iterates them (opt-in)
