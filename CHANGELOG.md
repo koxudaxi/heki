@@ -53,34 +53,6 @@ release can change rules, configuration keys, diagnostics, and output formats.
   heuristic report may not have established. `docs/precision.md` defines exact and heuristic
   reports, the assumptions R1-R7 exact claims rest on, how a rule is certified, and what each
   rule measured.
-- `EFF111` (`async-possibly-blocking-call`) and `EFF113` (`loop-possible-db-query`), heuristic:
-  the reports `EFF101` and `EFF103` made before, where the new exact claims are not established.
-  See the first entry under Changed.
-- `sqlite3.connect` of an in-memory database (`":memory:"`, `file::memory:`, `mode=memory`) does
-  not wait, and neither do the statements on that connection. A connection waits only where
-  heki establishes that it was opened on a file (a literal or a module constant without an
-  in-memory form, or a path built from such parts and `__file__`); any other, one opened from a
-  parameter, an f-string, or an environment lookup, or only named by an annotation, may be in
-  memory, so its waits are not established (`EFF111`; its statements still count for
-  `EFF103`). Reports name such
-  connections' methods by the library's API (`sqlite3.Connection.execute`). A
-  pragma that only reads or sets an option of the connection (`PRAGMA busy_timeout = 5000`)
-  does not wait.
-- Test code, which `lint.relax-async-in-tests` leaves out of `EFF101`, `EFF111`, `EFF105`, and
-  `EFF106`, is what pytest discovers: `test_*` functions and the functions nested in them,
-  `test_*.py` and `*_test.py` files at any depth, and files under `test/` or `tests/`.
-- The ecosystem catalog says when a call waits. A blocking effect waits for input or output or
-  for another thread (`blocking_sync`), which can have done its part already. Every wait entry
-  lists the arguments that end it at once: `time.sleep(0)`, `Popen.wait(timeout=0)`, a numeric
-  host or `localhost` for `socket.getaddrinfo` and `socket.gethostbyname`, a `data:` URL for
-  `urlopen`; no rule reports those calls as waiting. Database entries
-  carry `emits` (`always`, `on-identity-map-miss` for `Session.get`, `if-pending` for
-  `Session.flush` / `commit` and a driver's `commit()` / `rollback()`, `unless-cached` for
-  Django's `QuerySet.count()` / `exists()` / `first()` / `last()`, `unless-connected` for a pool
-  checkout), and context managers `exit_suppresses` (`false` for files, locks, HTTP sessions,
-  and database connections; `true` for `contextlib.suppress`), and calls whose results the
-  environment sizes `items` (`rows`, `lines`, `entries`, `text`). New argument tests: `one_of`
-  and `numeric_address`.
 - `MUT206` (`unresolved-guarded-read`) and `MUT207` (`unresolved-guarded-call`): `read-owners`
   and `call-owners` contracts take `unresolved = "report"`, as `write-owners` does, and then
   report the reads of an attribute and the calls of a method named like a target on an object of
@@ -110,24 +82,6 @@ release can change rules, configuration keys, diagnostics, and output formats.
 
 ### Changed
 
-- `DATA101` marks a report exact when every premise is established (the update returns on every
-  iteration that completes, every path around the back edge carries it, the loop steps through
-  a parameter, the rows of a query, the lines of a file, or directory entries, and its trip count
-  is not fixed) and heuristic otherwise; its message names the loop's origin and drops
-  "(quadratic copying)".
-- `EFF101` and `EFF103` state exact claims, each premise established: `EFF101` that whenever
-  the reported call returns, a call that waits for the network, a database, a child process, or a
-  sleep has run on the event loop's thread, through functions that each make the next call on
-  every path on which they return (exception edges included), with every implementation of each
-  call followed (protocol receivers are not); `EFF103` that every iteration of a loop over a
-  parameter, the rows of a query, the lines of a file, or the entries of a directory sends a
-  database statement. Their messages state the claim and its witnesses only: a call whose
-  implementations reach different statements names each with the function that makes it, and
-  relates each where it is, and "N+1" and
-  "batch the queries" are gone. Everything else they reported is `EFF111` / `EFF113`. Waits on
-  another thread (`Thread.join()`, `Event.wait()`, locks, `Queue.get()`, `Future.result()`) are
-  `EFF111` only. Both are certified exact, as is `DATA101` (`docs/precision.md` has their
-  census and holdout counts), and run by default.
 - Only exact reports are shown by default. A report is *exact* when every premise of its claim
   was established and its rule was certified (a false exact report is a bug), and *heuristic*
   when a premise can be open, so that it can be wrong about the code. A heuristic rule runs
@@ -135,8 +89,8 @@ release can change rules, configuration keys, diagnostics, and output formats.
   `[tool.heki.lint] heuristic = true` (`--heuristic`) also by default and for every prefix and
   `ALL`, as Ruff's `preview` does. An exact rule's heuristic reports (an `OPT` report whose
   rewrite is not proven) are shown under the same conditions. A contract rule runs when its
-  contract is declared, whatever its certainty. `heki check` with no configuration runs the exact rules (`EFF101`, `EFF103`,
-  `DATA101`) and the contract rules, and `heki check --fix` applies no fix, since `OPT101` and `OPT102` stay heuristic until
+  contract is declared, whatever its certainty. No rule is exact yet: `heki check` with no configuration runs only the contract
+  rules, and `heki check --fix` applies no fix, since `OPT101` and `OPT102` stay heuristic until
   a measurement certifies them. `MUT202`, which also reports `@lru_cache` / `@cache` results
   without a contract, is selected like the other heuristic rules, so a `readonly-returns`
   contract needs it named or `lint.heuristic = true`. `lint.heuristic = true` restores the rules
