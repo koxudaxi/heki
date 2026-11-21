@@ -259,6 +259,37 @@ fn import_target(imp: &ModuleImport, input: &ModuleInput<'_>) -> Option<String> 
 
 // ------------------------------------------------------------------------------ declarations
 
+/// What reading one attribute on a value of a class may run besides finding it
+/// ([`ProjectDecls::attr_read`]), over the classes the value may be under R2.
+#[derive(Debug, Default)]
+pub struct AttrRead {
+    /// Every class along the MRO is a project class or a plain base (`object`, `NamedTuple`,
+    /// `Generic`): an external base may define anything.
+    pub bases_known: bool,
+    /// A project class along the MRO has the attribute as a member.
+    pub declared: bool,
+    /// A class has a metaclass other than `type` and `abc.ABCMeta`, which may install a
+    /// descriptor.
+    pub custom_metaclass: bool,
+    /// A class defines `__getattribute__`, which runs on every read.
+    pub getattribute: bool,
+    /// A class defines `__getattr__`, which runs when the instance lacks the attribute.
+    pub getattr: bool,
+    /// The classes that bind the name (in the body or on `self`).
+    pub binders: Vec<String>,
+    /// The classes whose body binds the name to something that may run code when read on an
+    /// instance (`ClassDecl::code_attrs`): a method, a property, a call.
+    pub code_binders: Vec<String>,
+}
+
+impl AttrRead {
+    /// Whether a read may run a hook of the project: `__getattribute__`, a metaclass heki does
+    /// not know, and with `missing` (the instance may lack the attribute) `__getattr__`.
+    pub fn runs_hook(&self, missing: bool) -> bool {
+        self.getattribute || self.custom_metaclass || (missing && self.getattr)
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClassDecl {
     /// Base classes, resolved within the defining module (canonicalized on lookup).
@@ -2208,40 +2239,106 @@ impl ProjectDecls {
             })
     }
 
+    /// The project classes whose bodies may supply an attribute of a value of the class `class`
+    /// under assumption R2 (a value typed `class` is an instance of it or of a project
+    /// subclass): the project classes along its MRO, every project subclass, and the project
+    /// classes along the MROs of a subclass's other bases (a mixin it also derives from), each
+    /// once.
+    pub fn value_classes(&self, class: &str) -> Vec<String> {
+        let class = self.canonical(class);
+        let mut seen = FxHashSet::default();
+        let mut out = Vec::new();
+        let mut add = |c: String, out: &mut Vec<String>| {
+            if self.is_project_class(&c) && seen.insert(c.clone()) {
+                out.push(c);
+            }
+        };
+        for c in self.mro(&class) {
+            add(c, &mut out);
+        }
+        let subclasses = self.subclasses_of(&class);
+        for sub in &subclasses {
+            add(sub.clone(), &mut out);
+        }
+        for sub in &subclasses {
+            self.read(|k| note(&mut k.class_facts, sub));
+            let bases = self.class(sub).map(|d| d.bases.clone()).unwrap_or_default();
+            for base in bases.iter().map(|b| self.canonical(b)) {
+                if self.is_project_class(&base) {
+                    for c in self.mro(&base) {
+                        add(c, &mut out);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// What reading `attr` on a value of the class `class` may run besides finding it, over
+    /// [`Self::value_classes`]: the one reader of the classes a read depends on, for the
+    /// attribute loads that do not raise (R7), the plain keys of `OPT113`, and the builtin
+    /// methods no project subclass replaces (`MUT110`, `MUT114`).
+    pub fn attr_read(&self, class: &str, attr: &str) -> AttrRead {
+        let class = self.canonical(class);
+        let mut read = AttrRead {
+            bases_known: true,
+            ..AttrRead::default()
+        };
+        for c in self.mro(&class) {
+            self.read(|k| note(&mut k.class_facts, &c));
+            match self.class(&c) {
+                Some(d) => read.declared |= d.members.contains(attr),
+                None => read.bases_known &= PLAIN_BASES.contains(&c.as_str()),
+            }
+        }
+        for c in self.value_classes(&class) {
+            self.read(|k| note(&mut k.class_facts, &c));
+            let Some(d) = self.class(&c) else { continue };
+            read.custom_metaclass |= d.custom_metaclass;
+            read.getattribute |= d.members.contains("__getattribute__");
+            read.getattr |= d.members.contains("__getattr__");
+            if d.members.contains(attr) {
+                read.binders.push(c.clone());
+            }
+            if d.code_attrs.contains(attr) {
+                read.code_binders.push(c);
+            }
+        }
+        read
+    }
+
     /// Whether reading `attr` on an instance of the project class `class` (or, under assumption
     /// R2, of a project subclass) reads a plain attribute and runs no code of the project: a
     /// class along its MRO declares it (a field, a slot, or what its body or methods store), no
-    /// class of its MRO or of its subclasses binds it to a method, property, or other call in
-    /// its body or defines `__getattr__` or `__getattribute__`, every base is a project class
-    /// (or `object`, `NamedTuple`, `Generic`), and no metaclass heki does not know creates the
-    /// class.
+    /// class a value may be ([`Self::value_classes`]) binds it to a method, property, or other
+    /// call in its body or defines `__getattr__` or `__getattribute__`, every base is a project
+    /// class (or `object`, `NamedTuple`, `Generic`), and no metaclass heki does not know creates
+    /// the class.
     pub fn plain_attr(&self, class: &str, attr: &str) -> bool {
-        let class = self.canonical(class);
-        let decls_of = |classes: Vec<String>| -> Option<Vec<&ClassDecl>> {
-            classes
-                .iter()
-                .filter(|c| !PLAIN_BASES.contains(&c.as_str()))
-                .map(|c| {
-                    self.read(|k| note(&mut k.class_facts, c));
-                    self.class(c)
-                })
-                .collect()
+        let read = self.attr_read(class, attr);
+        read.bases_known && read.declared && !read.runs_hook(true) && read.code_binders.is_empty()
+    }
+
+    /// Whether reading the method `attr` on an instance of the project class `class` (or, under
+    /// assumption R2, of a project subclass) finds a method and runs no code of the project, so
+    /// the load cannot raise: its MRO finds a project method that no decorator replaces
+    /// (`FunctionDecl::called_as_defined`; a property's getter runs on the read), every class a
+    /// value may be that binds the name to code binds it to such a method too, and none defines
+    /// `__getattribute__` or has a metaclass other than `type`.
+    pub fn method_read_runs_no_code(&self, class: &str, attr: &str) -> bool {
+        let plain_method = |key: Option<FuncKey>| {
+            key.and_then(|k| self.function_decl(&k))
+                .is_some_and(|d| d.called_as_defined)
         };
-        let (Some(mro), Some(subclasses)) = (
-            decls_of(self.mro(&class)),
-            decls_of(self.subclasses_of(&class)),
-        ) else {
+        if !plain_method(self.mro_method(class, attr)) {
             return false;
-        };
-        // `__getattr__` runs for an attribute an instance lacks, `__getattribute__` for all.
-        let plain_in = |d: &&ClassDecl| {
-            !d.code_attrs.contains(attr)
-                && !d.members.contains("__getattribute__")
-                && !d.members.contains("__getattr__")
-        };
-        !self.has_custom_metaclass(&class)
-            && mro.iter().chain(&subclasses).all(plain_in)
-            && mro.iter().any(|d| d.members.contains(attr))
+        }
+        let read = self.attr_read(class, attr);
+        !read.runs_hook(false)
+            && read
+                .code_binders
+                .iter()
+                .all(|c| plain_method(self.own_method(c, attr)))
     }
 
     /// The class whose `__hash__` the instances of the project class `class` use: the first
@@ -2273,35 +2370,13 @@ impl ProjectDecls {
 
     /// Whether `method` of `class` (a builtin container, say) runs on every instance of `class`
     /// the project can make: under R2 a value of type `class` may be an instance of a project
-    /// subclass. No project class along the MRO of a project subclass binds `method`, has a
+    /// subclass. No class a value may be ([`Self::value_classes`]) binds `method`, has a
     /// metaclass other than `type` (which may install it), or, when the method is looked up by
     /// name (`xs.sort()`, not the operator or item store that calls it implicitly, which skips
-    /// it), defines `__getattribute__`. Each class is read once: the subclasses, then the MROs
-    /// of their project bases that derive from no subclass (mixins).
+    /// it), defines `__getattribute__`.
     pub fn method_not_overridden(&self, class: &str, method: &str, by_name: bool) -> bool {
-        let subclasses = self.subclasses_of(class);
-        let mut seen: FxHashSet<String> = subclasses.iter().cloned().collect();
-        let mut classes = subclasses.clone();
-        for sub in &subclasses {
-            self.read(|k| note(&mut k.class_facts, sub));
-            let bases = self.class(sub).map(|d| d.bases.clone()).unwrap_or_default();
-            for base in bases.iter().map(|b| self.canonical(b)) {
-                if !seen.contains(&base) && self.is_project_class(&base) {
-                    let mixin = self.mro(&base).into_iter();
-                    classes.extend(
-                        mixin.filter(|c| self.is_project_class(c) && seen.insert(c.clone())),
-                    );
-                }
-            }
-        }
-        classes.iter().all(|c| {
-            self.read(|k| note(&mut k.class_facts, c));
-            self.class(c).is_none_or(|d| {
-                !d.members.contains(method)
-                    && !d.custom_metaclass
-                    && !(by_name && d.members.contains("__getattribute__"))
-            })
-        })
+        let read = self.attr_read(class, method);
+        read.binders.is_empty() && !read.custom_metaclass && !(by_name && read.getattribute)
     }
 
     /// Every project class that (transitively) inherits from `class`, sorted.
