@@ -1522,6 +1522,15 @@ def lambda_in_loop(xs, ys: list, other: list):
         other.sort(key=lambda x: ys.index(x))
 
 
+def extended_alias(xs, ys: list):
+    rows = ys
+    for a in xs:
+        for b in ys:
+            if a.k == b.k:
+                print(b)
+        rows += ["new"]
+
+
 def yielding(xs, ys):
     for a in xs:
         for b in ys:
@@ -1593,6 +1602,7 @@ fn opt113_states_its_exact_claim_only_when_every_premise_holds() {
             ("helper_rekeys", false, tier(false)),
             ("closure_drops", false, tier(false)),
             ("lambda_in_loop", false, tier(false)),
+            ("extended_alias", false, tier(false)),
             ("yielding", false, tier(false)),
         ],
         "{json}{stderr}"

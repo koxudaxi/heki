@@ -1286,8 +1286,8 @@ impl JoinPremises<'_, '_, '_> {
     /// Whether running `inst` may run code of the project that reaches a value `hit` accepts: a
     /// call (but an inert builtin, or a method of a builtin container, which only stores or
     /// reads its arguments) that receives one or a closure capturing one, a call of such a
-    /// closure, a method of one that is not a reading one, the making of a closure that captures
-    /// one, or a `yield` or `await`, after which other code may run.
+    /// closure, a method of one that is not a reading one, an in-place operator on one, the making
+    /// of a closure that captures one, or a `yield` or `await`, after which other code may run.
     fn runs_code_reaching(&self, inst: &Inst, hit: &dyn Fn(VarId) -> bool) -> bool {
         let shape = self.sizes.ix.shape();
         let captures = |v: VarId| {
@@ -1324,6 +1324,12 @@ impl JoinPremises<'_, '_, '_> {
                     || (!self.builtin_type(*recv, CONTAINERS) && handed(args, kwargs))
             }
             InstKind::MakeClosure { captured, .. } => captured.iter().any(|c| hit(*c)),
+            // `rows += [...]` extends a list in place.
+            InstKind::BinOp {
+                lhs,
+                in_place: true,
+                ..
+            } => hit(*lhs),
             InstKind::Yield { .. } | InstKind::YieldFrom { .. } | InstKind::Await { .. } => true,
             _ => false,
         }
