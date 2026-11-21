@@ -22,6 +22,7 @@ use heki_kb::{ArgFact, EffectiveEcosystemKb, ExecEffectKind, LiteralValue};
 use heki_semantic::{ModuleImport, ScopeKind, SemanticModel};
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -2341,21 +2342,17 @@ impl ProjectDecls {
         }
     }
 
-    /// Whether reading or calling `name` on an instance of the project class `class` runs one
-    /// of `keys`: along its MRO, the first class whose body or methods bind `name`
-    /// (`ClassDecl::members`) defines one of them, and no base outside the project comes first
-    /// (heki does not know what such a base binds). A plain class or instance attribute coming
-    /// first is read itself, and no getter runs.
-    pub(crate) fn takes_from(&self, class: &str, name: &str, keys: &[FuncKey]) -> bool {
+    /// The function an instance of the project class `class` takes `name` from: along its MRO,
+    /// the first class whose body or methods bind `name` (`ClassDecl::members`) defines it.
+    /// `None` when a plain class or instance attribute comes first (reading it runs nothing), a
+    /// base outside the project does (heki does not know what it binds), or none binds it.
+    pub(crate) fn function_taken(&self, class: &str, name: &str) -> Option<FuncKey> {
         for c in self.mro(class) {
-            let Some(decl) = self.class(&c) else {
-                return false;
-            };
-            if decl.members.contains(name) {
-                return self.own_method(&c, name).is_some_and(|k| keys.contains(&k));
+            if self.class(&c)?.members.contains(name) {
+                return self.own_method(&c, name);
             }
         }
-        false
+        None
     }
 
     /// Resolve `instance_of(class).method(...)`: MRO definition plus overriding project
@@ -4160,6 +4157,9 @@ pub struct TypeCtx<'a> {
     import_by_span: FxHashMap<Span, String>,
     /// Inference state shared by the functions of the module (child scopes and their parents).
     pub(crate) scopes: crate::infer::Scopes,
+    /// [`ProjectDecls::function_taken`] by class and name, asked once per module (the module's
+    /// summaries are one recording, which the first answer's reads join).
+    taken: RefCell<FxHashMap<(String, String), Option<FuncKey>>>,
 }
 
 /// Declarations used when a module is missing from `ProjectDecls`.
@@ -4202,6 +4202,7 @@ impl<'a> TypeCtx<'a> {
             ir: input.ir,
             import_by_span,
             scopes: crate::infer::Scopes::default(),
+            taken: RefCell::default(),
         }
     }
 
@@ -4420,9 +4421,9 @@ impl<'a> TypeCtx<'a> {
     }
 
     /// Whether a read or call of `name` on `recv` runs one of `keys` whatever class `recv` is:
-    /// on every class of a union or every implementation of a protocol, as on a class of its
-    /// own ([`ProjectDecls::takes_from`]). A module function, a class object, and `super()`
-    /// dispatch on no instance: they run what they name.
+    /// every class of a union or implementation of a protocol, as a class of its own, takes
+    /// `name` from one of them ([`ProjectDecls::function_taken`]). A module function, a class
+    /// object, and `super()` dispatch on no instance: they run what they name.
     pub(crate) fn runs_on_every_class(
         &self,
         recv: Option<&Val>,
@@ -4437,9 +4438,16 @@ impl<'a> TypeCtx<'a> {
                 .unwrap_or(std::slice::from_ref(class)),
             Some(Val::Ref(_) | Val::Class(_) | Val::Super(_)) | None => return true,
         };
-        classes
-            .iter()
-            .all(|class| self.project.takes_from(class, name, keys))
+        classes.iter().all(|class| {
+            let key = (class.clone(), name.to_owned());
+            let known = self.taken.borrow().get(&key).cloned();
+            let taken = known.unwrap_or_else(|| {
+                let taken = self.project.function_taken(class, name);
+                self.taken.borrow_mut().insert(key, taken.clone());
+                taken
+            });
+            taken.is_some_and(|k| keys.contains(&k))
+        })
     }
 
     /// Resolve reading `recv.attr` (`AttrLoad`): the property getters it runs, which bind the
