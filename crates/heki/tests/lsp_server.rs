@@ -702,6 +702,134 @@ fn lsp_keeps_open_documents_through_reloads_and_deletions_until_they_close() {
     lsp.stop(true);
 }
 
+// Unix only: symbolic links to files need no privilege there.
+#[cfg(unix)]
+#[test]
+fn lsp_closes_a_document_whose_file_resolves_elsewhere_by_then() {
+    // A document keeps the path it was opened by. Its file can change into one that resolves
+    // elsewhere before it closes: here a symbolic link; on Windows a file resolved while it is
+    // being deleted is found in `\$Extend\$Deleted`. The `didClose` still closes it, so the
+    // deletion reported next removes the module.
+    let p = Project::new("lsp_close_resolved_elsewhere");
+    let other = Project::new("lsp_close_resolved_elsewhere_target");
+    let helper = "import time\n\n\ndef wait():\n    time.sleep(1)\n";
+    let caller = "from helper import wait\n\n\nasync def handler():\n    wait()\n";
+    p.write("helper.py", helper).write("caller.py", caller);
+    other.write("helper.py", helper);
+    let (module, handler) = (uri(&p.dir.join("helper.py")), uri(&p.dir.join("caller.py")));
+    let mut lsp = ready_server(
+        &p,
+        json!({"workspace": {"didChangeWatchedFiles": {"dynamicRegistration": true}}}),
+    );
+    lsp.open(&module, helper);
+    lsp.open(&handler, caller);
+    lsp.settle();
+    assert_eq!(codes(&lsp.latest[&handler]), ["EFF101"]);
+    std::fs::remove_file(p.dir.join("helper.py")).unwrap();
+    std::os::unix::fs::symlink(other.dir.join("helper.py"), p.dir.join("helper.py")).unwrap();
+    lsp.notify(
+        "textDocument/didClose",
+        json!({"textDocument": {"uri": module}}),
+    );
+    assert_eq!(lsp.settle()["open_documents"], 1);
+    std::fs::remove_file(p.dir.join("helper.py")).unwrap();
+    lsp.notify(
+        "workspace/didChangeWatchedFiles",
+        json!({"changes": [{"uri": module, "type": 3}]}),
+    );
+    let stats = lsp.settle();
+    assert_eq!(lsp.latest[&handler], Vec::<Value>::new());
+    assert_eq!(stats["indexed_files"], 1, "{stats}");
+    lsp.stop(true);
+}
+
+/// A file the client reported deleted while the disk still lists it, unreadable: a Windows
+/// file deleted while another process holds it open, which here a file without permissions
+/// stands for. It is removed only after the server has handled the event.
+#[cfg(unix)]
+fn delete_while_listed(p: &Project, lsp: &mut Lsp, rel: &str, close: bool) {
+    use std::os::unix::fs::PermissionsExt;
+    let path = p.dir.join(rel);
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let u = uri(&path);
+    lsp.notify(
+        "workspace/didChangeWatchedFiles",
+        json!({"changes": [{"uri": u, "type": 3}]}),
+    );
+    if close {
+        lsp.notify("textDocument/didClose", json!({"textDocument": {"uri": u}}));
+    }
+    lsp.settle();
+    std::fs::remove_file(&path).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn lsp_drops_a_deleted_module_whatever_the_disk_still_shows() {
+    // A project module shadowing a catalogued one: while it is there `requests.get` is the
+    // project's function; once it is gone it is the blocking catalogued call. A module heki
+    // only cannot read would resolve to nothing instead.
+    let p = Project::new("lsp_deleted_listed");
+    let caller = "import requests\n\n\nasync def fetch(url):\n    return requests.get(url)\n";
+    let shadow = "def get(url):\n    return url\n";
+    p.write("requests.py", shadow).write("caller.py", caller);
+    let (module, handler) = (
+        uri(&p.dir.join("requests.py")),
+        uri(&p.dir.join("caller.py")),
+    );
+    let mut lsp = ready_server(
+        &p,
+        json!({"workspace": {"didChangeWatchedFiles": {"dynamicRegistration": true}}}),
+    );
+    lsp.open(&module, shadow);
+    lsp.open(&handler, caller);
+    lsp.settle();
+    assert_eq!(lsp.latest[&handler], Vec::<Value>::new());
+    // Deleted while its document is open: the document is closed after the event.
+    delete_while_listed(&p, &mut lsp, "requests.py", true);
+    assert_eq!(codes(&lsp.latest[&handler]), ["EFF101"]);
+    assert!(
+        p.check(&["--output-format", "concise"])
+            .1
+            .contains("EFF101")
+    );
+    let stats = lsp.request("heki/stats", Value::Null);
+    assert_eq!(stats["indexed_files"], 1, "{stats}");
+    lsp.stop(true);
+}
+
+#[cfg(unix)]
+#[test]
+fn lsp_counts_a_deleted_package_marker_gone_for_the_module_layout() {
+    // `src/__init__.py` makes `src` a package (`src.pkg.util`); deleted, `src` is a source root
+    // and `pkg.util` names the blocking helper.
+    let p = Project::new("lsp_deleted_marker");
+    let caller = "from pkg.util import helper\n\n\nasync def handler():\n    helper()\n";
+    p.write("src/__init__.py", "")
+        .write("src/pkg/__init__.py", "")
+        .write(
+            "src/pkg/util.py",
+            "import time\n\n\ndef helper():\n    time.sleep(1)\n",
+        )
+        .write("caller.py", caller);
+    let handler = uri(&p.dir.join("caller.py"));
+    let mut lsp = ready_server(
+        &p,
+        json!({"workspace": {"didChangeWatchedFiles": {"dynamicRegistration": true}}}),
+    );
+    lsp.open(&handler, caller);
+    lsp.settle();
+    assert_eq!(lsp.latest[&handler], Vec::<Value>::new());
+    delete_while_listed(&p, &mut lsp, "src/__init__.py", false);
+    assert_eq!(codes(&lsp.latest[&handler]), ["EFF101"]);
+    assert!(
+        p.check(&["--output-format", "concise"])
+            .1
+            .contains("EFF101")
+    );
+    lsp.stop(true);
+}
+
 #[test]
 fn lsp_analyzes_documents_opened_together_in_the_order_they_were_opened() {
     // Never-saved modules opened at once, each importing the one opened before it. A module's

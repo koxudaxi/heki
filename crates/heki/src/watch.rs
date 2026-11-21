@@ -13,7 +13,7 @@ use heki_ast::LineIndex;
 use heki_diagnostics::{Diagnostic, Stylesheet, render, sort_diagnostics};
 use heki_effect::ModuleLayout;
 use heki_env::LintConfig;
-use heki_lsp::{CONFIG_FILES, EditOutcome, Workspace};
+use heki_lsp::{CONFIG_FILES, EditOutcome, Source, Workspace};
 use heki_profile::{ProfileData, ProfiledFunction};
 use heki_rules::project::{
     FileError, ProjectEnv, ProjectOptions, collect_files, display_path, exclude_set,
@@ -167,6 +167,7 @@ impl Watcher<'_> {
             working_dir: None,
             target_version: self.args.analysis.target_version.as_deref(),
             overrides: None,
+            removed: None,
         }
     }
 
@@ -357,35 +358,42 @@ impl Report {
         // against the index as the files before it left it: what a later one changes for it
         // queues it again.
         let mut affected: BTreeSet<PathBuf> = BTreeSet::new();
-        for gone in before.keys().filter(|p| !now.contains_key(*p)) {
+        let changed: Vec<(&PathBuf, Source)> = now
+            .iter()
+            .filter(|(p, s)| before.get(*p).is_none_or(|b| !s.same_as(b)))
+            .map(|(p, _)| (p, Source::read(p)))
+            .collect();
+        // Gone: not listed any more, or deleted after the poll listed it.
+        let deleted = changed
+            .iter()
+            .filter(|(_, source)| matches!(source, Source::Gone))
+            .map(|(p, _)| *p);
+        for gone in before
+            .keys()
+            .filter(|p| !now.contains_key(*p))
+            .chain(deleted)
+        {
             affected.extend(ws.remove(gone));
             self.diags.remove(gone);
             self.errors.remove(gone);
         }
-        let changed = now
-            .iter()
-            .filter(|(p, s)| before.get(*p).is_none_or(|b| !s.same_as(b)));
-        for (p, _) in changed {
-            match heki_ast::read_source(p) {
-                Ok(text) => {
-                    let out = ws.edit(p, &text);
-                    affected.remove(p);
-                    affected.extend(out.affected.iter().cloned());
-                    self.record(p, Some(out));
-                }
+        for (p, source) in changed {
+            if let Source::Text(text) = source {
+                let out = ws.edit(p, &text);
+                affected.remove(p);
+                affected.extend(out.affected.iter().cloned());
+                self.record(p, Some(out));
+            } else if let Source::Unreadable(e) = source {
                 // A file that cannot be read is a module heki knows nothing about, as for
                 // `heki check`: its facts leave the index, and what they affected is
                 // re-analyzed.
-                Err(e) => {
-                    affected.remove(p);
-                    affected.extend(ws.unread_or_removed(p));
-                    self.diags.remove(p);
-                    self.errors.insert(p.clone(), FileError::unreadable(p, &e));
-                }
+                affected.remove(p);
+                affected.extend(ws.unreadable(p));
+                self.diags.remove(p);
+                self.errors.insert(p.clone(), FileError::unreadable(p, &e));
             }
         }
-        let read = |p: &Path| heki_ast::read_source(p).ok();
-        for (p, out) in ws.refresh_all(affected, &read) {
+        for (p, out) in ws.refresh_all(affected, &Source::read) {
             self.record(&p, out);
         }
     }
