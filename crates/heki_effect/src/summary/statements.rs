@@ -242,13 +242,13 @@ impl Extractor<'_> {
         })
     }
 
-    /// The texts the value `v` defines, which is no copy or phi: a constant (`const_str`, a
+    /// The texts the value `v` defines, which is no copy or phi: a constant (`resolved_str`, a
     /// module's string constant), the head of an f-string, of a `+` or `%` with a constant first
     /// operand, or of `.format(...)` on one, what a `str` method keeping the first word or
     /// SQLAlchemy's `text()` is given, none for a local read before it is bound, and each item a
     /// loop over constant texts yields.
     fn source_texts(&self, v: VarId, walk: &mut Walk) -> Option<Vec<Text>> {
-        if let Some(s) = self.const_str(v) {
+        if let Some(s) = self.resolved_str(v) {
             return Some(vec![Text::Whole(Arc::from(s))]);
         }
         if let Some(head) = self.f.str_head(v) {
@@ -375,7 +375,7 @@ impl Extractor<'_> {
                 ..
             } if kwargs.is_empty() => {
                 let separator = match (method.as_str(), args.as_slice()) {
-                    ("split", [sep]) => Some(self.const_str(*sep)?),
+                    ("split", [sep]) => Some(self.resolved_str(*sep)?),
                     ("splitlines", []) => None,
                     _ => return None,
                 };

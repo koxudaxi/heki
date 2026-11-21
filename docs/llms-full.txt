@@ -259,7 +259,7 @@ report names the missing obligation instead of offering a fix. See [Fixes and sa
 - 🎯 See what heki [covers and does not cover](https://heki.koxudaxi.dev/scope/).
 - 📦 [Install heki](https://heki.koxudaxi.dev/installation/) and 🚀 [run it on a project](https://heki.koxudaxi.dev/getting-started/).
 - ⚙️ [Configure](https://heki.koxudaxi.dev/configuration/) rule selection, contracts, and the Python version.
-- 📏 Browse the [38 rules](https://heki.koxudaxi.dev/rules/), and see [how precise each one is](https://heki.koxudaxi.dev/precision/).
+- 📏 Browse the [40 rules](https://heki.koxudaxi.dev/rules/), and see [how precise each one is](https://heki.koxudaxi.dev/precision/).
 - 🔧 Read how [fixes are proven safe](https://heki.koxudaxi.dev/fixes/).
 - 🪜 [Adopt it gradually](https://heki.koxudaxi.dev/adoption/) with a Ratchet baseline in CI.
 - 🖥️ Use it from [your editor](https://heki.koxudaxi.dev/lsp/) or 🤖 [a coding agent](https://heki.koxudaxi.dev/coding-agents/).
@@ -683,9 +683,9 @@ The proofs heki can make, on five axes:
 
 | Axis | What heki establishes | Used by |
 | ---- | --------------------- | ------- |
-| Control flow | which statements can run after which: CFG paths, loops and their bounds, exception edges | `MUT106`, `MUT109`, `MUT113`, `EFF102`, `EFF103`, `EFF106`, `DATA101`, `OPT` |
-| Calls | which functions a call reaches across modules, and what they do (summaries propagated over the call graph) | `EFF101`, `EFF201`, `MUT103`, `MUT108`, `MUT109`, `MUT110`, `MUT112`, `MUT113`, `MUT201`–`MUT204` |
-| Aliases | which names, iterators, and views refer to one object; whether it is unique to its frame and of an exact builtin type | `MUT202`, `MUT201`, `MUT204`, `MUT108`, `MUT110`, `MUT112`, `EFF107`, `OPT101`–`OPT130` |
+| Control flow | which statements can run after which: CFG paths, loops and their bounds, exception edges | `MUT106`, `MUT109`, `MUT113`, `EFF102`, `EFF103`, `EFF106`, `EFF109`, `EFF110`, `DATA101`, `OPT` |
+| Calls | which functions a call reaches across modules, and what they do (summaries propagated over the call graph) | `EFF101`, `EFF109`, `EFF110`, `EFF201`, `MUT103`, `MUT108`, `MUT109`, `MUT110`, `MUT112`, `MUT113`, `MUT201`–`MUT204` |
+| Aliases | which names, iterators, and views refer to one object; whether it is unique to its frame and of an exact builtin type | `MUT202`, `MUT201`, `MUT204`, `MUT108`, `MUT110`, `MUT112`, `EFF107`, `EFF109`, `EFF110`, `OPT101`–`OPT130` |
 | Effects | which blocking, network, file, or database work runs, from the catalog of library behavior | `EFF101`–`EFF106`, `EFF201`, `DATA101` |
 | State | which attributes and containers a function reads, writes, or mutates, and who may do so | `MUT101`, `MUT107`, `MUT108`, `MUT109`, `MUT110`, `MUT111`, `MUT112`, `MUT113`, `MUT201`–`MUT204` |
 
@@ -1073,9 +1073,9 @@ supported version that every clause admits:
   `heuristic = true`, or when its code or name is selected.
 - A run of `full` or `concise` output that leaves heuristic rules off, or heuristic reports out,
   says how many.
-- A prefix or `ALL` never enables the opt-in rules (`EFF105`, `EFF106`, `EFF107`, `MUT101`,
-  `MUT103`, `MUT106`, `MUT107`, `MUT108`, `MUT111`, `MUT112`, `MUT113`): they need their exact
-  code or name. In `ignore`, a prefix covers every rule it matches.
+- A prefix or `ALL` never enables the opt-in rules (`EFF105`, `EFF106`, `EFF107`, `EFF109`,
+  `EFF110`, `MUT101`, `MUT103`, `MUT106`, `MUT107`, `MUT108`, `MUT111`, `MUT112`, `MUT113`): they
+  need their exact code or name. In `ignore`, a prefix covers every rule it matches.
 - The command line wins: `--select` replaces `select`, `--extend-select` and `--ignore` add to the
   configured lists, and `--heuristic` / `--no-heuristic` replace `heuristic`.
 
@@ -1497,6 +1497,8 @@ excluded = true               # never reported
 | `copy-sanitizer` | Returns a copy of its first argument (or receiver), ending `MUT202` protection: `"deep"` copies everything below it too; `"shallow"` (or `true`) copies only the object itself, so the values below it stay protected. |
 | `return-type` | The class of the objects the call returns (a factory: `mypkg.db.open` returning `sqlite3.Connection`), whose methods are then looked up in the catalog. |
 | `sync-lock-or-tx` | A `with` over an instance of this class, or over the result of this call, holds a synchronous lock or a database transaction (`EFF106`). |
+| `non-reentrant-lock` | An instance of this class is a lock its holder cannot take again: acquiring it while the same thread or task holds it waits forever (`EFF109`). |
+| `one-at-a-time` | Tasks may not be inside this method on one object at once (`EFF110`): `"always"` (a second task's call raises), `"when_unbound"` (only while the object holds no connection, as an `AsyncSession`), or `"unbinds"` (as `"when_unbound"`, and the object holds no connection after the call: `commit`). |
 
 - An override sets the keys it lists on the built-in entry for the same symbol. The keys it leaves
   out keep their built-in values; `effects = []` removes every effect.
@@ -1512,7 +1514,7 @@ For a project function:
 | `async-safe` | keeps the blocking effects of the body from its callers |
 | `return-type` | types its result, over its annotation |
 | `offloads-blocking-arg` | the parameter the body offloads, counted as for a library method |
-| `copy-sanitizer`, `sync-lock-or-tx` | not read: library symbols only |
+| `copy-sanitizer`, `sync-lock-or-tx`, `non-reentrant-lock`, `one-at-a-time` | not read: library symbols only |
 
 ## Inline suppressions
 
@@ -1933,6 +1935,7 @@ Commands:
   rule         Explain a rule, its Proof Obligations, and counterexamples (`ruff rule` style) [alias: explain]
   snapshot     Manage interprocedural effect summary snapshots (`MUT103`)
   assumptions  List Assumption A1 hazards (`eval`, `exec`, `locals()`, frame introspection, functions too large to model) in a project
+  inspect      Experimental: what heki knows about one function (its effects, what it changes, keeps, and returns, whether it is pure, its callers, reports, and contracts)
   help         Print this message or the help of the given subcommand(s)
 
 Options:
@@ -1967,18 +1970,18 @@ Options:
           Also run the heuristic rules, whose reports can be wrong about the code, by default and for every prefix and `ALL` (`lint.heuristic = true`)
       --no-heuristic
           Run a heuristic rule only when its code or name is selected (`lint.heuristic = false`)
-      --fail-on <FAIL_ON>
-          Exit with code 1 on reports of this severity or higher: `error` (the default), or `warning` to fail on warnings too (`lint.fail-on`) [possible values: error, warning]
-      --output-format <OUTPUT_FORMAT>
-          Output format [default: full] [possible values: full, concise, json, github, sarif]
-      --color <WHEN>
-          When to color the `full` and `concise` output and `--diff`, as Ruff does: `auto` colors them on a terminal unless `NO_COLOR` is set (`FORCE_COLOR` or `CLICOLOR_FORCE` color them anywhere), `always`, or `never` [default: auto] [possible values: auto, always, never]
       --config <CONFIG>
           Explicit configuration file: a `pyproject.toml` (its `[tool.heki]` table) or a file with the keys at its top level, like `heki.toml`
       --target-version <TARGET_VERSION>
           Target Python version (`py311`, `py312`, `py313`, `py314`, `py315`)
       --baseline <BASELINE>
           Ratchet baseline TOML file (line-number-independent)
+      --fail-on <FAIL_ON>
+          Exit with code 1 on reports of this severity or higher: `error` (the default), or `warning` to fail on warnings too (`lint.fail-on`) [possible values: error, warning]
+      --output-format <OUTPUT_FORMAT>
+          Output format [default: full] [possible values: full, concise, json, github, sarif]
+      --color <WHEN>
+          When to color the `full` and `concise` output and `--diff`, as Ruff does: `auto` colors them on a terminal unless `NO_COLOR` is set (`FORCE_COLOR` or `CLICOLOR_FORCE` color them anywhere), `always`, or `never` [default: auto] [possible values: auto, always, never]
       --update-baseline
           Generate or shrink-update the Ratchet baseline file
       --profile <PROFILE>
@@ -2059,6 +2062,44 @@ Options:
           Print help
 ```
 
+## `heki inspect`
+
+```text
+Experimental: what heki knows about one function (its effects, what it changes, keeps, and returns, whether it is pure, its callers, reports, and contracts)
+
+Usage: heki inspect [OPTIONS] <SYMBOL> [PATHS]...
+
+Arguments:
+  <SYMBOL>    A dotted name (`pkg.mod.Class.method`, a dotted suffix such as `Class.method`, or a glob), `path.py:LINE`, or `path.py::NAME`
+  [PATHS]...  The project to analyze, as for `heki check` [default: .]
+
+Options:
+      --output-format <OUTPUT_FORMAT>
+          `text`, or `json` [default: text] [possible values: text, json]
+      --callers
+          List the callers transitively, and the reports above the function
+      --depth <DEPTH>
+          How many caller levels `--callers` lists [default: 3]
+      --select <SELECT>
+          Comma-separated rule codes, prefixes, or slugs to enable
+      --extend-select <EXTEND_SELECT>
+          Additional rules to enable on top of defaults/config
+      --ignore <IGNORE>
+          Comma-separated rule codes or slugs to ignore
+      --heuristic
+          Also run the heuristic rules, whose reports can be wrong about the code, by default and for every prefix and `ALL` (`lint.heuristic = true`)
+      --no-heuristic
+          Run a heuristic rule only when its code or name is selected (`lint.heuristic = false`)
+      --config <CONFIG>
+          Explicit configuration file: a `pyproject.toml` (its `[tool.heki]` table) or a file with the keys at its top level, like `heki.toml`
+      --target-version <TARGET_VERSION>
+          Target Python version (`py311`, `py312`, `py313`, `py314`, `py315`)
+      --baseline <BASELINE>
+          Ratchet baseline TOML file (line-number-independent)
+  -h, --help
+          Print help
+```
+
 
 ---
 
@@ -2066,7 +2107,7 @@ Source: https://heki.koxudaxi.dev/rules/
 
 # Rules
 
-heki has 38 rules in four families. A rule is exact when it reports only what it established and was certified on the corpus, and heuristic (≈) when a report can be wrong about the code: [Rule Precision](https://heki.koxudaxi.dev/precision/) says how a rule is certified and what each one measured. Each rule's page says what a report states.
+heki has 40 rules in four families. A rule is exact when it reports only what it established and was certified on the corpus, and heuristic (≈) when a report can be wrong about the code: [Rule Precision](https://heki.koxudaxi.dev/precision/) says how a rule is certified and what each one measured. Each rule's page says what a report states.
 
 - The exact rules run by default, and for a prefix such as `EFF` or `ALL`. A report of an exact rule that did not establish every premise (an `OPT` report whose rewrite is not proven) is shown where a heuristic rule would run.
 - A heuristic rule runs when `select` / `extend-select` names its code or name. With `lint.heuristic = true` (`--heuristic`), the heuristic rules that are not opt-in also run by default and for a prefix or `ALL`.
@@ -2121,6 +2162,8 @@ Work that runs where it should not: blocking calls on the event loop, clients an
 | EFF105 | [async-blocking-fs](https://heki.koxudaxi.dev/rules/async-blocking-fs/) | Opt-in: blocking local filesystem I/O reachable from `async def`. | ≈ 🔌 |
 | EFF106 | [lock-or-tx-held-across-io](https://heki.koxudaxi.dev/rules/lock-or-tx-held-across-io/) | Opt-in: `await` or blocking network I/O while holding a `threading` lock or a DB transaction. | ≈ 🔌 |
 | EFF107 | [unretained-async-task](https://heki.koxudaxi.dev/rules/unretained-async-task/) | Opt-in: an `asyncio.create_task` result bound to a local variable but never awaited, returned, or stored. | ≈ 🔌 |
+| EFF109 | [lock-reacquired-while-held](https://heki.koxudaxi.dev/rules/lock-reacquired-while-held/) | Opt-in: a non-reentrant lock (`threading.Lock`, `asyncio.Lock`) taken again, directly or through a call, while it is held (the thread or task waits for itself). | ≈ 🔌 🧪 |
+| EFF110 | [exclusive-object-fanout](https://heki.koxudaxi.dev/rules/exclusive-object-fanout/) | Opt-in: an object allowing one operation at a time (`asyncio.StreamReader`, an asyncpg connection, a WebSocket) used by tasks started together (`asyncio.gather`, a task group). | ≈ 🔌 🧪 |
 | EFF201 | [effect-boundary-violation](https://heki.koxudaxi.dev/rules/effect-boundary-violation/) | Reaching a forbidden effect (directly or through calls) from a declared `effect-boundaries` scope. | ≈ 📜 |
 
 ## Data Pipelines (DATA)
@@ -2349,6 +2392,9 @@ An experimental rule is never enabled by default: it runs only when `select` or 
 | ID | Kind | Target | Since | Tracking |
 | -- | ---- | ------ | ----- | -------- |
 | `cli-option.profile` | cli-option | `heki check --profile` | 0.1.1 | - |
+| `command.inspect` | command | `heki inspect` | 0.2.1 | - |
+| `rule.EFF109` | rule | [`EFF109`](https://heki.koxudaxi.dev/rules/lock-reacquired-while-held/) | 0.2.1 | - |
+| `rule.EFF110` | rule | [`EFF110`](https://heki.koxudaxi.dev/rules/exclusive-object-fanout/) | 0.2.1 | - |
 | `rule.MUT101` | rule | [`MUT101`](https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/) | 0.1.0 | - |
 | `rule.MUT111` | rule | [`MUT111`](https://heki.koxudaxi.dev/rules/cached-property-stale-read/) | 0.1.1 | - |
 | `rule.MUT112` | rule | [`MUT112`](https://heki.koxudaxi.dev/rules/conditional-ownership-mutation/) | 0.2.0 | - |
@@ -2361,6 +2407,30 @@ An experimental rule is never enabled by default: it runs only when `select` or 
 - **Since:** 0.1.1
 
 It reads the output of CPython 3.15's sampling profiler, and that format can still change.
+
+## `command.inspect`
+
+- **Kind:** command
+- **Target:** `heki inspect`
+- **Since:** 0.2.1
+
+The facts it shows, its purity verdict, and its JSON object can still change as heki's summaries close gaps; the object's `version` changes when a field is removed or changes meaning.
+
+## `rule.EFF109`
+
+- **Kind:** rule
+- **Target:** [`EFF109`](https://heki.koxudaxi.dev/rules/lock-reacquired-while-held/)
+- **Since:** 0.2.1
+
+Its precision is measured on a small sample of reports only.
+
+## `rule.EFF110`
+
+- **Kind:** rule
+- **Target:** [`EFF110`](https://heki.koxudaxi.dev/rules/exclusive-object-fanout/)
+- **Since:** 0.2.1
+
+Its precision is measured on a small sample of reports only.
 
 ## `rule.MUT101`
 
@@ -2517,7 +2587,7 @@ On a save, the edit reaches other files only through what it changes:
 
 | The edit changes | Also re-analyzed |
 | ---------------- | ---------------- |
-| a function's effects, or what the object it returns may be (a new one, its argument, or state it keeps) | its callers, and the functions of a call cycle through it (their effects change with it) |
+| a function's effects, the locks it takes (`EFF109`), the objects it uses one operation at a time (`EFF110`), or what the object it returns may be (a new one, its argument, or state it keeps) | its callers, and the functions of a call cycle through it (their effects change with it) |
 | a declaration that names resolve through: a re-exported class, a new method or base class, a property getter, a subclass, an offloading decorator | every file that resolved names through it |
 | a method of a class family | the classes of that family; with `MUT112` selected, every changed method counts: a value stored in `self.<attr>` is reported when a method of the family changes that attribute in place |
 | what a function changes of its own containers, or what it does with the generators it calls (`MUT113`, when selected) | the classes of its family with generators suspending inside an iteration of their containers, and those of the generators it calls |
@@ -2585,9 +2655,48 @@ Source: https://heki.koxudaxi.dev/coding-agents/
 # Coding Agents
 
 heki gives coding agents (Claude Code, Codex, Cursor, and similar) the checks it gives people:
-every diagnostic says what was proven, where the evidence is, and what blocks a fix.
+every diagnostic says what was proven, where the evidence is, and what blocks a fix. `heki
+inspect` says what one function does, so an agent does not read its callees to find out.
 
-## Use the CLI in the agent's loop
+## Analyze the project, not one file
+
+heki follows calls across files. `heki check app/api.py` analyzes that file alone and misses what
+its callees do: run heki on the project (the default `.`) and filter the JSON by path.
+
+## Before an edit: `heki inspect` (experimental)
+
+```console
+$ heki inspect app.users.load_user --output-format json
+$ heki inspect app/users.py:42
+$ heki inspect app/users.py::load_user --callers --depth 3
+```
+
+| Field | Content |
+| ----- | ------- |
+| `effects` | the network, database, file, subprocess, sleep, and lock waits it reaches, and the clients and queries it creates, each with the shortest call chain |
+| `changes` | the parameters, `self` attributes, other objects' attributes, module globals, and closure cells it changes, directly or through calls, with the call chain to the change |
+| `retains` | the parameters it stores where they outlive the call |
+| `returns` | whether its result is a new object, a parameter, or state that outlives the call |
+| `purity` | `pure`, `impure` with the reasons, or `unknown` with the first function whose calls heki cannot resolve, and what the verdict assumes |
+| `callers` | who calls it, whether in a loop; with `--callers`, transitively |
+| `reports` | what `heki check` reports in it; with `--callers`, also above it |
+| `contracts` | the contracts that name it |
+
+- A name is a dotted name (`pkg.mod.Class.method`, or a suffix such as `Class.method`, or a
+  glob), `path.py:line`, or `path.py::name`. An ambiguous or unknown name exits with 2 and lists
+  the candidates (in JSON, under `error.candidates`).
+- `pure` means heki found no effect and no change of an input or of shared state, and resolved
+  every call below. Libraries the [catalog](https://heki.koxudaxi.dev/configuration/#ecosystem-knowledge-toolhekiecosystem)
+  does not list count as having no effects.
+- A field the configuration does not compute is `null`, with the setting that computes it.
+- Exit code 0 when the function was inspected, 2 otherwise or when a file could not be analyzed
+  (the report is still printed, with `complete: false`).
+
+Inspect the edited function again after the edit and compare `effects`, `changes`, `retains`, and
+`returns` with the run before it: a new entry is new behavior. Fact keys carry no line numbers, so
+a diff of the two JSON objects shows only what changed.
+
+## After an edit: `heki check`
 
 A typical instruction for the agent:
 
@@ -2797,8 +2906,25 @@ and the linear lookups `FnShape` answers from a table (W4). `crates/heki/tests/w
 the functions it still allows, each with its reason. The test fails on a finding the list does
 not allow and on an entry that finds nothing any more, so the list only shrinks as walks move.
 
-`heki check --walk-steps <path>` (hidden) writes the steps each owner's walks took per function as
-JSON: growth across sizes of a shape is then checked without timing noise.
+```console
+$ cargo build --release
+$ python3 scripts/check_walk_shapes.py --heki target/release/heki
+```
+
+`scripts/check_walk_shapes.py` runs generated shapes on the release binary, and CI runs it next to
+the memory gate. A shape that lives in one function is placed in a function, a method, and a module
+body, and grown to the largest size whose function the IR budget still models, so a builder change
+moves the size with it; a shape spread over a project (a wide class hierarchy, a chain of private
+helpers) has a fixed size. Each runs with every rule and one contract of each kind, through `heki
+check` and the `--watch` engine, and fails when it costs more than 1 s (on the machine the limits
+were measured on, scaled to the machine running the gate by linear shapes of calls and of loops) or
+1 GiB beyond an empty module. `heki check --walk-steps <path>` (hidden) writes the steps each
+owner's walks took per function as JSON: the gate also fails when an owner's steps grow more than
+2.5 times from half the size to the full size, or when a budget is spent on a shape like real code.
+`KNOWN_OVER` in the script lists the shapes known to cost more, and only shrinks: a listed shape
+runs only through `heki check` (not the `--watch` engine), with a short timeout, and fails the gate
+once it costs under a quarter of the limits. `KNOWN_STEPS` lists, the same way, the shapes whose
+steps are known to grow faster than linearly or to spend a budget.
 
 Each bound comes with a shape in `crates/heki/tests/e2e_analysis_bounds.rs` that is slow without it,
 checked against a time limit: comparisons sharing an operand thirty deep, many `match` statements of
@@ -2816,8 +2942,13 @@ behind as many tests, a function making twenty thousand calls of eight operands 
 types nothing making thousands of strict accesses of one name that one caller calls as many times, a
 helper that types nothing reading, calling, or writing one strict target name thousands of times,
 which a caller calls as many times, many `is` tests each followed by a conditional expression on the
-tested parameter, many branches on a long chain of copies of one `is` test, a long chain of returned
-calls each handed the previous call's result as two of its arguments, a long chain of returned
+tested parameter, many branches on a long chain of copies of one `is` test,
+thousands of tests of an object's state before thousands of acquisitions of its lock, thousands of
+locks held at once over thousands of blocks, thousands of fan-outs of one session in one function,
+hundreds of comprehension fan-outs, thousands of tasks a task group starts in one loop, a long chain
+of returned
+calls each handed the previous call's result as two of its arguments, a function of twelve thousand
+calls each handed the previous call's result, with every rule selected, a long chain of returned
 aliases each appended to one list or to a new list of its own, a long chain of conditional
 expressions each choosing between a call of the previous value and the value, one returned call
 handed the last of a long chain of item reads as each of its arguments, a loop carrying a long chain
@@ -2839,7 +2970,11 @@ one after another, and of a chain of hundreds of `and` tests of module constants
 origins of a chain of thousands of wrappers, of a list filled by appends in a thousand loops, and of
 a phi of sixty branches each choosing a different parameter, and thousands of `call-owners` targets,
 in one contract or in as many contracts, and thousands of references to a `call-owners` target that
-a long chain of phis carries to one `return`.
+a long chain of phis carries to one `return`, an argument handed down through thousands of functions
+of one module to the one that changes it, thousands of reports whose call chains enter one module,
+the callers of the bottom of a lattice of calls thirty levels deep, the chains `heki inspect` walks
+down thousands of calls of one module, a value chosen among a thousand module globals before it is
+changed, and thousands of calls handing a global to a helper that changes it.
 
 A change to the IR builder, a walk, a fixpoint, or a rule's state is also run over a large
 corpus of real projects before it is merged, every run under a memory cap and a timeout. No
@@ -4232,6 +4367,144 @@ No automatic fix.
 
 ---
 
+Source: https://heki.koxudaxi.dev/rules/exclusive-object-fanout/
+
+# exclusive-object-fanout (EFF110)
+
+Family: Execution Effects (EFF) · Heuristic · Opt-in · Experimental · Severity `error` (a bug) · No automatic fix
+
+Opt-in: an object allowing one operation at a time (`asyncio.StreamReader`, an asyncpg connection, a WebSocket) used by tasks started together (`asyncio.gather`, a task group).
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs only when `select` or `extend-select` names its code or name. It has not been measured yet. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
+
+!!! warning "Experimental"
+
+    Its precision is measured on a small sample of reports only. Experimental features can still change in behavior or precision, or be removed, in any release, and each change is listed in the release notes. An opt-in rule that is not experimental is stable and only off by default. See [Experimental Features](https://heki.koxudaxi.dev/experimental/).
+
+## What it does
+Checks for an object that allows one operation at a time, used by tasks a function starts
+together. The rule is opt-in: enable it with `--extend-select EFF110` or
+`extend-select = ["EFF110"]`.
+
+An object allows one operation at a time when the catalog flags a method of its class: a second
+task calling one while another task is inside one raises. heki knows:
+
+- `asyncio.StreamReader`: `read`, `readline`, `readexactly`, `readuntil`, and `async for`;
+- asyncpg's `Connection`: `execute`, `fetch`, `fetchrow`, `fetchval`, ... (`asyncpg.connect()`
+  types it);
+- websockets connections: `recv`, `recv_streaming`, and `async for` (`websockets.connect()`
+  types them);
+- aiohttp's `ClientWebSocketResponse` and `web.WebSocketResponse`: `receive`, `receive_str`,
+  `receive_bytes`, `receive_json`, and `async for` (`ClientSession.ws_connect()` types it);
+- SQLAlchemy's (and SQLModel's) `AsyncSession`, only while it holds no connection: see below.
+
+Add your own with `one-at-a-time = "always"` on a method in `[[tool.heki.ecosystem]]`.
+
+The tasks are started together by:
+
+- `asyncio.gather(...)`: its coroutines and tasks, also those of a generator expression or a
+  comprehension unpacked into it (`*(read(r) for _ in range(n))`), each started once per item;
+- `asyncio.wait(...)` over a display of tasks (`{t1, t2}`) or of a comprehension;
+- the `create_task` calls of one `asyncio.TaskGroup`, and the `start_soon` calls of one anyio
+  task group (`anyio.create_task_group()`), each in a loop started once per iteration.
+
+A task is a coroutine a project call creates (`read_line(reader)`, `self.read_frame()`),
+`asyncio.create_task` of one, or a one-at-a-time call itself (`reader.readline()`). What it
+uses comes from its function's summary, any number of calls deep, through the arguments it is
+given by position or by keyword. The rule reports two tasks, or one started several times,
+using the same object: a parameter or its attribute (`self._reader`), a global, a closure
+variable, or a local variable of the function starting them.
+
+An `AsyncSession` raises only while it holds no connection: before its first operation, and
+after `commit()`, `rollback()`, or `close()` give the connection back. It is reported only
+where the fan-out can be its first operation since then: not after an operation on it, its own
+or through a call, on every path to the fan-out.
+
+It does not report:
+
+- different objects, such as a process's `stdout` and `stderr`, or each task's own reader and
+  writer;
+- uses made while a lock is held, in the task's function or around the call leading to them
+  (`async with self._lock: return await self._reader.readline()`);
+- an object each task gets for itself: the item of the loop or comprehension starting it
+  (`*(read(s) for s in streams)`), or one the task's function makes (a session per task);
+- a task started again only after the previous one is done (`t = asyncio.create_task(...)`
+  again after `asyncio.wait` returns it), and a task appended to a list once, outside a loop
+  (`if proc.stdout: tasks.append(read(proc.stdout))`);
+- a task whose function may bind the object's name first (`self.reader, _ = await
+  asyncio.open_connection(...)`): it may use another object;
+- a fan-out no run reaches;
+- objects whose class is not known, tasks heki cannot resolve, and the same object reached
+  under two different names.
+
+## What a report states
+
+A report states that two tasks a function starts together, or one it starts for every item, use
+the same object that allows one operation at a time, so one of them can raise while the other is
+inside an operation.
+
+Its premises:
+
+- **One at a time**: the object is an instance of a class whose method the catalog or the
+  configuration flags, by the value inferred or an annotation (assumptions R2, R3); for an
+  `AsyncSession`, the fan-out can be its first operation since it was made or gave its connection
+  back. Established for the paths described above.
+- **Together**: the tasks are started by one `asyncio.gather`, `asyncio.wait`, or task group, and
+  run until the fan-out ends. Established.
+- **Same object**: each task's function names the object the same way, through the arguments of
+  its call, and may not bind that name. Established, as long as no other code binds it while the
+  tasks run.
+- **Resolves**: each call on the chain is to the function shown (assumption R1). Open through a
+  method call: one candidate implementation that uses the object is enough.
+- **Reaches**: each task reaches the use outside any lock it holds. Open: one path is enough, and
+  a branch heki cannot decide counts as taken.
+
+## Why is this bad?
+These objects keep the state of one operation in progress: a stream reader one pending read,
+a database connection one query, a WebSocket one receive. A second task starting an operation
+while the first one is inside raises (`RuntimeError: readuntil() called while another coroutine
+is already waiting for incoming data`, asyncpg's `InterfaceError: cannot perform operation:
+another operation is in progress`, `ConcurrencyError` in websockets, `RuntimeError: Concurrent
+call to receive() is not allowed` in aiohttp, SQLAlchemy's `InvalidRequestError` for a session
+provisioning a connection). The failure depends on timing: it shows under load, or when the
+first operation is slow.
+
+## Example
+```python
+import asyncio
+
+
+class FrameClient:
+    def __init__(self, reader: asyncio.StreamReader) -> None:
+        self._reader = reader
+
+    async def read_frame(self) -> bytes:
+        return await self._reader.readexactly(4)
+
+    async def read_frames(self, count: int) -> list[bytes]:
+        return await asyncio.gather(*(self.read_frame() for _ in range(count)))  # EFF110
+```
+
+Use instead:
+```python
+    async def read_frames(self, count: int) -> list[bytes]:
+        return [await self.read_frame() for _ in range(count)]
+```
+
+## Fix safety
+No automatic fix.
+
+## Options
+- `lint.extend-select = ["EFF110"]` (or `--extend-select EFF110`) enables the rule. It is
+  opt-in: selecting the `EFF` prefix does not enable it.
+- `[[tool.heki.ecosystem]]` entries with `one-at-a-time = "always"` add methods; a session-like
+  class takes `"when_unbound"`, and its methods giving the connection back `"unbinds"`.
+
+
+---
+
 Source: https://heki.koxudaxi.dev/rules/hash-attr-mutation/
 
 # hash-attr-mutation (MUT107)
@@ -5033,6 +5306,146 @@ No automatic fix.
 - `lint.extend-select = ["EFF106"]` (or `--extend-select EFF106`) enables the rule. It is
   opt-in: selecting the `EFF` prefix does not enable it.
 - `lint.relax-async-in-tests` applies as for `EFF101`.
+
+
+---
+
+Source: https://heki.koxudaxi.dev/rules/lock-reacquired-while-held/
+
+# lock-reacquired-while-held (EFF109)
+
+Family: Execution Effects (EFF) · Heuristic · Opt-in · Experimental · Severity `error` (a bug) · No automatic fix
+
+Opt-in: a non-reentrant lock (`threading.Lock`, `asyncio.Lock`) taken again, directly or through a call, while it is held (the thread or task waits for itself).
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs only when `select` or `extend-select` names its code or name. It has not been measured yet. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
+
+!!! warning "Experimental"
+
+    Its precision is measured on a small sample of reports only. Experimental features can still change in behavior or precision, or be removed, in any release, and each change is listed in the release notes. An opt-in rule that is not experimental is stable and only off by default. See [Experimental Features](https://heki.koxudaxi.dev/experimental/).
+
+## What it does
+Checks for a non-reentrant lock taken again while it is held: by the function holding it, or by
+a function it calls, any number of calls deep. The rule is opt-in: enable it with
+`--extend-select EFF109` or `extend-select = ["EFF109"]`.
+
+A lock is non-reentrant when the catalog says so: `threading.Lock`, `asyncio.Lock`,
+`asyncio.Condition`, and `multiprocessing.Lock` (`threading.RLock` is reentrant; a
+`threading.Condition` uses an `RLock` unless it is given another lock; a semaphore's class does
+not say its count). Add your own with `non-reentrant-lock = true` in
+`[[tool.heki.ecosystem]]`.
+
+A function holds a lock from a `with` or `async with` over it to the end of that statement, and
+from an `acquire()` to a `release()`, on every path. An `acquire()` counts when it is awaited,
+or when it blocks without a timeout (`lock.acquire()`, `lock.acquire(True)`). The lock is the
+same object on both sides when both name it the same way, through the calls between them:
+
+- an attribute of `self`, or of another parameter (`self._lock`, passed on as `self` or as the
+  lock itself);
+- a module global, also imported from another module or read on its module (`_LOCK`,
+  `locks._LOCK`);
+- a variable of an enclosing function that a closure it calls captures.
+
+The calls followed are those that run there, on the same thread or task: plain calls, awaited
+coroutines, property getters, generators iterated there, and functions builtins call there
+(`sorted(xs, key=self._rank)`). The rule reports the inner acquisition, or the call that leads
+to it, with the call chain as related locations.
+
+It does not report:
+
+- a call that only creates a coroutine or a generator (`asyncio.create_task(self.refresh())`),
+  a function run on another thread (`asyncio.to_thread`, `loop.run_in_executor`, a
+  `threading.Thread` target), and a callable stored or handed to code heki does not follow;
+- an acquisition a branch switches off for the call's arguments (`self._close(notify=False)`
+  where only `notify` leads to the lock);
+- an acquisition behind a test of state the holder changes: an attribute of the lock's owner
+  that the holder, or what it calls, changes (`if self._closed: return`,
+  `if self._in_own_start(): raise`, in the acquiring function or in one on the way to it), or a
+  module global the holder sets (`if _LIB is not None: return _LIB` in a lazy initialization
+  under the lock): such code keeps a flag to know whether it holds the lock, which heki does not
+  evaluate;
+- a lock the code gives back before taking it again, also inside the `with` that took it
+  (`self._lock.release()`, then `self._lock.acquire()`);
+- a lock whose name may be bound to another object before it is taken again
+  (`self._lock = threading.Lock()`, `global _LOCK`, `del self._lock`): by the holder, by a
+  function the holder calls first, or by the function taking the lock or one on the way to it;
+  the name then reaches another lock;
+- a lock some function of the module releases without holding it: another thread gives it back
+  as a signal, so taking it again waits for that thread, by design;
+- `acquire(blocking=False)` and `acquire(timeout=...)`, which return;
+- locks whose class is not known, a lock in a local variable handed to a helper, and the same
+  lock reached under two different names.
+
+## What a report states
+
+A report states that a function holding a non-reentrant lock takes the same lock again, itself
+or through the calls it makes on its thread or task, so the thread or task waits for itself.
+
+Its premises:
+
+- **Non-reentrant**: the lock is an instance of a class the catalog or the configuration flags,
+  by the value inferred or an annotation (assumptions R2, R3).
+- **Held**: a `with` over it, or an awaited or blocking `acquire()`, holds it on every path to the
+  inner acquisition, and nothing gives it back or binds its name again on the way. Established.
+- **Same object**: both sides name the lock the same way, through the arguments of each call, and
+  no function on the way may bind that name. Established, as long as no other thread binds it.
+- **Resolves**: each call on the chain is to the function shown (assumption R1). Open through a
+  method call: one candidate implementation that takes the lock is enough.
+- **Reaches**: each function on the chain reaches the next call on its thread or task. Open: one
+  path is enough, and a branch heki cannot decide counts as taken; only the branches the caller's
+  arguments switch off, and those behind a test of state the holder changes, are left out.
+
+## Why is this bad?
+A thread that takes a `threading.Lock` it already holds waits for itself forever, and so does an
+`asyncio` task taking an `asyncio.Lock` it holds: the lock never becomes free, and every other
+thread or task that needs it stops behind it. The retake is usually hidden in a helper that
+takes the lock for its own callers, called from a method that already holds it, often only on
+an error path.
+
+## Example
+```python
+import threading
+
+
+class Registry:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._items: dict[str, int] = {}
+
+    def size(self) -> int:
+        with self._lock:
+            return len(self._items)
+
+    def add(self, key: str) -> int:
+        with self._lock:
+            self._items[key] = 1
+            return self.size()  # EFF109
+```
+
+Use instead:
+```python
+    def _size_locked(self) -> int:
+        return len(self._items)
+
+    def size(self) -> int:
+        with self._lock:
+            return self._size_locked()
+
+    def add(self, key: str) -> int:
+        with self._lock:
+            self._items[key] = 1
+            return self._size_locked()
+```
+
+## Fix safety
+No automatic fix.
+
+## Options
+- `lint.extend-select = ["EFF109"]` (or `--extend-select EFF109`) enables the rule. It is
+  opt-in: selecting the `EFF` prefix does not enable it.
+- `[[tool.heki.ecosystem]]` entries with `non-reentrant-lock = true` add lock classes.
 
 
 ---

@@ -136,7 +136,7 @@ impl Scalar<'_> {
 /// `typing.TYPE_CHECKING` read as an attribute of the module.
 pub(super) fn scalar<'a>(ix: &FnIndex<'a>, v: VarId) -> Option<Scalar<'a>> {
     let module: &'a ModuleConstants = ix.module;
-    let shape = ix.shape();
+    let shape = &ix.shape;
     match &shape.inst(shape.copy_root(v))?.kind {
         InstKind::Const { literal, .. } => match literal {
             ConstLiteral::None => Some(Scalar::None),
@@ -203,7 +203,7 @@ impl<'a> FnIndex<'a> {
     /// inputs along back edges, which leave the phi undecided.
     pub fn decided(&self) -> &Decided {
         self.decided.get_or_init(|| {
-            let shape = self.shape();
+            let shape = &self.shape;
             let n = self.f.blocks.len();
             let mut live = vec![false; n];
             let mut never_taken: Vec<Option<BlockId>> = vec![None; n];
@@ -793,7 +793,7 @@ impl<'p, 'a> Paths<'p, 'a> {
     fn dominance(&self, region: Region<'_>) -> Answer<Dominance> {
         let f = self.ix.f;
         let decided = self.ix.decided();
-        let shape = self.ix.shape();
+        let shape = &self.ix.shape;
         let (blocks, root): (Vec<BlockId>, BlockId) = match region {
             Region::Function => (shape.rpo().to_vec(), BlockId(0)),
             Region::Loop(li, lp) => {
