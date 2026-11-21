@@ -14,7 +14,8 @@ use crate::contracts::ConfigContracts;
 use crate::{CheckContext, RuleConfigError, SitesByCaller};
 use heki_diagnostics::Diagnostic;
 use heki_effect::{
-    FuncKey, Reach, UnmetWrite, body_runs_at, builds_written_object, is_initializer, reach_across,
+    ContractClass, FuncKey, Reach, UnmetWrite, body_runs_at, builds_written_object, is_initializer,
+    reach_across,
 };
 use rustc_hash::FxHashSet;
 use std::collections::VecDeque;
@@ -23,7 +24,7 @@ pub(crate) fn run(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) -> Result<()
     if !cx.selection.is_enabled("MUT109") || cx.config.invalidation.is_empty() {
         return Ok(());
     }
-    let names = ConfigContracts::new(cx.config)?;
+    let names = ConfigContracts::new(cx.config, cx.kb)?;
     let sites = cx.sites_by_caller();
     let mut paths: Vec<_> = cx.index.files.keys().collect();
     paths.sort();
@@ -61,8 +62,7 @@ pub(crate) fn run(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) -> Result<()
                     continue;
                 }
                 // The configured target that names the write, as the summary matched it.
-                let mut classes = vec![u.class_qualname.clone()];
-                classes.extend(cx.decls.ancestors_of(&u.class_qualname));
+                let classes = ContractClass::lineage(&names, cx.decls, &u.class_qualname);
                 let contract = &names.invalidations[usize::from(u.contract)];
                 let target = contract
                     .target(&classes, &u.attr)
@@ -72,6 +72,8 @@ pub(crate) fn run(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) -> Result<()
                 // diagnostic target names the contract: two contracts announcing one write are
                 // two reports, and two baseline entries.
                 let report_target = format!("{}:{target}", rule.name);
+                let named =
+                    super::matched_name(&target, || format!("{}.{}", u.class_qualname, u.attr));
                 let writer = u
                     .via_chain
                     .last()
@@ -85,12 +87,12 @@ pub(crate) fn run(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) -> Result<()
                     unit,
                     key,
                     u.span,
-                    &report_target,
+                    (&report_target, &named),
                     (writer, u.origin),
                     rule.message.as_deref(),
                     || {
                         format!(
-                            "`{}` writes `{target}` ({}){via} and returns on some path without calling an invalidator of `{}`",
+                            "`{}` writes `{named}` ({}){via} and returns on some path without calling an invalidator of `{}`",
                             key.qualname,
                             u.kind.as_str(),
                             rule.name

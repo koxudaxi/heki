@@ -1128,6 +1128,14 @@ fn extension_configuration_errors_exit_2() {
         "[[tool.heki.read-owners]]\nname = \"r\"\ntargets = [\"Model.fields\"]\nforbidden-readers = [\"[r\"]\n",
         "invalid glob `[r` in read-owners.forbidden-readers",
     );
+    // Globs that each compile but are too many to match together in one set.
+    let globs: Vec<String> = (0..20_000)
+        .map(|i| format!("\"*X{i}?[ab]*{{c,d}}*._*\""))
+        .collect();
+    fails(
+        &owners(&format!("targets = [{}]\n", globs.join(", "))),
+        "the globs of call-owners.targets are too many to match together",
+    );
     // A contract whose rules do not run (`MUT204`, and its strict mode `MUT207`) is not
     // validated (as for the other contracts); a target that names nothing reports nothing.
     p.write(

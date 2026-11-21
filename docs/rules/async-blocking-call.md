@@ -2,134 +2,73 @@
 
 # async-blocking-call (EFF101)
 
-Family: Execution Effects (EFF) · Heuristic · Off by default · Severity `warning` (slower code) · No automatic fix
+Family: Execution Effects (EFF) · Exact · Enabled by default · Severity `warning` (slower code) · No automatic fix
 
-Direct or indirect blocking network/DB/subprocess/sleep call reachable from `async def`.
-
-!!! note "Heuristic"
-
-    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 50 sampled reports (round 3, 2026-11-21), 82% were right about the code. See [Rule Precision](../precision.md).
+A call in `async def` that always runs a network, database, subprocess, or sleep call that waits on the event loop.
 
 ## What it does
-Checks `async def` functions that reach a blocking call on the event loop, directly or through
-synchronous helpers: network I/O (`requests`, `httpx.Client`, `urllib`), host name lookups
-(`socket.getaddrinfo` / `gethostbyname` / `getfqdn`; the event loop has `loop.getaddrinfo()`;
-`getaddrinfo` with the `AI_NUMERICHOST` flag only parses an address and is not reported),
-database drivers
-(`sqlite3`, `psycopg`, `pymongo`, ...; the fetches of a named, server-side psycopg cursor
-`conn.cursor("name")` too), subprocesses waiting for completion, `time.sleep`, and
-waits on other threads (acquiring a `threading` lock, `Event.wait()`, `Thread.join()`,
-`queue.Queue.get()`, `put()` on a queue known to be bounded (see below), `Future.result()`,
-`concurrent.futures.wait()`; a zero timeout or
-`blocking=False` / `block=False` returns at once and is not reported, also when a helper passes
-on its own flag parameter and its caller passes `False`: `close(wait=False)` over
-`shutdown(wait=wait)`; so does `result()` / `exception()` of a `concurrent.futures.Future` known
-to be done: under `if f.done():` (also after `if not f.done(): return`, a `while not f.done():`
-poll, or with `and`), or once `await asyncio.wrap_future(f)` has returned, on every path to the
-call). A function SQLAlchemy's
-`AsyncSession.run_sync(fn)` / `AsyncConnection.run_sync(fn)` runs is called on the event loop:
-its database I/O through the session or connection it receives is awaited for it, its other
-blocking calls are reported. Where an argument decides what a library call does, a literal
-one is followed: `pd.read_csv("https://...")` downloads the file.
+Checks `async def` functions where a call, whenever it returns, has run a call that waits for
+input or output on the event loop's thread: a network request, a database operation, a child
+process, or a sleep (`time.sleep` with a length that is not zero). The waiting call is the
+reported call itself, or the end of a chain of synchronous functions each of which makes the
+next call on every path on which it returns.
 
-`put()` on a `queue.Queue`, `LifoQueue`, or `PriorityQueue` waits only while the queue is full,
-which only a queue its `maxsize` bounds can be, so it is reported only on a queue known to be
-bounded: a positive `maxsize` (a literal, a module constant, a class constant, or an integer a
-constructor parameter receives from every call, such as its default) on some path, and every
-path known. heki follows the queue from where it is built into local variables, the attributes
-the class family's own bodies and methods store (`self.queue = queue.Queue(maxsize=n)`, or a
-queue the class's `__init__` receives), module globals, and parameters, whose project callers
-decide: a helper's at each call, an `async def`'s by what all of its callers pass. A queue built
-without a `maxsize` (or with zero, a negative one, or `None`), one from a call or an object heki
-cannot see, and one a parameter without project callers receives are not known to be bounded,
-and putting on them is not reported.
+Each step of the chain is established, not assumed:
 
-Reading a `@property` or `functools.cached_property` attribute of a project class runs its
-getter, so the read counts as a call of the getter (`self.client` whose getter opens a
-connection). A property that also defines a setter or deleter is not followed.
+- the call is made on every path on which the function returns, exception edges included: an
+  exception raised before it (by an earlier statement, an earlier call in the same statement or
+  `with` header, or the call itself when it is a helper) that a handler takes and then returns
+  or goes on is a path without it;
+- every implementation the call can run is followed, and each one makes the next call: all the
+  overrides in project subclasses of the receiver's class, every class that inherits a mixin
+  method calling `self`, every member of a union; a receiver typed by a protocol has
+  implementations heki cannot list, and is not followed; a decorator other than
+  `staticmethod`, `classmethod`, `property`, `abstractmethod`, or `override` may not run the
+  body, and is not followed; a function defined twice is not followed;
+- the waiting call is in the ecosystem catalog, waits on every call (a database call that may be
+  answered by a session's identity map, a cache, an open connection, or that sends only pending
+  changes does not), and no argument that may come from the caller can make it return at once
+  (`time.sleep(delay)` with `delay` a parameter is not established). An argument heki cannot
+  evaluate counts as one the call waits on (assumption R6), the URL or name a database
+  connection was opened from included: a statement on a SQLAlchemy engine or another DB-API
+  connection opened from a value heki does not know waits. `sqlite3.connect` is the one
+  exception, as its in-memory form is common: a SQLite connection waits only when heki
+  establishes that it was opened on a file (a literal or a module constant without an in-memory
+  form, or a path built from such parts and `__file__`), and any other may be in memory.
 
-Calling a generator function only creates the generator; its body runs where the generator is
-iterated: a `for` loop or comprehension over it, unpacking it, `yield from` it, a call that
-consumes it (`list(...)`, `sorted(...)`, `"".join(...)`, `items.extend(...)`, ...), a lazy wrapper
-iterated there (`enumerate(...)`, `zip(...)`, `itertools.islice(...)`, ...), or a project
-function iterating the parameter it is handed. A generator returned by a plain function runs
-where its caller iterates it. `next(gen)` runs the body only up to its first `yield`, which heki
-does not separate from the rest, so it is not followed.
+Waits on another thread (`Thread.join()`, `Event.wait()`, acquiring a lock, `Queue.get()`,
+`put()` on a bounded queue, `Future.result()`, `Executor.shutdown()`) end at once when that
+thread has done its part, which is state at run time: they are `EFF111` reports. So is everything else `EFF111` reports: a path
+heki cannot decide, a call it cannot resolve to all its implementations.
 
-A call whose arguments switch off the callee's branch with the blocking call is not followed
-into it: `load(name, cache=False)` does not reach the request under `if cache:`. The branches
-are the callee's tests of its parameters: truthiness, `is None`, `isinstance` with builtin,
-`io`, or `os.PathLike` classes, and `hasattr` (which a value's class decides for the methods of
-the file protocol: `read`, `write`, `close`, ...), also of a parameter the callee rebinds on
-some paths (`if buf is None: buf = io.StringIO()`, then `if isinstance(buf, str): open(buf)`
-opens a file only for a path argument). The arguments that decide them are constants and the
-literal defaults of omitted ones (`False`, `None`, `0`, `""`, empty displays), values whose
-exact class the caller knows (a display or comprehension, or an `io.StringIO` / `io.BytesIO` it
-constructs, also held in a variable: `fetch(io.BytesIO(data))` does not reach the download
-under `if not hasattr(src, "read"):`; an instance of a subclass does not count), and tests the
-caller has already made on the same value: a call made only when `isinstance(self._input,
-PathLike)` is false does not reach the callee's branch for `isinstance(self._input, PathLike)`.
-A generator's branches are decided at the call that creates it. Lazy initialization does not
-relax this rule: a connection opened once still blocks the event loop that once.
-
-The rule reports the boundary: the call (or property read, or iteration) inside the `async def`
-that leads to the blocking operation, with the call chain as related information. Several
-boundaries reaching the same blocking call are shown as one report with a count once more than
-ten of them are shown (in the editor, per file). Inline suppressions and Ratchet baselines see
-every boundary: suppressing the first one leaves the others reported, and a baseline counts each.
-
-It does not report:
-
-- calls offloaded to a thread (`asyncio.to_thread`, `loop.run_in_executor`,
-  `anyio.to_thread.run_sync`, `run_in_threadpool`, `asgiref`'s `sync_to_async`,
-  `asyncer.asyncify`, and project wrappers that forward their callable to them; what the
-  offloaded function does besides blocking still counts where it is called, such as its
-  queries in a loop for `EFF103`);
-- functions decorated to run on a thread: `@sync_to_async` (also as a factory,
-  `@sync_to_async(thread_sensitive=False)`), `channels`' `@database_sync_to_async`, `@asyncify`,
-  and any decorator declared with `offloads-blocking-arg = 0`. `@d def f` is `f = d(f)`, so
-  calling `f` calls `d(f)`; other decorators (`functools.wraps` wrappers) are followed;
-- generators that leave the `async def` without being iterated there: returned, stored, or
-  handed to a call that is not a consuming one, such as `StreamingResponse(rows())` or
-  `iterate_in_threadpool(rows())` (whatever iterates them later, often a thread pool, is not
-  analyzed);
-- `async` APIs, also where they are not awaited directly (`async with`, `asyncio.gather`,
-  `asyncio.wait_for`): `httpx.AsyncClient`, `aiohttp`, `redis.asyncio`, SQLAlchemy's
-  `AsyncSession`, psycopg's `AsyncConnection`, pymongo's `AsyncMongoClient`, ...;
-- clients that connect on first use (`redis.Redis(...)`, `pymongo.MongoClient(...)`, except
-  that a `mongodb+srv://` URI literal is resolved in the constructor unless `connect=False`,
-  `pymysql.connect(..., defer_connect=True)`, `sqlalchemy.create_engine(...)`) and calls that
-  only build an object (`Redis.pipeline()`, a
-  lazy Django `QuerySet.filter(...)`): the call that does the I/O is the one reported;
-- spawning a process without waiting (`subprocess.Popen(...)`);
-- private coroutine functions that only run through a synchronous driver without an event loop
-  (`.send(None)`, a `run_sync` function); `asyncio.run(...)` runs its coroutine on an event loop,
-  where blocking stops the tasks it starts;
-- CLI commands (`@click.command`, `@app.command`), ASGI lifespan handlers, and tests
-  (`test_*` functions and files under `tests/`, see the option below).
+The rule reports the boundary: the call inside the `async def` that leads to the waiting call,
+with the chain as related information. Several boundaries reaching the same waiting call are
+shown as one report with a count once more than ten of them are shown. Calls offloaded to a
+thread, `async` APIs, CLI commands, ASGI lifespan handlers, and tests (as pytest finds them) are not
+reported, as for `EFF111`.
 
 ## What a report states
 
-A report states that the `async def` reaches the blocking call at the end of the chain on the event
-loop: the reported call (or property read, or iteration) leads, through the calls shown, to a call
-that blocks the thread.
+A report states that whenever the reported call returns, the waiting call at the end of the
+chain has run on the event loop's thread.
 
 Its premises:
 
-- **Resolves**: each call on the chain is to the function shown, through the calls heki resolves.
-  Open through a method call: one candidate implementation that leads on is enough.
-- **Reaches**: each function on the chain reaches the next call. Open: one path is enough, and a
-  branch heki cannot decide counts as taken; only the branches the caller's arguments switch off,
-  and the cases listed above, are left out.
-- **Blocks**: the last call blocks the thread, as the ecosystem catalog describes it. An argument
-  heki cannot evaluate counts as one the call waits on (assumption R6). Open for an effect with a
-  condition heki does not know: `queue.Queue.put` counts as blocking on a queue whose bound heki
-  cannot see.
+- **Every return**: each function on the chain has made the next call on every path on which it
+  returns normally, exception edges into handlers included; the last call counts as made also
+  when it raised.
+- **Every implementation**: each call on the chain has as its targets every implementation it
+  can run (assumptions R2 and R5), each a synchronous function run as written, and each has the
+  fact.
+- **Waits**: the last call waits for the network, a database, a child process, or a sleep on
+  every call, as the ecosystem catalog describes it (R3), for every argument heki cannot evaluate,
+  the arguments that opened its connection included (R6; a SQLite connection only when it was
+  established to be opened on a file).
 
-Not part of the claim: how long the call blocks, and how often the path runs.
+Not part of the claim: how long the call waits, and how often the reported call runs.
 
 ## Why is this bad?
-A blocking call inside a coroutine stops the whole event loop: every other request, timer, and
+A call that waits inside a coroutine stops the whole event loop: every other request, timer, and
 task waits until it returns.
 
 ## Example
@@ -143,7 +82,7 @@ def load() -> bytes:
 
 
 async def handler() -> bytes:
-    return load()  # EFF101: reaches `time.sleep`
+    return load()  # EFF101: always runs `time.sleep`
 ```
 
 Use instead:

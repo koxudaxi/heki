@@ -132,7 +132,7 @@ Contracts reach further when a function changes its calls:
 | ---------- | ---------------- | ------- |
 | an ownership or `invalidation` contract | every function below it | whether a function only runs inside allowed callers, or whether its callers announce its writes, depends on all callers above it |
 | a contract on calls (`call-owners`, an effect boundary forbidding `calls`) | every function above it | a call of a target is reported at the callers of the private helper making it, and at the scope functions reaching it |
-| an effect boundary, when the function changes its calls of library APIs | every function above it | a boundary may allow one API and forbid another of the same effect, and counts every call it reaches |
+| an effect boundary, when the function changes its calls of library APIs, or the calls, module attribute reads, and import probes outside the project that a boundary forbids | every function above it | a boundary may allow one API and forbid another of the same effect, counts every call it reaches, and no summary records an access outside the project |
 
 Edits that change none of these, such as most comments, stop at the edited file.
 

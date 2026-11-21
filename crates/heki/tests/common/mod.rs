@@ -109,3 +109,26 @@ pub fn run_python(dir: &Path, script: &str) -> String {
     );
     String::from_utf8(out.stdout).unwrap()
 }
+
+/// `rules` with the heuristic sibling of each effect rule among them (`EFF111` for `EFF101`,
+/// `EFF113` for `EFF103`): a report of the claim the exact rule does not establish is its
+/// sibling's.
+#[allow(dead_code)]
+pub fn with_siblings<'r>(rules: &[&'r str]) -> Vec<&'r str> {
+    let mut out = Vec::new();
+    for rule in rules {
+        out.push(*rule);
+        match *rule {
+            "EFF101" => out.push("EFF111"),
+            "EFF103" => out.push("EFF113"),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// [`with_siblings`] of a comma-separated selection.
+#[allow(dead_code)]
+pub fn select_with_siblings(select: &str) -> String {
+    with_siblings(&select.split(',').collect::<Vec<_>>()).join(",")
+}
