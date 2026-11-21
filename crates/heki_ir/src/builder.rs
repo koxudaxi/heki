@@ -426,7 +426,11 @@ impl<'a> ModuleLowerer<'a> {
             passed_from: None,
         };
         let fn_id = self.alloc_function_slot(placeholder);
-        self.lowered_at.insert(spec.span, fn_id);
+        // The module body is no definition, and its span (the whole source) is also the span of
+        // a definition or an expression that spans the whole file.
+        if !spec.is_module_body {
+            self.lowered_at.insert(spec.span, fn_id);
+        }
 
         let mut builder = FnBuilder::new(
             self,
@@ -616,14 +620,17 @@ struct FnBuilder<'m, 'a> {
     may_raise: Vec<bool>,
     preds: Vec<Vec<BlockId>>,
     sealed: Vec<bool>,
+    /// A path from the entry reaches the block through the edges added so far. Lowering adds
+    /// the edges entering a block before the ones leaving it, except a loop's back edges, which
+    /// come from blocks reached only through its header: marking a block when an edge from a
+    /// marked one enters it finds every block a path reaches.
+    reachable: Vec<bool>,
     cur_bb: BlockId,
 
     var_names: Vec<Option<String>>,
     current_def: FxHashMap<(BlockId, String), VarId>,
     incomplete_phis: FxHashMap<BlockId, Vec<(String, VarId)>>,
     var_replacements: FxHashMap<VarId, VarId>,
-    /// The source of each `Copy`.
-    copy_src: FxHashMap<VarId, VarId>,
 
     exc_target_stack: Vec<BlockId>,
     /// The statements around the current point that a jump out of them runs, innermost last.
@@ -703,12 +710,12 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             may_raise: vec![false],
             preds: vec![Vec::new()],
             sealed: vec![true], // entry block has no predecessors
+            reachable: vec![true],
             cur_bb: BlockId(0),
             var_names: Vec::new(),
             current_def: FxHashMap::default(),
             incomplete_phis: FxHashMap::default(),
             var_replacements: FxHashMap::default(),
-            copy_src: FxHashMap::default(),
             exc_target_stack: Vec::new(),
             unwind: Vec::new(),
             loop_stack: Vec::new(),
@@ -754,6 +761,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         self.may_raise.push(false);
         self.preds.push(Vec::new());
         self.sealed.push(sealed);
+        self.reachable.push(false);
         // Any block allocated while inside active loops belongs to those loop bodies.
         for lp in &mut self.loop_stack {
             lp.body_blocks.push(id);
@@ -765,6 +773,9 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         let p = &mut self.preds[to.0 as usize];
         if !p.contains(&from) {
             p.push(from);
+        }
+        if self.reachable[from.0 as usize] {
+            self.reachable[to.0 as usize] = true;
         }
     }
 
@@ -790,9 +801,6 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
 
     fn emit(&mut self, kind: InstKind, span: Span) {
         self.spend_unit();
-        if let InstKind::Copy { dst, src } = kind {
-            self.copy_src.insert(dst, src);
-        }
         self.ensure_open_block();
         let bb = self.cur_bb;
         if kind.may_raise() {
@@ -1147,13 +1155,15 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 break;
             }
         }
-        // The one other value can be a copy of the phi: a loop no path enters has only its back
-        // edge, which passes the phi around through copies. Taking that value would close the
-        // copies into a cycle; the phi stays, with no value from outside.
+        // In a block a path from the entry reaches, the one other value comes in on every path
+        // and is defined before the block. A loop no path enters has only its back edges, whose
+        // one other value can be computed from the phi (`d = d.x` in a loop after `return`):
+        // taking it would define a value from itself, a cycle of definitions without a phi. The
+        // phi stays there, with no value from outside.
         if trivial
             && let Some(s) = same
             && s != phi_var
-            && !self.copies(s, phi_var)
+            && self.reachable[bb.0 as usize]
         {
             self.var_replacements.insert(phi_var, s);
             return s;
@@ -1189,19 +1199,6 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
 
     fn canonical_var(&self, v: VarId) -> VarId {
         resolve_replacement(&self.var_replacements, v)
-    }
-
-    /// Whether `v` is `of` through copies. The copies form no cycle: only replacing a phi can
-    /// close one, and `finish_phi` asks this first.
-    fn copies(&self, v: VarId, of: VarId) -> bool {
-        let mut cur = v;
-        while let Some(&src) = self.copy_src.get(&cur) {
-            cur = self.canonical_var(src);
-            if cur == of {
-                return true;
-            }
-        }
-        false
     }
 
     // -------------------------------------------------------------------------
@@ -3809,6 +3806,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         self.may_raise = vec![false];
         self.preds = vec![Vec::new()];
         self.sealed = vec![true];
+        self.reachable = vec![true];
         self.incomplete_phis.clear();
         self.var_replacements.clear();
         self.finished_loops.clear();

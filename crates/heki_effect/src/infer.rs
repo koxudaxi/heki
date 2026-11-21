@@ -1240,8 +1240,7 @@ impl<'e, 'a> Engine<'e, 'a> {
             _ if !args.is_empty()
                 && self
                     .cx
-                    .kb
-                    .lookup(fqn)
+                    .catalog(fqn)
                     .is_some_and(|e| e.copy_sanitizer.is_some()) =>
             {
                 return Ok(self.need(args[0])?.cloned());
@@ -1329,8 +1328,7 @@ impl<'e, 'a> Engine<'e, 'a> {
         match cx.project.method_targets(class, method, skip_self) {
             Callee::External(symbol)
                 if cx
-                    .kb
-                    .lookup(&symbol)
+                    .catalog(&symbol)
                     .is_some_and(|e| e.copy_sanitizer.is_some()) =>
             {
                 Some(self_ty)
