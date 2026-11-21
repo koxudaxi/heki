@@ -462,6 +462,193 @@ fn a_class_base_naming_a_target_counts_with_calls_and_bases() {
     assert_eq!(base_reports("subclasses = false\n"), exact);
 }
 
+// The bases a class statement passes, each named in the scope the statement runs in: a
+// parameter, a local, a closure cell, or a class-body name of the same name as the imported
+// target is another value.
+const SCOPED: &str = r#"import pkg.core as core
+from pkg.core import Error, Rule
+
+
+def from_parameter(Rule):
+    class Derived(Rule):
+        pass
+
+    return Derived
+
+
+def from_module_parameter(core):
+    class Derived(core.Rule):
+        pass
+
+    return Derived
+
+
+def from_local(make):
+    Rule = make()
+
+    class Derived(Rule):
+        pass
+
+    return Derived
+
+
+def from_one_path(flag, other):
+    if flag:
+        Rule = other
+
+    class Derived(Rule):
+        pass
+
+    return Derived
+
+
+def from_enclosing_parameter(Rule):
+    def inner():
+        class Derived(Rule):
+            pass
+
+        return Derived
+
+    return inner
+
+
+def from_call(make):
+    class Derived(make()):
+        pass
+
+    return Derived
+
+
+class Holder:
+    Rule = Error
+
+    class Derived(Rule):
+        pass
+
+
+def through_alias():
+    Base = Rule
+
+    class Derived(Base):
+        pass
+
+    return Derived
+
+
+def through_enclosing_alias():
+    Base = Rule
+
+    def inner():
+        class Derived(Base):
+            pass
+
+        return Derived
+
+    return inner
+
+
+def reading_the_module_class():
+    def inner():
+        class Derived(Rule):
+            pass
+
+        return Derived
+
+    return inner
+
+
+class AliasHolder:
+    Base = Rule
+
+    class Derived(Base):
+        pass
+"#;
+
+// The module rebinds the imported name: a class statement before the rebinding subclasses the
+// import, one after it (or in a function, which runs once the module has run) the new value.
+const REBOUND: &str = r#"from pkg.core import Error, Rule
+
+
+class Before(Rule):
+    pass
+
+
+def later():
+    class Derived(Rule):
+        pass
+
+    return Derived
+
+
+Rule = Error
+
+
+class After(Rule):
+    pass
+"#;
+
+// The name holds the target on one path and another class on the other: no established base.
+const FALLBACK: &str = r#"try:
+    from pkg.core import Rule
+except ImportError:
+    Rule = object
+
+
+class Fallback(Rule):
+    pass
+"#;
+
+#[test]
+fn a_class_base_is_named_in_the_scope_of_its_class_statement() {
+    let p = Project::new("references_scoped_bases");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT204\"]\n\n[[tool.heki.call-owners]]\nname = \"home\"\ntargets = [\"pkg.core.Rule\"]\nallowed-callers = [\"pkg.core.*\"]\nreferences = \"calls-and-bases\"\n",
+    )
+    .write("pkg/__init__.py", "")
+    .write("pkg/core.py", CORE)
+    .write("pkg/scoped.py", SCOPED)
+    .write("pkg/rebound.py", REBOUND)
+    .write("pkg/fallback.py", FALLBACK);
+    let (code, stdout, stderr) = p.check(&["--output-format", "json"]);
+    assert_eq!(code, 1, "{stdout}{stderr}");
+    let diags: Vec<Value> = serde_json::from_str(&stdout).unwrap();
+    let mut found: Vec<(String, u64, u64, String)> = diags
+        .iter()
+        .map(|d| {
+            (
+                d["path"].as_str().unwrap().to_owned(),
+                d["line"].as_u64().unwrap(),
+                d["column"].as_u64().unwrap(),
+                d["message"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    found.sort();
+    let at = |path: &str, line: u64, column: u64, func: &str| {
+        (
+            path.to_owned(),
+            line,
+            column,
+            format!("`{func}` subclasses `pkg.core.Rule` outside the call owners of `home`"),
+        )
+    };
+    let scoped = |line: u64, column: u64, func: &str| at("pkg/scoped.py", line, column, func);
+    // The target through a local alias, a closure cell holding it, a module global read in a
+    // nested function, and a class-body alias; the import before the module rebinds it. None of
+    // the bases shadowing the import (a parameter, a module parameter, a local, a local bound on
+    // one path, an enclosing function's parameter, a call's result, a class-body name) is it.
+    let mut expected = vec![
+        at("pkg/rebound.py", 4, 1, "<module>"),
+        scoped(65, 5, "through_alias"),
+        scoped(75, 23, "through_enclosing_alias.<locals>.inner"),
+        scoped(85, 23, "reading_the_module_class.<locals>.inner"),
+        scoped(96, 5, "<module>"),
+    ];
+    expected.sort();
+    assert_eq!(found, expected);
+}
+
 #[test]
 fn an_effect_boundary_counts_references_for_calls_only_with_the_key() {
     let boundary = |references: &str| {
@@ -510,11 +697,11 @@ fn an_effect_boundary_counts_class_bases_with_calls_and_bases() {
         .write("pkg/core.py", CORE)
         .write(
             "pkg/pure_ops.py",
-            "from pkg.core import Rule\n\n\ndef helper() -> None:\n    class Local(Rule):\n        pass\n",
+            "from pkg.core import Rule\n\n\ndef helper() -> None:\n    class Local(Rule):\n        pass\n\n\ndef shadowed(Rule: type) -> None:\n    class Local(Rule):\n        pass\n",
         )
         .write(
             "pkg/pure.py",
-            "from pkg.pure_ops import helper\n\n\ndef render() -> None:\n    helper()\n",
+            "from pkg.pure_ops import helper, shadowed\n\n\ndef render() -> None:\n    helper()\n\n\ndef paint() -> None:\n    shadowed(dict)\n",
         );
         p.check(&["--output-format", "concise"])
     };
@@ -528,6 +715,8 @@ fn an_effect_boundary_counts_class_bases_with_calls_and_bases() {
         ),
         "{stdout}"
     );
+    // A parameter of the imported class's name is another class.
+    assert!(!stdout.contains("`paint`"), "{stdout}");
 }
 
 #[test]

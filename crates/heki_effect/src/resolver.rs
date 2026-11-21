@@ -2321,13 +2321,6 @@ impl ProjectDecls {
         out
     }
 
-    /// The bases the class statement of the project class `class` names, canonical, in order.
-    pub fn bases_of(&self, class: &str) -> Vec<String> {
-        self.class(class).map_or_else(Vec::new, |c| {
-            c.bases.iter().map(|b| self.canonical(b)).collect()
-        })
-    }
-
     /// The project classes `class` inherits from (its MRO without itself and external bases).
     pub fn ancestors_of(&self, class: &str) -> Vec<String> {
         let class = self.canonical(class);

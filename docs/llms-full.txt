@@ -1284,12 +1284,13 @@ The call side of `write-owners`.
   arguments, so it never matches. A target with an argument list names no symbol outside the
   project; `unresolved = "report"` matches its last name before the list, whatever the arguments
   of a call on an object of unknown class.
-- With `references = "calls-and-bases"`, a class statement whose declaration resolves a base to a
-  class target is reported too ("`<module>` subclasses `pkg.core.Base`"), at the base, or at the
-  class statement for a name an import or the module body binds: the class it makes holds the
-  base, and constructing it runs the base's initialization unless it overrides it. A base is
-  matched as a construction is (with `subclasses = false`, the class itself only), and a keyword
-  (`metaclass=Base`) is no base.
+- With `references = "calls-and-bases"`, a class statement passing a class target as a base is
+  reported too ("`<module>` subclasses `pkg.core.Base`"), at the base, or at the class statement
+  for a name an import or the module body binds: the class it makes holds the base, and
+  constructing it runs the base's initialization unless it overrides it. A base is the value the
+  statement passes, typed where the statement runs as any value is (a parameter, a local, or a
+  class-body name of the imported class's name is another value), and matched as a construction
+  is (with `subclasses = false`, the class itself only); a keyword (`metaclass=Base`) is no base.
 
 ### Allowed and forbidden functions
 
@@ -3966,12 +3967,14 @@ running the class statement (`<module>` for a class at module level).
 With `references = "calls-and-bases"`, a class statement naming a class target among its bases
 counts too ("`<module>` subclasses `pkg.core.Base`"): the class it makes holds the base, and
 constructing it runs the base's initialization unless it overrides it. A base is a positional
-argument of the class statement that its declaration resolves to the class (`Base`,
-`core.Base`, `Base[int]`, also through an import alias), matched as a construction is, so a base
-that is a subclass of the target counts unless `subclasses = false`; a keyword
-(`metaclass=Base`) is no base. It is reported at the base where the statement loads it, and at
-the class statement for a name an import or the module body binds, for the function running the
-class statement (a nested class: the function running the outer one).
+argument of the class statement whose value is the class where the statement runs (`Base`,
+`core.Base`, `Base[int]`, also through an import alias, a local alias, or a closure cell holding
+it; a parameter, a local, or a class-body name of the imported class's name is another value),
+matched as a construction is, so a base that is a subclass of the target counts unless
+`subclasses = false`; a keyword (`metaclass=Base`) is no base. It is reported at the base where
+the statement loads it, and at the class statement for a name an import or the module body
+binds, for the function running the class statement (a nested class: the function running the
+outer one).
 
 A call through a value typed with a project `Protocol` that declares the method is judged by the
 protocol's declaration (`h._helper()` with `h: Host` calls `Host._helper`), not by the
@@ -4037,9 +4040,10 @@ Its premises:
   copies and displays, an argument, a store, a `return`, a `yield`, or a `raise`. Open: a value
   merged from several paths is enough. Whether the code it is handed to calls it is not part of
   the claim.
-- **Subclasses** (`references = "calls-and-bases"`): the class statement's declaration resolves
-  a base to the target class. Established from the declarations. Whether the subclass is
-  constructed is not part of the claim.
+- **Subclasses** (`references = "calls-and-bases"`): the value the class statement passes as a
+  base is the target class, typed where the statement runs. Established: a base heki cannot type
+  (a parameter, a call's result, a value merged from paths that disagree) is no match. Whether
+  the subclass is constructed is not part of the claim.
 - **Arguments** (a target with an argument list): the call binds each parameter the list names to
   its constant. Established: an argument heki cannot tell is no match.
 
@@ -4392,9 +4396,9 @@ Its premises:
   importing a module, open: the module is not established to be the project's. With
   `references = "calls"`, a target handed on is one for `calls`: the value is the target, and it
   reaches a use handing it on. Established; whether the code it is handed to calls it is not
-  part of the claim. With `"calls-and-bases"`, so is a class statement whose declaration
-  resolves a base to a class target; whether the subclass is constructed is not part of the
-  claim.
+  part of the claim. With `"calls-and-bases"`, so is a class statement passing a class target
+  as a base, typed where the statement runs; whether the subclass is constructed is not part of
+  the claim.
 
 ## Why is this bad?
 Some parts of a code base promise to be pure: rendering a model must not mutate it, domain code

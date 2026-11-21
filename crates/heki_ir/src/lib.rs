@@ -756,6 +756,12 @@ pub struct IrFunction {
     /// `f(*xs)` passes the elements of `xs`, not `xs`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub starred: Vec<(VarId, u32)>,
+    /// The bases of the class statements: the `dst` of a class's `MakeClosure` and the index
+    /// among its operands (its `captured`) of a value the statement passes as a base, in the
+    /// order of the bases. A starred base (`*bases`) passes the items of its value and is not
+    /// listed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub class_bases: Vec<(VarId, u32)>,
     /// The text each f-string starts with (`heki_ast::fstring_head`): the `dst` of the string
     /// it builds and `ALTER TABLE ` of `f"ALTER TABLE {name}"`, in the order of the variables.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
