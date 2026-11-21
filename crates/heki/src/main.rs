@@ -451,6 +451,7 @@ fn run_assumptions(args: AssumptionsArgs) -> Result<ExitCode> {
         working_dir: None,
         target_version: args.target_version.as_deref(),
         overrides: None,
+        removed: None,
     })?;
     let mut total_fns = 0usize;
     let mut all_records = Vec::new();
