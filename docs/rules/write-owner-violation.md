@@ -194,7 +194,8 @@ No automatic fix.
     `pkg.model.Model.*`).
   - `allowed-writers`: functions allowed to write the targets, as dotted names or globs matched
     against the function's qualified name and its `Class.method` qualname (`Store.*`,
-    `pkg.parser.generation.*`).
+    `pkg.parser.generation.*`). A module part names one module without its submodules:
+    `pkg.model:*` allows what `pkg/model/__init__.py` defines, not `pkg.model.io.save`.
   - `forbidden-writers`: when set, only writes by these functions are reported (matched like
     `allowed-writers`, `pkg.render.*`); `allowed-writers` and `exempt-methods` stay exceptions
     inside them. A write is in scope when a function on its chain (the reporting function, the

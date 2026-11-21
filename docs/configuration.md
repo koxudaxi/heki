@@ -159,13 +159,24 @@ Contracts declare what no type can say. Each kind is an array of tables with its
   method, or class: `pkg.*._*` names the private members of everything in `pkg`, and no function
   of a private module whose own name is public; `pkg.api_*` names `pkg.api_commit`, not
   `pkg.api_helpers.api_reset`.
+- A name with a module part, `module:qualname`, names definitions of the project modules the
+  part names, never of their submodules. The module part matches the whole module name, exactly
+  or as a glob (`pkg.*:run`), not a suffix; the qualified name after the colon matches the whole
+  name inside the module, a `*` spanning dots. `pkg:*` names everything `pkg/__init__.py`
+  defines (its functions, classes, methods, nested functions, and module body `<module>`), where
+  `pkg.*` also covers `pkg.sub.user.sub_user`; `pkg.sub:Store.*` names the methods of `Store` in
+  `pkg.sub`. In a `Class.attr` target the module part belongs to the class
+  (`pkg.model:DataModel.fields`), and a call target with one is matched whole (`pkg:*` names
+  every function, method, and class of `pkg`). Such a name never matches an external symbol, and
+  `unresolved = "report"` counts its last name (`decide` of `pkg:decide`). A module part that
+  names no project module is no error: the name matches nothing.
 - A report of a glob target names the member it matched (`reads
   `pkg.types.DataType._flag``); one report standing for several members lists the others.
 - A `Class.attr` target covers the subclasses of the class too.
 - A contract heki cannot use is a configuration error: a target that is not `Class.attr`, an
-  invalid glob, call targets whose globs are too many to match together (tens of thousands of
-  complex ones), or an unknown value of `forbid`, `fresh-objects`, `unresolved`, or
-  `references`.
+  invalid glob, a name with more than one colon or an empty module or qualified name, call
+  targets whose globs are too many to match together (tens of thousands of complex ones), or an
+  unknown value of `forbid`, `fresh-objects`, `unresolved`, or `references`.
 - With `unresolved = "report"`, a contract also reports the accesses it cannot tie to a class,
   each under its own rule (`MUT205` writes, `MUT206` reads, `MUT207` calls): an attribute or
   method named like a target, accessed on an object of unknown class (an unannotated parameter,

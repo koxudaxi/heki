@@ -385,7 +385,11 @@ kept until the indexes change; a recording that reads one again adds what comput
 invalidation contracts are declared. `TypedFieldWriteSite::key` names the entry a write goes to.
 `unresolved_access_sites` hold only the names a `read-owners` or `call-owners` contract with
 `unresolved = "report"` ends a target with (`Contracts::unresolved_read`,
-`Contracts::unresolved_call`), so a summary keeps no read or call no rule asks for.
+`Contracts::unresolved_call`), so a summary keeps no read or call no rule asks for. A class the
+summaries hand to the contracts (`ContractClass`, in `ArgTargets` too) carries its qualname inside
+its module, read from the declarations, only when an `invalidation` target's class or a
+`readonly-returns` producer has a module part (`Contracts::names_class_modules`): such a pattern
+compares the module and the qualname, which the fqn alone does not tell apart.
 
 `FileSummary.reference_sites` holds, only when a call contract sets `references = "calls"`
 (`Contracts::references`), the references handing a project function, method, or class on to

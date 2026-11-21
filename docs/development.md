@@ -128,7 +128,7 @@ follows these rules:
 - A rule that follows exception edges, one from each call that can raise, runs a dataflow over
   blocks with one fact per tracked value. It never enumerates paths.
 - A contract's targets are looked up from what an access names (the dotted suffixes of a
-  function's names, its class), never tried one by one: the cost grows with the sites, not with
+  function's names, its module, its class), never tried one by one: the cost grows with the sites, not with
   sites times targets, and the targets of every contract of a rule are indexed together.
 
 Each bound comes with a shape in `crates/heki/tests/e2e_analysis_bounds.rs` that is slow without it,

@@ -7,8 +7,8 @@
 //! invalidator reached through calls are known across files without IR.
 
 use crate::mut_rules::{Allowance, AllowanceKeys, ReadOnlyProducers};
-use crate::{DottedPattern, RuleConfigError, RuleSelection};
-use heki_effect::{Contracts, FuncKey, OptInFacts, TypedWrites};
+use crate::{DottedPattern, RuleConfigError, RuleSelection, last_name, split_last_dot};
+use heki_effect::{ContractClass, Contracts, FuncKey, OptInFacts, TypedWrites};
 use heki_env::HekiConfig;
 use rustc_hash::FxHashMap;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -26,9 +26,7 @@ pub(crate) struct InvalidationNames {
 }
 
 fn names(patterns: &[DottedPattern], fqn: &str, qualname: &str) -> bool {
-    patterns
-        .iter()
-        .any(|p| p.matches(fqn) || p.matches(qualname))
+    patterns.iter().any(|p| p.matches_def(fqn, qualname))
 }
 
 impl InvalidationNames {
@@ -42,10 +40,10 @@ impl InvalidationNames {
 
     /// The first target naming attribute `attr` of an object of class `classes[0]` (`classes`:
     /// the class and its project bases), as configured.
-    pub(crate) fn target(&self, classes: &[String], attr: &str) -> Option<&str> {
+    pub(crate) fn target(&self, classes: &[ContractClass], attr: &str) -> Option<&str> {
         self.targets
             .iter()
-            .find(|(_, class, a)| a.matches(attr) && classes.iter().any(|name| class.matches(name)))
+            .find(|(_, class, a)| a.matches(attr) && classes.iter().any(|c| class.matches_class(c)))
             .map(|(text, _, _)| text.as_str())
     }
 }
@@ -55,6 +53,8 @@ impl InvalidationNames {
 pub(crate) struct ConfigContracts {
     /// [`Contracts::ownership`].
     ownership: bool,
+    /// [`Contracts::names_class_modules`].
+    class_modules: bool,
     producers: ReadOnlyProducers,
     pub(crate) invalidations: Vec<InvalidationNames>,
     /// The masks of [`Contracts::invalidator_of`] by name.
@@ -109,7 +109,7 @@ impl ConfigContracts {
         for rule in &config.invalidation {
             let mut targets = Vec::new();
             for t in &rule.targets {
-                let Some((class, attr)) = t.rsplit_once('.') else {
+                let Some((class, attr)) = split_last_dot(t) else {
                     return Err(RuleConfigError::InvalidTarget {
                         section: "invalidation",
                         target: t.clone(),
@@ -147,9 +147,16 @@ impl ConfigContracts {
         let strict = |mode: &Option<String>| mode.as_deref() == Some("report");
         let reads = config.read_owners.iter().filter(|r| strict(&r.unresolved));
         let calls = config.call_owners.iter().filter(|r| strict(&r.unresolved));
+        let producers = ReadOnlyProducers::new(config)?;
+        let class_modules = producers.names_modules()
+            || invalidations
+                .iter()
+                .flat_map(|c| &c.targets)
+                .any(|(_, class, _)| class.module().is_some());
         Ok(Self {
             ownership: declares_ownership(config),
-            producers: ReadOnlyProducers::new(config)?,
+            class_modules,
+            producers,
             invalidations,
             invalidators: NameMasks::default(),
             writers,
@@ -167,12 +174,7 @@ fn last_names<'t>(
     context: &'static str,
 ) -> Result<Vec<DottedPattern>, RuleConfigError> {
     targets
-        .map(|t| {
-            DottedPattern::new(
-                t.rsplit_once('.').map_or(t.as_str(), |(_, last)| last),
-                context,
-            )
-        })
+        .map(|t| DottedPattern::new(last_name(t), context))
         .collect()
 }
 
@@ -181,8 +183,12 @@ impl Contracts for ConfigContracts {
         self.ownership
     }
 
-    fn readonly_producer(&self, fqn: &str) -> Option<bool> {
-        self.producers.deep_for(fqn)
+    fn names_class_modules(&self) -> bool {
+        self.class_modules
+    }
+
+    fn readonly_producer(&self, fqn: &str, qualname: &str) -> Option<bool> {
+        self.producers.deep_for(fqn, qualname)
     }
 
     fn invalidations(&self) -> usize {
@@ -212,15 +218,15 @@ impl Contracts for ConfigContracts {
         })
     }
 
-    fn target_of(&self, classes: &[String], attr: &str) -> u64 {
+    fn target_of(&self, classes: &[ContractClass], attr: &str) -> u64 {
         mask(&self.invalidations, |c| c.target(classes, attr).is_some())
     }
 
-    fn names_class(&self, classes: &[String]) -> bool {
+    fn names_class(&self, classes: &[ContractClass]) -> bool {
         self.invalidations.iter().any(|c| {
             c.targets
                 .iter()
-                .any(|(_, class, _)| classes.iter().any(|name| class.matches(name)))
+                .any(|(_, class, _)| classes.iter().any(|name| class.matches_class(name)))
         })
     }
 
