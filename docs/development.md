@@ -91,6 +91,11 @@ follows these rules:
 - Facts are kept per SSA value, not per variable per block. State that grows with a function has
   a budget proportional to the function's source bytes, as the IR and proof-state budgets in
   [scope](scope.md) do. Past the budget the function gets no finding, never a guess.
+- A question an analysis cannot decide (a walk past its budget, a size the code does not fix, a
+  premise nothing establishes) answers `heki_ir::walk::Answer::Open`, heki's one type for an
+  answer that is established or unknown. Each use states what an open answer means to it, with
+  `open_means` or a `match`: a rewrite takes it as "no rewrite", an exact report as "no finding",
+  and a heuristic report states its own choice there.
 - A `finally` body is built once per way out of the `try`. Anything made per copy, such as a
   class body, is made once.
 - Dead code is modeled too. A loop after a `return` has only its back edge, and copies around it
@@ -117,10 +122,20 @@ a long chain of copies of one `is` test, a long chain of returned calls each han
 call's result as two of its arguments, a long chain of returned aliases each appended to one list or
 to a new list of its own, a long chain of conditional expressions each choosing between a call of
 the previous value and the value, one returned call handed the last of a long chain of item reads as
-each of its arguments, a loop carrying a long chain of assignments in reverse, an argument handed
-down through thousands of functions of one module to the one that changes it, thousands of
-reports whose call chains enter one module, the callers of the bottom of a lattice of calls thirty
-levels deep, and the chains `heki inspect` walks down thousands of calls of one module.
+each of its arguments, a loop carrying a long chain of assignments in reverse, a loop rotating
+aliases of many `self` containers, a chain of merges of many `self` containers, a loop over a
+generator whose body makes many calls, loops whose bodies hold many conditional blocks one after
+another, a function consuming a generator's result many times in a row, a loop over a `zip` of many
+generator results whose body makes as many calls, a loop over a `zip` of thousands of `self`
+containers whose body makes as many calls, one `zip` of thousands of `self` containers stepped by as
+many `yield from`s, a generator handed on through thousands of private wrappers, each returning the
+one before's result, an edit through the language server changing every method of a class of
+thousands of methods, methods changing a typed dict of `self` thousands of times, a method storing
+under a key after each of hundreds of tests that such a dict holds the key, a function reading
+attributes down a chain ten thousand deep (`x = x.child`), an argument handed down through
+thousands of functions of one module to the one that changes it, thousands of reports whose
+call chains enter one module, the callers of the bottom of a lattice of calls thirty levels deep,
+and the chains `heki inspect` walks down thousands of calls of one module.
 
 A change to the IR builder, a walk, a fixpoint, or a rule's state is also run over a large
 corpus of real projects before it is merged, every run under a memory cap and a timeout. No

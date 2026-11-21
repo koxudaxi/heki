@@ -25,6 +25,7 @@ mod contracts;
 pub mod guards;
 mod infer;
 mod invalidation;
+pub mod iterations;
 pub mod ownership;
 mod query;
 pub mod readonly;
@@ -42,8 +43,12 @@ pub use invalidation::{
     FlowWrite, FuncFlow, INITIALIZERS, Reach, SiteFlow, UnmetWrite, body_runs_at,
     builds_written_object, delegates_to_callers, is_initializer, reach_across,
 };
-pub use ownership::{LocalOrigins, Origins, ResultOf};
-pub use query::{CallerSite, Callers, CallsByCaller, ChangeChain, ParamChange};
+pub use iterations::{
+    BetweenSteps, ContainerChange, ContainerIteration, IteratedContainer, IteratedResult,
+    IterationFacts, ResultIteration,
+};
+pub use ownership::{LocalOrigins, Origins, ResultOf, ReturnOrigins};
+pub use query::{CallerSite, Callers, CallsByCaller, ChangeChain, HandedChange, ParamChange};
 pub use readonly::{ProtectedReturn, ReturnStep, Shared};
 pub use report::{BoundaryReport, boundary_reports, boundary_reports_in};
 pub use resolver::{
@@ -544,6 +549,11 @@ pub struct EffectSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hashed_whole_self_attrs: Option<Box<BTreeSet<String>>>,
     pub mutates_self_attrs: BTreeSet<AttrKeyPath>,
+    /// `MUT113`: what the function changes in place of its instance's containers and how it
+    /// iterates them and the objects its project calls return (`None` when it does none of
+    /// these, as most functions; read through [`Self::iteration_facts`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iterations: Option<Box<IterationFacts>>,
     pub invalidates_cached: BTreeSet<String>,
     /// The facts of every typed write the function reaches, through any callee.
     pub typed_field_writes: BTreeSet<TypedFieldWrite>,
@@ -577,23 +587,14 @@ pub struct EffectSummary {
     pub retains_params: u64,
     /// The function returns a new object that nothing else holds (`fresh-objects`).
     pub returns_new: ReturnsNew,
-    /// What the object the function returns may be, path by path: a new one, state that
-    /// outlives the call, one of its parameters, or an element of one (`MUT112`; propagated from
-    /// the project callees whose result it returns, [`Self::returns_results`]).
-    #[serde(default, skip_serializing_if = "Origins::is_empty")]
-    pub returns_origins: Origins,
-    /// The project calls of the function whose results it may return (`MUT112`): propagation
-    /// adds what they return to `returns_origins`, through the calls whose results their
-    /// arguments may be ([`ArgOrigin::origins`]).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub returns_results: Vec<ResultOf>,
-    /// The phis the returned object may be ([`Self::origin_nodes`] positions; `MUT112`, local).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub returns_nodes: Vec<u32>,
-    /// What each phi the origin walks of the function meet may be ([`LocalOrigins::nodes`]),
-    /// each walked once (`MUT112`, local).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub origin_nodes: Vec<LocalOrigins>,
+    /// `MUT112`: what the object the function returns may be, path by path: a new one, state
+    /// that outlives the call, one of its parameters, or an element of one, propagated from the
+    /// project callees whose result it returns, through the calls whose results their arguments
+    /// may be ([`ArgOrigin::origins`]). `None` when the function returns nothing `MUT112` knows
+    /// of, as every function while `MUT112` does not run; read through
+    /// [`Self::return_origin_facts`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub return_origins: Option<Box<ReturnOrigins>>,
     /// The function's own writes heki cannot tie to a class (`MUT205`; never propagated).
     pub unresolved_write_sites: BTreeSet<UnresolvedWriteSite>,
     /// The function's own reads and calls heki cannot tie to a class (`MUT206`, `MUT207`; never
@@ -607,27 +608,11 @@ pub struct EffectSummary {
     /// `resolver::CHA_CANDIDATE_LIMIT` candidates, or the function has an A1 hazard (`eval`,
     /// `exec`, `locals()`, frame introspection, a body too large to model).
     pub unknown_calls: bool,
-    /// The module globals and the closure cells of enclosing functions the function's own body
-    /// rebinds, deletes, or changes in place (an object reached from one through attributes,
-    /// items, iteration, and element accessors: `CACHE.clear()`, `REGISTRY[k] = v`,
-    /// `settings.DEBUG = True`), each with the span of its first change. A local fact, never
-    /// propagated.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub changed_state: BTreeMap<SharedState, Span>,
-    /// The function's body, or a body that runs in it, changes a module global
-    /// ([`Self::changed_state`]; propagated).
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub changes_globals: bool,
-    /// The closure cells the function's body, or a body that runs in it, changes, except those
-    /// of its own variables that stay inside its call: a variable it rebinds through a nested
-    /// function, or one it binds only to new containers ([`Self::new_cells`]; propagated).
-    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
-    pub changes_cells: BTreeSet<CellChange>,
-    /// The function's variables that nested functions capture and that it binds only to new
-    /// containers (`out = []`): a nested function changing them in place changes an object of
-    /// this call. A local fact.
-    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
-    pub new_cells: BTreeSet<String>,
+    /// The module globals and closure cells the function changes; `None` for the many
+    /// functions that change none and whose nested functions capture no new container. Shared:
+    /// a final summary holds its local summary's facts until propagation changes them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_state: Option<Arc<SharedStateFacts>>,
 
     /// What iterating the object this plain function returns runs: the bodies of the
     /// generators it returns (directly, through lazy wrappers, or through the functions whose
@@ -656,8 +641,74 @@ pub struct EffectSummary {
     pub declared_hidden: BTreeSet<ExecEffectKind>,
 }
 
+/// The shared state a function changes ([`EffectSummary::shared_state`]). The lists are sorted
+/// and hold each entry once ([`SharedStateFacts::normalize`]); most hold one or two entries, so
+/// they are vectors of their exact length.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SharedStateFacts {
+    /// The module globals and the closure cells of enclosing functions the function's own body
+    /// rebinds, deletes, or changes in place (an object reached from one through attributes,
+    /// items, iteration, and element accessors: `CACHE.clear()`, `REGISTRY[k] = v`,
+    /// `settings.DEBUG = True`), each with the span of its first change. A local fact, never
+    /// propagated.
+    pub changed: Vec<(SharedState, Span)>,
+    /// The function's body, or a body that runs in it, changes a module global (propagated).
+    pub globals: bool,
+    /// The closure cells the function's body, or a body that runs in it, changes, except those
+    /// of its own variables that stay inside its call: a variable it rebinds through a nested
+    /// function, or one it binds only to new containers (`new_cells`; propagated).
+    pub cells: Vec<CellChange>,
+    /// The function's variables that nested functions capture and that it binds only to new
+    /// containers (`out = []`): a nested function changing them in place changes an object of
+    /// this call. A local fact.
+    pub new_cells: Vec<String>,
+    /// The shared state the function's calls hand to project functions, as an argument or as
+    /// the receiver, by call: changed when the callee changes that parameter
+    /// ([`EffectSummary::changes_argument`]). A local fact.
+    pub handed: Vec<HandedState>,
+}
+
+impl SharedStateFacts {
+    fn is_empty(&self) -> bool {
+        self.changed.is_empty()
+            && !self.globals
+            && self.cells.is_empty()
+            && self.new_cells.is_empty()
+            && self.handed.is_empty()
+    }
+
+    /// Sort the lists, keep each entry once (the first change of each state), and drop their
+    /// spare room.
+    pub(crate) fn normalize(&mut self) {
+        self.changed
+            .sort_by(|(a, x), (b, y)| a.cmp(b).then(x.start.cmp(&y.start)));
+        self.changed.dedup_by(|later, first| later.0 == first.0);
+        self.cells.sort();
+        self.cells.dedup();
+        self.new_cells.sort();
+        self.new_cells.dedup();
+        self.handed.sort();
+        self.handed.dedup();
+        self.changed.shrink_to_fit();
+        self.cells.shrink_to_fit();
+        self.new_cells.shrink_to_fit();
+        self.handed.shrink_to_fit();
+    }
+}
+
+/// Shared state handed to a callee: the object of `state` (or one reached from it) is
+/// argument `param` of callee `callee` (its index among the call's project callees) at the
+/// call at `site` (`helper(CACHE)`, `registry.add(x)` on a module-level object).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct HandedState {
+    pub site: Span,
+    pub callee: u8,
+    pub param: u8,
+    pub state: SharedState,
+}
+
 /// State that outlives a call: a module global, or the closure cell of a variable of an
-/// enclosing function (`EffectSummary::changed_state`).
+/// enclosing function ([`SharedStateFacts::changed`]).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SharedState {
@@ -768,6 +819,68 @@ pub struct ArgBinding {
 }
 
 impl EffectSummary {
+    /// [`SharedStateFacts::changed`].
+    pub fn changed_state(&self) -> &[(SharedState, Span)] {
+        self.shared_state.as_ref().map_or(&[], |f| &f.changed)
+    }
+
+    /// [`SharedStateFacts::globals`].
+    pub fn changes_globals(&self) -> bool {
+        self.shared_state.as_ref().is_some_and(|f| f.globals)
+    }
+
+    /// [`SharedStateFacts::cells`].
+    pub fn changes_cells(&self) -> &[CellChange] {
+        self.shared_state.as_ref().map_or(&[], |f| &f.cells)
+    }
+
+    /// [`SharedStateFacts::new_cells`].
+    pub fn new_cells(&self) -> &[String] {
+        self.shared_state.as_ref().map_or(&[], |f| &f.new_cells)
+    }
+
+    /// The shared state handed at the call at `site` to its project callee `callee`
+    /// ([`SharedStateFacts::handed`]).
+    pub fn handed_at(&self, site: Span, callee: usize) -> impl Iterator<Item = &HandedState> {
+        let handed = self
+            .shared_state
+            .as_ref()
+            .map_or(&[][..], |f| &f.handed[..]);
+        let from = handed.partition_point(|h| h.site.start < site.start);
+        handed[from..]
+            .iter()
+            .take_while(move |h| h.site.start == site.start)
+            .filter(move |h| h.site == site && usize::from(h.callee) == callee)
+    }
+
+    /// Whether the function changes the object its parameter `j` is: in place, an attribute
+    /// of it, or a container held in one of its slots.
+    pub fn changes_argument(&self, j: u8) -> bool {
+        self.mutated_param_paths.contains_key(&j)
+            || self
+                .inplace_param_slots
+                .get(&j)
+                .is_some_and(|s| !s.is_empty())
+    }
+
+    /// Change the shared-state facts with `change` and normalize them, keeping `None` when they
+    /// stay empty (so that a summary without them equals one that never had them).
+    pub(crate) fn change_shared_state(&mut self, change: impl FnOnce(&mut SharedStateFacts)) {
+        let mut facts = self.shared_state.take().unwrap_or_default();
+        let f = Arc::make_mut(&mut facts);
+        change(f);
+        f.normalize();
+        if !f.is_empty() {
+            self.shared_state = Some(facts);
+        }
+    }
+
+    /// Change the shared-state facts while the function's body is read; the caller normalizes
+    /// them once at the end ([`SharedStateFacts::normalize`]).
+    pub(crate) fn shared_state_mut(&mut self) -> &mut SharedStateFacts {
+        Arc::make_mut(self.shared_state.get_or_insert_with(Arc::default))
+    }
+
     /// Drop the execution effects in `hidden`, with their chains and guards, here and in what
     /// iterating the returned object runs.
     pub(crate) fn hide_exec_effects(&mut self, hidden: &BTreeSet<ExecEffectKind>) {
@@ -822,9 +935,16 @@ impl EffectSummary {
             })
             .collect();
         out.param_change_sites.clear();
-        for span in out.changed_state.values_mut() {
-            *span = Span { start: 0, end: 0 };
+        if let Some(f) = &mut out.shared_state {
+            let f = Arc::make_mut(f);
+            for (_, span) in &mut f.changed {
+                *span = Span { start: 0, end: 0 };
+            }
+            for h in &mut f.handed {
+                h.site = Span { start: 0, end: 0 };
+            }
         }
+        out.iterations = out.iterations.map(|f| Box::new(f.without_locations()));
         out.iterated = out.iterated.map(|i| Box::new(i.without_locations()));
         if let Some(r) = &mut out.returns_protected {
             zero_hop_spans(&mut r.chain);
@@ -865,18 +985,45 @@ impl EffectSummary {
 
     /// Equality of everything callers copy into their own summaries: the facts, and the
     /// positions of call chains and write sites. Only the positions of the function's own read
-    /// sites, parameter and global changes, and unresolved accesses are left out: those are
-    /// never propagated.
+    /// sites, parameter, container, and global changes, iterations, and unresolved accesses are
+    /// left out: those are never propagated.
     pub fn same_for_callers(&self, other: &Self) -> bool {
         let without_local = |s: &Self| Self {
             typed_field_read_sites: BTreeSet::new(),
             param_change_sites: BTreeMap::new(),
-            changed_state: BTreeMap::new(),
+            shared_state: s.shared_state.as_ref().and_then(|f| {
+                let propagated = SharedStateFacts {
+                    changed: Vec::new(),
+                    handed: Vec::new(),
+                    ..(**f).clone()
+                };
+                (!propagated.is_empty()).then(|| Arc::new(propagated))
+            }),
+            iterations: s.iterations.as_ref().and_then(|f| f.propagated()),
             unresolved_write_sites: BTreeSet::new(),
             unresolved_access_sites: BTreeSet::new(),
             ..s.clone()
         };
         without_local(self) == without_local(other) && self.same_facts(other)
+    }
+
+    /// [`Self::iterations`], empty when there are none.
+    pub fn iteration_facts(&self) -> &IterationFacts {
+        self.iterations
+            .as_deref()
+            .unwrap_or(&iterations::NO_ITERATION_FACTS)
+    }
+
+    /// [`Self::iterations`], to add facts to.
+    pub(crate) fn iteration_facts_mut(&mut self) -> &mut IterationFacts {
+        self.iterations.get_or_insert_with(Box::default)
+    }
+
+    /// [`Self::return_origins`], empty when there are none.
+    pub fn return_origin_facts(&self) -> &ReturnOrigins {
+        self.return_origins
+            .as_deref()
+            .unwrap_or(&ownership::NO_RETURN_ORIGINS)
     }
 
     /// Add the facts of the typed write sites to `typed_field_writes` (propagation adds those
@@ -1216,6 +1363,13 @@ pub struct CallSite {
     /// [`EffectSummary::returns_self_attrs`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub result_discarded: bool,
+    /// The object the call returns outlives one of the caller's uses of it
+    /// ([`iterations::held_results`]): it escapes (stored, yielded, captured, handed to code heki
+    /// does not follow), or a step that may leave a generator suspended (`next()`, a loop that
+    /// leaves early) is followed by another use. Any code may run while the generator is
+    /// suspended (`MUT113`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub result_held: bool,
 }
 
 /// How an API runs a callable it is handed ([`CallSite::runner`]).
@@ -1419,6 +1573,9 @@ pub struct ProjectIndex {
     /// of their callees, nor their write facts, nor `IndirectHelper` sites. Set when no
     /// enabled rule reads them; every function keeps its own.
     pub(crate) skips_typed_writes: bool,
+    /// The opt-in facts the summaries carry ([`OptInFacts`]); incremental updates extract the
+    /// same.
+    pub(crate) opt_in: OptInFacts,
 }
 
 /// True for `.pyi` typing stubs (prefer the sibling `.py` implementation when both exist).
@@ -1447,18 +1604,26 @@ pub fn analyze_project_with(
     kb: &EffectiveEcosystemKb,
     contracts: Option<Arc<dyn Contracts>>,
 ) -> ProjectIndex {
-    analyze_project_for(modules, kb, contracts, TypedWrites::Propagated)
+    analyze_project_for(
+        modules,
+        kb,
+        contracts,
+        TypedWrites::Propagated,
+        OptInFacts::ALL,
+    )
 }
 
-/// [`analyze_project_with`], propagating typed writes only when a rule reads them.
+/// [`analyze_project_with`], propagating typed writes and extracting the opt-in facts only when
+/// a rule reads them.
 pub fn analyze_project_for(
     modules: &[ModuleInput<'_>],
     kb: &EffectiveEcosystemKb,
     contracts: Option<Arc<dyn Contracts>>,
     typed_writes: TypedWrites,
+    opt_in: OptInFacts,
 ) -> ProjectIndex {
-    let files = summarize(modules, kb, false, contracts.as_deref());
-    ProjectIndex::build_for(files, contracts, typed_writes)
+    let files = summarize(modules, kb, false, contracts.as_deref(), opt_in);
+    ProjectIndex::build_for(files, contracts, typed_writes, opt_in)
 }
 
 /// Whether propagation carries typed writes (`EffectSummary::typed_field_write_sites` and
@@ -1470,6 +1635,34 @@ pub enum TypedWrites {
     Local,
 }
 
+/// The facts that summaries and propagation compute only when something reads them: the
+/// opt-in rules' facts, `MUT112`'s return origins (`EffectSummary::return_origins`,
+/// `ArgOrigin::origins`) and `MUT113`'s iteration facts (`EffectSummary::iterations`,
+/// `CallSite::result_held`), and the shared state functions change
+/// (`EffectSummary::shared_state`), which only `heki inspect` reads.
+/// `CallSite::returned`, which `MUT202` reads too, is always computed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OptInFacts {
+    pub return_origins: bool,
+    pub iterations: bool,
+    pub shared_state: bool,
+}
+
+impl OptInFacts {
+    /// Every opt-in fact.
+    pub const ALL: Self = Self {
+        return_origins: true,
+        iterations: true,
+        shared_state: true,
+    };
+}
+
+impl Default for OptInFacts {
+    fn default() -> Self {
+        Self::ALL
+    }
+}
+
 /// The local summaries of every module of a project with `contracts`, recording what each read
 /// of the project declarations (`FileSummary::decl_reads`), for an index that incremental
 /// updates keep current. [`ProjectIndex::build_with`] propagates them; it needs no IR, so the
@@ -1478,8 +1671,9 @@ pub fn summarize_project_with_reads(
     modules: &[ModuleInput<'_>],
     kb: &EffectiveEcosystemKb,
     contracts: Option<&dyn Contracts>,
+    opt_in: OptInFacts,
 ) -> Vec<FileSummary> {
-    summarize(modules, kb, true, contracts)
+    summarize(modules, kb, true, contracts, opt_in)
 }
 
 fn summarize(
@@ -1487,6 +1681,7 @@ fn summarize(
     kb: &EffectiveEcosystemKb,
     track: bool,
     contracts: Option<&dyn Contracts>,
+    opt_in: OptInFacts,
 ) -> Vec<FileSummary> {
     let (decls, own) = resolver::project_decls_for(modules, kb, None, track);
     if track {
@@ -1494,7 +1689,7 @@ fn summarize(
         return modules
             .iter()
             .zip(own)
-            .map(|(m, own)| summary::summarize_module(m, &decls, kb, own, track, contracts))
+            .map(|(m, own)| summary::summarize_module(m, &decls, kb, own, track, contracts, opt_in))
             .collect();
     }
     // A module's local summary depends on it and the declarations only (indexed collect: input
@@ -1502,7 +1697,7 @@ fn summarize(
     modules
         .par_iter()
         .zip(own)
-        .map(|(m, own)| summary::summarize_module(m, &decls, kb, own, track, contracts))
+        .map(|(m, own)| summary::summarize_module(m, &decls, kb, own, track, contracts, opt_in))
         .collect()
 }
 
@@ -1517,23 +1712,30 @@ impl ProjectIndex {
         !self.skips_typed_writes
     }
 
-    /// [`Self::build`] for summaries extracted with `contracts`.
-    pub fn build_with(files: Vec<FileSummary>, contracts: Option<Arc<dyn Contracts>>) -> Self {
-        Self::build_for(files, contracts, TypedWrites::Propagated)
+    /// The opt-in facts the summaries carry.
+    pub fn opt_in_facts(&self) -> OptInFacts {
+        self.opt_in
     }
 
-    /// [`Self::build_with`], propagating typed writes as `typed_writes` says; incremental
-    /// updates keep doing so.
+    /// [`Self::build`] for summaries extracted with `contracts`.
+    pub fn build_with(files: Vec<FileSummary>, contracts: Option<Arc<dyn Contracts>>) -> Self {
+        Self::build_for(files, contracts, TypedWrites::Propagated, OptInFacts::ALL)
+    }
+
+    /// [`Self::build_with`], propagating typed writes as `typed_writes` says, for summaries that
+    /// carry the opt-in facts `opt_in`; incremental updates keep doing so.
     pub fn build_for(
         mut files: Vec<FileSummary>,
         contracts: Option<Arc<dyn Contracts>>,
         typed_writes: TypedWrites,
+        opt_in: OptInFacts,
     ) -> Self {
         // The owners of shared module names last (`add_file_links` keeps them either way).
         files.sort_by(|a, b| module_precedence(&a.path).cmp(&module_precedence(&b.path)));
         let mut index = Self {
             contracts,
             skips_typed_writes: typed_writes == TypedWrites::Local,
+            opt_in,
             ..Self::default()
         };
         for mut file in files {
@@ -1679,8 +1881,15 @@ impl ProjectIndex {
         let (decls, own) =
             resolver::project_decls_for(std::slice::from_ref(input), kb, Some(others), true);
         let own = own.into_iter().next().expect("one module in, one out");
-        let file =
-            summary::summarize_module(input, &decls, kb, own, true, self.contracts.as_deref());
+        let file = summary::summarize_module(
+            input,
+            &decls,
+            kb,
+            own,
+            true,
+            self.contracts.as_deref(),
+            self.opt_in,
+        );
         self.update_file(file)
     }
 
@@ -1716,6 +1925,7 @@ impl ProjectIndex {
             own,
             true,
             self.contracts.as_deref(),
+            self.opt_in,
         );
         (self.update_file(file), changed)
     }

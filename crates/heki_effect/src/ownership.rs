@@ -4,11 +4,11 @@
 //!
 //! [`source`] tells what the instruction defining a value makes of it. `heki_rules` applies it
 //! forward over a function's values; the extractor applies it backward, from the values a
-//! function returns ([`origins_of`]), into [`EffectSummary::returns_origins`] and the calls whose
+//! function returns ([`origins_of`]), into [`EffectSummary::return_origins`] and the calls whose
 //! results they may be, which propagation resolves with what those calls return: a call's
 //! result is classified across functions, through any number of wrappers and nested calls.
 //!
-//! [`EffectSummary::returns_origins`]: crate::EffectSummary::returns_origins
+//! [`EffectSummary::return_origins`]: crate::EffectSummary::return_origins
 
 use crate::readonly::{COPY_METHODS, SLICE_COPYING_TYPES};
 use crate::resolver::Callee;
@@ -69,7 +69,7 @@ pub struct ResultOf {
 /// What an object may be as the function holding it sees it (`MUT112`): the origins it knows,
 /// the project calls whose results it may be, which propagation resolves with what their
 /// callees return, and the phis it may be, by their positions in the function's
-/// `EffectSummary::origin_nodes` (each phi is walked once, for every value that may be it).
+/// `ReturnOrigins::nodes` (each phi is walked once, for every value that may be it).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct LocalOrigins {
     pub known: Origins,
@@ -81,6 +81,44 @@ pub struct LocalOrigins {
 impl LocalOrigins {
     pub fn is_empty(&self) -> bool {
         self.known.is_empty() && self.results.is_empty() && self.nodes.is_empty()
+    }
+}
+
+/// `MUT112`'s facts of one function ([`EffectSummary::return_origins`]): what the object it
+/// returns may be, and what each phi its origin walks meet may be.
+///
+/// [`EffectSummary::return_origins`]: crate::EffectSummary::return_origins
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ReturnOrigins {
+    /// The returned object: its known origins, path by path (propagation adds what the project
+    /// calls in `results` return), the project calls whose results it may be, and the phis it
+    /// may be (local).
+    pub returned: LocalOrigins,
+    /// What each phi the origin walks of the function meet may be, at the positions that
+    /// [`LocalOrigins::nodes`] and the arguments' [`crate::ArgOrigin::origins`] name, each walked
+    /// once (local).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nodes: Vec<LocalOrigins>,
+}
+
+/// The facts of a function that returns nothing `MUT112` knows of.
+pub(crate) static NO_RETURN_ORIGINS: ReturnOrigins = ReturnOrigins {
+    returned: LocalOrigins {
+        known: Origins {
+            new: false,
+            held: false,
+            params: 0,
+            elements: 0,
+        },
+        results: Vec::new(),
+        nodes: Vec::new(),
+    },
+    nodes: Vec::new(),
+};
+
+impl ReturnOrigins {
+    pub fn is_empty(&self) -> bool {
+        self.returned.is_empty() && self.nodes.is_empty()
     }
 }
 
@@ -188,12 +226,15 @@ const CASTS: &[&str] = &["typing.cast", "typing_extensions.cast"];
 
 /// What the instruction `kind` makes of the object its result holds. A call's resolution is
 /// `callee` (`None` for any other instruction); `constructs` says the call constructs a project
-/// class.
+/// class. `made_here` tells the values holding an object the function makes itself
+/// ([`made_here`]): an attribute of such an object is one of its elements, of unknown origin,
+/// not state that outlives the call.
 pub fn source<'i>(
     kind: &'i InstKind,
     callee: Option<&Callee>,
     constructs: bool,
     kb: &EffectiveEcosystemKb,
+    made_here: &dyn Fn(VarId) -> bool,
 ) -> Source<'i> {
     match kind {
         InstKind::AllocBuiltin { .. } | InstKind::DictLiteral { .. } => Source::New,
@@ -206,6 +247,7 @@ pub fn source<'i>(
         InstKind::Copy { src, .. } => Source::Same(*src),
         InstKind::LoadGlobal { name, .. } => Source::Held(Holder::Global(name)),
         InstKind::LoadDeref { name, .. } => Source::Held(Holder::Cell(name)),
+        InstKind::AttrLoad { obj, .. } if made_here(*obj) => Source::Element(*obj),
         InstKind::AttrLoad { obj, attr, .. } => Source::Held(Holder::Attr { obj: *obj, attr }),
         InstKind::SubscriptLoad {
             obj,
@@ -245,9 +287,11 @@ pub fn source<'i>(
                     obj: *obj,
                     name: *name,
                 };
-                return match args.get(2) {
-                    Some(default) => Source::HeldOr(held, *default),
-                    None => Source::Held(held),
+                return match (args.get(2), made_here(*obj)) {
+                    (Some(default), true) => Source::ElementOr(*obj, *default),
+                    (Some(default), false) => Source::HeldOr(held, *default),
+                    (None, true) => Source::Element(*obj),
+                    (None, false) => Source::Held(held),
                 };
             }
             match kind {
@@ -257,6 +301,68 @@ pub fn source<'i>(
         }
         _ => Source::Unknown,
     }
+}
+
+/// Calls of these with one argument return a copy of it.
+const COPYING_CALLS: &[&str] = &[
+    "builtins.list",
+    "builtins.dict",
+    "builtins.set",
+    "builtins.bytearray",
+    "collections.OrderedDict",
+    "collections.deque",
+    "copy.copy",
+    "copy.deepcopy",
+];
+
+/// The operand whose copy the instruction `kind` makes (with the call's resolution `callee`): the
+/// receiver of a copy method (`x.copy()`), or the argument of a copying call with that argument
+/// alone (`list(x)`, `dict(x)`, `copy.copy(x)`, a copy sanitizer of the catalog).
+pub fn copied_operand(
+    kind: &InstKind,
+    callee: Option<&Callee>,
+    kb: &EffectiveEcosystemKb,
+) -> Option<VarId> {
+    match kind {
+        InstKind::MethodCall {
+            recv,
+            method,
+            args,
+            kwargs,
+            ..
+        } if args.is_empty() && kwargs.is_empty() && COPY_METHODS.contains(&method.as_str()) => {
+            Some(*recv)
+        }
+        InstKind::Call { args, kwargs, .. } if args.len() == 1 && kwargs.is_empty() => {
+            let Some(Callee::External(symbol)) = callee else {
+                return None;
+            };
+            let copies = COPYING_CALLS.contains(&symbol.as_str())
+                || kb
+                    .lookup(symbol)
+                    .is_some_and(|e| e.copy_sanitizer.is_some());
+            copies.then_some(args[0])
+        }
+        _ => None,
+    }
+}
+
+/// The [`source`] of an instruction, given the values that hold an object the function makes
+/// itself ([`made_here`]).
+pub type SourceGiven<'i, 'f> = dyn Fn(&'i Inst, &dyn Fn(VarId) -> bool) -> Source<'i> + 'f;
+
+/// Whether the object a variable holds is one the function makes itself: `root`, the value the
+/// variable copies through any number of copies, is defined as a new object. Whether an
+/// instruction makes a new object never depends on what its operands hold, so `source_of` is
+/// asked with none made here, and the question does not go on through the operands
+/// (`x = x.child`, thousands deep).
+pub fn made_here<'i>(
+    root: VarId,
+    defs: &FxHashMap<VarId, &'i Inst>,
+    source_of: &SourceGiven<'i, '_>,
+) -> bool {
+    defs.get(&root)
+        .is_some_and(|inst| matches!(source_of(inst, &|_| false), Source::New))
 }
 
 /// [`source`] of a method call outside the project, by the method's name.
@@ -363,6 +469,35 @@ impl Live {
     pub fn edge(&self, from: heki_ir::BlockId, to: heki_ir::BlockId) -> bool {
         self.block(from) && !self.dead.contains(&(from, to))
     }
+}
+
+/// The value each copy among `defs` copies, through any number of copies: each chain is walked
+/// once (`heki_ir` closes no cycle of copies).
+pub fn copy_roots(defs: &FxHashMap<VarId, &Inst>) -> FxHashMap<VarId, VarId> {
+    let mut roots: FxHashMap<VarId, VarId> = FxHashMap::default();
+    for (&start, inst) in defs {
+        if !matches!(inst.kind, InstKind::Copy { .. }) {
+            continue;
+        }
+        let mut passed = Vec::new();
+        let mut cur = start;
+        let root = loop {
+            if let Some(&root) = roots.get(&cur) {
+                break root;
+            }
+            match defs.get(&cur).map(|i| &i.kind) {
+                Some(InstKind::Copy { src, .. }) => {
+                    passed.push(cur);
+                    cur = *src;
+                }
+                _ => break cur,
+            }
+        };
+        for v in passed {
+            roots.insert(v, root);
+        }
+    }
+    roots
 }
 
 /// The edges of `f` a branch on a constant never takes, by `(from, to)` block.

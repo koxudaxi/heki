@@ -56,6 +56,27 @@ impl<'i> CallsByCaller<'i> {
     }
 }
 
+/// Shared state a call hands to a callee that changes it ([`ProjectIndex::handed_changes_of`]).
+#[derive(Debug, Clone, Copy)]
+pub struct HandedChange<'s> {
+    pub site: &'s CallSite,
+    pub callee: &'s BoundCallee,
+    /// The callee's parameter the state is.
+    pub param: u8,
+    pub state: &'s SharedState,
+}
+
+impl SharedState {
+    /// Whether this is a module global (`cell` `None`) or the closure cell `cell`.
+    pub fn is_change_of(&self, cell: Option<&CellChange>) -> bool {
+        match (cell, self) {
+            (None, SharedState::Global(_)) => true,
+            (Some(c), SharedState::Cell(d)) => c == d,
+            _ => false,
+        }
+    }
+}
+
 /// A call of a function [`ProjectIndex::callers_within`] found.
 #[derive(Debug, Clone)]
 pub struct CallerSite<'i> {
@@ -391,25 +412,71 @@ impl ProjectIndex {
         cell: Option<&CellChange>,
     ) -> ChangeChain {
         let hands_on = |s: &EffectSummary| match cell {
-            Some(c) => s.changes_cells.contains(c),
-            None => s.changes_globals,
+            Some(c) => s.changes_cells().contains(c),
+            None => s.changes_globals(),
         };
         self.nearest(
             calls,
             start,
             |site, callee| hands_on(callee) && self.delivery(site, callee).is_some(),
-            |key, _| {
-                self.local_summary(key).is_some_and(|local| match cell {
-                    Some(c) => local
-                        .changed_state
-                        .contains_key(&SharedState::Cell(c.clone())),
-                    None => local
-                        .changed_state
-                        .keys()
-                        .any(|k| matches!(k, SharedState::Global(_))),
-                })
+            |key, sites| {
+                let own = self.local_summary(key).is_some_and(|local| {
+                    local
+                        .changed_state()
+                        .iter()
+                        .any(|(state, _)| state.is_change_of(cell))
+                });
+                own || self
+                    .handed_changes(key, sites)
+                    .iter()
+                    .any(|h| h.state.is_change_of(cell))
             },
         )
+    }
+
+    /// [`Self::handed_changes`] of the calls of `func`.
+    pub fn handed_changes_of<'i>(
+        &'i self,
+        calls: &mut CallsByCaller<'i>,
+        func: &FuncKey,
+    ) -> Vec<HandedChange<'i>> {
+        let sites = calls.of(func).to_vec();
+        self.handed_changes(func, &sites)
+    }
+
+    /// The shared state `func`'s calls `sites` hand to a callee whose facts running there change
+    /// that argument (`helper(CACHE)`, `REGISTRY.add(x)`): the propagation of
+    /// `SharedStateFacts::handed`, call by call.
+    fn handed_changes<'s>(
+        &'s self,
+        func: &FuncKey,
+        sites: &[&'s CallSite],
+    ) -> Vec<HandedChange<'s>> {
+        let Some(local) = self
+            .local_summary(func)
+            .filter(|l| l.shared_state.is_some())
+        else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for &site in sites {
+            for (ci, bc) in site.project_callees().iter().enumerate() {
+                let facts = self
+                    .summary(&bc.callee)
+                    .and_then(|callee| callee.facts(self.delivery(site, callee)?.from));
+                for h in local.handed_at(site.span, ci) {
+                    if facts.is_some_and(|f| f.changes_argument(h.param)) {
+                        out.push(HandedChange {
+                            site,
+                            callee: bc,
+                            param: h.param,
+                            state: &h.state,
+                        });
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// The nearest function, among `start` and the callees whose facts run in it, whose own

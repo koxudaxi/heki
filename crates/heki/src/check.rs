@@ -102,11 +102,14 @@ pub(crate) struct Indexed {
 
 /// Load the project at `paths` (with `overrides` in place of files' text) and build the index
 /// `heki check` builds for `analysis`. `format` is the output format the run's warnings follow.
+/// `inspect`: the index also holds the facts `heki inspect` reads besides the rules
+/// ([`heki_rules::inspect_facts`]), which no rule reads.
 pub(crate) fn load_and_index(
     paths: &[PathBuf],
     analysis: &AnalysisArgs,
     format: OutputFormat,
     overrides: Option<&FxHashMap<PathBuf, String>>,
+    inspect: bool,
 ) -> Result<Indexed> {
     let project = Project::load(&ProjectOptions {
         paths,
@@ -119,8 +122,13 @@ pub(crate) fn load_and_index(
     let env = &project.env;
     let contracts = heki_rules::summary_contracts(&env.cfg)?;
     let typed_writes = heki_rules::typed_writes(&env.cfg, &selection);
+    let opt_in = if inspect {
+        heki_rules::inspect_facts(&selection)
+    } else {
+        heki_rules::opt_in_facts(&selection)
+    };
     let inputs = project.inputs();
-    let index = analyze_project_for(&inputs, &env.kb, contracts, typed_writes);
+    let index = analyze_project_for(&inputs, &env.kb, contracts, typed_writes, opt_in);
     drop(inputs);
     Ok(Indexed {
         project,
@@ -184,7 +192,13 @@ fn analyze(
     profile: Option<&ProfileData>,
     overrides: Option<&FxHashMap<PathBuf, String>>,
 ) -> Result<Analyzed> {
-    let indexed = load_and_index(&args.paths, &args.analysis, args.output_format, overrides)?;
+    let indexed = load_and_index(
+        &args.paths,
+        &args.analysis,
+        args.output_format,
+        overrides,
+        false,
+    )?;
     let mut diags = indexed.diagnose()?;
     let Indexed { project, index, .. } = indexed;
     let hot = profile.map(|p| p.attribute(profiled_functions(&project)));

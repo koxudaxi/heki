@@ -608,6 +608,111 @@ fn shared_state_changed_directly_through_calls_and_in_closures() {
     assert_eq!(add["changes"]["globals"][0]["direct"], true);
 }
 
+const HANDED: &str = r#"import os
+
+CACHE = []
+A = []
+B = []
+
+
+class Registry:
+    def __init__(self):
+        self.items = []
+
+    def add(self, x):
+        self.items.append(x)
+
+    def get(self, i):
+        return self.items[i]
+
+
+REGISTRY = Registry()
+os.environ["MODE"] = "fast"
+
+
+def append(xs):
+    xs.append(1)
+
+
+def size(xs):
+    return len(xs)
+
+
+def update():
+    append(CACHE)
+
+
+def measure():
+    return size(CACHE)
+
+
+def register(x):
+    REGISTRY.add(x)
+
+
+def lookup(i):
+    return REGISTRY.get(i)
+
+
+def refresh():
+    update()
+
+
+def either(flag):
+    target = A if flag else B
+    target.clear()
+"#;
+
+#[test]
+fn shared_state_handed_to_callees_and_merged_and_at_import() {
+    let p = Project::new("inspect_handed");
+    p.write("m.py", HANDED);
+    let names = |r: &Value| -> Vec<String> {
+        r["changes"]["globals"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|g| g["name"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    // Handed to a callee changing its argument: one hop, at the callee's change.
+    let update = report(&p, "m.update");
+    let cache = &update["changes"]["globals"][0];
+    assert_eq!(
+        (&cache["name"], &cache["direct"]),
+        (&Value::from("CACHE"), &Value::from(false))
+    );
+    assert_eq!(hops(&cache["chain"]), [(32, "m.append".to_owned())]);
+    assert_eq!(cache["at"]["line"], 24);
+    assert_eq!(
+        update["purity"]["because"],
+        serde_json::json!(["changes_globals"])
+    );
+    // A module-level object whose method changes `self`.
+    let register = report(&p, "m.register");
+    assert_eq!(names(&register), ["REGISTRY"]);
+    assert_eq!(
+        hops(&register["changes"]["globals"][0]["chain"]),
+        [(40, "m.Registry.add".to_owned())]
+    );
+    // Two levels up: the chain to the function that hands it on.
+    let refresh = report(&p, "m.refresh");
+    assert_eq!(
+        hops(&refresh["changes"]["globals"][0]["chain"]),
+        [(48, "m.update".to_owned()), (32, "m.append".to_owned())]
+    );
+    // A callee that only reads it.
+    for symbol in ["m.measure", "m.lookup"] {
+        let r = report(&p, symbol);
+        assert!(names(&r).is_empty(), "{symbol}");
+        assert_eq!(r["purity"]["verdict"], "pure", "{symbol}");
+    }
+    // Every global a merged value may be.
+    assert_eq!(names(&report(&p, "m.either")), ["A", "B"]);
+    // The module body defines its names, and changes what it changes in place at import.
+    assert_eq!(names(&report(&p, "m.<module>")), ["os"]);
+}
+
 #[test]
 fn facts_the_configuration_does_not_compute_are_null() {
     let p = Project::new("inspect_modes");

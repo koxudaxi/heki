@@ -7,12 +7,13 @@
 //! edited file's SCC closure and then over the affected callers only.
 
 use crate::guards;
+use crate::iterations;
 use crate::scc::tarjan_scc;
 use crate::{
-    ArgOrigin, AttrKeyPath, BoundCallee, CallHop, CallSite, Construction, Delivery, EffectSummary,
-    Facts, FuncKey, LocalOrigins, NewArg, NewCond, NewKind, Origins, ProjectIndex, ProtectedReturn,
-    ReturnsNew, Runner, Shared, SharedChain, SharedLine, SiteRole, Slot, TypedFieldWriteSite,
-    UnresolvedWriteSite, WriteKind, cache_flow,
+    ArgOrigin, AttrKeyPath, BoundCallee, CallHop, CallSite, CellChange, Construction, Delivery,
+    EffectSummary, Facts, FuncKey, LocalOrigins, NewArg, NewCond, NewKind, Origins, ProjectIndex,
+    ProtectedReturn, ReturnsNew, Runner, Shared, SharedChain, SharedLine, SharedState, SiteRole,
+    Slot, TypedFieldWriteSite, UnresolvedWriteSite, WriteKind, cache_flow,
 };
 use heki_ast::Span;
 use heki_kb::ExecEffectKind;
@@ -271,11 +272,13 @@ fn recompute(
         }
         s.consumes_params |= consumed.unwrap_or(0) & s.unconditional_forwards;
     }
-    returned_results(
-        index,
-        out.get(func).map(Vec::as_slice).unwrap_or(&[]),
-        &mut s,
-    );
+    if index.opt_in.return_origins {
+        returned_results(
+            index,
+            out.get(func).map(Vec::as_slice).unwrap_or(&[]),
+            &mut s,
+        );
+    }
     if !s.returns_self_attrs.is_empty() {
         drop_attrs_read_by_discarded_calls(index, &self_calls, local, &mut s);
     }
@@ -502,9 +505,9 @@ fn return_flow_edge(
 }
 
 /// `MUT112` return flow: what the project calls whose results the function may return
-/// (`EffectSummary::returns_results`) return, with the arguments bound to the parameters each
+/// (`EffectSummary::return_origins`) return, with the arguments bound to the parameters each
 /// callee returns in their place, through the calls whose results those arguments may be in
-/// turn, and through the phis the function's origin walks met (`EffectSummary::origin_nodes`).
+/// turn, and through the phis the function's origin walks met (`ReturnOrigins::nodes`).
 /// `sites` are the function's call sites.
 ///
 /// Each call result and each phi is resolved once: what it is of its own (for a call, what its
@@ -513,6 +516,9 @@ fn return_flow_edge(
 /// a call or a phi depend on itself). The fixpoint only joins, and each change adds a kind or a
 /// parameter to one value, so it ends after a bounded number of changes per value.
 fn returned_results(index: &ProjectIndex, sites: &[(PathBuf, usize)], s: &mut EffectSummary) {
+    let Some(facts) = s.return_origins.as_deref_mut() else {
+        return;
+    };
     let at: FxHashMap<Span, &CallSite> = sites
         .iter()
         .map(|(path, i)| &index.files[path].call_sites[*i])
@@ -525,11 +531,12 @@ fn returned_results(index: &ProjectIndex, sites: &[(PathBuf, usize)], s: &mut Ef
     let mut index_of: FxHashMap<Resolved, usize> = FxHashMap::default();
     let mut value: Vec<Origins> = Vec::new();
     let mut needs: Vec<Vec<(Resolved, bool)>> = Vec::new();
-    let mut pending: Vec<Resolved> = s
-        .returns_results
+    let mut pending: Vec<Resolved> = facts
+        .returned
+        .results
         .iter()
         .map(|r| Resolved::Call(r.span))
-        .chain(s.returns_nodes.iter().map(|n| Resolved::Node(*n)))
+        .chain(facts.returned.nodes.iter().map(|n| Resolved::Node(*n)))
         .collect();
     while let Some(item) = pending.pop() {
         if index_of.contains_key(&item) {
@@ -556,7 +563,7 @@ fn returned_results(index: &ProjectIndex, sites: &[(PathBuf, usize)], s: &mut Ef
                         .filter(|(_, callee)| runs_at_call(callee, site))
                 });
                 for (bc, callee) in callees {
-                    let returned = callee.returns_origins;
+                    let returned = callee.return_origin_facts().returned.known;
                     own.join(Origins {
                         params: 0,
                         elements: 0,
@@ -583,7 +590,7 @@ fn returned_results(index: &ProjectIndex, sites: &[(PathBuf, usize)], s: &mut Ef
                 }
             }
             Resolved::Node(n) => {
-                let local = &s.origin_nodes[n as usize];
+                let local = &facts.nodes[n as usize];
                 own.join(local.known);
                 depend(local, false, &mut deps);
             }
@@ -618,23 +625,30 @@ fn returned_results(index: &ProjectIndex, sites: &[(PathBuf, usize)], s: &mut Ef
             }
         }
     }
-    let resolved: Vec<Origins> = s
-        .returns_results
+    let resolved: Vec<Origins> = facts
+        .returned
+        .results
         .iter()
         .map(|r| (Resolved::Call(r.span), r.element))
-        .chain(s.returns_nodes.iter().map(|n| (Resolved::Node(*n), false)))
+        .chain(
+            facts
+                .returned
+                .nodes
+                .iter()
+                .map(|n| (Resolved::Node(*n), false)),
+        )
         .filter_map(|(item, element)| {
             let v = value[*index_of.get(&item)?];
             Some(if element { v.element() } else { v })
         })
         .collect();
     for o in resolved {
-        s.returns_origins.join(o);
+        facts.returned.known.join(o);
     }
 }
 
 /// A value [`returned_results`] resolves: a project call's result (by its span) or a phi (by its
-/// position in `EffectSummary::origin_nodes`).
+/// position in `ReturnOrigins::nodes`).
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum Resolved {
     Call(Span),
@@ -717,14 +731,57 @@ fn add_cell_changes(
     bc: &BoundCallee,
     facts: &EffectSummary,
 ) {
-    for cell in &facts.changes_cells {
-        let own = cell.owner == site.caller.qualname
-            && bc.callee.module == site.caller.module
-            && (cell.rebinds || local.new_cells.contains(&cell.name));
-        if !own {
-            t.changes_cells.insert(cell.clone());
-        }
+    let leaving: Vec<&CellChange> = facts
+        .changes_cells()
+        .iter()
+        .filter(|cell| {
+            let own = cell.owner == site.caller.qualname
+                && bc.callee.module == site.caller.module
+                && (cell.rebinds || local.new_cells().contains(&cell.name));
+            !own
+        })
+        .collect();
+    if !leaving.is_empty() {
+        t.change_shared_state(|f| f.cells.extend(leaving.into_iter().cloned()));
     }
+}
+
+/// Add to `t` the shared state the caller (whose local summary is `local`) hands to the callee
+/// `bc` at `site` when the callee's `facts` change that argument (`helper(CACHE)`, a method of a
+/// module-level object changing `self`).
+fn add_handed_changes(
+    t: &mut EffectSummary,
+    local: &EffectSummary,
+    site: &CallSite,
+    bc: &BoundCallee,
+    facts: &EffectSummary,
+) {
+    if local.shared_state.is_none() {
+        return;
+    }
+    let Some(ci) = site
+        .project_callees()
+        .iter()
+        .position(|b| std::ptr::eq(b, bc))
+    else {
+        return;
+    };
+    let changed: Vec<&SharedState> = local
+        .handed_at(site.span, ci)
+        .filter(|h| facts.changes_argument(h.param))
+        .map(|h| &h.state)
+        .collect();
+    if changed.is_empty() {
+        return;
+    }
+    t.change_shared_state(|f| {
+        for state in changed {
+            match state {
+                SharedState::Global(_) => f.globals = true,
+                SharedState::Cell(cell) => f.cells.push(cell.clone()),
+            }
+        }
+    });
 }
 
 /// Add `facts` (of the callee `callee`, bound by `bc` at `site`) to `t`, a summary of the caller
@@ -748,8 +805,11 @@ fn transfer(
     t.offloads_blocking_params |= caller_params(facts.offloads_blocking_params, bc);
 
     // Shared state that outlives the call.
-    t.changes_globals |= facts.changes_globals;
+    if facts.changes_globals() && !t.changes_globals() {
+        t.change_shared_state(|f| f.globals = true);
+    }
     add_cell_changes(t, local, site, bc, facts);
+    add_handed_changes(t, local, site, bc, facts);
 
     // b. Execution effects, with the shortest chain to each. An effect whose guard the call
     //    decides against does not run here; the others take the call's guards and the
@@ -809,6 +869,29 @@ fn transfer(
             .extend(facts.mutates_self_attrs.iter().cloned());
         t.invalidates_cached
             .extend(facts.invalidates_cached.iter().cloned());
+    }
+    let changes = iterations::call_changes(site, bc, callee, facts);
+    if !changes.is_empty() {
+        iterations::merge_changes(
+            &mut t.iteration_facts_mut().changes_self_containers,
+            changes,
+        );
+    }
+    // A callee parameter bound to a caller parameter itself changes that parameter's container.
+    let param_changes: Vec<(u8, iterations::ContainerChange)> = facts
+        .iteration_facts()
+        .changes_param_containers
+        .iter()
+        .filter_map(|(&i, &change)| match origin(usize::from(i))?.param {
+            Some((p, None)) => Some((p, change)),
+            _ => None,
+        })
+        .collect();
+    if !param_changes.is_empty() {
+        iterations::merge_changes(
+            &mut t.iteration_facts_mut().changes_param_containers,
+            param_changes,
+        );
     }
     // A slot of a callee parameter bound to a caller parameter is that parameter's slot.
     for (&i, slots) in &facts.inplace_param_slots {

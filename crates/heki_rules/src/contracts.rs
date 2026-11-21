@@ -8,7 +8,7 @@
 use crate::inspect::ContractRole;
 use crate::mut_rules::{Allowance, AllowanceKeys, FunctionMatcher, ReadOnlyProducers, patterns};
 use crate::{CheckContext, DottedPattern, RuleConfigError, RuleSelection};
-use heki_effect::{Contracts, FuncKey, TypedWrites};
+use heki_effect::{Contracts, FuncKey, OptInFacts, TypedWrites};
 use heki_env::HekiConfig;
 use rustc_hash::FxHashMap;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -276,6 +276,28 @@ pub fn typed_writes(config: &HekiConfig, selection: &RuleSelection) -> TypedWrit
         TypedWrites::Propagated
     } else {
         TypedWrites::Local
+    }
+}
+
+/// The opt-in facts the rules `selection` runs read: `MUT112`'s return origins and `MUT113`'s
+/// iteration facts, each only with its rule. The readers assert it
+/// ([`heki_effect::ProjectIndex::opt_in_facts`]).
+pub fn opt_in_facts(selection: &RuleSelection) -> OptInFacts {
+    OptInFacts {
+        return_origins: selection.is_enabled("MUT112"),
+        iterations: selection.is_enabled("MUT113"),
+        shared_state: false,
+    }
+}
+
+/// [`opt_in_facts`] with the facts `heki inspect` reads besides the rules: the shared state
+/// functions change, and what they return (`returns.origins`). `heki check` computes them only
+/// for the rules it runs.
+pub fn inspect_facts(selection: &RuleSelection) -> OptInFacts {
+    OptInFacts {
+        return_origins: true,
+        shared_state: true,
+        ..opt_in_facts(selection)
     }
 }
 

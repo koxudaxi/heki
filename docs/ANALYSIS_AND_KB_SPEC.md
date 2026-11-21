@@ -78,7 +78,7 @@ Compound expressions are flattened into **basic instructions in explicit left-to
 | Operators | `BinOp(op, lhs, rhs, in_place)`, `UnaryOp`, `Compare(op, lhs, rhs)` | Augmented assignment is `BinOp` with `in_place`; `in` / `not in` are `Compare`; a chained comparison `a < b < c` branches after each link like `a < b and b < c`, with `b` evaluated once and each `Compare` spanning its own operands; until types are exact, any special method may run |
 | Attributes and items | `AttrLoad`, `AttrStore`, `AttrDelete`, `SubscriptLoad`, `SubscriptStore`, `SubscriptDelete` | Stores make the stored value `Shared`; `AttrDelete` recognizes `@cached_property` invalidation (`del self.prop`) and `MUT201` writes; subscripts keep constant keys and slice bounds; the slice object itself is the tuple `(lower, upper, step)` of its bounds (`None` where one is left out), since `__getitem__` may keep it; a template string builds the tuple of its fields' values (`Template.values`) and is otherwise opaque |
 | Calls | `Call(callee, args, kwargs, is_awaited)`, `MethodCall(recv, method, args, kwargs, is_awaited)` | `is_awaited` separates awaited calls from synchronous ones (a coroutine awaited after it is made runs at its `await`, which the effect summary follows); `star_from` is the index of the first `*` argument, so arguments bind to parameters exactly up to it |
-| Iteration and generators | `MakeIter(iterable)`, `IterNext(iter)`, `MakeGenExpr(outer_iter, captured)`, `MakeClosure(captured)` | `MakeIter` and `MakeGenExpr` bind a **derived reference** of `iterable` / `outer_iter` to an explicit SSA variable; `MakeClosure` holds every value the function or class object keeps: its cells (free variables of nested scopes at any depth, the iteration variables of inlined comprehensions, the names read by lazily evaluated annotation and type-parameter scopes), its defaults, eagerly evaluated annotations, and a class's bases and keywords (a `type` alias is a `MakeClosure` without a lowered body) |
+| ContainerIteration and generators | `MakeIter(iterable)`, `IterNext(iter)`, `MakeGenExpr(outer_iter, captured)`, `MakeClosure(captured)` | `MakeIter` and `MakeGenExpr` bind a **derived reference** of `iterable` / `outer_iter` to an explicit SSA variable; `MakeClosure` holds every value the function or class object keeps: its cells (free variables of nested scopes at any depth, the iteration variables of inlined comprehensions, the names read by lazily evaluated annotation and type-parameter scopes), its defaults, eagerly evaluated annotations, and a class's bases and keywords (a `type` alias is a `MakeClosure` without a lowered body) |
 | Suspension | `Await`, `Yield`, `YieldFrom` | `Await` lets other tasks run (`Unique` stays unique), as do the implicit awaits of `async for` and `async with` (`InstKind::suspends`); `Yield` makes the yielded value `Shared` |
 | Context managers | `EnterWith(mgr, is_async)`, `ExitWith(mgr, is_async)` | Mark the region of a `with` / `async with` (the lock and transaction regions of `EFF106`) |
 | Exceptions | `CatchException(types)` | Starts an exception handler |
@@ -310,22 +310,32 @@ EffectSummary(f) = {
     retains_params:           Bitset,                      // parameters the function keeps (stores, returns)
     returns_new:              bool,                        // returns an object it constructs, nothing else
                                                            // holding it (fresh-objects)
-    returns_origins:          Origins,                     // what the returned object may be, path by path:
-                                                           // new, held state, parameter i, or an element of
-                                                           // parameter i (MUT112; propagated)
-    returns_results:          Vec<ResultOf>,               // the project calls whose results (or elements of
-                                                           // them) it may return, by span (MUT112; local)
+    return_origins:           Option<Box<ReturnOrigins>>,  // MUT112, absent for most functions: what the
+                                                           // returned object may be, path by path (new, held
+                                                           // state, parameter i, or an element of parameter i;
+                                                           // propagated), the project calls whose results (or
+                                                           // elements of them) it may return, by span, and the
+                                                           // phis its origin walks met (local)
     unresolved_write_sites:   Set<UnresolvedWrite>,        // target-named writes on objects of unknown class,
                                                            // computed names on guarded classes (MUT205)
     unresolved_access_sites:  Set<UnresolvedAccess>,       // reads and method calls named like a strict
                                                            // contract's target on objects of unknown class;
                                                            // never propagated (MUT206, MUT207)
-    changed_state:            Map<SharedState, Span>,      // module globals and enclosing functions' closure
+    shared_state:             Option<SharedStateFacts>,    // None for a function that changes no shared state
+                                                           // (only with OptInFacts::shared_state: heki inspect
+                                                           // and the language server, never heki check):
+      changed:                [(SharedState, Span)],       // module globals and enclosing functions' closure
                                                            // cells the own body rebinds, deletes, or changes
-                                                           // in place, first change of each (local)
-    changes_globals:          bool,                        // a module global changed by the body or a body
-                                                           // running in it (propagated)
-    changes_cells:            Set<CellChange>,             // closure cells changed so, except the own
+                                                           // in place (from every root a merged value may
+                                                           // have), first change of each (local); the
+                                                           // module body's bindings define its names and
+                                                           // do not count, its in-place changes do
+      handed:                 [HandedState],               // shared state its calls hand to a project callee
+                                                           // as an argument or the receiver (local)
+      globals:                bool,                        // a module global changed by the body, a body
+                                                           // running in it, or a callee changing what it is
+                                                           // handed (propagated)
+      cells:                  [CellChange],                // closure cells changed so, except the own
                                                            // variables whose change stays inside the call:
                                                            // rebound by a nested function, or bound only
                                                            // to new containers (new_cells) (propagated)
@@ -520,7 +530,11 @@ edited file's functions that change a parameter in place (`heki_rules::chain_fac
 re-checks the files with such reports above a function whose facts changed. Likewise, while
 `MUT111` is selected, it keeps the stale writes `MUT101` finds in each file's methods, with the
 classes whose instances run each writer (`heki_rules::stale_writes_by_file`), as of the file's
-latest analysis; when they change, the files reading those cached properties are re-checked.
+latest analysis; when they change, the files reading those cached properties are re-checked. A
+`MUT113` report shows where other methods change a container (`self_container_change_sites`):
+the language server re-checks the files showing a change site that moved, as for a call site. A
+place it records keeps what is there (a call's callees, a change's attribute), so that two calls
+or changes of one length swapping on a line, which keep every span, count as moved too.
 
 The incremental index also records what summarizing each file read of the project declarations
 (`FileSummary::decl_reads`: the modules looked up, the classes whose subclasses were listed, the
@@ -530,7 +544,7 @@ differ); every file that read one of them is re-analyzed. This covers names reso
 re-exports, class hierarchy analysis across modules, and property getters, without depending on
 which module imports which.
 
-### 2.3 Family 1 (`MUT101` / `MUT103` / `MUT106` / `MUT107` / `MUT109` / `MUT111` / `MUT112` / `MUT201` / `MUT202` / `MUT203` / `MUT204`)
+### 2.3 Family 1 (`MUT101` / `MUT103` / `MUT106` / `MUT107` / `MUT109` / `MUT111` / `MUT112` / `MUT113` / `MUT201` / `MUT202` / `MUT203` / `MUT204`)
 
 #### `MUT101`: mutation of attributes a `@cached_property` depends on, without invalidation (strict Stage 0-A version)
 1. For every `@cached_property` method `p` of a class `C` (with its subclasses; a nested class is
@@ -597,9 +611,12 @@ which module imports which.
    closure cell), the operand's object (a copy of the reference, `typing.cast`, an in-place
    operator), an element of the operand (an item, `get` / `pop` / `setdefault`, an iteration
    step), an element or the default (`d.get(k, default)`, `getattr(o, n, default)`), or what the
-   project callees return. A parameter is borrowed, `*args` / `**kwargs` are new with borrowed
-   elements, and a method's `self` is its own object.
-2. **The summary fact**: `returns_origins` walks back from the returns a run can reach (plain
+   project callees return. An attribute of an object the function makes itself (through copies,
+   `ownership::made_here`, read from the definition alone: whether it makes a new object never
+   depends on its operands) is an element of that object, of unknown origin. A parameter is
+   borrowed, `*args` / `**kwargs` are new with borrowed elements, and a method's `self` is its own
+   object.
+2. **The summary fact**: `return_origins` walks back from the returns a run can reach (plain
    sync functions; a memoizing decorator makes the result held, another decorator unknown):
    new, held, parameter `i`, or an element of parameter `i`. A run reaches what
    `ownership::Live` leaves once each branch on a constant takes its one side (`while True:`
@@ -609,14 +626,14 @@ which module imports which.
    held. One walk takes each stored value and the values it copies (through copies and phis)
    with each place once, for all the stores; past a budget of such pairs proportional to the
    function's source, what the function returns is unknown. A project call's result the walk
-   reaches is one of `returns_results` (the call's span, and whether the object is the result or
+   reaches is one of `ReturnOrigins::returned.results` (the call's span, and whether the object is the result or
    an element of it), and each argument of such a call gets `ArgOrigin::origins` from the same
    walk: its own origins and, in turn, the calls whose results it may be. A phi the walk meets
-   (other than where it starts) is a node of `origin_nodes`, as itself or as an element, walked
-   once and referred to by every walk that meets it (`returns_nodes`, `LocalOrigins::nodes`);
+   (other than where it starts) is a node of `ReturnOrigins::nodes`, as itself or as an element, walked
+   once and referred to by every walk that meets it (`LocalOrigins::nodes`);
    past a budget of walked values proportional to the function's source, what the function
    returns is unknown. Propagation (`returned_results`) adds what those calls return: each
-   callee's `returns_origins` without its parameters, and the origins of the arguments bound to
+   callee's returned origins without its parameters, and the origins of the arguments bound to
    the parameters it returns (or an element of them), through any number of nested calls
    (`identity(identity(x))`). Each call's result and each node is resolved once, to a fixpoint
    over the calls and nodes it depends on (a loop makes a call or a phi depend on itself): the
@@ -625,21 +642,25 @@ which module imports which.
    part in Early Cutoff like every summary field.
 3. **The forward analysis** (`heki_rules`, per function, to a fixpoint that visits each phi and
    instruction once, then again only when a value it reads grows) joins the kinds of a value at
-   phis, maps a project call's result through its callees' `returns_origins` and the
+   phis, maps a project call's result through its callees' returned origins and the
    bound arguments, and takes a closure's variable from what the enclosing function bound to it
    (`MakeClosure` captures; functions are analyzed enclosing first). It follows the blocks and
    edges of `ownership::Live` only. A side of an `is` test (of the branch it decides) is the
    edge from the branch to that successor, and every edge from a block that a run reaches only
    through that successor: the walk up the dominator tree from an edge's source to the
    dominator of its target finds them, once per edge, and the test a condition is (through
-   `not` and copies) and the value a copy copies are each found once per value. On a phi input from the side where an `is` test of the input's value
-   failed, the input leaves out the object it is tested against (`if result is shared: result =
-   shared.copy()`). Where the test is against a constant, a global, or an attribute (`if out is
-   None: out = []`) and the phi also takes inputs from the other side, the parameter the value
-   is on the failed side is *defaulted*, and the new objects from the other side are its
-   replacements: the accumulator idiom. A test that selects no replacement (`if p is None:
-   raise ...`) leaves the parameter borrowed. A new object the function stores somewhere is
-   part of where it is stored.
+   `not` and copies) and the value a copy copies are each found once per value. On a phi input
+   from the side where an `is` test of the input's value failed, the input leaves out the object
+   it is tested against (`if result is shared: result = shared.copy()`). A phi input that copies
+   another input of the phi (`ownership::copied_operand`) where a flag of the caller's decides to
+   copy it (a branch on parameters other than the receiver and the copied value, and constants:
+   `if not in_place: x = x.copy()`) brings the other input's object: the function changes that
+   object on purpose where it does not copy it. Where the test is against a constant, a global,
+   or an attribute (`if out is None: out = []`) and the phi also takes inputs from the other
+   side, the parameter the value is on the failed side is *defaulted*, and the new objects from
+   the other side are its replacements: the accumulator idiom. A test that selects no
+   replacement (`if p is None: raise ...`) leaves the parameter borrowed. A new object the
+   function stores somewhere is part of where it is stored.
 4. **Reports**: a change of a container (an item stored or deleted, a container method, an
    in-place operator on a builtin container, a project callee changing the container it is
    handed, `mutated_param_paths` entry `""`) of a value that may be new and borrowed, once per
@@ -657,6 +678,103 @@ which module imports which.
    (`typed_field_writes` with `ContainerMut`, `AliasContainerMut`, or `IndirectHelper` on a class
    of the family); with `MUT112` selected, propagation carries typed writes, and the language
    server re-checks the family of every changed method (`family_readers`).
+6. **Only when selected** (`OptInFacts::return_origins`, `heki_rules::opt_in_facts`): the
+   summaries carry `return_origins` and `ArgOrigin::origins`, and propagation resolves them, only
+   with `MUT112` selected; a run without it computes none of them, and its summaries hold no
+   room for them (`return_origins` is `None`). A configuration change re-indexes the language server's
+   project with the facts the new selection reads.
+
+#### `MUT113`: containers changed while a method iterates them (opt-in)
+The facts are in `EffectSummary::iterations` (`iterations::IterationFacts`, absent for the many
+functions with none), with `CallSite::result_held`. The summaries carry them only with `MUT113`
+selected (`OptInFacts::iterations`), and propagation copies what callees change in place from
+them; a run without the rule computes none of them.
+
+1. Containers: a `self.<attr>` whose class (from the value inferred, an annotation, or the
+   `__init__` assignment) is `dict`, `OrderedDict`, `defaultdict`, `Counter`, `set`, or `deque`
+   (`typing` aliases included). An abstract `MutableMapping` / `MutableSet`, a union of different
+   kinds, and a `list` are not: Python checks these classes' iterators at every step, and a dict
+   or set iterator raises `RuntimeError` after its container changed size, a deque iterator
+   after any change but an item store or `reverse()`.
+2. Iterations (`container_iterations`, a local fact of a method): a `for` loop or a
+   `yield from` over the container, its `keys()` / `values()` / `items()` views, or a lazy wrapper
+   of either (`iter`, `enumerate`, `zip`, `map`, `filter`, `reversed`, the lazy `itertools`
+   functions, a generator expression), through copies and merges; a consuming call (`list`,
+   `tuple`, `sorted`, `.copy()`) makes a snapshot. Each records the containers it may step, all
+   of them, whether a generator suspends inside it (a `yield` in a block of the loop from which
+   its header is reachable without leaving the loop, on normal or exception edges, or the
+   `yield from` itself), and the spans of the call sites in such blocks
+   (`iterations::BetweenSteps`), once for all the containers. The containers each value may iterate are a
+   fixpoint over copies, phis, views, and wrappers, with a pass limit (24) and a budget of
+   `(value, container)` facts (one per source byte, at least 4,096, at most 100,000), and the
+   iterations take a budget of `(iteration, container)` facts of the same size: past any of them,
+   as for a loop rotating aliases of hundreds of containers or one `zip` of thousands of
+   containers stepped by as many `yield from`s, the method has no iterations, and no report comes
+   from them.
+3. Changes of such containers (`changes_self_containers`, propagated through the calls on
+   `self`, `super()` included, the property reads, and the helpers changing the container of the
+   parameter bound to `self.<attr>`, with the helper's own change of it): `Resizes` for the
+   insertion, removal, and reordering methods (`append`, `appendleft`, `extend`, `extendleft`,
+   `insert`, `add`, `update`, `setdefault`, `pop`, `popleft`, `popitem`, `remove`, `discard`,
+   `clear`, the `*_update` methods, `rotate`, `move_to_end`, `__delitem__`), `del x[k]`, the
+   in-place operators (also stored back, `self.s |= t`), and reading a missing key of a
+   `defaultdict`; `StoresItems` for an item store (`x[k] = v`, `__setitem__`), which breaks only
+   a mapping's iterators. A `defaultdict` read or an item store under a key the container holds
+   is no change: on the side of a test that the key is there (`k in`, `k not in`, `get(k)`
+   against `None` or by its truth, through `not`) that dominates it and is entered only from the
+   test, or after a read of the same key in its block (not for a `Counter`, whose read of a
+   missing key inserts nothing). Rebinding the attribute is no change, and neither is a change of
+   a read of `self.<attr>` that a store of a new object to `self.<attr>` dominates, when every
+   store of the function to it is of a new object: that is the new container's change (a
+   callee's change at a call after the store still counts). The key tests, the key reads, and
+   the stores (of new objects by the callees of all the function's calls) are gathered in one
+   walk per function, and whether one dominates a change is read from the function's dominator
+   tree over normal and exception edges. The function's own change sites are
+   in `self_container_change_sites`. A function's changes of its parameters' own containers, of
+   any class, are counted the same way (`changes_param_containers`, propagated through the
+   helpers it hands them to): a helper storing an item of a deque it is handed breaks no
+   iterator of it.
+4. Calls in a loop's body: a call site among an iteration's calls whose project callees change
+   the container while their body runs there (`iterations::changed_at`, through
+   `ProjectIndex::delivery`) is reported at the call, with the iteration as a related location.
+   A change written in the body itself is the linters' loop-iterator-mutation check.
+5. Suspended generators: what can run while a generator method `g` is suspended follows where its
+   objects go, from the uses its callers record (`result_iterations`: for each iteration of
+   project calls' results in a function, what runs between its steps and the calls whose results
+   it steps; one fact for a loop over `zip(a(), b())`, not one per call). At each call of
+   `g`, its result is returned (follow the returning function), iterated (the calls in the loop's
+   body run; a generator suspending inside the loop is followed), or passed to a project function
+   (not followed); whatever else its caller does, it is **held** when it outlives one of these
+   uses (`CallSite::result_held`, `iterations::held_results`): it escapes (stored, yielded,
+   captured, handed to code heki does not follow, returned by a generator or a coroutine), or a
+   step that may leave it suspended (`next()`, a method of it, a `for` loop that leaves its body
+   other than through its header or over a wrapper that may stop first, `any()`, a consuming
+   call over `islice()`) reaches another use on normal or exception edges. A public function
+   followed is **offered**: callers outside the project can iterate it.
+   - held: every public method of the class family (its own, its subclasses', the inherited
+     ones) counts, except `MUT101`'s two-phase initialization methods;
+   - offered: property getters and the read dunders (`__getitem__`, `__len__`, `__contains__`,
+     ...) count: a public generator and the public methods changing the container are the
+     class's interface, as `dict.items()` and `dict.pop()` are;
+   - the family methods the project's loops over `g` call on `g`'s instance count: a call whose
+     first argument (a method's `self`) is the object the loop's call binds to the parameter
+     holding the instance (`ResultIteration::receivers` and `IteratedResult::arguments`, which
+     number these objects within the iteration: the same value through copies, `super()` being
+     `self`, or the same attribute of one that runs no property getter). The
+     instance is followed through the functions returning `g` or suspending in it as the
+     caller's parameter their call binds to it, and is unknown otherwise. A call on another
+     object, another parameter included, does not count.
+   A method counts when its final `changes_self_containers` holds a change that breaks the
+   container's iterators. One report per iteration, at the iteration, naming the first method
+   (the class's own first), with each method's first change (its own, else its first call that
+   changes the container) as a related location.
+6. Incremental updates: `heki_rules::family_readers` re-checks the family of a changed method when
+   a class of it has a suspending generator, and the families of the generators whose objects the
+   calls of a function may receive when its summary or its call sites changed: its callees (both
+   before and after the change, so that a call it stops making is followed too), and in turn what
+   each hands on (the result of a call it returns, or iterates while suspending: the relation
+   step 5 follows up from a generator). The language server re-checks the files showing a
+   container change site that moved, or whose call or change at a place is another one.
 
 #### `MUT103`: cross-function effect snapshots (`heki snapshot summary`)
 - The summaries of public functions (`mutates_params`, `escapes_params`, `mutates_self_attrs`,

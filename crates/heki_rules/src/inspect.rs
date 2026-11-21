@@ -13,8 +13,8 @@ use crate::{DottedPattern, ModuleUnit, has_glob_syntax};
 use heki_ast::{LineIndex, Span};
 use heki_diagnostics::Diagnostic;
 use heki_effect::{
-    AttrKeyPath, CallHop, CallsByCaller, EffectSummary, FuncKey, GuardTest, ProjectDecls,
-    ProjectIndex, SharedState, SiteRole, Slot, func_qualname, is_stub,
+    AttrKeyPath, CallHop, CallsByCaller, CellChange, EffectSummary, FuncKey, GuardTest,
+    ProjectDecls, ProjectIndex, SharedState, SiteRole, Slot, func_qualname, is_stub,
 };
 use heki_ir::IrFunction;
 use heki_kb::{EffectiveEcosystemKb, ExecEffectKind};
@@ -601,6 +601,10 @@ pub fn inspect(
     query: &InspectQuery<'_>,
 ) -> InspectReport {
     let index = inputs.index;
+    assert!(
+        index.opt_in_facts().shared_state,
+        "heki inspect reads an index with heki_rules::inspect_facts"
+    );
     let summary = index
         .summary(key)
         .expect("the resolved function is summarized");
@@ -891,7 +895,7 @@ fn changes(
         invalidates: s.invalidates_cached.iter().cloned().collect(),
         class_attrs_needs: class_attrs.is_none().then_some(TYPED_WRITES_NEED),
         class_attrs,
-        globals: globals(b, key, s, local),
+        globals: globals(b, key, s),
     }
 }
 
@@ -940,72 +944,115 @@ fn self_attr(
     }
 }
 
-fn globals(
-    b: &Builder<'_, '_>,
-    key: &FuncKey,
-    s: &EffectSummary,
-    local: &EffectSummary,
-) -> Vec<GlobalChange> {
+fn globals(b: &Builder<'_, '_>, key: &FuncKey, s: &EffectSummary) -> Vec<GlobalChange> {
     let index = b.inputs.index;
-    // A change of `state` the body of `func` makes at `span`, reached through `chain`.
-    let entry = |func: &FuncKey, state: &SharedState, chain: Vec<Hop>, span: Span| {
-        let at = b.location(index.file_of(func).expect("summarized"), span);
-        let direct = func == key;
-        match state {
-            SharedState::Global(name) => GlobalChange {
-                name: name.clone(),
-                cell_of: None,
-                direct,
-                chain,
-                at,
-            },
-            SharedState::Cell(c) => GlobalChange {
-                name: c.name.clone(),
-                cell_of: Some(format!("{}.{}", func.module, c.owner)),
-                direct,
-                chain,
-                at,
-            },
-        }
-    };
-    let mut out: Vec<GlobalChange> = local
-        .changed_state
-        .iter()
-        .filter(|(state, _)| match state {
-            SharedState::Global(_) => true,
-            SharedState::Cell(c) => s.changes_cells.contains(c),
+    let mut out = changes_made_in(b, key, None, Vec::new())
+        .into_iter()
+        .filter(|g| {
+            g.cell
+                .as_ref()
+                .is_none_or(|c| s.changes_cells().contains(c))
         })
-        .map(|(state, span)| entry(key, state, Vec::new(), *span))
-        .collect();
+        .map(|g| g.change)
+        .collect::<Vec<_>>();
+    let listed = |cell: Option<&CellChange>, out: &[GlobalChange]| {
+        out.iter().any(|g| match cell {
+            None => g.cell_of.is_none(),
+            Some(c) => g.cell_of.is_some() && g.name == c.name,
+        })
+    };
     // What reaches the function through calls: module globals, then each closure cell.
-    let through_cells = s
-        .changes_cells
-        .iter()
-        .filter(|c| !local.changes_cells.contains(c))
-        .map(Some);
-    let globals = (s.changes_globals && !local.changes_globals).then_some(None);
-    for cell in globals.into_iter().chain(through_cells) {
+    let globals = s.changes_globals().then_some(None);
+    let cells = s.changes_cells().iter().map(Some);
+    for cell in globals.into_iter().chain(cells) {
+        if listed(cell, &out) {
+            continue;
+        }
         let chain = index.first_state_change(&mut b.calls.borrow_mut(), key, cell);
         let hops = b.hops(&chain.hops);
-        for end in chain.changed_in.as_slice() {
-            let end_local = index.local_summary(end).expect("summarized");
-            for (state, span) in &end_local.changed_state {
-                let wanted = match (cell, state) {
-                    (None, SharedState::Global(_)) => true,
-                    (Some(c), SharedState::Cell(d)) => c == d,
-                    _ => false,
-                };
-                if wanted {
-                    out.push(entry(end, state, hops.clone(), *span));
-                }
-            }
+        for end in chain.changed_in.iter().filter(|end| *end != key) {
+            out.extend(
+                changes_made_in(b, end, cell, hops.clone())
+                    .into_iter()
+                    .map(|g| g.change),
+            );
         }
     }
     out
 }
 
+/// A change of shared state [`changes_made_in`] lists, with the cell it changes.
+struct MadeChange {
+    change: GlobalChange,
+    cell: Option<CellChange>,
+}
+
+/// The changes of shared state (of `cell`, or of every global and cell when `cell` is `None`
+/// and `chain` is empty) that the body of `func` makes, reached through `chain`: its own, and
+/// those of the callees it hands the state to, one hop further.
+fn changes_made_in(
+    b: &Builder<'_, '_>,
+    func: &FuncKey,
+    cell: Option<&CellChange>,
+    chain: Vec<Hop>,
+) -> Vec<MadeChange> {
+    let index = b.inputs.index;
+    let every = cell.is_none() && chain.is_empty();
+    let wanted = |state: &SharedState| every || state.is_change_of(cell);
+    let direct = chain.is_empty();
+    let made = |state: &SharedState, chain: Vec<Hop>, at: Location, direct: bool| {
+        let (name, cell_of, cell) = match state {
+            SharedState::Global(name) => (name.clone(), None, None),
+            SharedState::Cell(c) => (
+                c.name.clone(),
+                Some(format!("{}.{}", func.module, c.owner)),
+                Some(c.clone()),
+            ),
+        };
+        MadeChange {
+            change: GlobalChange {
+                name,
+                cell_of,
+                direct,
+                chain,
+                at,
+            },
+            cell,
+        }
+    };
+    let path = index.file_of(func).expect("summarized");
+    let local = index.local_summary(func).expect("summarized");
+    let mut out: Vec<MadeChange> = local
+        .changed_state()
+        .iter()
+        .filter(|(state, _)| wanted(state))
+        .map(|(state, span)| made(state, chain.clone(), b.location(path, *span), direct))
+        .collect();
+    for h in index.handed_changes_of(&mut b.calls.borrow_mut(), func) {
+        if !wanted(h.state) {
+            continue;
+        }
+        let hop = CallHop {
+            caller: func.clone(),
+            callee: h.callee.callee.fqn(),
+            span: h.site.span,
+            path: path.to_path_buf(),
+        };
+        let mut hops = chain.clone();
+        hops.push(b.hop(&hop));
+        let at = first_change_site(b, &h.callee.callee, h.param)
+            .unwrap_or_else(|| b.location(path, h.site.span));
+        out.push(made(h.state, hops, at, false));
+    }
+    out
+}
+
 fn returns(b: &Builder<'_, '_>, s: &EffectSummary, params: &[String]) -> Returns {
-    let o = s.returns_origins;
+    let o = s
+        .return_origins
+        .as_deref()
+        .map(|r| r.returned.known)
+        .unwrap_or_default();
     let known = o != heki_effect::Origins::default();
     Returns {
         kind: if s.is_async {
@@ -1209,7 +1256,7 @@ fn purity(
         ),
         (
             "changes_globals",
-            s.changes_globals || !s.changes_cells.is_empty(),
+            s.changes_globals() || !s.changes_cells().is_empty(),
         ),
     ]
     .into_iter()

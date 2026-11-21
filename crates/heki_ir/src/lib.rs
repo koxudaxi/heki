@@ -10,9 +10,12 @@
 //!   while `heki_effect` continues normally.
 
 mod builder;
+mod dominators;
 mod facts;
+pub mod walk;
 
 pub use builder::build_module_ir;
+pub use dominators::{Dominated, DominatorTree, immediate_dominators};
 pub use facts::{FnIndex, LEN_CAP_MAX, ModuleConstants, SMALL_MAX, SmallDisplay};
 
 use heki_ast::Span;
@@ -178,7 +181,7 @@ impl BuiltinKind {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConstLiteral {
     None,
@@ -291,6 +294,9 @@ pub enum InstKind {
         /// The name is a module global (`del` in the module body or after `global name`).
         #[serde(default)]
         global: bool,
+        /// The name is an enclosing function's variable (`del` after `nonlocal name`).
+        #[serde(default)]
+        nonlocal: bool,
     },
     BinOp {
         dst: VarId,

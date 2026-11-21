@@ -39,7 +39,7 @@ pub(crate) fn run(args: &InspectArgs) -> Result<ExitCode> {
             return fail(args, json, &failure, None, &[]);
         }
     };
-    let indexed = load_and_index(&args.paths, &args.analysis, OutputFormat::Full, None)?;
+    let indexed = load_and_index(&args.paths, &args.analysis, OutputFormat::Full, None, true)?;
     let errors = shown_errors(&indexed.project.errors);
     let decls = indexed.index.project_decls();
     let resolution = match resolve(&indexed, &decls, &symbol) {
