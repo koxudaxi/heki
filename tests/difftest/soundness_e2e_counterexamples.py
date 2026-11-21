@@ -169,7 +169,7 @@ class Loud:
 
 
 def cx_nested_builtin_runs_user_code(items):
-    objs = [Loud(1), Loud(2)]
+    objs = [Loud(i) for i in range(1, 18)]
     hits = 0
     for p in items:
         if p in tuple(list(map(repr, objs))):
@@ -178,7 +178,7 @@ def cx_nested_builtin_runs_user_code(items):
 
 
 def old_nested_builtin_runs_user_code(items):
-    objs = [Loud(1), Loud(2)]
+    objs = [Loud(i) for i in range(1, 18)]
     hits = 0
     hoisted = tuple(list(map(repr, objs)))
     for p in items:

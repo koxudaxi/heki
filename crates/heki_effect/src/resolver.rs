@@ -35,6 +35,7 @@ struct Indexes {
     typed_dicts: FxHashSet<String>,
     protocols: FxHashMap<String, Option<Vec<String>>>,
     grown_elsewhere: FxHashSet<String>,
+    rebound_elsewhere: FxHashSet<String>,
 }
 
 /// Names every class has, which a protocol's body defines without requiring them.
@@ -361,6 +362,11 @@ pub struct ModuleDecls {
     /// ([`ProjectDecls::grown_elsewhere`]).
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub grown_globals: BTreeSet<String>,
+    /// The `grown_globals` this module rebinds or deletes (`cfg.QUEUE = []`, `del
+    /// cfg.QUEUE`): bound to another object, so not even a tuple keeps its display
+    /// ([`ProjectDecls::rebound_elsewhere`]).
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub rebound_globals: BTreeSet<String>,
     /// Module-level string constants declared `Final` (`KEY: Final = "_key"`), by name: a
     /// constant names an attribute in `obj.__dict__[KEY]`, `getattr(obj, KEY)`, and
     /// `setattr(obj, KEY, v)`, and a key in `obj.attr[KEY]`, as its literal would.
@@ -1009,6 +1015,8 @@ pub struct ProjectDecls {
     /// Canonical fqns of module globals another project module may grow or rebinds
     /// (`ModuleDecls::grown_globals`).
     grown_elsewhere: FxHashSet<String>,
+    /// Those another project module rebinds or deletes (`ModuleDecls::rebound_globals`).
+    rebound_elsewhere: FxHashSet<String>,
     recorder: Recorder,
     /// The C3 linearizations computed so far of classes with multiple inheritance along their
     /// bases (`Self::mro`); cleared with the indexes.
@@ -1119,6 +1127,8 @@ impl ProjectDecls {
             }
         }
         out.grown_globals = differ(&before.grown_elsewhere, &self.grown_elsewhere);
+        out.grown_globals
+            .extend(differ(&before.rebound_elsewhere, &self.rebound_elsewhere));
         out
     }
 
@@ -1130,6 +1140,7 @@ impl ProjectDecls {
             typed_dicts: self.typed_dicts.clone(),
             protocols: self.protocols.clone(),
             grown_elsewhere: self.grown_elsewhere.clone(),
+            rebound_elsewhere: self.rebound_elsewhere.clone(),
         }
     }
 
@@ -1181,15 +1192,19 @@ impl ProjectDecls {
             .collect();
         self.frozen = self.frozen_classes();
         self.protocols = self.protocol_implementations();
-        self.grown_elsewhere = self.globals_grown_elsewhere();
+        self.grown_elsewhere = self.globals_changed_elsewhere(|m| &m.grown_globals);
+        self.rebound_elsewhere = self.globals_changed_elsewhere(|m| &m.rebound_globals);
     }
 
-    /// The canonical fqns of the globals some module grows or rebinds that another module
-    /// owns (`ModuleDecls::grown_globals`).
-    fn globals_grown_elsewhere(&self) -> FxHashSet<String> {
+    /// The canonical fqns of the globals that another module than their owner lists in
+    /// `changed` (`ModuleDecls::grown_globals`, `ModuleDecls::rebound_globals`).
+    fn globals_changed_elsewhere(
+        &self,
+        changed: impl Fn(&ModuleDecls) -> &BTreeSet<String>,
+    ) -> FxHashSet<String> {
         let mut out = FxHashSet::default();
         for m in self.modules.values() {
-            for fqn in &m.grown_globals {
+            for fqn in changed(m) {
                 let fqn = self.canonical(fqn);
                 if self.split_module(&fqn).is_some_and(|(owner, rest)| {
                     owner.module_name != m.module_name && !rest.is_empty()
@@ -1207,6 +1222,24 @@ impl ProjectDecls {
         let fqn = self.canonical(fqn);
         self.read(|k| note(&mut k.grown_globals, &fqn));
         self.grown_elsewhere.contains(&fqn)
+    }
+
+    /// Whether another project module rebinds or deletes the module global `fqn`.
+    pub fn rebound_elsewhere(&self, fqn: &str) -> bool {
+        let fqn = self.canonical(fqn);
+        self.read(|k| note(&mut k.grown_globals, &fqn));
+        self.rebound_elsewhere.contains(&fqn)
+    }
+
+    /// Whether another project module may change what the module global `fqn` holds: grow it
+    /// or rebind it, or only rebind it when it holds `display` and that is a tuple or a
+    /// string.
+    pub fn changed_elsewhere(&self, fqn: &str, display: &SmallDisplay) -> bool {
+        if display.is_immutable() {
+            self.rebound_elsewhere(fqn)
+        } else {
+            self.grown_elsewhere(fqn)
+        }
     }
 
     /// For every project protocol, the project classes implementing it structurally: those
@@ -1446,12 +1479,13 @@ impl ProjectDecls {
     }
 
     /// The small display the module global `fqn` of a project module holds
-    /// (`ModuleDecls::small_globals`), through re-exports.
+    /// (`ModuleDecls::small_globals`), through re-exports, when no other module changes it
+    /// ([`Self::changed_elsewhere`]).
     pub fn small_global(&self, fqn: &str) -> Option<&SmallDisplay> {
         let fqn = self.canonical(fqn);
         let (m, rest) = self.split_module(&fqn)?;
         let display = m.small_globals.get(rest)?;
-        (!self.grown_elsewhere(&fqn)).then_some(display)
+        (!self.changed_elsewhere(&fqn, display)).then_some(display)
     }
 
     /// The small display attribute `attr` of an instance of the project class `class` holds:
@@ -2318,7 +2352,7 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
     }
     readonly_metadata(input, &mut decls);
     decls.small_globals = input.ir.constants.displays.clone();
-    decls.grown_globals = foreign_grown_globals(input, &decls.imports);
+    (decls.grown_globals, decls.rebound_globals) = foreign_grown_globals(input, &decls.imports);
     attr_displays(input, &mut decls);
     decls.str_constants = final_str_constants(input, &decls);
     decls
@@ -2327,14 +2361,16 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
 /// `ModuleDecls::grown_globals`: the loads of an imported module's global (`cfg.QUEUE`, or
 /// `QUEUE` after `from cfg import QUEUE`) whose object a function may grow, and the globals
 /// it stores into or deletes on an imported module (`cfg.QUEUE = []`), decided by the shared
-/// `heki_ir` facts ([`FnIndex::grown_vars`]).
+/// `heki_ir` facts ([`FnIndex::grown_vars`]); and those stores and deletes alone
+/// (`ModuleDecls::rebound_globals`).
 fn foreign_grown_globals(
     input: &ModuleInput<'_>,
     imports: &BTreeMap<String, String>,
-) -> BTreeSet<String> {
+) -> (BTreeSet<String>, BTreeSet<String>) {
     let mut out = BTreeSet::new();
+    let mut rebound = BTreeSet::new();
     if imports.is_empty() {
-        return out;
+        return (out, rebound);
     }
     for f in &input.ir.functions {
         let ix = FnIndex::new(f, &input.ir.constants);
@@ -2343,7 +2379,7 @@ fn foreign_grown_globals(
             match &inst.kind {
                 InstKind::AttrStore { obj, attr, .. } | InstKind::AttrDelete { obj, attr } => {
                     if let Some(module) = imported_fqn(&ix, imports, *obj, 0) {
-                        out.insert(format!("{module}.{attr}"));
+                        rebound.insert(format!("{module}.{attr}"));
                     }
                 }
                 kind => {
@@ -2373,7 +2409,8 @@ fn foreign_grown_globals(
                 .map(|(_, fqn)| fqn),
         );
     }
-    out
+    out.extend(rebound.iter().cloned());
+    (out, rebound)
 }
 
 /// The fqn `v` names through this module's runtime imports (`cfg`, `cfg.QUEUE`), through
@@ -3147,6 +3184,7 @@ static EMPTY_DECLS: ModuleDecls = ModuleDecls {
     global_types: BTreeMap::new(),
     small_globals: BTreeMap::new(),
     grown_globals: BTreeSet::new(),
+    rebound_globals: BTreeSet::new(),
     str_constants: BTreeMap::new(),
 };
 
@@ -3489,7 +3527,9 @@ impl<'a> TypeCtx<'a> {
         self.str_constant_with(var, &|v| f.def_inst(v).map(|(_, inst)| inst), types)
     }
 
-    pub(crate) fn import_target(&self, span: Span) -> Option<&str> {
+    /// The fqn the import statement at `span` binds (what a module body's copy of its
+    /// `Import` refers to).
+    pub fn import_target(&self, span: Span) -> Option<&str> {
         self.import_by_span.get(&span).map(String::as_str)
     }
 

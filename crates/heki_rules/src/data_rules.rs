@@ -2,9 +2,10 @@
 
 use crate::eff_rules::shortest;
 use crate::mut_rules::{CallInst, site_call};
+use crate::opt_rules::Sizes;
 use crate::{CheckContext, ModuleUnit};
 use heki_diagnostics::Diagnostic;
-use heki_effect::{CallSite, SiteEffect};
+use heki_effect::{CallSite, SiteEffect, TypeCtx};
 use heki_ir::{
     BinOpKind, BuiltinKind, ConstLiteral, Inst, InstKind, IrFunction, LoopCarriedInfo, NaturalLoop,
     UnaryOpKind, VarId,
@@ -19,24 +20,32 @@ use rustc_hash::{FxHashMap, FxHashSet};
 /// (`out = np.concatenate(parts, out=out)` reuses the buffer) or through arithmetic on it
 /// (`x = np.concatenate((x - d, [a]))` combines a new array). One-shot concatenations inside a
 /// loop, also on a branch that leaves the variable unchanged otherwise, are not updates and are
-/// never reported.
+/// never reported, and neither is a loop whose trip count the code fixes (`Sizes::data_sized`).
 pub(crate) fn data101(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Diagnostic>) {
     if !cx.enabled("DATA101", unit) {
         return;
     }
     let sites = cx.sites_by_span(unit);
+    let tcx = TypeCtx::new(&unit.input, cx.decls, cx.kb);
+    let no_types = FxHashMap::default();
+    let constants = cx.fixed_constants(unit);
     for f in &unit.input.ir.functions {
         if f.is_class_body || f.loop_carried.iter().all(|lc| !lc.self_accumulating) {
             continue;
         }
         let key = CheckContext::key(unit, f);
+        let sizes = Sizes::new(cx, &tcx, &no_types, f, unit, &constants);
         let mut defs: FxHashMap<VarId, &Inst> = FxHashMap::default();
         for inst in f.blocks.iter().flat_map(|b| &b.insts) {
             if let Some(d) = inst.kind.dst() {
                 defs.insert(d, inst);
             }
         }
-        for (lc, _) in accumulating_loops(f) {
+        let starred = first_starred(f);
+        for (lc, _) in accumulating_loops(f)
+            .into_iter()
+            .filter(|(_, lp)| sizes.data_sized(lp))
+        {
             // The first update (in block order) that is a quadratic reallocation of the previous
             // value: the reallocating call itself, or a project call returning one of the
             // argument that carries it (`acc = grow(acc)`, not `acc = step(acc)` where `step`
@@ -48,7 +57,7 @@ pub(crate) fn data101(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Ve
                     _ => defs.get(v)?,
                 };
                 let call = CallInst::of(&inst.kind)?;
-                if !combines(f, &defs, &call, lc.phi_var) {
+                if !combines(f, &defs, &starred, &call, lc.phi_var) {
                     return None;
                 }
                 let at: &[&CallSite] = sites
@@ -136,6 +145,7 @@ fn carries(f: &IrFunction, v: VarId, previous: VarId) -> bool {
 fn combines(
     f: &IrFunction,
     defs: &FxHashMap<VarId, &Inst>,
+    starred: &FxHashMap<VarId, usize>,
     call: &CallInst<'_>,
     previous: VarId,
 ) -> bool {
@@ -152,7 +162,7 @@ fn combines(
         .flat_map(|b| &b.phis)
         .map(|p| (p.dst, p))
         .collect();
-    let mut derivations = Derivations::new(f, defs, previous);
+    let mut derivations = Derivations::new(defs, starred, previous);
     let mut seen: FxHashSet<VarId> = work.iter().copied().collect();
     while let Some(v) = work.pop() {
         if v == previous {
@@ -218,17 +228,22 @@ enum FromPrevious {
 /// The [`FromPrevious`] of each value of one function, also through copies and unpacking
 /// (`w, v = q[0], q[1:]` takes `v` from the display). Each answer is kept per value.
 struct Derivations<'a> {
-    f: &'a IrFunction,
     defs: &'a FxHashMap<VarId, &'a Inst>,
+    /// The first operand written with `*` of each display ([`first_starred`]).
+    starred: &'a FxHashMap<VarId, usize>,
     previous: VarId,
     known: FxHashMap<VarId, FromPrevious>,
 }
 
 impl<'a> Derivations<'a> {
-    fn new(f: &'a IrFunction, defs: &'a FxHashMap<VarId, &'a Inst>, previous: VarId) -> Self {
+    fn new(
+        defs: &'a FxHashMap<VarId, &'a Inst>,
+        starred: &'a FxHashMap<VarId, usize>,
+        previous: VarId,
+    ) -> Self {
         Self {
-            f,
             defs,
+            starred,
             previous,
             known: FxHashMap::default(),
         }
@@ -340,8 +355,24 @@ impl<'a> Derivations<'a> {
         };
         let i = usize::try_from(*i).ok()?;
         let item = *elems.get(i)?;
-        (!(0..=i).any(|k| self.f.is_starred(*dst, k))).then_some(item)
+        self.starred
+            .get(dst)
+            .is_none_or(|&first| first > i)
+            .then_some(item)
     }
+}
+
+/// The first operand written with `*` (`IrFunction::starred`) of each display or call of `f`.
+fn first_starred(f: &IrFunction) -> FxHashMap<VarId, usize> {
+    let mut first: FxHashMap<VarId, usize> = FxHashMap::default();
+    for &(dst, i) in &f.starred {
+        let i = i as usize;
+        first
+            .entry(dst)
+            .and_modify(|k| *k = (*k).min(i))
+            .or_insert(i);
+    }
+    first
 }
 
 /// The keyword arguments of a call but `out=`, the destination buffer it writes into.

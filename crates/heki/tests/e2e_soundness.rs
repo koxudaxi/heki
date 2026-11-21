@@ -794,11 +794,14 @@ const HOIST: &[Expect] = &[
         &[
             (
                 "OPT130",
-                V::Fix(&["    hoisted = set(\"abcdefghi\")\n", "hoisted"]),
+                V::Fix(&["    hoisted = set(\"abcdefghijklmnopq\")\n", "hoisted"]),
             ),
             (
                 "OPT130",
-                V::Fix(&["        hoisted_1 = set(\"jklmnopqr\")\n", "hoisted_1"]),
+                V::Fix(&[
+                    "        hoisted_1 = set(\"jklmnopqrstuvwxyz\")\n",
+                    "hoisted_1",
+                ]),
             ),
         ],
     ),

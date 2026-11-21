@@ -146,7 +146,15 @@ Compound expressions are flattened into **basic instructions in explicit left-to
   - `ConstSmall(k)`: a `for` over a small display (below) or `range(...)` (the builtin, by
     name resolution) spanning at most 16 (`SMALL_MAX`), also through `enumerate`, `zip`, `reversed`, `sorted`, `map`,
     `filter`, and `.items()` / `.keys()` / `.values()`, and with range bounds that are constant
-    integer expressions (`+`, `-`, `*`, module constants included).
+    integer expressions (`+`, `-`, `*`, module constants included); or over an iterable that a
+    `len(x) <= N` test on every path to the loop caps at `N <= 16` (`if not 1 <= len(x) <= 6:
+    raise`, `assert len(x) <= 3`, the exit of `while len(x) > 3: x.pop()`), when nothing in a
+    block that reaches the loop grows `x` or lets it escape (returning it after the loop is
+    fine). `FnIndex::guarded_len` reads the outcome of the test on the edge into a block whose
+    one predecessor branches on it, through `not`, `and` / `or`, and comparison chains, and the
+    tests on the single-predecessor way to each operand. A generator expression's or a
+    comprehension function's loop over `.0` takes the bound of the iterable its creator passes
+    (`IrFunction::passed_from`).
   - `RetryPattern`: a retry body (a `try` that leaves the loop on success and sleeps in a
     handler) over a small constant range or a target named like `retry` / `attempt`, or a
     `while` loop with a retry body that sleeps.
@@ -158,10 +166,22 @@ Compound expressions are flattened into **basic instructions in explicit left-to
   - `Unbounded`: everything else.
 - **Size facts** (`heki_ir::facts`, the one home of size and trip-count facts; profitability and
   Advisory noise only, never Soundness premises):
-  - A **small display** (`SmallDisplay`) is a list, tuple, set, or dict display of at most 16
-    items (`SMALL_MAX`) without `*` / `**` unpacking that nothing grows or lets escape.
-    Shrinking it and passing it to read-only builtins are fine; a store at an unknown index
-    (`xs[k] = v`, possibly a slice) counts as growth.
+  - A **small display** (`SmallDisplay`) holds at most 16 items (`SMALL_MAX`) and nothing
+    grows it past that or lets it escape: a list, tuple, set, or dict display without `*` /
+    `**` unpacking, a string constant, a builtin constructor (`list`, `tuple`, `set`,
+    `frozenset`, `dict`, `sorted`) of an iterable the code fixes, a slice with constant bounds
+    (of a container of unknown kind it has a size but no kind, so it bounds loops and scans but
+    is no module or attribute display), or what a comprehension function returns
+    (`ModuleConstants::comprehensions`, Python 3.11). Shrinking it and passing it to read-only
+    builtins are fine; a store at an unknown index (`xs[k] = v`, possibly a slice) counts as
+    growth. A new object may gain items a fixed number of times: an `append` / `add` /
+    `insert` / `setdefault`, or an item store into a dict, adds one per run of its block, and
+    `extend(x)` / `update(x)` as many as `x` yields; a block runs once per iteration of each
+    loop around it that the object outlives (it is made outside the loop, or a header phi
+    carries it), so a comprehension or a list filled in a fixed loop is small. A module
+    constant's object gains none (every call shares it). Tuples and strings are fixed whatever
+    their uses, also in other modules, unless another module rebinds or deletes the name
+    (`ModuleDecls.rebound_globals`, `ProjectDecls::changed_elsewhere`).
   - `NaturalLoop.len_caps` (`LenCap`) records `while len(x) < N` caps up to 4096
     (`LEN_CAP_MAX`); `LoopCarriedInfo.updates` lists the real updates of a loop-carried value.
   - `IrFunction.starred` marks starred display elements, `BasicBlock.term_span` the source of a

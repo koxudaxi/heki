@@ -14,8 +14,9 @@ This is a size-dependent rewrite: it is reported as a suggestion and applied onl
 `heki check --fix --include-size-dependent`, or for functions that a `--profile` dump shows
 hot. Not reported:
 
-- small displays: at most 16 items that nothing grows, whatever the items are
-  (`x in ("a", "b")`, `x in [b"1", b"2"]`, also through a name bound to one);
+- small containers: at most 16 items that nothing grows, whatever the items are
+  (`x in ("a", "b")`, `x in [b"1", b"2"]`, also through a name bound to one, a comprehension
+  over one, or `list(range(5))`);
 - lists whose elements are dicts, lists, or sets: no `set` can hold them.
 
 ## Why is this bad?
@@ -48,6 +49,6 @@ Proven safe only when:
 
 A `list[int]` annotation is never trusted: a list subclass can override `__contains__`.
 
-Not reported when the container is a small display that nothing grows, or when the loop runs a
-fixed small number of times (`for i in range(3):`): building the set costs about as much as the
-scans it saves.
+Not reported when the container is small whatever the input, or when the loop runs a fixed
+small number of times (`for i in range(3):`): building the set costs about as much as the scans
+it saves.

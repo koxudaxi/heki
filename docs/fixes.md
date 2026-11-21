@@ -48,17 +48,26 @@ Two independent questions decide whether heki offers the rewrite:
 
 A size-dependent rule reports nothing when the code fixes the size:
 
-- the container is a display of at most 16 items, without `*` / `**` unpacking, that nothing
-  grows or lets escape. Shrinking it (`expected.pop(0)` on `expected = [b"a", b""]`) and
-  read-only builtins are fine. This holds also through local names, module constants, and other
-  modules' module-level displays and class attributes;
-- the loop runs a fixed number of times: over a small display or a `range` of constants with
-  at most 16 steps;
+- the container holds at most 16 items and nothing grows it past that or lets it escape. It
+  is a display without `*` / `**` unpacking, a string constant, a builtin constructor of an
+  iterable the code fixes (`list(range(7))`, `tuple(".;:")`, `sorted(NAMES)`, `list()`), a
+  slice with constant bounds (`cases[:3]`, `paths[-2:]`), or a comprehension over fixed
+  iterables (`[c for c in LABELS if c in wanted]`). Shrinking it (`expected.pop(0)` on
+  `expected = [b"a", b""]`) and read-only builtins are fine, and so is filling a new list a
+  fixed number of times (`ids.append(card["id"])` in a loop over at most 6 cards). A tuple or
+  a string stays fixed whatever other code does with it, unless other code rebinds its name
+  (`cfg.STATEMENTS = tuple(rows)`). This holds also through local names,
+  module constants, and other modules' module-level displays and class attributes, read in a
+  function or in a module body;
+- the loop runs a fixed number of times: over such a container, a `range` of constants with at
+  most 16 steps, or an iterable a test on every path to the loop caps (`if not 1 <= len(cards)
+  <= 6: raise ValueError(...)`, `assert len(xs) <= 3`, also after a loop that shrinks it, when
+  nothing on the way to the loop grows it or hands it to other code);
 - the list is rebuilt in every iteration;
 - the loop's own test caps the accumulator: `while len(buf) < 10`.
 
 These facts decide profitability only, never safety. A size known only at run time does not
-count: a list built at run time is reported even when it always holds three items.
+count: a list whose size depends on the input is reported even when it always holds three items.
 
 ## What a fix must prove
 

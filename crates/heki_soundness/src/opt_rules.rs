@@ -1612,12 +1612,12 @@ impl<'a, 'c> Rules<'a, 'c> {
         )
     }
 
-    /// `v` is a small display for its whole life (`heki_ir::FnIndex::container_bound`): why
-    /// a size-dependent rewrite does not pay off.
+    /// `v` is small for its whole life (`heki_ir::FnIndex::container_bound`): why a
+    /// size-dependent rewrite does not pay off.
     fn small_note(&self, name: &str, v: VarId) -> Option<String> {
-        self.ix.container_bound(v).map(|n| {
-            format!("`{name}` holds at most {n} item(s): a small display that nothing grows")
-        })
+        self.ix
+            .container_bound(v)
+            .map(|n| format!("`{name}` holds at most {n} item(s) whatever the input"))
     }
 
     // ------------------------------------------------------------------------ OPT110

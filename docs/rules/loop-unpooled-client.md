@@ -28,8 +28,12 @@ same function as another lambda is not followed: every lambda of a function has 
 The iterable of a `for` loop is evaluated once and is not reported; neither are calls in
 loops whose size the code fixes, when no data-sized loop is around them: displays of at most 16
 items (also through a name or a module constant bound to one that nothing in the project
-grows, and through `enumerate` / `zip` / `reversed` / `sorted` / `.items()`), `range` of integer
-constants with at most 16 steps (`range(ATTEMPTS - 1)`), retry loops, and daemon polling loops.
+grows, a tuple whatever other code does with it short of rebinding it, and through
+`enumerate` / `zip` / `reversed` / `sorted` / `.items()`), `range` of integer constants with at
+most 16 steps (`range(ATTEMPTS - 1)`), what a builtin constructor, a comprehension, or a fixed
+loop of `append`s makes of those (`list(range(7))`, `[n.upper() for n in ("a", "b")]`), slices
+with a constant bound (`for case in cases[:3]`), iterables a length test on every path to the
+loop caps (`if len(cases) > 3: raise ...`), retry loops, and daemon polling loops.
 
 A client that is only created while an attribute is unset, which the code then sets (lazy
 initialization: `if not self._sock: self._sock = connect()`, or `if self._sock: return`

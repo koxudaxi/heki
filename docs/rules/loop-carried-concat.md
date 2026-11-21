@@ -24,7 +24,9 @@ value must be among the data that is combined. A list holding it counts (`pd.con
 parts)`), arithmetic on it does not (`x = np.concatenate((x - np.outer(u, v), [a]))`,
 `q = np.concatenate([[w * q[0]], w * q[1:]])`): every entry of the new value changed, so each
 iteration already works in proportion to the value's size, and there are no unchanged parts to
-collect and combine once.
+collect and combine once. A loop whose trip count the code fixes is not reported either
+(`for is_p_wave in [False, True]`, `for _ in range(steps)` with `steps = 8`): it copies a fixed
+number of times, whatever the input.
 
 ## Why is this bad?
 Every concatenation copies everything accumulated so far, so the loop is quadratic in the total

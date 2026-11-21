@@ -637,6 +637,84 @@ fn lazy_initializations_past_the_budget_count_as_changes() {
     assert_eq!(reported, vec!["use"], "{found:#?}");
 }
 
+/// Each list copies the one before (`x1 = list(x0)`): the size of the last is not followed
+/// past a few constructors, and each is decided once.
+#[test]
+fn chains_of_builtin_constructors_are_followed_a_bounded_depth() {
+    let mut lines = vec![
+        "import httpx".to_owned(),
+        String::new(),
+        String::new(),
+        "def copies():".to_owned(),
+        "    x0 = [1, 2]".to_owned(),
+    ];
+    for i in 1..=3000 {
+        lines.push(format!("    x{i} = list(x{})", i - 1));
+    }
+    lines.push("    for _ in x4:".to_owned());
+    lines.push("        httpx.Client()".to_owned());
+    lines.push("    for _ in x3000:".to_owned());
+    lines.push("        httpx.Client()".to_owned());
+    let p = Project::new("bounds_constructor_chain");
+    p.write("m.py", &(lines.join("\n") + "\n"));
+    // Four copies keep two items; three thousand are past the depth the sizes follow.
+    let diags = check_within(&p, Duration::from_secs(20));
+    let lines: Vec<u64> = diags.iter().map(|d| d["line"].as_u64().unwrap()).collect();
+    assert_eq!(lines, [3009], "{diags:#?}");
+}
+
+/// Two lists that extend each other: the size of each asks for the other's at the same store,
+/// and the question is answered once, as not fixed, instead of recursing until the stack ends.
+#[test]
+fn lists_that_extend_each_other_are_not_fixed() {
+    let p = Project::new("bounds_mutual_extend");
+    p.write(
+        "m.py",
+        "import sqlite3\n\n\ndef f(conn: sqlite3.Connection):\n    a = []\n    b = []\n    a.extend(b)\n    b.extend(a)\n    for x in a:\n        conn.execute(\"SELECT ?\", (x,))\n",
+    );
+    let found = check_within(&p, Duration::from_secs(20));
+    let queries: Vec<&Value> = found
+        .iter()
+        .filter(|d| d["rule_code"] == "EFF103")
+        .collect();
+    assert_eq!(queries.len(), 1, "{found:#?}");
+}
+
+/// A length test repeated through `steps` assignments, each `and` of the one before with its
+/// double negation: every value implies the same one cap, kept once, so the caps stay one per
+/// measured value instead of doubling at each step.
+fn repeated_length_test(steps: usize) -> String {
+    let mut lines = vec![
+        "import sqlite3".to_owned(),
+        String::new(),
+        String::new(),
+        "def f(conn: sqlite3.Connection, xs):".to_owned(),
+        "    b0 = len(xs) <= 6".to_owned(),
+    ];
+    for i in 1..=steps {
+        lines.push(format!("    b{i} = b{} and not not b{}", i - 1, i - 1));
+    }
+    lines.push(format!("    if not b{steps}:"));
+    lines.push("        raise ValueError(xs)".to_owned());
+    lines.push("    for x in xs:".to_owned());
+    lines.push("        conn.execute(\"SELECT ?\", (x,))".to_owned());
+    lines.join("\n") + "\n"
+}
+
+#[test]
+fn length_tests_repeated_through_assignments_keep_one_cap() {
+    for steps in [4, 40] {
+        let p = Project::new(&format!("bounds_repeated_len_{steps}"));
+        p.write("m.py", &repeated_length_test(steps));
+        let found = check_within(&p, Duration::from_secs(20));
+        // The loop runs at most six times, so it is no N+1.
+        assert!(
+            !found.iter().any(|d| d["rule_code"] == "EFF103"),
+            "{found:#?}"
+        );
+    }
+}
+
 /// A query a sort key runs, the key reached through `depth` nested `functools.partial` objects
 /// and `copies` copies before the call.
 fn partial_chain(depth: usize, copies: usize) -> String {
@@ -679,4 +757,43 @@ fn callables_past_the_partial_and_copy_bounds_are_not_followed() {
     assert_eq!(queries(3, 3), 1);
     assert_eq!(queries(30, 3), 0);
     assert_eq!(queries(3, 30), 0);
+}
+
+/// Thousands of names unpacked from one display of the previous value
+/// (`a0, a1, ... = acc, acc, ...`), each rebuilt entry by entry, in a function with as many
+/// starred elements elsewhere: where each display starts unpacking is indexed once.
+#[test]
+fn names_unpacked_from_one_display_find_its_starred_elements_once() {
+    let n = 3000;
+    let names: Vec<String> = (0..n).map(|i| format!("a{i}")).collect();
+    let mut lines = vec![
+        "import numpy as np".to_owned(),
+        String::new(),
+        String::new(),
+        "def rebuilt(rows):".to_owned(),
+        "    acc = np.empty(0)".to_owned(),
+        "    for row in rows:".to_owned(),
+    ];
+    for i in 0..n {
+        lines.push(format!("        b{i} = [*row]"));
+    }
+    lines.push(format!(
+        "        {} = {}",
+        names.join(", "),
+        vec!["acc"; n].join(", ")
+    ));
+    let scaled: Vec<String> = names.iter().map(|a| format!("{a} * 2")).collect();
+    lines.push(format!(
+        "        acc = np.concatenate(({}, [row]))",
+        scaled.join(", ")
+    ));
+    lines.push("    return acc".to_owned());
+    let p = Project::new("bounds_unpacked_display");
+    p.write("m.py", &(lines.join("\n") + "\n"));
+    let found = check_within(&p, Duration::from_secs(20));
+    // Every operand is computed entry by entry from the previous array.
+    assert!(
+        !found.iter().any(|d| d["rule_code"] == "DATA101"),
+        "{found:#?}"
+    );
 }

@@ -504,7 +504,7 @@ class Worker:
     names: list[str]
 
     def __init__(self):
-        self.items = list()
+        self.items = list(self.names)
         self._running = True
 
     def drop(self, xs):
