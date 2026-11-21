@@ -536,6 +536,7 @@ def class_attribute_first(d: D) -> None:
 
 def lacking(obj: A | F) -> None:
     obj.view.append(1)
+    obj.members().append(1)
 
 
 class G(A):
@@ -604,10 +605,10 @@ fn a_getter_hands_out_its_attribute_only_where_every_read_runs_it() {
             d(m, 45, "MUT201", "E.items"),
             d(m, 49, "MUT201", "A.items"),
             // `drain` storing the attribute again is a write itself.
-            d(m, 83, "MUT201", "Pool.items"),
+            d(m, 84, "MUT201", "Pool.items"),
             // A getter returning the attribute; not one that stores it again before returning
             // what it held, nor a keyword-only parameter bound by name.
-            d(m, 100, "MUT201", "Pool.items"),
+            d(m, 101, "MUT201", "Pool.items"),
         ]
     );
 }
@@ -630,10 +631,19 @@ async def cached(s: Cached) -> None:
 
 async def plain(s: Plain) -> None:
     s.get("x")
+
+
+class Table(dict):
+    pass
+
+
+def private(t: Table) -> None:
+    t._helper()
 "#;
 
 /// A method no project class defines comes from the first base outside the project along the
-/// MRO: a catalogued base's after a base heki knows nothing of, which may define it, is unknown.
+/// MRO that heki takes to define it: a catalogued base's after a base heki knows nothing of,
+/// which may define it, is unknown, and a builtin type does not define a private name.
 #[test]
 fn an_unknown_base_before_a_catalogued_one_leaves_the_method_unknown() {
     let p = Project::new("unknown_base_first");
