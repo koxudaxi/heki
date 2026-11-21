@@ -50,23 +50,28 @@ pub(crate) fn import_probes(
     f: &IrFunction,
 ) -> impl Iterator<Item = (Span, Option<&str>, &str)> + '_ {
     f.blocks.iter().flat_map(move |bb| {
-        let probing = catches_import_error(f, bb.exc_target);
-        bb.insts.iter().filter_map(move |i| match &i.kind {
-            InstKind::Import {
-                module,
-                name,
-                is_lazy: false,
-                ..
-            } if probing => Some((i.span, module.as_deref(), name.as_str())),
-            _ => None,
-        })
+        let mut imports = bb
+            .insts
+            .iter()
+            .filter_map(|i| match &i.kind {
+                InstKind::Import {
+                    module,
+                    name,
+                    is_lazy: false,
+                    ..
+                } => Some((i.span, module.as_deref(), name.as_str())),
+                _ => None,
+            })
+            .peekable();
+        let probing = imports.peek().is_some() && catches_import_error(f, bb.exc_target);
+        imports.filter(move |_| probing)
     })
 }
 
 /// Whether the exception handler `handler` takes an `ImportError`: one of the `except` clauses
 /// it tests in turn names it, or, when none does and it raises the exception again, an
-/// enclosing handler takes it. Any other shape of handler (a `finally` body, the exit of a
-/// `with` block) is not followed.
+/// enclosing handler takes it (also after a `finally` body). Any other shape of handler (the
+/// exit of a `with` block, which may suppress the exception) is not followed.
 fn catches_import_error(f: &IrFunction, mut handler: Option<BlockId>) -> bool {
     let mut seen: FxHashSet<BlockId> = FxHashSet::default();
     while let Some(start) = handler.filter(|b| seen.insert(*b)) {

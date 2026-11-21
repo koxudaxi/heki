@@ -443,6 +443,17 @@ def guarded(lock: object) -> bool:
     return True
 
 
+def guarded_then_tested(lock: object, flag: bool) -> bool:
+    try:
+        with lock:  # type: ignore[attr-defined]
+            import csv  # noqa: F401
+        if flag:
+            return True
+    except ImportError:
+        return False
+    return False
+
+
 def unguarded() -> object:
     import pickle
 
