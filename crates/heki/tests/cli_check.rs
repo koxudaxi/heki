@@ -79,7 +79,7 @@ fn semantic_fixtures_gate_json() {
         (73, "MUT201"),
         (76, "MUT201"),
         (78, "MUT201"),
-        (92, "MUT202"),
+        (92, "MUT114"),
         (108, "EFF101"),
         (143, "EFF102"),
     ]
@@ -104,7 +104,7 @@ fn exit_codes_and_clean_runs() {
     let (code, stdout, stderr) = p.heki(&[]);
     assert_eq!(code, 0);
     assert!(
-        stdout.starts_with("pkg/bad.py:4:5: EFF101 (async-blocking-call) [warning, heuristic]"),
+        stdout.starts_with("pkg/bad.py:4:5: EFF101 (async-blocking-call) [warning] "),
         "{stdout}"
     );
     assert!(stdout.contains("4 |     time.sleep(1)"));
@@ -230,21 +230,18 @@ fn output_formats_and_config_selection() {
         );
     // The message is one sentence; the help is a line of its own in `full`, a field in JSON,
     // the result's `properties.help` in SARIF, and left out of `concise` and `github`.
-    let message = "`handler` reaches the blocking call `time.sleep` on the event loop";
+    let message = "`handler` runs the waiting call `time.sleep` on the event loop";
     let help = "use `await asyncio.sleep(...)`, or offload it with `asyncio.to_thread`";
     let (code, stdout, _) = p.heki(&["--output-format", "github"]);
     assert_eq!(code, 1);
     assert_eq!(
         stdout.lines().collect::<Vec<_>>(),
         vec![format!(
-            "::error file=src/pkg/api.py,line=4,col=5,title=heki EFF101 (heuristic)::{message}"
+            "::error file=src/pkg/api.py,line=4,col=5,title=heki EFF101::{message}"
         )]
     );
     let (_, stdout, _) = p.heki(&["--output-format", "concise"]);
-    assert_eq!(
-        stdout,
-        format!("src/pkg/api.py:4:5: EFF101 [heuristic] {message}\n")
-    );
+    assert_eq!(stdout, format!("src/pkg/api.py:4:5: EFF101 {message}\n"));
     let (_, stdout, _) = p.heki(&[]);
     assert!(
         stdout.ends_with(&format!(
@@ -329,7 +326,7 @@ fn slower_code_defaults_to_warning() {
     let (code, stdout, _) = p.heki(&["--select", "OPT"]);
     assert_eq!(code, 0, "{stdout}");
     assert!(
-        stdout.starts_with("app.py:7:9: OPT101 (list-quadratic-concat) [warning, heuristic] "),
+        stdout.starts_with("app.py:7:9: OPT101 (list-quadratic-concat) [warning] "),
         "{stdout}"
     );
     let (_, stdout, _) = p.heki(&["--output-format", "sarif", "--select", "OPT113"]);
@@ -366,7 +363,7 @@ fn warnings_do_not_fail_the_check_unless_fail_on_says_so() {
     let (code, stdout, stderr) = p.heki(&[]);
     assert_eq!(code, 0, "{stderr}");
     assert!(
-        stdout.starts_with("app.py:4:5: EFF101 (async-blocking-call) [warning, heuristic]"),
+        stdout.starts_with("app.py:4:5: EFF101 (async-blocking-call) [warning] "),
         "{stdout}"
     );
     assert!(stderr.contains("Found 1 diagnostic(s)"), "{stderr}");
@@ -631,7 +628,7 @@ fn baselines_and_snapshots_are_kept_when_a_file_fails_to_parse() {
 fn sleeps(n: usize) -> String {
     let mut src = String::from("import time\n\nasync def h():\n");
     for i in 0..n {
-        src.push_str(&format!("    time.sleep({i})\n"));
+        src.push_str(&format!("    time.sleep({})\n", i + 1));
     }
     src
 }
@@ -644,11 +641,15 @@ fn folded_blocking_calls_are_suppressed_and_baselined_one_by_one() {
     let (code, stdout, _) = p.heki(&concise);
     assert_eq!(code, 0);
     assert_eq!(stdout.lines().count(), 1, "{stdout}");
-    assert!(stdout.contains("(+10 more async call sites"), "{stdout}");
+    // Exact reports fold by the call each of them always runs, and say it.
+    assert!(
+        stdout.contains("(+10 more async call sites that always run `time.sleep`)"),
+        "{stdout}"
+    );
     // Suppressing the first call leaves the other ten, below the folding threshold.
     p.write(
         "a.py",
-        &sleeps(11).replacen("time.sleep(0)", "time.sleep(0)  # heki: ignore[EFF101]", 1),
+        &sleeps(11).replacen("time.sleep(1)", "time.sleep(1)  # heki: ignore[EFF101]", 1),
     );
     let (code, stdout, _) = p.heki(&concise);
     assert_eq!(code, 0);

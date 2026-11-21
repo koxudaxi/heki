@@ -21,6 +21,7 @@
 use crate::resolver::{self, Callee, ProjectDecls, TypeCtx, Val};
 use crate::types::{Args, Elem, Obj, Ty};
 use heki_ast::Span;
+use heki_ir::walk::FnShape;
 use heki_ir::{
     BlockId, BuiltinKind, ConstLiteral, DictEntry, FunctionId, FunctionKind, Inst, InstKind,
     IrFunction, PhiNode, Terminator, UnaryOpKind, VarId,
@@ -205,7 +206,8 @@ impl TypeCtx<'_> {
             return Rc::clone(done);
         }
         let seed = self.seed_of(f);
-        let inferred = Rc::new(Engine::new(self, f, seed).run());
+        let shape = FnShape::new(f);
+        let inferred = Rc::new(Engine::new(self, &shape, seed).run());
         if inferred.encloses {
             self.scopes
                 .enclosing
@@ -338,7 +340,8 @@ impl TypeCtx<'_> {
             return done.clone();
         }
         let child = self.ir().function(id);
-        let inferred = Engine::new(self, child, Some(key.1.clone())).run();
+        let shape = FnShape::new(child);
+        let inferred = Engine::new(self, &shape, Some(key.1.clone())).run();
         let produced = |v: VarId| inferred.facts[v.0 as usize].elem();
         let out = if matches!(
             child.kind,
@@ -423,6 +426,7 @@ const MAX_PASSES: usize = 24;
 struct Engine<'e, 'a> {
     cx: &'e TypeCtx<'a>,
     f: &'e IrFunction,
+    shape: &'e FnShape<'e>,
     owner: Option<String>,
     /// The instance `Self` stands for in a method's annotations.
     self_ty: Option<Ty>,
@@ -438,8 +442,6 @@ struct Engine<'e, 'a> {
     strs: FxHashMap<VarId, String>,
     /// How many targets the unpacking assignments of each variable have (`a, b = pair`).
     unpacked: FxHashMap<VarId, usize>,
-    /// The source of each `Copy`.
-    copies: FxHashMap<VarId, VarId>,
     /// Container displays built in the function (`[]`, `{}`, `set()` is a call), by kind.
     displays: FxHashMap<VarId, BuiltinKind>,
     /// The items (or keys) and values added to each display after it is built.
@@ -461,7 +463,6 @@ struct Engine<'e, 'a> {
 /// The CFG facts `isinstance` narrowing needs, and the narrowed types at each block's entry
 /// (`None` until a pass reaches the block).
 struct Narrowing<'e> {
-    preds: Vec<Vec<BlockId>>,
     defs: FxHashMap<VarId, &'e InstKind>,
     /// Each phi with its block.
     phis: FxHashMap<VarId, (BlockId, &'e PhiNode)>,
@@ -469,10 +470,12 @@ struct Narrowing<'e> {
 }
 
 impl<'e, 'a> Engine<'e, 'a> {
-    fn new(cx: &'e TypeCtx<'a>, f: &'e IrFunction, seed: Option<Option<Ty>>) -> Self {
+    fn new(cx: &'e TypeCtx<'a>, shape: &'e FnShape<'e>, seed: Option<Option<Ty>>) -> Self {
+        let f = shape.f;
         let mut engine = Self {
             cx,
             f,
+            shape,
             owner: cx.owner_fqn(f),
             self_ty: cx.owner_fqn(f).map(Ty::inst),
             reads_globals: f.is_module_body || f.is_class_body,
@@ -482,7 +485,6 @@ impl<'e, 'a> Engine<'e, 'a> {
             ints: FxHashMap::default(),
             strs: FxHashMap::default(),
             unpacked: FxHashMap::default(),
-            copies: FxHashMap::default(),
             displays: FxHashMap::default(),
             added: FxHashMap::default(),
             encloses: false,
@@ -566,7 +568,6 @@ impl<'e, 'a> Engine<'e, 'a> {
                 .flat_map(|b| b.phis.iter().map(move |p| (p.dst, (b.id, p))))
                 .collect();
             self.narrowing = Some(Narrowing {
-                preds: f.predecessors(),
                 defs,
                 phis,
                 entry: vec![None; f.blocks.len()],
@@ -610,9 +611,6 @@ impl<'e, 'a> Engine<'e, 'a> {
                 } => {
                     self.strs.insert(*dst, text.clone());
                 }
-                InstKind::Copy { dst, src } => {
-                    self.copies.insert(*dst, *src);
-                }
                 InstKind::AllocBuiltin { dst, kind, .. } => {
                     self.displays.insert(*dst, *kind);
                 }
@@ -640,7 +638,7 @@ impl<'e, 'a> Engine<'e, 'a> {
     }
 
     fn run(mut self) -> Inferred {
-        let rpo = self.f.rpo_blocks();
+        let shape = self.shape;
         // Without loops every operand is computed before its users in reverse postorder: one
         // pass is final unless it added items to a display already computed.
         let acyclic = self.f.loops.is_empty();
@@ -654,7 +652,7 @@ impl<'e, 'a> Engine<'e, 'a> {
             }
             self.changed = false;
             self.added_changed = false;
-            for &bb in &rpo {
+            for &bb in shape.rpo() {
                 let block = self.f.block(bb);
                 self.enter(bb);
                 for phi in &block.phis {
@@ -746,7 +744,7 @@ impl<'e, 'a> Engine<'e, 'a> {
             return;
         };
         let mut entry: Option<FxHashMap<VarId, Ty>> = None;
-        for &p in &n.preds[bb.0 as usize] {
+        for &p in self.shape.preds(bb) {
             let Some(at) = &n.entry[p.0 as usize] else {
                 continue;
             };
@@ -926,7 +924,10 @@ impl<'e, 'a> Engine<'e, 'a> {
     /// What calling special method `name` on an instance returns. The syntax calling it (`x[k]`,
     /// `for v in x`) hands no argument facts to the catalog's argument cases.
     fn dunder(&self, o: &Obj, name: &str) -> Option<Ty> {
-        let targets = self.cx.project.method_targets(&o.class, name, false);
+        let targets = self
+            .cx
+            .project
+            .method_targets(&o.class, name, false, self.cx.kb);
         self.cx.callee_result(&targets, |_, _| None)
     }
 
@@ -952,12 +953,13 @@ impl<'e, 'a> Engine<'e, 'a> {
             (index, keyword),
             |v| {
                 resolver::arg_fact(
-                    |d| self.f.def_inst(d).map(|(_, i)| i),
+                    |d| self.shape.inst(d),
                     class,
                     |n| match self.need(n).ok().flatten()? {
                         Ty::Ref(fqn) => Some(fqn.clone()),
                         _ => None,
                     },
+                    &|n| self.cx.global_str(n).map(str::to_owned),
                     v,
                 )
             },
@@ -1198,13 +1200,9 @@ impl<'e, 'a> Engine<'e, 'a> {
     }
 
     /// The display a variable holds (through copies), with its kind.
-    fn display_of(&self, mut var: VarId) -> Option<(VarId, BuiltinKind)> {
-        loop {
-            if let Some(kind) = self.displays.get(&var) {
-                return Some((var, *kind));
-            }
-            var = *self.copies.get(&var)?;
-        }
+    fn display_of(&self, var: VarId) -> Option<(VarId, BuiltinKind)> {
+        let root = self.shape.copy_root(var);
+        self.displays.get(&root).map(|kind| (root, *kind))
     }
 
     fn subscript(&self, span: Span, obj: VarId, index: VarId, is_slice: bool) -> Step {
@@ -1281,6 +1279,11 @@ impl<'e, 'a> Engine<'e, 'a> {
                 };
                 iterator(fqn, inner)
             }
+            // `object.__new__(cls)` allocates an instance of `cls` without initializing it.
+            "builtins.object.__new__" if !args.is_empty() => match self.need(args[0])? {
+                Some(Ty::Ref(class) | Ty::Class(class)) => Ty::inst(class.as_str()),
+                _ => return Ok(None),
+            },
             "builtins.sorted" => Ty::container("builtins.list", Args::items(items(0))),
             "builtins.list" | "builtins.set" | "builtins.frozenset" => {
                 Ty::container(fqn, Args::items(items(0)))
@@ -1341,6 +1344,15 @@ impl<'e, 'a> Engine<'e, 'a> {
             && !cx.project.is_project_class(fqn)
         {
             return self.call_named(&cx.project.canonical(&format!("{fqn}.{method}")), call);
+        }
+        // `Model.__new__(Model)`, `super().__new__(cls)`: what `object.__new__` allocates.
+        if method == "__new__"
+            && let Some(Ty::Ref(class) | Ty::Class(class) | Ty::Super(class)) = r
+            && cx
+                .project
+                .new_is_object_new(class, matches!(r, Some(Ty::Super(_))), cx.kb)
+        {
+            return self.call_named("builtins.object.__new__", call);
         }
         if let Some(o) = r.and_then(Ty::obj)
             && let Some(item) = self.container_method(o, method, args)
@@ -1409,7 +1421,7 @@ impl<'e, 'a> Engine<'e, 'a> {
                 .and_then(|t| t.bind_self(Some(&self_ty)))
                 .map(|t| decl.call_type(t));
         }
-        match cx.project.method_targets(class, method, skip_self) {
+        match cx.project.method_targets(class, method, skip_self, cx.kb) {
             Callee::External(symbol)
                 if cx
                     .catalog(&symbol)

@@ -165,6 +165,14 @@ pub struct CallOwnerRule {
     /// `"report"`: also report (`MUT207`) calls of a method named like a target on an object
     /// of unknown class; `"ignore"` (default) does not.
     pub unresolved: Option<String>,
+    /// `false`: a class target names the class itself (constructing a subclass is no call of
+    /// it); `true` (default) covers its subclasses. `Class.method` targets cover the method's
+    /// overrides either way.
+    pub subclasses: Option<bool>,
+    /// `"calls"`: a reference to a target that hands it on to be called later (`[decide]`,
+    /// `return decide`, `partial(decide)`, `field(default_factory=Rule)`) counts as a call of
+    /// it; `"ignore"` (default) does not.
+    pub references: Option<String>,
 }
 
 /// `[[tool.heki.effect-boundaries]]` contract for `EFF201`: effects that must not be reached,
@@ -177,13 +185,15 @@ pub struct EffectBoundaryRule {
     pub scopes: Vec<String>,
     /// Forbidden effects: `blocking-net`, `blocking-db`, `blocking-fs`, `blocking-subprocess`,
     /// `blocking-sync`, `sleep`, `blocking` (all six), `mutates-params`, `writes-targets`,
-    /// `reads-targets`, `calls`.
+    /// `reads-targets`, `calls`, `reads-environment`.
     pub forbid: Vec<String>,
     /// `Class.attr` targets of `writes-targets`.
     pub write_targets: Vec<String>,
-    /// `Class.attr` targets of `reads-targets`.
+    /// `Class.attr` targets of `reads-targets`, or attributes of modules outside the project by
+    /// their full name (`sys.platform`).
     pub read_targets: Vec<String>,
-    /// Functions, methods, or classes (construction) of `calls`, as for `call-owners` targets.
+    /// Functions, methods, or classes (construction) of `calls`, as for `call-owners` targets,
+    /// or functions and classes outside the project by their full name (`os.getenv`).
     pub call_targets: Vec<String>,
     /// `Class.attr` writes the boundary allows: every other reached write of `write-universe`
     /// (or of `write-targets`) is reported.
@@ -196,6 +206,12 @@ pub struct EffectBoundaryRule {
     /// `"allow"` (default) or `"report"`, as for `write-owners`: whether writes that construct
     /// the object they write count as writes of the boundary.
     pub fresh_objects: Option<String>,
+    /// `"calls"` or `"ignore"` (default), as for `call-owners`: whether a reference handing a
+    /// `call-targets` entry on counts as a call of it for `calls`.
+    pub references: Option<String>,
+    /// `"allow"` (default) or `"report"`: whether `reads-environment` also forbids the imports
+    /// that probe whether a module is installed (`try: import yaml` / `except ImportError:`).
+    pub import_probes: Option<String>,
     /// The help of every `EFF201` report of this contract.
     pub message: Option<String>,
 }
@@ -716,6 +732,8 @@ forbidden-callers = ["pkg.parser.*"]
 exempt-methods = ["__deepcopy__"]
 message = "use a GenerationStore operation instead"
 unresolved = "ignore"
+subclasses = false
+references = "calls"
 
 [[tool.heki.readonly-returns]]
 name = "shared-schema"
@@ -741,6 +759,8 @@ write-universe = ["DataModel.*"]
 allowed-callees = ["pkg.logging.*"]
 message = "render must not mutate model state"
 fresh-objects = "allow"
+references = "calls"
+import-probes = "report"
 "#;
         let wrapper: PyProjectWrapper = toml::from_str(raw).unwrap();
         let cfg = wrapper.tool.heki.unwrap();
@@ -777,6 +797,8 @@ fresh-objects = "allow"
                 exempt_methods: vec!["__deepcopy__".into()],
                 message: Some("use a GenerationStore operation instead".into()),
                 unresolved: Some("ignore".into()),
+                subclasses: Some(false),
+                references: Some("calls".into()),
             }
         );
         assert_eq!(
@@ -798,6 +820,8 @@ fresh-objects = "allow"
                 allowed_callees: vec!["pkg.logging.*".into()],
                 message: Some("render must not mutate model state".into()),
                 fresh_objects: Some("allow".into()),
+                references: Some("calls".into()),
+                import_probes: Some("report".into()),
             }
         );
         assert!(cfg.readonly_returns[0].deep);

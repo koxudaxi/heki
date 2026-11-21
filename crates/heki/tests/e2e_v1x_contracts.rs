@@ -819,7 +819,7 @@ fn contract_configuration_errors_exit_2() {
     };
     fails(
         &boundary("forbid = [\"blocking\", \"network\"]\n"),
-        "unknown `forbid` token `network` in effect-boundaries `b` (expected one of `blocking`, `blocking-net`, `blocking-db`, `blocking-fs`, `blocking-subprocess`, `blocking-sync`, `sleep`, `mutates-params`, `writes-targets`, `reads-targets`, `calls`)",
+        "unknown `forbid` token `network` in effect-boundaries `b` (expected one of `blocking`, `blocking-net`, `blocking-db`, `blocking-fs`, `blocking-subprocess`, `blocking-sync`, `sleep`, `mutates-params`, `writes-targets`, `reads-targets`, `calls`, `reads-environment`)",
     );
     fails(
         &boundary("forbid = [\"writes-targets\"]\n"),

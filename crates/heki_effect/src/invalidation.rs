@@ -18,6 +18,7 @@ use crate::{
     CallSite, Delivery, EffectSummary, Facts, FuncKey, ProjectIndex, SharedChain, WriteKind,
 };
 use heki_ast::Span;
+use heki_ir::walk::FnShape;
 use heki_ir::{BlockId, ConstLiteral, InstKind, IrFunction, Terminator, VarId};
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
@@ -162,7 +163,8 @@ type FlagEnv = Vec<(VarId, bool)>;
 
 impl<'f> Flags<'f> {
     /// The conditions of `f`, and whether a branch tests a flag.
-    fn of(f: &'f IrFunction, consts: &'f FxHashMap<VarId, bool>) -> (Self, bool) {
+    fn of(shape: &FnShape<'f>, consts: &'f FxHashMap<VarId, bool>) -> (Self, bool) {
+        let f = shape.f;
         // Without a boolean constant no condition is known and no phi is a flag.
         if consts.is_empty() {
             let phis = vec![Vec::new(); f.blocks.len()];
@@ -187,10 +189,7 @@ impl<'f> Flags<'f> {
             let before = flags.len();
             for phi in f.blocks.iter().flat_map(|b| &b.phis) {
                 let flag_input = |v: &VarId| {
-                    let mut v = *v;
-                    while let Some(InstKind::Copy { src, .. }) = defs.get(&v) {
-                        v = *src;
-                    }
+                    let v = shape.copy_root(*v);
                     consts.contains_key(&v) || flags.contains(&v)
                 };
                 if !phi
@@ -330,10 +329,11 @@ impl<'f> Flags<'f> {
 /// `next_call` indices are site-list indices of the function (the caller rebases them onto the
 /// file's call sites).
 pub(crate) fn analyze(
-    f: &IrFunction,
+    shape: &FnShape<'_>,
     mut events: Events,
     contracts: usize,
 ) -> (SiteFlow, Vec<(usize, SiteFlow)>, Vec<FlowWrite>) {
+    let f = shape.f;
     let all = contracts_mask(contracts);
     let n = f.blocks.len();
     let consts: FxHashMap<VarId, bool> = f
@@ -348,7 +348,7 @@ pub(crate) fn analyze(
             _ => None,
         })
         .collect();
-    let (conds, has_flags) = Flags::of(f, &consts);
+    let (conds, has_flags) = Flags::of(shape, &consts);
     // Normal successors (a constant branch keeps its feasible edge); `None`: a normal return.
     let mut succ: Vec<Option<Vec<usize>>> = Vec::with_capacity(n);
     for bb in &f.blocks {
@@ -377,7 +377,7 @@ pub(crate) fn analyze(
     // Contracts covered from the start of each block: a greatest fixpoint from `all`, so
     // paths that never return (and loops before a return) add no obligation.
     let mut cov_in = vec![all; n];
-    let order: Vec<usize> = f.rpo_blocks().iter().rev().map(|b| b.0 as usize).collect();
+    let order: Vec<usize> = shape.rpo().iter().rev().map(|b| b.0 as usize).collect();
     let cov_out = |b: usize, cov_in: &[u64]| -> u64 {
         match &succ[b] {
             None => 0,
@@ -739,7 +739,7 @@ pub(crate) fn propagate_facts(
                     Through::Instance => targets
                         .classes
                         .iter()
-                        .find(|line| line[0] == w.class)
+                        .find(|line| line[0].fqn == w.class)
                         .map_or(0, |line| contracts.target_of(line, w.attr)),
                 };
                 let reach = w.origin.reach;

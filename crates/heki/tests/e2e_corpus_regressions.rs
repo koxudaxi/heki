@@ -704,7 +704,7 @@ fn r14_loops_whose_trip_count_the_code_fixes_are_not_reported() {
     // inner loop, and a display that grows before the loop.
     let p = Project::new("reg_r14");
     p.write("case.py", R14_BOUNDED_LOOPS);
-    let diags = diagnostics(&p, &["--select", "EFF102,EFF103"]);
+    let diags = diagnostics(&p, &["--select", "EFF102,EFF103,EFF113"]);
     assert_eq!(
         reported(&diags),
         pairs(&[
@@ -815,7 +815,7 @@ fn loops_that_wait_for_a_condition_or_count_attempts_are_not_data_sized() {
     assert_reports(
         "reg_polls_and_retries",
         POLLS_AND_RETRIES,
-        "EFF102,EFF103",
+        "EFF102,EFF103,EFF113",
         &[
             ("per_url_paced", "EFF102"),
             ("per_message", "EFF102"),

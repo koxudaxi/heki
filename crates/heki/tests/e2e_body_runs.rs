@@ -139,8 +139,8 @@ fn generators_run_where_iterated_and_offloaded_functions_never_on_the_loop() {
         vec![
             d(v, 18, 12, "EFF101", "view_blocking"),
             // The `for` header and the consuming call, where the body runs.
-            d(s, 16, 16, "EFF101", "iterate_on_loop"),
-            d(s, 20, 12, "EFF101", "materialize_on_loop"),
+            d(s, 16, 16, "EFF111", "iterate_on_loop"),
+            d(s, 20, 12, "EFF111", "materialize_on_loop"),
         ],
         "{diags:#?}"
     );
@@ -273,22 +273,22 @@ fn consumers_wrappers_and_escapes() {
         found(&diags),
         vec![
             // A sync helper iterating its parameter: at the call that hands it over.
-            d(g, 39, 5, "EFF101", "helper_consumes"),
+            d(g, 39, 5, "EFF111", "helper_consumes"),
             // One that may stop at the first item still runs the body.
-            d(g, 43, 12, "EFF101", "helper_may_stop_early"),
+            d(g, 43, 12, "EFF111", "helper_may_stop_early"),
             // Lazy wrappers that are iterated: `enumerate`, `zip` with another iterable,
             // `islice`.
-            d(g, 47, 19, "EFF101", "wrappers"),
-            d(g, 49, 22, "EFF101", "wrappers"),
-            d(g, 51, 16, "EFF101", "wrappers"),
+            d(g, 47, 19, "EFF111", "wrappers"),
+            d(g, 49, 22, "EFF111", "wrappers"),
+            d(g, 51, 16, "EFF111", "wrappers"),
             // A project generator iterating the generator it is handed, iterated here.
-            d(g, 56, 18, "EFF101", "project_generator_over_it"),
+            d(g, 56, 18, "EFF111", "project_generator_over_it"),
             // `yield from` in a generator iterated here.
-            d(g, 61, 16, "EFF101", "delegated"),
+            d(g, 61, 16, "EFF111", "delegated"),
             // Through two aliases, by unpacking.
-            d(g, 68, 6, "EFF101", "alias_and_unpacking"),
+            d(g, 68, 6, "EFF111", "alias_and_unpacking"),
             // A sync helper materializing a generator runs its body.
-            d(g, 73, 12, "EFF101", "sync_helper_materializes"),
+            d(g, 73, 12, "EFF111", "sync_helper_materializes"),
         ],
         "{diags:#?}"
     );
@@ -322,10 +322,10 @@ fn comprehensions_follow_the_target_version() {
     // Python 3.11 runs the comprehension in a frame of its own, which receives the generator:
     // the body runs at the call of that frame (the comprehension).
     let diags = diagnostics(&p, &["--target-version", "py311"]);
-    assert_eq!(found(&diags), vec![d("app.py", 9, 12, "EFF101", "collect")]);
+    assert_eq!(found(&diags), vec![d("app.py", 9, 12, "EFF111", "collect")]);
     // Python 3.12 inlines it (PEP 709): the body runs at its `for` clause.
     let diags = diagnostics(&p, &["--target-version", "py312"]);
-    assert_eq!(found(&diags), vec![d("app.py", 9, 36, "EFF101", "collect")]);
+    assert_eq!(found(&diags), vec![d("app.py", 9, 36, "EFF111", "collect")]);
 }
 
 const FACTORY: &str = r#"import requests
@@ -374,9 +374,9 @@ fn a_returned_generator_runs_where_the_caller_iterates_it() {
     assert_eq!(
         found(&diags),
         vec![
-            d(f, 17, 16, "EFF101", "iterate_factory"),
-            d(f, 24, 16, "EFF101", "iterate_later"),
-            d(f, 29, 19, "EFF101", "iterate_wrapped_factory"),
+            d(f, 17, 16, "EFF111", "iterate_factory"),
+            d(f, 24, 16, "EFF111", "iterate_later"),
+            d(f, 29, 19, "EFF111", "iterate_wrapped_factory"),
         ],
         "{diags:#?}"
     );
@@ -572,13 +572,13 @@ def report_once(conn: sqlite3.Connection, users):
 fn a_generator_iterated_in_a_loop_queries_on_every_iteration() {
     let p = Project::new("body_runs_loops");
     p.write("app.py", LOOPS);
-    let diags = diagnostics(&p, &["--select", "EFF103"]);
+    let diags = diagnostics(&p, &["--select", "EFF103,EFF113"]);
     assert_eq!(
         found(&diags),
         vec![
             // At the inner loop's iterable and at the consuming call, inside the outer loop.
-            d("app.py", 12, 20, "EFF103", "report"),
-            d("app.py", 18, 15, "EFF103", "report_materialized"),
+            d("app.py", 12, 20, "EFF113", "report"),
+            d("app.py", 18, 15, "EFF113", "report_materialized"),
         ],
         "{diags:#?}"
     );
@@ -928,8 +928,8 @@ fn offloading_decorators_and_plain_ones() {
     assert_eq!(
         found(&diags),
         vec![
-            d("app/views.py", 63, 12, "EFF101", "view_logged"),
-            d("app/views.py", 79, 18, "EFF101", "view_either"),
+            d("app/views.py", 63, 12, "EFF111", "view_logged"),
+            d("app/views.py", 79, 18, "EFF111", "view_either"),
         ],
         "{diags:#?}"
     );
@@ -1015,7 +1015,7 @@ fn watch_follows_a_generator_through_the_factory_returning_it() {
     let stdout = String::from_utf8(out.stdout).unwrap();
     assert!(
         stdout.contains(
-            "pkg/api.py:5:16: EFF101 [heuristic] `handler` reaches the blocking call `time.sleep` on the event loop by iterating `pkg.rows.rows`"
+            "pkg/api.py:5:16: EFF111 [heuristic] `handler` reaches the blocking call `time.sleep` on the event loop by iterating `pkg.rows.rows`"
         ),
         "{stdout}"
     );
@@ -1077,6 +1077,8 @@ type Marks = Vec<(String, u64, String)>;
 /// `(path, line, rule)` of the diagnostics of `rules` for `files`, and the marks of `files`: a
 /// line ending in `# <RULE>`.
 fn reported_and_marked(name: &str, files: &[(&str, &str)], rules: &[&str]) -> (Marks, Marks) {
+    let rules = common::with_siblings(rules);
+    let rules = rules.as_slice();
     let p = Project::new(name);
     p.write("pyproject.toml", DEFERRED_CONFIG);
     p.write("pkg/__init__.py", "");
@@ -1139,11 +1141,11 @@ async def made():
 
 
 async def iterated():
-    list(rows(1))  # EFF101
+    list(rows(1))  # EFF111
 
 
 async def stepped():
-    any(rows(1))  # EFF101
+    any(rows(1))  # EFF111
 
 
 class Table:
@@ -1157,19 +1159,19 @@ class Table:
 
 
 async def through_property(t: Table):
-    list(t.rows)  # EFF101
+    list(t.rows)  # EFF111
     t.rows
     t.size
 
 
 async def chosen(flag):
     it = rows(1) if flag else rows(2)
-    list(it)  # EFF101
+    list(it)  # EFF111
 
 
 async def chosen_or_empty(flag):
     it = rows(1) if flag else []
-    list(it)  # EFF101
+    list(it)  # EFF111
 
 
 async def chosen_not_iterated(flag):
@@ -1213,7 +1215,7 @@ def adapter():
 
 
 async def through_adapter():
-    list(adapter())  # EFF101
+    list(adapter())  # EFF111
 
 
 async def adapter_not_iterated():
@@ -1275,44 +1277,44 @@ from pkg.queries import Users, add_name, name, name_of_pair, score
 
 
 def lambda_map(ids):
-    return list(map(lambda u: name(u), ids))  # EFF103
+    return list(map(lambda u: name(u), ids))  # EFF113
 
 
 def lambda_filter(ids):
-    return list(filter(lambda u: name(u), ids))  # EFF103
+    return list(filter(lambda u: name(u), ids))  # EFF113
 
 
 def lambda_filterfalse(ids):
-    return list(itertools.filterfalse(lambda u: name(u), ids))  # EFF103
+    return list(itertools.filterfalse(lambda u: name(u), ids))  # EFF113
 
 
 def lambda_starmap(pairs):
-    return list(itertools.starmap(lambda u, v: name(u), pairs))  # EFF103
+    return list(itertools.starmap(lambda u, v: name(u), pairs))  # EFF113
 
 
 def lambda_reduce(ids):
-    return functools.reduce(lambda t, u: t + name(u), ids, 0)  # EFF103
+    return functools.reduce(lambda t, u: t + name(u), ids, 0)  # EFF113
 
 
 def lambda_sorted(ids):
-    return sorted(ids, key=lambda u: name(u))  # EFF103
+    return sorted(ids, key=lambda u: name(u))  # EFF113
 
 
 def lambda_min(ids):
-    return min(ids, key=lambda u: name(u))  # EFF103
+    return min(ids, key=lambda u: name(u))  # EFF113
 
 
 def lambda_max(ids):
-    return max(ids, key=lambda u: name(u))  # EFF103
+    return max(ids, key=lambda u: name(u))  # EFF113
 
 
 def lambda_sort(rows: list[int]):
-    rows.sort(key=lambda u: name(u))  # EFF103
+    rows.sort(key=lambda u: name(u))  # EFF113
 
 
 def lambda_groupby(ids):
     key = lambda u: name(u)
-    return itertools.groupby(ids, key)  # EFF103
+    return itertools.groupby(ids, key)  # EFF113
 
 
 def lambdas_of_one_name(ids, on_done):
@@ -1324,42 +1326,42 @@ def lambdas_of_one_name(ids, on_done):
 
 
 def functions(ids, pairs, rows: list[int]):
-    list(map(name, ids))  # EFF103
-    list(filter(name, ids))  # EFF103
-    list(itertools.filterfalse(name, ids))  # EFF103
-    list(itertools.starmap(name_of_pair, pairs))  # EFF103
-    functools.reduce(add_name, ids, 0)  # EFF103
-    sorted(ids, key=name)  # EFF103
-    min(ids, key=name)  # EFF103
-    max(ids, key=name)  # EFF103
-    rows.sort(key=name)  # EFF103
-    itertools.groupby(ids, key=name)  # EFF103
+    list(map(name, ids))  # EFF113
+    list(filter(name, ids))  # EFF113
+    list(itertools.filterfalse(name, ids))  # EFF113
+    list(itertools.starmap(name_of_pair, pairs))  # EFF113
+    functools.reduce(add_name, ids, 0)  # EFF113
+    sorted(ids, key=name)  # EFF113
+    min(ids, key=name)  # EFF113
+    max(ids, key=name)  # EFF113
+    rows.sort(key=name)  # EFF113
+    itertools.groupby(ids, key=name)  # EFF113
 
 
 def bound_methods(users: Users, ids, pairs, rows: list[int]):
-    list(map(users.name, ids))  # EFF103
-    list(filter(users.name, ids))  # EFF103
-    list(itertools.filterfalse(users.name, ids))  # EFF103
-    list(itertools.starmap(users.name_of_pair, pairs))  # EFF103
-    functools.reduce(users.add_name, ids, 0)  # EFF103
-    sorted(ids, key=users.name)  # EFF103
-    min(ids, key=users.name)  # EFF103
-    max(ids, key=users.name)  # EFF103
-    rows.sort(key=users.name)  # EFF103
-    itertools.groupby(ids, users.name)  # EFF103
+    list(map(users.name, ids))  # EFF113
+    list(filter(users.name, ids))  # EFF113
+    list(itertools.filterfalse(users.name, ids))  # EFF113
+    list(itertools.starmap(users.name_of_pair, pairs))  # EFF113
+    functools.reduce(users.add_name, ids, 0)  # EFF113
+    sorted(ids, key=users.name)  # EFF113
+    min(ids, key=users.name)  # EFF113
+    max(ids, key=users.name)  # EFF113
+    rows.sort(key=users.name)  # EFF113
+    itertools.groupby(ids, users.name)  # EFF113
 
 
 def partials(conn: sqlite3.Connection, ids, extra):
-    list(map(functools.partial(score, conn), ids))  # EFF103
-    list(map(partial(score, conn), ids))  # EFF103
-    sorted(ids, key=functools.partial(functools.partial(score), conn))  # EFF103
-    sorted(ids, key=functools.partial(score, *extra))  # EFF103
+    list(map(functools.partial(score, conn), ids))  # EFF113
+    list(map(partial(score, conn), ids))  # EFF113
+    sorted(ids, key=functools.partial(functools.partial(score), conn))  # EFF113
+    sorted(ids, key=functools.partial(score, *extra))  # EFF113
     key = functools.partial(score, conn)
-    sorted(ids, key=key)  # EFF103
+    sorted(ids, key=key)  # EFF113
 
 
 def unpacked_iterables(columns):
-    list(map(name_of_pair, *columns))  # EFF103
+    list(map(name_of_pair, *columns))  # EFF113
 
 
 def fixed_items(ids):
@@ -1389,13 +1391,13 @@ async def aname(uid):
 
 def every_outer_iteration(batches):
     for batch in batches:
-        max(1, 2, key=lambda u: name(batch))  # EFF103
+        max(1, 2, key=lambda u: name(batch))  # EFF113
 
 
 def items_of_the_first_batch(batches):
     # The loop runs the call once (every way on breaks out), the builtin once per item.
     for batch in batches:
-        sorted(batch, key=lambda u: name(u))  # EFF103
+        sorted(batch, key=lambda u: name(u))  # EFF113
         break
 
 
@@ -1474,7 +1476,7 @@ def two_hosts():
 
 
 async def on_the_event_loop(delays):
-    list(map(pause, delays))  # EFF101
+    list(map(pause, delays))  # EFF111
 
 
 def fetch_if(url, enabled=False):
@@ -1546,7 +1548,7 @@ fn builtins_call_a_callable_once_per_item() {
     for (path, text) in files {
         p.write(path, text);
     }
-    let diags = diagnostics(&p, &["--select", "EFF102,EFF103"]);
+    let diags = diagnostics(&p, &["--select", "EFF102,EFF103,EFF113"]);
     // The line of `PER_ITEM` holding `code`.
     let at = |code: &str| {
         PER_ITEM
@@ -1568,7 +1570,7 @@ fn builtins_call_a_callable_once_per_item() {
     assert_eq!(
         message(&diags, "pkg/per_item.py", sorted),
         "`pkg.per_item.lambda_sorted.<locals>.<lambda>` runs a database query \
-         (`sqlite3.Connection.execute`) for every item `sorted` calls it with (N+1)"
+         (`sqlite3.Connection.execute`) for every item `sorted` calls it with"
     );
     assert_eq!(
         help(sorted),
@@ -1581,14 +1583,14 @@ fn builtins_call_a_callable_once_per_item() {
     assert_eq!(
         message(&diags, "pkg/per_item.py", at("rows.sort(key=lambda")),
         "`pkg.per_item.lambda_sort.<locals>.<lambda>` runs a database query \
-         (`sqlite3.Connection.execute`) for every item `list.sort` calls it with (N+1)"
+         (`sqlite3.Connection.execute`) for every item `list.sort` calls it with"
     );
     // A fixed number of items inside a data-sized loop: the loop repeats the query.
     let outer = at("max(1, 2, key=lambda u: name(batch))");
     assert_eq!(
         message(&diags, "pkg/per_item.py", outer),
         "`pkg.per_item.every_outer_iteration.<locals>.<lambda>` runs a database query \
-         (`sqlite3.Connection.execute`) on every loop iteration (N+1)"
+         (`sqlite3.Connection.execute`) on every loop iteration"
     );
     assert_eq!(
         help(outer),
@@ -1597,7 +1599,7 @@ fn builtins_call_a_callable_once_per_item() {
     assert_eq!(
         message(&diags, "pkg/per_item.py", at("sorted(batch, key=lambda")),
         "`pkg.per_item.items_of_the_first_batch.<locals>.<lambda>` runs a database query \
-         (`sqlite3.Connection.execute`) for every item `sorted` calls it with (N+1)"
+         (`sqlite3.Connection.execute`) for every item `sorted` calls it with"
     );
     assert_eq!(
         message(

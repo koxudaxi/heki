@@ -7,10 +7,16 @@ It catches blocking I/O in `async` code, database queries and HTTP clients in lo
 quadratic loops. You can also add rules in `pyproject.toml` to restrict which functions may
 mutate state or reach I/O.
 
-A report is *exact* when heki established every premise of its claim and its rule was
-certified, and only exact reports are shown by default. The others are *heuristic*: they can be
-wrong, every output labels them, and `heki check --heuristic` shows them too. No rule is exact
-yet.
+By default, heki shows only *exact* reports: reports of a certified rule, built only from facts
+heki established. To certify a rule, two reviewers check by hand every exact report it makes on
+the development corpus (378 packages and 30.75 million lines, plus packages added for rules with
+few reports), and one run on a frozen holdout of 100 packages is checked too. Neither may hold a
+false claim. `EFF101` and `EFF103`, the rules of the two examples below, had 287 and 103 reports
+on the corpus and 152 and 122 on the holdout, none false.
+[Rule precision](precision.md#certifications) lists every certified rule.
+
+*Heuristic* reports can be wrong about the code. They are opt-in (`heki check --heuristic`), and
+every output labels them.
 
 <p>
   <a class="md-button md-button--primary" href="getting-started/">Getting Started</a>
@@ -22,6 +28,8 @@ yet.
 [![Python versions](https://img.shields.io/pypi/pyversions/heki)](https://pypi.org/project/heki/)
 [![CI](https://github.com/koxudaxi/heki/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/koxudaxi/heki/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/koxudaxi/heki/blob/main/LICENSE)
+
+⚡ Try it in your project's root, without installing: `uvx heki check`
 
 ---
 
@@ -47,8 +55,8 @@ async def get_user(user_id: int) -> dict[str, str]:
 ```
 
 ```console
-$ heki check --heuristic
-app/api.py:5:12: EFF101 (async-blocking-call) [warning, heuristic] `get_user` reaches the blocking call `requests.get` on the event loop
+$ heki check
+app/api.py:5:12: EFF101 (async-blocking-call) [warning] `app.users.load_user` always runs the waiting call `requests.get` on the event loop (2 calls down, on every path)
   |
 5 |     return load_user(user_id)
   |            ^
@@ -58,6 +66,7 @@ app/api.py:5:12: EFF101 (async-blocking-call) [warning, heuristic] `get_user` re
   = help: offload it with `asyncio.to_thread`, or use an async client
 
 Found 1 diagnostic(s) in 2 file(s).
+note: 4 heuristic rule(s) are off; enable them with `--heuristic` or `lint.heuristic = true`
 ```
 
 ### A query one helper below a loop
@@ -78,8 +87,8 @@ def order_summaries(cursor: sqlite3.Cursor, orders: list[tuple[int, int]]) -> li
 ```
 
 ```console
-$ heki check --heuristic
-app/orders.py:11:37: EFF103 (loop-db-query) [warning, heuristic] `app.orders.customer_name` runs a database query (`sqlite3.Cursor.execute`) on every loop iteration (N+1)
+$ heki check
+app/orders.py:11:37: EFF103 (loop-db-query) [warning] every iteration over parameter `orders` sends a database statement: `sqlite3.Cursor.execute` (through `app.orders.customer_name`)
    |
 11 |         lines.append(f"#{order_id} {customer_name(cursor, customer_id)}")
    |                                     ^
@@ -88,18 +97,32 @@ app/orders.py:11:37: EFF103 (loop-db-query) [warning, heuristic] `app.orders.cus
   = help: batch the queries, or load the data once before the loop
 
 Found 1 diagnostic(s) in 1 file(s).
+note: 4 heuristic rule(s) are off; enable them with `--heuristic` or `lint.heuristic = true`
 ```
 
 Ruff, ty, Pyrefly, pyright, and mypy report nothing for either example with their default settings.
 
+### What a first run shows
+
+Run `uvx heki check` (or `heki check` once [installed](installation.md)) in the directory with
+`pyproject.toml`:
+
+- An error reports a bug: a wrong result, an exception, a lost update, a deadlock, or a broken
+  contract. A warning reports slower code, like the two above, or a bug that is rarely harmful.
+- Warnings are printed and do not fail the run (exit code 0). Errors fail it (exit code 1).
+  [`--fail-on warning`](configuration.md#rule-selection-toolhekilint)
+  (`lint.fail-on = "warning"`) makes warnings fail it too.
+- A note at the end says how many heuristic rules were left off; `--heuristic` runs them.
+
 ### Your own conventions, too
 
-The checks above need no configuration, only `--heuristic` while their rules are heuristic.
+The checks above need no configuration: `EFF101` and `EFF103` are exact and run by default.
 The rules of your own project, which you keep today by review, by AST scripts, or by run-time
 guards in tests, can be added as a few lines of [configuration](configuration.md):
 
 ```toml
 [[tool.heki.write-owners]]
+name = "order-store"
 targets = ["app.models.Order.items"]
 allowed-writers = ["app.store.*"]
 ```
@@ -110,9 +133,9 @@ and `effect-boundaries`.
 
 !!! warning "Experimental"
 
-    heki is under active development: rules, configuration keys, diagnostics, and output formats
-    can change between releases without a deprecation period. Try it on your code and report what
-    it gets wrong, but do not depend on its output staying the same yet.
+    The exact rules are certified, but heki is still under active development: rules,
+    configuration keys, diagnostics, and output formats can change between releases without a
+    deprecation period. Try it on your code and report what it gets wrong.
 
 ## ✨ Why heki?
 
@@ -126,26 +149,19 @@ Types say what values are; heki checks what code does:
 
 ### What code does, not what types it has
 
-Each report shows the chain of calls that leads to the bug.
+These rules are exact and run by default. Each report shows the chain of calls that leads to it.
 
-| What goes wrong | Rule | Certainty |
-| --- | --- | --- |
-| A blocking call several helpers below an `async def` | [`EFF101`](rules/async-blocking-call.md) | heuristic |
-| A database query, or a new HTTP client, on every loop iteration | [`EFF103`](rules/loop-db-query.md), [`EFF102`](rules/loop-unpooled-client.md) | heuristic |
-| An attribute that `__hash__` reads, changed after the object went into a `set` | [`MUT107`](rules/hash-attr-mutation.md) | heuristic |
-| A `Sequence` / `Mapping` argument changed in place by a helper | [`MUT110`](rules/readonly-param-mutation.md) | heuristic |
-| Opt-in: a frozen or `ReadOnly` field changed in place | [`MUT108`](rules/readonly-type-mutation.md) | heuristic |
-| Opt-in: I/O while a lock or a database transaction is held | [`EFF106`](rules/lock-or-tx-held-across-io.md) | heuristic |
-| Opt-in: a generator consumed twice | [`MUT106`](rules/iterator-double-consumption.md) | heuristic |
-| Opt-in, experimental: a function reading a `@cached_property` that another method leaves stale | [`MUT111`](rules/cached-property-stale-read.md) | heuristic |
-| Opt-in, experimental: a `@cached_property` left stale after another method changes what it read | [`MUT101`](rules/cached-property-stale-mutation.md) | heuristic |
-| Opt-in, experimental: a value that is a new object on one path and the caller's object on another, changed in place | [`MUT112`](rules/conditional-ownership-mutation.md) | heuristic |
-| Opt-in, experimental: a dict or set changed while a suspended generator, or a loop calling a helper, iterates it | [`MUT113`](rules/iterated-container-mutation.md) | heuristic |
-| Opt-in, experimental: a `threading.Lock` or `asyncio.Lock` taken again, through a helper, while it is held | [`EFF109`](rules/lock-reacquired-while-held.md) | heuristic |
+| What goes wrong | Rule |
+| --- | --- |
+| A blocking call that a call in an `async def` always runs, several helpers below | [`EFF101`](rules/async-blocking-call.md) |
+| A database statement on every iteration of a loop over data | [`EFF103`](rules/loop-db-query.md) |
+| A `Sequence` / `Mapping` argument changed in place by a helper | [`MUT110`](rules/readonly-param-mutation.md) |
+| A list, dict, or set that an `lru_cache` / `cache` function returned, changed in place | [`MUT114`](rules/cached-result-mutation.md) |
+| A DataFrame or array concatenated with itself on every loop iteration | [`DATA101`](rules/loop-carried-concat.md) |
+| A quadratic list, dict, set, bytes, or queue pattern | `OPT101`-`OPT103`, `OPT110`, `OPT111`, `OPT113`, `OPT120`, `OPT121`, `OPT130` ([fixes](fixes.md)) |
 
-A heuristic rule runs when its code or name is selected, or with `--heuristic`
-(`lint.heuristic = true` in the [configuration](configuration.md#rule-selection-toolhekilint)).
-See [Rule precision](precision.md) for how a rule becomes exact and what each one measured.
+The other rules are heuristic or opt-in, and the [contract](configuration.md#contracts) rules run
+once you declare a contract: see [Rules](rules/index.md) and [Rule precision](precision.md).
 
 ### A safety net for reviews and coding agents
 
@@ -156,10 +172,8 @@ See [Rule precision](precision.md) for how a rule becomes exact and what each on
 
 ### Fast, quiet, and easy to adopt
 
-- Under a second for a 200,000-line project.
+- A 100,000-line project is checked in a few seconds.
 - A report needs evidence: when heki cannot tell, [it stays quiet](scope.md#when-heki-cannot-tell).
-- Bugs fail the run; slower code is reported as a warning that does not, unless you ask for
-  [`--fail-on warning`](configuration.md#rule-selection-toolhekilint).
 - Configuration, suppression comments, and output formats follow Ruff, and a [baseline](adoption.md#ratchet-baselines) fails CI
   only on new findings.
 
@@ -169,7 +183,7 @@ See [Rule precision](precision.md) for how a rule becomes exact and what each on
 | --- | --- | --- |
 | Any code can change any object it reaches | ownership and borrowing (Rust), `const` / `readonly` | read-only parameters and fields changed through helpers (`MUT110`, `MUT108`); `write-owners` / `read-owners` contracts (`MUT201`, `MUT203`) |
 | A signature does not say what a function does | effect types, `IO` in the type (Haskell) | blocking calls reached from `async def`, and clients and queries in loops (`EFF101`–`EFF103`); `effect-boundaries` (`EFF201`); effect snapshots (`MUT103`) |
-| Shared mutable objects hide changes | value semantics, immutability by default | stale cached properties and hashes (`MUT101`, `MUT107`); changed shared return values (`MUT202`); writes an `invalidation` contract must announce (`MUT109`) |
+| Shared mutable objects hide changes | value semantics, immutability by default | stale cached properties and hashes (`MUT101`, `MUT107`); changed shared return values (`MUT114`, `MUT202`); writes an `invalidation` contract must announce (`MUT109`) |
 | Dynamic dispatch blocks optimizations | static types let a compiler prove a rewrite | quadratic patterns (`OPT`), rewritten only when proven under CPython's semantics |
 
 ## 🔍 How heki differs
@@ -200,6 +214,33 @@ rewrites one only when it proves that the program behaves the same:
 - evaluation order and exceptions are kept;
 - builtins count only while the module does not rebind them.
 
+A `collections.deque` rewrite also updates the annotation and adds the import:
+
+```console
+$ heki check --diff --include-size-dependent jobs.py
+--- a/jobs.py
++++ b/jobs.py
+@@ -1,11 +1,12 @@
+ """Job queue."""
+ 
++import collections
+ import os
+ 
+ 
+ def drain(jobs: list[int]) -> int:
+-    queue: list[int] = list(jobs)
++    queue: collections.deque[int] = collections.deque(list(jobs))
+     total = 0
+     while queue:
+-        total += queue.pop(0)
++        total += queue.popleft()
+     return total
+Would fix 1 issue(s) in 1 file(s).
+```
+
+`--fix` alone applies the rewrites that are faster for every input (`OPT101`, `OPT102`); a
+size-dependent one like this needs `--include-size-dependent`.
+
 The scope analysis is checked against CPython's `symtable` on 3.11 to 3.15, and adversarial
 programs that break a naive rewrite must all be blocked on CPython. When a proof fails, the
 report names the missing obligation instead of offering a fix. See [Fixes and safety](fixes.md).
@@ -209,7 +250,7 @@ report names the missing obligation instead of offering a fix. See [Fixes and sa
 - 🎯 See what heki [covers and does not cover](scope.md).
 - 📦 [Install heki](installation.md) and 🚀 [run it on a project](getting-started.md).
 - ⚙️ [Configure](configuration.md) rule selection, contracts, and the Python version.
-- 📏 Browse the [36 rules](rules/index.md), and see [how precise each one is](precision.md).
+- 📏 Browse the [39 rules](rules/index.md), and see [how precise each one is](precision.md).
 - 🔧 Read how [fixes are proven safe](fixes.md).
 - 🪜 [Adopt it gradually](adoption.md) with a Ratchet baseline in CI.
 - 🖥️ Use it from [your editor](lsp.md) or 🤖 [a coding agent](coding-agents.md).

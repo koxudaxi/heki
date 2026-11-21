@@ -2,7 +2,8 @@
 //! dominators, and the dominator tree numbered in preorder so that the blocks a block dominates
 //! are one range of numbers.
 
-use crate::{BlockId, IrFunction};
+use crate::BlockId;
+use crate::walk::FnShape;
 
 /// The immediate dominator of each block the entry reaches over the edges `takes` admits
 /// (`None` for the other blocks, the entry for itself), from one pass in reverse postorder. One
@@ -10,23 +11,20 @@ use crate::{BlockId, IrFunction};
 /// goes back to a loop header that dominates the edge's source, and leaving such an edge out
 /// changes no dominator.
 pub fn immediate_dominators(
-    f: &IrFunction,
-    preds: &[Vec<BlockId>],
+    shape: &FnShape<'_>,
     takes: impl Fn(BlockId, BlockId) -> bool,
 ) -> Vec<Option<BlockId>> {
-    let rpo = f.rpo_blocks();
-    let mut order = vec![usize::MAX; f.blocks.len()];
-    for (i, b) in rpo.iter().enumerate() {
-        order[b.0 as usize] = i;
-    }
-    let mut idom: Vec<Option<BlockId>> = vec![None; f.blocks.len()];
+    let rpo = shape.rpo();
+    // Only blocks with a dominator are compared, and the entry reaches each of them.
+    let order = |b: BlockId| shape.rpo_index(b);
+    let mut idom: Vec<Option<BlockId>> = vec![None; shape.f.blocks.len()];
     idom[rpo[0].0 as usize] = Some(rpo[0]);
     let up = |b: BlockId, idom: &[Option<BlockId>]| {
         idom[b.0 as usize].expect("a block before in reverse postorder has a dominator")
     };
     for &b in &rpo[1..] {
         let mut found: Option<BlockId> = None;
-        for &p in &preds[b.0 as usize] {
+        for &p in shape.preds(b) {
             if idom[p.0 as usize].is_none() || !takes(p, b) {
                 continue;
             }
@@ -35,10 +33,10 @@ pub fn immediate_dominators(
                 Some(mut d) => {
                     let mut q = p;
                     while d != q {
-                        while order[d.0 as usize] > order[q.0 as usize] {
+                        while order(d) > order(q) {
                             d = up(d, &idom);
                         }
-                        while order[q.0 as usize] > order[d.0 as usize] {
+                        while order(q) > order(d) {
                             q = up(q, &idom);
                         }
                     }
@@ -65,14 +63,15 @@ pub struct DominatorTree {
 pub struct Dominated(Vec<(u32, u32)>);
 
 impl DominatorTree {
-    pub fn of(f: &IrFunction) -> Self {
-        Self::over(f, |_, _| true)
+    pub fn of(shape: &FnShape<'_>) -> Self {
+        Self::over(shape, |_, _| true)
     }
 
     /// [`Self::of`] over the edges `takes` admits: a block only the other edges lead to
     /// dominates nothing and has no dominator.
-    pub fn over(f: &IrFunction, takes: impl Fn(BlockId, BlockId) -> bool) -> Self {
-        let idom = immediate_dominators(f, &f.predecessors(), takes);
+    pub fn over(shape: &FnShape<'_>, takes: impl Fn(BlockId, BlockId) -> bool) -> Self {
+        let f = shape.f;
+        let idom = immediate_dominators(shape, takes);
         let mut children = vec![Vec::new(); f.blocks.len()];
         for (b, d) in idom.iter().enumerate() {
             if let Some(d) = d.filter(|d| d.0 as usize != b) {

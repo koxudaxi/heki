@@ -425,7 +425,9 @@ incremental LSP design, and the Stage 0-A Wave 2 decisions.
      most (`Certainty::at_most`). One claim is one code: an effect rule's heuristic side is a
      code of its own (`EFF101` "reaches on every path" beside `EFF111` "can reach", `EFF103`
      beside `EFF113`). An `OPT` rule keeps one code with a certainty per report: a report whose
-     rewrite is proven safe is the rule's exact tier, the others are heuristic. A demoted rule
+     rewrite is proven safe, in a loop whose trip count the code does not fix, is the rule's
+     exact tier (for `OPT113`, a join whose rule page premises all hold), the others are
+     heuristic. A demoted rule
      keeps `Default`, so `lint.heuristic = true` restores the earlier default set and a
      promotion is a one-field change. Experimental stays its own axis and implies `OptIn`.
      *Rejected*: a second list of heuristic codes; one code with a per-report tier for the
@@ -444,8 +446,9 @@ incremental LSP design, and the Stage 0-A Wave 2 decisions.
       break `extend-select = ["EFF105"]`).
   11. **Contract rules** (D7): classified and labelled like the others; declaring the contract
       selects them, whatever their certainty. `MUT202`'s zero-configuration part (`@lru_cache` /
-      `@cache` producers) becomes a code of its own; until then `MUT202` is selected as a
-      heuristic `Default` rule. *Rejected*: exempting contract rules from the class (`EFF201`
+      `@cache` producers) is a code of its own, `MUT114`, a `Default` rule whose reports are
+      exact when the changed object is the list, dict, or set a cached function returned, the
+      same object on every path; `MUT202` keeps the declared producers. *Rejected*: exempting contract rules from the class (`EFF201`
       calls itself over-approximate); gating them on `heuristic` (a declared contract would
       report nothing).
   12. **Certification** (replaces the earlier D8 and D9): a rule becomes exact when (a) for
@@ -474,7 +477,8 @@ incremental LSP design, and the Stage 0-A Wave 2 decisions.
   reports whose rewrite is not proven are heuristic), the `heuristic` key and options, the
   withholding of an exact rule's heuristic reports, the note, the labels in every output, the
   "What a report states" section of every rule page, and the certification check are
-  implemented. Every rule is heuristic until certified. The measurements are in
+  implemented. The proven tier of the `OPT` rewrite rules and the exact tier of `OPT113` are
+  certified in 0.2.0; the other rules are heuristic until certified. The measurements are in
   [docs/precision.md](precision.md), and release gate 3 of
   [ARCHITECTURE.md](../ARCHITECTURE.md) is the certification.
 
@@ -486,7 +490,9 @@ incremental LSP design, and the Stage 0-A Wave 2 decisions.
   quadratic concatenation make code slower, as the `OPT` rules' findings do, yet were errors.
 - **Decision**: `RuleMeta::consequence` says what happens in the code a rule reports, and sets
   its default severity: `Bug` (a wrong result, an exception, a lost update, a deadlock, or a
-  broken contract) is `error`, `Slowdown` is `warning`. `EFF101`, `EFF102`, `EFF103`, `EFF105`,
+  broken contract) is `error`; `MinorBug` (a broken promise that callers seldom notice, such as
+  `MUT110`'s read-only annotation changed by a helper, with no harmful report among those
+  checked) and `Slowdown` are `warning`. `EFF101`, `EFF102`, `EFF103`, `EFF105`,
   `DATA101`, and the `OPT` rules are slowdowns; `EFF106` (a synchronous lock or a transaction
   held across I/O can deadlock the event loop), `EFF107`, `EFF201`, and every `MUT` rule are
   bugs. A rule split off another (a heuristic sibling code) has its parent's consequence.

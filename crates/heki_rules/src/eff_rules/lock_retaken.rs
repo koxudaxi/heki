@@ -26,13 +26,14 @@ use heki_effect::{CallSite, EffectSummary, FuncKey, TypeCtx, anchors_call_site};
 
 /// Call sites of a module by `(caller qualname, span)` (`CheckContext::sites_by_span`).
 type SitesBySpan<'s> = FxHashMap<(String, Span), Vec<&'s CallSite>>;
-use heki_ir::walk::Answer;
+use heki_ir::walk::{Answer, FnShape};
 use heki_ir::{BlockId, Inst, InstKind, IrFunction, VarId};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::BTreeSet;
 
 /// A function's lock steps, in the blocks a run reaches (`live`).
-struct Steps {
+struct Steps<'f> {
+    shape: FnShape<'f>,
     live: ownership::Live,
     locks: LockSteps,
 }
@@ -81,7 +82,7 @@ fn handoffs(
         }
         let key = CheckContext::key(unit, f);
         let steps = lock_steps(cx, tcx, sites, f, &key);
-        let entry = held::at_entry(f, steps.locks.taken.len(), |b, i| {
+        let entry = held::at_entry(&steps.shape, steps.locks.taken.len(), |b, i| {
             steps.locks.changes.get(&(b, i))
         });
         let reached = entry
@@ -153,7 +154,7 @@ pub(super) fn run(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Di
             summary,
             sets: &sets,
         };
-        let entry = held::at_entry(f, steps.locks.taken.len(), |b, i| {
+        let entry = held::at_entry(&steps.shape, steps.locks.taken.len(), |b, i| {
             steps.locks.changes.get(&(b, i))
         });
         let mut reported: FxHashSet<(Span, ObjRef)> = FxHashSet::default();
@@ -194,13 +195,13 @@ pub(super) fn run(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Di
 
 /// The lock acquisitions of `f` and what each instruction does to them, the names its calls
 /// may bind among them.
-fn lock_steps(
+fn lock_steps<'f>(
     cx: &CheckContext<'_>,
     tcx: &TypeCtx<'_>,
     sites: &SitesBySpan<'_>,
-    f: &IrFunction,
+    f: &'f IrFunction,
     key: &FuncKey,
-) -> Steps {
+) -> Steps<'f> {
     let defs: FxHashMap<VarId, &Inst> = f
         .blocks
         .iter()
@@ -222,7 +223,11 @@ fn lock_steps(
         .collect()
     };
     let locks = locks::lock_steps(tcx, f, key, &types, &def, &live, &rebound_by_call);
-    Steps { live, locks }
+    Steps {
+        shape: FnShape::new(f),
+        live,
+        locks,
+    }
 }
 
 /// The locks `inst` takes, with the calls to where it takes each (empty for its own

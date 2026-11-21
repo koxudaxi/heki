@@ -9,6 +9,7 @@
 
 use crate::{CONTAINER_MUTATORS, CallSite, FuncKey, TypeCtx, aliases_of, guards, self_aliases};
 use heki_ast::Span;
+use heki_ir::walk::FnShape;
 use heki_ir::{BlockId, CompareOpKind, InstKind, IrFunction, Terminator, VarId};
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
@@ -126,15 +127,16 @@ impl CacheFlow {
 /// The `MUT101` facts of `f` (`None` for a function that is no method or writes no `self`
 /// attribute itself). `sites` are the function's call sites.
 pub(crate) fn cache_flow(
-    f: &IrFunction,
+    shape: &FnShape<'_>,
     key: &FuncKey,
     sites: &[CallSite],
     tcx: &TypeCtx<'_>,
 ) -> Option<CacheFlow> {
+    let f = shape.f;
     if f.is_class_body || f.is_module_body || f.owner_class_qualname.is_none() {
         return None;
     }
-    let writes = self_attr_writes(f);
+    let writes = self_attr_writes(shape);
     if writes.is_empty() {
         return None;
     }
@@ -146,7 +148,7 @@ pub(crate) fn cache_flow(
             ..w
         })
         .collect();
-    let blocks = flow_blocks(f, key, sites, tcx, &mut names);
+    let blocks = flow_blocks(shape, key, sites, tcx, &mut names);
     Some(CacheFlow {
         names: names.list,
         writes,
@@ -184,8 +186,9 @@ fn self_vars(f: &IrFunction) -> FxHashSet<VarId> {
 /// without a `self` parameter): rebinding or deleting it, and changing the container it holds
 /// in place (also through local copies of `self.<attr>`). `self.__dict__` itself is no
 /// attribute a property reads.
-pub fn self_attr_writes(f: &IrFunction) -> Vec<(&str, SelfAttrWrite)> {
-    attr_writes(f, &self_vars(f).into_iter().map(|v| (v, 0)).collect())
+pub fn self_attr_writes<'f>(shape: &FnShape<'f>) -> Vec<(&'f str, SelfAttrWrite)> {
+    let objects = self_vars(shape.f).into_iter().map(|v| (v, 0)).collect();
+    attr_writes(shape, &objects)
 }
 
 /// An attribute of one of the objects [`attr_writes`] reads: the object's number and the name.
@@ -196,9 +199,10 @@ type Held<'f> = (u32, &'f str);
 /// of them the object's number. Each object is read on its own: a test of one object's attribute
 /// says nothing of another's.
 pub fn attr_writes<'f>(
-    f: &'f IrFunction,
+    shape: &FnShape<'f>,
     objects: &FxHashMap<VarId, u32>,
 ) -> Vec<(&'f str, SelfAttrWrite)> {
+    let f = shape.f;
     // `var -> (object, attr)`: the variables holding `<obj>.<attr>`, through copies.
     let mut alias: FxHashMap<VarId, (u32, &str)> = FxHashMap::default();
     let mut defs: FxHashMap<VarId, &InstKind> = FxHashMap::default();
@@ -291,7 +295,7 @@ pub fn attr_writes<'f>(
     for (_, _, _, (o, attr), _, _) in &found {
         written.entry(attr).or_default().insert(*o);
     }
-    let lazy = lazy_init_blocks(f, objects, &written);
+    let lazy = lazy_init_blocks(shape, objects, &written);
     let mut out: Vec<(&str, SelfAttrWrite)> = found
         .into_iter()
         .map(|(block, index, span, held, memo_shaped, rebinds)| {
@@ -319,19 +323,21 @@ pub fn attr_writes<'f>(
 /// path from the entry to such a block runs through the branch (normal and exception edges).
 /// The walks share the function's budget ([`guards::Cells`]); past it none is kept.
 fn lazy_init_blocks<'f>(
-    f: &IrFunction,
+    shape: &FnShape<'_>,
     objects: &FxHashMap<VarId, u32>,
     written: &FxHashMap<&'f str, FxHashSet<u32>>,
 ) -> Vec<((u32, &'f str), Vec<bool>)> {
-    let mut cells = guards::Cells::of(f);
+    let mut cells = guards::Cells::of(shape.f);
     let mut found = Vec::new();
-    let branches = guards::lazy_init_branches(f).into_iter().filter_map(|b| {
-        let o = *objects.get(&b.obj)?;
-        let (attr, by) = written.get_key_value(b.attr.as_str())?;
-        by.contains(&o).then_some(((o, *attr), b.init))
-    });
+    let branches = guards::lazy_init_branches(shape)
+        .into_iter()
+        .filter_map(|b| {
+            let o = *objects.get(&b.obj)?;
+            let (attr, by) = written.get_key_value(b.attr.as_str())?;
+            by.contains(&o).then_some(((o, *attr), b.init))
+        });
     for (held, init) in branches {
-        found.push((held, guards::dominated(f, init, &mut cells)));
+        found.push((held, guards::dominated(shape, init, &mut cells)));
         if cells.spent() {
             return Vec::new();
         }
@@ -342,12 +348,13 @@ fn lazy_init_blocks<'f>(
 /// The blocks of `f` with the points that invalidate or read a cached property of its own
 /// instance.
 fn flow_blocks(
-    f: &IrFunction,
+    shape: &FnShape<'_>,
     key: &FuncKey,
     sites: &[CallSite],
     tcx: &TypeCtx<'_>,
     names: &mut Names,
 ) -> Vec<FlowBlock> {
+    let f = shape.f;
     let self_vars = self_vars(f);
     let dicts = aliases_of(
         f,
@@ -366,9 +373,10 @@ fn flow_blocks(
     // A key naming a property: a string literal or a `Final` string constant.
     let types = OnceCell::new();
     let key_name = |v: VarId| {
-        f.const_str(v)
+        shape
+            .str_const(v)
             .map(str::to_owned)
-            .or_else(|| tcx.str_constant_in(f, v, types.get_or_init(|| tcx.infer(f))))
+            .or_else(|| tcx.str_constant_in(shape, v, types.get_or_init(|| tcx.infer(f))))
     };
     let self_calls: FxHashSet<Span> = sites
         .iter()

@@ -203,13 +203,13 @@ pub(super) fn mut207(
             .filter(|a| a.access == Access::Call)
         {
             for (r, rule) in strict.iter().enumerate() {
-                let hits: Vec<_> = rule
-                    .targets
-                    .iter()
-                    .filter(|t| t.name.matches(&a.name))
+                let hits: Vec<usize> = (0..rule.targets.patterns.len())
+                    .filter(|&i| rule.targets.patterns[i].name.matches(&a.name))
                     .collect();
-                let calls_target =
-                    |class: &str| hits.iter().any(|t| t.calls_on(cx, class, &a.name));
+                let calls_target = |class: &str| {
+                    hits.iter()
+                        .any(|&i| rule.targets.calls_on(cx, i, class, &a.name))
+                };
                 let access = Unseen {
                     func: key,
                     obj: a.obj_params,
@@ -224,7 +224,7 @@ pub(super) fn mut207(
                 {
                     continue;
                 }
-                let guarded = listed(hits.iter().map(|t| t.text.as_str()));
+                let guarded = listed(hits.iter().map(|&i| rule.targets.patterns[i].text.as_str()));
                 add(cx, &mut reports, key, a.span, &a.name, rule.note, || {
                     format!(
                         "`{}` calls `{}` on an object of unknown class {}: heki cannot tell whether it calls {guarded}",
@@ -257,7 +257,7 @@ fn add<'u>(
         unit,
         key,
         span,
-        target,
+        (target, target),
         (key.fqn(), span),
         note,
         message,

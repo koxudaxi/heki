@@ -126,8 +126,8 @@ supported version that every clause admits:
 | `extend-select` | `[]` | Rules to add. |
 | `ignore` | `[]` | Rules to disable. |
 | `per-file-ignores` | `{}` | Glob → rules disabled in matching files (project-relative POSIX paths). As in Ruff, `*` also matches `/`: `scripts/*.py` covers `scripts/tools/worker.py` too. |
-| `severity` | `"warning"` for the rules that report slower code (`EFF101`, `EFF102`, `EFF103`, `EFF105`, `DATA101`, and the `OPT` rules), `"error"` for the others, which report bugs | Rule → `"error"` or `"warning"`. It changes the output, the SARIF level, and whether a report makes `heki check` fail (`fail-on`). |
-| `relax-async-in-tests` | `true` | Skip `EFF101`, `EFF105`, and `EFF106` in `test_*` functions and in files under `tests/`. |
+| `severity` | `"warning"` for the rules that report slower code (`EFF101`, `EFF102`, `EFF103`, `EFF105`, `EFF111`, `EFF113`, `DATA101`, and the `OPT` rules) and for `MUT110`, which reports a bug that is rarely harmful; `"error"` for the others, which report bugs | Rule → `"error"` or `"warning"`. It changes the output and the SARIF level. By default only errors make `heki check` fail; `fail-on = "warning"` makes warnings fail it too. |
+| `relax-async-in-tests` | `true` | Skip `EFF101`, `EFF111`, `EFF105`, and `EFF106` in test code as pytest finds it: `test_*` functions and the functions nested in them, `test_*.py` and `*_test.py` files, and files under `test/` or `tests/`. |
 | `heuristic` | `false` | Whether the heuristic rules that are not opt-in run by default and for a prefix or `ALL`, as the exact rules do. `--heuristic` and `--no-heuristic` override it. |
 | `fail-on` | `"error"` | The least severity whose reports make `heki check` (and `--watch`) exit with code 1: `"error"`, or `"warning"` to fail on warnings too. Warnings are reported either way, and the language server shows them. `--fail-on` overrides it. |
 
@@ -143,7 +143,7 @@ supported version that every clause admits:
 - A run of `full` or `concise` output that leaves heuristic rules off, or heuristic reports out,
   says how many.
 - A prefix or `ALL` never enables the opt-in rules (`EFF105`, `EFF106`, `EFF107`, `EFF109`,
-  `MUT101`, `MUT103`, `MUT106`, `MUT108`, `MUT111`, `MUT112`, `MUT113`): they need their exact
+  `MUT101`, `MUT103`, `MUT106`, `MUT107`, `MUT108`, `MUT111`, `MUT112`, `MUT113`): they need their exact
   code or name. In `ignore`, a prefix covers every rule it matches.
 - The command line wins: `--select` replaces `select`, `--extend-select` and `--ignore` add to the
   configured lists, and `--heuristic` / `--no-heuristic` replace `heuristic`.
@@ -166,17 +166,35 @@ Contracts declare what no type can say. Each kind is an array of tables with its
 | [`readonly-returns`](#readonly-returns) | results every caller shares | `MUT202` | heuristic |
 | [`invalidation`](#invalidation) | writes that must be announced | `MUT109` | heuristic |
 
-- These rules report nothing until a contract exists, except `MUT202`, which also protects the
-  results of `@lru_cache` / `@cache` functions.
-- Declaring a contract selects its rule, whatever its certainty. `MUT202`, which also reports
-  without a contract, is selected like the heuristic rules that are not opt-in: by its code or
-  name, or with `lint.heuristic = true`.
+- These rules report nothing until a contract exists. The results of `functools.lru_cache` /
+  `functools.cache` functions are checked without one by `MUT114` (`cached-result-mutation`).
+- Declaring a contract selects its rule, whatever its certainty.
 - Every name in a contract is a dotted pattern. It matches the full name or any dotted suffix
   (`DataModel.fields` matches `pkg.model.DataModel.fields`, not `pkg.BigModel.fields`), and it
   may be a glob (`*`, `?`, `[...]`, `{a,b}`).
+- A glob's `*` spans dots (`pkg.parser.*` covers the functions of every module under
+  `pkg.parser`), except in the last segment of a target, which names the attribute, function,
+  method, or class: `pkg.*._*` names the private members of everything in `pkg`, and no function
+  of a private module whose own name is public; `pkg.api_*` names `pkg.api_commit`, not
+  `pkg.api_helpers.api_reset`.
+- A name with a module part, `module:qualname`, names definitions of the project modules the
+  part names, never of their submodules. The module part matches the whole module name, exactly
+  or as a glob (`pkg.*:run`), not a suffix; the qualified name after the colon matches the whole
+  name inside the module, a `*` spanning dots. `pkg:*` names everything `pkg/__init__.py`
+  defines (its functions, classes, methods, nested functions, and module body `<module>`), where
+  `pkg.*` also covers `pkg.sub.user.sub_user`; `pkg.sub:Store.*` names the methods of `Store` in
+  `pkg.sub`. In a `Class.attr` target the module part belongs to the class
+  (`pkg.model:DataModel.fields`), and a call target with one is matched whole (`pkg:*` names
+  every function, method, and class of `pkg`). Such a name never matches an external symbol, and
+  `unresolved = "report"` counts its last name (`decide` of `pkg:decide`). A module part that
+  names no project module is no error: the name matches nothing.
+- A report of a glob target names the member it matched (`reads
+  `pkg.types.DataType._flag``); one report standing for several members lists the others.
 - A `Class.attr` target covers the subclasses of the class too.
 - A contract heki cannot use is a configuration error: a target that is not `Class.attr`, an
-  invalid glob, or an unknown value of `forbid`, `fresh-objects`, or `unresolved`.
+  invalid glob, a name with more than one colon or an empty module or qualified name, call
+  targets whose globs are too many to match together (tens of thousands of complex ones), or an
+  unknown value of `forbid`, `fresh-objects`, `unresolved`, or `references`.
 - With `unresolved = "report"`, a contract also reports the accesses it cannot tie to a class,
   each under its own rule (`MUT205` writes, `MUT206` reads, `MUT207` calls): an attribute or
   method named like a target, accessed on an object of unknown class (an unannotated parameter,
@@ -222,8 +240,8 @@ the target.
 
 With `fresh-objects = "allow"`, a write is no violation when it constructs the object it writes:
 
-- the object was allocated in the same call chain: by calling its class, by a copy, or by a
-  project function returning a new object;
+- the object was allocated in the same call chain: by calling its class, by `object.__new__`
+  (`object.__new__(Node)`), by a copy, or by a project function returning a new object;
 - nothing can hold it yet: no store, `yield`, closure, or call that may keep it ran before the
   write.
 
@@ -249,6 +267,13 @@ unresolved = "report"
 
 The read side of `write-owners`. A read is `ref.children`, a read through a local alias,
 `getattr(ref, "children")`, or `ref.__dict__["children"]`.
+
+A read, or a call (`call-owners`, and an effect boundary's `call-targets` and
+`allowed-callees`), through a value typed with a project protocol that declares the member is
+judged by the protocol, the type the code uses it through: `def f(h: Host): h._m` reads
+`Host._m`, not `_m` of the classes implementing `Host`, and a private method of an
+implementation called through the protocol keeps what it reads and calls. A write through such
+a value still writes the implementations' attribute.
 
 | Key | Default | Meaning |
 | --- | ------- | ------- |
@@ -282,11 +307,13 @@ The call side of `write-owners`.
 | --- | ------- | ------- |
 | `name` | `""` | The contract's name in reports. |
 | `targets` | `[]` | Functions, methods, or classes. A `Class.method` target covers the method's overrides in subclasses; a class target means constructing the class or a subclass. |
+| `subclasses` | `true` | `false`: a class target means constructing exactly the class, not a subclass (an exception class whose subclasses anyone may raise). `Class.method` targets keep covering overrides. |
 | `allowed-callers` | `[]` | Functions allowed to call the targets. |
 | `forbidden-callers` | `[]` | When set, only calls by these functions are reported. |
 | `exempt-methods` | `[]` | Methods allowed to call the targets, matched as in `write-owners`. |
 | `message` | none | The help of every report of the contract. |
 | `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the calls of a method named like a target (its last name) on an object of unknown class are reported under [`MUT207`](rules/unresolved-guarded-call.md). |
+| `references` | `"ignore"` | `"ignore"` or `"calls"`: whether a reference handing a target on to be called later counts as a call of it (`[decide]`, `return decide`, `partial(decide)`, `field(default_factory=Rule)`, `obj.callback = self.decide`). |
 
 - A call is reported only when every function it may call (each candidate in the class
   hierarchy) is a target: `text.replace(...)` on a `str` is never a call of
@@ -295,6 +322,16 @@ The call side of `write-owners`.
   with a constant name are followed.
 - The targets of a contract may call each other: a call of the guarded operation is checked where
   it is made, so what the operation does inside is part of it.
+- With `references = "calls"`, a target handed on is reported where it is named ("`f` hands on
+  `pkg.core.decide`"; a name an import or the module body binds, at the statement handing it
+  on): passed to a call, stored in an attribute, an item, or a global, returned,
+  yielded, raised, or held by a display that is. A use that only names it is no reference: an
+  argument of `isinstance`, `issubclass`, another builtin that only inspects its arguments
+  (`print`, `getattr`, `type`), `super`, `typing.cast`, `typing.TypeVar`, `typing.NewType`, or
+  `contextlib.suppress`; an `except` clause, a class's bases and keywords, a default or an
+  annotation of a function; a subscript (`Optional[Rule]`), a comparison, a receiver
+  (`Rule.of(...)`), and a module binding another name to it (an import, `run = core.decide`). A
+  callable a builtin calls once per item (`sorted(xs, key=decide)`) is a call already.
 
 ### Allowed and forbidden functions
 
@@ -346,6 +383,12 @@ name = "pass-sort-base-classes"
 scopes = ["pkg.parser.passes.sort_base_classes"]
 allow-writes = ["DataModel.base_classes"]
 write-universe = ["DataModel.*", "DataModelFieldBase.*", "DataType.*"]
+
+[[tool.heki.effect-boundaries]]
+name = "portable-generation"
+scopes = ["pkg.generate.*"]
+forbid = ["reads-environment"]
+import-probes = "report"
 ```
 
 | Key | Default | Meaning |
@@ -354,12 +397,14 @@ write-universe = ["DataModel.*", "DataModelFieldBase.*", "DataType.*"]
 | `scopes` | `[]` | Modules, classes, or functions whose functions must stay inside the boundary; nested functions are included. |
 | `forbid` | `[]` | What the scope functions must not reach (tokens below). |
 | `write-targets` | `[]` | `Class.attr` targets of `writes-targets`, required with it. `Class.attr["key"]` names one entry, as in `write-owners`. |
-| `read-targets` | `[]` | `Class.attr` targets of `reads-targets`, required with it: reads as `read-owners` sees them, also inside property getters. A container entry is a configuration error. |
-| `call-targets` | `[]` | Functions, methods, or classes of `calls`, required with it, matched as the `targets` of `call-owners`. |
+| `read-targets` | `[]` | `Class.attr` targets of `reads-targets`, required with it: reads as `read-owners` sees them, also inside property getters. A container entry is a configuration error. An entry can also name an attribute of a module outside the project by its full name (`sys.platform`, `os.environ`, below). |
+| `call-targets` | `[]` | Functions, methods, or classes of `calls`, required with it, matched as the `targets` of `call-owners`. An entry can also name a function or class outside the project by its full name (`os.getenv`, `platform.*`, below). |
 | `write-universe` | `[]` | `Class.attr` entries: a reached write of one that `allow-writes` does not name is reported, once per written `Class.attr`. |
 | `allow-writes` | `[]` | `Class.attr` writes the boundary allows, exempt from `write-targets` too. Needs `write-universe`. |
 | `allowed-callees` | `[]` | Functions, classes, modules, or ecosystem symbols whose effects are allowed: paths through them are not followed, and calls of them are no `calls` violation. |
 | `fresh-objects` | `"allow"` | `"allow"` or `"report"`: whether a write that constructs the object it writes (as in `write-owners`) counts as a write of the boundary. |
+| `references` | `"ignore"` | `"ignore"` or `"calls"`, as for `call-owners`: whether a reference handing a `call-targets` entry on counts for `calls`. |
+| `import-probes` | `"allow"` | `"allow"` or `"report"`: whether `reads-environment` also forbids an import probe, an `import` inside a `try` with an `except` clause naming `ImportError` or `ModuleNotFoundError`. `"report"` without `reads-environment` is a configuration error. |
 | `message` | none | The help of every report of the boundary. |
 
 | `forbid` token | Forbids |
@@ -370,6 +415,27 @@ write-universe = ["DataModel.*", "DataModelFieldBase.*", "DataType.*"]
 | `writes-targets` | writing a `write-targets` attribute |
 | `reads-targets` | reading a `read-targets` attribute |
 | `calls` | calling a `call-targets` function or class |
+| `reads-environment` | reading the environment the program runs in: calling or reading what the ecosystem catalog tags `environment` (below), and import probes with `import-probes = "report"` |
+
+Outside the project, `call-targets` and `read-targets` entries name symbols by their full dotted
+name, starting with the top-level module: `os.getenv` matches a call of `os.getenv` (also
+`from os import getenv`, `import os as o`), `platform.*` every function of `platform`, and
+`sys.platform` a read of `sys.platform` (also `from sys import platform`, or `import sys as s`
+and `s.platform`). A dotted suffix (`getenv`), a leading glob (`*.getenv`), or a module part (`os:getenv`) never
+names a symbol outside the project, so an entry for project functions keeps its meaning. Only a call or a read
+heki resolves counts: an attribute read by name (`getattr(sys, name)`) or on an object of unknown
+origin is not reported.
+
+`reads-environment` needs no targets. The ecosystem catalog tags these calls: `os.getenv`,
+`os.getenvb`, the functions of `platform` that describe the machine or the interpreter
+(`platform.system`, `platform.machine`, `platform.python_version`, ...),
+`importlib.util.find_spec`, `importlib.import_module`, `importlib.metadata.version`,
+`importlib.metadata.distribution`, `shutil.which`, and `sysconfig.get_config_var`; and these
+reads: `os.environ`, `os.environb`, `os.name`, `sys.platform`, `sys.version`,
+`sys.version_info`, `sys.hexversion`, `sys.implementation`, and `sys.flags`. An entry set
+`excluded = true` (`[[tool.heki.ecosystem]]`, below) is never reported. A call on
+`os.environ` (`os.environ.get("X")`) is a read of `os.environ`. One report per scope function
+names the first read it reaches and counts every one.
 
 - Each scope function is checked through any number of calls.
 - A violation inside another scope function is reported there only, once.

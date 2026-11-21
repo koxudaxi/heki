@@ -28,7 +28,7 @@ use crate::{
 };
 use crate::{callgraph, owned_chain};
 use heki_ast::Span;
-use heki_ir::walk::Answer;
+use heki_ir::walk::{Answer, FnShape};
 use heki_ir::{
     BlockId, ConstLiteral, DominatorTree, Inst, InstKind, IrFunction, Terminator, VarId,
 };
@@ -712,12 +712,13 @@ impl BlockTests {
     /// `dom`: the dominator tree over the edges a run can take. `resolve` gives the definitions
     /// of a method called on a value, `global` the fully qualified name of a module global.
     pub fn of<'i>(
-        f: &IrFunction,
+        shape: &FnShape<'_>,
         dom: DominatorTree,
         def: &dyn Fn(VarId) -> Option<&'i Inst>,
         resolve: &dyn Fn(VarId, &str) -> Vec<FuncKey>,
         global: &dyn Fn(&str) -> String,
     ) -> Self {
+        let f = shape.f;
         let param_of = |v: VarId| {
             let v = through_copies(def, v);
             (f.params.iter().take(64))
@@ -727,7 +728,7 @@ impl BlockTests {
         let mut sets = vec![Arc::new(Answer::Known(StateTests::default()))];
         let mut at: Vec<Option<(usize, usize)>> = vec![None; f.blocks.len()];
         // A dominator comes before the blocks it dominates in reverse postorder.
-        for b in f.rpo_blocks() {
+        for &b in shape.rpo() {
             let to = match dom.strict_dominator(b) {
                 Some(d) => at[d.0 as usize].expect("a dominator comes first").1,
                 None if dom.number(b).is_some() => 0,

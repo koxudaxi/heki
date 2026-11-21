@@ -2,24 +2,21 @@
 
 # readonly-return-mutation (MUT202)
 
-Family: Mutation & State (MUT) · Heuristic · Off by default · Severity `error` (a bug) · No automatic fix
+Family: Mutation & State (MUT) · Heuristic · Runs when its contract is declared · Severity `error` (a bug) · No automatic fix
 
-Mutating a shared object returned by a declared `readonly-returns` producer or `@lru_cache`, directly or through the functions that return it.
+Mutating a shared object returned by a declared `readonly-returns` producer, directly or through the functions that return it.
 
 !!! note "Heuristic"
 
-    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 20 sampled reports (round 3, 2026-11-21), 70% were right about the code. See [Rule Precision](../precision.md).
+    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when its contract is declared. Of 20 sampled reports (round 3, 2026-11-21), 70% were right about the code. See [Rule Precision](../precision.md).
 
 ## What it does
-Checks mutations of objects returned by a shared producer:
-
-- functions decorated with `@functools.lru_cache` / `@functools.cache` (every caller receives
-  the same object), also through an import alias (`lru_cache as _lru_cache`); a `cache`
-  decorator the module defines itself is not one;
-- producers declared in `[[tool.heki.readonly-returns]]`;
-- functions that return a producer's value, or a part of it, on some path: a wrapper is a
-  producer itself, without configuration, through any number of wrappers, property getters,
-  and recursion.
+Checks mutations of objects returned by a shared producer declared in
+`[[tool.heki.readonly-returns]]`, and by the functions that return a producer's value, or a part
+of it, on some path: a wrapper is a producer itself, without configuration, through any number
+of wrappers, property getters, and recursion. The rule runs when such a contract is declared.
+The results of `functools.lru_cache` / `functools.cache` functions are checked without
+configuration by `MUT114` (`cached-result-mutation`).
 
 Mutations through attributes, subscripts, container methods, in-place operators, and helpers
 that mutate their argument (also run on a worker thread: `asyncio.to_thread(clear, shared)`) are
@@ -50,12 +47,11 @@ computes as it was.
 ## What a report states
 
 A report states that the function changes in place an object that a shared producer returned: a
-function decorated with `@functools.lru_cache` / `@functools.cache`, a producer declared in
-`readonly-returns`, or a function returning a producer's value.
+producer declared in `readonly-returns`, or a function returning a producer's value.
 
 Its premises:
 
-- **Producer**: the decorator, known by what its name is bound to, or the declaration. Established.
+- **Producer**: the declaration. Established.
 - **Returned through wrappers**: a function returning a producer's value on some path is a producer.
   Open: one path is enough.
 - **Same object**: the changed object is the returned one, or an object below it, not a copy. Open:
@@ -65,17 +61,19 @@ Its premises:
   object.
 
 ## Why is this bad?
-A cached return value is shared by every caller. Mutating it corrupts the cache for everyone
-else, usually long after the mutation happened.
+A shared return value is seen by every caller. Mutating it corrupts it for everyone else,
+usually long after the mutation happened.
 
 ## Example
+```toml
+[[tool.heki.readonly-returns]]
+name = "schemas"
+producers = ["registry.schema"]
+deep = true
+```
+
 ```python
-from functools import lru_cache
-
-
-@lru_cache(maxsize=32)
-def schema(name: str) -> dict[str, list[str]]:
-    return {"fields": [name]}
+from registry import schema
 
 
 def schema_of(name: str) -> dict[str, list[str]]:
@@ -84,7 +82,7 @@ def schema_of(name: str) -> dict[str, list[str]]:
 
 def extend(name: str) -> None:
     s = schema_of(name)
-    s["fields"].append("extra")  # MUT202: mutates the cached object
+    s["fields"].append("extra")  # MUT202: mutates the shared object
 ```
 
 Use instead:

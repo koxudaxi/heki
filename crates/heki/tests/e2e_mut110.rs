@@ -227,6 +227,9 @@ fn mut110_readonly_parameters_handed_to_helpers() {
         one["help"],
         "pass a copy (`list(items)` / `dict(items)`), or annotate the helper's parameter with a mutable type"
     );
+    // `push` does not type `items`: whether `append` changes it in place is open, so the report
+    // names no line and is heuristic.
+    assert_eq!(one["certainty"], "heuristic");
     assert_eq!(chain(at(&diags, c, 21)), vec![(c.into(), 21)]);
     // Two calls deep: the chain ends at the function that changes the argument.
     assert_eq!(
@@ -238,6 +241,96 @@ fn mut110_readonly_parameters_handed_to_helpers() {
         related[1]["message"], "`push_via` calls `pkg.fill.push`",
         "{related:#}"
     );
+}
+
+// ====================================================================== the named line
+
+/// The claim is the named line: whenever it runs during the call, it changes the caller's object.
+/// So a change under a test of the argument's type is reported, and a parameter that is a copy on
+/// one path before the call, or a helper's parameter rebound to a copy on one path before the
+/// change, is not. A change made where a generator another function returns is iterated has no
+/// line in the chain: that report is heuristic and names none.
+const ANCHORED: &str = r#"from collections.abc import Sequence
+
+
+def sort_values(values):
+    values.sort()
+
+
+def copy_then_sort(values, fresh):
+    if fresh:
+        values = list(values)
+    values.sort()
+
+
+def append_to_lists(values):
+    if isinstance(values, list):
+        values.append(1)
+
+
+def copied_on_one_path(values: Sequence[float], fresh: bool) -> None:
+    if fresh:
+        values = list(values)
+    sort_values(values)
+
+
+def rebound_in_the_helper(values: Sequence[float]) -> None:
+    copy_then_sort(values, True)
+
+
+def under_a_type_test(values: Sequence[float]) -> None:
+    append_to_lists(values)
+
+
+def wipe(values):
+    values.clear()
+    yield 1
+
+
+def adapter(values):
+    return wipe(values)
+
+
+def consume(values):
+    list(adapter(values))
+
+
+def through_a_generator(values: Sequence[float]) -> None:
+    consume(values)
+"#;
+
+#[test]
+fn mut110_names_a_line_that_changes_the_callers_object_whenever_it_runs() {
+    let p = Project::new("mut110_anchored");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/anchored.py", ANCHORED);
+    let diags = diagnostics(&p, &[]);
+    let a = "pkg/anchored.py";
+    assert_eq!(
+        found(&diags),
+        vec![
+            d(a, 30, "under_a_type_test", "values"),
+            d(a, 47, "through_a_generator", "values"),
+        ]
+    );
+    assert_eq!(
+        message(&diags[0]),
+        "`under_a_type_test` passes its read-only parameter `values` to `pkg.anchored.append_to_lists`; whenever line 16 of `append_to_lists` runs, it changes the caller's object in place"
+    );
+    assert_eq!(chain(&diags[0]), vec![(a.into(), 30), (a.into(), 16)]);
+    assert_eq!(diags[0]["severity"], "warning");
+    assert_eq!(
+        message(&diags[1]),
+        "`through_a_generator` passes its read-only parameter `values` to `pkg.anchored.consume`, which changes it in place"
+    );
+    assert_eq!(diags[1]["certainty"], "heuristic");
+    assert_eq!(chain(&diags[1]), vec![(a.into(), 47)]);
+    // A per-file ignore leaves the file without reports.
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nper-file-ignores = { \"pkg/anchored.py\" = [\"MUT110\"] }\n",
+    );
+    assert!(diagnostics(&p, &[]).is_empty());
 }
 
 // ============================================================== defaults and `heki rule`
@@ -365,4 +458,70 @@ fn mut110_lsp_follows_helper_edits_in_other_files() {
     save(&mut lsp, &p, "pkg/helpers.py", 3, LSP_HELPERS_ANNOTATED);
     lsp.diagnostics(&stats, <[Value]>::is_empty);
     lsp.stop(true);
+}
+
+/// A call that can run two implementations: one names no line, the other changes a list at a
+/// line. The call is reported once, with the line.
+const DISPATCHED: &str = r#"from collections.abc import Sequence
+
+
+class Adder:
+    def add(self, values):
+        values.append(1)
+
+
+class ListAdder(Adder):
+    def add(self, values):
+        if isinstance(values, list):
+            values.append(2)
+
+
+def fill(adder: Adder, values: Sequence[int]) -> None:
+    adder.add(values)
+"#;
+
+#[test]
+fn mut110_prefers_the_implementation_that_names_a_line() {
+    let p = Project::new("mut110_dispatched");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/dispatched.py", DISPATCHED);
+    let diags = diagnostics(&p, &[]);
+    let a = "pkg/dispatched.py";
+    assert_eq!(found(&diags), vec![d(a, 16, "fill", "values")]);
+    assert_eq!(diags[0]["certainty"], "exact", "{diags:#?}");
+    assert_eq!(chain(&diags[0]).last(), Some(&(a.into(), 12)));
+}
+
+/// A helper defined once per platform: the definitions' changes join, and the report names the
+/// first line.
+const PER_PLATFORM: &str = r#"import sys
+from collections.abc import Sequence
+
+if sys.platform == "win32":
+
+    def fill(values):
+        if isinstance(values, list):
+            values.append(1)
+
+else:
+
+    def fill(values):
+        if isinstance(values, list):
+            values.append(2)
+
+
+def use(values: Sequence[int]) -> None:
+    fill(values)
+"#;
+
+#[test]
+fn mut110_joins_the_changes_of_each_definition() {
+    let p = Project::new("mut110_per_platform");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/platform.py", PER_PLATFORM);
+    let diags = diagnostics(&p, &[]);
+    let a = "pkg/platform.py";
+    assert_eq!(found(&diags), vec![d(a, 18, "use", "values")]);
+    assert_eq!(diags[0]["certainty"], "exact", "{diags:#?}");
+    assert_eq!(chain(&diags[0]).last(), Some(&(a.into(), 8)));
 }

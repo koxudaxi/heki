@@ -15,6 +15,7 @@
 use crate::Items;
 use crate::resolver::{Callee, TypeCtx, Val};
 use heki_ast::Span;
+use heki_ir::walk::FnShape;
 use heki_ir::{BlockId, ConstLiteral, FunctionKind, Inst, InstKind, IrFunction, Terminator, VarId};
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -385,12 +386,13 @@ impl IterFlow {
     /// index records (the summaries resolved it with the values `isinstance` tests narrow),
     /// and any other call is resolved with `types`.
     pub fn new(
-        f: &IrFunction,
+        shape: &FnShape<'_>,
         tcx: &TypeCtx<'_>,
         types: &FxHashMap<VarId, Val>,
         roots: Roots,
         recorded: &dyn Fn(&Inst) -> Option<Callee>,
     ) -> Self {
+        let f = shape.f;
         let mut callees = FxHashMap::default();
         for bb in &f.blocks {
             for (index, inst) in bb.insts.iter().enumerate() {
@@ -404,17 +406,18 @@ impl IterFlow {
                 }
             }
         }
-        Self::with_callees(f, tcx, types, roots, callees)
+        Self::with_callees(shape, tcx, types, roots, callees)
     }
 
     /// Analyze `f` with the callee of every `Call` / `MethodCall` already resolved.
     pub fn with_callees(
-        f: &IrFunction,
+        shape: &FnShape<'_>,
         tcx: &TypeCtx<'_>,
         types: &FxHashMap<VarId, Val>,
         roots: Roots,
         callees: FxHashMap<(BlockId, usize), Callee>,
     ) -> Self {
+        let f = shape.f;
         let mut flow = Self {
             callees,
             ..Self::default()
@@ -486,7 +489,7 @@ impl IterFlow {
             }
         }
         flow.alias(f);
-        flow.collect_events(f, types);
+        flow.collect_events(shape, types);
         flow
     }
 
@@ -621,14 +624,15 @@ impl IterFlow {
         }
     }
 
-    fn collect_events(&mut self, f: &IrFunction, types: &FxHashMap<VarId, Val>) {
+    fn collect_events(&mut self, shape: &FnShape<'_>, types: &FxHashMap<VarId, Val>) {
+        let f = shape.f;
         // `a, b = it` reads `it[0]` and `it[1]`: one unpacking per root and block.
         let mut unpacked: FxHashSet<(BlockId, VarId)> = FxHashSet::default();
         for bb in &f.blocks {
             for (index, inst) in bb.insts.iter().enumerate() {
                 let consumed: Vec<VarId> = match &inst.kind {
                     InstKind::MakeIter { dst, iterable, .. } => {
-                        if let Some((exhausted, full)) = loop_exhaustion(f, *dst) {
+                        if let Some((exhausted, full)) = loop_exhaustion(shape, *dst) {
                             let done = (exhausted, 0);
                             self.push(bb.id, index, inst.span, &[*iterable], full, done);
                         }
@@ -636,7 +640,7 @@ impl IterFlow {
                     }
                     InstKind::YieldFrom { value, .. } => vec![*value],
                     InstKind::SubscriptLoad { obj, index, .. }
-                        if is_unpacking(f, *index, inst.span) =>
+                        if is_unpacking(shape, *index, inst.span) =>
                     {
                         match self.root_of.get(obj) {
                             Some(r)
@@ -655,7 +659,7 @@ impl IterFlow {
                     } => args.first().copied().into_iter().collect(),
                     InstKind::MethodCall {
                         recv, method, args, ..
-                    } if method == "join" && args.len() == 1 && is_text(f, types, *recv) => {
+                    } if method == "join" && args.len() == 1 && is_text(shape, types, *recv) => {
                         args.clone()
                     }
                     InstKind::Call { args, .. } | InstKind::MethodCall { args, .. } => {
@@ -684,10 +688,10 @@ impl IterFlow {
 /// unpacking (`a, b = it` reads `it[0]` and `it[1]`): a constant integer index lowered at the
 /// target element's own location. A subscript written in the source (`it["row"]`, `it[0]`)
 /// lowers its index at the index expression.
-pub fn is_unpacking(f: &IrFunction, index: VarId, span: Span) -> bool {
+pub fn is_unpacking(shape: &FnShape<'_>, index: VarId, span: Span) -> bool {
     matches!(
-        f.def_inst(index),
-        Some((_, Inst { kind: InstKind::Const { literal: ConstLiteral::Int(_), .. }, span: at, .. }))
+        shape.inst(index),
+        Some(Inst { kind: InstKind::Const { literal: ConstLiteral::Int(_), .. }, span: at, .. })
             if *at == span
     )
 }
@@ -747,24 +751,21 @@ fn is_iterator_annotation(tcx: &TypeCtx<'_>, annotation: &str) -> bool {
 }
 
 /// `var` holds a `str` or `bytes`: a constant (through copies) or a value typed so.
-fn is_text(f: &IrFunction, types: &FxHashMap<VarId, Val>, var: VarId) -> bool {
-    let mut cur = var;
-    while let Some((_, inst)) = f.def_inst(cur) {
-        match &inst.kind {
-            InstKind::Copy { src, .. } => cur = *src,
-            InstKind::Const {
-                literal: ConstLiteral::Str(_) | ConstLiteral::Bytes,
-                ..
-            } => return true,
-            _ => break,
-        }
-    }
-    matches!(types.get(&var), Some(Val::Inst(t)) if t == "builtins.str" || t == "builtins.bytes")
+fn is_text(shape: &FnShape<'_>, types: &FxHashMap<VarId, Val>, var: VarId) -> bool {
+    let copied = shape.inst(shape.copy_root(var)).map(|i| &i.kind);
+    matches!(
+        copied,
+        Some(InstKind::Const {
+            literal: ConstLiteral::Str(_) | ConstLiteral::Bytes,
+            ..
+        })
+    ) || matches!(types.get(&var), Some(Val::Inst(t)) if t == "builtins.str" || t == "builtins.bytes")
 }
 
 /// For the iterator `iter` a `MakeIter` defines: the block entered when its loop is exhausted,
 /// and whether the loop always runs to exhaustion (no `break`, `return`, or `raise` inside it).
-fn loop_exhaustion(f: &IrFunction, iter: VarId) -> Option<(BlockId, bool)> {
+fn loop_exhaustion(shape: &FnShape<'_>, iter: VarId) -> Option<(BlockId, bool)> {
+    let f = shape.f;
     let lp = f.loops.iter().find(|lp| {
         f.block(lp.header)
             .insts
@@ -775,11 +776,11 @@ fn loop_exhaustion(f: &IrFunction, iter: VarId) -> Option<(BlockId, bool)> {
     let exhausted = header
         .successors()
         .into_iter()
-        .find(|s| !lp.body.contains(s))?;
+        .find(|s| !shape.in_body(lp, *s))?;
     let leaves_early = lp.body.iter().filter(|b| **b != lp.header).any(|b| {
         let t = &f.block(*b).terminator;
         matches!(t, Terminator::Return(_) | Terminator::Raise(_))
-            || t.successors().iter().any(|s| !lp.body.contains(s))
+            || t.successors().iter().any(|s| !shape.in_body(lp, *s))
     });
     Some((exhausted, !leaves_early))
 }
