@@ -206,6 +206,9 @@ pub struct FnIndex<'a> {
     /// [`Self::trip_count`] of each loop (by its index in `f.loops`) asked so far, in the same
     /// way.
     trips: RefCell<FxHashMap<usize, Option<u32>>>,
+    /// [`Self::display_at`] of each value and sink asked so far, in the same way: two lists that
+    /// extend each other hold no display the code fixes.
+    sink_displays: RefCell<FxHashMap<(VarId, Sink), Option<SmallDisplay>>>,
     /// The predecessors of each block of `f` (normal and exception edges).
     preds: OnceCell<Vec<Vec<BlockId>>>,
     /// The values `f` passes to `len()` (after copies): only their lengths can be tested.
@@ -279,7 +282,7 @@ struct CapWalk<'p> {
 /// Where a container's object may go without it counting as grown ([`FnIndex::growth`]):
 /// the store that binds it (a module global or an attribute), or the function's return
 /// (the result of a comprehension function).
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum Sink {
     Store(BlockId, usize),
     Return,
@@ -337,6 +340,7 @@ impl<'a> FnIndex<'a> {
             defs,
             bounds: RefCell::default(),
             trips: RefCell::default(),
+            sink_displays: RefCell::default(),
             preds: OnceCell::new(),
             measured: OnceCell::new(),
             guards: OnceCell::new(),
@@ -450,6 +454,18 @@ impl<'a> FnIndex<'a> {
     }
 
     fn display_at(&self, value: VarId, sink: Sink) -> Option<SmallDisplay> {
+        if let Some(known) = self.sink_displays.borrow().get(&(value, sink)) {
+            return known.clone();
+        }
+        self.sink_displays.borrow_mut().insert((value, sink), None);
+        let display = self.decide_display(value, sink);
+        self.sink_displays
+            .borrow_mut()
+            .insert((value, sink), display.clone());
+        display
+    }
+
+    fn decide_display(&self, value: VarId, sink: Sink) -> Option<SmallDisplay> {
         let mut origins = Origins::default();
         let loads = |o: &Origins| {
             o.roots.iter().any(|r| {

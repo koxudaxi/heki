@@ -469,3 +469,20 @@ fn chains_of_builtin_constructors_are_followed_a_bounded_depth() {
     let lines: Vec<u64> = diags.iter().map(|d| d["line"].as_u64().unwrap()).collect();
     assert_eq!(lines, [3009], "{diags:#?}");
 }
+
+/// Two lists that extend each other: the size of each asks for the other's at the same store,
+/// and the question is answered once, as not fixed, instead of recursing until the stack ends.
+#[test]
+fn lists_that_extend_each_other_are_not_fixed() {
+    let p = Project::new("bounds_mutual_extend");
+    p.write(
+        "m.py",
+        "import sqlite3\n\n\ndef f(conn: sqlite3.Connection):\n    a = []\n    b = []\n    a.extend(b)\n    b.extend(a)\n    for x in a:\n        conn.execute(\"SELECT ?\", (x,))\n",
+    );
+    let found = check_within(&p, Duration::from_secs(20));
+    let queries: Vec<&Value> = found
+        .iter()
+        .filter(|d| d["rule_code"] == "EFF103")
+        .collect();
+    assert_eq!(queries.len(), 1, "{found:#?}");
+}
