@@ -119,8 +119,9 @@ pub(crate) fn load_and_index(
     let env = &project.env;
     let contracts = heki_rules::summary_contracts(&env.cfg)?;
     let typed_writes = heki_rules::typed_writes(&env.cfg, &selection);
+    let opt_in = heki_rules::opt_in_facts(&selection);
     let inputs = project.inputs();
-    let index = analyze_project_for(&inputs, &env.kb, contracts, typed_writes);
+    let index = analyze_project_for(&inputs, &env.kb, contracts, typed_writes, opt_in);
     drop(inputs);
     Ok(Indexed {
         project,

@@ -1131,6 +1131,79 @@ fn mut112_reports_a_loop_value_a_raising_sentinel_test_guards() {
     );
 }
 
+/// What a callee returns, followed back through a `get` default (an element of the parameter, or
+/// the new default), a slice (a copy of a list or of an unknown value, a view of a NumPy array),
+/// and a display unpacking a parameter (a new dict).
+const RETURNED_PARTS: &str = r#"import numpy as np
+
+
+def rows_of(table, key):
+    return table.get(key, [])
+
+
+def add(table, key, row):
+    rows = rows_of(table, key)
+    rows.append(row)
+
+
+def tail(rows):
+    return rows[1:]
+
+
+def use_tail(rows, flag):
+    x = tail(rows) if flag else rows
+    x.append(1)
+
+
+def use_tail_only(rows):
+    x = tail(rows)
+    x.append(1)
+
+
+def window(arr: np.ndarray):
+    return arr[1:]
+
+
+def use_window(arr: np.ndarray, flag):
+    x = window(arr) if flag else []
+    x[0] = 1
+
+
+def use_window_only(arr: np.ndarray, flag):
+    x = window(arr) if flag else arr
+    x[0] = 1
+
+
+def merged(base, k):
+    return {**base, k: 1}
+
+
+def use_merged(base, k, flag):
+    x = merged(base, k) if flag else base
+    x["y"] = 2
+"#;
+
+#[test]
+fn mut112_follows_returned_defaults_slices_and_unpacking_displays() {
+    let p = Project::new("mut112_returned_parts");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/returns.py", RETURNED_PARTS);
+    let diags = diagnostics(&p, &["--select", "MUT112"]);
+    let f = "pkg/returns.py";
+    assert_eq!(
+        found(&diags),
+        vec![
+            d(f, 10, "add", "rows"),
+            d(f, 19, "use_tail", "x"),
+            d(f, 33, "use_window", "x"),
+            d(f, 47, "use_merged", "x"),
+        ],
+        "{diags:#?}"
+    );
+    assert!(message(at(&diags, f, 10)).ends_with("an element of the parameter `table` on another"));
+    assert!(message(at(&diags, f, 33)).ends_with("the parameter `arr` on another"));
+}
+
 /// Two definitions of one function under a condition, each returning through a phi: what the
 /// second returns through a call of a phi's value refers to its own phis, after the first's.
 const CONDITIONAL_DEFINITIONS: &str = r#"FAST = True
@@ -1196,6 +1269,128 @@ fn mut112_follows_returned_calls_through_nested_calls() {
             message(at(&diags, c, line))
         );
     }
+}
+
+/// An attribute of an object the function makes itself is no borrowed state, and a copy that a
+/// flag of the caller's picks is the function's choice; an attribute of a parameter, and a copy
+/// that another test picks (of the value, or of other state), still count, as does a copy whose
+/// edge other branches join first.
+const PICKED: &str = r#"class Collector:
+    def __init__(self):
+        self.errors = []
+
+
+def collect(tree):
+    if not tree:
+        return []
+    visitor = Collector()
+    return visitor.errors
+
+
+def validate(tree):
+    errors = collect(tree)
+    errors.append("checked")
+    return errors
+
+
+def local_attribute(flag):
+    visitor = Collector()
+    alias = visitor
+    errors = alias.errors if flag else []
+    errors.append(1)
+    named = getattr(Collector(), "errors", [])
+    named.append(1)
+    bare = getattr(Collector(), "errors")
+    bare.append(1)
+
+
+def parameter_attribute(node, flag):
+    errors = node.errors if flag else []
+    errors.append(1)
+
+
+def fill(image, mask, value, in_place=False):
+    if not in_place:
+        image = image.copy()
+    image[mask] = value
+    return image
+
+
+def extended(items, copy=True):
+    items = list(items) if copy else items
+    items.append(1)
+    return items
+
+
+def by_mode(items, mode="copy"):
+    chosen = list(items) if mode == "copy" else items
+    chosen.append(1)
+
+
+def either(items, copy, force):
+    wanted = copy or force
+    if wanted:
+        items = list(items)
+    items.append(1)
+
+
+def copied_first(items, flag):
+    snapshot = list(items)
+    chosen = snapshot if flag else items
+    chosen.append(1)
+
+
+def ordered(items, order=False):
+    chosen = sorted(items) if order else items
+    chosen.append(1)
+
+
+def drop_cached(task_ids, cached):
+    ids = task_ids if isinstance(task_ids, set) else set(task_ids)
+    ids.difference_update(cached)
+    return ids
+
+
+def restricted(caps, config):
+    if config.get("bundle2"):
+        caps = set(caps)
+        caps.add("bundle2")
+    if config.get("narrow"):
+        caps.add("narrow")
+    return caps
+
+
+def when_given(items):
+    if items:
+        items = list(items)
+    items.append(1)
+
+
+def joined_first(items, copy, verbose):
+    if copy:
+        if verbose:
+            print("copying")
+        items = list(items)
+    items.append(1)
+"#;
+
+#[test]
+fn mut112_leaves_out_attributes_of_new_objects_and_copies_a_flag_picks() {
+    let p = Project::new("mut112_picked");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/picked.py", PICKED);
+    let diags = diagnostics(&p, &["--select", "MUT112"]);
+    assert_eq!(
+        found(&diags),
+        vec![
+            d("pkg/picked.py", 32, "parameter_attribute", "errors"),
+            d("pkg/picked.py", 68, "ordered", "chosen"),
+            d("pkg/picked.py", 73, "drop_cached", "ids"),
+            d("pkg/picked.py", 82, "restricted", "caps"),
+            d("pkg/picked.py", 89, "when_given", "items"),
+            d("pkg/picked.py", 97, "joined_first", "items"),
+        ]
+    );
 }
 
 /// A `MUT112` report, a suppression, and the `heki rule` page.

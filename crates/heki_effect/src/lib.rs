@@ -25,6 +25,7 @@ mod contracts;
 pub mod guards;
 mod infer;
 mod invalidation;
+pub mod iterations;
 pub mod ownership;
 mod query;
 pub mod readonly;
@@ -41,6 +42,10 @@ pub use contracts::Contracts;
 pub use invalidation::{
     FlowWrite, FuncFlow, INITIALIZERS, Reach, SiteFlow, UnmetWrite, body_runs_at,
     builds_written_object, delegates_to_callers, is_initializer, reach_across,
+};
+pub use iterations::{
+    BetweenSteps, ContainerChange, ContainerIteration, IteratedContainer, IteratedResult,
+    IterationFacts, ResultIteration,
 };
 pub use ownership::{LocalOrigins, Origins, ResultOf};
 pub use query::{CallsByCaller, ChangeChain, ParamChange};
@@ -544,6 +549,11 @@ pub struct EffectSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hashed_whole_self_attrs: Option<Box<BTreeSet<String>>>,
     pub mutates_self_attrs: BTreeSet<AttrKeyPath>,
+    /// `MUT113`: what the function changes in place of its instance's containers and how it
+    /// iterates them and the objects its project calls return (`None` when it does none of
+    /// these, as most functions; read through [`Self::iteration_facts`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iterations: Option<Box<IterationFacts>>,
     pub invalidates_cached: BTreeSet<String>,
     /// The facts of every typed write the function reaches, through any callee.
     pub typed_field_writes: BTreeSet<TypedFieldWrite>,
@@ -825,6 +835,7 @@ impl EffectSummary {
         for span in out.changed_state.values_mut() {
             *span = Span { start: 0, end: 0 };
         }
+        out.iterations = out.iterations.map(|f| Box::new(f.without_locations()));
         out.iterated = out.iterated.map(|i| Box::new(i.without_locations()));
         if let Some(r) = &mut out.returns_protected {
             zero_hop_spans(&mut r.chain);
@@ -865,18 +876,31 @@ impl EffectSummary {
 
     /// Equality of everything callers copy into their own summaries: the facts, and the
     /// positions of call chains and write sites. Only the positions of the function's own read
-    /// sites, parameter and global changes, and unresolved accesses are left out: those are
-    /// never propagated.
+    /// sites, parameter, container, and global changes, iterations, and unresolved accesses are
+    /// left out: those are never propagated.
     pub fn same_for_callers(&self, other: &Self) -> bool {
         let without_local = |s: &Self| Self {
             typed_field_read_sites: BTreeSet::new(),
             param_change_sites: BTreeMap::new(),
             changed_state: BTreeMap::new(),
+            iterations: s.iterations.as_ref().and_then(|f| f.propagated()),
             unresolved_write_sites: BTreeSet::new(),
             unresolved_access_sites: BTreeSet::new(),
             ..s.clone()
         };
         without_local(self) == without_local(other) && self.same_facts(other)
+    }
+
+    /// [`Self::iterations`], empty when there are none.
+    pub fn iteration_facts(&self) -> &IterationFacts {
+        self.iterations
+            .as_deref()
+            .unwrap_or(&iterations::NO_ITERATION_FACTS)
+    }
+
+    /// [`Self::iterations`], to add facts to.
+    pub(crate) fn iteration_facts_mut(&mut self) -> &mut IterationFacts {
+        self.iterations.get_or_insert_with(Box::default)
     }
 
     /// Add the facts of the typed write sites to `typed_field_writes` (propagation adds those
@@ -1216,6 +1240,13 @@ pub struct CallSite {
     /// [`EffectSummary::returns_self_attrs`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub result_discarded: bool,
+    /// The object the call returns outlives one of the caller's uses of it
+    /// ([`iterations::held_results`]): it escapes (stored, yielded, captured, handed to code heki
+    /// does not follow), or a step that may leave a generator suspended (`next()`, a loop that
+    /// leaves early) is followed by another use. Any code may run while the generator is
+    /// suspended (`MUT113`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub result_held: bool,
 }
 
 /// How an API runs a callable it is handed ([`CallSite::runner`]).
@@ -1419,6 +1450,9 @@ pub struct ProjectIndex {
     /// of their callees, nor their write facts, nor `IndirectHelper` sites. Set when no
     /// enabled rule reads them; every function keeps its own.
     pub(crate) skips_typed_writes: bool,
+    /// The opt-in facts the summaries carry ([`OptInFacts`]); incremental updates extract the
+    /// same.
+    pub(crate) opt_in: OptInFacts,
 }
 
 /// True for `.pyi` typing stubs (prefer the sibling `.py` implementation when both exist).
@@ -1447,18 +1481,26 @@ pub fn analyze_project_with(
     kb: &EffectiveEcosystemKb,
     contracts: Option<Arc<dyn Contracts>>,
 ) -> ProjectIndex {
-    analyze_project_for(modules, kb, contracts, TypedWrites::Propagated)
+    analyze_project_for(
+        modules,
+        kb,
+        contracts,
+        TypedWrites::Propagated,
+        OptInFacts::ALL,
+    )
 }
 
-/// [`analyze_project_with`], propagating typed writes only when a rule reads them.
+/// [`analyze_project_with`], propagating typed writes and extracting the opt-in facts only when
+/// a rule reads them.
 pub fn analyze_project_for(
     modules: &[ModuleInput<'_>],
     kb: &EffectiveEcosystemKb,
     contracts: Option<Arc<dyn Contracts>>,
     typed_writes: TypedWrites,
+    opt_in: OptInFacts,
 ) -> ProjectIndex {
-    let files = summarize(modules, kb, false, contracts.as_deref());
-    ProjectIndex::build_for(files, contracts, typed_writes)
+    let files = summarize(modules, kb, false, contracts.as_deref(), opt_in);
+    ProjectIndex::build_for(files, contracts, typed_writes, opt_in)
 }
 
 /// Whether propagation carries typed writes (`EffectSummary::typed_field_write_sites` and
@@ -1470,6 +1512,31 @@ pub enum TypedWrites {
     Local,
 }
 
+/// The facts of the opt-in rules that summaries and propagation compute only when a rule
+/// reads them: `MUT112`'s return origins (`EffectSummary::returns_origins`, `returns_results`,
+/// `returns_nodes`, `origin_nodes`, `ArgOrigin::origins`) and `MUT113`'s iteration facts
+/// (`EffectSummary::iterations`, `CallSite::result_held`). `CallSite::returned`, which `MUT202`
+/// reads too, is always computed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OptInFacts {
+    pub return_origins: bool,
+    pub iterations: bool,
+}
+
+impl OptInFacts {
+    /// Every opt-in fact.
+    pub const ALL: Self = Self {
+        return_origins: true,
+        iterations: true,
+    };
+}
+
+impl Default for OptInFacts {
+    fn default() -> Self {
+        Self::ALL
+    }
+}
+
 /// The local summaries of every module of a project with `contracts`, recording what each read
 /// of the project declarations (`FileSummary::decl_reads`), for an index that incremental
 /// updates keep current. [`ProjectIndex::build_with`] propagates them; it needs no IR, so the
@@ -1478,8 +1545,9 @@ pub fn summarize_project_with_reads(
     modules: &[ModuleInput<'_>],
     kb: &EffectiveEcosystemKb,
     contracts: Option<&dyn Contracts>,
+    opt_in: OptInFacts,
 ) -> Vec<FileSummary> {
-    summarize(modules, kb, true, contracts)
+    summarize(modules, kb, true, contracts, opt_in)
 }
 
 fn summarize(
@@ -1487,6 +1555,7 @@ fn summarize(
     kb: &EffectiveEcosystemKb,
     track: bool,
     contracts: Option<&dyn Contracts>,
+    opt_in: OptInFacts,
 ) -> Vec<FileSummary> {
     let (decls, own) = resolver::project_decls_for(modules, kb, None, track);
     if track {
@@ -1494,7 +1563,7 @@ fn summarize(
         return modules
             .iter()
             .zip(own)
-            .map(|(m, own)| summary::summarize_module(m, &decls, kb, own, track, contracts))
+            .map(|(m, own)| summary::summarize_module(m, &decls, kb, own, track, contracts, opt_in))
             .collect();
     }
     // A module's local summary depends on it and the declarations only (indexed collect: input
@@ -1502,7 +1571,7 @@ fn summarize(
     modules
         .par_iter()
         .zip(own)
-        .map(|(m, own)| summary::summarize_module(m, &decls, kb, own, track, contracts))
+        .map(|(m, own)| summary::summarize_module(m, &decls, kb, own, track, contracts, opt_in))
         .collect()
 }
 
@@ -1517,23 +1586,30 @@ impl ProjectIndex {
         !self.skips_typed_writes
     }
 
-    /// [`Self::build`] for summaries extracted with `contracts`.
-    pub fn build_with(files: Vec<FileSummary>, contracts: Option<Arc<dyn Contracts>>) -> Self {
-        Self::build_for(files, contracts, TypedWrites::Propagated)
+    /// The opt-in facts the summaries carry.
+    pub fn opt_in_facts(&self) -> OptInFacts {
+        self.opt_in
     }
 
-    /// [`Self::build_with`], propagating typed writes as `typed_writes` says; incremental
-    /// updates keep doing so.
+    /// [`Self::build`] for summaries extracted with `contracts`.
+    pub fn build_with(files: Vec<FileSummary>, contracts: Option<Arc<dyn Contracts>>) -> Self {
+        Self::build_for(files, contracts, TypedWrites::Propagated, OptInFacts::ALL)
+    }
+
+    /// [`Self::build_with`], propagating typed writes as `typed_writes` says, for summaries that
+    /// carry the opt-in facts `opt_in`; incremental updates keep doing so.
     pub fn build_for(
         mut files: Vec<FileSummary>,
         contracts: Option<Arc<dyn Contracts>>,
         typed_writes: TypedWrites,
+        opt_in: OptInFacts,
     ) -> Self {
         // The owners of shared module names last (`add_file_links` keeps them either way).
         files.sort_by(|a, b| module_precedence(&a.path).cmp(&module_precedence(&b.path)));
         let mut index = Self {
             contracts,
             skips_typed_writes: typed_writes == TypedWrites::Local,
+            opt_in,
             ..Self::default()
         };
         for mut file in files {
@@ -1679,8 +1755,15 @@ impl ProjectIndex {
         let (decls, own) =
             resolver::project_decls_for(std::slice::from_ref(input), kb, Some(others), true);
         let own = own.into_iter().next().expect("one module in, one out");
-        let file =
-            summary::summarize_module(input, &decls, kb, own, true, self.contracts.as_deref());
+        let file = summary::summarize_module(
+            input,
+            &decls,
+            kb,
+            own,
+            true,
+            self.contracts.as_deref(),
+            self.opt_in,
+        );
         self.update_file(file)
     }
 
@@ -1716,6 +1799,7 @@ impl ProjectIndex {
             own,
             true,
             self.contracts.as_deref(),
+            self.opt_in,
         );
         (self.update_file(file), changed)
     }
