@@ -166,6 +166,14 @@ class Delegated(Rule):
 
 def _register_check(rule: Rule) -> None:
     register(rule.check)
+
+
+TWICE = [LATE, LATE]
+
+
+class Shadowing:
+    decide = decide
+    register(decide)
 "#;
 
 fn project(name: &str, references: &str) -> Project {
@@ -294,6 +302,10 @@ fn references_handing_a_target_on_count_as_calls_only_with_the_key() {
         hands(77, 24, "method_refs", "Rule.check"),
         hands(111, 1, "<module>", "pkg.core.decide"),
         hands(117, 1, "<module>", "pkg.core.decide"),
+        // One value reached twice (a display holding it twice), and a name a class body reads
+        // before binding it.
+        hands(140, 1, "<module>", "pkg.core.decide"),
+        hands(144, 14, "<module>", "pkg.core.decide"),
     ];
     with.extend(without);
     with.sort();
