@@ -410,7 +410,9 @@ fn cache_decorator(
             Some("functools.lru_cache") => CacheDecorator::LruCache,
             Some("functools.cache") if args.is_none() => CacheDecorator::Cache,
             // The builtins, which no import or definition of the module rebinds.
-            None if matches!(head, "staticmethod" | "classmethod") && args.is_none() => continue,
+            None if args.is_none() && crate::decorators::keeps(head, |d| d.beside_cache) => {
+                continue;
+            }
             _ => return None,
         };
         // The cache keeps results when `maxsize` is left out (128), `None`, or a literal number
