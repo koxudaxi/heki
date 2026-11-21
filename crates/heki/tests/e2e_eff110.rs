@@ -670,6 +670,7 @@ async def with_sleep(reader: asyncio.StreamReader) -> None:
 async def handed(callback, pending) -> None:
     async with anyio.create_task_group() as tg:
         tg.start_soon(callback)
+        tg.start_soon(callback)
     async with asyncio.TaskGroup() as group:
         group.create_task(pending)
         group.create_task(pending)
@@ -753,7 +754,7 @@ fn eff110_follows_more_ways_to_start_and_name_tasks() {
             d("shapes.py", 91, "two_paths", &format!("reader->{readline}")),
             d(
                 "shapes.py",
-                140,
+                141,
                 "looped_appends",
                 &format!("reader->{read}")
             ),
