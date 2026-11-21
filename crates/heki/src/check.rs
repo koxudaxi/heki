@@ -15,20 +15,29 @@ use heki_rules::project::{
     FileError, ParsedFile, Project, ProjectOptions, canonical, retain_unsuppressed,
 };
 use heki_rules::{
-    CheckExtras, RuleSelection, SNAPSHOT_FILE, SummarySnapshot, check_project, find_rule,
-    fold_root_causes,
+    CheckExtras, RuleSelection, SNAPSHOT_FILE, Selectors, SummarySnapshot, check_project,
+    find_rule, fold_root_causes,
 };
 use rustc_hash::FxHashMap;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-/// Rule selection of a run (`--select` / `--extend-select` / `--ignore` over the config), with
-/// `lint.severity` keys validated.
+/// The selection options of the command line.
+pub(crate) fn selectors(args: &CheckArgs) -> Selectors {
+    Selectors {
+        select: args.select.clone(),
+        extend_select: args.extend_select.clone(),
+        ignore: args.ignore.clone(),
+        heuristic: args.heuristic.value(),
+    }
+}
+
+/// Rule selection of a run (the command line over the config), with `lint.severity` keys
+/// validated.
 pub(crate) fn selection(args: &CheckArgs, project: &Project) -> Result<RuleSelection> {
     let cfg = &project.env.cfg;
-    let selection =
-        RuleSelection::resolve(&cfg.lint, &args.select, &args.extend_select, &args.ignore)?;
+    let selection = RuleSelection::resolve(&cfg.lint, &selectors(args))?;
     for key in cfg.lint.severity.keys() {
         if find_rule(key).is_none() {
             bail!("unknown rule `{key}` in lint.severity");
@@ -97,6 +106,8 @@ struct Analyzed {
     index: ProjectIndex,
     diags: Vec<Diagnostic>,
     hot: Option<HotFunctions>,
+    /// The heuristic rules that did not run only because `lint.heuristic` is off.
+    heuristic_off: usize,
 }
 
 fn analyze(
@@ -136,6 +147,7 @@ fn analyze(
         index,
         diags,
         hot,
+        heuristic_off: selection.heuristic_off().len(),
     })
 }
 
@@ -314,10 +326,11 @@ pub(crate) fn run(args: &CheckArgs) -> Result<ExitCode> {
         mut project,
         index,
         diags,
+        heuristic_off,
         ..
     } = analyze(args, hot.as_ref(), None)?;
     project.errors.extend(conflicts);
-    let code = report(args, &project, diags)?;
+    let code = report(args, &project, diags, heuristic_off)?;
     // The process ends here: freeing the index and the parsed files one allocation at a time
     // would only cost time.
     std::mem::forget(index);
@@ -348,11 +361,13 @@ fn write_fixed(files: &[FixedFile]) -> Result<(usize, usize, Vec<FileError>)> {
     Ok((fixes, written, conflicts))
 }
 
-/// Baseline handling, rendering, summary, and exit code of one analyzed run.
+/// Baseline handling, rendering, summary, and exit code of one analyzed run, whose selection
+/// left `heuristic_off` rules off for being heuristic.
 pub(crate) fn report(
     args: &CheckArgs,
     project: &Project,
     mut diags: Vec<Diagnostic>,
+    heuristic_off: usize,
 ) -> Result<ExitCode> {
     let root = &project.env.root;
     let by_path: FxHashMap<&Path, &ParsedFile> = project
@@ -474,6 +489,7 @@ pub(crate) fn report(
         OutputFormat::Full | OutputFormat::Concise
     ) {
         summary(&diags, project.files.len(), baseline_path.is_some());
+        heuristic_hint(heuristic_off);
     }
     let code = if diags.is_empty() {
         ExitCode::SUCCESS
@@ -552,6 +568,16 @@ fn summary(diags: &[Diagnostic], files: usize, baseline: bool) {
         eprintln!("All checks passed ({files} file(s)).");
     } else {
         eprintln!("Found {} {what} in {files} file(s).", diags.len());
+    }
+}
+
+/// After the summary of a text format: how to run the `heuristic_off` rules a selection left
+/// off for being heuristic (as Ruff says how to apply the fixes it holds back).
+pub(crate) fn heuristic_hint(heuristic_off: usize) {
+    if heuristic_off > 0 {
+        eprintln!(
+            "note: {heuristic_off} heuristic rule(s) are off; enable them with `--heuristic` or `lint.heuristic = true`"
+        );
     }
 }
 

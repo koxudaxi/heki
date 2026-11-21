@@ -2,9 +2,13 @@
 
 # nested-loop-equijoin (OPT113)
 
-Family: Complexity Rewrites (OPT) · Enabled by default · Severity `warning` · No automatic fix
+Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` · No automatic fix
 
 Size-dependent nested-loop equi-join (`for a in A: for b in B: if a.k == b.k`) -> `dict` index.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 50 sampled reports (round 3, 2026-11-21), 92% were right about the code. See [Rule Precision](../precision.md).
 
 ## What it does
 Checks nested loops that join two collections by comparing a key of each with `==`:

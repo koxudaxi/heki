@@ -2,9 +2,13 @@
 
 # effect-boundary-violation (EFF201)
 
-Family: Execution Effects (EFF) · Enabled by default · Severity `error` · No automatic fix
+Family: Execution Effects (EFF) · Heuristic · Runs when its contract is declared · Severity `error` · No automatic fix
 
 Reaching a forbidden effect (directly or through calls) from a declared `effect-boundaries` scope.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a report can be wrong about the code. It runs when its contract is declared. It has not been measured yet. See [Rule Precision](../precision.md).
 
 ## What it does
 Checks the functions of a declared effect boundary (`[[tool.heki.effect-boundaries]]`): they

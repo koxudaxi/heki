@@ -6,7 +6,7 @@
 > Wave 1/2 corpora of 19 million lines, counterexample experiments, a study of
 > datamodel-code-generator's 196,000 lines and its 20,000 lines of in-house checkers, and checks
 > of CPython 3.15 PEP 810 and `ruff_python_parser` 0.17.5), the reasons for every revision from
-> v1.0 to v4.1, and every major decision (ADR-001 to ADR-017). The project's working name was
+> v1.0 to v4.1, and every major decision (ADR-001 to ADR-018). The project's working name was
 > `pyopt`; crate names below use the current `heki_*` names.
 
 ---
@@ -58,7 +58,8 @@ Lean 4.
 ### 2.2 Stage 0-A measurement (339 repositories / 56,629 files / 18,108,143 lines, all 171 samples reviewed by hand)
 - **Corpus**: 118 mature open-source repositories (12.42 million lines) and 221 new GitHub
   repositories of 2026 (5.68 million lines), scanned with 8 workers (62.8 s); 171 samples of 8
-  rules reviewed by hand.
+  rules reviewed by hand. These figures describe that analysis; each rule's certainty and its
+  current rates are in [docs/precision.md](precision.md).
 - **Adopted as the core**:
   - `EFF101`: **37.6%** of web/async repositories (82.3% indirect), **68% real harm** (including
     a real `time.sleep` in redis-py `redis/asyncio/cluster.py:1613` reached in 4–5 hops). The
@@ -68,7 +69,8 @@ Lean 4.
   - `EFF103`: **47.6%** of database repositories (74.2% indirect). The need to exclude
     `for.iter`, DDL, migrations, and ORM internals was identified.
   - `DATA101`: **19.5%** of data/ML repositories. The 60% false positives of a naive AST check
-    were all non-`LoopCarried` padding; with the SSA `LoopCarried` check precision is about 90%.
+    were all non-`LoopCarried` padding; with the SSA `LoopCarried` check (Stage 0-A audit,
+    2026-11) about 90% of reports were right about the shape.
 - **Made strict or rejected**:
   - `MUT101`: **16.1%** of mature repositories (real hits in datamodel-code-generator, mkdocs,
     wagtail, textual, ...). The three noise sources of the naive version (two-phase
@@ -223,6 +225,9 @@ incremental LSP design, and the Stage 0-A Wave 2 decisions.
   zero unsafe rewrites, a strict Advisory false-positive rate below 5%, practical noise below
   20%, a convincing finding in at least 30% of the target projects (shown on
   datamodel-code-generator for the contract rules), and 100,000 lines analyzed in a few seconds.
+- **Superseded in part by [ADR-018](#adr-018)**: the false-positive and noise gates give way to
+  rule certainty (100 hand-checked reports with no wrong one for each rule that runs by
+  default), and the 30% measure is published as a measure of value, not a gate.
 
 <a id="adr-011"></a>
 ### ADR-011: Derived references, invariance of object contents, and the unpacking order of `OPT102`
@@ -317,9 +322,10 @@ incremental LSP design, and the Stage 0-A Wave 2 decisions.
      callers through Early Cutoff.
   4. **Stage 0-A Wave 2 (339 repositories, 19 million lines, 30.5 s, with a manual audit)**:
      - **First v1.x rules**: `MUT107` (attributes `__hash__` depends on: 21.2% of mature
-       projects, about 83% precise), `OPT112` (`list.index` / `remove` in loops: 81.4% of mature
-       projects, restricted by type), `OPT113` (nested-loop equi-joins: 10.2% of mature projects,
-       about 90% precise).
+       projects; Wave 2 audit, 2026-11: about 83% of reports right about the shape), `OPT112`
+       (`list.index` / `remove` in loops: 81.4% of mature projects, restricted by type), `OPT113`
+       (nested-loop equi-joins: 10.2% of mature projects; Wave 2 audit, 2026-11: about 90% of
+       reports right about the shape).
      - **Adopted when narrow and strict (v1.x opt-in)**: `EFF106` (`await` / HTTP while a
        type-certain synchronous lock or a database `.begin()` is held), `MUT106` (single-pass
        iterators that SSA does not rebind, consumed twice), `EFF107` (tasks bound to a local
@@ -329,6 +335,77 @@ incremental LSP design, and the Stage 0-A Wave 2 decisions.
        registries or caches; mutation of `@lru_cache` results was folded into `MUT202`),
        `EFF108` (duplicates Ruff's `SIM115` and is noisy), `MUT105` (very sparse under SSA).
 - **Status**: all of the above is implemented (the v1.x rules on 2026-11-20).
+
+<a id="adr-018"></a>
+### ADR-018: Exact and heuristic rules
+- **Background**: the third precision review (2026-11-21) hand-checked up to 50 reports of every
+  rule that ran by default. Every rule had reports wrong about the code, and none had 100 checked
+  reports; the old gate (strict false positives below 5%) let rules with known wrong reports run
+  by default. The goal is that every rule running by default is right about the shape it reports.
+- **Decision**:
+  1. **The claim** (D1): a report states what its message says about the code, in the terms its
+     rule page defines; it is wrong when that statement is false. Harm and usefulness (small by
+     domain, deliberate, a memo heki does not recognize, a blocked rewrite) are not part of it.
+     *Rejected*: every documented exclusion as part of the claim (each exclusion heki cannot
+     recognize in every form becomes a permanent wrong-report class, and documenting less is
+     rewarded); harm-based precision (harm and shape are separate questions).
+  2. **Data-sized** (D2): the code does not fix the size or trip count at 16 or fewer, the cut
+     `SMALL_MAX` already implements; for a function only the checked files can call, the
+     arguments its callers pass count. The definition holds only where the rule's message and
+     page say so in plain words ("a query runs once per item of an iterable whose size the code
+     does not bound"): it may never raise a measured precision without the user reading the same
+     claim. *Rejected*: any constant bound as fixed (`range(1000)` would be small); unknown sizes
+     as small (a guess in the other direction).
+  3. **Rewrite validity is fix safety** (D3): an `OPT` claim is the cost (what runs on every
+     iteration, loop-carried, data-sized); whether the rewrite is valid is what the help's
+     blocking obligation says. *Rejected*: silence until `ValueLoopInvariant` and
+     `HashConsistentProbe` are established (at least 19% of `OPT110`).
+  4. **Names** (D4): `exact` and `heuristic`, on an axis called `certainty`; only heuristic rules
+     are labelled in output, as Ruff labels preview rules. *Rejected*: `proven` (a report needs
+     evidence, a rewrite a proof, and a 100-report bar is a measurement), `precise`, `certain`,
+     CodeQL's four `@precision` levels, Pylint's per-message confidence, and Semgrep's three
+     confidence levels (heki's bar is binary and its selection per rule).
+  5. **Where the class lives** (D5): `RuleMeta::certainty`, and `activation` (`Default`,
+     `OptIn`, `Contract`) instead of `default_enabled`. The default selection is the exact
+     `Default` rules and the `Contract` rules. A demoted rule keeps `Default`, so
+     `lint.heuristic = true` restores the earlier default set and a promotion is a one-field
+     change. Experimental stays its own axis and implies `OptIn`. *Rejected*: a second list of
+     heuristic codes; a per-report certainty that the selection reads.
+  6. **Selecting the heuristic rules** (D6): `[tool.heki.lint] heuristic = true` and
+     `--heuristic` / `--no-heuristic` (on `check` and `server`), modelled on Ruff's `preview`:
+     prefixes and `ALL` then also select the heuristic `Default` rules, and an exact code or name
+     selects any rule either way. *Rejected*: a pseudo-selector (`extend-select =
+     ["HEURISTIC"]`); requiring the key even for an exact code (it would break
+     `extend-select = ["EFF105"]`).
+  7. **Contract rules** (D7): classified and labelled like the others; declaring the contract
+     selects them, whatever their certainty. `MUT202`'s zero-configuration part (`@lru_cache` /
+     `@cache` producers) becomes a code of its own, which passes the same bar as every other
+     zero-configuration rule; until then `MUT202` is selected as a heuristic `Default` rule.
+     *Rejected*: exempting contract rules from the class (`EFF201` calls itself
+     over-approximate); gating them on `heuristic` (a declared contract would report nothing).
+  8. **The bar** (D8): at least 100 hand-checked reports with no wrong one, on the frozen
+     corpus; afterwards every report a pull request or a release adds to an exact rule is
+     checked, and a confirmed wrong report blocks the release until it is fixed or the rule is
+     demoted in that release. No wrong report in 100 bounds the rate below 3% (one-sided, 95%).
+     *Rejected*: a rate threshold (wrong reports below 5%); a bar of 50.
+  9. **Rules short of 100 reports** (D9): the corpus grows with packages chosen by grepping for
+     each rule's trigger (Stage 0-C), frozen per release cycle; a rule still short stays
+     heuristic. `OPT101` and `OPT102` get no exception: they are certified like the others once
+     their wrong reports (they do not read `ConstSmall`) are fixed, and until then `heki check
+     --fix` applies no fix without configuration. *Rejected*: a higher cap per package (the
+     wrong-report classes cluster by package); a synthetic corpus.
+  10. **`EFF101`** (D10): it keeps the chains whose every call runs on every normal path of its
+      function, with every class-hierarchy candidate reaching the effect; a new heuristic code
+      takes the chains through branches heki cannot decide. *Rejected*: `EFF101` whole and
+      heuristic (the most valuable rule would be off by default); path-sensitive constant
+      propagation through containers and objects.
+  11. **0.2.0** (D11): released once its first group of rules is measured exact; every other
+      rule ships heuristic and off by default, and `lint.heuristic = true` restores the default
+      set of 0.1.
+- **Status**: the certainty and activation of every rule, the `heuristic` key and options, and
+  the labels in every output are implemented; every rule is heuristic until measured. The
+  measurements are in [docs/precision.md](precision.md), and release gate 3 of
+  [ARCHITECTURE.md](../ARCHITECTURE.md) is this bar.
 
 ---
 

@@ -95,6 +95,9 @@ pub struct LintConfig {
     /// `EFF101` / `EFF105` / `EFF106` context relaxation for test code (`test_*` functions and files under
     /// `tests/`). Defaults to `true`; set `false` to check test files (e.g. rule fixtures).
     pub relax_async_in_tests: Option<bool>,
+    /// Whether the heuristic rules that are not opt-in run by default and for a prefix or `ALL`,
+    /// as the exact ones do (Ruff's `preview`). Defaults to `false`.
+    pub heuristic: Option<bool>,
 }
 
 /// `[[tool.heki.write-owners]]` contract for `MUT201`.

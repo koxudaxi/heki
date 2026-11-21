@@ -38,6 +38,43 @@ pub struct TextEdit {
     pub replacement: String,
 }
 
+/// Whether the reports of a rule can be wrong about the code (ADR-018).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Certainty {
+    /// Hand-checked samples of at least 100 reports found none wrong about the code; a wrong
+    /// report found later is a bug.
+    Exact,
+    /// A report can be wrong about the code.
+    Heuristic,
+}
+
+impl Certainty {
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Exact => "exact",
+            Self::Heuristic => "heuristic",
+        }
+    }
+
+    /// The SARIF `reportingDescriptor.properties.precision` GitHub code scanning reads: the
+    /// scale of CodeQL's `@precision` (`very-high`, `high`, `medium`, `low`).
+    const fn sarif_precision(self) -> &'static str {
+        match self {
+            Self::Exact => "very-high",
+            Self::Heuristic => "medium",
+        }
+    }
+
+    /// The label every output adds to a report of the rule: only heuristic rules get one.
+    pub const fn label(self) -> Option<&'static str> {
+        match self {
+            Self::Exact => None,
+            Self::Heuristic => Some(Self::Heuristic.word()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Diagnostic {
     #[serde(serialize_with = "report_path")]
@@ -50,6 +87,8 @@ pub struct Diagnostic {
     pub rule_slug: String,
     pub target: String,
     pub severity: Severity,
+    /// The certainty of the rule, written by every output format.
+    pub certainty: Certainty,
     /// One sentence saying what happens, without advice.
     pub message: String,
     /// What to do about it (`= help:` in the full output); `None` when the rule has no advice
@@ -176,6 +215,7 @@ pub fn render(
 fn render_full(diags: &[Diagnostic], source_line: &dyn Fn(&Path, u32) -> Option<String>) -> String {
     let mut out = String::new();
     for d in diags {
+        let severity = severity_word(d.severity);
         let _ = writeln!(
             out,
             "{}:{}:{}: {} ({}) [{}] {}",
@@ -184,7 +224,9 @@ fn render_full(diags: &[Diagnostic], source_line: &dyn Fn(&Path, u32) -> Option<
             d.column,
             d.rule_code,
             d.rule_slug,
-            severity_word(d.severity),
+            d.certainty
+                .label()
+                .map_or_else(|| severity.to_owned(), |l| format!("{severity}, {l}")),
             d.message
         );
         if let Some(text) = source_line(&d.path, d.line) {
@@ -284,13 +326,15 @@ fn display_width(c: char) -> usize {
 fn render_concise(diags: &[Diagnostic]) -> String {
     let mut out = String::new();
     for d in diags {
+        let label = d.certainty.label().map(|l| format!(" [{l}]"));
         let _ = writeln!(
             out,
-            "{}:{}:{}: {} {}",
+            "{}:{}:{}: {}{} {}",
             path_text(&d.path),
             d.line,
             d.column,
             d.rule_code,
+            label.unwrap_or_default(),
             d.message
         );
     }
@@ -318,6 +362,7 @@ fn gh_escape(s: &str, property: bool) -> String {
 fn render_github(diags: &[Diagnostic]) -> String {
     let mut out = String::new();
     for d in diags {
+        let label = d.certainty.label().map(|l| format!(" ({l})"));
         let _ = writeln!(
             out,
             "::{} file={},line={},col={},title={}::{}",
@@ -325,7 +370,10 @@ fn render_github(diags: &[Diagnostic]) -> String {
             gh_escape(&path_text(&d.path), true),
             d.line,
             d.column,
-            gh_escape(&format!("heki {}", d.rule_code), true),
+            gh_escape(
+                &format!("heki {}{}", d.rule_code, label.unwrap_or_default()),
+                true
+            ),
             gh_escape(&d.message, false)
         );
     }
@@ -336,15 +384,17 @@ fn render_github(diags: &[Diagnostic]) -> String {
 /// code units (SARIF's default `columnKind`), converted from the byte columns of diagnostics
 /// with `source_line(path, line)`. A result's help goes into its property bag
 /// (`properties.help`): `reportingDescriptor.help` is one text per rule, while help may name
-/// the reported object, and a result has no help property of its own.
+/// the reported object, and a result has no help property of its own. A rule's certainty goes
+/// into its descriptor's property bag as GitHub code scanning reads it: `precision`, and the tag
+/// `heuristic` for a heuristic rule.
 pub fn sarif(
     diags: &[Diagnostic],
     source_line: &dyn Fn(&Path, u32) -> Option<String>,
 ) -> serde_json::Value {
     use serde_json::json;
-    let mut rules: BTreeMap<&str, &str> = BTreeMap::new();
+    let mut rules: BTreeMap<&str, (&str, Certainty)> = BTreeMap::new();
     for d in diags {
-        rules.insert(&d.rule_code, &d.rule_slug);
+        rules.insert(&d.rule_code, (&d.rule_slug, d.certainty));
     }
     let location = |path: &Path, line: u32, column: u32| {
         let column = source_line(path, line).map_or(column, |text| {
@@ -395,10 +445,17 @@ pub fn sarif(
                 "driver": {
                     "name": "heki",
                     "version": env!("CARGO_PKG_VERSION"),
-                    "rules": rules.iter().map(|(code, slug)| json!({
-                        "id": code,
-                        "name": slug,
-                    })).collect::<Vec<_>>()
+                    "rules": rules.iter().map(|(code, (slug, certainty))| {
+                        let mut properties = json!({ "precision": certainty.sarif_precision() });
+                        if let Some(label) = certainty.label() {
+                            properties["tags"] = json!([label]);
+                        }
+                        json!({
+                            "id": code,
+                            "name": slug,
+                            "properties": properties,
+                        })
+                    }).collect::<Vec<_>>()
                 }
             },
             "results": results
@@ -756,6 +813,7 @@ mod tests {
             rule_slug: "write-owner-violation".into(),
             target: "DataModel.fields".into(),
             severity: Severity::Error,
+            certainty: Certainty::Exact,
             message: message.into(),
             help: None,
             evidence: None,
@@ -1012,6 +1070,55 @@ mod tests {
         assert_eq!(
             s["runs"][0]["results"][0]["properties"]["help"],
             "use the store"
+        );
+    }
+
+    #[test]
+    fn only_heuristic_reports_are_labelled_and_sarif_gives_every_rule_a_precision() {
+        let mut heuristic = diag(2, "EFF102", "m");
+        heuristic.rule_slug = "loop-unpooled-client".into();
+        heuristic.certainty = Certainty::Heuristic;
+        heuristic.related.clear();
+        let mut exact = diag(3, "MUT201", "m");
+        exact.related.clear();
+        let diags = [heuristic, exact];
+        let none = |_: &Path, _: u32| None;
+        assert_eq!(
+            render(&diags, OutputFormat::Full, &none),
+            "src/a.py:2:5: EFF102 (loop-unpooled-client) [error, heuristic] m\n\n\
+             src/a.py:3:5: MUT201 (write-owner-violation) [error] m\n\n"
+        );
+        assert_eq!(
+            render(&diags, OutputFormat::Concise, &none),
+            "src/a.py:2:5: EFF102 [heuristic] m\nsrc/a.py:3:5: MUT201 m\n"
+        );
+        assert_eq!(
+            render(&diags, OutputFormat::Github, &none),
+            "::error file=src/a.py,line=2,col=5,title=heki EFF102 (heuristic)::m\n\
+             ::error file=src/a.py,line=3,col=5,title=heki MUT201::m\n"
+        );
+        let json: serde_json::Value =
+            serde_json::from_str(&render(&diags, OutputFormat::Json, &none)).unwrap();
+        assert_eq!(
+            [&json[0]["certainty"], &json[1]["certainty"]],
+            ["heuristic", "exact"]
+        );
+        let s: serde_json::Value =
+            serde_json::from_str(&render(&diags, OutputFormat::Sarif, &none)).unwrap();
+        assert_eq!(
+            s["runs"][0]["tool"]["driver"]["rules"],
+            serde_json::json!([
+                {
+                    "id": "EFF102",
+                    "name": "loop-unpooled-client",
+                    "properties": { "precision": "medium", "tags": ["heuristic"] }
+                },
+                {
+                    "id": "MUT201",
+                    "name": "write-owner-violation",
+                    "properties": { "precision": "very-high" }
+                }
+            ])
         );
     }
 

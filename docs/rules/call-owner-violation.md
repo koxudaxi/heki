@@ -2,9 +2,13 @@
 
 # call-owner-violation (MUT204)
 
-Family: Mutation & State (MUT) · Enabled by default · Severity `error` · No automatic fix
+Family: Mutation & State (MUT) · Heuristic · Runs when its contract is declared · Severity `error` · No automatic fix
 
 Calling a guarded function or method, or constructing a guarded class (directly, via a bound method, `getattr`, or a helper), outside declared `call-owners`.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a report can be wrong about the code. It runs when its contract is declared. It has not been measured yet. See [Rule Precision](../precision.md).
 
 ## What it does
 Checks calls of functions and methods, and constructions of classes, that a

@@ -2,9 +2,13 @@
 
 # loop-invariant-container-rebuild (OPT130)
 
-Family: Complexity Rewrites (OPT) · Enabled by default · Severity `warning` · Proven-safe suggestion (`--fix --include-size-dependent`)
+Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` · Proven-safe suggestion (`--fix --include-size-dependent`)
 
 Size-dependent loop-invariant container reconstruction (`e in set(keys)`).
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 30 sampled reports (round 3, 2026-11-21), 97% were right about the code. See [Rule Precision](../precision.md).
 
 ## What it does
 Checks loops that rebuild the same container on every iteration just to test membership,

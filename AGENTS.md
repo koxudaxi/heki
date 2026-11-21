@@ -10,7 +10,7 @@ that implements or changes anything here follows the invariants and procedures b
    the gate a new rule has to pass.
 3. `docs/ANALYSIS_AND_KB_SPEC.md`: the IR, `EffectSummary`, the Soundness lane's abstract domain
    and proof obligations, the knowledge bases, and the Stage 0-A measurements.
-4. `docs/DESIGN_HISTORY_AND_ADR.md`: ADR-001 to ADR-017, what was decided and why the
+4. `docs/DESIGN_HISTORY_AND_ADR.md`: ADR-001 to ADR-018, what was decided and why the
    alternatives were rejected.
 
 When a document and the implementation disagree, update the document in the same change.
@@ -79,7 +79,9 @@ uvx --python 3.12 --from "pytest==8.4.2" --with "pyyaml==6.0.3" --with "jsonsche
 - A new rule passes the gate in `docs/scope.md`: what a single-file syntax check, a type checker,
   or an import-graph checker can decide belongs to Ruff, ty, or tach; heki takes only what needs
   control flow, the call graph, or alias facts. It is also measured on a corpus and reviewed by
-  hand before it is enabled by default (ADR-010).
+  hand before it is enabled by default (ADR-010). A new rule is heuristic: it runs by default
+  only once it is exact, with at least 100 hand-checked reports and none wrong about the code
+  (ADR-018, `docs/precision.md`).
 - Every new rule and every filter change comes with true-positive and true-negative regression
   tests: end-to-end tests through the real binary in `crates/heki/tests/`, plus
   `tests/semantic/fixtures.py` or `tests/difftest/` where they apply.

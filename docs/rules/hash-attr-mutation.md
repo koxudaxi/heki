@@ -2,9 +2,13 @@
 
 # hash-attr-mutation (MUT107)
 
-Family: Mutation & State (MUT) · Enabled by default · Severity `error` · No automatic fix
+Family: Mutation & State (MUT) · Heuristic · Off by default · Severity `error` · No automatic fix
 
 Mutating an attribute read by `__hash__` after initialization (stored `set` / `dict` entries become unreachable).
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 50 sampled reports (round 3, 2026-11-21), 78% were right about the code. See [Rule Precision](../precision.md).
 
 ## What it does
 Checks methods that rebind or mutate an attribute that the class's `__hash__` reads (directly,

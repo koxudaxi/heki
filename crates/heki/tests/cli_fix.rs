@@ -259,7 +259,7 @@ fn snapshot_write_and_mut103_regressions() {
     let (code, stdout, _) = p.check(&["--extend-select", "MUT103", "--output-format", "concise"]);
     assert_eq!(code, 1);
     assert!(
-        stdout.starts_with("pkg/api.py:1:1: MUT103 `add` gained side effects since the summary snapshot: mutates parameter `items`"),
+        stdout.starts_with("pkg/api.py:1:1: MUT103 [heuristic] `add` gained side effects since the summary snapshot: mutates parameter `items`"),
         "{stdout}"
     );
     // MUT103 is opt-in.

@@ -2,9 +2,13 @@
 
 # async-blocking-call (EFF101)
 
-Family: Execution Effects (EFF) · Enabled by default · Severity `error` · No automatic fix
+Family: Execution Effects (EFF) · Heuristic · Off by default · Severity `error` · No automatic fix
 
 Direct or indirect blocking network/DB/subprocess/sleep call reachable from `async def`.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 50 sampled reports (round 3, 2026-11-21), 82% were right about the code. See [Rule Precision](../precision.md).
 
 ## What it does
 Checks `async def` functions that reach a blocking call on the event loop, directly or through

@@ -2,9 +2,13 @@
 
 # summary-effect-regression (MUT103)
 
-Family: Mutation & State (MUT) · Opt-in · Severity `error` · No automatic fix
+Family: Mutation & State (MUT) · Heuristic · Opt-in · Severity `error` · No automatic fix
 
 Interprocedural mutation/escape/effect regression against saved summary snapshot.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a report can be wrong about the code. It runs only when `select` or `extend-select` names its code or name. It has not been measured yet. See [Rule Precision](../precision.md).
 
 ## What it does
 Compares the interprocedural side effects of every public function with the summary snapshot

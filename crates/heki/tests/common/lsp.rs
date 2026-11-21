@@ -27,9 +27,14 @@ pub struct Lsp {
 }
 
 impl Lsp {
+    /// Start `heki <args>`, a `server` command, with `--heuristic` after the command (as
+    /// `Project::check` passes it; `--no-heuristic` in `args` turns it off again).
     pub fn start(dir: &Path, args: &[&str]) -> Self {
+        let (command, options) = args.split_first().expect("a server command");
         let mut child = Command::new(env!("CARGO_BIN_EXE_heki"))
-            .args(args)
+            .arg(command)
+            .arg("--heuristic")
+            .args(options)
             .current_dir(dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

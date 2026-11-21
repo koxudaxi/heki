@@ -47,6 +47,10 @@ Options:
           Additional rules to enable on top of defaults/config
       --ignore <IGNORE>
           Comma-separated rule codes or slugs to ignore
+      --heuristic
+          Also run the heuristic rules, whose reports can be wrong about the code, by default and for every prefix and `ALL` (`lint.heuristic = true`)
+      --no-heuristic
+          Run a heuristic rule only when its code or name is selected (`lint.heuristic = false`)
       --output-format <OUTPUT_FORMAT>
           Output format [default: full] [possible values: full, concise, json, github, sarif]
       --config <CONFIG>
@@ -73,8 +77,10 @@ Start the incremental Language Server Protocol (LSP) server
 Usage: heki server [OPTIONS]
 
 Options:
-      --stdio  Use stdio transport (default LSP mode)
-  -h, --help   Print help
+      --stdio         Use stdio transport (default LSP mode)
+      --heuristic     Also run the heuristic rules, whose reports can be wrong about the code, by default and for every prefix and `ALL` (`lint.heuristic = true`)
+      --no-heuristic  Run a heuristic rule only when its code or name is selected (`lint.heuristic = false`)
+  -h, --help          Print help
 ```
 
 ## `heki rule`

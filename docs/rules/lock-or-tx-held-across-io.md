@@ -2,9 +2,13 @@
 
 # lock-or-tx-held-across-io (EFF106)
 
-Family: Execution Effects (EFF) · Opt-in · Severity `error` · No automatic fix
+Family: Execution Effects (EFF) · Heuristic · Opt-in · Severity `error` · No automatic fix
 
 Opt-in: `await` or blocking network I/O while holding a `threading` lock or a DB transaction.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a report can be wrong about the code. It runs only when `select` or `extend-select` names its code or name. It has not been measured yet. See [Rule Precision](../precision.md).
 
 ## What it does
 Checks for an `await` (also the implicit ones of `async for` and `async with`), or a call

@@ -12,7 +12,7 @@ use anyhow::Result;
 use heki_ast::LineIndex;
 use heki_diagnostics::{Diagnostic, render, sort_diagnostics};
 use heki_effect::ModuleLayout;
-use heki_lsp::{CONFIG_FILES, EditOutcome, Selectors, Workspace};
+use heki_lsp::{CONFIG_FILES, EditOutcome, Workspace};
 use heki_profile::{ProfileData, ProfiledFunction};
 use heki_rules::project::{
     FileError, ProjectEnv, ProjectOptions, collect_files, display_path, exclude_set,
@@ -174,13 +174,11 @@ impl Watcher<'_> {
         let config_files = self.config_files(&env);
         let config = stamps_of(&config_files, earlier.1);
         let files = self.scan(&env, earlier.0)?;
-        let selectors = Selectors {
-            select: self.args.select.clone(),
-            extend_select: self.args.extend_select.clone(),
-            ignore: self.args.ignore.clone(),
-        };
-        let (ws, errors) =
-            Workspace::load(&self.opts(), &selectors, self.args.baseline.as_deref())?;
+        let (ws, errors) = Workspace::load(
+            &self.opts(),
+            &crate::check::selectors(self.args),
+            self.args.baseline.as_deref(),
+        )?;
         Ok(Loaded {
             ws,
             errors,
@@ -271,6 +269,7 @@ impl Watcher<'_> {
                 all.len(),
                 report.diags.len()
             );
+            crate::check::heuristic_hint(ws.map_or(0, |ws| ws.selection().heuristic_off().len()));
         }
         !all.is_empty()
     }

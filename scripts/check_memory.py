@@ -52,10 +52,17 @@ BUDGETS_MIB = {
 }
 RUNS = 3
 
+# `--heuristic`: every rule that is not opt-in runs, the heuristic ones too.
 MODES = {
-    "check": (["check", "--output-format", "json", "."], {}),
-    "watch": (["check", "--watch", "--output-format", "json", "."], {"HEKI_WATCH_MAX_RUNS": "0"}),
-    "owners": (["check", "--output-format", "json", "--config", "owners.toml", "."], {}),
+    "check": (["check", "--heuristic", "--output-format", "json", "."], {}),
+    "watch": (
+        ["check", "--heuristic", "--watch", "--output-format", "json", "."],
+        {"HEKI_WATCH_MAX_RUNS": "0"},
+    ),
+    "owners": (
+        ["check", "--heuristic", "--output-format", "json", "--config", "owners.toml", "."],
+        {},
+    ),
 }
 
 

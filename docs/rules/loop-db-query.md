@@ -2,9 +2,13 @@
 
 # loop-db-query (EFF103)
 
-Family: Execution Effects (EFF) · Enabled by default · Severity `error` · No automatic fix
+Family: Execution Effects (EFF) · Heuristic · Off by default · Severity `error` · No automatic fix
 
 Explicit DB query / external RPC executed inside a loop (N+1).
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 50 sampled reports (round 3, 2026-11-21), 74% were right about the code. See [Rule Precision](../precision.md).
 
 ## What it does
 Checks loops that run a database query on every iteration (the "N+1 queries" problem):

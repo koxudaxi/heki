@@ -12,9 +12,13 @@ Source: https://heki.koxudaxi.dev/
 🧱 heki (壁, "wall") is a static checker for Python, written in Rust. It tracks side effects and
 mutations across function calls.
 
-With no configuration, it catches blocking I/O in `async` code, database queries and HTTP clients
-in loops, and quadratic loops. You can also add rules in `pyproject.toml` to restrict
-which functions may mutate state or reach I/O.
+It catches blocking I/O in `async` code, database queries and HTTP clients in loops, and
+quadratic loops. You can also add rules in `pyproject.toml` to restrict which functions may
+mutate state or reach I/O.
+
+A rule is *exact* once hand-checked samples of its reports found none wrong about the code, and
+only exact rules run by default. The others are *heuristic*: their reports can be wrong, every
+output labels them, and `heki check --heuristic` runs them too. No rule is exact yet.
 
 <p>
   <a class="md-button md-button--primary" href="getting-started/">Getting Started</a>
@@ -51,8 +55,8 @@ async def get_user(user_id: int) -> dict[str, str]:
 ```
 
 ```console
-$ heki check
-app/api.py:5:12: EFF101 (async-blocking-call) [error] `get_user` reaches the blocking call `requests.get` on the event loop
+$ heki check --heuristic
+app/api.py:5:12: EFF101 (async-blocking-call) [error, heuristic] `get_user` reaches the blocking call `requests.get` on the event loop
   |
 5 |     return load_user(user_id)
   |            ^
@@ -82,8 +86,8 @@ def order_summaries(cursor: sqlite3.Cursor, orders: list[tuple[int, int]]) -> li
 ```
 
 ```console
-$ heki check
-app/orders.py:11:37: EFF103 (loop-db-query) [error] `app.orders.customer_name` runs a database query (`sqlite3.Cursor.execute`) on every loop iteration (N+1)
+$ heki check --heuristic
+app/orders.py:11:37: EFF103 (loop-db-query) [error, heuristic] `app.orders.customer_name` runs a database query (`sqlite3.Cursor.execute`) on every loop iteration (N+1)
    |
 11 |         lines.append(f"#{order_id} {customer_name(cursor, customer_id)}")
    |                                     ^
@@ -98,9 +102,9 @@ Ruff, ty, Pyrefly, pyright, and mypy report nothing for either example with thei
 
 ### Your own conventions, too
 
-The checks above need no configuration. The rules of your own project, which you keep today by
-review, by AST scripts, or by run-time guards in tests, can be added as a few lines of
-[configuration](https://heki.koxudaxi.dev/configuration/):
+The checks above need no configuration, only `--heuristic` while their rules are heuristic.
+The rules of your own project, which you keep today by review, by AST scripts, or by run-time
+guards in tests, can be added as a few lines of [configuration](https://heki.koxudaxi.dev/configuration/):
 
 ```toml
 [[tool.heki.write-owners]]
@@ -132,18 +136,22 @@ Types say what values are; heki checks what code does:
 
 Each report shows the chain of calls that leads to the bug.
 
-| What goes wrong | Rule |
-| --- | --- |
-| A blocking call several helpers below an `async def` | [`EFF101`](https://heki.koxudaxi.dev/rules/async-blocking-call/) |
-| A database query, or a new HTTP client, on every loop iteration | [`EFF103`](https://heki.koxudaxi.dev/rules/loop-db-query/), [`EFF102`](https://heki.koxudaxi.dev/rules/loop-unpooled-client/) |
-| An attribute that `__hash__` reads, changed after the object went into a `set` | [`MUT107`](https://heki.koxudaxi.dev/rules/hash-attr-mutation/) |
-| A `Sequence` / `Mapping` argument changed in place by a helper | [`MUT110`](https://heki.koxudaxi.dev/rules/readonly-param-mutation/) |
-| Opt-in: a frozen or `ReadOnly` field changed in place | [`MUT108`](https://heki.koxudaxi.dev/rules/readonly-type-mutation/) |
-| Opt-in: I/O while a lock or a database transaction is held | [`EFF106`](https://heki.koxudaxi.dev/rules/lock-or-tx-held-across-io/) |
-| Opt-in: a generator consumed twice | [`MUT106`](https://heki.koxudaxi.dev/rules/iterator-double-consumption/) |
-| Opt-in, experimental: a function reading a `@cached_property` that another method leaves stale | [`MUT111`](https://heki.koxudaxi.dev/rules/cached-property-stale-read/) |
-| Opt-in, experimental: a `@cached_property` left stale after another method changes what it read | [`MUT101`](https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/) |
-| Opt-in, experimental: a value that is a new object on one path and the caller's object on another, changed in place | [`MUT112`](https://heki.koxudaxi.dev/rules/conditional-ownership-mutation/) |
+| What goes wrong | Rule | Certainty |
+| --- | --- | --- |
+| A blocking call several helpers below an `async def` | [`EFF101`](https://heki.koxudaxi.dev/rules/async-blocking-call/) | heuristic |
+| A database query, or a new HTTP client, on every loop iteration | [`EFF103`](https://heki.koxudaxi.dev/rules/loop-db-query/), [`EFF102`](https://heki.koxudaxi.dev/rules/loop-unpooled-client/) | heuristic |
+| An attribute that `__hash__` reads, changed after the object went into a `set` | [`MUT107`](https://heki.koxudaxi.dev/rules/hash-attr-mutation/) | heuristic |
+| A `Sequence` / `Mapping` argument changed in place by a helper | [`MUT110`](https://heki.koxudaxi.dev/rules/readonly-param-mutation/) | heuristic |
+| Opt-in: a frozen or `ReadOnly` field changed in place | [`MUT108`](https://heki.koxudaxi.dev/rules/readonly-type-mutation/) | heuristic |
+| Opt-in: I/O while a lock or a database transaction is held | [`EFF106`](https://heki.koxudaxi.dev/rules/lock-or-tx-held-across-io/) | heuristic |
+| Opt-in: a generator consumed twice | [`MUT106`](https://heki.koxudaxi.dev/rules/iterator-double-consumption/) | heuristic |
+| Opt-in, experimental: a function reading a `@cached_property` that another method leaves stale | [`MUT111`](https://heki.koxudaxi.dev/rules/cached-property-stale-read/) | heuristic |
+| Opt-in, experimental: a `@cached_property` left stale after another method changes what it read | [`MUT101`](https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/) | heuristic |
+| Opt-in, experimental: a value that is a new object on one path and the caller's object on another, changed in place | [`MUT112`](https://heki.koxudaxi.dev/rules/conditional-ownership-mutation/) | heuristic |
+
+A heuristic rule runs when its code or name is selected, or with `--heuristic`
+(`lint.heuristic = true` in the [configuration](https://heki.koxudaxi.dev/configuration/#rule-selection-toolhekilint)).
+See [Rule precision](https://heki.koxudaxi.dev/precision/) for how a rule becomes exact and what each one measured.
 
 ### A safety net for reviews and coding agents
 
@@ -205,7 +213,7 @@ report names the missing obligation instead of offering a fix. See [Fixes and sa
 - 🎯 See what heki [covers and does not cover](https://heki.koxudaxi.dev/scope/).
 - 📦 [Install heki](https://heki.koxudaxi.dev/installation/) and 🚀 [run it on a project](https://heki.koxudaxi.dev/getting-started/).
 - ⚙️ [Configure](https://heki.koxudaxi.dev/configuration/) rule selection, contracts, and the Python version.
-- 📏 Browse the [34 rules](https://heki.koxudaxi.dev/rules/).
+- 📏 Browse the [34 rules](https://heki.koxudaxi.dev/rules/), and see [how precise each one is](https://heki.koxudaxi.dev/precision/).
 - 🔧 Read how [fixes are proven safe](https://heki.koxudaxi.dev/fixes/).
 - 🪜 [Adopt it gradually](https://heki.koxudaxi.dev/adoption/) with a Ratchet baseline in CI.
 - 🖥️ Use it from [your editor](https://heki.koxudaxi.dev/lsp/) or 🤖 [a coding agent](https://heki.koxudaxi.dev/coding-agents/).
@@ -309,9 +317,9 @@ Each of these passes, because each tool sees one step:
 heki follows the call into `load_user` and the alias into `add_default`:
 
 ```console
-$ heki check --output-format concise
-app/api.py:5:12: EFF101 `handler` reaches the blocking call `requests.get` on the event loop
-app/models.py:17:5: MUT201 `parse` writes `Model.fields` (indirect_helper) via `app.models.add_default` outside the write owners of `model-store`
+$ heki check --heuristic --output-format concise
+app/api.py:5:12: EFF101 [heuristic] `handler` reaches the blocking call `requests.get` on the event loop
+app/models.py:17:5: MUT201 [heuristic] `parse` writes `Model.fields` (indirect_helper) via `app.models.add_default` outside the write owners of `model-store`
 Found 2 diagnostic(s) in 4 file(s).
 ```
 
@@ -406,6 +414,15 @@ byte of its source, at most 250,000, gets no `OPT` finding: heki does not try to
 in it. A function whose lazy initializations (the blocks each covers, and the walks that find
 them) would take more than 8 cells per byte of its source, at most 250,000, has none of them
 recognized: its clients and queries count as made on every iteration.
+
+One choice goes the other way: a size heki cannot bound counts as data-sized. A rule about
+loops reports a loop over a list that the code does not fix at 16 items or fewer, also when the
+list is small by its nature (the columns of a table, a handful of options). The report states
+exactly that, a loop over an iterable whose size the code does not bound, and it is right about
+the code; whether the loop is slow is the harm, which the rule cannot see. A report that is wrong
+about the code (a bound the code states, a call that cannot run on every iteration) is what a
+rule's certainty counts: an exact rule has none in its measured samples, a heuristic one can have
+some ([Rule Precision](https://heki.koxudaxi.dev/precision/)).
 
 Missed findings close as heki learns more:
 
@@ -680,7 +697,13 @@ From the root of a project (the directory with `pyproject.toml`):
 
 ```console
 $ heki check
+$ heki check --heuristic
 ```
+
+The first command runs the exact rules: hand-checked samples of their reports found none wrong
+about the code. No rule is exact yet, so for now it reports nothing and says how many heuristic
+rules it left off. `--heuristic` runs those too; their reports can be wrong about the code, and
+every output labels them ([Rule Precision](https://heki.koxudaxi.dev/precision/)).
 
 heki checks every Python file under the current directory, except the
 [excluded and ignored ones](https://heki.koxudaxi.dev/configuration/#which-files-are-checked). Pass files or directories
@@ -693,7 +716,7 @@ $ heki check src/ tests/test_api.py
 ## Read a diagnostic
 
 ```console
-app/api.py:5:12: EFF101 (async-blocking-call) [error] `handler` reaches the blocking call `requests.get` on the event loop
+app/api.py:5:12: EFF101 (async-blocking-call) [error, heuristic] `handler` reaches the blocking call `requests.get` on the event loop
   |
 5 |     user = load_user(user_id)
   |            ^
@@ -706,7 +729,7 @@ app/api.py:5:12: EFF101 (async-blocking-call) [error] `handler` reaches the bloc
 | ---- | ------- |
 | `app/api.py:5:12` | where to look |
 | `EFF101 (async-blocking-call)` | the rule's code and name |
-| `[error]` | its severity: `error`, or `warning` for the `OPT` rules (slower code, not wrong code); both make `heki check` fail |
+| `[error, heuristic]` | its severity: `error`, or `warning` for the `OPT` rules (slower code, not wrong code); both make `heki check` fail. `heuristic` marks a rule whose reports can be wrong about the code |
 | the message | what heki proved, in one sentence: here, an `async def` reaches a blocking network call |
 | `related` lines | the hops of the chain of calls behind it, to follow it across files; editors show them as related information you can jump to |
 | `help` line | what to do about it |
@@ -717,10 +740,10 @@ app/api.py:5:12: EFF101 (async-blocking-call) [error] `handler` reaches the bloc
 ## Fix what heki can prove
 
 `--fix` applies the rewrites heki proves safe and always faster (`OPT101`, `OPT102`), and
-`--diff` shows them first:
+`--diff` shows them first. Both rules are heuristic, so they run with `--heuristic`:
 
 ```console
-$ heki check --diff
+$ heki check --heuristic --diff
 --- a/app/report.py
 +++ b/app/report.py
 @@ -1,5 +1,5 @@
@@ -773,7 +796,8 @@ $ heki check --ignore OPT110         # everything except one rule
 ```
 
 Codes, code prefixes, and rule names (`async-blocking-call`) are accepted. A prefix does not
-enable the opt-in rules: see [Rule selection](https://heki.koxudaxi.dev/configuration/#rule-selection-toolhekilint).
+enable the opt-in rules, nor the heuristic ones without `--heuristic`: see
+[Rule selection](https://heki.koxudaxi.dev/configuration/#rule-selection-toolhekilint).
 
 ## Output formats
 
@@ -911,36 +935,50 @@ supported version that every clause admits:
 
 | Key | Default | Meaning |
 | --- | ------- | ------- |
-| `select` | every rule except the opt-in ones | Rules to enable instead of the defaults. An empty list enables no rule before `extend-select`, as in Ruff. |
+| `select` | the exact rules and the contract rules | Rules to enable instead of the defaults. An empty list enables no rule before `extend-select`, as in Ruff. |
 | `extend-select` | `[]` | Rules to add. |
 | `ignore` | `[]` | Rules to disable. |
 | `per-file-ignores` | `{}` | Glob → rules disabled in matching files (project-relative POSIX paths). As in Ruff, `*` also matches `/`: `scripts/*.py` covers `scripts/tools/worker.py` too. |
 | `severity` | `"warning"` for the `OPT` rules, `"error"` for the others | Rule → `"error"` or `"warning"`. It changes the output and the SARIF level; both make `heki check` fail. |
 | `relax-async-in-tests` | `true` | Skip `EFF101`, `EFF105`, and `EFF106` in `test_*` functions and in files under `tests/`. |
+| `heuristic` | `false` | Whether the heuristic rules that are not opt-in run by default and for a prefix or `ALL`, as the exact rules do. `--heuristic` and `--no-heuristic` override it. |
 
 - A rule is named by its code (`EFF101`), its name (`async-blocking-call`), a code prefix
   (`EFF`, `MUT2`), or `ALL`. An unknown rule is a configuration error.
-- A prefix or `ALL` enables only the default rules. The opt-in rules (`EFF105`, `EFF106`,
-  `EFF107`, `MUT101`, `MUT103`, `MUT106`, `MUT108`, `MUT111`, `MUT112`) need their exact code or
-  name. In `ignore`, a prefix covers every rule it matches.
-- The command line wins: `--select` replaces `select`, and `--extend-select` and `--ignore` add
-  to the configured lists.
+- Every rule is exact or heuristic ([Rule Precision](https://heki.koxudaxi.dev/precision/)). The defaults, a prefix, and
+  `ALL` enable the exact rules and the contract rules; with `heuristic = true` they also enable
+  the heuristic rules that are not opt-in, as Ruff's `preview` does. Its code or name enables a
+  heuristic rule either way. A run of `full` or `concise` output that leaves heuristic rules off
+  says how many.
+- A prefix or `ALL` never enables the opt-in rules (`EFF105`, `EFF106`, `EFF107`, `MUT101`,
+  `MUT103`, `MUT106`, `MUT108`, `MUT111`, `MUT112`): they need their exact code or name. In
+  `ignore`, a prefix covers every rule it matches.
+- The command line wins: `--select` replaces `select`, `--extend-select` and `--ignore` add to the
+  configured lists, and `--heuristic` / `--no-heuristic` replace `heuristic`.
+
+```toml
+[tool.heki.lint]
+heuristic = true   # also the heuristic rules that are not opt-in
+```
 
 ## Contracts
 
 Contracts declare what no type can say. Each kind is an array of tables with its own rule:
 
-| Contract | Declares | Rule |
-| -------- | -------- | ---- |
-| [`write-owners`](https://heki.koxudaxi.dev/configuration/#write-owners) | who may write an attribute | `MUT201`; `MUT205` with `unresolved = "report"` |
-| [`read-owners`](https://heki.koxudaxi.dev/configuration/#read-owners) | who may read an attribute | `MUT203`; `MUT206` with `unresolved = "report"` |
-| [`call-owners`](https://heki.koxudaxi.dev/configuration/#call-owners) | who may call a function or construct a class | `MUT204`; `MUT207` with `unresolved = "report"` |
-| [`effect-boundaries`](https://heki.koxudaxi.dev/configuration/#effect-boundaries) | what a scope must not reach: I/O, writes, reads, or calls | `EFF201` |
-| [`readonly-returns`](https://heki.koxudaxi.dev/configuration/#readonly-returns) | results every caller shares | `MUT202` |
-| [`invalidation`](https://heki.koxudaxi.dev/configuration/#invalidation) | writes that must be announced | `MUT109` |
+| Contract | Declares | Rule | Certainty |
+| -------- | -------- | ---- | --------- |
+| [`write-owners`](https://heki.koxudaxi.dev/configuration/#write-owners) | who may write an attribute | `MUT201`; `MUT205` with `unresolved = "report"` | heuristic |
+| [`read-owners`](https://heki.koxudaxi.dev/configuration/#read-owners) | who may read an attribute | `MUT203`; `MUT206` with `unresolved = "report"` | heuristic |
+| [`call-owners`](https://heki.koxudaxi.dev/configuration/#call-owners) | who may call a function or construct a class | `MUT204`; `MUT207` with `unresolved = "report"` | heuristic |
+| [`effect-boundaries`](https://heki.koxudaxi.dev/configuration/#effect-boundaries) | what a scope must not reach: I/O, writes, reads, or calls | `EFF201` | heuristic |
+| [`readonly-returns`](https://heki.koxudaxi.dev/configuration/#readonly-returns) | results every caller shares | `MUT202` | heuristic |
+| [`invalidation`](https://heki.koxudaxi.dev/configuration/#invalidation) | writes that must be announced | `MUT109` | heuristic |
 
 - These rules report nothing until a contract exists, except `MUT202`, which also protects the
   results of `@lru_cache` / `@cache` functions.
+- Declaring a contract selects its rule, whatever its certainty. `MUT202`, which also reports
+  without a contract, is selected like the heuristic rules that are not opt-in: by its code or
+  name, or with `lint.heuristic = true`.
 - Every name in a contract is a dotted pattern. It matches the full name or any dotted suffix
   (`DataModel.fields` matches `pkg.model.DataModel.fields`, not `pkg.BigModel.fields`), and it
   may be a glob (`*`, `?`, `[...]`, `{a,b}`).
@@ -1306,6 +1344,10 @@ $ heki check --fix --include-size-dependent      # also the proven-safe size-dep
 $ heki check --fix --profile profile.txt         # size-dependent rewrites in hot functions only
 ```
 
+- A fix comes with a report: `--fix` applies only the fixes of the rules that run. The `OPT`
+  rules are [heuristic](https://heki.koxudaxi.dev/precision/) for now, so a run without configuration applies none;
+  add `--heuristic` (`lint.heuristic = true`), or select the rules, as in
+  `heki check --fix --select OPT101,OPT102`.
 - `--diff` takes the same flags as `--fix` and writes nothing.
 - `--include-size-dependent` applies the size-dependent rewrites in every function, with or
   without `--profile`.
@@ -1331,11 +1373,11 @@ Two independent questions decide whether heki offers the rewrite:
 
 ### Profitability
 
-| Profitability | Rules | Applied by |
-| ------------- | ----- | ---------- |
-| Unconditional (faster from the first iteration) | `OPT101`, `OPT102` | `heki check --fix` |
-| Size-dependent | `OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130` | `heki check --fix --include-size-dependent`, or `--fix --profile <dump>` in hot functions |
-| Size-dependent, no rewrite | `OPT103`, `OPT112`, `OPT113` | none: suggestion only |
+| Profitability | Rules | Certainty | Applied by |
+| ------------- | ----- | --------- | ---------- |
+| Unconditional (faster from the first iteration) | `OPT101`, `OPT102` | heuristic | `heki check --fix` |
+| Size-dependent | `OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130` | heuristic | `heki check --fix --include-size-dependent`, or `--fix --profile <dump>` in hot functions |
+| Size-dependent, no rewrite | `OPT103`, `OPT112`, `OPT113` | heuristic | none: suggestion only |
 
 ### When the size is fixed
 
@@ -1603,21 +1645,35 @@ For custom tooling, `--output-format json` gives every field: see
 
 ## Rolling out rules
 
-1. Start with the default rules and a baseline, or `--select` one family at a time.
+1. Start with the default rules and a baseline, or `--select` one family at a time. Only the
+   exact rules run by default; add the heuristic ones with `lint.heuristic = true` (or
+   `--heuristic`), or name the ones you want in `extend-select`. Their reports can be wrong
+   about the code, and every output labels them `heuristic`
+   ([Rule Precision](https://heki.koxudaxi.dev/precision/)).
 2. Declare [contracts](https://heki.koxudaxi.dev/configuration/#contracts) for the shared state and the operations you
    care about, and effect boundaries for the code that must stay pure. `MUT201`, `MUT203`,
    `MUT204`, `MUT109`, and `EFF201` report nothing until a contract exists.
 3. Enable the opt-in rules where they matter:
 
-    | Rule | Turn it on for |
-    | ---- | -------------- |
-    | [`EFF105`](https://heki.koxudaxi.dev/rules/async-blocking-fs/), [`EFF107`](https://heki.koxudaxi.dev/rules/unretained-async-task/) | async services |
-    | [`EFF106`](https://heki.koxudaxi.dev/rules/lock-or-tx-held-across-io/) | threaded code, and code that holds database transactions |
-    | [`MUT103`](https://heki.koxudaxi.dev/rules/summary-effect-regression/) | library APIs (with [effect snapshots](https://heki.koxudaxi.dev/adoption/#effect-snapshots-mut103)) |
-    | [`MUT106`](https://heki.koxudaxi.dev/rules/iterator-double-consumption/) | code that passes iterators and generators around |
-    | [`MUT108`](https://heki.koxudaxi.dev/rules/readonly-type-mutation/) | code that relies on frozen dataclasses and `ReadOnly` fields |
+    | Rule | Certainty | Turn it on for |
+    | ---- | --------- | -------------- |
+    | [`EFF105`](https://heki.koxudaxi.dev/rules/async-blocking-fs/), [`EFF107`](https://heki.koxudaxi.dev/rules/unretained-async-task/) | heuristic | async services |
+    | [`EFF106`](https://heki.koxudaxi.dev/rules/lock-or-tx-held-across-io/) | heuristic | threaded code, and code that holds database transactions |
+    | [`MUT103`](https://heki.koxudaxi.dev/rules/summary-effect-regression/) | heuristic | library APIs (with [effect snapshots](https://heki.koxudaxi.dev/adoption/#effect-snapshots-mut103)) |
+    | [`MUT106`](https://heki.koxudaxi.dev/rules/iterator-double-consumption/) | heuristic | code that passes iterators and generators around |
+    | [`MUT108`](https://heki.koxudaxi.dev/rules/readonly-type-mutation/) | heuristic | code that relies on frozen dataclasses and `ReadOnly` fields |
 
 4. Use `per-file-ignores` rather than broad `ignore` lists, so new code stays covered.
+
+### From heki 0.1
+
+heki 0.1 ran every rule that is not opt-in by default. Since rules have a certainty, only the
+exact ones do, and no rule is exact yet:
+
+- `lint.heuristic = true` restores the rules of 0.1, now labelled `heuristic` in every output.
+- A baseline keeps its entries: their keys (file, function, rule, target) do not change.
+- `heki check --fix` applies the fixes of `OPT101` and `OPT102` only when they run: with
+  `lint.heuristic = true`, or when `select` or `extend-select` names them.
 
 ## Effect snapshots (`MUT103`)
 
@@ -1690,6 +1746,10 @@ Options:
           Additional rules to enable on top of defaults/config
       --ignore <IGNORE>
           Comma-separated rule codes or slugs to ignore
+      --heuristic
+          Also run the heuristic rules, whose reports can be wrong about the code, by default and for every prefix and `ALL` (`lint.heuristic = true`)
+      --no-heuristic
+          Run a heuristic rule only when its code or name is selected (`lint.heuristic = false`)
       --output-format <OUTPUT_FORMAT>
           Output format [default: full] [possible values: full, concise, json, github, sarif]
       --config <CONFIG>
@@ -1716,8 +1776,10 @@ Start the incremental Language Server Protocol (LSP) server
 Usage: heki server [OPTIONS]
 
 Options:
-      --stdio  Use stdio transport (default LSP mode)
-  -h, --help   Print help
+      --stdio         Use stdio transport (default LSP mode)
+      --heuristic     Also run the heuristic rules, whose reports can be wrong about the code, by default and for every prefix and `ALL` (`lint.heuristic = true`)
+      --no-heuristic  Run a heuristic rule only when its code or name is selected (`lint.heuristic = false`)
+  -h, --help          Print help
 ```
 
 ## `heki rule`
@@ -1783,13 +1845,20 @@ Source: https://heki.koxudaxi.dev/rules/
 
 # Rules
 
-heki has 34 rules in four families. Every rule is enabled by default except the opt-in rules marked 🔌, which need their exact code or name in `select` / `extend-select` (a prefix such as `EFF` does not enable them).
+heki has 34 rules in four families. A rule is exact when hand-checked samples of at least 100 of its reports found none wrong about the code, and heuristic (≈) when a report can be wrong about it: [Rule Precision](https://heki.koxudaxi.dev/precision/) has the measurements.
+
+- The exact rules run by default, and for a prefix such as `EFF` or `ALL`.
+- A heuristic rule runs when `select` / `extend-select` names its code or name. With `lint.heuristic = true` (`--heuristic`), the heuristic rules that are not opt-in also run by default and for a prefix or `ALL`.
+- The opt-in rules marked 🔌 run only when `select` / `extend-select` names their exact code or name.
+- The contract rules marked 📜 run when their contract is declared, whatever their certainty.
 
 ## Legend
 
 - 🛠️ The fix is applied by `heki check --fix` when heki proves it safe.
 - 🔧 A proven-safe rewrite applied only with `--fix --include-size-dependent` or in functions a `--profile` dump shows hot (it can be slower for tiny inputs).
+- ≈ Heuristic rule: a report can be wrong about the code. Every output labels its reports `heuristic`.
 - 🔌 Opt-in rule.
+- 📜 Contract rule: it reports only what a declared contract asks for.
 - 🧪 Experimental rule. Experimental features can still change in behavior or precision, or be removed, in any release, and each change is listed in the release notes. An opt-in rule that is not experimental is stable and only off by default. See [Experimental Features](https://heki.koxudaxi.dev/experimental/).
 
 ## Mutation & State (MUT)
@@ -1798,22 +1867,22 @@ Shared state written behind its owner's back: stale caches, write-ownership cont
 
 | Code | Name | Message | |
 | ---- | ---- | ------- | ------: |
-| MUT101 | [cached-property-stale-mutation](https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/) | Mutating an attribute read by `@cached_property` without invalidating the cache. | 🔌 🧪 |
-| MUT103 | [summary-effect-regression](https://heki.koxudaxi.dev/rules/summary-effect-regression/) | Interprocedural mutation/escape/effect regression against saved summary snapshot. | 🔌 |
-| MUT106 | [iterator-double-consumption](https://heki.koxudaxi.dev/rules/iterator-double-consumption/) | Opt-in: consuming a single-pass iterator or generator a second time (the second pass sees no items). | 🔌 |
-| MUT107 | [hash-attr-mutation](https://heki.koxudaxi.dev/rules/hash-attr-mutation/) | Mutating an attribute read by `__hash__` after initialization (stored `set` / `dict` entries become unreachable). |  |
-| MUT108 | [readonly-type-mutation](https://heki.koxudaxi.dev/rules/readonly-type-mutation/) | Opt-in: changing in place a field that a standard type declares read-only (frozen dataclass / `NamedTuple` / `dataclass_transform` fields, `Final` / `ReadOnly` attributes, `ReadOnly` `TypedDict` keys), directly, through an alias, or in a helper. | 🔌 |
-| MUT109 | [write-without-invalidation](https://heki.koxudaxi.dev/rules/write-without-invalidation/) | Writing a declared `invalidation` target (directly, via alias, or via helper) without reaching one of its invalidators on every path to the function's return. |  |
-| MUT110 | [readonly-param-mutation](https://heki.koxudaxi.dev/rules/readonly-param-mutation/) | Handing a `Sequence` / `Mapping` / `ReadOnly` parameter to a function that changes it in place (directly, through an alias, or through helpers). |  |
-| MUT111 | [cached-property-stale-read](https://heki.koxudaxi.dev/rules/cached-property-stale-read/) | Opt-in: reading a `@cached_property` that a method of its class family can leave stale (a write `MUT101` reports). | 🔌 🧪 |
-| MUT112 | [conditional-ownership-mutation](https://heki.koxudaxi.dev/rules/conditional-ownership-mutation/) | Opt-in: changing in place a value that is a new object on one path and borrowed state (a parameter, an attribute, a global, or what a function returns of such state) on another. | 🔌 🧪 |
-| MUT201 | [write-owner-violation](https://heki.koxudaxi.dev/rules/write-owner-violation/) | Writing a guarded attribute/container (directly, via alias, or via helper) outside declared `write-owners`. |  |
-| MUT202 | [readonly-return-mutation](https://heki.koxudaxi.dev/rules/readonly-return-mutation/) | Mutating a shared object returned by a declared `readonly-returns` producer or `@lru_cache`, directly or through the functions that return it. |  |
-| MUT203 | [read-owner-violation](https://heki.koxudaxi.dev/rules/read-owner-violation/) | Reading a guarded attribute (directly, via alias, `getattr`, or `__dict__`) outside declared `read-owners`. |  |
-| MUT204 | [call-owner-violation](https://heki.koxudaxi.dev/rules/call-owner-violation/) | Calling a guarded function or method, or constructing a guarded class (directly, via a bound method, `getattr`, or a helper), outside declared `call-owners`. |  |
-| MUT205 | [unresolved-guarded-write](https://heki.koxudaxi.dev/rules/unresolved-guarded-write/) | Strict mode of a `write-owners` contract (`unresolved = "report"`): writing an attribute named like a target on an object of unknown class, or a computed attribute name on a guarded class. |  |
-| MUT206 | [unresolved-guarded-read](https://heki.koxudaxi.dev/rules/unresolved-guarded-read/) | Strict mode of a `read-owners` contract (`unresolved = "report"`): reading an attribute named like a target on an object of unknown class. |  |
-| MUT207 | [unresolved-guarded-call](https://heki.koxudaxi.dev/rules/unresolved-guarded-call/) | Strict mode of a `call-owners` contract (`unresolved = "report"`): calling a method named like a target on an object of unknown class. |  |
+| MUT101 | [cached-property-stale-mutation](https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/) | Mutating an attribute read by `@cached_property` without invalidating the cache. | ≈ 🔌 🧪 |
+| MUT103 | [summary-effect-regression](https://heki.koxudaxi.dev/rules/summary-effect-regression/) | Interprocedural mutation/escape/effect regression against saved summary snapshot. | ≈ 🔌 |
+| MUT106 | [iterator-double-consumption](https://heki.koxudaxi.dev/rules/iterator-double-consumption/) | Opt-in: consuming a single-pass iterator or generator a second time (the second pass sees no items). | ≈ 🔌 |
+| MUT107 | [hash-attr-mutation](https://heki.koxudaxi.dev/rules/hash-attr-mutation/) | Mutating an attribute read by `__hash__` after initialization (stored `set` / `dict` entries become unreachable). | ≈ |
+| MUT108 | [readonly-type-mutation](https://heki.koxudaxi.dev/rules/readonly-type-mutation/) | Opt-in: changing in place a field that a standard type declares read-only (frozen dataclass / `NamedTuple` / `dataclass_transform` fields, `Final` / `ReadOnly` attributes, `ReadOnly` `TypedDict` keys), directly, through an alias, or in a helper. | ≈ 🔌 |
+| MUT109 | [write-without-invalidation](https://heki.koxudaxi.dev/rules/write-without-invalidation/) | Writing a declared `invalidation` target (directly, via alias, or via helper) without reaching one of its invalidators on every path to the function's return. | ≈ 📜 |
+| MUT110 | [readonly-param-mutation](https://heki.koxudaxi.dev/rules/readonly-param-mutation/) | Handing a `Sequence` / `Mapping` / `ReadOnly` parameter to a function that changes it in place (directly, through an alias, or through helpers). | ≈ |
+| MUT111 | [cached-property-stale-read](https://heki.koxudaxi.dev/rules/cached-property-stale-read/) | Opt-in: reading a `@cached_property` that a method of its class family can leave stale (a write `MUT101` reports). | ≈ 🔌 🧪 |
+| MUT112 | [conditional-ownership-mutation](https://heki.koxudaxi.dev/rules/conditional-ownership-mutation/) | Opt-in: changing in place a value that is a new object on one path and borrowed state (a parameter, an attribute, a global, or what a function returns of such state) on another. | ≈ 🔌 🧪 |
+| MUT201 | [write-owner-violation](https://heki.koxudaxi.dev/rules/write-owner-violation/) | Writing a guarded attribute/container (directly, via alias, or via helper) outside declared `write-owners`. | ≈ 📜 |
+| MUT202 | [readonly-return-mutation](https://heki.koxudaxi.dev/rules/readonly-return-mutation/) | Mutating a shared object returned by a declared `readonly-returns` producer or `@lru_cache`, directly or through the functions that return it. | ≈ |
+| MUT203 | [read-owner-violation](https://heki.koxudaxi.dev/rules/read-owner-violation/) | Reading a guarded attribute (directly, via alias, `getattr`, or `__dict__`) outside declared `read-owners`. | ≈ 📜 |
+| MUT204 | [call-owner-violation](https://heki.koxudaxi.dev/rules/call-owner-violation/) | Calling a guarded function or method, or constructing a guarded class (directly, via a bound method, `getattr`, or a helper), outside declared `call-owners`. | ≈ 📜 |
+| MUT205 | [unresolved-guarded-write](https://heki.koxudaxi.dev/rules/unresolved-guarded-write/) | Strict mode of a `write-owners` contract (`unresolved = "report"`): writing an attribute named like a target on an object of unknown class, or a computed attribute name on a guarded class. | ≈ 📜 |
+| MUT206 | [unresolved-guarded-read](https://heki.koxudaxi.dev/rules/unresolved-guarded-read/) | Strict mode of a `read-owners` contract (`unresolved = "report"`): reading an attribute named like a target on an object of unknown class. | ≈ 📜 |
+| MUT207 | [unresolved-guarded-call](https://heki.koxudaxi.dev/rules/unresolved-guarded-call/) | Strict mode of a `call-owners` contract (`unresolved = "report"`): calling a method named like a target on an object of unknown class. | ≈ 📜 |
 
 ## Execution Effects (EFF)
 
@@ -1821,13 +1890,13 @@ Work that runs where it should not: blocking calls on the event loop, clients an
 
 | Code | Name | Message | |
 | ---- | ---- | ------- | ------: |
-| EFF101 | [async-blocking-call](https://heki.koxudaxi.dev/rules/async-blocking-call/) | Direct or indirect blocking network/DB/subprocess/sleep call reachable from `async def`. |  |
-| EFF102 | [loop-unpooled-client](https://heki.koxudaxi.dev/rules/loop-unpooled-client/) | Allocating an unpooled HTTP/DB/RPC client or sessionless request inside a loop. |  |
-| EFF103 | [loop-db-query](https://heki.koxudaxi.dev/rules/loop-db-query/) | Explicit DB query / external RPC executed inside a loop (N+1). |  |
-| EFF105 | [async-blocking-fs](https://heki.koxudaxi.dev/rules/async-blocking-fs/) | Opt-in: blocking local filesystem I/O reachable from `async def`. | 🔌 |
-| EFF106 | [lock-or-tx-held-across-io](https://heki.koxudaxi.dev/rules/lock-or-tx-held-across-io/) | Opt-in: `await` or blocking network I/O while holding a `threading` lock or a DB transaction. | 🔌 |
-| EFF107 | [unretained-async-task](https://heki.koxudaxi.dev/rules/unretained-async-task/) | Opt-in: an `asyncio.create_task` result bound to a local variable but never awaited, returned, or stored. | 🔌 |
-| EFF201 | [effect-boundary-violation](https://heki.koxudaxi.dev/rules/effect-boundary-violation/) | Reaching a forbidden effect (directly or through calls) from a declared `effect-boundaries` scope. |  |
+| EFF101 | [async-blocking-call](https://heki.koxudaxi.dev/rules/async-blocking-call/) | Direct or indirect blocking network/DB/subprocess/sleep call reachable from `async def`. | ≈ |
+| EFF102 | [loop-unpooled-client](https://heki.koxudaxi.dev/rules/loop-unpooled-client/) | Allocating an unpooled HTTP/DB/RPC client or sessionless request inside a loop. | ≈ |
+| EFF103 | [loop-db-query](https://heki.koxudaxi.dev/rules/loop-db-query/) | Explicit DB query / external RPC executed inside a loop (N+1). | ≈ |
+| EFF105 | [async-blocking-fs](https://heki.koxudaxi.dev/rules/async-blocking-fs/) | Opt-in: blocking local filesystem I/O reachable from `async def`. | ≈ 🔌 |
+| EFF106 | [lock-or-tx-held-across-io](https://heki.koxudaxi.dev/rules/lock-or-tx-held-across-io/) | Opt-in: `await` or blocking network I/O while holding a `threading` lock or a DB transaction. | ≈ 🔌 |
+| EFF107 | [unretained-async-task](https://heki.koxudaxi.dev/rules/unretained-async-task/) | Opt-in: an `asyncio.create_task` result bound to a local variable but never awaited, returned, or stored. | ≈ 🔌 |
+| EFF201 | [effect-boundary-violation](https://heki.koxudaxi.dev/rules/effect-boundary-violation/) | Reaching a forbidden effect (directly or through calls) from a declared `effect-boundaries` scope. | ≈ 📜 |
 
 ## Data Pipelines (DATA)
 
@@ -1835,7 +1904,7 @@ Quadratic re-allocation of DataFrames and arrays across loop iterations.
 
 | Code | Name | Message | |
 | ---- | ---- | ------- | ------: |
-| DATA101 | [loop-carried-concat](https://heki.koxudaxi.dev/rules/loop-carried-concat/) | Loop-carried quadratic `pandas.concat` / `numpy.vstack` / `numpy.append` accumulation. |  |
+| DATA101 | [loop-carried-concat](https://heki.koxudaxi.dev/rules/loop-carried-concat/) | Loop-carried quadratic `pandas.concat` / `numpy.vstack` / `numpy.append` accumulation. | ≈ |
 
 ## Complexity Rewrites (OPT)
 
@@ -1843,16 +1912,122 @@ Quadratic patterns heki can rewrite, each proven safe by the alias analysis befo
 
 | Code | Name | Message | |
 | ---- | ---- | ------- | ------: |
-| OPT101 | [list-quadratic-concat](https://heki.koxudaxi.dev/rules/list-quadratic-concat/) | Unconditionally profitable `list` quadratic concatenation (`x = x + [e]` -> `x.append(e)`). | 🛠️ |
-| OPT102 | [set-dict-quadratic-merge](https://heki.koxudaxi.dev/rules/set-dict-quadratic-merge/) | Unconditionally profitable `set`/`dict` quadratic merge (`{**d, ...}` with `d` first). | 🛠️ |
-| OPT103 | [immutable-quadratic-concat](https://heki.koxudaxi.dev/rules/immutable-quadratic-concat/) | Size-dependent immutable quadratic accumulation (`bytes`/`tuple`/attr `str`). |  |
-| OPT110 | [loop-linear-membership](https://heki.koxudaxi.dev/rules/loop-linear-membership/) | Size-dependent `e in lst` inside a loop -> hoist `set` outside loop. | 🔧 |
-| OPT111 | [loop-linear-dedup](https://heki.koxudaxi.dev/rules/loop-linear-dedup/) | Size-dependent `if v not in seen: seen.append(v)` -> auxiliary `set`. | 🔧 |
-| OPT112 | [loop-linear-list-lookup](https://heki.koxudaxi.dev/rules/loop-linear-list-lookup/) | Size-dependent `list.index` / `list.remove` / `list.count` inside a loop (repeated linear scans). |  |
-| OPT113 | [nested-loop-equijoin](https://heki.koxudaxi.dev/rules/nested-loop-equijoin/) | Size-dependent nested-loop equi-join (`for a in A: for b in B: if a.k == b.k`) -> `dict` index. |  |
-| OPT120 | [list-front-pop](https://heki.koxudaxi.dev/rules/list-front-pop/) | Size-dependent `q.pop(0)` / `del q[0]` / `q = q[1:]` -> `collections.deque`. | 🔧 |
-| OPT121 | [list-front-insert](https://heki.koxudaxi.dev/rules/list-front-insert/) | Size-dependent `q.insert(0, v)` -> `collections.deque`. | 🔧 |
-| OPT130 | [loop-invariant-container-rebuild](https://heki.koxudaxi.dev/rules/loop-invariant-container-rebuild/) | Size-dependent loop-invariant container reconstruction (`e in set(keys)`). | 🔧 |
+| OPT101 | [list-quadratic-concat](https://heki.koxudaxi.dev/rules/list-quadratic-concat/) | Unconditionally profitable `list` quadratic concatenation (`x = x + [e]` -> `x.append(e)`). | 🛠️ ≈ |
+| OPT102 | [set-dict-quadratic-merge](https://heki.koxudaxi.dev/rules/set-dict-quadratic-merge/) | Unconditionally profitable `set`/`dict` quadratic merge (`{**d, ...}` with `d` first). | 🛠️ ≈ |
+| OPT103 | [immutable-quadratic-concat](https://heki.koxudaxi.dev/rules/immutable-quadratic-concat/) | Size-dependent immutable quadratic accumulation (`bytes`/`tuple`/attr `str`). | ≈ |
+| OPT110 | [loop-linear-membership](https://heki.koxudaxi.dev/rules/loop-linear-membership/) | Size-dependent `e in lst` inside a loop -> hoist `set` outside loop. | 🔧 ≈ |
+| OPT111 | [loop-linear-dedup](https://heki.koxudaxi.dev/rules/loop-linear-dedup/) | Size-dependent `if v not in seen: seen.append(v)` -> auxiliary `set`. | 🔧 ≈ |
+| OPT112 | [loop-linear-list-lookup](https://heki.koxudaxi.dev/rules/loop-linear-list-lookup/) | Size-dependent `list.index` / `list.remove` / `list.count` inside a loop (repeated linear scans). | ≈ |
+| OPT113 | [nested-loop-equijoin](https://heki.koxudaxi.dev/rules/nested-loop-equijoin/) | Size-dependent nested-loop equi-join (`for a in A: for b in B: if a.k == b.k`) -> `dict` index. | ≈ |
+| OPT120 | [list-front-pop](https://heki.koxudaxi.dev/rules/list-front-pop/) | Size-dependent `q.pop(0)` / `del q[0]` / `q = q[1:]` -> `collections.deque`. | 🔧 ≈ |
+| OPT121 | [list-front-insert](https://heki.koxudaxi.dev/rules/list-front-insert/) | Size-dependent `q.insert(0, v)` -> `collections.deque`. | 🔧 ≈ |
+| OPT130 | [loop-invariant-container-rebuild](https://heki.koxudaxi.dev/rules/loop-invariant-container-rebuild/) | Size-dependent loop-invariant container reconstruction (`e in set(keys)`). | 🔧 ≈ |
+
+
+---
+
+Source: https://heki.koxudaxi.dev/precision/
+
+# Rule Precision
+
+Every heki rule is **exact** or **heuristic**:
+
+- An exact rule had at least 100 of its reports checked by hand, at most 3 from one package,
+  and none was wrong about the code. A wrong report found later is a bug: it is fixed before the
+  next release, or the rule becomes heuristic in that release.
+- A heuristic rule's report can be wrong about the code. Every output labels its reports
+  `heuristic`.
+
+Only the exact rules run by default. A heuristic rule runs when `select` or `extend-select` names
+its code or name; with `lint.heuristic = true` (`--heuristic`), the heuristic rules that are not
+opt-in also run by default and for their prefixes and `ALL`. A contract rule runs when its
+contract is declared, whatever its certainty. See
+[Rule selection](https://heki.koxudaxi.dev/configuration/#rule-selection-toolhekilint).
+
+No rule is exact yet: no rule has had 100 of its reports checked, and every rule measured so far
+had reports that were wrong about the code.
+
+## What counts as wrong
+
+A report states what its message says about the code, in the terms its rule page defines. It is
+wrong when that statement is false. Whether the code does harm is a separate question, and so is
+whether a rewrite of it would be valid:
+
+- A query in a loop over three items has the shape the rule reports; the harm is small.
+- A write the author meant, or a memo heki does not recognize, still changes the object.
+- A rewrite that a fact heki cannot prove blocks is a question of [fix safety](https://heki.koxudaxi.dev/fixes/).
+
+Each checked report gets one class:
+
+| Class | Meaning |
+| ----- | ------- |
+| C (confirmed) | The problem is real and observable from the code. |
+| P (plausible) | The report is right, and the code does harm at realistic sizes. |
+| B (benign) | The report is right, but the code is deliberate or harmless at realistic sizes. |
+| F (false) | The report is wrong about the code. |
+
+"Right about the code" is C, P, and B together; "real harm" is C and P. Real harm is published
+for each rule but decides nothing about its certainty.
+
+The terms the rules use:
+
+- **Data-sized**: the code does not fix the size or the number of iterations at 16 or fewer. A
+  bound stated anywhere heki reads counts: a literal, a constant, `range(K)`, a slice, a `len`
+  test or cap, a counted `while`, or a comprehension over such a value. For a function that only
+  the checked files can call, the arguments its callers pass count too. A bound past 16 is
+  data-sized.
+- **On every iteration**: the statement runs on at least two iterations of some run of the loop.
+  It does not when every way on from it leaves the loop, or when a first-iteration flag, a flag
+  set once, or a lazy initialization the loop tests guards it.
+- **Reaches**: through the calls heki resolves ([How a call is
+  resolved](https://heki.koxudaxi.dev/scope/#how-a-call-is-resolved)), along branches the code does not rule out.
+
+A rule becomes exact only once its page and its message state its claim in these terms.
+
+## How a rule is measured
+
+1. **Corpus**: the 378 packages of Stage 0-A (30.75 million lines), frozen, and packages chosen
+   for the rules with few reports, frozen for each release cycle.
+2. **Sample**: 100 reports per rule, or all of them when it has fewer: one report per package in
+   each round, at most 3 per package, mature and young packages alternating, reports in tests
+   marked.
+3. **Review**: at least two reviewers per rule, on one rubric. A wrong report needs a minimal
+   reproduction on the measured build, and a second reviewer confirms it.
+4. **Exact**: no wrong report among 100 or more. No wrong report in 100 puts the rate of wrong
+   reports below 3% (one-sided, 95%).
+5. **Every release**: a corpus run of the release candidate, a check of every report it adds or
+   changes in an exact rule, and a fresh sample of 30 reports per exact rule.
+
+## Measurements
+
+Round 3 sampled up to 50 reports per rule on the Stage 0-A corpus, with the build of 2026-11-21.
+Its reviewers also counted as wrong a bound past 16 that the code states and an exclusion a rule
+page documents but heki does not recognize; under the terms above those reports are right, so
+these figures are lower bounds. For `OPT101` and `OPT102` the table keeps the reviewers' verdicts:
+four of their samples loop a fixed 4 times, which is not data-sized.
+
+| Rule | Certainty | Measured | Sample | C / P / B / F | Right about the code | 95% interval | Real harm |
+| ---- | --------- | -------- | -----: | ------------- | -------------------: | ------------ | --------: |
+| `EFF101` | heuristic | round 3, 2026-11-21 | 50 | 3 / 13 / 25 / 9 | 82% | 69-90% | 32% |
+| `EFF102` | heuristic | round 3, 2026-11-21 | 50 | 0 / 2 / 25 / 23 | 54% | 40-67% | 4% |
+| `EFF103` | heuristic | round 3, 2026-11-21 | 50 | 0 / 8 / 29 / 13 | 74% | 60-84% | 16% |
+| `DATA101` | heuristic | round 3, 2026-11-21 | 28 | 0 / 3 / 17 / 8 | 71% | 53-85% | 11% |
+| `MUT107` | heuristic | round 3, 2026-11-21 | 50 | 1 / 1 / 37 / 11 | 78% | 65-87% | 4% |
+| `MUT110` | heuristic | round 3, 2026-11-21 | 4 | 0 / 0 / 4 / 0 | 100% | 51-100% | 0% |
+| `MUT202` | heuristic | round 3, 2026-11-21 | 20 | 2 / 1 / 11 / 6 | 70% | 48-85% | 15% |
+| `OPT101` | heuristic | round 3, 2026-11-21 | 9 | 0 / 0 / 7 / 2 | 78% | 45-94% | 0% |
+| `OPT102` | heuristic | round 3, 2026-11-21 | 6 | 0 / 1 / 3 / 2 | 67% | 30-90% | 17% |
+| `OPT103` | heuristic | round 3, 2026-11-21 | 50 | 0 / 2 / 44 / 4 | 92% | 81-97% | 4% |
+| `OPT110` | heuristic | round 3, 2026-11-21 | 50 | 0 / 3 / 36 / 11 | 78% | 65-87% | 6% |
+| `OPT111` | heuristic | round 3, 2026-11-21 | 50 | 0 / 2 / 42 / 6 | 88% | 76-94% | 4% |
+| `OPT112` | heuristic | round 3, 2026-11-21 | 50 | 0 / 2 / 43 / 5 | 90% | 79-96% | 4% |
+| `OPT113` | heuristic | round 3, 2026-11-21 | 50 | 0 / 11 / 35 / 4 | 92% | 81-97% | 22% |
+| `OPT120` | heuristic | round 3, 2026-11-21 | 50 | 0 / 2 / 45 / 3 | 94% | 84-98% | 4% |
+| `OPT121` | heuristic | round 3, 2026-11-21 | 50 | 0 / 1 / 41 / 8 | 84% | 71-92% | 2% |
+| `OPT130` | heuristic | round 3, 2026-11-21 | 30 | 0 / 2 / 27 / 1 | 97% | 83-99% | 7% |
+
+The other rules (the contract rules and the opt-in rules) have not been measured on this
+protocol yet.
 
 
 ---
@@ -1975,6 +2150,11 @@ heki's diagnostics and fixes while you edit, with the results `heki check` repor
   `async def` to `time.sleep`) as related information you can jump to. The message is the
   report's one sentence; its help, what to do about it, is the last related-information entry
   (`help: ...`) at the diagnostic's own range, the way rust-analyzer shows a `help:` note.
+- The message of a [heuristic](https://heki.koxudaxi.dev/precision/) rule ends in `[heuristic]`, and every diagnostic's
+  `data.certainty` is `"exact"` or `"heuristic"`. The rule code links to the rule's page
+  (`codeDescription`).
+- `heki server --heuristic` (or `--no-heuristic`) overrides `lint.heuristic` of the
+  configuration, as on the command line.
 - Quick fixes for the safe `OPT101` / `OPT102` rewrites.
 - `refactor.rewrite.heki` code actions for the proven-safe size-dependent rewrites. A fix whose
   result would not parse is never offered, as `heki check --fix` refuses it.
@@ -2091,14 +2271,15 @@ every diagnostic says what was proven, where the evidence is, and what blocks a 
 
 A typical instruction for the agent:
 
-> After changing Python files, run `heki check --output-format json`. For each diagnostic,
-> read its `help` and `heki rule <rule_code>`, follow `related` to the root cause, and fix it
-> there. Apply
-> `heki check --fix` for the safe rewrites. Never silence a diagnostic with `# heki: ignore`
-> unless the rule's documentation describes the case as intended.
+> After changing Python files, run `heki check --heuristic --output-format json`. For each
+> diagnostic, read its `help` and `heki rule <rule_code>`, follow `related` to the root cause,
+> and fix it there. A diagnostic whose `certainty` is `heuristic` can be wrong about the code:
+> confirm what its message says before changing anything. Apply `heki check --heuristic --fix`
+> for the safe rewrites. Never silence a diagnostic with `# heki: ignore` unless the rule's
+> documentation describes the case as intended.
 
 ```console
-$ heki check --output-format json
+$ heki check --heuristic --output-format json
 ```
 
 Each diagnostic has:
@@ -2107,6 +2288,7 @@ Each diagnostic has:
 | ----- | ------- |
 | `path`, `line`, `column`, `span` | location (byte span in the file) |
 | `rule_code`, `rule_slug`, `severity`, `message` | the finding: `message` is one sentence saying what happens |
+| `certainty` | `exact`, or `heuristic` when the report can be wrong about the code ([Rule Precision](https://heki.koxudaxi.dev/precision/)) |
 | `help` | what to do about it (`null` when the rule has no advice for the report) |
 | `qualname`, `target` | the function and the object involved |
 | `related` | every hop of the call chain behind the finding |
@@ -2280,6 +2462,12 @@ $ uvx --from "zensical==0.1.2" zensical serve
   when a hand-written page marks a rule differently. An experimental feature can change or go
   away in any release, and the release notes list each change; once it is stable, its entry is
   removed.
+- Each rule's certainty (`exact` or `heuristic`) and activation (`Default`, `OptIn`, or
+  `Contract`) are fields of its entry in `crates/heki_rules/src/lib.rs`. The generator marks the
+  heuristic rules on the generated pages, copies each rule's measurement from
+  [Rule Precision](https://heki.koxudaxi.dev/precision/) into its page, and fails when a hand-written table row says
+  "heuristic" other than exactly when a rule it names is heuristic, or when an exact rule lacks a
+  row there with at least 100 sampled reports and none wrong.
 - The Docs workflow deploys the site to Cloudflare Pages (heki.koxudaxi.dev) once a published
   release is on PyPI (the newest release only), or when it is run by hand on `main`, so the site
   documents the released version. That job runs in the `docs-production` environment, which
@@ -2347,6 +2535,10 @@ development scripts, or the CI workflows skip Claude and count as not breaking. 
 release come from `CHANGELOG.md`.
 
 ### Publishing a release
+
+The measurements of [Rule Precision](https://heki.koxudaxi.dev/precision/) must hold for the release candidate first
+(release gate 3 in `ARCHITECTURE.md`): a corpus run, a check of every report it adds or changes in
+an exact rule, and a fresh sample of 30 reports per exact rule.
 
 1. Check that the first unreleased section of `CHANGELOG.md` is headed
    `## [<version>] - Unreleased`, with the version of the draft's tag: the sync dates that
@@ -2452,9 +2644,13 @@ Source: https://heki.koxudaxi.dev/rules/async-blocking-call/
 
 # async-blocking-call (EFF101)
 
-Family: Execution Effects (EFF) · Enabled by default · Severity `error` · No automatic fix
+Family: Execution Effects (EFF) · Heuristic · Off by default · Severity `error` · No automatic fix
 
 Direct or indirect blocking network/DB/subprocess/sleep call reachable from `async def`.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 50 sampled reports (round 3, 2026-11-21), 82% were right about the code. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 ## What it does
 Checks `async def` functions that reach a blocking call on the event loop, directly or through
@@ -2584,9 +2780,13 @@ Source: https://heki.koxudaxi.dev/rules/async-blocking-fs/
 
 # async-blocking-fs (EFF105)
 
-Family: Execution Effects (EFF) · Opt-in · Severity `error` · No automatic fix
+Family: Execution Effects (EFF) · Heuristic · Opt-in · Severity `error` · No automatic fix
 
 Opt-in: blocking local filesystem I/O reachable from `async def`.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a report can be wrong about the code. It runs only when `select` or `extend-select` names its code or name. It has not been measured yet. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 ## What it does
 Checks `async def` functions that reach blocking local filesystem I/O: `open(...)`,
@@ -2641,9 +2841,13 @@ Source: https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/
 
 # cached-property-stale-mutation (MUT101)
 
-Family: Mutation & State (MUT) · Opt-in · Experimental · Severity `error` · No automatic fix
+Family: Mutation & State (MUT) · Heuristic · Opt-in · Experimental · Severity `error` · No automatic fix
 
 Mutating an attribute read by `@cached_property` without invalidating the cache.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a report can be wrong about the code. It runs only when `select` or `extend-select` names its code or name. It has not been measured yet. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 !!! warning "Experimental"
 
@@ -2741,9 +2945,13 @@ Source: https://heki.koxudaxi.dev/rules/cached-property-stale-read/
 
 # cached-property-stale-read (MUT111)
 
-Family: Mutation & State (MUT) · Opt-in · Experimental · Severity `error` · No automatic fix
+Family: Mutation & State (MUT) · Heuristic · Opt-in · Experimental · Severity `error` · No automatic fix
 
 Opt-in: reading a `@cached_property` that a method of its class family can leave stale (a write `MUT101` reports).
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a report can be wrong about the code. It runs only when `select` or `extend-select` names its code or name. It has not been measured yet. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 !!! warning "Experimental"
 
@@ -2826,9 +3034,13 @@ Source: https://heki.koxudaxi.dev/rules/call-owner-violation/
 
 # call-owner-violation (MUT204)
 
-Family: Mutation & State (MUT) · Enabled by default · Severity `error` · No automatic fix
+Family: Mutation & State (MUT) · Heuristic · Runs when its contract is declared · Severity `error` · No automatic fix
 
 Calling a guarded function or method, or constructing a guarded class (directly, via a bound method, `getattr`, or a helper), outside declared `call-owners`.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a report can be wrong about the code. It runs when its contract is declared. It has not been measured yet. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 ## What it does
 Checks calls of functions and methods, and constructions of classes, that a
@@ -2941,9 +3153,13 @@ Source: https://heki.koxudaxi.dev/rules/conditional-ownership-mutation/
 
 # conditional-ownership-mutation (MUT112)
 
-Family: Mutation & State (MUT) · Opt-in · Experimental · Severity `error` · No automatic fix
+Family: Mutation & State (MUT) · Heuristic · Opt-in · Experimental · Severity `error` · No automatic fix
 
 Opt-in: changing in place a value that is a new object on one path and borrowed state (a parameter, an attribute, a global, or what a function returns of such state) on another.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a report can be wrong about the code. It runs only when `select` or `extend-select` names its code or name. It has not been measured yet. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 !!! warning "Experimental"
 
@@ -3050,9 +3266,13 @@ Source: https://heki.koxudaxi.dev/rules/effect-boundary-violation/
 
 # effect-boundary-violation (EFF201)
 
-Family: Execution Effects (EFF) · Enabled by default · Severity `error` · No automatic fix
+Family: Execution Effects (EFF) · Heuristic · Runs when its contract is declared · Severity `error` · No automatic fix
 
 Reaching a forbidden effect (directly or through calls) from a declared `effect-boundaries` scope.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a report can be wrong about the code. It runs when its contract is declared. It has not been measured yet. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 ## What it does
 Checks the functions of a declared effect boundary (`[[tool.heki.effect-boundaries]]`): they
@@ -3199,9 +3419,13 @@ Source: https://heki.koxudaxi.dev/rules/hash-attr-mutation/
 
 # hash-attr-mutation (MUT107)
 
-Family: Mutation & State (MUT) · Enabled by default · Severity `error` · No automatic fix
+Family: Mutation & State (MUT) · Heuristic · Off by default · Severity `error` · No automatic fix
 
 Mutating an attribute read by `__hash__` after initialization (stored `set` / `dict` entries become unreachable).
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 50 sampled reports (round 3, 2026-11-21), 78% were right about the code. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 ## What it does
 Checks methods that rebind or mutate an attribute that the class's `__hash__` reads (directly,
@@ -3288,9 +3512,13 @@ Source: https://heki.koxudaxi.dev/rules/immutable-quadratic-concat/
 
 # immutable-quadratic-concat (OPT103)
 
-Family: Complexity Rewrites (OPT) · Enabled by default · Severity `warning` · No automatic fix
+Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` · No automatic fix
 
 Size-dependent immutable quadratic accumulation (`bytes`/`tuple`/attr `str`).
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 50 sampled reports (round 3, 2026-11-21), 92% were right about the code. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 ## What it does
 Checks quadratic accumulation of immutable values in a loop:
@@ -3338,9 +3566,13 @@ Source: https://heki.koxudaxi.dev/rules/iterator-double-consumption/
 
 # iterator-double-consumption (MUT106)
 
-Family: Mutation & State (MUT) · Opt-in · Severity `error` · No automatic fix
+Family: Mutation & State (MUT) · Heuristic · Opt-in · Severity `error` · No automatic fix
 
 Opt-in: consuming a single-pass iterator or generator a second time (the second pass sees no items).
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a report can be wrong about the code. It runs only when `select` or `extend-select` names its code or name. It has not been measured yet. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 ## What it does
 Checks for a single-pass iterator or generator that is consumed a second time. Once an
@@ -3426,9 +3658,13 @@ Source: https://heki.koxudaxi.dev/rules/list-front-insert/
 
 # list-front-insert (OPT121)
 
-Family: Complexity Rewrites (OPT) · Enabled by default · Severity `warning` · Proven-safe suggestion (`--fix --include-size-dependent`)
+Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` · Proven-safe suggestion (`--fix --include-size-dependent`)
 
 Size-dependent `q.insert(0, v)` -> `collections.deque`.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 50 sampled reports (round 3, 2026-11-21), 84% were right about the code. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 ## What it does
 Checks loops that insert at the front of a list, `q.insert(0, v)`, and suggests a
@@ -3472,9 +3708,13 @@ Source: https://heki.koxudaxi.dev/rules/list-front-pop/
 
 # list-front-pop (OPT120)
 
-Family: Complexity Rewrites (OPT) · Enabled by default · Severity `warning` · Proven-safe suggestion (`--fix --include-size-dependent`)
+Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` · Proven-safe suggestion (`--fix --include-size-dependent`)
 
 Size-dependent `q.pop(0)` / `del q[0]` / `q = q[1:]` -> `collections.deque`.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 50 sampled reports (round 3, 2026-11-21), 94% were right about the code. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 ## What it does
 Checks loops that remove the first element of a list: `q.pop(0)`, `del q[0]`, and
@@ -3553,9 +3793,13 @@ Source: https://heki.koxudaxi.dev/rules/list-quadratic-concat/
 
 # list-quadratic-concat (OPT101)
 
-Family: Complexity Rewrites (OPT) · Enabled by default · Severity `warning` · Safe fix (`--fix`)
+Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` · Safe fix (`--fix`)
 
 Unconditionally profitable `list` quadratic concatenation (`x = x + [e]` -> `x.append(e)`).
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 9 sampled reports (round 3, 2026-11-21), 78% were right about the code. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 ## What it does
 Checks loops that grow a list by building a new one every iteration, `x = x + [e]`, and
@@ -3609,9 +3853,13 @@ Source: https://heki.koxudaxi.dev/rules/lock-or-tx-held-across-io/
 
 # lock-or-tx-held-across-io (EFF106)
 
-Family: Execution Effects (EFF) · Opt-in · Severity `error` · No automatic fix
+Family: Execution Effects (EFF) · Heuristic · Opt-in · Severity `error` · No automatic fix
 
 Opt-in: `await` or blocking network I/O while holding a `threading` lock or a DB transaction.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a report can be wrong about the code. It runs only when `select` or `extend-select` names its code or name. It has not been measured yet. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 ## What it does
 Checks for an `await` (also the implicit ones of `async for` and `async with`), or a call
@@ -3687,9 +3935,13 @@ Source: https://heki.koxudaxi.dev/rules/loop-carried-concat/
 
 # loop-carried-concat (DATA101)
 
-Family: Data Pipelines (DATA) · Enabled by default · Severity `error` · No automatic fix
+Family: Data Pipelines (DATA) · Heuristic · Off by default · Severity `error` · No automatic fix
 
 Loop-carried quadratic `pandas.concat` / `numpy.vstack` / `numpy.append` accumulation.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 28 sampled reports (round 3, 2026-11-21), 71% were right about the code. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 ## What it does
 Checks loops that grow a DataFrame or array by re-concatenating it on every iteration:
@@ -3745,9 +3997,13 @@ Source: https://heki.koxudaxi.dev/rules/loop-db-query/
 
 # loop-db-query (EFF103)
 
-Family: Execution Effects (EFF) · Enabled by default · Severity `error` · No automatic fix
+Family: Execution Effects (EFF) · Heuristic · Off by default · Severity `error` · No automatic fix
 
 Explicit DB query / external RPC executed inside a loop (N+1).
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 50 sampled reports (round 3, 2026-11-21), 74% were right about the code. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 ## What it does
 Checks loops that run a database query on every iteration (the "N+1 queries" problem):
@@ -3832,9 +4088,13 @@ Source: https://heki.koxudaxi.dev/rules/loop-invariant-container-rebuild/
 
 # loop-invariant-container-rebuild (OPT130)
 
-Family: Complexity Rewrites (OPT) · Enabled by default · Severity `warning` · Proven-safe suggestion (`--fix --include-size-dependent`)
+Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` · Proven-safe suggestion (`--fix --include-size-dependent`)
 
 Size-dependent loop-invariant container reconstruction (`e in set(keys)`).
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 30 sampled reports (round 3, 2026-11-21), 97% were right about the code. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 ## What it does
 Checks loops that rebuild the same container on every iteration just to test membership,
@@ -3888,9 +4148,13 @@ Source: https://heki.koxudaxi.dev/rules/loop-linear-dedup/
 
 # loop-linear-dedup (OPT111)
 
-Family: Complexity Rewrites (OPT) · Enabled by default · Severity `warning` · Proven-safe suggestion (`--fix --include-size-dependent`)
+Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` · Proven-safe suggestion (`--fix --include-size-dependent`)
 
 Size-dependent `if v not in seen: seen.append(v)` -> auxiliary `set`.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 50 sampled reports (round 3, 2026-11-21), 88% were right about the code. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 ## What it does
 Checks the de-duplication idiom `if v not in seen: seen.append(v)` inside a loop and suggests
@@ -3936,9 +4200,13 @@ Source: https://heki.koxudaxi.dev/rules/loop-linear-list-lookup/
 
 # loop-linear-list-lookup (OPT112)
 
-Family: Complexity Rewrites (OPT) · Enabled by default · Severity `warning` · No automatic fix
+Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` · No automatic fix
 
 Size-dependent `list.index` / `list.remove` / `list.count` inside a loop (repeated linear scans).
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 50 sampled reports (round 3, 2026-11-21), 90% were right about the code. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 ## What it does
 Checks `list.index()`, `list.remove()`, and `list.count()` calls that run on every iteration
@@ -4020,9 +4288,13 @@ Source: https://heki.koxudaxi.dev/rules/loop-linear-membership/
 
 # loop-linear-membership (OPT110)
 
-Family: Complexity Rewrites (OPT) · Enabled by default · Severity `warning` · Proven-safe suggestion (`--fix --include-size-dependent`)
+Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` · Proven-safe suggestion (`--fix --include-size-dependent`)
 
 Size-dependent `e in lst` inside a loop -> hoist `set` outside loop.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 50 sampled reports (round 3, 2026-11-21), 78% were right about the code. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 ## What it does
 Checks membership tests against a list or tuple inside a loop, `e in lst`, where the list does
@@ -4078,9 +4350,13 @@ Source: https://heki.koxudaxi.dev/rules/loop-unpooled-client/
 
 # loop-unpooled-client (EFF102)
 
-Family: Execution Effects (EFF) · Enabled by default · Severity `error` · No automatic fix
+Family: Execution Effects (EFF) · Heuristic · Off by default · Severity `error` · No automatic fix
 
 Allocating an unpooled HTTP/DB/RPC client or sessionless request inside a loop.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 50 sampled reports (round 3, 2026-11-21), 54% were right about the code. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 ## What it does
 Checks loops that allocate a network or database client on every iteration: module-level
@@ -4185,9 +4461,13 @@ Source: https://heki.koxudaxi.dev/rules/nested-loop-equijoin/
 
 # nested-loop-equijoin (OPT113)
 
-Family: Complexity Rewrites (OPT) · Enabled by default · Severity `warning` · No automatic fix
+Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` · No automatic fix
 
 Size-dependent nested-loop equi-join (`for a in A: for b in B: if a.k == b.k`) -> `dict` index.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 50 sampled reports (round 3, 2026-11-21), 92% were right about the code. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 ## What it does
 Checks nested loops that join two collections by comparing a key of each with `==`:
@@ -4268,9 +4548,13 @@ Source: https://heki.koxudaxi.dev/rules/read-owner-violation/
 
 # read-owner-violation (MUT203)
 
-Family: Mutation & State (MUT) · Enabled by default · Severity `error` · No automatic fix
+Family: Mutation & State (MUT) · Heuristic · Runs when its contract is declared · Severity `error` · No automatic fix
 
 Reading a guarded attribute (directly, via alias, `getattr`, or `__dict__`) outside declared `read-owners`.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a report can be wrong about the code. It runs when its contract is declared. It has not been measured yet. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 ## What it does
 Checks reads of attributes that a `[[tool.heki.read-owners]]` contract reserves for a set of
@@ -4393,9 +4677,13 @@ Source: https://heki.koxudaxi.dev/rules/readonly-param-mutation/
 
 # readonly-param-mutation (MUT110)
 
-Family: Mutation & State (MUT) · Enabled by default · Severity `error` · No automatic fix
+Family: Mutation & State (MUT) · Heuristic · Off by default · Severity `error` · No automatic fix
 
 Handing a `Sequence` / `Mapping` / `ReadOnly` parameter to a function that changes it in place (directly, through an alias, or through helpers).
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 4 sampled reports (round 3, 2026-11-21), 100% were right about the code. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 ## What it does
 Checks functions that hand a parameter annotated as a read-only container to code that changes
@@ -4471,9 +4759,13 @@ Source: https://heki.koxudaxi.dev/rules/readonly-return-mutation/
 
 # readonly-return-mutation (MUT202)
 
-Family: Mutation & State (MUT) · Enabled by default · Severity `error` · No automatic fix
+Family: Mutation & State (MUT) · Heuristic · Off by default · Severity `error` · No automatic fix
 
 Mutating a shared object returned by a declared `readonly-returns` producer or `@lru_cache`, directly or through the functions that return it.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 20 sampled reports (round 3, 2026-11-21), 70% were right about the code. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 ## What it does
 Checks mutations of objects returned by a shared producer:
@@ -4573,9 +4865,13 @@ Source: https://heki.koxudaxi.dev/rules/readonly-type-mutation/
 
 # readonly-type-mutation (MUT108)
 
-Family: Mutation & State (MUT) · Opt-in · Severity `error` · No automatic fix
+Family: Mutation & State (MUT) · Heuristic · Opt-in · Severity `error` · No automatic fix
 
 Opt-in: changing in place a field that a standard type declares read-only (frozen dataclass / `NamedTuple` / `dataclass_transform` fields, `Final` / `ReadOnly` attributes, `ReadOnly` `TypedDict` keys), directly, through an alias, or in a helper.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a report can be wrong about the code. It runs only when `select` or `extend-select` names its code or name. It has not been measured yet. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 ## What it does
 Checks in-place changes of containers held in fields that a standard type declares read-only,
@@ -4678,9 +4974,13 @@ Source: https://heki.koxudaxi.dev/rules/set-dict-quadratic-merge/
 
 # set-dict-quadratic-merge (OPT102)
 
-Family: Complexity Rewrites (OPT) · Enabled by default · Severity `warning` · Safe fix (`--fix`)
+Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` · Safe fix (`--fix`)
 
 Unconditionally profitable `set`/`dict` quadratic merge (`{**d, ...}` with `d` first).
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 6 sampled reports (round 3, 2026-11-21), 67% were right about the code. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 ## What it does
 Checks loops that rebuild a dict or set every iteration and rewrites them in place:
@@ -4735,9 +5035,13 @@ Source: https://heki.koxudaxi.dev/rules/summary-effect-regression/
 
 # summary-effect-regression (MUT103)
 
-Family: Mutation & State (MUT) · Opt-in · Severity `error` · No automatic fix
+Family: Mutation & State (MUT) · Heuristic · Opt-in · Severity `error` · No automatic fix
 
 Interprocedural mutation/escape/effect regression against saved summary snapshot.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a report can be wrong about the code. It runs only when `select` or `extend-select` names its code or name. It has not been measured yet. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 ## What it does
 Compares the interprocedural side effects of every public function with the summary snapshot
@@ -4794,9 +5098,13 @@ Source: https://heki.koxudaxi.dev/rules/unresolved-guarded-call/
 
 # unresolved-guarded-call (MUT207)
 
-Family: Mutation & State (MUT) · Enabled by default · Severity `error` · No automatic fix
+Family: Mutation & State (MUT) · Heuristic · Runs when its contract is declared · Severity `error` · No automatic fix
 
 Strict mode of a `call-owners` contract (`unresolved = "report"`): calling a method named like a target on an object of unknown class.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a report can be wrong about the code. It runs when its contract is declared. It has not been measured yet. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 ## What it does
 The strict mode of a `[[tool.heki.call-owners]]` contract that sets `unresolved = "report"`:
@@ -4868,9 +5176,13 @@ Source: https://heki.koxudaxi.dev/rules/unresolved-guarded-read/
 
 # unresolved-guarded-read (MUT206)
 
-Family: Mutation & State (MUT) · Enabled by default · Severity `error` · No automatic fix
+Family: Mutation & State (MUT) · Heuristic · Runs when its contract is declared · Severity `error` · No automatic fix
 
 Strict mode of a `read-owners` contract (`unresolved = "report"`): reading an attribute named like a target on an object of unknown class.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a report can be wrong about the code. It runs when its contract is declared. It has not been measured yet. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 ## What it does
 The strict mode of a `[[tool.heki.read-owners]]` contract that sets `unresolved = "report"`:
@@ -4938,9 +5250,13 @@ Source: https://heki.koxudaxi.dev/rules/unresolved-guarded-write/
 
 # unresolved-guarded-write (MUT205)
 
-Family: Mutation & State (MUT) · Enabled by default · Severity `error` · No automatic fix
+Family: Mutation & State (MUT) · Heuristic · Runs when its contract is declared · Severity `error` · No automatic fix
 
 Strict mode of a `write-owners` contract (`unresolved = "report"`): writing an attribute named like a target on an object of unknown class, or a computed attribute name on a guarded class.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a report can be wrong about the code. It runs when its contract is declared. It has not been measured yet. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 ## What it does
 The strict mode of a `[[tool.heki.write-owners]]` contract that sets `unresolved = "report"`:
@@ -5023,9 +5339,13 @@ Source: https://heki.koxudaxi.dev/rules/unretained-async-task/
 
 # unretained-async-task (EFF107)
 
-Family: Execution Effects (EFF) · Opt-in · Severity `error` · No automatic fix
+Family: Execution Effects (EFF) · Heuristic · Opt-in · Severity `error` · No automatic fix
 
 Opt-in: an `asyncio.create_task` result bound to a local variable but never awaited, returned, or stored.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a report can be wrong about the code. It runs only when `select` or `extend-select` names its code or name. It has not been measured yet. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 ## What it does
 Checks for the result of `asyncio.create_task(...)`, `asyncio.ensure_future(...)`, or
@@ -5103,9 +5423,13 @@ Source: https://heki.koxudaxi.dev/rules/write-owner-violation/
 
 # write-owner-violation (MUT201)
 
-Family: Mutation & State (MUT) · Enabled by default · Severity `error` · No automatic fix
+Family: Mutation & State (MUT) · Heuristic · Runs when its contract is declared · Severity `error` · No automatic fix
 
 Writing a guarded attribute/container (directly, via alias, or via helper) outside declared `write-owners`.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a report can be wrong about the code. It runs when its contract is declared. It has not been measured yet. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 ## What it does
 Checks writes to attributes and containers that a `[[tool.heki.write-owners]]` contract
@@ -5294,9 +5618,13 @@ Source: https://heki.koxudaxi.dev/rules/write-without-invalidation/
 
 # write-without-invalidation (MUT109)
 
-Family: Mutation & State (MUT) · Enabled by default · Severity `error` · No automatic fix
+Family: Mutation & State (MUT) · Heuristic · Runs when its contract is declared · Severity `error` · No automatic fix
 
 Writing a declared `invalidation` target (directly, via alias, or via helper) without reaching one of its invalidators on every path to the function's return.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a report can be wrong about the code. It runs when its contract is declared. It has not been measured yet. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 ## What it does
 Checks writes to attributes declared in an `[[tool.heki.invalidation]]` contract: after the

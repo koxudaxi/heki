@@ -9,6 +9,7 @@ use heki_diagnostics::{Diagnostic, RatchetBaseline};
 use heki_effect::{
     CallSite, DeclKeys, DeclPasses, FuncKey, ProjectIndex, SiteRole, summarize_project_with_reads,
 };
+pub use heki_rules::Selectors;
 use heki_rules::project::{
     FileError, ParsedFile, Project, ProjectEnv, ProjectError, ProjectOptions, discovers,
     exclude_set, parse_source, retain_unsuppressed,
@@ -103,14 +104,6 @@ pub struct EditOutcome {
     /// Why the file has no diagnostics: a syntax error (the file then leaves the index, as a
     /// file `heki check` cannot parse is not part of the project).
     pub error: Option<FileError>,
-}
-
-/// Selection overrides (`--select` / `--extend-select` / `--ignore`).
-#[derive(Debug, Clone, Default)]
-pub struct Selectors {
-    pub select: Vec<String>,
-    pub extend_select: Vec<String>,
-    pub ignore: Vec<String>,
 }
 
 pub struct Workspace {
@@ -290,13 +283,8 @@ impl Workspace {
     ) -> Result<(Self, Vec<FileError>), EngineError> {
         let project = Project::load(opts).map_err(EngineError::Project)?;
         let env_cfg = &project.env.cfg;
-        let selection = RuleSelection::resolve(
-            &env_cfg.lint,
-            &selectors.select,
-            &selectors.extend_select,
-            &selectors.ignore,
-        )
-        .map_err(EngineError::Selection)?;
+        let selection =
+            RuleSelection::resolve(&env_cfg.lint, selectors).map_err(EngineError::Selection)?;
         if let Some(k) = env_cfg
             .lint
             .severity
@@ -423,6 +411,10 @@ impl Workspace {
 
     pub fn stats(&self) -> &EngineStats {
         &self.stats
+    }
+
+    pub fn selection(&self) -> &RuleSelection {
+        &self.selection
     }
 
     /// The files in the index.

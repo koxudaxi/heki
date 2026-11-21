@@ -2,9 +2,13 @@
 
 # read-owner-violation (MUT203)
 
-Family: Mutation & State (MUT) · Enabled by default · Severity `error` · No automatic fix
+Family: Mutation & State (MUT) · Heuristic · Runs when its contract is declared · Severity `error` · No automatic fix
 
 Reading a guarded attribute (directly, via alias, `getattr`, or `__dict__`) outside declared `read-owners`.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a report can be wrong about the code. It runs when its contract is declared. It has not been measured yet. See [Rule Precision](../precision.md).
 
 ## What it does
 Checks reads of attributes that a `[[tool.heki.read-owners]]` contract reserves for a set of

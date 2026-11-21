@@ -2,9 +2,13 @@
 
 # cached-property-stale-mutation (MUT101)
 
-Family: Mutation & State (MUT) · Opt-in · Experimental · Severity `error` · No automatic fix
+Family: Mutation & State (MUT) · Heuristic · Opt-in · Experimental · Severity `error` · No automatic fix
 
 Mutating an attribute read by `@cached_property` without invalidating the cache.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a report can be wrong about the code. It runs only when `select` or `extend-select` names its code or name. It has not been measured yet. See [Rule Precision](../precision.md).
 
 !!! warning "Experimental"
 

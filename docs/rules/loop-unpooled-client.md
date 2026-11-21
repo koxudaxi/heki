@@ -2,9 +2,13 @@
 
 # loop-unpooled-client (EFF102)
 
-Family: Execution Effects (EFF) · Enabled by default · Severity `error` · No automatic fix
+Family: Execution Effects (EFF) · Heuristic · Off by default · Severity `error` · No automatic fix
 
 Allocating an unpooled HTTP/DB/RPC client or sessionless request inside a loop.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 50 sampled reports (round 3, 2026-11-21), 54% were right about the code. See [Rule Precision](../precision.md).
 
 ## What it does
 Checks loops that allocate a network or database client on every iteration: module-level

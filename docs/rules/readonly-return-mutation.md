@@ -2,9 +2,13 @@
 
 # readonly-return-mutation (MUT202)
 
-Family: Mutation & State (MUT) · Enabled by default · Severity `error` · No automatic fix
+Family: Mutation & State (MUT) · Heuristic · Off by default · Severity `error` · No automatic fix
 
 Mutating a shared object returned by a declared `readonly-returns` producer or `@lru_cache`, directly or through the functions that return it.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 20 sampled reports (round 3, 2026-11-21), 70% were right about the code. See [Rule Precision](../precision.md).
 
 ## What it does
 Checks mutations of objects returned by a shared producer:

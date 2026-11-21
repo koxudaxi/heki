@@ -2,9 +2,13 @@
 
 # unresolved-guarded-call (MUT207)
 
-Family: Mutation & State (MUT) · Enabled by default · Severity `error` · No automatic fix
+Family: Mutation & State (MUT) · Heuristic · Runs when its contract is declared · Severity `error` · No automatic fix
 
 Strict mode of a `call-owners` contract (`unresolved = "report"`): calling a method named like a target on an object of unknown class.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a report can be wrong about the code. It runs when its contract is declared. It has not been measured yet. See [Rule Precision](../precision.md).
 
 ## What it does
 The strict mode of a `[[tool.heki.call-owners]]` contract that sets `unresolved = "report"`:

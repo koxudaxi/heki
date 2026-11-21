@@ -2,9 +2,13 @@
 
 # immutable-quadratic-concat (OPT103)
 
-Family: Complexity Rewrites (OPT) · Enabled by default · Severity `warning` · No automatic fix
+Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` · No automatic fix
 
 Size-dependent immutable quadratic accumulation (`bytes`/`tuple`/attr `str`).
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 50 sampled reports (round 3, 2026-11-21), 92% were right about the code. See [Rule Precision](../precision.md).
 
 ## What it does
 Checks quadratic accumulation of immutable values in a loop:

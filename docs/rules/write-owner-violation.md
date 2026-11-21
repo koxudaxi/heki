@@ -2,9 +2,13 @@
 
 # write-owner-violation (MUT201)
 
-Family: Mutation & State (MUT) · Enabled by default · Severity `error` · No automatic fix
+Family: Mutation & State (MUT) · Heuristic · Runs when its contract is declared · Severity `error` · No automatic fix
 
 Writing a guarded attribute/container (directly, via alias, or via helper) outside declared `write-owners`.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a report can be wrong about the code. It runs when its contract is declared. It has not been measured yet. See [Rule Precision](../precision.md).
 
 ## What it does
 Checks writes to attributes and containers that a `[[tool.heki.write-owners]]` contract

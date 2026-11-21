@@ -2,9 +2,13 @@
 
 # unretained-async-task (EFF107)
 
-Family: Execution Effects (EFF) · Opt-in · Severity `error` · No automatic fix
+Family: Execution Effects (EFF) · Heuristic · Opt-in · Severity `error` · No automatic fix
 
 Opt-in: an `asyncio.create_task` result bound to a local variable but never awaited, returned, or stored.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a report can be wrong about the code. It runs only when `select` or `extend-select` names its code or name. It has not been measured yet. See [Rule Precision](../precision.md).
 
 ## What it does
 Checks for the result of `asyncio.create_task(...)`, `asyncio.ensure_future(...)`, or

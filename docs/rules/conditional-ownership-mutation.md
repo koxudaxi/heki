@@ -2,9 +2,13 @@
 
 # conditional-ownership-mutation (MUT112)
 
-Family: Mutation & State (MUT) · Opt-in · Experimental · Severity `error` · No automatic fix
+Family: Mutation & State (MUT) · Heuristic · Opt-in · Experimental · Severity `error` · No automatic fix
 
 Opt-in: changing in place a value that is a new object on one path and borrowed state (a parameter, an attribute, a global, or what a function returns of such state) on another.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a report can be wrong about the code. It runs only when `select` or `extend-select` names its code or name. It has not been measured yet. See [Rule Precision](../precision.md).
 
 !!! warning "Experimental"
 

@@ -1926,16 +1926,18 @@ fn rule_and_explain_commands() {
     let lines: Vec<&str> = all.lines().collect();
     assert_eq!(lines.len(), 34, "{all}");
     assert!(lines[0].starts_with("MUT101   cached-property-stale-mutation "));
-    assert!(
-        all.lines()
-            .any(|l| l.starts_with("OPT101") && l.contains("[default=true  fix=true ]")),
-        "{all}"
-    );
-    assert!(
-        all.lines()
-            .any(|l| l.starts_with("EFF105") && l.contains("[default=false fix=false]")),
-        "{all}"
-    );
+    // Each rule's certainty and when it runs with no configuration.
+    for (code, state) in [
+        ("OPT101", "[heuristic off      fix=true ]"),
+        ("EFF105", "[heuristic opt-in   fix=false]"),
+        ("MUT201", "[heuristic contract fix=false]"),
+    ] {
+        assert!(
+            all.lines()
+                .any(|l| l.starts_with(code) && l.contains(state)),
+            "{code}: {all}"
+        );
+    }
     // Without a rule, `rule` lists them all too.
     assert_eq!(heki(&["rule"]).1, all);
 
@@ -1986,6 +1988,28 @@ fn rule_and_explain_commands() {
             &json!("list-quadratic-concat"),
             &json!(true)
         )
+    );
+    assert_eq!(
+        (
+            &one["certainty"],
+            &one["activation"],
+            &one["default_enabled"]
+        ),
+        (&json!("heuristic"), &json!("default"), &json!(false))
+    );
+    let contract: Value =
+        serde_json::from_str(&heki(&["rule", "MUT201", "--output-format", "json"]).1).unwrap();
+    assert_eq!(
+        (&contract["activation"], &contract["default_enabled"]),
+        (&json!("contract"), &json!(true))
+    );
+    // A heuristic rule's page says so before its documentation, as its JSON note does.
+    let note = one["heuristic_note"].as_str().unwrap();
+    assert!(note.starts_with("This rule is heuristic: "), "{note}");
+    let (_, page, _) = heki(&["rule", "OPT101"]);
+    assert!(
+        page.contains(&format!("\n\n{note}\n\n## What it does\n")),
+        "{page}"
     );
 }
 

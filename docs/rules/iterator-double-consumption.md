@@ -2,9 +2,13 @@
 
 # iterator-double-consumption (MUT106)
 
-Family: Mutation & State (MUT) · Opt-in · Severity `error` · No automatic fix
+Family: Mutation & State (MUT) · Heuristic · Opt-in · Severity `error` · No automatic fix
 
 Opt-in: consuming a single-pass iterator or generator a second time (the second pass sees no items).
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a report can be wrong about the code. It runs only when `select` or `extend-select` names its code or name. It has not been measured yet. See [Rule Precision](../precision.md).
 
 ## What it does
 Checks for a single-pass iterator or generator that is consumed a second time. Once an

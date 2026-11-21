@@ -87,9 +87,9 @@ Each of these passes, because each tool sees one step:
 heki follows the call into `load_user` and the alias into `add_default`:
 
 ```console
-$ heki check --output-format concise
-app/api.py:5:12: EFF101 `handler` reaches the blocking call `requests.get` on the event loop
-app/models.py:17:5: MUT201 `parse` writes `Model.fields` (indirect_helper) via `app.models.add_default` outside the write owners of `model-store`
+$ heki check --heuristic --output-format concise
+app/api.py:5:12: EFF101 [heuristic] `handler` reaches the blocking call `requests.get` on the event loop
+app/models.py:17:5: MUT201 [heuristic] `parse` writes `Model.fields` (indirect_helper) via `app.models.add_default` outside the write owners of `model-store`
 Found 2 diagnostic(s) in 4 file(s).
 ```
 
@@ -184,6 +184,15 @@ byte of its source, at most 250,000, gets no `OPT` finding: heki does not try to
 in it. A function whose lazy initializations (the blocks each covers, and the walks that find
 them) would take more than 8 cells per byte of its source, at most 250,000, has none of them
 recognized: its clients and queries count as made on every iteration.
+
+One choice goes the other way: a size heki cannot bound counts as data-sized. A rule about
+loops reports a loop over a list that the code does not fix at 16 items or fewer, also when the
+list is small by its nature (the columns of a table, a handful of options). The report states
+exactly that, a loop over an iterable whose size the code does not bound, and it is right about
+the code; whether the loop is slow is the harm, which the rule cannot see. A report that is wrong
+about the code (a bound the code states, a call that cannot run on every iteration) is what a
+rule's certainty counts: an exact rule has none in its measured samples, a heuristic one can have
+some ([Rule Precision](precision.md)).
 
 Missed findings close as heki learns more:
 

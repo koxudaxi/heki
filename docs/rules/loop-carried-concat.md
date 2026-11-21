@@ -2,9 +2,13 @@
 
 # loop-carried-concat (DATA101)
 
-Family: Data Pipelines (DATA) · Enabled by default · Severity `error` · No automatic fix
+Family: Data Pipelines (DATA) · Heuristic · Off by default · Severity `error` · No automatic fix
 
 Loop-carried quadratic `pandas.concat` / `numpy.vstack` / `numpy.append` accumulation.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 28 sampled reports (round 3, 2026-11-21), 71% were right about the code. See [Rule Precision](../precision.md).
 
 ## What it does
 Checks loops that grow a DataFrame or array by re-concatenating it on every iteration:

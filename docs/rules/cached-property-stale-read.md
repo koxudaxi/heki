@@ -2,9 +2,13 @@
 
 # cached-property-stale-read (MUT111)
 
-Family: Mutation & State (MUT) · Opt-in · Experimental · Severity `error` · No automatic fix
+Family: Mutation & State (MUT) · Heuristic · Opt-in · Experimental · Severity `error` · No automatic fix
 
 Opt-in: reading a `@cached_property` that a method of its class family can leave stale (a write `MUT101` reports).
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a report can be wrong about the code. It runs only when `select` or `extend-select` names its code or name. It has not been measured yet. See [Rule Precision](../precision.md).
 
 !!! warning "Experimental"
 

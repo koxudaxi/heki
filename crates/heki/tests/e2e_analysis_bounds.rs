@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 /// `heki check --output-format json` of the project, which must finish within `limit`.
 fn check_within(p: &Project, limit: Duration) -> Vec<Value> {
     let mut child = Command::new(env!("CARGO_BIN_EXE_heki"))
-        .args(["check", "--output-format", "json", "."])
+        .args(["check", "--heuristic", "--output-format", "json", "."])
         .current_dir(&p.dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
