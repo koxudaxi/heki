@@ -921,3 +921,77 @@ fn imported_queues_are_followed_wherever_a_name_binds_them() {
         ]
     );
 }
+
+const CYCLES: &str = r#"import queue
+
+
+def make() -> queue.Queue:
+    return queue.Queue(1)
+
+
+class Ring:
+    def __init__(self) -> None:
+        self.a: queue.Queue = queue.Queue(1)
+        self.b: queue.Queue = queue.Queue()
+
+    def swap(self) -> None:
+        a = self.a
+        self.a = self.b
+        self.b = a
+
+    def post(self) -> None:
+        self.b.put(1)
+
+
+class OpenRing:
+    def __init__(self) -> None:
+        self.a: queue.Queue = queue.Queue(1)
+        self.b: queue.Queue = make()
+
+    def swap(self) -> None:
+        a = self.a
+        self.a = self.b
+        self.b = a
+
+    def post(self) -> None:
+        self.a.put(1)
+
+
+class Diamond:
+    def __init__(self) -> None:
+        self.base: queue.Queue = queue.Queue(1)
+        self.left: queue.Queue = queue.Queue()
+        self.right: queue.Queue = queue.Queue()
+        self.top: queue.Queue = queue.Queue()
+
+    def rewire(self, flag: bool) -> None:
+        self.left = self.base
+        self.right = self.base
+        self.top = self.left if flag else self.right
+
+    def post(self) -> None:
+        self.top.put(1)
+
+
+async def tp_ring(r: Ring) -> None:
+    r.post()
+
+
+async def tn_open_ring(r: OpenRing) -> None:
+    r.post()
+
+
+async def tp_diamond(d: Diamond) -> None:
+    d.post()
+"#;
+
+/// Attributes stored from one another: the names on a cycle share one answer (bounded when one
+/// store bounds the queue and every store is known, unknown when one is not), and a name two
+/// others read is resolved once.
+#[test]
+fn attributes_stored_from_one_another_share_their_answers() {
+    assert_eq!(
+        eff101("queue_attribute_cycles", &[("m.py", CYCLES)]),
+        vec![r("m.py", 53, "tp_ring"), r("m.py", 61, "tp_diamond")]
+    );
+}

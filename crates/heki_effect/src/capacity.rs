@@ -17,8 +17,8 @@
 //! not count.
 
 use crate::resolver::{
-    ModuleDecls, ProjectDecls, TypeCtx, func_qualname, is_summarized_function, passed_var,
-    self_aliases,
+    DeclKeys, ModuleDecls, ProjectDecls, TypeCtx, func_qualname, is_summarized_function,
+    passed_var, self_aliases,
 };
 use crate::types::Ty;
 use crate::{
@@ -720,41 +720,190 @@ pub(crate) fn asking<'f>(
     waiting.map(|(k, _)| k).chain(calling).collect()
 }
 
-/// What the declarations record of an attribute or a global (`start`), with the attributes
-/// and globals they name followed, each once: in terms of parameters only.
+/// What `start` gives a queue through the declarations, in terms of parameters only: what it
+/// fixes, joined with the answer of each attribute and global it names ([`NameWalk`]).
 pub(crate) fn resolve_in_decls(project: &ProjectDecls, start: CapacityOf) -> CapacityOf {
     let mut out = CapacityOf {
         fixed: start.fixed,
         params: start.params,
         ..CapacityOf::default()
     };
-    let mut attrs: BTreeSet<(String, String)> = start.attrs;
-    let mut globals: BTreeSet<String> = start.globals;
-    let mut stack: Vec<CapacityOf> = Vec::new();
-    for (class, attr) in &attrs {
-        stack.extend(project.stored_attr_capacities(class, attr));
-    }
-    for fqn in &globals {
-        stack.push(project.stored_global_capacity(fqn));
-    }
-    while let Some(c) = stack.pop() {
-        out.fixed = join(out.fixed, c.fixed);
-        out.params.extend(c.params);
-        for (class, attr) in c.attrs {
-            if attrs.insert((class.clone(), attr.clone())) {
-                stack.extend(project.stored_attr_capacities(&class, &attr));
-            }
+    for name in names(start.attrs, start.globals) {
+        let (value, reads) = NameWalk { project }.answer(name);
+        if let Some(reads) = reads {
+            project.replay(reads);
         }
-        for fqn in c.globals {
-            if globals.insert(fqn.clone()) {
-                stack.push(project.stored_global_capacity(&fqn));
-            }
-        }
-    }
-    if out.is_unknown() {
-        out = CapacityOf::unknown();
+        out.join(&value);
     }
     out
+}
+
+/// Each attribute and global of `attrs` and `globals` as the `CapacityOf` naming only it, the
+/// key its answer is kept under.
+fn names(
+    attrs: BTreeSet<(String, String)>,
+    globals: BTreeSet<String>,
+) -> impl Iterator<Item = CapacityOf> {
+    let attrs = attrs.into_iter().map(|a| CapacityOf {
+        attrs: BTreeSet::from([a]),
+        ..CapacityOf::default()
+    });
+    let globals = globals.into_iter().map(|g| CapacityOf {
+        globals: BTreeSet::from([g]),
+        ..CapacityOf::default()
+    });
+    attrs.chain(globals)
+}
+
+/// An answer of the declarations (`ProjectDecls::known_capacity`): the capacity, in terms of
+/// parameters only, and what computing it read while recording.
+type NameAnswer = (CapacityOf, Option<Arc<DeclKeys>>);
+
+/// The answers of attributes and globals: what the declarations record of each one's stores
+/// (`ProjectDecls::stored_attr_capacities`, `ProjectDecls::stored_global_capacity`), joined
+/// with the answers of the names they read. Every name is resolved once while the indexes stay
+/// (`ProjectDecls::keep_capacity`), and the names on one cycle share one answer.
+struct NameWalk<'p> {
+    project: &'p ProjectDecls,
+}
+
+/// One name of a walk in progress (Tarjan's algorithm over the names the stores of each name
+/// read): its position, the least position it reaches back to, whether it is on the stack,
+/// what its stores fix with the parameters they name, what reading them read, and the names
+/// they read.
+struct NameVisit {
+    index: usize,
+    low: usize,
+    on_stack: bool,
+    own: CapacityOf,
+    reads: Option<DeclKeys>,
+    names: Vec<CapacityOf>,
+}
+
+impl NameWalk<'_> {
+    fn answer(&self, root: CapacityOf) -> NameAnswer {
+        if let Some(known) = self.project.known_capacity(&root) {
+            return known;
+        }
+        let mut done: FxHashMap<CapacityOf, NameAnswer> = FxHashMap::default();
+        let mut visits: FxHashMap<CapacityOf, NameVisit> = FxHashMap::default();
+        let mut stack: Vec<CapacityOf> = Vec::new();
+        // `(name, next name its stores read to visit)`.
+        let mut path: Vec<(CapacityOf, usize)> = vec![(root.clone(), 0)];
+        self.enter(root.clone(), &mut visits, &mut stack);
+        while let Some((v, next)) = path.last().cloned() {
+            if let Some(w) = visits[&v].names.get(next).cloned() {
+                path.last_mut().expect("a name on the path").1 += 1;
+                if done.contains_key(&w) {
+                    continue;
+                }
+                if let Some(known) = self.project.known_capacity(&w) {
+                    done.insert(w, known);
+                    continue;
+                }
+                match visits.get(&w) {
+                    None => {
+                        self.enter(w.clone(), &mut visits, &mut stack);
+                        path.push((w, 0));
+                    }
+                    Some(seen) => {
+                        let reached = seen.on_stack.then_some(seen.index);
+                        let visit = visits.get_mut(&v).expect("a visited name");
+                        visit.low = visit.low.min(reached.unwrap_or(visit.low));
+                    }
+                }
+                continue;
+            }
+            path.pop();
+            let (index, low) = (visits[&v].index, visits[&v].low);
+            if let Some((parent, _)) = path.last() {
+                let visit = visits.get_mut(parent).expect("a visited name");
+                visit.low = visit.low.min(low);
+            }
+            if low == index {
+                // `v` starts a cycle, or is alone: its members share the answer.
+                let at = stack
+                    .iter()
+                    .rposition(|m| *m == v)
+                    .expect("a name starting a cycle is on the stack");
+                let members = stack.split_off(at);
+                let answer = self.settle(&members, &mut visits, &done);
+                for m in members {
+                    self.project
+                        .keep_capacity(m.clone(), answer.0.clone(), answer.1.clone());
+                    done.insert(m, answer.clone());
+                }
+            }
+        }
+        done.remove(&root).expect("the root's answer is settled")
+    }
+
+    /// Start visiting `name`: what its stores fix, and the names they read.
+    fn enter(
+        &self,
+        name: CapacityOf,
+        visits: &mut FxHashMap<CapacityOf, NameVisit>,
+        stack: &mut Vec<CapacityOf>,
+    ) {
+        let (stored, reads) = self.project.reads_of(|| self.stored(&name));
+        let index = visits.len();
+        let visit = NameVisit {
+            index,
+            low: index,
+            on_stack: true,
+            own: CapacityOf {
+                fixed: stored.fixed,
+                params: stored.params,
+                ..CapacityOf::default()
+            },
+            reads,
+            names: names(stored.attrs, stored.globals).collect(),
+        };
+        visits.insert(name.clone(), visit);
+        stack.push(name);
+    }
+
+    /// The join of what the declarations record of the stores of `name`.
+    fn stored(&self, name: &CapacityOf) -> CapacityOf {
+        let mut out = CapacityOf::default();
+        for (class, attr) in &name.attrs {
+            for c in self.project.stored_attr_capacities(class, attr) {
+                out.join(&c);
+            }
+        }
+        for fqn in &name.globals {
+            out.join(&self.project.stored_global_capacity(fqn));
+        }
+        out
+    }
+
+    /// The answer of the cycle `members`: what their stores fix, joined with the answers of
+    /// the names outside it they read (settled before it), and what all of that read.
+    fn settle(
+        &self,
+        members: &[CapacityOf],
+        visits: &mut FxHashMap<CapacityOf, NameVisit>,
+        done: &FxHashMap<CapacityOf, NameAnswer>,
+    ) -> NameAnswer {
+        let mut value = CapacityOf::default();
+        let mut reads: Option<DeclKeys> = None;
+        let mut add_reads = |r: DeclKeys| reads.get_or_insert_with(DeclKeys::default).extend(r);
+        for m in members {
+            let visit = visits.get_mut(m).expect("a visited name");
+            visit.on_stack = false;
+            value.join(&visit.own);
+            if let Some(r) = visit.reads.take() {
+                add_reads(r);
+            }
+            for (answer, r) in visit.names.iter().filter_map(|w| done.get(w)) {
+                value.join(answer);
+                if let Some(r) = r {
+                    add_reads(DeclKeys::clone(r));
+                }
+            }
+        }
+        (value, reads.map(Arc::new))
+    }
 }
 
 // ------------------------------------------------------------------------ the declarations

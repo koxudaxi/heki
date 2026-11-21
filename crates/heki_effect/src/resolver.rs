@@ -1687,44 +1687,57 @@ impl ProjectDecls {
         })
     }
 
-    /// `start` resolved through the declarations (`crate::capacity::resolve_in_decls`), kept
-    /// until the indexes change.
+    /// `start` resolved through the declarations ([`crate::capacity::resolve_in_decls`], which
+    /// keeps the answer of each attribute and global until the indexes change).
     fn capacity(&self, start: CapacityOf) -> CapacityOf {
+        crate::capacity::resolve_in_decls(self, start)
+    }
+
+    /// The answer kept for an attribute or a global (`name`, a `CapacityOf` naming only it), with
+    /// what computing it read. One kept without its reads is no answer while recording: it is
+    /// computed again, to record them.
+    pub(crate) fn known_capacity(
+        &self,
+        name: &CapacityOf,
+    ) -> Option<(CapacityOf, Option<Arc<DeclKeys>>)> {
         let recording = self.recorder.on.load(Ordering::Relaxed);
-        // An answer kept without its reads is computed again while recording, to record them.
-        let known = self
-            .capacities
+        self.capacities
             .read()
             .unwrap_or_else(PoisonError::into_inner)
-            .get(&start)
+            .get(name)
             .filter(|k| !recording || k.reads.is_some())
-            .cloned();
-        if let Some(known) = known {
-            if let Some(reads) = known.reads.filter(|_| recording) {
-                self.recorded().replayed.push(reads);
-            }
-            return known.value;
-        }
-        let (value, reads) = if recording {
-            // What this computation reads, apart from what the recording read before.
-            let before = std::mem::take(&mut *self.recorded());
-            let value = crate::capacity::resolve_in_decls(self, start.clone());
-            let mut recorded = self.recorded();
-            let reads = Arc::new(std::mem::replace(&mut *recorded, before).into_keys());
-            recorded.replayed.push(Arc::clone(&reads));
-            (value, Some(reads))
-        } else {
-            (crate::capacity::resolve_in_decls(self, start.clone()), None)
-        };
-        let known = KnownCapacity {
-            value: value.clone(),
-            reads,
-        };
+            .map(|k| (k.value.clone(), k.reads.clone()))
+    }
+
+    pub(crate) fn keep_capacity(
+        &self,
+        name: CapacityOf,
+        value: CapacityOf,
+        reads: Option<Arc<DeclKeys>>,
+    ) {
         self.capacities
             .write()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(start, known);
-        value
+            .insert(name, KnownCapacity { value, reads });
+    }
+
+    /// Run `f`, and return with its result what it read of these declarations while recording
+    /// (`None` when not recording), apart from what the recording read before.
+    pub(crate) fn reads_of<T>(&self, f: impl FnOnce() -> T) -> (T, Option<DeclKeys>) {
+        if !self.recorder.on.load(Ordering::Relaxed) {
+            return (f(), None);
+        }
+        let before = std::mem::take(&mut *self.recorded());
+        let out = f();
+        let reads = std::mem::replace(&mut *self.recorded(), before).into_keys();
+        (out, Some(reads))
+    }
+
+    /// Add what computing a kept answer read to the recording.
+    pub(crate) fn replay(&self, reads: Arc<DeclKeys>) {
+        if self.recorder.on.load(Ordering::Relaxed) {
+            self.recorded().replayed.push(reads);
+        }
     }
 
     /// What the classes whose stores an instance of `class` may hold record of `attr`

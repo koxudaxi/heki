@@ -2085,3 +2085,48 @@ fn queue_parameters_along_a_reversed_chain_of_helpers_resolve_in_linear_time() {
         "{found:#?}"
     );
 }
+
+/// A class whose annotated queue attributes each store the one before, with a method putting on
+/// each: the capacity of every attribute names the one before it.
+fn queue_attribute_chain(attrs: usize) -> String {
+    let mut lines = vec![
+        "import queue".to_owned(),
+        String::new(),
+        String::new(),
+        "class Holder:".to_owned(),
+    ];
+    lines.extend((0..attrs).map(|i| format!("    a{i}: queue.Queue")));
+    lines.extend([
+        String::new(),
+        "    def __init__(self) -> None:".to_owned(),
+        "        self.a0 = queue.Queue(1)".to_owned(),
+    ]);
+    lines.extend((1..attrs).map(|i| format!("        self.a{i} = self.a{}", i - 1)));
+    for i in 0..attrs {
+        lines.push(String::new());
+        lines.push(format!("    def p{i}(self) -> None:"));
+        lines.push(format!("        self.a{i}.put(1)"));
+    }
+    lines.extend([
+        String::new(),
+        String::new(),
+        "async def entry(h: Holder) -> None:".to_owned(),
+        format!("    h.p{}()", attrs - 1),
+    ]);
+    lines.join("\n") + "\n"
+}
+
+/// The declarations keep the answer of each attribute and global they resolve: the puts on a
+/// long chain of attributes resolve each attribute once, not the chain once per put.
+#[test]
+fn puts_along_a_chain_of_attributes_resolve_each_attribute_once() {
+    let p = Project::new("bounds_queue_attribute_chain");
+    p.write("m.py", &queue_attribute_chain(6000));
+    let found = check_within(&p, Duration::from_secs(20));
+    assert!(
+        found
+            .iter()
+            .any(|d| d["rule_code"] == "EFF101" && d["qualname"] == "entry"),
+        "{found:#?}"
+    );
+}

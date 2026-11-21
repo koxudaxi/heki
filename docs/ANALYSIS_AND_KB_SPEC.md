@@ -449,25 +449,27 @@ attribute or a global as one records nothing); `ProjectDecls::attr_capacity` res
 over every class whose stores an instance may hold (the class, its subclasses, and their MROs; a
 class defining the name without a record, or a name another module stores, is unknown) and
 `ProjectDecls::global_capacity` a global over its module (unknown without a record or when another
-module rebinds it), following what the records name, so a summary's capacities name parameters only.
-A wait the code decides is an effect like any other. A wait on the function's own parameter is an
-effect needing a bounded queue there (`EffectGuards::bounded_queue`): each call decides it by what
-it binds (a queue not known to be bounded prunes the effect there; the caller's own parameter
-carries the need on), so a helper waits only for the callers handing it a bounded queue. Any other
-wait is a `CapacityWait` of the summary, and every such call keeps it in `CallSite::queues`
-(`SiteQueues::while_full`). Before propagation, the index resolves the parameters these name, and
-those queue arguments name (`SiteQueues::handed`, every parameter a call's binding can name, so one
-pass over the calls finds every source), over the call sites binding them (`ParamCapacities`, a join
-fixpoint over a worklist of the parameters each one's value depends on, a value growing three times
-at most): the argument's capacity as its caller found it, or its constant (`ConstArg::positive`,
-also of a literal default); an argument not bound exactly, and a function without project callers,
-are unknown. Propagation adds the waits the parameters show bounded to the summary's effects
-(`ParamCapacities::realize`); a site's `while_full` effects run where the parameters show its queue
-bounded (`ProjectIndex::while_full_effects`, which Boundary-Only Reporting and `EFF201` read), and
-an `async def` reaching a wait that needs its own parameter bounded reports it only when its
-callers' join is bounded. An incremental update recomputes the parameters' capacities; the functions
-whose waits or calls name a parameter whose capacity changed are re-propagated and reported changed,
-also when their summary stays equal (the report at their own call moves).
+module rebinds it), following what the records name (each attribute and global resolved once while
+the indexes stay, the names on one cycle sharing one answer), so a summary's capacities name
+parameters only. A wait the code decides is an effect like any other. A wait on the function's own
+parameter is an effect needing a bounded queue there (`EffectGuards::bounded_queue`): each call
+decides it by what it binds (a queue not known to be bounded prunes the effect there; the caller's
+own parameter carries the need on), so a helper waits only for the callers handing it a bounded
+queue. Any other wait is a `CapacityWait` of the summary, and every such call keeps it in
+`CallSite::queues` (`SiteQueues::while_full`). Before propagation, the index resolves the parameters
+these name, and those queue arguments name (`SiteQueues::handed`, every parameter a call's binding
+can name, so one pass over the calls finds every source), over the call sites binding them
+(`ParamCapacities`, a join fixpoint over a worklist of the parameters each one's value depends on, a
+value growing three times at most): the argument's capacity as its caller found it, or its constant
+(`ConstArg::positive`, also of a literal default); an argument not bound exactly, and a function
+without project callers, are unknown. Propagation adds the waits the parameters show bounded to the
+summary's effects (`ParamCapacities::realize`); a site's `while_full` effects run where the
+parameters show its queue bounded (`ProjectIndex::while_full_effects`, which Boundary-Only Reporting
+and `EFF201` read), and an `async def` reaching a wait that needs its own parameter bounded reports
+it only when its callers' join is bounded. An incremental update recomputes the parameters'
+capacities; the functions whose waits or calls name a parameter whose capacity changed are
+re-propagated and reported changed, also when their summary stays equal (the report at their own
+call moves).
 
 **Where a body runs.** A call site hands its caller one of a callee's two fact sets (one home,
 `ProjectIndex::delivery`): its *body* (`Body`), or what iterating the object it returns runs
