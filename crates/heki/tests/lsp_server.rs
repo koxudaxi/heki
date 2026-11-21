@@ -703,6 +703,37 @@ fn lsp_keeps_open_documents_through_reloads_and_deletions_until_they_close() {
 }
 
 #[test]
+fn lsp_analyzes_documents_opened_together_in_the_order_they_were_opened() {
+    // Never-saved modules opened at once, each importing the one opened before it. A module's
+    // analysis finds the module before it in the index only if it runs after that module's, and
+    // what an analysis affects waits for a save, so the blocking call at the bottom reaches the
+    // `async def` at the top only when the analyses run in message order.
+    const MODULES: usize = 24;
+    let p = Project::new("lsp_open_order");
+    let mut lsp = ready_server(&p, json!({}));
+    lsp.open(
+        &uri_in(&p.dir, "m0.py"),
+        "import time\n\n\ndef f0():\n    time.sleep(1)\n",
+    );
+    for i in 1..MODULES {
+        let below = i - 1;
+        lsp.open(
+            &uri_in(&p.dir, &format!("m{i}.py")),
+            &format!("from m{below} import f{below}\n\n\ndef f{i}():\n    f{below}()\n"),
+        );
+    }
+    let top = MODULES - 1;
+    let handler = uri_in(&p.dir, "handler.py");
+    lsp.open(
+        &handler,
+        &format!("from m{top} import f{top}\n\n\nasync def handler():\n    f{top}()\n"),
+    );
+    lsp.settle();
+    assert_eq!(codes(&lsp.latest[&handler]), ["EFF101"]);
+    lsp.stop(true);
+}
+
+#[test]
 fn lsp_reports_invalid_rule_options_as_a_failed_load() {
     let p = Project::new("lsp_bad_targets");
     let text = "import time\n\n\nasync def h():\n    time.sleep(1)\n";
