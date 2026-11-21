@@ -356,10 +356,17 @@ pub(crate) fn cached_result<'t>(
 /// not inside a union or `Optional`.
 fn annotated_kind(text: &str, resolve: &impl Fn(&str) -> Option<String>) -> Option<ContainerKind> {
     let text = text.trim().trim_matches(|c| c == '"' || c == '\'');
-    let head = text.split_once('[').map_or(text, |(h, _)| h).trim();
-    if head.contains(|c: char| !(c.is_alphanumeric() || c == '_' || c == '.')) {
+    // The head names the whole annotation only when no `|` joins it to another at the top
+    // level (`list[int] | dict[str, int]`).
+    let mut depth = 0i32;
+    let union = text.chars().any(|c| {
+        depth += i32::from(c == '[') - i32::from(c == ']');
+        c == '|' && depth == 0
+    });
+    if union {
         return None;
     }
+    let head = text.split_once('[').map_or(text, |(h, _)| h).trim();
     match resolve(head)?.as_str() {
         "builtins.list" | "typing.List" | "typing_extensions.List" => Some(ContainerKind::List),
         "builtins.dict" | "typing.Dict" | "typing_extensions.Dict" => Some(ContainerKind::Dict),

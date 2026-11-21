@@ -322,6 +322,11 @@ def counted(a) -> int:
 
 
 @lru_cache
+def either_kind(a, c) -> list[int] | dict[str, int]:
+    return [a] if c else {"a": a}
+
+
+@lru_cache
 async def fetched(a) -> list:
     return [a]
 
@@ -373,6 +378,7 @@ def use(g, c):
     raises(g).append(1)
     maybe_dict(g)["k"] = 1
     counted(g).append(1)
+    either_kind(g, c).clear()
     d = config(g)
     d |= {"a": 2}
     twice(g).append(1)
@@ -392,35 +398,37 @@ fn mut114_knows_each_container_kind_by_annotation_or_construction() {
             // A set by annotation, its method and `|=`; a list by `typing.List`, its method and
             // `+=`; lists, sets, and dicts built by assignment, phi, `sorted`, `set`, `dict`, and
             // `list`.
-            (124, true),
-            (126, true),
-            (128, true),
-            (130, true),
+            (129, true),
             (131, true),
-            (132, true),
             (133, true),
-            (134, true),
             (135, true),
             (136, true),
+            (137, true),
+            (138, true),
+            (139, true),
+            (140, true),
+            (141, true),
             // A `frozenset`, a tuple, a list on one return and a set on another, a fall through
             // the end (`None`), and no return at all.
-            (137, false),
-            (138, false),
-            (139, false),
-            (140, false),
-            (141, false),
-            // `dict | None` establishes nothing, but every return builds a dict.
-            (142, true),
-            // An annotation that is no container, and a return built as none.
+            (142, false),
             (143, false),
-            // `|=` on a dict by annotation.
-            (145, true),
-            // Two definitions that hand out different kinds.
+            (144, false),
+            (145, false),
             (146, false),
-            // A static method under the cache.
+            // `dict | None` establishes nothing, but every return builds a dict.
             (147, true),
-            // An item of a generator's value.
+            // An annotation that is no container, and a return built as none.
+            (148, false),
+            // A union of two container kinds, and returns of both.
             (149, false),
+            // `|=` on a dict by annotation.
+            (151, true),
+            // Two definitions that hand out different kinds.
+            (152, false),
+            // A static method under the cache.
+            (153, true),
+            // An item of a generator's value.
+            (155, false),
         ],
         "{diags:#?}"
     );
