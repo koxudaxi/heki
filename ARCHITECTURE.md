@@ -674,7 +674,7 @@ heki/
   facts. Files changed on disk and configuration changes are followed.
   `crates/heki/tests/lsp_oracle.rs` compares the server with `heki check` after every step of an
   editing session. Each group of steps is a test of its own, a session that starts from the
-  project's initial files, so the groups run in parallel: 330 steps in 39 groups, 44 steps in
+  project's initial files, so the groups run in parallel: 334 steps in 40 groups, 44 steps in
   13 groups over file, layout, source root, buffer, and baseline changes, and 3 steps in a
   project below a Git working tree without a configuration file.
   Measured on datamodel-code-generator: p90 of about 45 ms per file edit.
