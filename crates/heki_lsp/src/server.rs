@@ -215,6 +215,7 @@ impl State {
         let loaded = Workspace::load(
             &ProjectOptions {
                 paths: &paths,
+                working_dir: Some(&paths[0]),
                 overrides: Some(&texts),
                 ..ProjectOptions::default()
             },
@@ -322,7 +323,8 @@ impl State {
         // The configuration, the summary snapshot, or an ignore file changed: everything is
         // analyzed again (an ignore file changes which files belong to the project), as
         // `heki check --watch` does.
-        let config_root = find_root(self.root.as_deref().unwrap_or(Path::new(".")));
+        let workspace_root = self.root.as_deref().unwrap_or(Path::new("."));
+        let config_root = find_root(workspace_root, workspace_root);
         let baseline = self
             .workspace
             .as_ref()
@@ -377,7 +379,7 @@ impl State {
     fn layout_changed(&self) -> bool {
         self.workspace
             .as_ref()
-            .is_some_and(|ws| ModuleLayout::detect(&ws.env.root) != ws.env.layout)
+            .is_some_and(|ws| ModuleLayout::detect(&ws.env.root, &ws.env.cfg) != ws.env.layout)
     }
 
     /// A document was closed (`text`: what it held): the file on the disk is its text again.

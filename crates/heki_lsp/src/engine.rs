@@ -491,7 +491,7 @@ impl Workspace {
             path,
             &self.env.root,
             text.to_owned(),
-            self.env.layout,
+            &self.env.layout,
             self.env.runtime,
         )
     }

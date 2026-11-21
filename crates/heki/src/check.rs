@@ -123,6 +123,7 @@ pub(crate) fn load_and_index(
     let project = Project::load(&ProjectOptions {
         paths,
         config: analysis.config.as_deref(),
+        working_dir: None,
         target_version: analysis.target_version.as_deref(),
         overrides,
     })?;
@@ -600,6 +601,7 @@ pub(crate) fn run_snapshot(args: &SnapshotArgs) -> Result<ExitCode> {
     let project = Project::load(&ProjectOptions {
         paths: &paths,
         config: args.config.as_deref(),
+        working_dir: None,
         target_version: args.target_version.as_deref(),
         overrides: None,
     })?;
