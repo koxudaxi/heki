@@ -15,3 +15,6 @@ heki_semantic.workspace = true
 rustc-hash.workspace = true
 serde.workspace = true
 smallvec.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

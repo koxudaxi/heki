@@ -1132,7 +1132,7 @@ fn annotation_normalization() {
             ("List".into(), "typing.List".into()),
         ]),
         type_checking_imports: BTreeMap::from([("Repo".into(), "pkg.repo.Repo".into())]),
-        classes: BTreeMap::from([("Local".into(), ClassDecl::default())]),
+        classes: BTreeMap::from([("Local".into(), Box::default())]),
         ..ModuleDecls::default()
     };
     let r = |a: &str| decls.resolve_annotation(a);

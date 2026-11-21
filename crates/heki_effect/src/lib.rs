@@ -51,7 +51,7 @@ pub use iterations::{
 };
 pub use locks::{LockAcquire, LockFacts, ObjRef, SiteLock, StateTests};
 pub use one_at_a_time::ExclusiveUse;
-pub use ownership::{LocalOrigins, Origins, ResultOf};
+pub use ownership::{LocalOrigins, Origins, ResultOf, ReturnOrigins};
 pub use readonly::{ProtectedReturn, ReturnStep, Shared};
 pub use report::{BoundaryReport, boundary_reports, boundary_reports_in};
 pub use resolver::{
@@ -590,23 +590,14 @@ pub struct EffectSummary {
     pub retains_params: u64,
     /// The function returns a new object that nothing else holds (`fresh-objects`).
     pub returns_new: ReturnsNew,
-    /// What the object the function returns may be, path by path: a new one, state that
-    /// outlives the call, one of its parameters, or an element of one (`MUT112`; propagated from
-    /// the project callees whose result it returns, [`Self::returns_results`]).
-    #[serde(default, skip_serializing_if = "Origins::is_empty")]
-    pub returns_origins: Origins,
-    /// The project calls of the function whose results it may return (`MUT112`): propagation
-    /// adds what they return to `returns_origins`, through the calls whose results their
-    /// arguments may be ([`ArgOrigin::origins`]).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub returns_results: Vec<ResultOf>,
-    /// The phis the returned object may be ([`Self::origin_nodes`] positions; `MUT112`, local).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub returns_nodes: Vec<u32>,
-    /// What each phi the origin walks of the function meet may be ([`LocalOrigins::nodes`]),
-    /// each walked once (`MUT112`, local).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub origin_nodes: Vec<LocalOrigins>,
+    /// `MUT112`: what the object the function returns may be, path by path: a new one, state
+    /// that outlives the call, one of its parameters, or an element of one, propagated from the
+    /// project callees whose result it returns, through the calls whose results their arguments
+    /// may be ([`ArgOrigin::origins`]). `None` when the function returns nothing `MUT112` knows
+    /// of, as every function while `MUT112` does not run; read through
+    /// [`Self::return_origin_facts`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub return_origins: Option<Box<ReturnOrigins>>,
     /// The function's own writes heki cannot tie to a class (`MUT205`; never propagated).
     pub unresolved_write_sites: BTreeSet<UnresolvedWriteSite>,
     /// The function's own reads and calls heki cannot tie to a class (`MUT206`, `MUT207`; never
@@ -912,6 +903,13 @@ impl EffectSummary {
         for (obj, u) in other {
             one_at_a_time::add_use(self.exclusive_uses_mut(), obj, u);
         }
+    }
+
+    /// [`Self::return_origins`], empty when there are none.
+    pub fn return_origin_facts(&self) -> &ReturnOrigins {
+        self.return_origins
+            .as_deref()
+            .unwrap_or(&ownership::NO_RETURN_ORIGINS)
     }
 
     /// Add the facts of the typed write sites to `typed_field_writes` (propagation adds those
@@ -1262,7 +1260,7 @@ pub struct CallSite {
     /// a test of state the holder changes is not reported; only computed while the rule runs,
     /// `None` when there is none).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub state_tests: Option<Box<StateTests>>,
+    pub state_tests: Option<Box<heki_ir::walk::Answer<StateTests>>>,
     /// The caller certainly holds a lock at the call: what the callees use one operation at a
     /// time is kept to one task at a time (`EFF110`; only computed while the rule runs).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -1533,12 +1531,11 @@ pub enum TypedWrites {
 }
 
 /// The facts of the opt-in rules that summaries and propagation compute only when a rule
-/// reads them: `MUT112`'s return origins (`EffectSummary::returns_origins`, `returns_results`,
-/// `returns_nodes`, `origin_nodes`, `ArgOrigin::origins`) and `MUT113`'s iteration facts
-/// (`EffectSummary::iterations`, `CallSite::result_held`), and `EFF109`'s lock facts
-/// (`EffectSummary::locks`, `CallSite::state_tests`), and `EFF110`'s one-at-a-time uses
-/// (`EffectSummary::exclusive`, `CallSite::under_lock`). `CallSite::returned`, which `MUT202`
-/// reads too, is always computed.
+/// reads them: `MUT112`'s return origins (`EffectSummary::return_origins`, `ArgOrigin::origins`),
+/// `MUT113`'s iteration facts (`EffectSummary::iterations`, `CallSite::result_held`), `EFF109`'s
+/// lock facts (`EffectSummary::locks`, `CallSite::state_tests`), and `EFF110`'s one-at-a-time
+/// uses (`EffectSummary::exclusive`, `CallSite::under_lock`). `CallSite::returned`, which
+/// `MUT202` reads too, is always computed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OptInFacts {
     pub return_origins: bool,
