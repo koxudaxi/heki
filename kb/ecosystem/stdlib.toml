@@ -7,7 +7,7 @@ opaque_packages = [
     "builtins", "asyncio", "socket", "ssl", "subprocess", "time", "io", "os",
     "pathlib", "shutil", "sqlite3", "urllib", "http", "logging", "copy", "functools",
     "itertools", "collections", "threading", "multiprocessing", "concurrent", "dataclasses",
-    "queue",
+    "queue", "contextlib",
 ]
 
 # --- Sleep ---
@@ -15,6 +15,10 @@ opaque_packages = [
 [[entries]]
 symbol = "time.sleep"
 effects = ["sleep"]
+# A sleep of no length returns at once.
+cases = [
+    { arg = 0, equals = 0, effects = [] },
+]
 opaque_to_layer3 = true
 
 # --- Subprocess ---
@@ -44,6 +48,10 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "subprocess.Popen.wait"
 effects = ["blocking_subprocess"]
+# With no time left, it polls the child once and returns or raises `TimeoutExpired`.
+cases = [
+    { arg = 0, param = "timeout", equals = 0, effects = [] },
+]
 opaque_to_layer3 = true
 
 [[entries]]
@@ -58,6 +66,7 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "builtins.open"
 effects = ["blocking_fs"]
+exit_suppresses = false
 opaque_to_layer3 = true
 
 [[entries]]
@@ -185,12 +194,16 @@ opaque_to_layer3 = true
 
 # --- Name resolution ---
 # A host name lookup waits for the resolver (DNS); the event loop has `loop.getaddrinfo()`.
+# A numeric address is parsed, not looked up, and `localhost` is answered by the hosts file or
+# the resolver's own entry, without the network.
 
 [[entries]]
 symbol = "socket.getaddrinfo"
 effects = ["blocking_net"]
 # `AI_NUMERICHOST` takes only a numeric address and never asks a resolver.
 cases = [
+    { arg = 0, param = "host", numeric_address = true, effects = [] },
+    { arg = 0, param = "host", one_of = ["localhost"], effects = [] },
     { arg = 5, param = "flags", flag = ["socket.AI_NUMERICHOST", "socket.AddressInfo.AI_NUMERICHOST"], effects = [] },
 ]
 opaque_to_layer3 = true
@@ -198,11 +211,22 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "socket.gethostbyname"
 effects = ["blocking_net"]
+cases = [
+    { arg = 0, numeric_address = true, effects = [] },
+    { arg = 0, one_of = ["localhost"], effects = [] },
+]
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "socket.getfqdn"
 effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+# --- Context managers that can suppress the exception of the `with` body ---
+
+[[entries]]
+symbol = "contextlib.suppress"
+exit_suppresses = true
 opaque_to_layer3 = true
 
 # --- Async-safe ---
@@ -266,26 +290,31 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "threading.Lock"
 sync_lock_or_tx = true
+exit_suppresses = false
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "threading.RLock"
 sync_lock_or_tx = true
+exit_suppresses = false
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "threading.Semaphore"
 sync_lock_or_tx = true
+exit_suppresses = false
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "threading.BoundedSemaphore"
 sync_lock_or_tx = true
+exit_suppresses = false
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "threading.Condition"
 sync_lock_or_tx = true
+exit_suppresses = false
 opaque_to_layer3 = true
 
 # --- Blocking synchronization (waits on the calling thread) ---
@@ -681,16 +710,23 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "urllib.request.urlopen"
 effects = ["blocking_net", "unpooled_client_alloc"]
+# A `data:` URL is decoded in memory.
+cases = [
+    { arg = 0, param = "url", prefix = ["data:"], effects = [] },
+]
+exit_suppresses = false
 opaque_to_layer3 = true
 
 # --- DB (sqlite3) ---
 # The `execute*` methods return the cursor. `fetch*` step the statement already executed: they
 # read the database file (blocking) but send no new query, so a fetch loop is not `EFF103`.
+# `commit()` and `rollback()` do nothing without an open transaction.
 
 [[entries]]
 symbol = "sqlite3.connect"
 effects = ["blocking_db", "unpooled_client_alloc"]
 return_type = "sqlite3.Connection"
+exit_suppresses = false
 opaque_to_layer3 = true
 
 [[entries]]
@@ -719,11 +755,13 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "sqlite3.Connection.commit"
 effects = ["blocking_db"]
+emits = "if-pending"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "sqlite3.Connection.rollback"
 effects = ["blocking_db"]
+emits = "if-pending"
 opaque_to_layer3 = true
 
 [[entries]]

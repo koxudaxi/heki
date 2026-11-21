@@ -1286,6 +1286,61 @@ async def handler(host, ip):
     );
 }
 
+#[test]
+fn waits_that_their_arguments_end_at_once_are_not_reported() {
+    // No sleep, a polled child, a numeric or local host, a `data:` URL: none of them waits.
+    // An argument heki cannot evaluate is one the call waits on.
+    assert_eq!(
+        check(
+            "cat_waits_end_at_once",
+            "app.py",
+            r#"import socket
+import subprocess
+import time
+from urllib.request import urlopen
+
+
+async def tn_no_sleep():
+    time.sleep(0)
+    time.sleep(0.0)
+
+
+async def tn_polled(child: subprocess.Popen):
+    child.wait(timeout=0)
+
+
+async def tn_local_hosts():
+    socket.getaddrinfo("127.0.0.1", 80)
+    socket.getaddrinfo(host="::1", port=80)
+    socket.getaddrinfo("localhost", 80)
+    socket.gethostbyname("10.0.0.1")
+
+
+async def tn_data_url():
+    return urlopen("data:,hello").read()
+
+
+async def tp_sleep(seconds):
+    time.sleep(seconds)
+
+
+async def tp_lookup():
+    socket.getaddrinfo("example.com", 80)
+
+
+async def tp_fetch():
+    return urlopen("https://example.com").read()
+"#,
+            "EFF101",
+        ),
+        vec![
+            d(28, "EFF101", "tp_sleep", "time.sleep"),
+            d(32, "EFF101", "tp_lookup", "socket.getaddrinfo"),
+            d(36, "EFF101", "tp_fetch", "urllib.request.urlopen"),
+        ]
+    );
+}
+
 const OVERRIDES: &str = r#"
 [[tool.heki.ecosystem]]
 symbol = "sqlite3.connect"

@@ -162,6 +162,7 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "requests.Session"
 effects = ["unpooled_client_alloc"]
+exit_suppresses = false
 opaque_to_layer3 = true
 
 [[entries]]
@@ -266,6 +267,7 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "httpx.Client"
 effects = ["unpooled_client_alloc"]
+exit_suppresses = false
 opaque_to_layer3 = true
 
 [[entries]]
@@ -322,6 +324,7 @@ opaque_to_layer3 = true
 symbol = "httpx.AsyncClient"
 effects = ["unpooled_client_alloc"]
 async_safe = true
+exit_suppresses = false
 opaque_to_layer3 = true
 
 [[entries]]
@@ -382,6 +385,7 @@ opaque_to_layer3 = true
 symbol = "aiohttp.ClientSession"
 effects = ["unpooled_client_alloc"]
 async_safe = true
+exit_suppresses = false
 opaque_to_layer3 = true
 
 [[entries]]
@@ -446,6 +450,7 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "urllib3.PoolManager"
 effects = ["unpooled_client_alloc"]
+exit_suppresses = false
 opaque_to_layer3 = true
 
 [[entries]]
@@ -461,6 +466,7 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "urllib3.ProxyManager"
 effects = ["unpooled_client_alloc"]
+exit_suppresses = false
 opaque_to_layer3 = true
 
 [[entries]]
@@ -476,6 +482,7 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "urllib3.HTTPConnectionPool"
 effects = ["unpooled_client_alloc"]
+exit_suppresses = false
 opaque_to_layer3 = true
 
 [[entries]]
@@ -491,6 +498,7 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "urllib3.HTTPSConnectionPool"
 effects = ["unpooled_client_alloc"]
+exit_suppresses = false
 opaque_to_layer3 = true
 
 [[entries]]
@@ -870,6 +878,8 @@ opaque_to_layer3 = true
 symbol = "sqlalchemy.engine.Engine.connect"
 effects = ["blocking_db"]
 return_type = "sqlalchemy.engine.Connection"
+exit_suppresses = false
+emits = "unless-connected"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -895,11 +905,13 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "sqlalchemy.engine.Connection.commit"
 effects = ["blocking_db"]
+emits = "if-pending"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "sqlalchemy.engine.Connection.rollback"
 effects = ["blocking_db"]
+emits = "if-pending"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -927,11 +939,13 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "sqlalchemy.orm.Session.get"
 effects = ["blocking_db", "db_query"]
+emits = "on-identity-map-miss"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "sqlalchemy.orm.Session.get_one"
 effects = ["blocking_db", "db_query"]
+emits = "on-identity-map-miss"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -942,11 +956,13 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "sqlalchemy.orm.Session.commit"
 effects = ["blocking_db", "db_query"]
+emits = "if-pending"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "sqlalchemy.orm.Session.flush"
 effects = ["blocking_db", "db_query"]
+emits = "if-pending"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -1122,6 +1138,7 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "sqlalchemy.orm.Query.get"
 effects = ["blocking_db", "db_query"]
+emits = "on-identity-map-miss"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -1222,12 +1239,14 @@ opaque_to_layer3 = true
 symbol = "sqlalchemy.ext.asyncio.AsyncSession.get"
 effects = ["db_query"]
 async_safe = true
+emits = "on-identity-map-miss"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "sqlalchemy.ext.asyncio.AsyncSession.get_one"
 effects = ["db_query"]
 async_safe = true
+emits = "on-identity-map-miss"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -1240,12 +1259,14 @@ opaque_to_layer3 = true
 symbol = "sqlalchemy.ext.asyncio.AsyncSession.commit"
 effects = ["db_query"]
 async_safe = true
+emits = "if-pending"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "sqlalchemy.ext.asyncio.AsyncSession.flush"
 effects = ["db_query"]
 async_safe = true
+emits = "if-pending"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -1317,11 +1338,13 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "sqlmodel.Session.get"
 effects = ["blocking_db", "db_query"]
+emits = "on-identity-map-miss"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "sqlmodel.Session.get_one"
 effects = ["blocking_db", "db_query"]
+emits = "on-identity-map-miss"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -1332,11 +1355,13 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "sqlmodel.Session.commit"
 effects = ["blocking_db", "db_query"]
+emits = "if-pending"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "sqlmodel.Session.flush"
 effects = ["blocking_db", "db_query"]
+emits = "if-pending"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -1367,12 +1392,14 @@ opaque_to_layer3 = true
 symbol = "sqlmodel.ext.asyncio.session.AsyncSession.get"
 effects = ["db_query"]
 async_safe = true
+emits = "on-identity-map-miss"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "sqlmodel.ext.asyncio.session.AsyncSession.get_one"
 effects = ["db_query"]
 async_safe = true
+emits = "on-identity-map-miss"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -1385,12 +1412,14 @@ opaque_to_layer3 = true
 symbol = "sqlmodel.ext.asyncio.session.AsyncSession.commit"
 effects = ["db_query"]
 async_safe = true
+emits = "if-pending"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "sqlmodel.ext.asyncio.session.AsyncSession.flush"
 effects = ["db_query"]
 async_safe = true
+emits = "if-pending"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -1414,6 +1443,7 @@ opaque_to_layer3 = true
 symbol = "psycopg.connect"
 effects = ["blocking_db", "unpooled_client_alloc"]
 return_type = "psycopg.Connection"
+exit_suppresses = false
 opaque_to_layer3 = true
 
 [[entries]]
@@ -1439,11 +1469,13 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "psycopg.Connection.commit"
 effects = ["blocking_db"]
+emits = "if-pending"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "psycopg.Connection.rollback"
 effects = ["blocking_db"]
+emits = "if-pending"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -1545,18 +1577,22 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "psycopg_pool.ConnectionPool"
 effects = ["unpooled_client_alloc"]
+exit_suppresses = false
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "psycopg_pool.AsyncConnectionPool"
 effects = ["unpooled_client_alloc"]
 async_safe = true
+exit_suppresses = false
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "psycopg_pool.ConnectionPool.connection"
 effects = ["blocking_db"]
 return_type = "psycopg.Connection"
+exit_suppresses = false
+emits = "unless-connected"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -1571,6 +1607,7 @@ opaque_to_layer3 = true
 symbol = "psycopg2.connect"
 effects = ["blocking_db", "unpooled_client_alloc"]
 return_type = "psycopg2.extensions.connection"
+exit_suppresses = false
 opaque_to_layer3 = true
 
 [[entries]]
@@ -1581,11 +1618,13 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "psycopg2.extensions.connection.commit"
 effects = ["blocking_db"]
+emits = "if-pending"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "psycopg2.extensions.connection.rollback"
 effects = ["blocking_db"]
+emits = "if-pending"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -1614,6 +1653,7 @@ return_type = "pymysql.connections.Connection"
 cases = [
     { param = "defer_connect", equals = true, effects = ["unpooled_client_alloc"] },
 ]
+exit_suppresses = false
 opaque_to_layer3 = true
 
 [[entries]]
@@ -1662,6 +1702,7 @@ opaque_to_layer3 = true
 symbol = "django.db.connection.cursor"
 effects = ["blocking_db"]
 return_type = "django.db.backends.utils.CursorWrapper"
+emits = "unless-connected"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -1707,21 +1748,25 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "django.db.models.query.QuerySet.first"
 effects = ["blocking_db", "db_query"]
+emits = "unless-cached"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "django.db.models.query.QuerySet.last"
 effects = ["blocking_db", "db_query"]
+emits = "unless-cached"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "django.db.models.query.QuerySet.exists"
 effects = ["blocking_db", "db_query"]
+emits = "unless-cached"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "django.db.models.query.QuerySet.count"
 effects = ["blocking_db", "db_query"]
+emits = "unless-cached"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -1774,24 +1819,28 @@ opaque_to_layer3 = true
 symbol = "django.db.models.query.QuerySet.afirst"
 effects = ["db_query"]
 async_safe = true
+emits = "unless-cached"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "django.db.models.query.QuerySet.alast"
 effects = ["db_query"]
 async_safe = true
+emits = "unless-cached"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "django.db.models.query.QuerySet.aexists"
 effects = ["db_query"]
 async_safe = true
+emits = "unless-cached"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "django.db.models.query.QuerySet.acount"
 effects = ["db_query"]
 async_safe = true
+emits = "unless-cached"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -1851,11 +1900,13 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "redis.Redis"
 effects = ["unpooled_client_alloc"]
+exit_suppresses = false
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "redis.StrictRedis"
 effects = ["unpooled_client_alloc"]
+exit_suppresses = false
 opaque_to_layer3 = true
 
 [[entries]]
@@ -2188,6 +2239,7 @@ opaque_to_layer3 = true
 symbol = "redis.asyncio.Redis"
 effects = ["unpooled_client_alloc"]
 async_safe = true
+exit_suppresses = false
 opaque_to_layer3 = true
 
 [[entries]]
@@ -2591,6 +2643,7 @@ cases = [
     { arg = 4, param = "connect", equals = false, effects = ["unpooled_client_alloc"] },
     { arg = 0, param = "host", prefix = ["mongodb+srv://"], effects = ["blocking_net", "unpooled_client_alloc"] },
 ]
+exit_suppresses = false
 opaque_to_layer3 = true
 
 [[entries]]
@@ -2809,6 +2862,7 @@ opaque_to_layer3 = true
 symbol = "pymongo.AsyncMongoClient"
 effects = ["unpooled_client_alloc"]
 async_safe = true
+exit_suppresses = false
 opaque_to_layer3 = true
 
 [[entries]]
@@ -3070,6 +3124,7 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "sqlalchemy.orm.Session.begin"
 sync_lock_or_tx = true
+exit_suppresses = false
 opaque_to_layer3 = true
 
 [[entries]]
@@ -3099,6 +3154,8 @@ symbol = "sqlalchemy.engine.Engine.begin"
 effects = ["blocking_db"]
 return_type = "sqlalchemy.engine.Connection"
 sync_lock_or_tx = true
+exit_suppresses = false
+emits = "unless-connected"
 opaque_to_layer3 = true
 
 [[entries]]
