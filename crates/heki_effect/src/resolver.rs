@@ -524,6 +524,12 @@ pub struct ModuleDecls {
     /// of a value heki may not know ([`Symbol::Unknown`]), never a builtin of the same name.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub unknown_globals: BTreeSet<String>,
+    /// The runtime imports the module binds again (another module-level store, a store or
+    /// `del` in a function declaring the name `global`), and all of them when a star import,
+    /// `exec`, or `globals()` may rebind its names: such a name may hold another object than
+    /// the import, so no constant of the imported module ([`Self::fixed_import`]).
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub rebound_imports: BTreeSet<String>,
     /// Module globals bound to a small display that no function of the module grows
     /// (`heki_ir::ModuleConstants::displays`): other modules read them through
     /// [`ProjectDecls::small_global`].
@@ -622,6 +628,14 @@ pub enum StrValue {
 }
 
 impl ModuleDecls {
+    /// The fqn the runtime import of `name` binds, when nothing else in the module binds the
+    /// name ([`Self::rebound_imports`]): reading it gives what the import bound.
+    pub fn fixed_import(&self, name: &str) -> Option<&String> {
+        self.imports
+            .get(name)
+            .filter(|_| !self.rebound_imports.contains(name))
+    }
+
     /// The declarations of a module heki could not read or parse: none. A name under it is
     /// unresolved ([`ProjectDecls::outside`]), never looked up in the catalog: the module may
     /// shadow a module the catalog lists, as any project module does.
@@ -1910,9 +1924,22 @@ impl ProjectDecls {
         self.chase(fqn, false)
     }
 
+    /// [`Self::canonical`] for a value read through the name (a constant, a small display):
+    /// `None` when a module on the way binds the name it re-exports again
+    /// ([`ModuleDecls::fixed_import`]).
+    pub fn canonical_value(&self, fqn: &str) -> Option<String> {
+        self.follow(fqn, false, true)
+    }
+
     /// `fqn` through re-exports and, with `aliases`, the module aliases it names (at most
     /// `MAX_ALIAS_CHASE` steps).
     fn chase(&self, fqn: &str, aliases: bool) -> String {
+        self.follow(fqn, aliases, false)
+            .unwrap_or_else(|| fqn.to_owned())
+    }
+
+    /// [`Self::chase`]; with `values`, `None` past a re-export its module binds again.
+    fn follow(&self, fqn: &str, aliases: bool, values: bool) -> Option<String> {
         let mut cur = fqn.to_owned();
         for _ in 0..MAX_ALIAS_CHASE {
             let Some((m, rest)) = self.split_module(&cur) else {
@@ -1929,6 +1956,7 @@ impl ProjectDecls {
             // (`ModuleImport::rebound_at`): a class or function of the same name is shadowed by
             // it.
             let target = match m.imports.get(first) {
+                Some(_) if values && m.fixed_import(first).is_none() => return None,
                 Some(target) => target,
                 None if aliases => match m.aliases.get(first) {
                     Some(target) if !self.alias_rebound(&m.module_name, first) => target,
@@ -1945,7 +1973,7 @@ impl ProjectDecls {
             }
             cur = next;
         }
-        cur
+        Some(cur)
     }
 
     /// Whether another module rebinds or deletes the module alias `name` of `module`
@@ -1964,9 +1992,9 @@ impl ProjectDecls {
     }
 
     /// The value of the number or boolean constant `fqn` (`pkg.settings.PAUSE`), through
-    /// re-exports, unless another module rebinds it.
+    /// re-exports ([`Self::canonical_value`]), unless another module rebinds it.
     pub fn literal_constant(&self, fqn: &str) -> Option<LiteralValue> {
-        let fqn = self.canonical(fqn);
+        let fqn = self.canonical_value(fqn)?;
         let (m, rest) = self.split_module(&fqn)?;
         let constant = m.literal_constants.get(rest)?;
         (!(constant.rebindable && self.rebound_elsewhere(&fqn)))
@@ -1975,9 +2003,10 @@ impl ProjectDecls {
     }
 
     /// The value of the string constant `fqn` (`pkg.keys.KEY`, `pkg.model.Model.KEY`), through
-    /// re-exports and constants bound to other constants (at most `MAX_ALIAS_CHASE` steps).
+    /// re-exports ([`Self::canonical_value`]) and constants bound to other constants (at most
+    /// `MAX_ALIAS_CHASE` steps).
     pub fn str_constant(&self, fqn: &str) -> Option<&str> {
-        let mut cur = self.canonical(fqn);
+        let mut cur = self.canonical_value(fqn)?;
         for _ in 0..MAX_ALIAS_CHASE {
             let (m, rest) = self.split_module(&cur)?;
             let constant = m.str_constants.get(rest)?;
@@ -1986,7 +2015,7 @@ impl ProjectDecls {
             }
             match &constant.value {
                 StrValue::Literal(v) => return Some(v),
-                StrValue::Alias(next) => cur = self.canonical(next),
+                StrValue::Alias(next) => cur = self.canonical_value(next)?,
             }
         }
         None
@@ -2304,10 +2333,11 @@ impl ProjectDecls {
     }
 
     /// The small display the module global `fqn` of a project module holds
-    /// (`ModuleDecls::small_globals`), through re-exports, when no other module changes it
+    /// (`ModuleDecls::small_globals`), through re-exports ([`Self::canonical_value`]), when no
+    /// other module changes it
     /// ([`Self::changed_elsewhere`]).
     pub fn small_global(&self, fqn: &str) -> Option<&SmallDisplay> {
-        let fqn = self.canonical(fqn);
+        let fqn = self.canonical_value(fqn)?;
         let (m, rest) = self.split_module(&fqn)?;
         let display = m.small_globals.get(rest)?;
         (!self.changed_elsewhere(&fqn, display)).then_some(display)
@@ -3316,7 +3346,9 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
         }
     }
     decls.aliases = module_aliases(input, &decls);
-    decls.unknown_globals = unknown_globals(input, &decls);
+    let stores = module_store_counts(input);
+    decls.unknown_globals = unknown_globals(&stores, &decls);
+    decls.rebound_imports = rebound_imports(input, &stores, &decls);
     // Qualnames whose every definition is a property getter (a setter, a deleter, or any other
     // function with the same qualname shares its summary).
     let mut getters_only: FxHashMap<&str, bool> = FxHashMap::default();
@@ -4053,17 +4085,35 @@ fn module_store_counts<'i>(input: &'i ModuleInput<'_>) -> FxHashMap<&'i str, usi
     out
 }
 
-/// [`ModuleDecls::unknown_globals`]: the globals the module stores or deletes that are no
-/// runtime import, class, or function of it.
-fn unknown_globals(input: &ModuleInput<'_>, decls: &ModuleDecls) -> BTreeSet<String> {
-    module_store_counts(input)
-        .into_keys()
+/// [`ModuleDecls::unknown_globals`]: the globals the module stores or deletes (`stores`) that are
+/// no runtime import, class, or function of it.
+fn unknown_globals(stores: &FxHashMap<&str, usize>, decls: &ModuleDecls) -> BTreeSet<String> {
+    stores
+        .keys()
+        .copied()
         .filter(|name| {
             !decls.imports.contains_key(*name)
                 && !decls.classes.contains_key(*name)
                 && !decls.functions.contains_key(*name)
         })
         .map(str::to_owned)
+        .collect()
+}
+
+/// [`ModuleDecls::rebound_imports`]: the import's own store is one of the module's stores of
+/// the name (`stores`).
+fn rebound_imports(
+    input: &ModuleInput<'_>,
+    stores: &FxHashMap<&str, usize>,
+    decls: &ModuleDecls,
+) -> BTreeSet<String> {
+    let unfixed = input.ir.constants.dynamic || input.ir.has_star_import;
+    let rebound = |name: &str| unfixed || stores.get(name).is_some_and(|&n| n > 1);
+    decls
+        .imports
+        .keys()
+        .filter(|name| rebound(name))
+        .cloned()
         .collect()
 }
 
@@ -5234,6 +5284,7 @@ static EMPTY_DECLS: ModuleDecls = ModuleDecls {
     global_types: BTreeMap::new(),
     aliases: BTreeMap::new(),
     unknown_globals: BTreeSet::new(),
+    rebound_imports: BTreeSet::new(),
     small_globals: BTreeMap::new(),
     grown_globals: BTreeSet::new(),
     rebound_globals: BTreeSet::new(),
@@ -5361,7 +5412,7 @@ impl<'a> TypeCtx<'a> {
             return Some(LiteralValue::Str(text.to_owned()));
         }
         let fqn = match self.module.imports.get(name) {
-            Some(fqn) => fqn.clone(),
+            Some(_) => self.module.fixed_import(name)?.clone(),
             None => format!("{}.{name}", self.module.module_name),
         };
         self.project.literal_constant(&fqn)
@@ -5373,8 +5424,7 @@ impl<'a> TypeCtx<'a> {
         let Some(constant) = self.module.str_constants.get(name) else {
             return self
                 .module
-                .imports
-                .get(name)
+                .fixed_import(name)
                 .and_then(|fqn| self.project.str_constant(fqn));
         };
         let fqn = || format!("{}.{name}", self.module.module_name);

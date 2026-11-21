@@ -342,7 +342,9 @@ The call side of `write-owners`.
   passes it when heki establishes that the argument bound to the parameter is that constant (a
   literal, a string constant bound once, such as a module's `Final` name, or a module's number or
   boolean bound once, as `EFF101` evaluates them: `LIMIT = 0`, also imported, unless a module
-  rebinds it): passed by keyword (also to a class without a project `__init__`, a dataclass or a
+  rebinds it; an imported name the importing module binds again in a function declaring it
+  `global`, in another module-level store, or with `del`, or that a star import may rebind, is no
+  constant there): passed by keyword (also to a class without a project `__init__`, a dataclass or a
   pydantic model), by position where every function the call may run binds that position to the
   parameter, or left out where every such function's default is the value and only `True`,
   `False`, `None`, `0`, or `""` (heki keeps defaults by class and truthiness). A keyword binds as
