@@ -2,7 +2,7 @@
 
 # read-owner-violation (MUT203)
 
-Family: Mutation & State (MUT) · Heuristic · Runs when its contract is declared · Severity `error` · No automatic fix
+Family: Mutation & State (MUT) · Heuristic · Runs when its contract is declared · Severity `error` (a bug) · No automatic fix
 
 Reading a guarded attribute (directly, via alias, `getattr`, or `__dict__`) outside declared `read-owners`.
 

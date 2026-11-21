@@ -2,7 +2,7 @@
 
 # loop-linear-list-lookup (OPT112)
 
-Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` · No automatic fix
+Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` (slower code) · No automatic fix
 
 Size-dependent `list.index` / `list.remove` / `list.count` inside a loop (repeated linear scans).
 

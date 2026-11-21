@@ -2,7 +2,7 @@
 
 # loop-unpooled-client (EFF102)
 
-Family: Execution Effects (EFF) · Heuristic · Off by default · Severity `error` · No automatic fix
+Family: Execution Effects (EFF) · Heuristic · Off by default · Severity `warning` (slower code) · No automatic fix
 
 Allocating an unpooled HTTP/DB/RPC client or sessionless request inside a loop.
 

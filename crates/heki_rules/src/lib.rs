@@ -52,6 +52,16 @@ pub enum RuleFamily {
     Opt,
 }
 
+/// What happens in the code a rule reports, which sets its default severity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Consequence {
+    /// A bug: a wrong result, an exception, a lost update, a deadlock, or a broken contract.
+    Bug,
+    /// Slower code that computes the right result.
+    Slowdown,
+}
+
 /// When a rule runs without being named by its code or name (ADR-018).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -73,6 +83,7 @@ pub struct RuleMeta {
     pub family: RuleFamily,
     pub certainty: Certainty,
     pub activation: Activation,
+    pub consequence: Consequence,
     pub auto_fix_default: bool,
     /// A proven-safe rewrite that `--fix` applies only with `--include-size-dependent` or in a
     /// function a `--profile` dump shows hot.
@@ -135,12 +146,12 @@ impl RuleMeta {
         format!("{RULE_PAGES}{}/", self.slug)
     }
 
-    /// The severity of the rule's diagnostics unless `lint.severity` names the rule: `warning`
-    /// for the `OPT` family (slower code, not wrong code), `error` for the others.
+    /// The severity of the rule's diagnostics unless `lint.severity` names the rule: `error` for
+    /// a bug, `warning` for slower code.
     pub const fn default_severity(&self) -> Severity {
-        match self.family {
-            RuleFamily::Opt => Severity::Warning,
-            RuleFamily::Mut | RuleFamily::Eff | RuleFamily::Data => Severity::Error,
+        match self.consequence {
+            Consequence::Bug => Severity::Error,
+            Consequence::Slowdown => Severity::Warning,
         }
     }
 }
@@ -156,6 +167,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         family: RuleFamily::Mut,
         certainty: Certainty::Heuristic,
         activation: Activation::OptIn,
+        consequence: Consequence::Bug,
         size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Mutating an attribute read by `@cached_property` without invalidating the cache.",
@@ -167,6 +179,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         family: RuleFamily::Mut,
         certainty: Certainty::Heuristic,
         activation: Activation::OptIn,
+        consequence: Consequence::Bug,
         size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Interprocedural mutation/escape/effect regression against saved summary snapshot.",
@@ -178,6 +191,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         family: RuleFamily::Mut,
         certainty: Certainty::Heuristic,
         activation: Activation::OptIn,
+        consequence: Consequence::Bug,
         size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Opt-in: consuming a single-pass iterator or generator a second time (the second pass sees no items).",
@@ -189,6 +203,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         family: RuleFamily::Mut,
         certainty: Certainty::Heuristic,
         activation: Activation::Default,
+        consequence: Consequence::Bug,
         size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Mutating an attribute read by `__hash__` after initialization (stored `set` / `dict` entries become unreachable).",
@@ -200,6 +215,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         family: RuleFamily::Mut,
         certainty: Certainty::Heuristic,
         activation: Activation::OptIn,
+        consequence: Consequence::Bug,
         size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Opt-in: changing in place a field that a standard type declares read-only (frozen dataclass / `NamedTuple` / `dataclass_transform` fields, `Final` / `ReadOnly` attributes, `ReadOnly` `TypedDict` keys), directly, through an alias, or in a helper.",
@@ -211,6 +227,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         family: RuleFamily::Mut,
         certainty: Certainty::Heuristic,
         activation: Activation::Contract,
+        consequence: Consequence::Bug,
         size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Writing a declared `invalidation` target (directly, via alias, or via helper) without reaching one of its invalidators on every path to the function's return.",
@@ -222,6 +239,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         family: RuleFamily::Mut,
         certainty: Certainty::Heuristic,
         activation: Activation::Default,
+        consequence: Consequence::Bug,
         size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Handing a `Sequence` / `Mapping` / `ReadOnly` parameter to a function that changes it in place (directly, through an alias, or through helpers).",
@@ -233,6 +251,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         family: RuleFamily::Mut,
         certainty: Certainty::Heuristic,
         activation: Activation::OptIn,
+        consequence: Consequence::Bug,
         size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Opt-in: reading a `@cached_property` that a method of its class family can leave stale (a write `MUT101` reports).",
@@ -244,6 +263,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         family: RuleFamily::Mut,
         certainty: Certainty::Heuristic,
         activation: Activation::OptIn,
+        consequence: Consequence::Bug,
         size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Opt-in: changing in place a value that is a new object on one path and borrowed state (a parameter, an attribute, a global, or what a function returns of such state) on another.",
@@ -255,6 +275,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         family: RuleFamily::Mut,
         certainty: Certainty::Heuristic,
         activation: Activation::OptIn,
+        consequence: Consequence::Bug,
         size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Opt-in: a dict, set, or deque of the instance changed while a method iterates it, by another method while a generator is suspended in the loop or by a function the loop's body calls (the next step raises `RuntimeError`).",
@@ -266,6 +287,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         family: RuleFamily::Mut,
         certainty: Certainty::Heuristic,
         activation: Activation::Contract,
+        consequence: Consequence::Bug,
         size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Writing a guarded attribute/container (directly, via alias, or via helper) outside declared `write-owners`.",
@@ -278,6 +300,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         certainty: Certainty::Heuristic,
         // Not `Contract`: it also reports without one (`@lru_cache` / `@cache` results).
         activation: Activation::Default,
+        consequence: Consequence::Bug,
         size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Mutating a shared object returned by a declared `readonly-returns` producer or `@lru_cache`, directly or through the functions that return it.",
@@ -289,6 +312,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         family: RuleFamily::Mut,
         certainty: Certainty::Heuristic,
         activation: Activation::Contract,
+        consequence: Consequence::Bug,
         size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Reading a guarded attribute (directly, via alias, `getattr`, or `__dict__`) outside declared `read-owners`.",
@@ -300,6 +324,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         family: RuleFamily::Mut,
         certainty: Certainty::Heuristic,
         activation: Activation::Contract,
+        consequence: Consequence::Bug,
         size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Calling a guarded function or method, or constructing a guarded class (directly, via a bound method, `getattr`, or a helper), outside declared `call-owners`.",
@@ -311,6 +336,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         family: RuleFamily::Mut,
         certainty: Certainty::Heuristic,
         activation: Activation::Contract,
+        consequence: Consequence::Bug,
         size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Strict mode of a `write-owners` contract (`unresolved = \"report\"`): writing an attribute named like a target on an object of unknown class, or a computed attribute name on a guarded class.",
@@ -322,6 +348,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         family: RuleFamily::Mut,
         certainty: Certainty::Heuristic,
         activation: Activation::Contract,
+        consequence: Consequence::Bug,
         size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Strict mode of a `read-owners` contract (`unresolved = \"report\"`): reading an attribute named like a target on an object of unknown class.",
@@ -333,6 +360,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         family: RuleFamily::Mut,
         certainty: Certainty::Heuristic,
         activation: Activation::Contract,
+        consequence: Consequence::Bug,
         size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Strict mode of a `call-owners` contract (`unresolved = \"report\"`): calling a method named like a target on an object of unknown class.",
@@ -344,6 +372,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         family: RuleFamily::Eff,
         certainty: Certainty::Heuristic,
         activation: Activation::Default,
+        consequence: Consequence::Slowdown,
         size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Direct or indirect blocking network/DB/subprocess/sleep call reachable from `async def`.",
@@ -355,6 +384,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         family: RuleFamily::Eff,
         certainty: Certainty::Heuristic,
         activation: Activation::Default,
+        consequence: Consequence::Slowdown,
         size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Allocating an unpooled HTTP/DB/RPC client or sessionless request inside a loop.",
@@ -366,6 +396,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         family: RuleFamily::Eff,
         certainty: Certainty::Heuristic,
         activation: Activation::Default,
+        consequence: Consequence::Slowdown,
         size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Explicit DB query / external RPC executed inside a loop (N+1).",
@@ -377,6 +408,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         family: RuleFamily::Eff,
         certainty: Certainty::Heuristic,
         activation: Activation::OptIn,
+        consequence: Consequence::Slowdown,
         size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Opt-in: blocking local filesystem I/O reachable from `async def`.",
@@ -388,6 +420,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         family: RuleFamily::Eff,
         certainty: Certainty::Heuristic,
         activation: Activation::OptIn,
+        consequence: Consequence::Bug,
         size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Opt-in: `await` or blocking network I/O while holding a `threading` lock or a DB transaction.",
@@ -399,6 +432,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         family: RuleFamily::Eff,
         certainty: Certainty::Heuristic,
         activation: Activation::OptIn,
+        consequence: Consequence::Bug,
         size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Opt-in: an `asyncio.create_task` result bound to a local variable but never awaited, returned, or stored.",
@@ -410,6 +444,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         family: RuleFamily::Eff,
         certainty: Certainty::Heuristic,
         activation: Activation::Contract,
+        consequence: Consequence::Bug,
         size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Reaching a forbidden effect (directly or through calls) from a declared `effect-boundaries` scope.",
@@ -421,6 +456,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         family: RuleFamily::Data,
         certainty: Certainty::Heuristic,
         activation: Activation::Default,
+        consequence: Consequence::Slowdown,
         size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Loop-carried quadratic `pandas.concat` / `numpy.vstack` / `numpy.append` accumulation.",
@@ -432,6 +468,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         family: RuleFamily::Opt,
         certainty: Certainty::Heuristic,
         activation: Activation::Default,
+        consequence: Consequence::Slowdown,
         size_dependent_fix: false,
         auto_fix_default: true,
         summary: "Unconditionally profitable `list` quadratic concatenation (`x = x + [e]` -> `x.append(e)`).",
@@ -443,6 +480,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         family: RuleFamily::Opt,
         certainty: Certainty::Heuristic,
         activation: Activation::Default,
+        consequence: Consequence::Slowdown,
         size_dependent_fix: false,
         auto_fix_default: true,
         summary: "Unconditionally profitable `set`/`dict` quadratic merge (`{**d, ...}` with `d` first).",
@@ -454,6 +492,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         family: RuleFamily::Opt,
         certainty: Certainty::Heuristic,
         activation: Activation::Default,
+        consequence: Consequence::Slowdown,
         size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Size-dependent immutable quadratic accumulation (`bytes`/`tuple`/attr `str`).",
@@ -465,6 +504,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         family: RuleFamily::Opt,
         certainty: Certainty::Heuristic,
         activation: Activation::Default,
+        consequence: Consequence::Slowdown,
         size_dependent_fix: true,
         auto_fix_default: false,
         summary: "Size-dependent `e in lst` inside a loop -> hoist `set` outside loop.",
@@ -476,6 +516,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         family: RuleFamily::Opt,
         certainty: Certainty::Heuristic,
         activation: Activation::Default,
+        consequence: Consequence::Slowdown,
         size_dependent_fix: true,
         auto_fix_default: false,
         summary: "Size-dependent `if v not in seen: seen.append(v)` -> auxiliary `set`.",
@@ -487,6 +528,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         family: RuleFamily::Opt,
         certainty: Certainty::Heuristic,
         activation: Activation::Default,
+        consequence: Consequence::Slowdown,
         size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Size-dependent `list.index` / `list.remove` / `list.count` inside a loop (repeated linear scans).",
@@ -498,6 +540,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         family: RuleFamily::Opt,
         certainty: Certainty::Heuristic,
         activation: Activation::Default,
+        consequence: Consequence::Slowdown,
         size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Size-dependent nested-loop equi-join (`for a in A: for b in B: if a.k == b.k`) -> `dict` index.",
@@ -509,6 +552,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         family: RuleFamily::Opt,
         certainty: Certainty::Heuristic,
         activation: Activation::Default,
+        consequence: Consequence::Slowdown,
         size_dependent_fix: true,
         auto_fix_default: false,
         summary: "Size-dependent `q.pop(0)` / `del q[0]` / `q = q[1:]` -> `collections.deque`.",
@@ -520,6 +564,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         family: RuleFamily::Opt,
         certainty: Certainty::Heuristic,
         activation: Activation::Default,
+        consequence: Consequence::Slowdown,
         size_dependent_fix: true,
         auto_fix_default: false,
         summary: "Size-dependent `q.insert(0, v)` -> `collections.deque`.",
@@ -531,6 +576,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         family: RuleFamily::Opt,
         certainty: Certainty::Heuristic,
         activation: Activation::Default,
+        consequence: Consequence::Slowdown,
         size_dependent_fix: true,
         auto_fix_default: false,
         summary: "Size-dependent loop-invariant container reconstruction (`e in set(keys)`).",
@@ -1019,6 +1065,23 @@ mod registry_tests {
                 certainty == Heuristic,
                 "{certainty:?} {activation:?}"
             );
+        }
+    }
+
+    #[test]
+    fn a_rule_is_an_error_for_a_bug_and_a_warning_for_slower_code() {
+        for r in CORE_RULES {
+            let expected = match r.consequence {
+                Consequence::Bug => Severity::Error,
+                Consequence::Slowdown => Severity::Warning,
+            };
+            assert_eq!(r.default_severity(), expected, "{}", r.code);
+            // The `OPT` rules report slower code, and every `MUT` rule a bug.
+            match r.family {
+                RuleFamily::Opt => assert_eq!(r.consequence, Consequence::Slowdown, "{}", r.code),
+                RuleFamily::Mut => assert_eq!(r.consequence, Consequence::Bug, "{}", r.code),
+                RuleFamily::Eff | RuleFamily::Data => {}
+            }
         }
     }
 

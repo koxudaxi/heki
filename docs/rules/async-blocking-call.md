@@ -2,7 +2,7 @@
 
 # async-blocking-call (EFF101)
 
-Family: Execution Effects (EFF) · Heuristic · Off by default · Severity `error` · No automatic fix
+Family: Execution Effects (EFF) · Heuristic · Off by default · Severity `warning` (slower code) · No automatic fix
 
 Direct or indirect blocking network/DB/subprocess/sleep call reachable from `async def`.
 

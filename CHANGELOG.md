@@ -67,9 +67,14 @@ release can change rules, configuration keys, diagnostics, and output formats.
   ` [heuristic]` after the language server's message. `heki rule --all` lists each rule's
   certainty and when it runs (`on`, `off`, `opt-in`, or `contract`) instead of
   `default=true` / `false`.
-- The `OPT` rules default to severity `warning` instead of `error`: they report slower code,
-  not wrong code. The exit code does not change (a warning still makes `heki check` exit 1),
-  only the output label and the SARIF level. `[tool.heki.lint.severity]` still overrides it.
+- A rule's default severity follows what happens in the code it reports, not its family: a bug
+  (a wrong result, an exception, a lost update, a deadlock, or a broken contract) is an
+  `error`, slower code a `warning`. `EFF101`, `EFF102`, `EFF103`, `EFF105`, `DATA101`, and the
+  `OPT` rules default to `warning` instead of `error`; the other rules stay `error`. The exit
+  code does not change (a warning still makes `heki check` exit 1), only the output label, the
+  SARIF level, and the language server's severity. `[tool.heki.lint.severity]` still overrides
+  it. Each rule page shows its default severity, and `heki rule --output-format json` gives each
+  rule's `consequence` (`bug` or `slowdown`).
 - `EFF102` and `EFF103` also report the function a builtin calls once per item: the function
   handed to `map`, `filter`, `itertools.starmap`, `itertools.filterfalse`, and
   `functools.reduce`, and the `key` of `sorted`, `list.sort`, `min`, `max`, and

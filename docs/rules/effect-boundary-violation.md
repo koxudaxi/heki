@@ -2,7 +2,7 @@
 
 # effect-boundary-violation (EFF201)
 
-Family: Execution Effects (EFF) · Heuristic · Runs when its contract is declared · Severity `error` · No automatic fix
+Family: Execution Effects (EFF) · Heuristic · Runs when its contract is declared · Severity `error` (a bug) · No automatic fix
 
 Reaching a forbidden effect (directly or through calls) from a declared `effect-boundaries` scope.
 

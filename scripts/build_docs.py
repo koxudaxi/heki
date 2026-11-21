@@ -36,6 +36,8 @@ CLI_PAGE = DOCS / "cli-reference.md"
 EXPERIMENTAL_PAGE = DOCS / "experimental.md"
 CHANGELOG = ROOT / "CHANGELOG.md"
 PRECISION_PAGE = DOCS / "precision.md"
+# What a rule's default severity says, by the consequence of the code it reports.
+CONSEQUENCES = {"bug": "a bug", "slowdown": "slower code"}
 # The section of every rule's documentation that lists the premises of its claim (ADR-018).
 CLAIM_SECTION = "## What a report states"
 
@@ -223,7 +225,8 @@ def rule_page(rule: dict, policy: str, measurement: dict | None) -> str:
             GENERATED,
             f"# {rule['slug']} ({rule['code']})",
             "",
-            f"Family: {title} · {' · '.join(state)} · Severity `{rule['default_severity']}` · {fix_label(rule)}",
+            f"Family: {title} · {' · '.join(state)} · Severity `{rule['default_severity']}` "
+            f"({CONSEQUENCES[rule['consequence']]}) · {fix_label(rule)}",
             "",
             rule["summary"],
             "",

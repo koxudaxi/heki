@@ -103,7 +103,7 @@ fn exit_codes_and_clean_runs() {
     let (code, stdout, stderr) = p.heki(&[]);
     assert_eq!(code, 1);
     assert!(
-        stdout.starts_with("pkg/bad.py:4:5: EFF101 (async-blocking-call) [error, heuristic]"),
+        stdout.starts_with("pkg/bad.py:4:5: EFF101 (async-blocking-call) [warning, heuristic]"),
         "{stdout}"
     );
     assert!(stdout.contains("4 |     time.sleep(1)"));
@@ -221,7 +221,7 @@ fn output_formats_and_config_selection() {
         .write("src/pkg/legacy.py", BLOCKING)
         .write(
             "pyproject.toml",
-            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nper-file-ignores = { \"src/pkg/legacy.py\" = [\"EFF\"] }\n\n[tool.heki.lint.severity]\nEFF101 = \"warning\"\n",
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nper-file-ignores = { \"src/pkg/legacy.py\" = [\"EFF\"] }\n\n[tool.heki.lint.severity]\nEFF101 = \"error\"\n",
         );
     // The message is one sentence; the help is a line of its own in `full`, a field in JSON,
     // the result's `properties.help` in SARIF, and left out of `concise` and `github`.
@@ -232,7 +232,7 @@ fn output_formats_and_config_selection() {
     assert_eq!(
         stdout.lines().collect::<Vec<_>>(),
         vec![format!(
-            "::warning file=src/pkg/api.py,line=4,col=5,title=heki EFF101 (heuristic)::{message}"
+            "::error file=src/pkg/api.py,line=4,col=5,title=heki EFF101 (heuristic)::{message}"
         )]
     );
     let (_, stdout, _) = p.heki(&["--output-format", "concise"]);
@@ -250,7 +250,7 @@ fn output_formats_and_config_selection() {
     let (_, stdout, _) = p.heki(&["--output-format", "sarif"]);
     let sarif: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     assert_eq!(sarif["runs"][0]["tool"]["driver"]["name"], "heki");
-    assert_eq!(sarif["runs"][0]["results"][0]["level"], "warning");
+    assert_eq!(sarif["runs"][0]["results"][0]["level"], "error");
     assert_eq!(sarif["runs"][0]["results"][0]["message"]["text"], message);
     assert_eq!(sarif["runs"][0]["results"][0]["properties"]["help"], help);
 
@@ -294,7 +294,7 @@ async def handler():
 "#;
 
 #[test]
-fn opt_rules_default_to_warning_and_still_fail_the_check() {
+fn slower_code_defaults_to_warning_and_still_fails_the_check() {
     let p = Project::new("opt_warning");
     p.write("app.py", SLOW_AND_BLOCKING);
     let severities = |args: &[&str]| -> Vec<(String, String)> {
@@ -311,13 +311,13 @@ fn opt_rules_default_to_warning_and_still_fail_the_check() {
             .collect()
     };
     let pair = |rule: &str, severity: &str| (rule.to_owned(), severity.to_owned());
-    // The `OPT` rules report slower code, not wrong code: `warning`; the other families `error`.
+    // These rules report slower code, not wrong code: `warning` (a bug is an `error`).
     assert_eq!(
         severities(&[]),
         vec![
             pair("OPT101", "warning"),
             pair("OPT113", "warning"),
-            pair("EFF101", "error"),
+            pair("EFF101", "warning"),
         ]
     );
     // Warnings alone still fail the check; the label and the SARIF level change.
@@ -333,7 +333,7 @@ fn opt_rules_default_to_warning_and_still_fail_the_check() {
     // `lint.severity` still overrides the default, by code or by name.
     p.write(
         "heki.toml",
-        "[lint.severity]\nOPT101 = \"error\"\nnested-loop-equijoin = \"error\"\nEFF101 = \"warning\"\n",
+        "[lint.severity]\nOPT101 = \"error\"\nnested-loop-equijoin = \"error\"\n",
     );
     assert_eq!(
         severities(&[]),

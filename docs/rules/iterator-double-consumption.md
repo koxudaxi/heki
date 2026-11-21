@@ -2,7 +2,7 @@
 
 # iterator-double-consumption (MUT106)
 
-Family: Mutation & State (MUT) · Heuristic · Opt-in · Severity `error` · No automatic fix
+Family: Mutation & State (MUT) · Heuristic · Opt-in · Severity `error` (a bug) · No automatic fix
 
 Opt-in: consuming a single-pass iterator or generator a second time (the second pass sees no items).
 

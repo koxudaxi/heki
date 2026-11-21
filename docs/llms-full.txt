@@ -57,7 +57,7 @@ async def get_user(user_id: int) -> dict[str, str]:
 
 ```console
 $ heki check --heuristic
-app/api.py:5:12: EFF101 (async-blocking-call) [error, heuristic] `get_user` reaches the blocking call `requests.get` on the event loop
+app/api.py:5:12: EFF101 (async-blocking-call) [warning, heuristic] `get_user` reaches the blocking call `requests.get` on the event loop
   |
 5 |     return load_user(user_id)
   |            ^
@@ -88,7 +88,7 @@ def order_summaries(cursor: sqlite3.Cursor, orders: list[tuple[int, int]]) -> li
 
 ```console
 $ heki check --heuristic
-app/orders.py:11:37: EFF103 (loop-db-query) [error, heuristic] `app.orders.customer_name` runs a database query (`sqlite3.Cursor.execute`) on every loop iteration (N+1)
+app/orders.py:11:37: EFF103 (loop-db-query) [warning, heuristic] `app.orders.customer_name` runs a database query (`sqlite3.Cursor.execute`) on every loop iteration (N+1)
    |
 11 |         lines.append(f"#{order_id} {customer_name(cursor, customer_id)}")
    |                                     ^
@@ -725,7 +725,7 @@ $ heki check src/ tests/test_api.py
 ## Read a diagnostic
 
 ```console
-app/api.py:5:12: EFF101 (async-blocking-call) [error, heuristic] `handler` reaches the blocking call `requests.get` on the event loop
+app/api.py:5:12: EFF101 (async-blocking-call) [warning, heuristic] `handler` reaches the blocking call `requests.get` on the event loop
   |
 5 |     user = load_user(user_id)
   |            ^
@@ -738,7 +738,7 @@ app/api.py:5:12: EFF101 (async-blocking-call) [error, heuristic] `handler` reach
 | ---- | ------- |
 | `app/api.py:5:12` | where to look |
 | `EFF101 (async-blocking-call)` | the rule's code and name |
-| `[error, heuristic]` | its severity: `error`, or `warning` for the `OPT` rules (slower code, not wrong code); both make `heki check` fail. `heuristic` marks a report that can be wrong about the code: a premise of its claim can be open |
+| `[warning, heuristic]` | its severity: `error` for a bug (a wrong result, an exception, a lost update, a deadlock, a broken contract), `warning` for slower code, as here; both make `heki check` fail. `heuristic` marks a report that can be wrong about the code: a premise of its claim can be open |
 | the message | what heki proved, in one sentence: here, an `async def` reaches a blocking network call |
 | `related` lines | the hops of the chain of calls behind it, to follow it across files; editors show them as related information you can jump to |
 | `help` line | what to do about it |
@@ -948,7 +948,7 @@ supported version that every clause admits:
 | `extend-select` | `[]` | Rules to add. |
 | `ignore` | `[]` | Rules to disable. |
 | `per-file-ignores` | `{}` | Glob → rules disabled in matching files (project-relative POSIX paths). As in Ruff, `*` also matches `/`: `scripts/*.py` covers `scripts/tools/worker.py` too. |
-| `severity` | `"warning"` for the `OPT` rules, `"error"` for the others | Rule → `"error"` or `"warning"`. It changes the output and the SARIF level; both make `heki check` fail. |
+| `severity` | `"warning"` for the rules that report slower code (`EFF101`, `EFF102`, `EFF103`, `EFF105`, `DATA101`, and the `OPT` rules), `"error"` for the others, which report bugs | Rule → `"error"` or `"warning"`. It changes the output and the SARIF level; both make `heki check` fail. |
 | `relax-async-in-tests` | `true` | Skip `EFF101`, `EFF105`, and `EFF106` in `test_*` functions and in files under `tests/`. |
 | `heuristic` | `false` | Whether the heuristic rules that are not opt-in run by default and for a prefix or `ALL`, as the exact rules do. `--heuristic` and `--no-heuristic` override it. |
 
@@ -2727,7 +2727,7 @@ Source: https://heki.koxudaxi.dev/rules/async-blocking-call/
 
 # async-blocking-call (EFF101)
 
-Family: Execution Effects (EFF) · Heuristic · Off by default · Severity `error` · No automatic fix
+Family: Execution Effects (EFF) · Heuristic · Off by default · Severity `warning` (slower code) · No automatic fix
 
 Direct or indirect blocking network/DB/subprocess/sleep call reachable from `async def`.
 
@@ -2883,7 +2883,7 @@ Source: https://heki.koxudaxi.dev/rules/async-blocking-fs/
 
 # async-blocking-fs (EFF105)
 
-Family: Execution Effects (EFF) · Heuristic · Opt-in · Severity `error` · No automatic fix
+Family: Execution Effects (EFF) · Heuristic · Opt-in · Severity `warning` (slower code) · No automatic fix
 
 Opt-in: blocking local filesystem I/O reachable from `async def`.
 
@@ -2959,7 +2959,7 @@ Source: https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/
 
 # cached-property-stale-mutation (MUT101)
 
-Family: Mutation & State (MUT) · Heuristic · Opt-in · Experimental · Severity `error` · No automatic fix
+Family: Mutation & State (MUT) · Heuristic · Opt-in · Experimental · Severity `error` (a bug) · No automatic fix
 
 Mutating an attribute read by `@cached_property` without invalidating the cache.
 
@@ -3078,7 +3078,7 @@ Source: https://heki.koxudaxi.dev/rules/cached-property-stale-read/
 
 # cached-property-stale-read (MUT111)
 
-Family: Mutation & State (MUT) · Heuristic · Opt-in · Experimental · Severity `error` · No automatic fix
+Family: Mutation & State (MUT) · Heuristic · Opt-in · Experimental · Severity `error` (a bug) · No automatic fix
 
 Opt-in: reading a `@cached_property` that a method of its class family can leave stale (a write `MUT101` reports).
 
@@ -3177,7 +3177,7 @@ Source: https://heki.koxudaxi.dev/rules/call-owner-violation/
 
 # call-owner-violation (MUT204)
 
-Family: Mutation & State (MUT) · Heuristic · Runs when its contract is declared · Severity `error` · No automatic fix
+Family: Mutation & State (MUT) · Heuristic · Runs when its contract is declared · Severity `error` (a bug) · No automatic fix
 
 Calling a guarded function or method, or constructing a guarded class (directly, via a bound method, `getattr`, or a helper), outside declared `call-owners`.
 
@@ -3311,7 +3311,7 @@ Source: https://heki.koxudaxi.dev/rules/conditional-ownership-mutation/
 
 # conditional-ownership-mutation (MUT112)
 
-Family: Mutation & State (MUT) · Heuristic · Opt-in · Experimental · Severity `error` · No automatic fix
+Family: Mutation & State (MUT) · Heuristic · Opt-in · Experimental · Severity `error` (a bug) · No automatic fix
 
 Opt-in: changing in place a value that is a new object on one path and borrowed state (a parameter, an attribute, a global, or what a function returns of such state) on another.
 
@@ -3448,7 +3448,7 @@ Source: https://heki.koxudaxi.dev/rules/effect-boundary-violation/
 
 # effect-boundary-violation (EFF201)
 
-Family: Execution Effects (EFF) · Heuristic · Runs when its contract is declared · Severity `error` · No automatic fix
+Family: Execution Effects (EFF) · Heuristic · Runs when its contract is declared · Severity `error` (a bug) · No automatic fix
 
 Reaching a forbidden effect (directly or through calls) from a declared `effect-boundaries` scope.
 
@@ -3616,7 +3616,7 @@ Source: https://heki.koxudaxi.dev/rules/hash-attr-mutation/
 
 # hash-attr-mutation (MUT107)
 
-Family: Mutation & State (MUT) · Heuristic · Off by default · Severity `error` · No automatic fix
+Family: Mutation & State (MUT) · Heuristic · Off by default · Severity `error` (a bug) · No automatic fix
 
 Mutating an attribute read by `__hash__` after initialization (stored `set` / `dict` entries become unreachable).
 
@@ -3728,7 +3728,7 @@ Source: https://heki.koxudaxi.dev/rules/immutable-quadratic-concat/
 
 # immutable-quadratic-concat (OPT103)
 
-Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` · No automatic fix
+Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` (slower code) · No automatic fix
 
 Size-dependent immutable quadratic accumulation (`bytes`/`tuple`/attr `str`).
 
@@ -3800,7 +3800,7 @@ Source: https://heki.koxudaxi.dev/rules/iterated-container-mutation/
 
 # iterated-container-mutation (MUT113)
 
-Family: Mutation & State (MUT) · Heuristic · Opt-in · Experimental · Severity `error` · No automatic fix
+Family: Mutation & State (MUT) · Heuristic · Opt-in · Experimental · Severity `error` (a bug) · No automatic fix
 
 Opt-in: a dict, set, or deque of the instance changed while a method iterates it, by another method while a generator is suspended in the loop or by a function the loop's body calls (the next step raises `RuntimeError`).
 
@@ -3959,7 +3959,7 @@ Source: https://heki.koxudaxi.dev/rules/iterator-double-consumption/
 
 # iterator-double-consumption (MUT106)
 
-Family: Mutation & State (MUT) · Heuristic · Opt-in · Severity `error` · No automatic fix
+Family: Mutation & State (MUT) · Heuristic · Opt-in · Severity `error` (a bug) · No automatic fix
 
 Opt-in: consuming a single-pass iterator or generator a second time (the second pass sees no items).
 
@@ -4065,7 +4065,7 @@ Source: https://heki.koxudaxi.dev/rules/list-front-insert/
 
 # list-front-insert (OPT121)
 
-Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` · Proven-safe suggestion (`--fix --include-size-dependent`)
+Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` (slower code) · Proven-safe suggestion (`--fix --include-size-dependent`)
 
 Size-dependent `q.insert(0, v)` -> `collections.deque`.
 
@@ -4134,7 +4134,7 @@ Source: https://heki.koxudaxi.dev/rules/list-front-pop/
 
 # list-front-pop (OPT120)
 
-Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` · Proven-safe suggestion (`--fix --include-size-dependent`)
+Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` (slower code) · Proven-safe suggestion (`--fix --include-size-dependent`)
 
 Size-dependent `q.pop(0)` / `del q[0]` / `q = q[1:]` -> `collections.deque`.
 
@@ -4238,7 +4238,7 @@ Source: https://heki.koxudaxi.dev/rules/list-quadratic-concat/
 
 # list-quadratic-concat (OPT101)
 
-Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` · Safe fix (`--fix`)
+Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` (slower code) · Safe fix (`--fix`)
 
 Unconditionally profitable `list` quadratic concatenation (`x = x + [e]` -> `x.append(e)`).
 
@@ -4318,7 +4318,7 @@ Source: https://heki.koxudaxi.dev/rules/lock-or-tx-held-across-io/
 
 # lock-or-tx-held-across-io (EFF106)
 
-Family: Execution Effects (EFF) · Heuristic · Opt-in · Severity `error` · No automatic fix
+Family: Execution Effects (EFF) · Heuristic · Opt-in · Severity `error` (a bug) · No automatic fix
 
 Opt-in: `await` or blocking network I/O while holding a `threading` lock or a DB transaction.
 
@@ -4416,7 +4416,7 @@ Source: https://heki.koxudaxi.dev/rules/loop-carried-concat/
 
 # loop-carried-concat (DATA101)
 
-Family: Data Pipelines (DATA) · Heuristic · Off by default · Severity `error` · No automatic fix
+Family: Data Pipelines (DATA) · Heuristic · Off by default · Severity `warning` (slower code) · No automatic fix
 
 Loop-carried quadratic `pandas.concat` / `numpy.vstack` / `numpy.append` accumulation.
 
@@ -4495,7 +4495,7 @@ Source: https://heki.koxudaxi.dev/rules/loop-db-query/
 
 # loop-db-query (EFF103)
 
-Family: Execution Effects (EFF) · Heuristic · Off by default · Severity `error` · No automatic fix
+Family: Execution Effects (EFF) · Heuristic · Off by default · Severity `warning` (slower code) · No automatic fix
 
 Explicit DB query / external RPC executed inside a loop (N+1).
 
@@ -4608,7 +4608,7 @@ Source: https://heki.koxudaxi.dev/rules/loop-invariant-container-rebuild/
 
 # loop-invariant-container-rebuild (OPT130)
 
-Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` · Proven-safe suggestion (`--fix --include-size-dependent`)
+Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` (slower code) · Proven-safe suggestion (`--fix --include-size-dependent`)
 
 Size-dependent loop-invariant container reconstruction (`e in set(keys)`).
 
@@ -4686,7 +4686,7 @@ Source: https://heki.koxudaxi.dev/rules/loop-linear-dedup/
 
 # loop-linear-dedup (OPT111)
 
-Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` · Proven-safe suggestion (`--fix --include-size-dependent`)
+Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` (slower code) · Proven-safe suggestion (`--fix --include-size-dependent`)
 
 Size-dependent `if v not in seen: seen.append(v)` -> auxiliary `set`.
 
@@ -4757,7 +4757,7 @@ Source: https://heki.koxudaxi.dev/rules/loop-linear-list-lookup/
 
 # loop-linear-list-lookup (OPT112)
 
-Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` · No automatic fix
+Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` (slower code) · No automatic fix
 
 Size-dependent `list.index` / `list.remove` / `list.count` inside a loop (repeated linear scans).
 
@@ -4858,7 +4858,7 @@ Source: https://heki.koxudaxi.dev/rules/loop-linear-membership/
 
 # loop-linear-membership (OPT110)
 
-Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` · Proven-safe suggestion (`--fix --include-size-dependent`)
+Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` (slower code) · Proven-safe suggestion (`--fix --include-size-dependent`)
 
 Size-dependent `e in lst` inside a loop -> hoist `set` outside loop.
 
@@ -4942,7 +4942,7 @@ Source: https://heki.koxudaxi.dev/rules/loop-unpooled-client/
 
 # loop-unpooled-client (EFF102)
 
-Family: Execution Effects (EFF) · Heuristic · Off by default · Severity `error` · No automatic fix
+Family: Execution Effects (EFF) · Heuristic · Off by default · Severity `warning` (slower code) · No automatic fix
 
 Allocating an unpooled HTTP/DB/RPC client or sessionless request inside a loop.
 
@@ -5074,7 +5074,7 @@ Source: https://heki.koxudaxi.dev/rules/nested-loop-equijoin/
 
 # nested-loop-equijoin (OPT113)
 
-Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` · No automatic fix
+Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` (slower code) · No automatic fix
 
 Size-dependent nested-loop equi-join (`for a in A: for b in B: if a.k == b.k`) -> `dict` index.
 
@@ -5176,7 +5176,7 @@ Source: https://heki.koxudaxi.dev/rules/read-owner-violation/
 
 # read-owner-violation (MUT203)
 
-Family: Mutation & State (MUT) · Heuristic · Runs when its contract is declared · Severity `error` · No automatic fix
+Family: Mutation & State (MUT) · Heuristic · Runs when its contract is declared · Severity `error` (a bug) · No automatic fix
 
 Reading a guarded attribute (directly, via alias, `getattr`, or `__dict__`) outside declared `read-owners`.
 
@@ -5319,7 +5319,7 @@ Source: https://heki.koxudaxi.dev/rules/readonly-param-mutation/
 
 # readonly-param-mutation (MUT110)
 
-Family: Mutation & State (MUT) · Heuristic · Off by default · Severity `error` · No automatic fix
+Family: Mutation & State (MUT) · Heuristic · Off by default · Severity `error` (a bug) · No automatic fix
 
 Handing a `Sequence` / `Mapping` / `ReadOnly` parameter to a function that changes it in place (directly, through an alias, or through helpers).
 
@@ -5415,7 +5415,7 @@ Source: https://heki.koxudaxi.dev/rules/readonly-return-mutation/
 
 # readonly-return-mutation (MUT202)
 
-Family: Mutation & State (MUT) · Heuristic · Off by default · Severity `error` · No automatic fix
+Family: Mutation & State (MUT) · Heuristic · Off by default · Severity `error` (a bug) · No automatic fix
 
 Mutating a shared object returned by a declared `readonly-returns` producer or `@lru_cache`, directly or through the functions that return it.
 
@@ -5538,7 +5538,7 @@ Source: https://heki.koxudaxi.dev/rules/readonly-type-mutation/
 
 # readonly-type-mutation (MUT108)
 
-Family: Mutation & State (MUT) · Heuristic · Opt-in · Severity `error` · No automatic fix
+Family: Mutation & State (MUT) · Heuristic · Opt-in · Severity `error` (a bug) · No automatic fix
 
 Opt-in: changing in place a field that a standard type declares read-only (frozen dataclass / `NamedTuple` / `dataclass_transform` fields, `Final` / `ReadOnly` attributes, `ReadOnly` `TypedDict` keys), directly, through an alias, or in a helper.
 
@@ -5661,7 +5661,7 @@ Source: https://heki.koxudaxi.dev/rules/set-dict-quadratic-merge/
 
 # set-dict-quadratic-merge (OPT102)
 
-Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` · Safe fix (`--fix`)
+Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` (slower code) · Safe fix (`--fix`)
 
 Unconditionally profitable `set`/`dict` quadratic merge (`{**d, ...}` with `d` first).
 
@@ -5742,7 +5742,7 @@ Source: https://heki.koxudaxi.dev/rules/summary-effect-regression/
 
 # summary-effect-regression (MUT103)
 
-Family: Mutation & State (MUT) · Heuristic · Opt-in · Severity `error` · No automatic fix
+Family: Mutation & State (MUT) · Heuristic · Opt-in · Severity `error` (a bug) · No automatic fix
 
 Interprocedural mutation/escape/effect regression against saved summary snapshot.
 
@@ -5817,7 +5817,7 @@ Source: https://heki.koxudaxi.dev/rules/unresolved-guarded-call/
 
 # unresolved-guarded-call (MUT207)
 
-Family: Mutation & State (MUT) · Heuristic · Runs when its contract is declared · Severity `error` · No automatic fix
+Family: Mutation & State (MUT) · Heuristic · Runs when its contract is declared · Severity `error` (a bug) · No automatic fix
 
 Strict mode of a `call-owners` contract (`unresolved = "report"`): calling a method named like a target on an object of unknown class.
 
@@ -5908,7 +5908,7 @@ Source: https://heki.koxudaxi.dev/rules/unresolved-guarded-read/
 
 # unresolved-guarded-read (MUT206)
 
-Family: Mutation & State (MUT) · Heuristic · Runs when its contract is declared · Severity `error` · No automatic fix
+Family: Mutation & State (MUT) · Heuristic · Runs when its contract is declared · Severity `error` (a bug) · No automatic fix
 
 Strict mode of a `read-owners` contract (`unresolved = "report"`): reading an attribute named like a target on an object of unknown class.
 
@@ -5995,7 +5995,7 @@ Source: https://heki.koxudaxi.dev/rules/unresolved-guarded-write/
 
 # unresolved-guarded-write (MUT205)
 
-Family: Mutation & State (MUT) · Heuristic · Runs when its contract is declared · Severity `error` · No automatic fix
+Family: Mutation & State (MUT) · Heuristic · Runs when its contract is declared · Severity `error` (a bug) · No automatic fix
 
 Strict mode of a `write-owners` contract (`unresolved = "report"`): writing an attribute named like a target on an object of unknown class, or a computed attribute name on a guarded class.
 
@@ -6098,7 +6098,7 @@ Source: https://heki.koxudaxi.dev/rules/unretained-async-task/
 
 # unretained-async-task (EFF107)
 
-Family: Execution Effects (EFF) · Heuristic · Opt-in · Severity `error` · No automatic fix
+Family: Execution Effects (EFF) · Heuristic · Opt-in · Severity `error` (a bug) · No automatic fix
 
 Opt-in: an `asyncio.create_task` result bound to a local variable but never awaited, returned, or stored.
 
@@ -6196,7 +6196,7 @@ Source: https://heki.koxudaxi.dev/rules/write-owner-violation/
 
 # write-owner-violation (MUT201)
 
-Family: Mutation & State (MUT) · Heuristic · Runs when its contract is declared · Severity `error` · No automatic fix
+Family: Mutation & State (MUT) · Heuristic · Runs when its contract is declared · Severity `error` (a bug) · No automatic fix
 
 Writing a guarded attribute/container (directly, via alias, or via helper) outside declared `write-owners`.
 
@@ -6406,7 +6406,7 @@ Source: https://heki.koxudaxi.dev/rules/write-without-invalidation/
 
 # write-without-invalidation (MUT109)
 
-Family: Mutation & State (MUT) · Heuristic · Runs when its contract is declared · Severity `error` · No automatic fix
+Family: Mutation & State (MUT) · Heuristic · Runs when its contract is declared · Severity `error` (a bug) · No automatic fix
 
 Writing a declared `invalidation` target (directly, via alias, or via helper) without reaching one of its invalidators on every path to the function's return.
 

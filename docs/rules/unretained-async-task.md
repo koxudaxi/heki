@@ -2,7 +2,7 @@
 
 # unretained-async-task (EFF107)
 
-Family: Execution Effects (EFF) · Heuristic · Opt-in · Severity `error` · No automatic fix
+Family: Execution Effects (EFF) · Heuristic · Opt-in · Severity `error` (a bug) · No automatic fix
 
 Opt-in: an `asyncio.create_task` result bound to a local variable but never awaited, returned, or stored.
 

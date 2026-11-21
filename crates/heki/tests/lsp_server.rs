@@ -356,7 +356,7 @@ fn lsp_debounce_close_and_pending_refresh_of_unopened_files() {
     // Write owners make every per-file check look at the other indexed files too.
     p.write(
         "heki.toml",
-        "[lint.severity]\nEFF101 = \"warning\"\n\n[[write-owners]]\nname = \"store\"\ntargets = [\"Model.fields\"]\nallowed-writers = [\"Store.*\"]\n",
+        "[lint.severity]\nEFF101 = \"error\"\n\n[[write-owners]]\nname = \"store\"\ntargets = [\"Model.fields\"]\nallowed-writers = [\"Store.*\"]\n",
     )
         .write("pkg/__init__.py", "")
         .write("pkg/util.py", UTIL)
@@ -398,7 +398,7 @@ fn lsp_debounce_close_and_pending_refresh_of_unopened_files() {
     );
     let diags = lsp.diagnostics(&api, |d| !d.is_empty());
     assert_eq!(codes(&diags), vec!["EFF101"]);
-    assert_eq!(diags[0]["severity"], 2, "lint.severity = warning");
+    assert_eq!(diags[0]["severity"], 1, "lint.severity = error");
     let related = diags[0]["relatedInformation"].as_array().unwrap();
     assert_eq!(related[0]["location"]["uri"], api);
     assert_eq!(related[1]["location"]["uri"], util);
