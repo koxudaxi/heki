@@ -6,7 +6,8 @@
 mod common;
 
 use common::Project;
-use serde_json::Value;
+use common::lsp::{Lsp, codes, uri};
+use serde_json::{Value, json};
 use std::io::Read;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -491,6 +492,32 @@ fn stores_of_a_long_alias_chain_into_many_lists_past_the_budget_return_unknown()
         found.iter().all(|d| d["rule_code"] != "MUT112"),
         "{found:#?}"
     );
+}
+
+/// A function reading attributes down a chain ten thousand deep (`x = x.child`) under `MUT112`:
+/// whether each receiver holds an object the function makes is read from its own definition,
+/// not again through every read before it, which took a walk as deep as the chain (and the
+/// stack) per read and pass.
+#[test]
+fn attribute_reads_down_a_long_chain_decide_each_receiver_once() {
+    let links = 10_000;
+    let mut lines = vec![
+        "def walk(node):".to_owned(),
+        "    extra = node or []".to_owned(),
+        "    extra.append(1)".to_owned(),
+        "    x = node".to_owned(),
+    ];
+    lines.extend((0..links).map(|_| "    x = x.child".to_owned()));
+    lines.push("    x.append(1)".to_owned());
+    let p = Project::new("bounds_attribute_chain");
+    p.write("pyproject.toml", MUT112_CONFIG)
+        .write("m.py", &(lines.join("\n") + "\n"));
+    let found: Vec<u64> = check_within(&p, Duration::from_secs(20))
+        .iter()
+        .filter(|d| d["rule_code"] == "MUT112")
+        .map(|d| d["line"].as_u64().unwrap())
+        .collect();
+    assert_eq!(found, vec![3]);
 }
 
 /// A function returning the last of a long chain of calls, each handed the previous call's
@@ -1525,6 +1552,465 @@ fn tests_of_a_wide_merge_keep_their_edges_within_a_budget() {
         .map(|d| d["qualname"].as_str().unwrap())
         .collect();
     assert_eq!(reported, vec!["load"], "{found:#?}");
+}
+
+/// `MUT113` selected (it reads the iterations of a method's own containers).
+const MUT113_CONFIG: &str =
+    "[project]\nname = \"t\"\n\n[tool.heki.lint]\nextend-select = [\"MUT113\"]\n";
+
+/// A class with `containers` dicts, a generator kept on the instance iterating one of them
+/// through `body`'s aliases, and a method changing the first.
+fn kept_generator_over(containers: usize, body: &[String]) -> String {
+    let mut lines = vec![
+        "class Holder:".to_owned(),
+        "    def __init__(self) -> None:".to_owned(),
+    ];
+    for i in 0..containers {
+        lines.push(format!("        self.d{i}: dict[str, int] = {{}}"));
+    }
+    lines.push("        self._cursor = self._walk(1)".to_owned());
+    lines.push(String::new());
+    lines.push("    def _walk(self, n):".to_owned());
+    lines.extend(body.iter().cloned());
+    lines.push("            yield k".to_owned());
+    lines.push(String::new());
+    lines.push("    def drop(self, k: str) -> None:".to_owned());
+    lines.push("        self.d0.pop(k, None)".to_owned());
+    lines.join("\n") + "\n"
+}
+
+/// `MUT113` reports of `heki check` over `src`.
+fn iterated_mutations(name: &str, src: &str) -> usize {
+    let p = Project::new(name);
+    p.write("pyproject.toml", MUT113_CONFIG).write("m.py", src);
+    check_within(&p, Duration::from_secs(20))
+        .iter()
+        .filter(|d| d["rule_code"] == "MUT113")
+        .count()
+}
+
+/// A loop rotating aliases of `containers` dicts (`t = a0; a0 = a1; ...; a599 = t`): the
+/// containers a value may iterate reach each alias one pass after another, so finding them takes
+/// a pass per alias. Past the pass limit no value iterates a container: no report.
+#[test]
+fn iterated_containers_past_the_pass_limit_are_unknown() {
+    let rotating = |containers: usize| {
+        let mut body: Vec<String> = (0..containers)
+            .map(|i| format!("        a{i} = self.d{i}"))
+            .collect();
+        body.push("        while n:".to_owned());
+        body.push("            t = a0".to_owned());
+        body.extend((0..containers - 1).map(|i| format!("            a{i} = a{}", i + 1)));
+        body.push(format!("            a{} = t", containers - 1));
+        body.push("            n -= 1".to_owned());
+        body.push("        for k in a0:".to_owned());
+        kept_generator_over(containers, &body)
+    };
+    assert_eq!(iterated_mutations("bounds_rotation_3", &rotating(3)), 1);
+    // Within the pass limit, and past it within the fact budget.
+    assert_eq!(iterated_mutations("bounds_rotation_20", &rotating(20)), 1);
+    assert_eq!(iterated_mutations("bounds_rotation_30", &rotating(30)), 0);
+    // Past the fact budget too.
+    assert_eq!(iterated_mutations("bounds_rotation_600", &rotating(600)), 0);
+}
+
+/// A chain of `containers` merges (`if n == i: x = self.di`): the merged value after the `i`-th
+/// may iterate any of `i` containers, so the facts grow with the square of the chain. Past their
+/// budget (proportional to the source) no value iterates a container: no report.
+#[test]
+fn iterated_containers_past_their_budget_are_unknown() {
+    let merging = |containers: usize| {
+        let mut body = vec!["        x = self.d0".to_owned()];
+        for i in 1..containers {
+            body.push(format!("        if n == {i}:"));
+            body.push(format!("            x = self.d{i}"));
+        }
+        body.push("        for k in x:".to_owned());
+        kept_generator_over(containers, &body)
+    };
+    assert_eq!(iterated_mutations("bounds_merges_3", &merging(3)), 1);
+    assert_eq!(iterated_mutations("bounds_merges_2000", &merging(2000)), 0);
+}
+
+/// A loop over a private generator whose body makes `calls` calls of a method changing the
+/// container it iterates: what each call runs on (the iterated call's arguments, a method of the
+/// family) is looked up by its span once, not by a scan of the function's calls per call.
+#[test]
+fn a_loop_over_a_generator_looks_up_each_call_of_its_body_once() {
+    let calls = 20_000;
+    let mut lines = vec![
+        "class Node:".to_owned(),
+        "    def __init__(self) -> None:".to_owned(),
+        "        self.items: dict[str, int] = {}".to_owned(),
+        String::new(),
+        "    def _walk(self):".to_owned(),
+        "        for k in self.items:".to_owned(),
+        "            yield k".to_owned(),
+        String::new(),
+        "    def touch(self) -> None:".to_owned(),
+        "        self.items.pop(\"x\", None)".to_owned(),
+        String::new(),
+        String::new(),
+        "def visit(n: Node):".to_owned(),
+        "    for k in n._walk():".to_owned(),
+    ];
+    lines.extend((0..calls).map(|_| "        n.touch()".to_owned()));
+    assert_eq!(
+        iterated_mutations("bounds_loop_calls", &(lines.join("\n") + "\n")),
+        1
+    );
+}
+
+/// Loops over a container of `self` and over a private generator's result whose bodies hold
+/// `branches` conditional blocks one after another: the blocks from which each loop goes on to
+/// its next step are found by one walk back from its header, not by a walk from every block.
+#[test]
+fn a_loop_with_many_branches_finds_the_blocks_reaching_its_header_once() {
+    let branches = 8_000;
+    let body = |lines: &mut Vec<String>| {
+        for _ in 0..branches {
+            lines.push("            if k:".to_owned());
+            lines.push("                pass".to_owned());
+        }
+    };
+    let mut lines = vec![
+        "class Table:".to_owned(),
+        "    def __init__(self) -> None:".to_owned(),
+        "        self.items: dict[str, int] = {}".to_owned(),
+        String::new(),
+        "    def _keys(self):".to_owned(),
+        "        yield from self.items".to_owned(),
+        String::new(),
+        "    def scan(self):".to_owned(),
+        "        for k in self.items:".to_owned(),
+    ];
+    body(&mut lines);
+    lines.push(String::new());
+    lines.push("    def scan_keys(self):".to_owned());
+    lines.push("        for k in self._keys():".to_owned());
+    body(&mut lines);
+    assert_eq!(
+        iterated_mutations("bounds_loop_branches", &(lines.join("\n") + "\n")),
+        0
+    );
+}
+
+/// A function consuming a private generator's result `consumptions` times in a row
+/// (`list(node._walk())`): what it does with each call's result (handed on, iterated) is read
+/// from one index of its call sites and iterations, not by a scan of the file's call sites per
+/// call. Each result is consumed at once, so nothing runs while the generator is suspended.
+#[test]
+fn repeated_consumptions_of_a_generator_read_each_call_once() {
+    let consumptions = 16_000;
+    let mut lines = vec![
+        "class Node:".to_owned(),
+        "    def __init__(self) -> None:".to_owned(),
+        "        self.items: dict[str, int] = {}".to_owned(),
+        String::new(),
+        "    def _walk(self):".to_owned(),
+        "        for k in self.items:".to_owned(),
+        "            yield k".to_owned(),
+        String::new(),
+        "    def drop(self, k: str) -> None:".to_owned(),
+        "        self.items.pop(k, None)".to_owned(),
+        String::new(),
+        String::new(),
+        "def consume(node: Node):".to_owned(),
+    ];
+    lines.extend((0..consumptions).map(|_| "    list(node._walk())".to_owned()));
+    assert_eq!(
+        iterated_mutations("bounds_consumptions", &(lines.join("\n") + "\n")),
+        0
+    );
+}
+
+/// A loop over `zip(node._walk(), ...)` of `results` generator calls whose body makes as many
+/// calls: the loop is one fact shared by every result it steps, and what it does to them is found
+/// once per instruction, not once per result.
+#[test]
+fn a_loop_over_many_generator_results_is_summarized_once() {
+    let results = 8_000;
+    let mut lines = vec![
+        "class Node:".to_owned(),
+        "    def __init__(self) -> None:".to_owned(),
+        "        self.items: dict[str, int] = {}".to_owned(),
+        String::new(),
+        "    def _walk(self):".to_owned(),
+        "        for k in self.items:".to_owned(),
+        "            yield k".to_owned(),
+        String::new(),
+        "    def touch(self) -> None:".to_owned(),
+        "        self.items.pop(\"x\", None)".to_owned(),
+        String::new(),
+        String::new(),
+        "def visit(node: Node):".to_owned(),
+        "    for row in zip(".to_owned(),
+    ];
+    lines.extend((0..results).map(|_| "        node._walk(),".to_owned()));
+    lines.push("    ):".to_owned());
+    lines.extend((0..results).map(|_| "        node.touch()".to_owned()));
+    assert_eq!(
+        iterated_mutations("bounds_zipped_results", &(lines.join("\n") + "\n")),
+        1
+    );
+}
+
+/// A loop over `zip(self.d0, ..., self.d1999)` whose body makes as many calls: the loop is one
+/// fact for every container it steps, and what each call changes is read once, not once per
+/// container.
+#[test]
+fn a_loop_over_many_self_containers_is_one_fact() {
+    let containers = 2_000;
+    let mut lines = vec![
+        "class Table:".to_owned(),
+        "    def __init__(self) -> None:".to_owned(),
+    ];
+    lines.extend((0..containers).map(|i| format!("        self.d{i}: dict[str, int] = {{}}")));
+    lines.extend(
+        [
+            "",
+            "    def touch(self) -> None:",
+            "        pass",
+            "",
+            "    def drop(self) -> None:",
+            "        self.d0.pop(\"x\", None)",
+            "",
+            "    def visit(self) -> None:",
+        ]
+        .map(str::to_owned),
+    );
+    let zipped: Vec<String> = (0..containers).map(|i| format!("self.d{i}")).collect();
+    lines.push(format!("        for row in zip({}):", zipped.join(", ")));
+    lines.extend((0..containers).map(|_| "            self.touch()".to_owned()));
+    lines.push("            self.drop()".to_owned());
+    assert_eq!(
+        iterated_mutations("bounds_zipped_containers", &(lines.join("\n") + "\n")),
+        1
+    );
+}
+
+/// One `zip` of `containers` dicts of `self` stepped by as many `yield from`s in a private
+/// generator, and a method changing the first dict while the generator is suspended: each
+/// `yield from` steps every container, so past ten of them the iterations' facts pass their
+/// budget and the generator has none. Ten give ten reports, two thousand none.
+#[test]
+fn iterations_past_the_fact_budget_are_unknown() {
+    let zipped = |containers: usize| {
+        let mut lines = vec![
+            "class Table:".to_owned(),
+            "    def __init__(self) -> None:".to_owned(),
+        ];
+        lines.extend((0..containers).map(|i| format!("        self.d{i}: dict[str, int] = {{}}")));
+        lines.extend(
+            [
+                "",
+                "    def drop(self) -> None:",
+                "        self.d0.pop(\"x\", None)",
+                "",
+                "    def pump(self) -> None:",
+                "        g = self._rows()",
+                "        next(g)",
+                "        self.drop()",
+                "        next(g)",
+                "",
+                "    def _rows(self):",
+            ]
+            .map(str::to_owned),
+        );
+        let attrs: Vec<String> = (0..containers).map(|i| format!("self.d{i}")).collect();
+        lines.push(format!("        z = zip({})", attrs.join(", ")));
+        lines.extend((0..containers).map(|_| "        yield from z".to_owned()));
+        lines.join("\n") + "\n"
+    };
+    assert_eq!(
+        iterated_mutations("bounds_iteration_facts_few", &zipped(10)),
+        10
+    );
+    assert_eq!(
+        iterated_mutations("bounds_iteration_facts", &zipped(2_000)),
+        0
+    );
+}
+
+/// A private generator handed on through five thousand private wrappers, each returning the one
+/// before's result (`def _w1(self): return self._w0()`), and a loop over the last one's result
+/// calling a method that changes the generator's container: the walk from the generator to the
+/// loop keeps its own stack, one entry per wrapper, instead of a native frame per wrapper.
+#[test]
+fn a_long_chain_of_wrappers_handing_on_a_generator_is_walked_on_its_own_stack() {
+    let wrappers = 5_000;
+    let mut lines = vec![
+        "class Box:".to_owned(),
+        "    def __init__(self) -> None:".to_owned(),
+        "        self.items: dict[str, int] = {}".to_owned(),
+        String::new(),
+        "    def _w0(self):".to_owned(),
+        "        yield from self.items".to_owned(),
+    ];
+    for i in 1..=wrappers {
+        lines.push(String::new());
+        lines.push(format!("    def _w{i}(self):"));
+        lines.push(format!("        return self._w{}()", i - 1));
+    }
+    lines.extend(
+        [
+            "",
+            "    def _drop(self, k: str) -> None:",
+            "        self.items.pop(k, None)",
+            "",
+            "    def drain(self) -> None:",
+        ]
+        .map(str::to_owned),
+    );
+    lines.push(format!("        for k in self._w{wrappers}():"));
+    lines.push("            self._drop(k)".to_owned());
+    assert_eq!(
+        iterated_mutations("bounds_wrapper_chain", &(lines.join("\n") + "\n")),
+        1
+    );
+}
+
+/// An edit through the language server changing every method of a class of five thousand
+/// methods (and adding a blocking call to an `async def`, whose `EFF101` report shows the edit
+/// was checked): which class families read the changed methods' summaries is decided once per
+/// class, not by reading the class's methods again for each changed method.
+#[test]
+fn an_edit_changing_thousands_of_methods_reads_each_class_once() {
+    let methods = 5_000;
+    let module = |changed: bool| {
+        let mut lines = vec![
+            "import time".to_owned(),
+            String::new(),
+            String::new(),
+            "class Table:".to_owned(),
+            "    def __init__(self) -> None:".to_owned(),
+            "        self.rows: dict[str, int] = {}".to_owned(),
+        ];
+        for i in 0..methods {
+            lines.push(String::new());
+            lines.push(format!("    def m{i}(self) -> None:"));
+            lines.push(if changed {
+                format!("        self.rows[\"k{i}\"] = {i}")
+            } else {
+                format!("        print({i})")
+            });
+        }
+        if changed {
+            lines.extend(
+                ["", "", "async def pause() -> None:", "    time.sleep(1)"].map(str::to_owned),
+            );
+        }
+        lines.join("\n") + "\n"
+    };
+    let p = Project::new("bounds_family_edit");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/table.py", &module(false));
+    let table = uri(&p.dir.join("pkg/table.py"));
+    let mut lsp = Lsp::start(&p.dir, &["server", "--stdio"]);
+    lsp.request(
+        "initialize",
+        json!({"processId": null, "rootUri": uri(&p.dir), "capabilities": {}}),
+    );
+    lsp.notify("initialized", json!({}));
+    lsp.ready();
+    lsp.open(&table, &module(false));
+    lsp.diagnostics(&table, <[Value]>::is_empty);
+    let changed = module(true);
+    lsp.change(&table, 2, &changed);
+    p.write("pkg/table.py", &changed);
+    lsp.notify(
+        "textDocument/didSave",
+        json!({"textDocument": {"uri": table}, "text": changed}),
+    );
+    // Each wait fails past its time limit.
+    let diags = lsp.diagnostics(&table, |d| !d.is_empty());
+    assert_eq!(codes(&diags), vec!["EFF101"]);
+    lsp.settle();
+    lsp.stop(true);
+}
+
+/// The lines of the `MUT113` diagnostics of the project, which must finish within `limit`.
+fn mut113_lines(p: &Project, limit: Duration) -> Vec<u64> {
+    check_within(p, limit)
+        .iter()
+        .filter(|d| d["rule_code"] == "MUT113")
+        .map(|d| d["line"].as_u64().unwrap())
+        .collect()
+}
+
+/// Methods that each change a typed dict of `self` thousands of times (`self.rows[str(i)] =
+/// i`), the first after binding a new dict, called in a loop over it: the stores of new objects
+/// before a change, and the blocks they dominate, are gathered once per function.
+#[test]
+fn many_changes_of_a_container_of_self_decide_their_rebinding_once() {
+    let (methods, writes) = (3, 8_000);
+    let mut lines = vec![
+        "class Table:".to_owned(),
+        "    def __init__(self) -> None:".to_owned(),
+        "        self.rows: dict[str, int] = {}".to_owned(),
+    ];
+    for m in 0..methods {
+        lines.push(String::new());
+        lines.push(format!("    def fill{m}(self) -> None:"));
+        if m == 0 {
+            lines.push("        self.rows = {}".to_owned());
+        }
+        for i in 0..writes {
+            lines.push(format!("        self.rows[str({i})] = {i}"));
+        }
+    }
+    lines.push(String::new());
+    lines.push("    def refresh(self) -> None:".to_owned());
+    lines.push("        for key in self.rows:".to_owned());
+    let mut calls = Vec::new();
+    for m in 0..methods {
+        lines.push(format!("            self.fill{m}()"));
+        calls.push(lines.len() as u64);
+    }
+    let p = Project::new("bounds_self_container_changes");
+    p.write("pyproject.toml", MUT113_CONFIG)
+        .write("m.py", &(lines.join("\n") + "\n"));
+    assert_eq!(mut113_lines(&p, Duration::from_secs(20)), calls[1..]);
+}
+
+/// A method storing under a key of a typed dict of `self` after each of hundreds of tests that
+/// the key is there (`if key in self.rows: self.rows[key] = value`), called in a loop over it:
+/// the sides of the tests are found once per function, and whether one dominates a store by
+/// the dominator tree.
+#[test]
+fn many_key_tests_of_a_container_of_self_find_their_sides_once() {
+    let tests = 600;
+    let mut lines = vec![
+        "class Table:".to_owned(),
+        "    def __init__(self) -> None:".to_owned(),
+        "        self.rows: dict[str, int] = {}".to_owned(),
+        String::new(),
+        "    def update(self, key: str, value: int) -> None:".to_owned(),
+    ];
+    for _ in 0..tests {
+        lines.push("        if key in self.rows:".to_owned());
+        lines.push("            self.rows[key] = value".to_owned());
+    }
+    lines.extend(
+        [
+            "",
+            "    def insert(self, key: str, value: int) -> None:",
+            "        self.rows[key] = value",
+            "",
+            "    def refresh(self) -> None:",
+            "        for key in self.rows:",
+            "            self.update(key, 1)",
+            "            self.insert(key, 1)",
+        ]
+        .map(str::to_owned),
+    );
+    let p = Project::new("bounds_self_container_key_tests");
+    p.write("pyproject.toml", MUT113_CONFIG)
+        .write("m.py", &(lines.join("\n") + "\n"));
+    assert_eq!(
+        mut113_lines(&p, Duration::from_secs(20)),
+        vec![lines.len() as u64]
+    );
 }
 
 /// Puts after each of many branches that may build a new unbounded queue: the queue of each put

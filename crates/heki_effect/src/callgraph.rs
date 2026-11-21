@@ -7,6 +7,7 @@
 //! edited file's SCC closure and then over the affected callers only.
 
 use crate::guards;
+use crate::iterations;
 use crate::scc::tarjan_scc;
 use crate::{
     ArgOrigin, AttrKeyPath, BoundCallee, CallHop, CallSite, Construction, Delivery, EffectSummary,
@@ -280,11 +281,13 @@ fn recompute(
         }
         s.consumes_params |= consumed.unwrap_or(0) & s.unconditional_forwards;
     }
-    returned_results(
-        index,
-        out.get(func).map(Vec::as_slice).unwrap_or(&[]),
-        &mut s,
-    );
+    if index.opt_in.return_origins {
+        returned_results(
+            index,
+            out.get(func).map(Vec::as_slice).unwrap_or(&[]),
+            &mut s,
+        );
+    }
     if !s.returns_self_attrs.is_empty() {
         drop_attrs_read_by_discarded_calls(index, &self_calls, local, &mut s);
     }
@@ -814,6 +817,29 @@ fn transfer(
             .extend(facts.mutates_self_attrs.iter().cloned());
         t.invalidates_cached
             .extend(facts.invalidates_cached.iter().cloned());
+    }
+    let changes = iterations::call_changes(site, bc, callee, facts);
+    if !changes.is_empty() {
+        iterations::merge_changes(
+            &mut t.iteration_facts_mut().changes_self_containers,
+            changes,
+        );
+    }
+    // A callee parameter bound to a caller parameter itself changes that parameter's container.
+    let param_changes: Vec<(u8, iterations::ContainerChange)> = facts
+        .iteration_facts()
+        .changes_param_containers
+        .iter()
+        .filter_map(|(&i, &change)| match origin(usize::from(i))?.param {
+            Some((p, None)) => Some((p, change)),
+            _ => None,
+        })
+        .collect();
+    if !param_changes.is_empty() {
+        iterations::merge_changes(
+            &mut t.iteration_facts_mut().changes_param_containers,
+            param_changes,
+        );
     }
     // A slot of a callee parameter bound to a caller parameter is that parameter's slot.
     for (&i, slots) in &facts.inplace_param_slots {
