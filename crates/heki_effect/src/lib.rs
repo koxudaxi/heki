@@ -19,6 +19,7 @@
 
 pub mod cache_flow;
 mod callgraph;
+pub mod capacity;
 mod construction;
 pub mod consumption;
 mod contracts;
@@ -36,6 +37,7 @@ pub mod types;
 pub use cache_flow::{
     CacheEvent, CacheFlow, FlowBlock, SelfAttrWrite, attr_writes, self_attr_writes,
 };
+pub use capacity::{Capacity, CapacityOf, CapacityWait, ParamOf, WhileFull};
 pub use contracts::Contracts;
 pub use invalidation::{
     FlowWrite, FuncFlow, INITIALIZERS, Reach, SiteFlow, UnmetWrite, body_runs_at,
@@ -630,6 +632,12 @@ pub struct EffectSummary {
     /// one when it is `excluded`, the blocking ones when it is `async_safe` (applied to the
     /// final summary, whatever the callees bring).
     pub declared_hidden: BTreeSet<ExecEffectKind>,
+
+    /// The function's own waits on queues whose capacity what calls of other functions bind
+    /// decides, such as an attribute a constructor's parameter fills ([`capacity`]): propagation
+    /// adds their effects where the project shows the queue bounded (local).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capacity_waits: Vec<CapacityWait>,
 }
 
 /// An input of a function that a guard tests: parameter `param` itself, or its attribute
@@ -673,6 +681,10 @@ pub struct EffectGuards {
     /// from the parameters in this mask (`0`: from none, such as a pooled connection or a module
     /// global). `None`: some occurrence runs on every call.
     pub once_per: Option<u64>,
+    /// Every occurrence waits on the queue the function's parameter `p` holds, which it does
+    /// only when the queue is bounded: each call decides by what it binds there ([`capacity`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bounded_queue: Option<u8>,
 }
 
 /// The exact class of a value a function knows: a constant, a display or comprehension, or a
@@ -699,11 +711,14 @@ pub enum ConstClass {
 }
 
 /// An argument (or a literal default) whose class the caller knows: its class and, where the
-/// value decides it, its truthiness (`False`, `None`, `0`, `""`, and empty displays are falsy).
+/// value decides it, its truthiness (`False`, `None`, `0`, `""`, and empty displays are falsy)
+/// and, for an integer, whether it is above zero (a default may be negative: `size=-1`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ConstArg {
     pub class: ConstClass,
     pub truthy: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub positive: Option<bool>,
 }
 
 /// What a caller knows about the value of a callee parameter at one call, when the argument
@@ -722,6 +737,10 @@ pub struct ArgBinding {
     /// The loops around the call (bit `d - 1`: the one at depth `d`) across whose iterations
     /// the argument stays one object: those that do not construct it.
     pub stays_in_loops: u64,
+    /// What the argument, a queue, gives the parameter ([`capacity`]; boxed: few arguments are
+    /// queues).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity: Option<Box<CapacityOf>>,
 }
 
 impl EffectSummary {
@@ -779,6 +798,9 @@ impl EffectSummary {
             })
             .collect();
         out.param_change_sites.clear();
+        for w in &mut out.capacity_waits {
+            w.hop.span = Span { start: 0, end: 0 };
+        }
         out.iterated = out.iterated.map(|i| Box::new(i.without_locations()));
         if let Some(r) = &mut out.returns_protected {
             zero_hop_spans(&mut r.chain);
@@ -1079,6 +1101,10 @@ pub enum CallTarget {
         effects: BTreeSet<ExecEffectKind>,
         offloads_blocking_arg: Option<u8>,
         async_safe: bool,
+        /// The blocking effects it has only on a bounded queue, whose capacity the project
+        /// decides (`ProjectIndex::while_full_effects`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        while_full: Option<Box<WhileFull>>,
     },
 }
 
@@ -1372,6 +1398,9 @@ pub struct ProjectIndex {
     /// of their callees, nor their write facts, nor `IndirectHelper` sites. Set when no
     /// enabled rule reads them; every function keeps its own.
     pub(crate) skips_typed_writes: bool,
+    /// What the project callers bind to the parameters queue waits ask about, from the local
+    /// facts of every file (computed before propagation).
+    pub(crate) param_capacities: capacity::ParamCapacities,
 }
 
 /// True for `.pyi` typing stubs (prefer the sibling `.py` implementation when both exist).
@@ -1494,6 +1523,7 @@ impl ProjectIndex {
             index.add_file_links(&file);
             index.files.insert(file.path.clone(), file);
         }
+        index.param_capacities = capacity::ParamCapacities::of(&index);
         let all: FxHashSet<FuncKey> = index.all_functions().collect();
         callgraph::propagate(&mut index, &all);
         callgraph::recompute_sync_driven(&mut index);
@@ -1510,7 +1540,10 @@ impl ProjectIndex {
             CallTarget::Layer2 {
                 symbol, effects, ..
             } => {
-                for e in effects {
+                for e in effects
+                    .iter()
+                    .chain(self.while_full_effects(site).into_iter().flatten())
+                {
                     out.push(SiteEffect {
                         effect: *e,
                         chain: vec![callgraph::site_hop(site, path, symbol.clone())],
@@ -1543,12 +1576,24 @@ impl ProjectIndex {
                         if site.hides(e) {
                             continue;
                         }
-                        // A guard the call decides against: the effect does not run here.
-                        let Some(through) =
-                            guards::through_call(site, bc, facts.exec_guards.get(&e))
-                        else {
+                        // A guard the call decides against: the effect does not run here. A
+                        // queue the caller's parameter holds is bounded when its own callers
+                        // all bind known queues and one is bounded.
+                        let Some(through) = guards::through_call(
+                            site,
+                            bc,
+                            facts.exec_guards.get(&e),
+                            &self.param_capacities,
+                        ) else {
                             continue;
                         };
+                        let queue = through.guards.bounded_queue.map(|p| CapacityOf {
+                            params: BTreeSet::from([(site.caller.clone(), p)]),
+                            ..CapacityOf::default()
+                        });
+                        if queue.is_some_and(|q| !self.param_capacities.bounded(&q)) {
+                            continue;
+                        }
                         let Some(tail) = facts.effect_chain_for(e, site.receiver()) else {
                             continue;
                         };
@@ -1565,6 +1610,16 @@ impl ProjectIndex {
             }
         }
         out
+    }
+
+    /// The effects a call of a Layer 2 API has besides its own (`CallTarget::Layer2::effects`):
+    /// those it has only on a queue, which the project shows bounded
+    /// (`CallTarget::Layer2::while_full`).
+    pub fn while_full_effects<'s>(
+        &self,
+        site: &'s CallSite,
+    ) -> Option<&'s BTreeSet<ExecEffectKind>> {
+        self.param_capacities.while_full(site)
     }
 
     /// What `site` hands its caller of the project callee summarized by `callee`: the one
@@ -1716,7 +1771,7 @@ impl ProjectIndex {
                 sync_candidates.insert(callee.clone());
             }
         }
-        self.files.insert(path, new_file);
+        self.files.insert(path.clone(), new_file);
         // A function the file stopped defining falls back to the highest-ranked other file
         // defining it (a `.pyi` stub next to its `.py` implementation), as a full build links it.
         for func in owned_before.iter().filter(|f| !own.contains(*f)) {
@@ -1730,10 +1785,37 @@ impl ProjectIndex {
                 self.func_files.insert(func.clone(), other.clone());
             }
         }
+        // The functions elsewhere waiting on a queue whose capacity the edit changed (what the
+        // file's calls bind to a parameter): their effects change without an edit of their own.
+        let touched = old_file.iter().chain(self.files.get(&path));
+        let recapacitated = if self.param_capacities.touched_by(touched) {
+            let capacities = capacity::ParamCapacities::of(self);
+            let changed = capacities.changed(&self.param_capacities);
+            self.param_capacities = capacities;
+            changed
+        } else {
+            FxHashSet::default()
+        };
+        let waiting: FxHashSet<FuncKey> = if recapacitated.is_empty() {
+            FxHashSet::default()
+        } else {
+            self.files
+                .values()
+                .flat_map(|f| {
+                    let asking = capacity::asking(f, &recapacitated);
+                    asking
+                        .into_iter()
+                        .filter(|k| self.func_files.get(*k) == Some(&f.path))
+                })
+                .cloned()
+                .collect()
+        };
 
-        // Region 0: the file's functions plus every function sharing a (cross-file) SCC with
-        // them, so cycles cannot keep stale effects of the old version alive.
-        let mut region = callgraph::scc_closure(self, &own);
+        // Region 0: the file's functions (and those waiting on queues it changed) plus every
+        // function sharing a (cross-file) SCC with them, so cycles cannot keep stale effects of
+        // the old version alive.
+        let seeds: FxHashSet<FuncKey> = own.iter().chain(&waiting).cloned().collect();
+        let mut region = callgraph::scc_closure(self, &seeds);
         for func in &region {
             if !own.contains(func)
                 && let Some(s) = self.shared_summary(func)
@@ -1767,6 +1849,9 @@ impl ProjectIndex {
             }
         }
         changed.extend(sync_changed);
+        // A wait whose queue changed changes the reports at its own call even where the
+        // function blocks already for another reason (its summary unchanged).
+        changed.extend(waiting);
 
         // Callers whose facts depend on changed summaries (Early Cutoff when there are none),
         // then callers that only copy moved positions: their summaries are refreshed too, so

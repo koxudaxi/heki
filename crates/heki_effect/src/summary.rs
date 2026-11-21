@@ -4,6 +4,7 @@
 //! fixpoint (`callgraph`) maps callee facts through. No IR survives this module.
 
 use crate::cache_flow;
+use crate::capacity::{self, Capacity, CapacityOf, CapacityWait, WhileFull};
 use crate::construction::{Escape, Pos, Recorder};
 use crate::consumption::{ItemArgs, IterFlow, PerItemCall, Roots, param_iteration};
 use crate::guards::{self, GuardInputs, LocalGuards, per_item_bit};
@@ -270,6 +271,7 @@ fn absorb_class_body(into: &mut EffectSummary, body: EffectSummary) {
         .extend(body.typed_field_read_sites);
     into.private_calls.extend(body.private_calls);
     into.unknown_calls |= body.unknown_calls;
+    into.capacity_waits.extend(body.capacity_waits);
     into.refresh_typed_field_writes();
 }
 
@@ -409,6 +411,7 @@ fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary) {
         .extend(other.unresolved_write_sites);
     into.unresolved_access_sites
         .extend(other.unresolved_access_sites);
+    into.capacity_waits.extend(other.capacity_waits);
     into.refresh_typed_field_writes();
 }
 
@@ -566,6 +569,10 @@ struct Extractor<'a> {
     stored_attrs: Vec<&'a str>,
     /// The block and phi defining each phi variable (`GuardInputs::phis`).
     phis: OnceCell<FxHashMap<VarId, (BlockId, &'a PhiNode)>>,
+    /// The function's integer constants (`capacity`), built on first use.
+    ints: OnceCell<heki_ir::FnIndex<'a>>,
+    /// What the queue capacity walks of the function's values found so far.
+    capacity_walks: RefCell<capacity::Walks>,
     /// Buffers of the guard analysis's backward walks (`GuardInputs::scratch`).
     scratch: RefCell<(FxHashSet<VarId>, Vec<VarId>)>,
     /// The loops around each block.
@@ -703,6 +710,8 @@ impl<'a> Extractor<'a> {
             fresh: FxHashSet::default(),
             stored_attrs,
             phis: OnceCell::new(),
+            ints: OnceCell::new(),
+            capacity_walks: RefCell::default(),
             scratch: RefCell::default(),
             around: OnceCell::new(),
             guards: LocalGuards::default(),
@@ -788,9 +797,43 @@ impl<'a> Extractor<'a> {
         &table[bb.0 as usize]
     }
 
-    /// [`ArgBinding`] of the argument `var` of a call inside `loops`.
+    /// [`ArgBinding`] of the argument `var` of a call inside `loops`, with what it gives the
+    /// parameter when it is a queue.
     fn binding(&self, var: VarId, loops: &[&NaturalLoop]) -> ArgBinding {
-        self.guards.binding(&self.guard_inputs(), var, loops)
+        let mut b = self.guards.binding(&self.guard_inputs(), var, loops);
+        if matches!(self.types.get(&var), Some(Val::Inst(c)) if capacity::is_queue_class(self.cx.kb, c))
+        {
+            b.capacity = Some(Box::new(self.capacity_of(var).capacity));
+        }
+        b
+    }
+
+    /// What `var` gives a queue (`capacity`): attributes and globals through the project's
+    /// declarations, the parameters as keys.
+    fn capacity_of(&self, var: VarId) -> capacity::Walked {
+        let owner = self.cx.owner_fqn(self.f);
+        let class_of = |v: VarId| {
+            if self.self_vars.contains(&v) {
+                return owner.clone();
+            }
+            match self.types.get(&v) {
+                Some(Val::Inst(c)) if self.cx.project.is_project_class(c) => Some(c.clone()),
+                _ => None,
+            }
+        };
+        capacity::ValueCapacity {
+            cx: self.cx,
+            f: self.f,
+            key: self.key,
+            defs: &self.defs,
+            phis: guards::phi_table(self.f, &self.phis),
+            ints: &self.ints,
+            class_of: &class_of,
+            queue_params: u64::MAX,
+            in_decls: false,
+            walks: &self.capacity_walks,
+        }
+        .walk(var)
     }
 
     /// The constant key of a subscript: its string literal, or the module-level `Final`
@@ -4086,13 +4129,39 @@ impl<'a> Extractor<'a> {
                 self.guards
                     .finished_at(&self.guard_inputs(), bb, self.pos.1, r)
             });
-        let effects: std::collections::BTreeSet<ExecEffectKind> = entry
+        let mut effects: std::collections::BTreeSet<ExecEffectKind> = entry
             .effects_in(case)
             .iter()
             .copied()
             .filter(|e| !((is_awaited || finished) && BLOCKING_EFFECTS.contains(e)))
             .filter(|e| !(ddl && *e == ExecEffectKind::DbQuery))
             .collect();
+        // A `put` waits only on a bounded queue: the code may decide its capacity here, or leave
+        // it to the project (what the callers bind to a parameter).
+        let mut while_full = None;
+        if entry.waits_while_full {
+            let waits: BTreeSet<ExecEffectKind> = effects
+                .iter()
+                .copied()
+                .filter(|e| BLOCKING_EFFECTS.contains(e))
+                .collect();
+            if !waits.is_empty() {
+                let capacity = passed
+                    .recv
+                    .map_or_else(CapacityOf::unknown, |r| self.capacity_of(r).capacity);
+                effects.retain(|e| !waits.contains(e));
+                match capacity.decided() {
+                    Some(Some(Capacity::Bounded)) => effects.extend(waits),
+                    Some(_) => {}
+                    None => {
+                        while_full = Some(Box::new(WhileFull {
+                            effects: waits,
+                            capacity,
+                        }));
+                    }
+                }
+            }
+        }
         if let Some(k) = entry.offloads_blocking_arg
             && let Some((p, None)) = args
                 .get(usize::from(k))
@@ -4100,7 +4169,7 @@ impl<'a> Extractor<'a> {
         {
             self.summary.offloads_blocking_params |= 1u64 << p;
         }
-        if effects.is_empty() && entry.offloads_blocking_arg.is_none() {
+        if effects.is_empty() && entry.offloads_blocking_arg.is_none() && while_full.is_none() {
             return;
         }
         let occurrence = self.guards.occurrence(&self.guard_inputs(), bb);
@@ -4108,29 +4177,57 @@ impl<'a> Extractor<'a> {
             Some(_) => None,
             None => self.forwarded_flag(entry, passed),
         };
-        for e in &effects {
-            let had = !self.summary.direct_exec_effects.insert(*e);
-            let occurrence = match flagged {
-                Some((off, param)) if !off.contains(e) => {
-                    let mut needs_flag = occurrence.clone();
-                    needs_flag.inputs.insert(crate::InputGuard {
-                        subject: GuardSubject { param, attr: None },
-                        test: crate::GuardTest::Truthy,
-                        holds: true,
-                    });
-                    needs_flag
-                }
-                _ => occurrence.clone(),
+        let occurrence_of = |e: &ExecEffectKind| match flagged {
+            Some((off, param)) if !off.contains(e) => {
+                let mut needs_flag = occurrence.clone();
+                needs_flag.inputs.insert(crate::InputGuard {
+                    subject: GuardSubject { param, attr: None },
+                    test: crate::GuardTest::Truthy,
+                    holds: true,
+                });
+                needs_flag
+            }
+            _ => occurrence.clone(),
+        };
+        // A queue that only the function's parameter can make bounded: each call decides, so
+        // the wait is an effect needing a bounded queue there. Any other is resolved over the
+        // project before propagation (`capacity::ParamCapacities::realize`).
+        let own_param = while_full.as_ref().and_then(|w| {
+            let c = &w.capacity;
+            match (c.fixed, c.params.iter().collect::<Vec<_>>().as_slice()) {
+                (None | Some(Capacity::Unbounded), [(f, p)]) if f == self.key => Some(*p),
+                _ => None,
+            }
+        });
+        let guarded = own_param.and(while_full.as_ref()).map(|w| &w.effects);
+        for e in effects.iter().chain(guarded.into_iter().flatten()) {
+            let guards = crate::EffectGuards {
+                bounded_queue: own_param.filter(|_| !effects.contains(e)),
+                ..occurrence_of(e)
             };
-            guards::add_occurrence(&mut self.summary.exec_guards, *e, had, &occurrence);
+            let had = !self.summary.direct_exec_effects.insert(*e);
+            guards::add_occurrence(&mut self.summary.exec_guards, *e, had, &guards);
             let chain = vec![Arc::new(self.hop(symbol.clone(), span))];
             self.summary.exec_chains.insert(*e, chain);
+        }
+        for w in while_full.iter().filter(|_| own_param.is_none()) {
+            for e in &w.effects {
+                self.summary.capacity_waits.push(CapacityWait {
+                    wait: WhileFull {
+                        effects: BTreeSet::from([*e]),
+                        capacity: w.capacity.clone(),
+                    },
+                    guards: occurrence_of(e),
+                    hop: self.hop(symbol.clone(), span),
+                });
+            }
         }
         let target = CallTarget::Layer2 {
             symbol,
             effects,
             offloads_blocking_arg: entry.offloads_blocking_arg,
             async_safe: entry.async_safe,
+            while_full,
         };
         let site = self.site(bb, target, is_awaited, span);
         self.sites.push(site);

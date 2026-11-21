@@ -519,6 +519,21 @@ const OWN_BASE: &str =
 const OWN_SUB: &str = "from pkg.own_base import Box\n\n\nclass Bag(Box):\n    def order(self):\n        return sorted(self.items)\n";
 const OWN_SUB_SORTING: &str = "from pkg.own_base import Box\n\n\nclass Bag(Box):\n    def order(self):\n        self.items.sort()\n";
 
+// Queue capacities (`EFF101` on `queue.Queue.put`): a queue one module builds and another
+// module's class stores, an `async def` putting on its parameter whose caller is in another
+// module, and a class constant bounding a queue that a subclass in another module may define
+// again.
+const Q_TELEMETRY: &str = "import queue\n\n\nclass Telemetry:\n    def __init__(self, events: queue.Queue | None):\n        self._events = events\n\n    def enqueue(self, item):\n        if self._events is not None:\n            self._events.put(item)\n";
+const Q_OWNER: &str = "import queue\n\nfrom pkg.q_telemetry import Telemetry\n\n\nclass Topology:\n    def __init__(self):\n        self._events = queue.Queue()\n        self.telemetry = Telemetry(self._events)\n";
+const Q_PUBLISH: &str = "from pkg.q_telemetry import Telemetry\n\n\nasync def publish(t: Telemetry):\n    t.enqueue(1)\n";
+const Q_DRAIN: &str = "import queue\n\n\nasync def drain(q: queue.Queue):\n    q.put(1)\n";
+const Q_RUN: &str = "import queue\n\nfrom pkg.q_drain import drain\n\n\nasync def run():\n    await drain(queue.Queue(5))\n";
+const Q_RUNNER: &str = "import queue\n\n\nclass Runner:\n    _MAX = 16\n\n    def __init__(self):\n        self._queue = queue.Queue(maxsize=self._MAX)\n\n    def stop(self):\n        self._queue.put(None, timeout=1.0)\n";
+const Q_SMALL: &str =
+    "from pkg.q_runner import Runner\n\n\nclass SmallRunner(Runner):\n    label = \"small\"\n";
+const Q_HALT: &str =
+    "from pkg.q_runner import Runner\n\n\nasync def halt(r: Runner):\n    r.stop()\n";
+
 /// The project before the first step (every file is opened).
 fn initial_files() -> Vec<(&'static str, String)> {
     [
@@ -693,6 +708,14 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/fresh_build.py", FRESH_BUILD),
         ("pkg/strict_ops.py", STRICT_OPS),
         ("pkg/strict_use.py", STRICT_USE),
+        ("pkg/q_telemetry.py", Q_TELEMETRY),
+        ("pkg/q_owner.py", Q_OWNER),
+        ("pkg/q_publish.py", Q_PUBLISH),
+        ("pkg/q_drain.py", Q_DRAIN),
+        ("pkg/q_run.py", Q_RUN),
+        ("pkg/q_runner.py", Q_RUNNER),
+        ("pkg/q_small.py", Q_SMALL),
+        ("pkg/q_halt.py", Q_HALT),
     ]
     .into_iter()
     .map(|(rel, text)| (rel, text.to_owned()))
@@ -1908,6 +1931,53 @@ fn steps_mut111() -> Vec<Step> {
     ]
 }
 
+/// Queue capacities: a `put` waits only on a queue known to be bounded, which the module
+/// building the queue, the callers binding a parameter, and the class family's own stores
+/// decide, each possibly in another module than the `put`.
+fn steps_queue_capacity() -> Vec<Step> {
+    vec![
+        Step::new(
+            "the module building a queue another module's class stores gives it a maxsize",
+            vec![save(
+                "pkg/q_owner.py",
+                &Q_OWNER.replace("queue.Queue()", "queue.Queue(maxsize=8)"),
+            )],
+        )
+        .present(&[("pkg/q_publish.py", "EFF101")]),
+        Step::new(
+            "it builds the queue unbounded again",
+            vec![save("pkg/q_owner.py", Q_OWNER)],
+        )
+        .absent(&[("pkg/q_publish.py", "EFF101")]),
+        Step::new(
+            "the caller of an async def putting on its parameter passes an unbounded queue",
+            vec![save(
+                "pkg/q_run.py",
+                &Q_RUN.replace("queue.Queue(5)", "queue.Queue()"),
+            )],
+        )
+        .absent(&[("pkg/q_drain.py", "EFF101")]),
+        Step::new(
+            "it passes a bounded queue again",
+            vec![save("pkg/q_run.py", Q_RUN)],
+        )
+        .present(&[("pkg/q_drain.py", "EFF101")]),
+        Step::new(
+            "a subclass in another module defines the constant bounding the queue again",
+            vec![save(
+                "pkg/q_small.py",
+                &Q_SMALL.replace("label = \"small\"", "_MAX = 0"),
+            )],
+        )
+        .absent(&[("pkg/q_halt.py", "EFF101")]),
+        Step::new(
+            "the subclass leaves the constant to its base again",
+            vec![save("pkg/q_small.py", Q_SMALL)],
+        )
+        .present(&[("pkg/q_halt.py", "EFF101")]),
+    ]
+}
+
 fn steps() -> Vec<Step> {
     let mut steps = vec![
         // 1. The initial index.
@@ -2106,6 +2176,7 @@ fn steps() -> Vec<Step> {
     steps.extend(steps_body_runs());
     steps.extend(steps_task_arguments());
     steps.extend(steps_small_displays());
+    steps.extend(steps_queue_capacity());
     steps.extend(steps_mut202_mut109());
     steps.extend(steps_indirect_helpers());
     steps.extend(steps_inherited_writers());

@@ -1526,3 +1526,36 @@ fn tests_of_a_wide_merge_keep_their_edges_within_a_budget() {
         .collect();
     assert_eq!(reported, vec!["load"], "{found:#?}");
 }
+
+/// Puts after each of many branches that may build a new unbounded queue: the queue of each put
+/// is a phi of the previous one and a new queue, back to a bounded one.
+fn queue_rebindings(steps: usize) -> String {
+    let mut lines = vec![
+        "import queue".to_owned(),
+        String::new(),
+        String::new(),
+        "async def fill(flags, item):".to_owned(),
+        "    q = queue.Queue(maxsize=1)".to_owned(),
+    ];
+    for i in 0..steps {
+        lines.push(format!("    if flags[{i}]:"));
+        lines.push("        q = queue.Queue()".to_owned());
+        lines.push("    q.put(item)".to_owned());
+    }
+    lines.join("\n") + "\n"
+}
+
+/// The capacity of a function's value is walked once: each put reads what the walks of the
+/// puts before it found instead of walking every rebinding again.
+#[test]
+fn puts_after_many_rebindings_of_a_queue_walk_each_value_once() {
+    let p = Project::new("bounds_queue_rebindings");
+    p.write("m.py", &queue_rebindings(1200));
+    let found = check_within(&p, Duration::from_secs(20));
+    assert!(
+        found
+            .iter()
+            .any(|d| d["rule_code"] == "EFF101" && d["qualname"] == "fill"),
+        "{found:#?}"
+    );
+}
