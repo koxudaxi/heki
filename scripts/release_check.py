@@ -9,8 +9,8 @@ manifests (`scripts/set_release_versions.py`). Without `--version`, a run that b
 committed manifests, it is `Cargo.toml`'s `workspace.package.version`.
 
 `smoke` checks that a wheel carries the `heki` executable and that the executable analyzes a
-project: `heki --version` prints the version, and `heki check` reports a known diagnostic with
-exit code 1 and a clean project with 0. With `--install` it runs the executable installed into
+project: `heki --version` prints the version, and `heki check --fail-on warning` reports a known
+warning with exit code 1 and `heki check` a clean project with 0. With `--install` it runs the executable installed into
 a fresh virtual environment by uv, otherwise the one extracted from the wheel (for a platform
 the runner's Python cannot install, such as musl on a glibc runner).
 
@@ -108,8 +108,18 @@ def smoke(wheel_path: Path, install: bool, expected: str) -> None:
         project.mkdir()
         (project / "pyproject.toml").write_text('[project]\nname = "smoke"\nversion = "0"\n')
         (project / "blocking.py").write_text(BLOCKING)
-        # Named by its code, the rule runs whatever its certainty.
-        found = run(exe, "check", "--select", "EFF101", "--output-format", "concise", cwd=project)
+        # Named by its code, the rule runs whatever its certainty; its reports are warnings.
+        found = run(
+            exe,
+            "check",
+            "--select",
+            "EFF101",
+            "--fail-on",
+            "warning",
+            "--output-format",
+            "concise",
+            cwd=project,
+        )
         if found.returncode != 1 or not any(
             line.startswith(BLOCKING_REPORT) for line in found.stdout.splitlines()
         ):

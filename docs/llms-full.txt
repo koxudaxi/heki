@@ -166,6 +166,8 @@ See [Rule precision](https://heki.koxudaxi.dev/precision/) for how a rule become
 
 - Under a second for a 200,000-line project.
 - A report needs evidence: when heki cannot tell, [it stays quiet](https://heki.koxudaxi.dev/scope/#when-heki-cannot-tell).
+- Bugs fail the run; slower code is reported as a warning that does not, unless you ask for
+  [`--fail-on warning`](https://heki.koxudaxi.dev/configuration/#rule-selection-toolhekilint).
 - Configuration, suppression comments, and output formats follow Ruff, and a [baseline](https://heki.koxudaxi.dev/adoption/#ratchet-baselines) fails CI
   only on new findings.
 
@@ -411,6 +413,9 @@ Two more cases stay quiet by design:
   holds), or right before the loop ends (`break`, `return`, `raise`), counts once per loop.
 - A blocking wait on a `concurrent.futures.Future` known to be done (`if f.done():`, after
   `await asyncio.wrap_future(f)`) returns at once.
+- `queue.Queue.put` waits only on a queue known to be bounded: a positive `maxsize` on some
+  path, every path known. A `put` on a queue heki cannot follow to where it is built is not
+  reported.
 
 A file that cannot be read or does not parse is reported (exit code 2), and every other file is
 checked as usual. A file that does not parse cannot run either, so heki assumes nothing it would
@@ -554,6 +559,12 @@ A generator's body runs where it is iterated:
   argument (`@lru_cache`, a dict) are not followed.
 - A future is known to be done only through `f.done()` and `await asyncio.wrap_future(f)`, not
   through an event or another future its done callback sets.
+- A queue is known to be bounded through local variables, the attributes its class family's own
+  bodies and methods store, module globals, and parameters whose project callers decide (a
+  helper's at each call, an `async def`'s by the join of every caller). Not followed: stores into
+  an attribute from outside the class family, a `maxsize` checked to be positive but not known,
+  an integer constant imported from another module or passed on through a parameter other than
+  a literal default, and a queue whose function has no project caller.
 - `EFF201` does not use guards.
 - An object a factory function returns counts as obtained once, like a pooled connection.
 
@@ -753,7 +764,7 @@ app/api.py:5:12: EFF101 (async-blocking-call) [warning, heuristic] `handler` rea
 | ---- | ------- |
 | `app/api.py:5:12` | where to look |
 | `EFF101 (async-blocking-call)` | the rule's code and name |
-| `[warning, heuristic]` | its severity: `error` for a bug (a wrong result, an exception, a lost update, a deadlock, a broken contract), `warning` for slower code, as here; both make `heki check` fail. `heuristic` marks a report that can be wrong about the code: a premise of its claim can be open |
+| `[warning, heuristic]` | its severity: `error` for a bug (a wrong result, an exception, a lost update, a deadlock, a broken contract), `warning` for slower code, as here. An error makes `heki check` fail; a warning is shown without failing it, unless `--fail-on warning` (`lint.fail-on = "warning"`) is set. `heuristic` marks a report that can be wrong about the code: a premise of its claim can be open |
 | the message | what heki proved, in one sentence: here, an `async def` reaches a blocking network call |
 | `related` lines | the hops of the chain of calls behind it, to follow it across files; editors show them as related information you can jump to |
 | `help` line | what to do about it |
@@ -845,8 +856,8 @@ does, and with `/` separators on every platform, Windows included.
 
 | Code | Meaning |
 | ---- | ------- |
-| `0` | no diagnostics |
-| `1` | diagnostics found (or Ratchet regressions, or `--diff` would change files) |
+| `0` | no diagnostics, or only warnings (they are printed) |
+| `1` | an error found, or a warning with `--fail-on warning` (`lint.fail-on = "warning"`), among the Ratchet regressions when a baseline is used; also when `--update-baseline` refuses a grown entry, or `--diff` would change files |
 | `2` | configuration error, unreadable file, unknown rule, or syntax error |
 
 
@@ -871,6 +882,7 @@ extend-select = ["EFF105"]
 ignore = ["OPT110"]
 per-file-ignores = { "tests/**" = ["EFF"], "scripts/*.py" = ["OPT"] }
 relax-async-in-tests = true
+fail-on = "warning"                 # warnings fail heki check too (default: "error")
 
 [tool.heki.lint.severity]
 OPT103 = "warning"
@@ -981,9 +993,10 @@ supported version that every clause admits:
 | `extend-select` | `[]` | Rules to add. |
 | `ignore` | `[]` | Rules to disable. |
 | `per-file-ignores` | `{}` | Glob → rules disabled in matching files (project-relative POSIX paths). As in Ruff, `*` also matches `/`: `scripts/*.py` covers `scripts/tools/worker.py` too. |
-| `severity` | `"warning"` for the rules that report slower code (`EFF101`, `EFF102`, `EFF103`, `EFF105`, `DATA101`, and the `OPT` rules), `"error"` for the others, which report bugs | Rule → `"error"` or `"warning"`. It changes the output and the SARIF level; both make `heki check` fail. |
+| `severity` | `"warning"` for the rules that report slower code (`EFF101`, `EFF102`, `EFF103`, `EFF105`, `DATA101`, and the `OPT` rules), `"error"` for the others, which report bugs | Rule → `"error"` or `"warning"`. It changes the output, the SARIF level, and whether a report makes `heki check` fail (`fail-on`). |
 | `relax-async-in-tests` | `true` | Skip `EFF101`, `EFF105`, and `EFF106` in `test_*` functions and in files under `tests/`. |
 | `heuristic` | `false` | Whether the heuristic rules that are not opt-in run by default and for a prefix or `ALL`, as the exact rules do. `--heuristic` and `--no-heuristic` override it. |
+| `fail-on` | `"error"` | The least severity whose reports make `heki check` (and `--watch`) exit with code 1: `"error"`, or `"warning"` to fail on warnings too. Warnings are reported either way, and the language server shows them. `--fail-on` overrides it. |
 
 - A rule is named by its code (`EFF101`), its name (`async-blocking-call`), a code prefix
   (`EFF`, `MUT2`), or `ALL`. An unknown rule is a configuration error.
@@ -1597,7 +1610,7 @@ The recorded set can only shrink:
 | --------- | ------------ | ------------------------------ |
 | No baseline file yet | an error (exit code 2) | records today's findings |
 | A finding was fixed | a note that the entry can shrink | records the smaller entry |
-| An entry grew, or a new finding appeared | reports it, with a note on the allowed and found counts (exit code 1) | reports it the same way and leaves the file as it is (exit code 1) |
+| An entry grew, or a new finding appeared | reports it, with a note on the allowed and found counts (exit code 1 for an error, and for a warning with [`fail-on = "warning"`](https://heki.koxudaxi.dev/configuration/#rule-selection-toolhekilint)) | reports it the same way and leaves the file as it is (exit code 1) |
 | A file could not be analyzed (a syntax error, an unreadable file) | reports the error and the other files' findings (exit code 2) | writes nothing, so the entries of that file are not lost (exit code 2) |
 
 To record new findings on purpose, delete the baseline and record it again.
@@ -1657,7 +1670,9 @@ across files, so the hook checks the whole project instead of the staged files o
             pass_filenames: false
     ```
 
-With a baseline configured, the hook fails only on new findings.
+The hook fails on errors and passes with warnings, which it prints. To make warnings fail it too,
+set `fail-on = "warning"` in `[tool.heki.lint]`, or add `--fail-on warning` to `entry`. With a
+baseline configured, the hook fails only on new findings.
 
 ## Continuous integration
 
@@ -1677,9 +1692,13 @@ With a baseline configured, the hook fails only on new findings.
         sarif_file: heki.sarif
     ```
 
+Warnings become annotations without failing the step; `fail-on = "warning"` in
+`[tool.heki.lint]` (or `--fail-on warning`) makes them fail it, as in pre-commit.
+
 With SARIF:
 
-- findings (exit code `1`) become code-scanning alerts and keep the step green;
+- findings become code-scanning alerts, warnings included, and keep the step green (exit code
+  `1` when one fails the run);
 - a configuration, read, or syntax error (exit code `2`) still fails the step; a file heki could
   not read or parse is an `error` notification of the run
   (`invocations[0].toolExecutionNotifications`, with `executionSuccessful: false`), and the
@@ -1749,7 +1768,7 @@ Source: https://heki.koxudaxi.dev/cli-reference/
 
 # CLI Reference
 
-Exit codes: `0` no diagnostics, `1` diagnostics (or Ratchet regressions, or pending `--diff` changes), `2` configuration / I/O / syntax errors.
+Exit codes: `0` no diagnostic that fails the run (warnings are reported without failing it), `1` an `error` diagnostic, or a `warning` with `--fail-on warning` (`lint.fail-on`), among the Ratchet regressions when a baseline is used (or a refused `--update-baseline`, or pending `--diff` changes), `2` configuration / I/O / syntax errors.
 
 A file that cannot be read or does not parse does not stop the run: `heki check` reports its error, checks and reports the other files, and exits with `2`, also when it reports diagnostics. A file that does not parse cannot run either, so nothing it would do is assumed; the names under its module resolve to nothing. SARIF output lists such files as `error` notifications of a run that did not execute successfully (`invocations[0].toolExecutionNotifications`, `executionSuccessful: false`); JSON output holds the diagnostics only.
 
@@ -1800,6 +1819,8 @@ Options:
           Also run the heuristic rules, whose reports can be wrong about the code, by default and for every prefix and `ALL` (`lint.heuristic = true`)
       --no-heuristic
           Run a heuristic rule only when its code or name is selected (`lint.heuristic = false`)
+      --fail-on <FAIL_ON>
+          Exit with code 1 on reports of this severity or higher: `error` (the default), or `warning` to fail on warnings too (`lint.fail-on`) [possible values: error, warning]
       --output-format <OUTPUT_FORMAT>
           Output format [default: full] [possible values: full, concise, json, github, sarif]
       --config <CONFIG>
@@ -2623,12 +2644,14 @@ row, a loop over a `zip` of many generator results whose body makes as many call
 private wrappers, each returning the one before's result, an edit through the language server
 changing every method of a class of thousands of methods, methods changing a typed dict of `self`
 thousands of times, a method storing under a key after each of hundreds of tests that such a dict
-holds the key, and a function reading attributes down a chain ten thousand deep (`x = x.child`), and
-the path facts of a `try` body of thousands of calls whose handler returns, of loops nested twenty
-deep with a call at each depth, of a thousand loops one after another, and of a chain of hundreds of
-`and` tests of module constants, and the item origins of a chain of thousands of wrappers, of a list
-filled by appends in a thousand loops, and of a phi of sixty branches each choosing a different
-parameter.
+holds the key, and a function reading attributes down a chain ten thousand deep (`x = x.child`),
+many queue puts each after a branch that may build a new queue, a long chain of helpers handing a
+queue on, named in the opposite order of the calls, a class whose thousands of queue attributes each
+store the one before, with a put on each, and the path facts of a `try` body of thousands of calls
+whose handler returns, of loops nested twenty deep with a call at each depth, of a thousand loops
+one after another, and of a chain of hundreds of `and` tests of module constants, and the item
+origins of a chain of thousands of wrappers, of a list filled by appends in a thousand loops, and of
+a phi of sixty branches each choosing a different parameter.
 
 A change to the IR builder, a walk, a fixpoint, or a rule's state is also run over a large
 corpus of real projects before it is merged, every run under a memory cap and a timeout. No
@@ -2852,7 +2875,8 @@ database drivers
 (`sqlite3`, `psycopg`, `pymongo`, ...; the fetches of a named, server-side psycopg cursor
 `conn.cursor("name")` too), subprocesses waiting for completion, `time.sleep`, and
 waits on other threads (acquiring a `threading` lock, `Event.wait()`, `Thread.join()`,
-`queue.Queue.get()` / `put()`, `Future.result()`, `concurrent.futures.wait()`; a zero timeout or
+`queue.Queue.get()`, `put()` on a queue known to be bounded (see below), `Future.result()`,
+`concurrent.futures.wait()`; a zero timeout or
 `blocking=False` / `block=False` returns at once and is not reported, also when a helper passes
 on its own flag parameter and its caller passes `False`: `close(wait=False)` over
 `shutdown(wait=wait)`; so does `result()` / `exception()` of a `concurrent.futures.Future` known
@@ -2863,6 +2887,18 @@ call). A function SQLAlchemy's
 its database I/O through the session or connection it receives is awaited for it, its other
 blocking calls are reported. Where an argument decides what a library call does, a literal
 one is followed: `pd.read_csv("https://...")` downloads the file.
+
+`put()` on a `queue.Queue`, `LifoQueue`, or `PriorityQueue` waits only while the queue is full,
+which only a queue its `maxsize` bounds can be, so it is reported only on a queue known to be
+bounded: a positive `maxsize` (a literal, a module constant, a class constant, or an integer a
+constructor parameter receives from every call, such as its default) on some path, and every
+path known. heki follows the queue from where it is built into local variables, the attributes
+the class family's own bodies and methods store (`self.queue = queue.Queue(maxsize=n)`, or a
+queue the class's `__init__` receives), module globals, and parameters, whose project callers
+decide: a helper's at each call, an `async def`'s by what all of its callers pass. A queue built
+without a `maxsize` (or with zero, a negative one, or `None`), one from a call or an object heki
+cannot see, and one a parameter without project callers receives are not known to be bounded,
+and putting on them is not reported.
 
 Reading a `@property` or `functools.cached_property` attribute of a project class runs its
 getter, so the read counts as a call of the getter (`self.client` whose getter opens a
@@ -4326,7 +4362,8 @@ def bfs(graph: dict[int, list[int]], start: int) -> list[int]:
 Proven safe only when the list is created in the function, never leaves it (not returned,
 stored, or passed to other code except read-only builtins such as `len`), and every use has a
 `deque` equivalent: no sorting, no slicing, no indexes other than `0` and `-1`, no `==`
-against lists. An annotation the rewrite cannot turn into a `deque` one (`Sequence[str]`, a
+against lists, and no text of it (a replacement field of an f-string, `str()`), which differs
+for a `deque`. An annotation the rewrite cannot turn into a `deque` one (`Sequence[str]`, a
 union) or another annotated declaration of the variable blocks the fix, so that a type checker
 accepts the fixed file.
 
