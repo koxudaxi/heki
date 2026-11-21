@@ -673,14 +673,16 @@ def retitle(name):
     fresh = {"fields": []}
     u = {**schema(name), **fresh}
     u["fields"].append(1)
+    w = dict(schema(name), fields=[])
+    w["fields"].append(1)
     r = list(rows(name))
     r.append(["y"])
     copied(name)["new"] = 1
 "#,
     );
     // The new container holds the cached one's values: changing them changes the cache, while
-    // changing the new container's own items does not. A dict display adding values of its own
-    // is not followed (`t["extra"]` is its own list, and so is `u["fields"]`).
+    // changing the new container's own items does not. A dict adding values of its own is not
+    // followed (`t["extra"]` is its own list, and so are `u["fields"]` and `w["fields"]`).
     assert_eq!(
         reports(&p, "MUT202"),
         vec![
@@ -869,6 +871,14 @@ class Strip:
             self._decoders[config] = object()
         return self._decoders[config]
 
+    def default_decoder(self):
+        if "default" not in self._decoders:
+            self._decoders["default"] = object()
+
+    def misfill(self):
+        if "probe" not in self._decoders:
+            self._decoders["live"] = object()
+
     def contains(self, value):
         bounds = self._ranges
         if bounds is None:
@@ -920,6 +930,7 @@ def render(width, style):
     line.apply_style(style)
     line.runtime()
     line.decoder(style)
+    line.default_decoder()
     line.contains(" ")
     known_bases(line)
     line.glyph("a")
@@ -929,6 +940,7 @@ def render(width, style):
 
 def render_logged(width):
     line = blank(width)
+    line.misfill()
     line.count("a")
     copy_runtime(Strip([]), line)
     other = blank(width + 1)
@@ -939,20 +951,22 @@ def render_logged(width):
     line.history.append("direct")
 "#,
         );
-    // A memo (by name, also a cache object whose methods change it, or filled under `not in`)
-    // and a lazy initialization (also through a local copy of the attribute, also by a function
-    // taking the object) only cache what the object computes; counting into an object of the
-    // same class not named as a memo, setting an attribute that a test of another object found
-    // unset, appending to its history, or replacing a memo changes it.
+    // A memo (by name, also a cache object whose methods change it, or filled under `not in` the
+    // key it stores) and a lazy initialization (also through a local copy of the attribute, also
+    // by a function taking the object) only cache what the object computes; storing a key other
+    // than the one found missing, counting into an object of the same class not named as a memo,
+    // setting an attribute that a test of another object found unset, appending to its history,
+    // or replacing a memo changes it.
     assert_eq!(
         reports(&p, "MUT202"),
         vec![
-            at("pkg/render.py", 25, "render_logged"),
             at("pkg/render.py", 26, "render_logged"),
-            at("pkg/render.py", 29, "render_logged"),
-            at("pkg/render.py", 30, "render_logged"),
+            at("pkg/render.py", 27, "render_logged"),
+            at("pkg/render.py", 28, "render_logged"),
             at("pkg/render.py", 31, "render_logged"),
             at("pkg/render.py", 32, "render_logged"),
+            at("pkg/render.py", 33, "render_logged"),
+            at("pkg/render.py", 34, "render_logged"),
         ]
     );
 }

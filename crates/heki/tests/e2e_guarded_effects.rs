@@ -1666,3 +1666,25 @@ fn guards_with_generators_and_nested_loops() {
         &["EFF101", "EFF102"],
     );
 }
+
+/// A list display decides a truthiness test of the helper only when an element is written as
+/// itself: `[*parts]` is empty when `parts` is.
+#[test]
+fn an_unpacked_display_decides_no_truthiness_test() {
+    check_marks(
+        "unpacked_display_truthiness",
+        &[
+            ("pkg/__init__.py", ""),
+            (
+                "pkg/fetch.py",
+                "from urllib.request import urlopen\n\n\ndef fetch(xs):\n    if not xs:\n        return urlopen(\"http://example.com\").read()\n    return b\"\"\n",
+            ),
+            (
+                "pkg/use.py",
+                "from pkg.fetch import fetch\n\n\nasync def known(parts):\n    return fetch([1, *parts])\n\n\nasync def unpacked(parts):\n    return fetch([*parts])  # EFF101\n",
+            ),
+        ],
+        &[],
+        &["EFF101"],
+    );
+}

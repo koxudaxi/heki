@@ -175,17 +175,24 @@ pub enum Derivation {
 /// sanitizers of the catalog copy as deeply as their entry says, and copy methods of a receiver
 /// that is no project class copy, deeply for `__deepcopy__` and `model_copy(deep=True)`
 /// (`deep_kwarg`). A copy method a project class defines copies as deeply as its own body does,
-/// which its summary says (`EffectSummary::returns_protected`), not its name.
+/// which its summary says (`EffectSummary::returns_protected`), not its name. A `dict` built
+/// from a mapping and other arguments (`own_items`: `dict(m, k=v)`) holds their values under
+/// their keys, so it is not followed, as a dict display with entries of its own is not
+/// ([`display_copies`]).
 pub fn call_derivation(
     method: Option<&str>,
     callee: &Callee,
     kb: &EffectiveEcosystemKb,
     deep_kwarg: bool,
+    own_items: bool,
 ) -> Option<Derivation> {
     let symbol = match callee {
         Callee::External(s) => s.as_str(),
         _ => "",
     };
+    if method.is_none() && own_items && symbol == "builtins.dict" {
+        return None;
+    }
     let catalogued = kb.lookup(symbol).and_then(|e| e.copy_sanitizer);
     let copies_by_name =
         method.is_some_and(|m| COPY_METHODS.contains(&m)) && !matches!(callee, Callee::Project(..));

@@ -2279,7 +2279,9 @@ impl<'a> Mut202Fn<'a> {
                 let deep = readonly::deep_copy_requested(call.kwargs, |v| {
                     self.f.const_bool(v) == Some(true)
                 });
-                match readonly::call_derivation(method, &call.callee, self.cx.kb, deep)? {
+                let own_items = call.args.len() > 1 || !call.kwargs.is_empty();
+                match readonly::call_derivation(method, &call.callee, self.cx.kb, deep, own_items)?
+                {
                     Derivation::DeepCopy => None,
                     Derivation::Step(step) => r.derive(step),
                 }

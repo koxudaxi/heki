@@ -1302,14 +1302,15 @@ impl<'a> Extractor<'a> {
             _ => return Vec::new(),
         };
         let deep = readonly::deep_copy_requested(kwargs, |v| self.f.const_bool(v) == Some(true));
+        let own_items = args.len() > 1 || !kwargs.is_empty();
         let mut out = Vec::new();
         if let Some(r) = recv
-            && let Some(d) = readonly::call_derivation(method, &callee, self.cx.kb, deep)
+            && let Some(d) = readonly::call_derivation(method, &callee, self.cx.kb, deep, own_items)
         {
             out.push((r, d));
         }
         if let Some(a) = args.first()
-            && let Some(d) = readonly::call_derivation(None, &callee, self.cx.kb, deep)
+            && let Some(d) = readonly::call_derivation(None, &callee, self.cx.kb, deep, own_items)
         {
             out.push((*a, d));
         }

@@ -1374,8 +1374,8 @@ fn const_arg(cx: &GuardInputs<'_, '_>, classes: &Classes, var: VarId) -> Option<
             kind: BuiltinKind::Tuple,
             elems,
             ..
-        }) => Some(!elems.is_empty()),
-        Some(InstKind::AllocBuiltin { elems, .. }) if alone() => Some(!elems.is_empty()),
+        }) => display_truthiness(cx.f, elems),
+        Some(InstKind::AllocBuiltin { elems, .. }) if alone() => display_truthiness(cx.f, elems),
         Some(InstKind::DictLiteral { entries, .. }) if alone() => entries
             .iter()
             .any(|e| matches!(e, DictEntry::KeyValue { .. }))
@@ -1384,6 +1384,17 @@ fn const_arg(cx: &GuardInputs<'_, '_>, classes: &Classes, var: VarId) -> Option<
         _ => None,
     };
     Some(ConstArg { class, truthy })
+}
+
+/// Whether a list, tuple, or set display of `elems` is truthy: true with an element written
+/// as itself, false with none, unknown when every element is unpacked (`[*parts]` is empty when
+/// `parts` is).
+fn display_truthiness(f: &IrFunction, elems: &[VarId]) -> Option<bool> {
+    if elems.iter().any(|v| !f.is_unpacked(*v)) {
+        Some(true)
+    } else {
+        elems.is_empty().then_some(false)
+    }
 }
 
 /// The exact classes of a function's values ([`known_classes`]).

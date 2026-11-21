@@ -9,7 +9,7 @@
 
 use crate::{CONTAINER_MUTATORS, CallSite, FuncKey, TypeCtx, aliases_of, guards, self_aliases};
 use heki_ast::Span;
-use heki_ir::{BlockId, CompareOpKind, InstKind, IrFunction, Terminator, VarId};
+use heki_ir::{BlockId, CompareOpKind, ConstLiteral, InstKind, IrFunction, Terminator, VarId};
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use std::cell::OnceCell;
@@ -188,6 +188,9 @@ pub fn self_attr_writes(f: &IrFunction) -> Vec<(&str, SelfAttrWrite)> {
     attr_writes(f, &self_vars(f).into_iter().map(|v| (v, 0)).collect())
 }
 
+/// An attribute of one of the objects [`attr_writes`] reads: the object's number and the name.
+type Held<'f> = (u32, &'f str);
+
 /// [`self_attr_writes`] of several objects at once (`self`, parameters, shared values): the
 /// writes of `<obj>.<attr>` in `f`'s own body, where `objects` gives each variable holding one
 /// of them the object's number. Each object is read on its own: a test of one object's attribute
@@ -223,24 +226,36 @@ pub fn attr_writes<'f>(
             break;
         }
     }
-    // The `if k not in <obj>.<attr>:` branches, by the block they lead into.
-    let mut membership: FxHashMap<BlockId, Vec<(u32, &str)>> = FxHashMap::default();
+    // The `if k not in <obj>.<attr>:` branches, by the block they lead into, with the key tested.
+    let mut membership: FxHashMap<BlockId, Vec<(Held<'_>, VarId)>> = FxHashMap::default();
     for p in &f.blocks {
         if let Terminator::Branch { cond, then_bb, .. } = &p.terminator
             && let Some(InstKind::Compare {
                 op: CompareOpKind::NotIn,
+                lhs,
                 rhs,
                 ..
             }) = defs.get(cond)
             && let Some(&held) = alias.get(rhs)
         {
-            membership.entry(*then_bb).or_default().push(held);
+            membership.entry(*then_bb).or_default().push((held, *lhs));
         }
     }
-    let guarded = |bb: BlockId, held: (u32, &str)| {
+    // The store fills the key the branch found missing: the same value, or the same string.
+    let literal = |v: &VarId| match defs.get(v) {
+        Some(InstKind::Const {
+            literal: ConstLiteral::Str(s),
+            ..
+        }) => Some(s.as_str()),
+        _ => None,
+    };
+    let same_key = |tested: &VarId, index: &VarId| {
+        tested == index || literal(tested).is_some_and(|t| literal(index) == Some(t))
+    };
+    let guarded = |bb: BlockId, held: (u32, &str), index: &VarId| {
         membership
             .get(&bb)
-            .is_some_and(|tests| tests.contains(&held))
+            .is_some_and(|tests| tests.iter().any(|(h, k)| *h == held && same_key(k, index)))
     };
     // `(block, index, (object, attr), memo_shaped, rebinds)` of each write.
     let mut found = Vec::new();
@@ -252,9 +267,9 @@ pub fn attr_writes<'f>(
                 {
                     objects.get(obj).map(|&o| ((o, attr.as_str()), false, true))
                 }
-                InstKind::SubscriptStore { obj, .. } => alias
+                InstKind::SubscriptStore { obj, index, .. } => alias
                     .get(obj)
-                    .map(|&held| (held, guarded(bb.id, held), false)),
+                    .map(|&held| (held, guarded(bb.id, held, index), false)),
                 InstKind::SubscriptDelete { obj, .. } => {
                     alias.get(obj).map(|&held| (held, false, false))
                 }
