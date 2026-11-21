@@ -1106,6 +1106,36 @@ fn a_package_whose_path_may_lead_outside_the_project_holds_modules_of_other_dist
     }
 }
 
+/// A module that is not a package importing a package's path under its own name (`from
+/// pkg.named import __path__`) binds a name of its own, not a path: only what it then does to
+/// the list changes the package's path.
+#[test]
+fn an_import_of_a_path_in_a_module_names_it_without_changing_it() {
+    let p = Project::new("env_path_imported_name");
+    p.write("pyproject.toml", PROBES_CONFIG)
+        .write("pkg/__init__.py", "")
+        .write("pkg/named/__init__.py", "")
+        .write("pkg/named/mod.py", "VALUE = 1\n")
+        .write("pkg/grown/__init__.py", "")
+        .write("pkg/grown/mod.py", "VALUE = 1\n")
+        .write(
+            "pkg/boot.py",
+            "from pkg.named import __path__\n\nCOUNT = len(__path__)\n",
+        )
+        .write(
+            "pkg/grow.py",
+            "from pkg.grown import __path__\n\n__path__.append(\"/opt/plugins\")\n",
+        );
+    let probes = [
+        probe("module_named", "pkg.named.mod", false),
+        probe("under_named", "pkg.named.", false),
+        probe("under_grown", "pkg.grown.", true),
+        probe("module_grown", "pkg.grown.mod", false),
+    ];
+    let (reported, expected) = reported_probes(&p, &probes, &[]);
+    assert_eq!(reported, expected);
+}
+
 #[test]
 fn the_packages_along_a_name_decide_where_it_is_found() {
     let p = Project::new("env_path_along");
