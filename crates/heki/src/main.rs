@@ -114,6 +114,10 @@ struct CheckArgs {
     /// Watch for file changes and re-run incrementally.
     #[arg(long)]
     watch: bool,
+    /// Internal: write the steps each owner's walks took per function to this JSON file
+    /// (`scripts/check_walk_shapes.py`).
+    #[arg(long, hide = true)]
+    walk_steps: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]

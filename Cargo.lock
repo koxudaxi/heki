@@ -531,9 +531,11 @@ dependencies = [
  "heki_rules",
  "heki_semantic",
  "heki_soundness",
+ "proc-macro2",
  "rustc-hash",
  "serde",
  "serde_json",
+ "syn 3.0.10",
  "url",
 ]
 
