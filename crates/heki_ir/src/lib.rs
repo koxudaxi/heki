@@ -16,7 +16,7 @@ pub mod walk;
 
 pub use builder::build_module_ir;
 pub use dominators::{Dominated, DominatorTree, immediate_dominators};
-pub use facts::{FnIndex, LEN_CAP_MAX, ModuleConstants, SMALL_MAX, SmallDisplay};
+pub use facts::{FnIndex, LEN_CAP_MAX, ModuleConstants, SMALL_MAX, SmallDisplay, comprehension_id};
 
 use heki_ast::Span;
 use heki_semantic::{ClassId, ScopeId};

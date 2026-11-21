@@ -2002,8 +2002,8 @@ impl SharedTexts {
 }
 
 /// The id of the comprehension function a call runs (`__comp_<id>`, a comprehension before
-/// 3.12).
-fn comprehension_id(callee_var: Option<VarId>, callee: &str) -> Option<u32> {
+/// 3.12, called with the iterable of its first `for` clause).
+pub fn comprehension_id(callee_var: Option<VarId>, callee: &str) -> Option<u32> {
     match callee_var {
         None => callee.strip_prefix("__comp_")?.parse().ok(),
         Some(_) => None,
