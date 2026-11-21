@@ -221,8 +221,10 @@ pub enum Emits {
     /// Only when no open connection is at hand (a pool checkout, Django's
     /// `connection.cursor()`).
     UnlessConnected,
-    /// Only when the connection's database is on disk: one opened from a parameter may be in
-    /// memory (`sqlite3.connect(path)` with `path=":memory:"` passed in).
+    /// Its waits (`blocking_db`) only when the connection's database is on disk, which heki did
+    /// not see opened: one opened from a parameter (`sqlite3.connect(path)` with
+    /// `path=":memory:"` passed in) or only named by an annotation may be in memory. It sends
+    /// its statements either way.
     IfOnDisk,
 }
 
@@ -290,6 +292,10 @@ pub struct EcosystemEntry {
     /// What the items of the call's result are, when the environment decides how many there
     /// are (the origin of a loop's items: `EFF103`).
     pub items: Option<ResultItems>,
+    /// The library API a method of a catalog class is, as reports name it: the class of what a
+    /// call returns in one case (`sqlite3.connect(":memory:")`) has the methods of a library
+    /// class (`sqlite3.Connection.execute`).
+    pub api: Option<String>,
     /// Whether a `with` statement over an instance of this class, or over the result of this
     /// call, can suppress the exception its body raises: `Some(false)` when `__exit__` /
     /// `__aexit__` returns a false value on every path, `Some(true)` when it can return a true
@@ -325,7 +331,7 @@ pub struct ArgCase {
     /// A string literal containing one of these.
     pub contains: Vec<String>,
     /// A value the calling function may compute from one of its parameters (the parameter, or
-    /// `str()`, an f-string, or a concatenation of it), which its callers decide.
+    /// `str()` or a concatenation of it), which its callers decide.
     pub from_parameter: bool,
     pub effects: Option<Vec<ExecEffectKind>>,
     pub return_type: Option<String>,
@@ -1314,15 +1320,12 @@ mod tests {
                                 arg: Some(0),
                                 param: Some("database".into()),
                                 from_parameter: true,
-                                return_type: Some(SQLITE3_PARAMETER.into()),
+                                return_type: Some("sqlite3.Connection".into()),
                                 ..ArgCase::default()
                             },
                         ]
                     },
-                    returning(
-                        "sqlite3.Connection",
-                        entry(&[BlockingDb, UnpooledClientAlloc]),
-                    ),
+                    returning(SQLITE3_FILE, entry(&[BlockingDb, UnpooledClientAlloc])),
                 ),
             ),
             // The connections of an in-memory database and of one named by a parameter.
@@ -1340,24 +1343,24 @@ mod tests {
             ),
             (
                 [
-                    with_prefix(SQLITE3_PARAMETER, SQLITE3_EXECUTES),
-                    with_prefix(&format!("{SQLITE3_PARAMETER}.cursor()"), SQLITE3_EXECUTES),
+                    with_prefix(SQLITE3_FILE, SQLITE3_EXECUTES),
+                    with_prefix(&format!("{SQLITE3_FILE}.cursor()"), SQLITE3_EXECUTES),
                 ]
                 .concat(),
                 returning(
-                    &format!("{SQLITE3_PARAMETER}.cursor()"),
+                    &format!("{SQLITE3_FILE}.cursor()"),
                     entry(&[BlockingDb, DbQuery]),
                 ),
             ),
             (
-                s(&[&format!("{SQLITE3_PARAMETER}.cursor")]),
-                returning(&format!("{SQLITE3_PARAMETER}.cursor()"), entry(&[])),
+                s(&[&format!("{SQLITE3_FILE}.cursor")]),
+                returning(&format!("{SQLITE3_FILE}.cursor()"), entry(&[])),
             ),
             (
                 [
-                    with_prefix(SQLITE3_PARAMETER, COMMIT_ROLLBACK),
+                    with_prefix(SQLITE3_FILE, COMMIT_ROLLBACK),
                     with_prefix(
-                        &format!("{SQLITE3_PARAMETER}.cursor()"),
+                        &format!("{SQLITE3_FILE}.cursor()"),
                         &["fetchone", "fetchmany", "fetchall"],
                     ),
                 ]
@@ -2220,7 +2223,7 @@ mod tests {
     /// The classes of the connections `sqlite3.connect` opens on an in-memory database and on
     /// one a parameter names.
     const SQLITE3_MEMORY: &str = "sqlite3.connect(\":memory:\")";
-    const SQLITE3_PARAMETER: &str = "sqlite3.connect(parameter)";
+    const SQLITE3_FILE: &str = "sqlite3.connect(file)";
 
     /// The database calls that wait only in a state the call does not show.
     const CONDITIONAL_EMITTERS: &[(Emits, &[&str])] = &[
@@ -2257,22 +2260,22 @@ mod tests {
                 "psycopg.Connection.rollback",
                 "psycopg2.extensions.connection.commit",
                 "psycopg2.extensions.connection.rollback",
-                "sqlite3.connect(parameter).commit",
-                "sqlite3.connect(parameter).rollback",
+                "sqlite3.connect(file).commit",
+                "sqlite3.connect(file).rollback",
             ],
         ),
         (
             Emits::IfOnDisk,
             &[
-                "sqlite3.connect(parameter).execute",
-                "sqlite3.connect(parameter).executemany",
-                "sqlite3.connect(parameter).executescript",
-                "sqlite3.connect(parameter).cursor().execute",
-                "sqlite3.connect(parameter).cursor().executemany",
-                "sqlite3.connect(parameter).cursor().executescript",
-                "sqlite3.connect(parameter).cursor().fetchone",
-                "sqlite3.connect(parameter).cursor().fetchmany",
-                "sqlite3.connect(parameter).cursor().fetchall",
+                "sqlite3.Connection.execute",
+                "sqlite3.Connection.executemany",
+                "sqlite3.Connection.executescript",
+                "sqlite3.Cursor.execute",
+                "sqlite3.Cursor.executemany",
+                "sqlite3.Cursor.executescript",
+                "sqlite3.Cursor.fetchone",
+                "sqlite3.Cursor.fetchmany",
+                "sqlite3.Cursor.fetchall",
             ],
         ),
         (
@@ -2328,14 +2331,14 @@ mod tests {
                 "sqlite3.connect(\":memory:\").cursor().execute",
                 "sqlite3.connect(\":memory:\").cursor().executemany",
                 "sqlite3.connect(\":memory:\").cursor().executescript",
-                "sqlite3.connect(parameter).execute",
-                "sqlite3.connect(parameter).executemany",
-                "sqlite3.connect(parameter).executescript",
-                "sqlite3.connect(parameter).cursor().execute",
-                "sqlite3.connect(parameter).cursor().executemany",
-                "sqlite3.connect(parameter).cursor().executescript",
-                "sqlite3.connect(parameter).cursor().fetchmany",
-                "sqlite3.connect(parameter).cursor().fetchall",
+                "sqlite3.connect(file).execute",
+                "sqlite3.connect(file).executemany",
+                "sqlite3.connect(file).executescript",
+                "sqlite3.connect(file).cursor().execute",
+                "sqlite3.connect(file).cursor().executemany",
+                "sqlite3.connect(file).cursor().executescript",
+                "sqlite3.connect(file).cursor().fetchmany",
+                "sqlite3.connect(file).cursor().fetchall",
             ],
         ),
         (
@@ -2403,11 +2406,20 @@ mod tests {
                     .iter()
                     .find(|(_, symbols)| symbols.contains(&symbol.as_str()))
                     .map(|(items, _)| *items);
+                // The methods of the classes of what `sqlite3.connect` returns are the library's.
+                let api = [SQLITE3_MEMORY, SQLITE3_FILE].iter().find_map(|class| {
+                    let method = symbol.strip_prefix(&format!("{class}."))?;
+                    Some(match method.strip_prefix("cursor().") {
+                        Some(m) => format!("sqlite3.Cursor.{m}"),
+                        None => format!("sqlite3.Connection.{method}"),
+                    })
+                });
                 let expected = EcosystemEntry {
                     symbol: symbol.clone(),
                     emits,
                     exit_suppresses,
                     items,
+                    api,
                     ..expected.clone()
                 };
                 assert_eq!(kb.lookup(&symbol), Some(&expected), "{symbol}");

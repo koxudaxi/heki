@@ -87,9 +87,10 @@ async def handler(cur: sqlite3.Cursor) -> None:
 "#,
     );
     // A Redis key is no statement; a helper running only DDL runs no query; a DDL statement
-    // still blocks the event loop.
+    // still blocks the event loop (on a cursor only an annotation names, which may be in
+    // memory: not established).
     assert_eq!(query_lines(&p), vec![8, 22, 28]);
-    assert_eq!(lines(&p, "EFF101"), vec![32]);
+    assert_eq!(lines(&p, "EFF111"), vec![32]);
 }
 
 const DDL_AT_RUN_TIME: &str = r#"import sqlite3

@@ -52,7 +52,9 @@ release can change rules, configuration keys, diagnostics, and output formats.
   See the first entry under Changed.
 - `sqlite3.connect` of an in-memory database (`":memory:"`, `file::memory:`, `mode=memory`) does
   not wait, and neither do the statements on that connection; a connection opened from a
-  parameter of the function may be in memory, so its waits are not established (`EFF111`). A
+  parameter of the function, or only named by an annotation, may be in memory, so its waits are
+  not established (`EFF111`; its statements still count for `EFF103`). Reports name such
+  connections' methods by the library's API (`sqlite3.Connection.execute`). A
   pragma that only reads or sets an option of the connection (`PRAGMA busy_timeout = 5000`)
   does not wait.
 - Test code, which `lint.relax-async-in-tests` leaves out of `EFF101`, `EFF111`, `EFF105`, and

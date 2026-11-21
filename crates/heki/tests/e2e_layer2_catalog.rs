@@ -600,7 +600,7 @@ fn dbapi_drivers_block_on_connect_and_statements_but_not_on_row_reads() {
                 "pymysql.connections.Connection.commit"
             ),
             // sqlite3 reads the database file when it steps a statement (`fetch*`).
-            d(41, "EFF101", "tp_sqlite", "sqlite3.Connection.execute"),
+            d(41, "EFF111", "tp_sqlite", "sqlite3.Cursor.fetchone"),
             d(42, "EFF101", "tp_sqlite", "sqlite3.Connection.execute"),
             d(42, "EFF101", "tp_sqlite", "sqlite3.connect"),
             d(43, "EFF101", "tp_sqlite", "sqlite3.Cursor.fetchall"),
@@ -1328,11 +1328,119 @@ async def tp_session(s: requests.Session):
     );
 }
 
+/// A connection whose opening heki does not see, a parameter or a value only an annotation
+/// types, may be in memory: its waits are not established, whatever opens it (here, in memory,
+/// through annotated parameters, attributes, and return values). Its statements are sent either
+/// way, so a loop over data still sends one per item.
+#[test]
+fn connections_only_annotations_name_may_be_in_memory() {
+    let p = Project::new("cat_annotated_connections");
+    p.write("repro.py", REPRO_ANNOTATED)
+        .write("repro2.py", REPRO_UNANNOTATED);
+    let (code, stdout, stderr) = p.check(&[
+        "--output-format",
+        "json",
+        "--select",
+        "EFF101,EFF111,EFF103,EFF113",
+    ]);
+    assert!(code == 0 || code == 1, "{stdout}{stderr}");
+    let diags: Vec<Value> = serde_json::from_str(&stdout).unwrap();
+    let got: Vec<(String, u64, String)> = diags
+        .iter()
+        .map(|d| {
+            (
+                d["path"].as_str().unwrap().to_owned(),
+                d["line"].as_u64().unwrap(),
+                d["rule_code"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    let at = |path: &str, line: u64, code: &str| (path.to_owned(), line, code.to_owned());
+    assert_eq!(
+        got,
+        vec![
+            at("repro.py", 14, "EFF111"),
+            at("repro.py", 15, "EFF111"),
+            at("repro.py", 27, "EFF111"),
+            at("repro.py", 32, "EFF111"),
+            at("repro.py", 34, "EFF103"),
+            at("repro2.py", 29, "EFF111"),
+        ]
+    );
+}
+
+const REPRO_ANNOTATED: &str = r#"import sqlite3
+
+
+def count_rows(db: sqlite3.Connection) -> int:
+    return db.execute("SELECT count(*) FROM t").fetchone()[0]
+
+
+def make_table(db: sqlite3.Connection) -> None:
+    db.execute("CREATE TABLE t(x)")
+
+
+async def annotated_parameter() -> int:
+    conn = sqlite3.connect(":memory:")
+    make_table(conn)
+    return count_rows(conn)
+
+
+class Cache:
+    def __init__(self) -> None:
+        self.conn: sqlite3.Connection = sqlite3.connect(":memory:")
+
+    def get(self) -> None:
+        self.conn.execute("SELECT 1")
+
+
+async def annotated_attribute() -> None:
+    Cache().get()
+
+
+async def loop_over(items: list[str]) -> None:
+    conn = sqlite3.connect(":memory:")
+    make_table(conn)
+    for item in items:
+        conn.execute("INSERT INTO t VALUES (?)", (item,))
+"#;
+
+const REPRO_UNANNOTATED: &str = r#"import sqlite3
+
+
+class Plain:
+    def __init__(self) -> None:
+        self.conn = sqlite3.connect(":memory:")
+
+    def get(self) -> None:
+        self.conn.execute("SELECT 1")
+
+
+async def unannotated_attribute() -> None:
+    Plain().get()
+
+
+def helper(db):
+    db.execute("SELECT 1")
+
+
+async def unannotated_parameter() -> None:
+    helper(sqlite3.connect(":memory:"))
+
+
+def opened() -> sqlite3.Connection:
+    return sqlite3.connect(":memory:")
+
+
+async def through_annotated_return() -> None:
+    opened().execute("SELECT 1")
+"#;
+
 #[test]
 fn in_memory_databases_and_connection_options_do_not_wait() {
     // An in-memory database is opened, and its statements run, without waiting; a connection
-    // opened from a parameter may be one (here through a literal default), so its waits are not
-    // established. A pragma that sets an option of the connection does not wait either; one
+    // opened from a parameter (here through a literal default) or only named by an annotation
+    // may be one, so its waits are not established. A pragma that sets an option of the connection does not wait either; one
     // that changes the database file does.
     assert_eq!(
         check(
@@ -1371,6 +1479,28 @@ async def tn_connection_options(conn: sqlite3.Connection):
 
 async def tp_journal(conn: sqlite3.Connection):
     conn.execute("PRAGMA journal_mode=WAL")
+
+
+def open_named(name):
+    return sqlite3.connect(f"{name}.db").execute("SELECT 1")
+
+
+def open_joined(name):
+    return sqlite3.connect(name + ".db").execute("SELECT 1")
+
+
+async def tn_paths_from_parameters():
+    open_named("app")
+    open_joined("app")
+
+
+async def tn_option_reads_and_values(conn: sqlite3.Connection, ms):
+    conn.execute("PRAGMA foreign_keys")
+    conn.execute(f"PRAGMA busy_timeout = {ms}")
+
+
+async def tp_pragma_named_at_run_time(conn: sqlite3.Connection, name):
+    conn.execute(f"PRAGMA {name}")
 "#,
             "EFF101,EFF111",
         ),
@@ -1379,10 +1509,29 @@ async def tp_journal(conn: sqlite3.Connection):
                 11,
                 "EFF111",
                 "tn_through_a_default",
-                "sqlite3.connect(parameter).execute"
+                "sqlite3.Connection.execute"
             ),
             d(24, "EFF101", "tp_file", "sqlite3.connect"),
-            d(33, "EFF101", "tp_journal", "sqlite3.Connection.execute"),
+            d(33, "EFF111", "tp_journal", "sqlite3.Connection.execute"),
+            d(
+                // An f-string is opaque (R6): a file name ending in `.db`, here.
+                45,
+                "EFF101",
+                "tn_paths_from_parameters",
+                "sqlite3.connect"
+            ),
+            d(
+                46,
+                "EFF111",
+                "tn_paths_from_parameters",
+                "sqlite3.Connection.execute"
+            ),
+            d(
+                55,
+                "EFF111",
+                "tp_pragma_named_at_run_time",
+                "sqlite3.Connection.execute"
+            ),
         ]
     );
 }

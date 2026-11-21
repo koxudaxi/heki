@@ -470,13 +470,14 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
         for (q, exact) in queries.iter().zip(exact) {
             let root = q.chain.last().map(|h| h.callee.clone()).unwrap_or_default();
             match exact {
+                // An exact report names and keys the call it claims.
                 Some(e) if cx.enabled("EFF103", unit) => cx.emit(
                     out,
                     "EFF103",
                     unit,
                     q.span,
                     &key.qualname,
-                    root,
+                    e.must.chain.last().map_or(root, |h| h.callee.clone()),
                     e.message(),
                     None,
                     &e.must.chain,
