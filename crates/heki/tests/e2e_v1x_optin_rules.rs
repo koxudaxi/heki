@@ -1462,7 +1462,7 @@ fn rule_command_prints_the_documentation() {
     for code in ["MUT106", "EFF106", "EFF107"] {
         assert!(
             all.lines()
-                .any(|l| l.starts_with(code) && l.contains("[default=false fix=false]")),
+                .any(|l| l.starts_with(code) && l.contains("[heuristic opt-in   fix=false]")),
             "{all}"
         );
     }

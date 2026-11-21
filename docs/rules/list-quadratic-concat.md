@@ -2,13 +2,37 @@
 
 # list-quadratic-concat (OPT101)
 
-Family: Complexity Rewrites (OPT) · Enabled by default · Severity `warning` · Safe fix (`--fix`)
+Family: Complexity Rewrites (OPT) · Heuristic · Off by default · Severity `warning` (slower code) · Safe fix (`--fix`)
 
 Unconditionally profitable `list` quadratic concatenation (`x = x + [e]` -> `x.append(e)`).
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs when `select` or `extend-select` names its code or name, and with `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes and `ALL`. Of 9 sampled reports (round 3, 2026-11-21), 78% were right about the code. See [Rule Precision](../precision.md).
 
 ## What it does
 Checks loops that grow a list by building a new one every iteration, `x = x + [e]`, and
 rewrites it to `x.append(e)` (`x.extend([...])` for several elements).
+
+## What a report states
+
+A report states that `x = x + [e]` builds a new list from the whole accumulated list on every
+iteration of the loop, where appending would change it in place.
+
+Its premises:
+
+- **Builtin list**: the value is a builtin `list` by its construction (a display, a comprehension,
+  `list(...)`). Established: the Soundness lane takes types from constructions only, never from
+  annotations.
+- **Loop-carried**: the result is the accumulator of the next iteration. Established by the IR.
+- **On every iteration**: the statement runs on every iteration of the loop. Open: a statement under
+  a branch inside the loop counts.
+- **Data-sized**: the code does not fix the sizes the cost depends on (the loop's and the
+  container's) at 16 or fewer. Open: a size heki cannot bound counts as data-sized.
+- **Rewrite proven safe**: the help says `[safe fix: ...]`, `[proven-safe suggestion: ...]`, or
+  `[proven safe; ...]`. A report whose help names a blocking obligation instead (`[not auto-fixable:
+  ...]`) lacks this premise and is heuristic whatever the rule's certainty; the proven reports are
+  the rule's exact tier.
 
 ## Why is this bad?
 `x + [e]` copies the whole list, so the loop is quadratic. `append` is amortized constant time

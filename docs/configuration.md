@@ -121,36 +121,54 @@ supported version that every clause admits:
 
 | Key | Default | Meaning |
 | --- | ------- | ------- |
-| `select` | every rule except the opt-in ones | Rules to enable instead of the defaults. An empty list enables no rule before `extend-select`, as in Ruff. |
+| `select` | the exact rules and the contract rules | Rules to enable instead of the defaults. An empty list enables no rule before `extend-select`, as in Ruff. |
 | `extend-select` | `[]` | Rules to add. |
 | `ignore` | `[]` | Rules to disable. |
 | `per-file-ignores` | `{}` | Glob → rules disabled in matching files (project-relative POSIX paths). As in Ruff, `*` also matches `/`: `scripts/*.py` covers `scripts/tools/worker.py` too. |
-| `severity` | `"warning"` for the `OPT` rules, `"error"` for the others | Rule → `"error"` or `"warning"`. It changes the output and the SARIF level; both make `heki check` fail. |
+| `severity` | `"warning"` for the rules that report slower code (`EFF101`, `EFF102`, `EFF103`, `EFF105`, `DATA101`, and the `OPT` rules), `"error"` for the others, which report bugs | Rule → `"error"` or `"warning"`. It changes the output and the SARIF level; both make `heki check` fail. |
 | `relax-async-in-tests` | `true` | Skip `EFF101`, `EFF105`, and `EFF106` in `test_*` functions and in files under `tests/`. |
+| `heuristic` | `false` | Whether the heuristic rules that are not opt-in run by default and for a prefix or `ALL`, as the exact rules do. `--heuristic` and `--no-heuristic` override it. |
 
 - A rule is named by its code (`EFF101`), its name (`async-blocking-call`), a code prefix
   (`EFF`, `MUT2`), or `ALL`. An unknown rule is a configuration error.
-- A prefix or `ALL` enables only the default rules. The opt-in rules (`EFF105`, `EFF106`,
-  `EFF107`, `MUT101`, `MUT103`, `MUT106`, `MUT108`, `MUT111`, `MUT112`, `MUT113`) need their
-  exact code or name. In `ignore`, a prefix covers every rule it matches.
-- The command line wins: `--select` replaces `select`, and `--extend-select` and `--ignore` add
-  to the configured lists.
+- Every rule is exact or heuristic ([Rule Precision](precision.md)). The defaults, a prefix, and
+  `ALL` enable the exact rules and the contract rules; with `heuristic = true` they also enable
+  the heuristic rules that are not opt-in, as Ruff's `preview` does. Its code or name enables a
+  heuristic rule either way.
+- An exact rule's report that did not establish every premise of its claim (an `OPT` report
+  whose rewrite is not proven) is heuristic, and is shown where a heuristic rule would run: with
+  `heuristic = true`, or when its code or name is selected.
+- A run of `full` or `concise` output that leaves heuristic rules off, or heuristic reports out,
+  says how many.
+- A prefix or `ALL` never enables the opt-in rules (`EFF105`, `EFF106`, `EFF107`, `MUT101`,
+  `MUT103`, `MUT106`, `MUT108`, `MUT111`, `MUT112`, `MUT113`): they need their exact code or
+  name. In `ignore`, a prefix covers every rule it matches.
+- The command line wins: `--select` replaces `select`, `--extend-select` and `--ignore` add to the
+  configured lists, and `--heuristic` / `--no-heuristic` replace `heuristic`.
+
+```toml
+[tool.heki.lint]
+heuristic = true   # also the heuristic rules that are not opt-in
+```
 
 ## Contracts
 
 Contracts declare what no type can say. Each kind is an array of tables with its own rule:
 
-| Contract | Declares | Rule |
-| -------- | -------- | ---- |
-| [`write-owners`](#write-owners) | who may write an attribute | `MUT201`; `MUT205` with `unresolved = "report"` |
-| [`read-owners`](#read-owners) | who may read an attribute | `MUT203`; `MUT206` with `unresolved = "report"` |
-| [`call-owners`](#call-owners) | who may call a function or construct a class | `MUT204`; `MUT207` with `unresolved = "report"` |
-| [`effect-boundaries`](#effect-boundaries) | what a scope must not reach: I/O, writes, reads, or calls | `EFF201` |
-| [`readonly-returns`](#readonly-returns) | results every caller shares | `MUT202` |
-| [`invalidation`](#invalidation) | writes that must be announced | `MUT109` |
+| Contract | Declares | Rule | Certainty |
+| -------- | -------- | ---- | --------- |
+| [`write-owners`](#write-owners) | who may write an attribute | `MUT201`; `MUT205` with `unresolved = "report"` | heuristic |
+| [`read-owners`](#read-owners) | who may read an attribute | `MUT203`; `MUT206` with `unresolved = "report"` | heuristic |
+| [`call-owners`](#call-owners) | who may call a function or construct a class | `MUT204`; `MUT207` with `unresolved = "report"` | heuristic |
+| [`effect-boundaries`](#effect-boundaries) | what a scope must not reach: I/O, writes, reads, or calls | `EFF201` | heuristic |
+| [`readonly-returns`](#readonly-returns) | results every caller shares | `MUT202` | heuristic |
+| [`invalidation`](#invalidation) | writes that must be announced | `MUT109` | heuristic |
 
 - These rules report nothing until a contract exists, except `MUT202`, which also protects the
   results of `@lru_cache` / `@cache` functions.
+- Declaring a contract selects its rule, whatever its certainty. `MUT202`, which also reports
+  without a contract, is selected like the heuristic rules that are not opt-in: by its code or
+  name, or with `lint.heuristic = true`.
 - Every name in a contract is a dotted pattern. It matches the full name or any dotted suffix
   (`DataModel.fields` matches `pkg.model.DataModel.fields`, not `pkg.BigModel.fields`), and it
   may be a glob (`*`, `?`, `[...]`, `{a,b}`).
