@@ -259,23 +259,23 @@ fn execution_effects_run_property_getters() {
         found(&diags),
         vec![
             // `self.text` in an `async def` method.
-            d(a, 34, "EFF101", "Client.refresh", "requests.get"),
+            d(a, 34, "EFF111", "Client.refresh", "requests.get"),
             // An `async` getter is an `async def`: it reports its own boundary, and reading it
             // (`not_awaited`, `awaited`) reports nothing.
             d(a, 77, "EFF101", "Lazy.value", "requests.get"),
-            d(h, 7, "EFF101", "direct", "requests.get"),
+            d(h, 7, "EFF111", "direct", "requests.get"),
             // One helper deeper.
-            d(h, 11, "EFF101", "one_deeper", "requests.get"),
+            d(h, 11, "EFF111", "one_deeper", "requests.get"),
             // A `functools.cached_property` getter.
-            d(h, 15, "EFF101", "cached", "time.sleep"),
+            d(h, 15, "EFF111", "cached", "time.sleep"),
             // A base-class property read on a subclass instance.
-            d(h, 19, "EFF101", "inherited", "requests.get"),
+            d(h, 19, "EFF111", "inherited", "requests.get"),
             // An overriding property of a subclass (CHA over `Base`).
-            d(h, 23, "EFF101", "overridden", "time.sleep"),
+            d(h, 23, "EFF111", "overridden", "time.sleep"),
             // An overriding property reading `super().remote`.
-            d(h, 27, "EFF101", "through_super", "requests.get"),
+            d(h, 27, "EFF111", "through_super", "requests.get"),
             // Property reads in unbounded loops: a query and a fresh client per iteration.
-            d(h, 56, "EFF103", "report", "sqlite3.Connection.execute"),
+            d(h, 56, "EFF113", "report", "sqlite3.Connection.execute"),
             d(h, 61, "EFF102", "clients", "httpx.Client"),
         ],
         "{diags:#?}"
@@ -373,7 +373,7 @@ fn property_reads_follow_overrides_up_to_the_cha_limit() {
     p.write("pkg/kinds.py", &overriding_properties(7));
     assert_eq!(
         found(&diagnostics(&p, &[])),
-        vec![d("pkg/kinds.py", 53, "EFF101", "fan_out", "time.sleep")]
+        vec![d("pkg/kinds.py", 53, "EFF111", "fan_out", "time.sleep")]
     );
 }
 
@@ -436,7 +436,7 @@ class Tag:
 fn cached_properties_and_hashes_read_through_properties() {
     let p = Project::new("property_reads_state");
     p.write("pkg/__init__.py", "").write("pkg/state.py", STATE);
-    let diags = diagnostics(&p, &["--extend-select", "MUT101"]);
+    let diags = diagnostics(&p, &["--extend-select", "MUT101,MUT107"]);
     let s = "pkg/state.py";
     assert_eq!(
         found(&diags),
@@ -612,7 +612,7 @@ fn lsp_reader_follows_a_getter_edit_in_another_file() {
     // The getter starts blocking: saving it re-checks the reader's file.
     save(&mut lsp, &p, "pkg/api.py", 2, LSP_API_BLOCKING);
     let diags = lsp.diagnostics(&handler, |d| !d.is_empty());
-    assert_eq!(codes(&diags), vec!["EFF101"]);
+    assert_eq!(codes(&diags), vec!["EFF111"]);
     assert_eq!(
         diags[0]["range"]["start"],
         json!({"line": 4, "character": 11})

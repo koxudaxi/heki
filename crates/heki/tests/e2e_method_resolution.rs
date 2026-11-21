@@ -62,6 +62,8 @@ fn marked(files: &[(&str, &str)], rules: &[&str]) -> Vec<(String, u64, String)> 
 }
 
 fn check_marks(name: &str, files: &[(&str, &str)], rules: &[&str]) {
+    let rules = common::with_siblings(rules);
+    let rules = rules.as_slice();
     let p = Project::new(name);
     p.write("pyproject.toml", CONFIG);
     p.write("pkg/__init__.py", "");
@@ -149,7 +151,7 @@ async def through_slow(obj):
 
 
 async def through_cls():
-    Base.make()  # EFF101
+    Base.make()  # EFF111
 "#;
 
 #[test]
@@ -232,14 +234,14 @@ def via(p: Provider):
 
 
 def use(p: Provider):
-    via(Provider()).clear()  # MUT202
-    p().clear()  # MUT202
+    via(Provider()).clear()  # MUT114
+    p().clear()  # MUT114
     Holder().items.clear()
 "#;
 
 #[test]
 fn calling_an_instance_runs_its_call_method_on_it() {
-    check_marks("callable", &[("pkg/callable.py", CALLABLE)], &["MUT202"]);
+    check_marks("callable", &[("pkg/callable.py", CALLABLE)], &["MUT114"]);
 }
 
 /// Constructing a frozen dataclass through its module makes a new object, as importing it does.
@@ -581,16 +583,16 @@ async def on_async(c: AsyncClient):
 
 
 async def on_sync(c: SyncClient):
-    c.masters()  # EFF101
-    c.relay()  # EFF101
+    c.masters()  # EFF111
+    c.relay()  # EFF111
 
 
 async def on_sync_subclass(c: SyncPipeline):
-    c.masters()  # EFF101
+    c.masters()  # EFF111
 
 
 async def on_any(c: Commands):
-    c.masters()  # EFF101
+    c.masters()  # EFF111
 
 
 class Sentinel:
@@ -651,8 +653,8 @@ async def on_quiet(q: Quiet):
 
 
 async def on_file(f: FileSink):
-    f.run_short_first()  # EFF101
-    f.run_long_first()  # EFF101
+    f.run_short_first()  # EFF111
+    f.run_long_first()  # EFF111
 "#;
 
 #[test]
@@ -660,7 +662,7 @@ fn an_effect_through_self_and_a_plain_call_runs_for_every_receiver() {
     check_marks("self_hooks", &[("pkg/hooks.py", HOOKS)], &["EFF101"]);
     let p = Project::new("self_hooks_chains");
     p.write("pkg/__init__.py", "").write("pkg/hooks.py", HOOKS);
-    let (_, stdout, _) = p.check(&["--select", "EFF101", "--output-format", "json"]);
+    let (_, stdout, _) = p.check(&["--select", "EFF101,EFF111", "--output-format", "json"]);
     let diags: Vec<Value> = serde_json::from_str(&stdout).unwrap();
     // `(line of the report, line of the hop into `FileSink.flush`)`.
     let hops: Vec<(u64, u64)> = diags
@@ -718,7 +720,7 @@ class B(Y, X):
     pass
 
 
-def test_rejects_an_inconsistent_order():
+def rejects_an_inconsistent_order():
     with pytest.raises(TypeError):
 
         class Both(A, B):
@@ -768,7 +770,7 @@ class Slow(Model):
 
 
 async def make():
-    Slow.build(False)  # EFF101
+    Slow.build(False)  # EFF111
     Slow.plain()
 "#;
 

@@ -8,7 +8,8 @@
 //! they hold.
 
 use heki_ast::Span;
-use heki_ir::{BlockId, IrFunction, VarId};
+use heki_ir::walk::FnShape;
+use heki_ir::{BlockId, VarId};
 use rustc_hash::FxHashMap;
 
 /// The acquisitions of one function, by index, with what each holds.
@@ -142,13 +143,13 @@ impl HeldSet {
 /// intersection. Along an exception edge only what the block holds at every one of its
 /// instructions flows.
 pub fn at_entry<'c>(
-    f: &IrFunction,
+    shape: &FnShape<'_>,
     n: usize,
     change: impl Fn(BlockId, usize) -> Option<&'c Change>,
 ) -> Vec<Option<HeldSet>> {
+    let f = shape.f;
     let mut ins: Vec<Option<HeldSet>> = vec![None; f.blocks.len()];
     ins[0] = Some(HeldSet::empty(n));
-    let rpo = f.rpo_blocks();
     let meet = |slot: &mut Option<HeldSet>, incoming: &HeldSet| -> bool {
         match slot {
             Some(cur) => cur.meet(incoming),
@@ -161,7 +162,7 @@ pub fn at_entry<'c>(
     loop {
         let mut changed = false;
         // Reverse postorder reaches every block from an already visited predecessor first.
-        for &b in &rpo {
+        for &b in shape.rpo() {
             // Reverse postorder visits a predecessor of every block but the first before it.
             let mut state = ins[b.0 as usize]
                 .clone()

@@ -285,7 +285,7 @@ impl<'c, 'a> ValueCapacity<'c, 'a> {
         let ints = self
             .ints
             .get_or_init(|| FnIndex::new(self.f, &self.cx.ir().constants));
-        let (own, sources) = match (ints.const_int(v), self.defs.get(&v)) {
+        let (own, sources) = match (ints.fixed_int(v), self.defs.get(&v)) {
             (Some(n), _) => {
                 let own = Walked {
                     int: true,

@@ -6,10 +6,11 @@
 //! established; it exists only for the obligation-stripping tests, which prove that each
 //! obligation is what stops its counterexample.
 
-use crate::interpreter::{Allocs, Analysis, Def, FnCtx};
+use crate::interpreter::{Allocs, Analysis, FnCtx};
 use crate::liveness::Liveness;
 use crate::{ExactTypeVal, FrameState, KindMask, ObligationStatus, SafetyTier};
 use heki_ast::{LineIndex, Span};
+use heki_ir::walk::Def;
 use heki_ir::{BlockId, BuiltinKind, InstKind, NaturalLoop, VarId};
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
@@ -197,7 +198,7 @@ impl<'a, 'c> Checker<'a, 'c> {
     pub fn name(&self, v: VarId) -> String {
         // A starred display element (`[*xs]`) is a copy of the iterable it unpacks.
         if self.cx.f.is_unpacked(v)
-            && let Some((_, _, i)) = self.cx.def_inst(v)
+            && let Some(i) = self.cx.shape.inst(v)
             && let InstKind::Copy { src, .. } = &i.kind
         {
             return self.name(*src);
@@ -210,7 +211,7 @@ impl<'a, 'c> Checker<'a, 'c> {
     }
 
     fn describe_temp(&self, v: VarId) -> String {
-        match self.cx.def_inst(v).map(|(_, _, i)| &i.kind) {
+        match self.cx.shape.inst(v).map(|i| &i.kind) {
             Some(InstKind::MakeIter { .. }) => "the loop's iterator".into(),
             Some(InstKind::MakeGenExpr { .. }) => "a generator expression".into(),
             Some(InstKind::Call { callee, .. }) => format!("the result of `{callee}(...)`"),
@@ -463,9 +464,9 @@ impl<'a, 'c> Checker<'a, 'c> {
             if !seen.insert(x) {
                 continue;
             }
-            match self.cx.def(x) {
+            match self.cx.shape.def(x) {
                 Def::Param => {}
-                Def::Phi(b) => stack.extend(
+                Def::Phi(b, _) => stack.extend(
                     self.cx
                         .f
                         .block(b)
@@ -474,19 +475,17 @@ impl<'a, 'c> Checker<'a, 'c> {
                         .filter(|p| p.dst == x)
                         .flat_map(|p| p.incoming.iter().map(|&(_, v)| v)),
                 ),
-                // An instruction's result, or no definition at all (`def_inst` is `None`).
-                Def::Inst(..) | Def::Undefined => {
-                    match self.cx.def_inst(x).map(|(_, _, inst)| &inst.kind) {
-                        Some(
-                            InstKind::LoadName { .. }
-                            | InstKind::LoadGlobal { .. }
-                            | InstKind::LoadDeref { .. },
-                        )
-                        | None => return false,
-                        Some(InstKind::Copy { src, .. }) => stack.push(*src),
-                        Some(_) => {}
-                    }
-                }
+                // An instruction's result, or no definition at all (no instruction).
+                Def::Inst(..) | Def::None => match self.cx.shape.inst(x).map(|inst| &inst.kind) {
+                    Some(
+                        InstKind::LoadName { .. }
+                        | InstKind::LoadGlobal { .. }
+                        | InstKind::LoadDeref { .. },
+                    )
+                    | None => return false,
+                    Some(InstKind::Copy { src, .. }) => stack.push(*src),
+                    Some(_) => {}
+                },
             }
         }
         true
@@ -501,8 +500,8 @@ impl<'a, 'c> Checker<'a, 'c> {
         lp: &NaturalLoop,
         region: Option<Span>,
     ) -> Option<&'static str> {
-        if let Def::Phi(b) | Def::Inst(b, _) = self.cx.def(v)
-            && lp.body.contains(&b)
+        if let Def::Phi(b, _) | Def::Inst(b, _) = self.cx.shape.def(v)
+            && self.cx.shape.in_body(lp, b)
         {
             return Some("inside the loop");
         }
@@ -519,9 +518,9 @@ impl<'a, 'c> Checker<'a, 'c> {
         if !seen.insert(v) {
             return false;
         }
-        match self.cx.def(v) {
-            Def::Inst(b, i) => within(self.cx.f.block(b).insts[i].span, region),
-            Def::Phi(b) => self
+        match self.cx.shape.def(v) {
+            Def::Inst(b, i) => within(self.cx.f.block(b).insts[i as usize].span, region),
+            Def::Phi(b, _) => self
                 .cx
                 .f
                 .block(b)
@@ -530,7 +529,7 @@ impl<'a, 'c> Checker<'a, 'c> {
                 .filter(|p| p.dst == v)
                 .flat_map(|p| &p.incoming)
                 .any(|&(_, w)| self.defined_in(w, region, seen)),
-            Def::Param | Def::Undefined => false,
+            Def::Param | Def::None => false,
         }
     }
 
@@ -679,7 +678,8 @@ impl<'a, 'c> Checker<'a, 'c> {
 
     /// Instruction `i` of block `b` runs inside `lp` or inside `region`.
     pub fn in_loop_or(&self, lp: &NaturalLoop, region: Option<Span>, b: BlockId, i: usize) -> bool {
-        lp.body.contains(&b) || region.is_some_and(|r| within(self.cx.f.block(b).insts[i].span, r))
+        self.cx.shape.in_body(lp, b)
+            || region.is_some_and(|r| within(self.cx.f.block(b).insts[i].span, r))
     }
 
     /// The first mutation of `allocs`, in source order, among the instructions `pred` accepts.

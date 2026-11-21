@@ -1,8 +1,8 @@
 //! Rule registry spanning all 3 families derived from the single Effect & Alias theory.
 //!
 //! - Family 1 (`MUT`): Mutation & State Effect (`MUT101`, `MUT103`, `MUT106`, `MUT107`, `MUT108`,
-//!   `MUT109`, `MUT110`, `MUT111`, `MUT112`, `MUT113`, `MUT201`, `MUT202`, `MUT203`, `MUT204`,
-//!   `MUT205`, `MUT206`, `MUT207`)
+//!   `MUT109`, `MUT110`, `MUT111`, `MUT112`, `MUT113`, `MUT114`, `MUT201`, `MUT202`, `MUT203`,
+//!   `MUT204`, `MUT205`, `MUT206`, `MUT207`)
 //! - Family 2 (`EFF` / `DATA`): Execution Effect (`EFF101`, `EFF102`, `EFF103`, `EFF105`, `EFF106`,
 //!   `EFF107`, `EFF109`, `EFF110`, `EFF201`, `DATA101`)
 //! - Family 3 (`OPT`): Complexity Rewrite (`OPT101`, `OPT102`, `OPT103`, `OPT110`, `OPT111`,
@@ -32,7 +32,8 @@ use globset::{Glob, GlobMatcher};
 use heki_ast::{LineIndex, Span};
 use heki_diagnostics::{Diagnostic, RelatedLocation};
 use heki_effect::{
-    CallHop, CallSite, EffectSummary, FuncKey, ModuleInput, ProjectDecls, ProjectIndex,
+    CallHop, CallSite, ContractClass, EffectSummary, FileSummary, FuncKey, ModuleInput,
+    ProjectDecls, ProjectIndex,
 };
 use heki_env::{HekiConfig, Severity};
 use heki_ir::{IrFunction, ModuleConstants};
@@ -56,8 +57,12 @@ pub enum RuleFamily {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Consequence {
-    /// A bug: a wrong result, an exception, a lost update, a deadlock, or a broken contract.
+    /// A bug that can be critical: a wrong result, an exception, a lost update, a deadlock, or a
+    /// broken contract.
     Bug,
+    /// A bug that is rarely harmful: a promise the code makes is broken, such as a read-only
+    /// annotation, where the callers seldom notice.
+    MinorBug,
     /// Slower code that computes the right result.
     Slowdown,
 }
@@ -147,17 +152,23 @@ impl RuleMeta {
     }
 
     /// The severity of the rule's diagnostics unless `lint.severity` names the rule: `error` for
-    /// a bug, `warning` for slower code.
+    /// a bug that can be critical, `warning` for a bug that is rarely harmful and for slower code.
     pub const fn default_severity(&self) -> Severity {
         match self.consequence {
             Consequence::Bug => Severity::Error,
-            Consequence::Slowdown => Severity::Warning,
+            Consequence::MinorBug | Consequence::Slowdown => Severity::Warning,
         }
     }
 }
 
 /// Where the rule pages are published: the documentation's `site_url` (`zensical.toml`).
 pub const RULE_PAGES: &str = "https://heki.koxudaxi.dev/rules/";
+
+/// The certainty of the eight Soundness-lane `OPT` rules (`OPT101`-`OPT103`, `OPT110`, `OPT111`,
+/// `OPT120`, `OPT121`, `OPT130`). Their exact tier is the reports whose rewrite is proven safe,
+/// the others are heuristic whatever this says (ADR-018, decision 9). They are certified
+/// together, so that whether the proven tier runs by default is this one value.
+const PROVEN_OPT_TIER: Certainty = Certainty::Exact;
 
 /// Core v1.0 rule catalog (empirically validated in Stage 0-A + `dcg` study).
 pub const CORE_RULES: &[RuleMeta] = &[
@@ -202,11 +213,11 @@ pub const CORE_RULES: &[RuleMeta] = &[
         slug: "hash-attr-mutation",
         family: RuleFamily::Mut,
         certainty: Certainty::Heuristic,
-        activation: Activation::Default,
+        activation: Activation::OptIn,
         consequence: Consequence::Bug,
         size_dependent_fix: false,
         auto_fix_default: false,
-        summary: "Mutating an attribute read by `__hash__` after initialization (stored `set` / `dict` entries become unreachable).",
+        summary: "Opt-in: a method other than the initializers rebinds or changes in place an attribute that the `__hash__` of its instances reads.",
         doc: include_str!("../rule-docs/MUT107.md"),
     },
     RuleMeta {
@@ -237,12 +248,12 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "MUT110",
         slug: "readonly-param-mutation",
         family: RuleFamily::Mut,
-        certainty: Certainty::Heuristic,
+        certainty: Certainty::Exact,
         activation: Activation::Default,
-        consequence: Consequence::Bug,
+        consequence: Consequence::MinorBug,
         size_dependent_fix: false,
         auto_fix_default: false,
-        summary: "Handing a `Sequence` / `Mapping` / `ReadOnly` parameter to a function that changes it in place (directly, through an alias, or through helpers).",
+        summary: "Handing a `Sequence` / `Mapping` / `ReadOnly` parameter, as itself, to a function whose body (or a helper's) changes it in place at a named line.",
         doc: include_str!("../rule-docs/MUT110.md"),
     },
     RuleMeta {
@@ -282,6 +293,18 @@ pub const CORE_RULES: &[RuleMeta] = &[
         doc: include_str!("../rule-docs/MUT113.md"),
     },
     RuleMeta {
+        code: "MUT114",
+        slug: "cached-result-mutation",
+        family: RuleFamily::Mut,
+        certainty: Certainty::Exact,
+        activation: Activation::Default,
+        consequence: Consequence::Bug,
+        size_dependent_fix: false,
+        auto_fix_default: false,
+        summary: "Changing in place the list, dict, or set that a `functools.lru_cache` / `functools.cache` function returned (the cache hands the same object to later calls with the same arguments), directly or through the functions that return it.",
+        doc: include_str!("../rule-docs/MUT114.md"),
+    },
+    RuleMeta {
         code: "MUT201",
         slug: "write-owner-violation",
         family: RuleFamily::Mut,
@@ -298,12 +321,11 @@ pub const CORE_RULES: &[RuleMeta] = &[
         slug: "readonly-return-mutation",
         family: RuleFamily::Mut,
         certainty: Certainty::Heuristic,
-        // Not `Contract`: it also reports without one (`@lru_cache` / `@cache` results).
-        activation: Activation::Default,
+        activation: Activation::Contract,
         consequence: Consequence::Bug,
         size_dependent_fix: false,
         auto_fix_default: false,
-        summary: "Mutating a shared object returned by a declared `readonly-returns` producer or `@lru_cache`, directly or through the functions that return it.",
+        summary: "Mutating a shared object returned by a declared `readonly-returns` producer, directly or through the functions that return it.",
         doc: include_str!("../rule-docs/MUT202.md"),
     },
     RuleMeta {
@@ -370,13 +392,25 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "EFF101",
         slug: "async-blocking-call",
         family: RuleFamily::Eff,
+        certainty: Certainty::Exact,
+        activation: Activation::Default,
+        consequence: Consequence::Slowdown,
+        size_dependent_fix: false,
+        auto_fix_default: false,
+        summary: "A call in `async def` that always runs a network, database, subprocess, or sleep call that waits on the event loop.",
+        doc: include_str!("../rule-docs/EFF101.md"),
+    },
+    RuleMeta {
+        code: "EFF111",
+        slug: "async-possibly-blocking-call",
+        family: RuleFamily::Eff,
         certainty: Certainty::Heuristic,
         activation: Activation::Default,
         consequence: Consequence::Slowdown,
         size_dependent_fix: false,
         auto_fix_default: false,
-        summary: "Direct or indirect blocking network/DB/subprocess/sleep call reachable from `async def`.",
-        doc: include_str!("../rule-docs/EFF101.md"),
+        summary: "Heuristic sibling of `EFF101`: a call in `async def` that can reach a blocking call on the event loop.",
+        doc: include_str!("../rule-docs/EFF111.md"),
     },
     RuleMeta {
         code: "EFF102",
@@ -394,13 +428,25 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "EFF103",
         slug: "loop-db-query",
         family: RuleFamily::Eff,
+        certainty: Certainty::Exact,
+        activation: Activation::Default,
+        consequence: Consequence::Slowdown,
+        size_dependent_fix: false,
+        auto_fix_default: false,
+        summary: "A loop over data whose every iteration sends a database statement.",
+        doc: include_str!("../rule-docs/EFF103.md"),
+    },
+    RuleMeta {
+        code: "EFF113",
+        slug: "loop-possible-db-query",
+        family: RuleFamily::Eff,
         certainty: Certainty::Heuristic,
         activation: Activation::Default,
         consequence: Consequence::Slowdown,
         size_dependent_fix: false,
         auto_fix_default: false,
-        summary: "Explicit DB query / external RPC executed inside a loop (N+1).",
-        doc: include_str!("../rule-docs/EFF103.md"),
+        summary: "Heuristic sibling of `EFF103`: a loop that can run a database query on every iteration.",
+        doc: include_str!("../rule-docs/EFF113.md"),
     },
     RuleMeta {
         code: "EFF105",
@@ -478,7 +524,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "DATA101",
         slug: "loop-carried-concat",
         family: RuleFamily::Data,
-        certainty: Certainty::Heuristic,
+        certainty: Certainty::Exact,
         activation: Activation::Default,
         consequence: Consequence::Slowdown,
         size_dependent_fix: false,
@@ -490,7 +536,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "OPT101",
         slug: "list-quadratic-concat",
         family: RuleFamily::Opt,
-        certainty: Certainty::Heuristic,
+        certainty: PROVEN_OPT_TIER,
         activation: Activation::Default,
         consequence: Consequence::Slowdown,
         size_dependent_fix: false,
@@ -502,7 +548,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "OPT102",
         slug: "set-dict-quadratic-merge",
         family: RuleFamily::Opt,
-        certainty: Certainty::Heuristic,
+        certainty: PROVEN_OPT_TIER,
         activation: Activation::Default,
         consequence: Consequence::Slowdown,
         size_dependent_fix: false,
@@ -514,7 +560,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "OPT103",
         slug: "immutable-quadratic-concat",
         family: RuleFamily::Opt,
-        certainty: Certainty::Heuristic,
+        certainty: PROVEN_OPT_TIER,
         activation: Activation::Default,
         consequence: Consequence::Slowdown,
         size_dependent_fix: false,
@@ -526,7 +572,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "OPT110",
         slug: "loop-linear-membership",
         family: RuleFamily::Opt,
-        certainty: Certainty::Heuristic,
+        certainty: PROVEN_OPT_TIER,
         activation: Activation::Default,
         consequence: Consequence::Slowdown,
         size_dependent_fix: true,
@@ -538,7 +584,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "OPT111",
         slug: "loop-linear-dedup",
         family: RuleFamily::Opt,
-        certainty: Certainty::Heuristic,
+        certainty: PROVEN_OPT_TIER,
         activation: Activation::Default,
         consequence: Consequence::Slowdown,
         size_dependent_fix: true,
@@ -562,7 +608,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "OPT113",
         slug: "nested-loop-equijoin",
         family: RuleFamily::Opt,
-        certainty: Certainty::Heuristic,
+        certainty: Certainty::Exact,
         activation: Activation::Default,
         consequence: Consequence::Slowdown,
         size_dependent_fix: false,
@@ -574,7 +620,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "OPT120",
         slug: "list-front-pop",
         family: RuleFamily::Opt,
-        certainty: Certainty::Heuristic,
+        certainty: PROVEN_OPT_TIER,
         activation: Activation::Default,
         consequence: Consequence::Slowdown,
         size_dependent_fix: true,
@@ -586,7 +632,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "OPT121",
         slug: "list-front-insert",
         family: RuleFamily::Opt,
-        certainty: Certainty::Heuristic,
+        certainty: PROVEN_OPT_TIER,
         activation: Activation::Default,
         consequence: Consequence::Slowdown,
         size_dependent_fix: true,
@@ -598,7 +644,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "OPT130",
         slug: "loop-invariant-container-rebuild",
         family: RuleFamily::Opt,
-        certainty: Certainty::Heuristic,
+        certainty: PROVEN_OPT_TIER,
         activation: Activation::Default,
         consequence: Consequence::Slowdown,
         size_dependent_fix: true,
@@ -659,6 +705,10 @@ pub enum RuleConfigError {
     },
     #[error("effect-boundaries `{0}` sets `allow-writes` but no `write-universe`")]
     AllowWritesWithoutUniverse(String),
+    #[error(
+        "effect-boundaries `{0}` sets `import-probes = \"report\"` but does not forbid `reads-environment`"
+    )]
+    ImportProbesWithoutEnvironment(String),
     /// A mode key of a contract (`fresh-objects`, `unresolved`) with an unknown value.
     #[error("unknown `{key}` value `{value}` in {section} `{contract}` (expected {expected})")]
     UnknownMode {
@@ -671,6 +721,19 @@ pub enum RuleConfigError {
     #[error("invalid glob `{pattern}` in {context}: {cause}")]
     Glob {
         pattern: String,
+        context: &'static str,
+        cause: globset::Error,
+    },
+    /// A `module:qualname` pattern with more than one colon or an empty part.
+    #[error(
+        "invalid pattern `{pattern}` in {context} (expected `module:qualname`, one colon with a name on each side)"
+    )]
+    ModulePattern {
+        pattern: String,
+        context: &'static str,
+    },
+    #[error("the globs of {context} are too many to match together: {cause}")]
+    GlobSet {
         context: &'static str,
         cause: globset::Error,
     },
@@ -877,9 +940,19 @@ impl<'a> CheckContext<'a> {
     /// Call sites of every summarized function with their file, keyed by caller, from its
     /// defining file and in source order (the IR-free call graph the contract rules walk).
     pub fn sites_by_caller(&self) -> SitesByCaller<'a> {
+        self.by_caller(|file| &file.call_sites)
+    }
+
+    /// The reference sites of every summarized function (`FileSummary::reference_sites`), as
+    /// [`Self::sites_by_caller`] keeps the call sites.
+    pub fn reference_sites_by_caller(&self) -> SitesByCaller<'a> {
+        self.by_caller(|file| &file.reference_sites)
+    }
+
+    fn by_caller(&self, sites: impl Fn(&'a FileSummary) -> &'a [CallSite]) -> SitesByCaller<'a> {
         let mut out = SitesByCaller::default();
         for (path, file) in &self.index.files {
-            for site in &file.call_sites {
+            for site in sites(file) {
                 if self.index.file_of(&site.caller) == Some(path.as_path()) {
                     out.entry(&site.caller)
                         .or_default()
@@ -985,20 +1058,20 @@ pub(crate) fn has_glob_syntax(text: &str) -> bool {
     text.contains(['*', '?', '[', '{'])
 }
 
-/// Dotted-name pattern: a glob (`pkg.*.Model`, `*Store.*`, `Mode?.fields`) that matches the name
-/// or one of its dot-separated suffixes (`Model.fields` matches `pkg.model.Model.fields`).
-#[derive(Debug)]
-pub(crate) struct DottedPattern {
+/// One part of a [`DottedPattern`]: a literal name or a glob.
+#[derive(Debug, Clone)]
+pub(crate) struct NamePart {
     text: String,
     /// `None` for a literal name, compared as a string.
     glob: Option<GlobMatcher>,
 }
 
-impl DottedPattern {
-    pub fn new(text: &str, context: &'static str) -> Result<Self, RuleConfigError> {
+impl NamePart {
+    /// A bad glob is reported with the configured `pattern` the part belongs to.
+    fn new(text: &str, pattern: &str, context: &'static str) -> Result<Self, RuleConfigError> {
         let glob = Glob::new(text)
             .map_err(|cause| RuleConfigError::Glob {
-                pattern: text.to_owned(),
+                pattern: pattern.to_owned(),
                 context,
                 cause,
             })?
@@ -1009,7 +1082,23 @@ impl DottedPattern {
         })
     }
 
-    pub fn matches(&self, name: &str) -> bool {
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// The glob of a part with glob syntax (`None`: a literal name, [`Self::text`]).
+    pub fn glob(&self) -> Option<&Glob> {
+        self.glob.as_ref().map(GlobMatcher::glob)
+    }
+
+    fn is_match(&self, name: &str) -> bool {
+        self.glob
+            .as_ref()
+            .map_or(name == self.text, |glob| glob.is_match(name))
+    }
+
+    /// Whether the part names `name` or one of its dot-separated suffixes.
+    fn matches_suffix(&self, name: &str) -> bool {
         let Some(glob) = &self.glob else {
             return name == self.text
                 || name
@@ -1021,6 +1110,119 @@ impl DottedPattern {
                 .match_indices('.')
                 .any(|(i, _)| glob.is_match(&name[i + 1..]))
     }
+}
+
+/// Dotted-name pattern: a glob (`pkg.*.Model`, `*Store.*`, `Mode?.fields`) that matches the name
+/// or one of its dot-separated suffixes (`Model.fields` matches `pkg.model.Model.fields`). A
+/// pattern with a module part (`pkg:*`, `pkg.model:Model`) names definitions of the project
+/// modules it names: the module part is compared with the whole module name and the qualname
+/// part with the whole qualname, so `pkg:*` leaves out the submodules of `pkg`, which a suffix or
+/// a glob spanning dots would take in.
+#[derive(Debug, Clone)]
+pub(crate) struct DottedPattern {
+    module: Option<NamePart>,
+    /// The qualname part, or the whole text of a pattern without a module part.
+    name: NamePart,
+}
+
+impl DottedPattern {
+    pub fn new(text: &str, context: &'static str) -> Result<Self, RuleConfigError> {
+        let (module, name) = match text.split_once(':') {
+            None => (None, text),
+            Some((module, qualname)) => {
+                if module.is_empty() || qualname.is_empty() || qualname.contains(':') {
+                    return Err(RuleConfigError::ModulePattern {
+                        pattern: text.to_owned(),
+                        context,
+                    });
+                }
+                (Some(NamePart::new(module, text, context)?), qualname)
+            }
+        };
+        Ok(Self {
+            module,
+            name: NamePart::new(name, text, context)?,
+        })
+    }
+
+    /// The module part (`None`: a pattern without one).
+    pub fn module(&self) -> Option<&NamePart> {
+        self.module.as_ref()
+    }
+
+    /// The qualname part, or the whole text of a pattern without a module part.
+    pub fn name(&self) -> &NamePart {
+        &self.name
+    }
+
+    /// Whether the pattern names `name`, which heki knows only as a whole (an attribute, an
+    /// external symbol), or one of its dotted suffixes. A pattern with a module part names
+    /// project definitions only.
+    pub fn matches(&self, name: &str) -> bool {
+        self.module.is_none() && self.name.matches_suffix(name)
+    }
+
+    /// Whether the pattern names all of `name`, a symbol or attribute outside the project known
+    /// by its full dotted name (`os.getenv`, `sys.platform`), never one of its suffixes. A
+    /// pattern with a module part names project definitions only.
+    pub fn matches_whole(&self, name: &str) -> bool {
+        self.module.is_none() && self.name.is_match(name)
+    }
+
+    /// Whether the pattern names a project function or class (`fqn` is `module.qualname`), or an
+    /// external symbol (`fqn` and `qualname` both the symbol). Without a module part, the
+    /// dotted suffixes of `fqn` include the qualname.
+    pub fn matches_def(&self, fqn: &str, qualname: &str) -> bool {
+        match &self.module {
+            None => self.name.matches_suffix(fqn),
+            Some(module) => {
+                module_of(fqn, qualname).is_some_and(|m| module.is_match(m))
+                    && self.name.is_match(qualname)
+            }
+        }
+    }
+
+    /// [`Self::matches_def`] of a class (by its fqn alone without its qualname).
+    pub fn matches_class(&self, class: &ContractClass) -> bool {
+        self.matches_def(&class.fqn, class.qualname.as_deref().unwrap_or(&class.fqn))
+    }
+
+    /// Whether the pattern names the definition ([`Self::matches_def`]) or a module, class, or
+    /// function containing it.
+    pub fn names_within(&self, fqn: &str, qualname: &str) -> bool {
+        match &self.module {
+            None => with_prefixes(fqn).any(|n| self.name.matches_suffix(n)),
+            Some(module) => {
+                module_of(fqn, qualname).is_some_and(|m| module.is_match(m))
+                    && with_prefixes(qualname).any(|q| self.name.is_match(q))
+            }
+        }
+    }
+}
+
+/// The module of a project definition (`fqn` is `module.qualname`); `None` for an external
+/// symbol (`fqn` is `qualname`).
+pub(crate) fn module_of<'n>(fqn: &'n str, qualname: &str) -> Option<&'n str> {
+    fqn.strip_suffix(qualname)?.strip_suffix('.')
+}
+
+/// `name` and each of its dotted prefixes (`pkg.mod.f`, then `pkg` and `pkg.mod`).
+fn with_prefixes(name: &str) -> impl Iterator<Item = &str> {
+    std::iter::once(name).chain(name.match_indices('.').map(|(i, _)| &name[..i]))
+}
+
+/// A configured name split at its last dot after the module part (`pkg.model:Model` and `fields`
+/// of `pkg.model:Model.fields`); `None` when its qualified name has no dot.
+pub(crate) fn split_last_dot(text: &str) -> Option<(&str, &str)> {
+    let start = text.find(':').map_or(0, |colon| colon + 1);
+    let dot = start + text[start..].rfind('.')?;
+    Some((&text[..dot], &text[dot + 1..]))
+}
+
+/// The last name of a configured name's qualified name (`replace` of `pkg.store:Store.replace`,
+/// `decide` of `pkg:decide`).
+pub(crate) fn last_name(text: &str) -> &str {
+    text.rsplit(['.', ':']).next().unwrap_or(text)
 }
 
 #[cfg(test)]
@@ -1048,6 +1250,69 @@ mod registry_tests {
             let p = DottedPattern::new(pattern, "test").unwrap();
             assert!(p.matches(name), "{pattern} {name}");
             assert!(!p.matches("pkg.models.Model.other"), "{pattern}");
+        }
+    }
+
+    #[test]
+    fn module_patterns_match_the_module_whole() {
+        // (pattern, module, qualname, matches_def, names_within)
+        for (pattern, module, qualname, def, within) in [
+            ("pkg:*", "pkg", "decide", true, true),
+            ("pkg:*", "pkg", "<module>", true, true),
+            ("pkg:*", "pkg", "Store.add.inner", true, true),
+            ("pkg:*", "pkg.sub.user", "sub_user", false, false),
+            ("pkg:*", "x.pkg", "decide", false, false),
+            ("pkg:_*", "pkg", "_helper", true, true),
+            ("pkg:_*", "pkg", "_Store.add", true, true),
+            ("pkg:_*", "pkg", "Store._add", false, false),
+            ("pkg:Store.*", "pkg", "Store.add", true, true),
+            ("pkg.sub:Store.*", "pkg.sub", "Store.add", true, true),
+            ("pkg.sub:Store.*", "pkg.sub", "Store", false, false),
+            ("pkg.sub:Store", "pkg.sub", "Store.add", false, true),
+            ("pkg.sub:Store", "pkg", "sub.Store", false, false),
+            ("pkg.*:run", "pkg.jobs.nightly", "run", true, true),
+            ("pkg.*:run", "pkg", "run", false, false),
+            ("pkg.*:run", "pkg.jobs", "Job.run", false, false),
+            ("decide", "pkg", "decide", true, true),
+            ("pkg", "pkg.sub", "f", false, true),
+        ] {
+            let p = DottedPattern::new(pattern, "test").unwrap();
+            let fqn = format!("{module}.{qualname}");
+            assert_eq!(p.matches_def(&fqn, qualname), def, "{pattern} {fqn}");
+            assert_eq!(p.names_within(&fqn, qualname), within, "{pattern} {fqn}");
+        }
+        // An external symbol, and a name known only as a whole, have no module.
+        let p = DottedPattern::new("os.path:join", "test").unwrap();
+        assert!(!p.matches_def("os.path.join", "os.path.join"));
+        assert!(!p.names_within("os.path.join", "os.path.join"));
+        assert!(!p.matches("join"));
+        let class = |fqn: &str, qualname: Option<&str>| ContractClass {
+            fqn: fqn.to_owned(),
+            qualname: qualname.map(str::to_owned),
+        };
+        let p = DottedPattern::new("pkg.model:Model", "test").unwrap();
+        assert!(p.matches_class(&class("pkg.model.Model", Some("Model"))));
+        assert!(!p.matches_class(&class("pkg.model.Model", None)));
+        assert!(
+            DottedPattern::new("Model", "test")
+                .unwrap()
+                .matches_class(&class("pkg.model.Model", None))
+        );
+        for bad in ["pkg:", ":f", "a:b:c", "pkg:[x"] {
+            assert!(DottedPattern::new(bad, "test").is_err(), "{bad}");
+        }
+        for (text, split, last) in [
+            (
+                "pkg.model:Model.fields",
+                Some(("pkg.model:Model", "fields")),
+                "fields",
+            ),
+            ("pkg:decide", None, "decide"),
+            ("Model.fields", Some(("Model", "fields")), "fields"),
+            ("pkg.Model.a:b", None, "b"),
+        ] {
+            assert_eq!(split_last_dot(text), split, "{text}");
+            assert_eq!(last_name(text), last, "{text}");
         }
     }
 
@@ -1095,17 +1360,17 @@ mod registry_tests {
     }
 
     #[test]
-    fn a_rule_is_an_error_for_a_bug_and_a_warning_for_slower_code() {
+    fn a_rule_is_an_error_for_a_critical_bug_and_a_warning_otherwise() {
         for r in CORE_RULES {
             let expected = match r.consequence {
                 Consequence::Bug => Severity::Error,
-                Consequence::Slowdown => Severity::Warning,
+                Consequence::MinorBug | Consequence::Slowdown => Severity::Warning,
             };
             assert_eq!(r.default_severity(), expected, "{}", r.code);
             // The `OPT` rules report slower code, and every `MUT` rule a bug.
             match r.family {
                 RuleFamily::Opt => assert_eq!(r.consequence, Consequence::Slowdown, "{}", r.code),
-                RuleFamily::Mut => assert_eq!(r.consequence, Consequence::Bug, "{}", r.code),
+                RuleFamily::Mut => assert_ne!(r.consequence, Consequence::Slowdown, "{}", r.code),
                 RuleFamily::Eff | RuleFamily::Data => {}
             }
         }

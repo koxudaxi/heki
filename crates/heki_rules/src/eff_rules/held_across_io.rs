@@ -16,6 +16,7 @@ use heki_diagnostics::Diagnostic;
 use heki_effect::consumption::resolve_inst;
 use heki_effect::held::{self, Acquisitions, Change};
 use heki_effect::{CallHop, CallSite, Callee, SiteEffect, TypeCtx, Val, anchors_call_site};
+use heki_ir::walk::FnShape;
 use heki_ir::{BlockId, Inst, InstKind, IrFunction, VarId};
 use heki_kb::ExecEffectKind;
 use rustc_hash::FxHashMap;
@@ -58,13 +59,14 @@ pub(super) fn run(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Di
             continue;
         }
         let types = tcx.infer(f);
-        let held = held_managers(&tcx, f, &types);
+        let shape = FnShape::new(f);
+        let held = held_managers(&tcx, &shape, &types);
         if held.is_empty() {
             continue;
         }
         let sites = sites.get_or_insert_with(|| cx.sites_by_span(unit));
         let (taken, changes) = acquisitions(f, &held);
-        let reached = held::at_entry(f, taken.len(), |b, i| changes.get(&(b, i)))
+        let reached = held::at_entry(&shape, taken.len(), |b, i| changes.get(&(b, i)))
             .into_iter()
             .enumerate()
             .filter_map(|(b, s)| s.map(|s| (BlockId(b as u32), s)));
@@ -194,9 +196,10 @@ fn describe(qualname: &str, held: &Held, line: u32, offense: Offense) -> Report 
 /// Managers of non-async `with` items that hold a flagged lock or transaction.
 fn held_managers(
     tcx: &TypeCtx<'_>,
-    f: &IrFunction,
+    shape: &FnShape<'_>,
     types: &FxHashMap<VarId, Val>,
 ) -> FxHashMap<VarId, Held> {
+    let f = shape.f;
     let flagged = |symbol: &str| tcx.catalog(symbol).is_some_and(|e| e.sync_lock_or_tx);
     let mut out = FxHashMap::default();
     for inst in f.blocks.iter().flat_map(|b| &b.insts) {
@@ -213,19 +216,11 @@ fn held_managers(
             _ => None,
         };
         let held = lock.or_else(|| {
-            let mut cur = mgr;
-            while let Some((_, def)) = f.def_inst(cur) {
-                match &def.kind {
-                    InstKind::Copy { src, .. } => cur = *src,
-                    kind => {
-                        return match resolve_inst(tcx, types, kind) {
-                            Callee::External(symbol) if flagged(&symbol) => Some((symbol, true)),
-                            _ => None,
-                        };
-                    }
-                }
+            let def = shape.inst(shape.copy_root(mgr))?;
+            match resolve_inst(tcx, types, &def.kind) {
+                Callee::External(symbol) if flagged(&symbol) => Some((symbol, true)),
+                _ => None,
             }
-            None
         });
         if let Some((symbol, transaction)) = held {
             out.entry(mgr).or_insert(Held {

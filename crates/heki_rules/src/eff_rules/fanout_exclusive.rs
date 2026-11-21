@@ -25,6 +25,7 @@ use heki_effect::locks::{self, ObjRef};
 use heki_effect::one_at_a_time::{self, ExclusiveUse};
 use heki_effect::ownership::Live;
 use heki_effect::{CallHop, Callee, FuncKey, TypeCtx, Val, owned_chain};
+use heki_ir::walk::FnShape;
 use heki_ir::{BlockId, FunctionId, Inst, InstKind, IrFunction, VarId};
 use heki_kb::OneAtATime;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -74,6 +75,7 @@ impl Holder {
 /// A function's IR with its definitions and inferred values.
 struct Frame<'f> {
     f: &'f IrFunction,
+    shape: FnShape<'f>,
     key: FuncKey,
     types: FxHashMap<VarId, Val>,
     defs: FxHashMap<VarId, &'f Inst>,
@@ -98,6 +100,7 @@ impl<'f> Frame<'f> {
         }
         Self {
             f,
+            shape: FnShape::new(f),
             key: CheckContext::key(unit, f),
             types: tcx.infer(f),
             defs,
@@ -340,7 +343,7 @@ impl<'a> Check<'_, 'a> {
 
     /// A block of the innermost loop of the fan-out function around `bb`.
     fn loop_of(&self, bb: BlockId) -> Option<BlockId> {
-        self.top().f.innermost_loop(bb).map(|lp| lp.header)
+        self.top().shape.innermost(bb).map(|lp| lp.header)
     }
 
     /// The tasks the iterable `v` holds for the fan-out in block `at`: the items of a display,
@@ -375,8 +378,8 @@ impl<'a> Check<'_, 'a> {
                     out
                 });
                 for &(b, item) in appended.get(&v).into_iter().flatten() {
-                    let looped = (top.f.innermost_loop(b))
-                        .filter(|lp| !lp.body.contains(&at))
+                    let looped = (top.shape.innermost(b))
+                        .filter(|lp| !top.shape.in_body(lp, at))
                         .map(|lp| lp.header);
                     self.element(0, item, looped, out);
                 }
@@ -746,7 +749,7 @@ impl<'a> Check<'_, 'a> {
                 }
             }
         }
-        let entry = held::at_entry(f, 1, |b, i| changes.get(&(b, i)));
+        let entry = held::at_entry(&top.shape, 1, |b, i| changes.get(&(b, i)));
         Bound { entry, changes }
     }
 

@@ -242,15 +242,15 @@ fn eff101_resolves_receivers_through_imports_globals_annotations_and_classes() {
             // A function-local import.
             d(h, 63, "EFF101", "time.sleep"),
             // A class method calling a static method through `cls`.
-            d(h, 67, "EFF101", "app.models.K.make"),
+            d(h, 67, "EFF111", "app.models.K.make"),
             // A generator expression runs where it is consumed.
+            d(h, 71, "EFF102", "requests.get"),
             d(
                 h,
                 71,
-                "EFF101",
+                "EFF111",
                 "app.handlers.via_genexpr.<locals>.<genexpr>"
             ),
-            d(h, 71, "EFF102", "requests.get"),
         ],
         "{diags:#?}"
     );
@@ -371,7 +371,7 @@ fn eff101_resolves_pipe_and_optional_annotations_super_returns_and_overrides() {
             // A method's return annotation types its result.
             d(a, 52, "EFF101", "httpx.Client.get"),
             // CHA over a subclass overriding the method.
-            d(a, 56, "EFF101", "pkg.api.SlowJob.run"),
+            d(a, 56, "EFF111", "pkg.api.SlowJob.run"),
             // A Layer 2 constructor with a lowercase name (`boto3.client`) returns a client
             // whose methods the configuration catalogues.
             d(a, 61, "EFF101", "boto3.client.get_object"),
@@ -383,7 +383,7 @@ fn eff101_resolves_pipe_and_optional_annotations_super_returns_and_overrides() {
     p.write("pkg/many.py", &overrides(7));
     assert_eq!(
         found(&diagnostics(&p, &["pkg/many.py", "pkg/util.py"])),
-        vec![d("pkg/many.py", 45, "EFF101", "pkg.many.Sub0.go")]
+        vec![d("pkg/many.py", 45, "EFF111", "pkg.many.Sub0.go")]
     );
 }
 
@@ -402,7 +402,7 @@ fn eff101_merges_conditional_definitions_and_follows_python_311_comprehensions()
     let diags = diagnostics(&p, &["pkg/dup.py"]);
     assert_eq!(
         found(&diags),
-        vec![d("pkg/dup.py", 15, "EFF101", "pkg.dup.pause")]
+        vec![d("pkg/dup.py", 15, "EFF111", "pkg.dup.pause")]
     );
     let (_, stdout, _) = p.heki(&["snapshot", "pkg/dup.py"]);
     let snap: Value = serde_json::from_str(&stdout).unwrap();
@@ -448,8 +448,9 @@ fn eff101_merges_conditional_definitions_and_follows_python_311_comprehensions()
         ]
     );
     let diags = diagnostics(&p, &["pkg/comps.py", "--target-version", "py311"]);
+    // Through the comprehension's frame the call runs once per item: not on every path.
     let eff101 = &diags[0];
-    assert_eq!(eff101["rule_code"], "EFF101");
+    assert_eq!(eff101["rule_code"], "EFF111");
     assert_eq!(eff101["column"], 12, "at the comprehension call");
     assert_eq!(
         eff101["related"][0]["message"],
@@ -564,7 +565,7 @@ def ddl(cur: sqlite3.Cursor, names):
         cur.execute("  create table € (a int)")
 "#,
     );
-    let diags = diagnostics(&p, &["--select", "EFF103"]);
+    let diags = diagnostics(&p, &["--select", "EFF103,EFF113"]);
     let got: Vec<(&str, &str)> = diags
         .iter()
         .map(|d| {
@@ -636,6 +637,121 @@ def combine(a, b):
     assert_eq!(diags[0]["target"], "df");
 }
 
+/// An established `DATA101` report names what the loop steps through: the update returns on
+/// every iteration that completes, every path around the back edge carries it, and the items are
+/// the data's. A path that resets the value, items whose origin is not the data's (an attribute
+/// of the receiver), a project helper doing the reallocation (it may return another value), or
+/// data that holds the previous value only on some paths leave the report heuristic, worded
+/// without an origin (a `while` loop steps through no items).
+#[test]
+fn data101_names_the_origin_of_an_established_report() {
+    let p = Project::new("data101_established");
+    p.write(
+        "frames.py",
+        r#"import pandas as pd
+
+
+def from_parameter(frames):
+    df = pd.DataFrame()
+    for part in frames:
+        df = pd.concat([df, part])
+    return df
+
+
+def reset_on_some_path(frames):
+    df = pd.DataFrame()
+    for part in frames:
+        df = pd.concat([df, part])
+        if len(df) > 10:
+            df = pd.DataFrame()
+    return df
+
+
+class Builder:
+    def build(self):
+        df = pd.DataFrame()
+        for part in self.parts:
+            df = pd.concat([df, part])
+        return df
+
+
+def combine(acc, part):
+    return pd.concat([acc, part])
+
+
+def through_a_helper(frames):
+    df = pd.DataFrame()
+    for part in frames:
+        df = combine(df, part)
+    return df
+
+
+def drops_it_on_some_path(frames, keep):
+    df = pd.DataFrame()
+    for part in frames:
+        prior = df if keep else pd.DataFrame()
+        df = pd.concat([prior, part])
+    return df
+
+
+from pandas import concat
+
+
+def through_an_imported_name(frames):
+    df = pd.DataFrame()
+    for part in frames:
+        df = concat([df, part])
+    return df
+
+
+def drained(chunks):
+    df = pd.DataFrame()
+    while chunks:
+        part = chunks.pop()
+        df = pd.concat([df, part])
+    return df
+"#,
+    );
+    let diags = diagnostics(&p, &["--select", "DATA101"]);
+    let messages: Vec<(u64, &str)> = diags
+        .iter()
+        .map(|d| (d["line"].as_u64().unwrap(), d["message"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        messages,
+        vec![
+            (
+                7,
+                "`df` is rebuilt from itself with `pandas.concat` on every iteration over parameter `frames`"
+            ),
+            (
+                14,
+                "`df` is rebuilt from itself with `pandas.concat` on every loop iteration"
+            ),
+            (
+                24,
+                "`df` is rebuilt from itself with `pandas.concat` on every loop iteration"
+            ),
+            (
+                35,
+                "`df` is rebuilt from itself with `pandas.concat` on every loop iteration"
+            ),
+            (
+                43,
+                "`df` is rebuilt from itself with `pandas.concat` on every loop iteration"
+            ),
+            (
+                53,
+                "`df` is rebuilt from itself with `pandas.concat` on every iteration over parameter `frames`"
+            ),
+            (
+                61,
+                "`df` is rebuilt from itself with `pandas.concat` on every loop iteration"
+            ),
+        ]
+    );
+}
+
 #[test]
 fn py_module_beats_sibling_pyi_stub_end_to_end() {
     let p = Project::new("effects_py_over_pyi");
@@ -669,7 +785,7 @@ import sqlalchemy
 
 
 def via_sqlite(ids):
-    conn = sqlite3.connect(":memory:")
+    conn = sqlite3.connect("app.db")
     cur = conn.cursor()
     for i in ids:
         conn.execute("SELECT 1 WHERE id = ?", (i,))
@@ -687,7 +803,7 @@ def via_psycopg_and_sa(ids):
         sa_conn.execute("SELECT 3")
 "#,
     );
-    let diags = diagnostics(&p, &["--select", "EFF103"]);
+    let diags = diagnostics(&p, &["--select", "EFF103,EFF113"]);
     assert_eq!(
         found(&diags),
         vec![
@@ -777,24 +893,24 @@ fn each_effect_has_its_own_help() {
             (
                 d["line"].as_u64().unwrap(),
                 d["message"].as_str().unwrap(),
-                d["help"].as_str().unwrap(),
+                d["help"].as_str().unwrap_or_default(),
             )
         })
         .collect();
     let offload = "offload it with `asyncio.to_thread`, or";
     let client = "create one client or session before the loop and reuse it";
-    let batch = "batch the queries, or load the data once before the loop";
+    let query = "batch the queries, or load the data once before the loop";
     assert_eq!(
         reports,
         vec![
             (
                 12,
-                "`sleeps` reaches the blocking call `time.sleep` on the event loop",
+                "`sleeps` runs the waiting call `time.sleep` on the event loop",
                 "use `await asyncio.sleep(...)`, or offload it with `asyncio.to_thread`"
             ),
             (
                 16,
-                "`fetches` reaches the blocking call `requests.get` on the event loop",
+                "`fetches` runs the waiting call `requests.get` on the event loop",
                 &format!("{offload} use an async client")
             ),
             (
@@ -804,7 +920,7 @@ fn each_effect_has_its_own_help() {
             ),
             (
                 24,
-                "`runs` reaches the blocking call `subprocess.run` on the event loop",
+                "`runs` runs the waiting call `subprocess.run` on the event loop",
                 &format!("{offload} use `asyncio.create_subprocess_exec`")
             ),
             (
@@ -831,14 +947,556 @@ fn each_effect_has_its_own_help() {
             ),
             (
                 52,
-                "`sqlite3.Cursor.execute` runs a database query on every loop iteration (N+1)",
-                batch
+                "every iteration over parameter `ids` sends a database statement: `sqlite3.Cursor.execute`",
+                query
             ),
             (
                 53,
-                "`app.lookup` runs a database query (`sqlite3.Cursor.execute`) on every loop iteration (N+1)",
-                batch
+                "every iteration over parameter `ids` sends a database statement: `sqlite3.Cursor.execute` (through `app.lookup`)",
+                query
             ),
         ]
+    );
+}
+
+/// Each premise of the exact claims, established and not: every implementation of a call (two
+/// sinks, a class object, an instance's `__call__`, `super()`, a union, subclasses that alone
+/// define the method, a constructor through `cls`), the `with` statements whose managers never
+/// suppress (an instance of a catalogued class, the result of a catalogued function or method)
+/// and one that may, and the origins of a loop's items (a part of a parameter, the rows of a
+/// query, the lines of a file or of its text, directory entries, a count; a receiver's attribute
+/// and the target of a `with` are not established).
+const PREMISES: &str = r#"import os
+import sqlite3
+import threading
+import time
+from pathlib import Path
+
+import httpx
+import requests
+from sqlalchemy.engine import Engine
+
+
+class Repo:
+    def get(self, key):
+        raise NotImplementedError
+
+
+class Remote(Repo):
+    def get(self, key):
+        return requests.get(key)
+
+
+class Local(Repo):
+    def get(self, key):
+        return requests.post(key)
+
+
+class Factory:
+    @classmethod
+    def make(cls):
+        return cls.load()
+
+    @classmethod
+    def load(cls):
+        return requests.get("https://example.com")
+
+
+class Caller:
+    def __call__(self):
+        time.sleep(1)
+
+
+class Child(Remote):
+    def get(self, key):
+        return super().get(key)
+
+
+def with_lock(lock: threading.Lock):
+    with lock:
+        print("held")
+        time.sleep(1)
+
+
+def with_file(p):
+    with open(p) as f:
+        f.read()
+        time.sleep(1)
+
+
+def with_client(url):
+    with httpx.Client() as client:
+        print(client)
+        return requests.get(url)
+
+
+def with_unknown(manager):
+    with manager:
+        print("entered")
+        time.sleep(1)
+
+
+async def tp_two_sinks(r: Repo):
+    r.get("k")
+
+
+async def tp_class_object():
+    Factory.make()
+
+
+async def tp_instance_call(c: Caller):
+    c()
+
+
+async def tp_super(c: Child):
+    c.get("k")
+
+
+async def tp_managers(lock: threading.Lock, manager):
+    with_lock(lock)
+    with_file("x")
+    with_client("u")
+    with_unknown(manager)
+
+
+def per_part(conn: sqlite3.Connection, req):
+    for i in req.ids:
+        conn.execute("SELECT ?", (i,))
+
+
+def per_line(conn: sqlite3.Connection, p):
+    with open(p) as f:
+        for line in f:
+            conn.execute("SELECT ?", (line,))
+
+
+def per_entry(conn: sqlite3.Connection, root):
+    for name in os.listdir(root):
+        conn.execute("SELECT ?", (name,))
+
+
+def per_text_line(conn: sqlite3.Connection, p: Path):
+    for line in p.read_text().splitlines():
+        conn.execute("SELECT ?", (line,))
+
+
+def per_count(conn: sqlite3.Connection, ids):
+    for i in map(str, ids):
+        conn.execute("SELECT ?", (i,))
+
+
+class Store:
+    def save(self, conn, x):
+        raise NotImplementedError
+
+
+class SqlStore(Store):
+    def save(self, conn: sqlite3.Connection, x):
+        conn.execute("INSERT INTO a VALUES (?)", (x,))
+
+
+class OtherStore(Store):
+    def save(self, conn: sqlite3.Connection, x):
+        conn.executemany("INSERT INTO b VALUES (?)", [(x,)])
+
+
+def per_store(store: Store, conn, xs):
+    for x in xs:
+        store.save(conn, x)
+
+
+async def tp_union(r: Remote | Local):
+    r.get("k")
+
+
+class Built:
+    def __init__(self):
+        time.sleep(1)
+
+    @classmethod
+    def create(cls):
+        return cls()
+
+
+async def tn_subclass_constructed():
+    Built.create()
+
+
+class Plain:
+    pass
+
+
+class PlainSub(Plain):
+    def run(self):
+        time.sleep(1)
+
+
+async def tp_method_only_subclasses_define(p: Plain):
+    p.run()
+
+
+def with_connection(engine: Engine):
+    with engine.connect() as conn:
+        print(conn)
+        time.sleep(1)
+
+
+async def tp_method_manager(engine):
+    with_connection(engine)
+
+
+class Batch:
+    def run(self, conn: sqlite3.Connection):
+        for x in self.items:
+            conn.execute("SELECT ?", (x,))
+
+
+def per_row(conn: sqlite3.Connection):
+    for (i,) in conn.execute("SELECT id FROM t").fetchall():
+        conn.execute("SELECT ?", (i,))
+
+
+def per_open_line(conn: sqlite3.Connection, p):
+    for line in open(p):
+        conn.execute("SELECT ?", (line,))
+
+
+def per_character(conn: sqlite3.Connection, p: Path):
+    for ch in p.read_text():
+        conn.execute("SELECT ?", (ch,))
+
+
+from abc import ABC, abstractmethod
+
+
+class Sender(ABC):
+    @abstractmethod
+    def send(self, x): ...
+
+
+class Mailer(Sender):
+    def send(self, x):
+        return requests.post(x)
+
+
+async def tp_abstract(s: Sender):
+    s.send("x")
+
+
+def per_row_of_a_file():
+    conn = sqlite3.connect("app.db")
+    for (i,) in conn.execute("SELECT id FROM t"):
+        conn.execute("SELECT ?", (i,))
+"#;
+
+#[test]
+fn exact_claims_establish_each_premise() {
+    let p = Project::new("exact_premises");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/premises.py", PREMISES);
+    let diags = diagnostics(&p, &["--select", "EFF101,EFF111,EFF103,EFF113"]);
+    let got: Vec<(u64, &str, &str)> = diags
+        .iter()
+        .map(|d| {
+            (
+                d["line"].as_u64().unwrap(),
+                d["rule_code"].as_str().unwrap(),
+                d["message"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            (
+                72,
+                "EFF101",
+                "`get` always runs a waiting call on the event loop: `requests.get` (in `Remote.get`) or `requests.post` (in `Local.get`)"
+            ),
+            (
+                76,
+                "EFF101",
+                "`pkg.premises.Factory.make` always runs the waiting call `requests.get` on the event loop (2 calls down, on every path)"
+            ),
+            (
+                80,
+                "EFF101",
+                "`pkg.premises.Caller.__call__` always runs the waiting call `time.sleep` on the event loop (1 call down, on every path)"
+            ),
+            (
+                84,
+                "EFF101",
+                "`pkg.premises.Child.get` always runs the waiting call `requests.get` on the event loop (2 calls down, on every path)"
+            ),
+            (
+                88,
+                "EFF101",
+                "`pkg.premises.with_lock` always runs the waiting call `time.sleep` on the event loop (1 call down, on every path)"
+            ),
+            (
+                89,
+                "EFF101",
+                "`pkg.premises.with_file` always runs the waiting call `time.sleep` on the event loop (1 call down, on every path)"
+            ),
+            (
+                90,
+                "EFF101",
+                "`pkg.premises.with_client` always runs the waiting call `requests.get` on the event loop (1 call down, on every path)"
+            ),
+            (
+                91,
+                "EFF111",
+                "`tp_managers` reaches the blocking call `time.sleep` on the event loop"
+            ),
+            (
+                96,
+                "EFF103",
+                "every iteration over a part of parameter `req` sends a database statement: `sqlite3.Connection.execute`"
+            ),
+            (
+                102,
+                "EFF113",
+                "`sqlite3.Connection.execute` runs a database query on every loop iteration"
+            ),
+            (
+                107,
+                "EFF103",
+                "every iteration over the entries of `os.listdir` sends a database statement: `sqlite3.Connection.execute`"
+            ),
+            (
+                112,
+                "EFF103",
+                "every iteration over the lines of the text of `pathlib.Path.read_text` sends a database statement: `sqlite3.Connection.execute`"
+            ),
+            (
+                117,
+                "EFF103",
+                "every iteration, once for each item of parameter `ids`, sends a database statement: `sqlite3.Connection.execute`"
+            ),
+            (
+                137,
+                "EFF103",
+                "every iteration over parameter `xs` sends a database statement: `sqlite3.Connection.executemany` (in `OtherStore.save`) or `sqlite3.Connection.execute` (in `SqlStore.save`)"
+            ),
+            (
+                141,
+                "EFF101",
+                "`get` always runs a waiting call on the event loop: `requests.post` (in `Local.get`) or `requests.get` (in `Remote.get`)"
+            ),
+            (
+                154,
+                "EFF111",
+                "`tn_subclass_constructed` reaches the blocking call `time.sleep` on the event loop"
+            ),
+            (
+                167,
+                "EFF101",
+                "`pkg.premises.PlainSub.run` always runs the waiting call `time.sleep` on the event loop (1 call down, on every path)"
+            ),
+            (
+                177,
+                "EFF101",
+                "`pkg.premises.with_connection` always runs the waiting call `time.sleep` on the event loop (1 call down, on every path)"
+            ),
+            (
+                177,
+                "EFF111",
+                "`tp_method_manager` reaches the blocking call `sqlalchemy.engine.Engine.connect` on the event loop"
+            ),
+            (
+                183,
+                "EFF113",
+                "`sqlite3.Connection.execute` runs a database query on every loop iteration"
+            ),
+            (
+                188,
+                "EFF103",
+                "every iteration over the rows of `sqlite3.Cursor.fetchall` sends a database statement: `sqlite3.Connection.execute`"
+            ),
+            (
+                193,
+                "EFF103",
+                "every iteration over the lines of `builtins.open` sends a database statement: `sqlite3.Connection.execute`"
+            ),
+            (
+                198,
+                "EFF113",
+                "`sqlite3.Connection.execute` runs a database query on every loop iteration"
+            ),
+            (
+                215,
+                "EFF101",
+                "`pkg.premises.Mailer.send` always runs the waiting call `requests.post` on the event loop (1 call down, on every path)"
+            ),
+            (
+                221,
+                "EFF103",
+                "every iteration over the rows of `sqlite3.Connection.execute` sends a database statement: `sqlite3.Connection.execute`"
+            ),
+        ]
+    );
+    // The advice is in the help of every query report, exact or heuristic.
+    let query_helps: Vec<(&str, &str)> = diags
+        .iter()
+        .filter(|d| d["rule_code"] == "EFF103" || d["rule_code"] == "EFF113")
+        .map(|d| {
+            (
+                d["rule_code"].as_str().unwrap(),
+                d["help"].as_str().unwrap_or_default(),
+            )
+        })
+        .collect();
+    assert!(
+        query_helps.iter().any(|(code, _)| *code == "EFF103")
+            && query_helps.iter().any(|(code, _)| *code == "EFF113")
+            && query_helps.iter().all(
+                |(_, help)| *help == "batch the queries, or load the data once before the loop"
+            ),
+        "{query_helps:?}"
+    );
+    // Each implementation's waiting call is named, and related, where it is: `Child.get` reaches
+    // `requests.get` through `super().get`, in `Remote.get`.
+    let witnesses = diags
+        .iter()
+        .find(|d| d["line"] == 72)
+        .map(|d| {
+            let related: Vec<(u64, &str)> = d["related"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| (r["line"].as_u64().unwrap(), r["message"].as_str().unwrap()))
+                .collect();
+            (d["target"].as_str().unwrap(), related)
+        })
+        .unwrap();
+    assert_eq!(
+        witnesses,
+        (
+            "requests.get, requests.post",
+            vec![
+                (72, "`tp_two_sinks` calls `pkg.premises.Local.get`"),
+                (24, "`Local.get` calls `requests.post`"),
+                (19, "`Remote.get` calls `requests.get`"),
+            ]
+        )
+    );
+}
+
+const PROPERTY_READS: &str = r#"import time
+
+
+class Conn:
+    @property
+    def ready(self):
+        raise ValueError("not ready")
+
+
+class Plain:
+    def ready(self):
+        return True
+
+
+def wait_when_ready(c: Conn):
+    try:
+        c.ready
+        time.sleep(1)
+    except ValueError:
+        pass
+
+
+def wait_after_lookup(p: Plain):
+    try:
+        p.ready
+        time.sleep(1)
+    except ValueError:
+        pass
+
+
+async def tn_property(c: Conn):
+    wait_when_ready(c)
+
+
+async def tp_method_lookup(p: Plain):
+    wait_after_lookup(p)
+"#;
+
+/// Reading a property runs its getter, which may raise into a handler that returns without the
+/// wait: the helper does not always wait. Looking up a plain method does not raise.
+#[test]
+fn a_property_read_may_raise_before_the_wait() {
+    let p = Project::new("exact_property_reads");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/reads.py", PROPERTY_READS);
+    let diags = diagnostics(&p, &["--select", "EFF101,EFF111"]);
+    let got: Vec<(u64, &str)> = diags
+        .iter()
+        .map(|d| {
+            (
+                d["line"].as_u64().unwrap(),
+                d["rule_code"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(got, vec![(32, "EFF111"), (36, "EFF101")], "{diags:#?}");
+}
+
+const HELPER_OVER_DISPATCH: &str = r#"import requests
+
+
+class Repo:
+    def get(self, key):
+        raise NotImplementedError
+
+
+class Remote(Repo):
+    def get(self, key):
+        return requests.get(key)
+
+
+class Local(Repo):
+    def get(self, key):
+        return requests.post(key)
+
+
+def fetch(r: Repo, key):
+    return r.get(key)
+
+
+async def serve(r: Repo):
+    fetch(r, "k")
+"#;
+
+/// A helper over a call whose implementations wait in different calls keeps each of them: the
+/// report names, targets, and relates every one, not the one its shortest chain ends in.
+#[test]
+fn a_helper_summary_keeps_every_witness() {
+    let p = Project::new("exact_helper_witnesses");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/serve.py", HELPER_OVER_DISPATCH);
+    let diags = diagnostics(&p, &["--select", "EFF101,EFF111"]);
+    assert_eq!(diags.len(), 1, "{diags:#?}");
+    let d = &diags[0];
+    assert_eq!(
+        (
+            d["line"].as_u64().unwrap(),
+            d["rule_code"].as_str().unwrap()
+        ),
+        (24, "EFF101")
+    );
+    assert_eq!(
+        d["message"],
+        "`fetch` always runs a waiting call on the event loop: `requests.post` (in `Local.get`) or `requests.get` (in `Remote.get`)"
+    );
+    assert_eq!(d["target"], "requests.get, requests.post");
+    let related: Vec<(u64, &str)> = d["related"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| (r["line"].as_u64().unwrap(), r["message"].as_str().unwrap()))
+        .collect();
+    assert!(
+        related.contains(&(11, "`Remote.get` calls `requests.get`"))
+            && related.contains(&(16, "`Local.get` calls `requests.post`")),
+        "{related:?}"
     );
 }

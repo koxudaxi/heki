@@ -15,6 +15,23 @@ const SQL_EXECUTORS: &[&str] = &["execute", "executemany", "executescript", "exe
 /// Leading keywords of statements that change a schema or a connection setting.
 const DDL_KEYWORDS: &[&str] = &["CREATE", "ALTER", "DROP", "PRAGMA"];
 
+/// SQLite pragmas that read or set an option of the connection itself, without touching the
+/// database file (`PRAGMA busy_timeout = 5000`).
+const CONNECTION_PRAGMAS: &[&str] = &[
+    "automatic_index",
+    "busy_timeout",
+    "cache_size",
+    "cache_spill",
+    "case_sensitive_like",
+    "defer_foreign_keys",
+    "foreign_keys",
+    "query_only",
+    "recursive_triggers",
+    "synchronous",
+    "temp_store",
+    "trusted_schema",
+];
+
 /// Constructors of a SQLAlchemy statement from its text (`text("CREATE TABLE ...")`).
 const SQL_TEXT_CONSTRUCTORS: &[&str] = &[
     "sqlalchemy.text",
@@ -61,6 +78,31 @@ impl Text {
         DDL_KEYWORDS.iter().any(|k| word.eq_ignore_ascii_case(k))
     }
 
+    /// The statement reads or sets an option of the connection ([`CONNECTION_PRAGMAS`]): the
+    /// pragma's name is fixed (a head names it when something follows it).
+    fn is_connection_setting(&self) -> bool {
+        let (text, whole) = match self {
+            Text::Whole(t) => (t.trim_start(), true),
+            Text::Head(h) => (h.trim_start(), false),
+        };
+        let Some(rest) = text
+            .get(..6)
+            .filter(|w| w.eq_ignore_ascii_case("PRAGMA"))
+            .map(|_| text[6..].trim_start())
+        else {
+            return false;
+        };
+        let end = rest.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'));
+        let name = match end {
+            Some(end) => &rest[..end],
+            None if whole => rest,
+            None => return false,
+        };
+        CONNECTION_PRAGMAS
+            .iter()
+            .any(|p| name.eq_ignore_ascii_case(p))
+    }
+
     /// The same text as the head of a longer one.
     fn into_head(self) -> Text {
         match self {
@@ -105,6 +147,18 @@ impl Extractor<'_> {
             && statement
                 .and_then(|v| self.statement_texts(v, &mut Walk::default()))
                 .is_some_and(|texts| texts.iter().all(Text::is_ddl))
+    }
+
+    /// Whether the call of `symbol`, given `statement` first, only reads or sets an option of its
+    /// connection (`conn.execute("PRAGMA busy_timeout = 5000")`): it is a statement executor,
+    /// and every text the code lets the statement be is such a pragma. It does not wait on the
+    /// database.
+    pub(super) fn runs_connection_setting(&self, symbol: &str, statement: Option<VarId>) -> bool {
+        let executes = SQL_EXECUTORS.contains(&symbol.rsplit('.').next().unwrap_or(symbol));
+        executes
+            && statement
+                .and_then(|v| self.statement_texts(v, &mut Walk::default()))
+                .is_some_and(|texts| texts.iter().all(Text::is_connection_setting))
     }
 
     /// Every text `v` may hold, when the code fixes each (`None` when one is unknown), each
@@ -161,13 +215,13 @@ impl Extractor<'_> {
         })
     }
 
-    /// The texts the value `v` defines, which is no copy or phi: a constant (`const_str`, a
+    /// The texts the value `v` defines, which is no copy or phi: a constant (`resolved_str`, a
     /// module's string constant), the head of an f-string, of a `+` or `%` with a constant first
     /// operand, or of `.format(...)` on one, what a `str` method keeping the first word or
     /// SQLAlchemy's `text()` is given, none for a local read before it is bound, and each item a
     /// loop over constant texts yields.
     fn source_texts(&self, v: VarId, walk: &mut Walk) -> Option<Vec<Text>> {
-        if let Some(s) = self.const_str(v) {
+        if let Some(s) = self.resolved_str(v) {
             return Some(vec![Text::Whole(Arc::from(s))]);
         }
         if let Some(head) = self.f.str_head(v) {
@@ -290,7 +344,7 @@ impl Extractor<'_> {
                 ..
             } if kwargs.is_empty() => {
                 let separator = match (method.as_str(), args.as_slice()) {
-                    ("split", [sep]) => Some(self.const_str(*sep)?),
+                    ("split", [sep]) => Some(self.resolved_str(*sep)?),
                     ("splitlines", []) => None,
                     _ => return None,
                 };

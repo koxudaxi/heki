@@ -87,10 +87,11 @@ Each of these passes, because each tool sees one step:
 heki follows the call into `load_user` and the alias into `add_default`:
 
 ```console
-$ heki check --heuristic --output-format concise
-app/api.py:5:12: EFF101 [heuristic] `handler` reaches the blocking call `requests.get` on the event loop
+$ heki check --output-format concise
+app/api.py:5:12: EFF101 `app.users.load_user` always runs the waiting call `requests.get` on the event loop (3 calls down, on every path)
 app/models.py:17:5: MUT201 [heuristic] `parse` writes `Model.fields` (indirect_helper) via `app.models.add_default` outside the write owners of `model-store`
 Found 2 diagnostic(s) in 4 file(s).
+note: 4 heuristic rule(s) are off; enable them with `--heuristic` or `lint.heuristic = true`
 ```
 
 ## Where heki pays off
@@ -237,6 +238,13 @@ Missed findings close as heki learns more:
   a `Final` field of a dataclass or of a class a `dataclass_transform` builds read on an instance
   (`Keys("x").KEY` is `"x"`), or on a class object whose default a class with `slots=True` or built
   by a transform replaces, or a computed name.
+- `setattr` and `object.__setattr__` are followed through a module-level name bound once to them
+  (`_set = object.__setattr__`), and `getattr(obj, "fields")` is `obj.fields` itself: changing
+  what it returns changes the attribute's object.
+- A write-owners contract sees a container change through what a method or a property returns
+  when it returns the attribute itself on every `return` (`node.members().append(x)` with
+  `return self.items`) and every class the object may be runs it. A `cached_property` hands out
+  nothing: what the instance keeps can be replaced.
 - A `write-owners` contract with `unresolved = "report"` reports the writes heki cannot tie to a
   class ([`MUT205`](rules/unresolved-guarded-write.md)).
 

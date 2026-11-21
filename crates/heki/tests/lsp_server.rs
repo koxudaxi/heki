@@ -41,7 +41,7 @@ fn lsp_session_publishes_fixes_and_cuts_off_unchanged_summaries() {
     let opt = &diags[0];
     assert_eq!(opt["source"], "heki");
     // The rule's certainty, and its page, which the site's address names.
-    assert_eq!(opt["data"], json!({"certainty": "heuristic"}));
+    assert_eq!(opt["data"], json!({"certainty": "exact"}));
     let site = common::repo_file("zensical.toml")
         .lines()
         .find_map(|l| {
@@ -126,11 +126,11 @@ fn lsp_session_publishes_fixes_and_cuts_off_unchanged_summaries() {
         related[1]["location"]["range"]["start"],
         json!({"line": 4, "character": 4})
     );
-    // The message is the sentence alone, labelled for a heuristic rule; the help follows the
-    // hops, at the diagnostic itself.
+    // The message is the sentence alone, with no label for an exact report; the help follows
+    // the hops, at the diagnostic itself.
     assert_eq!(
         eff["message"],
-        "`handler` reaches the blocking call `time.sleep` on the event loop [heuristic]"
+        "`pkg.util.helper` always runs the waiting call `time.sleep` on the event loop (1 call down, on every path)"
     );
     assert_eq!(related.len(), 3, "{related:#?}");
     assert_eq!(related[2]["location"]["uri"], api);
@@ -762,10 +762,14 @@ fn lsp_reloads_when_a_save_finds_the_module_layout_switched() {
     lsp.stop(true);
 }
 
+/// A heuristic report: handing the list to `sink` blocks the proof of the rewrite.
+const API_BLOCKED: &str = "def build(items, sink):\n    x = []\n    for i in items:\n        x = x + [i]\n        sink(x)\n    return x\n";
+
 #[test]
 fn the_server_runs_the_heuristic_rules_as_the_command_line_and_the_configuration_say() {
     let p = Project::new("lsp_heuristic");
-    p.write("pkg/__init__.py", "").write("pkg/api.py", API);
+    p.write("pkg/__init__.py", "")
+        .write("pkg/api.py", API_BLOCKED);
     let api = uri(&p.dir.join("pkg/api.py"));
     let published = |args: &[&str]| {
         let mut lsp = Lsp::start(&p.dir, args);
@@ -776,14 +780,15 @@ fn the_server_runs_the_heuristic_rules_as_the_command_line_and_the_configuration
         lsp.notify("initialized", json!({}));
         lsp.notify(
             "textDocument/didOpen",
-            json!({"textDocument": {"uri": api, "languageId": "python", "version": 1, "text": API}}),
+            json!({"textDocument": {"uri": api, "languageId": "python", "version": 1, "text": API_BLOCKED}}),
         );
         lsp.settle();
         let codes = codes(&lsp.latest.get(&api).cloned().unwrap_or_default());
         lsp.stop(true);
         codes
     };
-    // `Lsp::start` passes `--heuristic`; `--no-heuristic` after it wins.
+    // `Lsp::start` passes `--heuristic`; `--no-heuristic` after it wins: the exact rule then
+    // withholds its heuristic report.
     assert_eq!(published(&["server"]), ["OPT101"]);
     assert_eq!(
         published(&["server", "--no-heuristic"]),
