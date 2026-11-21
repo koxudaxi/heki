@@ -677,6 +677,7 @@ heki check --select EFF,MUT --ignore MUT101   # rule selection (codes, prefixes,
 heki check --heuristic                        # also the heuristic rules (lint.heuristic = true)
 heki check --fail-on warning                  # warnings fail the run too (lint.fail-on = "warning")
 heki check --output-format full|concise|json|github|sarif
+heki check --color auto|always|never          # colored full / concise / --diff output (NO_COLOR, FORCE_COLOR, as in Ruff)
 heki check --baseline heki-baseline.toml      # Ratchet: more findings fail, fewer ask to shrink the file
 heki check --update-baseline                  # record a new baseline or shrink an existing one (growth is refused)
 heki check --profile dump.collapsed [PATHS]   # optional: rank fixes with a recorded profile dump

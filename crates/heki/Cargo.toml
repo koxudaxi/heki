@@ -20,6 +20,7 @@ path = "src/main.rs"
 count-alloc = ["dep:cap", "dep:rayon"]
 
 [dependencies]
+anstyle-query.workspace = true
 anyhow.workspace = true
 cap = { workspace = true, optional = true }
 clap.workspace = true
