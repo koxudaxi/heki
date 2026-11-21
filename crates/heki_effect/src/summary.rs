@@ -7,6 +7,7 @@ use crate::cache_flow;
 use crate::capacity::{self, Bound, CapacityOf, CapacityWait, SiteQueues, WhileFull};
 use crate::construction::{Escape, Pos, Recorder};
 use crate::consumption::{ItemArgs, IterFlow, PerItemCall, Roots, param_iteration};
+use crate::decorators::keeps_returned_value;
 use crate::environment::{self, AccessKind, ExternalAccess};
 use crate::guards::{self, GuardInputs, LocalGuards, per_item_bit};
 use crate::held;
@@ -17,7 +18,7 @@ use crate::iterations::{
 use crate::locks::{self, LockStep, ObjRef};
 use crate::one_at_a_time;
 use crate::ownership::{self, LocalOrigins, Origins, ParamRole, ReturnOrigins, Source};
-use crate::readonly::{self, Derivation, ProtectedReturn, ReturnStep, Shared};
+use crate::readonly::{self, Derivation, ProtectedReturn, ReturnStep, Shared, container_mutator};
 use crate::resolver::{
     self, Callee, DeclKeys, FunctionDecl, ModuleDecls, TypeCtx, Val, func_qualname,
     is_generator_function, self_aliases,
@@ -47,28 +48,6 @@ use std::sync::Arc;
 
 mod imports;
 mod statements;
-
-/// Methods that mutate their receiver in place (section 2.4; shared by MUT101/201/202).
-pub const CONTAINER_MUTATORS: &[&str] = &[
-    "append",
-    "extend",
-    "insert",
-    "pop",
-    "remove",
-    "clear",
-    "sort",
-    "reverse",
-    "add",
-    "discard",
-    "update",
-    "popitem",
-    "setdefault",
-    "difference_update",
-    "intersection_update",
-    "symmetric_difference_update",
-    "__setitem__",
-    "__delitem__",
-];
 
 /// The (value, place) pairs the store walk of `return_origins` may take per byte of a function's
 /// source, above a floor: a function past it returns objects of unknown origin.
@@ -3207,7 +3186,7 @@ impl<'a> Extractor<'a> {
         let mutated = |var: &VarId| {
             self.uses.get(var).into_iter().flatten().any(|u| match u {
                 InstKind::MethodCall { recv, method, .. } => {
-                    recv == var && CONTAINER_MUTATORS.contains(&method.as_str())
+                    recv == var && container_mutator(method)
                 }
                 InstKind::SubscriptStore { obj, .. }
                 | InstKind::SubscriptDelete { obj, .. }
@@ -3450,9 +3429,7 @@ impl<'a> Extractor<'a> {
                 // A container method changes its receiver in place, unless the receiver's
                 // class defines the method itself: then what that method does is in its
                 // summary (`Stats.clear()` may change nothing).
-                if CONTAINER_MUTATORS.contains(&method.as_str())
-                    && !matches!(callee, Callee::Project(..))
-                {
+                if container_mutator(method) && !matches!(callee, Callee::Project(..)) {
                     self.container_method(*recv, method, args, span);
                     for a in args {
                         if matches!(method.as_str(), "append" | "insert" | "add" | "setdefault") {
@@ -6650,26 +6627,6 @@ fn role_site(
         complete: false,
         on_every_return: crate::OnEveryReturn::default(),
     }
-}
-
-/// Decorators that call the function's body on every call (its result stays a new object).
-const RETURN_KEEPING_DECORATORS: &[&str] = &[
-    "staticmethod",
-    "classmethod",
-    "property",
-    "abstractmethod",
-    "override",
-];
-
-/// Whether calling a function decorated with `decorators` returns what its body returns: a
-/// decorator may hand out one cached object (`@lru_cache`, `@cached_property`), so only the
-/// decorators that call the body each time keep its result.
-pub(crate) fn keeps_returned_value(decorators: &[String]) -> bool {
-    decorators.iter().all(|d| {
-        let base = d.split('(').next().unwrap_or(d).trim();
-        let last = base.rsplit('.').next().unwrap_or(base);
-        RETURN_KEEPING_DECORATORS.contains(&last)
-    })
 }
 
 /// Builtins that only inspect their arguments: calling one keeps none of them.

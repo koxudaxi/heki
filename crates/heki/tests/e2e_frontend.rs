@@ -2041,6 +2041,30 @@ fn rule_and_explain_commands() {
         page.contains(&format!("\n\n{note}\n\n## What it does\n")),
         "{page}"
     );
+    // An exact rule lists the premises of its claim from the premise table, each with where heki
+    // decides it; a heuristic rule lists none.
+    let names: Vec<&str> = one["premises"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "Builtin type by construction",
+            "Loop-carried",
+            "In a loop",
+            "Rewrite proven safe"
+        ]
+    );
+    assert!(
+        one["premises"][0]["decided_in"][0]
+            .as_str()
+            .unwrap()
+            .starts_with("heki_soundness::")
+    );
+    assert_eq!(heuristic["premises"], json!([]));
 }
 
 // ======================================================================== dump error paths

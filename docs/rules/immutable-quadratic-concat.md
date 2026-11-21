@@ -29,7 +29,7 @@ in a loop, copies all of it each time it runs.
 
 Its premises:
 
-- **Immutable type**: the value's exact type is known from its construction. Established.
+- **Builtin type by construction**: the value's exact type is known from its construction. Established.
 - **Loop-carried**: the result is the value the next iteration starts from. Established by the IR.
 - **In a loop**: the statement is in the body of a loop. Established by the IR.
 - **Rewrite proven safe**: the help says `[safe fix: ...]`, `[proven-safe suggestion: ...]`, or
