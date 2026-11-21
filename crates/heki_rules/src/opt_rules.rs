@@ -1283,6 +1283,52 @@ impl JoinPremises<'_, '_, '_> {
         self.builtin_type(v, CONTAINERS) && self.not_overridden(CONTAINERS, "__iter__")
     }
 
+    /// Whether running `inst` may run code of the project that reaches a value `hit` accepts: a
+    /// call (but an inert builtin, or a method of a builtin container, which only stores or
+    /// reads its arguments) that receives one or a closure capturing one, a call of such a
+    /// closure, a method of one that is not a reading one, the making of a closure that captures
+    /// one, or a `yield` or `await`, after which other code may run.
+    fn runs_code_reaching(&self, inst: &Inst, hit: &dyn Fn(VarId) -> bool) -> bool {
+        let shape = self.sizes.ix.shape();
+        let captures = |v: VarId| {
+            matches!(
+                shape.inst(shape.copy_root(v)).map(|i| &i.kind),
+                Some(InstKind::MakeClosure { captured, .. }) if captured.iter().any(|c| hit(*c))
+            )
+        };
+        let handed = |args: &[VarId], kwargs: &[(Option<String>, VarId)]| {
+            args.iter()
+                .chain(kwargs.iter().map(|(_, v)| v))
+                .any(|a| hit(*a) || captures(*a))
+        };
+        match &inst.kind {
+            InstKind::Call {
+                callee_var,
+                callee,
+                args,
+                kwargs,
+                ..
+            } => {
+                callee_var.is_some_and(captures)
+                    || (!self.inert_builtin(*callee_var, callee, args, kwargs)
+                        && handed(args, kwargs))
+            }
+            InstKind::MethodCall {
+                recv,
+                method,
+                args,
+                kwargs,
+                ..
+            } => {
+                (hit(*recv) && !READING_METHODS.contains(&method.as_str()))
+                    || (!self.builtin_type(*recv, CONTAINERS) && handed(args, kwargs))
+            }
+            InstKind::MakeClosure { captured, .. } => captured.iter().any(|c| hit(*c)),
+            InstKind::Yield { .. } | InstKind::YieldFrom { .. } | InstKind::Await { .. } => true,
+            _ => false,
+        }
+    }
+
     /// Whether a call is to a builtin that changes no argument and runs no code of the project: no function handed to it (a `key=`, any keyword, `map` / `filter`'s function,
     /// a `lambda` or a generator expression as an argument).
     fn inert_builtin(
@@ -1518,18 +1564,20 @@ impl JoinPremises<'_, '_, '_> {
         let key = shape.copy_root(key);
         // A store, a deletion, or a changing method of the key's object or of an object the key
         // is loaded from, at what the key loads (`None`: anything).
+        let on_the_way = |v: VarId| {
+            let v = shape.copy_root(v);
+            v == key || loads.iter().any(|(read, _)| *read == v)
+        };
         let rekeys = |inst: &Inst| {
+            if self.runs_code_reaching(inst, &on_the_way) {
+                return true;
+            }
             let (obj, what) = match &inst.kind {
                 InstKind::AttrStore { obj, attr, .. } | InstKind::AttrDelete { obj, attr } => {
                     (*obj, Some(attr.as_str()))
                 }
                 InstKind::SubscriptStore { obj, index, .. }
                 | InstKind::SubscriptDelete { obj, index, .. } => (*obj, shape.str_const(*index)),
-                InstKind::MethodCall { recv, method, .. }
-                    if !READING_METHODS.contains(&method.as_str()) =>
-                {
-                    (*recv, None)
-                }
                 _ => return false,
             };
             let obj = shape.copy_root(obj);
@@ -1635,33 +1683,11 @@ impl JoinPremises<'_, '_, '_> {
         let names = forward_aliases(f, &sources);
         let named = |v: &VarId| names.contains(v);
         let changes = |inst: &Inst| match &inst.kind {
-            InstKind::MethodCall {
-                recv,
-                method,
-                args,
-                kwargs,
-                ..
-            } => {
-                (named(recv) && !READING_METHODS.contains(&method.as_str()))
-                    || args.iter().any(named)
-                    || kwargs.iter().any(|(_, v)| named(v))
-            }
-            InstKind::Call {
-                callee_var,
-                callee,
-                args,
-                kwargs,
-                ..
-            } => {
-                !self.inert_builtin(*callee_var, callee, args, kwargs)
-                    && (args.iter().any(named) || kwargs.iter().any(|(_, v)| named(v)))
-            }
             InstKind::AttrStore { obj, .. }
             | InstKind::AttrDelete { obj, .. }
             | InstKind::SubscriptStore { obj, .. }
             | InstKind::SubscriptDelete { obj, .. } => named(obj),
-            InstKind::Yield { .. } | InstKind::YieldFrom { .. } | InstKind::Await { .. } => true,
-            _ => false,
+            _ => self.runs_code_reaching(inst, &|v| named(&v)),
         };
         complete
             && !f

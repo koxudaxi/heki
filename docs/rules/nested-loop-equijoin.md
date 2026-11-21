@@ -65,12 +65,13 @@ Its premises:
   a generator, and a generator, `map`, `filter`, or another call runs code for each item.
 - **Same collection, same keys**: the inner loop steps through the same collection on every
   iteration of the outer loop: its iterable is bound before the outer loop, or computed inside it
-  only from values bound before it, and the outer loop does not change those values through
-  their names, every name a copy binds to them (`rows = ys` makes `ys` one): no changing method,
-  store, `del`, call that receives one (a builtin counts too when it is handed a function, as
-  `sorted(ys, key=f)` is), `yield`, or `await`. Nor does it change the compared key
-  of an inner item: no store into or deletion of what the key loads (`b.k = ...` for the key
-  `b.k`), and no changing method of the key's object.
+  only from values bound before it, and the outer loop does not change those values through their
+  names, every name a copy binds to them (`rows = ys` makes `ys` one): no changing method, store,
+  `del`, call that receives one (a builtin counts too when it is handed a function, as `sorted(ys,
+  key=f)` is; a method of a builtin container only stores or reads its arguments), closure that
+  captures one, `yield`, or `await`. Nor does it change the compared key of an inner item: no store
+  into or deletion of what the key loads (`b.k = ...` for the key `b.k`), and no such call or
+  closure that reaches the item or the key's object.
 
 Not part of the claim: any count or size. A loop whose trip count the code fixes or caps (a
 constant `range`, a constant slice, a display, or a length test every path to the loop passes,

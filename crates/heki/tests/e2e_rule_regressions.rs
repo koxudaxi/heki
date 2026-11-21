@@ -1214,8 +1214,9 @@ fn starred_elements_keep_the_names_in_blockers() {
 /// module constant of 20 items, work before the test or after the `if` for every pair, an earlier
 /// `and` operand, a generator, a `filter` call, or a value of unknown type (it may be a generator)
 /// as the inner iterable, an inner collection the outer loop changes, also through another name
-/// bound to it, rebinds, or may let other code change (`yield`, a builtin handed a function), a store
-/// into the compared key of an inner item, and a trip count the code fixes.
+/// bound to it, rebinds, or may let other code change (`yield`, a builtin handed a function, a
+/// closure capturing it), a store into the compared key of an inner item, also by a function handed
+/// the item, and a trip count the code fixes.
 const PREMISES: &str = r#"RUNNERS = (
     "a", "b", "c", "d", "e", "f", "g", "h", "i", "j",
     "k", "l", "m", "n", "o", "p", "q", "r", "s", "t",
@@ -1495,6 +1496,32 @@ def filter_before(xs, ys: list, keep):
     return out
 
 
+def helper_rekeys(xs, ys: list, rekey):
+    for a in xs:
+        for b in ys:
+            if a.k == b.k:
+                rekey(b)
+
+
+def closure_drops(xs, ys: list):
+    drop = lambda: ys.pop()
+    out = []
+    for a in xs:
+        for b in ys:
+            if a.k == b.k:
+                out.append(b)
+        drop()
+    return out
+
+
+def lambda_in_loop(xs, ys: list, other: list):
+    for a in xs:
+        for b in ys:
+            if a.k == b.k:
+                print(b)
+        other.sort(key=lambda x: ys.index(x))
+
+
 def yielding(xs, ys):
     for a in xs:
         for b in ys:
@@ -1563,6 +1590,9 @@ fn opt113_states_its_exact_claim_only_when_every_premise_holds() {
             ("by_item_value", true, tier(true)),
             ("sorted_with_key", false, tier(false)),
             ("filter_before", false, tier(false)),
+            ("helper_rekeys", false, tier(false)),
+            ("closure_drops", false, tier(false)),
+            ("lambda_in_loop", false, tier(false)),
             ("yielding", false, tier(false)),
         ],
         "{json}{stderr}"
