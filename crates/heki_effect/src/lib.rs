@@ -1510,6 +1510,20 @@ pub struct FileSummary {
 }
 
 impl FileSummary {
+    /// The summary of a project file heki could not read or parse: a module that defines
+    /// nothing heki knows ([`ModuleDecls::unread_module`]).
+    pub fn unread(module: &UnreadModule) -> Self {
+        Self {
+            path: module.path.clone(),
+            module_name: module.module_name.clone(),
+            decls: Arc::new(ModuleDecls::unread_module(
+                &module.module_name,
+                module.is_package,
+            )),
+            ..Self::default()
+        }
+    }
+
     /// Project call edges `(caller, callee, span)`, the source of the reverse call graph: every
     /// resolved project callee of every call site.
     pub fn call_edges(&self) -> impl Iterator<Item = (&FuncKey, &FuncKey, Span)> + '_ {
@@ -1531,6 +1545,14 @@ pub struct IncrementalUpdate {
     /// The functions of the file (and of call cycles through it) whose facts changed or that
     /// disappeared, and the callers whose facts changed with them, sorted.
     pub changed: Vec<FuncKey>,
+}
+
+/// A file of the project that heki could not read or parse, by the module it would define.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnreadModule {
+    pub path: PathBuf,
+    pub module_name: String,
+    pub is_package: bool,
 }
 
 /// One module handed to the analyzer. The IR is borrowed only during summarization.
@@ -1607,6 +1629,7 @@ pub fn analyze_project_with(
 ) -> ProjectIndex {
     analyze_project_for(
         modules,
+        &[],
         kb,
         contracts,
         TypedWrites::Propagated,
@@ -1614,16 +1637,17 @@ pub fn analyze_project_with(
     )
 }
 
-/// [`analyze_project_with`], propagating typed writes and extracting the opt-in facts only when
-/// a rule reads them.
+/// [`analyze_project_with`] with the project's files heki could not read or parse (`unread`),
+/// propagating typed writes and extracting the opt-in facts only when a rule reads them.
 pub fn analyze_project_for(
     modules: &[ModuleInput<'_>],
+    unread: &[UnreadModule],
     kb: &EffectiveEcosystemKb,
     contracts: Option<Arc<dyn Contracts>>,
     typed_writes: TypedWrites,
     opt_in: OptInFacts,
 ) -> ProjectIndex {
-    let files = summarize(modules, kb, false, contracts.as_deref(), opt_in);
+    let files = summarize(modules, unread, kb, false, contracts.as_deref(), opt_in);
     ProjectIndex::build_for(files, contracts, typed_writes, opt_in)
 }
 
@@ -1670,36 +1694,47 @@ impl Default for OptInFacts {
 /// caller can drop the modules first.
 pub fn summarize_project_with_reads(
     modules: &[ModuleInput<'_>],
+    unread: &[UnreadModule],
     kb: &EffectiveEcosystemKb,
     contracts: Option<&dyn Contracts>,
     opt_in: OptInFacts,
 ) -> Vec<FileSummary> {
-    summarize(modules, kb, true, contracts, opt_in)
+    summarize(modules, unread, kb, true, contracts, opt_in)
 }
 
+/// The summaries of `modules`, then one per `unread` module.
 fn summarize(
     modules: &[ModuleInput<'_>],
+    unread: &[UnreadModule],
     kb: &EffectiveEcosystemKb,
     track: bool,
     contracts: Option<&dyn Contracts>,
     opt_in: OptInFacts,
 ) -> Vec<FileSummary> {
-    let (decls, own) = resolver::project_decls_for(modules, kb, None, track);
-    if track {
+    let unread: Vec<FileSummary> = unread.iter().map(FileSummary::unread).collect();
+    let known = unread
+        .iter()
+        .map(|f| (f.path.clone(), Arc::clone(&f.decls)))
+        .collect();
+    let (decls, own) = resolver::project_decls_for(modules, kb, Some(known), track);
+    let mut files: Vec<FileSummary> = if track {
         // Every module's reads go to the one recorder of `decls`: one module at a time.
-        return modules
+        modules
             .iter()
             .zip(own)
             .map(|(m, own)| summary::summarize_module(m, &decls, kb, own, track, contracts, opt_in))
-            .collect();
-    }
-    // A module's local summary depends on it and the declarations only (indexed collect: input
-    // order).
-    modules
-        .par_iter()
-        .zip(own)
-        .map(|(m, own)| summary::summarize_module(m, &decls, kb, own, track, contracts, opt_in))
-        .collect()
+            .collect()
+    } else {
+        // A module's local summary depends on it and the declarations only (indexed collect:
+        // input order).
+        modules
+            .par_iter()
+            .zip(own)
+            .map(|(m, own)| summary::summarize_module(m, &decls, kb, own, track, contracts, opt_in))
+            .collect()
+    };
+    files.extend(unread);
+    files
 }
 
 impl ProjectIndex {
