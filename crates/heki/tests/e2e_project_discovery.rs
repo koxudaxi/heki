@@ -533,7 +533,7 @@ fn type_checking_guards_resolve_to_the_typing_flag_on_every_clause() {
 #[test]
 fn a_later_definition_replaces_an_imported_name() {
     let p = Project::new("disc_import_then_def");
-    let call = "\n\nasync def go():\n    sleep(0)\n";
+    let call = "\n\nasync def go():\n    sleep(1)\n";
     // The local no-op replaces the import before any call can run.
     p.write(
         "replaced.py",

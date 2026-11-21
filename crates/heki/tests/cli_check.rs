@@ -631,7 +631,7 @@ fn baselines_and_snapshots_are_kept_when_a_file_fails_to_parse() {
 fn sleeps(n: usize) -> String {
     let mut src = String::from("import time\n\nasync def h():\n");
     for i in 0..n {
-        src.push_str(&format!("    time.sleep({i})\n"));
+        src.push_str(&format!("    time.sleep({})\n", i + 1));
     }
     src
 }
@@ -648,7 +648,7 @@ fn folded_blocking_calls_are_suppressed_and_baselined_one_by_one() {
     // Suppressing the first call leaves the other ten, below the folding threshold.
     p.write(
         "a.py",
-        &sleeps(11).replacen("time.sleep(0)", "time.sleep(0)  # heki: ignore[EFF101]", 1),
+        &sleeps(11).replacen("time.sleep(1)", "time.sleep(1)  # heki: ignore[EFF101]", 1),
     );
     let (code, stdout, _) = p.heki(&concise);
     assert_eq!(code, 0);

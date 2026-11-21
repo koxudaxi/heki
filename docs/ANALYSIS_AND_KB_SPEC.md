@@ -1282,7 +1282,8 @@ attribute does, `os.environ`, `sys.platform`, `sys.version_info`: what `EFF201`'
 `reads-environment` forbids; such an entry has no other fact), and
 `opaque_to_layer3` (reserved for Layer 3), and `cases`: what the call does instead when one
 argument (by position, the receiver not counted, or by keyword) is a given literal, a string
-literal with a given prefix or not empty, an instance of a given class, or an integer that sets
+literal with a given prefix, equal to one of given strings (`one_of`), an IPv4 or IPv6 address
+(`numeric_address`), or not empty, an instance of a given class, or an integer that sets
 a named flag, alone or as an operand of `|` (`pd.read_csv` of a `https://` URL is
 `blocking_net`, of an `io.StringIO` nothing; `socket.getaddrinfo(..., flags=AI_NUMERICHOST)`
 resolves nothing); the first case that holds sets
@@ -1300,6 +1301,32 @@ blocking effects of the final summary from its callers (`EffectSummary::declared
 its `return_type` types the call over the annotation. An `async_safe` entry
 keeps only its loop-sensitive effects when the catalog is loaded (built-in entries carry no
 blocking effect at all).
+
+Three more keys state when a call waits, which an exact claim needs (ADR-018):
+- **Wait kind.** A blocking effect waits for input or output the call performs (`blocking_net`,
+  `blocking_db`, `blocking_subprocess`, `sleep`, `blocking_fs`), or for another thread
+  (`blocking_sync`), which may already have done its part: that is state at run time
+  (`ExecEffectKind::wait_kind`).
+- **Arguments that end a wait at once.** Every wait entry has a case for each argument value with
+  which it returns at once: `time.sleep(0)`, `Popen.wait(timeout=0)`, a zero timeout or
+  `blocking=False` of the thread waits, a numeric host or `localhost` for `socket.getaddrinfo`
+  and `socket.gethostbyname`, a `data:` URL for `urlopen`. An argument heki cannot evaluate takes
+  the entry's own effects: it counts as a value for which the call waits (R6).
+- **`emits`** on the database entries: `always` (the default), `on-identity-map-miss`
+  (`Session.get`), `if-pending` (`Session.flush`, `Session.commit`, a driver's `commit()` /
+  `rollback()` without an open transaction does nothing), `unless-cached` (Django's
+  `QuerySet.count()` / `exists()` / `first()` / `last()` on an evaluated query set read its
+  cache), `unless-connected` (a pool checkout, Django's `connection.cursor()`). Only `always`
+  establishes that the call sends or waits on every call.
+- **`items`** on a call whose result's items the environment decides the number of: `rows`
+  (`Cursor.fetchall`, a DB-API `execute` whose cursor is iterated, `Session.execute`, pymongo's
+  `find`), `lines` (`open`), `entries` (`os.listdir`, `os.scandir`, `os.walk`), `text`
+  (`Path.read_text`, whose `splitlines()` pieces are lines). A loop over such items, or over a
+  parameter, is a loop over data (`EFF103`).
+- **`exit_suppresses`** on a class, or a factory whose result a `with` statement manages:
+  `false` when `__exit__` / `__aexit__` returns a false value on every path (files, locks, HTTP
+  sessions and pools, database connections), `true` when it can suppress the body's exception
+  (`contextlib.suppress`). A manager the catalog does not describe may suppress.
 
 The entries follow the public API of each package, with three conventions:
 - An async API is `async_safe` and carries no blocking effect: it is often called without a
