@@ -184,7 +184,9 @@ many `yield from`s, a generator handed on through thousands of private wrappers,
 one before's result, an edit through the language server changing every method of a class of
 thousands of methods, methods changing a typed dict of `self` thousands of times, a method storing
 under a key after each of hundreds of tests that such a dict holds the key, and a function reading
-attributes down a chain ten thousand deep (`x = x.child`).
+attributes down a chain ten thousand deep (`x = x.child`), and the path facts of a `try` body of
+thousands of calls whose handler returns, of loops nested twenty deep with a call at each depth, of
+a thousand loops one after another, and of a chain of hundreds of `and` tests of module constants.
 
 A change to the IR builder, a walk, a fixpoint, or a rule's state is also run over a large
 corpus of real projects before it is merged, every run under a memory cap and a timeout. No
