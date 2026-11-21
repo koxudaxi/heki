@@ -23,10 +23,11 @@ pub use contracts::{
     MAX_INVALIDATIONS, inspect_facts, opt_in_facts, summary_contracts, typed_writes,
 };
 pub use eff_rules::{ROOT_CAUSE_GROUP_THRESHOLD, fold_root_causes};
+pub use heki_diagnostics::Certainty;
 pub use mut_rules::{
     CHAIN_RULES, ChainFacts, StaleWriteKey, chain_facts, family_readers, stale_writes_by_file,
 };
-pub use selection::{RuleSelection, SelectionError};
+pub use selection::{RuleSelection, SelectionError, Selectors, heuristic_hint};
 pub use snapshot::{SNAPSHOT_FILE, SnapshotError, SummarySnapshot};
 
 use globset::{Glob, GlobMatcher};
@@ -53,12 +54,38 @@ pub enum RuleFamily {
     Opt,
 }
 
+/// What happens in the code a rule reports, which sets its default severity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Consequence {
+    /// A bug: a wrong result, an exception, a lost update, a deadlock, or a broken contract.
+    Bug,
+    /// Slower code that computes the right result.
+    Slowdown,
+}
+
+/// When a rule runs without being named by its code or name (ADR-018).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Activation {
+    /// In the default selection, and matched by a prefix or `ALL`, while the rule is exact;
+    /// whatever its certainty with `lint.heuristic`.
+    Default,
+    /// Only by its exact code or name.
+    OptIn,
+    /// Selected as an exact `Default` rule is, whatever its certainty: it reports only what a
+    /// declared contract asks for, so declaring the contract is what selects it.
+    Contract,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RuleMeta {
     pub code: &'static str,
     pub slug: &'static str,
     pub family: RuleFamily,
-    pub default_enabled: bool,
+    pub certainty: Certainty,
+    pub activation: Activation,
+    pub consequence: Consequence,
     pub auto_fix_default: bool,
     /// A proven-safe rewrite that `--fix` applies only with `--include-size-dependent` or in a
     /// function a `--profile` dump shows hot.
@@ -70,15 +97,69 @@ pub struct RuleMeta {
 }
 
 impl RuleMeta {
-    /// The severity of the rule's diagnostics unless `lint.severity` names the rule: `warning`
-    /// for the `OPT` family (slower code, not wrong code), `error` for the others.
+    /// Whether the rule runs without being named: in the default selection and for a prefix or
+    /// `ALL`. `heuristic` is `lint.heuristic`.
+    pub const fn runs_unnamed(&self, heuristic: bool) -> bool {
+        match self.activation {
+            Activation::Default => heuristic || matches!(self.certainty, Certainty::Exact),
+            Activation::Contract => true,
+            Activation::OptIn => false,
+        }
+    }
+
+    /// Whether the enabled rule shows its heuristic reports, those of a heuristic rule or the
+    /// single heuristic reports of an exact one (an `OPT` report whose rewrite is not proven):
+    /// where a heuristic rule would run, that is with `lint.heuristic` (`heuristic`), when
+    /// `select` / `extend-select` names its code or name (`named`), or for a contract rule.
+    pub const fn shows_heuristic_reports(&self, named: bool, heuristic: bool) -> bool {
+        match self.activation {
+            Activation::Default => {
+                heuristic || named || matches!(self.certainty, Certainty::Heuristic)
+            }
+            Activation::OptIn | Activation::Contract => true,
+        }
+    }
+
+    /// What `heki rule <CODE>` and the rule's page say about a heuristic rule: what its
+    /// certainty means and how it is selected. `None` for an exact rule.
+    pub fn heuristic_note(&self) -> Option<String> {
+        if self.certainty == Certainty::Exact {
+            return None;
+        }
+        let runs = match self.activation {
+            Activation::Default => {
+                "It runs when `select` or `extend-select` names its code or name, and with \
+                 `lint.heuristic = true` (`--heuristic`) also by default and for its prefixes \
+                 and `ALL`."
+            }
+            Activation::OptIn => {
+                "It runs only when `select` or `extend-select` names its code or name."
+            }
+            Activation::Contract => "It runs when its contract is declared.",
+        };
+        Some(format!(
+            "This rule is heuristic: a premise of its claim can be open (\"What a report \
+             states\" lists them), so a report can be wrong about the code. {runs}"
+        ))
+    }
+
+    /// The rule's published page.
+    pub fn page_url(&self) -> String {
+        format!("{RULE_PAGES}{}/", self.slug)
+    }
+
+    /// The severity of the rule's diagnostics unless `lint.severity` names the rule: `error` for
+    /// a bug, `warning` for slower code.
     pub const fn default_severity(&self) -> Severity {
-        match self.family {
-            RuleFamily::Opt => Severity::Warning,
-            RuleFamily::Mut | RuleFamily::Eff | RuleFamily::Data => Severity::Error,
+        match self.consequence {
+            Consequence::Bug => Severity::Error,
+            Consequence::Slowdown => Severity::Warning,
         }
     }
 }
+
+/// Where the rule pages are published: the documentation's `site_url` (`zensical.toml`).
+pub const RULE_PAGES: &str = "https://heki.koxudaxi.dev/rules/";
 
 /// Core v1.0 rule catalog (empirically validated in Stage 0-A + `dcg` study).
 pub const CORE_RULES: &[RuleMeta] = &[
@@ -86,7 +167,9 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "MUT101",
         slug: "cached-property-stale-mutation",
         family: RuleFamily::Mut,
-        default_enabled: false,
+        certainty: Certainty::Heuristic,
+        activation: Activation::OptIn,
+        consequence: Consequence::Bug,
         size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Mutating an attribute read by `@cached_property` without invalidating the cache.",
@@ -96,7 +179,9 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "MUT103",
         slug: "summary-effect-regression",
         family: RuleFamily::Mut,
-        default_enabled: false,
+        certainty: Certainty::Heuristic,
+        activation: Activation::OptIn,
+        consequence: Consequence::Bug,
         size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Interprocedural mutation/escape/effect regression against saved summary snapshot.",
@@ -106,7 +191,9 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "MUT106",
         slug: "iterator-double-consumption",
         family: RuleFamily::Mut,
-        default_enabled: false,
+        certainty: Certainty::Heuristic,
+        activation: Activation::OptIn,
+        consequence: Consequence::Bug,
         size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Opt-in: consuming a single-pass iterator or generator a second time (the second pass sees no items).",
@@ -116,7 +203,9 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "MUT107",
         slug: "hash-attr-mutation",
         family: RuleFamily::Mut,
-        default_enabled: true,
+        certainty: Certainty::Heuristic,
+        activation: Activation::Default,
+        consequence: Consequence::Bug,
         size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Mutating an attribute read by `__hash__` after initialization (stored `set` / `dict` entries become unreachable).",
@@ -126,7 +215,9 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "MUT108",
         slug: "readonly-type-mutation",
         family: RuleFamily::Mut,
-        default_enabled: false,
+        certainty: Certainty::Heuristic,
+        activation: Activation::OptIn,
+        consequence: Consequence::Bug,
         size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Opt-in: changing in place a field that a standard type declares read-only (frozen dataclass / `NamedTuple` / `dataclass_transform` fields, `Final` / `ReadOnly` attributes, `ReadOnly` `TypedDict` keys), directly, through an alias, or in a helper.",
@@ -136,7 +227,9 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "MUT109",
         slug: "write-without-invalidation",
         family: RuleFamily::Mut,
-        default_enabled: true,
+        certainty: Certainty::Heuristic,
+        activation: Activation::Contract,
+        consequence: Consequence::Bug,
         size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Writing a declared `invalidation` target (directly, via alias, or via helper) without reaching one of its invalidators on every path to the function's return.",
@@ -146,7 +239,9 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "MUT110",
         slug: "readonly-param-mutation",
         family: RuleFamily::Mut,
-        default_enabled: true,
+        certainty: Certainty::Heuristic,
+        activation: Activation::Default,
+        consequence: Consequence::Bug,
         size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Handing a `Sequence` / `Mapping` / `ReadOnly` parameter to a function that changes it in place (directly, through an alias, or through helpers).",
@@ -156,7 +251,9 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "MUT111",
         slug: "cached-property-stale-read",
         family: RuleFamily::Mut,
-        default_enabled: false,
+        certainty: Certainty::Heuristic,
+        activation: Activation::OptIn,
+        consequence: Consequence::Bug,
         size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Opt-in: reading a `@cached_property` that a method of its class family can leave stale (a write `MUT101` reports).",
@@ -166,7 +263,9 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "MUT112",
         slug: "conditional-ownership-mutation",
         family: RuleFamily::Mut,
-        default_enabled: false,
+        certainty: Certainty::Heuristic,
+        activation: Activation::OptIn,
+        consequence: Consequence::Bug,
         size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Opt-in: changing in place a value that is a new object on one path and borrowed state (a parameter, an attribute, a global, or what a function returns of such state) on another.",
@@ -176,7 +275,9 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "MUT113",
         slug: "iterated-container-mutation",
         family: RuleFamily::Mut,
-        default_enabled: false,
+        certainty: Certainty::Heuristic,
+        activation: Activation::OptIn,
+        consequence: Consequence::Bug,
         size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Opt-in: a dict, set, or deque of the instance changed while a method iterates it, by another method while a generator is suspended in the loop or by a function the loop's body calls (the next step raises `RuntimeError`).",
@@ -186,7 +287,9 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "MUT201",
         slug: "write-owner-violation",
         family: RuleFamily::Mut,
-        default_enabled: true,
+        certainty: Certainty::Heuristic,
+        activation: Activation::Contract,
+        consequence: Consequence::Bug,
         size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Writing a guarded attribute/container (directly, via alias, or via helper) outside declared `write-owners`.",
@@ -196,7 +299,10 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "MUT202",
         slug: "readonly-return-mutation",
         family: RuleFamily::Mut,
-        default_enabled: true,
+        certainty: Certainty::Heuristic,
+        // Not `Contract`: it also reports without one (`@lru_cache` / `@cache` results).
+        activation: Activation::Default,
+        consequence: Consequence::Bug,
         size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Mutating a shared object returned by a declared `readonly-returns` producer or `@lru_cache`, directly or through the functions that return it.",
@@ -206,7 +312,9 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "MUT203",
         slug: "read-owner-violation",
         family: RuleFamily::Mut,
-        default_enabled: true,
+        certainty: Certainty::Heuristic,
+        activation: Activation::Contract,
+        consequence: Consequence::Bug,
         size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Reading a guarded attribute (directly, via alias, `getattr`, or `__dict__`) outside declared `read-owners`.",
@@ -216,7 +324,9 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "MUT204",
         slug: "call-owner-violation",
         family: RuleFamily::Mut,
-        default_enabled: true,
+        certainty: Certainty::Heuristic,
+        activation: Activation::Contract,
+        consequence: Consequence::Bug,
         size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Calling a guarded function or method, or constructing a guarded class (directly, via a bound method, `getattr`, or a helper), outside declared `call-owners`.",
@@ -226,7 +336,9 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "MUT205",
         slug: "unresolved-guarded-write",
         family: RuleFamily::Mut,
-        default_enabled: true,
+        certainty: Certainty::Heuristic,
+        activation: Activation::Contract,
+        consequence: Consequence::Bug,
         size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Strict mode of a `write-owners` contract (`unresolved = \"report\"`): writing an attribute named like a target on an object of unknown class, or a computed attribute name on a guarded class.",
@@ -236,7 +348,9 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "MUT206",
         slug: "unresolved-guarded-read",
         family: RuleFamily::Mut,
-        default_enabled: true,
+        certainty: Certainty::Heuristic,
+        activation: Activation::Contract,
+        consequence: Consequence::Bug,
         size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Strict mode of a `read-owners` contract (`unresolved = \"report\"`): reading an attribute named like a target on an object of unknown class.",
@@ -246,7 +360,9 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "MUT207",
         slug: "unresolved-guarded-call",
         family: RuleFamily::Mut,
-        default_enabled: true,
+        certainty: Certainty::Heuristic,
+        activation: Activation::Contract,
+        consequence: Consequence::Bug,
         size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Strict mode of a `call-owners` contract (`unresolved = \"report\"`): calling a method named like a target on an object of unknown class.",
@@ -256,7 +372,9 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "EFF101",
         slug: "async-blocking-call",
         family: RuleFamily::Eff,
-        default_enabled: true,
+        certainty: Certainty::Heuristic,
+        activation: Activation::Default,
+        consequence: Consequence::Slowdown,
         size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Direct or indirect blocking network/DB/subprocess/sleep call reachable from `async def`.",
@@ -266,7 +384,9 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "EFF102",
         slug: "loop-unpooled-client",
         family: RuleFamily::Eff,
-        default_enabled: true,
+        certainty: Certainty::Heuristic,
+        activation: Activation::Default,
+        consequence: Consequence::Slowdown,
         size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Allocating an unpooled HTTP/DB/RPC client or sessionless request inside a loop.",
@@ -276,7 +396,9 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "EFF103",
         slug: "loop-db-query",
         family: RuleFamily::Eff,
-        default_enabled: true,
+        certainty: Certainty::Heuristic,
+        activation: Activation::Default,
+        consequence: Consequence::Slowdown,
         size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Explicit DB query / external RPC executed inside a loop (N+1).",
@@ -286,7 +408,9 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "EFF105",
         slug: "async-blocking-fs",
         family: RuleFamily::Eff,
-        default_enabled: false,
+        certainty: Certainty::Heuristic,
+        activation: Activation::OptIn,
+        consequence: Consequence::Slowdown,
         size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Opt-in: blocking local filesystem I/O reachable from `async def`.",
@@ -296,7 +420,9 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "EFF106",
         slug: "lock-or-tx-held-across-io",
         family: RuleFamily::Eff,
-        default_enabled: false,
+        certainty: Certainty::Heuristic,
+        activation: Activation::OptIn,
+        consequence: Consequence::Bug,
         size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Opt-in: `await` or blocking network I/O while holding a `threading` lock or a DB transaction.",
@@ -306,7 +432,9 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "EFF107",
         slug: "unretained-async-task",
         family: RuleFamily::Eff,
-        default_enabled: false,
+        certainty: Certainty::Heuristic,
+        activation: Activation::OptIn,
+        consequence: Consequence::Bug,
         size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Opt-in: an `asyncio.create_task` result bound to a local variable but never awaited, returned, or stored.",
@@ -316,7 +444,9 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "EFF201",
         slug: "effect-boundary-violation",
         family: RuleFamily::Eff,
-        default_enabled: true,
+        certainty: Certainty::Heuristic,
+        activation: Activation::Contract,
+        consequence: Consequence::Bug,
         size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Reaching a forbidden effect (directly or through calls) from a declared `effect-boundaries` scope.",
@@ -326,7 +456,9 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "DATA101",
         slug: "loop-carried-concat",
         family: RuleFamily::Data,
-        default_enabled: true,
+        certainty: Certainty::Heuristic,
+        activation: Activation::Default,
+        consequence: Consequence::Slowdown,
         size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Loop-carried quadratic `pandas.concat` / `numpy.vstack` / `numpy.append` accumulation.",
@@ -336,7 +468,9 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "OPT101",
         slug: "list-quadratic-concat",
         family: RuleFamily::Opt,
-        default_enabled: true,
+        certainty: Certainty::Heuristic,
+        activation: Activation::Default,
+        consequence: Consequence::Slowdown,
         size_dependent_fix: false,
         auto_fix_default: true,
         summary: "Unconditionally profitable `list` quadratic concatenation (`x = x + [e]` -> `x.append(e)`).",
@@ -346,7 +480,9 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "OPT102",
         slug: "set-dict-quadratic-merge",
         family: RuleFamily::Opt,
-        default_enabled: true,
+        certainty: Certainty::Heuristic,
+        activation: Activation::Default,
+        consequence: Consequence::Slowdown,
         size_dependent_fix: false,
         auto_fix_default: true,
         summary: "Unconditionally profitable `set`/`dict` quadratic merge (`{**d, ...}` with `d` first).",
@@ -356,7 +492,9 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "OPT103",
         slug: "immutable-quadratic-concat",
         family: RuleFamily::Opt,
-        default_enabled: true,
+        certainty: Certainty::Heuristic,
+        activation: Activation::Default,
+        consequence: Consequence::Slowdown,
         size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Size-dependent immutable quadratic accumulation (`bytes`/`tuple`/attr `str`).",
@@ -366,7 +504,9 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "OPT110",
         slug: "loop-linear-membership",
         family: RuleFamily::Opt,
-        default_enabled: true,
+        certainty: Certainty::Heuristic,
+        activation: Activation::Default,
+        consequence: Consequence::Slowdown,
         size_dependent_fix: true,
         auto_fix_default: false,
         summary: "Size-dependent `e in lst` inside a loop -> hoist `set` outside loop.",
@@ -376,7 +516,9 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "OPT111",
         slug: "loop-linear-dedup",
         family: RuleFamily::Opt,
-        default_enabled: true,
+        certainty: Certainty::Heuristic,
+        activation: Activation::Default,
+        consequence: Consequence::Slowdown,
         size_dependent_fix: true,
         auto_fix_default: false,
         summary: "Size-dependent `if v not in seen: seen.append(v)` -> auxiliary `set`.",
@@ -386,7 +528,9 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "OPT112",
         slug: "loop-linear-list-lookup",
         family: RuleFamily::Opt,
-        default_enabled: true,
+        certainty: Certainty::Heuristic,
+        activation: Activation::Default,
+        consequence: Consequence::Slowdown,
         size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Size-dependent `list.index` / `list.remove` / `list.count` inside a loop (repeated linear scans).",
@@ -396,7 +540,9 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "OPT113",
         slug: "nested-loop-equijoin",
         family: RuleFamily::Opt,
-        default_enabled: true,
+        certainty: Certainty::Heuristic,
+        activation: Activation::Default,
+        consequence: Consequence::Slowdown,
         size_dependent_fix: false,
         auto_fix_default: false,
         summary: "Size-dependent nested-loop equi-join (`for a in A: for b in B: if a.k == b.k`) -> `dict` index.",
@@ -406,7 +552,9 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "OPT120",
         slug: "list-front-pop",
         family: RuleFamily::Opt,
-        default_enabled: true,
+        certainty: Certainty::Heuristic,
+        activation: Activation::Default,
+        consequence: Consequence::Slowdown,
         size_dependent_fix: true,
         auto_fix_default: false,
         summary: "Size-dependent `q.pop(0)` / `del q[0]` / `q = q[1:]` -> `collections.deque`.",
@@ -416,7 +564,9 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "OPT121",
         slug: "list-front-insert",
         family: RuleFamily::Opt,
-        default_enabled: true,
+        certainty: Certainty::Heuristic,
+        activation: Activation::Default,
+        consequence: Consequence::Slowdown,
         size_dependent_fix: true,
         auto_fix_default: false,
         summary: "Size-dependent `q.insert(0, v)` -> `collections.deque`.",
@@ -426,7 +576,9 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "OPT130",
         slug: "loop-invariant-container-rebuild",
         family: RuleFamily::Opt,
-        default_enabled: true,
+        certainty: Certainty::Heuristic,
+        activation: Activation::Default,
+        consequence: Consequence::Slowdown,
         size_dependent_fix: true,
         auto_fix_default: false,
         summary: "Size-dependent loop-invariant container reconstruction (`e in set(keys)`).",
@@ -789,6 +941,7 @@ impl<'a> CheckContext<'a> {
             rule_slug: meta.slug.to_owned(),
             target,
             severity,
+            certainty: meta.certainty,
             message,
             help,
             evidence: None,
@@ -875,6 +1028,66 @@ mod registry_tests {
     }
 
     #[test]
+    fn rules_run_unnamed_by_activation_and_certainty() {
+        let rule = |certainty, activation| RuleMeta {
+            certainty,
+            activation,
+            ..*find_rule("EFF102").unwrap()
+        };
+        use Activation::{Contract, OptIn};
+        use Certainty::{Exact, Heuristic};
+        let on = Activation::Default;
+        // Whether it runs without being named, and whether it shows its heuristic reports when
+        // it runs unnamed, both without and with `lint.heuristic`; named, every rule shows them.
+        for (certainty, activation, plain, with_heuristic, shows_plain) in [
+            (Exact, on, true, true, false),
+            (Heuristic, on, false, true, true),
+            (Exact, Contract, true, true, true),
+            (Heuristic, Contract, true, true, true),
+            (Exact, OptIn, false, false, true),
+            (Heuristic, OptIn, false, false, true),
+        ] {
+            let r = rule(certainty, activation);
+            assert_eq!(
+                (r.runs_unnamed(false), r.runs_unnamed(true)),
+                (plain, with_heuristic),
+                "{certainty:?} {activation:?}"
+            );
+            assert_eq!(
+                [
+                    r.shows_heuristic_reports(false, false),
+                    r.shows_heuristic_reports(false, true),
+                    r.shows_heuristic_reports(true, false),
+                ],
+                [shows_plain, true, true],
+                "{certainty:?} {activation:?}"
+            );
+            assert_eq!(
+                r.heuristic_note().is_some(),
+                certainty == Heuristic,
+                "{certainty:?} {activation:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_rule_is_an_error_for_a_bug_and_a_warning_for_slower_code() {
+        for r in CORE_RULES {
+            let expected = match r.consequence {
+                Consequence::Bug => Severity::Error,
+                Consequence::Slowdown => Severity::Warning,
+            };
+            assert_eq!(r.default_severity(), expected, "{}", r.code);
+            // The `OPT` rules report slower code, and every `MUT` rule a bug.
+            match r.family {
+                RuleFamily::Opt => assert_eq!(r.consequence, Consequence::Slowdown, "{}", r.code),
+                RuleFamily::Mut => assert_eq!(r.consequence, Consequence::Bug, "{}", r.code),
+                RuleFamily::Eff | RuleFamily::Data => {}
+            }
+        }
+    }
+
+    #[test]
     fn resolves_rules_by_code_or_slug() {
         assert_eq!(find_rule("EFF101").unwrap().slug, "async-blocking-call");
         assert_eq!(find_rule("write-owner-violation").unwrap().code, "MUT201");
@@ -921,7 +1134,7 @@ mod registry_tests {
             .filter(|f| f.kind == ExperimentalKind::Rule)
         {
             let rule = find_rule(f.target).unwrap();
-            assert_eq!((rule.code, rule.default_enabled), (f.target, false));
+            assert_eq!((rule.code, rule.activation), (f.target, Activation::OptIn));
             assert_eq!(experimental_rule(rule.code), Some(f));
         }
         assert_eq!(experimental_rule("MUT107"), None);
