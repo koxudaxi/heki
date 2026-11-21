@@ -4,6 +4,8 @@
 mod common;
 
 use common::Project;
+use std::path::Path;
+use std::process::Command;
 
 /// `import time` + a blocking helper.
 const BLOCKING_WAIT: &str = "import time\n\n\ndef wait():\n    time.sleep(1)\n";
@@ -61,6 +63,182 @@ fn src_directories_are_source_roots_unless_they_are_packages() {
         "from helpers import wait\n\n\nasync def go():\n    wait()\n",
     );
     assert_eq!(concise(&p), (0, String::new()));
+}
+
+/// `heki check --output-format concise <args>` run from `dir`: `(exit code, stdout)`.
+fn concise_in(dir: &Path, args: &[&str]) -> (i32, String) {
+    let out = Command::new(env!("CARGO_BIN_EXE_heki"))
+        .args(["check", "--output-format", "concise"])
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    let code = out.status.code().unwrap();
+    assert_ne!(code, 2, "{stderr}");
+    (code, String::from_utf8(out.stdout).unwrap())
+}
+
+/// A client created through a helper of another module, once per item (`EFF102` when the import
+/// of the helper resolves).
+const CLIENT_HELPER: &str = "import httpx\n\n\ndef client():\n    return httpx.Client()\n";
+
+fn client_loop(module: &str) -> String {
+    format!(
+        "from {module} import client\n\n\ndef run(items):\n    for item in items:\n        client().get(item)\n"
+    )
+}
+
+#[test]
+fn a_project_without_configuration_is_rooted_where_heki_runs() {
+    // Below the top of a Git working tree, the directory heki runs in is the root: `src/defs.py`
+    // is `defs`, so the four statuses are a small constant and `OPT113` stays silent.
+    let p = Project::new("disc_git_subdirectory");
+    std::fs::remove_file(p.dir.join("pyproject.toml")).unwrap();
+    std::fs::create_dir_all(p.dir.join(".git")).unwrap();
+    p.write(
+        "tools/proj/src/defs.py",
+        "STATUS_ORDER = [\"available\", \"caveated\", \"approximate\", \"unavailable\"]\n",
+    )
+    .write(
+        "tools/proj/b_func.py",
+        "from defs import STATUS_ORDER\n\n\ndef f(metrics):\n    return [m for s in STATUS_ORDER for m in metrics if m.status == s]\n",
+    );
+    let proj = p.dir.join("tools/proj");
+    assert_eq!(concise_in(&proj, &[]), (0, String::new()));
+    // Run from the top, the top is the root: `tools/proj/src/defs.py` is `tools.proj.src.defs`.
+    let (code, stdout) = concise_in(&p.dir, &["tools/proj"]);
+    assert_eq!(code, 1);
+    assert!(
+        stdout.contains("tools/proj/b_func.py:5:57: OPT113 "),
+        "{stdout}"
+    );
+    // So it is from a directory that does not hold the checked one.
+    std::fs::create_dir_all(p.dir.join("tools/other")).unwrap();
+    let (code, stdout) = concise_in(&p.dir.join("tools/other"), &["../proj"]);
+    assert_eq!(code, 1);
+    assert!(stdout.contains("proj/b_func.py:5:57: OPT113 "), "{stdout}");
+    // A configuration file roots the project where it is, wherever heki runs.
+    p.write("tools/proj/heki.toml", "");
+    assert_eq!(concise_in(&p.dir, &["tools/proj"]), (0, String::new()));
+
+    // Outside a Git working tree too: `heki check pkg` names the modules `pkg.*`.
+    let p = Project::new("disc_no_marker");
+    std::fs::remove_file(p.dir.join("pyproject.toml")).unwrap();
+    p.write("pkg/net.py", CLIENT_HELPER)
+        .write("pkg/server.py", &client_loop("pkg.net"));
+    let (code, stdout) = concise_in(&p.dir, &["pkg"]);
+    assert_eq!(code, 1);
+    assert!(stdout.contains("pkg/server.py:6:9: EFF102 "), "{stdout}");
+    // Run inside the package, the package is the root: its modules are `net` and `server`.
+    assert_eq!(concise_in(&p.dir.join("pkg"), &[]), (0, String::new()));
+    // A checked directory that the current one does not hold is the root itself.
+    let (code, stdout) = concise_in(&p.dir.join("pkg"), &[".."]);
+    assert_eq!(code, 1);
+    assert!(stdout.contains("server.py:6:9: EFF102 "), "{stdout}");
+}
+
+#[test]
+fn src_lists_the_source_roots() {
+    // A subdirectory application whose directories are namespace packages (`backend/config`).
+    let p = Project::new("disc_src_subapp");
+    p.write("backend/config/net.py", CLIENT_HELPER)
+        .write("backend/server.py", &client_loop("config.net"));
+    assert_eq!(concise(&p), (0, String::new()));
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki]\nsrc = [\"./backend/\"]\n",
+    );
+    let (code, stdout) = concise(&p);
+    assert_eq!(code, 1);
+    assert!(
+        stdout.contains("backend/server.py:6:9: EFF102 `config.net.client` allocates"),
+        "{stdout}"
+    );
+
+    // A `lib/` layout: the package lives in `lib/pkg`.
+    let p = Project::new("disc_src_lib");
+    p.write("lib/pkg/__init__.py", "")
+        .write("lib/pkg/net.py", CLIENT_HELPER)
+        .write("lib/pkg/server.py", &client_loop("pkg.net"));
+    assert_eq!(concise(&p), (0, String::new()));
+    p.write("heki.toml", "src = [\"lib\"]\n");
+    let (code, stdout) = concise(&p);
+    assert_eq!(code, 1);
+    assert!(
+        stdout.contains("lib/pkg/server.py:6:9: EFF102 `pkg.net.client` allocates"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn python_and_project_name_directories_are_detected_source_roots() {
+    // A maturin layout (`python/acme`) and a directory named after the project holding the
+    // package (`kit/kit`), as ty detects them; neither when it is a package.
+    let p = Project::new("disc_detected_roots");
+    p.write("pyproject.toml", "[project]\nname = \"kit\"\n")
+        .write("python/acme/net.py", CLIENT_HELPER)
+        .write("python/acme/server.py", &client_loop("acme.net"))
+        .write("kit/kit/net.py", CLIENT_HELPER)
+        .write("kit/kit/server.py", &client_loop("kit.net"));
+    let (code, stdout) = concise(&p);
+    assert_eq!(code, 1);
+    assert!(
+        stdout.contains("python/acme/server.py:6:9: EFF102 "),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("kit/kit/server.py:6:9: EFF102 "),
+        "{stdout}"
+    );
+    p.write("python/__init__.py", "")
+        .write("kit/__init__.py", "");
+    assert_eq!(concise(&p), (0, String::new()));
+    std::fs::remove_file(p.dir.join("python/__init__.py")).unwrap();
+    std::fs::remove_file(p.dir.join("kit/__init__.py")).unwrap();
+    // Another project name names no source root, and `src` replaces the detected ones.
+    p.write("pyproject.toml", "[project]\nname = \"other\"\n");
+    let (_, stdout) = concise(&p);
+    assert!(!stdout.contains("kit/kit/server.py"), "{stdout}");
+    assert!(
+        stdout.contains("python/acme/server.py:6:9: EFF102 "),
+        "{stdout}"
+    );
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"kit\"\n\n[tool.heki]\nsrc = [\"kit\"]\n",
+    );
+    let (_, stdout) = concise(&p);
+    assert!(!stdout.contains("python/acme/server.py"), "{stdout}");
+    assert!(
+        stdout.contains("kit/kit/server.py:6:9: EFF102 "),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn src_entries_name_directories_inside_the_project() {
+    let p = Project::new("disc_src_entries");
+    p.write("a.py", "x = 1\n");
+    for (entry, reason) in [
+        ("../lib", "the directory is outside the project root"),
+        ("/opt/lib", "the path must be relative to the project root"),
+        (
+            "packages/*",
+            "globs are not accepted yet: list the directories",
+        ),
+    ] {
+        p.write(
+            "pyproject.toml",
+            &format!("[project]\nname = \"t\"\n\n[tool.heki]\nsrc = [\"{entry}\"]\n"),
+        );
+        let (code, _, stderr) = p.check(&[]);
+        assert_eq!(code, 2, "{entry}");
+        assert!(
+            stderr.contains(&format!("`src` entry `{entry}` in ")) && stderr.contains(reason),
+            "{stderr}"
+        );
+    }
 }
 
 #[test]

@@ -583,8 +583,9 @@ heki/
   that only moved; those positions are re-propagated into the callers' summaries without changing
   facts. Files changed on disk and configuration changes are followed.
   `crates/heki/tests/lsp_oracle.rs` compares the server with `heki check` after every step of an
-  editing session (112 steps, and a second session of 20 steps over file, layout, buffer, and
-  baseline changes).
+  editing session (206 steps, a second session of 28 steps over file, layout, source root,
+  buffer, and baseline changes, and a third of 3 steps in a project below a Git working tree
+  without a configuration file).
   Measured on datamodel-code-generator: p90 of about 45 ms per file edit.
 - **LSP features**: the call chains of `EFF101` / `MUT201` and others, and each diagnostic's
   help, are `DiagnosticRelatedInformation`; `OPT101` / `OPT102` are quick fixes and the proven
@@ -619,6 +620,7 @@ heki assumptions [PATHS...]                   # list the A1 violations of a proj
 [tool.heki]
 target-version = "py312"             # default: inferred from project.requires-python
 extend-exclude = ["generated"]       # .gitignore and .hekiignore are honored
+src = ["src", "lib"]                 # source roots (default: src/, python/, <project-name>/ as ty detects them)
 baseline = "heki-baseline.toml"      # optional Ratchet baseline
 
 [tool.heki.lint]

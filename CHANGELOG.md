@@ -7,8 +7,31 @@ release can change rules, configuration keys, diagnostics, and output formats.
 
 ## [0.2.0] - Unreleased
 
+### Breaking changes
+
+- Module names change for projects with a `python/` directory or a directory named after the
+  project: they follow the source roots ty detects. Besides `src/`, a `python/` directory (the
+  maturin layout) and a directory named after the project that holds one of the same name
+  (`acme/acme/`) are source roots when they are not packages, so `python/acme/io.py` is
+  `acme.io`, not `python.acme.io`, and the imports of `acme` resolve. The names in messages,
+  in contract patterns, and in baseline `target`s change with them, and the default rules can
+  report calls through the imports that now resolve. `src = ["src"]` restores the earlier names
+  (`src = []` for a project without a `src/` layout).
+- The project root of a project without a configuration file changes: it is the current
+  directory when that holds the checked paths (the language server: its workspace folder), as
+  Ruff and ty root it, instead of the top of the enclosing Git working tree, which stays the
+  root when heki runs above it. Outside a Git working tree, `heki check pkg` is rooted in the
+  current directory, not in `pkg`. Module names, the `path`s of a `--baseline` file, and the
+  place of `.heki-summary-snapshot.json` move with the root; a configuration file keeps the
+  root where it is.
+
 ### Added
 
+- `src` (`[tool.heki]`) lists the source roots, as Ruff's `src` and ty's `environment.root`
+  do: directories relative to the project root whose files are named relative to them, so a
+  subdirectory application (`src = ["backend"]`, for `backend/config/env.py` imported as
+  `config.env`) and a `lib/` layout (`src = ["lib"]`) resolve their imports. It replaces the
+  detected source roots.
 - `MUT206` (`unresolved-guarded-read`) and `MUT207` (`unresolved-guarded-call`): `read-owners`
   and `call-owners` contracts take `unresolved = "report"`, as `write-owners` does, and then
   report the reads of an attribute and the calls of a method named like a target on an object of
