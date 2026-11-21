@@ -22,7 +22,8 @@ is heuristic, as that premise is open. Only exact reports are shown by default.
 - A run of `full` or `concise` output that leaves heuristic rules off, or heuristic reports out,
   ends with a note saying how many.
 
-See [Rule selection](configuration.md#rule-selection-toolhekilint). No rule is exact yet.
+See [Rule selection](configuration.md#rule-selection-toolhekilint). The exact rules are listed
+under [Certifications](#certifications).
 
 ## What a report states
 
@@ -117,15 +118,20 @@ release, or the rule becomes heuristic in that release and needs a new certifica
 ## Certifications
 
 A certified rule has a row here: the release that certified it, and the reports of its census
-and of its holdout run with the false claims among them. No rule is certified yet.
+and of its holdout run with the false claims among them. The census of `EFF101` counts its
+boundaries before reports reaching one waiting call are folded together.
 
 | Rule | Certified | Census: reports / false | Holdout: reports / false |
 | ---- | --------- | ----------------------: | -----------------------: |
+| `EFF101` | 0.2.0 | 287 / 0 | 152 / 0 |
+| `EFF103` | 0.2.0 | 103 / 0 | 122 / 0 |
+| `DATA101` | 0.2.0 | 6 / 0 | 0 / 0 |
 
 ## Measurements
 
 Round 3 sampled up to 50 reports per rule on the Stage 0-A corpus, with the build of 2026-11-21.
-These are measurements of heuristic rules, not certifications. Its reviewers also counted as
+These are measurements of the rules as they were then, all heuristic, not certifications;
+the Certainty column gives each rule's certainty now. Its reviewers also counted as
 wrong a bound past 16 that the code states and an exclusion a rule page documents but heki does
 not recognize; under the terms above those reports are right, so these figures are lower
 bounds. For `OPT101` and `OPT102` the table keeps the reviewers' verdicts: four of their samples
@@ -133,10 +139,10 @@ loop a fixed 4 times, which is not data-sized.
 
 | Rule | Certainty | Measured | Sample | C / P / B / F | Right about the code | 95% interval | Real harm |
 | ---- | --------- | -------- | -----: | ------------- | -------------------: | ------------ | --------: |
-| `EFF101` | heuristic | round 3, 2026-11-21 | 50 | 3 / 13 / 25 / 9 | 82% | 69-90% | 32% |
+| `EFF101` | exact | round 3, 2026-11-21 | 50 | 3 / 13 / 25 / 9 | 82% | 69-90% | 32% |
 | `EFF102` | heuristic | round 3, 2026-11-21 | 50 | 0 / 2 / 25 / 23 | 54% | 40-67% | 4% |
-| `EFF103` | heuristic | round 3, 2026-11-21 | 50 | 0 / 8 / 29 / 13 | 74% | 60-84% | 16% |
-| `DATA101` | heuristic | round 3, 2026-11-21 | 28 | 0 / 3 / 17 / 8 | 71% | 53-85% | 11% |
+| `EFF103` | exact | round 3, 2026-11-21 | 50 | 0 / 8 / 29 / 13 | 74% | 60-84% | 16% |
+| `DATA101` | exact | round 3, 2026-11-21 | 28 | 0 / 3 / 17 / 8 | 71% | 53-85% | 11% |
 | `MUT107` | heuristic | round 3, 2026-11-21 | 50 | 1 / 1 / 37 / 11 | 78% | 65-87% | 4% |
 | `MUT110` | heuristic | round 3, 2026-11-21 | 4 | 0 / 0 / 4 / 0 | 100% | 51-100% | 0% |
 | `MUT202` | heuristic | round 3, 2026-11-21 | 20 | 2 / 1 / 11 / 6 | 70% | 48-85% | 15% |
