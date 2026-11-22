@@ -2160,6 +2160,45 @@ class Called:
         self.client.get("https://example.com")
 
 
+class Branched:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    def __setstate__(self, state) -> None:
+        if state.get("version") == 2:
+            state = dict(state)
+        self.__dict__.update(state)
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")  # EFF101
+
+
+class Constant:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    def __setstate__(self, state) -> None:
+        for attr in state:
+            setattr(self, attr, 0)
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")
+
+
+class Unpacked:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    def __getstate__(self):
+        return {**self.__dict__}
+
+    def __setstate__(self, state) -> None:
+        self.__dict__.update(state)
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")
+
+
 def extra():
     return {"client": httpx.AsyncClient()}
 "#;
@@ -2228,6 +2267,128 @@ fn a_star_import_rebinds_the_names_its_module_exports() {
             ("pkg/star_exports.py", STAR_EXPORTS),
             ("pkg/exporting.py", EXPORTING),
             ("pkg/exporting_tuple.py", EXPORTING_TUPLE),
+        ],
+        &["EFF101"],
+    );
+}
+
+/// A name whose `__all__` is a set is exported as a whole: the star import rebinds every name.
+const EXPORTING_SET: &str = r#"import httpx
+
+__all__ = {"listed"}
+
+listed = httpx.AsyncClient()
+"#;
+
+const STAR_SET: &str = r#"import httpx
+
+listed = httpx.Client()
+
+from pkg.exporting_set import *  # noqa: E402, F403
+
+
+async def handle() -> None:
+    listed.get("https://example.com")
+"#;
+
+/// An attribute declared by a subclass keeps the type its base's stores bind, and a subclass
+/// storing attributes under names the code does not give leaves the base's reads unknown.
+const FAMILIES: &str = r#"import httpx
+
+
+class Annotated:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")  # EFF101
+
+
+class AnnotatedSub(Annotated):
+    client: httpx.Client
+
+
+class Open:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")
+
+
+class OpenSub(Open):
+    def put(self, name: str) -> None:
+        setattr(self, name, httpx.AsyncClient())
+
+
+class AnnotatedReader:
+    def __init__(self, source: Annotated) -> None:
+        self.copy = source.client
+
+    async def handle(self) -> None:
+        self.copy.get("https://example.com")  # EFF101
+
+
+class OpenReader:
+    def __init__(self, source: Open) -> None:
+        self.copy = source.client
+
+    async def handle(self) -> None:
+        self.copy.get("https://example.com")
+"#;
+
+const FAMILY_BASE: &str = r#"import httpx
+
+
+class Base:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")  # EFF101
+"#;
+
+const FAMILY_SUB: &str = r#"import httpx
+
+from pkg.family_base import Base
+
+
+class Sub(Base):
+    client: httpx.Client
+"#;
+
+/// A module storing through a module that re-exports the name binds the re-exporting module's
+/// name: the module's own name keeps its type.
+const REEXPORTED: &str = r#"import httpx
+
+import pkg.reexporting
+
+shared = httpx.Client()
+
+
+def swap() -> None:
+    pkg.reexporting.shared = httpx.AsyncClient()
+
+
+async def handle() -> None:
+    shared.get("https://example.com")  # EFF101
+"#;
+
+const REEXPORTING: &str = r#"from pkg.reexported import shared  # noqa: F401
+"#;
+
+#[test]
+fn stores_through_families_and_re_exports_keep_what_they_bind() {
+    check_marks(
+        "store_edges",
+        &[
+            ("pkg/exporting_set.py", EXPORTING_SET),
+            ("pkg/star_set.py", STAR_SET),
+            ("pkg/families.py", FAMILIES),
+            ("pkg/family_base.py", FAMILY_BASE),
+            ("pkg/family_sub.py", FAMILY_SUB),
+            ("pkg/reexported.py", REEXPORTED),
+            ("pkg/reexporting.py", REEXPORTING),
         ],
         &["EFF101"],
     );

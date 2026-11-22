@@ -120,11 +120,11 @@ const KEEP_CLASS_IN_PLACE: &[&str] = &[
 /// Whether `t` is a type of [`KEEP_CLASS_IN_PLACE`]: a name holding it keeps it through the
 /// stores rebinding it in place.
 fn keeps_in_place(t: &Ty) -> bool {
-    let kept = |o: &crate::types::Obj| KEEP_CLASS_IN_PLACE.contains(&o.class.as_str());
-    match t {
-        Ty::Union(os) => os.iter().all(kept),
-        t => t.obj().is_some_and(kept),
-    }
+    let members = t.members();
+    !members.is_empty()
+        && members
+            .iter()
+            .all(|o| KEEP_CLASS_IN_PLACE.contains(&o.class.as_str()))
 }
 
 /// What reading a name being decided depends on: the name, whether a class (by qualname)
@@ -322,12 +322,14 @@ impl Decided {
         decls.global_types.extend(self.globals);
         for (qualname, attrs) in self.attrs {
             // The semantic model declares every class the IR has (one AST).
-            if let Some(class) = decls.classes.get_mut(&qualname) {
-                class.attr_stores = attrs
-                    .into_iter()
-                    .map(|(attr, store)| (Box::from(attr), store))
-                    .collect();
-            }
+            let class = decls
+                .classes
+                .get_mut(&qualname)
+                .expect("a class a store names is declared by its module");
+            class.attr_stores = attrs
+                .into_iter()
+                .map(|(attr, store)| (Box::from(attr), store))
+                .collect();
         }
         for qualname in self.any {
             if let Some(class) = decls.classes.get_mut(&qualname) {
@@ -1009,17 +1011,15 @@ impl<'f> Calls<'_, 'f> {
     fn may_name_store_builtin(&self, callee: VarId) -> bool {
         let shape = self.shape;
         let f: &'f IrFunction = shape.f;
-        let next = |v: VarId, out: &mut Vec<VarId>| match (shape.def(v), shape.inst(v)) {
-            (Def::Phi(b, i), _) => out.extend(
+        // Only phis and copies are expanded.
+        let next = |v: VarId, out: &mut Vec<VarId>| match shape.def(v) {
+            Def::Phi(b, i) => out.extend(
                 f.blocks[b.0 as usize].phis[i as usize]
                     .incoming
                     .iter()
                     .map(|(_, x)| *x),
             ),
-            (_, inst) => out.extend(inst.and_then(|i| match &i.kind {
-                InstKind::Copy { src, .. } => Some(*src),
-                _ => None,
-            })),
+            _ => out.push(shape.copy_root(v)),
         };
         let visit = |v: VarId| {
             let found = match (shape.def(v), shape.inst(v)) {
@@ -2026,6 +2026,11 @@ impl ProjectDecls {
             let (owner, rest) = self.split_module(fqn)?;
             (owner.module_name != m.module_name).then(|| (owner.module_name.clone(), rest.len()))
         };
+        // The module of a class or a module a holder names: a project one other than `m`, whose
+        // classes and module the holders of `m` give by their canonical names.
+        let holder_owner = |fqn: &str, m: &ModuleDecls| {
+            owner(fqn, m).expect("a holder is a class or a module of another project module")
+        };
         for m in self.modules.values() {
             let Some(stores) = m.stores_elsewhere.as_deref() else {
                 continue;
@@ -2041,9 +2046,7 @@ impl ProjectDecls {
             }
             for (class, attrs) in &stores.attrs {
                 let class = self.canonical(class);
-                let Some((module, _)) = owner(&class, m) else {
-                    continue;
-                };
+                let (module, _) = holder_owner(&class, m);
                 let into = touched.entry(module).or_default();
                 into.attrs.extend(attrs.keys().cloned());
                 let joins = out.attrs.entry(class).or_default();
@@ -2053,9 +2056,7 @@ impl ProjectDecls {
             }
             for fqn in &stores.unnamed {
                 let fqn = self.canonical(fqn);
-                let Some((module, rest)) = owner(&fqn, m) else {
-                    continue;
-                };
+                let (module, rest) = holder_owner(&fqn, m);
                 let into = touched.entry(module).or_default();
                 if rest == 0 {
                     into.any_global = true;
@@ -2148,9 +2149,7 @@ impl ProjectDecls {
         let mut restoring = false;
         let mut in_place = false;
         for class in family {
-            let Some(decl) = self.class(class) else {
-                continue;
-            };
+            let decl = self.class(class).expect("a family lists project classes");
             if self.stores_any_attr(class, decl) {
                 return None;
             }

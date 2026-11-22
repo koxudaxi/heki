@@ -467,6 +467,61 @@ fn eff110_leaves_tasks_that_share_nothing() {
     }
 }
 
+/// A task that may bind the name it uses first (an attribute of its parameter, a global) uses
+/// another object under it than the one the name reached at the call: two such tasks share
+/// nothing. The same tasks that bind nothing share the reader.
+const REBINDERS: &str = r#"import asyncio
+
+_READER: asyncio.StreamReader = asyncio.StreamReader()
+
+
+class Box:
+    def __init__(self, reader: asyncio.StreamReader) -> None:
+        self.reader = reader
+
+
+async def fresh_attribute(box: Box) -> bytes:
+    box.reader = asyncio.StreamReader()
+    return await box.reader.readline()
+
+
+async def fresh_global() -> bytes:
+    global _READER
+    _READER = asyncio.StreamReader()
+    return await _READER.readline()
+
+
+async def kept_attribute(box: Box) -> bytes:
+    return await box.reader.readline()
+
+
+async def rebinding(box: Box) -> list[bytes]:
+    return await asyncio.gather(fresh_attribute(box), fresh_attribute(box))
+
+
+async def rebinding_global() -> list[bytes]:
+    return await asyncio.gather(fresh_global(), fresh_global())
+
+
+async def keeping(box: Box) -> list[bytes]:
+    return await asyncio.gather(kept_attribute(box), kept_attribute(box))
+"#;
+
+#[test]
+fn eff110_leaves_tasks_that_may_bind_the_name_first() {
+    let p = Project::new("eff110_rebinders");
+    p.write("rebinders.py", REBINDERS);
+    assert_eq!(
+        found(&diagnostics(&p, SELECT)),
+        vec![d(
+            "rebinders.py",
+            35,
+            "keeping",
+            "box.reader->asyncio.StreamReader.readline"
+        )]
+    );
+}
+
 /// An attribute of a local variable is one object for both tasks.
 #[test]
 fn eff110_reports_one_attribute_of_a_local_used_twice() {

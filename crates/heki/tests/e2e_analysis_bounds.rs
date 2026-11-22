@@ -394,6 +394,61 @@ fn names_setattr_stores_are_read_from_a_table() {
     assert_eq!(blocking(check_linear(2000, shape)), 1);
 }
 
+/// A class whose `__setstate__` hands its state through `copies` copies to `stores` stores under
+/// a name the code does not give, then pads and writes through its namespace; its `handle` calls
+/// a blocking method on the client `__init__` binds.
+fn restoring_class(name: &str, copies: usize, stores: usize, padding: usize) -> String {
+    let mut lines = vec![
+        format!("class {name}:"),
+        "    def __init__(self):".to_owned(),
+        "        self.client = httpx.Client()".to_owned(),
+        String::new(),
+        "    def __setstate__(self, state, key):".to_owned(),
+        "        s0 = state".to_owned(),
+    ];
+    lines.extend((1..=copies).map(|i| format!("        s{i} = s{}", i - 1)));
+    lines.extend((0..stores).map(|_| format!("        setattr(self, key, s{copies})")));
+    lines.extend((0..padding).map(|i| format!("        pad{i} = {i}")));
+    lines.extend(
+        [
+            "        ns = self.__dict__",
+            "        ns[\"a\"] = 1",
+            "",
+            "    async def handle(self):",
+            "        self.client.get(\"https://example.com\")",
+            "",
+            "",
+        ]
+        .map(str::to_owned),
+    );
+    lines.join("\n")
+}
+
+/// The stores of a function share one budget with the walks that read what they store. Once a
+/// `__setstate__` spends it on following its state, later stores and the namespace it writes are
+/// stores of unknown names, so no attribute of the class keeps its type. The budget is spent
+/// before the namespace (`spent`), and with one step left after the stores (`one_step_left`),
+/// which the namespace's first walk takes, so its next step finds none.
+#[test]
+fn a_function_past_its_store_budget_stores_attributes_of_unknown_names() {
+    let p = Project::new("bounds_store_budget");
+    let text = [
+        "import httpx\n\n\n".to_owned(),
+        restoring_class("Spent", 374, 101, 0),
+        restoring_class("OneStepLeft", 374, 101, 6),
+        restoring_class("Within", 10, 3, 0),
+    ]
+    .concat();
+    p.write("m.py", text.trim_end_matches('\n'));
+    let found = check(&p);
+    let blocking: Vec<&str> = found
+        .iter()
+        .filter(|d| d["rule_code"] == "EFF101")
+        .map(|d| d["qualname"].as_str().unwrap())
+        .collect();
+    assert_eq!(blocking, vec!["Within.handle"], "{found:#?}");
+}
+
 /// A class whose `__init__` binds `pairs` pairs of attributes to clients, a `reset` binding
 /// each first one to its second (`self.a0 = self.d0`), and an `async def` calling the client's
 /// blocking method through the first; with `touched`, another module stores into `d0`.

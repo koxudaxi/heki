@@ -267,6 +267,8 @@ const KEY_SUBCLASS: &str =
 const KEY_CLASS_REBIND: &str =
     "from pkg.key_class import Keys\n\n\ndef reset():\n    Keys.KEY = \"other\"\n";
 const KEY_SUBCLASS_REBIND: &str = "from pkg.key_class import Keys\n\n\nclass QuietKeys(Keys):\n    pass\n\n\nQuietKeys.KEY = \"other\"\n";
+const RESTORING: &str = "import httpx\n\n\nclass Restoring:\n    def __init__(self):\n        self.client = httpx.Client()\n\n    def __setstate__(self, state):\n        self.__dict__.update(state)\n\n    async def handle(self):\n        self.client.get(\"https://example.com\")\n";
+const SETSTATE_CALL: &str = "import httpx\n\nfrom pkg.restoring import Restoring\n\n\ndef load(target: Restoring):\n    target.__setstate__({\"client\": httpx.AsyncClient()})\n";
 // Another module reads the class constant on an instance, as the class's own method does.
 const KEY_CLASS_READER: &str = "from pkg.key_class import Keys\nfrom pkg.model import Registry\n\n\ndef mark_with(keys: Keys, r: Registry):\n    r.__dict__[keys.KEY] = []\n";
 // A `Final` class constant of a class a decorator of another module builds; a third module
@@ -972,6 +974,7 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/key_consts.py", KEY_CONSTS),
         ("pkg/key_writer.py", KEY_WRITER),
         ("pkg/alias_src.py", ALIAS_SRC),
+        ("pkg/restoring.py", RESTORING),
         ("pkg/alias_use.py", ALIAS_USE),
         ("pkg/getter_src.py", GETTER_SRC),
         ("pkg/getter_use.py", GETTER_USE),
@@ -2528,6 +2531,19 @@ fn steps_aliases_and_getters() -> Vec<Step> {
             vec![save("pkg/natives/__init__.py", "")],
         )
         .present(&[("pkg/natives_use.py", "EFF101")]),
+        Step::new(
+            "another module calls `__setstate__` itself",
+            vec![Action::Create(
+                "pkg/setstate_call.py",
+                SETSTATE_CALL.to_owned(),
+            )],
+        )
+        .absent(&[("pkg/restoring.py", "EFF101")]),
+        Step::new(
+            "the module calling it is deleted",
+            vec![Action::Delete("pkg/setstate_call.py")],
+        )
+        .present(&[("pkg/restoring.py", "EFF101")]),
     ]
 }
 
