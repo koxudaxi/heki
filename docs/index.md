@@ -7,22 +7,14 @@
 🧱 heki (壁, Japanese for "wall") is a static checker for Python, written in Rust. It tracks side
 effects and mutations across function calls.
 
-It catches blocking I/O in `async` code, database queries and HTTP clients in loops, and
-quadratic loops. You can also add rules in `pyproject.toml` to restrict which functions may
-mutate state or reach I/O.
+By default, it catches blocking calls in `async` code, database queries in loops, quadratic
+loops, and in-place changes to read-only parameters and to `lru_cache` results. You can also add
+rules in `pyproject.toml` to restrict which functions may mutate state or reach I/O.
 
 ![heki check in a terminal: EFF101 reports a blocking call two helpers below an async def, and EFF103 a database query one helper below a loop, each with its call chain](assets/example-check.svg)
 
-By default, heki shows only *exact* reports: reports of a certified rule, built only from facts
-heki established. To certify a rule, two reviewers check by hand every exact report it makes on
-the development corpus (378 packages and 30.75 million lines, plus packages added for rules with
-few reports), and one run on a frozen holdout of 100 packages is checked too. Neither may hold a
-false claim. `EFF101` and `EFF103`, the rules of the two examples below, had 287 and 103 reports
-on the corpus and 152 and 122 on the holdout, none false.
-[Rule precision](precision.md#certifications) lists every certified rule.
-
-*Heuristic* reports can be wrong about the code. They are opt-in (`heki check --heuristic`), and
-every output labels them.
+These reports are *exact*: built only from facts heki established, by rules whose every report
+on a corpus was checked by hand ([Rule precision](precision.md#certifications)).
 
 <p>
   <a class="md-button md-button--primary" href="getting-started/">Getting Started</a>
@@ -146,6 +138,9 @@ app/api.py:9:5: MUT201 (write-owner-violation) [error, heuristic] `add_gift_wrap
   = related: app/api.py:9:5: `add_gift_wrap` calls `app.api._append`
 ```
 
+The report is heuristic: the contract rules are not [certified](precision.md#certifications)
+yet, and a `MUT201` report can rest on an alias or a helper's write on one path only.
+
 heki follows aliases, helpers, and subclasses, with no decorators and nothing running at run
 time. Each kind of rule has its own contract:
 
@@ -189,6 +184,16 @@ These rules are exact and run by default. Each report shows the chain of calls t
 | A DataFrame or array concatenated with itself on every loop iteration | [`DATA101`](rules/loop-carried-concat.md) |
 | A quadratic list, dict, set, bytes, or queue pattern | `OPT101`-`OPT103`, `OPT110`, `OPT111`, `OPT113`, `OPT120`, `OPT121`, `OPT130` ([fixes](fixes.md)) |
 
+To certify a rule, two reviewers check by hand every exact report it makes on the development
+corpus (378 packages and 30.75 million lines, plus packages added for rules with few reports), and
+one run on a frozen holdout of 100 packages is checked too. Neither may hold a false claim.
+`EFF101` and `EFF103`, the rules of the two examples above, had 287 and 103 reports on the corpus
+and 152 and 122 on the holdout, none false.
+[Rule precision](precision.md#certifications) lists every certified rule.
+
+*Heuristic* reports can be wrong about the code. They are opt-in (`heki check --heuristic`), and
+every output labels them.
+
 The other rules are heuristic or opt-in, and the [contract](configuration.md#contracts) rules run
 once you declare a contract: see [Rules](rules/index.md) and [Rule precision](precision.md).
 
@@ -199,10 +204,14 @@ once you declare a contract: see [Rules](rules/index.md) and [Rule precision](pr
   effect, which a diff does not show.
 - [Coding agents](coding-agents.md) get the same checks as JSON, and an
   [Agent Skill](coding-agents.md#agent-skill-experimental) teaches them the workflow.
+- [`heki inspect`](coding-agents.md#before-an-edit-heki-inspect-experimental) (experimental)
+  says what one function does, so an agent does not read its callees to find out.
 
 ### Fast, quiet, and easy to adopt
 
 - A 100,000-line project is checked in a few seconds.
+- [`heki recommend`](recommend.md) (experimental) prints advice on the project's configuration,
+  with the keys to add to `[tool.heki]`.
 - A report needs evidence: when heki cannot tell, [it stays quiet](scope.md#when-heki-cannot-tell).
 - Configuration, suppression comments, and output formats follow Ruff, and a [baseline](adoption.md#ratchet-baselines) fails CI
   only on new findings.
