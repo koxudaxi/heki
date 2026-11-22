@@ -59,6 +59,7 @@ pub const RULE_POLICY: &[(&str, RulePolicy)] = &[
     ("EFF102", RulePolicy::List),
     ("EFF103", RulePolicy::List),
     ("EFF113", RulePolicy::List),
+    ("EFF114", RulePolicy::Enable),
     ("EFF105", RulePolicy::List),
     ("EFF106", RulePolicy::Enable),
     ("EFF107", RulePolicy::Enable),
