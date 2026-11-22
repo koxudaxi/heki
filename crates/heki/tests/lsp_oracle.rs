@@ -1062,9 +1062,9 @@ impl Step {
 
 /// The tier of `MUT101` and of the `MUT111` reader behind it follows the facts other files give
 /// the writer and the getter: a helper of a base class the getter reads through
-/// (`EffectSummary::must_read_self_attrs`), a method of that class called after the write that
+/// (`KeptFacts::must_read_self_attrs`), a method of that class called after the write that
 /// starts invalidating, a function of another file called after the write that starts removing
-/// the kept value (`EffectSummary::removes_kept`), and a subclass that defines the name as a plain
+/// the kept value (`KeptFacts::removes_kept`), and a subclass that defines the name as a plain
 /// property (the cached property is no longer the first definition along its MRO).
 fn steps_kept_values() -> Vec<Step> {
     const BOTH: &[(&str, &str)] = &[

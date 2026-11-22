@@ -5,7 +5,7 @@
 //! - **Cached property**: every class the instance may be gets the property from a
 //!   `functools.cached_property` getter, the first definition along its MRO.
 //! - **Reads on every path**: that getter reads the written attribute on every path on which it
-//!   returns normally (`EffectSummary::must_read_self_attrs`).
+//!   returns normally (`KeptFacts::must_read_self_attrs`).
 //! - **Plain write**: the write rebinds or deletes the attribute with a plain store, or changes
 //!   in place the builtin container it holds through a method no project subclass replaces.
 //! - **Kept to the return**: no point between the write and the method's normal return may
@@ -54,7 +54,7 @@ pub(super) fn established(
     let classes = stale_reads::classes_running(index, decls, writer, prop);
     let read = AttrKeyPath {
         attr: attr.to_owned(),
-        const_key: w.key.clone(),
+        const_key: w.key().map(str::to_owned),
     };
     let holders: Vec<&String> = classes
         .iter()
@@ -119,15 +119,14 @@ fn setup_step(
     }
     let lazy_getter = index
         .summary(writer)
-        .is_some_and(|s| s.is_cached_property && s.listed_cache.is_some());
+        .is_some_and(|s| s.is_cached_property && s.listed_cache().is_some());
     lazy_getter
         && !invalidated_anywhere(index, name)
         && holders.iter().all(|class| {
             decls
                 .function_taken(class, prop)
                 .and_then(|getter| index.summary(&getter))
-                .and_then(|s| s.must_read_self_attrs.as_deref())
-                .is_some_and(|reads| reads.iter().any(|r| r.attr == name))
+                .is_some_and(|s| s.must_read_self_attrs().iter().any(|r| r.attr == name))
         })
 }
 
@@ -138,7 +137,7 @@ fn invalidated_anywhere(index: &ProjectIndex, name: &str) -> bool {
         .files
         .values()
         .flat_map(|f| f.local_functions.values())
-        .any(|s| invalidates(s, name) || matches!(&s.removes_kept, heki_effect::KeptRemoval::Named(names) if names.contains(name)))
+        .any(|s| invalidates(s, name) || matches!(s.removes_kept(), heki_effect::KeptRemoval::Named(names) if names.contains(name)))
 }
 
 /// Whether an instance of `class` may hold a value under the property's name `prop`: a class
@@ -152,7 +151,7 @@ fn may_hold(decls: &ProjectDecls, class: &str, prop: &str) -> bool {
 /// **Cached property** and **Reads on every path** for instances of `class`: the first
 /// definition of `prop` along its MRO is a synchronous getter of a project class that no base
 /// heki does not know comes before, decorated by a cached-property decorator the catalog lists
-/// as keeping the value in the instance `__dict__` (`EffectSummary::listed_cache`, R3; with one
+/// as keeping the value in the instance `__dict__` (`KeptFacts::listed_cache`, R3; with one
 /// that keeps it in a slot on an instance without a `__dict__`, no project class along the MRO
 /// defines `__slots__`), the class has no metaclass heki does not know, and the getter reads
 /// `read` on every path on which it returns normally: the attribute with the written key, or as
@@ -173,19 +172,15 @@ fn cached_getter_reads(
     let Some(s) = index.summary(&getter) else {
         return false;
     };
-    let Some(listed) = s.listed_cache.filter(|_| s.is_cached_property) else {
+    let Some(listed) = s.listed_cache().filter(|_| s.is_cached_property) else {
         return false;
     };
     if s.is_async || s.is_generator || (listed.in_slot && decls.defines_slots(class)) {
         return false;
     }
-    s.must_read_self_attrs.as_deref().is_some_and(|reads| {
-        reads.iter().any(|r| {
-            r.attr == read.attr
-                && (r.const_key.is_none()
-                    || read.const_key.is_none()
-                    || r.const_key == read.const_key)
-        })
+    s.must_read_self_attrs().iter().any(|r| {
+        r.attr == read.attr
+            && (r.const_key.is_none() || read.const_key.is_none() || r.const_key == read.const_key)
     })
 }
 
@@ -206,7 +201,7 @@ fn plain_write(decls: &ProjectDecls, class: &str, attr: &str, w: &SelfAttrWrite)
                 .iter()
                 .all(|c| !decls.attr_write_runs_code(c, attr));
     }
-    w.change.as_ref().is_some_and(|change| {
+    w.change().is_some_and(|change| {
         decls.plain_attr(class, attr)
             && decls.method_not_overridden(change.kind.class(), &change.method, change.by_name)
     })
@@ -243,7 +238,7 @@ impl<'f> KeptAfterWrites<'f> {
         let call_removes = |span: Span| {
             calls.get(&span).into_iter().flatten().any(|callee| {
                 index.summary(callee).is_none_or(|c| {
-                    c.removes_kept.removes(prop)
+                    c.removes_kept().removes(prop)
                         || invalidates(c, prop)
                         || c.mutates_self_attrs.iter().any(|w| w.attr == prop)
                         || c.mutated_param_paths
