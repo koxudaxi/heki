@@ -69,8 +69,14 @@ MEASUREMENT = {
 
 def test_the_tables_are_written_from_the_data() -> None:
     precision = {"certifications": [certification(0, 0)], "measurements": [MEASUREMENT]}
-    assert build_docs.certifications_table(precision).splitlines()[2] == (
+    stable = [{"code": "OPT110", "experimental": None}]
+    assert build_docs.certifications_table(precision, stable).splitlines()[2] == (
         "| `OPT110` | 0.3.0 | 240 / 0 | 31 / 0 |"
+    )
+    # A certified rule that is still experimental says so in its row.
+    experimental = [{"code": "OPT110", "experimental": {"reason": "Opt-in."}}]
+    assert build_docs.certifications_table(precision, experimental).splitlines()[2] == (
+        "| `OPT110` | 0.3.0 (experimental) | 240 / 0 | 31 / 0 |"
     )
     rules = [{"code": "EFF102", "certainty": "heuristic"}]
     assert build_docs.measurements_table(precision, rules).splitlines()[2] == (

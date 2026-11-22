@@ -4,7 +4,8 @@
 //! creating them, the size of the Soundness lane's proof state, the values
 //! `EFF107` follows from a task factory, the walk to the callable a builtin calls once per item,
 //! contracts with many call targets and argument lists, the walk to the uses handing a reference to
-//! a call target on, the locks `EFF109` follows, and the values class statements pass as bases.
+//! a call target on, the locks `EFF109` follows, the values class statements pass as bases, and
+//! the bindings the deque rewrite's candidates check.
 //!
 //! A shape's cost is counted, not timed: `heki check --walk-steps` writes the steps of each
 //! owner's walks (as `scripts/check_walk_shapes.py` reads them), and a shape is compared with the
@@ -366,6 +367,89 @@ fn scopes_reading_a_cell_bound_many_times_read_its_joined_fact() {
             names
         );
     }
+}
+
+/// A nested function an initializer calls writes a name chosen at run time on the last of a long
+/// chain of copies (`s1 = s0`, `s2 = s1`, ...) of each of two closure cells: the initializer's
+/// `self`, and another of its parameters. The parameter each chain holds is read from the copy
+/// roots of the function at any length, so the write on the initializer's own object is part of
+/// its initialization, and only the other one is reported (`MUT205`).
+#[test]
+fn a_long_copy_chain_of_a_closure_cell_holds_the_enclosing_parameter() {
+    let config = "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT205\"]\n\n\
+                  [[tool.heki.write-owners]]\nname = \"imports\"\ntargets = [\"m.Model.imports\"]\n\
+                  unresolved = \"report\"\n";
+    let copies = 2_000;
+    let found = check_linear(copies, |copies| {
+        let mut lines = vec![
+            "class Model:".to_owned(),
+            "    def __init__(self, names, peer):".to_owned(),
+            "        self.imports = []".to_owned(),
+            String::new(),
+            "        def add(name):".to_owned(),
+            "            s0 = self".to_owned(),
+            "            p0 = peer".to_owned(),
+        ];
+        for i in 1..=copies {
+            lines.push(format!("            s{i} = s{}", i - 1));
+            lines.push(format!("            p{i} = p{}", i - 1));
+        }
+        lines.push(format!("            setattr(s{copies}, name, None)"));
+        lines.push(format!("            setattr(p{copies}, name, None)"));
+        lines.push(String::new());
+        lines.push("        for name in names:".to_owned());
+        lines.push("            add(name)".to_owned());
+        let p = Project::new(&format!("bounds_captured_copy_chain_{copies}"));
+        p.write("pyproject.toml", config)
+            .write("m.py", &(lines.join("\n") + "\n"));
+        p
+    });
+    let reported: Vec<u64> = found
+        .iter()
+        .filter(|d| d["rule_code"] == "MUT205")
+        .map(|d| d["line"].as_u64().unwrap())
+        .collect();
+    // The write on the other parameter's copy, after both chains.
+    assert_eq!(reported, vec![2 * copies as u64 + 9], "{found:#?}");
+}
+
+/// A display changed in place by a long chain of augmented assignments (`items += []`,
+/// `items *= 1`, ...) before an item is appended and the items are written: each result is the
+/// display, decided once from the result before it at any length, so the appended item keeps its
+/// class (`MUT201`).
+#[test]
+fn a_long_chain_of_in_place_operators_gives_the_display_back() {
+    let config = "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT201\"]\n\n\
+                  [[tool.heki.write-owners]]\nname = \"fields\"\ntargets = [\"Model.fields\"]\n\
+                  allowed-writers = [\"m.Model.*\"]\n";
+    let found = check_linear(4_000, |operators| {
+        let mut lines = vec![
+            "class Model:".to_owned(),
+            "    def __init__(self) -> None:".to_owned(),
+            "        self.fields: list[str] = []".to_owned(),
+            String::new(),
+            String::new(),
+            "def extend(model: Model) -> None:".to_owned(),
+            "    items = []".to_owned(),
+        ];
+        for i in 0..operators {
+            let op = if i % 2 == 0 { "+= []" } else { "*= 1" };
+            lines.push(format!("    items {op}"));
+        }
+        lines.push("    items.append(model)".to_owned());
+        lines.push("    for each in items:".to_owned());
+        lines.push("        each.fields = []".to_owned());
+        let p = Project::new(&format!("bounds_in_place_chain_{operators}"));
+        p.write("pyproject.toml", config)
+            .write("m.py", &(lines.join("\n") + "\n"));
+        p
+    });
+    let reported: Vec<&str> = found
+        .iter()
+        .filter(|d| d["rule_code"] == "MUT201")
+        .map(|d| d["qualname"].as_str().unwrap())
+        .collect();
+    assert_eq!(reported, vec!["extend"], "{found:#?}");
 }
 
 /// A function creating `children` child scopes, each over a value it binds just before and
@@ -4662,6 +4746,74 @@ fn reads_on_every_path_of_many_keys_stay_within_the_function_budget() {
     assert_eq!(found, vec!["C.put"]);
 }
 
+/// A writer counting through thousands of branches after its write, each merging two
+/// arithmetic results of the one before: whether an operator's operand is a builtin value the
+/// function built is decided once per variable for the whole function, not by a walk back
+/// through the merges per operator.
+#[test]
+fn built_values_after_a_write_are_decided_once_per_variable() {
+    let found = kept_value_changes("bounds_built_values", 1_000, &[], |branches| {
+        let mut lines = vec![
+            "from functools import cached_property".to_owned(),
+            String::new(),
+            String::new(),
+            "class C:".to_owned(),
+            "    def __init__(self):".to_owned(),
+            "        self.a = 0".to_owned(),
+            "        self.flag = False".to_owned(),
+            String::new(),
+            "    @cached_property".to_owned(),
+            "    def p(self):".to_owned(),
+            "        return self.a".to_owned(),
+            String::new(),
+            "    def bump(self):".to_owned(),
+            "        self.a = 1".to_owned(),
+            "        total = 0".to_owned(),
+        ];
+        for _ in 0..branches {
+            lines.push("        if self.flag:".to_owned());
+            lines.push("            total = total + 1".to_owned());
+            lines.push("        else:".to_owned());
+            lines.push("            total = -total".to_owned());
+        }
+        lines.push("        return None".to_owned());
+        lines.join("\n") + "\n"
+    });
+    assert_eq!(found, vec!["C.bump"]);
+}
+
+/// A writer building a dict display of tens of thousands of keys after its write, each hashed:
+/// what the keys' special methods may run, and whether the other operands an implementation
+/// would be handed are inert, are decided once per key, not again per pair of keys.
+#[test]
+fn special_methods_of_a_large_display_after_a_write_are_decided_once_per_key() {
+    let diagnostics = check_past_budgets(20_000, &[], |keys| {
+        let entries: Vec<String> = (0..keys).map(|i| format!("\"k{i}\": {i}")).collect();
+        let source = format!(
+            "from functools import cached_property\n\n\nclass C:\n    def __init__(self):\n        \
+             self.a = 0\n\n    @cached_property\n    def p(self):\n        return self.a\n\n    \
+             def bump(self):\n        self.a = 1\n        table = {{{}}}\n        return table\n",
+            entries.join(", ")
+        );
+        module_project(
+            &format!("bounds_large_display_{keys}"),
+            MUT101_CONFIG,
+            &source,
+        )
+    });
+    let found: Vec<(String, String)> = diagnostics
+        .iter()
+        .filter(|d| d["rule_code"] == "MUT101")
+        .map(|d| {
+            (
+                d["qualname"].as_str().unwrap().to_owned(),
+                d["certainty"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    assert_eq!(found, vec![("C.bump".to_owned(), "exact".to_owned())]);
+}
+
 /// A writer making thousands of project calls and library calls after its write: whether a
 /// callable a library call is handed has a site of its own is looked up once per argument, not
 /// by a scan of every site of the function (which took time quadratic in its calls).
@@ -5323,6 +5475,41 @@ fn the_census_of_many_classes_is_one_pass_over_their_sites() {
         }),
         "{totals:#}"
     );
+}
+
+/// A list front-inserted at `inserts` sites of a loop, then bound back and forth between two
+/// variables `16 * inserts` times after the loop: every insert is a candidate of the deque
+/// rewrite (`OPT121`), and each checks every binding of both variables.
+fn front_inserts_then_rebindings(inserts: usize) -> String {
+    let mut lines = vec![
+        "def fill(items):".to_owned(),
+        "    q = []".to_owned(),
+        "    for x in items:".to_owned(),
+    ];
+    lines.extend((0..inserts).map(|_| "        q.insert(0, x)".to_owned()));
+    for _ in 0..16 * inserts {
+        lines.push("    r = q".to_owned());
+        lines.push("    q = r".to_owned());
+    }
+    lines.push("    return list(q)".to_owned());
+    lines.join("\n") + "\n"
+}
+
+/// The deque rewrite's candidates of one function share one budget and one answer per value
+/// about the objects the variables a list reaches may hold: a binding is walked once, not once
+/// per candidate, and every insert keeps its fix.
+#[test]
+fn deque_candidates_of_one_list_walk_its_bindings_once() {
+    let found = check_linear(16, |inserts| {
+        let p = Project::new(&format!("bounds_deque_bindings_{inserts}"));
+        p.write("m.py", &front_inserts_then_rebindings(inserts));
+        p
+    });
+    let fixed = found
+        .iter()
+        .filter(|d| d["rule_code"] == "OPT121" && !d["fix"].is_null())
+        .count();
+    assert_eq!(fixed, 16, "{found:#?}");
 }
 
 /// `OPT103` and `OPT111` selected.

@@ -395,15 +395,19 @@ def example_image(heki: Path) -> str:
     return ansi_svg.render(prompt + out.stdout + out.stderr, TERMINAL_COLUMNS, EXAMPLE_IMAGE_TITLE)
 
 
-def certifications_table(precision: dict) -> str:
+def certifications_table(precision: dict, rules: list[dict]) -> str:
+    """The certifications; a certified rule that is still experimental (opt-in for its harm
+    share) says so in its row."""
+    experimental = {r["code"] for r in rules if r["experimental"]}
     lines = [
         "| Rule | Certified | Census: reports / false | Holdout: reports / false |",
         "| ---- | --------- | ----------------------: | -----------------------: |",
     ]
     for c in precision["certifications"]:
         census, holdout = c["census"], c["holdout"]
+        release = c["release"] + (" (experimental)" if c["rule"] in experimental else "")
         lines.append(
-            f"| `{c['rule']}` | {c['release']} | {census['reports']} / {census['false_claims']} "
+            f"| `{c['rule']}` | {release} | {census['reports']} / {census['false_claims']} "
             f"| {holdout['reports']} / {holdout['false_claims']} |"
         )
     return "\n".join(lines) + "\n"
@@ -460,7 +464,7 @@ def outputs(heki: Path, rules: list[dict], registry: dict, precision: dict) -> d
         PRECISION_PAGE: with_generated_parts(
             PRECISION_PAGE,
             {
-                "certifications": certifications_table(precision),
+                "certifications": certifications_table(precision, rules),
                 "measurements": measurements_table(precision, rules),
             },
         ),
