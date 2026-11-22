@@ -72,6 +72,10 @@ Options:
           Experimental: offline profile dump (collapsed stacks of CPython 3.15's profiler or py-spy, or `--gecko` JSON): apply the `size-dependent` fixes in its hot functions (in every function with `--include-size-dependent`)
       --watch
           Watch for file changes and re-run incrementally
+      --generate-prompt [<QUESTION>]
+          Experimental: print a prompt for consulting a language model about this run instead of the report: the configuration, the rules that apply, the diagnostics, how to answer, and QUESTION when given (put PATHS before the option). `--output-format json` prints it as JSON. Writes no file and exits with 0
+      --output-format-json-schema <TARGET>
+          Print the JSON Schema of a JSON output and exit: `generate-prompt`, the object of `--generate-prompt --output-format json` [possible values: generate-prompt]
   -h, --help
           Print help
 ```

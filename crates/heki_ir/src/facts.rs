@@ -27,7 +27,7 @@ mod paths;
 pub use origin::{Carries, ItemOrigin, ItemOrigins, ItemSource};
 pub use paths::{Decided, ModuleBindings, Must, PathReader, Paths, Progress};
 
-use crate::walk::{Answer, Def, FnShape};
+use crate::walk::{Answer, Budget, Def, FnShape};
 use crate::{
     BinOpKind, BlockId, BuiltinKind, CompareOpKind, ConstLiteral, DictEntry, FunctionId,
     FunctionKind, Inst, InstKind, IrFunction, LenCap, LoopBound, NaturalLoop, Terminator,
@@ -230,8 +230,8 @@ fn is_immutable_kind(kind: BuiltinKind) -> bool {
 }
 
 /// Module-level names the code fixes: bound once, by the module body, outside loops, and
-/// never rebound (no other store, `del`, `global` assignment, later star import of a public
-/// name, or dynamic globals).
+/// never rebound (no other store, `del`, `global` assignment, later star import, or dynamic
+/// globals).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModuleConstants {
     /// Integer constants (`ATTEMPTS = 5`, `LIMIT = BASE * 2`).
@@ -259,6 +259,9 @@ pub struct ModuleConstants {
     /// `t.TYPE_CHECKING` for a name `t` bound to `import typing` (the dotted key).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub bools: BTreeMap<String, bool>,
+    /// Float constants (`DELAY = 0.5`), the text of their literal.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub floats: BTreeMap<String, String>,
     /// Names of the builtins the facts rely on (`range`, `len`, ...) that the module rebinds.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub shadowed: BTreeSet<String>,
@@ -313,6 +316,9 @@ pub struct FnIndex<'a> {
     guards: OnceCell<Vec<LenGuard>>,
     /// The branches the code of `f` decides ([`Self::decided`]).
     decided: OnceCell<Decided>,
+    /// The blocks every path to another block passes, over the path facts' graph
+    /// ([`Self::every_path_passes`]); `None` past the budget of the walk.
+    block_dominators: OnceCell<Option<paths::BlockDominators>>,
     /// The fixed trip counts `f.loops` record were decided with these constants (see
     /// [`Self::redeciding_trips`]).
     recorded_trips: bool,
@@ -439,6 +445,7 @@ impl<'a> FnIndex<'a> {
             measured: OnceCell::new(),
             guards: OnceCell::new(),
             decided: OnceCell::new(),
+            block_dominators: OnceCell::new(),
             recorded_trips: true,
         }
     }
@@ -1640,6 +1647,24 @@ impl<'a> FnIndex<'a> {
         }
     }
 
+    /// Whether every path from the entry to block `at` passes block `through`, over the graph of
+    /// the path facts (`paths::Paths`): a branch the module's constants decide is not taken, and
+    /// a block raises into its handler only where an instruction of it may raise. Past the
+    /// budget of that walk, the dominator tree of every edge answers.
+    fn every_path_passes(&self, through: BlockId, at: BlockId) -> bool {
+        let dominators = self.block_dominators.get_or_init(|| {
+            let budget = Budget::of_function("heki_ir::facts::FnIndex::every_path_passes", self.f);
+            match paths::Paths::new(self, &paths::PathReader::ir(), &budget).block_dominators() {
+                Answer::Known(d) => Some(d),
+                Answer::Open => None,
+            }
+        });
+        match dominators {
+            Some(d) => d.passes(through, at),
+            None => !self.shape.reachable(at) || self.shape.dominators().dominates(through, at),
+        }
+    }
+
     /// The most items `v` holds in the block `at`, and while the blocks `during` run, by the
     /// tests before it: the smallest `N` of a `len(v) <= N` (or `< N + 1`, `== N`, the negation
     /// of `>` / `>=`) that every path to `at` passes, also through `not`, `and`, `or`, and
@@ -1667,11 +1692,9 @@ impl<'a> FnIndex<'a> {
         if !measured.contains(&v) && path.is_none() {
             return None;
         }
-        // Every path from the entry to `at` (normal and exception edges) runs through the guarded
-        // edge: also when no path from the entry reaches `at`, since none avoids the edge either.
-        let shape = &self.shape;
-        let guards_at =
-            |to: BlockId| to == at || !shape.reachable(at) || shape.dominators().dominates(to, at);
+        // Every path from the entry to `at` runs through the guarded edge: also when no path from
+        // the entry reaches `at`, since none avoids the edge either.
+        let guards_at = |to: BlockId| to == at || self.every_path_passes(to, at);
         let mut on_the_way = self.reaching(at);
         for b in during {
             on_the_way[b.0 as usize] = true;
@@ -2118,38 +2141,39 @@ impl<'a> FnIndex<'a> {
     }
 }
 
-/// Whether every path from the header of `lp` back to it runs a call that waits (a sleep, or a
-/// wait with a timeout): the loop is paced by time, as a poll or a retry is, and the data
-/// decides nothing about how often it runs. An exception edge leaves a block before its wait.
-fn waits_every_iteration(shape: &FnShape<'_>, lp: &NaturalLoop) -> bool {
-    let f = shape.f;
-    let waits = |b: BlockId| f.block(b).insts.iter().any(|i| waits_for_time(shape, i));
-    if !lp.body.iter().any(|b| waits(*b)) {
+/// Whether every iteration of `f.loops[li]` that completes runs a call that waits (a sleep, or
+/// a wait with a timeout) to its return: the loop is paced by time, as a poll or a retry is, and
+/// the data decides nothing about how often it runs. The iterations are those of the path facts
+/// (the function's, which `paths` gives once a loop waits at all,
+/// [`Paths::on_every_iteration_passes_one_of`]): a branch the module's constants decide is not
+/// taken, and an exception raised before the wait returns skips it.
+fn waits_every_iteration<'q, 'r, 's>(
+    ix: &FnIndex<'_>,
+    li: usize,
+    lp: &NaturalLoop,
+    paths: impl FnOnce() -> &'q Paths<'r, 's>,
+) -> bool
+where
+    'r: 'q,
+    's: 'r,
+{
+    let f = ix.f;
+    let waits: Vec<(BlockId, usize)> = lp
+        .body
+        .iter()
+        .flat_map(|&b| {
+            f.block(b)
+                .insts
+                .iter()
+                .enumerate()
+                .filter(|(_, i)| waits_for_time(&ix.shape, i))
+                .map(move |(k, _)| (b, k))
+        })
+        .collect();
+    if waits.is_empty() {
         return false;
     }
-    let body: FxHashSet<BlockId> = lp.body.iter().copied().collect();
-    let mut seen: FxHashSet<BlockId> = FxHashSet::default();
-    let mut stack = vec![lp.header];
-    while let Some(b) = stack.pop() {
-        if !seen.insert(b) {
-            continue;
-        }
-        let bb = f.block(b);
-        let next = if waits(b) {
-            Vec::new()
-        } else {
-            bb.terminator.successors()
-        };
-        for s in next.into_iter().chain(bb.exc_target) {
-            if s == lp.header {
-                return false;
-            }
-            if body.contains(&s) {
-                stack.push(s);
-            }
-        }
-    }
-    true
+    paths().on_every_iteration_passes_one_of(li, &waits, Progress::Returned) == Answer::Known(true)
 }
 
 /// A call that waits before the program goes on: a sleep of a duration other than a literal
@@ -2483,6 +2507,58 @@ fn writes_globals(f: &IrFunction, module: &ModuleConstants) -> bool {
     })
 }
 
+/// How a module's code binds each module global: the stores in the module body or in a
+/// function after `global name`, and the deletions (`del NAME` at module level or after
+/// `global NAME`). The one count every view of a module name bound once reads: the constants
+/// ([`ModuleConstants`]), the bindings the path facts trust ([`ModuleBindings`]), and the
+/// declarations of the effect lane.
+#[derive(Debug, Default)]
+pub struct GlobalStores<'a> {
+    stores: FxHashMap<&'a str, u32>,
+    deleted: FxHashSet<&'a str>,
+}
+
+impl<'a> GlobalStores<'a> {
+    pub fn of(functions: &'a [IrFunction]) -> Self {
+        let mut out = Self::default();
+        for inst in functions
+            .iter()
+            .flat_map(|f| f.blocks.iter().flat_map(|b| &b.insts))
+        {
+            match &inst.kind {
+                InstKind::StoreGlobal { name, .. } => *out.stores.entry(name).or_default() += 1,
+                InstKind::Delete {
+                    name, global: true, ..
+                } => {
+                    out.deleted.insert(name);
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// Stored exactly once and never deleted.
+    pub fn once(&self, name: &str) -> bool {
+        self.stores.get(name) == Some(&1) && !self.deleted.contains(name)
+    }
+
+    /// Stored or deleted somewhere.
+    pub fn binds(&self, name: &str) -> bool {
+        self.stores.contains_key(name) || self.deleted.contains(name)
+    }
+
+    /// The globals stored or deleted somewhere.
+    pub fn names(&self) -> impl Iterator<Item = &'a str> + '_ {
+        self.stores.keys().copied().chain(
+            self.deleted
+                .iter()
+                .copied()
+                .filter(|n| !self.stores.contains_key(n)),
+        )
+    }
+}
+
 /// The constants of a module (see [`ModuleConstants`]), knowing what its comprehension
 /// functions return (`comprehensions`).
 fn module_constants(
@@ -2492,25 +2568,10 @@ fn module_constants(
     comprehensions: BTreeMap<u32, SmallDisplay>,
 ) -> ModuleConstants {
     let module = &functions[module_fn.0 as usize];
-    let mut stores: FxHashMap<&str, u32> = FxHashMap::default();
-    let mut deleted: FxHashSet<&str> = FxHashSet::default();
-    for f in functions {
-        for inst in f.blocks.iter().flat_map(|b| &b.insts) {
-            match &inst.kind {
-                InstKind::StoreGlobal { name, .. } => *stores.entry(name).or_default() += 1,
-                // `del NAME` at module level or after `global NAME` unbinds it.
-                InstKind::Delete {
-                    name, global: true, ..
-                } => {
-                    deleted.insert(name);
-                }
-                _ => {}
-            }
-        }
-    }
+    let stores = GlobalStores::of(functions);
     let shadowed: BTreeSet<String> = READ_ONLY_BUILTINS
         .iter()
-        .filter(|b| stores.contains_key(**b) || deleted.contains(**b))
+        .filter(|b| stores.binds(b))
         .map(|b| (*b).to_owned())
         .collect();
     let mut out = ModuleConstants {
@@ -2532,6 +2593,7 @@ fn module_constants(
     let mut strs = BTreeMap::new();
     let mut str_tuples = BTreeMap::new();
     let mut bools = BTreeMap::new();
+    let mut floats = BTreeMap::new();
     let mut shared = SharedTexts::default();
     let mut candidates: Vec<(String, SmallDisplay)> = Vec::new();
     for bb in &module.blocks {
@@ -2542,12 +2604,10 @@ fn module_constants(
             let InstKind::StoreGlobal { name, value } = &inst.kind else {
                 continue;
             };
-            let star_rebinds =
-                last_star_import.is_some_and(|s| inst.span.start < s) && !name.starts_with('_');
-            if stores.get(name.as_str()) != Some(&1)
-                || deleted.contains(name.as_str())
-                || star_rebinds
-            {
+            // A star import binds the public names of its module, or those its `__all__` lists,
+            // which may start with an underscore.
+            let star_rebinds = last_star_import.is_some_and(|s| inst.span.start < s);
+            if !stores.once(name) || star_rebinds {
                 continue;
             }
             // A string constant, or a tuple of them, is one entry: its text, whose length is its
@@ -2556,6 +2616,12 @@ fn module_constants(
                 ints.insert(name.clone(), n);
             } else if let Some((key, b)) = bool_constant(&ix, name, *value) {
                 bools.insert(key, b);
+            } else if let Some(InstKind::Const {
+                literal: ConstLiteral::Float(text),
+                ..
+            }) = ix.source(*value).map(|i| &i.kind)
+            {
+                floats.insert(name.clone(), text.clone());
             } else if let Some(text) = shared.text(&ix, *value) {
                 candidates.extend(
                     immutable_display(BuiltinKind::Str, text.chars().count())
@@ -2576,6 +2642,7 @@ fn module_constants(
     out.strs = strs;
     out.str_tuples = str_tuples;
     out.bools = bools;
+    out.floats = floats;
     if candidates.is_empty() {
         return out;
     }
@@ -2631,10 +2698,13 @@ fn bool_constant(ix: &FnIndex<'_>, name: &str, value: VarId) -> Option<(String, 
             literal: ConstLiteral::Bool(b),
             ..
         } => Some((name.to_owned(), *b)),
+        // A package's own `typing` module (`from .typing import TYPE_CHECKING`) is not the
+        // standard library's.
         InstKind::Import {
             module: Some(module),
             name: imported,
             is_lazy: false,
+            relative: false,
             ..
         } if TYPING.contains(&module.as_str()) && imported == "TYPE_CHECKING" => {
             Some((name.to_owned(), false))
@@ -2643,6 +2713,7 @@ fn bool_constant(ix: &FnIndex<'_>, name: &str, value: VarId) -> Option<(String, 
             module: None,
             name: imported,
             is_lazy: false,
+            relative: false,
             ..
         } if TYPING.contains(&imported.as_str()) => Some((format!("{name}.TYPE_CHECKING"), false)),
         _ => None,
@@ -2768,6 +2839,9 @@ fn refine_round(
             continue;
         }
         let ix = FnIndex::new(f, constants);
+        // One reader and one budget for the function's loops.
+        let budget = Budget::of_function("heki_ir::facts::waits_every_iteration", f);
+        let paths = OnceCell::new();
         for (li, (lp, hint)) in f.loops.iter().zip(loop_hints).enumerate() {
             let mut bound = lp.bound;
             if bound == LoopBound::Unbounded
@@ -2784,7 +2858,11 @@ fn refine_round(
             if bound == LoopBound::Unbounded {
                 bound = if let Some(n) = ix.counted_trips(lp, SMALL_MAX) {
                     LoopBound::ConstSmall(n)
-                } else if hint.repeats && waits_every_iteration(&ix.shape, lp) {
+                } else if hint.repeats
+                    && waits_every_iteration(&ix, li, lp, || {
+                        paths.get_or_init(|| Paths::new(&ix, &PathReader::ir(), &budget))
+                    })
+                {
                     if hint.forever {
                         LoopBound::DaemonPolling
                     } else {

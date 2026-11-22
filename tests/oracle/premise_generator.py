@@ -154,6 +154,14 @@ def _waiting_leaf(sc, strip):
         [
             (["v = time.sleep(0)"], ["import time"], []),
             ([f"v = time.sleep({const})"], ["import time"], [f"{const} = 0"]),
+            # The module's constants as its IR computes them: from other constants, and after a
+            # star import that cannot rebind them.
+            (
+                [f"v = time.sleep({const})"],
+                ["import time"],
+                [f"{const}_BASE = 3", f"{const} = {const}_BASE - 3"],
+            ),
+            ([f"v = time.sleep({const})"], ["import time", f"from {sc.common} import *"], [f"{const} = 0"]),
             ([f"v = urllib.request.urlopen({const})"], ["import urllib.request"], [f'{const} = "data:,x"']),
             ([f"v = socket.getaddrinfo({const}, 80)"], ["import socket"], [f'{const} = "127.0.0.1"']),
             ([f"v = socket.gethostbyname({const})"], ["import socket"], [f'{const} = "localhost"']),
