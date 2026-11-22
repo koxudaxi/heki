@@ -4,6 +4,7 @@
 #![allow(dead_code)]
 
 pub mod lsp;
+pub mod schema;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

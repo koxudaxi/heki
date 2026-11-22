@@ -12,8 +12,8 @@ use heki_effect::{
 };
 pub use heki_rules::Selectors;
 use heki_rules::project::{
-    FileError, ParsedFile, Project, ProjectEnv, ProjectError, ProjectOptions, discovers,
-    exclude_set, parse_source, retain_unsuppressed, unread_module,
+    Facts, FileError, IndexFacts, ParsedFile, Project, ProjectEnv, ProjectError, ProjectOptions,
+    discovers, exclude_set, parse_source, retain_unsuppressed, unread_module,
 };
 use heki_rules::{
     CHAIN_RULES, ChainFacts, CheckExtras, RuleSelection, SNAPSHOT_FILE, SelectionError,
@@ -388,14 +388,13 @@ type EcosystemView = BTreeMap<FuncKey, (Vec<CallSite>, Vec<heki_effect::External
 impl Workspace {
     /// Index every Python file under `paths` (IR is dropped once the files are summarized, before
     /// propagation). `overrides` replaces the disk text of open documents. `baseline` replaces
-    /// the Ratchet baseline of the configuration (`--baseline`). `inspect`: the index also holds
-    /// what `heki inspect` reads besides the rules ([`heki_rules::inspect_facts`]), for the
-    /// language server; `heki check --watch` leaves it out.
+    /// the Ratchet baseline of the configuration (`--baseline`). `facts`: [`Facts::Inspect`] for
+    /// the language server, [`Facts::Check`] for `heki check --watch`.
     pub fn load(
         opts: &ProjectOptions<'_>,
         selectors: &Selectors,
         baseline: Option<&Path>,
-        inspect: bool,
+        facts: Facts,
     ) -> Result<(Self, Vec<FileError>), EngineError> {
         let project = Project::load(opts).map_err(EngineError::Project)?;
         let env_cfg = &project.env.cfg;
@@ -433,14 +432,12 @@ impl Workspace {
             .filter(|f| f.patches_builtins())
             .map(|f| f.path.clone())
             .collect();
-        let contracts =
-            heki_rules::summary_contracts(env_cfg, &project.env.kb).map_err(EngineError::Rules)?;
-        let typed_writes = heki_rules::typed_writes(env_cfg, &selection);
-        let opt_in = if inspect {
-            heki_rules::inspect_facts(&selection)
-        } else {
-            heki_rules::opt_in_facts(&selection)
-        };
+        let IndexFacts {
+            contracts,
+            typed_writes,
+            opt_in,
+        } = IndexFacts::of(facts, env_cfg, &project.env.kb, &selection)
+            .map_err(EngineError::Rules)?;
         let summaries = summarize_project_with_reads(
             &project.inputs(),
             &project.unread,
@@ -1280,7 +1277,8 @@ mod tests {
             paths: &paths,
             ..ProjectOptions::default()
         };
-        let (mut ws, errors) = Workspace::load(&opts, &Selectors::default(), None, false).unwrap();
+        let (mut ws, errors) =
+            Workspace::load(&opts, &Selectors::default(), None, Facts::Check).unwrap();
         assert!(errors.is_empty(), "{errors:?}");
         // After indexing (a race a process cannot set up portably), `b.py` stops being UTF-8
         // and `c.py` stops parsing: both errors are reported, `a.py` is still checked.
