@@ -865,3 +865,217 @@ fn a_module_constant_read_as_an_attribute_or_a_local_import_passes_its_value() {
         ]
     );
 }
+
+const DISPLAY_SIGNATURES: &str = r#"from dataclasses import dataclass
+from typing import Final
+
+KEY: Final = "kind"
+
+
+def plain(kind=False):
+    return kind
+
+
+def two(kind=False, other=0):
+    return kind, other
+
+
+def opts(**options):
+    return options
+
+
+def required(value, *, kind=False):
+    return value
+
+
+def mutate(flags: dict) -> None:
+    flags["kind"] = False
+
+
+@dataclass
+class Record:
+    kind: bool = False
+"#;
+
+/// `**` operands: dict displays with constant keys (inline, through copies, a module constant as
+/// a key, a key given twice), beside written keywords, landing in `**kwargs`, binding a required
+/// parameter, and constructing a dataclass; displays something changes before the call, other
+/// mappings, calls that raise `TypeError`, and a display merged with another or tested and
+/// returned.
+const DISPLAY_USE: &str = r#"from pkg.sig import KEY, Record, mutate, opts, plain, required, two
+
+
+def inline():
+    plain(**{"kind": True})
+
+
+def aliased():
+    flags = {"kind": True}
+    plain(**flags)
+
+
+def copied():
+    flags = {"kind": True}
+    again = flags
+    plain(**again)
+
+
+def constant_key():
+    plain(**{KEY: True})
+
+
+def later_entry():
+    plain(**{"kind": False, "kind": True})
+
+
+def with_keywords():
+    two(kind=True, **{"other": 1})
+    two(**{"kind": True}, other=1)
+
+
+def into_kwargs():
+    opts(**{"kind": True})
+
+
+def binds_required():
+    required(**{"value": 1, "kind": True})
+
+
+def dataclass_fields():
+    Record(**{"kind": True})
+
+
+def changed_by_item():
+    flags = {"kind": True}
+    flags["kind"] = False
+    plain(**flags)
+
+
+def changed_by_method():
+    flags = {"kind": True}
+    flags.update(kind=False)
+    plain(**flags)
+
+
+def changed_by_delete():
+    flags = {"kind": True}
+    del flags["kind"]
+    plain(**flags)
+
+
+def changed_by_callee():
+    flags = {"kind": True}
+    mutate(flags)
+    plain(**flags)
+
+
+def computed_key(name: str):
+    plain(**{name: True})
+
+
+def not_a_display(kw: dict):
+    plain(**dict(kind=True))
+    plain(**kw)
+
+
+def unpacks_inside(base: dict):
+    plain(**{**base, "kind": True})
+
+
+def either_display(flag: bool):
+    flags = {"kind": True} if flag else {"kind": True}
+    plain(**flags)
+
+
+def captured():
+    flags = {"kind": True}
+
+    def change() -> None:
+        flags["kind"] = False
+
+    change()
+    plain(**flags)
+
+
+def repeated():
+    plain(kind=True, **{"kind": True})
+    plain(**{"kind": True}, **{"kind": True})
+    Record(kind=True, **{"kind": True})
+
+
+def unknown_name():
+    plain(**{"other": 1, "kind": True})
+
+
+def unbound_required():
+    required(**{"kind": True})
+
+
+def rebound_later(flag: bool):
+    flags = {"kind": True}
+    plain(**flags)
+    if flag:
+        flags = {"kind": False}
+    plain(**flags)
+
+
+def tested_and_returned():
+    flags = {"kind": True}
+    if flags:
+        plain(**flags)
+    return flags
+"#;
+
+/// A `**` operand that is a dict display with string constant keys, which nothing changes (each
+/// value holding it is only copied, merged, unpacked with `**`, tested, or returned), binds its
+/// keys as written keywords bind, a later entry of a key replacing an earlier one. Any other mapping may pass any
+/// keyword, so it claims no argument; a key given twice (by two operands, or by an operand and a
+/// written keyword) makes the call raise `TypeError`, so it passes nothing.
+#[test]
+fn a_constant_dict_display_unpacked_with_two_stars_binds_its_keys_as_keywords() {
+    let p = Project::new("call_target_arguments_displays");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT204\"]\n\n[[tool.heki.call-owners]]\nname = \"c\"\ntargets = [\"plain(kind=True)\", \"two(other=1)\", \"opts(kind=True)\", \"required(kind=True)\", \"Record(kind=True)\"]\n",
+    )
+    .write("pkg/__init__.py", "")
+    .write("pkg/sig.py", DISPLAY_SIGNATURES)
+    .write("pkg/use.py", DISPLAY_USE);
+    let call = |line: u64, func: &str, target: &str| {
+        let verb = if target.starts_with("Record") {
+            "constructs"
+        } else {
+            "calls"
+        };
+        report(
+            "pkg/use.py",
+            line,
+            5,
+            "MUT204",
+            &format!("`{func}` {verb} `{target}` outside the call owners of `c`"),
+        )
+    };
+    assert_eq!(
+        reports(&p),
+        vec![
+            call(5, "inline", "plain(kind=True)"),
+            call(10, "aliased", "plain(kind=True)"),
+            call(16, "copied", "plain(kind=True)"),
+            call(20, "constant_key", "plain(kind=True)"),
+            call(24, "later_entry", "plain(kind=True)"),
+            call(28, "with_keywords", "two(other=1)"),
+            call(29, "with_keywords", "two(other=1)"),
+            call(33, "into_kwargs", "opts(kind=True)"),
+            call(37, "binds_required", "required(kind=True)"),
+            call(41, "dataclass_fields", "Record(kind=True)"),
+            call(112, "rebound_later", "plain(kind=True)"),
+            report(
+                "pkg/use.py",
+                121,
+                9,
+                "MUT204",
+                "`tested_and_returned` calls `plain(kind=True)` outside the call owners of `c`",
+            ),
+        ]
+    );
+}

@@ -4689,6 +4689,73 @@ fn lsp_diagnostics_equal_a_full_check_through_argument_lists_across_modules() {
     s.lsp.stop(true);
 }
 
+// ------------------------------------------- accesses through protocols a contract names
+
+const PROTOCOL_CONFIG: &str = r#"[project]
+name = "t"
+
+[tool.heki.lint]
+select = ["MUT201", "MUT203"]
+
+[[tool.heki.write-owners]]
+name = "writes"
+targets = ["pkg.base.Parser._*"]
+forbidden-writers = ["pkg.render:*"]
+allowed-protocols = ["*Host"]
+
+[[tool.heki.read-owners]]
+name = "reads"
+targets = ["pkg.base.Parser._*"]
+forbidden-readers = ["pkg.render:*"]
+allowed-protocols = ["*Host"]
+"#;
+
+const PROTOCOL_BASE: &str = "class Parser:\n    def __init__(self) -> None:\n        self._graph_builder = None\n        self._flag = False\n";
+const PROTOCOL_HOST: &str = "from typing import Protocol\n\n\nclass RenderHost(Protocol):\n    _graph_builder: object\n    _flag: bool\n";
+const PROTOCOL_RENDER: &str = "from pkg.host import RenderHost\n\n\ndef mark(parser: RenderHost) -> None:\n    parser._graph_builder = None\n\n\ndef peek(parser: RenderHost) -> object:\n    return parser._graph_builder\n";
+
+/// `allowed-protocols` with the protocol in another module than the accesses through it: whether
+/// it declares the member decides for the write (`TypedFieldWriteSite::protocol`) and the read,
+/// as the protocol drops the declaration and declares it again.
+#[test]
+fn lsp_diagnostics_equal_a_full_check_through_protocols_a_contract_names() {
+    let files = vec![
+        ("pkg/__init__.py", String::new()),
+        ("pkg/base.py", PROTOCOL_BASE.to_owned()),
+        ("pkg/host.py", PROTOCOL_HOST.to_owned()),
+        ("pkg/render.py", PROTOCOL_RENDER.to_owned()),
+    ];
+    let mut s = Session::start_with(
+        "lsp_oracle_allowed_protocols",
+        PROTOCOL_CONFIG,
+        files,
+        false,
+    );
+    let reported: &[(&str, &str)] = &[("pkg/render.py", "MUT201"), ("pkg/render.py", "MUT203")];
+    let steps = [
+        Step::new("initial index", Vec::new()).absent(reported),
+        Step::new(
+            "the protocol stops declaring the member",
+            vec![save(
+                "pkg/host.py",
+                &PROTOCOL_HOST.replace("    _graph_builder: object\n", ""),
+            )],
+        )
+        .present(reported),
+        Step::new(
+            "the protocol declares it again",
+            vec![save("pkg/host.py", PROTOCOL_HOST)],
+        )
+        .absent(reported),
+    ];
+    let mut failures = Vec::new();
+    for step in &steps {
+        failures.extend(s.run(step));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+    s.lsp.stop(true);
+}
+
 // ---------------------------------------------- class bases named in their scope (session 4)
 
 const SCOPED_BASES_CONFIG: &str = r#"[project]
@@ -4745,6 +4812,162 @@ fn lsp_diagnostics_equal_a_full_check_for_bases_named_in_their_scope() {
             )],
         )
         .absent(&[("pkg/site.py", "MUT204")]),
+    ];
+    let mut failures = Vec::new();
+    for step in &steps {
+        failures.extend(s.run(step));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+    s.lsp.stop(true);
+}
+
+// --------------------------------------------------------------------- reads of a guarded class
+
+const READS_CONFIG: &str = r#"[project]
+name = "t"
+
+[tool.heki.lint]
+select = ["MUT204"]
+
+[[tool.heki.call-owners]]
+name = "home"
+targets = ["pkg.core.Rule"]
+allowed-callers = ["pkg.core.*"]
+references = "reads"
+"#;
+
+const READS_CORE: &str = "class Rule:\n    pass\n";
+const READS_OPS: &str =
+    "from pkg.core import Rule\n\n\ndef _matches(value):\n    return isinstance(value, Rule)\n";
+const READS_SITE: &str =
+    "from pkg.ops import _matches\n\n\ndef check(value):\n    return _matches(value)\n";
+
+/// `references = "reads"`: a private helper of another module reads the guarded class, which is
+/// reported at its caller; the read turns into a class pattern, goes away, comes back, the class
+/// is renamed and restored in its own module, and the key stops counting reads.
+#[test]
+fn lsp_diagnostics_equal_a_full_check_for_reads_of_a_guarded_class() {
+    let files = vec![
+        ("pkg/__init__.py", String::new()),
+        ("pkg/core.py", READS_CORE.to_owned()),
+        ("pkg/ops.py", READS_OPS.to_owned()),
+        ("pkg/site.py", READS_SITE.to_owned()),
+    ];
+    let mut s = Session::start_with("lsp_oracle_reads", READS_CONFIG, files, false);
+    let reported: &[(&str, &str)] = &[("pkg/site.py", "MUT204")];
+    let helper = |body: &str| READS_OPS.replace("    return isinstance(value, Rule)\n", body);
+    let steps = [
+        Step::new("initial index", Vec::new()).present(reported),
+        Step::new(
+            "the helper matches a class pattern instead",
+            vec![save(
+                "pkg/ops.py",
+                &helper("    match value:\n        case Rule():\n            return True\n    return False\n"),
+            )],
+        )
+        .present(reported),
+        Step::new(
+            "the helper reads an attribute of its argument only",
+            vec![save("pkg/ops.py", &helper("    return value.flag\n"))],
+        )
+        .absent(reported),
+        Step::new(
+            "the helper reads the class again",
+            vec![save("pkg/ops.py", READS_OPS)],
+        )
+        .present(reported),
+        Step::new(
+            "the guarded class is renamed",
+            vec![save(
+                "pkg/core.py",
+                &READS_CORE.replace("class Rule", "class Slip"),
+            )],
+        )
+        .absent(reported),
+        Step::new(
+            "the guarded class is restored",
+            vec![save("pkg/core.py", READS_CORE)],
+        )
+        .present(reported),
+        Step::new(
+            "the key counts bases only",
+            vec![Action::Configure(
+                READS_CONFIG.replace("\"reads\"", "\"calls-and-bases\""),
+            )],
+        )
+        .absent(reported),
+    ];
+    let mut failures = Vec::new();
+    for step in &steps {
+        failures.extend(s.run(step));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+    s.lsp.stop(true);
+}
+
+// --------------------------------------- the class hierarchy class bodies name in their scope
+
+const HIERARCHY_CONFIG: &str = r#"[project]
+name = "t"
+
+[tool.heki.lint]
+select = ["MUT204"]
+
+[[tool.heki.call-owners]]
+name = "home"
+targets = ["Rule.check"]
+allowed-callers = ["pkg.core.*", "pkg.site.*"]
+"#;
+
+const HIERARCHY_CORE: &str = "class Rule:\n    def check(self):\n        return True\n";
+// Classes nested in a class body: one inherits `Rule.check`, one overrides it.
+const HIERARCHY_SITE: &str = "from pkg.core import Rule\n\n\nclass Holder:\n    class Inherits(Rule):\n        pass\n\n    class Overrides(Rule):\n        def check(self):\n            return False\n";
+// `Holder.Inherits` finds `Rule.check` along its MRO, `Holder.Overrides` overrides it as a
+// subclass of `Rule`.
+const HIERARCHY_MRO: &str =
+    "from pkg.site import Holder\n\n\ndef through_mro(d: Holder.Inherits):\n    return d.check()\n";
+const HIERARCHY_FAMILY: &str = "from pkg.site import Holder\n\n\ndef through_family(d: Holder.Overrides):\n    return d.check()\n";
+
+/// The bases of class statements in a class body, named where they run (`ClassDecl::bases`),
+/// read by other files through the MRO and the subclass family: the class body binding the base's
+/// name before its classes turns both reports off, binding it after them turns them on (Python
+/// reads the module's name then), and binding it before them again turns them off.
+#[test]
+fn lsp_diagnostics_equal_a_full_check_while_a_class_body_shadows_a_base() {
+    let files = vec![
+        ("pkg/__init__.py", String::new()),
+        ("pkg/core.py", HIERARCHY_CORE.to_owned()),
+        ("pkg/site.py", HIERARCHY_SITE.to_owned()),
+        ("pkg/use_mro.py", HIERARCHY_MRO.to_owned()),
+        ("pkg/use_family.py", HIERARCHY_FAMILY.to_owned()),
+    ];
+    let shadowing =
+        HIERARCHY_SITE.replace("class Holder:\n", "class Holder:\n    Rule = object\n\n");
+    let mut s = Session::start_with("lsp_oracle_hierarchy_scope", HIERARCHY_CONFIG, files, false);
+    let both = &[
+        ("pkg/use_mro.py", "MUT204"),
+        ("pkg/use_family.py", "MUT204"),
+    ];
+    let steps = [
+        Step::new("initial index", Vec::new()).present(both),
+        Step::new(
+            "the class body binds the base's name before its classes",
+            vec![save("pkg/site.py", &shadowing)],
+        )
+        .absent(both),
+        Step::new(
+            "the class body binds it after its classes",
+            vec![save(
+                "pkg/site.py",
+                &format!("{HIERARCHY_SITE}\n    Rule = object\n"),
+            )],
+        )
+        .present(both),
+        Step::new(
+            "the class body binds it before its classes again",
+            vec![save("pkg/site.py", &shadowing)],
+        )
+        .absent(both),
     ];
     let mut failures = Vec::new();
     for step in &steps {
@@ -4876,6 +5099,91 @@ fn lsp_diagnostics_equal_a_full_check_through_a_re_export_its_package_binds_agai
             )],
         )
         .present(reported),
+    ];
+    let mut failures = Vec::new();
+    for step in &steps {
+        failures.extend(s.run(step));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+    s.lsp.stop(true);
+}
+
+// ------------------------------------------------------ class objects across modules (session)
+
+const CLASS_OBJECTS_CONFIG: &str = r#"[project]
+name = "t"
+
+[tool.heki.lint]
+select = ["MUT203", "MUT204"]
+
+[[tool.heki.call-owners]]
+name = "dict-builder"
+targets = ["pkg.types.DataType(is_dict=True)"]
+forbidden-callers = ["pkg.use:*"]
+
+[[tool.heki.read-owners]]
+name = "members"
+targets = ["pkg.types.DataType.HOLDS_MEMBERS"]
+forbidden-readers = ["pkg.use:*"]
+"#;
+
+const CLASS_OBJECTS_TYPES: &str = "class DataType:\n    HOLDS_MEMBERS = True\n\n    def __init__(self, *, is_dict: bool = False) -> None:\n        self.is_dict = is_dict\n";
+// The property and the function returning a class object live in another module than their
+// callers.
+const CLASS_OBJECTS_BASE: &str = "from pkg.types import DataType\n\n\nclass Base:\n    @property\n    def data_type(self) -> type[DataType]:\n        return DataType\n\n\ndef kind() -> type[DataType]:\n    return DataType\n";
+const CLASS_OBJECTS_USE: &str = "from pkg.base import Base, kind\nfrom pkg.types import DataType\n\n\nclass Use(Base):\n    def build(self) -> DataType:\n        return self.data_type(is_dict=True)\n\n\ndef returned() -> DataType:\n    return kind()(is_dict=True)\n\n\ndef read(model_type: type[DataType]) -> bool:\n    return model_type.HOLDS_MEMBERS\n";
+
+/// A `type[C]` annotation names the class object of `C` from the declarations of other modules:
+/// the property and the function returning one are declared in another module than the calls of
+/// their values, and the class the annotation names becomes a protocol (whose class objects are
+/// of no known class) and a class again.
+#[test]
+fn lsp_diagnostics_equal_a_full_check_for_class_objects_across_modules() {
+    let files = vec![
+        ("pkg/__init__.py", String::new()),
+        ("pkg/types.py", CLASS_OBJECTS_TYPES.to_owned()),
+        ("pkg/base.py", CLASS_OBJECTS_BASE.to_owned()),
+        ("pkg/use.py", CLASS_OBJECTS_USE.to_owned()),
+    ];
+    let mut s = Session::start_with(
+        "lsp_oracle_class_objects",
+        CLASS_OBJECTS_CONFIG,
+        files,
+        false,
+    );
+    let both: &[(&str, &str)] = &[("pkg/use.py", "MUT203"), ("pkg/use.py", "MUT204")];
+    let steps = [
+        Step::new("initial index", Vec::new()).present(both),
+        Step::new(
+            "the property and the function return an instance",
+            vec![save(
+                "pkg/base.py",
+                &CLASS_OBJECTS_BASE.replace("-> type[DataType]", "-> DataType"),
+            )],
+        )
+        .present(&[("pkg/use.py", "MUT203")])
+        .absent(&[("pkg/use.py", "MUT204")]),
+        Step::new(
+            "they return the class object again",
+            vec![save("pkg/base.py", CLASS_OBJECTS_BASE)],
+        )
+        .present(both),
+        Step::new(
+            "the class becomes a protocol",
+            vec![save(
+                "pkg/types.py",
+                &format!(
+                    "from typing import Protocol\n\n\n{}",
+                    CLASS_OBJECTS_TYPES.replace("class DataType:", "class DataType(Protocol):")
+                ),
+            )],
+        )
+        .absent(both),
+        Step::new(
+            "it is a class again",
+            vec![save("pkg/types.py", CLASS_OBJECTS_TYPES)],
+        )
+        .present(both),
     ];
     let mut failures = Vec::new();
     for step in &steps {
