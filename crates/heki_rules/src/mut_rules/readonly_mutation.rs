@@ -11,9 +11,10 @@
 //! read-only parameter) over, with the calls down to the change as related locations.
 
 use super::{Allowance, facts_run_at, initializes_itself, runs_inside_allowed};
+use crate::premises;
 use crate::{CheckContext, ModuleUnit, SitesByCaller};
 use heki_ast::Span;
-use heki_diagnostics::{Diagnostic, RelatedLocation};
+use heki_diagnostics::{Diagnostic, OpenPremise, RelatedLocation};
 use heki_effect::{
     BoundCallee, CallHop, CallSite, CallsByCaller, EffectSummary, FuncKey, ParamChange,
     ProjectIndex, ReadOnlyAttr, ReadOnlyKind, SiteRole, Slot, WriteKind,
@@ -104,6 +105,8 @@ struct HandedParam {
     chain: Vec<CallHop>,
     /// The line that changes the caller's object, which makes the report exact.
     witness: Option<RelatedLocation>,
+    /// Why there is no such line, when the run records open premises.
+    open: Vec<OpenPremise>,
 }
 
 /// One project callee of a call site, with the facts of it that run there.
@@ -290,6 +293,20 @@ impl Rule<'_, '_> {
                             format!("`{}` changes the object in place here", changer.qualname);
                         cx.related_at(path, span, what)
                     });
+                    // "Read-only parameter" and "Passed as itself" hold for every report.
+                    let open = if cx.open_premises && witness.is_none() {
+                        let (cause, about) = if found {
+                            (
+                                &premises::NOT_A_BUILTIN_CONTAINER_CHANGE,
+                                Some(changer.fqn()),
+                            )
+                        } else {
+                            (&premises::NO_CHANGING_BODY, None)
+                        };
+                        vec![cause.open_at(None, about.map(|f| format!("`{f}`")))]
+                    } else {
+                        Vec::new()
+                    };
                     let (caller, callee) = (&site.caller.qualname, bc.callee.fqn());
                     let message = match &witness {
                         Some(w) => format!(
@@ -309,6 +326,7 @@ impl Rule<'_, '_> {
                         help,
                         chain,
                         witness,
+                        open,
                     });
                 }
             }
@@ -321,11 +339,11 @@ impl Rule<'_, '_> {
             if let Some(d) = self.emit(
                 out, "MUT110", unit, caller, span, target, h.message, &h.help, &h.chain,
             ) {
-                d.certainty =
-                    crate::premises::tier("MUT110", h.witness.is_some()).at_most(d.certainty);
+                d.certainty = premises::tier("MUT110", h.witness.is_some()).at_most(d.certainty);
                 if let Some(w) = h.witness {
                     d.related.push(w);
                 }
+                d.open_premises = h.open;
             }
         }
     }

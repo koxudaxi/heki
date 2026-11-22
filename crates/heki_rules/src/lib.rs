@@ -809,6 +809,10 @@ pub struct CheckExtras<'a> {
     /// The text of a file that is not checked, for the positions of the call-chain hops in it
     /// (the LSP engine checks one file).
     pub text_of: Option<&'a TextOf<'a>>,
+    /// Record on each heuristic report of a claim with a premise row which premises it left
+    /// open and why (`Diagnostic::open_premises`, [`premises::OpenCause`]). Off, nothing more
+    /// is computed than the tiers need.
+    pub open_premises: bool,
 }
 
 /// Reads the text of a file by path.
@@ -872,6 +876,11 @@ pub(crate) struct CheckContext<'a> {
     pub selection: &'a RuleSelection,
     unit_by_path: FxHashMap<&'a Path, usize>,
     text_of: Option<&'a TextOf<'a>>,
+    /// [`CheckExtras::open_premises`].
+    pub open_premises: bool,
+    /// Why must-facts do not hold, shared by the rules that record open premises (built only
+    /// when the run records them).
+    pub must_explainer: Option<heki_effect::MustExplainer<'a>>,
 }
 
 /// Run every enabled rule over an analyzed project.
@@ -906,6 +915,10 @@ pub fn check_project(
             .map(|(i, u)| (u.input.path.as_path(), i))
             .collect(),
         text_of: extras.text_of,
+        open_premises: extras.open_premises,
+        must_explainer: extras
+            .open_premises
+            .then(|| heki_effect::MustExplainer::new(index)),
     };
     let mut out = Vec::new();
     mut_rules::mut101_mut111(&cx, &mut out);
@@ -980,6 +993,8 @@ pub fn contract_roles(
         selection,
         unit_by_path: FxHashMap::default(),
         text_of: None,
+        open_premises: false,
+        must_explainer: None,
     };
     contracts::roles_of(&cx, key)
 }
@@ -1089,16 +1104,16 @@ impl<'a> CheckContext<'a> {
     }
 
     fn related(&self, chain: &[CallHop]) -> Vec<RelatedLocation> {
-        chain
-            .iter()
-            .map(|hop| {
-                self.related_at(
-                    &hop.path,
-                    hop.span,
-                    format!("`{}` calls `{}`", hop.caller.qualname, hop.callee),
-                )
-            })
-            .collect()
+        chain.iter().map(|hop| self.hop_location(hop)).collect()
+    }
+
+    /// The related location of a call chain's hop: where its caller calls its callee.
+    pub fn hop_location(&self, hop: &CallHop) -> RelatedLocation {
+        self.related_at(
+            &hop.path,
+            hop.span,
+            format!("`{}` calls `{}`", hop.caller.qualname, hop.callee),
+        )
     }
 
     /// A related location at `span` of `path`.
@@ -1169,6 +1184,7 @@ impl<'a> CheckContext<'a> {
             fix: None,
             sites: 1,
             fold_key: None,
+            open_premises: Vec::new(),
         });
         out.last_mut()
     }
