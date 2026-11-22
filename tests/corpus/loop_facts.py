@@ -3,6 +3,7 @@
 LIMIT = 8
 WIDTH = LIMIT * 2 - 15
 STEP = LIMIT // 2
+DEBUG = False
 gone = ["x"]
 del gone
 
@@ -401,6 +402,14 @@ def sleeps_on_one_path(get, time):
     while True:
         if get():
             continue
+        time.sleep(1)
+
+
+def paced_past_a_decided_branch(get, time):
+    while True:
+        if DEBUG:
+            continue
+        get()
         time.sleep(1)
 
 

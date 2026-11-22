@@ -52,6 +52,28 @@ pub struct RuleSelection {
     /// The enabled rules whose heuristic reports are withheld: exact rules that run without
     /// being named while `lint.heuristic` is off.
     exact_reports_only: BTreeSet<&'static str>,
+    /// `lint.heuristic`, the command line's over the configuration's.
+    heuristic: bool,
+}
+
+/// The selectors a run applies: the command line's `select` over the configuration's (`None`:
+/// the default rules), and the `extend-select` and `ignore` lists of both.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectiveSelectors {
+    pub select: Option<Vec<String>>,
+    pub extend_select: Vec<String>,
+    pub ignore: Vec<String>,
+}
+
+impl EffectiveSelectors {
+    pub fn of(lint: &LintConfig, cli: &Selectors) -> Self {
+        let (select, extend) = selecting(lint, cli);
+        Self {
+            select: select.map(<[String]>::to_vec),
+            extend_select: extend.concat(),
+            ignore: [lint.ignore.as_slice(), &cli.ignore].concat(),
+        }
+    }
 }
 
 /// The rule a code or slug names.
@@ -188,7 +210,13 @@ impl RuleSelection {
             per_file,
             heuristic_off,
             exact_reports_only,
+            heuristic,
         })
+    }
+
+    /// Whether the heuristic rules run as the exact ones do (`lint.heuristic`).
+    pub fn heuristic(&self) -> bool {
+        self.heuristic
     }
 
     pub fn is_enabled(&self, code: &str) -> bool {
@@ -364,6 +392,7 @@ mod tests {
             per_file: Vec::new(),
             heuristic_off: BTreeSet::new(),
             exact_reports_only: BTreeSet::from(["OPT110"]),
+            heuristic: false,
         };
         let mut diags = vec![
             report("OPT110", Certainty::Exact),
