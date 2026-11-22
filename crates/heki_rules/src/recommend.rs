@@ -145,8 +145,8 @@ pub struct LeftOut {
     pub python_files: usize,
     /// The files found, in the order of a walk of the root sorted by name.
     pub files: Vec<String>,
-    /// Whether the count stopped before the end: after 50 files, or after the first 10,000
-    /// entries below the root.
+    /// Whether the count stopped before the end (after 50 files, or after the first 10,000
+    /// entries below the root) or could not read an entry.
     pub truncated: bool,
 }
 
@@ -378,7 +378,7 @@ fn left_out(
         &|rel| analyzed.contains(rel),
         MAX_LISTED,
         MAX_CENSUS_ENTRIES,
-    )?;
+    );
     Ok(LeftOut {
         python_files: found.len(),
         files: found.iter().map(|p| shown(p)).collect(),
