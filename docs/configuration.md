@@ -238,7 +238,8 @@ unresolved = "report"
 | `attribution` | `"call-graph"` | `"call-graph"` or `"lexical"`: which function a write is judged in. See [How contracts report](#how-contracts-report). |
 | `own-receiver` | `"report"` | `"report"` or `"allow"`: whether a write through the receiver of the method it is judged in (`self`, `cls`, `super()`) is allowed. See [How contracts report](#how-contracts-report). |
 | `allowed-protocols` | `[]` | Project protocols (class patterns, their subclasses included): a write through a value typed with one that declares the attribute, itself or through its protocol bases, is allowed. See [How contracts report](#how-contracts-report). |
-| `unlisted-dict-keys` | `"ignore"` | `"ignore"` or `"report"`: whether a `__dict__` key of a target's class that no target names is reported when it is written. |
+| `protocol-subclasses` | `true` | `false`: an `allowed-protocols` pattern names the protocols it matches, not their subprotocols (a protocol deriving from an allowed one stays judged). |
+| `unlisted-dict-keys` | `"ignore"` | `"ignore"` or `"report"`: whether a `__dict__` key of a target's class that no `write-owners` target names is reported when it is written. |
 
 A container entry (`Class.attr["key"]`):
 
@@ -261,11 +262,21 @@ A shallow copy's containers are the original's: only rebinding its attributes co
 With `unlisted-dict-keys = "report"`, `MUT201` also reports a constant key written through the
 namespace of an object of a class a target covers (`field.__dict__[KEY] = v`,
 `field.__dict__.setdefault("_cache", v)`, `del vars(field)["k"]`) when no target covering that
-class names the key, so a new cache key needs a target first. A target names the keys its
-attribute pattern matches (`Field._*` names `_cache`), and an entry target names its container.
-The contract's allowance applies as to a target write. A key computed at run time has no name to
-check (`MUT205`, with `unresolved = "report"`), and neither has a write in a helper that does not
-type the object.
+class names the key, in this contract or in any other `write-owners` contract, so a new cache key
+needs a target first. A target names the keys its attribute pattern matches (`Field._*` names
+`_cache`), and an entry target names its container. A key another contract names is that
+contract's to guard: its writes are judged by that contract's allowance alone. The contract's
+allowance applies to an unlisted key as to a target write. A key computed at run time has no name
+to check (`MUT205`, with `unresolved = "report"`), and neither has a write in a helper that does
+not type the object. A key every function may write is listed by a contract that allows every
+writer:
+
+```toml
+[[tool.heki.write-owners]]
+name = "bookkeeping"
+targets = ["pkg.model.Field._derived_from", "pkg.model.Field._seen_*"]
+allowed-writers = ["*"]
+```
 
 With `unresolved = "report"`, `MUT205` reports:
 
@@ -311,6 +322,7 @@ and writes through the protocols it names (see [How contracts report](#how-contr
 | `attribution` | `"call-graph"` | `"call-graph"` or `"lexical"`, as in `write-owners`. |
 | `own-receiver` | `"report"` | `"report"` or `"allow"`, as in `write-owners`. |
 | `allowed-protocols` | `[]` | As in `write-owners`, for a read or a call through the protocol. |
+| `protocol-subclasses` | `true` | As in `write-owners`. |
 
 `MUT203` does not see a read through a parameter without a project-class annotation; with
 `unresolved = "report"`, `MUT206` reports it unless every caller binds the parameter to an
@@ -344,6 +356,7 @@ The call side of `write-owners`.
 | `attribution` | `"call-graph"` | `"call-graph"` or `"lexical"`, as in `write-owners`. |
 | `own-receiver` | `"report"` | `"report"` or `"allow"`, as in `write-owners`. |
 | `allowed-protocols` | `[]` | As in `write-owners`, for a read or a call through the protocol. |
+| `protocol-subclasses` | `true` | As in `write-owners`. |
 
 - A call is reported only when every function it may call (each candidate in the class
   hierarchy) is a target: `text.replace(...)` on a `str` is never a call of
@@ -677,8 +690,13 @@ holds for `invalidation` too:
   that declares the member, itself or through its protocol bases, is allowed wherever it is
   judged, and so is a reference that `references` counts (`return h._helper`): `allowed-protocols = ["*Host"]` allows `parser._flag` with `parser: RenderHost` and
   `class RenderHost(RuntimeFlags, Protocol)` when `RuntimeFlags` declares `_flag`, while the same
-  read through `flags: RuntimeFlags` stays reported. A write through the protocol is allowed for
-  the protocol's member and for each implementation's attribute alike. Accesses through a
+  read through `flags: RuntimeFlags` stays reported. With `protocol-subclasses = false`, a
+  pattern names the protocols it matches only, not their subprotocols: with
+  `class RuntimeExpressionFlags(GraphBuilderHost, Protocol)`, `allowed-protocols = ["*Host"]`
+  allows the accesses through `GraphBuilderHost`, and those through `RuntimeExpressionFlags`
+  stay judged, also of the members it inherits from `GraphBuilderHost`. A write through the
+  protocol is allowed for the protocol's member and for each implementation's attribute alike.
+  Accesses through a
   protocol that does not declare the member, through an implementation's class, through a value
   of unknown class (`unresolved = "report"`, also a protocol whose implementations heki cannot
   list), and a protocol-typed value handed to a helper that changes it without typing its

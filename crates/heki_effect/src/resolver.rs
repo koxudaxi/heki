@@ -800,16 +800,24 @@ impl ModuleDecls {
     /// defines is its own decorator and none of `names` (an identity `def cache(fn)` caches
     /// nothing); a head bound by neither (a builtin, a star import) counts by its spelling.
     pub fn decorator_is(&self, text: &str, names: &[&str]) -> bool {
+        self.decorator_symbol(text)
+            .is_some_and(|s| names.contains(&s.rsplit('.').next().unwrap_or(&s)))
+    }
+
+    /// The symbol the head of the decorator `text` names, through this module's imports and
+    /// aliases (`functools.cached_property` of `@cached_property` after `from functools import
+    /// cached_property`); `None` for a class or function the module defines; a name the module
+    /// neither imports nor defines as written.
+    pub fn decorator_symbol(&self, text: &str) -> Option<String> {
         let (head, _) = decorator_parts(text);
         let first = head.split('.').next().unwrap_or(head);
-        let symbol = if self.imports.contains_key(first) || self.aliases.contains_key(first) {
+        if self.imports.contains_key(first) || self.aliases.contains_key(first) {
             self.resolve_dotted(head, false)
         } else if self.classes.contains_key(first) || self.functions.contains_key(first) {
             None
         } else {
             Some(head.to_owned())
-        };
-        symbol.is_some_and(|s| names.contains(&s.rsplit('.').next().unwrap_or(&s)))
+        }
     }
 
     /// Resolve a dotted name written in this module (runtime imports, then aliases and local
@@ -2453,6 +2461,11 @@ impl ProjectDecls {
         self.split_module(fqn).is_some_and(|(m, _)| m.unread)
     }
 
+    /// Whether `fqn` names a project module or something under one.
+    pub(crate) fn in_project_module(&self, fqn: &str) -> bool {
+        self.split_module(fqn).is_some()
+    }
+
     /// The target of a call to `fqn`, a name no project definition holds: the external function
     /// the catalog may list, or nothing heki knows when `fqn` is under a project module it could
     /// not read (that module, not the catalog's, is what the name refers to).
@@ -2851,6 +2864,42 @@ impl ProjectDecls {
             })
     }
 
+    /// The project classes whose instances an object of the project class `class` may hold in
+    /// its attributes, by the attribute types its classes declare (`ClassDecl::attr_types`: a
+    /// class, the members of a union, the items of a generic container, the structural
+    /// implementations of a protocol), each once with the first attribute that holds it. A class
+    /// whose own copy is decided otherwise ([`Self::copy_decided_by_class`]) is left out: what a
+    /// deep copy makes of it is not its attributes' copies. A walk below several levels of
+    /// attributes reads this once per class it reaches.
+    pub fn classes_in_attributes(&self, class: &str) -> Vec<(String, String)> {
+        let mut seen = FxHashSet::from_iter([self.canonical(class)]);
+        let mut out: Vec<(String, String)> = Vec::new();
+        let declared = self.mro(class).into_iter().filter_map(|m| self.class(&m));
+        for (attr, ty) in declared.flat_map(|d| &d.attr_types) {
+            let mut found = Vec::new();
+            ty_classes(ty, &mut found);
+            let mut held: Vec<String> = Vec::new();
+            for t in found.iter().map(|t| self.canonical(t)) {
+                held.extend(
+                    self.protocol_implementers(&t)
+                        .into_iter()
+                        .flatten()
+                        .cloned(),
+                );
+                held.push(t);
+            }
+            for h in held {
+                if self.is_project_class(&h)
+                    && seen.insert(h.clone())
+                    && !self.copy_decided_by_class(&h)
+                {
+                    out.push((h, attr.clone()));
+                }
+            }
+        }
+        out
+    }
+
     /// Whether a project class along the MRO of `class` binds `model_config` or `Config` in its
     /// body: a model's configuration may ask it to validate its fields' defaults
     /// (`validate_default`), and a field doing so holds what the validation returns.
@@ -2870,6 +2919,30 @@ impl ProjectDecls {
         })
     }
 
+    /// Whether something of the class `class` itself decides what `copy.deepcopy` makes of its
+    /// instances, in place of copying their attributes: a copy hook along its MRO
+    /// (`__deepcopy__`, `__reduce__`, `__reduce_ex__`, `__getstate__`, `__setstate__`), or a
+    /// `copyreg` registration of the class ([`Self::copy_registered`]). Either may keep any value.
+    pub fn copy_decided_by_class(&self, class: &str) -> bool {
+        let class = self.canonical(class);
+        self.mro(&class).iter().any(|c| {
+            self.read(|k| note(&mut k.class_facts, c));
+            self.class(c)
+                .is_some_and(|d| COPY_HOOKS.iter().any(|h| d.members.contains(*h)))
+        }) || self.copy_registered(&class)
+    }
+
+    /// Whether a project module registers the class `class` with `copyreg`
+    /// (`ModuleDecls::copy_registrations`), or a class heki cannot name: `copy.deepcopy` then
+    /// copies an instance whose exact class it is by the registered function.
+    pub fn copy_registered(&self, class: &str) -> bool {
+        self.read(|k| {
+            note(&mut k.class_facts, class);
+            note(&mut k.class_facts, "*");
+        });
+        self.copy_registered.contains(class) || self.copy_registered.contains("*")
+    }
+
     /// What `copy.deepcopy` (without a `memo`) does with a value of the project class `class`,
     /// an instance of it or, under R2, of a project subclass ([`DeepCopy`]). The copy protocol
     /// looks for `__deepcopy__` on the instance (where `__getattr__` and `__getattribute__`
@@ -2879,13 +2952,6 @@ impl ProjectDecls {
     /// copy is a new instance whose attributes are deep copies of the original's.
     pub fn deep_copy_of(&self, class: &str, kb: &EffectiveEcosystemKb) -> DeepCopy {
         let class = self.canonical(class);
-        let registered = |c: &str| {
-            self.read(|k| {
-                note(&mut k.class_facts, c);
-                note(&mut k.class_facts, "*");
-            });
-            self.copy_registered.contains(c) || self.copy_registered.contains("*")
-        };
         let hooked = |d: &ClassDecl| COPY_HOOKS.iter().any(|h| d.members.contains(*h));
         // A base outside the project: one known to define none of the hooks, or one whose
         // `__deepcopy__` the catalog describes as copying the attributes deeply (R3).
@@ -2895,16 +2961,10 @@ impl ProjectDecls {
                     .lookup(&format!("{c}.__deepcopy__"))
                     .is_some_and(|e| e.copy_sanitizer == Some(CopyDepth::Deep))
         };
-        let mro = self.mro(&class);
-        for c in &mro {
-            self.read(|k| note(&mut k.class_facts, c));
-            if self.class(c).is_some_and(hooked) {
-                return DeepCopy::Hooked;
-            }
-        }
-        if registered(&class) {
+        if self.copy_decided_by_class(&class) {
             return DeepCopy::Hooked;
         }
+        let mro = self.mro(&class);
         let mut answer = DeepCopy::Attributes;
         for c in &mro {
             if !self.is_project_class(c) && !known_base(c) {
@@ -2923,7 +2983,7 @@ impl ProjectDecls {
                 || lookup_hooks.iter().any(|h| d.members.contains(*h))
                 || d.custom_metaclass
                 || unknown_base
-                || c != class && registered(&c)
+                || c != class && self.copy_registered(&c)
             {
                 answer = DeepCopy::Open;
             }
@@ -3442,16 +3502,23 @@ impl ProjectDecls {
     /// `None` when a plain class or instance attribute comes first (reading it runs nothing), a
     /// class on the way stores the name outside its body, a base outside the project comes
     /// first (heki does not know what it binds), or none binds it.
-    pub(crate) fn function_taken(&self, class: &str, name: &str) -> Option<FuncKey> {
-        for c in self.mro(class) {
-            let decl = self.class(&c)?;
+    pub fn function_taken(&self, class: &str, name: &str) -> Option<FuncKey> {
+        self.function_taken_along(&self.mro(class), name)
+    }
+
+    /// [`Self::function_taken`] along `mro`: an MRO, or the part of one after a class (what
+    /// `super()` in that class looks up).
+    fn function_taken_along(&self, mro: &[String], name: &str) -> Option<FuncKey> {
+        for c in mro {
+            self.read(|k| note(&mut k.class_facts, c));
+            let decl = self.class(c)?;
             // Stored on the class object outside its body (`Child.view = []`), the name holds
             // what was stored there from then on.
             if decl.rebound_attrs.contains(name) {
                 return None;
             }
             if decl.members.contains(name) {
-                return self.own_method(&c, name);
+                return self.own_method(c, name);
             }
         }
         None
@@ -3508,6 +3575,65 @@ impl ProjectDecls {
             |c| {
                 visited += 1;
                 if visited > DISPATCH_CLASS_LIMIT || !self.runs_a_target(c, method, callee, kb) {
+                    Visit::Stop(())
+                } else {
+                    Visit::Expand
+                }
+            },
+        );
+        missing == Answer::Known(None)
+    }
+
+    /// Whether reading `attr` on every instance of the project class `class` or of a project
+    /// subclass (R2) runs one of the getters `keys`: what each such class takes the name from is
+    /// one of them ([`Self::function_taken`]: not a plain attribute, a method, or a value stored on
+    /// the class outside its body, and no base outside the project before it), and no class is a
+    /// protocol, defines `__getattribute__`, or has a metaclass heki does not know.
+    pub(crate) fn getters_complete(&self, class: &str, attr: &str, keys: &[FuncKey]) -> bool {
+        let class = self.canonical(class);
+        let read = self.attr_read(&class, attr);
+        if read.getattribute || read.custom_metaclass {
+            return false;
+        }
+        self.every_class_finds(&class, keys, |c| {
+            self.protocol(c)
+                .is_none()
+                .then(|| self.function_taken(c, attr))
+                .flatten()
+        })
+    }
+
+    /// Whether reading `attr` through `super()` in the project class `owner` runs one of the
+    /// getters `keys` on every instance (R2): for the owner and each project subclass, what its
+    /// MRO takes the name from after the owner ([`Self::function_taken`] from there) is one of
+    /// them, also when a subclass's MRO puts another class there.
+    pub(crate) fn super_getters_complete(&self, owner: &str, attr: &str, keys: &[FuncKey]) -> bool {
+        let owner = self.canonical(owner);
+        self.every_class_finds(&owner, keys, |c| {
+            let mro = self.mro(c);
+            let after = mro.iter().position(|m| *m == owner).map_or(0, |i| i + 1);
+            self.function_taken_along(&mro[after..], attr)
+        })
+    }
+
+    /// Whether `find` gives one of `keys` for the project class `class` and for each of its
+    /// project subclasses, at most `DISPATCH_CLASS_LIMIT` of them.
+    fn every_class_finds(
+        &self,
+        class: &str,
+        keys: &[FuncKey],
+        find: impl Fn(&str) -> Option<FuncKey>,
+    ) -> bool {
+        let budget = Budget::unmetered("heki_effect::resolver::ProjectDecls::every_class_finds");
+        let mut visited = 0;
+        let missing = reach(
+            &budget,
+            [class],
+            |c, out| out.extend(self.direct_subclasses(c).iter().map(String::as_str)),
+            |c| {
+                visited += 1;
+                let runs = find(c).is_some_and(|k| keys.contains(&k));
+                if visited > DISPATCH_CLASS_LIMIT || !runs {
                     Visit::Stop(())
                 } else {
                     Visit::Expand
@@ -4332,11 +4458,34 @@ fn attr_displays(input: &ModuleInput<'_>, decls: &mut ModuleDecls) {
 const PLAIN_BASES: &[&str] = &[
     "object",
     "builtins.object",
+    // `abc.ABC` defines no attribute but empty `__slots__`, and its metaclass `abc.ABCMeta`
+    // installs no descriptor.
+    "abc.ABC",
     "typing.NamedTuple",
     "typing_extensions.NamedTuple",
     "typing.Generic",
     "typing_extensions.Generic",
 ];
+
+/// The classes a type names: the class of an instance or of each member of a union, and those
+/// of a generic container's items (one level: `list[Model]`, `dict[str, Model]`, `tuple[A, B]`,
+/// `list[A | B]`; `dict[str, list[Model]]` names `str` and `list`).
+fn ty_classes(ty: &Ty, out: &mut Vec<String>) {
+    for obj in ty.members() {
+        out.push(obj.class.clone());
+        let items: Vec<&Elem> = match &obj.args {
+            Args::None => Vec::new(),
+            Args::Items(e) => vec![e.as_ref()],
+            Args::Map(k, v) => vec![k.as_ref(), v.as_ref()],
+            Args::Tuple(es) => es.iter().collect(),
+        };
+        for item in items {
+            if let Elem::Of(inner) = item {
+                out.extend(inner.members().iter().map(|o| o.class.clone()));
+            }
+        }
+    }
+}
 
 /// The methods that decide what `copy.deepcopy` makes of an instance in place of copying its
 /// attributes ([`ProjectDecls::deep_copy_of`]).
@@ -6245,6 +6394,31 @@ impl<'a> TypeCtx<'a> {
             _ => recv
                 .and_then(Val::recv)
                 .is_some_and(|recv| self.targets_complete_on(recv, method, callee)),
+        }
+    }
+
+    /// Whether `keys`, the property getters [`Self::resolve_attr_load`] resolves reading
+    /// `recv.attr` to, are every getter the read can run (`CallSite::complete`): on an instance,
+    /// each class the value may be (R2) takes the name from one of them
+    /// ([`ProjectDecls::getters_complete`]), on each member of a union too; through `super()`,
+    /// each class finds one of them after the class `super()` is in
+    /// ([`ProjectDecls::super_getters_complete`]).
+    pub fn getter_targets_complete(
+        &self,
+        recv: Option<&Val>,
+        attr: &str,
+        keys: &[FuncKey],
+    ) -> bool {
+        match recv {
+            Some(Val::Union(classes)) => classes
+                .iter()
+                .all(|c| self.project.getters_complete(c, attr, keys)),
+            Some(Val::Super(owner)) => self.project.super_getters_complete(owner, attr, keys),
+            // A read on a class or module object runs no getter (`resolve_attr_load` resolves
+            // none).
+            _ => {
+                matches!(recv, Some(Val::Inst(class)) if self.project.getters_complete(class, attr, keys))
+            }
         }
     }
 

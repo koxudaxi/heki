@@ -291,6 +291,14 @@ fn recompute(
             &mut s,
         );
     }
+    if index.opt_in.kept_values {
+        must_reads_through_self_calls(
+            index,
+            out.get(func).map(Vec::as_slice).unwrap_or(&[]),
+            in_scc,
+            &mut s,
+        );
+    }
     if !s.returns_self_attrs.is_empty() {
         drop_attrs_read_by_discarded_calls(index, &self_calls, local, &mut s);
     }
@@ -313,6 +321,89 @@ fn recompute(
     }
     s.refresh_typed_field_writes();
     s
+}
+
+/// [`crate::KeptFacts::must_read_self_attrs`] the function gets from the `self` methods it has
+/// called and the properties it has read, and that returned, whenever it returns normally: the
+/// attributes every target reads on every path, when the targets are every implementation the
+/// call can run and each runs its body at every call (a cached property or function may hand
+/// out what an earlier call computed). A callee of the function's own call-graph component adds nothing, so the fact
+/// needs no fixpoint of its own. A name bound to two definitions gains nothing: each site's
+/// paths are its own definition's, and a call runs one of them.
+fn must_reads_through_self_calls(
+    index: &ProjectIndex,
+    sites: &[(PathBuf, usize)],
+    in_scc: &dyn Fn(&FuncKey) -> bool,
+    s: &mut EffectSummary,
+) {
+    if s.must_exec.as_ref().is_some_and(|m| m.bound_twice) {
+        return;
+    }
+    let mut gained: BTreeSet<AttrKeyPath> = BTreeSet::new();
+    for (path, i) in sites {
+        let site = &index.files[path].call_sites[*i];
+        if !site.recv_is_self
+            || !site.complete
+            || !site.on_every_return.returned
+            || site.role != SiteRole::Call
+            || site.runner != Runner::Caller
+        {
+            continue;
+        }
+        let mut common: Option<BTreeSet<AttrKeyPath>> = None;
+        for bc in site.project_callees() {
+            let callee = index.summary(&bc.callee);
+            // An abstract method never runs: an override does.
+            if callee.is_some_and(EffectSummary::is_abstract) {
+                continue;
+            }
+            let reads = callee
+                .filter(|callee| {
+                    let bound_to_self = callee.owner_class_qualname.is_some()
+                        && !callee.decorators.iter().any(|d| {
+                            matches!(
+                                crate::decorators::last_name(d),
+                                "staticmethod" | "classmethod"
+                            )
+                        });
+                    bound_to_self
+                        && !in_scc(&bc.callee)
+                        && runs_at_call(callee, site)
+                        && crate::decorators::keeps_returned_value(&callee.decorators)
+                })
+                .map(EffectSummary::must_read_self_attrs);
+            let reads: BTreeSet<AttrKeyPath> = reads.into_iter().flatten().cloned().collect();
+            common = Some(match common {
+                None => reads,
+                Some(c) => must_reads_of_both(&c, &reads),
+            });
+        }
+        gained.extend(common.into_iter().flatten());
+    }
+    if gained.is_empty() {
+        return;
+    }
+    s.kept_mut().must_read_self_attrs.extend(gained);
+}
+
+/// The reads both `a` and `b` make on every path ([`crate::KeptFacts::must_read_self_attrs`]): an
+/// attribute read as a whole covers each of its keys.
+pub(crate) fn must_reads_of_both(
+    a: &BTreeSet<AttrKeyPath>,
+    b: &BTreeSet<AttrKeyPath>,
+) -> BTreeSet<AttrKeyPath> {
+    let covers = |reads: &BTreeSet<AttrKeyPath>, r: &AttrKeyPath| {
+        reads.contains(r)
+            || reads.contains(&AttrKeyPath {
+                attr: r.attr.clone(),
+                const_key: None,
+            })
+    };
+    a.iter()
+        .chain(b)
+        .filter(|r| covers(a, r) && covers(b, r))
+        .cloned()
+        .collect()
 }
 
 /// The must-facts the function gets from the project calls it makes whenever it returns
@@ -1113,6 +1204,7 @@ fn apply_edge(
         facts,
     };
     transfer(index, target, local, &edge, &lead, rewrite);
+    target.join_removes_kept(facts.removes_kept());
     if !index.skips_typed_writes
         && (!facts.typed_field_write_sites.is_empty() || !facts.mutated_param_paths.is_empty())
     {

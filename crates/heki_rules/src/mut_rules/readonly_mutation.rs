@@ -14,7 +14,7 @@ use super::{Allowance, facts_run_at, initializes_itself, runs_inside_allowed};
 use crate::premises;
 use crate::{CheckContext, ModuleUnit, SitesByCaller};
 use heki_ast::Span;
-use heki_diagnostics::{Diagnostic, OpenPremise, RelatedLocation};
+use heki_diagnostics::{Diagnostic, OpenPremise, OpenRecord, RelatedLocation};
 use heki_effect::{
     BoundCallee, CallHop, CallSite, CallsByCaller, EffectSummary, FuncKey, ParamChange,
     ProjectIndex, ReadOnlyAttr, ReadOnlyKind, SiteRole, Slot, WriteKind,
@@ -343,7 +343,7 @@ impl Rule<'_, '_> {
                 if let Some(w) = h.witness {
                     d.related.push(w);
                 }
-                d.open_premises = h.open;
+                d.open_records = h.open.into_iter().map(OpenRecord::from).collect();
             }
         }
     }

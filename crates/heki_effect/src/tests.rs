@@ -1863,3 +1863,506 @@ fn a1_hazards_are_calls_heki_cannot_follow() {
     }
     assert!(!summary(&index, "m", "plain").unknown_calls);
 }
+
+// ============================================================ MUT101: kept-value facts
+
+const KEPT_READS_PY: &str = r#"
+import abc
+from functools import cached_property
+
+FLAG = True
+
+
+class Base:
+    def __init__(self, raw: dict[str, str], flag: bool) -> None:
+        self.raw = raw
+        self.flag = flag
+        self.params = {"a": "1", "b": "2"}
+        self.other = ""
+
+    @cached_property
+    def every(self) -> str:
+        return self.raw.get("k", "")
+
+    @cached_property
+    def some(self) -> str:
+        if self.flag:
+            return self.raw.get("k", "")
+        return ""
+
+    @cached_property
+    def keyed(self) -> str:
+        if self.flag:
+            return self.params["a"] + self.params["b"]
+        return self.params["a"]
+
+    @cached_property
+    def through_helper(self) -> str:
+        return self._helper()
+
+    @cached_property
+    def helper_on_one_branch(self) -> str:
+        if self.flag:
+            return self._helper()
+        return ""
+
+    @cached_property
+    def through_cached(self) -> str:
+        return self.every
+
+    @cached_property
+    def through_static(self) -> str:
+        return self._static(self.other)
+
+    @cached_property
+    def guarded(self) -> str:
+        try:
+            value = self.raw["k"]
+        except KeyError:
+            return ""
+        return value
+
+    @cached_property
+    def dispatched(self) -> str:
+        return self.hook()
+
+    def _helper(self) -> str:
+        return self.raw.get("k", "")
+
+    @staticmethod
+    def _static(value: str) -> str:
+        return value
+
+    def hook(self) -> str:
+        return self.raw.get("k", "")
+
+
+class Child(Base):
+    def hook(self) -> str:
+        return self.other
+
+
+class Abstract(abc.ABC):
+    def __init__(self) -> None:
+        self.a = 1
+        self.b = 2
+
+    @cached_property
+    def p(self) -> int:
+        return self.hook()
+
+    @abc.abstractmethod
+    def hook(self) -> int: ...
+
+
+class Concrete(Abstract):
+    def hook(self) -> int:
+        return self.a
+
+
+class Viewed:
+    def __init__(self, raw: dict[str, str]) -> None:
+        self.raw = raw
+
+    @property
+    def key(self) -> str:
+        return self.raw.get("k", "")
+
+    @cached_property
+    def p(self) -> str:
+        return self.key
+
+
+class Overridden(Viewed):
+    @property
+    def key(self) -> str:
+        return ""
+
+
+class Plain:
+    def __init__(self, raw: dict[str, str]) -> None:
+        self.raw = raw
+
+    @property
+    def key(self) -> str:
+        return self.raw.get("k", "")
+
+    @cached_property
+    def p(self) -> str:
+        return self.key
+
+
+class Twice:
+    def __init__(self) -> None:
+        self.a = 1
+        self.b = 2
+
+    if FLAG:
+        def get(self) -> int:
+            return self.a
+    else:
+        def get(self) -> int:
+            return self.a + self.b
+
+    if FLAG:
+        def via(self) -> int:
+            return self._b()
+    else:
+        def via(self) -> int:
+            return 0
+
+    def _b(self) -> int:
+        return self.b
+
+
+class Loop:
+    def __init__(self) -> None:
+        self.a = 1
+
+    @cached_property
+    def p(self) -> int:
+        return self._ping(3)
+
+    def _ping(self, n: int) -> int:
+        return self._pong(n) + self.a
+
+    def _pong(self, n: int) -> int:
+        return self._ping(n - 1) if n else self.a
+"#;
+
+#[test]
+fn reads_on_every_path_are_the_loads_and_self_calls_every_normal_return_passes() {
+    let index = project(&[("kept.py", KEPT_READS_PY)]);
+    let must = |q: &str| -> BTreeSet<(String, Option<String>)> {
+        summary(&index, "kept", q)
+            .must_read_self_attrs()
+            .iter()
+            .map(|r| (r.attr.clone(), r.const_key.clone()))
+            .collect()
+    };
+    let whole = |a: &str| (a.to_owned(), None);
+    let keyed = |a: &str, k: &str| (a.to_owned(), Some(k.to_owned()));
+    assert_eq!(must("Base.every"), set(&[whole("raw")]));
+    assert_eq!(must("Base.some"), set(&[whole("flag")]));
+    // Key "a" is read on both paths, "b" on one.
+    assert_eq!(
+        must("Base.keyed"),
+        set(&[whole("flag"), keyed("params", "a")])
+    );
+    assert_eq!(must("Base.through_helper"), set(&[whole("raw")]));
+    assert_eq!(must("Base.helper_on_one_branch"), set(&[whole("flag")]));
+    // A cached property may hand out what an earlier read computed: its own reads do not
+    // count, only the read of the property.
+    assert_eq!(must("Base.through_cached"), set(&[whole("every")]));
+    // A static method's first parameter is no instance.
+    assert_eq!(must("Base.through_static"), set(&[whole("other")]));
+    // A load that may raise into a handler that returns is no read on that path.
+    assert_eq!(must("Base.guarded"), set(&[]));
+    // `Child.hook` reads `other`, `Base.hook` reads `raw`: neither on every implementation.
+    assert_eq!(must("Base.dispatched"), set(&[]));
+    // A callee of the function's own call-graph component adds nothing: `_pong` reads `a` on
+    // one branch, and `_ping` on its other.
+    assert_eq!(must("Loop._ping"), set(&[whole("a")]));
+    assert_eq!(must("Loop._pong"), set(&[]));
+    assert_eq!(must("Loop.p"), set(&[whole("a")]));
+    // An abstract method never runs: what its overrides read counts.
+    assert_eq!(must("Abstract.p"), set(&[whole("a")]));
+    // A property read is a `self` call of its getter: `Plain.key` reads `raw` on every path;
+    // `Overridden.key` does not, so `Viewed.p`'s read of `key` establishes nothing.
+    assert_eq!(must("Plain.p"), set(&[whole("key"), whole("raw")]));
+    assert_eq!(must("Viewed.p"), set(&[whole("key")]));
+    // Both definitions of a name defined twice read `a`; only one reads `b`.
+    assert_eq!(must("Twice.get"), set(&[whole("a")]));
+    // A helper one definition calls on every path is not the other's: a name bound twice takes
+    // nothing from its calls.
+    assert_eq!(must("Twice.via"), set(&[]));
+}
+
+const KEPT_REMOVALS_PY: &str = r#"
+import asyncio
+import functools
+import json
+
+
+class Holder:
+    def __init__(self) -> None:
+        self.items: list[str] = []
+
+    @functools.cached_property
+    def size(self) -> int:
+        return len(self.items)
+
+
+def drop(h: Holder) -> None:
+    del h.size
+
+
+def pop(h: Holder) -> None:
+    h.__dict__.pop("size", None)
+
+
+def clear(h: Holder) -> None:
+    h.__dict__.clear()
+
+
+def calls_drop(h: Holder) -> None:
+    drop(h)
+
+
+def unknown(callback) -> None:
+    callback()
+
+
+def library_only(names: list[str]) -> int:
+    parts = []
+    parts.append("x")
+    parts.append(",".join(names))
+    parts.append(f"{names}".strip())
+    return len(parts) + len("abc")
+
+
+def handed_unknown(value) -> int:
+    return len(value)
+
+
+def class_check(value: Holder) -> bool:
+    return isinstance(value, Holder)
+
+
+async def waits(h: Holder) -> None:
+    await h.items_ready()
+
+
+class Row:
+    def __init__(self, raw: str) -> None:
+        self.raw = raw
+
+
+class Ranker:
+    def __call__(self, name: str) -> int:
+        return len(name)
+
+
+def dumps(h: Holder) -> str:
+    return json.dumps(h.__dict__)
+
+
+def copied(names: list[str] | tuple[str, ...]) -> list[str]:
+    out: list[str] = []
+    for name in names:
+        out.append(name)
+    return out
+
+
+def ordered(names: list[str] | tuple[str, ...]) -> list[str]:
+    return sorted(names)
+
+
+def checks(value: object, cls: type[Holder]) -> bool:
+    return isinstance(value, cls)
+
+
+def present(first: str, last: str) -> list[str]:
+    out: list[str] = []
+    for part in filter(None, [first, last]):
+        out.append(part)
+    return out
+
+
+def built_rows(cls: type[Row], raws: list[str]) -> int:
+    total = 0
+    for _ in map(cls, raws):
+        total += 1
+    return total
+
+
+def by_len(first: str, last: str) -> list[str]:
+    return sorted([first, last], key=len)
+
+
+def by_partial(first: str, last: str, key: functools.partial[int]) -> list[str]:
+    return sorted([first, last], key=key)
+
+
+def by_ranker(first: str, last: str, ranker: Ranker) -> list[str]:
+    return sorted([first, last], key=ranker)
+
+
+def by_unknown(first: str, last: str, key) -> list[str]:
+    return sorted([first, last], key=key)
+
+
+def appended(h: Holder) -> bool:
+    found = []
+    found.append(h)
+    return any(found)
+
+
+def copied_list(h: Holder) -> bool:
+    return any(list((h,)))
+
+
+def generated(names: list[str]) -> bool:
+    return any(name for name in names)
+
+
+def keyed(first: str, last: str) -> list[str]:
+    return sorted({first: 1, last: 2})
+
+
+def merged(first: str, extra: dict[str, int]) -> list[str]:
+    return sorted({first: 1, **extra})
+
+
+async def locked(h: Holder, lock: asyncio.Lock) -> None:
+    async with lock:
+        h.items.append("x")
+
+
+class Feed:
+    def __init__(self) -> None:
+        self.items: list[str] = []
+
+    @functools.cached_property
+    def count(self) -> int:
+        return len(self.items)
+
+    def rows(self):
+        del self.count
+        yield 1
+
+    def make(self) -> list[int]:
+        return [1]
+
+    def refill(self) -> int:
+        self.items.append("x")
+        total = 0
+        for _ in self.rows():
+            total += 1
+        return total
+
+    def from_factory(self, h: Holder) -> int:
+        total = 0
+        for _ in self.make():
+            total += 1
+        for _ in factory(h):
+            total += 1
+        return total
+
+
+def factory(h: Holder):
+    return h
+"#;
+
+#[test]
+fn removals_of_kept_values_by_name_and_by_unknown_code() {
+    let index = project(&[("rm.py", KEPT_REMOVALS_PY)]);
+    let removes = |q: &str| summary(&index, "rm", q).removes_kept().clone();
+    let named = |n: &str| KeptRemoval::Named(Box::new(set(&[n.to_owned()])));
+    assert_eq!(removes("drop"), named("size"));
+    assert_eq!(removes("pop"), named("size"));
+    assert_eq!(removes("clear"), KeptRemoval::Any);
+    assert_eq!(removes("calls_drop"), named("size"));
+    assert_eq!(removes("unknown"), KeptRemoval::Any);
+    // `list.append` and `len` of a builtin list or string run no code of the project.
+    assert_eq!(removes("library_only"), KeptRemoval::Nothing);
+    // `len` of a value of a class heki does not know runs its `__len__`.
+    assert_eq!(removes("handed_unknown"), KeptRemoval::Any);
+    // `isinstance` looks up `__class__` on its first argument, and runs the metaclass's
+    // `__instancecheck__` of its second, which a class without a metaclass of its own does not
+    // define in the project.
+    assert_eq!(removes("class_check"), KeptRemoval::Nothing);
+    // Other tasks run while a coroutine waits.
+    assert_eq!(removes("waits"), KeptRemoval::Any);
+    // A call handed an object's `__dict__` may change it.
+    assert_eq!(removes("dumps"), KeptRemoval::Any);
+    // Iterating builtin containers runs their own iteration; the items `sorted` compares are of
+    // classes heki does not know.
+    assert_eq!(removes("copied"), KeptRemoval::Nothing);
+    assert_eq!(removes("ordered"), KeptRemoval::Any);
+    // A class object's `__instancecheck__` is its metaclass's.
+    assert_eq!(removes("checks"), KeptRemoval::Nothing);
+    // `filter(None, ...)` calls nothing; `map` calls a project class while it is iterated.
+    assert_eq!(removes("present"), KeptRemoval::Nothing);
+    assert_eq!(removes("built_rows"), KeptRemoval::Any);
+    // A key function: a builtin runs no project code; a `functools.partial`, an instance whose
+    // class defines `__call__`, and a value of unknown type may.
+    assert_eq!(removes("by_len"), KeptRemoval::Nothing);
+    assert_eq!(removes("by_partial"), KeptRemoval::Any);
+    assert_eq!(removes("by_ranker"), KeptRemoval::Any);
+    assert_eq!(removes("by_unknown"), KeptRemoval::Any);
+    // Items heki does not know: a display changed after it is built, what a builtin call or a
+    // generator expression returns.
+    assert_eq!(removes("appended"), KeptRemoval::Any);
+    assert_eq!(removes("copied_list"), KeptRemoval::Any);
+    assert_eq!(removes("generated"), KeptRemoval::Any);
+    // A dict display used once hands on its keys; a `**` unpacking adds keys of another value.
+    assert_eq!(removes("keyed"), KeptRemoval::Nothing);
+    assert_eq!(removes("merged"), KeptRemoval::Any);
+    // Leaving an `async with` awaits `__aexit__`: other tasks run then, whatever the manager.
+    assert_eq!(removes("locked"), KeptRemoval::Any);
+    // A generator runs its body while what it returns is iterated: each step of the loop is a
+    // point of the generator's removals (its summary's), after the write before the loop.
+    assert_eq!(removes("Feed.refill"), named("count"));
+    let file = &index.files[&PathBuf::from("rm.py")];
+    let refill = &file.cache_flows[&key("rm", "Feed.refill")][0];
+    let rows_call = file
+        .call_sites
+        .iter()
+        .find(|s| s.caller == key("rm", "Feed.refill") && s.recv_is_self)
+        .map(|s| s.span)
+        .unwrap();
+    let steps = refill
+        .blocks
+        .iter()
+        .flat_map(|b| &b.events)
+        .filter(|(_, e)| *e == CacheEvent::Calls(rows_call))
+        .count();
+    assert!(steps > 0, "the loop's steps run the generator: {refill:#?}");
+    // A builtin list a project method declares it returns iterates as a builtin; what another
+    // project call returns runs its class's iteration, which may be anything.
+    assert_eq!(removes("Feed.from_factory"), KeptRemoval::Any);
+}
+
+const LISTED_CACHES_PY: &str = r#"
+import functools
+from functools import cached_property as cp
+
+from mylib import cached_property
+from werkzeug.utils import cached_property as wcp
+
+
+class A:
+    @functools.cached_property
+    def by_module(self) -> int:
+        return 1
+
+    @cp
+    def by_alias(self) -> int:
+        return 1
+
+    @cached_property
+    def lookalike(self) -> int:
+        return 1
+
+    @wcp
+    def in_slot(self) -> int:
+        return 1
+"#;
+
+#[test]
+fn cached_property_decorators_the_catalog_lists_keep_their_value_in_the_instance_dict() {
+    let index = project(&[("lc.py", LISTED_CACHES_PY)]);
+    let of = |q: &str| {
+        let s = summary(&index, "lc", q);
+        (s.is_cached_property, s.listed_cache())
+    };
+    let listed = |in_slot| Some(ListedCache { in_slot });
+    assert_eq!(of("A.by_module"), (true, listed(false)));
+    // An alias import names the decorator it imports.
+    assert_eq!(of("A.by_alias"), (true, listed(false)));
+    // A `cached_property` of a library the catalog does not list is one by its name only.
+    assert_eq!(of("A.lookalike"), (true, None));
+    // Werkzeug keeps the value of an instance without a `__dict__` in a slot.
+    assert_eq!(of("A.in_slot"), (true, listed(true)));
+}

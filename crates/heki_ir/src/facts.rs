@@ -238,6 +238,12 @@ const BUILTIN_NAMES: &[&str] = &[
     "zip",
 ];
 
+/// Whether Python binds `name` in `builtins` (`len`, `ValueError`), unlike a name a module
+/// loads that nothing heki sees binds (one a star import or `globals()` may bind).
+pub fn is_builtin_name(name: &str) -> bool {
+    BUILTIN_NAMES.binary_search(&name).is_ok()
+}
+
 /// Methods of the builtin containers that never add an item to their receiver (they read it,
 /// shrink it, reorder it, or return a new object).
 const NON_GROWING_METHODS: &[&str] = &[

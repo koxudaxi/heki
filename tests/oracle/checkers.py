@@ -14,8 +14,15 @@ The claims, as the rule pages state them:
   names.
 - `DATA101`: on every iteration that completes, the variable's new value was built by the
   reallocating calls from its value at the start of the iteration.
+- `MUT101`: whenever the reported write runs on an instance that holds a value of the cached
+  property, that value was computed by a run of the property's getter that loaded the written
+  attribute of the instance (itself or in the calls it made on it), the write rebinds the
+  attribute with a plain store or changes its object in place, and the value is still in the
+  instance when the writing method returns normally.
 - `MUT110`: whenever the named line runs during the reported call, reached through the calls the
   report shows, it changes the caller's object in place.
+- `MUT111`: the object whose cached property the function reads gets the property from its
+  getter, and its class is one that runs the writer.
 - `MUT114`: the reported line changes in place a list, dict, or set that the cached function
   returned.
 - `MUT118`: whenever the deep copy receives an instance of the class that holds an `object()`
@@ -32,6 +39,9 @@ from __future__ import annotations
 import ast
 
 from plan import normalize_api
+
+# The index of a kept-value line's facts in its `line` event (monitor.py), after `attrs_after`.
+KEPT_FACTS = 17
 
 CATALOG_KINDS = ("sleep", "net", "subprocess", "db_stmt", "db_other", "thread")
 CONTAINER_KINDS = ("list", "dict", "set")
@@ -348,6 +358,106 @@ def check_mut110(claim, runs, sources=None):
 
 
 # ---------------------------------------------------------------------------------------------
+# MUT101 and MUT111
+# ---------------------------------------------------------------------------------------------
+def check_mut101(claim, runs, sources=None):
+    result = Result(claim)
+    for run in valid_runs(runs):
+        events = run["events"]
+        # A run of the getter on another instance may return the same object (a small integer,
+        # an interned string): only a run on the instance itself computed its kept value.
+        rets = [(e[3], e[2], e[4], e[7] if len(e) > 7 else None) for e in _of(events, "ret", claim["ret"])]
+        starts = {e[2]: e[1] for e in _of(events, "start")}
+        loads = [e for e in _of(events, "load") if e[4] == claim["attr"]]
+        kept_at_return = {e[2]: e[5] for e in _of(events, "kept_ret", claim["writer_ret"])}
+        for line in _of(events, "line", claim["line_id"]):
+            facts = line[KEPT_FACTS] if len(line) > KEPT_FACTS else None
+            if line[5] != "ok" or not facts or facts["before"].get("kept") is None:
+                continue
+            before, after = facts["before"], facts["after"]
+            # An instance of a class that defines nothing under the property's name holds no
+            # value of the property: the claim says nothing of it.
+            if not before.get("has"):
+                continue
+            result.checked += 1
+            kept, obj = before["kept"], before["self"]
+            if not before.get("cached"):
+                result.refute(
+                    "not-cached-property",
+                    "Cached property: the instance's class does not get the property from the getter",
+                    run,
+                    {"class": before.get("class")},
+                )
+                continue
+            computed = [r for r in rets if r[2] == kept and r[3] == obj and r[0] < line[3]]
+            if not computed:
+                result.refute(
+                    "not-getter-value",
+                    "Cached property: the value the instance keeps is none the getter returned",
+                    run,
+                    {"class": before.get("class")},
+                )
+                continue
+            ret_seq, act, _, _ = computed[-1]
+            begun = starts.get(act, -1)
+            read = any(begun <= e[2] <= ret_seq and e[3] == obj for e in loads)
+            if not read:
+                result.refute(
+                    "not-read",
+                    "Reads on every path: the run of the getter that computed the kept value did not load the attribute",
+                    run,
+                    {"attr": claim["attr"], "class": before.get("class")},
+                )
+            if claim["rebinds"]:
+                if not before.get("plain"):
+                    result.refute(
+                        "not-plain-store",
+                        "Plain write: storing the attribute on the instance's class runs code",
+                        run,
+                        {"class": before.get("class")},
+                    )
+            else:
+                held = (before.get("attr") or [None])[0]
+                changed = held is not None and (
+                    held in {m[0] for m in line[9]} or after.get("attr") != before.get("attr")
+                )
+                if not changed:
+                    result.refute(
+                        "not-changed",
+                        "Plain write: the line ran and changed nothing of the attribute's object",
+                        run,
+                        {"attr": before.get("attr"), "after": after.get("attr")},
+                    )
+            if line[2] in kept_at_return and kept_at_return[line[2]] != kept:
+                result.refute(
+                    "removed",
+                    "Kept to the return: the kept value is gone or replaced when the writer returns normally",
+                    run,
+                    {"class": before.get("class")},
+                )
+    return result
+
+
+def check_mut111(claim, runs, sources=None):
+    result = Result(claim)
+    for run in valid_runs(runs):
+        for line in _of(run["events"], "line", claim["line_id"]):
+            facts = line[KEPT_FACTS] if len(line) > KEPT_FACTS else None
+            if line[5] != "ok" or not facts:
+                continue
+            result.checked += 1
+            before = facts["before"]
+            if not before.get("cached"):
+                result.refute(
+                    "not-cached-property",
+                    "Runs the writer: the object read does not get the property from the getter",
+                    run,
+                    {"class": before.get("class"), "mro": before.get("mro")},
+                )
+    return result
+
+
+# ---------------------------------------------------------------------------------------------
 # MUT114
 # ---------------------------------------------------------------------------------------------
 def check_mut114(claim, runs, sources=None):
@@ -643,7 +753,9 @@ CHECKERS = {
     "EFF101": check_eff101,
     "EFF103": check_eff103,
     "DATA101": check_data101,
+    "MUT101": check_mut101,
     "MUT110": check_mut110,
+    "MUT111": check_mut111,
     "MUT114": check_mut114,
     "MUT115": check_mut115,
     "MUT118": check_mut118,

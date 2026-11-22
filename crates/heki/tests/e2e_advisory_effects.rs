@@ -1732,9 +1732,9 @@ fn a_call_of_a_property_value_is_as_complete_as_calling_the_value() {
             // A project class value: exact.
             (37, "EFF101"),
             (40, "EFF101"),
-            // The getter's own wait is a property read's, heuristic; the value call beside it is
-            // exact.
-            (51, "EFF111"),
+            // The getter waits on every path: the read of the property runs it, and so does the
+            // value call beside it, which calls a project class value.
+            (51, "EFF101"),
             (52, "EFF101"),
         ]
     );

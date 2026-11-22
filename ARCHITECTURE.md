@@ -381,6 +381,9 @@ EffectSummary(f) = {
                                                     // callee handed them (heki inspect and the server)
 
     // Metadata: is_async, is_generator, is_cached_property, is_lru_cache, owner class, decorators
+    // kept: Option<Box<KeptFacts>> (MUT101 only): must_read_self_attrs (the self.<attr> read on
+    // every path that returns normally), removes_kept, and listed_cache (the decorator is a
+    // [[cached_properties]] entry)
 }
 ```
 
