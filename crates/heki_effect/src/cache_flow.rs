@@ -119,6 +119,9 @@ pub(crate) enum KeptRemovalKind {
     /// method resumes; a caller of the method is that consumer, so it is no fact of the
     /// method's summary.
     Suspends,
+    /// Run the bodies of the project generators whose call is at this span (a step of iterating
+    /// what they return): what they remove is in their summaries.
+    Runs(Span),
 }
 
 /// An instruction of a method that may remove a kept value ([`KeptRemovalKind`]).
@@ -191,8 +194,8 @@ pub enum CacheEvent {
     /// [`KeptRemovalKind::Suspends`]).
     MayRemoveAny,
     /// A project call at the point that no `SelfCall` event stands for (another receiver, a
-    /// property getter a read of `self.<name>` runs): what it removes is in its callees'
-    /// summaries.
+    /// property getter a read of `self.<name>` runs), or a step of iterating what the project
+    /// generators called at the span return: what it removes is in its callees' summaries.
     Calls(Span),
 }
 
@@ -559,6 +562,7 @@ fn flow_blocks(
                         KeptRemovalKind::Any | KeptRemovalKind::Suspends => {
                             CacheEvent::MayRemoveAny
                         }
+                        KeptRemovalKind::Runs(span) => CacheEvent::Calls(*span),
                     },
                 ));
             }

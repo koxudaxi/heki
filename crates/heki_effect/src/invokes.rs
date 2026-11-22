@@ -84,8 +84,11 @@ pub(crate) struct Handed<'v> {
     /// display, a string, a comparison's result, a generator expression (its body is the
     /// function's own scope, followed through its own call site).
     pub built: bool,
-    /// The elements of a display built in the calling function.
-    pub elems: Vec<Handed<'v>>,
+    /// The items of a value built in the calling function, when it knows them all: the
+    /// elements of a display nothing else changes, none of a constant or a string (whose items
+    /// are builtin values). `None`: items heki does not know (what a builtin call or a generator
+    /// expression returns, a display used elsewhere).
+    pub elems: Option<Vec<Handed<'v>>>,
     /// A callable the call runs that heki follows through a call site of its own at the call.
     pub followed: bool,
 }
@@ -224,7 +227,10 @@ fn may_define(project: &ProjectDecls, h: &Handed<'_>, name: &str, by_name: bool)
 /// elements, and those of any other value are of classes heki does not know.
 fn items_may_define(project: &ProjectDecls, h: &Handed<'_>, name: &str) -> bool {
     if h.built {
-        return h.elems.iter().any(|e| may_define(project, e, name, false));
+        return h
+            .elems
+            .as_ref()
+            .is_none_or(|elems| elems.iter().any(|e| may_define(project, e, name, false)));
     }
     let class = match h.val {
         Some(Val::Inst(class)) => class,
@@ -280,10 +286,11 @@ fn calls_project_code(project: &ProjectDecls, h: &Handed<'_>) -> bool {
 /// (R2).
 fn inert(project: &ProjectDecls, h: &Handed<'_>) -> bool {
     if h.built {
-        return h
-            .elems
-            .iter()
-            .all(|e| e.built || of_library_class(project, e));
+        return h.elems.as_ref().is_some_and(|elems| {
+            elems
+                .iter()
+                .all(|e| e.built || of_library_class(project, e))
+        });
     }
     of_library_class(project, h)
 }

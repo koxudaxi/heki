@@ -2155,6 +2155,55 @@ def by_ranker(first: str, last: str, ranker: Ranker) -> list[str]:
 
 def by_unknown(first: str, last: str, key) -> list[str]:
     return sorted([first, last], key=key)
+
+
+def appended(h: Holder) -> bool:
+    found = []
+    found.append(h)
+    return any(found)
+
+
+def copied_list(h: Holder) -> bool:
+    return any(list((h,)))
+
+
+def generated(names: list[str]) -> bool:
+    return any(name for name in names)
+
+
+class Feed:
+    def __init__(self) -> None:
+        self.items: list[str] = []
+
+    @functools.cached_property
+    def count(self) -> int:
+        return len(self.items)
+
+    def rows(self):
+        del self.count
+        yield 1
+
+    def make(self) -> list[int]:
+        return [1]
+
+    def refill(self) -> int:
+        self.items.append("x")
+        total = 0
+        for _ in self.rows():
+            total += 1
+        return total
+
+    def from_factory(self, h: Holder) -> int:
+        total = 0
+        for _ in self.make():
+            total += 1
+        for _ in factory(h):
+            total += 1
+        return total
+
+
+def factory(h: Holder):
+    return h
 "#;
 
 #[test]
@@ -2194,4 +2243,30 @@ fn removals_of_kept_values_by_name_and_by_unknown_code() {
     assert_eq!(removes("by_partial"), KeptRemoval::Any);
     assert_eq!(removes("by_ranker"), KeptRemoval::Any);
     assert_eq!(removes("by_unknown"), KeptRemoval::Any);
+    // Items heki does not know: a display changed after it is built, what a builtin call or a
+    // generator expression returns.
+    assert_eq!(removes("appended"), KeptRemoval::Any);
+    assert_eq!(removes("copied_list"), KeptRemoval::Any);
+    assert_eq!(removes("generated"), KeptRemoval::Any);
+    // A generator runs its body while what it returns is iterated: each step of the loop is a
+    // point of the generator's removals (its summary's), after the write before the loop.
+    assert_eq!(removes("Feed.refill"), named("count"));
+    let file = &index.files[&PathBuf::from("rm.py")];
+    let refill = &file.cache_flows[&key("rm", "Feed.refill")][0];
+    let rows_call = file
+        .call_sites
+        .iter()
+        .find(|s| s.caller == key("rm", "Feed.refill") && s.recv_is_self)
+        .map(|s| s.span)
+        .unwrap();
+    let steps = refill
+        .blocks
+        .iter()
+        .flat_map(|b| &b.events)
+        .filter(|(_, e)| *e == CacheEvent::Calls(rows_call))
+        .count();
+    assert!(steps > 0, "the loop's steps run the generator: {refill:#?}");
+    // A builtin list a project method declares it returns iterates as a builtin; what another
+    // project call returns runs its class's iteration, which may be anything.
+    assert_eq!(removes("Feed.from_factory"), KeptRemoval::Any);
 }
