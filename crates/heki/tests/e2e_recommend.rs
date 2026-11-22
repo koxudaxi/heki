@@ -8,6 +8,7 @@ use common::{Project, schema};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::process::Command;
+use std::sync::OnceLock;
 
 const USERS: &str = "\
 import requests
@@ -96,12 +97,17 @@ fn checked(p: &Project, args: &[&str]) -> Vec<Value> {
 }
 
 fn assert_follows_the_schema(report: &Value) {
-    let (code, out, _) =
-        Project::new("recommend_schema").heki(&["recommend", "--output-format-json-schema"]);
-    assert_eq!(code, 0);
-    let published: Value = serde_json::from_str(&out).unwrap();
+    // Read once: the tests run in parallel, and each `Project::new` of one name removes the
+    // directory another test may be running heki in.
+    static PUBLISHED: OnceLock<Value> = OnceLock::new();
+    let published = PUBLISHED.get_or_init(|| {
+        let (code, out, _) =
+            Project::new("recommend_schema").heki(&["recommend", "--output-format-json-schema"]);
+        assert_eq!(code, 0);
+        serde_json::from_str(&out).unwrap()
+    });
     assert_eq!(published["$id"], report["$schema"]);
-    let errors = schema::errors(&published, report);
+    let errors = schema::errors(published, report);
     assert!(errors.is_empty(), "{errors:#?}\n{report:#}");
 }
 
