@@ -249,11 +249,12 @@ impl<'a, 'c> Sizes<'a, 'c> {
     }
 
     /// The fqn an imported name `inst` loads names, as this module's imports bind it: a load
-    /// of the name, or in a module body a copy of its `Import`.
+    /// of a name nothing else in the module binds ([`ModuleDecls::fixed_import`]), or in a
+    /// module body a copy of its `Import`.
     fn import_of(&self, inst: &Inst) -> Option<&str> {
         match &inst.kind {
             InstKind::LoadGlobal { name, .. } | InstKind::LoadName { name, .. } => {
-                self.tcx.module.imports.get(name).map(String::as_str)
+                self.tcx.module.fixed_import(name).map(String::as_str)
             }
             InstKind::Import { .. } => self.tcx.import_target(inst.span),
             _ => None,
@@ -268,15 +269,13 @@ impl<'a, 'c> Sizes<'a, 'c> {
         let decls = self.cx.decls;
         match &inst.kind {
             InstKind::LoadGlobal { name, .. } | InstKind::LoadName { name, .. } => {
-                let fqn = self.import_of(inst).map_or_else(
-                    || format!("{}.{name}", self.tcx.module_name()),
-                    |t| decls.canonical(t),
-                );
+                let fqn = match self.tcx.module.imports.get(name) {
+                    Some(_) => self.import_of(inst)?.to_owned(),
+                    None => format!("{}.{name}", self.tcx.module_name()),
+                };
                 decls.small_global(&fqn).cloned()
             }
-            InstKind::Import { .. } => decls
-                .small_global(&decls.canonical(self.import_of(inst)?))
-                .cloned(),
+            InstKind::Import { .. } => decls.small_global(self.import_of(inst)?).cloned(),
             InstKind::AttrLoad { obj, attr, .. } => {
                 match self.types.get(obj).cloned().or_else(|| self.imported(*obj)) {
                     // A class attribute read through the class (`cls.order`).

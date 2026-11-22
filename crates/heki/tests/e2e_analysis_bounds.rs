@@ -1,8 +1,9 @@
 //! The cost of the analyses past the IR, end to end through the real binary: `isinstance`
 //! narrowing through phis, the passes of the type inference and of the classes of merged values,
-//! the size of the Soundness lane's proof state, the values `EFF107` follows from a task factory,
-//! the walk to the callable a builtin calls once per item, contracts with many call targets, the
-//! walk to the uses handing a reference to a call target on, and the locks `EFF109` follows.
+//! the closure cells child scopes read, the size of the Soundness lane's proof state, the values
+//! `EFF107` follows from a task factory, the walk to the callable a builtin calls once per item,
+//! contracts with many call targets and argument lists, the walk to the uses handing a reference to
+//! a call target on, and the locks `EFF109` follows.
 
 mod common;
 
@@ -155,6 +156,66 @@ fn types_past_the_inference_pass_bound_are_unknown() {
     };
     assert_eq!(blocking(4), 1);
     assert_eq!(blocking(30), 0);
+}
+
+/// A function binding `names` variables in turn `bindings` times in all, each binding followed
+/// by a generator expression reading every variable: closure cells bound many times, each read
+/// by as many scopes. The values are of a wide container type, so that joining them costs more
+/// than the rest of the work per binding. The function returns `_given` of a `Model` that a last
+/// generator expression takes out of each variable. With `declared`, each variable is annotated
+/// once.
+fn cells_read_after_each_binding(bindings: usize, names: usize, declared: bool) -> String {
+    let ty = format!("dict[str, list[tuple[{}]]]", vec!["Model"; 32].join(", "));
+    let mut lines = vec![
+        "class Model:".to_owned(),
+        "    def __init__(self):".to_owned(),
+        "        self._given = 1".to_owned(),
+        String::new(),
+        String::new(),
+        format!("def load(i) -> {ty}:"),
+        "    return {}".to_owned(),
+        String::new(),
+        String::new(),
+        "def shape(xs, out):".to_owned(),
+    ];
+    if declared {
+        lines.extend((0..names).map(|k| format!("    x{k}: {ty} = load({k})")));
+    }
+    let all: Vec<String> = (0..names).map(|k| format!("x{k}")).collect();
+    for i in 0..bindings {
+        lines.push(format!("    x{} = load({i})", i % names));
+        lines.push(format!(
+            "    out.append(sum(1 for _ in xs if {}))",
+            all.join(" and ")
+        ));
+    }
+    let given: Vec<String> = (0..names)
+        .map(|k| format!("next(x{k}[\"k\"][0][0] for _ in xs)._given"))
+        .collect();
+    lines.push(format!("    return {}", given.join(", ")));
+    lines.join("\n") + "\n"
+}
+
+/// The scopes created between the bindings of a closure cell read the values bound to it so far
+/// as one joined fact, kept as the bindings are computed, not folded from every binding again per
+/// scope. The cells keep their types: a forbidden read of `Model._given` per variable.
+#[test]
+fn scopes_reading_a_cell_bound_many_times_read_its_joined_fact() {
+    let config = "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT203\"]\n\n\
+                  [[tool.heki.read-owners]]\nname = \"given\"\ntargets = [\"m.Model._given\"]\n\
+                  forbidden-readers = [\"m:shape\"]\n";
+    for (names, declared) in [(1, false), (4, true)] {
+        let p = Project::new(&format!("bounds_cells_{names}"));
+        p.write("pyproject.toml", config).write(
+            "m.py",
+            &cells_read_after_each_binding(3_000, names, declared),
+        );
+        let found = check_within(&p, Duration::from_secs(20));
+        assert_eq!(
+            found.iter().filter(|d| d["rule_code"] == "MUT203").count(),
+            names
+        );
+    }
 }
 
 /// An `async def` handing a buffer it keeps in a loop to a reader that downloads only what has
@@ -352,15 +413,16 @@ fn returned_phis_of_calls_on_the_previous_value_are_walked_once() {
 }
 
 /// One returned call handed the last 256 of a long chain of item reads (`z2000 = z1999[0]`) as
-/// its arguments: each argument walks the chain, so past the budget of walked values
-/// proportional to the source what the function returns is unknown, and nothing is reported
-/// from it.
+/// the arguments of its 256 parameters: each argument walks the chain, so past the budget of
+/// walked values proportional to the source what the function returns is unknown, and nothing
+/// is reported from it.
 #[test]
 fn origin_walks_past_their_budget_return_unknown() {
     let (links, args) = (2_000, 256);
+    let params: Vec<String> = (0..args).map(|i| format!("r{i}")).collect();
     let mut lines = vec![
-        "def pick(*rows):".to_owned(),
-        "    return rows[0]".to_owned(),
+        format!("def pick({}):", params.join(", ")),
+        "    return r0".to_owned(),
         String::new(),
         String::new(),
         "def deep(z0, flag):".to_owned(),
@@ -2259,6 +2321,60 @@ fn call_targets_are_looked_up_not_tried_one_by_one() {
     }
 }
 
+/// Call targets with an argument list naming `targets` distinct parameters, the first `defined`
+/// of whose functions exist, and `functions` functions each making `calls` calls of those
+/// functions passing the named constant, and as many calls of a function of `wide` parameters
+/// that no list names.
+fn argument_marks(
+    targets: usize,
+    defined: usize,
+    functions: usize,
+    calls: usize,
+    wide: usize,
+) -> Project {
+    let texts: Vec<String> = (0..targets)
+        .map(|i| format!("\"pkg.m.f{i}(p{i}=True)\""))
+        .collect();
+    let mut model: Vec<String> = (0..defined)
+        .map(|i| format!("def f{i}(p{i}=False, q=None):\n    return p{i}\n\n"))
+        .collect();
+    let params: String = (0..wide).map(|j| format!(", b{j}=None")).collect();
+    model.push(format!("def g(x{params}):\n    return x\n"));
+    let mut usage = vec!["from pkg import m\n\n".to_owned()];
+    for f in 0..functions {
+        usage.push(format!("def u{f}(x):\n"));
+        for k in 0..calls {
+            let i = (f * calls + k) % defined;
+            usage.push(format!("    m.f{i}(p{i}=True)\n    m.g(x)\n"));
+        }
+        usage.push("\n\n".to_owned());
+    }
+    let p = Project::new(&format!("bounds_argument_marks_{targets}"));
+    p.write(
+        "pyproject.toml",
+        &format!(
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT204\"]\n\n[[tool.heki.call-owners]]\nname = \"marks\"\ntargets = [{}]\nforbidden-callers = [\"pkg.use.u0\"]\n",
+            texts.join(", ")
+        ),
+    )
+    .write("pkg/__init__.py", "")
+    .write("pkg/m.py", &model.join("\n"))
+    .write("pkg/use.py", &usage.concat());
+    p
+}
+
+/// The parameters argument lists name are looked up from the names a call binds: twenty thousand
+/// lists, each naming a parameter of its own, add no work per list to twenty thousand calls, of
+/// their functions and of a function of many parameters none names.
+#[test]
+fn argument_lists_are_looked_up_from_the_bound_parameters() {
+    let p = argument_marks(20_000, 1_000, 100, 100, 50);
+    let diags = check_within(&p, Duration::from_secs(20));
+    // Only the forbidden caller's hundred calls passing the constants are reported.
+    assert_eq!(diags.len(), 100, "{diags:#?}");
+    assert!(diags.iter().all(|d| d["qualname"] == "u0"));
+}
+
 /// Thousands of references to a `call-owners` target, each a rebinding of one name that a long
 /// chain of phis carries to one `return` (`references = "calls"`): which values reach a use
 /// handing them on is found in one walk of the function, not once per reference (a function
@@ -3051,4 +3167,109 @@ fn many_reports_into_one_module_share_its_index_of_calls() {
         .map(|d| d["related"].as_array().unwrap().len())
         .collect();
     assert_eq!(hops.iter().filter(|&&n| n == 2).count(), 8_000);
+}
+
+/// A package function holding its `__path__` through a chain of merges, each merging the one
+/// before with a new read of it and counting an item of it, ending with `end`.
+fn path_alias_chain(aliases: usize, end: &str) -> String {
+    let mut lines = vec![
+        "def scan(flag, x):".to_owned(),
+        "    p0 = __path__".to_owned(),
+    ];
+    for i in 1..=aliases {
+        lines.push(format!("    p{i} = p{} if flag else __path__", i - 1));
+        lines.push(format!("    c{i} = p{i}.count(x)"));
+    }
+    lines.push(format!("    {end}"));
+    lines.join("\n") + "\n"
+}
+
+/// What the uses of a package's `__path__` do to it is decided once per value holding it: a
+/// function holding it through as many merges as the IR budget models only reads it, or inserts
+/// a directory before its own at the end, which takes `f"pkg.{name}"` outside the project.
+#[test]
+fn the_values_holding_a_package_path_are_each_decided_once() {
+    for (end, reported) in [
+        ("return c1".to_owned(), false),
+        ("p1500.insert(0, x)".to_owned(), true),
+    ] {
+        let p = Project::new(&format!("bounds_package_path_{reported}"));
+        p.write(
+            "pyproject.toml",
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"EFF201\"]\n\n[[tool.heki.effect-boundaries]]\nname = \"env\"\nscopes = [\"probe.*\"]\nforbid = [\"reads-environment\"]\n",
+        )
+        .write("pkg/__init__.py", &path_alias_chain(1_500, &end))
+        .write(
+            "probe.py",
+            "from importlib import import_module\n\n\ndef load(name):\n    return import_module(f\"pkg.{name}\")\n",
+        );
+        let found = check_within(&p, Duration::from_secs(20));
+        assert_eq!(
+            found.iter().any(|d| d["rule_code"] == "EFF201"),
+            reported,
+            "{found:?}"
+        );
+    }
+}
+
+/// Functions of one module each merging the `__path__` of two thousand packages through a chain
+/// of conditional aliases (`v1 = v0 if flag else requests.p1.__path__`), the first chain starting
+/// at a package of the project and inserting a directory before its own at the end.
+fn merged_package_paths(functions: usize, packages: usize) -> String {
+    let mut lines = vec!["import requests".to_owned(), "import pkg.plug".to_owned()];
+    for f in 0..functions {
+        let first = if f == 0 {
+            "pkg.plug".to_owned()
+        } else {
+            format!("requests.f{f}_0")
+        };
+        lines.extend([
+            String::new(),
+            String::new(),
+            format!("def merge{f}(flag):"),
+            format!("    v0 = {first}.__path__"),
+        ]);
+        for i in 1..=packages {
+            lines.push(format!(
+                "    v{i} = v{} if flag else requests.f{f}_{i}.__path__",
+                i - 1
+            ));
+        }
+        lines.push(if f == 0 {
+            format!("    v{packages}.insert(0, flag)")
+        } else {
+            format!("    return len(v{packages})")
+        });
+    }
+    lines.join("\n") + "\n"
+}
+
+/// The values holding the paths of many packages are decided once for all of them: each
+/// package's values reach every merge after its own, which walked once per package took time
+/// quadratic in the packages of a function. The project's package at the head of the first chain
+/// is still found changed.
+#[test]
+fn the_paths_of_many_packages_merged_in_one_function_are_decided_once() {
+    let p = Project::new("bounds_merged_package_paths");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"EFF201\"]\n\n[[tool.heki.effect-boundaries]]\nname = \"env\"\nscopes = [\"probe.*\"]\nforbid = [\"reads-environment\"]\n",
+    )
+    .write("pkg/__init__.py", "")
+    .write("pkg/plug/__init__.py", "")
+    .write("pkg/boot.py", &merged_package_paths(8, 2_000))
+    .write("clean/__init__.py", "")
+    .write(
+        "probe.py",
+        "from importlib import import_module\n\n\ndef plugin(name):\n    return import_module(f\"pkg.plug.{name}\")\n\n\ndef unrelated(name):\n    return import_module(f\"clean.{name}\")\n",
+    );
+    let found = check_within(&p, Duration::from_secs(10));
+    assert_eq!(
+        found
+            .iter()
+            .filter(|d| d["rule_code"] == "EFF201")
+            .map(|d| d["qualname"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["plugin"]
+    );
 }

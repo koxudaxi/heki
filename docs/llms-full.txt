@@ -1277,21 +1277,34 @@ The call side of `write-owners`.
   that pass each value: `"DataType(is_dict=True)"`, `'container_flags(kind="dict")'`. A value is
   `True`, `False`, `None`, an integer, or a string in single or double quotes (no escapes). A call
   passes it when heki establishes that the argument bound to the parameter is that constant (a
-  literal, or a string constant bound once, such as a module's `Final` name): passed by keyword
-  (also to a class without a project `__init__`, a dataclass or a pydantic model), by position
-  where every function the call may run binds that position to the parameter, or left out where
-  every such function's default is the value and only `True`, `False`, `None`, `0`, or `""`
-  (heki keeps defaults by class and truthiness). Any other argument (a variable, a call, `*` or
-  `**` unpacking) is not established, and the call is not reported. A reference passes no
-  arguments, so it never matches. A target with an argument list names no symbol outside the
-  project; `unresolved = "report"` matches its last name before the list, whatever the arguments
-  of a call on an object of unknown class.
-- With `references = "calls-and-bases"`, a class statement whose declaration resolves a base to a
-  class target is reported too ("`<module>` subclasses `pkg.core.Base`"), at the base, or at the
-  class statement for a name an import or the module body binds: the class it makes holds the
-  base, and constructing it runs the base's initialization unless it overrides it. A base is
-  matched as a construction is (with `subclasses = false`, the class itself only), and a keyword
-  (`metaclass=Base`) is no base.
+  literal, a string constant bound once, such as a module's `Final` name, or a module's number or
+  boolean bound once, as `EFF101` evaluates them: `LIMIT = 0`, also imported (by the module or by
+  a function) or read as an attribute of its module (`settings.LIMIT`), unless a module rebinds
+  it; an imported name the importing module binds again in a function declaring it
+  `global`, in another module-level store, or with `del`, or that a star import may rebind, is no
+  constant there): passed by keyword (also to a class without a project `__init__`, a dataclass or a
+  pydantic model), by position where every function the call may run binds that position to the
+  parameter, or left out where every such function's default is the value and only `True`,
+  `False`, `None`, `0`, or `""` (heki keeps defaults by class and truthiness). A keyword binds as
+  Python binds it: never a positional-only parameter (with `def f(kind=False, /, **kwargs)`,
+  `f(kind=True)` leaves `kind` false), and a keyword naming no parameter passes its value under
+  its name into `**kwargs`; the receiver of a method call is its first position. A call that
+  raises `TypeError` instead of running the function passes nothing: a keyword binding a
+  parameter a position or the receiver binds too, a keyword naming no parameter of a function
+  without `**kwargs`, a position (the receiver included) past the parameters of a function
+  without `*args`, or a parameter without a default left unbound where no `*` or `**` unpacking
+  may bind it. Any other argument (a variable, a call, `*` or `**` unpacking) is not
+  established, and the call is not reported. A reference passes no arguments, so it never
+  matches. A target with an argument list names no symbol outside the project; `unresolved =
+  "report"` matches its last name before the list, whatever the arguments of a call on an object
+  of unknown class.
+- With `references = "calls-and-bases"`, a class statement passing a class target as a base is
+  reported too ("`<module>` subclasses `pkg.core.Base`"), at the base, or at the class statement
+  for a name an import or the module body binds: the class it makes holds the base, and
+  constructing it runs the base's initialization unless it overrides it. A base is the value the
+  statement passes, typed where the statement runs as any value is (a parameter, a local, or a
+  class-body name of the imported class's name is another value), and matched as a construction
+  is (with `subclasses = false`, the class itself only); a keyword (`metaclass=Base`) is no base.
 
 ### Allowed and forbidden functions
 
@@ -1402,14 +1415,39 @@ names the first read it reaches and counts every one.
 environment unless the module they import is established to be the project's own:
 
 - every text `name` may hold names a module of the project (`"pkg.config"`, a module constant,
-  either of two such texts), or starts with a package of the project and a dot
-  (`f"pkg.parser.{name}"`, `"pkg.parser." + name`, `"pkg.%s" % name`). The longest project
-  module before that dot must be a regular package whose `__init__.py` heki reads and does not
-  rebind `__path__` (`pkgutil.extend_path` lets installed distributions add modules to it);
+  either of two such texts) that the import finds in the project, or starts with a package of
+  the project and a dot (`f"pkg.parser.{name}"`, `"pkg.parser." + name`, `"pkg.%s" % name`)
+  under which it finds only modules of the project (below);
 - a relative name (`".config"`, `f"..parser.{name}"`) is anchored at `package`: a text the code
   fixes, or the module's own `__package__` or `__name__`;
 - the call is not inside a `try` with an `except` clause naming `ImportError` or
   `ModuleNotFoundError`: the code expects the import to fail.
+
+Python finds the modules under a package on its `__path__`, the package's own directory unless
+code changes it. heki follows what the modules of the project do to the `__path__` of a package,
+its own in its `__init__.py` or another's through an import (`plugins.__path__`, `from plugins
+import __path__`):
+
+- adding directories after the package's own (`__path__.append(d)`, `__path__.extend(ds)`,
+  `__path__ += ds`, `__path__ = __path__ + ds`, `__path__ = pkgutil.extend_path(__path__,
+  __name__)`, also on `__import__("pkgutil")`, and `pkg_resources.declare_namespace`) leaves the
+  package's own modules found first, but any other name under the package may be an installed
+  module;
+- any other change (`__path__ = [d]`, `__path__.insert(0, d)`, a slice store, `del __path__`), or
+  a use heki does not follow (the list handed to a function other than a builtin that only reads
+  it and `pkgutil.iter_modules`, `walk_packages`, or `extend_path`, returned, or stored
+  elsewhere), may take any name under the package elsewhere, its own modules included. So may a
+  package whose `__init__.py` heki cannot read.
+
+Reading the path (iterating it, `__path__[0]`, `len(__path__)`, `pkgutil.iter_modules(__path__)`)
+changes nothing. A module is found in the project when each package along its name leads the
+import there first: heki takes the project's top-level packages to be found in the project, a
+regular package of the project is found before the directories added after its parent's own,
+and a directory without `__init__.py` is a namespace package with a portion in each directory of
+its parent's path, in that order. A name under a package holds only modules of the project when
+the packages along it lead to the project's directories alone and no package under it changes
+its path: `f"pkg.{name}"` reads the environment once a package anywhere under `pkg` changes its
+`__path__`, while a change in another package does not affect it.
 
 A name heki cannot tell (a parameter, `"pkg" + name`, a namespace package without
 `__init__.py`) stays a read of the environment, and so does an import of a module the project
@@ -1670,7 +1708,7 @@ deliberately conservative:
 | The object is created in the function and never escapes | heki counts anything it cannot see as shared: parameters, globals, attributes, values passed to unknown functions, names captured by closures | `sink(rows)` inside the loop blocks `rows.append(...)` |
 | Access is exclusive: no other variable, iterator, or view still refers to the old object after the statement | an in-place update would change what they see | `for v in x: x = x + [v]` ends, but `x.append(v)` would loop forever, so heki reports nothing |
 | Evaluation order and exceptions are kept | a rewrite must not call anything earlier or later | `{**d, f(): g()}` becomes `d.update({f(): g()})`, not `d[f()] = g()`, which would call `g` first |
-| Builtin names are the builtins | the module can rebind them | trusted only while nothing rebinds them: an assignment, a `global` store, `from m import *`, a change through `globals()` (storing or deleting an item, a method that changes the dict, the dict handed on; reading it rebinds nothing), or a module that patches `builtins` (a `.pyi` stub never runs, so its `import builtins` does not count) |
+| Builtin names are the builtins | the module can rebind them | trusted only while nothing rebinds them: an assignment, a `global` store, `from m import *`, any call of `globals()`, or a module that patches `builtins` (a `.pyi` stub never runs, so its `import builtins` does not count) |
 | Locals change only through the code | `eval`, `exec`, `locals()`, `sys._getframe`, and frame attributes can change them behind any analysis | candidates in such functions are always blocked; `heki assumptions` lists these places in a project |
 
 The scope analysis is checked against CPython's `symtable`, and adversarial programs that break a
@@ -3031,7 +3069,7 @@ follows these rules:
 - A contract's targets are looked up from what an access names (the dotted suffixes of a
   function's names, its module and qualname, its class), never tried one by one: the cost grows
   with the sites, not with sites times targets, and the targets of every contract of a rule are
-  indexed together.
+  indexed together. The parameters argument lists name are looked up from those a call binds.
 
 The engines of `heki_ir::walk` apply these rules by construction, and every walk over IR ids,
 the call graph, or the class hierarchy goes through them:
@@ -3066,13 +3104,15 @@ $ python3 scripts/check_walk_shapes.py --heki target/release/heki
 the memory gate, in two jobs that each run half of the shapes (`--shard 1/2` and `--shard 2/2`).
 A shape that lives in one function is placed in a function, a method, and a module body, and grown
 to the largest size whose function the IR budget still models, so a builder change moves the size
-with it; a shape spread over a project (a wide class hierarchy, a chain of private
-helpers) has a fixed size. Each runs with every rule and one contract of each kind, through `heki
-check` and the `--watch` engine, and fails when it costs more than 1 s (on the machine the limits
-were measured on, scaled to the machine running the gate by linear shapes of calls and of loops) or
-1 GiB beyond an empty module. `heki check --walk-steps <path>` (hidden) writes the steps each
-owner's walks took per function as JSON: the gate also fails when an owner's steps grow more than
-2.5 times from half the size to the full size, or when a budget is spent on a shape like real code.
+with it; a shape spread over a project (a wide class hierarchy, a chain of private helpers,
+thousands of argument lists) has a fixed size, and so has a shape in one function whose cost
+already shows at a smaller size, where the walks it does not gate stay cheap. Each runs with every
+rule and one contract of each kind (a family may add its own), through `heki check` and the
+`--watch` engine, and fails when it costs more than 1 s (on the machine the limits were measured
+on, scaled to the machine running the gate by linear shapes of calls and of loops) or 1 GiB beyond
+an empty module. `heki check --walk-steps <path>` (hidden) writes the steps each owner's walks took
+per function as JSON: the gate also fails when an owner's steps grow more than 2.5 times from half
+the size to the full size, or when a budget is spent on a shape like real code.
 `KNOWN_OVER` in the script lists the shapes known to cost more, and only shrinks: a listed shape
 runs only through `heki check` (not the `--watch` engine), with a short timeout, and fails the gate
 once it costs under a quarter of the limits. `KNOWN_STEPS` lists, the same way, the shapes whose
@@ -3081,8 +3121,9 @@ steps are known to grow faster than linearly or to spend a budget.
 Each bound comes with a shape in `crates/heki/tests/e2e_analysis_bounds.rs` that is slow without it,
 checked against a time limit: comparisons sharing an operand thirty deep, many `match` statements of
 slicing or pass-through cases, `t1 = t0[t0]` chains in a loop, a loop with many `continue`s and
-`isinstance` tests, a long chain of assignments a loop carries, many loops one after another, each
-with a lazy initialization (the blocks each covers count toward a budget proportional to the
+`isinstance` tests, a long chain of assignments a loop carries, closure cells bound thousands of
+times, each binding followed by a generator expression reading them, many loops one after another,
+each with a lazy initialization (the blocks each covers count toward a budget proportional to the
 source), many waits on one future before many `await`s of it, task factories at the end of a long
 chain of copies, a long chain of aliases of a class with an attribute store through the last one per
 alias, a class with thousands of subclasses whose class constant as many functions read on an
@@ -3121,7 +3162,8 @@ whose handler returns, of loops nested twenty deep with a call at each depth, of
 one after another, and of a chain of hundreds of `and` tests of module constants, and the item
 origins of a chain of thousands of wrappers, of a list filled by appends in a thousand loops, and of
 a phi of sixty branches each choosing a different parameter, and thousands of `call-owners` targets,
-in one contract or in as many contracts, and thousands of references to a `call-owners` target that
+in one contract or in as many contracts, tens of thousands of argument lists each naming its own
+parameter at as many calls, and thousands of references to a `call-owners` target that
 a long chain of phis carries to one `return`, an argument handed down through thousands of functions
 of one module to the one that changes it, thousands of reports whose call chains enter one module,
 the callers of the bottom of a lattice of calls thirty levels deep, the chains `heki inspect` walks
@@ -3363,8 +3405,11 @@ Each step of the chain is established, not assumed:
   answered by a session's identity map, a cache, an open connection, or that sends only pending
   changes does not), and no argument that may come from the caller can make it return at once
   (`time.sleep(delay)` with `delay` a parameter is not established). A literal argument, and
-  a module constant bound once to one (`PAUSE = 0`, also imported from another module, unless
-  a module rebinds it), is evaluated: `time.sleep(PAUSE)` does not wait. An argument heki cannot
+  a module constant bound once to one (`PAUSE = 0`, also imported from another module by the
+  module or by a function, or read as an attribute of its module, `settings.PAUSE`, unless a
+  module rebinds it or the importing module binds the name again: a `global` store or `del` in
+  a function, another module-level store, a star import), is evaluated: `time.sleep(PAUSE)`
+  does not wait. An argument heki cannot
   evaluate counts as one the call waits on (assumption R6), the URL or name a database
   connection was opened from included: a statement on a SQLAlchemy engine or another DB-API
   connection opened from a value heki does not know waits. `sqlite3.connect` is the one
@@ -4048,12 +4093,21 @@ the allowed callers and resolves to a target:
 A target ending in an argument list names only the calls passing those constants:
 `DataType(is_dict=True)` is `DataType(is_dict=True)`, not `DataType(is_list=True)`, and
 `container_flags(kind="dict")` is `container_flags(dt, "dict")`, not `container_flags(dt, "list")`.
-A call passes a constant when heki establishes it: the argument is a literal or a string constant
-bound once (a module's `Final` name), passed by keyword, by position where every function the call
-may run binds that position to the parameter, or left out where every such function's default is
-`True`, `False`, `None`, `0`, or `""` and the value. A variable, a call result, `*` or `**`
-unpacking, or a position of a class without a project `__init__` establishes nothing, and the call
-is not reported. A reference passes nothing, so it never matches such a target.
+A call passes a constant when heki establishes it: the argument is a literal, a string constant
+bound once (a module's `Final` name), or a module's number or boolean bound once (`LIMIT = 0`),
+read by name, through an import (also a function's own), or as an attribute of the module
+(`settings.LIMIT`), and unless the importing module binds the name again (a `global` store or
+`del` in a function, another module-level store, a star import); passed by keyword, by position
+where every function the call may run binds that position to the parameter, or left out where
+every such function's default is `True`, `False`, `None`, `0`, or `""` and the value. A keyword
+binds as Python binds it: never a positional-only parameter, and one naming no parameter passes
+its value under its name into `**kwargs`; the receiver is the first position. A call that raises
+`TypeError` instead of running the function (a parameter bound by a position, or the receiver, and
+a keyword, a keyword without `**kwargs` to land in, a position past the parameters without
+`*args`, a parameter without a default left unbound where no `*` or `**` unpacking may bind it)
+passes nothing. A variable, a call result, `*` or `**` unpacking, or a position of a class without a
+project `__init__` establishes nothing, and the call is not reported. A reference passes nothing,
+so it never matches such a target.
 
 With `references = "calls"` (or `"calls-and-bases"`), a reference handing a target on to be
 called later counts as a call of it, reported where the target is named ("`f` hands on `pkg.core.decide`"; a name an import or
@@ -4075,12 +4129,14 @@ running the class statement (`<module>` for a class at module level).
 With `references = "calls-and-bases"`, a class statement naming a class target among its bases
 counts too ("`<module>` subclasses `pkg.core.Base`"): the class it makes holds the base, and
 constructing it runs the base's initialization unless it overrides it. A base is a positional
-argument of the class statement that its declaration resolves to the class (`Base`,
-`core.Base`, `Base[int]`, also through an import alias), matched as a construction is, so a base
-that is a subclass of the target counts unless `subclasses = false`; a keyword
-(`metaclass=Base`) is no base. It is reported at the base where the statement loads it, and at
-the class statement for a name an import or the module body binds, for the function running the
-class statement (a nested class: the function running the outer one).
+argument of the class statement whose value is the class where the statement runs (`Base`,
+`core.Base`, `Base[int]`, also through an import alias, a local alias, or a closure cell holding
+it; a parameter, a local, or a class-body name of the imported class's name is another value),
+matched as a construction is, so a base that is a subclass of the target counts unless
+`subclasses = false`; a keyword (`metaclass=Base`) is no base. It is reported at the base where
+the statement loads it, and at the class statement for a name an import or the module body
+binds, for the function running the class statement (a nested class: the function running the
+outer one).
 
 A call through a value typed with a project `Protocol` that declares the method is judged by the
 protocol's declaration (`h._helper()` with `h: Host` calls `Host._helper`), not by the
@@ -4146,11 +4202,13 @@ Its premises:
   copies and displays, an argument, a store, a `return`, a `yield`, or a `raise`. Open: a value
   merged from several paths is enough. Whether the code it is handed to calls it is not part of
   the claim.
-- **Subclasses** (`references = "calls-and-bases"`): the class statement's declaration resolves
-  a base to the target class. Established from the declarations. Whether the subclass is
-  constructed is not part of the claim.
+- **Subclasses** (`references = "calls-and-bases"`): the value the class statement passes as a
+  base is the target class, typed where the statement runs. Established: a base heki cannot type
+  (a parameter, a call's result, a value merged from paths that disagree) is no match. Whether
+  the subclass is constructed is not part of the claim.
 - **Arguments** (a target with an argument list): the call binds each parameter the list names to
-  its constant. Established: an argument heki cannot tell is no match.
+  its constant, as Python binds the call. Established: an argument heki cannot tell is no match,
+  and a call that raises `TypeError` instead of running the function binds nothing.
 
 ## Why is this bad?
 Some operations keep invariants only when one component runs them: a store that updates its
@@ -4431,9 +4489,12 @@ count for a read.
     `importlib.util.find_spec` that imports a module of the project reads no environment: every
     text its name may hold names a project module (`"pkg.config"`, a module constant), or
     starts with a project package and a dot (`f"pkg.parser.{name}"`, `"pkg.parser." + name`),
-    a package whose `__init__` does not rebind `__path__`; a relative name is anchored at
-    `package` (a text, or the module's own `__package__` or `__name__`). Inside a `try` that
-    takes an `ImportError`, such a call still counts;
+    and the packages along the name lead the import to the project's module, or under the
+    package to the project's directories alone: a package whose `__path__` a module of the
+    project changes (`__path__.append(d)`, `pkgutil.extend_path`, `__path__ = [d]`), or whose
+    `__init__` heki cannot read, may lead it to an installed module. A relative name is
+    anchored at `package` (a text, or the module's own `__package__` or `__name__`). Inside a
+    `try` that takes an `ImportError`, such a call still counts;
   - `mutates-params`: mutating a parameter, its attributes, or its contents. For a method,
     parameter 0 is `self`, so a method writing `self.x` mutates a parameter.
 - `write-universe` with `allow-writes` states the writes a scope may make positively: a reached
@@ -4501,9 +4562,9 @@ Its premises:
   importing a module, open: the module is not established to be the project's. With
   `references = "calls"`, a target handed on is one for `calls`: the value is the target, and it
   reaches a use handing it on. Established; whether the code it is handed to calls it is not
-  part of the claim. With `"calls-and-bases"`, so is a class statement whose declaration
-  resolves a base to a class target; whether the subclass is constructed is not part of the
-  claim.
+  part of the claim. With `"calls-and-bases"`, so is a class statement passing a class target
+  as a base, typed where the statement runs; whether the subclass is constructed is not part of
+  the claim.
 
 ## Why is this bad?
 Some parts of a code base promise to be pure: rendering a model must not mutate it, domain code

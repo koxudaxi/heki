@@ -355,3 +355,513 @@ fn an_argument_list_heki_cannot_read_is_a_configuration_error() {
         );
     }
 }
+
+const SIGNATURES: &str = r#"def po_kw(kind=False, /, **kwargs):
+    return kind
+
+
+def po(kind=False, /):
+    return kind
+
+
+def ko(x=None, *, kind=False):
+    return kind
+
+
+def ko_strict(*, kind=False):
+    return kind
+
+
+def ko_args(*args, kind=False):
+    return kind
+
+
+def plain(kind=False):
+    return kind
+
+
+def opts(**options):
+    return options
+
+
+def va(*kind, **kw):
+    return kind
+
+
+def vk(**kind):
+    return kind
+
+
+class Box:
+    def __init__(self, kind=False, /, **kw):
+        self.kind = kind
+
+    def put(self, kind=False, /, **kw):
+        return kind
+
+    def take(self, kind=False):
+        return kind
+
+    @staticmethod
+    def make(kind=False, /):
+        return kind
+"#;
+
+const BINDINGS: &str = r#"from pkg.sig import Box, ko, ko_args, ko_strict, opts, plain, po, po_kw, va, vk
+
+
+def keyword_of_positional_only():
+    po_kw(kind=True)
+
+
+def position_of_positional_only():
+    po_kw(True, kind=False)
+
+
+def positional_only_without_kwargs():
+    po(kind=True)
+    po(True)
+
+
+def keyword_only():
+    ko(kind=True)
+    ko(True)
+    ko_strict(True)
+    ko_args(True)
+
+
+def raising():
+    plain(False, kind=True)
+    plain(kind=True, other=1)
+
+
+def into_kwargs():
+    opts(kind=True)
+    va(kind=True)
+    vk(kind=True)
+
+
+def receivers(b: Box):
+    b.put(True)
+    b.put(kind=True)
+    b.make(True)
+    Box(True)
+    Box(kind=True)
+    Box.take(b, True)
+    b.take(False, kind=True)
+
+
+def unpacking(args, kw):
+    plain(*args, kind=True)
+    plain(kind=True, **kw)
+    plain(*args)
+    plain(**kw)
+"#;
+
+#[test]
+fn a_keyword_binds_a_parameter_only_where_python_binds_it() {
+    let names = "po_kw po ko ko_strict ko_args plain opts va vk Box Box.put Box.take Box.make";
+    let targets = |value: &str| {
+        let texts: Vec<String> = names
+            .split(' ')
+            .map(|n| format!("\"{n}(kind={value})\""))
+            .collect();
+        texts.join(", ")
+    };
+    let p = Project::new("call_target_arguments_bindings");
+    p.write(
+        "pyproject.toml",
+        &format!(
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT204\", \"EFF201\"]\n\n[[tool.heki.call-owners]]\nname = \"on\"\ntargets = [{}]\n\n[[tool.heki.call-owners]]\nname = \"off\"\ntargets = [{}]\n\n[[tool.heki.effect-boundaries]]\nname = \"pure\"\nscopes = [\"pkg.use.keyword_of_positional_only\"]\nforbid = [\"calls\"]\ncall-targets = [\"po_kw(kind=True)\", \"po_kw(kind=False)\"]\n",
+            targets("True"),
+            targets("False")
+        ),
+    )
+    .write("pkg/__init__.py", "")
+    .write("pkg/sig.py", SIGNATURES)
+    .write("pkg/use.py", BINDINGS);
+    let call = |line: u64, func: &str, target: &str, value: &str| {
+        let verb = if target == "Box" {
+            "constructs"
+        } else {
+            "calls"
+        };
+        let contract = if value == "True" { "on" } else { "off" };
+        report(
+            "pkg/use.py",
+            line,
+            5,
+            "MUT204",
+            &format!(
+                "`{func}` {verb} `{target}(kind={value})` outside the call owners of `{contract}`"
+            ),
+        )
+    };
+    let mut expected = vec![
+        // The keyword lands in `**kwargs`: `kind` keeps its default.
+        call(5, "keyword_of_positional_only", "po_kw", "False"),
+        report(
+            "pkg/use.py",
+            5,
+            5,
+            "EFF201",
+            "`keyword_of_positional_only` calls `po_kw(kind=False)`, which effect boundary `pure` forbids",
+        ),
+        // The position binds `kind`, the keyword lands in `**kwargs`.
+        call(9, "position_of_positional_only", "po_kw", "True"),
+        call(14, "positional_only_without_kwargs", "po", "True"),
+        call(18, "keyword_only", "ko", "True"),
+        call(19, "keyword_only", "ko", "False"),
+        call(21, "keyword_only", "ko_args", "False"),
+        // A keyword naming no parameter is one of `**kwargs`.
+        call(30, "into_kwargs", "opts", "True"),
+        call(36, "receivers", "Box.put", "True"),
+        call(37, "receivers", "Box.put", "False"),
+        call(38, "receivers", "Box.make", "True"),
+        call(39, "receivers", "Box", "True"),
+        call(40, "receivers", "Box", "False"),
+        call(41, "receivers", "Box.take", "True"),
+        call(46, "unpacking", "plain", "True"),
+        call(47, "unpacking", "plain", "True"),
+    ];
+    expected.sort();
+    // Nothing for the calls that raise `TypeError` (a keyword naming a positional-only parameter
+    // without `**kwargs`, a position past the parameters without `*args`, a parameter bound by
+    // a position and a keyword, a keyword naming no parameter without `**kwargs`), for a keyword
+    // landing in `**kwargs` beside `*args` or `**kwargs` of its name, and for an argument
+    // unpacking may pass.
+    assert_eq!(reports(&p), expected);
+}
+
+const SETTINGS: &str = r#"from typing import Final
+
+LIMIT = 0
+STRICT: Final = 3
+RATE = 0.5
+MOVED = 0
+TWICE = 0
+TWICE = 1
+"#;
+
+const CONSTANTS: &str = r#"from pkg.settings import LIMIT, MOVED, RATE, STRICT, TWICE
+from pkg.sig import levels
+
+FLAG = True
+TOGGLE = True
+
+
+def flip():
+    global TOGGLE
+    TOGGLE = False
+
+
+def own_constant():
+    levels(kind=FLAG)
+    levels(FLAG)
+
+
+def imported_constants():
+    levels(level=LIMIT)
+    levels(level=STRICT)
+
+
+def no_constants():
+    levels(level=MOVED)
+    levels(level=TWICE)
+    levels(kind=TOGGLE)
+    levels(level=RATE)
+    levels(level=FLAG)
+"#;
+
+#[test]
+fn a_module_constant_passes_its_value() {
+    let p = Project::new("call_target_arguments_constants");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT204\"]\n\n[[tool.heki.call-owners]]\nname = \"c\"\ntargets = [\"levels(kind=True)\", \"levels(kind=False)\", \"levels(level=0)\", \"levels(level=1)\", \"levels(level=3)\"]\n",
+    )
+    .write("pkg/__init__.py", "")
+    .write(
+        "pkg/sig.py",
+        "def levels(kind=None, level=None):\n    return level\n",
+    )
+    .write("pkg/settings.py", SETTINGS)
+    .write(
+        "pkg/rebind.py",
+        "from pkg import settings\n\n\ndef move():\n    settings.MOVED = 3\n",
+    )
+    .write("pkg/use.py", CONSTANTS);
+    let call = |line: u64, func: &str, target: &str| {
+        report(
+            "pkg/use.py",
+            line,
+            5,
+            "MUT204",
+            &format!("`{func}` calls `levels({target})` outside the call owners of `c`"),
+        )
+    };
+    // Not matched: a constant another module rebinds, one bound twice, one a function of its
+    // module rebinds, a float, and a boolean for an integer.
+    assert_eq!(
+        reports(&p),
+        vec![
+            call(14, "own_constant", "kind=True"),
+            call(15, "own_constant", "kind=True"),
+            call(19, "imported_constants", "level=0"),
+            call(20, "imported_constants", "level=3"),
+        ]
+    );
+}
+
+const REBINDING_FLIPPED: &str = r#"from pkg.settings import FLAG
+from pkg.sig import levels
+
+
+def flip():
+    global FLAG
+    FLAG = False
+
+
+def caller():
+    flip()
+    levels(kind=FLAG)
+"#;
+
+const REBINDING_TWICE: &str = r#"import os
+
+from pkg.settings import LIMIT
+from pkg.sig import levels
+
+if os.environ.get("X"):
+    LIMIT = 1
+
+
+def caller():
+    levels(level=LIMIT)
+"#;
+
+const REBINDING_DELETED: &str = r#"from pkg.settings import LIMIT
+from pkg.sig import levels
+
+
+def drop():
+    global LIMIT
+    del LIMIT
+
+
+def caller():
+    levels(level=LIMIT)
+"#;
+
+const REBINDING_STARRED: &str = r#"from pkg.settings import LIMIT
+from pkg.other import *
+from pkg.sig import levels
+
+
+def caller():
+    levels(level=LIMIT)
+"#;
+
+#[test]
+fn an_imported_constant_its_module_binds_again_passes_nothing() {
+    let user = |module: &str, name: &str, argument: &str| {
+        format!(
+            "from {module} import {name}\nfrom pkg.sig import levels\n\n\ndef caller():\n    levels({argument}={name})\n"
+        )
+    };
+    let p = Project::new("call_target_arguments_rebound_imports");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT204\"]\n\n[[tool.heki.call-owners]]\nname = \"c\"\ntargets = [\"levels(kind=True)\", \"levels(level=0)\"]\n",
+    )
+    .write("pkg/__init__.py", "")
+    .write(
+        "pkg/sig.py",
+        "def levels(kind=None, level=None):\n    return level\n",
+    )
+    .write("pkg/settings.py", "FLAG = True\nLIMIT = 0\n")
+    .write(
+        "pkg/other.py",
+        "LIMIT = 5\n\n\ndef bump():\n    global LIMIT\n    LIMIT = 6\n",
+    )
+    .write("pkg/flipped.py", REBINDING_FLIPPED)
+    .write("pkg/twice.py", REBINDING_TWICE)
+    .write("pkg/deleted.py", REBINDING_DELETED)
+    .write("pkg/starred.py", REBINDING_STARRED)
+    .write("pkg/kept.py", &user("pkg.settings", "LIMIT", "level"))
+    .write(
+        "pkg/relay/__init__.py",
+        "from pkg.settings import FLAG\n\n\ndef reset():\n    global FLAG\n    FLAG = False\n",
+    )
+    .write("pkg/relayed.py", &user("pkg.relay", "FLAG", "kind"))
+    .write("pkg/plain_relay/__init__.py", "from pkg.settings import FLAG\n")
+    .write("pkg/plain_relayed.py", &user("pkg.plain_relay", "FLAG", "kind"));
+    let call = |path: &str, target: &str| {
+        report(
+            path,
+            6,
+            5,
+            "MUT204",
+            &format!("`caller` calls `levels({target})` outside the call owners of `c`"),
+        )
+    };
+    // Not matched: a name the importing module binds again in a function (`global`), in a second
+    // module-level store, or deletes, one a star import may rebind, and one a module re-exporting
+    // it binds again. Another module binding a global of the same name of its own changes
+    // nothing here.
+    assert_eq!(
+        reports(&p),
+        vec![
+            call("pkg/kept.py", "level=0"),
+            call("pkg/plain_relayed.py", "kind=True"),
+        ]
+    );
+}
+
+const REQUIRED: &str = r#"def guarded(required, *, kind=True):
+    return required
+
+
+def keyed(*, need, kind=True):
+    return need
+
+
+class Box:
+    def check(*args, kind=False):
+        return args
+
+    def strict(*, kw):
+        return kw
+
+    def plain(self, x):
+        return x
+"#;
+
+const REQUIRED_USE: &str = r#"from pkg.sig import Box, guarded, keyed
+
+
+def missing(args):
+    guarded(kind=True)
+    guarded(1, kind=True)
+    guarded(required=1, kind=True)
+    keyed(kind=True)
+    keyed(need=1, kind=True)
+    guarded(*args, kind=True)
+
+
+def receivers(b: Box):
+    b.check(kind=True)
+    b.strict(kw=1)
+    b.plain(x=1)
+    b.plain(self=b, x=1)
+"#;
+
+#[test]
+fn a_call_leaving_a_parameter_unbound_passes_nothing() {
+    let p = Project::new("call_target_arguments_required");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT204\"]\n\n[[tool.heki.call-owners]]\nname = \"c\"\ntargets = [\"guarded(kind=True)\", \"keyed(kind=True)\", \"Box.check(kind=True)\", \"Box.strict(kw=1)\", \"Box.plain(x=1)\"]\n",
+    )
+    .write("pkg/__init__.py", "")
+    .write("pkg/sig.py", REQUIRED)
+    .write("pkg/use.py", REQUIRED_USE);
+    let call = |line: u64, func: &str, target: &str| {
+        report(
+            "pkg/use.py",
+            line,
+            5,
+            "MUT204",
+            &format!("`{func}` calls `{target}` outside the call owners of `c`"),
+        )
+    };
+    // Nothing for the calls that raise `TypeError`: a parameter without a default left unbound
+    // (positional or keyword-only), a receiver no positional parameter or `*args` takes, and a
+    // keyword naming the receiver's parameter. `*` unpacking may bind the parameter, and the
+    // receiver of a method taking only `*args` and keywords lands in `*args`.
+    assert_eq!(
+        reports(&p),
+        vec![
+            call(6, "missing", "guarded(kind=True)"),
+            call(7, "missing", "guarded(kind=True)"),
+            call(9, "missing", "keyed(kind=True)"),
+            call(10, "missing", "guarded(kind=True)"),
+            call(14, "receivers", "Box.check(kind=True)"),
+            call(16, "receivers", "Box.plain(x=1)"),
+        ]
+    );
+}
+
+const READ_FORMS: &str = r#"import pkg.settings as cfg
+from pkg import settings
+from pkg.sig import levels
+
+
+def by_attribute():
+    levels(kind=settings.FLAG)
+    levels(level=cfg.LIMIT)
+
+
+def by_local_import():
+    from pkg.settings import FLAG, LIMIT
+    levels(kind=FLAG)
+    levels(level=LIMIT)
+
+
+def rebound_elsewhere():
+    levels(level=settings.MOVED)
+
+
+class Holder:
+    FLAG = True
+
+    def __init__(self) -> None:
+        self.flag = True
+
+    def by_instance(self):
+        levels(kind=self.flag)
+
+
+def by_class():
+    levels(kind=Holder.FLAG)
+"#;
+
+#[test]
+fn a_module_constant_read_as_an_attribute_or_a_local_import_passes_its_value() {
+    let p = Project::new("call_target_arguments_read_forms");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT204\"]\n\n[[tool.heki.call-owners]]\nname = \"c\"\ntargets = [\"levels(kind=True)\", \"levels(level=0)\"]\n",
+    )
+    .write("pkg/__init__.py", "")
+    .write(
+        "pkg/sig.py",
+        "def levels(kind=None, level=None):\n    return level\n",
+    )
+    .write("pkg/settings.py", "FLAG = True\nLIMIT = 0\nMOVED = 0\n")
+    .write(
+        "pkg/mover.py",
+        "from pkg import settings\n\n\ndef move():\n    settings.MOVED = 5\n",
+    )
+    .write("pkg/use.py", READ_FORMS);
+    let call = |line: u64, func: &str, target: &str| {
+        report(
+            "pkg/use.py",
+            line,
+            5,
+            "MUT204",
+            &format!("`{func}` calls `levels({target})` outside the call owners of `c`"),
+        )
+    };
+    // Not matched: an attribute another module rebinds, and an attribute of a class or an
+    // instance (no module constant).
+    assert_eq!(
+        reports(&p),
+        vec![
+            call(7, "by_attribute", "kind=True"),
+            call(8, "by_attribute", "level=0"),
+            call(13, "by_local_import", "kind=True"),
+            call(14, "by_local_import", "level=0"),
+        ]
+    );
+}

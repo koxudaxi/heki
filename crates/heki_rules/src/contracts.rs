@@ -18,7 +18,7 @@ use crate::{
 use heki_effect::{ContractClass, Contracts, FuncKey, OptInFacts, TypedWrites};
 use heki_env::HekiConfig;
 use heki_kb::{EffectiveEcosystemKb, EnvironmentAccess};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::sync::{Arc, Mutex, PoisonError};
 
 /// The most `invalidation` contracts a configuration may declare (one bit each).
@@ -78,7 +78,7 @@ pub(crate) struct ConfigContracts {
     /// [`Contracts::references`] and [`Contracts::reference_bases`].
     references: References,
     /// [`Contracts::marked_params`].
-    marked_params: Vec<String>,
+    marked_params: FxHashSet<String>,
     external: ExternalNames,
 }
 
@@ -267,22 +267,19 @@ fn call_last_names<'t>(
 
 /// [`Contracts::marked_params`] of `config`. A bad argument list is left out: it is a
 /// configuration error of the rule of its contract, which parses it before it reports.
-fn marked_params(config: &HekiConfig) -> Vec<String> {
+fn marked_params(config: &HekiConfig) -> FxHashSet<String> {
     let calls = config.call_owners.iter().flat_map(|r| &r.targets);
     let boundaries = config
         .effect_boundaries
         .iter()
         .filter(|b| b.forbid.iter().any(|t| t == "calls"))
         .flat_map(|b| &b.call_targets);
-    let mut names: Vec<String> = calls
+    calls
         .chain(boundaries)
         .filter_map(|t| split_arguments(t, "call-targets").ok()?.1)
         .flatten()
         .map(|(name, _)| name)
-        .collect();
-    names.sort();
-    names.dedup();
-    names
+        .collect()
 }
 
 /// The patterns of the last dotted names of `targets` (`children` of `pkg.Reference.children`).
@@ -399,7 +396,7 @@ impl Contracts for ConfigContracts {
         self.references == References::CallsAndBases
     }
 
-    fn marked_params(&self) -> &[String] {
+    fn marked_params(&self) -> &FxHashSet<String> {
         &self.marked_params
     }
 }

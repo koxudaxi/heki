@@ -624,9 +624,11 @@ struct Engine<'e, 'a> {
     added: FxHashMap<VarId, (Elem, Elem)>,
     /// The facts of the closure cells of enclosing functions the function can read, by name.
     cells: FxHashMap<String, Fact>,
-    /// The closure cells the function binds, by name, with the variables it binds each to:
-    /// its parameters and the instructions naming them.
-    own_cells: FxHashMap<String, Vec<VarId>>,
+    /// The closure cells the function binds, by name.
+    own_cells: FxHashMap<String, OwnCell>,
+    /// The position of each variable binding one of those cells (the cell it is named after)
+    /// among the cell's variables.
+    bound_at: FxHashMap<VarId, usize>,
     nested_read: bool,
     changed: bool,
     /// A pass added items to a display.
@@ -642,6 +644,61 @@ struct Engine<'e, 'a> {
     /// and depth, while one block is entered: a condition reaches the same phi through many
     /// paths (a loop header's phi is an input of itself on each `continue`).
     implied_memo: RefCell<FxHashMap<(VarId, bool, BlockId, u8), Narrowed>>,
+}
+
+/// A closure cell the function binds.
+struct OwnCell {
+    /// The variables the function binds it to: its parameters and the instructions naming it.
+    vars: Vec<VarId>,
+    /// Their facts as bound, not as the `isinstance` checks of a block narrow them.
+    bound: BoundFacts,
+}
+
+/// Facts in a fixed order, joined pairwise up a balanced tree: a new fact for one of them updates
+/// the join in a step per level. A cell bound many times and read by a child scope created
+/// after each binding is then read without folding every binding again.
+struct BoundFacts {
+    /// The facts from `width` on, padded with unset ones; below `width`, the join of each node's
+    /// two children, the root at 1.
+    nodes: Vec<Fact>,
+    width: usize,
+    /// How many of the facts are unset.
+    unset: usize,
+}
+
+impl BoundFacts {
+    fn new(facts: Vec<Fact>) -> Self {
+        let width = facts.len().next_power_of_two();
+        let unset = facts.iter().filter(|f| **f == Fact::Unset).count();
+        let mut nodes = vec![Fact::Unset; width];
+        nodes.extend(facts);
+        nodes.resize(2 * width, Fact::Unset);
+        for node in (1..width).rev() {
+            nodes[node] = nodes[2 * node].join(&nodes[2 * node + 1]);
+        }
+        Self {
+            nodes,
+            width,
+            unset,
+        }
+    }
+
+    /// Replaces fact `i` with `fact`, which is set: a computed value never becomes unset again.
+    fn set(&mut self, i: usize, fact: Fact) {
+        let mut node = self.width + i;
+        if self.nodes[node] == Fact::Unset {
+            self.unset -= 1;
+        }
+        self.nodes[node] = fact;
+        while node > 1 {
+            node /= 2;
+            self.nodes[node] = self.nodes[2 * node].join(&self.nodes[2 * node + 1]);
+        }
+    }
+
+    fn joined(&self) -> &Fact {
+        &self.nodes[1]
+    }
 }
 
 /// The CFG facts `isinstance` narrowing needs, and the narrowed types at each block's entry
@@ -673,6 +730,7 @@ impl<'e, 'a> Engine<'e, 'a> {
             added: FxHashMap::default(),
             cells: seed.cells,
             own_cells: FxHashMap::default(),
+            bound_at: FxHashMap::default(),
             nested_read: false,
             changed: false,
             added_changed: false,
@@ -786,24 +844,34 @@ impl<'e, 'a> Engine<'e, 'a> {
         }
         // A cell holds every value the function binds to it: its parameter's, and those of the
         // instructions naming it (an unassigned read, `LoadName`, binds none).
-        for name in &f.captured_vars {
-            self.own_cells.insert(name.clone(), Vec::new());
-        }
-        if !self.own_cells.is_empty() {
+        let mut cell_vars: FxHashMap<&str, Vec<VarId>> = f
+            .captured_vars
+            .iter()
+            .map(|name| (name.as_str(), Vec::new()))
+            .collect();
+        if !cell_vars.is_empty() {
             self.nested_read = true;
             for p in &f.params {
-                if let Some(vars) = self.own_cells.get_mut(&p.name) {
+                if let Some(vars) = cell_vars.get_mut(p.name.as_str()) {
                     vars.push(p.var);
                 }
             }
             for inst in insts() {
                 if let Some(d) = inst.kind.dst()
                     && !matches!(inst.kind, InstKind::LoadName { .. })
-                    && let Some(vars) = f.var_name(d).and_then(|n| self.own_cells.get_mut(n))
+                    && let Some(vars) = f.var_name(d).and_then(|n| cell_vars.get_mut(n))
                 {
                     vars.push(d);
                 }
             }
+        }
+        for (name, vars) in cell_vars {
+            self.bound_at
+                .extend(vars.iter().enumerate().map(|(i, v)| (*v, i)));
+            let facts = vars.iter().map(|v| self.bound_fact(*v)).collect();
+            let bound = BoundFacts::new(facts);
+            self.own_cells
+                .insert(name.to_owned(), OwnCell { vars, bound });
         }
         for inst in f.blocks.iter().flat_map(|b| &b.insts) {
             match &inst.kind {
@@ -903,8 +971,9 @@ impl<'e, 'a> Engine<'e, 'a> {
         let cells = self
             .own_cells
             .iter()
-            .map(|(name, bound)| {
-                let fact = bound
+            .map(|(name, cell)| {
+                let fact = cell
+                    .vars
                     .iter()
                     .fold(Fact::Unset, |acc, v| acc.join(&facts[v.0 as usize]));
                 (name.clone(), fact)
@@ -962,17 +1031,32 @@ impl<'e, 'a> Engine<'e, 'a> {
             .collect()
     }
 
-    /// The fact of the cell `name` the function binds, from the values bound to it so far (as
-    /// bound, not as the `isinstance` checks of the current block narrow them): a binding not
-    /// computed yet adds none, and asks for another pass.
+    /// The fact of the cell `name` the function binds, from the values bound to it so far: a
+    /// binding not computed yet adds none, and asks for another pass.
     fn own_cell(&self, name: &str) -> Fact {
-        self.own_cells[name].iter().fold(Fact::Unset, |acc, v| {
-            let bound = to_fact(self.unnarrowed(*v));
-            if bound == Fact::Unset {
-                self.cells_deferred.set(true);
-            }
-            acc.join(&bound)
-        })
+        let bound = &self.own_cells[name].bound;
+        if bound.unset > 0 {
+            self.cells_deferred.set(true);
+        }
+        bound.joined().clone()
+    }
+
+    /// The fact of `var` as bound to the cell it is named after, not as the `isinstance` checks
+    /// of the current block narrow it.
+    fn bound_fact(&self, var: VarId) -> Fact {
+        to_fact(self.unnarrowed(var))
+    }
+
+    /// Hands the new fact of `var` to the cell it binds, if it binds one.
+    fn rebind(&mut self, var: VarId) {
+        let Some(&i) = self.bound_at.get(&var) else {
+            return;
+        };
+        let fact = self.bound_fact(var);
+        let cell = self.f.var_name(var).and_then(|n| self.own_cells.get_mut(n));
+        cell.expect("a variable binds the cell it is named after")
+            .bound
+            .set(i, fact);
     }
 
     /// What `type(value)` returns for a value of type `t`: a class object that is the class of
@@ -1163,6 +1247,7 @@ impl<'e, 'a> Engine<'e, 'a> {
         if joined != *slot {
             *slot = joined;
             self.changed = true;
+            self.rebind(var);
         }
     }
 
@@ -1216,14 +1301,15 @@ impl<'e, 'a> Engine<'e, 'a> {
             call.star_from,
             (index, keyword),
             |v| {
+                let name_of = |n| match self.need(n).ok().flatten()? {
+                    Ty::Ref(fqn) => Some(fqn.clone()),
+                    _ => None,
+                };
                 resolver::arg_fact(
                     |d| self.shape.inst(d),
                     class,
-                    |n| match self.need(n).ok().flatten()? {
-                        Ty::Ref(fqn) => Some(fqn.clone()),
-                        _ => None,
-                    },
-                    &|n| self.cx.global_literal(n),
+                    name_of,
+                    &|inst| self.cx.module_constant(inst, &name_of),
                     v,
                 )
             },

@@ -10,10 +10,12 @@ in one function is placed three ways (a function, a method, and a module body) a
 largest n whose function the IR budget still models: n doubles, then bisects, with
 `heki assumptions --json` telling a modeled function from an unmodeled one, so a change to the
 builder moves the size with it. A family spread over a project (a wide class hierarchy, a chain
-of private helpers, a chain of container subclasses) has a fixed size.
+of private helpers, a chain of container subclasses) has a fixed size, and so has a family in one
+function whose cost already shows at a smaller size, where the walks it does not gate stay cheap.
 
 Each shape is checked with every rule selected and one contract of each kind naming the classes
-and functions the shapes define, through `heki check` and through the `--watch` engine. The cost
+and functions the shapes define (a family may add contracts of its own, such as thousands of
+argument lists), through `heki check` and through the `--watch` engine. The cost
 is the wall time and the peak (the heap of the memory gate's counting build, or what the system
 reports, see `check_memory.py`) minus those of an empty module; the time limit is scaled to the
 machine by fixed linear shapes of calls and of loops.
@@ -325,6 +327,58 @@ def attribute_chain(n: int) -> Body:
     return Body(("p",), [*lines, f"return a{n}"])
 
 
+# The declared type of the cell families' names: a wide container, so that joining the values bound
+# to a cell costs more than the rest of the work per binding, and the families show a quadratic
+# join at a size where the walks they do not gate stay cheap.
+CELL_TYPE = f"dict[str, list[tuple[{', '.join(['Base'] * 16)}]]]"
+# The size of the cell families.
+CELL_BINDINGS = 1024
+
+
+def cell_reads(n: int) -> Body:
+    """Many assignments to one name of a declared container type, each followed by a generator
+    expression reading it: a closure cell bound many times and read by as many scopes."""
+    lines = [f"x: {CELL_TYPE} = g(0)"]
+    for i in range(n):
+        lines += [f"x = g({i})", "out.append(sum(1 for _ in xs if x))"]
+    return Body(("xs", "out"), lines)
+
+
+def cell_reads_of_several_names(n: int) -> Body:
+    """Assignments to four names in turn, each followed by a generator expression reading all
+    four."""
+    lines = [f"x{k}: {CELL_TYPE} = g({k})" for k in range(4)]
+    for i in range(n):
+        lines += [f"x{i % 4} = g({i})", "out.append(sum(1 for _ in xs if x0 and x1 and x2 and x3))"]
+    return Body(("xs", "out"), lines)
+
+
+def path_aliases(n: int) -> Body:
+    """Merges each joining the previous alias of a package's `__path__` and a new read of it,
+    each alias read."""
+    lines = ["p0 = requests.__path__"]
+    for i in range(1, n + 1):
+        lines += [f"p{i} = p{i - 1} if flag else requests.__path__", f"use(p{i}.count(x))"]
+    return Body(("flag", "x"), lines)
+
+
+def merged_package_paths(n: int) -> Body:
+    """Merges each joining the paths of the packages before them and a new package's path."""
+    lines = ["v0 = requests.p0.__path__"]
+    lines += [f"v{i} = v{i - 1} if flag else requests.p{i}.__path__" for i in range(1, n + 1)]
+    return Body(("flag",), [*lines, f"return len(v{n})"])
+
+
+def package_paths_merged_in_functions(n: int) -> str:
+    """Functions each merging the paths of `n` packages, the first one's reaching every merge."""
+    lines = []
+    for f in range(16):
+        lines += [f"def merge{f}(flag):", f"    v0 = requests.f{f}_0.__path__"]
+        lines += [f"    v{i} = v{i - 1} if flag else requests.f{f}_{i}.__path__" for i in range(1, n + 1)]
+        lines += [f"    return len(v{n})", ""]
+    return "\n".join(lines)
+
+
 def wide_hierarchy(n: int) -> str:
     """Many subclasses overriding one method, and as many functions calling it on the base."""
     lines = []
@@ -351,6 +405,36 @@ def helper_chain(n: int) -> str:
         lines += [f"def _h{i}(d):", f"    _h{i + 1}(d)", f"    _h{i + 1}(d)", ""]
     lines += [f"def _h{n}(d):", "    d.append(1)", "", "def entry(d):", "    _h0(d)", ""]
     return "\n".join(lines)
+
+
+# The functions `argument_marks` defines, each named by an argument list of `marked_targets`.
+MARKED_FUNCTIONS = 1000
+
+
+def argument_marks(n: int) -> str:
+    """Calls passing the constants of argument lists, and as many calls of a function of fifty
+    parameters that no list names, a hundred in each function."""
+    lines = []
+    for i in range(MARKED_FUNCTIONS):
+        lines += [f"def mark{i}(p{i}=False, q=None):", f"    return p{i}", ""]
+    params = ", ".join(f"b{j}=None" for j in range(50))
+    lines += [f"def wide(x, {params}):", "    return x", ""]
+    for f in range(n // 100):
+        lines.append(f"def call{f}(x):")
+        for k in range(100):
+            i = (f * 100 + k) % MARKED_FUNCTIONS
+            lines += [f"    mark{i}(p{i}=True)", "    wide(x)"]
+        lines.append("")
+    return "\n".join(lines)
+
+
+def marked_targets(n: int) -> str:
+    """A `call-owners` contract whose n targets each name a parameter of their own."""
+    targets = ", ".join(f'"m.mark{i}(p{i}=True)"' for i in range(n))
+    return (
+        f'\n[[call-owners]]\nname = "shape-marks"\ntargets = [{targets}]\n'
+        'forbidden-callers = ["m.call0"]\n'
+    )
 
 
 def container_subclass_chain(n: int) -> str:
@@ -397,10 +481,13 @@ class Family:
     body: Callable[[int], Body] | None = None
     project: Callable[[int], str] | None = None
     placements: tuple[str, ...] = PLACED
-    # The size of a project family.
+    # The size of a project family, or of a family in one function whose cost shows at a smaller
+    # size than the largest the IR budget models (0: that largest size).
     size: int = 0
     # Adversarial: its budgets may be spent.
     real_code: bool = True
+    # Contracts of its own, added to `CONTRACTS` for its runs.
+    contracts: Callable[[int], str] | None = None
 
 
 FAMILIES = [
@@ -421,12 +508,35 @@ FAMILIES = [
     Family("match_pass_through", match_pass_through),
     Family("with_statements", with_statements),
     Family("attribute_chain", attribute_chain),
+    # A module body's names are globals, not closure cells.
+    Family("cell_reads", cell_reads, placements=("function", "method"), size=CELL_BINDINGS),
+    Family(
+        "cell_reads_of_several_names",
+        cell_reads_of_several_names,
+        placements=("function", "method"),
+        size=CELL_BINDINGS,
+    ),
+    Family("path_aliases", path_aliases),
+    Family("merged_package_paths", merged_package_paths),
     Family("lazy_init_sites", lazy_init_sites, placements=("method",)),
     Family("wide_hierarchy", project=wide_hierarchy, placements=("project",), size=4000),
     Family("helper_chain", project=helper_chain, placements=("project",), size=2000),
     Family("callers_of_one_helper", project=callers_of_one_helper, placements=("project",), size=4000),
     Family(
+        "argument_marks",
+        project=argument_marks,
+        placements=("project",),
+        size=8000,
+        contracts=marked_targets,
+    ),
+    Family(
         "container_subclass_chain", project=container_subclass_chain, placements=("project",), size=1400
+    ),
+    Family(
+        "package_paths_merged_in_functions",
+        project=package_paths_merged_in_functions,
+        placements=("project",),
+        size=2000,
     ),
 ]
 
@@ -468,7 +578,11 @@ class Runner:
         codes = json.loads(self.run_text(["rule", "--all", "--output-format", "json"]))
         self.select = ",".join(rule["code"] for rule in codes)
         (root / "pyproject.toml").write_text('[project]\nname = "shapes"\n')
-        (root / "shapes.toml").write_text(CONTRACTS)
+        self.contracts("")
+
+    def contracts(self, extra: str) -> None:
+        """The contracts of the runs that follow: `CONTRACTS` and `extra`."""
+        (self.root / "shapes.toml").write_text(CONTRACTS + extra)
 
     def run_text(self, args: list[str]) -> str:
         done = subprocess.run([self.heki, *args], cwd=self.root, capture_output=True, text=True)
@@ -618,8 +732,13 @@ def main() -> int:
         print(f"time limit on this machine: {limit_seconds:.2f} s", flush=True)
         for family, placement in shapes:
             shape = (family.name, placement)
+            runner.contracts("" if family.contracts is None else family.contracts(family.size))
             if family.project is not None:
                 n, failed = family.size, None
+            elif family.size:
+                n = family.size
+                modeled = runner.modeled(source(family, placement, n))
+                failed = None if modeled is True else modeled or "leaves the function unmodeled"
             else:
                 n, failed = runner.largest_modeled(family, placement)
             text = source(family, placement, n)

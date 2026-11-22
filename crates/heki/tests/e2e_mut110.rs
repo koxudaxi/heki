@@ -588,6 +588,42 @@ fn mut110_does_not_follow_a_change_through_annotated_helpers() {
     assert!(diagnostics(&p, &[]).is_empty());
 }
 
+/// A positional argument binds a positional parameter only: past them it lands in `*args` (a new
+/// tuple holding it), or the call raises `TypeError`; it never binds a keyword-only parameter.
+const PAST_POSITIONALS: &str = r#"from collections.abc import Sequence
+
+
+def log(msg, *args, extra=None):
+    extra.append(msg)
+
+
+def tag(first, *rest, label=None):
+    first.append(1)
+    label.append(1)
+
+
+def strict(first, *, label=None):
+    label.append(1)
+
+
+def callers(a: Sequence[int], b: Sequence[int], c: Sequence[int], d: Sequence[int]) -> None:
+    log("x", a)
+    tag(b, c)
+    strict(1, d)
+"#;
+
+#[test]
+fn mut110_follows_a_position_only_into_the_parameter_it_binds() {
+    let p = Project::new("mut110_past_positionals");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/past.py", PAST_POSITIONALS);
+    // `b` binds `first`; `a` and `c` land in `*args`, and `d` makes the call raise.
+    assert_eq!(
+        found(&diagnostics(&p, &[])),
+        vec![d("pkg/past.py", 19, "callers", "b")]
+    );
+}
+
 /// A metaclass may install `reverse` (or `__iadd__`) on the subclass it creates, and
 /// `__getattribute__` decides what `xs.reverse` is: both leave the line open. An augmented
 /// assignment calls `__iadd__` without `__getattribute__`, so beside `__getattribute__` its line

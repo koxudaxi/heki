@@ -2910,3 +2910,88 @@ fn catalog_argument_cases_read_module_constants_bound_once() {
         ]
     );
 }
+
+/// A module constant imported by a module that binds the name again: in a function declaring it
+/// `global`, in a second module-level store, or by deleting it. The import no longer decides
+/// the value, so the call waits on it; another module binding a global of the same name of its
+/// own changes nothing.
+#[test]
+fn catalog_argument_cases_read_no_imported_constant_the_module_binds_again() {
+    let sleeps = |head: &str| {
+        format!(
+            "import time\n\nfrom app.settings import QUIET\n{head}\n\nasync def handler():\n    time.sleep(QUIET)\n"
+        )
+    };
+    let p = Project::new("cat_rebound_imports");
+    p.write("app/__init__.py", "")
+        .write("app/settings.py", SETTINGS)
+        .write(
+            "app/unrelated.py",
+            "QUIET = 3\n\n\ndef louder():\n    global QUIET\n    QUIET = 4\n",
+        )
+        .write(
+            "app/flips.py",
+            &sleeps("\n\ndef louder():\n    global QUIET\n    QUIET = 1\n"),
+        )
+        .write(
+            "app/twice.py",
+            &sleeps("import os\n\nif os.environ.get(\"X\"):\n    QUIET = 1\n"),
+        )
+        .write(
+            "app/deleted.py",
+            &sleeps("\n\ndef drop():\n    global QUIET\n    del QUIET\n"),
+        )
+        .write("app/kept.py", &sleeps(""));
+    let (code, stdout, stderr) = p.check(&["--output-format", "json", "--select", "EFF101"]);
+    assert!(code == 0 || code == 1, "{stdout}{stderr}");
+    let diags: Vec<Value> = serde_json::from_str(&stdout).unwrap();
+    let got: Vec<(String, String)> = diags
+        .iter()
+        .map(|d| {
+            (
+                d["path"].as_str().unwrap().to_owned(),
+                d["rule_code"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    let at = |path: &str| (path.to_owned(), "EFF101".to_owned());
+    assert_eq!(
+        got,
+        vec![at("app/deleted.py"), at("app/flips.py"), at("app/twice.py")]
+    );
+}
+
+/// A catalog case reads a module constant through the module object (`settings.QUIET`) and
+/// through a function's own import as it reads the name: a sleep of no time is no wait, one
+/// another module rebinds is, and a database name read as an attribute names its file.
+#[test]
+fn catalog_argument_cases_read_module_constants_as_attributes_and_local_imports() {
+    let p = Project::new("cat_constant_read_forms");
+    p.write("app/__init__.py", "")
+        .write("app/settings.py", SETTINGS)
+        .write("app/rebind.py", REBIND)
+        .write("app/names.py", "DB = \"data.db\"\nMEMORY = \":memory:\"\n")
+        .write(
+            "app/use.py",
+            "import sqlite3\nimport time\n\nfrom app import names, settings\n\n\nasync def by_attribute():\n    time.sleep(settings.QUIET)\n\n\nasync def by_local_import():\n    from app.settings import QUIET\n    time.sleep(QUIET)\n\n\nasync def rebound_elsewhere():\n    time.sleep(settings.SHARED)\n\n\nasync def file_database():\n    sqlite3.connect(names.DB)\n\n\nasync def memory_database():\n    sqlite3.connect(names.MEMORY)\n",
+        );
+    let (code, stdout, stderr) = p.check(&["--output-format", "json", "--select", "EFF101"]);
+    assert!(code == 0 || code == 1, "{stdout}{stderr}");
+    let diags: Vec<Value> = serde_json::from_str(&stdout).unwrap();
+    let got: Vec<(u64, String)> = diags
+        .iter()
+        .map(|d| {
+            (
+                d["line"].as_u64().unwrap(),
+                d["qualname"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            (17, "rebound_elsewhere".to_owned()),
+            (21, "file_database".to_owned()),
+        ]
+    );
+}

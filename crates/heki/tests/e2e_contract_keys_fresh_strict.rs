@@ -2062,6 +2062,136 @@ unresolved = "report"
     );
 }
 
+// A copy handed to a helper by a position past its positional parameters: the tuple `*args`
+// holds it, so the helper keeps it only by keeping that parameter, never through a keyword-only
+// parameter after `*args`.
+const PACKED: &str = r#"import copy
+
+REGISTRY: list[object] = []
+
+
+def _log(*objs: object) -> None:
+    print(*objs)
+
+
+def _keep_all(*objs: object) -> None:
+    REGISTRY.extend(objs)
+
+
+def _keep_label(first: object, *rest: object, label: object = None) -> None:
+    REGISTRY.append(label)
+
+
+def logged_second(obj) -> None:
+    dup = copy.copy(obj)
+    _log(1, dup)
+    dup.name = "x"
+
+
+def kept_second(obj) -> None:
+    dup = copy.copy(obj)
+    _keep_all(1, dup)
+    dup.name = "x"
+
+
+def beside_keyword_only(obj) -> None:
+    dup = copy.copy(obj)
+    _keep_label(1, dup)
+    dup.name = "x"
+"#;
+
+#[test]
+fn construction_through_arguments_star_args_holds() {
+    let p = Project::new("fresh_packed_arguments");
+    p.write(
+        "pyproject.toml",
+        r#"[project]
+name = "t"
+
+[tool.heki.lint]
+select = ["MUT201", "MUT205"]
+
+[[tool.heki.write-owners]]
+name = "store"
+targets = ["DataModelFieldBase.name"]
+allowed-writers = ["pkg.store.*"]
+unresolved = "report"
+"#,
+    )
+    .write("pkg/__init__.py", "")
+    .write("pkg/model.py", MODEL)
+    .write("pkg/packed.py", PACKED);
+    // Only the copy a helper keeps through `*objs` is written outside its construction.
+    assert_eq!(
+        found(&diagnostics(&p, &[])),
+        vec![d("pkg/packed.py", 27, "MUT205", "kept_second", "name")]
+    );
+}
+
+// A copy handed by keyword after `*` unpacking: the keyword binds its parameter exactly, so the
+// helper keeps the copy only by keeping that parameter; a position after the unpacking may bind
+// any parameter.
+const AFTER_UNPACKING: &str = r#"import copy
+
+REGISTRY: list[object] = []
+
+
+def _show(*rest: object, label: object = None) -> None:
+    print(label)
+
+
+def _keep_label(*rest: object, label: object = None) -> None:
+    REGISTRY.append(label)
+
+
+def shown(obj, extra: list[object]) -> None:
+    dup = copy.copy(obj)
+    _show(*extra, label=dup)
+    dup.name = "x"
+
+
+def kept(obj, extra: list[object]) -> None:
+    dup = copy.copy(obj)
+    _keep_label(*extra, label=dup)
+    dup.name = "x"
+
+
+def positional(obj, extra: list[object]) -> None:
+    dup = copy.copy(obj)
+    _show(*extra, dup)
+    dup.name = "x"
+"#;
+
+#[test]
+fn construction_through_a_keyword_after_unpacking() {
+    let p = Project::new("fresh_keyword_after_unpacking");
+    p.write(
+        "pyproject.toml",
+        r#"[project]
+name = "t"
+
+[tool.heki.lint]
+select = ["MUT201", "MUT205"]
+
+[[tool.heki.write-owners]]
+name = "store"
+targets = ["DataModelFieldBase.name"]
+allowed-writers = ["pkg.store.*"]
+unresolved = "report"
+"#,
+    )
+    .write("pkg/__init__.py", "")
+    .write("pkg/model.py", MODEL)
+    .write("pkg/after.py", AFTER_UNPACKING);
+    assert_eq!(
+        found(&diagnostics(&p, &[])),
+        vec![
+            d("pkg/after.py", 23, "MUT205", "kept", "name"),
+            d("pkg/after.py", 29, "MUT205", "positional", "name"),
+        ]
+    );
+}
+
 // ================================================== strict mode and entries: more shapes
 
 const STRICT_SHAPES: &str = r#"from pkg.model import DataModel, DataModelFieldBase
@@ -2558,6 +2688,28 @@ const GLOBALS_USES: &[(&str, &str, &str)] = &[
         "",
     ),
     ("read_items", "    return sorted(globals().items())", ""),
+    ("read_is", "    return globals() is value", ""),
+    (
+        "read_self_compared",
+        "    return globals() == globals()",
+        "",
+    ),
+    (
+        "read_module_level",
+        "    return None",
+        "SIZE = len(globals())\n",
+    ),
+    (
+        "read_local_elsewhere",
+        "    return len(globals())",
+        "def measure(len: int) -> int:\n    return len\n",
+    ),
+    (
+        "read_class_attribute",
+        "    return None",
+        "class Sized:\n    len = staticmethod(register)\n\n    \
+         def size(self) -> int:\n        return len(globals())\n",
+    ),
     (
         "write_item",
         "    globals()[name] = value\n    return None",
@@ -2590,12 +2742,47 @@ const GLOBALS_USES: &[(&str, &str, &str)] = &[
         "    found = globals()\n    found[name] = value\n    return None",
         "",
     ),
+    (
+        "write_own_len",
+        "    return len(globals())",
+        "def len(ns: dict) -> int:\n    ns[\"KEY\"] = \"other\"\n    return 0\n",
+    ),
+    (
+        "write_imported_len",
+        "    return len(globals())",
+        "from pkg.writer import len\n",
+    ),
+    (
+        "write_parameter_len",
+        "    def apply(len):\n        return len(globals())\n\n    return apply(register)",
+        "",
+    ),
+    (
+        "write_local_len",
+        "    len = register\n    return len(globals())",
+        "",
+    ),
+    ("write_index", "    return value[globals()]", ""),
+    ("write_contained", "    return globals() in value", ""),
+    ("write_compared", "    return value == globals()", ""),
+    ("write_sentinel", "    return iter(register, globals())", ""),
+    (
+        "write_own_globals",
+        "    globals()[name] = value\n    return None",
+        "def globals() -> dict:\n    return {}\n",
+    ),
 ];
 
-/// Reading the dict of module globals (`globals().get(name)`, `name in globals()`, iterating it)
-/// binds no name, so the module's constants still name keys;
-/// storing into it, deleting from it, a method changing it, or handing it on (also the builtin
-/// `globals` itself) may bind any name, even one declared `Final`.
+/// Reading the dict of module globals (`globals().get(name)`, `globals()[name]`, `name in
+/// globals()`, iterating it, `len(globals())` with the real builtin) binds no name, so the
+/// module's constants still name keys; storing into it, deleting from it, a method changing it,
+/// or handing it on may bind any name, even one declared `Final`. Handing it on includes the
+/// builtin `globals` itself, a call of a reading builtin's name that the module, an import, a
+/// parameter, or a local rebinds (`def len(ns)`; a class attribute does not rebind it for the
+/// methods), and a place where another object's method receives the dict: an index
+/// (`obj[globals()]`), a container tested (`globals() in obj`), a comparison (`obj ==
+/// globals()`), the sentinel of `iter`. A call of a function the module names `globals` may
+/// return the dict too.
 #[test]
 fn only_a_change_through_the_dict_of_module_globals_unfixes_its_constants() {
     let p = Project::new("keys_globals_uses");
@@ -2609,6 +2796,10 @@ fn only_a_change_through_the_dict_of_module_globals_unfixes_its_constants() {
     .write(
         "pkg/model.py",
         "class Node:\n    def __init__(self) -> None:\n        self.kind = \"a\"\n",
+    )
+    .write(
+        "pkg/writer.py",
+        "def len(ns: dict) -> int:\n    ns[\"KEY\"] = \"other\"\n    return 0\n",
     );
     for (module, body, tail) in GLOBALS_USES {
         p.write(

@@ -82,7 +82,7 @@ Compound expressions are flattened into **basic instructions in explicit left-to
 | Strings | `Convert(value, conversion)`, `Format(value, spec)`, `BuildString(parts)` | As CPython compiles an f-string: each replacement field, left to right, evaluates its value, converts it (`!s` / `!r` / `!a`, and `{x=}` without a specification: `Convert`, which runs `__str__` / `__repr__`), evaluates its format specification (an f-string of its own), and formats the result (`Format`: `format(value, spec)`, which runs `__format__`); each runs code of the value's class unless that is a builtin, and may raise. A field alone is the f-string's result (`__format__` may return a `str` subclass); any other f-string is a `BuildString` of its formatted fields, a new `str` that keeps none of them. A template string keeps its values unconverted and unformatted, as the tuple `Template.values`, formats its specifications' fields, and is otherwise opaque |
 | Attributes and items | `AttrLoad`, `AttrStore`, `AttrDelete`, `SubscriptLoad`, `SubscriptStore`, `SubscriptDelete` | Stores make the stored value `Shared`; `AttrDelete` recognizes `@cached_property` invalidation (`del self.prop`) and `MUT201` writes; subscripts keep constant keys and slice bounds; the slice object itself is the tuple `(lower, upper, step)` of its bounds (`None` where one is left out), since `__getitem__` may keep it |
 | Calls | `Call(callee, args, kwargs, is_awaited)`, `MethodCall(recv, method, args, kwargs, is_awaited)` | `is_awaited` separates awaited calls from synchronous ones (a coroutine awaited after it is made runs at its `await`, which the effect summary follows); `star_from` is the index of the first `*` argument, so arguments bind to parameters exactly up to it |
-| ContainerIteration and generators | `MakeIter(iterable)`, `IterNext(iter)`, `MakeGenExpr(outer_iter, captured)`, `MakeClosure(captured)` | `MakeIter` and `MakeGenExpr` bind a **derived reference** of `iterable` / `outer_iter` to an explicit SSA variable; `MakeClosure` holds every value the function or class object keeps: its cells (free variables of nested scopes at any depth, the iteration variables of inlined comprehensions, the names read by lazily evaluated annotation and type-parameter scopes), its defaults, eagerly evaluated annotations, and a class's bases and keywords (a `type` alias is a `MakeClosure` without a lowered body) |
+| ContainerIteration and generators | `MakeIter(iterable)`, `IterNext(iter)`, `MakeGenExpr(outer_iter, captured)`, `MakeClosure(captured)` | `MakeIter` and `MakeGenExpr` bind a **derived reference** of `iterable` / `outer_iter` to an explicit SSA variable; `MakeClosure` holds every value the function or class object keeps: its cells (free variables of nested scopes at any depth, the iteration variables of inlined comprehensions, the names read by lazily evaluated annotation and type-parameter scopes), its defaults, eagerly evaluated annotations, and a class's bases and keywords (`ModuleIr.class_bases` lists the bases among them; a `type` alias is a `MakeClosure` without a lowered body) |
 | Suspension | `Await`, `Yield`, `YieldFrom` | `Await` lets other tasks run (`Unique` stays unique), as do the implicit awaits of `async for` and `async with` (`InstKind::suspends`); `Yield` makes the yielded value `Shared` |
 | Context managers | `EnterWith(mgr, is_async)`, `ExitWith(mgr, is_async)` | Mark the region of a `with` / `async with` (the lock and transaction regions of `EFF106`) |
 | Exceptions | `CatchException(types)` | Starts an exception handler |
@@ -206,12 +206,12 @@ Compound expressions are flattened into **basic instructions in explicit left-to
     (`ModuleDecls.rebound_globals`, `ProjectDecls::changed_elsewhere`).
   - `NaturalLoop.len_caps` (`LenCap`) records `while len(x) < N` caps up to 4096
     (`LEN_CAP_MAX`); `LoopCarriedInfo.updates` lists the real updates of a loop-carried value.
-  - `IrFunction.starred` marks starred display elements, `BasicBlock.term_span` the source of a
-    block's terminator (blocker lines point at it), and `ModuleIr.constants`
-    (`ModuleConstants`) the module's constant integers, displays, strings, and tuples of
-    strings. A string constant, or a tuple of them, is one entry: its text (`strs` /
-    `str_tuples`, one `Arc<str>` per string the module writes, which aliases and items share),
-    whose length gives its display.
+  - `IrFunction.starred` marks starred display elements, `ModuleIr.class_bases` the bases a
+    class statement passes, `BasicBlock.term_span` the source of a block's terminator (blocker
+    lines point at it), and `ModuleIr.constants` (`ModuleConstants`) the module's constant
+    integers, displays, strings, and tuples of strings. A string constant, or a tuple of them,
+    is one entry: its text (`strs` / `str_tuples`, one `Arc<str>` per string the module writes,
+    which aliases and items share), whose length gives its display.
   - The Soundness lane reads these facts within one module only (`FnIndex`). The Advisory rules
     read other modules' small displays through the declarations (`ModuleDecls.small_globals`,
     `ClassDecl.attr_displays`), so the language server re-checks their users when they change.
@@ -499,7 +499,15 @@ same constant (`ProjectDecls::class_str_constant`). A `Final` name without `Clas
 `ClassDecl::dataclass`, or a class a `dataclass_transform` builds) is a field: no constant on an
 instance, and on a class object only where each class from it to the field's class keeps the
 default as its attribute (`Dataclass::Slots` and transform builds replace it). Each answer is
-kept until the indexes change; a recording that reads one again adds what computing it read. Contract-only facts
+kept until the indexes change; a recording that reads one again adds what computing it read.
+A module's import holds the constant of the imported module (a string, a number or boolean of
+`ModuleDecls::literal_constants`, a small display of `ModuleDecls::small_globals`) only where the
+module binds the name nowhere else (`ModuleDecls::fixed_import`): `ModuleDecls::rebound_imports`
+lists the imports it binds again (another module-level store, a store or `del` in a function
+declaring the name `global`), and all of them when a star import, `exec`, or `globals()` may
+rebind its names. `TypeCtx::global_literal` and `TypeCtx::global_str` read through it, and so do
+re-exports (`ProjectDecls::canonical_value`, which `literal_constant`, `str_constant`, and
+`small_global` follow). Contract-only facts
 (container entries and `WriteKind::ItemMut`, construction through `ArgOrigin::new_object` and
 `TypedFieldWriteSite::construction`, `unresolved_write_sites`) are computed only when
 `Contracts::ownership()` is true, that is when write-owners, read-owners, effect-boundaries, or
@@ -529,17 +537,33 @@ receiver, an operand, a subscript, a dict key, a closure's captures (defaults an
 evaluated annotations are not told apart, nor a class's bases and keywords), and a module
 binding a name to the value itself (an import, a module alias). With `references =
 "calls-and-bases"` (`Contracts::reference_bases`), the bases of a class statement are reference
-sites too (`CallSite::is_base`): one per base its declaration resolves to a project class,
-constructing that class, at the captured value naming it when the statement loads it there,
-else at the class statement. The class bodies a module runs add their references to the module
-body's (their other facts are not the module's). Like `call_sites`, they are local facts: the language server compares a function's references with
+sites too (`CallSite::is_base`): one per value the statement passes as a base
+(`ModuleIr::class_bases`) that is a project class, typed in the statement's block as any value
+is (a parameter or a local of the imported class's name is another value), constructing that
+class, at the base's load when the statement loads it, else at the class statement. The class
+bodies a module runs add their references to the module body's (their other facts are not the
+module's). Like `call_sites`, they are local facts: the language server compares a function's references with
 its call sites (`Workspace::caller_view`) and shows them in call chains.
 
 `CallSite.arguments` holds, only when a call target has an argument list
-(`Contracts::marked_params`), the constants the call passes for the parameters those lists name:
-by keyword, else by position or as a default decided by its class and truthiness for every
-callee the call binds (the parameter binding of the extraction), a keyword only for a class
-without a project `__init__`.
+(`Contracts::marked_params`), the constants the call passes for the parameters those lists name,
+those every callee the call may run agrees on: by keyword, by position, or as a default decided
+by its class and truthiness, as the parameter binding of the extraction binds them, a keyword
+only for a class without a project `__init__`. That binding (`BoundCallee::params`, and the rules'
+`bind_arguments`) follows Python's: a position binds the parameter of its slot only among the
+positional parameters (`FunctionDecl::positional_param`; one past them lands in `*args`, a new
+tuple, and binds no parameter, never a keyword-only one: only a hand-over asks whether the callee
+keeps `*args`, which holds it), and a keyword never binds a positional-only parameter
+(`FunctionDecl::keyword_param`; one binding no parameter is, for the argument lists, a parameter
+of its own name in `**kwargs`); the receiver is the first position. A callee the call raises
+`TypeError` for instead of running (`Bindings::raises`: a parameter bound twice, a keyword without
+`**kwargs`, a position past the parameters without `*args`, a parameter without a default left
+unbound where no unpacking may bind it, counted from `FunctionDecl::required_positional` and
+`required_keyword_only` in the work of the call's arguments) is passed nothing. The constants are
+literals, string constants (`TypeCtx::str_constant_with`), and modules' number and boolean
+constants (`TypeCtx::module_constant`: a module-level name, an import, or a module's attribute,
+`TypeCtx::global_read`, the reads catalog cases follow too). The marked names are looked up for the parameters a call binds, so
+the work per call is that of binding it, whatever the number of argument lists.
 
 `CallSite.returned` (whether the call's result may be returned, and how) is computed at
 extraction for every project call. `CallSite.flow` (the invalidation contracts announced after
@@ -1326,11 +1350,34 @@ deep = true   # changes to attributes and nested containers below are forbidden 
    (`ExternalAccess::imports_project_module`, no read of the environment): outside a `try`
    taking an `ImportError`, every text its `name` argument may hold (as for `EFF103`'s
    statements, `summary/statements.rs`, a `str` method changing the case or the blanks giving
-   none) names a project module, or starts with one and a dot whose longest project module is
-   a regular package that heki read and that rebinds no `__path__`
-   (`ProjectDecls::holds_modules_starting_with`); a relative name is anchored at the texts of
-   `package`, or at the module's own `__package__` or `__name__`. The project modules it looks
-   up are declaration reads, so a module created or deleted re-summarizes the function.
+   none) names a project module the packages along the name lead the import to first
+   (`ProjectDecls::holds_module`), or starts with a package and a dot under which the import
+   finds only project modules (`ProjectDecls::holds_modules_starting_with`): the packages along
+   the name lead it to the project's directories alone, and no package under it changes its
+   `__path__`; a relative name is anchored at the texts of `package`, or at the module's own
+   `__package__` or `__name__`. Where an import looks under a package
+   (`ProjectDecls::search_under`) follows the packages along the name from the project's
+   top-level names: a regular package of the project is found first, a directory without
+   `__init__.py` is a namespace package with its parent's order, and a package's `__path__`
+   changes it. What a module does to the `__path__` of its own package, or of one its imports
+   name, is a declaration fact (`ModuleDecls::path_changes`, a `PathChange` per package):
+   `Appended` for directories after the package's own (`append`, `extend`, `+=`, `__path__ +
+   ds`, `pkgutil.extend_path`, `pkg_resources.declare_namespace`), `Replaced` for any other
+   change or a use it does not follow (handing the list to a function other than a builtin
+   that only reads it and `pkgutil`'s readers, returning or storing it elsewhere). In each
+   function, the uses of the values holding a path (its loads and the values bound to it) are
+   joined over the values each reaches through copies, phis, and `+=` (a `Closure`, so a value
+   merging the paths of many packages is decided once); binding a value to a package's
+   `__path__` leaves that path as it is and shares the list with any other package the value
+   holds. A value bound to a path appends only when the value it adds to (`p + ds`,
+   `extend_path(p, ...)`) holds that path on every way it comes, back through copies, phis, and
+   `+=` (a second `Closure`). The walks of one function spend one budget; past it a package's
+   path counts as replaced. `ProjectDecls`
+   joins them per package with the packages heki could not read (`changed_paths`, sorted, so
+   the packages under a name are one range). The project modules and packages it looks up are
+   declaration reads (`DeclKeys::modules`, `DeclKeys::package_paths`; a change of a package's
+   path changes the key of each package above it), so a module created, deleted, or changing a
+   path re-summarizes the function.
    A module body's accesses include those of the class bodies it runs, as its reference sites
    do, when a scope names a module body (`Contracts::checks_module_bodies`) or reference sites
    are kept. Without such a boundary the map stays empty. The language server compares a
@@ -1466,7 +1513,8 @@ forbids; such an entry has no other fact), and
 `opaque_to_layer3` (reserved for Layer 3), and `cases`: what the call does instead when one
 argument (by position, the receiver not counted, or by keyword) is a given literal (an
 argument is the literal it is, or the one a module constant bound once holds:
-`TypeCtx::global_literal`, `ModuleDecls::str_constants` and `literal_constants`), a string
+`TypeCtx::global_literal`, `ModuleDecls::str_constants` and `literal_constants`, also imported
+unless the importing module binds the name again, `ModuleDecls::fixed_import`), a string
 literal with a given prefix, equal to one of given strings (`one_of`), containing one
 (`contains`), an IPv4 or IPv6 address (`numeric_address`), or not empty, a value established to
 name a file (`names_file`: a literal or module constant without an in-memory form, or a path

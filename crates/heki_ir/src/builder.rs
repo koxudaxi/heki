@@ -82,6 +82,7 @@ pub fn build_module_ir(
         class_by_span,
         lazy_import_names,
         functions: Vec::new(),
+        class_bases: Vec::new(),
         free_names: Vec::new(),
         lowered_at: FxHashMap::default(),
         loop_hints: Vec::new(),
@@ -124,12 +125,17 @@ pub fn build_module_ir(
         release_spare_capacity(f);
     }
     functions.shrink_to_fit();
+    let mut class_bases = ctx.class_bases;
+    // Nested functions finish before the functions holding them.
+    class_bases.sort_unstable_by_key(|&(function, _, _)| function);
+    class_bases.shrink_to_fit();
     ModuleIr {
         functions,
         module_fn,
         has_future_annotations: semantic.has_future_annotations,
         has_star_import: ctx.has_star_import,
         constants,
+        class_bases,
     }
 }
 
@@ -299,6 +305,8 @@ struct ModuleLowerer<'a> {
     class_by_span: FxHashMap<Span, (ClassId, String)>,
     lazy_import_names: FxHashSet<String>,
     functions: Vec<IrFunction>,
+    /// The class bases of every lowered function (`ModuleIr::class_bases`).
+    class_bases: Vec<(FunctionId, VarId, u32)>,
     /// The free variables of every lowered function, by `FunctionId` (sorted).
     free_names: Vec<Vec<String>>,
     /// The function lowered from each definition, by its span.
@@ -518,8 +526,13 @@ impl<'a> ModuleLowerer<'a> {
             }
         }
 
-        let ir_fn = builder.finish();
+        let (ir_fn, bases) = builder.finish();
         self.functions[fn_id.0 as usize] = ir_fn;
+        self.class_bases.extend(
+            bases
+                .into_iter()
+                .map(|(class, index)| (fn_id, class, index)),
+        );
         fn_id
     }
 }
@@ -642,6 +655,8 @@ struct FnBuilder<'m, 'a> {
     a1_hazards: Vec<A1Hazard>,
     /// `*x` operands of displays and calls (`IrFunction::starred`).
     starred: Vec<(VarId, u32)>,
+    /// The class bases of the function (`ModuleIr::class_bases`).
+    class_bases: Vec<(VarId, u32)>,
     /// `IrFunction::str_heads`.
     str_heads: Vec<(VarId, String)>,
     /// Local names bound by importing a frame-introspection function, with its kind.
@@ -723,6 +738,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             finished_hints: Vec::new(),
             a1_hazards: Vec::new(),
             starred: Vec::new(),
+            class_bases: Vec::new(),
             str_heads: Vec::new(),
             introspection_locals: FxHashMap::default(),
             comp_target_renames: Vec::new(),
@@ -1227,6 +1243,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 has_default: p.default.is_some(),
                 default: p.default.as_deref().and_then(literal_default),
                 kw_only: i >= positional,
+                pos_only: i < params.posonlyargs.len(),
                 is_vararg: false,
                 is_kwarg: false,
                 annotation,
@@ -1246,6 +1263,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 has_default: false,
                 default: None,
                 kw_only: false,
+                pos_only: false,
                 is_vararg: true,
                 is_kwarg: false,
                 annotation,
@@ -1265,6 +1283,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 has_default: false,
                 default: None,
                 kw_only: false,
+                pos_only: false,
                 is_vararg: false,
                 is_kwarg: true,
                 annotation,
@@ -1651,8 +1670,16 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         let mut captured_names = self.collect_child_captures(child_id);
         captured_names.extend(self.capture_type_param_reads(cls.type_params.as_deref()));
         let mut captured = self.read_captured_vars(&captured_names, span);
+        let first_base = captured.len();
         captured.extend(retained);
         let dst = self.fresh_var(Some(cls.name.to_string()));
+        if let Some(args) = &cls.arguments {
+            for (i, arg) in args.args.iter().enumerate() {
+                if !matches!(arg, Expr::Starred(_)) {
+                    self.class_bases.push((dst, (first_base + i) as u32));
+                }
+            }
+        }
         self.emit(
             InstKind::MakeClosure {
                 dst,
@@ -3818,6 +3845,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         self.finished_loops.clear();
         self.finished_hints.clear();
         self.starred.clear();
+        self.class_bases.clear();
         self.str_heads.clear();
         self.a1_hazards.push(A1Hazard {
             kind: crate::UNMODELED.to_owned(),
@@ -3829,7 +3857,8 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
     // Finalization: seal remaining blocks, apply trivial-Phi replacements,
     // and compute `LoopCarriedInfo` for every natural loop.
     // -------------------------------------------------------------------------
-    fn finish(mut self) -> IrFunction {
+    /// The function, and its class bases (`ModuleIr::class_bases`).
+    fn finish(mut self) -> (IrFunction, Vec<(VarId, u32)>) {
         if self.unmodeled {
             self.replace_body_with_opaque_call();
         }
@@ -3889,7 +3918,8 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             .loop_hints
             .push((self.id, std::mem::take(&mut self.finished_hints)));
 
-        IrFunction {
+        let class_bases = std::mem::take(&mut self.class_bases);
+        let f = IrFunction {
             id: self.id,
             name: self.name,
             qualname: self.qualname,
@@ -3913,7 +3943,8 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             is_module_body: self.is_module_body,
             is_class_body: self.is_class_body,
             passed_from: None,
-        }
+        };
+        (f, class_bases)
     }
 }
 
