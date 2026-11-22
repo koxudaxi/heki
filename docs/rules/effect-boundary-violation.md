@@ -71,8 +71,11 @@ count for a read.
     `__init__` heki cannot read, may lead it to an installed module. A relative name is
     anchored at `package` (a text, or the module's own `__package__` or `__name__`). Inside a
     `try` that takes an `ImportError`, such a call still counts;
-  - `mutates-params`: mutating a parameter, its attributes, or its contents. For a method,
-    parameter 0 is `self`, so a method writing `self.x` mutates a parameter.
+  - `mutates-params`: mutating a parameter, its attributes, or its contents, also an object it
+    holds as an item or an element (`p["k"].append(x)`, `for row in p: row.clear()`), directly
+    or through a shallow copy of it (`dict(p)["k"].append(x)`), unless the function gave that
+    item a new object first. For a method, parameter 0 is `self`, so a method writing `self.x`
+    mutates a parameter.
 - `write-universe` with `allow-writes` states the writes a scope may make positively: a reached
   write of a `write-universe` entry that no `allow-writes` entry names is reported, in every form
   `writes-targets` follows. `allow-writes` also exempts writes from `write-targets` in the same
