@@ -3054,3 +3054,254 @@ fn catalog_argument_cases_read_module_constants_as_attributes_and_local_imports(
         ]
     );
 }
+
+const ASYNC_DRIVERS_AND_DUCKDB: &str = r#"import asyncio
+
+import asyncpg
+import duckdb
+import redis
+import redis.asyncio as aioredis
+from asyncpg.pool import Pool
+from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorCollection
+
+
+async def tp_asyncpg_in_loops(dsn, ids):
+    for i in ids:
+        conn = await asyncpg.connect(dsn)
+        await conn.fetchrow("SELECT $1", i)
+    pool = await asyncpg.create_pool(dsn)
+    async with pool.acquire() as conn:
+        for i in ids:
+            await conn.execute("DELETE FROM t WHERE id = $1", i)
+    for i in ids:
+        await pool.fetchval("SELECT $1", i)
+
+
+async def tp_rows_of_a_query(pool: Pool):
+    for row in await pool.fetch("SELECT id FROM t"):
+        await pool.execute("DELETE FROM u WHERE t_id = $1", row["id"])
+
+
+async def tn_asyncpg(dsn, rows):
+    async with asyncpg.create_pool(dsn) as pool:
+        await pool.fetch("SELECT 1")
+        await asyncio.gather(pool.fetchval("SELECT 1"), pool.fetchval("SELECT 2"))
+        async with pool.acquire() as conn:
+            await conn.executemany("INSERT INTO t VALUES ($1)", rows)
+            await conn.copy_records_to_table("t", records=rows)
+
+
+async def tp_motor_in_loops(url, ids):
+    users = AsyncIOMotorClient(url)["app"]["users"]
+    for i in ids:
+        await users.find_one({"_id": i})
+    for i in ids:
+        await users.find({"_id": i}).sort("a").to_list(None)
+
+
+async def tn_motor(coll: AsyncIOMotorCollection, docs):
+    await coll.find_one({})
+    await coll.insert_many(docs)
+    async for doc in coll.find({}).sort("a"):
+        pass
+    for d in docs:
+        coll.find({"_id": d})
+        coll.aggregate([{"$match": d}])
+
+
+async def tp_redis_commands(r: redis.Redis, keys):
+    r.hincrby("h", "n", 1)
+    for k in keys:
+        await aioredis.Redis().xadd(k, {"a": 1})
+
+
+def tp_duckdb_in_loops(path, ids):
+    con = duckdb.connect(path)
+    for i in ids:
+        con.execute("SELECT ?", [i])
+        duckdb.connect()
+
+
+async def tn_duckdb_may_be_in_memory(path):
+    con = duckdb.connect(path)
+    con.execute("SELECT 1")
+    duckdb.connect().execute("SELECT 1").fetchall()
+"#;
+
+/// asyncpg and motor count their queries (a pool's included) and never block; a sync redis
+/// command blocks; a DuckDB statement is a query but, the database possibly in memory, no wait.
+#[test]
+fn async_drivers_count_their_queries_and_duckdb_waits_on_nothing_known() {
+    assert_eq!(
+        check(
+            "catalog_async_drivers",
+            "app/drivers.py",
+            ASYNC_DRIVERS_AND_DUCKDB,
+            RULES
+        ),
+        vec![
+            d(13, "EFF102", "tp_asyncpg_in_loops", "asyncpg.connect"),
+            d(
+                14,
+                "EFF103",
+                "tp_asyncpg_in_loops",
+                "asyncpg.Connection.fetchrow"
+            ),
+            d(
+                18,
+                "EFF103",
+                "tp_asyncpg_in_loops",
+                "asyncpg.Connection.execute"
+            ),
+            d(20, "EFF103", "tp_asyncpg_in_loops", "asyncpg.Pool.fetchval"),
+            // The rows of a query are as many as the database holds.
+            d(
+                25,
+                "EFF103",
+                "tp_rows_of_a_query",
+                "asyncpg.pool.Pool.execute"
+            ),
+            d(
+                40,
+                "EFF103",
+                "tp_motor_in_loops",
+                "motor.motor_asyncio.AsyncIOMotorCollection.find_one"
+            ),
+            d(
+                42,
+                "EFF103",
+                "tp_motor_in_loops",
+                "motor.motor_asyncio.AsyncIOMotorCursor.to_list"
+            ),
+            d(56, "EFF101", "tp_redis_commands", "redis.Redis.hincrby"),
+            d(58, "EFF102", "tp_redis_commands", "redis.asyncio.Redis"),
+            d(
+                58,
+                "EFF103",
+                "tp_redis_commands",
+                "redis.asyncio.Redis.xadd"
+            ),
+            d(
+                64,
+                "EFF103",
+                "tp_duckdb_in_loops",
+                "duckdb.DuckDBPyConnection.execute"
+            ),
+            d(65, "EFF102", "tp_duckdb_in_loops", "duckdb.connect"),
+        ]
+    );
+}
+
+const API_CLIENTS_AND_DATA: &str = r#"import io
+
+import anthropic
+import celery
+import openai
+import polars as pl
+import torch
+from celery import Celery
+from google import genai
+
+app = Celery("proj")
+
+
+async def tp_celery(task: celery.Task):
+    app.send_task("proj.add", args=(1, 2))
+    task.delay(1, 2)
+
+
+def tp_clients_in_loops(prompts):
+    for p in prompts:
+        openai.OpenAI()
+        anthropic.Anthropic()
+        genai.Client()
+
+
+async def tp_async_clients_in_loops(prompts):
+    for p in prompts:
+        openai.AsyncOpenAI()
+        anthropic.AsyncAnthropic()
+
+
+async def tn_clients_built_once(prompts):
+    client = openai.AsyncOpenAI()
+    sync = openai.OpenAI()
+    for p in prompts:
+        pass
+
+
+async def tp_polars(conn, path):
+    pl.read_database("SELECT 1", conn)
+    pl.read_csv("https://example.com/a.csv")
+    pl.read_parquet(path)
+
+
+async def tn_polars_in_memory(data: bytes):
+    pl.read_csv(io.BytesIO(data))
+    pl.scan_parquet("a.parquet")
+
+
+def tp_torch_accumulation(batches):
+    acc = torch.zeros(0)
+    for b in batches:
+        acc = torch.cat([acc, b])
+    return acc
+
+
+def tn_torch_concatenated_once(batches):
+    out = []
+    for b in batches:
+        out.append(b)
+    return torch.cat(out)
+
+
+async def tp_torch_io(path, model):
+    torch.save(model.state_dict(), path)
+    torch.load(path)
+
+
+async def tn_torch_buffers(model):
+    buf = io.BytesIO()
+    torch.save(model.state_dict(), buf)
+    torch.load(io.BytesIO(buf.getvalue()))
+"#;
+
+/// Celery publishes to its broker; LLM API clients build a connection pool each; polars and
+/// torch read and write files, polars downloads URLs and runs queries, and `torch.cat`
+/// reallocates its accumulator.
+#[test]
+fn api_clients_task_queues_and_data_libraries() {
+    assert_eq!(
+        check(
+            "catalog_api_clients",
+            "app/apis.py",
+            API_CLIENTS_AND_DATA,
+            "EFF101,EFF111,EFF102,EFF103,EFF113,EFF105,DATA101"
+        ),
+        vec![
+            d(15, "EFF101", "tp_celery", "celery.Celery.send_task"),
+            d(16, "EFF101", "tp_celery", "celery.Task.delay"),
+            d(21, "EFF102", "tp_clients_in_loops", "openai.OpenAI"),
+            d(22, "EFF102", "tp_clients_in_loops", "anthropic.Anthropic"),
+            d(23, "EFF102", "tp_clients_in_loops", "google.genai.Client"),
+            d(
+                28,
+                "EFF102",
+                "tp_async_clients_in_loops",
+                "openai.AsyncOpenAI"
+            ),
+            d(
+                29,
+                "EFF102",
+                "tp_async_clients_in_loops",
+                "anthropic.AsyncAnthropic"
+            ),
+            d(40, "EFF101", "tp_polars", "polars.read_database"),
+            d(41, "EFF101", "tp_polars", "polars.read_csv"),
+            d(42, "EFF105", "tp_polars", "polars.read_parquet"),
+            d(53, "DATA101", "tp_torch_accumulation", "acc"),
+            d(65, "EFF105", "tp_torch_io", "torch.save"),
+            d(66, "EFF105", "tp_torch_io", "torch.load"),
+        ]
+    );
+}
