@@ -5,6 +5,392 @@ All notable changes to heki are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). heki is experimental: until 1.0, any
 release can change rules, configuration keys, diagnostics, and output formats.
 
+## [0.2.2] - Unreleased
+
+### Added
+
+- `heki check --generate-prompt [QUESTION]` (experimental) prints a prompt for consulting a
+  language model about the run, from the analysis `heki check` runs with the same options: the
+  effective configuration (the project root, the configuration file, the target version, the
+  source roots, the rule selection, the baseline, and the declared contracts as TOML), the rules
+  that apply with their code, name, certainty, activation, and what a report states, the run's
+  diagnostics in the `concise` form (up to 16 KiB of lines, with a note counting the rest, and the
+  files heki could not analyze), the question, and how to answer (fix at the root cause, do not
+  suppress, check heuristic reports, rely on proven fixes, how a contract is written). With
+  `--output-format json` it prints the same content as one versioned object, whose JSON Schema
+  the new `heki check --output-format-json-schema generate-prompt` prints. It writes no file and
+  exits with 0 once the prompt is printed; it cannot be combined with `--fix`, `--diff`,
+  `--watch`, `--update-baseline`, `--profile`, or `--include-size-dependent`. A word after the
+  option is the question, so paths go before it.
+- `heki recommend [PATHS]` (experimental): advice on the configuration of a project, with counts
+  from the analysis `heki check` runs on it, and the `[tool.heki]` keys to add. It takes
+  `heki check`'s analysis options (`--select`, `--extend-select`, `--ignore`, `--heuristic`,
+  `--config`, `--target-version`, `--baseline`) and prints what `heki check` shows with them
+  (exact and heuristic reports, the heuristic reports and rules `lint.heuristic` leaves out, and
+  with a baseline the allowed reports and the regressions), the rules worth enabling, a note when
+  the paths given leave Python files below the project root out, and the keys to add for the
+  file the project reads its configuration from. The rules worth enabling are every rule the
+  configuration leaves off, and every exact rule whose heuristic reports it withholds, each with
+  the reports naming it would add on the project, its consequence, and the published measurement
+  of how often its reports are right (or "not measured"). Its block enables a rule in
+  `lint.extend-select` when the rule reports there, is not experimental, reports bugs, and no
+  published measurement puts its share of real harm below 10%; the other rules are listed with
+  the reason they stay out. `--output-format json` prints one object, whose JSON Schema
+  `heki recommend --output-format-json-schema` prints and the documentation publishes. It
+  writes no file, and exits with 0, or 2 for configuration, I/O, or syntax errors. See
+  Configuration Advice in the documentation.
+- An Agent Skill for coding agents (experimental), at `skills/heki/` in the repository: it
+  teaches an agent to run `heki inspect` before editing a function and `heki check --output-format
+  json` after the edit, to follow `related` to the root cause and read `heki rule <CODE>`, to treat
+  heuristic reports as possibly wrong, to apply only the fixes heki proves safe, and to use
+  `heki check --generate-prompt` when unsure. Claude Code installs it from the repository's
+  marketplace (`claude plugin marketplace add koxudaxi/heki`, then
+  `claude plugin install heki@heki`), Codex and other agents with
+  `gh skill install koxudaxi/heki heki --agent <agent>` or `npx skills add koxudaxi/heki`, or by
+  copying the directory; the Coding Agents page documents each way.
+- A pre-commit hook in heki's own repository: `repo: https://github.com/koxudaxi/heki` with a
+  `rev` and `id: heki` runs `heki check` on the whole project. On its first run, pre-commit builds
+  heki from that release's source with cargo (Rust 1.99 or newer; when cargo is missing, the
+  build installs Rust into a cache directory first). The `uvx heki check` local hook stays the
+  alternative that runs the PyPI wheel and needs no compile.
+- `heki rule --output-format json` lists the premises of each exact rule's claim, with what each
+  states and where heki decides it (`premises`, empty for a rule without an exact claim). The
+  rule pages list the same premises under "What a report states".
+- `own-receiver` on `[[tool.heki.write-owners]]`, `[[tool.heki.read-owners]]`, and
+  `[[tool.heki.call-owners]]`: `"report"` (default, the behaviour so far) or `"allow"`. With
+  `"allow"`, an access through the receiver of the method it is judged in is allowed: the
+  function reported (with `attribution = "lexical"`, the function holding the access) is a method
+  that is no static method, and the object the member is looked up on may be its first parameter
+  (`self._cache[k] = v`, `self._seen`, `cls._kind()`, `super()._label()`, `self._norm(x)` of a
+  static method, `Resolver._label(self)`, `setattr(self, name, v)`), also for a member the class
+  inherits. Another parameter, an attribute of the receiver, a static method called through its
+  class, the parameter of a static method or of a function, and a nested `def`, lambda, or
+  comprehension using the enclosing method's `self` stay reported. A layer rule such as "a module
+  reaches a private member of another layer only through its own receiver" needs no list of
+  methods.
+- `allowed-protocols` on `[[tool.heki.write-owners]]`, `[[tool.heki.read-owners]]`, and
+  `[[tool.heki.call-owners]]`: project protocols, as class patterns (their subclasses included).
+  A read, call, or write through a value typed with a protocol the key names that declares the
+  member, itself or through its protocol bases, is allowed wherever it is judged:
+  `allowed-protocols = ["*Host"]` allows `parser._flag` with `parser: RenderHost` and
+  `class RenderHost(RuntimeFlags, Protocol)` when `RuntimeFlags` declares `_flag`, also a write
+  (for the protocol's member and each implementation's attribute), one a private helper makes, and
+  a reference `references` counts (`return h._helper`), while the same access through
+  `flags: RuntimeFlags`, through the implementation's class, or through a protocol that does not
+  declare the member stays reported.
+- `unlisted-dict-keys` on `[[tool.heki.write-owners]]`: `"ignore"` (default, the behaviour so far)
+  or `"report"`. With `"report"`, `MUT201` also reports a constant key written through the
+  namespace of an object of a class a target covers (`field.__dict__[KEY] = v`,
+  `field.__dict__.setdefault("_name_cache", v)`, `del vars(field)["k"]`) when no target covering
+  that class names the key: "writes `pkg.model.Field._type_cache` (dict_direct), a `__dict__` key
+  no target names". A new cache key on a guarded class then needs a target first. A target names
+  the keys its attribute pattern matches, and an entry target names its container; the contract's
+  allowed writers, exempt methods, own initialization, `fresh-objects`, and `attribution` apply as
+  to a target write. A key computed at run time, a plain attribute store, and a write in a helper
+  that does not see the object's class are not reported this way.
+- `references = "reads"` on `call-owners` and on effect boundaries (`calls`): what
+  `"calls-and-bases"` counts, and every other use of a target's value, reported as "`build` reads
+  `pkg.core.Keys`": the object of an attribute access and a method's receiver (`Keys.of(names)`,
+  `Keys.__annotations__`, `Code.OK`), an argument of a call that only names it (`isinstance(value,
+  Keys)`, `cast(Keys, x)`), a subscript or its index (`Pair: TypeAlias = tuple[Keys, int]`), an
+  operand (`f is decide`), a tested condition, an iterated, awaited, formatted, or `with` value, a
+  dict display's key, the class of a class pattern (`case Keys():`), the types of an `except` clause
+  an exception may reach, a decorator, a default of a function or lambda, a keyword of a class
+  statement, and the cause of `raise ... from`, also through copies and the displays holding it. An
+  annotation, evaluated or not (and a `type` statement's value), an import, a name bound to the
+  target by itself (`Alias = Keys`), and a value nothing uses are no read; a load handing a target
+  on stays a hand-on, and a read is matched as a construction is. The other values report as
+  before.
+
+### Changed
+
+- `MUT201`, `MUT203`, `MUT204`: an access matching several targets of one contract is reported
+  once, naming the others. A write on an instance of a subclass matching a target on the class and
+  one on the subclass, or a write through a protocol matching the protocol's member and the
+  implementation's attribute, was one report per target; it is now one report of the contract,
+  under the target configured first, with the others listed in its message (`(also
+  `pkg.parser._flags.RuntimeFlags._flag`)`). Accesses of different targets behind one call stay
+  one report each. This changes the default output of contracts whose targets overlap: fewer
+  reports, each naming the targets it stands for.
+- `heki rule --output-format json` prints each rule's published precision: `certification` (the
+  release that certified an exact rule, and the reports of its census and holdout run with the
+  false claims among them) and `measurement` (the latest round: the sample, its C / P / B / F
+  classes, the share right about the code with its 95% interval, and the share of real harm),
+  `null` when there is none. The tables of the Rule Precision page are written from the same
+  data.
+- Rule pages name each premise once: `DATA101`'s "On every iteration" is "Every iteration", as
+  on `EFF103`'s page, its loop-carried premise is "Loop-carried on every path", and the `OPT`
+  pages' "Builtin list", "Builtin set or dict", "Immutable type", and "Builtin container" are
+  "Builtin type by construction".
+- The Coding Agents page's typical instruction for an agent runs `heki check --output-format json`
+  (with `--heuristic` as an option) instead of always adding `--heuristic`, and ends with
+  `heki check --generate-prompt` for unclear cases.
+- `OPT120` / `OPT121` fixes reuse an existing `from collections import deque` or
+  `import collections` only when nothing else binds or deletes the name: an import that a
+  function deletes (`global deque; del deque`) is no longer reused (the fix adds
+  `import collections`), and in a module with a star import the rewrite is left to be made by
+  hand. Reports are unchanged. Choosing the import no longer walks the module body once per
+  block, so checking a module body with many loops is faster.
+
+### Fixed
+
+- Several analyses no longer take time quadratic in the size of their input, and their reports
+  are unchanged. The type inference hands a function's closure cells to the generator expressions
+  it creates (and to its comprehensions with a scope of their own, before Python 3.12) in time
+  linear in the cells' bindings. The iterables those scopes receive from the function creating
+  them are sized once per function, for the IR's loop bounds and for the rules that skip loops of
+  fixed size (`EFF102`, `EFF103`, `DATA101`, `OPT112`, `OPT113`), and several over the same value
+  are sized once. `MUT202`, `MUT114`, and `OPT112` look up the call site of each call, and the
+  facts a call runs where the object it returns is used, instead of scanning a module's calls.
+  Under an `invalidation` contract, the contracts announced after each project call and write,
+  and the next call after it, are looked up instead of scanned. `MUT203` and `MUT204` walk the
+  callers of a function once for the accesses they report at the same places (the generator
+  expressions of a function share one qualname, so each of their call sites is still reported for
+  the accesses of all of them). The constants that argument lists name are looked up from the
+  parameters each call binds, instead of comparing every parameter name of every argument list
+  with the parameters of every call's callees. The owner contracts decide once per function and
+  object whether an access only runs inside allowed functions or a class's own initialization,
+  instead of once per access: a public helper making a thousand accesses on its own `self`, run
+  by a thousand methods the initializer calls, took about two minutes and now takes a fraction of
+  a second.
+- A module that hands the dict `globals()` returns to code that may change it no longer keeps its
+  constants. A call of a function that the module, an import, a parameter, or a local binds to the
+  name of a reading builtin (`def len(ns): ns["KEY"] = "other"`, then `len(globals())`), the dict as
+  an index (`obj[globals()]`), as the left operand of `in` (`globals() in obj`), compared with
+  another object by `==`, `<`, or another rich comparison (`obj == globals()`), or as an argument
+  after the first of a reading builtin (`iter(f, globals())`) now leaves the module's names unfixed:
+  a `Final` key of such a module gives `MUT205` in `obj.__dict__[KEY]` instead of a `MUT201` naming
+  the attribute of its first value. Reading the dict with the real builtins (`len(globals())`,
+  `globals()[name]`, `name in globals()`, `globals() is obj`) still keeps them.
+- A module with a star import fixes none of the names the import may bind. A module-level name
+  bound before the import holds no constant, also one that starts with an underscore (the imported
+  module's `__all__` may list it), and no module-level name counts as bound once for the path
+  facts. The module's builtins are no longer taken for the real ones: the import may bind the name
+  of any builtin (`from numpy import *` binds `sum`, `min`, `max`, `any`, and `all`), heki does not
+  read which names the imported module exports, and a function may run after the import wherever
+  it stands. So, in such a module, `time.sleep(_PAUSE)` with `_PAUSE` bound before the import is
+  a wait for `EFF101`, and a `__dict__` key in such a name gives `MUT205` instead of a `MUT201`
+  naming the attribute; `len(globals())` may hand the dict of module globals to another `len`, so
+  the module's names are not fixed (a `Final` key in `obj.__dict__[KEY]` is a `MUT205` write, no
+  longer a `MUT201` one); and a size that rests on a builtin (`range(len(rows))`, `range(3)`,
+  `min` / `max` bounds, `len`, `sorted`, or `list` of a display) is not known: no exact report
+  claims it
+  (`EFF103` no longer says the loop runs once for each row), and the loop counts as data-sized for
+  the rules that report data-sized loops (`EFF113`, `OPT113`). In modules with a star import, the
+  default output can therefore show new `EFF101` reports and `MUT205` reports in place of `MUT201`
+  ones, and no longer shows the `EFF103` reports that rested on a builtin's size.
+- A name a module imports holds the constant of the imported module only where the module binds
+  the name nowhere else. An import the module binds again (in a function declaring it `global`,
+  in another module-level store, with `del`), or any import of a module whose star import,
+  `exec`, or `globals()` may rebind its names, is no constant there, also for the modules
+  re-exporting it. With `from settings import FLAG` and a `def flip(): global FLAG; FLAG = False`,
+  `levels(kind=FLAG)` no longer matches an argument list naming `kind=True` (`MUT204`, `EFF201`);
+  a catalog argument read from such a name is one the call waits on (`EFF101`: `time.sleep(PAUSE)`
+  after `global PAUSE; PAUSE = 1` in a function), a string key or name read from it is unknown
+  (`MUT201` reports such a forced write as `MUT205`), and a small display read from it is no
+  constant (`OPT113`). A global of the same name another module binds for itself changes nothing.
+  Existing code in such modules can get new `EFF101` and `OPT113` reports.
+- `reads-environment` effect boundaries (`EFF201`) follow the `__path__` of the packages an
+  `importlib.import_module` or `importlib.util.find_spec` call imports through. A name under a
+  package (`f"pkg.{name}"`) is the project's only while neither that package nor any package below
+  it has its `__path__` changed: `pkg/plugins/__init__.py` assigning `__path__` used to leave
+  `import_module(f"pkg.{name}")` unreported, although `name` may be `plugins.thirdparty`, an
+  installed module. heki follows what any module of the project does to a package's `__path__`,
+  its own or another's through an import. Directories added after the package's own
+  (`__path__.append(d)`, `extend`, `+=`, `__path__ + ds`, `pkgutil.extend_path`, also on
+  `__import__("pkgutil")`, and `pkg_resources.declare_namespace`) let installed modules answer the
+  names the package does not hold, so a name under the package is reported, while its own modules
+  (`import_module("pkg.plugins.builtin")`) are still found first. Any other change
+  (`__path__ = [d]`, `__path__.insert(0, d)`, a slice store, `del __path__`), handing the list to
+  a function other than a builtin that only reads it and `pkgutil.iter_modules`, `walk_packages`,
+  and `extend_path`, and a package heki cannot read make every import below the package a read of
+  the environment, its own modules included. Reading the path (`pkgutil.iter_modules(__path__)`,
+  iterating it, `__path__[0]`) changes nothing, and a regular package of the project, and its
+  modules, stay the project's below a package that only adds directories after its own. The
+  language server follows a package gaining or losing such a change, and a package with one
+  appearing below an imported name. Boundaries that forbid `reads-environment` can report imports
+  they passed before.
+- A class statement's bases are the values the statement passes where it runs, not the classes
+  the module imports under the same names. After `from pkg.core import Rule`, a class whose base
+  is a parameter, a local, a local bound on one path, an enclosing function's parameter, or a
+  class-body name of that name (`def factory(Rule): class Derived(Rule): ...`), or an attribute of
+  such a name (`core.Rule` with a parameter `core`), is no longer a subclass of `pkg.core.Rule`:
+  constructing it no longer gives `MUT204` "constructs `pkg.core.Rule`", a method it does not
+  define no longer resolves to `Rule`'s (`MUT204` "calls `Rule.check`", `EFF101` and `EFF111`
+  through a waiting call of `Rule`'s), its overrides no longer join the calls on a `Rule`
+  receiver, and with `references = "calls-and-bases"` it no longer gives `MUT204` or `EFF201`
+  "subclasses `pkg.core.Rule`". A base reached through a local alias of the import
+  (`Base = Rule`, then `class Derived(Base)`), an import in the function, a class-body alias, or a
+  name the class body binds only after the statement (which Python then reads from the module) is
+  now the class, and `references = "calls-and-bases"` also counts a base read from a closure cell
+  holding it. A module-level base whose name holds the class on one path and another class on
+  another (`try: from pkg.core import Base` / `except ImportError: Base = object`) no longer counts
+  for `"calls-and-bases"`, as a construction through that name does not. Projects with
+  `call-owners` contracts or effect boundaries can get new `MUT204` and `EFF201` reports for such
+  aliased bases, and lose the false ones above.
+- A base heki names no class for keeps its place in the class's MRO as a base heki knows nothing
+  of: a value its class statement's scope binds, an expression (`with_metaclass(Meta)`, `*bases`),
+  a module variable (`Base = declarative_base()`), and the bases of a class statement in a function
+  too large to model. A method or special method no project class along the MRO defines may come
+  from it, so a call of one is unresolved instead of one an instance lacks, `super().__new__(cls)`
+  is no plain allocation, and a union holding the class no longer drops it from a call it may
+  answer.
+- A value annotated `type[C]` or `typing.Type[C]` (a parameter, a local, an attribute, a module
+  global, a return or property annotation, the items of a container, also optional or quoted) is
+  the class object of `C` or of a subclass, as `cls` in a class method is: calling it constructs
+  `C`, a class method called on it runs `C`'s, and an attribute read through it reads `C`'s class
+  attribute. `MUT204` missed these constructions and calls (also for a target with an argument
+  list, `factory(is_dict=True)` with `factory: type[DataType]`) and now reports them; a class
+  object of a protocol, of `Any`, or of one of several classes is of no known class, as before.
+  `typing.Type[C]` of such a class is now of no known class too, as `type[C]` was.
+- Calling a property's value, `self.data_type(is_dict=True)`, runs the getter as reading the
+  property does and calls what the getter's return annotation says it returns, so a property
+  returning `type[DataType]` constructs `DataType` there and one returning an instance calls its
+  `__call__`. heki took such a call for a call of the getter with the call's arguments, so `MUT204`
+  missed it, and a target with an argument list never matched it.
+- `MUT203` (`read-owners`) and an effect boundary's `read-targets` see reads through a class
+  object, which read the class attribute: `DataType.HOLDS_MEMBERS`, `cls.HOLDS_MEMBERS` in a class
+  method, `type(data).HOLDS_MEMBERS`, and `model_type.HOLDS_MEMBERS` with `model_type:
+  type[DataType]`, also through `getattr`. Only reads through an instance were reported, so
+  contracts on class attributes can get new reports.
+- A call target with an argument list (`pkg.f(kind=True)`) reads a keyword as Python binds it: a
+  keyword naming a positional-only parameter no longer passes its value to that parameter. With
+  `def f(kind=False, /, **kwargs)`, `f(kind=True)` leaves `kind` false and puts `True` in
+  `kwargs`, so `MUT204` and `EFF201` no longer report it as a call of `f(kind=True)`, and report it
+  as one of `f(kind=False)`; `f(True, kind=False)` passes `True`. A call that raises `TypeError`
+  instead of running the function passes nothing: a parameter bound by a position (or the
+  receiver) and a keyword, a keyword naming no parameter of a function without `**kwargs`, a
+  position past the parameters of a function without `*args`, or a parameter without a default
+  left unbound (`guarded(kind=True)` with `def guarded(required, *, kind=True)`), unless `*` or
+  `**` unpacking may bind it. The receiver of a method call is its first position: with
+  `def check(*args, kind=False)` in a class, `obj.check(kind=True)` passes `kind=True` (the
+  receiver lands in `*args`), and a method taking no positional parameter and no `*args` raises.
+  A keyword naming no parameter of a function with `**kwargs` still passes its value under its
+  name, and a keyword never binds `*args` or `**kwargs` themselves. The rules that follow an
+  argument into the project function it is passed to (a parameter the function changes, consumes,
+  or tests against a constant) no longer bind such a keyword to a positional-only parameter or to
+  `*args` / `**kwargs` either.
+- An argument list matches a module's number or boolean constant bound once, as `EFF101` evaluates
+  them: with `FLAG = True` or `LIMIT = 0` in a module (also imported from another module, unless a
+  module rebinds it), `f(kind=FLAG)` passes `True` and `f(level=LIMIT)` passes `0`. It reads a
+  module's constants through every form of the read: a name the function imports itself
+  (`from settings import FLAG` inside it) and an attribute of the module (`settings.FLAG`,
+  `cfg.LIMIT`) pass their values as a module-level name does, under the same rules on rebinding.
+  The language server follows the constant's module changing it. `MUT204` and `EFF201` report the
+  calls passing such constants, which no argument list matched before.
+- A call target with an argument list (`"pkg.types.DataType(is_dict=True)"`), and an effect
+  boundary's `call-targets` entry with one, match a call passing the constant through a `**` dict
+  display with string constant keys that nothing changes: `DataType(**{"is_dict": True})`,
+  `flags = {"is_dict": True}` then `DataType(**flags)`. The display's entries bind as written
+  keywords bind, also into `**kwargs`, a parameter without a default, or a dataclass field. A call
+  naming one keyword twice (`DataType(is_dict=True, **{"is_dict": True})`, or in two displays)
+  raises `TypeError` and passes nothing; `MUT204` reported such a call. Any other `**` mapping (a
+  parameter, `dict(...)`, a display something changes, a display with a computed key) still passes
+  nothing it holds.
+- A positional argument binds only a positional parameter, as Python binds it: one past them lands
+  in `*args` (a new tuple holding it), or the call raises `TypeError`, and binds no parameter of
+  the function. With `def log(msg, *args, extra=None)`, `log("x", items)` no longer binds `items`
+  to `extra` (a false `MUT110` when `log` changes `extra`), and with `def drain(*its)` iterating
+  `its`, `drain(gen)` no longer consumes `gen` (a false `MUT106`). The rules that follow an
+  argument into the project function it is passed to all bind positions this way. Whether the
+  function keeps such an argument is what it does with `*args`, which holds it: a copy handed to a
+  helper's `*objs` in a second position is no longer taken to be under construction when the
+  helper keeps the tuple (`MUT201` / `MUT205` missed the write after it, and now report it), and
+  one handed beside a keyword-only parameter is judged by `*args`, not by that parameter. A copy
+  handed by keyword after `*` unpacking (`show(*extra, label=dup)`) is bound to its parameter
+  exactly: a helper that does not keep that parameter no longer makes the copy leave its
+  construction (a false `MUT205` / `MUT201`).
+- With `references = "calls"` (or `"calls-and-bases"`) on `call-owners` and on the `calls` token of
+  effect boundaries, a scope nested in a function hands on what the function binds to a name it
+  reads: a class body (`class Config: options = staticmethod(Options)` after `from pkg.core import
+  Options` in the function), a nested function, a lambda, a generator expression, and a
+  comprehension with a scope of its own (before Python 3.12), also inside a class body. `MUT204`
+  and `EFF201` missed these references and now report them at the name the nested scope reads, as
+  a module import read there already was.
+- A write through an alias of a guarded attribute is followed into the scopes nested in the
+  function binding it: `extras = field.extras` and then `def inner(): extras["a"] = 1`,
+  `lambda: extras.setdefault("b", 2)`, a comprehension or generator expression with a scope of its
+  own, at any depth, is a `MUT201` write of `Field.extras`, as the same write in the function is.
+  An alias of an entry of the attribute's container (`entry = field.meta["k"]`) is one too, and,
+  with `unresolved = "report"`, an alias of an attribute of an object of unknown class is a
+  `MUT205` write. A variable a nested scope rebinds (`nonlocal`), or one the function binds to two
+  different attributes, holds no alias. `write-owners` contracts can report these writes, which
+  they missed.
+- `vars(obj)` (the builtin, not a name shadowing it) is `obj.__dict__`, and `|=` updates either in
+  place. `vars(field)[KEY] = 1`, `vars(field).setdefault("required", v)`, `del vars(field)[KEY]`,
+  and a local alias of the namespace are `MUT201` writes of the attribute they name;
+  `vars(field).update(...)` and `field.__dict__ |= {...}` (also through `vars` or an alias) are
+  `MUT205` writes of a name heki cannot tell, as `field.__dict__.update(...)` is. Reads through
+  `vars(obj)` are reads (`MUT203`, `MUT206`, `MUT111`, `reads-targets` boundaries), and
+  `vars(self).pop("prop", None)` invalidates a cached property for `MUT101`, as
+  `self.__dict__.pop("prop", None)` does. An object the function constructs stays under
+  construction when it is handed to `vars`, and rebinding an attribute of a shallow copy through
+  `vars(copy)` or `copy.__dict__ |= ...` makes it the copy's own, so changing it no longer changes
+  the original (`MUT114`, `MUT201` through helpers). Contracts can report these writes and reads,
+  which they missed.
+- With `unresolved = "report"`, a `write-owners` contract reports (`MUT205`) an attribute name
+  computed at run time written on an object of unknown class (`setattr(target, name, v)`,
+  `target.__dict__[key] = v`, `vars(target).update(...)` with `target` unannotated), which may
+  write any target: "writes an attribute named at run time (set_attr) on an object of unknown
+  class". Each half alone was reported already (a computed name on a target class, a target's name
+  on an object of unknown class); together they were silent. A parameter that every caller path
+  binds to an object of a class no target covers is not reported, nor a helper that only a
+  guarded class's initializer runs on its own `self` (`_setup(self, name, value)` in `__init__`).
+- `MUT201`, `MUT203`, `MUT204`, `MUT205` with `attribution = "lexical"`: a class's own
+  initialization stays allowed through the helpers it passes `self` to, as the configuration
+  documentation says. A method or function whose every path of project callers starts in an
+  initializer (`__init__`, `__post_init__`, `__new__`, `model_post_init`, `__setstate__`) of a
+  target class handing it its own `self` (`self._process_validators()`, `self._add_decorator(self)`,
+  `_setup(self)`, a chain of such helpers) is no longer reported for accessing that object. A helper
+  also called from elsewhere, or handed another object, is still reported.
+- `MUT202` reads what a call runs from the sites of the object that call returns only: a call
+  whose generator or coroutine is never iterated or awaited (`kept = gen(shared)`) is no longer
+  reported because another call of the same function with the same argument is
+  (`for _ in gen(shared):`). The call whose object is iterated, handed to a function iterating
+  it, or awaited is still reported.
+- `EFF101`, `EFF103`, `DATA101`: looking up a method raises nothing only when no class the value
+  may be under R2 runs code on the read. A class that defines `__getattribute__` or has a
+  metaclass heki does not know, or a project subclass or one of its other bases that binds the
+  name to a property or other code, now puts an exception edge before the call, so a handler
+  that goes on after such a lookup leaves the claim open (`EFF111` / `EFF113` / a heuristic
+  `DATA101` report instead of a false exact one). `OPT113`: a key a property computes in a mixin
+  of a project subclass leaves the exact tier (the report is heuristic), as one the class or a
+  subclass computes already did. These were exact reports in 0.2.1 that could be wrong; 0.2.2
+  makes them heuristic, so the default output no longer shows them.
+- A relative import names the package's own module: `from .typing import TYPE_CHECKING` no
+  longer decides a branch as `typing.TYPE_CHECKING` does, and `from . import subprocess` no
+  longer counts as the standard library's module for the path facts (looking up its members may
+  raise). Exact `EFF101`, `EFF103`, and `DATA101` claims that relied on either are left open:
+  these reports are now heuristic, and the default output no longer shows them.
+- A branch the module's constants rule out no longer keeps a loop from its path facts. A length
+  test that every path to a loop passes, except such a branch (`if DEBUG: ... else: if
+  len(rows) > 8: raise`), now caps the loop's count as a test on every path does (`EFF103`,
+  `DATA101`, `OPT113`), and a loop that waits on every way back except such a branch
+  (`while True: if DEBUG: continue ... time.sleep(1)`) is paced by time, as one that waits on every
+  way back is (`EFF102`, `EFF103`, `DATA101`, `OPT112`). A report on such a loop leaves the exact
+  tier (or is not made under 16 trips) instead of claiming a count heki does not know to grow,
+  and the reports that need a loop sized by data are not made for a paced loop, so the default
+  output shows fewer reports on these loops.
+- `EFF101` evaluates more catalog arguments read from module constants: a constant computed from
+  other constants (`PAUSE = BASE - 2`), one bound after a star import (`from x import *` then
+  `PAUSE = 0`), an attribute of the module (`settings.PAUSE`), and a name a function imports
+  itself (`from settings import PAUSE` inside it), under the rules on rebinding above.
+  `time.sleep(PAUSE)` or `time.sleep(settings.PAUSE)` with such a constant equal to zero is no
+  wait, and a database name read as `settings.DB_PATH` names its file. These were exact reports
+  in 0.2.1 that could be wrong; 0.2.2 drops them.
+- The language server runs its analyses one at a time, in the order of the editor's messages (an
+  edit's analysis takes its place when its debounce ends). Each analysis ran on its own thread
+  before, in no particular order, so the diagnostics could depend on which one started first: of
+  documents opened together, one importing a document opened just before it could be analyzed
+  first and keep diagnostics without that document until the next save.
+- The language server could keep a deleted module for the rest of a session on Windows: a
+  document was keyed by the file's own resolved path, which Windows reports under
+  `\$Extend\$Deleted` while a deletion is in progress, so closing the document missed it and the
+  following Deleted event was skipped. Documents are now keyed by their resolved directory and
+  file name, a Deleted event stays authoritative until the file is created, changed, or saved
+  again, and a file counts as gone only when reading it finds no file (not when `exists()` says
+  so).
+
 ## [0.2.1] - 2026-11-21
 
 ### Added
@@ -694,6 +1080,7 @@ The first public preview.
 - Wheels for Linux (x86_64 and aarch64 with glibc, x86_64 with musl), macOS (arm64 and x86_64),
   and Windows (x86_64), and a source distribution.
 
+[0.2.2]: https://github.com/koxudaxi/heki/compare/v0.2.1...HEAD
 [0.2.1]: https://github.com/koxudaxi/heki/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/koxudaxi/heki/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/koxudaxi/heki/compare/v0.1.1...v0.1.2
