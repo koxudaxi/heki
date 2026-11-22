@@ -15,6 +15,11 @@ $ cargo fmt --all -- --check
 
 - The tests are end to end first: they run the real `heki` binary and the real LSP server
   (`heki server --stdio`) on small projects.
+- A test waits for `heki` by what it reports, not by the clock: a wait for the language server's
+  diagnostics ends when `heki/stats` shows the server idle, and fails then if they never came. The
+  only time limit, `HANG` in `crates/heki/tests/common/mod.rs`, stops a run, a reply, or a
+  `--watch` report that never comes; a debug build on a loaded CI runner can take many times its
+  usual time without hanging.
 - The `--fix` tests run the original and the rewritten programs on CPython and require identical
   output. They use `python3.15`, or the interpreter in `HEKI_TEST_PYTHON`.
 
@@ -272,11 +277,20 @@ runs only through `heki check` (not the `--watch` engine), with a short timeout,
 once it costs under a quarter of the limits. `KNOWN_STEPS` lists, the same way, the shapes whose
 steps are known to grow faster than linearly or to spend a budget.
 
-Each bound comes with a shape in `crates/heki/tests/e2e_analysis_bounds.rs` that is slow without it,
-checked against a time limit: comparisons sharing an operand thirty deep, many `match` statements of
-slicing or pass-through cases, `t1 = t0[t0]` chains in a loop, a loop with many `continue`s and
-`isinstance` tests, a long chain of assignments a loop carries, closure cells bound thousands of
-times, each binding followed by a generator expression reading them, many loops one after another,
+Each bound comes with a shape in `crates/heki/tests/e2e_analysis_bounds.rs` that is slow without it.
+The test counts the steps of the walks (`heki check --walk-steps`) on the shape and on the same
+shape eight times smaller, and compares the counts, not times, so the result does not depend on the
+machine's speed or load: each owner's steps may grow at most sixteen times, and no owner may spend
+its budget on the full shape unless the test names it (`check_past_budgets`: a shape made to pass
+a budget). A walk made quadratic spends its budget, and a walk without one takes the extra steps;
+either fails. Work no walk counts (the IR builder, the indexes, the language server's engine)
+shows only in time, which these tests do not compare: `scripts/check_walk_shapes.py` times its own
+shapes on the release build, and here a run fails only once it hangs (`HANG` in
+`crates/heki/tests/common/mod.rs`). The shapes: comparisons sharing an operand thirty deep, many
+`match` statements of slicing or pass-through cases, `t1 = t0[t0]` chains in a loop, a loop with
+many `continue`s and `isinstance` tests, a long chain of assignments a loop carries, closure cells
+bound thousands of times, each binding followed by a generator expression reading them, many loops
+one after another,
 each with a lazy initialization (the blocks each covers count toward a budget proportional to the
 source), many waits on one future before many `await`s of it, task factories at the end of a long
 chain of copies, a long chain of aliases of a class with an attribute store through the last one per

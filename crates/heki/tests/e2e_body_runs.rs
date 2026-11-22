@@ -941,8 +941,8 @@ fn wait_for(rx: &std::sync::mpsc::Receiver<String>, needle: &str) {
     let mut seen = Vec::new();
     loop {
         let line = rx
-            .recv_timeout(std::time::Duration::from_secs(20))
-            .unwrap_or_else(|_| panic!("no `{needle}` in {seen:#?}"));
+            .recv_timeout(common::HANG)
+            .unwrap_or_else(|e| panic!("no `{needle}` ({e}) in {seen:#?}"));
         let hit = line.contains(needle);
         seen.push(line);
         if hit {

@@ -584,19 +584,7 @@ fn lsp_withholds_suppressions_that_would_land_in_a_continuation_or_a_string() {
 #[test]
 fn lsp_exit_codes_follow_the_shutdown_handshake() {
     let p = Project::new("lsp_exit");
-    let status = |lsp: &mut Lsp| {
-        let started = std::time::Instant::now();
-        loop {
-            if let Some(status) = lsp.child.try_wait().unwrap() {
-                return status.code();
-            }
-            assert!(
-                started.elapsed() < common::lsp::TIMEOUT,
-                "the server never ended"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-    };
+    let status = |lsp: &mut Lsp| common::wait_or_hang(&mut lsp.child, "the server").code();
     // A client may take its time between `shutdown` and `exit`; `exit` ends the process with 0
     // even while stdin stays open.
     let mut lsp = ready_server(&p, json!({}));
