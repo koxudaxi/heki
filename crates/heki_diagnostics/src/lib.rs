@@ -171,13 +171,6 @@ pub enum OutputFormat {
     Sarif,
 }
 
-fn severity_word(s: Severity) -> &'static str {
-    match s {
-        Severity::Error => "error",
-        Severity::Warning => "warning",
-    }
-}
-
 /// How reports write a path: with `/` separators on every platform. Only Windows separates
 /// with `\\`; elsewhere it is a character of the file name and stays.
 pub fn path_text(p: &Path) -> String {
@@ -262,7 +255,7 @@ fn render_full(
             styles.location(&path, d.line, d.column),
             paint(styles.rule_code, &d.rule_code),
             d.rule_slug,
-            paint(severity, severity_word(d.severity)),
+            paint(severity, d.severity.word()),
             label.unwrap_or_default(),
             d.message
         );
@@ -411,7 +404,7 @@ fn render_github(diags: &[Diagnostic]) -> String {
         let _ = writeln!(
             out,
             "::{} file={},line={},col={},title={}::{}",
-            severity_word(d.severity),
+            d.severity.word(),
             gh_escape(&path_text(&d.path), true),
             d.line,
             d.column,
@@ -474,7 +467,7 @@ pub fn sarif(
                 .collect();
             let mut result = json!({
                 "ruleId": d.rule_code,
-                "level": severity_word(d.severity),
+                "level": d.severity.word(),
                 "message": { "text": d.message },
                 "locations": [location(&d.path, d.line, d.column)],
                 "relatedLocations": related,
