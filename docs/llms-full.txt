@@ -2100,6 +2100,172 @@ lost.
 
 ---
 
+Source: https://heki.koxudaxi.dev/recommend/
+
+# Configuration Advice
+
+!!! warning "Experimental"
+
+    `heki recommend` is experimental: what it prints, its policies, and its JSON object can
+    still change in any release. See [Experimental Features](https://heki.koxudaxi.dev/experimental/).
+
+`heki recommend` analyzes a project as `heki check` does and prints advice on its
+configuration, with counts from the project and the keys to add to `[tool.heki]`. It writes no
+file and runs none of the project's code.
+
+```console
+$ heki recommend
+$ heki recommend app --output-format json
+```
+
+It takes the options of `heki check` that decide what is analyzed: `--select`,
+`--extend-select`, `--ignore`, `--heuristic` / `--no-heuristic`, `--config`,
+`--target-version`, and `--baseline`. The advice is relative to that configuration.
+
+## What it prints
+
+- **The project**: the root, and the files and functions analyzed.
+- **Reports now**: what `heki check` prints with the configuration, as exact and heuristic
+  reports (reports sharing a root cause count once, as `heki check` folds them), the heuristic
+  reports of exact rules that `lint.heuristic = false` withholds, and the heuristic rules it
+  leaves off. With a baseline, the reports it allows and the regressions.
+- **Rules worth enabling here**: every rule the configuration leaves off, and every exact rule
+  whose heuristic reports it withholds, with the reports naming it in `extend-select` would add
+  (exact and heuristic, and with a baseline the regressions among them), its consequence, and
+  the published measurement of how often its reports are right about the code
+  ([Rule Precision](https://heki.koxudaxi.dev/precision/)), or "not measured". Rules without reports here are named on
+  one line.
+- **Notes**: what to know to weigh the advice. When the paths given leave out Python files
+  below the project root, the note names them: heki takes the files it analyzed as the whole
+  project, so what it says about callers, readers, and writers holds for those files only. It
+  counts up to 50 such files, among the first 10,000 entries below the root.
+- **The keys to add or change**, for the file the project reads its configuration from:
+  `[tool.heki...]` tables in a `pyproject.toml`, tables at the top level in `heki.toml`,
+  `.heki.toml`, or a `--config` file. Without a configuration file, the keys go into a new
+  `pyproject.toml`. The block only adds: an array the file already sets is written whole, with
+  the additions named in a comment, since TOML cannot append to an array.
+
+## Which rules the block enables
+
+A rule enters the block when it reports here, is not experimental, reports bugs (its severity
+is `error`), and no published measurement shows real harm below 10%. The other rules are
+listed with the reason they stay out:
+
+- slower code, and bugs that are rarely harmful, are worth reading but not worth failing a run
+  for;
+- experimental rules are listed apart, under "Optional", and never enabled;
+- a rule the configuration ignores stays ignored;
+- `MUT103` compares with a summary snapshot you save with `heki snapshot --write`;
+- contract rules run when their contract is declared, so they are not listed here.
+
+## How the advice is kept honest
+
+- Every count comes from the project, through the analysis `heki check` runs: inline
+  suppressions, `per-file-ignores`, and the baseline apply as they do there. With the block
+  applied, `heki check` prints the reports it promises.
+- How often a rule's reports are right is quoted only from published measurements, with their
+  sample, interval, and date; a rule without one is "not measured". No score is computed.
+- The same input, configuration, and heki version give the same report, on any machine and
+  with any number of threads.
+- It writes nothing and keeps every value the configuration sets.
+
+[ADR-020](https://github.com/koxudaxi/heki/blob/main/docs/DESIGN_HISTORY_AND_ADR.md#adr-020-heki-recommend-advice-on-the-configuration-from-the-projects-own-analysis)
+records these rules and the decisions behind the command.
+
+## Example
+
+A project with three modules and a test file:
+
+```python
+# app/users.py
+import requests
+
+def fetch_name(user_id: int) -> str:
+    return requests.get(f"https://api.example.com/users/{user_id}", timeout=5).text
+
+def load_user(user_id: int) -> dict[str, str]:
+    return {"id": str(user_id), "name": fetch_name(user_id)}
+
+def known_names(names: list[str], source: list[str]) -> list[str]:
+    known = list(source)
+    found = []
+    for name in names:
+        if name in known:
+            found.append(name)
+    return found
+```
+
+```python
+# app/report.py
+def total_and_count(rows: list[int]) -> tuple[int, int]:
+    items = (r for r in rows)
+    total = sum(items)
+    count = len(list(items))
+    return total, count
+```
+
+```python
+# app/api.py
+from app.users import load_user
+
+async def get_user(user_id: int) -> dict[str, str]:
+    return load_user(user_id)
+```
+
+```python
+# tests/test_users.py
+def test_load_user() -> None:
+    pass
+```
+
+```console
+$ heki recommend app
+heki recommend (experimental) on .: 3 file(s), 9 function(s)
+
+Reports now  1 shown (1 exact, 0 heuristic), 1 heuristic withheld, 4 heuristic rule(s) off
+
+Rules worth enabling here
+  rule    reports  exact  consequence  right about the code (published)  real harm  block
+  MUT106        1      -  bug          not measured                      -          yes
+  OPT110        1      0  slowdown     78% (65-87%), n=50, 2026-11-21    6%         no: slower code, not a bug
+  No reports here: EFF102, EFF105, EFF106, EFF107, EFF109, EFF110, EFF111, EFF113, MUT101, MUT107, MUT108, MUT111, MUT112, MUT113, OPT112
+  MUT103: it compares with a saved summary snapshot: run `heki snapshot --write`, then select it.
+
+Notes
+  - 1 Python file(s) below the project root were not analyzed (tests/test_users.py): heki takes the analyzed files as the whole project, so what it says about callers, readers, and writers holds for those files only.
+
+pyproject.toml: keys to add or change
+  [tool.heki.lint]
+  extend-select = ["MUT106"]  # adds MUT106
+```
+
+## JSON output
+
+`--output-format json` prints one object, described by the JSON Schema at
+[schemas/recommend-1.json](https://heki.koxudaxi.dev/schemas/recommend-1.json), the URL its `$schema` field names, which
+`heki recommend --output-format-json-schema` prints.
+Within a `version`, fields are only added; the `version` changes when a field is removed or
+changes meaning.
+
+| Field | Content |
+| ----- | ------- |
+| `kind`, `version`, `heki` | `heki-recommend`, the version of the object, and the version of heki |
+| `root`, `config_file`, `table_prefix` | the project root, the configuration file (`null` without one), and the table its keys are under (`tool.heki`, or empty) |
+| `analyzed` | the files and functions analyzed, the files that could not be read or parsed, the paths given, and the Python files below the root they leave out |
+| `runs` | the analyses the report was computed from |
+| `reports_now` | the counts of "Reports now" |
+| `rules` | each rule of "Rules worth enabling here": its metadata, the reports it would add, its published measurement, whether the block enables it, and why |
+| `notes` | the notes |
+| `config`, `config_toml` | the keys to add or change, as keys and values and as TOML |
+| `content` | the report as the text output prints it |
+
+Exit codes: `0` the report was printed; `2` configuration, I/O, or syntax errors (the report
+of the other files is still printed, as `heki check` does). It never exits with `1`: it checks
+nothing.
+
+
+---
+
 Source: https://heki.koxudaxi.dev/cli-reference/
 
 # CLI Reference
@@ -2122,6 +2288,7 @@ Commands:
   snapshot     Manage interprocedural effect summary snapshots (`MUT103`)
   assumptions  List Assumption A1 hazards (`eval`, `exec`, `locals()`, frame introspection, functions too large to model) in a project
   inspect      Experimental: what heki knows about one function (its effects, what it changes, keeps, and returns, whether it is pure, its callers, reports, and contracts)
+  recommend    Experimental: advice on the configuration of a project, with counts from its analysis, and the keys to add (it writes no file)
   help         Print this message or the help of the given subcommand(s)
 
 Options:
@@ -2270,6 +2437,41 @@ Options:
           List the callers transitively, and the reports above the function
       --depth <DEPTH>
           How many caller levels `--callers` lists [default: 3]
+      --select <SELECT>
+          Comma-separated rule codes, prefixes, or slugs to enable
+      --extend-select <EXTEND_SELECT>
+          Additional rules to enable on top of defaults/config
+      --ignore <IGNORE>
+          Comma-separated rule codes or slugs to ignore
+      --heuristic
+          Also run the heuristic rules, whose reports can be wrong about the code, by default and for every prefix and `ALL` (`lint.heuristic = true`)
+      --no-heuristic
+          Run a heuristic rule only when its code or name is selected (`lint.heuristic = false`)
+      --config <CONFIG>
+          Explicit configuration file: a `pyproject.toml` (its `[tool.heki]` table) or a file with the keys at its top level, like `heki.toml`
+      --target-version <TARGET_VERSION>
+          Target Python version (`py311`, `py312`, `py313`, `py314`, `py315`)
+      --baseline <BASELINE>
+          Ratchet baseline TOML file (line-number-independent)
+  -h, --help
+          Print help
+```
+
+## `heki recommend`
+
+```text
+Experimental: advice on the configuration of a project, with counts from its analysis, and the keys to add (it writes no file)
+
+Usage: heki recommend [OPTIONS] [PATHS]...
+
+Arguments:
+  [PATHS]...  The project to analyze, as for `heki check` [default: .]
+
+Options:
+      --output-format <OUTPUT_FORMAT>
+          `text`, or `json` (one object, described by the JSON Schema its `$schema` names) [default: text] [possible values: text, json]
+      --output-format-json-schema
+          Print the JSON Schema of the object of `--output-format json` and exit
       --select <SELECT>
           Comma-separated rule codes, prefixes, or slugs to enable
       --extend-select <EXTEND_SELECT>
@@ -2598,6 +2800,7 @@ An experimental rule is never enabled by default: it runs only when `select` or 
 | `cli-option.generate-prompt` | cli-option | `heki check --generate-prompt` | 0.2.2 | - |
 | `cli-option.profile` | cli-option | `heki check --profile` | 0.1.1 | - |
 | `command.inspect` | command | `heki inspect` | 0.2.1 | - |
+| `command.recommend` | command | `heki recommend` | 0.2.2 | - |
 | `rule.EFF109` | rule | [`EFF109`](https://heki.koxudaxi.dev/rules/lock-reacquired-while-held/) | 0.2.1 | - |
 | `rule.EFF110` | rule | [`EFF110`](https://heki.koxudaxi.dev/rules/exclusive-object-fanout/) | 0.2.1 | - |
 | `rule.MUT101` | rule | [`MUT101`](https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/) | 0.1.0 | - |
@@ -2628,6 +2831,14 @@ It reads the output of CPython 3.15's sampling profiler, and that format can sti
 - **Since:** 0.2.1
 
 The facts it shows, its purity verdict, and its JSON object can still change as heki's summaries close gaps; the object's `version` changes when a field is removed or changes meaning.
+
+## `command.recommend`
+
+- **Kind:** command
+- **Target:** `heki recommend`
+- **Since:** 0.2.2
+
+The sections, their policies, the candidates it infers, and its JSON object can still change as the policies are calibrated; the object's `version` changes when a field is removed or changes meaning.
 
 ## `rule.EFF109`
 
@@ -2952,7 +3163,8 @@ Each diagnostic has:
 
 `heki rule <CODE>` prints a rule's documentation: what it does, why it matters, and what to do
 instead, which makes a good prompt for the fix. `heki rule --all --output-format json` gives
-every rule's metadata and documentation.
+every rule's metadata and documentation, the premises of its exact claim, and its published
+precision: its certification and its latest measurement ([Rule Precision](https://heki.koxudaxi.dev/precision/)).
 
 ## Ask a model: `heki check --generate-prompt` (experimental)
 
@@ -3397,15 +3609,17 @@ $ uvx --from "zensical==0.1.2" zensical serve
   away in any release, and the release notes list each change; once it is stable, its entry is
   removed.
 - Each rule's certainty (`exact` or `heuristic`) and activation (`Default`, `OptIn`, or
-  `Contract`) are fields of its entry in `crates/heki_rules/src/lib.rs`. The generator marks the
-  heuristic rules on the generated pages, copies each rule's measurement from
-  [Rule Precision](https://heki.koxudaxi.dev/precision/) into its page, and fails when a hand-written table row says
-  "heuristic" other than exactly when a rule it names is heuristic, when an exact rule lacks a
-  certification there with no false claim in its census and holdout run, when a rule's
-  documentation has no "What a report states" section, or when an exact rule's page lists other
-  premises under "Its premises:" than the premise table (`crates/heki_rules/src/premises.rs`,
-  which `heki rule --output-format json` prints with each rule), in another order or under other
-  names.
+  `Contract`) are fields of its entry in `crates/heki_rules/src/lib.rs`, and the certifications
+  and measurements of [Rule Precision](https://heki.koxudaxi.dev/precision/) are data in
+  `crates/heki_rules/src/precision.rs`, which `heki rule --output-format json` prints with each
+  rule. The generator marks the heuristic rules on the generated pages, writes the two tables of
+  Rule Precision between the markers of their generated parts, copies each rule's measurement into
+  its page, and fails when a hand-written table row says "heuristic" other than exactly when a
+  rule it names is heuristic, when an exact rule lacks a certification with no false claim in its
+  census and holdout run, when a rule's documentation has no "What a report states" section, or
+  when an exact rule's page lists other premises under "Its premises:" than the premise table
+  (`crates/heki_rules/src/premises.rs`, which `heki rule --output-format json` prints with each
+  rule), in another order or under other names.
 - The Docs workflow deploys the site to Cloudflare Pages (heki.koxudaxi.dev) once a published
   release is on PyPI (the newest release only), or when it is run by hand on `main`, so the site
   documents the released version. That job runs in the `docs-production` environment, which
@@ -3561,7 +3775,7 @@ The workspace is split by responsibility (`crates/`):
 | `heki_env` | configuration loading and the runtime profile of the target Python version |
 | `heki_effect` | call graph, per-function effect summaries, incremental project index |
 | `heki_soundness` | the alias analysis and proof obligations behind `OPT` rewrites (never depends on `heki_effect`, never reads annotations) |
-| `heki_rules` | the rules, rule selection, project discovery |
+| `heki_rules` | the rules, rule selection, project discovery and indexing |
 | `heki_diagnostics` | output formats, inline suppressions, Ratchet baselines, fix application |
 | `heki_profile` | offline profile dumps |
 | `heki_lsp` | the incremental LSP server and the `--watch` engine |

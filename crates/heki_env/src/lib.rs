@@ -415,13 +415,13 @@ pub fn source_root(entry: &str) -> Result<String, &'static str> {
 /// tables belong to the packaging standards and other tools; any other file (`heki.toml`,
 /// `.heki.toml`, a `--config` file) holds them at its top level and nothing else.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ConfigLayout {
+pub enum ConfigLayout {
     PyProject,
     TopLevel,
 }
 
 impl ConfigLayout {
-    fn of(path: &Path) -> Self {
+    pub fn of(path: &Path) -> Self {
         if path.file_name().is_some_and(|n| n == "pyproject.toml") {
             Self::PyProject
         } else {
@@ -429,10 +429,19 @@ impl ConfigLayout {
         }
     }
 
+    /// The table that holds the settings: `tool.heki` in a `pyproject.toml`, none (the top
+    /// level) in any other file.
+    pub const fn table_prefix(self) -> Option<&'static str> {
+        match self {
+            Self::PyProject => Some("tool.heki"),
+            Self::TopLevel => None,
+        }
+    }
+
     /// The configuration in `text`, the contents of `path`. A setting is never ignored: an
     /// unknown key, a `[tool.heki]` table outside a `pyproject.toml`, and a setting at the top
     /// level of a `pyproject.toml` are errors.
-    fn parse(self, path: &Path, text: &str) -> Result<HekiConfig, ConfigError> {
+    pub fn parse(self, path: &Path, text: &str) -> Result<HekiConfig, ConfigError> {
         let toml_error = |cause| ConfigError::Toml {
             path: path.to_path_buf(),
             cause,
@@ -703,13 +712,8 @@ impl HekiConfig {
         ConfigLayout::of(path).parse(path, &text)
     }
 
-    /// Load configuration from either `heki.toml` / `.heki.toml` or `pyproject.toml` `[tool.heki]`.
-    pub fn load_from_dir(root: &Path) -> Result<Self, ConfigError> {
-        Self::file_in(root).map_or_else(|| Ok(Self::default()), |p| Self::load_from_file(&p))
-    }
-
-    /// The file [`Self::load_from_dir`] reads in `root`, the first of `heki.toml`,
-    /// `.heki.toml`, and `pyproject.toml` that exists.
+    /// The file a project rooted at `root` reads its configuration from: the first of
+    /// `heki.toml`, `.heki.toml`, and `pyproject.toml` there.
     pub fn file_in(root: &Path) -> Option<PathBuf> {
         ["heki.toml", ".heki.toml", "pyproject.toml"]
             .into_iter()

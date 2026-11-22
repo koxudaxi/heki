@@ -8,6 +8,7 @@ use crate::{DumpOpenPremisesArgs, OutputFormat};
 use anyhow::Result;
 use heki_diagnostics::{Certainty, Diagnostic, OpenPremise};
 use heki_rules::premises::{self, Closer};
+use heki_rules::project::Facts;
 use serde::Serialize;
 use std::process::ExitCode;
 
@@ -72,7 +73,13 @@ impl<'d> Report<'d> {
 }
 
 pub(crate) fn run(args: &DumpOpenPremisesArgs) -> Result<ExitCode> {
-    let indexed = load_and_index(&args.paths, &args.analysis, OutputFormat::Json, None, false)?;
+    let indexed = load_and_index(
+        &args.paths,
+        &args.analysis,
+        OutputFormat::Json,
+        None,
+        Facts::Check,
+    )?;
     let (diags, _) = indexed.diagnose_units(&indexed.project.units(), true)?;
     let reports: Vec<Report<'_>> = diags.iter().map(Report::of).collect();
     println!(
