@@ -584,22 +584,19 @@ impl SourceRoots {
     /// Whether the dotted name `name` is under a dotted path of a project file below a
     /// candidate directory.
     pub fn names_project_file(&self, name: &str) -> bool {
-        !self.below.is_empty() && resolves(name, &self.below)
+        !self.below.is_empty() && module_prefix(name, |p| self.below.contains(p)).is_some()
     }
 }
 
-/// Whether some dotted prefix of `name` (itself included) is a module of `modules`: a project
-/// module heki resolves the name into.
-fn resolves(name: &str, modules: &FxHashSet<String>) -> bool {
+/// The longest dotted prefix of `name` (itself included) that `is_module` accepts: the module
+/// heki's index resolves the name into, the rest being a name in it.
+fn module_prefix(name: &str, is_module: impl Fn(&str) -> bool) -> Option<&str> {
     let mut end = name.len();
     loop {
-        if modules.contains(&name[..end]) {
-            return true;
+        if is_module(&name[..end]) {
+            return Some(&name[..end]);
         }
-        match name[..end].rfind('.') {
-            Some(dot) => end = dot,
-            None => return false,
-        }
+        end = name[..end].rfind('.')?;
     }
 }
 
@@ -607,8 +604,9 @@ fn resolves(name: &str, modules: &FxHashSet<String>) -> bool {
 struct Names {
     /// Of each file, in the order of `Project::files`: its module and whether it is a package.
     files: Vec<(String, bool)>,
-    /// Every module name, those of the files heki could not read included.
-    all: FxHashSet<String>,
+    /// Of each module name, the files defining it: indices into `Project::files`, then into
+    /// `Project::unread` after them (heki resolves a name into a file it could not read too).
+    defined: FxHashMap<String, Vec<usize>>,
     root_is_package: bool,
 }
 
@@ -624,12 +622,32 @@ impl Names {
             let rel = rel_posix(&u.path, root);
             module_of(&rel, &u.path, layout).0
         });
-        let all = files.iter().map(|(m, _)| m.clone()).chain(unread).collect();
+        let mut defined: FxHashMap<String, Vec<usize>> = FxHashMap::default();
+        for (i, module) in files
+            .iter()
+            .map(|(m, _)| m.clone())
+            .chain(unread)
+            .enumerate()
+        {
+            defined.entry(module).or_default().push(i);
+        }
         Self {
             files,
-            all,
+            defined,
             root_is_package: layout.root_is_package,
         }
+    }
+
+    /// What the dotted name `name` names under this layout: the files of the module heki
+    /// resolves it into, and the rest of the name, which names something in that module
+    /// (`.load` of `config.env.load`). Two layouts that give a name the same target let heki
+    /// follow it to the same definition.
+    fn target<'n>(&self, name: &'n str) -> Option<Target<'_, 'n>> {
+        let module = module_prefix(name, |p| self.defined.contains_key(p))?;
+        Some(Target {
+            files: &self.defined[module],
+            rest: &name[module.len()..],
+        })
     }
 
     /// The dotted name the import `imp` of file `i` names: the module of `import a.b`, the
@@ -677,9 +695,36 @@ impl Names {
     }
 }
 
+/// What a dotted name names under a module layout ([`Names::target`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Target<'f, 'n> {
+    files: &'f [usize],
+    rest: &'n str,
+}
+
+impl Target<'_, '_> {
+    /// As a refusal says it: the file, and the name in it when the target is not the module.
+    fn describe(t: Option<Self>, project: &Project, shown: &dyn Fn(&Path) -> String) -> String {
+        let Some(t) = t else {
+            return "no project module".to_owned();
+        };
+        let first = t.files[0];
+        let path = match project.files.get(first) {
+            Some(f) => shown(&f.path),
+            None => shown(&project.unread[first - project.files.len()].path),
+        };
+        match t.rest.strip_prefix('.') {
+            Some(rest) => format!("`{rest}` of {path}"),
+            None => path,
+        }
+    }
+}
+
 /// One import of a file that names no project module now.
 struct Unresolved {
     file: usize,
+    /// Its index among the file's imports.
+    import: usize,
     line: u32,
     name: String,
 }
@@ -692,8 +737,9 @@ struct Unresolved {
 /// whose path is below several directories none of which holds the importing file. The candidates
 /// resolving the most imports are tried first, each with the ones already taken: one enters the
 /// block when its imports resolve, no two files of one kind then share a module name, every
-/// import that resolves now still does, and no module whose name changes is named by a contract
-/// of the configuration or by an entry of `baseline`.
+/// import that resolves now and every import of a candidate taken still names the same module of
+/// the same file, and no module whose name changes is named by a contract of the configuration or
+/// by an entry of `baseline`.
 pub(super) fn source_roots(
     project: &Project,
     baseline: Option<&RatchetBaseline>,
@@ -723,36 +769,27 @@ pub(super) fn source_roots(
     }
     let mut out = SourceRoots::default();
     let mut by_dir: BTreeMap<String, Vec<Unresolved>> = BTreeMap::new();
-    let mut resolved_now: Vec<(usize, usize)> = Vec::new();
+    // The imports the block must leave naming what they name: those that resolve now, then the
+    // imports of each candidate taken (by file, then index among its imports).
+    let mut kept: Vec<(usize, usize)> = Vec::new();
     for (i, f) in project.files.iter().enumerate() {
         let mut lines = None;
         for (k, imp) in f.semantic.imports.iter().enumerate() {
             let Some(name) = current.imported(i, imp) else {
                 continue;
             };
-            if resolves(&name, &current.all) {
-                resolved_now.push((i, k));
+            if current.target(&name).is_some() {
+                kept.push((i, k));
                 continue;
             }
             let top = name.split('.').next().unwrap_or(&name);
             if imp.level > 0 || heki_env::is_stdlib_module(top) || env.kb.is_opaque_to_layer3(top) {
                 continue;
             }
-            // The longest dotted prefix that is a file below some directory.
-            let mut end = name.len();
-            let found = loop {
-                if let Some(found) = below.get(&name[..end]) {
-                    break Some(found);
-                }
-                match name[..end].rfind('.') {
-                    Some(dot) => end = dot,
-                    None => break None,
-                }
-            };
-            let Some((count, first)) = found else {
+            let Some(dotted) = module_prefix(&name, |p| below.contains_key(p)) else {
                 continue;
             };
-            let dotted = &name[..end];
+            let (count, first) = &below[dotted];
             out.below.insert(dotted.to_owned());
             // Below several directories, the import is of the one holding the importing file
             // (its own application's), the deepest; one that holds none is no candidate's.
@@ -769,6 +806,7 @@ pub(super) fn source_roots(
                 let lines = lines.get_or_insert_with(|| LineIndex::from_source(&f.source));
                 by_dir.entry(dir).or_default().push(Unresolved {
                     file: i,
+                    import: k,
                     line: lines.line(imp.span.start),
                     name: name.clone(),
                 });
@@ -781,6 +819,8 @@ pub(super) fn source_roots(
     });
     let named = names_in_configuration(&env.cfg, baseline);
     let mut accepted: Vec<String> = Vec::new();
+    // The module names with the candidates taken so far; `None` while none is.
+    let mut taken: Option<Names> = None;
     out.total = ranked.len();
     for (n, (dir, imports)) in ranked.into_iter().take(MAX_LISTED).enumerate() {
         let examples = imports
@@ -816,9 +856,10 @@ pub(super) fn source_roots(
         match refusal(
             project,
             &current,
+            taken.as_ref().unwrap_or(&current),
             &trial,
             &imports,
-            &resolved_now,
+            &kept,
             &named,
             shown,
         ) {
@@ -830,6 +871,8 @@ pub(super) fn source_roots(
                     .to_owned();
                 accepted.push(dir);
                 out.src = Some(with);
+                kept.extend(imports.iter().map(|u| (u.file, u.import)));
+                taken = Some(trial);
             }
         }
         out.candidates.push(candidate);
@@ -886,17 +929,22 @@ fn names_module(text: &str, name: &str) -> bool {
     })
 }
 
-/// Why the layout `trial` stays out of the block, or `None` when it may enter it.
+/// Why the layout `trial`, the source roots of `taken` and one candidate more, stays out of the
+/// block, or `None` when it may enter it. `current` is the layout the configuration's names
+/// were written for, `taken` the layout of the candidates taken so far, under which each import
+/// of `kept` names what it must keep naming.
+#[allow(clippy::too_many_arguments)]
 fn refusal(
     project: &Project,
     current: &Names,
+    taken: &Names,
     trial: &Names,
     imports: &[Unresolved],
-    resolved_now: &[(usize, usize)],
+    kept: &[(usize, usize)],
     named: &[(String, &'static str)],
     shown: &dyn Fn(&Path) -> String,
 ) -> Option<String> {
-    if let Some(u) = imports.iter().find(|u| !resolves(&u.name, &trial.all)) {
+    if let Some(u) = imports.iter().find(|u| trial.target(&u.name).is_none()) {
         return Some(format!("`{}` would still name no project module", u.name));
     }
     let before = current.shared(project);
@@ -911,16 +959,23 @@ fn refusal(
             shown(&project.files[b].path)
         ));
     }
-    for &(i, k) in resolved_now {
+    // The block as a whole keeps what an import that resolves now names, and what the imports
+    // a candidate was taken for name: a later, deeper source root may rename those files. A
+    // prefix still being a module is not enough (`backend` of `backend.lib.config.env` once
+    // `backend/lib` is a source root): heki would follow the name into another file.
+    for &(i, k) in kept {
         let imp = &project.files[i].semantic.imports[k];
-        if !trial
-            .imported(i, imp)
-            .is_some_and(|n| resolves(&n, &trial.all))
-        {
-            let name = current.imported(i, imp).unwrap_or_default();
+        let (Some(name), moved) = (taken.imported(i, imp), trial.imported(i, imp)) else {
+            continue;
+        };
+        let was = taken.target(&name);
+        let now = moved.as_deref().and_then(|n| trial.target(n));
+        if now != was {
             return Some(format!(
-                "`{name}` in {}, which names a project module now, would not",
-                shown(&project.files[i].path)
+                "`{name}` in {} would name {}, not {}",
+                shown(&project.files[i].path),
+                Target::describe(now, project, shown),
+                Target::describe(was, project, shown)
             ));
         }
     }
@@ -1282,20 +1337,22 @@ mod tests {
     }
 
     #[test]
-    fn a_name_resolves_into_a_module_it_is_or_is_below() {
-        let modules: FxHashSet<String> = ["config.env", "app"]
-            .map(str::to_owned)
-            .into_iter()
-            .collect();
-        for (name, resolved) in [
-            ("config.env", true),
-            ("config.env.load", true),
-            ("config", false),
-            ("config.envs", false),
-            ("app.models.Order", true),
-            ("application", false),
+    fn a_name_resolves_into_the_longest_module_it_is_or_is_below() {
+        let modules: FxHashSet<&str> = ["config", "config.env", "app"].into_iter().collect();
+        for (name, module) in [
+            ("config.env", Some("config.env")),
+            ("config.env.load", Some("config.env")),
+            ("config", Some("config")),
+            ("config.envs", Some("config")),
+            ("app.models.Order", Some("app")),
+            ("application", None),
+            ("settings.env", None),
         ] {
-            assert_eq!(resolves(name, &modules), resolved, "{name}");
+            assert_eq!(
+                module_prefix(name, |p| modules.contains(p)),
+                module,
+                "{name}"
+            );
         }
     }
 }

@@ -1297,6 +1297,25 @@ fn subdirectory_app(name: &str) -> Project {
     p
 }
 
+/// The paths of the `EFF101` reports `heki check` prints, sorted.
+fn waits_reported(p: &Project) -> Vec<String> {
+    let mut paths: Vec<String> = checked(p, &["--select", "EFF101"])
+        .iter()
+        .map(|d| d["path"].as_str().unwrap().to_owned())
+        .collect();
+    paths.sort();
+    paths
+}
+
+/// `pyproject.toml` with the block `report` prints.
+fn apply_block(p: &Project, report: &Value) {
+    let block = report["config_toml"].as_str().unwrap();
+    p.write(
+        "pyproject.toml",
+        &format!("[project]\nname = \"t\"\n\n{block}"),
+    );
+}
+
 #[test]
 fn a_directory_whose_files_imports_name_becomes_a_source_root_after_its_trial() {
     let p = subdirectory_app("recommend_source_root");
@@ -1330,14 +1349,9 @@ fn a_directory_whose_files_imports_name_becomes_a_source_root_after_its_trial() 
         "{out}"
     );
     // With the block, the imports resolve: the waits below the handlers are reported.
-    assert!(checked(&p, &["--select", "EFF101"]).is_empty());
-    let block = report["config_toml"].as_str().unwrap();
-    p.write(
-        "pyproject.toml",
-        &format!("[project]\nname = \"t\"\n\n{block}"),
-    );
-    let after = checked(&p, &["--select", "EFF101"]);
-    assert_eq!(after.len(), 2, "{after:#?}");
+    assert_eq!(waits_reported(&p), Vec::<String>::new());
+    apply_block(&p, &report);
+    assert_eq!(waits_reported(&p), ["backend/main.py", "backend/main.py"]);
     let (_, again, _) = recommend_json(&p, &[]);
     assert_eq!(again["blind_spots"]["source_roots"], json!([]));
 }
@@ -1378,7 +1392,7 @@ fn a_source_root_stays_out_when_a_name_the_configuration_uses_would_change() {
     q.write("tools.py", "import backend.config.env\n");
     assert_eq!(
         reason(&q, &[]),
-        "`backend.config.env` in tools.py, which names a project module now, would not"
+        "`backend.config.env` in tools.py would name no project module, not backend/config/env.py"
     );
     // Two files that would define one module.
     let r = subdirectory_app("recommend_source_root_shared");
@@ -1387,6 +1401,150 @@ fn a_source_root_stays_out_when_a_name_the_configuration_uses_would_change() {
         reason(&r, &[]),
         "backend/main.py and main.py would both define module `main`"
     );
+}
+
+#[test]
+fn a_source_root_stays_out_when_an_import_would_name_another_file() {
+    let p = Project::new("recommend_source_root_other_file");
+    p.write("backend/__init__.py", "")
+        .write(
+            "backend/lib/config/env.py",
+            "import time\n\n\ndef load():\n    time.sleep(1)\n",
+        )
+        .write("backend/lib/app.py", "import config.env\n")
+        // With `backend/lib` a source root, `backend` would still be a module, but the file
+        // this import names would be `config.env`.
+        .write(
+            "main.py",
+            "import backend.lib.config.env\n\n\nasync def handler():\n    \
+             backend.lib.config.env.load()\n",
+        )
+        // A candidate the block takes.
+        .write(
+            "tools/helpers/run.py",
+            "import time\n\n\ndef go():\n    time.sleep(1)\n",
+        )
+        .write(
+            "tools/cli.py",
+            "import helpers.run\n\n\nasync def main():\n    helpers.run.go()\n",
+        );
+    let (_, report, _) = recommend_json(&p, &[]);
+    let roots = &report["blind_spots"]["source_roots"];
+    let verdicts: Vec<(&Value, &Value, &Value)> = roots
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| (&r["directory"], &r["in_block"], &r["reason"]))
+        .collect();
+    assert_eq!(
+        verdicts,
+        [
+            (
+                &json!("backend/lib"),
+                &json!(false),
+                &json!(
+                    "`backend.lib.config.env` in main.py would name `lib.config.env` of \
+                     backend/__init__.py, not backend/lib/config/env.py"
+                )
+            ),
+            (
+                &json!("tools"),
+                &json!(true),
+                &json!(
+                    "its imports resolve, and no import, contract, or baseline entry loses its \
+                     module"
+                )
+            )
+        ]
+    );
+    assert_eq!(report["config"], json!({"src": ["tools"]}));
+    assert_follows_the_schema(&report);
+    // With the block, the import that resolves now still does, and the one of `tools` too.
+    assert_eq!(waits_reported(&p), ["main.py"]);
+    apply_block(&p, &report);
+    assert_eq!(waits_reported(&p), ["main.py", "tools/cli.py"]);
+}
+
+#[test]
+fn a_source_root_stays_out_when_it_would_rename_what_a_root_taken_before_resolves() {
+    let p = Project::new("recommend_source_root_nested");
+    p.write(
+        "a/main.py",
+        "import b.c\nimport b.d\n\n\nasync def handler():\n    b.c.load()\n",
+    )
+    .write("a/b/worker.py", "import c\n")
+    .write(
+        "a/b/c.py",
+        "import time\n\n\ndef load():\n    time.sleep(1)\n",
+    )
+    .write("a/b/d.py", "");
+    let (_, report, _) = recommend_json(&p, &[]);
+    let roots = &report["blind_spots"]["source_roots"];
+    let verdicts: Vec<(&Value, &Value, &Value)> = roots
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| (&r["directory"], &r["imports"], &r["in_block"]))
+        .collect();
+    assert_eq!(
+        verdicts,
+        [
+            (&json!("a"), &json!(2), &json!(true)),
+            (&json!("a/b"), &json!(1), &json!(false))
+        ]
+    );
+    // `b.c` names a file only once `a` is taken; `a/b` would name that file `c`.
+    assert_eq!(
+        roots[1]["reason"],
+        json!("`b.c` in a/main.py would name no project module, not a/b/c.py")
+    );
+    assert_eq!(report["config"], json!({"src": ["a"]}));
+    assert_follows_the_schema(&report);
+    let (_, out, _) = p.heki(&["recommend"]);
+    assert!(
+        out.contains(
+            "\n  source root `a/b`: 1 import(s) name its files (c): stays out: `b.c` in \
+             a/main.py would name no project module, not a/b/c.py\n"
+        ),
+        "{out}"
+    );
+    // With the block, the imports `a` was taken for resolve.
+    assert_eq!(waits_reported(&p), Vec::<String>::new());
+    apply_block(&p, &report);
+    assert_eq!(waits_reported(&p), ["a/main.py"]);
+}
+
+#[test]
+fn an_import_a_root_taken_before_resolves_by_chance_does_not_hold_back_its_own() {
+    let p = Project::new("recommend_source_root_two_services");
+    p.write("x/config/__init__.py", "")
+        .write("x/run.py", "import config\n")
+        .write(
+            "y/config/env.py",
+            "import time\n\n\ndef load():\n    time.sleep(1)\n",
+        )
+        // With `x` taken, this names `env` of x/config/__init__.py; it is `y`'s import.
+        .write(
+            "y/app.py",
+            "import config.env\n\n\nasync def handler():\n    config.env.load()\n",
+        );
+    let (_, report, _) = recommend_json(&p, &[]);
+    let roots = &report["blind_spots"]["source_roots"];
+    let verdicts: Vec<(&Value, &Value)> = roots
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| (&r["directory"], &r["in_block"]))
+        .collect();
+    assert_eq!(
+        verdicts,
+        [(&json!("x"), &json!(true)), (&json!("y"), &json!(true))]
+    );
+    assert_eq!(report["config"], json!({"src": ["x", "y"]}));
+    // With the block, each service's import names its own file.
+    assert_eq!(waits_reported(&p), Vec::<String>::new());
+    apply_block(&p, &report);
+    assert_eq!(waits_reported(&p), ["y/app.py"]);
 }
 
 #[test]
