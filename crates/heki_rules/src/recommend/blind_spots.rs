@@ -7,9 +7,9 @@
 //! A library entry never enters the block: heki cannot verify what a library call does (ADR-020,
 //! rule 3). A source root enters it only after its trial.
 
-use super::{ISSUES_URL, MAX_EXAMPLES, MAX_LISTED, RecommendError, printed, selection_of};
+use super::{ISSUES_URL, MAX_EXAMPLES, MAX_LISTED, RecommendError, analyze, printed};
 use crate::blind_spots::{BlindSite, BlindSpots, CallCounts};
-use crate::project::{Facts, Indexed, ParsedFile, Project, module_of, rel_posix};
+use crate::project::{ParsedFile, Project, module_of, rel_posix};
 use heki_ast::LineIndex;
 use heki_diagnostics::RatchetBaseline;
 use heki_effect::{ModuleLayout, ProjectIndex, module_name_for_path, resolve_relative_module};
@@ -361,13 +361,12 @@ pub(super) struct Trial {
     several: bool,
 }
 
-/// The hypothetical-catalog run: `project` analyzed with an entry of [`HYPOTHETICAL_EFFECTS`]
-/// for each of `tried` added to its configuration, with the rules those effects make report and
-/// the configuration's `per-file-ignores`, as `heki check` would. Each report counts for the name
-/// tried that its chain ends at (the first by name when it names several). Returns the project
-/// with its configuration as it was.
+/// The hypothetical-catalog run: `project` analyzed ([`analyze`]) with an entry of
+/// [`HYPOTHETICAL_EFFECTS`] for each of `tried` added to its configuration, running the rules
+/// those effects make report. Each report counts for the name tried that its chain ends at (the
+/// first by name when it names several). Returns the project with its configuration as it was.
 pub(super) fn hypothetical_catalog(
-    mut project: Project,
+    project: Project,
     tried: Vec<String>,
 ) -> Result<(Project, Trial), RecommendError> {
     let mut cfg = project.env.cfg.clone();
@@ -377,15 +376,7 @@ pub(super) fn hypothetical_catalog(
             effects: Some(HYPOTHETICAL_EFFECTS.map(str::to_owned).to_vec()),
             ..EcosystemOverride::default()
         }));
-    let saved = project.set_config(cfg)?;
-    let selection = selection_of(&saved.lint, HYPOTHETICAL_RULES.map(str::to_owned).to_vec())?;
-    let run = Indexed::build(project, selection, None, Facts::Check)?;
-    let (diags, _) = run.diagnose()?;
-    let Indexed {
-        mut project, index, ..
-    } = run;
-    drop(index);
-    project.set_config(saved)?;
+    let (project, diags, _) = analyze(project, cfg, &HYPOTHETICAL_RULES)?;
     let mut trial = Trial {
         tried: tried.into_iter().collect(),
         ..Trial::default()
