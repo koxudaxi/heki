@@ -1283,3 +1283,526 @@ opaque_to_layer3 = true
 symbol = "sys.flags"
 environment = "read"
 opaque_to_layer3 = true
+
+# --- What a call runs of the values it is handed (`[[invokes]]`) ---
+# Each entry lists every argument the call runs code of: the special methods it runs on the
+# argument's class (on the metaclass for a class object; "*" for any attribute, read by a name the
+# call is handed), on the classes of the argument's items, and whether it calls the argument. An
+# argument an entry does not list runs nothing there. A `lazy` call returns an iterator that runs
+# the same code again while it is iterated. A key a dict or set looks up is compared with the keys it
+# holds only on a hash collision, which an entry leaves out; the keys of a builtin dict or set it is
+# handed come with their stored hashes. Under R3 a call of these runs code of the project only
+# through what its entry lists, and a call of the catalog's other library functions only when it is
+# handed a callable, an instance of a project class, or a value of a class heki does not know.
+
+[[invokes]]
+symbol = "builtins.isinstance"
+values = [
+    { arg = 0, methods = ["__class__", "__getattribute__"] },
+    { arg = 1, methods = ["__instancecheck__", "__subclasshook__"], item_methods = ["__instancecheck__", "__subclasshook__"] },
+]
+
+[[invokes]]
+symbol = "builtins.issubclass"
+values = [
+    { arg = 1, methods = ["__subclasscheck__", "__subclasshook__"], item_methods = ["__subclasscheck__", "__subclasshook__"] },
+]
+
+[[invokes]]
+symbol = "builtins.id"
+values = []
+
+[[invokes]]
+symbol = "builtins.callable"
+values = []
+
+[[invokes]]
+symbol = "builtins.type"
+values = [
+    { arg = 1, item_methods = ["*"] },
+    { arg = 2, item_methods = ["*"] },
+]
+
+[[invokes]]
+symbol = "builtins.len"
+values = [{ arg = 0, methods = ["__len__"] }]
+
+[[invokes]]
+symbol = "builtins.str"
+values = [{ arg = 0, methods = ["__str__", "__repr__"] }]
+
+[[invokes]]
+symbol = "builtins.repr"
+values = [{ arg = 0, methods = ["__repr__"] }]
+
+[[invokes]]
+symbol = "builtins.format"
+values = [{ arg = 0, methods = ["__format__"] }]
+
+[[invokes]]
+symbol = "builtins.bool"
+values = [{ arg = 0, methods = ["__bool__", "__len__"] }]
+
+[[invokes]]
+symbol = "builtins.hash"
+values = [{ arg = 0, methods = ["__hash__"] }]
+
+[[invokes]]
+symbol = "builtins.int"
+values = [{ arg = 0, methods = ["__int__", "__index__", "__trunc__"] }]
+
+[[invokes]]
+symbol = "builtins.float"
+values = [{ arg = 0, methods = ["__float__", "__index__"] }]
+
+[[invokes]]
+symbol = "builtins.abs"
+values = [{ arg = 0, methods = ["__abs__"] }]
+
+[[invokes]]
+symbol = "builtins.round"
+values = [{ arg = 0, methods = ["__round__"] }]
+
+[[invokes]]
+symbol = "builtins.range"
+values = [{ arg = 0, rest = true, methods = ["__index__"] }]
+
+[[invokes]]
+symbol = "builtins.getattr"
+values = [{ arg = 0, methods = ["*"] }]
+
+[[invokes]]
+symbol = "builtins.hasattr"
+values = [{ arg = 0, methods = ["*"] }]
+
+[[invokes]]
+symbol = "builtins.setattr"
+values = [{ arg = 0, methods = ["*"] }]
+
+[[invokes]]
+symbol = "builtins.delattr"
+values = [{ arg = 0, methods = ["*"] }]
+
+[[invokes]]
+symbol = "builtins.vars"
+values = [{ arg = 0, methods = ["*"] }]
+
+[[invokes]]
+symbol = "builtins.object.__setattr__"
+values = [{ arg = 0, methods = ["*"] }]
+
+[[invokes]]
+symbol = "builtins.object.__getattribute__"
+values = [{ arg = 0, methods = ["*"] }]
+
+[[invokes]]
+symbol = "builtins.object.__init__"
+values = []
+
+[[invokes]]
+symbol = "builtins.print"
+values = [
+    { arg = 0, rest = true, methods = ["__str__", "__repr__"] },
+    { param = "file", methods = ["*"] },
+]
+
+[[invokes]]
+symbol = "builtins.iter"
+lazy = true
+values = [{ arg = 0, methods = ["__iter__", "__next__", "__getitem__"] }]
+
+[[invokes]]
+symbol = "builtins.next"
+values = [{ arg = 0, methods = ["__next__"] }]
+
+[[invokes]]
+symbol = "builtins.enumerate"
+lazy = true
+values = [{ arg = 0, methods = ["__iter__", "__next__", "__getitem__"] }]
+
+[[invokes]]
+symbol = "builtins.zip"
+lazy = true
+values = [{ arg = 0, rest = true, methods = ["__iter__", "__next__", "__getitem__"] }]
+
+[[invokes]]
+symbol = "builtins.reversed"
+lazy = true
+values = [{ arg = 0, methods = ["__reversed__", "__len__", "__getitem__"] }]
+
+[[invokes]]
+symbol = "builtins.map"
+lazy = true
+values = [
+    { arg = 0, calls = true },
+    { arg = 1, rest = true, methods = ["__iter__", "__next__", "__getitem__"] },
+]
+
+[[invokes]]
+symbol = "builtins.filter"
+lazy = true
+values = [
+    { arg = 0, calls = true },
+    { arg = 1, methods = ["__iter__", "__next__", "__getitem__"], item_methods = ["__bool__", "__len__"] },
+]
+
+[[invokes]]
+symbol = "builtins.sorted"
+values = [
+    { arg = 0, methods = ["__iter__", "__next__", "__getitem__"], item_methods = ["__lt__", "__gt__"] },
+    { param = "key", calls = true },
+]
+
+[[invokes]]
+symbol = "builtins.min"
+values = [
+    { arg = 0, rest = true, methods = ["__iter__", "__next__", "__getitem__", "__lt__", "__gt__"], item_methods = ["__lt__", "__gt__"] },
+    { param = "key", calls = true },
+]
+
+[[invokes]]
+symbol = "builtins.max"
+values = [
+    { arg = 0, rest = true, methods = ["__iter__", "__next__", "__getitem__", "__lt__", "__gt__"], item_methods = ["__lt__", "__gt__"] },
+    { param = "key", calls = true },
+]
+
+[[invokes]]
+symbol = "builtins.sum"
+values = [
+    { arg = 0, methods = ["__iter__", "__next__", "__getitem__"], item_methods = ["__add__", "__radd__"] },
+    { arg = 1, methods = ["__add__", "__radd__"] },
+]
+
+[[invokes]]
+symbol = "builtins.any"
+values = [{ arg = 0, methods = ["__iter__", "__next__", "__getitem__"], item_methods = ["__bool__", "__len__"] }]
+
+[[invokes]]
+symbol = "builtins.all"
+values = [{ arg = 0, methods = ["__iter__", "__next__", "__getitem__"], item_methods = ["__bool__", "__len__"] }]
+
+[[invokes]]
+symbol = "builtins.list"
+values = [{ arg = 0, methods = ["__iter__", "__next__", "__getitem__", "__len__", "__length_hint__"] }]
+
+[[invokes]]
+symbol = "builtins.tuple"
+values = [{ arg = 0, methods = ["__iter__", "__next__", "__getitem__", "__len__", "__length_hint__"] }]
+
+[[invokes]]
+symbol = "builtins.set"
+values = [{ arg = 0, methods = ["__iter__", "__next__", "__getitem__"], item_methods = ["__hash__", "__eq__"] }]
+
+[[invokes]]
+symbol = "builtins.frozenset"
+values = [{ arg = 0, methods = ["__iter__", "__next__", "__getitem__"], item_methods = ["__hash__", "__eq__"] }]
+
+[[invokes]]
+symbol = "builtins.dict"
+values = [
+    { arg = 0, methods = ["__iter__", "__next__", "__getitem__", "keys"], item_methods = ["__hash__", "__eq__", "__iter__", "__next__", "__getitem__"] },
+    { param = "*", methods = [] },
+]
+
+[[invokes]]
+symbol = "builtins.dict.fromkeys"
+values = [{ arg = 0, methods = ["__iter__", "__next__", "__getitem__"], item_methods = ["__hash__", "__eq__"] }]
+
+[[invokes]]
+symbol = "builtins.list.append"
+values = []
+
+[[invokes]]
+symbol = "builtins.list.extend"
+values = [{ arg = 0, methods = ["__iter__", "__next__", "__getitem__", "__len__", "__length_hint__"] }]
+
+[[invokes]]
+symbol = "builtins.list.insert"
+values = [{ arg = 0, methods = ["__index__"] }]
+
+[[invokes]]
+symbol = "builtins.list.pop"
+values = [{ arg = 0, methods = ["__index__"] }]
+
+[[invokes]]
+symbol = "builtins.list.copy"
+values = []
+
+[[invokes]]
+symbol = "builtins.list.clear"
+values = []
+
+[[invokes]]
+symbol = "builtins.list.reverse"
+values = []
+
+[[invokes]]
+symbol = "builtins.list.index"
+values = [{ arg = 0, methods = ["__eq__"] }, { receiver = true, item_methods = ["__eq__"] }]
+
+[[invokes]]
+symbol = "builtins.list.count"
+values = [{ arg = 0, methods = ["__eq__"] }, { receiver = true, item_methods = ["__eq__"] }]
+
+[[invokes]]
+symbol = "builtins.list.remove"
+values = [{ arg = 0, methods = ["__eq__"] }, { receiver = true, item_methods = ["__eq__"] }]
+
+[[invokes]]
+symbol = "builtins.list.sort"
+values = [{ receiver = true, item_methods = ["__lt__", "__gt__"] }, { param = "key", calls = true }]
+
+[[invokes]]
+symbol = "builtins.dict.get"
+values = [{ arg = 0, methods = ["__hash__", "__eq__"] }]
+
+[[invokes]]
+symbol = "builtins.dict.setdefault"
+values = [{ arg = 0, methods = ["__hash__", "__eq__"] }]
+
+[[invokes]]
+symbol = "builtins.dict.pop"
+values = [{ arg = 0, methods = ["__hash__", "__eq__"] }]
+
+[[invokes]]
+symbol = "builtins.dict.update"
+values = [
+    { arg = 0, methods = ["__iter__", "__next__", "__getitem__", "keys"], item_methods = ["__hash__", "__eq__", "__iter__", "__next__", "__getitem__"] },
+    { param = "*", methods = ["__hash__", "__eq__"] },
+]
+
+[[invokes]]
+symbol = "builtins.dict.keys"
+values = []
+
+[[invokes]]
+symbol = "builtins.dict.values"
+values = []
+
+[[invokes]]
+symbol = "builtins.dict.items"
+values = []
+
+[[invokes]]
+symbol = "builtins.dict.copy"
+values = []
+
+[[invokes]]
+symbol = "builtins.dict.clear"
+values = []
+
+[[invokes]]
+symbol = "builtins.dict.popitem"
+values = []
+
+[[invokes]]
+symbol = "builtins.set.add"
+values = [{ arg = 0, methods = ["__hash__", "__eq__"] }]
+
+[[invokes]]
+symbol = "builtins.set.discard"
+values = [{ arg = 0, methods = ["__hash__", "__eq__"] }]
+
+[[invokes]]
+symbol = "builtins.set.remove"
+values = [{ arg = 0, methods = ["__hash__", "__eq__"] }]
+
+[[invokes]]
+symbol = "builtins.set.update"
+values = [
+    { arg = 0, rest = true, methods = ["__iter__", "__next__", "__getitem__"], item_methods = ["__hash__", "__eq__"] },
+]
+
+[[invokes]]
+symbol = "builtins.set.copy"
+values = []
+
+[[invokes]]
+symbol = "builtins.set.clear"
+values = []
+
+[[invokes]]
+symbol = "builtins.set.pop"
+values = []
+
+[[invokes]]
+symbol = "builtins.str.join"
+values = [{ arg = 0, methods = ["__iter__", "__next__", "__getitem__"] }]
+
+[[invokes]]
+symbol = "builtins.str.format"
+values = [
+    { arg = 0, rest = true, methods = ["__format__", "*"] },
+    { param = "*", methods = ["__format__", "*"] },
+]
+
+[[invokes]]
+symbol = "builtins.str.split"
+values = []
+
+[[invokes]]
+symbol = "builtins.str.rsplit"
+values = []
+
+[[invokes]]
+symbol = "builtins.str.splitlines"
+values = []
+
+[[invokes]]
+symbol = "builtins.str.strip"
+values = []
+
+[[invokes]]
+symbol = "builtins.str.lstrip"
+values = []
+
+[[invokes]]
+symbol = "builtins.str.rstrip"
+values = []
+
+[[invokes]]
+symbol = "builtins.str.startswith"
+values = []
+
+[[invokes]]
+symbol = "builtins.str.endswith"
+values = []
+
+[[invokes]]
+symbol = "builtins.str.replace"
+values = []
+
+[[invokes]]
+symbol = "builtins.str.lower"
+values = []
+
+[[invokes]]
+symbol = "builtins.str.upper"
+values = []
+
+[[invokes]]
+symbol = "builtins.str.encode"
+values = []
+
+[[invokes]]
+symbol = "builtins.str.partition"
+values = []
+
+[[invokes]]
+symbol = "builtins.str.rpartition"
+values = []
+
+[[invokes]]
+symbol = "builtins.str.removeprefix"
+values = []
+
+[[invokes]]
+symbol = "builtins.str.removesuffix"
+values = []
+
+[[invokes]]
+symbol = "builtins.str.find"
+values = []
+
+[[invokes]]
+symbol = "builtins.str.isidentifier"
+values = []
+
+[[invokes]]
+symbol = "builtins.bytes.decode"
+values = []
+
+[[invokes]]
+symbol = "typing.cast"
+values = []
+
+[[invokes]]
+symbol = "typing_extensions.cast"
+values = []
+
+[[invokes]]
+symbol = "typing.TypeVar"
+values = []
+
+[[invokes]]
+symbol = "typing_extensions.TypeVar"
+values = []
+
+[[invokes]]
+symbol = "functools.partial"
+values = []
+
+[[invokes]]
+symbol = "functools.partial.__call__"
+values = [{ receiver = true, calls = true }]
+
+[[invokes]]
+symbol = "collections.abc.Callable.__call__"
+values = [{ receiver = true, calls = true }]
+
+[[invokes]]
+symbol = "collections.defaultdict"
+values = [{ arg = 0, calls = true }, { arg = 1, methods = ["__iter__", "__next__", "__getitem__", "keys"], item_methods = ["__hash__", "__eq__"] }]
+
+[[invokes]]
+symbol = "types.MappingProxyType"
+values = []
+
+[[invokes]]
+symbol = "re.compile"
+values = []
+
+[[invokes]]
+symbol = "re.escape"
+values = []
+
+[[invokes]]
+symbol = "re.Pattern.match"
+values = []
+
+[[invokes]]
+symbol = "re.Pattern.fullmatch"
+values = []
+
+[[invokes]]
+symbol = "re.Pattern.search"
+values = []
+
+[[invokes]]
+symbol = "re.Match.group"
+values = []
+
+[[invokes]]
+symbol = "contextvars.ContextVar.get"
+values = []
+
+[[invokes]]
+symbol = "contextlib.suppress"
+values = []
+
+[[invokes]]
+symbol = "dataclasses.replace"
+values = [{ arg = 0, methods = ["*"] }]
+
+[[invokes]]
+symbol = "dataclasses.fields"
+values = [{ arg = 0, methods = ["*"] }]
+
+[[invokes]]
+symbol = "warnings.warn"
+values = [{ arg = 0, methods = ["__str__", "__repr__"] }, { param = "message", methods = ["__str__", "__repr__"] }]
+
+# --- Cached-property decorators that keep the value in the instance `__dict__` ---
+# `[[cached_properties]]`: a decorator listed here keeps the getter's value in the instance
+# `__dict__` under the property's name, a later read returns it until something removes it, and
+# `del obj.<name>` or `obj.__dict__.pop(<name>)` makes the next read run the getter again. Each
+# entry names the versions whose source was read, why the value is kept there, and how removing it
+# acts; `slot` names where an instance without a `__dict__` keeps it instead. Only a decorator listed
+# here makes a cached property an exact claim's (R3); any other `cached_property` is one by its name.
+
+[[cached_properties]]
+symbol = "functools.cached_property"
+versions = "CPython 3.11, 3.15"
+keeps = "a non-data descriptor whose __get__ stores the getter's value in instance.__dict__[attrname], which later reads find before the descriptor"
+invalidation = "del obj.<name> and obj.__dict__.pop(<name>) remove the entry (the descriptor defines no __delete__); an instance without a __dict__ raises TypeError and keeps nothing"

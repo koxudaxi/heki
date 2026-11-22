@@ -3804,6 +3804,133 @@ fn a_wide_display_unpacked_by_many_calls_is_bound_within_the_budget() {
     assert!((1..8000).contains(&wide.len()), "{}", wide.len());
 }
 
+/// `MUT101` selected: the facts of its exact claim are computed (`OptInFacts::kept_values`).
+const MUT101_CONFIG: &str = "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT101\"]\n";
+
+/// A `@cached_property` reading an attribute through a chain of thousands of `self` helpers,
+/// each reading it on every path and calling the next: each helper's reads on every path come
+/// from its own callee's summary once, not again along the chain.
+#[test]
+fn reads_on_every_path_through_a_long_chain_of_self_helpers_are_joined_once() {
+    let helpers = 3_000;
+    let mut lines = vec![
+        "from functools import cached_property".to_owned(),
+        String::new(),
+        String::new(),
+        "class C:".to_owned(),
+        "    def __init__(self):".to_owned(),
+        "        self.a = 0".to_owned(),
+        String::new(),
+        "    @cached_property".to_owned(),
+        "    def p(self):".to_owned(),
+        "        return self._h0()".to_owned(),
+    ];
+    for i in 0..helpers {
+        lines.push(String::new());
+        lines.push(format!("    def _h{i}(self):"));
+        lines.push(format!("        return self.a + self._h{}()", i + 1));
+    }
+    lines.extend([
+        String::new(),
+        format!("    def _h{helpers}(self):"),
+        "        return self.a".to_owned(),
+        String::new(),
+        "    def bump(self):".to_owned(),
+        "        self.a += 1".to_owned(),
+    ]);
+    let p = Project::new("bounds_must_read_chain");
+    p.write("pyproject.toml", MUT101_CONFIG)
+        .write("m.py", &(lines.join("\n") + "\n"));
+    let found: Vec<String> = check_within(&p, Duration::from_secs(20))
+        .iter()
+        .filter(|d| d["rule_code"] == "MUT101")
+        .map(|d| d["qualname"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(found, vec!["C.bump"]);
+}
+
+/// A getter reading a thousand constant keys of one attribute, on alternating sides of
+/// branches: each key's reads are asked together once, and past the function's budget nothing
+/// is established.
+#[test]
+fn reads_on_every_path_of_many_keys_stay_within_the_function_budget() {
+    let keys = 1_000;
+    let mut lines = vec![
+        "from functools import cached_property".to_owned(),
+        String::new(),
+        String::new(),
+        "class C:".to_owned(),
+        "    def __init__(self):".to_owned(),
+        "        self.d = {}".to_owned(),
+        "        self.flag = False".to_owned(),
+        String::new(),
+        "    @cached_property".to_owned(),
+        "    def p(self):".to_owned(),
+        "        total = 0".to_owned(),
+    ];
+    for i in 0..keys {
+        lines.push("        if self.flag:".to_owned());
+        lines.push(format!("            total += self.d[\"k{i}\"]"));
+        lines.push("        else:".to_owned());
+        lines.push(format!("            total -= self.d[\"k{i}\"]"));
+    }
+    lines.extend([
+        "        return total".to_owned(),
+        String::new(),
+        "    def put(self, value):".to_owned(),
+        "        self.d[\"k0\"] = value".to_owned(),
+    ]);
+    let p = Project::new("bounds_must_read_keys");
+    p.write("pyproject.toml", MUT101_CONFIG)
+        .write("m.py", &(lines.join("\n") + "\n"));
+    let found: Vec<String> = check_within(&p, Duration::from_secs(20))
+        .iter()
+        .filter(|d| d["rule_code"] == "MUT101")
+        .map(|d| d["qualname"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(found, vec!["C.put"]);
+}
+
+/// A writer making thousands of project calls and library calls after its write: whether a
+/// callable a library call is handed has a site of its own is looked up once per argument, not
+/// by a scan of every site of the function (which took time quadratic in its calls).
+#[test]
+fn library_calls_after_a_write_look_up_handed_callables_once() {
+    let calls = 4_000;
+    let mut lines = vec![
+        "from functools import cached_property".to_owned(),
+        String::new(),
+        String::new(),
+        "def helper(x):".to_owned(),
+        "    return x".to_owned(),
+        String::new(),
+        String::new(),
+        "class C:".to_owned(),
+        "    def __init__(self):".to_owned(),
+        "        self.d = {}".to_owned(),
+        String::new(),
+        "    @cached_property".to_owned(),
+        "    def p(self):".to_owned(),
+        "        return self.d[\"k\"]".to_owned(),
+        String::new(),
+        "    def put(self, value):".to_owned(),
+        "        self.d[\"k\"] = value".to_owned(),
+    ];
+    for _ in 0..calls {
+        lines.push("        helper(value)".to_owned());
+        lines.push("        len(value)".to_owned());
+    }
+    let p = Project::new("bounds_handed_callables");
+    p.write("pyproject.toml", MUT101_CONFIG)
+        .write("m.py", &(lines.join("\n") + "\n"));
+    let found: Vec<String> = check_within(&p, Duration::from_secs(20))
+        .iter()
+        .filter(|d| d["rule_code"] == "MUT101")
+        .map(|d| d["qualname"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(found, ["C.put"]);
+}
+
 /// Open premises along shared chains are decided once per call: thousands of `async def`s each
 /// reach a sleep through the same chain of hundreds of helpers, none of which makes the next
 /// call on every return. Each report walks only its own chain, and each call on it is looked up

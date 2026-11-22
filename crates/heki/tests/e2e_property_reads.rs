@@ -6,8 +6,10 @@
 //! lock, `MUT101` / `MUT107`, and the `EFF201` / `MUT201` / `MUT203` contracts. No getter runs
 //! for untyped receivers, methods and plain attributes sharing a property's name, un-awaited
 //! `async` getters, classes outside the project, or properties with a setter (the setter shares
-//! the getter's summary). The LSP server re-checks a reader in another file when a getter
-//! starts blocking.
+//! the getter's summary). A read runs every getter it can when every class the object may be
+//! finds one first, which a union keeps and a class finding no getter, a base heki does not
+//! know, `__getattribute__`, or a shadowing class attribute does not. The LSP server re-checks a
+//! reader in another file when a getter starts blocking.
 
 mod common;
 
@@ -169,11 +171,69 @@ class Pool:
         import httpx
 
         return httpx.Client()
+
+
+class Shape:
+    pass
+
+
+class Square(Shape):
+    @property
+    def area(self):
+        return requests.get("https://example.com")
+
+
+class Remote:
+    @property
+    def body(self):
+        return requests.get("https://example.com")
+
+
+from vendor import TracingMixin
+
+
+class Traced(TracingMixin, Remote):
+    pass
+
+
+class Audited:
+    def __getattribute__(self, name):
+        return object.__getattribute__(self, name)
+
+    @property
+    def remote(self):
+        return requests.get("https://example.com")
+
+
+class Feed:
+    @property
+    def entries(self):
+        return requests.get("https://example.com")
+
+
+class StaticFeed(Feed):
+    entries = []
+
+
+class Middle(Base):
+    remote = "local"
+
+
+class Child(Middle):
+    async def via_super(self):
+        return super().remote
+
+
+class Rebound(Base):
+    pass
+
+
+Rebound.remote = "local"
 "#;
 
 const HANDLERS: &str = r#"import requests
 
-from pkg.api import Base, Client, Lazy, Other, Pool, Slow, Sub, Wrapped
+from pkg.api import Audited, Base, Client, Feed, Lazy, Other, Pool, Rebound, Shape, Slow, Sub, Traced, Wrapped
 
 
 async def direct(c: Client):
@@ -232,6 +292,30 @@ def report(c: Client, ids):
 def clients(p: Pool, urls):
     for u in urls:
         p.client.get(u)
+
+
+async def either(x: Sub | Wrapped):
+    return x.remote
+
+
+async def no_getter(s: Shape):
+    return s.area
+
+
+async def traced(t: Traced):
+    return t.body
+
+
+async def audited(a: Audited):
+    return a.remote
+
+
+async def feed_entries(f: Feed):
+    return f.entries
+
+
+async def rebound(r: Rebound):
+    return r.remote
 "#;
 
 const LOCKS: &str = r#"import threading
@@ -258,25 +342,43 @@ fn execution_effects_run_property_getters() {
     assert_eq!(
         found(&diags),
         vec![
-            // `self.text` in an `async def` method.
-            d(a, 34, "EFF111", "Client.refresh", "requests.get"),
+            // `self.text` in an `async def` method: every class the instance may be runs the
+            // one getter, which waits on every path.
+            d(a, 34, "EFF101", "Client.refresh", "requests.get"),
             // An `async` getter is an `async def`: it reports its own boundary, and reading it
             // (`not_awaited`, `awaited`) reports nothing.
             d(a, 77, "EFF101", "Lazy.value", "requests.get"),
-            d(h, 7, "EFF111", "direct", "requests.get"),
+            // `super().remote` in `Child` finds `Middle`'s class attribute after `Child`, not
+            // `Base`'s getter.
+            d(a, 141, "EFF111", "Child.via_super", "requests.get"),
+            d(h, 7, "EFF101", "direct", "requests.get"),
             // One helper deeper.
-            d(h, 11, "EFF111", "one_deeper", "requests.get"),
-            // A `functools.cached_property` getter.
+            d(h, 11, "EFF101", "one_deeper", "requests.get"),
+            // A `functools.cached_property` getter: a read may hand out the value an earlier
+            // read computed.
             d(h, 15, "EFF111", "cached", "time.sleep"),
             // A base-class property read on a subclass instance.
-            d(h, 19, "EFF111", "inherited", "requests.get"),
-            // An overriding property of a subclass (CHA over `Base`).
+            d(h, 19, "EFF101", "inherited", "requests.get"),
+            // An overriding property of a subclass (CHA over `Base`): `Base.data` does not wait.
             d(h, 23, "EFF111", "overridden", "time.sleep"),
             // An overriding property reading `super().remote`.
-            d(h, 27, "EFF111", "through_super", "requests.get"),
+            d(h, 27, "EFF101", "through_super", "requests.get"),
             // Property reads in unbounded loops: a query and a fresh client per iteration.
-            d(h, 56, "EFF113", "report", "sqlite3.Connection.execute"),
+            d(h, 56, "EFF103", "report", "sqlite3.Connection.execute"),
             d(h, 61, "EFF102", "clients", "httpx.Client"),
+            // Every member of a union finds a getter that waits.
+            d(h, 65, "EFF101", "either", "requests.get"),
+            // Not every class the object may be runs a getter: `Shape` finds no definition
+            // (only its subclass `Square` defines the property), a base heki does not know
+            // comes before the getter (`Traced`), `__getattribute__` runs on every read
+            // (`Audited`), and a subclass's class attribute shadows the property (`StaticFeed`).
+            d(h, 69, "EFF111", "no_getter", "requests.get"),
+            d(h, 73, "EFF111", "traced", "requests.get"),
+            d(h, 77, "EFF111", "audited", "requests.get"),
+            d(h, 81, "EFF111", "feed_entries", "requests.get"),
+            // A value stored on the class object outside its body (`Rebound.remote = ...`) is
+            // what the read finds.
+            d(h, 85, "EFF111", "rebound", "requests.get"),
         ],
         "{diags:#?}"
     );
@@ -288,7 +390,7 @@ fn execution_effects_run_property_getters() {
     assert_eq!(direct["column"], 12, "at the read itself");
     assert_eq!(
         direct["message"],
-        "`direct` reaches the blocking call `requests.get` on the event loop"
+        "`pkg.api.Client.text` always runs the waiting call `requests.get` on the event loop (1 call down, on every path)"
     );
     assert_eq!(
         related_of(&diags, "direct"),
@@ -612,7 +714,7 @@ fn lsp_reader_follows_a_getter_edit_in_another_file() {
     // The getter starts blocking: saving it re-checks the reader's file.
     save(&mut lsp, &p, "pkg/api.py", 2, LSP_API_BLOCKING);
     let diags = lsp.diagnostics(&handler, |d| !d.is_empty());
-    assert_eq!(codes(&diags), vec!["EFF111"]);
+    assert_eq!(codes(&diags), vec!["EFF101"]);
     assert_eq!(
         diags[0]["range"]["start"],
         json!({"line": 4, "character": 11})
