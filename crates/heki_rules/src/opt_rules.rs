@@ -109,7 +109,8 @@ pub(crate) fn opt(
 /// safe", once for each obligation of its verdict that is not established. The other premises
 /// hold for every report: its sites are in loops and carry the value around them
 /// (`heki_soundness::opt_rules::find_sites`), and it reports only a value whose builtin type
-/// its construction establishes (`OptCandidate::is_reportable`). A proven report in a loop
+/// its construction establishes (`OptCandidate::is_reportable`; for `OPT130`, a call of the
+/// builtin constructor, the only call a site is). A proven report in a loop
 /// whose trip count the code fixes or caps leaves none open: the exact tier leaves it out
 /// although its claim holds (`OptCandidate::in_exact_tier`).
 fn rewrite_open_premises(c: &OptCandidate) -> Vec<OpenPremise> {
