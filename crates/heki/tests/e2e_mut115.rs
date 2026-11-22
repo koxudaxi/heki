@@ -148,8 +148,9 @@ fn mut115_states_its_claim_on_the_issue_shapes_and_leaves_the_correct_code_alone
     assert_eq!(diags[0]["related"][0]["line"], 25, "{:#}", diags[0]);
 }
 
-/// More copies, all exact: the constructors, the unpacking displays, a slice, `get`, items
-/// below items, a copy of an attribute of `self`, of a global, and of an item of a parameter.
+/// More copies: the constructors, the unpacking displays, a slice, `get`, a copy of an
+/// attribute of `self`, of a global, and of an item of a parameter, all exact; and an item below
+/// an item, heuristic.
 const MORE_COPIES: &str = r#"from typing import Any
 
 DEFAULTS: dict[str, list[str]] = {"tags": []}
@@ -231,7 +232,8 @@ fn mut115_copies_the_builtin_containers_and_reads_their_items_exactly() {
             (30, true),
             (36, true),
             (42, true),
-            (47, true),
+            // Code reaching the dict the copy shares may have replaced the list below it.
+            (47, false),
             (52, true),
             (58, true),
             (64, true),
@@ -784,6 +786,39 @@ def copy_in_phi(options: dict[str, list[str]], other: dict[str, list[str]], flag
         copied = other
     tags.append("x")
     print(copied)
+
+
+def either_other(options: dict[str, list[str]], other: list[str], flag: bool) -> None:
+    copied = options.copy()
+    part = copied["tags"] if flag else other
+    part.append("x")
+
+
+def reset(inner: dict[str, list[int]]) -> None:
+    inner["b"] = []
+
+
+def replaced_below(p: dict[str, dict[str, list[int]]]) -> None:
+    copied = p.copy()
+    reset(copied["a"])
+    copied["a"]["b"].append(1)
+
+
+def stored_below(p: dict[str, dict[str, list[int]]]) -> None:
+    copied = p.copy()
+    copied["a"]["b"] = []
+    copied["a"]["b"].append(1)
+
+
+def unknown_load(options: dict[str, list[str]], k: str) -> None:
+    copied = options.copy()
+    copied[k].append("x")
+
+
+def unknown_load_after_store(options: dict[str, list[str]], k: str) -> None:
+    copied = options.copy()
+    copied["a"] = []
+    copied[k].append("x")
 "#;
 
 #[test]
@@ -814,10 +849,11 @@ fn mut115_reads_every_form_of_copy_load_use_and_change() {
         ("splatted_replace", false),
         ("computed_update", false),
         ("splat_update", false),
-        // `got_holder`: the copied value read with `get`; then `get` and attributes below.
+        // `got_holder`: the copied value read with `get`. Below a level the copy holds, any
+        // code reaching the shared object may have replaced what it holds since the copy.
         ("got_holder", true),
-        ("below_get", true),
-        ("below_attr", true),
+        ("below_get", false),
+        ("below_attr", false),
         ("below_property", false),
         ("popped", false),
         ("either", false),
@@ -850,6 +886,17 @@ fn mut115_reads_every_form_of_copy_load_use_and_change() {
         ("table_item", false),
         // A copy that flows on with another value is not followed past the merge.
         ("copy_in_phi", false),
+        // On one path the list is the parameter `other`.
+        ("either_other", false),
+        // `reset` changes in place the dict the copy shares; the list below it is new.
+        ("replaced_below", false),
+        ("replaced_below", false),
+        // The store changes the shared dict in place; the append changes the new list.
+        ("stored_below", true),
+        ("stored_below", false),
+        ("unknown_load", true),
+        // The store under "a" may be the item the load reads.
+        ("unknown_load_after_store", false),
     ]
     .into_iter()
     .map(|(f, exact)| (f.to_owned(), exact))
