@@ -644,6 +644,24 @@ literals, string constants (`TypeCtx::str_constant_with`), and modules' number a
 parameters a call binds, so the work per call is that of binding it, whatever the number of argument
 lists.
 
+`Dispatch.recv_params` holds, only when a `call-owners` contract allows the calls through a
+method's own receiver (`Contracts::own_receiver_calls`), the parameters of the caller the receiver
+of a class method's or a static method's call may be, as itself (`super()` is the method's own
+`self`): the first bound parameter of the callees (`BoundCallee::params`) does not tell it, since
+a class method binds the class and no value of the caller, and a static method no receiver at
+all. It sits behind the call site's boxed dispatch, which few sites have, so call sites keep their
+size.
+
+`TypedFieldWriteSite.through_protocol` marks, only when a `write-owners` contract allows writes
+through protocols (`Contracts::write_protocols`), every site of a write whose object is typed with
+a project protocol declaring the attribute itself or through its protocol bases
+(`ProjectDecls::protocol_declares`): the protocol's own site (its class is the protocol) and each
+implementation's, which keep it as they are handed up through private helpers. The rules find the
+protocol of a write among its sites (`mut_rules::protocols_written_through`, once per function);
+a flag fits the room the site's layout leaves, where the protocol's name would grow every site. It
+reads the protocol's declaration, which may sit in another module, so it takes part in Early
+Cutoff.
+
 `CallSite.returned` (whether the call's result may be returned, and how) is computed at
 extraction for every project call. `CallSite.flow` (the invalidation contracts announced after
 the call on every normal path, and the next call; set on `Iterate` / `Through` sites too), with

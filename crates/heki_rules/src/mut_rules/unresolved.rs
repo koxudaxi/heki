@@ -12,8 +12,7 @@
 
 use super::call_owners::CallOwnerRule;
 use super::{
-    Allowance, ContractTarget, MergedReports, OwnerRule, ReadOwnerRule, initializes_itself,
-    runs_inside_allowed,
+    Allowance, ContractTarget, MergedReports, Named, OwnerRule, ReadOwnerRule, runs_inside_allowed,
 };
 use crate::{CheckContext, SitesByCaller};
 use heki_ast::Span;
@@ -315,11 +314,17 @@ fn add<'u>(
     let Some(unit) = cx.index.file_of(key).and_then(|p| cx.unit(p)) else {
         return;
     };
+    let quoted = format!("`{target}`");
+    let name = Named {
+        target,
+        named: &quoted,
+        rank: 0,
+    };
     reports.add(
         unit,
         key,
         span,
-        (target, target),
+        (target.to_owned(), name),
         (key.fqn(), span),
         note,
         message,
@@ -361,9 +366,10 @@ struct Unseen<'k> {
 impl Unseen<'_> {
     /// Whether the access is a finding of the strict rule, under `MUT201`'s rules for what is
     /// allowed: allowed functions and exempt methods, `forbidden-*`, a class's own
-    /// initialization (of `family`), a function that only runs inside allowed functions (not
-    /// with `attribution = "lexical"`, which judges the function holding the access), and what
-    /// the callers bind to the object.
+    /// initialization (of `family`, through the helpers it passes `self` to too), an access
+    /// through the method's own receiver with `own-receiver = "allow"`, a function
+    /// that only runs inside allowed functions (not with `attribution = "lexical"`, which judges
+    /// the function holding the access), and what the callers bind to the object.
     fn counts(
         &self,
         cx: &CheckContext<'_>,
@@ -372,14 +378,11 @@ impl Unseen<'_> {
         family: &FxHashSet<String>,
         callers: Callers<'_>,
     ) -> bool {
-        let judged = allowance.judged(cx.decls, self.func);
-        // The parameters of a scope a function holds are none of the function's.
-        let obj = if *judged == *self.func { self.obj } else { 0 };
+        let (judged, obj) = allowance.judged_access(cx.decls, self.func, self.obj);
         if allowance.allows(&judged)
             || !allowance.in_scope(&judged)
-            || initializes_itself(cx, &judged, family, obj)
-            || !allowance.is_lexical()
-                && runs_inside_allowed(cx, sites, allowance, family, self.func, self.obj)
+            || allowance.owns(cx, &judged, family, (obj, obj))
+            || runs_inside_allowed(cx, sites, allowance, family, &judged, obj)
         {
             return false;
         }
@@ -424,7 +427,7 @@ fn unknown_above(
         for caller in callers {
             // A path through an allowed caller runs inside it; judged lexically, the access stays
             // the function's own, and the caller only tells the object's class.
-            if !allowance.is_lexical() && allowance.allows(caller) {
+            if allowance.allows_callees(caller) {
                 continue;
             }
             for (_, site) in sites.get(caller).into_iter().flatten() {

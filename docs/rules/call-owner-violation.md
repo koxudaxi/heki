@@ -113,7 +113,9 @@ hierarchy also offers a method that is no target (a receiver typed with a base c
 `replace_reference` is not guarded), the call is not reported. The functions it may call can be
 targets of different entries of one contract: with `A.reset` and `B.reset` both listed, `obj.reset()`
 on `obj: Base`, whose subclasses `A` and `B` implement `reset`, is one report for
-`A.reset|B.reset`. A call on a receiver whose class heki does not know (an unannotated
+`A.reset|B.reset`. A call every function of which several targets of one contract name
+(`A.reset` and `reset` for `a.reset()` on `a: A`) is one report too, under the target configured
+first, naming the others (`(also `reset`)`). A call on a receiver whose class heki does not know (an unannotated
 parameter, `Any`) is not seen; with `unresolved = "report"`,
 `MUT207` reports it.
 
@@ -139,8 +141,22 @@ With `attribution = "lexical"`, a call is judged in the function whose code hold
 private helper reports its calls itself, and a function that only runs inside allowed callers
 is reported too. A lambda, comprehension, or generator expression is part of the function it is
 written in (`any(decide() for x in xs)` in an allowed function is allowed), and a nested `def`
-is a function of its own. A class's own initialization and the targets calling each other stay
-allowed.
+is a function of its own. A class's own initialization, through the helpers it passes `self` to
+too (a helper whose every path of project callers starts in an initializer handing it its own
+`self`), and the targets calling each other stay allowed.
+
+With `own-receiver = "allow"`, a call through the receiver of the method it is judged in is
+allowed: the function reported (with `attribution = "lexical"`, the function holding the call) is
+a method that is no static method, and the object the called method is looked up on may be its
+first parameter (`self._label()`, `cls._kind()`, `super()._label()`, `self._norm(x)` of a static
+method, `Resolver._label(self)`), also for a method the class inherits. A static method called
+through its class (`Resolver._norm(x)`), a call on another parameter, and a nested `def`, lambda,
+or comprehension calling through the enclosing method's `self` stay reported.
+
+With `allowed-protocols`, a call through a value typed with a project protocol the key names that
+declares the method, itself or through its protocol bases, is allowed wherever it is judged, and so
+is a reference handing the method on through such a value (`return h._helper` with `references`);
+a call through another protocol or the implementation's class stays reported.
 
 ## What a report states
 
@@ -158,7 +174,8 @@ Its premises:
   is enough.
 - **Outside the owners**: the function is not in the allowed modules and classes, nor runs only
   inside allowed contexts (with `attribution = "lexical"`: the function holding the call is not
-  allowed). Established from the contract.
+  allowed, nor runs only inside a class's own initialization; with `own-receiver = "allow"`, the
+  receiver is not the one of the method judging it). Established from the contract.
 - **Through helpers**: a helper's write, read, or call counts at its caller (never with
   `attribution = "lexical"`). Open: one path of the helper is enough.
 - **Hands on** (`references = "calls"`): the value named is the target, and it reaches, through
@@ -250,3 +267,8 @@ No automatic fix.
   - `attribution`: `"call-graph"` (default) or `"lexical"`: whether a private helper hands its
     calls to its callers and a function that only runs inside allowed callers is allowed, or
     each call is judged in the function holding it.
+  - `own-receiver`: `"report"` (default) or `"allow"`: whether a call through the receiver of the
+    method it is judged in (`self`, `cls`, `super()`) is allowed.
+  - `allowed-protocols`: project protocols (class patterns, their subclasses included): a call
+    through a value typed with one that declares the method, itself or through its protocol
+    bases, is allowed.

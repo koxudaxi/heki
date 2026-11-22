@@ -4638,6 +4638,73 @@ fn lsp_diagnostics_equal_a_full_check_through_argument_lists_across_modules() {
     s.lsp.stop(true);
 }
 
+// ------------------------------------------- accesses through protocols a contract names
+
+const PROTOCOL_CONFIG: &str = r#"[project]
+name = "t"
+
+[tool.heki.lint]
+select = ["MUT201", "MUT203"]
+
+[[tool.heki.write-owners]]
+name = "writes"
+targets = ["pkg.base.Parser._*"]
+forbidden-writers = ["pkg.render:*"]
+allowed-protocols = ["*Host"]
+
+[[tool.heki.read-owners]]
+name = "reads"
+targets = ["pkg.base.Parser._*"]
+forbidden-readers = ["pkg.render:*"]
+allowed-protocols = ["*Host"]
+"#;
+
+const PROTOCOL_BASE: &str = "class Parser:\n    def __init__(self) -> None:\n        self._graph_builder = None\n        self._flag = False\n";
+const PROTOCOL_HOST: &str = "from typing import Protocol\n\n\nclass RenderHost(Protocol):\n    _graph_builder: object\n    _flag: bool\n";
+const PROTOCOL_RENDER: &str = "from pkg.host import RenderHost\n\n\ndef mark(parser: RenderHost) -> None:\n    parser._graph_builder = None\n\n\ndef peek(parser: RenderHost) -> object:\n    return parser._graph_builder\n";
+
+/// `allowed-protocols` with the protocol in another module than the accesses through it: whether
+/// it declares the member decides for the write (`TypedFieldWriteSite::protocol`) and the read,
+/// as the protocol drops the declaration and declares it again.
+#[test]
+fn lsp_diagnostics_equal_a_full_check_through_protocols_a_contract_names() {
+    let files = vec![
+        ("pkg/__init__.py", String::new()),
+        ("pkg/base.py", PROTOCOL_BASE.to_owned()),
+        ("pkg/host.py", PROTOCOL_HOST.to_owned()),
+        ("pkg/render.py", PROTOCOL_RENDER.to_owned()),
+    ];
+    let mut s = Session::start_with(
+        "lsp_oracle_allowed_protocols",
+        PROTOCOL_CONFIG,
+        files,
+        false,
+    );
+    let reported: &[(&str, &str)] = &[("pkg/render.py", "MUT201"), ("pkg/render.py", "MUT203")];
+    let steps = [
+        Step::new("initial index", Vec::new()).absent(reported),
+        Step::new(
+            "the protocol stops declaring the member",
+            vec![save(
+                "pkg/host.py",
+                &PROTOCOL_HOST.replace("    _graph_builder: object\n", ""),
+            )],
+        )
+        .present(reported),
+        Step::new(
+            "the protocol declares it again",
+            vec![save("pkg/host.py", PROTOCOL_HOST)],
+        )
+        .absent(reported),
+    ];
+    let mut failures = Vec::new();
+    for step in &steps {
+        failures.extend(s.run(step));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+    s.lsp.stop(true);
+}
+
 // ---------------------------------------------- class bases named in their scope (session 4)
 
 const SCOPED_BASES_CONFIG: &str = r#"[project]

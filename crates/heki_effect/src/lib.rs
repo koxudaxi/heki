@@ -261,7 +261,7 @@ pub const fn effect_bit(e: ExecEffectKind) -> u16 {
 
 /// What a method call's receiver tells about the implementations its callees run
 /// ([`EffectSummary::receiver_effects`]).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Dispatch {
     /// The receiver's class (a receiver of one project class, the class a constructor makes,
     /// or the caller's own `self`), when a callee is inherited from a proper base of it: the
@@ -275,6 +275,14 @@ pub struct Dispatch {
     /// the type the code calls it through, while the callees are the implementations it runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub declared: Option<FuncKey>,
+    /// Parameters of the caller the receiver may be, as itself (`cls.m()`, `self.m()`,
+    /// `super().m()`: bit 0), for a call of a class method, which binds the class and no value of
+    /// the caller, or of a static method, which binds no receiver at all: the first bound
+    /// parameter of the callees does not tell it ([`CallSite::recv_params`]). Kept only when a
+    /// `call-owners` contract allows calls through a method's own receiver
+    /// ([`Contracts::own_receiver_calls`]).
+    #[serde(default)]
+    pub recv_params: u64,
 }
 
 /// The hops of a kept chain, owned (what a report shows).
@@ -321,6 +329,14 @@ pub struct TypedFieldWriteSite {
     /// differ in it are kept apart, so a path through an allowed writer does not stand for one
     /// around it.
     pub contexts: u64,
+    /// The written object is typed with a project protocol that declares the attribute (itself
+    /// or through its protocol bases): the write is one of the protocol's member, the site whose
+    /// class is the protocol, and of each implementation's attribute, the other sites of the
+    /// write, and every one of them carries this. A flag, not the protocol's name: it fits the
+    /// room the site's layout leaves. Computed only when a `write-owners` contract allows writes
+    /// through protocols ([`Contracts::write_protocols`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub through_protocol: bool,
 }
 
 /// How a function's new object was made: a shallow copy shares the containers of the original
@@ -1774,6 +1790,12 @@ impl CallSite {
     pub fn argument(&self, name: &str) -> Option<&ArgValue> {
         let values = &self.arguments.as_ref()?.0;
         values.iter().find(|(n, _)| n == name).map(|(_, v)| v)
+    }
+
+    /// Parameters of the caller the receiver of a class method's or a static method's call may be
+    /// ([`Dispatch::recv_params`]).
+    pub fn recv_params(&self) -> u64 {
+        self.dispatch.as_ref().map_or(0, |d| d.recv_params)
     }
 
     /// The class of the receiver ([`Dispatch::receiver`]).

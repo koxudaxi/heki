@@ -99,7 +99,9 @@ sites of the first non-private callers, with the chain of calls as related infor
 private function that only its own recursion calls (`_walk` calling itself, handed out as a
 callback) has no such caller and reports its writes itself. One
 report stands for every write behind that call (`sites` in JSON), so a Ratchet baseline counts a
-second write inside a recorded helper. A write reached through an allowed writer on one path and
+second write inside a recorded helper. A write matching several targets of one contract (`A.items`
+and `E.items` for a write on an `E`, a subclass of `A`) is one report, under the target
+configured first, naming the others (`(also `E.items`)`). A write reached through an allowed writer on one path and
 around it on another (or through a forbidden writer on one path only) is reported for the path
 the contract does not allow.
 Reading a `@property` or `functools.cached_property` attribute calls its getter, so a private
@@ -126,7 +128,22 @@ own, and so is a call handing a typed object to a helper that changes it without
 class (`fill(model.fields)`, reported with `via` the helper, which never sees the class); a write
 a callee makes is reported at that callee. A lambda, comprehension, or generator expression is
 part of the function it is written in, and a nested `def` is a function of its own. A class's
-own initialization and `fresh-objects` still allow a write.
+own initialization and `fresh-objects` still allow a write, the initialization through the
+helpers it passes `self` to included: a helper whose every path of project callers starts in an
+initializer handing it its own `self`.
+
+With `own-receiver = "allow"`, a write through the receiver of the method it is judged in is
+allowed: the function reported (with `attribution = "lexical"`, the function holding the write)
+is a method that is no static method, and the object the member is looked up on may be its first
+parameter (`self._cache[k] = v`, `setattr(self, name, v)`), also for a member the class
+inherits. Another parameter, an attribute of the receiver, and a nested `def`, lambda, or
+comprehension using the enclosing method's `self` stay reported.
+
+With `allowed-protocols`, a write through a value typed with a project protocol the key names
+that declares the attribute (`parser._flag = True` with `parser: RenderHost`, `RenderHost`
+inheriting the declaration from a base protocol) is allowed, wherever it is judged; a write through
+another protocol, the implementation's class, or a value a helper changes without typing it stays
+reported.
 
 A class's own initialization is allowed: a write inside an initializer (`__init__`,
 `__post_init__`, `__new__`, `model_post_init`, `__setstate__`) of a class of the target's
@@ -164,7 +181,9 @@ Its premises:
   on one path is enough.
 - **Outside the owners**: the function is not in the allowed modules and classes, nor runs only
   inside allowed contexts (with `attribution = "lexical"`: the function holding the write is
-  not allowed). Established from the contract.
+  not allowed, nor runs only inside a class's own initialization; with `own-receiver =
+  "allow"`, the written object is not the receiver of the method judging it). Established from
+  the contract.
 - **Through helpers**: a helper's write, read, or call counts at its caller (with
   `attribution = "lexical"`: only a helper changing a typed object it is handed without knowing
   its class). Open: one path of the helper is enough.
@@ -241,5 +260,10 @@ No automatic fix.
   - `attribution`: `"call-graph"` (default) or `"lexical"`: whether a private helper hands its
     writes to its callers and a function that only runs inside allowed writers is allowed, or
     each write is judged in the function holding it.
+  - `own-receiver`: `"report"` (default) or `"allow"`: whether a write through the receiver of
+    the method it is judged in (`self`, `cls`, `super()`) is allowed.
+  - `allowed-protocols`: project protocols (class patterns, their subclasses included): a write
+    through a value typed with one that declares the attribute, itself or through its protocol
+    bases, is allowed, for the protocol's member and each implementation's attribute alike.
   - `unlisted-dict-keys`: `"ignore"` (default) or `"report"`: also report a constant `__dict__`
     key of a target's class that no target names.

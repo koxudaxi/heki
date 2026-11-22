@@ -4084,6 +4084,10 @@ impl<'a> Extractor<'a> {
                 ));
             }
         }
+        let through_protocol = self.contracts.is_some_and(|c| c.write_protocols())
+            && obj.holder.and_then(|v| self.val(v)).is_some_and(
+                |v| matches!(v, Val::Inst(p) if self.cx.project.protocol_declares(p, attr)),
+            );
         let site = TypedFieldWriteSite {
             class_qualname: class,
             attr: attr.to_owned(),
@@ -4095,6 +4099,7 @@ impl<'a> Extractor<'a> {
             key,
             construction: Construction::No,
             contexts: 0,
+            through_protocol,
         };
         // A site waiting for its answer joins the summary once the function is visited.
         if let Some(holder) = obj.holder.filter(|h| self.track && self.trackable(*h)) {
@@ -5390,6 +5395,18 @@ impl<'a> Extractor<'a> {
                 }
                 let arguments = agreed_marks(marks);
                 let site = self.site(bb, CallTarget::Project(callees), call.is_awaited, call.span);
+                let mut dispatch = self.dispatch(call, site.project_callees());
+                if let Some(recv) = call.recv.as_ref().filter(|r| r.may_params != 0)
+                    && self.contracts.is_some_and(|c| c.own_receiver_calls())
+                    && site.project_callees().iter().any(|bc| {
+                        self.cx
+                            .project
+                            .function_decl(&bc.callee)
+                            .is_some_and(|d| d.is_classmethod || d.is_staticmethod)
+                    })
+                {
+                    dispatch.get_or_insert_with(Box::default).recv_params = recv.may_params;
+                }
                 self.sites.push(CallSite {
                     arguments,
                     recv_is_self: call.recv_is_self,
@@ -5399,7 +5416,7 @@ impl<'a> Extractor<'a> {
                         && call.dst.is_some_and(|d| self.discards(d)),
                     drives_coroutine_manually: drives,
                     binds_recv: *binds_recv,
-                    dispatch: self.dispatch(call, site.project_callees()),
+                    dispatch,
                     queues: (!handed.is_empty()).then(|| {
                         Box::new(SiteQueues {
                             while_full: None,
@@ -5514,6 +5531,7 @@ impl<'a> Extractor<'a> {
                 receiver,
                 providers,
                 declared,
+                recv_params: 0,
             })
         })
     }

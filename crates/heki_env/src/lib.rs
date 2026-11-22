@@ -145,6 +145,12 @@ pub struct WriteOwnerRule {
     /// a private helper hands its writes to its callers, and a function that only runs inside
     /// allowed writers is allowed.
     pub attribution: Option<String>,
+    /// `"allow"`: a write through the receiver of the method it is judged in (`self`, `cls`,
+    /// `super()`) is allowed; `"report"` (default) judges it like any other.
+    pub own_receiver: Option<String>,
+    /// Project protocols (class patterns, their subclasses included): a write through a value
+    /// typed with one that declares the attribute is allowed.
+    pub allowed_protocols: Vec<String>,
     /// `"report"`: also report (`MUT201`) a constant key written through the namespace of an
     /// object of a target's class (`obj.__dict__[KEY] = v`, `vars(obj)`) that no target covering
     /// the class names; `"ignore"` (default) does not.
@@ -169,6 +175,11 @@ pub struct ReadOwnerRule {
     pub unresolved: Option<String>,
     /// `"lexical"` or `"call-graph"` (default), as for `WriteOwnerRule`.
     pub attribution: Option<String>,
+    /// `"allow"` or `"report"` (default), as for `WriteOwnerRule`.
+    pub own_receiver: Option<String>,
+    /// Project protocols, as for `WriteOwnerRule`: a read through a value typed with one that
+    /// declares the attribute is allowed.
+    pub allowed_protocols: Vec<String>,
 }
 
 /// `[[tool.heki.call-owners]]` contract for `MUT204`: who may call a function or method, or
@@ -202,6 +213,12 @@ pub struct CallOwnerRule {
     pub references: Option<String>,
     /// `"lexical"` or `"call-graph"` (default), as for `WriteOwnerRule`.
     pub attribution: Option<String>,
+    /// `"allow"` or `"report"` (default), as for `WriteOwnerRule`: a call of a method bound to
+    /// the receiver of the method it is judged in.
+    pub own_receiver: Option<String>,
+    /// Project protocols, as for `WriteOwnerRule`: a call through a value typed with one that
+    /// declares the method is allowed.
+    pub allowed_protocols: Vec<String>,
 }
 
 /// `[[tool.heki.effect-boundaries]]` contract for `EFF201`: effects that must not be reached,
@@ -772,6 +789,8 @@ exempt-methods = ["__deepcopy__"]
 message = "read children through GenerationIndex instead"
 unresolved = "report"
 attribution = "call-graph"
+own-receiver = "allow"
+allowed-protocols = ["*Host"]
 
 [[tool.heki.call-owners]]
 name = "reference-mutators"
@@ -784,6 +803,7 @@ unresolved = "ignore"
 subclasses = false
 references = "calls-and-bases"
 attribution = "lexical"
+own-receiver = "report"
 
 [[tool.heki.readonly-returns]]
 name = "shared-schema"
@@ -841,6 +861,8 @@ import-probes = "report"
                 message: Some("read children through GenerationIndex instead".into()),
                 unresolved: Some("report".into()),
                 attribution: Some("call-graph".into()),
+                own_receiver: Some("allow".into()),
+                allowed_protocols: vec!["*Host".into()],
             }
         );
         assert_eq!(
@@ -856,6 +878,8 @@ import-probes = "report"
                 subclasses: Some(false),
                 references: Some("calls-and-bases".into()),
                 attribution: Some("lexical".into()),
+                own_receiver: Some("report".into()),
+                allowed_protocols: Vec::new(),
             }
         );
         assert_eq!(

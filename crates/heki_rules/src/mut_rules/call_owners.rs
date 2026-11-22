@@ -7,9 +7,9 @@
 //! facts.
 
 use super::{
-    AccessGroups, Allowance, AllowanceKeys, DelegatedReport, FunctionMatcher, MergedReports,
-    References, attribution, counts_references, delegated_reports, project_classes,
-    reports_unresolved,
+    AccessGroups, Allowance, AllowanceKeys, DelegatedReport, FunctionMatcher, InsideAllowed,
+    MergedReports, Named, References, allows_own_receiver, attribution, binds_receiver,
+    counts_references, delegated_reports, named_protocols, project_classes, reports_unresolved,
 };
 use crate::{
     CheckContext, DottedPattern, NamePart, RuleConfigError, SitesByCaller, last_name, module_of,
@@ -148,44 +148,44 @@ impl CallTargets {
 /// targets' families with the classes defining the methods a site calls that they name, and
 /// their subclasses (an initializer of one of them calling the method on its own `self`
 /// initializes itself). Kept per group and defining classes, which many sites share, each with
-/// its number among the contract's families.
+/// its number among the contract's families and the answers its calls share ([`InsideAllowed`]).
 #[derive(Default)]
-struct Families(FxHashMap<FamilyKey, (usize, Rc<FxHashSet<String>>)>);
+struct Families<'k>(FxHashMap<FamilyKey, (usize, Rc<FxHashSet<String>>, InsideAllowed<'k>)>);
 
 /// A group of targets (indices into the contract's targets) and the classes defining the
 /// methods a site calls that they name, sorted.
 type FamilyKey = (Vec<usize>, Vec<String>);
 
-impl Families {
+impl<'k> Families<'k> {
     fn at(
         &mut self,
         cx: &CheckContext<'_>,
         targets: &CallTargets,
         group: &[usize],
         site: &CallSite,
-    ) -> (usize, Rc<FxHashSet<String>>) {
+    ) -> (usize, Rc<FxHashSet<String>>, &mut InsideAllowed<'k>) {
         let mut defining = Vec::new();
         for &i in group {
             targets.defining_classes(cx, i, site, &mut defining);
         }
         defining.sort_unstable();
         defining.dedup();
-        let key = (group.to_vec(), defining);
-        if let Some((id, family)) = self.0.get(&key) {
-            return (*id, Rc::clone(family));
-        }
-        let mut family: FxHashSet<String> = group
-            .iter()
-            .flat_map(|&i| targets.patterns[i].family.iter().cloned())
-            .collect();
-        for class in &key.1 {
-            family.extend(cx.decls.subclasses_of(class));
-            family.insert(class.clone());
-        }
-        let family = Rc::new(family);
         let id = self.0.len();
-        self.0.insert(key, (id, Rc::clone(&family)));
-        (id, family)
+        let (id, family, inside) =
+            self.0
+                .entry((group.to_vec(), defining))
+                .or_insert_with_key(|key| {
+                    let mut family: FxHashSet<String> = group
+                        .iter()
+                        .flat_map(|&i| targets.patterns[i].family.iter().cloned())
+                        .collect();
+                    for class in &key.1 {
+                        family.extend(cx.decls.subclasses_of(class));
+                        family.insert(class.clone());
+                    }
+                    (id, Rc::new(family), InsideAllowed::default())
+                });
+        (*id, Rc::clone(family), inside)
     }
 }
 
@@ -717,6 +717,35 @@ pub(crate) fn call_verb(site: &CallSite, reference: bool) -> &'static str {
     }
 }
 
+/// Whether `site` calls, or names (`references`), a method through a value typed with a protocol
+/// `allowance` allows (`allowed-protocols`) that declares it: the receiver's class is the
+/// protocol, and the method is the protocol's declaration ([`CallSite::declared`]) or, for a
+/// reference, which keeps none, the one the site names.
+fn through_allowed_protocol(cx: &CheckContext<'_>, allowance: &Allowance, site: &CallSite) -> bool {
+    let Some(bc) = site.project_callees().first() else {
+        return false;
+    };
+    let Some(protocol) = bc.params.first().and_then(|o| o.typed_instance.as_deref()) else {
+        return false;
+    };
+    let method = site.declared().unwrap_or(&bc.callee);
+    let name = method
+        .qualname
+        .rsplit('.')
+        .next()
+        .unwrap_or(&method.qualname);
+    allowance.allows_protocol(cx.decls, protocol, name)
+}
+
+/// Parameters of the caller the object `site` looks the called method up on may be: its
+/// receiver (`self._m()`, `cls._m()`, `super()._m()`), or, for a call binding no receiver of its
+/// own (`Class._m(self)`), the object every function a call contract judges it by binds as its
+/// receiver. The first argument of a call of a static method or of a function is no receiver.
+fn looked_up_params(cx: &CheckContext<'_>, site: &CallSite) -> u64 {
+    let binds = judged_callees(site).all(|k| cx.decls.function_decl(k).is_some_and(binds_receiver));
+    site.recv_params() | if binds { receiver_params(site) } else { 0 }
+}
+
 /// Parameters of the caller the receiver of `site` may be (`self.m()`: bit 0); none for a
 /// construction, whose object is fresh.
 fn receiver_params(site: &CallSite) -> u64 {
@@ -779,6 +808,17 @@ pub(crate) fn mut204<'c>(
                 rule.attribution.as_deref(),
                 "call-owners",
                 &rule.name,
+            )?)
+            .with_own_receiver(allows_own_receiver(
+                rule.own_receiver.as_deref(),
+                "call-owners",
+                &rule.name,
+            )?)
+            .with_protocols(named_protocols(
+                cx,
+                &all_classes,
+                &rule.allowed_protocols,
+                "call-owners.allowed-protocols",
             )?),
             note: rule.message.as_deref(),
             report_unresolved: reports_unresolved(
@@ -816,20 +856,40 @@ pub(crate) fn mut204<'c>(
                 called.filter(|(c, _)| !reference || rules[*c].references.counts(site))
             {
                 let rule = &rules[c];
+                if through_allowed_protocol(cx, &rule.allowance, site) {
+                    continue;
+                }
                 for group in groups {
                     let (target, called) = group_texts(&rule.targets, &group, Some(site));
-                    let (family_id, family) = families[c].at(cx, &rule.targets, &group, site);
+                    let (family_id, family, inside) =
+                        families[c].at(cx, &rule.targets, &group, site);
                     let obj = receiver_params(site);
-                    let walk = || delegated_reports(cx, &sites, &rule.allowance, &family, key, obj);
-                    let add = |reports: &mut MergedReports<'c>, r: &DelegatedReport, sites| {
+                    let looked_up = looked_up_params(cx, site);
+                    let walk = || {
+                        delegated_reports(
+                            cx,
+                            &sites,
+                            (&rule.allowance, &family),
+                            (key, obj, looked_up),
+                            inside,
+                        )
+                    };
+                    let add = |reports: &mut MergedReports<'c, usize>,
+                               r: &DelegatedReport,
+                               sites| {
                         let Some(unit) = cx.index.file_of(&r.func).and_then(|p| cx.unit(p)) else {
                             return;
+                        };
+                        let name = Named {
+                            target: &target,
+                            named: &called,
+                            rank: group[0],
                         };
                         reports.add(
                             unit,
                             &r.func,
                             r.span(site.span),
-                            (&target, &called),
+                            (c, name),
                             sites,
                             rule.note,
                             || {
@@ -864,7 +924,7 @@ pub(crate) fn mut204<'c>(
                             },
                         );
                     };
-                    let access = (obj, c, family_id, target.clone(), called.clone());
+                    let access = (obj, looked_up, c, family_id, target.clone(), called.clone());
                     let site_id = (caller.clone(), site.span);
                     access_groups.report(&mut reports, access, site_id, walk, add);
                 }
