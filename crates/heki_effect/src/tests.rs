@@ -2171,6 +2171,14 @@ def generated(names: list[str]) -> bool:
     return any(name for name in names)
 
 
+def keyed(first: str, last: str) -> list[str]:
+    return sorted({first: 1, last: 2})
+
+
+def merged(first: str, extra: dict[str, int]) -> list[str]:
+    return sorted({first: 1, **extra})
+
+
 class Feed:
     def __init__(self) -> None:
         self.items: list[str] = []
@@ -2248,6 +2256,9 @@ fn removals_of_kept_values_by_name_and_by_unknown_code() {
     assert_eq!(removes("appended"), KeptRemoval::Any);
     assert_eq!(removes("copied_list"), KeptRemoval::Any);
     assert_eq!(removes("generated"), KeptRemoval::Any);
+    // A dict display used once hands on its keys; a `**` unpacking adds keys of another value.
+    assert_eq!(removes("keyed"), KeptRemoval::Nothing);
+    assert_eq!(removes("merged"), KeptRemoval::Any);
     // A generator runs its body while what it returns is iterated: each step of the loop is a
     // point of the generator's removals (its summary's), after the write before the loop.
     assert_eq!(removes("Feed.refill"), named("count"));
