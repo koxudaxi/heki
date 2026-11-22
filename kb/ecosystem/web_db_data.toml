@@ -25,8 +25,8 @@ opaque_packages = [
     "requests", "httpx", "aiohttp", "urllib3", "sqlalchemy", "sqlmodel", "django", "psycopg",
     "psycopg_pool", "psycopg2", "pymysql", "redis", "pymongo", "boto3", "botocore", "grpc",
     "pandas", "numpy", "pydantic", "anyio", "trio", "starlette", "fastapi", "asgiref", "asyncer",
-    "channels", "asyncpg", "websockets", "motor", "duckdb", "celery", "openai", "anthropic",
-    "google", "polars", "torch",
+    "channels", "asyncpg", "websockets", "yaml", "motor", "duckdb", "celery", "openai",
+    "anthropic", "google", "polars", "torch",
 ]
 
 # --- Offloads blocking work (argument index of the offloaded callable) ---
@@ -5303,6 +5303,19 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "psycopg.Connection.transaction"
 sync_lock_or_tx = true
+opaque_to_layer3 = true
+
+# --- Serializers written in order (EFF112, opt-in) ---
+# PyYAML sorts mapping keys unless `sort_keys=False` is passed.
+
+[[entries]]
+symbol = "yaml.dump"
+writes_in_order = { arg = 0, param = "data", sorted_by = "sort_keys", sorted_by_default = true }
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "yaml.safe_dump"
+writes_in_order = { arg = 0, param = "data", sorted_by = "sort_keys", sorted_by_default = true }
 opaque_to_layer3 = true
 
 # --- Data: pandas I/O ---

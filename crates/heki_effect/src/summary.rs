@@ -20,6 +20,7 @@ use crate::iterations::{
 };
 use crate::locks::{self, LockStep, ObjRef};
 use crate::one_at_a_time;
+use crate::order_flow;
 use crate::ownership::{self, LocalOrigins, Origins, ParamRole, ReturnOrigins, Source};
 use crate::readonly::{self, Derivation, ProtectedReturn, ReturnStep, Shared, container_mutator};
 use crate::resolver::{
@@ -713,6 +714,8 @@ struct Extractor<'a> {
     cx: &'a TypeCtx<'a>,
     path: &'a Path,
     types: FxHashMap<VarId, Val>,
+    /// The types of the function's values with their arguments (`list[Model]`, `set[str]`).
+    inferred: std::rc::Rc<crate::infer::Inferred>,
     /// The values `isinstance` checks give variables in the blocks they guard.
     narrowed: FxHashMap<(BlockId, VarId), Val>,
     /// The classes each `isinstance` check names, by its second argument.
@@ -1092,7 +1095,7 @@ impl<'a> Extractor<'a> {
         cell_aliases: &'a CellAliases,
     ) -> Self {
         let f = shape.f;
-        let (types, narrowed, isinstance_classes) = cx.infer_flow(f);
+        let (types, narrowed, isinstance_classes, inferred) = cx.infer_flow(f);
         let mut defs = FxHashMap::default();
         let mut uses: FxHashMap<VarId, Vec<&InstKind>> = FxHashMap::default();
         let mut stored_attrs = Vec::new();
@@ -1154,6 +1157,7 @@ impl<'a> Extractor<'a> {
             types,
             narrowed,
             isinstance_classes,
+            inferred,
             defs,
             live,
             uses,
@@ -2528,6 +2532,30 @@ impl<'a> Extractor<'a> {
         self.resolve_construction();
         if self.opt_in.return_origins {
             self.returned_origins();
+        }
+        if self.opt_in.set_order {
+            let calls: Vec<order_flow::OrderCall<'_>> = self
+                .project_calls
+                .iter()
+                .map(|c| order_flow::OrderCall {
+                    at: c.at,
+                    dst: c.dst,
+                    span: self.sites[c.site].span,
+                    candidates: &c.params,
+                    recv: c.recv,
+                })
+                .collect();
+            self.summary.set_order = order_flow::local_facts(
+                order_flow::LocalInput {
+                    f,
+                    shape: self.shape,
+                    cx: self.cx,
+                    types: &self.types,
+                    inferred: &self.inferred,
+                    callees: &self.callees,
+                },
+                &calls,
+            );
         }
         self.iterations();
         if self.opt_in.iterations {
