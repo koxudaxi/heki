@@ -1,0 +1,289 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "heki check --generate-prompt --output-format json",
+  "description": "A prompt for consulting a language model about one run of heki check: the effective configuration, the rules that apply, the diagnostics of the run, the question, and how to answer. Experimental: `version` changes when a field is removed or changes meaning.",
+  "type": "object",
+  "required": [
+    "version",
+    "question",
+    "configuration",
+    "rules",
+    "heuristic_rules_off",
+    "diagnostics",
+    "guidance"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "description": "The version of this object.",
+      "const": 1
+    },
+    "question": {
+      "description": "The question given to --generate-prompt, or null without one.",
+      "type": ["string", "null"]
+    },
+    "configuration": {
+      "$ref": "#/$defs/configuration"
+    },
+    "rules": {
+      "description": "The rules heki check runs in this configuration.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/rule"
+      }
+    },
+    "heuristic_rules_off": {
+      "description": "The heuristic rules that are off only because lint.heuristic is: --heuristic runs them.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "diagnostics": {
+      "$ref": "#/$defs/diagnostics"
+    },
+    "guidance": {
+      "description": "How to answer.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "$defs": {
+    "string_list": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "contract_tables": {
+      "description": "The tables of one contract key, each with the keys it sets (docs/configuration.md, Contracts).",
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "configuration": {
+      "description": "The configuration of the run, the command line's options over the configuration file's.",
+      "type": "object",
+      "required": [
+        "root",
+        "config_file",
+        "target_version",
+        "source_roots",
+        "source_roots_from",
+        "selection",
+        "baseline",
+        "contracts"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "root": {
+          "description": "The project root, as heki check prints paths.",
+          "type": "string"
+        },
+        "config_file": {
+          "description": "The configuration file heki read, or null when it uses the defaults.",
+          "type": ["string", "null"]
+        },
+        "target_version": {
+          "description": "The target Python version (py311 to py315).",
+          "type": "string"
+        },
+        "source_roots": {
+          "description": "The source roots below the project root.",
+          "$ref": "#/$defs/string_list"
+        },
+        "source_roots_from": {
+          "description": "src when the src setting lists the source roots, detected when heki found them.",
+          "enum": ["src", "detected"]
+        },
+        "selection": {
+          "$ref": "#/$defs/selection"
+        },
+        "baseline": {
+          "description": "The Ratchet baseline the run compares with, or null.",
+          "type": ["string", "null"]
+        },
+        "contracts": {
+          "description": "The contracts, by key.",
+          "type": "object",
+          "required": [
+            "call-owners",
+            "effect-boundaries",
+            "invalidation",
+            "read-owners",
+            "readonly-returns",
+            "write-owners"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "call-owners": {
+              "$ref": "#/$defs/contract_tables"
+            },
+            "effect-boundaries": {
+              "$ref": "#/$defs/contract_tables"
+            },
+            "invalidation": {
+              "$ref": "#/$defs/contract_tables"
+            },
+            "read-owners": {
+              "$ref": "#/$defs/contract_tables"
+            },
+            "readonly-returns": {
+              "$ref": "#/$defs/contract_tables"
+            },
+            "write-owners": {
+              "$ref": "#/$defs/contract_tables"
+            }
+          }
+        }
+      }
+    },
+    "selection": {
+      "description": "The rule selection in effect.",
+      "type": "object",
+      "required": [
+        "select",
+        "extend_select",
+        "ignore",
+        "per_file_ignores",
+        "heuristic",
+        "fail_on"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "select": {
+          "description": "The select list, or null for the default rules.",
+          "type": ["array", "null"],
+          "items": {
+            "type": "string"
+          }
+        },
+        "extend_select": {
+          "$ref": "#/$defs/string_list"
+        },
+        "ignore": {
+          "$ref": "#/$defs/string_list"
+        },
+        "per_file_ignores": {
+          "description": "Globs with the rules ignored in the files they match.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/string_list"
+          }
+        },
+        "heuristic": {
+          "description": "lint.heuristic: whether the heuristic rules run as the exact ones do.",
+          "type": "boolean"
+        },
+        "fail_on": {
+          "description": "The least severity whose reports make heki check fail.",
+          "enum": ["error", "warning"]
+        }
+      }
+    },
+    "rule": {
+      "type": "object",
+      "required": ["code", "slug", "certainty", "activation", "claim"],
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "slug": {
+          "type": "string"
+        },
+        "certainty": {
+          "enum": ["exact", "heuristic"]
+        },
+        "activation": {
+          "description": "default: runs without being named; opt-in: only when named; contract: when its contract is declared.",
+          "enum": ["default", "opt-in", "contract"]
+        },
+        "claim": {
+          "description": "What a report states: the first paragraph of the rule documentation's section of that name.",
+          "type": "string"
+        }
+      }
+    },
+    "diagnostics": {
+      "description": "The diagnostics heki check reports (with a baseline, those it does not allow).",
+      "type": "object",
+      "required": [
+        "files_checked",
+        "total",
+        "shown",
+        "omitted",
+        "limit_bytes",
+        "heuristic_reports_withheld",
+        "files_not_analyzed"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "files_checked": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "total": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "shown": {
+          "description": "The diagnostics, in the order heki check prints them, while their concise lines fit limit_bytes.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/diagnostic"
+          }
+        },
+        "omitted": {
+          "description": "The diagnostics not shown.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "limit_bytes": {
+          "description": "The bytes of concise lines the shown diagnostics may take.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "heuristic_reports_withheld": {
+          "description": "The heuristic reports of exact rules withheld because lint.heuristic is off.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "files_not_analyzed": {
+          "description": "The files heki could not read or parse, with the error.",
+          "$ref": "#/$defs/string_list"
+        }
+      }
+    },
+    "diagnostic": {
+      "type": "object",
+      "required": ["path", "line", "column", "rule_code", "certainty", "message"],
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "line": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "column": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "rule_code": {
+          "type": "string"
+        },
+        "certainty": {
+          "enum": ["exact", "heuristic"]
+        },
+        "message": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

@@ -15,7 +15,7 @@ use heki_effect::{OptInFacts, ProjectIndex, TypedWrites, analyze_project_for, fu
 use heki_env::{LintConfig, Severity};
 use heki_profile::{HotFunctions, ProfileData, ProfiledFunction};
 use heki_rules::project::{
-    FileError, ParsedFile, Project, ProjectOptions, canonical, retain_unsuppressed,
+    FileError, ParsedFile, Project, ProjectEnv, ProjectOptions, canonical, retain_unsuppressed,
 };
 use heki_rules::{
     CheckExtras, ModuleUnit, RuleSelection, SNAPSHOT_FILE, Selectors, SummarySnapshot,
@@ -410,6 +410,13 @@ fn fix_in_memory(args: &CheckArgs, hot: Option<&ProfileData>) -> Result<FixRun> 
 }
 
 pub(crate) fn run(args: &CheckArgs) -> Result<ExitCode> {
+    if let Some(target) = args.output_format_json_schema {
+        print!("{}", crate::prompt::json_schema(target));
+        return Ok(ExitCode::SUCCESS);
+    }
+    if let Some(question) = &args.generate_prompt {
+        return crate::prompt::run(args, question);
+    }
     let Some(path) = &args.walk_steps else {
         return run_check(args);
     };
@@ -502,6 +509,35 @@ fn write_fixed(files: &[FixedFile]) -> Result<(usize, usize, Vec<FileError>)> {
     Ok((fixes, written, conflicts))
 }
 
+/// The Ratchet baseline a run compares its reports with: `--baseline`, else the `baseline` of
+/// the configuration, relative to the project root.
+pub(crate) fn baseline_path(analysis: &AnalysisArgs, env: &ProjectEnv) -> Option<PathBuf> {
+    analysis
+        .baseline
+        .clone()
+        .or_else(|| env.cfg.baseline.as_ref().map(|b| env.root.join(b)))
+}
+
+/// The path a baseline entry names for a file of `project`: relative to the project root.
+pub(crate) fn baseline_key(project: &Project) -> impl Fn(&Path) -> String + '_ {
+    let rel: FxHashMap<&Path, &str> = project
+        .files
+        .iter()
+        .map(|f| (f.path.as_path(), f.rel.as_str()))
+        .collect();
+    move |p: &Path| rel.get(p).map_or_else(|| path_text(p), |r| (*r).to_owned())
+}
+
+/// Every path of `diags` as the output formats print it ([`shown_path`]).
+pub(crate) fn show_paths(diags: &mut [Diagnostic]) {
+    for d in diags {
+        d.path = shown_path(&d.path);
+        for r in &mut d.related {
+            r.path = shown_path(&r.path);
+        }
+    }
+}
+
 /// Baseline handling, rendering, summary, and exit code of one analyzed run, whose selection
 /// left `heuristic_off` rules off and withheld `withheld` reports for being heuristic.
 pub(crate) fn report(
@@ -512,25 +548,8 @@ pub(crate) fn report(
     withheld: usize,
     styles: &Stylesheet,
 ) -> Result<ExitCode> {
-    let root = &project.env.root;
-    let by_path: FxHashMap<&Path, &ParsedFile> = project
-        .files
-        .iter()
-        .map(|p| (p.path.as_path(), p))
-        .collect();
-    // Every diagnostic is emitted for one of the project's files (`CheckContext::emit` takes
-    // the path of the unit it reports on), so its key path is that file's relative path.
-    let key_path = |p: &Path| {
-        by_path
-            .get(p)
-            .map(|f| f.rel.clone())
-            .expect("diagnostics are emitted for the project's files")
-    };
-    let baseline_path = args
-        .analysis
-        .baseline
-        .clone()
-        .or_else(|| project.env.cfg.baseline.clone().map(|b| root.join(b)));
+    let key_path = baseline_key(project);
+    let baseline_path = baseline_path(&args.analysis, &project.env);
     let fmt = args.output_format;
     if args.update_baseline && baseline_path.is_none() {
         bail!("`--update-baseline` needs `--baseline <path>` or `baseline` in the configuration");
@@ -610,12 +629,7 @@ pub(crate) fn report(
     // Suppressions and the baseline saw every report; only output folds them.
     fold_root_causes(&mut diags);
     // Every format prints the paths `--diff` prints.
-    for d in &mut diags {
-        d.path = shown_path(&d.path);
-        for r in &mut d.related {
-            r.path = shown_path(&r.path);
-        }
-    }
+    show_paths(&mut diags);
     let by_shown: FxHashMap<PathBuf, (&ParsedFile, LineIndex)> = project
         .files
         .iter()
