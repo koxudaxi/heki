@@ -547,13 +547,25 @@ pub(crate) fn group_texts(
     (texts.join("|"), named.join(" or "))
 }
 
-/// Whether a class target names its subclasses too (`call-owners.subclasses`).
+/// Whether a class a contract names stands for its subclasses too: a class target of
+/// `call-owners` (`subclasses`), and an `allowed-protocols` pattern (`protocol-subclasses`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Subclasses {
-    /// Constructing the class or a subclass calls the target.
+    /// The class and its subclasses: constructing a subclass calls a class target.
     Covered,
-    /// Constructing the class itself does.
+    /// The class itself.
     Excluded,
+}
+
+impl Subclasses {
+    /// The value of a `subclasses`-style key (`true` when unset).
+    pub(crate) fn of(value: Option<bool>) -> Self {
+        if value == Some(false) {
+            Self::Excluded
+        } else {
+            Self::Covered
+        }
+    }
 }
 
 impl CallTargetPattern {
@@ -787,10 +799,7 @@ pub(crate) fn mut204<'c>(
     let mut rules = Vec::new();
     for rule in &cx.config.call_owners {
         let context = "call-owners.targets";
-        let subclasses = match rule.subclasses {
-            Some(false) => Subclasses::Excluded,
-            _ => Subclasses::Covered,
-        };
+        let subclasses = Subclasses::of(rule.subclasses);
         let targets = parse_call_targets(cx, &all_classes, &rule.targets, context, subclasses)?;
         // The targets may call each other: a call of the guarded operation is checked where it
         // is made, so what the operation does inside is part of it.
@@ -817,7 +826,7 @@ pub(crate) fn mut204<'c>(
             .with_protocols(named_protocols(
                 cx,
                 &all_classes,
-                &rule.allowed_protocols,
+                (&rule.allowed_protocols, rule.protocol_subclasses),
                 "call-owners.allowed-protocols",
             )?),
             note: rule.message.as_deref(),

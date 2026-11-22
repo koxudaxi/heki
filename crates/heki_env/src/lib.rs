@@ -151,6 +151,9 @@ pub struct WriteOwnerRule {
     /// Project protocols (class patterns, their subclasses included): a write through a value
     /// typed with one that declares the attribute is allowed.
     pub allowed_protocols: Vec<String>,
+    /// `false`: an `allowed-protocols` pattern names the protocols it matches only, not their
+    /// subprotocols; `true` (default) covers them.
+    pub protocol_subclasses: Option<bool>,
     /// `"report"`: also report (`MUT201`) a constant key written through the namespace of an
     /// object of a target's class (`obj.__dict__[KEY] = v`, `vars(obj)`) that no target of any
     /// `write-owners` contract covering the class names; `"ignore"` (default) does not.
@@ -180,6 +183,8 @@ pub struct ReadOwnerRule {
     /// Project protocols, as for `WriteOwnerRule`: a read through a value typed with one that
     /// declares the attribute is allowed.
     pub allowed_protocols: Vec<String>,
+    /// Whether `allowed-protocols` covers subprotocols, as for `WriteOwnerRule`.
+    pub protocol_subclasses: Option<bool>,
 }
 
 /// `[[tool.heki.call-owners]]` contract for `MUT204`: who may call a function or method, or
@@ -219,6 +224,8 @@ pub struct CallOwnerRule {
     /// Project protocols, as for `WriteOwnerRule`: a call through a value typed with one that
     /// declares the method is allowed.
     pub allowed_protocols: Vec<String>,
+    /// Whether `allowed-protocols` covers subprotocols, as for `WriteOwnerRule`.
+    pub protocol_subclasses: Option<bool>,
 }
 
 /// `[[tool.heki.effect-boundaries]]` contract for `EFF201`: effects that must not be reached,
@@ -795,6 +802,7 @@ unresolved = "report"
 attribution = "call-graph"
 own-receiver = "allow"
 allowed-protocols = ["*Host"]
+protocol-subclasses = false
 
 [[tool.heki.call-owners]]
 name = "reference-mutators"
@@ -867,6 +875,7 @@ import-probes = "report"
                 attribution: Some("call-graph".into()),
                 own_receiver: Some("allow".into()),
                 allowed_protocols: vec!["*Host".into()],
+                protocol_subclasses: Some(false),
             }
         );
         assert_eq!(
@@ -884,6 +893,7 @@ import-probes = "report"
                 attribution: Some("lexical".into()),
                 own_receiver: Some("report".into()),
                 allowed_protocols: Vec::new(),
+                protocol_subclasses: None,
             }
         );
         assert_eq!(

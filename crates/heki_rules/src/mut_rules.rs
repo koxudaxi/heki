@@ -867,16 +867,20 @@ pub(crate) fn project_classes(cx: &CheckContext<'_>) -> Vec<ContractClass> {
     all
 }
 
-/// The project classes (fqn) of `all` that `pattern` names, plus all their subclasses.
+/// The project classes (fqn) of `all` that `pattern` names, plus all their subclasses when
+/// `subclasses` covers them.
 fn class_set(
     cx: &CheckContext<'_>,
     pattern: &DottedPattern,
     all: &[ContractClass],
+    subclasses: Subclasses,
 ) -> FxHashSet<String> {
     let mut out = FxHashSet::default();
     for c in all.iter().filter(|c| pattern.matches_class(c)) {
         out.insert(c.fqn.clone());
-        out.extend(cx.decls.subclasses_of(&c.fqn));
+        if subclasses == Subclasses::Covered {
+            out.extend(cx.decls.subclasses_of(&c.fqn));
+        }
     }
     out
 }
@@ -907,7 +911,7 @@ pub(crate) fn parse_targets(
             text: t.clone(),
             attr: DottedPattern::new(attr, context)?,
             key,
-            classes: class_set(cx, &class, all),
+            classes: class_set(cx, &class, all, Subclasses::Covered),
         });
     }
     Ok(out)
@@ -968,8 +972,8 @@ pub(crate) struct Allowance {
     /// `own-receiver = "allow"`: an access through the receiver of the method judging it is
     /// allowed ([`Self::owns`]).
     own_receiver: bool,
-    /// The project protocols `allowed-protocols` names, with their subclasses
-    /// ([`Self::allows_protocol`]).
+    /// The project protocols `allowed-protocols` names, with their subclasses unless
+    /// `protocol-subclasses = false` ([`Self::allows_protocol`]).
     protocols: FxHashSet<String>,
 }
 
@@ -1001,7 +1005,8 @@ impl FunctionMatcher {
     ) -> Result<Self, RuleConfigError> {
         let mut out = Self::named(text, context)?;
         if let Some((holder, last)) = split_last_dot(text) {
-            let owners = class_set(cx, &DottedPattern::new(holder, context)?, all_classes);
+            let holder = DottedPattern::new(holder, context)?;
+            let owners = class_set(cx, &holder, all_classes, Subclasses::Covered);
             if !owners.is_empty() {
                 out.method = Some((owners, DottedPattern::new(last, context)?));
             }
@@ -2193,16 +2198,23 @@ fn protocols_written_through<'s>(
 }
 
 /// The project classes the `allowed-protocols` patterns of a contract name, with their subclasses
-/// (a class that is no protocol allows nothing, [`Allowance::allows_protocol`]).
+/// unless `protocol-subclasses = false` (a class that is no protocol allows nothing,
+/// [`Allowance::allows_protocol`]).
 pub(crate) fn named_protocols(
     cx: &CheckContext<'_>,
     all: &[ContractClass],
-    patterns: &[String],
+    (patterns, subclasses): (&[String], Option<bool>),
     context: &'static str,
 ) -> Result<FxHashSet<String>, RuleConfigError> {
+    let subclasses = Subclasses::of(subclasses);
     let mut out = FxHashSet::default();
     for p in patterns {
-        out.extend(class_set(cx, &DottedPattern::new(p, context)?, all));
+        out.extend(class_set(
+            cx,
+            &DottedPattern::new(p, context)?,
+            all,
+            subclasses,
+        ));
     }
     Ok(out)
 }
@@ -2421,13 +2433,13 @@ pub(crate) fn mut201(
         .with_protocols(named_protocols(
             cx,
             &all_classes,
-            &rule.allowed_protocols,
+            (&rule.allowed_protocols, rule.protocol_subclasses),
             "write-owners.allowed-protocols",
         )?);
         let mut forbid_cached = FxHashSet::default();
         for p in &rule.forbid_cached_property_on {
             let p = DottedPattern::new(p, "write-owners.forbid-cached-property-on")?;
-            forbid_cached.extend(class_set(cx, &p, &all_classes));
+            forbid_cached.extend(class_set(cx, &p, &all_classes, Subclasses::Covered));
         }
         rules.push(OwnerRule {
             name: &rule.name,
@@ -4093,7 +4105,7 @@ pub(crate) fn mut203<'c>(
             .with_protocols(named_protocols(
                 cx,
                 &all_classes,
-                &rule.allowed_protocols,
+                (&rule.allowed_protocols, rule.protocol_subclasses),
                 "read-owners.allowed-protocols",
             )?),
             note: rule.message.as_deref(),
