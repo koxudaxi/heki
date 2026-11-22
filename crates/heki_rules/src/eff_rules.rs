@@ -201,7 +201,7 @@ pub(crate) fn eff101_105(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
     let reports = boundary_reports_in(
         cx.index,
         cx.units.iter().map(|u| u.input.path.as_path()),
-        cx.open_premises,
+        cx.must_explainer.as_ref(),
     );
     for r in reports {
         let code = boundary_code(&r);
@@ -816,15 +816,18 @@ fn progress_of(site: &CallSite) -> Progress {
 }
 
 /// The premises of `EFF103`'s claim the must-fact of the query `q` leaves open along its chain
-/// (`heki_effect::ProjectIndex::site_must_gaps`).
+/// (`heki_effect::MustExplainer::gaps_along`).
 fn query_chain_open_premises(
     cx: &CheckContext<'_>,
     path: &Path,
     q: &LoopQuery<'_>,
 ) -> Vec<OpenPremise> {
     let gaps = cx
-        .index
-        .site_must_gaps(path, q.chain_site, ExecEffectKind::DbQuery, &q.chain);
+        .must_explainer
+        .as_ref()
+        .map_or_else(Vec::new, |explainer| {
+            explainer.gaps_along(path, q.chain_site, ExecEffectKind::DbQuery, &q.chain)
+        });
     chain_open_premises(cx, &premises::CONDITIONAL_STATEMENT, &q.chain, &gaps)
 }
 

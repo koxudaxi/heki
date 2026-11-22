@@ -21,7 +21,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{BTreeSet, VecDeque};
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 /// Recomputations allowed per SCC member before the SCC is declared non-converged.
 const MAX_ITERATIONS_PER_SCC_MEMBER: usize = 16;
@@ -518,63 +518,136 @@ pub(crate) fn site_must_steps(
     }
 }
 
-/// Why the call at `site` (in `path`) has not been established to have run `e` whenever it
-/// returns, along `chain`, the chain a report shows from it: the gaps of each call on the
-/// chain, the first one's from [`site_must_steps`] and the others' also from their callers'
-/// returns ([`CallSite::made_on_every_return`]). The walk goes down while the function the
-/// chain enters has not run `e` whenever it returns, and that function's own gap gives way to
-/// the gaps found below it. Empty when the call has the fact.
-pub(crate) fn must_gaps_along(
-    index: &ProjectIndex,
-    path: &Path,
-    site: &CallSite,
-    e: ExecEffectKind,
-    chain: &[CallHop],
-) -> Vec<HopGap> {
-    let mut out: Vec<HopGap> = Vec::new();
-    // Per hop, the gap of the function the chain enters there, which the gaps below replace.
-    let mut entered_gaps: Vec<(usize, usize)> = Vec::new();
-    let mut at = Some((path, site));
-    for hop in 0..chain.len() {
-        let Some((path, site)) = at.take() else {
-            break;
-        };
-        if hop > 0 && !site.made_on_every_return() {
-            out.push(HopGap {
-                hop,
-                gap: MustGap::NotOnEveryReturn,
-            });
-        }
-        let entered = chain.get(hop + 1).map(|h| &h.caller);
-        site_must_steps(index, path, site, e, &mut |gap| {
-            if matches!(&gap, MustGap::WithoutTheFact(k) if Some(k) == entered) {
-                entered_gaps.push((hop, out.len()));
+/// Why must-facts do not hold, for the reports of one run: the call site each chain hop names,
+/// found in a table built once, and each call's own gaps ([`site_must_steps`]) decided once and
+/// shared by every report whose chain passes it. A report's walk visits only the hops of its
+/// own chain, so the work grows with the chains the reports show.
+pub struct MustExplainer<'i> {
+    index: &'i ProjectIndex,
+    sites: FxHashMap<(&'i Path, &'i FuncKey, Span), Vec<&'i CallSite>>,
+    gaps: Mutex<SiteGaps>,
+}
+
+/// The gaps of each call site (by its address) for an effect ([`MustExplainer::site_gaps`]).
+type SiteGaps = FxHashMap<(usize, ExecEffectKind), Arc<[MustGap]>>;
+
+impl<'i> MustExplainer<'i> {
+    pub fn new(index: &'i ProjectIndex) -> Self {
+        let mut sites: FxHashMap<(&Path, &FuncKey, Span), Vec<&CallSite>> = FxHashMap::default();
+        for (path, file) in &index.files {
+            for site in &file.call_sites {
+                sites
+                    .entry((path.as_path(), &site.caller, site.span))
+                    .or_default()
+                    .push(site);
             }
-            out.push(HopGap { hop, gap });
-            ControlFlow::Continue(())
-        });
-        let Some(next) = chain.get(hop + 1) else {
-            break;
-        };
-        let entered_has_it = index
-            .summary(&next.caller)
-            .and_then(|c| c.must_exec.as_deref()?.chain(e))
-            .is_some();
-        if !entered_has_it {
-            at = index.call_site_of(next).map(|s| (next.path.as_path(), s));
+        }
+        Self {
+            index,
+            sites,
+            gaps: Mutex::default(),
         }
     }
-    let deepest = out.last().map_or(0, |g| g.hop);
-    let replaced: FxHashSet<usize> = entered_gaps
-        .into_iter()
-        .filter(|&(hop, _)| deepest > hop)
-        .map(|(_, i)| i)
-        .collect();
-    out.into_iter()
-        .enumerate()
-        .filter(|(i, _)| !replaced.contains(i))
-        .map(|(_, g)| g)
-        .collect()
+
+    /// The call site a chain's hop stands for: the call of its callee its caller makes there.
+    fn site_of(&self, hop: &CallHop) -> Option<&'i CallSite> {
+        let calls = |site: &&CallSite| match &site.target {
+            CallTarget::Layer2 { symbol, .. } => *symbol == hop.callee,
+            CallTarget::Project(callees) => callees.iter().any(|bc| bc.callee.fqn() == hop.callee),
+        };
+        self.sites
+            .get(&(hop.path.as_path(), &hop.caller, hop.span))?
+            .iter()
+            .copied()
+            .find(calls)
+    }
+
+    /// The gaps of [`site_must_steps`] at `site` for `e`, each told once.
+    fn site_gaps(&self, path: &Path, site: &CallSite, e: ExecEffectKind) -> Arc<[MustGap]> {
+        // The index is borrowed for the explainer's life, so a site's address names it.
+        let key = (std::ptr::from_ref(site) as usize, e);
+        let kept = self
+            .gaps
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&key)
+            .cloned();
+        kept.unwrap_or_else(|| {
+            let mut gaps = Vec::new();
+            site_must_steps(self.index, path, site, e, &mut |gap| {
+                gaps.push(gap);
+                ControlFlow::Continue(())
+            });
+            let gaps: Arc<[MustGap]> = gaps.into();
+            self.gaps
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(key, Arc::clone(&gaps));
+            gaps
+        })
+    }
+
+    /// Why the call at `site` (in `path`) has not been established to have run `e` whenever it
+    /// returns, along `chain`, the chain a report shows from it: the gaps of each call on the
+    /// chain, the first one's from [`site_must_steps`] and the others' also from their callers'
+    /// returns ([`CallSite::made_on_every_return`]). The walk goes down while the function the
+    /// chain enters has not run `e` whenever it returns, and that function's own gap gives way
+    /// to the gaps found below it. Empty when the call has the fact.
+    pub fn gaps_along(
+        &self,
+        path: &Path,
+        site: &CallSite,
+        e: ExecEffectKind,
+        chain: &[CallHop],
+    ) -> Vec<HopGap> {
+        let mut out: Vec<HopGap> = Vec::new();
+        // Per hop, the gap of the function the chain enters there, which the gaps below replace.
+        let mut entered_gaps: Vec<(usize, usize)> = Vec::new();
+        let mut at = Some((path, site));
+        for hop in 0..chain.len() {
+            let Some((path, site)) = at.take() else {
+                break;
+            };
+            if hop > 0 && !site.made_on_every_return() {
+                out.push(HopGap {
+                    hop,
+                    gap: MustGap::NotOnEveryReturn,
+                });
+            }
+            let entered = chain.get(hop + 1).map(|h| &h.caller);
+            for gap in self.site_gaps(path, site, e).iter() {
+                if matches!(gap, MustGap::WithoutTheFact(k) if Some(k) == entered) {
+                    entered_gaps.push((hop, out.len()));
+                }
+                out.push(HopGap {
+                    hop,
+                    gap: gap.clone(),
+                });
+            }
+            let Some(next) = chain.get(hop + 1) else {
+                break;
+            };
+            let entered_has_it = self
+                .index
+                .summary(&next.caller)
+                .and_then(|c| c.must_exec.as_deref()?.chain(e))
+                .is_some();
+            if !entered_has_it {
+                at = self.site_of(next).map(|s| (next.path.as_path(), s));
+            }
+        }
+        let deepest = out.last().map_or(0, |g| g.hop);
+        let replaced: FxHashSet<usize> = entered_gaps
+            .into_iter()
+            .filter(|&(hop, _)| deepest > hop)
+            .map(|(_, i)| i)
+            .collect();
+        out.into_iter()
+            .enumerate()
+            .filter(|(i, _)| !replaced.contains(i))
+            .map(|(_, g)| g)
+            .collect()
+    }
 }
 
 /// What a call has run whenever it returns ([`site_must_chain`]).
