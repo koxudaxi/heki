@@ -7,9 +7,9 @@
 //! facts.
 
 use super::{
-    Allowance, AllowanceKeys, FunctionMatcher, InsideAllowed, MergedReports, References,
-    allows_own_receiver, attribution, binds_receiver, counts_references, delegated_reports,
-    named_protocols, project_classes, reports_unresolved,
+    AccessGroups, Allowance, AllowanceKeys, DelegatedReport, FunctionMatcher, InsideAllowed,
+    MergedReports, References, allows_own_receiver, attribution, binds_receiver, counts_references,
+    delegated_reports, named_protocols, project_classes, reports_unresolved,
 };
 use crate::{
     CheckContext, DottedPattern, NamePart, RuleConfigError, SitesByCaller, last_name, module_of,
@@ -148,9 +148,9 @@ impl CallTargets {
 /// targets' families with the classes defining the methods a site calls that they name, and
 /// their subclasses (an initializer of one of them calling the method on its own `self`
 /// initializes itself). Kept per group and defining classes, which many sites share, each with
-/// the answers its calls share ([`InsideAllowed`]).
+/// its number among the contract's families and the answers its calls share ([`InsideAllowed`]).
 #[derive(Default)]
-struct Families<'k>(FxHashMap<FamilyKey, (Rc<FxHashSet<String>>, InsideAllowed<'k>)>);
+struct Families<'k>(FxHashMap<FamilyKey, (usize, Rc<FxHashSet<String>>, InsideAllowed<'k>)>);
 
 /// A group of targets (indices into the contract's targets) and the classes defining the
 /// methods a site calls that they name, sorted.
@@ -163,28 +163,29 @@ impl<'k> Families<'k> {
         targets: &CallTargets,
         group: &[usize],
         site: &CallSite,
-    ) -> (Rc<FxHashSet<String>>, &mut InsideAllowed<'k>) {
+    ) -> (usize, Rc<FxHashSet<String>>, &mut InsideAllowed<'k>) {
         let mut defining = Vec::new();
         for &i in group {
             targets.defining_classes(cx, i, site, &mut defining);
         }
         defining.sort_unstable();
         defining.dedup();
-        let (family, inside) = self
-            .0
-            .entry((group.to_vec(), defining))
-            .or_insert_with_key(|key| {
-                let mut family: FxHashSet<String> = group
-                    .iter()
-                    .flat_map(|&i| targets.patterns[i].family.iter().cloned())
-                    .collect();
-                for class in &key.1 {
-                    family.extend(cx.decls.subclasses_of(class));
-                    family.insert(class.clone());
-                }
-                (Rc::new(family), InsideAllowed::default())
-            });
-        (Rc::clone(family), inside)
+        let id = self.0.len();
+        let (id, family, inside) =
+            self.0
+                .entry((group.to_vec(), defining))
+                .or_insert_with_key(|key| {
+                    let mut family: FxHashSet<String> = group
+                        .iter()
+                        .flat_map(|&i| targets.patterns[i].family.iter().cloned())
+                        .collect();
+                    for class in &key.1 {
+                        family.extend(cx.decls.subclasses_of(class));
+                        family.insert(class.clone());
+                    }
+                    (id, Rc::new(family), InsideAllowed::default())
+                });
+        (*id, Rc::clone(family), inside)
     }
 }
 
@@ -700,10 +701,13 @@ pub(crate) fn site_callee(site: &CallSite) -> String {
 }
 
 /// What a report says `site` does with its target: subclasses it (a base of a class
-/// statement), hands it on (another reference site), constructs it, or calls it.
+/// statement), reads it (a reference site using it for anything else), hands it on (another
+/// reference site), constructs it, or calls it.
 pub(crate) fn call_verb(site: &CallSite, reference: bool) -> &'static str {
     if site.is_base {
         "subclasses"
+    } else if site.is_read {
+        "reads"
     } else if reference {
         "hands on"
     } else if site.constructs.is_some() {
@@ -765,8 +769,8 @@ pub(super) struct CallOwnerRule<'r> {
 /// `MUT204`: calls of `call-owners` targets outside their allowed callers, reported like the
 /// reads of `MUT203` (private helpers hand them to their callers; functions that only run
 /// inside allowed contexts and a class's own initialization are not reported).
-pub(crate) fn mut204(
-    cx: &CheckContext<'_>,
+pub(crate) fn mut204<'c>(
+    cx: &CheckContext<'c>,
     out: &mut Vec<Diagnostic>,
 ) -> Result<(), RuleConfigError> {
     let (calls, unresolved) = (
@@ -839,6 +843,8 @@ pub(crate) fn mut204(
     let mut reports = MergedReports::default();
     let mut families: Vec<Families> = rules.iter().map(|_| Families::default()).collect();
     for key in callers {
+        let caller = key.fqn();
+        let mut access_groups = AccessGroups::new();
         let calls = sites.get(key).into_iter().flatten().map(|s| (s, false));
         let handed = references.get(key).into_iter().flatten().map(|s| (s, true));
         for (&(path, site), reference) in calls.chain(handed) {
@@ -852,32 +858,36 @@ pub(crate) fn mut204(
                 }
                 for group in groups {
                     let (target, called) = group_texts(&rule.targets, &group, Some(site));
-                    let (family, inside) = families[c].at(cx, &rule.targets, &group, site);
-                    let found = delegated_reports(
-                        cx,
-                        &sites,
-                        (&rule.allowance, &family),
-                        (key, receiver_params(site), looked_up_params(cx, site)),
-                        site.span,
-                        inside,
-                    );
-                    for r in found {
+                    let (family_id, family, inside) =
+                        families[c].at(cx, &rule.targets, &group, site);
+                    let obj = receiver_params(site);
+                    let looked_up = looked_up_params(cx, site);
+                    let walk = || {
+                        delegated_reports(
+                            cx,
+                            &sites,
+                            (&rule.allowance, &family),
+                            (key, obj, looked_up),
+                            inside,
+                        )
+                    };
+                    let add = |reports: &mut MergedReports<'c>, r: &DelegatedReport, sites| {
                         let Some(unit) = cx.index.file_of(&r.func).and_then(|p| cx.unit(p)) else {
-                            continue;
+                            return;
                         };
                         reports.add(
                             unit,
                             &r.func,
-                            r.span,
+                            r.span(site.span),
                             (&target, &called),
-                            (key.fqn(), site.span),
+                            sites,
                             rule.note,
                             || {
                                 let what = call_verb(site, reference);
                                 let via = if r.chain.is_empty() {
                                     String::new()
                                 } else {
-                                    format!(" via `{}`", key.fqn())
+                                    format!(" via `{caller}`")
                                 };
                                 format!(
                                     "`{}` {what} {called}{via} {}",
@@ -903,7 +913,10 @@ pub(crate) fn mut204(
                                 chain
                             },
                         );
-                    }
+                    };
+                    let access = (obj, looked_up, c, family_id, target.clone(), called.clone());
+                    let site_id = (caller.clone(), site.span);
+                    access_groups.report(&mut reports, access, site_id, walk, add);
                 }
             }
         }

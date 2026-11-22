@@ -118,6 +118,16 @@ fn a_lexical_contract_judges_the_function_holding_the_call() {
         vec![
             helper(9, "public_helper"),
             helper(13, "_private_helper"),
+            base.clone()
+        ]
+    );
+    // `"reads"` counts the bases too, and attributes them as the other references.
+    assert_eq!(run("references = \"reads\"\n"), vec![base.clone()]);
+    assert_eq!(
+        run("references = \"reads\"\nattribution = \"lexical\"\n"),
+        vec![
+            helper(9, "public_helper"),
+            helper(13, "_private_helper"),
             base
         ]
     );

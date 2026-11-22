@@ -32,9 +32,13 @@ listed there that costs less than a quarter of the limits fails the gate until i
 band between keeps a shape near the limit from failing on one machine and passing on another
 (shapes scale differently across machines than the calibration shape does).
 
+`--shard k/n` runs every n-th shape, starting at the k-th (each placement of a family is a shape),
+after the same calibration: CI runs the shapes in parallel jobs.
+
 Usage:
     python3 scripts/check_walk_shapes.py --heki target/release/heki
     python3 scripts/check_walk_shapes.py --heki target/release/heki --only call_chain --report
+    python3 scripts/check_walk_shapes.py --heki target/release/heki --shard 1/2
 """
 
 from __future__ import annotations
@@ -77,8 +81,6 @@ PLACED = ("function", "method", "module")
 
 # Shapes known to cost more than the limits, with the walk that costs: (family, placement).
 KNOWN_OVER: dict[tuple[str, str], str] = {
-    ("call_chain", "module"): "MUT202 looks up each call's site in a scan of the function's call "
-    "sites (`mut_rules::site_call`)",
     **{
         ("returned_merge_chain", p): "the roots of each merged value are listed again per merge, "
         "with the call sites through them (summary `iterations`)"
@@ -165,6 +167,7 @@ name = "shape-calls"
 targets = ["Base.m", "g"]
 allowed-callers = ["Base.*"]
 unresolved = "report"
+references = "reads"
 
 [[effect-boundaries]]
 name = "shape-boundary"
@@ -233,6 +236,12 @@ def copy_chain_in_loop(n: int) -> Body:
     lines = ["for it in items:", "    y0 = xs"]
     lines += [f"    y{i} = y{i - 1}" for i in range(1, n + 1)]
     return Body(("items", "xs"), [*lines, f"    y{n}.remove(it)"])
+
+
+def unpacked_display_copies(n: int) -> Body:
+    """One dict display copied along a chain, each copy unpacked with `**` into a call."""
+    lines = ['f0 = {"x": p}', *(f"f{i} = f{i - 1}" for i in range(1, n + 1))]
+    return Body(("p",), [*lines, *(f"g(**f{i})" for i in range(n + 1))])
 
 
 def reverse_chain_in_loop(n: int) -> Body:
@@ -349,6 +358,30 @@ def cell_reads_of_several_names(n: int) -> Body:
     return Body(("xs", "out"), lines)
 
 
+def guarded_accesses_in_generator_expressions(n: int) -> Body:
+    """Generator expressions each reading a guarded attribute and calling a guarded function: the
+    generator expressions of a function share one qualname, so each of their call sites runs the
+    accesses of all of them."""
+    lines = ["b = Base()"]
+    lines += ["out.append(sum(1 for _ in xs if b.LIMIT and g(b)))" for _ in range(n)]
+    return Body(("xs", "out"), lines)
+
+
+def read_only_value_handed_to_calls(n: int) -> Body:
+    """The value a `readonly-returns` producer returns, handed to many project calls."""
+    return Body(("p",), ["v = load()", *("use(v)" for _ in range(n))])
+
+
+def passed_iterables(n: int) -> Body:
+    """Generator expressions of two clauses, each over a value bound just before it: child scopes
+    each receiving their iterable from the function creating them, sized where the IR's loop
+    bounds are refined and again by `OPT113`, which sizes every loop of a function of two."""
+    lines = []
+    for i in range(n):
+        lines += [f"rows = xs[{i}]", f"out[{i}] = (1 for _ in rows for _ in (1, 2))"]
+    return Body(("xs", "out"), lines)
+
+
 def path_aliases(n: int) -> Body:
     """Merges each joining the previous alias of a package's `__path__` and a new read of it,
     each alias read."""
@@ -391,6 +424,14 @@ def callers_of_one_helper(n: int) -> str:
     lines = ["def _write(obj: Base):", "    obj.cache = []", ""]
     for i in range(n):
         lines += [f"def call{i}(obj: Base):", "    _write(obj)", "    return obj.m()", ""]
+    return "\n".join(lines)
+
+
+def functions_each_calling(n: int) -> str:
+    """Many functions each making one project call."""
+    lines = []
+    for i in range(n):
+        lines += [f"def call{i}(x):", "    return g(x)", ""]
     return "\n".join(lines)
 
 
@@ -512,6 +553,8 @@ FAMILIES = [
     Family("phi_diamonds", phi_diamonds),
     Family("isinstance_continue", isinstance_continue),
     Family("copy_chain_in_loop", copy_chain_in_loop),
+    # A module body's names are globals: no copy of the display reaches a call.
+    Family("unpacked_display_copies", unpacked_display_copies, placements=("function", "method")),
     Family("reverse_chain_in_loop", reverse_chain_in_loop),
     Family("alias_loops", alias_loops),
     Family("doubled_constant_slices", doubled_constant_slices, real_code=False),
@@ -531,11 +574,23 @@ FAMILIES = [
         placements=("function", "method"),
         size=CELL_BINDINGS,
     ),
+    Family("read_only_value_handed_to_calls", read_only_value_handed_to_calls),
+    # Every call site is reported, standing for every access: the cost of the reports shows at a
+    # size where the walks the family does not gate stay cheap.
+    Family(
+        "guarded_accesses_in_generator_expressions",
+        guarded_accesses_in_generator_expressions,
+        size=2000,
+    ),
+    Family("passed_iterables", passed_iterables),
     Family("path_aliases", path_aliases),
     Family("merged_package_paths", merged_package_paths),
     Family("lazy_init_sites", lazy_init_sites, placements=("method",)),
     Family("wide_hierarchy", project=wide_hierarchy, placements=("project",), size=4000),
     Family("helper_chain", project=helper_chain, placements=("project",), size=2000),
+    Family(
+        "functions_each_calling", project=functions_each_calling, placements=("project",), size=20000
+    ),
     Family("callers_of_one_helper", project=callers_of_one_helper, placements=("project",), size=4000),
     Family(
         "initialization_steps",
@@ -702,14 +757,26 @@ class Runner:
         return out
 
 
+def shard(text: str) -> tuple[int, int]:
+    """`k/n` with 1 <= k <= n."""
+    k, _, n = text.partition("/")
+    if not (k.isdigit() and n.isdigit() and 1 <= int(k) <= int(n)):
+        raise argparse.ArgumentTypeError(f"expected K/N with 1 <= K <= N, got {text!r}")
+    return int(k), int(n)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--heki", required=True, help="path to the heki binary (release build)")
     parser.add_argument("--only", action="append", default=[], help="run only these families")
     parser.add_argument("--report", action="store_true", help="print the costs, never fail")
+    parser.add_argument("--shard", type=shard, default=(1, 1), metavar="K/N",
+                        help="run every N-th shape, starting at the K-th")
     args = parser.parse_args()
     heki = str(Path(args.heki).resolve())
     families = [f for f in FAMILIES if not args.only or f.name in args.only]
+    first, step = args.shard
+    shapes = [(f, placement) for f in families for placement in f.placements][first - 1 :: step]
     problems: list[str] = []
     with tempfile.TemporaryDirectory(prefix="heki-walk-shapes-") as tmp:
         runner = Runner(heki, Path(tmp))
@@ -740,60 +807,59 @@ def main() -> int:
             factor = max(factor, took / seconds)
         limit_seconds = LIMIT_SECONDS * factor
         print(f"time limit on this machine: {limit_seconds:.2f} s", flush=True)
-        for family in families:
-            for placement in family.placements:
-                shape = (family.name, placement)
-                runner.contracts("" if family.contracts is None else family.contracts(family.size))
-                if family.project is not None:
-                    n, failed = family.size, None
-                elif family.size:
-                    n = family.size
-                    modeled = runner.modeled(source(family, placement, n))
-                    failed = None if modeled is True else modeled or "leaves the function unmodeled"
-                else:
-                    n, failed = runner.largest_modeled(family, placement)
-                text = source(family, placement, n)
-                listed = shape in KNOWN_OVER
-                over = []
-                # Whether a listed shape costs clearly less than the limits.
-                well_under = failed is None
-                if failed is not None:
-                    print(f"{family.name}/{placement} n={n}: building the IR {failed}", flush=True)
-                    over.append("build")
-                for watch in () if failed is not None else (False,) if listed else (False, True):
-                    # A listed shape only has to show when it drops under the limits.
-                    timeout = base_seconds + 2 * limit_seconds if listed else TIMEOUT_SECONDS
-                    seconds, peak, code = runner.check(text, watch, timeout=timeout)
+        for family, placement in shapes:
+            shape = (family.name, placement)
+            runner.contracts("" if family.contracts is None else family.contracts(family.size))
+            if family.project is not None:
+                n, failed = family.size, None
+            elif family.size:
+                n = family.size
+                modeled = runner.modeled(source(family, placement, n))
+                failed = None if modeled is True else modeled or "leaves the function unmodeled"
+            else:
+                n, failed = runner.largest_modeled(family, placement)
+            text = source(family, placement, n)
+            listed = shape in KNOWN_OVER
+            over = []
+            # Whether a listed shape costs clearly less than the limits.
+            well_under = failed is None
+            if failed is not None:
+                print(f"{family.name}/{placement} n={n}: building the IR {failed}", flush=True)
+                over.append("build")
+            for watch in () if failed is not None else (False,) if listed else (False, True):
+                # A listed shape only has to show when it drops under the limits.
+                timeout = base_seconds + 2 * limit_seconds if listed else TIMEOUT_SECONDS
+                seconds, peak, code = runner.check(text, watch, timeout=timeout)
+                cost = (seconds - base_seconds, peak - base_peak)
+                if not listed and (cost[0] > limit_seconds or cost[1] > LIMIT_MIB or code == -9):
+                    # Once more, against noise.
+                    seconds, peak, code = runner.check(text, watch)
                     cost = (seconds - base_seconds, peak - base_peak)
-                    if not listed and (cost[0] > limit_seconds or cost[1] > LIMIT_MIB or code == -9):
-                        # Once more, against noise.
-                        seconds, peak, code = runner.check(text, watch)
-                        cost = (seconds - base_seconds, peak - base_peak)
-                    mode = "watch" if watch else "check"
-                    if code == -9:
-                        spent = f"stopped after {cost[0]:.0f} s"
-                    elif code not in (0, 1):
-                        spent = f"crashed (exit code {code})"
-                    else:
-                        spent = f"{cost[0]:.2f} s, {cost[1]:.0f} MiB"
-                    print(f"{family.name}/{placement} n={n} {mode}: {spent}", flush=True)
-                    if cost[0] > limit_seconds or cost[1] > LIMIT_MIB or code not in (0, 1):
-                        over.append(mode)
-                    if cost[0] > limit_seconds / 4 or cost[1] > LIMIT_MIB / 4 or code not in (0, 1):
-                        well_under = False
-                if over and not listed:
-                    problems.append(f"{family.name}/{placement} at n={n} costs more than "
-                                    f"{limit_seconds:.1f} s or {LIMIT_MIB:.0f} MiB ({', '.join(over)})")
-                if listed and well_under:
-                    problems.append(f"{family.name}/{placement} costs less than a quarter of the limits: "
-                                    "remove it from KNOWN_OVER")
-                if family.project is None and not over:
-                    steps = step_growth(runner, family, placement, n, text)
-                    if shape not in KNOWN_STEPS:
-                        problems += steps
-                    elif not steps:
-                        problems.append(f"{family.name}/{placement} takes linear steps and spends no "
-                                        "budget: remove it from KNOWN_STEPS")
+                mode = "watch" if watch else "check"
+                if code == -9:
+                    spent = f"stopped after {cost[0]:.0f} s"
+                elif code not in (0, 1):
+                    spent = f"crashed (exit code {code})"
+                else:
+                    spent = f"{cost[0]:.2f} s, {cost[1]:.0f} MiB"
+                print(f"{family.name}/{placement} n={n} {mode}: {spent}", flush=True)
+                if cost[0] > limit_seconds or cost[1] > LIMIT_MIB or code not in (0, 1):
+                    over.append(mode)
+                if cost[0] > limit_seconds / 4 or cost[1] > LIMIT_MIB / 4 or code not in (0, 1):
+                    well_under = False
+            if over and not listed:
+                problems.append(f"{family.name}/{placement} at n={n} costs more than "
+                                f"{limit_seconds:.1f} s or {LIMIT_MIB:.0f} MiB ({', '.join(over)})")
+            if listed and well_under:
+                problems.append(f"{family.name}/{placement} costs less than a quarter of the limits: "
+                                "remove it from KNOWN_OVER")
+            if family.project is None and not over:
+                steps = step_growth(runner, family, placement, n, text)
+                if shape not in KNOWN_STEPS:
+                    problems += steps
+                elif not steps:
+                    problems.append(f"{family.name}/{placement} takes linear steps and spends no "
+                                    "budget: remove it from KNOWN_STEPS")
     for problem in problems:
         print(problem, file=sys.stderr)
     return 1 if problems and not args.report else 0

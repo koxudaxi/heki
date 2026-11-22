@@ -2,22 +2,23 @@
 //! `MUT113`, `MUT201`, `MUT202`, `MUT203`, `MUT204` (docs/ANALYSIS_AND_KB_SPEC.md section 2.3).
 
 use crate::{
-    CheckContext, DottedPattern, ModuleUnit, RuleConfigError, SitesByCaller, has_glob_syntax,
-    split_last_dot,
+    CheckContext, DottedPattern, FnSites, ModuleUnit, RuleConfigError, SitesByCaller, SitesBySpan,
+    has_glob_syntax, split_last_dot,
 };
 use heki_ast::Span;
 use heki_diagnostics::Diagnostic;
 use heki_effect::readonly::{self, Derivation};
 use heki_effect::{
-    AttrKeyPath, BoundCallee, CacheEvent, CacheFlow, CallHop, CallSite, Callee, Construction,
-    ContractClass, Delivery, EffectSummary, Facts, FlowBlock, FuncKey, INITIALIZERS, ProjectDecls,
-    ProjectIndex, ReturnStep, SelfAttrWrite, Shared, SiteRole, TypeCtx, TypedFieldWriteSite, Val,
-    WriteKind, attr_writes, container_mutator, self_attr_writes,
+    AttrKeyPath, BoundCallee, CacheEvent, CacheFlow, CallHop, CallSite, CallTarget, Callee,
+    Construction, ContractClass, Delivery, EffectSummary, Facts, FlowBlock, FuncKey, INITIALIZERS,
+    ProjectDecls, ProjectIndex, ReturnStep, SelfAttrWrite, Shared, SiteRole, TypeCtx,
+    TypedFieldWriteSite, Val, WriteKind, attr_writes, container_mutator, self_attr_writes,
 };
 use heki_env::HekiConfig;
 use heki_ir::walk::{Budget, FnShape, Visit, reach};
 use heki_ir::{BlockId, FnIndex, Inst, InstKind, IrFunction, VarId};
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
@@ -1821,6 +1822,24 @@ pub(crate) type SiteId = (String, Span);
 #[derive(Default)]
 pub(crate) struct MergedReports<'u> {
     reports: BTreeMap<(FuncKey, Span, String), MergedReport<'u>>,
+    /// The sites of each group of accesses reported at the same places ([`AccessGroups`]).
+    groups: Vec<BTreeSet<SiteId>>,
+}
+
+/// A group of sites of [`MergedReports`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct SiteGroup(usize);
+
+/// What a report stands for: one violation site, or every site of a group.
+pub(crate) enum Sites {
+    One(SiteId),
+    Group(SiteGroup),
+}
+
+impl From<SiteId> for Sites {
+    fn from(site: SiteId) -> Self {
+        Self::One(site)
+    }
 }
 
 /// The name a report gives the target an access matched: the configured text, or, for a glob
@@ -1848,11 +1867,23 @@ struct MergedReport<'u> {
     help: Option<String>,
     chain: Vec<CallHop>,
     sites: BTreeSet<SiteId>,
+    groups: BTreeSet<SiteGroup>,
 }
 
 impl<'u> MergedReports<'u> {
+    /// A new, empty group of sites.
+    pub(crate) fn group(&mut self) -> SiteGroup {
+        self.groups.push(BTreeSet::new());
+        SiteGroup(self.groups.len() - 1)
+    }
+
+    /// Add `site` to `group`: every report standing for the group stands for it too.
+    pub(crate) fn add_to_group(&mut self, group: SiteGroup, site: SiteId) {
+        self.groups[group.0].insert(site);
+    }
+
     /// Add a report of `func` at `span` for `target` (the configured text) and the member it
-    /// matched (`named`, [`matched_name`]), standing for `site`, with the contract's `message`
+    /// matched (`named`, [`matched_name`]), standing for `sites`, with the contract's `message`
     /// as its help (`note`); `message` and `chain` are only built for the first report of the
     /// key.
     #[allow(clippy::too_many_arguments)]
@@ -1862,7 +1893,7 @@ impl<'u> MergedReports<'u> {
         func: &FuncKey,
         span: Span,
         (target, named): (&str, &str),
-        site: SiteId,
+        sites: impl Into<Sites>,
         note: Option<&str>,
         message: impl FnOnce() -> String,
         chain: impl FnOnce() -> Vec<CallHop>,
@@ -1878,16 +1909,42 @@ impl<'u> MergedReports<'u> {
                 help: note.map(str::to_owned),
                 chain: chain(),
                 sites: BTreeSet::new(),
+                groups: BTreeSet::new(),
             });
         if report.named != named {
             report.also.insert(named.to_owned());
         }
-        report.sites.insert(site);
+        match sites.into() {
+            Sites::One(site) => {
+                report.sites.insert(site);
+            }
+            Sites::Group(group) => {
+                report.groups.insert(group);
+            }
+        }
     }
 
     pub(crate) fn emit(self, cx: &CheckContext<'_>, code: &'static str, out: &mut Vec<Diagnostic>) {
-        for ((func, span, target), r) in self.reports {
-            let sites = u32::try_from(r.sites.len()).unwrap_or(u32::MAX);
+        // Reports standing for the same sites and groups (the call sites of a function, each
+        // running the accesses of the same groups) count their union once.
+        type Union<'r> = (&'r BTreeSet<SiteId>, &'r BTreeSet<SiteGroup>);
+        let mut unions: FxHashMap<Union<'_>, usize> = FxHashMap::default();
+        let mut counted = Vec::with_capacity(self.reports.len());
+        for r in self.reports.values() {
+            let mut groups = r.groups.iter();
+            let distinct = match (groups.next(), groups.next()) {
+                (None, _) => r.sites.len(),
+                (Some(g), None) if r.sites.is_empty() => self.groups[g.0].len(),
+                _ => *unions.entry((&r.sites, &r.groups)).or_insert_with(|| {
+                    let grouped = r.groups.iter().flat_map(|g| &self.groups[g.0]);
+                    let union: BTreeSet<&SiteId> = r.sites.iter().chain(grouped).collect();
+                    union.len()
+                }),
+            };
+            counted.push(distinct);
+        }
+        for (((func, span, target), r), distinct) in self.reports.into_iter().zip(counted) {
+            let sites = u32::try_from(distinct).unwrap_or(u32::MAX);
             let mut message = r.message;
             if !r.also.is_empty() {
                 let also: Vec<String> = r.also.iter().map(|m| format!("`{m}`")).collect();
@@ -1917,6 +1974,9 @@ const UNRESOLVED: &[&str] = &["ignore", "report"];
 /// `fresh-objects` values; the first is the default (writes that construct an object are no
 /// violation).
 const FRESH_OBJECTS: &[&str] = &["allow", "report"];
+/// `unlisted-dict-keys` values; the first is the default (a `__dict__` key no target names is
+/// no target's write).
+const UNLISTED_DICT_KEYS: &[&str] = &["ignore", "report"];
 /// The values of `import-probes`, the default first.
 const IMPORT_PROBES: &[&str] = &["allow", "report"];
 
@@ -1953,7 +2013,7 @@ pub(crate) fn allows_fresh(
 }
 
 /// `references` values; the first is the default (a reference handing a target on is no call).
-const REFERENCES: &[&str] = &["ignore", "calls", "calls-and-bases"];
+const REFERENCES: &[&str] = &["ignore", "calls", "calls-and-bases", "reads"];
 
 /// What a call contract counts as a call of a target besides calling it (`references`), each
 /// value counting more than the one before.
@@ -1965,15 +2025,30 @@ pub(crate) enum References {
     Calls,
     /// A reference handing it on, or a class statement naming it among its bases.
     CallsAndBases,
+    /// Any use of its value: a reference handing it on, a class statement naming it among its
+    /// bases, or a read using it for anything else.
+    Reads,
 }
 
 impl References {
+    /// What the `references` value `value` counts (a value outside [`REFERENCES`] counts
+    /// nothing; it is checked where the rules parse it).
+    pub(crate) fn named(value: &str) -> Self {
+        match value {
+            "calls" => Self::Calls,
+            "calls-and-bases" => Self::CallsAndBases,
+            "reads" => Self::Reads,
+            _ => Self::Ignored,
+        }
+    }
+
     /// Whether the reference site `site` counts as a call.
     pub(crate) fn counts(self, site: &CallSite) -> bool {
         match self {
             Self::Ignored => false,
-            Self::Calls => !site.is_base,
-            Self::CallsAndBases => true,
+            Self::Calls => !site.is_base && !site.is_read,
+            Self::CallsAndBases => !site.is_read,
+            Self::Reads => true,
         }
     }
 }
@@ -1987,16 +2062,12 @@ pub(crate) fn counts_references(
     let value = mode(
         value,
         REFERENCES,
-        "`ignore`, `calls`, or `calls-and-bases`",
+        "`ignore`, `calls`, `calls-and-bases`, or `reads`",
         section,
         contract,
         "references",
     )?;
-    Ok(match value {
-        "calls" => References::Calls,
-        "calls-and-bases" => References::CallsAndBases,
-        _ => References::Ignored,
-    })
+    Ok(References::named(value))
 }
 
 /// `attribution` values; the first is the default (the call graph decides which function an
@@ -2150,6 +2221,51 @@ struct OwnerRule<'r> {
     allow_fresh: bool,
     /// `unresolved = "report"`: writes heki cannot tie to a class are reported (`MUT205`).
     report_unresolved: bool,
+    /// `unlisted-dict-keys = "report"`: the `__dict__` keys of the targets' classes that no
+    /// target names are reported too.
+    report_unlisted_keys: bool,
+}
+
+impl OwnerRule<'_> {
+    /// What `site` writes of the contract: the targets it hits, or, with `unlisted-dict-keys =
+    /// "report"`, a key written through the namespace of an object of a class some targets cover
+    /// (a `dict_direct` write) that none of them names, once for each family of those targets.
+    /// Each comes with the index of a target whose family it is.
+    fn written<'s>(&'s self, site: &TypedFieldWriteSite) -> Vec<(usize, Written<'s>)> {
+        let hits = write_hits(&self.targets, site);
+        if !hits.is_empty() || !self.report_unlisted_keys || site.kind != WriteKind::DictDirect {
+            return hits
+                .into_iter()
+                .map(|(k, t)| (k, Written::Target(t)))
+                .collect();
+        }
+        let covering: Vec<(usize, &ContractTarget)> = self
+            .targets
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.classes.contains(&site.class_qualname))
+            .collect();
+        if covering.iter().any(|(_, t)| t.matches_attr(&site.attr)) {
+            return Vec::new();
+        }
+        let mut families: Vec<(usize, &FxHashSet<String>)> = Vec::new();
+        for (k, t) in covering {
+            if !families.iter().any(|(_, f)| *f == &t.classes) {
+                families.push((k, &t.classes));
+            }
+        }
+        families
+            .into_iter()
+            .map(|(k, f)| (k, Written::UnlistedKey(f)))
+            .collect()
+    }
+}
+
+/// What a write site writes of a `write-owners` contract ([`OwnerRule::written`]).
+enum Written<'r> {
+    Target(&'r ContractTarget),
+    /// A `__dict__` key no target names, on an object of this target family's class.
+    UnlistedKey(&'r FxHashSet<String>),
 }
 
 pub(crate) fn mut201(
@@ -2215,6 +2331,14 @@ pub(crate) fn mut201(
                 "write-owners",
                 &rule.name,
             )?,
+            report_unlisted_keys: mode(
+                rule.unlisted_dict_keys.as_deref(),
+                UNLISTED_DICT_KEYS,
+                "`ignore` or `report`",
+                "write-owners",
+                &rule.name,
+                "unlisted-dict-keys",
+            )? == "report",
         });
     }
 
@@ -2273,7 +2397,11 @@ pub(crate) fn mut201(
                     }
                     let (judged, obj_params) =
                         rule.allowance.judged_access(cx.decls, key, site.obj_params);
-                    for (ti, t) in write_hits(&rule.targets, site) {
+                    for (ti, written) in rule.written(site) {
+                        let family = match written {
+                            Written::Target(t) => &t.classes,
+                            Written::UnlistedKey(family) => family,
+                        };
                         let mut chain: Vec<FuncKey> = vec![judged.clone().into_owned()];
                         chain.extend(
                             site.via_chain
@@ -2307,12 +2435,9 @@ pub(crate) fn mut201(
                             })
                         };
                         if !lexical && (kept_below() || delegates(cx, sites, key, Handover::Every))
-                            || rule.allowance.owns(
-                                cx,
-                                &judged,
-                                &t.classes,
-                                (obj_params, obj_params),
-                            )
+                            || rule
+                                .allowance
+                                .owns(cx, &judged, family, (obj_params, obj_params))
                         {
                             continue;
                         }
@@ -2331,7 +2456,7 @@ pub(crate) fn mut201(
                             cx,
                             sites,
                             &rule.allowance,
-                            &t.classes,
+                            family,
                             (key, site.obj_params),
                             &mut inside[r][ti],
                         ) {
@@ -2342,20 +2467,29 @@ pub(crate) fn mut201(
                             .via_chain
                             .last()
                             .map_or_else(|| key.fqn(), |h| h.callee.clone());
-                        let named = matched_name(&t.text, || {
-                            let entry = t.key.as_ref().map(|k| format!("[\"{k}\"]"));
-                            format!(
-                                "{}.{}{}",
-                                site.class_qualname,
-                                site.attr,
-                                entry.unwrap_or_default()
-                            )
-                        });
+                        let member = format!("{}.{}", site.class_qualname, site.attr);
+                        // The report's target: the configured one, or the unlisted key as a
+                        // target naming it would (`Class.key`).
+                        let (text, named, unlisted) = match written {
+                            Written::Target(t) => {
+                                let named = matched_name(&t.text, || {
+                                    let entry = t.key.as_ref().map(|k| format!("[\"{k}\"]"));
+                                    format!("{member}{}", entry.unwrap_or_default())
+                                });
+                                (t.text.clone(), named, "")
+                            }
+                            Written::UnlistedKey(_) => {
+                                let class = &site.class_qualname;
+                                let qualname = cx.decls.class_qualname(class).unwrap_or(class);
+                                let text = format!("{qualname}.{}", site.attr);
+                                (text, member, ", a `__dict__` key no target names,")
+                            }
+                        };
                         reports.add(
                             unit,
                             &judged,
                             span,
-                            (&t.text, &named),
+                            (&text, &named),
                             (writer, site.span),
                             rule.note,
                             || {
@@ -2365,7 +2499,7 @@ pub(crate) fn mut201(
                                     .map(|h| format!(" via `{}`", h.callee))
                                     .unwrap_or_default();
                                 format!(
-                                    "`{}` writes `{named}` ({}){via} {}",
+                                    "`{}` writes `{named}` ({}){via}{unlisted} {}",
                                     judged.qualname,
                                     site.kind.as_str(),
                                     rule.allowance.where_text(
@@ -2620,7 +2754,7 @@ impl CallParts<'_> {
 /// unbound.
 pub(crate) fn site_call<'i>(
     def: &dyn Fn(VarId) -> Option<&'i Inst>,
-    sites: &[&'i CallSite],
+    sites: FnSites<'_, 'i>,
     inst: &'i Inst,
     worker: bool,
 ) -> Option<CallParts<'i>> {
@@ -2630,11 +2764,8 @@ pub(crate) fn site_call<'i>(
     } else {
         heki_effect::Runner::Caller
     };
-    let site = sites.iter().find(|s| {
-        s.span == inst.span
-            && s.role == SiteRole::Call
-            && s.runner == runner
-            && !s.project_callees().is_empty()
+    let site = sites.at(inst.span).iter().find(|s| {
+        s.role == SiteRole::Call && s.runner == runner && !s.project_callees().is_empty()
     })?;
     if wraps_call_at_own_span(def, inst, &call) {
         return None;
@@ -2707,11 +2838,12 @@ pub(crate) fn mut202(
         return;
     }
     let tcx = TypeCtx::new(&unit.input, cx.decls, cx.kb);
+    let sites = cx.sites_by_span(unit);
     for f in &unit.input.ir.functions {
         if f.is_class_body {
             continue;
         }
-        Mut202Fn::new(cx, unit, &tcx, returns, f).run(out);
+        Mut202Fn::new(cx, unit, &tcx, returns, &sites, f).run(out);
     }
 }
 
@@ -2727,14 +2859,23 @@ struct Mut202Fn<'a> {
     key: FuncKey,
     types: FxHashMap<VarId, Val>,
     ro: FxHashMap<VarId, Ro>,
-    /// The function's call sites in the index, every role (built on the first need).
-    sites: std::cell::OnceCell<Vec<&'a CallSite>>,
+    /// The function's call sites in the index, every role.
+    sites: FnSites<'a, 'a>,
+    /// The distinct facts of each project callee that the sites of one call run in the function
+    /// ([`Self::facts_run_by_call`], built on the first need).
+    facts_by_call: std::cell::OnceCell<FactsByCall<'a>>,
     /// The cached function whose result each variable is on every path ([`Self::must_results`],
     /// built on the first need).
     cached: std::cell::OnceCell<FxHashMap<VarId, MustResult<'a>>>,
     /// The function's tables of definitions and block order (built on the first need).
     shape: std::cell::OnceCell<FnShape<'a>>,
 }
+
+/// Per call ([`CallSite::of_call`]) and project callee, the distinct facts of the callee that the
+/// call's site and the sites of the object it returns run in the calling function
+/// ([`facts_run_at`]).
+type FactsByCall<'a> =
+    FxHashMap<(Span, &'a CallTarget), FxHashMap<&'a FuncKey, Vec<&'a EffectSummary>>>;
 
 /// The passes of [`Mut202Fn::must_results`] before it gives up.
 const MUST_RESULT_PASSES: usize = 64;
@@ -2776,8 +2917,10 @@ impl<'a> Mut202Fn<'a> {
         unit: &'a ModuleUnit<'a>,
         tcx: &'a TypeCtx<'a>,
         returns: &'a ReadOnlyReturns,
+        sites: &'a SitesBySpan<'a>,
         f: &'a IrFunction,
     ) -> Self {
+        let key = CheckContext::key(unit, f);
         Self {
             cx,
             unit,
@@ -2785,10 +2928,11 @@ impl<'a> Mut202Fn<'a> {
             returns,
             f,
             ix: FnIndex::new(f, &unit.input.ir.constants),
-            key: CheckContext::key(unit, f),
+            sites: sites.of(&key.qualname),
+            key,
             types: tcx.infer(f),
             ro: FxHashMap::default(),
-            sites: std::cell::OnceCell::new(),
+            facts_by_call: std::cell::OnceCell::new(),
             cached: std::cell::OnceCell::new(),
             shape: std::cell::OnceCell::new(),
         }
@@ -2864,7 +3008,7 @@ impl<'a> Mut202Fn<'a> {
     /// keeps its results ([`heki_effect::CachedResult`]).
     fn cached_callee(&self, inst: &'a Inst) -> Option<&'a FuncKey> {
         let shape = self.shape();
-        let call = site_call(&|v| shape.inst(v), self.function_sites(), inst, false)?;
+        let call = site_call(&|v| shape.inst(v), self.sites, inst, false)?;
         let callees = call.site?.project_callees();
         let bc = callees.first().filter(|_| callees.len() == 1)?;
         let summary = self.cx.index.summary(&bc.callee)?;
@@ -2912,40 +3056,42 @@ impl<'a> Mut202Fn<'a> {
         (changes && builtin).then_some((key, cached))
     }
 
-    /// The function's call sites in the index, every role.
-    fn function_sites(&self) -> &[&'a CallSite] {
-        self.sites.get_or_init(|| {
-            self.cx
-                .index
-                .files
-                .get(&self.unit.input.path)
-                .into_iter()
-                .flat_map(|f| &f.call_sites)
-                .filter(|s| s.caller == self.key)
-                .collect()
-        })
+    /// The distinct facts of the project callee `key` that the call at `span` (a site of it)
+    /// runs in this function: at the call, and where the object it returns is iterated
+    /// ([`facts_run_at`]).
+    fn facts_run_by_call(&self, span: Span, key: &FuncKey) -> &[&'a EffectSummary] {
+        let call = self.sites.at(span).iter().find(|s| {
+            s.role == SiteRole::Call && s.project_callees().iter().any(|bc| bc.callee == *key)
+        });
+        call.and_then(|call| self.facts_by_call().get(&call.of_call())?.get(key))
+            .map_or(&[], Vec::as_slice)
     }
 
-    /// The facts of `callee` that the call at `span` (a site of it) runs in this function: at
-    /// the call, and where the object it returns is iterated ([`facts_run_at`]).
-    fn facts_run_by_call(
-        &self,
-        span: Span,
-        key: &FuncKey,
-        callee: &'a EffectSummary,
-    ) -> Vec<&'a EffectSummary> {
-        let sites = self.function_sites();
-        let calls_key = |s: &&&CallSite| s.project_callees().iter().any(|bc| bc.callee == *key);
-        let call = sites
-            .iter()
-            .filter(calls_key)
-            .find(|s| s.role == SiteRole::Call && s.span == span);
-        // The other sites of the object the call returns copy its target.
-        call.into_iter()
-            .flat_map(|call| sites.iter().filter(move |s| s.target == call.target))
-            .filter(calls_key)
-            .filter_map(|s| facts_run_at(self.cx.index, s, callee))
-            .collect()
+    /// The facts the function's sites run, per call they stand for, gathered for all calls in
+    /// one pass over the sites.
+    fn facts_by_call(&self) -> &FactsByCall<'a> {
+        self.facts_by_call.get_or_init(|| {
+            let index = self.cx.index;
+            let mut out = FactsByCall::default();
+            for site in self.sites.all() {
+                for bc in site.project_callees() {
+                    let run = index
+                        .summary(&bc.callee)
+                        .and_then(|callee| facts_run_at(index, site, callee));
+                    let facts = out
+                        .entry(site.of_call())
+                        .or_default()
+                        .entry(&bc.callee)
+                        .or_default();
+                    if let Some(run) =
+                        run.filter(|run| !facts.iter().any(|f| std::ptr::eq(*f, *run)))
+                    {
+                        facts.push(run);
+                    }
+                }
+            }
+            out
+        })
     }
 
     /// The parts of a call instruction (`None` for any other instruction).
@@ -2954,12 +3100,7 @@ impl<'a> Mut202Fn<'a> {
         'a: 'i,
     {
         // A project call as the summaries resolved it; any other call by the inferred values.
-        if let Some(call) = site_call(
-            &|v| self.ix.shape.inst(v),
-            self.function_sites(),
-            inst,
-            false,
-        ) {
+        if let Some(call) = site_call(&|v| self.ix.shape.inst(v), self.sites, inst, false) {
             return Some(call);
         }
         let call = CallInst::of(&inst.kind)?;
@@ -3268,12 +3409,12 @@ impl<'a> Mut202Fn<'a> {
         // Passing a read-only value to a project function that mutates that parameter, also
         // through an offloading API that calls it on a worker thread.
         let def = |v| self.ix.shape.inst(v);
-        let Some(call) = site_call(&def, self.function_sites(), inst, false)
-            .or_else(|| site_call(&def, self.function_sites(), inst, true))
+        let Some(call) = site_call(&def, self.sites, inst, false)
+            .or_else(|| site_call(&def, self.sites, inst, true))
         else {
             return (None, Vec::new());
         };
-        for (key, callee, pos, var) in call.bound_arguments(self.cx) {
+        for (key, _, pos, var) in call.bound_arguments(self.cx) {
             let Some(r) = self.ro.get(&var) else {
                 continue;
             };
@@ -3282,21 +3423,18 @@ impl<'a> Mut202Fn<'a> {
             // attributes changes the copy alone. Filling a memo of the shared object, or
             // initializing one of its attributes lazily, leaves what it computes as it was.
             let p = u8::try_from(pos).ok().filter(|p| *p < 64);
-            let mutates = self
-                .facts_run_by_call(inst.span, key, callee)
-                .iter()
-                .any(|facts| {
-                    p.is_some_and(|p| {
-                        if r.shallow_copy {
-                            facts
-                                .changed_param_attrs
-                                .get(&p)
-                                .is_some_and(|attrs| facts.changes_param_state(p, Some(attrs)))
-                        } else {
-                            facts.changes_param_state(p, None)
-                        }
-                    })
-                });
+            let mutates = self.facts_run_by_call(inst.span, key).iter().any(|facts| {
+                p.is_some_and(|p| {
+                    if r.shallow_copy {
+                        facts
+                            .changed_param_attrs
+                            .get(&p)
+                            .is_some_and(|attrs| facts.changes_param_state(p, Some(attrs)))
+                    } else {
+                        facts.changes_param_state(p, None)
+                    }
+                })
+            });
             if mutates {
                 let hop = CallHop {
                     caller: self.key.clone(),
@@ -3620,16 +3758,85 @@ struct ReadOwnerRule<'r> {
 /// Where one access (a read, a call) is reported.
 pub(crate) struct DelegatedReport {
     pub func: FuncKey,
-    pub span: Span,
     /// Hops from `func` down to the accessing function (empty: `func` accesses itself).
     pub chain: Vec<CallHop>,
+}
+
+impl DelegatedReport {
+    /// The span of the report of the access at `access`: the access itself, or the call of the
+    /// first hop.
+    pub(crate) fn span(&self, access: Span) -> Span {
+        self.chain.first().map_or(access, |hop| hop.span)
+    }
+}
+
+/// The reports of the accesses of one function, by groups of accesses that [`delegated_reports`]
+/// reports at the same places (the same object parameters, allowance, and family, and one target
+/// and member named): the walk runs once per group, and a report at a call site stands for the
+/// sites of every access of its group, so the work grows with the accesses plus the reports, not
+/// with their product. The generator expressions of a function share one qualname, and so one
+/// key whose every call site runs the accesses of all of them.
+pub(crate) struct AccessGroups<K> {
+    groups: FxHashMap<K, AccessGroup>,
+}
+
+struct AccessGroup {
+    sites: SiteGroup,
+    /// The reports the walk finds at the access itself, where every access of the group is
+    /// reported.
+    at_access: Vec<DelegatedReport>,
+}
+
+impl<K: Eq + std::hash::Hash> AccessGroups<K> {
+    pub(crate) fn new() -> Self {
+        Self {
+            groups: FxHashMap::default(),
+        }
+    }
+
+    /// Report the access at `site` of the group `key`, whose reports `walk` finds for its first
+    /// access: `add` adds a report found there, standing for `sites`.
+    pub(crate) fn report<'u>(
+        &mut self,
+        reports: &mut MergedReports<'u>,
+        key: K,
+        site: SiteId,
+        walk: impl FnOnce() -> Vec<DelegatedReport>,
+        mut add: impl FnMut(&mut MergedReports<'u>, &DelegatedReport, Sites),
+    ) {
+        match self.groups.entry(key) {
+            Entry::Occupied(group) => {
+                let group = group.get();
+                reports.add_to_group(group.sites, site.clone());
+                for r in &group.at_access {
+                    add(reports, r, Sites::One(site.clone()));
+                }
+            }
+            Entry::Vacant(group) => {
+                let sites = reports.group();
+                reports.add_to_group(sites, site.clone());
+                let found = walk();
+                // In the walk's order: the first report of a key gives its message and chain.
+                for r in &found {
+                    let stands_for = if r.chain.is_empty() {
+                        Sites::One(site.clone())
+                    } else {
+                        Sites::Group(sites)
+                    };
+                    add(reports, r, stands_for);
+                }
+                let at_access = found.into_iter().filter(|r| r.chain.is_empty()).collect();
+                group.insert(AccessGroup { sites, at_access });
+            }
+        }
+    }
 }
 
 /// `MUT203`: reads of `read-owners` targets outside their allowed readers. Read sites are
 /// local facts; a read in a private helper with project callers is reported at the call sites
 /// of its outermost non-private callers, found by walking the reverse call graph.
-pub(crate) fn mut203(
-    cx: &CheckContext<'_>,
+pub(crate) fn mut203<'c>(
+    cx: &CheckContext<'c>,
     out: &mut Vec<Diagnostic>,
 ) -> Result<(), RuleConfigError> {
     let (reads, unresolved) = (
@@ -3691,51 +3898,54 @@ pub(crate) fn mut203(
         .map(|r| r.targets.iter().map(|_| InsideAllowed::default()).collect())
         .collect();
     for (key, s) in cx.defined_functions() {
+        let reader = key.fqn();
+        let mut groups = AccessGroups::new();
         for read in s
             .typed_field_read_sites
             .iter()
             .filter(|r| r.counts_for_contracts())
         {
-            for (rule, inside) in rules.iter().zip(&mut inside) {
+            for (r, (rule, inside)) in rules.iter().zip(&mut inside).enumerate() {
                 if rule
                     .allowance
                     .allows_protocol(cx.decls, &read.class_qualname, &read.attr)
                 {
                     continue;
                 }
-                for (t, inside) in rule
+                for (k, (t, inside)) in rule
                     .targets
                     .iter()
                     .zip(inside.iter_mut())
-                    .filter(|(t, _)| t.matches(&read.class_qualname, &read.attr))
+                    .enumerate()
+                    .filter(|(_, (t, _))| t.matches(&read.class_qualname, &read.attr))
                 {
-                    let found = delegated_reports(
-                        cx,
-                        &sites,
-                        (&rule.allowance, &t.classes),
-                        (key, read.obj_params, read.obj_params),
-                        read.span,
-                        inside,
-                    );
-                    for r in found {
+                    let named =
+                        matched_name(&t.text, || format!("{}.{}", read.class_qualname, read.attr));
+                    let walk = || {
+                        delegated_reports(
+                            cx,
+                            &sites,
+                            (&rule.allowance, &t.classes),
+                            (key, read.obj_params, read.obj_params),
+                            inside,
+                        )
+                    };
+                    let add = |reports: &mut MergedReports<'c>, r: &DelegatedReport, sites| {
                         let Some(unit) = cx.index.file_of(&r.func).and_then(|p| cx.unit(p)) else {
-                            continue;
+                            return;
                         };
-                        let named = matched_name(&t.text, || {
-                            format!("{}.{}", read.class_qualname, read.attr)
-                        });
                         reports.add(
                             unit,
                             &r.func,
-                            r.span,
+                            r.span(read.span),
                             (&t.text, &named),
-                            (key.fqn(), read.span),
+                            sites,
                             rule.note,
                             || {
                                 let via = if r.chain.is_empty() {
                                     String::new()
                                 } else {
-                                    format!(" via `{}`", key.fqn())
+                                    format!(" via `{reader}`")
                                 };
                                 format!(
                                     "`{}` reads `{named}` ({}){via} {}",
@@ -3750,7 +3960,9 @@ pub(crate) fn mut203(
                             },
                             || r.chain.clone(),
                         );
-                    }
+                    };
+                    let group = (read.obj_params, r, k, named.clone());
+                    groups.report(&mut reports, group, (reader.clone(), read.span), walk, add);
                 }
             }
         }
@@ -3795,7 +4007,6 @@ pub(crate) fn delegated_reports<'k>(
     sites: &SitesByCaller<'_>,
     (allowance, family): (&Allowance, &FxHashSet<String>),
     (func, obj, looked_up): (&'k FuncKey, u64, u64),
-    span: Span,
     inside: &mut InsideAllowed<'k>,
 ) -> Vec<DelegatedReport> {
     if allowance.is_lexical() {
@@ -3810,7 +4021,6 @@ pub(crate) fn delegated_reports<'k>(
         }
         return vec![DelegatedReport {
             func: judged.into_owned(),
-            span,
             chain: Vec::new(),
         }];
     }
@@ -3832,7 +4042,6 @@ pub(crate) fn delegated_reports<'k>(
         }
         return vec![DelegatedReport {
             func: func.clone(),
-            span,
             chain: Vec::new(),
         }];
     }
@@ -3860,10 +4069,13 @@ pub(crate) fn delegated_reports<'k>(
         }
         DelegatedReport {
             func: func.clone(),
-            span: chain.first().map_or(span, |hop| hop.span),
             chain,
         }
     };
+    // What a caller's call sites hand over or keep is decided once per caller, whichever of its
+    // sites the walk reaches (a function calling its generator expressions at many sites).
+    let mut delegating: FxHashMap<&FuncKey, bool> = FxHashMap::default();
+    let mut reporting: FxHashMap<(&FuncKey, (u64, u64), bool), bool> = FxHashMap::default();
     let mut out = Vec::new();
     let mut i = 0;
     while i < states.len() {
@@ -3923,7 +4135,10 @@ pub(crate) fn delegated_reports<'k>(
             let in_scope = below_in_scope
                 || allowance.in_scope(c.caller)
                 || c.via.is_some_and(|p| allowance.in_scope(p));
-            if delegates(cx, sites, c.caller, Handover::ByImplementation) {
+            let delegating = *delegating
+                .entry(c.caller)
+                .or_insert_with(|| delegates(cx, sites, c.caller, Handover::ByImplementation));
+            if delegating {
                 if visited.insert((c.caller.clone(), c.into, caller_objs, in_scope)) {
                     states.push(WalkState {
                         func: c.caller.clone(),
@@ -3934,7 +4149,12 @@ pub(crate) fn delegated_reports<'k>(
                         down: Some((i, hops)),
                     });
                 }
-            } else if reports_itself(c.caller, caller_objs, in_scope, FirstCallers::All) {
+            } else if *reporting
+                .entry((c.caller, caller_objs, in_scope))
+                .or_insert_with(|| {
+                    reports_itself(c.caller, caller_objs, in_scope, FirstCallers::All)
+                })
+            {
                 out.push(report_at(&states, i, c.caller, hops));
             }
         }

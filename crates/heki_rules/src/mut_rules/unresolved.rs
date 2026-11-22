@@ -5,7 +5,8 @@
 //! they cannot: an attribute or method named like a target, accessed on an object of unknown
 //! class (a parameter no caller types, a loop variable, an untyped call result, `Any`, a
 //! protocol whose implementations heki cannot list), and an attribute name computed at run time
-//! written on an instance of a target class. Each is one finding at the access, so a baseline
+//! written on an instance of a target class or on an object of unknown class. Each is one
+//! finding at the access, so a baseline
 //! ratchets them down as annotations and refactorings make the accesses visible to the typed
 //! rules.
 
@@ -40,15 +41,20 @@ pub(super) fn mut205(cx: &CheckContext<'_>, rules: &[OwnerRule<'_>], out: &mut V
                     .filter(|t| match &w.what {
                         Unresolved::Receiver(attr) => t.matches_attr(attr),
                         Unresolved::Name(class) => t.classes.contains(class),
+                        Unresolved::Anything => true,
                     })
                     .collect();
                 if hits.is_empty() || rule.allow_fresh && w.construction == Construction::Yes {
                     continue;
                 }
+                let writes_target = |class: &str| hits.iter().any(|t| t.classes.contains(class));
                 // A computed name on a target class may be a class's own initialization
                 // (`setattr(self, name, v)` in `__init__`), as for `MUT201`; an attribute on an
                 // object of unknown class is tied to the classes its callers bind, which
-                // `MUT201` reports at those callers.
+                // `MUT201` reports at those callers. A computed name on an object of unknown
+                // class is tied to the other classes its callers bind; `MUT201` sees no name at
+                // a caller binding a target class, so such a caller leaves the write to this
+                // rule.
                 let (family, callers) = match &w.what {
                     Unresolved::Name(_) => (
                         hits.iter()
@@ -57,6 +63,10 @@ pub(super) fn mut205(cx: &CheckContext<'_>, rules: &[OwnerRule<'_>], out: &mut V
                         Callers::Ignored,
                     ),
                     Unresolved::Receiver(_) => (FxHashSet::default(), Callers::TieEveryClass),
+                    Unresolved::Anything => (
+                        FxHashSet::default(),
+                        Callers::LeaveTargetClasses(&writes_target),
+                    ),
                 };
                 let access = Unseen {
                     func: key,
@@ -75,6 +85,7 @@ pub(super) fn mut205(cx: &CheckContext<'_>, rules: &[OwnerRule<'_>], out: &mut V
                     Unresolved::Name(class) => {
                         cx.decls.class_qualname(class).unwrap_or(class).to_owned()
                     }
+                    Unresolved::Anything => "*".to_owned(),
                 };
                 let guarded = listed(hits.iter().map(|t| t.text.as_str()));
                 let what = match &w.what {
@@ -84,6 +95,10 @@ pub(super) fn mut205(cx: &CheckContext<'_>, rules: &[OwnerRule<'_>], out: &mut V
                     ),
                     Unresolved::Name(_) => format!(
                         "writes an attribute named at run time ({}) on `{target}`",
+                        w.kind.as_str()
+                    ),
+                    Unresolved::Anything => format!(
+                        "writes an attribute named at run time ({}) on an object of unknown class",
                         w.kind.as_str()
                     ),
                 };

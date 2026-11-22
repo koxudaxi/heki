@@ -75,8 +75,6 @@ heki_effect::summary::Extractor::returned_self_attrs  W2  worklist: reach, Closu
 heki_effect::summary::Extractor::site  W1  stage-2 debt (EFF110): recursion (through TypeCtx::infer_types): Memo or Closure
 heki_effect::summary::Extractor::visit  W1  stage-2 debt (EFF109): recursion (through TypeCtx::infer_types): Memo or Closure
 heki_effect::summary::Extractor::worker_site  W1  stage-2 debt (EFF110): recursion (through TypeCtx::infer_types): Memo or Closure
-heki_effect::summary::HandedValues::handed_at  W2  worklist: reach, Closure, or fixpoint; stage-2 migration debt
-heki_effect::summary::HandedValues::reaching  W2  worklist: reach, Closure, or fixpoint; stage-2 migration debt
 heki_effect::summary::class_bodies_run_by  W2  worklist: reach, Closure, or fixpoint
 heki_effect::summary::statements::Extractor::head_texts  W1  recursion (through Extractor::statement_texts, Extractor::merged_texts, Extractor::source_texts and 3 more): Memo or Closure
 heki_effect::summary::statements::Extractor::item_texts  W1  recursion (through Extractor::statement_texts, Extractor::merged_texts, Extractor::source_texts and 3 more): Memo or Closure

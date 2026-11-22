@@ -7,13 +7,13 @@
 //! decided from these facts and the summaries alone, also for a method of a file that is not
 //! checked (the language server checks one file).
 
-use crate::{CallSite, FuncKey, TypeCtx, aliases_of, container_mutator, guards, self_aliases};
+use crate::resolver::namespace_load;
+use crate::{CallSite, FuncKey, TypeCtx, Val, aliases_of, container_mutator, guards, self_aliases};
 use heki_ast::Span;
 use heki_ir::walk::FnShape;
 use heki_ir::{BlockId, CompareOpKind, InstKind, IrFunction, Terminator, VarId};
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
-use std::cell::OnceCell;
 
 /// The `MUT101` facts of one definition of a method that writes a `self` attribute itself.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -131,6 +131,7 @@ pub(crate) fn cache_flow(
     key: &FuncKey,
     sites: &[CallSite],
     tcx: &TypeCtx<'_>,
+    types: &FxHashMap<VarId, Val>,
 ) -> Option<CacheFlow> {
     let f = shape.f;
     if f.is_class_body || f.is_module_body || f.owner_class_qualname.is_none() {
@@ -148,7 +149,7 @@ pub(crate) fn cache_flow(
             ..w
         })
         .collect();
-    let blocks = flow_blocks(shape, key, sites, tcx, &mut names);
+    let blocks = flow_blocks(shape, key, sites, tcx, types, &mut names);
     Some(CacheFlow {
         names: names.list,
         writes,
@@ -341,13 +342,14 @@ fn lazy_init_blocks<'f>(
     found
 }
 
-/// The blocks of `f` with the points that invalidate or read a cached property of its own
-/// instance.
+/// The blocks of `f` (whose variables have `types`) with the points that invalidate or read a
+/// cached property of its own instance.
 fn flow_blocks(
     shape: &FnShape<'_>,
     key: &FuncKey,
     sites: &[CallSite],
     tcx: &TypeCtx<'_>,
+    types: &FxHashMap<VarId, Val>,
     names: &mut Names,
 ) -> Vec<FlowBlock> {
     let f = shape.f;
@@ -357,22 +359,16 @@ fn flow_blocks(
         f.blocks
             .iter()
             .flat_map(|b| &b.insts)
-            .filter_map(|i| match &i.kind {
-                InstKind::AttrLoad { dst, obj, attr }
-                    if attr == "__dict__" && self_vars.contains(obj) =>
-                {
-                    Some(*dst)
-                }
-                _ => None,
-            }),
+            .filter_map(|i| namespace_load(&i.kind, |v| types.get(&v)))
+            .filter(|(_, obj)| self_vars.contains(obj))
+            .map(|(dst, _)| dst),
     );
     // A key naming a property: a string literal or a `Final` string constant.
-    let types = OnceCell::new();
     let key_name = |v: VarId| {
         shape
             .str_const(v)
             .map(str::to_owned)
-            .or_else(|| tcx.str_constant_in(shape, v, types.get_or_init(|| tcx.infer(f))))
+            .or_else(|| tcx.str_constant_in(shape, v, types))
     };
     let self_calls: FxHashSet<Span> = sites
         .iter()

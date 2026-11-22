@@ -136,6 +136,10 @@ pub struct WriteOwnerRule {
     /// Project protocols (class patterns, their subclasses included): a write through a value
     /// typed with one that declares the attribute is allowed.
     pub allowed_protocols: Vec<String>,
+    /// `"report"`: also report (`MUT201`) a constant key written through the namespace of an
+    /// object of a target's class (`obj.__dict__[KEY] = v`, `vars(obj)`) that no target covering
+    /// the class names; `"ignore"` (default) does not.
+    pub unlisted_dict_keys: Option<String>,
 }
 
 /// `[[tool.heki.read-owners]]` contract for `MUT203` (the read side of `write-owners`).
@@ -189,7 +193,8 @@ pub struct CallOwnerRule {
     /// `"calls"`: a reference to a target that hands it on to be called later (`[decide]`,
     /// `return decide`, `partial(decide)`, `field(default_factory=Rule)`) counts as a call of
     /// it; `"calls-and-bases"` also a class statement naming a class target among its bases;
-    /// `"ignore"` (default) neither.
+    /// `"reads"` also every other use of a target's value (`Keys.of(...)`, `isinstance(x,
+    /// Keys)`); `"ignore"` (default) none of them.
     pub references: Option<String>,
     /// `"lexical"` or `"call-graph"` (default), as for `WriteOwnerRule`.
     pub attribution: Option<String>,
@@ -232,8 +237,9 @@ pub struct EffectBoundaryRule {
     /// `"allow"` (default) or `"report"`, as for `write-owners`: whether writes that construct
     /// the object they write count as writes of the boundary.
     pub fresh_objects: Option<String>,
-    /// `"calls"`, `"calls-and-bases"`, or `"ignore"` (default), as for `call-owners`: whether a
-    /// reference handing a `call-targets` entry on counts as a call of it for `calls`.
+    /// `"calls"`, `"calls-and-bases"`, `"reads"`, or `"ignore"` (default), as for `call-owners`:
+    /// whether a reference handing a `call-targets` entry on (or using it otherwise) counts as a
+    /// call of it for `calls`.
     pub references: Option<String>,
     /// `"allow"` (default) or `"report"`: whether `reads-environment` also forbids the imports
     /// that probe whether a module is installed (`try: import yaml` / `except ImportError:`).
@@ -744,6 +750,7 @@ message = "use Store.set_fields() instead"
 fresh-objects = "report"
 unresolved = "report"
 attribution = "lexical"
+unlisted-dict-keys = "report"
 
 [[tool.heki.read-owners]]
 name = "reference-children"
@@ -807,6 +814,10 @@ import-probes = "report"
         assert_eq!(cfg.write_owners[0].fresh_objects.as_deref(), Some("report"));
         assert_eq!(cfg.write_owners[0].unresolved.as_deref(), Some("report"));
         assert_eq!(cfg.write_owners[0].attribution.as_deref(), Some("lexical"));
+        assert_eq!(
+            cfg.write_owners[0].unlisted_dict_keys.as_deref(),
+            Some("report")
+        );
         assert_eq!(
             cfg.write_owners[0].message.as_deref(),
             Some("use Store.set_fields() instead")
