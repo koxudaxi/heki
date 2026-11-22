@@ -5200,8 +5200,14 @@ opaque_to_layer3 = true
 # `httpx.Client` / `httpx.AsyncClient`, unless `http_client=` hands it one) without I/O.
 # google-genai's `Client` builds both a sync and an async pool (its `aio` attribute); in
 # Vertex AI mode without a project or API key it also looks up the default credentials.
-# The requests (`client.chat.completions.create(...)`) are made through attributes of the
-# client, which the catalog does not type, so they are not listed.
+# The requests are made through attributes of the client (`client.chat.completions.create(...)`):
+# an `[[attributes]]` row types each step, the synchronous and the asynchronous client apart at
+# every step (`AsyncOpenAI.chat` is `AsyncChat`, whose `create` is a coroutine function), and
+# google-genai's asynchronous client is the `aio` attribute of its client. A synchronous request
+# method sends the request and waits for the response on every call (with `stream=True`, for its
+# headers). `with_options()` / `copy()` build a client of the receiver's class sharing its
+# connection pool. The rows were checked against the source of the releases each distribution's
+# `verified` range admits; Azure's clients are subclasses of OpenAI's with rows of their own.
 
 [[entries]]
 symbol = "openai.OpenAI"
@@ -5239,6 +5245,223 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "google.genai.Client"
 effects = ["unpooled_client_alloc"]
+opaque_to_layer3 = true
+
+[[distributions]]
+name = "openai"
+packages = ["openai"]
+verified = ">=1.66,<4"
+
+[[distributions]]
+name = "anthropic"
+packages = ["anthropic"]
+verified = ">=0.50,<3"
+
+[[distributions]]
+name = "google-genai"
+packages = ["google.genai"]
+verified = ">=1.0,<4"
+
+[[attributes]]
+symbol = "openai.OpenAI.chat"
+type = "openai.resources.chat.Chat"
+
+[[attributes]]
+symbol = "openai.OpenAI.responses"
+type = "openai.resources.responses.Responses"
+
+[[attributes]]
+symbol = "openai.OpenAI.embeddings"
+type = "openai.resources.Embeddings"
+
+[[attributes]]
+symbol = "openai.AzureOpenAI.chat"
+type = "openai.resources.chat.Chat"
+
+[[attributes]]
+symbol = "openai.AzureOpenAI.responses"
+type = "openai.resources.responses.Responses"
+
+[[attributes]]
+symbol = "openai.AzureOpenAI.embeddings"
+type = "openai.resources.Embeddings"
+
+[[attributes]]
+symbol = "openai.AsyncOpenAI.chat"
+type = "openai.resources.chat.AsyncChat"
+
+[[attributes]]
+symbol = "openai.AsyncOpenAI.responses"
+type = "openai.resources.responses.AsyncResponses"
+
+[[attributes]]
+symbol = "openai.AsyncOpenAI.embeddings"
+type = "openai.resources.AsyncEmbeddings"
+
+[[attributes]]
+symbol = "openai.AsyncAzureOpenAI.chat"
+type = "openai.resources.chat.AsyncChat"
+
+[[attributes]]
+symbol = "openai.AsyncAzureOpenAI.responses"
+type = "openai.resources.responses.AsyncResponses"
+
+[[attributes]]
+symbol = "openai.AsyncAzureOpenAI.embeddings"
+type = "openai.resources.AsyncEmbeddings"
+
+[[attributes]]
+symbol = "openai.resources.chat.Chat.completions"
+type = "openai.resources.chat.Completions"
+
+[[attributes]]
+symbol = "openai.resources.chat.AsyncChat.completions"
+type = "openai.resources.chat.AsyncCompletions"
+
+[[attributes]]
+symbol = "anthropic.Anthropic.messages"
+type = "anthropic.resources.Messages"
+
+[[attributes]]
+symbol = "anthropic.AsyncAnthropic.messages"
+type = "anthropic.resources.AsyncMessages"
+
+[[attributes]]
+symbol = "google.genai.Client.models"
+type = "google.genai.models.Models"
+
+[[attributes]]
+symbol = "google.genai.Client.aio"
+type = "google.genai.client.AsyncClient"
+
+[[attributes]]
+symbol = "google.genai.client.AsyncClient.models"
+type = "google.genai.models.AsyncModels"
+
+[[entries]]
+symbol = "openai.OpenAI.with_options"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "openai.OpenAI.copy"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "openai.AzureOpenAI.with_options"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "openai.AzureOpenAI.copy"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "openai.AsyncOpenAI.with_options"
+async_safe = true
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "openai.AsyncOpenAI.copy"
+async_safe = true
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "openai.AsyncAzureOpenAI.with_options"
+async_safe = true
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "openai.AsyncAzureOpenAI.copy"
+async_safe = true
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "anthropic.Anthropic.with_options"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "anthropic.Anthropic.copy"
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "anthropic.AsyncAnthropic.with_options"
+async_safe = true
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "anthropic.AsyncAnthropic.copy"
+async_safe = true
+return_type = "Self"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "openai.resources.chat.Completions.create"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "openai.resources.chat.AsyncCompletions.create"
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "openai.resources.responses.Responses.create"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "openai.resources.responses.AsyncResponses.create"
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "openai.resources.Embeddings.create"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "openai.resources.AsyncEmbeddings.create"
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "anthropic.resources.Messages.create"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "anthropic.resources.AsyncMessages.create"
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "google.genai.models.Models.generate_content"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "google.genai.models.AsyncModels.generate_content"
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "google.genai.models.Models.embed_content"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "google.genai.models.AsyncModels.embed_content"
+async_safe = true
 opaque_to_layer3 = true
 
 # --- DB transaction starters (EFF106, opt-in) ---

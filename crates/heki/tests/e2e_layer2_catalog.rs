@@ -3305,3 +3305,106 @@ fn api_clients_task_queues_and_data_libraries() {
         ]
     );
 }
+
+const LLM_REQUESTS: &str = r#"from anthropic import Anthropic, AsyncAnthropic
+from google import genai
+from openai import AsyncOpenAI, AzureOpenAI, OpenAI
+
+client = OpenAI()
+aclient = AsyncOpenAI()
+claude = Anthropic()
+gemini = genai.Client()
+
+
+async def tp_openai(prompt):
+    client.chat.completions.create(model="m", messages=[])
+    client.responses.create(model="m", input=prompt)
+    client.embeddings.create(model="m", input=prompt)
+    client.with_options(timeout=5).chat.completions.create(model="m", messages=[])
+
+
+async def tp_azure(azure: AzureOpenAI):
+    azure.chat.completions.create(model="m", messages=[])
+
+
+async def tp_anthropic():
+    claude.messages.create(model="m", max_tokens=1, messages=[])
+
+
+async def tp_genai():
+    gemini.models.generate_content(model="m", contents="x")
+    gemini.models.embed_content(model="m", contents="x")
+
+
+async def tn_async_clients(prompt):
+    await aclient.chat.completions.create(model="m", messages=[])
+    await aclient.responses.create(model="m", input=prompt)
+    await aclient.with_options(timeout=5).embeddings.create(model="m", input=prompt)
+    await AsyncAnthropic().messages.create(model="m", max_tokens=1, messages=[])
+    await gemini.aio.models.generate_content(model="m", contents="x")
+
+
+async def tn_untyped(make, wrapped):
+    make().chat.completions.create(model="m", messages=[])
+    wrapped.chat.completions.create(model="m", messages=[])
+
+
+async def tn_either(c: OpenAI | AsyncOpenAI):
+    c.chat.completions.create(model="m", messages=[])
+
+
+def tn_sync_caller():
+    client.chat.completions.create(model="m", messages=[])
+"#;
+
+/// The LLM SDKs' requests are reached through the clients' attributes: the synchronous
+/// clients' requests block the event loop, the asynchronous clients' (`AsyncOpenAI`,
+/// `AsyncAnthropic`, google-genai's `aio`) never do, and a client of unknown or mixed class
+/// types nothing.
+#[test]
+fn llm_requests_block_through_the_synchronous_clients_attributes() {
+    let create = "openai.resources.chat.Completions.create";
+    assert_eq!(
+        check(
+            "catalog_llm_requests",
+            "app/llm.py",
+            LLM_REQUESTS,
+            "EFF101,EFF111,EFF102"
+        ),
+        vec![
+            d(12, "EFF101", "tp_openai", create),
+            d(
+                13,
+                "EFF101",
+                "tp_openai",
+                "openai.resources.responses.Responses.create"
+            ),
+            d(
+                14,
+                "EFF101",
+                "tp_openai",
+                "openai.resources.Embeddings.create"
+            ),
+            d(15, "EFF101", "tp_openai", create),
+            d(19, "EFF101", "tp_azure", create),
+            d(
+                23,
+                "EFF101",
+                "tp_anthropic",
+                "anthropic.resources.Messages.create"
+            ),
+            d(
+                27,
+                "EFF101",
+                "tp_genai",
+                "google.genai.models.Models.generate_content"
+            ),
+            d(
+                28,
+                "EFF101",
+                "tp_genai",
+                "google.genai.models.Models.embed_content"
+            ),
+        ]
+    );
+}

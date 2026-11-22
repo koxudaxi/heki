@@ -1589,10 +1589,59 @@ mod tests {
             environment_reads(),
             ordered_outputs(),
             pydantic_models(),
+            llm_requests(),
         ]
         .into_iter()
         .flatten()
         .collect()
+    }
+
+    /// The requests of the LLM SDKs, reached through the clients' attributes, and the builders
+    /// returning a client of the receiver's class.
+    fn llm_requests() -> Vec<(Vec<String>, EcosystemEntry)> {
+        const BUILDERS: &[&str] = &["with_options", "copy"];
+        vec![
+            (
+                with_prefix_all(
+                    &["openai.OpenAI", "openai.AzureOpenAI", "anthropic.Anthropic"],
+                    BUILDERS,
+                ),
+                returning(SELF_RETURN_TYPE, entry(&[])),
+            ),
+            (
+                with_prefix_all(
+                    &[
+                        "openai.AsyncOpenAI",
+                        "openai.AsyncAzureOpenAI",
+                        "anthropic.AsyncAnthropic",
+                    ],
+                    BUILDERS,
+                ),
+                async_safe(returning(SELF_RETURN_TYPE, entry(&[]))),
+            ),
+            (
+                s(&[
+                    "openai.resources.chat.Completions.create",
+                    "openai.resources.responses.Responses.create",
+                    "openai.resources.Embeddings.create",
+                    "anthropic.resources.Messages.create",
+                    "google.genai.models.Models.generate_content",
+                    "google.genai.models.Models.embed_content",
+                ]),
+                entry(&[BlockingNet]),
+            ),
+            (
+                s(&[
+                    "openai.resources.chat.AsyncCompletions.create",
+                    "openai.resources.responses.AsyncResponses.create",
+                    "openai.resources.AsyncEmbeddings.create",
+                    "anthropic.resources.AsyncMessages.create",
+                    "google.genai.models.AsyncModels.generate_content",
+                    "google.genai.models.AsyncModels.embed_content",
+                ]),
+                async_safe(entry(&[])),
+            ),
+        ]
     }
 
     /// How a pydantic model stores and deletes its attributes, and what a field left out at
@@ -4024,6 +4073,46 @@ mod tests {
                     .any(|d| d.packages.iter().any(|p| under(symbol, p))),
                 "{symbol}"
             );
+        }
+        // From the class an async-safe constructor builds, no attribute row or result reaches
+        // a call that blocks: the asynchronous client's resources are classes of their own.
+        let mut reached: Vec<String> = kb
+            .entries
+            .iter()
+            .filter(|(s, e)| {
+                e.async_safe
+                    && s.rsplit('.')
+                        .next()
+                        .is_some_and(|n| n.starts_with(char::is_uppercase))
+            })
+            .map(|(s, _)| s.clone())
+            .collect();
+        let mut seen = BTreeSet::new();
+        while let Some(class) = reached.pop() {
+            if !seen.insert(class.clone()) {
+                continue;
+            }
+            let members = format!("{class}.");
+            for (symbol, e) in kb.entries.range(members.clone()..) {
+                let Some(member) = symbol.strip_prefix(&members) else {
+                    break;
+                };
+                assert!(
+                    !e.effects.iter().any(|x| x.blocks()),
+                    "{symbol}, reached from an async-safe constructor"
+                );
+                reached.extend(
+                    e.return_type_in(None)
+                        .filter(|_| !member.contains('.'))
+                        .map(str::to_owned),
+                );
+            }
+            for (symbol, t) in kb.attributes.range(members.clone()..) {
+                if !symbol.starts_with(&members) {
+                    break;
+                }
+                reached.push(t.clone());
+            }
         }
         // `return_type = "Self"`: an instance of the receiver's class, never a class of that
         // name.
