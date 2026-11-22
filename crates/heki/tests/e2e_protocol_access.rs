@@ -535,6 +535,32 @@ fn allowed_protocols_name_classes_by_pattern_and_a_bad_glob_is_a_configuration_e
         vec!["undeclared", "concrete"],
         "{found:#?}"
     );
+    // With `protocol-subclasses = false` the pattern names `RuntimeFlags` alone: the accesses
+    // through `RuntimeFlags` are allowed, those through `RenderHost` judged.
+    let exact = host_project(
+        "allowed_protocols_base_exact",
+        "attribution = \"lexical\"\nallowed-protocols = [\"RuntimeFlags\"]\nprotocol-subclasses = false\n",
+    );
+    let found = named(&exact);
+    assert_eq!(
+        found
+            .iter()
+            .map(|(_, _, func, _)| func.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "assign",
+            "flagged",
+            "mark",
+            "mark",
+            "mark",
+            "build",
+            "build",
+            "_set",
+            "undeclared",
+            "concrete"
+        ],
+        "{found:#?}"
+    );
     let bad = host_project(
         "allowed_protocols_bad_glob",
         "allowed-protocols = [\"[Host\"]\n",
@@ -702,4 +728,149 @@ fn allowed_protocols_allow_the_references_through_a_named_protocol() {
         run("allowed-protocols = [\"Host\"]\n"),
         vec![at(9, "other")]
     );
+}
+
+const SUBPROTOCOL_PARSER: &str = r#"from __future__ import annotations
+
+
+class Parser:
+    def __init__(self) -> None:
+        self._has_runtime_expressions = False
+        self._graph_builder: object = object()
+
+    def _build(self) -> object:
+        return self._graph_builder
+"#;
+
+const SUBPROTOCOL_SHARED: &str = r#"from __future__ import annotations
+
+from typing import Protocol
+
+
+class GraphBuilderHost(Protocol):
+    _graph_builder: object
+
+    def _build(self) -> object: ...
+
+
+class RuntimeExpressionFlags(GraphBuilderHost, Protocol):
+    _has_runtime_expressions: bool
+
+
+class RenderHost(RuntimeExpressionFlags, Protocol):
+    pass
+
+
+def builder(host: GraphBuilderHost) -> object:
+    return host._graph_builder
+
+
+def build(host: GraphBuilderHost) -> object:
+    return host._build()
+
+
+def builder_through_flags(host: RuntimeExpressionFlags) -> object:
+    return host._graph_builder
+
+
+def build_through_flags(host: RuntimeExpressionFlags) -> object:
+    return host._build()
+
+
+def register_runtime_expression(host: RuntimeExpressionFlags) -> None:
+    host._has_runtime_expressions = True
+
+
+def runtime_expressions(host: RuntimeExpressionFlags) -> bool:
+    return host._has_runtime_expressions
+
+
+def render_flag(host: RenderHost) -> bool:
+    return host._has_runtime_expressions
+"#;
+
+/// A project of the host rule's shape: the private members of every class of `pkg.parser` are
+/// targets inside `pkg.parser._shared`, and the accesses through `*Host` protocols are allowed,
+/// with `keys` added to each contract.
+fn subprotocol_project(name: &str, keys: &str) -> Project {
+    let contract = |section: &str, who: &str| {
+        format!(
+            "[[tool.heki.{section}]]\nname = \"{section}\"\ntargets = [\"pkg.parser.*._*\"]\nforbidden-{who} = [\"pkg.parser._shared:*\"]\nattribution = \"lexical\"\nallowed-protocols = [\"*Host\"]\n{keys}\n"
+        )
+    };
+    let p = Project::new(name);
+    p.write(
+        "pyproject.toml",
+        &format!(
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT201\", \"MUT203\", \"MUT204\"]\n\n{}{}{}",
+            contract("read-owners", "readers"),
+            contract("write-owners", "writers"),
+            contract("call-owners", "callers"),
+        ),
+    )
+    .write("pkg/__init__.py", "")
+    .write("pkg/parser/__init__.py", "")
+    .write("pkg/parser/base.py", SUBPROTOCOL_PARSER)
+    .write("pkg/parser/_shared.py", SUBPROTOCOL_SHARED);
+    p
+}
+
+/// An `allowed-protocols` pattern names the subprotocols of the protocols it matches, unless
+/// `protocol-subclasses = false`: then the accesses through `RuntimeExpressionFlags`, a protocol
+/// deriving from `GraphBuilderHost`, stay judged, also of the members it inherits from it, while
+/// those through `GraphBuilderHost` and `RenderHost` (a subprotocol whose own name matches) stay
+/// allowed. Each contract kind reads the key.
+#[test]
+fn protocol_subclasses_false_names_the_matching_protocols_only() {
+    let at = |line: u64, code: &str, func: &str, target: &str| {
+        (line, code.to_owned(), func.to_owned(), target.to_owned())
+    };
+    let flags = "pkg.parser._shared.RuntimeExpressionFlags";
+    assert_eq!(
+        named(&subprotocol_project("protocol_subclasses_unset", "")),
+        vec![]
+    );
+    assert_eq!(
+        named(&subprotocol_project(
+            "protocol_subclasses_true",
+            "protocol-subclasses = true\n"
+        )),
+        vec![]
+    );
+    assert_eq!(
+        named(&subprotocol_project(
+            "protocol_subclasses_false",
+            "protocol-subclasses = false\n"
+        )),
+        vec![
+            at(
+                29,
+                "MUT203",
+                "builder_through_flags",
+                &format!("{flags}._graph_builder")
+            ),
+            at(
+                33,
+                "MUT204",
+                "build_through_flags",
+                "pkg.parser._shared.GraphBuilderHost._build"
+            ),
+            at(
+                37,
+                "MUT201",
+                "register_runtime_expression",
+                &format!("{flags}._has_runtime_expressions")
+            ),
+            at(
+                41,
+                "MUT203",
+                "runtime_expressions",
+                &format!("{flags}._has_runtime_expressions")
+            ),
+        ]
+    );
+    let p = subprotocol_project("protocol_subclasses_bad", "protocol-subclasses = \"no\"\n");
+    let (code, stdout, stderr) = p.check(&[]);
+    assert_eq!(code, 2, "{stdout}{stderr}");
+    assert!(stderr.contains("protocol-subclasses"), "{stderr}");
 }
