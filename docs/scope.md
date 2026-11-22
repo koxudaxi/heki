@@ -241,6 +241,9 @@ Missed findings close as heki learns more:
 - `setattr` and `object.__setattr__` are followed through a module-level name bound once to them
   (`_set = object.__setattr__`), and `getattr(obj, "fields")` is `obj.fields` itself: changing
   what it returns changes the attribute's object.
+- `vars(obj)` (the builtin, not a name shadowing it) is `obj.__dict__`: an entry stored, deleted,
+  set by a container method, or updated in place (`vars(obj) |= other`, also on
+  `obj.__dict__`) through either is a write of the attribute it names.
 - A write-owners contract sees a container change through what a method or a property returns
   when it returns the attribute itself on every `return` (`node.members().append(x)` with
   `return self.items`) and every class the object may be runs it. A `cached_property` hands out

@@ -523,6 +523,9 @@ Missed findings close as heki learns more:
 - `setattr` and `object.__setattr__` are followed through a module-level name bound once to them
   (`_set = object.__setattr__`), and `getattr(obj, "fields")` is `obj.fields` itself: changing
   what it returns changes the attribute's object.
+- `vars(obj)` (the builtin, not a name shadowing it) is `obj.__dict__`: an entry stored, deleted,
+  set by a container method, or updated in place (`vars(obj) |= other`, also on
+  `obj.__dict__`) through either is a write of the attribute it names.
 - A write-owners contract sees a container change through what a method or a property returns
   when it returns the attribute itself on every `return` (`node.members().append(x)` with
   `return self.items`) and every class the object may be runs it. A `cached_property` hands out
@@ -1138,8 +1141,8 @@ Contracts declare what no type can say. Each kind is an array of tables with its
   method named like a target, accessed on an object of unknown class (an unannotated parameter,
   a loop variable, an untyped call result, `Any`, a protocol whose implementations heki cannot
   list). A baseline counts them apart from the violations the typed rules prove.
-- An attribute named through a string (`setattr`, `getattr`, `__dict__`) is followed when the
-  string is a constant: see [Dynamic names](https://heki.koxudaxi.dev/scope/#dynamic-names).
+- An attribute named through a string (`setattr`, `getattr`, `__dict__`, `vars`) is followed
+  when the string is a constant: see [Dynamic names](https://heki.koxudaxi.dev/scope/#dynamic-names).
 
 ### `write-owners`
 
@@ -1189,8 +1192,8 @@ A shallow copy's containers are the original's: only rebinding its attributes co
 With `unresolved = "report"`, `MUT205` reports:
 
 - an attribute named like a target, written on an object of unknown class;
-- a computed attribute name (`setattr(obj, name, v)`, `obj.__dict__[name] = v`) written on a
-  target class.
+- a computed attribute name (`setattr(obj, name, v)`, `obj.__dict__[name] = v`,
+  `obj.__dict__.update(...)`, `vars(obj) |= other`) written on a target class.
 
 ### `read-owners`
 
@@ -3790,8 +3793,9 @@ It does not report:
 - constant dictionary keys the property never reads (`self.params["proxy"]` while the property
   reads `self.params["outtmpl"]`);
 - writes after which every path invalidates the property (`del self.prop`,
-  `self.__dict__.pop("prop", None)`, also with the key in a string constant as `MUT201` follows
-  it, a `self` method that does), or before which every path already did and nothing read it
+  `self.__dict__.pop("prop", None)` or `vars(self).pop("prop", None)`, also with the key in a
+  string constant as `MUT201` follows it, a `self` method that does), or before which every path
+  already did and nothing read it
   since; an invalidation under a condition, such as
   `if clear:`, leaves the other path stale and is reported;
 - private helpers whose every caller invalidates the property;
@@ -3867,8 +3871,9 @@ method that changes an attribute the property reads without invalidating the cac
 
 A read is one in the function's own body, on any object of the class: `self.prop`, `obj.prop`
 on a parameter, attribute, or value whose class heki knows (as for `MUT203`),
-`getattr(obj, "prop")`, and `obj.__dict__["prop"]` / `obj.__dict__.get("prop")`. The object may
-be an instance of the read's class or of any project subclass of it. The read is reported when
+`getattr(obj, "prop")`, and `obj.__dict__["prop"]` / `obj.__dict__.get("prop")` (also on
+`vars(obj)`). The object may be an instance of the read's class or of any project subclass of
+it. The read is reported when
 an instance of one of those classes runs both the cached property and the method that leaves it
 stale: the first definition of each along its MRO, or one that the definitions before it call
 through `super()` without invalidating the property themselves. A method of a sibling class, or
@@ -4451,10 +4456,10 @@ count for a read.
     object it allocated), as for `MUT201`;
   - `reads-targets`: reads of the `Class.attr` entries of `read-targets` (and their
     subclasses), in every form `MUT203` follows (`obj.attr`, `getattr(obj, "attr")`,
-    `obj.__dict__["attr"]`, a property getter that reads it); an initializer reading its own
-    instance is no read. An entry also names an attribute of a module outside the project by its
-    full dotted name (`sys.platform`), read as `sys.platform` or through
-    `from sys import platform`;
+    `obj.__dict__["attr"]` or `vars(obj)["attr"]`, a property getter that reads it); an
+    initializer reading its own instance is no read. An entry also names an attribute of a module
+    outside the project by its full dotted name (`sys.platform`), read as `sys.platform` or
+    through `from sys import platform`;
   - `calls`: calls of the `call-targets` entries, matched as the targets of `MUT204`: a function,
     a method (with its overrides in subclasses, through bound-method aliases and `getattr` with a
     constant name), or a class (constructing it); a call is one only when every function it may
@@ -6637,8 +6642,8 @@ the allowed readers:
 - directly (`ref.children`), also on `self` and through local aliases;
 - through `getattr(ref, "children"[, default])` or `object.__getattribute__(ref, "children")`
   with a constant name: a string literal or a string constant, as for `MUT201`;
-- through `ref.__dict__["children"]` or `ref.__dict__.get("children")`, also with a string
-  constant for the key.
+- through `ref.__dict__["children"]` or `ref.__dict__.get("children")` (also on `vars(ref)`),
+  also with a string constant for the key.
 
 A target names a class and an attribute; it covers the class's subclasses too. A container
 entry (`Class.attr["key"]`) is a write target only: reading an entry reads the attribute, so a
@@ -7403,8 +7408,8 @@ call heki does not resolve, a value annotated `Any` or `object` (unless an `isin
 around the read narrows it to a class), a protocol whose implementations heki cannot list (one
 without members, or implemented by more than eight classes), or a variable of an enclosing
 function that a nested scope rebinds (`nonlocal`). `obj.children`, a local alias of it,
-`getattr(obj, "children")` with a constant name, and `obj.__dict__["children"]` count, as for
-`MUT203`.
+`getattr(obj, "children")` with a constant name, and `obj.__dict__["children"]` (also
+`vars(obj)["children"]`) count, as for `MUT203`.
 
 The rules of `MUT203` for what is allowed apply: allowed readers, exempt methods, functions that
 only run inside allowed readers, and `forbidden-readers` (the reading function must be one).
@@ -7502,7 +7507,8 @@ write:
   attribute holds (`obj.fields.append(x)`, `obj.meta["k"][name] = v`, also through an alias, in
   the function or in a scope nested in it) count;
 - an attribute name computed at run time written on an instance of a target class:
-  `setattr(model, name, v)`, `model.__dict__[name] = v`, `model.__dict__.update(...)`, and a
+  `setattr(model, name, v)`, `model.__dict__[name] = v`, `model.__dict__.update(...)`,
+  `model.__dict__ |= other` (also through `vars(model)` or a local alias of the namespace), and a
   `__dict__` key in a name that is no constant: a module-level name bound twice, in a loop, or
   before a star import, or rebound by another module, a class attribute without `ClassVar` or
   `Final` (an instance may hold its own), one a subclass defines again or inherits first from
@@ -7708,7 +7714,9 @@ allowed writers:
   the name coming first); the object must be passed by position (no keyword-only parameter, no
   `*args` unpacking);
 - through `setattr(model, "fields", ...)` / `object.__setattr__` (also through a module-level
-  name bound once to it: `_set = object.__setattr__`) or `model.__dict__["fields"]`,
+  name bound once to it: `_set = object.__setattr__`) or `model.__dict__["fields"]` (also
+  `vars(model)["fields"]`, `model.__dict__.setdefault("fields", v)`, and a local alias of the
+  namespace),
   also with a string constant for the name (`model.__dict__[FIELDS_KEY]`, imported or not):
   a module-level name declared `Final` or bound once in its module and rebound by no other, or
   a class-body name declared `ClassVar` or `Final` and bound once (`self.KEY`, `cls.KEY`,

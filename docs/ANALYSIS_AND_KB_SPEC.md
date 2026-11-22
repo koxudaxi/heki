@@ -1067,7 +1067,9 @@ message = "write model state through GenerationStore instead"
      - reassignment, deletion, and augmented assignment (`obj.a = ...`, `del obj.a`,
        `obj.a += ...`);
      - `setattr(obj, "a", ...)` / `object.__setattr__(obj, "a", ...)` /
-       `obj.__dict__["a"] = ...`;
+       `obj.__dict__["a"] = ...`, the namespace being `obj.__dict__`, `getattr(obj, "__dict__")`,
+       or `vars(obj)` (the builtin: `resolver::namespace_load`, which `MUT101`'s invalidations
+       read too); `update`, `popitem`, `clear`, and `|=` on it write names heki cannot tell;
      - **container mutation through an alias**: `xs = obj.a; xs.append(...)` / `xs[i] = ...` /
        `xs.clear()` / `xs.sort()` / `xs |= ...` (through alias tracking and
        `mutated_param_paths`, **handing `obj.a` to `helper(obj.a)` that calls `.append()` is

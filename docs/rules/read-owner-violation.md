@@ -18,8 +18,8 @@ the allowed readers:
 - directly (`ref.children`), also on `self` and through local aliases;
 - through `getattr(ref, "children"[, default])` or `object.__getattribute__(ref, "children")`
   with a constant name: a string literal or a string constant, as for `MUT201`;
-- through `ref.__dict__["children"]` or `ref.__dict__.get("children")`, also with a string
-  constant for the key.
+- through `ref.__dict__["children"]` or `ref.__dict__.get("children")` (also on `vars(ref)`),
+  also with a string constant for the key.
 
 A target names a class and an attribute; it covers the class's subclasses too. A container
 entry (`Class.attr["key"]`) is a write target only: reading an entry reads the attribute, so a

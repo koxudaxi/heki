@@ -176,6 +176,7 @@ fn extract_module(
             mut references,
             mut external,
             cells,
+            types,
         } = Extractor::new(
             &shape,
             &key,
@@ -252,7 +253,7 @@ fn extract_module(
             slot.entries.extend(flow.entries);
             slot.writes.extend(flow.writes);
         }
-        if let Some(flow) = cache_flow::cache_flow(&shape, &key, &sites, &cx) {
+        if let Some(flow) = cache_flow::cache_flow(&shape, &key, &sites, &cx, &types) {
             summary.lazily_read_self_attrs = flow.lazily_initialized().map(str::to_owned).collect();
             file.cache_flows.entry(key.clone()).or_default().push(flow);
         }
@@ -645,6 +646,8 @@ struct Extracted {
     external: Vec<ExternalAccess>,
     /// The [`CellAlias`] of the closure cells the function binds.
     cells: Vec<(CellKey, CellAlias)>,
+    /// The values of the function's variables ([`TypeCtx::infer`]).
+    types: FxHashMap<VarId, Val>,
 }
 
 /// A typed write site waiting for the answer of its construction query.
@@ -1320,7 +1323,7 @@ impl<'a> Extractor<'a> {
                 self.param_alias.insert(p.var, (i, None));
             }
         }
-        let rebound = Rebound::of(self.f);
+        let rebound = Rebound::of(self.f, |kind| self.namespace_load(kind));
         let mut returned_attrs: FxHashMap<VarId, (VarId, String)> = FxHashMap::default();
         for bb in &self.f.blocks {
             self.pos = (bb.id, 0);
@@ -1505,9 +1508,9 @@ impl<'a> Extractor<'a> {
         }
     }
 
-    /// `(dst, obj, attr)` of an instruction loading attribute `attr` of `obj`: `obj.attr`, or
+    /// `(dst, obj, attr)` of an instruction loading attribute `attr` of `obj`: `obj.attr`,
     /// `getattr(obj, "attr"[, default])` with a constant name (a default only stands in for a
-    /// missing attribute).
+    /// missing attribute), or `vars(obj)`, which loads `obj.__dict__`.
     fn attr_load(&self, kind: &InstKind) -> Option<(VarId, VarId, String)> {
         match kind {
             InstKind::AttrLoad { dst, obj, attr } => Some((*dst, *obj, attr.clone())),
@@ -1522,8 +1525,15 @@ impl<'a> Extractor<'a> {
             {
                 Some((*dst, args[0], self.resolved_str(args[1])?))
             }
-            _ => None,
+            _ => self
+                .namespace_load(kind)
+                .map(|(dst, obj)| (dst, obj, "__dict__".to_owned())),
         }
+    }
+
+    /// [`resolver::namespace_load`] in the function.
+    fn namespace_load(&self, kind: &InstKind) -> Option<(VarId, VarId)> {
+        resolver::namespace_load(kind, |v| self.val(v))
     }
 
     /// `(dst, holder, attr)` of a call or property read that returns attribute `attr` of an
@@ -2284,6 +2294,7 @@ impl<'a> Extractor<'a> {
             references,
             external: self.external,
             cells,
+            types: self.types,
         }
     }
 
@@ -3470,6 +3481,16 @@ impl<'a> Extractor<'a> {
                 {
                     self.container_change(*obj, ContainerChange::Resizes, span);
                 }
+            }
+            // `obj.__dict__ |= other` updates the namespace in place, whatever the result is
+            // stored to.
+            InstKind::BinOp {
+                op: BinOpKind::BitOr,
+                lhs,
+                in_place: true,
+                ..
+            } if self.dict_of.contains_key(lhs) => {
+                self.container_method(*lhs, BinOpKind::BitOr.in_place_method(), &[], span);
             }
             InstKind::BinOp {
                 dst,
@@ -4724,7 +4745,7 @@ impl<'a> Extractor<'a> {
                         self.computed_name(&owner, WriteKind::DictDirect, span);
                     }
                 }
-                // `update`, `popitem`, `clear`: attributes heki cannot name.
+                // `update`, `popitem`, `clear`, `|=` (`__ior__`): attributes heki cannot name.
                 _ => {
                     if method == "clear" && owner.is_self {
                         self.summary.invalidates_cached.insert("*".to_owned());
@@ -6794,6 +6815,7 @@ const INSPECTING_BUILTINS: &[&str] = &[
     "hasattr",
     "getattr",
     "object.__getattribute__",
+    "vars",
     "callable",
     "repr",
     "str",
@@ -6859,22 +6881,21 @@ struct Rebound<'f> {
 }
 
 impl<'f> Rebound<'f> {
-    fn of(f: &'f IrFunction) -> Self {
+    /// The names `f` may rebind, `namespace` telling the namespaces its instructions load
+    /// ([`resolver::namespace_load`]).
+    fn of(f: &'f IrFunction, namespace: impl Fn(&InstKind) -> Option<(VarId, VarId)>) -> Self {
         let insts = || f.blocks.iter().flat_map(|b| &b.insts);
         let mut strings: FxHashMap<VarId, &'f str> = FxHashMap::default();
         let mut dicts: FxHashSet<VarId> = FxHashSet::default();
         for inst in insts() {
-            match &inst.kind {
-                InstKind::Const {
-                    dst,
-                    literal: ConstLiteral::Str(text),
-                } => {
-                    strings.insert(*dst, text.as_str());
-                }
-                InstKind::AttrLoad { dst, attr, .. } if attr == "__dict__" => {
-                    dicts.insert(*dst);
-                }
-                _ => {}
+            if let InstKind::Const {
+                dst,
+                literal: ConstLiteral::Str(text),
+            } = &inst.kind
+            {
+                strings.insert(*dst, text.as_str());
+            } else if let Some((dst, _)) = namespace(&inst.kind) {
+                dicts.insert(dst);
             }
         }
         let mut attrs = Some(FxHashSet::default());
@@ -6917,6 +6938,12 @@ impl<'f> Rebound<'f> {
                     }
                     keys = None;
                 }
+                InstKind::BinOp {
+                    lhs,
+                    op: BinOpKind::BitOr,
+                    in_place: true,
+                    ..
+                } if dicts.contains(lhs) => attrs = None,
                 _ => {}
             }
         }

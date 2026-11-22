@@ -27,7 +27,9 @@ allowed writers:
   the name coming first); the object must be passed by position (no keyword-only parameter, no
   `*args` unpacking);
 - through `setattr(model, "fields", ...)` / `object.__setattr__` (also through a module-level
-  name bound once to it: `_set = object.__setattr__`) or `model.__dict__["fields"]`,
+  name bound once to it: `_set = object.__setattr__`) or `model.__dict__["fields"]` (also
+  `vars(model)["fields"]`, `model.__dict__.setdefault("fields", v)`, and a local alias of the
+  namespace),
   also with a string constant for the name (`model.__dict__[FIELDS_KEY]`, imported or not):
   a module-level name declared `Final` or bound once in its module and rebound by no other, or
   a class-body name declared `ClassVar` or `Final` and bound once (`self.KEY`, `cls.KEY`,

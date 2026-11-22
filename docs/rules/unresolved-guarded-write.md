@@ -27,7 +27,8 @@ write:
   attribute holds (`obj.fields.append(x)`, `obj.meta["k"][name] = v`, also through an alias, in
   the function or in a scope nested in it) count;
 - an attribute name computed at run time written on an instance of a target class:
-  `setattr(model, name, v)`, `model.__dict__[name] = v`, `model.__dict__.update(...)`, and a
+  `setattr(model, name, v)`, `model.__dict__[name] = v`, `model.__dict__.update(...)`,
+  `model.__dict__ |= other` (also through `vars(model)` or a local alias of the namespace), and a
   `__dict__` key in a name that is no constant: a module-level name bound twice, in a loop, or
   before a star import, or rebound by another module, a class attribute without `ClassVar` or
   `Final` (an instance may hold its own), one a subclass defines again or inherits first from

@@ -2832,3 +2832,145 @@ fn only_a_change_through_the_dict_of_module_globals_unfixes_its_constants() {
     sorted.sort();
     assert_eq!(codes, sorted);
 }
+
+// ================================================================ an object's namespace
+
+const NAMESPACE_MODEL: &str = r#"CACHE_KEY = "_cache_key"
+
+
+class Field:
+    def __init__(self) -> None:
+        self.required = False
+
+
+class Other:
+    def __init__(self) -> None:
+        self.required = False
+"#;
+
+const NAMESPACE_USE: &str = r#"from collections.abc import Mapping
+
+from pkg.model import CACHE_KEY, Field, Other
+
+
+def through_vars(field: Field) -> None:
+    vars(field)[CACHE_KEY] = 1
+
+
+def update_through_vars(field: Field) -> None:
+    vars(field).update(required=True)
+
+
+def in_place_namespace(field: Field) -> None:
+    field.__dict__ |= {"required": True}
+
+
+def in_place_alias(field: Field) -> None:
+    values = field.__dict__
+    values |= {"required": True}
+
+
+def control_subscript(field: Field) -> None:
+    field.__dict__[CACHE_KEY] = 1
+
+
+def control_update(field: Field) -> None:
+    field.__dict__.update(required=True)
+
+
+def setdefault_vars(field: Field) -> None:
+    vars(field).setdefault("required", True)
+
+
+def delete_vars(field: Field) -> None:
+    del vars(field)["required"]
+
+
+def alias_vars(field: Field, other: Mapping[str, object]) -> None:
+    ns = vars(field)
+    ns["required"] = True
+    ns |= other
+
+
+def another_class(other: Other) -> None:
+    vars(other)["required"] = True
+    other.__dict__ |= {"required": True}
+
+
+def reads(field: Field) -> object:
+    return vars(field)["required"], vars(field).get("required")
+
+
+def plain_dict(d: dict[str, object]) -> None:
+    d |= {"required": True}
+
+
+def fresh() -> Field:
+    made = Field()
+    vars(made)["required"] = True
+    return made
+"#;
+
+const NAMESPACE_SHADOWED: &str = r#"from pkg.model import Field
+
+
+def vars(obj: object) -> dict[str, object]:
+    return {}
+
+
+def shadowed(field: Field) -> None:
+    vars(field)["required"] = True
+"#;
+
+/// `vars(obj)` (the builtin) is `obj.__dict__`, and `|=` updates either in place: an entry
+/// stored, deleted, or set by a container method through it is a write of the attribute it
+/// names, and `update` and `|=` write names heki cannot tell (`MUT205`). A read through it is a
+/// read (`MUT203`); a name shadowing the builtin, another class, a plain dict, and an object the
+/// function constructs (nothing holds it: `vars` only reads it) are not writes of a target.
+#[test]
+fn vars_is_the_namespace_and_in_place_or_writes_through_it() {
+    let p = Project::new("namespace_forms");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT201\", \"MUT205\", \"MUT203\"]\n\n\
+         [[tool.heki.write-owners]]\nname = \"store\"\n\
+         targets = [\"pkg.model.Field.required\", \"pkg.model.Field._cache_key\"]\n\
+         allowed-writers = [\"pkg.store:*\"]\nunresolved = \"report\"\n\n\
+         [[tool.heki.read-owners]]\nname = \"reads\"\ntargets = [\"pkg.model.Field.required\"]\n\
+         allowed-readers = [\"pkg.store:*\"]\n",
+    )
+    .write("pkg/__init__.py", "")
+    .write("pkg/model.py", NAMESPACE_MODEL)
+    .write("pkg/use.py", NAMESPACE_USE)
+    .write("pkg/shadowed.py", NAMESPACE_SHADOWED);
+    let u = "pkg/use.py";
+    let (cache, required, field) = (
+        "pkg.model.Field._cache_key",
+        "pkg.model.Field.required",
+        "Field",
+    );
+    let diags = diagnostics(&p, &[]);
+    assert_eq!(
+        found(&diags),
+        vec![
+            d(u, 7, "MUT201", "through_vars", cache),
+            d(u, 11, "MUT205", "update_through_vars", field),
+            d(u, 15, "MUT205", "in_place_namespace", field),
+            d(u, 20, "MUT205", "in_place_alias", field),
+            d(u, 24, "MUT201", "control_subscript", cache),
+            d(u, 28, "MUT205", "control_update", field),
+            d(u, 32, "MUT201", "setdefault_vars", required),
+            d(u, 36, "MUT201", "delete_vars", required),
+            d(u, 41, "MUT201", "alias_vars", required),
+            d(u, 42, "MUT205", "alias_vars", field),
+            d(u, 51, "MUT203", "reads", required),
+            d(u, 51, "MUT203", "reads", required),
+        ]
+    );
+    assert!(
+        message_at(&diags, u, 15).contains(
+            "`in_place_namespace` writes an attribute named at run time (dict_direct) on `Field`"
+        ),
+        "{diags:#?}"
+    );
+}

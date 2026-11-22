@@ -201,8 +201,8 @@ Contracts declare what no type can say. Each kind is an array of tables with its
   method named like a target, accessed on an object of unknown class (an unannotated parameter,
   a loop variable, an untyped call result, `Any`, a protocol whose implementations heki cannot
   list). A baseline counts them apart from the violations the typed rules prove.
-- An attribute named through a string (`setattr`, `getattr`, `__dict__`) is followed when the
-  string is a constant: see [Dynamic names](scope.md#dynamic-names).
+- An attribute named through a string (`setattr`, `getattr`, `__dict__`, `vars`) is followed
+  when the string is a constant: see [Dynamic names](scope.md#dynamic-names).
 
 ### `write-owners`
 
@@ -252,8 +252,8 @@ A shallow copy's containers are the original's: only rebinding its attributes co
 With `unresolved = "report"`, `MUT205` reports:
 
 - an attribute named like a target, written on an object of unknown class;
-- a computed attribute name (`setattr(obj, name, v)`, `obj.__dict__[name] = v`) written on a
-  target class.
+- a computed attribute name (`setattr(obj, name, v)`, `obj.__dict__[name] = v`,
+  `obj.__dict__.update(...)`, `vars(obj) |= other`) written on a target class.
 
 ### `read-owners`
 
