@@ -45,7 +45,7 @@ impl Project {
 
     /// Run `heki <args>` in the project directory: `(exit code, stdout, stderr)`.
     pub fn heki(&self, args: &[&str]) -> (i32, String, String) {
-        let out = Command::new(env!("CARGO_BIN_EXE_heki"))
+        let out = heki_command()
             .args(args)
             .current_dir(&self.dir)
             .output()
@@ -75,6 +75,16 @@ impl Drop for Project {
 }
 
 /// `path` as heki's reports write it: with `/` separators on every platform.
+/// The real `heki` binary, run as from a terminal wherever the tests run: without the variables
+/// that choose `heki check`'s output format (`GITHUB_ACTIONS` is set in CI).
+pub fn heki_command() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_heki"));
+    command
+        .env_remove("GITHUB_ACTIONS")
+        .env_remove("HEKI_OUTPUT_FORMAT");
+    command
+}
+
 pub fn report_path(path: &Path) -> String {
     path.to_str()
         .unwrap()

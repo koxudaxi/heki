@@ -1075,6 +1075,50 @@ fn steps_exact_effects() -> Vec<Step> {
     ]
 }
 
+/// `report-unused-suppressions`: a suppression of `EFF101` in a caller's file turns unused, and
+/// back, as a subclass in another file stops and starts blocking (`unused-suppression` follows
+/// the reports of other files' changes, as the reports it judges do).
+fn steps_unused_suppressions() -> Vec<Step> {
+    let reporting = CONFIG.replacen(
+        "[tool.heki.lint]\n",
+        "[tool.heki.lint]\nreport-unused-suppressions = true\n",
+        1,
+    );
+    let suppressed = EXACT_USE.replace(
+        "b.fetch(\"u\")\n",
+        "b.fetch(\"u\")  # heki: ignore[EFF101]\n",
+    );
+    vec![
+        Step::new(
+            "a suppression of `EFF101` on its line suppresses its report",
+            vec![
+                Action::Configure(reporting),
+                save("pkg/exact_use.py", &suppressed),
+            ],
+        )
+        .absent(&[
+            ("pkg/exact_use.py", "EFF101"),
+            ("pkg/exact_use.py", "unused-suppression"),
+        ]),
+        Step::new(
+            "a subclass in another file overrides the method without blocking: the suppression is unused",
+            vec![save("pkg/exact_sub.py", EXACT_SUB_OVERRIDING)],
+        )
+        .present(&[
+            ("pkg/exact_use.py", "unused-suppression"),
+            ("pkg/exact_use.py", "EFF111"),
+        ]),
+        Step::new(
+            "the override blocks too: the suppression is used again",
+            vec![save("pkg/exact_sub.py", EXACT_SUB_BLOCKING)],
+        )
+        .absent(&[
+            ("pkg/exact_use.py", "EFF101"),
+            ("pkg/exact_use.py", "unused-suppression"),
+        ]),
+    ]
+}
+
 /// A catalog argument read from an imported constant (`ModuleDecls::literal_constants`): a sleep
 /// of no time is no wait, one of a second is, and so is one of a constant another module rebinds.
 /// A constant computed from another holds its value too (`heki_ir::ModuleConstants`).
@@ -4252,6 +4296,7 @@ sessions!(editing, Session::start, {
     receiver_typing: steps_receiver_typing,
     effect_index: steps_effect_index,
     exact_effects: steps_exact_effects,
+    unused_suppressions: steps_unused_suppressions,
     helper_witnesses: steps_helper_witnesses,
     imported_constants: steps_imported_constants,
     method_lookups: steps_method_lookups,

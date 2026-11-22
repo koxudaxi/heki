@@ -42,7 +42,7 @@ The recorded set can only shrink:
 | Situation | `heki check` | `heki check --update-baseline` |
 | --------- | ------------ | ------------------------------ |
 | No baseline file yet | an error (exit code 2) | records today's findings |
-| A finding was fixed | a note that the entry can shrink | records the smaller entry |
+| A finding was fixed | a note that the entry can shrink; with [`report-unused-suppressions`](configuration.md#unused-suppressions), an entry that matches nothing is an error (exit code 1) | records the smaller entry |
 | An entry grew, or a new finding appeared | reports it, with a note on the allowed and found counts (exit code 1 for an error, and for a warning with [`fail-on = "warning"`](configuration.md#rule-selection-toolhekilint)) | reports it the same way and leaves the file as it is (exit code 1) |
 | A file could not be analyzed (a syntax error, an unreadable file) | reports the error and the other files' findings (exit code 2) | writes nothing, so the entries of that file are not lost (exit code 2) |
 
@@ -145,6 +145,10 @@ baseline configured, the hook fails only on new findings.
 
 Warnings become annotations without failing the step; `fail-on = "warning"` in
 `[tool.heki.lint]` (or `--fail-on warning`) makes them fail it, as in pre-commit.
+
+In GitHub Actions (`GITHUB_ACTIONS=true`), `heki check` writes these annotations without
+`--output-format github`. To keep the text output there, pass `--output-format full`, or set
+`HEKI_OUTPUT_FORMAT` (any format) in the job's `env`: it applies whenever the option is not given.
 
 With SARIF:
 

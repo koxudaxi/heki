@@ -12,12 +12,12 @@ use common::Project;
 use common::lsp::{Lsp, codes, uri};
 use serde_json::{Value, json};
 use std::io::Read;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 /// `heki check --output-format json` of the project, which must finish within `limit`.
 fn check_within(p: &Project, limit: Duration) -> Vec<Value> {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_heki"))
+    let mut child = common::heki_command()
         .args(["check", "--heuristic", "--output-format", "json", "."])
         .current_dir(&p.dir)
         .stdout(Stdio::piped())
@@ -2792,7 +2792,7 @@ fn puts_along_a_chain_of_attributes_resolve_each_attribute_once() {
 /// `heki inspect <args> --output-format json` of the project, which must finish within
 /// `limit`.
 fn inspect_within(p: &Project, args: &[&str], limit: Duration) -> Value {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_heki"))
+    let mut child = common::heki_command()
         .arg("inspect")
         .args(args)
         .args(["--output-format", "json"])
@@ -4157,7 +4157,7 @@ fn copies_of_a_class_with_a_deep_subclass_chain_walk_each_class_once() {
 
 /// `heki dump-recommend-facts` of the project, which must finish within `limit`.
 fn recommend_facts_within(p: &Project, limit: Duration) -> Value {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_heki"))
+    let mut child = common::heki_command()
         .args(["dump-recommend-facts", "."])
         .current_dir(&p.dir)
         .stdout(Stdio::piped())

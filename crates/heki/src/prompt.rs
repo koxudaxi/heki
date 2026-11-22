@@ -182,7 +182,7 @@ pub(crate) fn run(args: &CheckArgs, question: &str) -> Result<ExitCode> {
         diagnostics: Diagnostics::of(
             &diags,
             project.files.len(),
-            withheld,
+            withheld.len(),
             shown_errors(&project.errors),
         ),
         guidance: GUIDANCE,

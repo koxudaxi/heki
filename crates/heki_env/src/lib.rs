@@ -116,6 +116,11 @@ pub struct LintConfig {
     /// The least severity whose reports make `heki check` fail (exit code 1). Defaults to
     /// `error`: warnings are reported without failing the run.
     pub fail_on: Option<Severity>,
+    /// Report the codes of suppression comments that suppressed no report of a rule that ran,
+    /// and the baseline entries that matched no report. Defaults to `false`.
+    pub report_unused_suppressions: Option<bool>,
+    /// Report `# heki: ignore` comments that name no rule. Defaults to `false`.
+    pub require_suppression_codes: Option<bool>,
 }
 
 /// `[[tool.heki.write-owners]]` contract for `MUT201`.

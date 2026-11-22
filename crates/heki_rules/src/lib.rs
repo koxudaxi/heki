@@ -886,6 +886,20 @@ pub(crate) struct CheckContext<'a> {
     pub must_explainer: Option<heki_effect::MustExplainer<'a>>,
 }
 
+/// Whether [`check_project`] runs the rule `code` on the file at the project-relative `rel_path`:
+/// `selection` enables it there, and `MUT103` also needs the summary snapshot it compares with
+/// (`snapshot`).
+pub fn runs_on(selection: &RuleSelection, snapshot: bool, code: &str, rel_path: &str) -> bool {
+    selection.is_enabled_for(code, rel_path) && (code != "MUT103" || snapshot)
+}
+
+/// Whether `--fix` applies the fix of `d` without options, and the language server offers it as
+/// the preferred quick fix: a `safe` + `unconditional` rule's, or a suppression report's.
+pub fn fixes_unconditionally(d: &Diagnostic) -> bool {
+    project::is_suppression_report(&d.rule_code)
+        || find_rule(&d.rule_code).is_some_and(|m| m.auto_fix_default)
+}
+
 /// Run every enabled rule over an analyzed project.
 /// Inline suppressions and baselines are applied by the caller (`heki check`).
 pub fn check_project(

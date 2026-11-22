@@ -123,11 +123,14 @@ $ heki check --output-format json
 
 | Format | Prints |
 | ------ | ------ |
-| `full` (default) | each diagnostic with its source line, call chain, and help |
+| `full` (default; `github` in GitHub Actions) | each diagnostic with its source line, call chain, and help |
 | `concise` | one line per diagnostic: the message, without the help |
 | `json` | every field: also the help, the evidence, the blocker that stops a fix, and the fix edits ([fields](coding-agents.md#after-an-edit-heki-check)) |
 | `github` | GitHub Actions annotations with the message ([CI](adoption.md#continuous-integration)) |
 | `sarif` | the message, the location, the call chain, and the help (`properties.help`), for code-scanning dashboards (no evidence or blocker) |
+
+Without `--output-format`, `HEKI_OUTPUT_FORMAT` chooses the format, and in GitHub Actions
+(`GITHUB_ACTIONS=true`) it is `github`.
 
 Every format, `--diff`, and the errors of files that cannot be read or parsed print a file's
 path relative to the working directory when the file is inside it (otherwise as given), as Ruff
@@ -155,5 +158,5 @@ writes to stderr are not colored.
 | Code | Meaning |
 | ---- | ------- |
 | `0` | no diagnostics, or only warnings (they are printed) |
-| `1` | an error found, or a warning with `--fail-on warning` (`lint.fail-on = "warning"`), among the Ratchet regressions when a baseline is used; also when `--update-baseline` refuses a grown entry, or `--diff` would change files |
+| `1` | an error found, or a warning with `--fail-on warning` (`lint.fail-on = "warning"`), among the Ratchet regressions when a baseline is used; also when `--update-baseline` refuses a grown entry, a baseline entry matched nothing with [`report-unused-suppressions`](configuration.md#unused-suppressions), or `--diff` would change files |
 | `2` | configuration error, unreadable file, unknown rule, or syntax error |

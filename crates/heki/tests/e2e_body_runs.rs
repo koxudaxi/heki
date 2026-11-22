@@ -954,7 +954,7 @@ fn wait_for(rx: &std::sync::mpsc::Receiver<String>, needle: &str) {
 #[test]
 fn watch_follows_a_generator_through_the_factory_returning_it() {
     use std::io::{BufRead, BufReader};
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
 
     let p = Project::new("body_runs_watch");
     p.write("pkg/__init__.py", "")
@@ -966,7 +966,7 @@ fn watch_follows_a_generator_through_the_factory_returning_it() {
             "pkg/api.py",
             "from pkg.rows import make_rows\n\n\nasync def handler():\n    for row in make_rows():\n        print(row)\n",
         );
-    let mut child = Command::new(env!("CARGO_BIN_EXE_heki"))
+    let mut child = common::heki_command()
         .args([
             "check",
             "--heuristic",

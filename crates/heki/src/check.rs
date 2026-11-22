@@ -16,10 +16,11 @@ use heki_env::{LintConfig, Severity};
 use heki_profile::{HotFunctions, ProfileData, ProfiledFunction};
 use heki_rules::project::{
     Facts, FileError, IndexFacts, Indexed, ParsedFile, Project, ProjectEnv, ProjectOptions,
-    baseline_key, canonical,
+    RulesRun, baseline_key, canonical,
 };
 use heki_rules::{
-    RuleSelection, SNAPSHOT_FILE, Selectors, SummarySnapshot, find_rule, fold_root_causes,
+    RuleSelection, SNAPSHOT_FILE, Selectors, SummarySnapshot, find_rule, fixes_unconditionally,
+    fold_root_causes,
 };
 use rustc_hash::FxHashMap;
 use std::collections::BTreeMap;
@@ -162,7 +163,20 @@ struct Analyzed {
     /// The heuristic rules that did not run only because `lint.heuristic` is off.
     heuristic_off: usize,
     /// The heuristic reports of exact rules withheld because `lint.heuristic` is off.
-    withheld: usize,
+    withheld: Vec<Diagnostic>,
+    selection: RuleSelection,
+    /// Whether the run compared with a summary snapshot.
+    snapshot: bool,
+}
+
+impl Analyzed {
+    fn rules_run(&self) -> RulesRun<'_> {
+        RulesRun {
+            selection: &self.selection,
+            snapshot: self.snapshot,
+            lint: &self.project.env.cfg.lint,
+        }
+    }
 }
 
 fn analyze(
@@ -182,7 +196,7 @@ fn analyze(
         project,
         index,
         selection,
-        ..
+        snapshot,
     } = indexed;
     let hot = profile.map(|p| p.attribute(profiled_functions(&project)));
     annotate_hot(&mut diags, hot.as_ref());
@@ -193,19 +207,20 @@ fn analyze(
         hot,
         heuristic_off: selection.heuristic_off().len(),
         withheld,
+        selection,
+        snapshot: snapshot.is_some(),
     })
 }
 
 /// Whether `--fix` / `--diff` applies this diagnostic's fix: `safe` + `unconditional` rules
-/// (`OPT101` / `OPT102`) always; `size-dependent` ones with `--include-size-dependent` or in a
-/// function the profile shows hot.
+/// (`OPT101` / `OPT102`) and reports on suppression comments always; `size-dependent` ones with
+/// `--include-size-dependent` or in a function the profile shows hot.
 fn applicable(d: &Diagnostic, args: &CheckArgs, hot: Option<&HotFunctions>) -> bool {
     d.fix.is_some()
-        && find_rule(&d.rule_code).is_some_and(|meta| {
-            meta.auto_fix_default
-                || args.include_size_dependent
-                || hot.is_some_and(|h| h.is_hot(&d.path, &d.qualname))
-        })
+        && (fixes_unconditionally(d)
+            || find_rule(&d.rule_code).is_some()
+                && (args.include_size_dependent
+                    || hot.is_some_and(|h| h.is_hot(&d.path, &d.qualname))))
 }
 
 /// Fix passes before `--fix` / `--diff` stop (each pass re-proves every candidate on the text
@@ -409,16 +424,11 @@ fn run_check(args: &CheckArgs) -> Result<ExitCode> {
         eprintln!("Fixed {fixes} issue(s) in {written} file(s).");
         refused = run.refused;
     }
-    let Analyzed {
-        mut project,
-        index,
-        diags,
-        heuristic_off,
-        withheld,
-        ..
-    } = analyze(args, hot.as_ref(), None)?;
-    project.errors.extend(conflicts);
-    let code = report(args, &project, diags, heuristic_off, withheld, &styles)?;
+    let mut analyzed = analyze(args, hot.as_ref(), None)?;
+    analyzed.project.errors.extend(conflicts);
+    let diags = std::mem::take(&mut analyzed.diags);
+    let code = report(args, &analyzed, diags, &styles)?;
+    let Analyzed { project, index, .. } = analyzed;
     // The process ends here: freeing the index and the parsed files one allocation at a time
     // would only cost time.
     std::mem::forget(index);
@@ -468,16 +478,14 @@ pub(crate) fn show_paths(diags: &mut [Diagnostic]) {
     }
 }
 
-/// Baseline handling, rendering, summary, and exit code of one analyzed run, whose selection
-/// left `heuristic_off` rules off and withheld `withheld` reports for being heuristic.
-pub(crate) fn report(
+/// Baseline handling, rendering, summary, and exit code of the reports `diags` of `analyzed`.
+fn report(
     args: &CheckArgs,
-    project: &Project,
+    analyzed: &Analyzed,
     mut diags: Vec<Diagnostic>,
-    heuristic_off: usize,
-    withheld: usize,
     styles: &Stylesheet,
 ) -> Result<ExitCode> {
+    let project = &analyzed.project;
     let key_path = baseline_key(&project.files);
     let baseline_path = baseline_path(&args.analysis, &project.env);
     let fmt = args.output_format;
@@ -495,6 +503,8 @@ pub(crate) fn report(
     let mut regressions = 0;
     // The update the run was asked for did not happen: it fails whatever the reports' severity.
     let mut refused_update = false;
+    // A baseline entry matched no report (`lint.report-unused-suppressions`): an error.
+    let mut unused_entries = false;
     if let (Some(bp), Some(baseline)) = (&baseline_path, &recorded) {
         let unit = baseline.unit;
         if unit == CountUnit::Diagnostics && !args.update_baseline {
@@ -507,7 +517,23 @@ pub(crate) fn report(
         // Legacy entries compare in their own unit, before `--update-baseline` rewrites them.
         let cmp = baseline.keep_regressions(&mut diags, &key_path);
         if !args.update_baseline {
+            let run = analyzed.rules_run();
+            let checked = project.files.iter().map(|f| f.rel.as_str()).collect();
+            let withheld = baseline_counts(&analyzed.withheld, &key_path, unit);
             for (key, allowed, cur) in &cmp.stale_entries {
+                let found = cur + withheld.get(key).copied().unwrap_or(0);
+                if run.unused_entry(key, found, &checked) {
+                    log!(
+                        fmt,
+                        "error: baseline entry {}::{} {} `{}` matched no report (`--update-baseline` removes it)",
+                        key.path,
+                        key.qualname,
+                        key.rule_code,
+                        key.target
+                    );
+                    unused_entries = true;
+                    continue;
+                }
                 log!(
                     fmt,
                     "note: baseline entry {}::{} {} `{}` can shrink {allowed} -> {cur} (`--update-baseline`)",
@@ -591,9 +617,12 @@ pub(crate) fn report(
         OutputFormat::Full | OutputFormat::Concise
     ) {
         summary(&diags, project.files.len(), baseline_path.is_some());
-        heuristic_hint(heuristic_off, withheld);
+        heuristic_hint(analyzed.heuristic_off, analyzed.withheld.len());
     }
-    let code = if refused_update || any_failing(&diags, fail_on(args, &project.env.cfg.lint)) {
+    let code = if refused_update
+        || unused_entries
+        || any_failing(&diags, fail_on(args, &project.env.cfg.lint))
+    {
         ExitCode::from(1)
     } else {
         ExitCode::SUCCESS

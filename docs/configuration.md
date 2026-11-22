@@ -130,6 +130,8 @@ supported version that every clause admits:
 | `relax-async-in-tests` | `true` | Skip `EFF101`, `EFF111`, `EFF105`, and `EFF106` in test code as pytest finds it: `test_*` functions and the functions nested in them, `test_*.py` and `*_test.py` files, and files under `test/` or `tests/`. |
 | `heuristic` | `false` | Whether the heuristic rules that are not opt-in run by default and for a prefix or `ALL`, as the exact rules do. `--heuristic` and `--no-heuristic` override it. |
 | `fail-on` | `"error"` | The least severity whose reports make `heki check` (and `--watch`) exit with code 1: `"error"`, or `"warning"` to fail on warnings too. Warnings are reported either way, and the language server shows them. `--fail-on` overrides it. |
+| `report-unused-suppressions` | `false` | Report the codes of suppression comments that suppressed no report, and the baseline entries that matched none. See [Unused suppressions](#unused-suppressions). |
+| `require-suppression-codes` | `false` | Report the `# heki: ignore` comments that name no rule. See [Suppressions that name no rule](#suppressions-that-name-no-rule). |
 
 - A rule is named by its code (`EFF101`), its name (`async-blocking-call`), a code prefix
   (`EFF`, `MUT2`), or `ALL`. An unknown rule is a configuration error.
@@ -772,3 +774,56 @@ w = load()            # noqa: EFF101
 - A bracketed list that is not closed or names no rule (`# heki: ignore[`, `# heki: ignore[]`)
   silences nothing.
 - To keep a rule away from whole files, use [`per-file-ignores`](#rule-selection-toolhekilint).
+
+### Unused suppressions
+
+```toml
+[tool.heki.lint]
+report-unused-suppressions = true
+```
+
+With `report-unused-suppressions = true`, `heki check`, `--watch`, and the language server report
+each code of a suppression comment that suppressed no report in the run (`unused-suppression`), as
+Ruff's `RUF100` and basedpyright's `reportUnnecessaryTypeIgnoreComment` do:
+
+```console
+$ heki check --output-format concise
+a.py:6:12: unused-suppression No `EFF101` report on this line to suppress
+```
+
+- A code is judged only when its rule ran on the file. A rule that did not run reported nothing a
+  suppression could match, so its codes are never reported: a heuristic rule left off (select it,
+  or set `heuristic = true`, to have its suppressions judged), an opt-in rule not selected, a
+  rule `--select` leaves out or `per-file-ignores` turns off in the file, and `MUT103` without
+  its summary snapshot.
+- A code that names no heki rule is another tool's and stays: `F401` in `# noqa: F401, EFF101`.
+  A suppression without codes is never reported as unused: a bare `# heki: ignore` covers rules
+  that did not run, and a bare `# noqa` belongs to Ruff as much as to heki.
+- A run judges what it reported, under its configuration: with `relax-async-in-tests`, a
+  suppression of `EFF101` in a test suppresses nothing. A run over some files of a project misses
+  the reports that come from the others (`heki check a.py` when the blocking call is in `b.py`),
+  so judge, and fix, on the whole project, as a pre-commit hook with `pass_filenames: false` does.
+- `heki check --fix` (and `--diff`) removes the unused codes, and the language server offers the
+  same edit as a quick fix. The other codes stay; a suppression left without codes goes, with
+  the blanks before it, and so does its line when the comment is alone on it. Other text of the
+  comment stays (`# type: ignore`). Without the setting, `--fix` leaves suppressions as they are.
+- The reports are errors, so they fail `heki check`. A suppression comment does not suppress
+  them: the setting turns them off. A baseline records them as it records other reports.
+- With a [baseline](adoption.md#ratchet-baselines), `heki check` also reports an entry that
+  matched no report of a rule that ran on its file, when the file was checked, and exits with
+  code 1: `error: baseline entry a.py::handler EFF101 `time.sleep` matched no report
+  (`--update-baseline` removes it)`. A heuristic report that the run withholds still matches its
+  entry. Without the setting, the entry gets a note that it can shrink.
+
+### Suppressions that name no rule
+
+```toml
+[tool.heki.lint]
+require-suppression-codes = true
+```
+
+With `require-suppression-codes = true`, a `# heki: ignore` without codes is reported
+(`suppression-without-code`, an error), as basedpyright's `reportIgnoreCommentWithoutRule` does.
+Its help names the rules it suppressed in the run (`# heki: ignore[EFF101]`). It still suppresses
+every rule on its line: the setting reports the comment and changes nothing else. A bare `# noqa`
+is not reported, since Ruff reads it too (its `PGH004` reports it).

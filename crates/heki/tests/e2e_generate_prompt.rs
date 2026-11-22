@@ -292,7 +292,7 @@ fn the_json_object_holds_the_same_content_and_follows_its_schema() {
     );
     // Run from below the project root, the root is a path outside the working directory, which
     // `heki check` prints as it is.
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_heki"))
+    let out = common::heki_command()
         .args(["check", "--generate-prompt", "--output-format", "json"])
         .current_dir(p.dir.join("src"))
         .output()

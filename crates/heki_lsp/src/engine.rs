@@ -13,7 +13,7 @@ use heki_effect::{
 pub use heki_rules::Selectors;
 use heki_rules::project::{
     Facts, FileError, IndexFacts, ParsedFile, Project, ProjectEnv, ProjectError, ProjectOptions,
-    discovers, exclude_set, parse_source, retain_unsuppressed, unread_module,
+    RulesRun, discovers, exclude_set, parse_source, retain_unsuppressed, unread_module,
 };
 use heki_rules::{
     CHAIN_RULES, ChainFacts, CheckExtras, RuleSelection, SNAPSHOT_FILE, SelectionError,
@@ -624,7 +624,12 @@ impl Workspace {
                 &extras,
             )
             .expect("a check fails only on invalid rule options, which fail `Workspace::load`");
-            retain_unsuppressed(&mut diags, [parsed]);
+            let run = RulesRun {
+                selection: &self.selection,
+                snapshot: self.snapshot.is_some(),
+                lint: &self.env.cfg.lint,
+            };
+            retain_unsuppressed(&mut diags, [parsed], &run);
             diags
         });
         // A withheld report counts: an edit to its call chain can make it exact.

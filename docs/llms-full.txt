@@ -903,11 +903,14 @@ $ heki check --output-format json
 
 | Format | Prints |
 | ------ | ------ |
-| `full` (default) | each diagnostic with its source line, call chain, and help |
+| `full` (default; `github` in GitHub Actions) | each diagnostic with its source line, call chain, and help |
 | `concise` | one line per diagnostic: the message, without the help |
 | `json` | every field: also the help, the evidence, the blocker that stops a fix, and the fix edits ([fields](https://heki.koxudaxi.dev/coding-agents/#after-an-edit-heki-check)) |
 | `github` | GitHub Actions annotations with the message ([CI](https://heki.koxudaxi.dev/adoption/#continuous-integration)) |
 | `sarif` | the message, the location, the call chain, and the help (`properties.help`), for code-scanning dashboards (no evidence or blocker) |
+
+Without `--output-format`, `HEKI_OUTPUT_FORMAT` chooses the format, and in GitHub Actions
+(`GITHUB_ACTIONS=true`) it is `github`.
 
 Every format, `--diff`, and the errors of files that cannot be read or parsed print a file's
 path relative to the working directory when the file is inside it (otherwise as given), as Ruff
@@ -935,7 +938,7 @@ writes to stderr are not colored.
 | Code | Meaning |
 | ---- | ------- |
 | `0` | no diagnostics, or only warnings (they are printed) |
-| `1` | an error found, or a warning with `--fail-on warning` (`lint.fail-on = "warning"`), among the Ratchet regressions when a baseline is used; also when `--update-baseline` refuses a grown entry, or `--diff` would change files |
+| `1` | an error found, or a warning with `--fail-on warning` (`lint.fail-on = "warning"`), among the Ratchet regressions when a baseline is used; also when `--update-baseline` refuses a grown entry, a baseline entry matched nothing with [`report-unused-suppressions`](https://heki.koxudaxi.dev/configuration/#unused-suppressions), or `--diff` would change files |
 | `2` | configuration error, unreadable file, unknown rule, or syntax error |
 
 
@@ -1075,6 +1078,8 @@ supported version that every clause admits:
 | `relax-async-in-tests` | `true` | Skip `EFF101`, `EFF111`, `EFF105`, and `EFF106` in test code as pytest finds it: `test_*` functions and the functions nested in them, `test_*.py` and `*_test.py` files, and files under `test/` or `tests/`. |
 | `heuristic` | `false` | Whether the heuristic rules that are not opt-in run by default and for a prefix or `ALL`, as the exact rules do. `--heuristic` and `--no-heuristic` override it. |
 | `fail-on` | `"error"` | The least severity whose reports make `heki check` (and `--watch`) exit with code 1: `"error"`, or `"warning"` to fail on warnings too. Warnings are reported either way, and the language server shows them. `--fail-on` overrides it. |
+| `report-unused-suppressions` | `false` | Report the codes of suppression comments that suppressed no report, and the baseline entries that matched none. See [Unused suppressions](https://heki.koxudaxi.dev/configuration/#unused-suppressions). |
+| `require-suppression-codes` | `false` | Report the `# heki: ignore` comments that name no rule. See [Suppressions that name no rule](https://heki.koxudaxi.dev/configuration/#suppressions-that-name-no-rule). |
 
 - A rule is named by its code (`EFF101`), its name (`async-blocking-call`), a code prefix
   (`EFF`, `MUT2`), or `ALL`. An unknown rule is a configuration error.
@@ -1718,6 +1723,59 @@ w = load()            # noqa: EFF101
   silences nothing.
 - To keep a rule away from whole files, use [`per-file-ignores`](https://heki.koxudaxi.dev/configuration/#rule-selection-toolhekilint).
 
+### Unused suppressions
+
+```toml
+[tool.heki.lint]
+report-unused-suppressions = true
+```
+
+With `report-unused-suppressions = true`, `heki check`, `--watch`, and the language server report
+each code of a suppression comment that suppressed no report in the run (`unused-suppression`), as
+Ruff's `RUF100` and basedpyright's `reportUnnecessaryTypeIgnoreComment` do:
+
+```console
+$ heki check --output-format concise
+a.py:6:12: unused-suppression No `EFF101` report on this line to suppress
+```
+
+- A code is judged only when its rule ran on the file. A rule that did not run reported nothing a
+  suppression could match, so its codes are never reported: a heuristic rule left off (select it,
+  or set `heuristic = true`, to have its suppressions judged), an opt-in rule not selected, a
+  rule `--select` leaves out or `per-file-ignores` turns off in the file, and `MUT103` without
+  its summary snapshot.
+- A code that names no heki rule is another tool's and stays: `F401` in `# noqa: F401, EFF101`.
+  A suppression without codes is never reported as unused: a bare `# heki: ignore` covers rules
+  that did not run, and a bare `# noqa` belongs to Ruff as much as to heki.
+- A run judges what it reported, under its configuration: with `relax-async-in-tests`, a
+  suppression of `EFF101` in a test suppresses nothing. A run over some files of a project misses
+  the reports that come from the others (`heki check a.py` when the blocking call is in `b.py`),
+  so judge, and fix, on the whole project, as a pre-commit hook with `pass_filenames: false` does.
+- `heki check --fix` (and `--diff`) removes the unused codes, and the language server offers the
+  same edit as a quick fix. The other codes stay; a suppression left without codes goes, with
+  the blanks before it, and so does its line when the comment is alone on it. Other text of the
+  comment stays (`# type: ignore`). Without the setting, `--fix` leaves suppressions as they are.
+- The reports are errors, so they fail `heki check`. A suppression comment does not suppress
+  them: the setting turns them off. A baseline records them as it records other reports.
+- With a [baseline](https://heki.koxudaxi.dev/adoption/#ratchet-baselines), `heki check` also reports an entry that
+  matched no report of a rule that ran on its file, when the file was checked, and exits with
+  code 1: `error: baseline entry a.py::handler EFF101 `time.sleep` matched no report
+  (`--update-baseline` removes it)`. A heuristic report that the run withholds still matches its
+  entry. Without the setting, the entry gets a note that it can shrink.
+
+### Suppressions that name no rule
+
+```toml
+[tool.heki.lint]
+require-suppression-codes = true
+```
+
+With `require-suppression-codes = true`, a `# heki: ignore` without codes is reported
+(`suppression-without-code`, an error), as basedpyright's `reportIgnoreCommentWithoutRule` does.
+Its help names the rules it suppressed in the run (`# heki: ignore[EFF101]`). It still suppresses
+every rule on its line: the setting reports the comment and changes nothing else. A bare `# noqa`
+is not reported, since Ruff reads it too (its `PGH004` reports it).
+
 
 ---
 
@@ -1944,7 +2002,7 @@ The recorded set can only shrink:
 | Situation | `heki check` | `heki check --update-baseline` |
 | --------- | ------------ | ------------------------------ |
 | No baseline file yet | an error (exit code 2) | records today's findings |
-| A finding was fixed | a note that the entry can shrink | records the smaller entry |
+| A finding was fixed | a note that the entry can shrink; with [`report-unused-suppressions`](https://heki.koxudaxi.dev/configuration/#unused-suppressions), an entry that matches nothing is an error (exit code 1) | records the smaller entry |
 | An entry grew, or a new finding appeared | reports it, with a note on the allowed and found counts (exit code 1 for an error, and for a warning with [`fail-on = "warning"`](https://heki.koxudaxi.dev/configuration/#rule-selection-toolhekilint)) | reports it the same way and leaves the file as it is (exit code 1) |
 | A file could not be analyzed (a syntax error, an unreadable file) | reports the error and the other files' findings (exit code 2) | writes nothing, so the entries of that file are not lost (exit code 2) |
 
@@ -2047,6 +2105,10 @@ baseline configured, the hook fails only on new findings.
 
 Warnings become annotations without failing the step; `fail-on = "warning"` in
 `[tool.heki.lint]` (or `--fail-on warning`) makes them fail it, as in pre-commit.
+
+In GitHub Actions (`GITHUB_ACTIONS=true`), `heki check` writes these annotations without
+`--output-format github`. To keep the text output there, pass `--output-format full`, or set
+`HEKI_OUTPUT_FORMAT` (any format) in the job's `env`: it applies whenever the option is not given.
 
 With SARIF:
 
@@ -2351,7 +2413,7 @@ Options:
       --fail-on <FAIL_ON>
           Exit with code 1 on reports of this severity or higher: `error` (the default), or `warning` to fail on warnings too (`lint.fail-on`) [possible values: error, warning]
       --output-format <OUTPUT_FORMAT>
-          Output format [default: full] [possible values: full, concise, json, github, sarif]
+          Output format: `full`, or `github` in GitHub Actions (`GITHUB_ACTIONS=true`); `HEKI_OUTPUT_FORMAT` sets it when the option is not given [possible values: full, concise, json, github, sarif]
       --color <WHEN>
           When to color the `full` and `concise` output and `--diff`, as Ruff does: `auto` colors them on a terminal unless `NO_COLOR` is set (`FORCE_COLOR` or `CLICOLOR_FORCE` color them anywhere), `always`, or `never` [default: auto] [possible values: auto, always, never]
       --update-baseline
@@ -2996,6 +3058,9 @@ heki's diagnostics and fixes while you edit, with the results `heki check` repor
   result would not parse is never offered, as `heki check --fix` refuses it.
 - A quick fix that appends `# heki: ignore[CODE]` to the line of any diagnostic, unless a comment
   cannot go there (the line ends inside a string or with a `\` continuation).
+- With [`report-unused-suppressions`](https://heki.koxudaxi.dev/configuration/#unused-suppressions), a quick fix that
+  removes the codes of a suppression comment that suppressed nothing, or the whole comment when
+  none is left.
 
 Code actions edit the version of the document their diagnostics were computed on:
 
