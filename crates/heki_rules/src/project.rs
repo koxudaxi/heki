@@ -648,6 +648,8 @@ pub enum Facts {
     /// Also what `heki inspect` shows ([`crate::inspect_facts`]): `heki inspect` and the language
     /// server.
     Inspect,
+    /// Also what `heki recommend` reads ([`crate::recommend_facts`]).
+    Recommend,
 }
 
 /// What an index is built with: the contracts its summaries depend on, whether typed writes
@@ -669,6 +671,7 @@ impl IndexFacts {
         let opt_in = match facts {
             Facts::Check => crate::opt_in_facts(selection),
             Facts::Inspect => crate::inspect_facts(selection),
+            Facts::Recommend => crate::recommend_facts(selection),
         };
         Ok(Self {
             contracts: crate::summary_contracts(config, kb)?,
@@ -729,6 +732,36 @@ impl Indexed {
         units: &[ModuleUnit<'_>],
         open_premises: bool,
     ) -> Result<(Vec<Diagnostic>, usize), RuleConfigError> {
+        let mut diags = self.reports(units, open_premises)?;
+        retain_unsuppressed(&mut diags, &self.project.files);
+        let withheld = self.selection.withhold_heuristic(&mut diags);
+        Ok((diags, withheld))
+    }
+
+    /// [`Self::diagnose`], with the reports inline suppressions drop apart, as
+    /// `(kept, suppressed)`.
+    pub fn diagnose_with_suppressed(
+        &self,
+    ) -> Result<(Vec<Diagnostic>, Vec<Diagnostic>), RuleConfigError> {
+        let mut diags = self.reports(&self.project.units(), false)?;
+        let mut kept = diags.clone();
+        retain_unsuppressed(&mut kept, &self.project.files);
+        // Both are in the same order, so one pass pairs them up.
+        let mut next = kept.iter().peekable();
+        diags.retain(|d| next.next_if(|k| *k == d).is_none());
+        let mut suppressed = diags;
+        self.selection.withhold_heuristic(&mut kept);
+        self.selection.withhold_heuristic(&mut suppressed);
+        Ok((kept, suppressed))
+    }
+
+    /// Every report of the selected rules in `units`, before inline suppressions and the
+    /// heuristic reports the selection withholds.
+    fn reports(
+        &self,
+        units: &[ModuleUnit<'_>],
+        open_premises: bool,
+    ) -> Result<Vec<Diagnostic>, RuleConfigError> {
         let env = &self.project.env;
         let decls = self.index.project_decls();
         let sources: FxHashMap<&Path, &str> = self
@@ -748,17 +781,14 @@ impl Indexed {
             text_of: Some(&text_of),
             open_premises,
         };
-        let mut diags = check_project(
+        check_project(
             units,
             &env.cfg,
             &env.kb,
             &self.index,
             &self.selection,
             &extras,
-        )?;
-        retain_unsuppressed(&mut diags, &self.project.files);
-        let withheld = self.selection.withhold_heuristic(&mut diags);
-        Ok((diags, withheld))
+        )
     }
 }
 

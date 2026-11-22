@@ -2136,6 +2136,9 @@ It takes the options of `heki check` that decide what is analyzed: `--select`,
   the published measurement of how often its reports are right about the code
   ([Rule Precision](https://heki.koxudaxi.dev/precision/)), or "not measured". Rules without reports here are named on
   one line.
+- **Contract candidates**: the `write-owners`, `read-owners`, and `effect-boundaries`
+  contracts the code already keeps, each with its confidence and evidence, and the trial run of
+  its rules that verified it; then the candidates a trial rejected, with the report it made.
 - **Notes**: what to know to weigh the advice. When the paths given leave out Python files
   below the project root, the note names them: heki takes the files it analyzed as the whole
   project, so what it says about callers, readers, and writers holds for those files only. It
@@ -2159,11 +2162,55 @@ listed with the reason they stay out:
 - `MUT103` compares with a summary snapshot you save with `heki snapshot --write`;
 - contract rules run when their contract is declared, so they are not listed here.
 
+## Which contracts the block declares
+
+Candidates are drawn from what the code does, never from names:
+
+- `write-owners`: an attribute of a project class written after its object is constructed only
+  by functions of one module, and read in at least two other modules. The entry allows the
+  smallest of `module:Class.*` and `module:*` that covers the writers. An attribute written
+  only while its objects are constructed (by an initializer, or by a function filling the object
+  it constructs) gets an entry that allows no writer.
+- `read-owners`: a private attribute (`_name`) read only by functions of its class's module,
+  whose class is used in at least two modules. The entry allows the readers as above.
+- `effect-boundaries`: a module whose functions reach no blocking call, with
+  `forbid = ["blocking"]`; a package whose every module qualifies is one scope. A scope has at
+  least three functions. Test code, as `relax-async-in-tests` finds it, gets no boundary.
+
+What the configuration already declares is not proposed: an attribute a `write-owners` or
+`read-owners` target names, and a module an effect boundary forbidding every blocking effect
+covers. A kind whose rule the configuration ignores is not proposed either. Each target has the
+module-part form (`app.models:Order.items`), which never matches another project's names.
+
+The contract trial declares every candidate at once, the ownership contracts with
+`unresolved = "report"`, and runs their rules (`MUT201` and `MUT205`, `MUT203` and `MUT206`,
+`EFF201`) as `heki check` would: inline suppressions and `per-file-ignores` apply, and the
+reports they drop are counted apart. A candidate its rule reports is rejected and listed with the
+first report. Of each kind, the trial declares the first 32 candidates: `write-owners` with the
+attributes changed in place first, then by the modules reading them; `read-owners` by the
+modules using the class; boundaries by their functions times the functions calling into them
+from outside. The configuration's own `write-owners` contracts count against the 32.
+
+| Confidence | When |
+| ---------- | ---- |
+| high | the trial reports nothing for the contract, every Python file below the project root was analyzed, and no function of a boundary's scopes reaches code heki does not see (a call it does not resolve, a library name without a catalog entry, a function it does not model) |
+| medium | the trial reports no violation, but `MUT205` or `MUT206` reports accesses on objects of unknown class (they are listed, and the entry sets `unresolved = "ignore"`), files were left out, or a scope function reaches code heki does not see (it is listed) |
+
+Medium candidates are in the block too. A candidate on a subclass is left out when the one on
+its base class is kept: a target covers the subclasses of its class. Every candidate carries the
+caveat that accesses inside code heki cannot follow are not seen.
+
+The verification run then applies the whole block, the rules it enables and the contracts it
+declares, as `heki check` would; the counts of the block's rules come from it. A contract that
+reports there is dropped, and the run repeats once.
+
 ## How the advice is kept honest
 
 - Every count comes from the project, through the analysis `heki check` runs: inline
   suppressions, `per-file-ignores`, and the baseline apply as they do there. With the block
   applied, `heki check` prints the reports it promises.
+- A contract enters the block only when a trial of its rules reports nothing on the code as it
+  is, and a run with the whole block confirms it.
 - How often a rule's reports are right is quoted only from published measurements, with their
   sample, interval, and date; a rule without one is "not measured". No score is computed.
 - The same input, configuration, and heki version give the same report, on any machine and
@@ -2203,6 +2250,14 @@ def total_and_count(rows: list[int]) -> tuple[int, int]:
     total = sum(items)
     count = len(list(items))
     return total, count
+
+
+def average(rows: list[int]) -> float:
+    return sum(rows) / len(rows) if rows else 0.0
+
+
+def spread(rows: list[int]) -> int:
+    return max(rows) - min(rows) if rows else 0
 ```
 
 ```python
@@ -2221,7 +2276,7 @@ def test_load_user() -> None:
 
 ```console
 $ heki recommend app
-heki recommend (experimental) on .: 3 file(s), 9 function(s)
+heki recommend (experimental) on .: 3 file(s), 11 function(s)
 
 Reports now  1 shown (1 exact, 0 heuristic), 1 heuristic withheld, 5 heuristic rule(s) off
 
@@ -2232,12 +2287,23 @@ Rules worth enabling here
   No reports here: EFF102, EFF105, EFF106, EFF107, EFF109, EFF110, EFF111, EFF113, MUT101, MUT107, MUT108, MUT111, MUT112, MUT113, MUT115, MUT118, OPT112
   MUT103: it compares with a saved summary snapshot: run `heki snapshot --write`, then select it.
 
+Contract candidates
+  effect-boundaries  app.report  medium
+    3 function(s) in 1 module(s) reach no blocking call heki sees
+    trial: EFF201 0
+  For every candidate, accesses inside code heki cannot follow (unresolved calls, libraries without a catalog) are not seen.
+
 Notes
   - 1 Python file(s) below the project root were not analyzed (tests/test_users.py): heki takes the analyzed files as the whole project, so what it says about callers, readers, and writers holds for those files only.
 
 pyproject.toml: keys to add or change
   [tool.heki.lint]
   extend-select = ["MUT106"]  # adds MUT106
+
+  [[tool.heki.effect-boundaries]]
+  name = "app.report without blocking calls"
+  scopes = ["app.report:*"]
+  forbid = ["blocking"]
 ```
 
 ## JSON output
@@ -2253,9 +2319,12 @@ changes meaning.
 | `kind`, `version`, `heki` | `heki-recommend`, the version of the object, and the version of heki |
 | `root`, `config_file`, `table_prefix` | the project root, the configuration file (`null` without one), and the table its keys are under (`tool.heki`, or empty) |
 | `analyzed` | the files and functions analyzed, the files that could not be read or parsed, the paths given, and the Python files below the root they leave out |
-| `runs` | the analyses the report was computed from |
+| `runs` | the analyses the report was computed from: `discovery`, then `contract-trial` when there are candidates, and `verification` (with whether it `repeated`) when the block adds anything |
 | `reports_now` | the counts of "Reports now" |
 | `rules` | each rule of "Rules worth enabling here": its metadata, the reports it would add, its published measurement, whether the block enables it, and why |
+| `contracts` | each contract candidate the block declares: its kind, what it is about, its entry, confidence, evidence, what the trial reported, and caveats |
+| `rejected_contracts` | the candidates a run reported for, with the run and its reports |
+| `contracts_not_tried` | per kind, the candidates past the first 32, which no trial declared |
 | `notes` | the notes |
 | `config`, `config_toml` | the keys to add or change, as keys and values and as TOML |
 | `content` | the report as the text output prints it |
@@ -3601,7 +3670,8 @@ changed, thousands of calls handing a global to a helper that changes it, thousa
 comprehensions or generator expressions, each over a value the function creating them binds just
 before, and, through `heki dump-recommend-facts`, the calls heki is blind to in a chain of
 thousands of helpers below as many `async def`s and the census of the attributes of thousands of
-classes.
+classes, and, through `heki recommend`, the contract candidates of thousands of classes and of
+thousands of modules.
 
 A change to the IR builder, a walk, a fixpoint, or a rule's state is also run over a large
 corpus of real projects before it is merged, every run under a memory cap and a timeout. No

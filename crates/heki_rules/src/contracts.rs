@@ -7,15 +7,16 @@
 //! `heki check` and the LSP engine hand them to the analysis, so a wrapper of a producer and an
 //! invalidator reached through calls are known across files without IR.
 
+use crate::eff_rules::{forbidden_effects, names_function};
 use crate::inspect::ContractRole;
 use crate::mut_rules::{
-    Allowance, AllowanceKeys, FunctionMatcher, FunctionMatchers, ReadOnlyProducers, References,
-    patterns, split_arguments,
+    Allowance, AllowanceKeys, ContractTarget, FunctionMatcher, FunctionMatchers, ReadOnlyProducers,
+    References, parse_read_targets, parse_targets, patterns, project_classes, split_arguments,
 };
 use crate::{
     CheckContext, DottedPattern, RuleConfigError, RuleSelection, last_name, split_last_dot,
 };
-use heki_effect::{ContractClass, Contracts, FuncKey, OptInFacts, TypedWrites};
+use heki_effect::{BLOCKING_EFFECTS, ContractClass, Contracts, FuncKey, OptInFacts, TypedWrites};
 use heki_env::HekiConfig;
 use heki_kb::{EffectiveEcosystemKb, EnvironmentAccess};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -532,6 +533,91 @@ pub fn recommend_facts(selection: &RuleSelection) -> OptInFacts {
     OptInFacts {
         blind_spots: true,
         ..opt_in_facts(selection)
+    }
+}
+
+/// What the contracts of the configuration already declare, from the matchers the rules
+/// compile: `heki recommend` proposes no contract for it.
+pub(crate) struct Declared {
+    write_targets: TargetsByClass,
+    read_targets: TargetsByClass,
+    /// The scopes of the effect boundaries forbidding every blocking effect.
+    blocking_scopes: Vec<DottedPattern>,
+}
+
+/// `Class.attr` targets, looked up by the classes they cover.
+struct TargetsByClass {
+    targets: Vec<ContractTarget>,
+    by_class: FxHashMap<String, Vec<usize>>,
+}
+
+impl TargetsByClass {
+    fn new(targets: Vec<ContractTarget>) -> Self {
+        let mut by_class: FxHashMap<String, Vec<usize>> = FxHashMap::default();
+        for (i, target) in targets.iter().enumerate() {
+            for class in &target.classes {
+                by_class.entry(class.clone()).or_default().push(i);
+            }
+        }
+        Self { targets, by_class }
+    }
+
+    /// Whether a target names attribute `attr` of the project class `class`.
+    fn name(&self, class: &str, attr: &str) -> bool {
+        self.by_class
+            .get(class)
+            .is_some_and(|found| found.iter().any(|&i| self.targets[i].matches(class, attr)))
+    }
+}
+
+impl Declared {
+    pub(crate) fn of(cx: &CheckContext<'_>) -> Result<Self, RuleConfigError> {
+        let config = cx.config;
+        let all_classes = project_classes(cx);
+        let mut write_targets = Vec::new();
+        for rule in &config.write_owners {
+            let context = "write-owners.targets";
+            let targets = parse_targets(cx, &all_classes, &rule.targets, "write-owners", context)?;
+            write_targets.extend(targets.into_iter().filter(|t| t.key.is_none()));
+        }
+        let mut read_targets = Vec::new();
+        for rule in &config.read_owners {
+            let context = "read-owners.targets";
+            read_targets.extend(parse_read_targets(
+                cx,
+                &all_classes,
+                &rule.targets,
+                "read-owners",
+                context,
+            )?);
+        }
+        let mut blocking_scopes = Vec::new();
+        for boundary in &config.effect_boundaries {
+            let forbidden = forbidden_effects(boundary)?;
+            if BLOCKING_EFFECTS.iter().all(|e| forbidden.contains(e)) {
+                blocking_scopes.extend(patterns(&boundary.scopes, "effect-boundaries.scopes")?);
+            }
+        }
+        Ok(Self {
+            write_targets: TargetsByClass::new(write_targets),
+            read_targets: TargetsByClass::new(read_targets),
+            blocking_scopes,
+        })
+    }
+
+    /// Whether a `write-owners` target names attribute `attr` of the project class `class`.
+    pub(crate) fn owns_writes(&self, class: &str, attr: &str) -> bool {
+        self.write_targets.name(class, attr)
+    }
+
+    /// Whether a `read-owners` target names attribute `attr` of the project class `class`.
+    pub(crate) fn owns_reads(&self, class: &str, attr: &str) -> bool {
+        self.read_targets.name(class, attr)
+    }
+
+    /// Whether an effect boundary forbidding every blocking effect has `function` in its scopes.
+    pub(crate) fn bounds(&self, function: &FuncKey) -> bool {
+        names_function(&self.blocking_scopes, function)
     }
 }
 

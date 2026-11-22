@@ -969,8 +969,18 @@ pub fn check_project(
         .collect();
     out.extend(per_unit.into_iter().flatten());
     heki_diagnostics::sort_diagnostics(&mut out);
+    // One report per access, rule, and target: the one kept stands for the contracts of both.
     out.dedup_by(|a, b| {
-        a.path == b.path && a.span == b.span && a.rule_code == b.rule_code && a.target == b.target
+        let same = a.path == b.path
+            && a.span == b.span
+            && a.rule_code == b.rule_code
+            && a.target == b.target;
+        if same && !a.contracts.is_empty() {
+            b.contracts.append(&mut a.contracts);
+            b.contracts.sort_unstable();
+            b.contracts.dedup();
+        }
+        same
     });
     Ok(out)
 }
@@ -986,23 +996,49 @@ pub fn contract_roles(
     selection: &RuleSelection,
     key: &FuncKey,
 ) -> Result<Vec<inspect::ContractRole>, RuleConfigError> {
-    let cx = CheckContext {
-        config,
-        kb,
-        soundness: soundness_kb,
-        index,
-        decls,
-        units: &[],
-        selection,
-        unit_by_path: FxHashMap::default(),
-        text_of: None,
-        open_premises: false,
-        must_explainer: None,
-    };
+    let cx = CheckContext::of_declarations(config, kb, soundness_kb, index, decls, selection);
     contracts::roles_of(&cx, key)
 }
 
+/// What the contracts of `config` already declare (`heki recommend`).
+pub(crate) fn declared_contracts(
+    config: &HekiConfig,
+    kb: &EffectiveEcosystemKb,
+    soundness_kb: &EffectiveSoundnessKb,
+    index: &ProjectIndex,
+    selection: &RuleSelection,
+) -> Result<contracts::Declared, RuleConfigError> {
+    let decls = index.project_decls();
+    let cx = CheckContext::of_declarations(config, kb, soundness_kb, index, &decls, selection);
+    contracts::Declared::of(&cx)
+}
+
 impl<'a> CheckContext<'a> {
+    /// A context over the project's declarations and summaries, with no unit to check: what the
+    /// rules' matchers compile from the configuration.
+    fn of_declarations(
+        config: &'a HekiConfig,
+        kb: &'a EffectiveEcosystemKb,
+        soundness: &'a EffectiveSoundnessKb,
+        index: &'a ProjectIndex,
+        decls: &'a ProjectDecls,
+        selection: &'a RuleSelection,
+    ) -> Self {
+        Self {
+            config,
+            kb,
+            soundness,
+            index,
+            decls,
+            units: &[],
+            selection,
+            unit_by_path: FxHashMap::default(),
+            text_of: None,
+            open_premises: false,
+            must_explainer: None,
+        }
+    }
+
     /// The unit's module constants without the displays another project module may change
     /// (`ProjectDecls::changed_elsewhere`): the constants the Advisory rules take as fixed.
     /// What its comprehension functions return goes with them, as it may rest on one.
@@ -1188,6 +1224,7 @@ impl<'a> CheckContext<'a> {
             sites: 1,
             fold_key: None,
             open_records: Vec::new(),
+            contracts: Vec::new(),
         });
         out.last_mut()
     }

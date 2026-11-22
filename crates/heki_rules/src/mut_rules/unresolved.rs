@@ -25,7 +25,7 @@ pub(super) fn mut205(cx: &CheckContext<'_>, rules: &[OwnerRule<'_>], out: &mut V
     if !cx.selection.is_enabled("MUT205") {
         return;
     }
-    let strict: Vec<&OwnerRule<'_>> = rules.iter().filter(|r| r.report_unresolved).collect();
+    let strict = strict_rules(rules, |r| r.report_unresolved);
     if strict.is_empty() {
         return;
     }
@@ -39,7 +39,7 @@ pub(super) fn mut205(cx: &CheckContext<'_>, rules: &[OwnerRule<'_>], out: &mut V
     let mut reports = MergedReports::default();
     for (key, s) in cx.defined_functions() {
         for w in &s.unresolved_write_sites {
-            for (r, rule) in strict.iter().enumerate() {
+            for (r, &(contract, rule)) in strict.iter().enumerate() {
                 let hits: Vec<_> = rule
                     .targets
                     .iter()
@@ -109,8 +109,8 @@ pub(super) fn mut205(cx: &CheckContext<'_>, rules: &[OwnerRule<'_>], out: &mut V
                 add(
                     cx,
                     &mut reports,
-                    &judged,
-                    w.span,
+                    contract,
+                    (&judged, w.span),
                     &target,
                     rule.note,
                     || {
@@ -155,7 +155,7 @@ pub(super) fn mut206(
     rules: &[ReadOwnerRule<'_>],
     out: &mut Vec<Diagnostic>,
 ) {
-    let strict: Vec<&ReadOwnerRule<'_>> = rules.iter().filter(|r| r.report_unresolved).collect();
+    let strict = strict_rules(rules, |r| r.report_unresolved);
     if !cx.selection.is_enabled("MUT206") || strict.is_empty() {
         return;
     }
@@ -172,7 +172,7 @@ pub(super) fn mut206(
             let Access::Read(kind) = a.access else {
                 continue;
             };
-            for (r, rule) in strict.iter().enumerate() {
+            for (r, &(contract, rule)) in strict.iter().enumerate() {
                 let (hits, family) = matched.entry((r, a.name.as_str())).or_insert_with(|| {
                     let hits: Vec<&ContractTarget> = rule
                         .targets
@@ -205,8 +205,8 @@ pub(super) fn mut206(
                 add(
                     cx,
                     &mut reports,
-                    &judged,
-                    a.span,
+                    contract,
+                    (&judged, a.span),
                     &a.name,
                     rule.note,
                     || {
@@ -236,7 +236,7 @@ pub(super) fn mut207(
     rules: &[CallOwnerRule<'_>],
     out: &mut Vec<Diagnostic>,
 ) {
-    let strict: Vec<&CallOwnerRule<'_>> = rules.iter().filter(|r| r.report_unresolved).collect();
+    let strict = strict_rules(rules, |r| r.report_unresolved);
     if !cx.selection.is_enabled("MUT207") || strict.is_empty() {
         return;
     }
@@ -251,7 +251,7 @@ pub(super) fn mut207(
             .iter()
             .filter(|a| a.access == Access::Call)
         {
-            for (r, rule) in strict.iter().enumerate() {
+            for (r, &(contract, rule)) in strict.iter().enumerate() {
                 let hits: Vec<usize> = (0..rule.targets.patterns.len())
                     .filter(|&i| rule.targets.patterns[i].name.matches(&a.name))
                     .collect();
@@ -278,8 +278,8 @@ pub(super) fn mut207(
                 add(
                     cx,
                     &mut reports,
-                    &judged,
-                    a.span,
+                    contract,
+                    (&judged, a.span),
                     &a.name,
                     rule.note,
                     || {
@@ -301,12 +301,23 @@ pub(super) fn mut207(
     reports.emit(cx, "MUT207", out);
 }
 
-/// One report at the access itself, its target the name accessed (or the class written).
+/// The rules of `rules` that `strict` holds for, each with its contract's place in the
+/// configuration ([`Diagnostic::contracts`]).
+fn strict_rules<R>(rules: &[R], strict: impl Fn(&R) -> bool) -> Vec<(usize, &R)> {
+    rules
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| strict(r))
+        .collect()
+}
+
+/// One report at the access itself, its target the name accessed (or the class written), of
+/// the contract at `contract` in the configuration.
 fn add<'u>(
     cx: &CheckContext<'u>,
     reports: &mut MergedReports<'u>,
-    key: &FuncKey,
-    span: Span,
+    contract: usize,
+    (key, span): (&FuncKey, Span),
     target: &str,
     note: Option<&str>,
     message: impl FnOnce() -> String,
@@ -319,6 +330,7 @@ fn add<'u>(
         target,
         named: &quoted,
         rank: 0,
+        contract,
     };
     reports.add(
         unit,

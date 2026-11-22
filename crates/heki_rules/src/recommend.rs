@@ -5,10 +5,14 @@
 //! with that selection: inline suppressions and `per-file-ignores` apply. What the current
 //! configuration shows is the part of that run's reports whose rules it selects, which is what
 //! `heki check` prints, since a rule's reports do not depend on which other rules are selected.
+//! The contract trial declares every contract candidate at once; the verification run is
+//! `heki check` with the whole block applied, and gives the counts the block promises. Each run
+//! builds its index after the previous one is dropped, from the files parsed once.
 //! The report is the same for the same input, configuration, and heki version: every list is
 //! sorted, and every cap is a count.
 
 pub mod block;
+pub mod contracts;
 pub mod rules;
 
 use crate::project::{
@@ -18,7 +22,7 @@ use crate::project::{
 use crate::selection::{RuleSelection, SelectionError, Selectors};
 use crate::{CORE_RULES, Certainty, RuleConfigError, SummarySnapshot, fold_root_causes};
 use heki_diagnostics::{Diagnostic, RatchetBaseline};
-use heki_env::{ConfigLayout, LintConfig};
+use heki_env::{ConfigLayout, HekiConfig, LintConfig};
 use rustc_hash::FxHashSet;
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -105,6 +109,13 @@ pub struct RecommendReport {
     /// Every rule the configuration does not run in full: the rules it leaves off, and the exact
     /// rules whose heuristic reports it withholds. The block's rules come first.
     pub rules: Vec<rules::RuleAdvice>,
+    /// The contracts the code keeps, which the block declares: each kept by the contract trial
+    /// and the verification run. By kind, then by rank within it.
+    pub contracts: Vec<contracts::ContractAdvice>,
+    /// The candidates a run with them declared reported for: not in the block.
+    pub rejected_contracts: Vec<contracts::RejectedContract>,
+    /// The candidates past the cap of their kind, which no trial declared.
+    pub contracts_not_tried: Vec<contracts::NotTried>,
     /// What the reader should know to weigh the advice.
     pub notes: Vec<String>,
     /// The keys `config_toml` adds or changes, as the configuration's keys and values.
@@ -154,13 +165,20 @@ pub struct LeftOut {
 #[schemars(deny_unknown_fields)]
 pub struct Run {
     pub label: RunLabel,
+    /// The verification run: whether it ran again after dropping a contract that reported.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repeated: Option<bool>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum RunLabel {
     /// Every rule selected, on the configuration as it is.
     Discovery,
+    /// The configuration with every contract candidate declared, the contract rules selected.
+    ContractTrial,
+    /// The configuration with the whole block applied, the block's rules and contracts selected.
+    Verification,
 }
 
 /// What the current configuration shows, as `heki check` prints it: reports that share a root
@@ -217,31 +235,104 @@ pub fn recommend(request: Request<'_>) -> Result<RecommendReport, RecommendError
     let functions = project.files.iter().map(|f| f.ir.functions.len()).sum();
     let files = project.files.len();
     let selection = discovery_selection(&env.cfg.lint, &current)?;
-    let discovery = Indexed::build(project, selection, snapshot, Facts::Check)?;
+    let discovery = Indexed::build(project, selection, snapshot, Facts::Recommend)?;
     let (diags, _) = discovery.diagnose()?;
     let files_analyzed = &discovery.project.files;
-    let rules = rules::advise(&rules::Inputs {
+    let mut rules = rules::advise(&rules::Inputs {
         current: &current,
         baseline: baseline.as_ref(),
         files: files_analyzed,
         discovery: &diags,
     });
     let reports_now = reports_now(&current, baseline.as_ref(), files_analyzed, &diags);
-    let mut extend_select: Vec<String> = rules
-        .iter()
-        .filter(|r| r.in_block)
-        .map(|r| r.code.clone())
+    drop(diags);
+    let env = &discovery.project.env;
+    let declared = crate::declared_contracts(
+        &env.cfg,
+        &env.kb,
+        &env.soundness_kb,
+        &discovery.index,
+        &current,
+    )?;
+    let tests: FxHashSet<&Path> = (discovery.project.files.iter())
+        .filter(|f| crate::eff_rules::is_test_code("", &f.rel))
+        .map(|f| f.path.as_path())
         .collect();
-    extend_select.sort();
-    let additions = block::Additions {
-        extend_select,
-        ..block::Additions::default()
+    let generated = contracts::generate(&discovery.index, &env.cfg, &declared, &current, &tests);
+    drop(tests);
+    // The next runs build their own index: the discovery run's goes first. (A partial move
+    // would keep it until the end of the function.)
+    let Indexed {
+        mut project, index, ..
+    } = discovery;
+    drop(index);
+    let user = project.env.cfg.clone();
+    let mut runs = vec![Run {
+        label: RunLabel::Discovery,
+        repeated: None,
+    }];
+    let mut section = if generated.is_empty() {
+        contracts::Section::untried(generated)
+    } else {
+        let trial = contracts::trial_config(&user, &generated);
+        let rules_run = contracts::trial_rules(&generated);
+        let (analyzed, kept, suppressed) = analyze(project, trial, &rules_run)?;
+        project = analyzed;
+        runs.push(Run {
+            label: RunLabel::ContractTrial,
+            repeated: None,
+        });
+        contracts::judge(
+            generated,
+            &user,
+            (&kept, &suppressed),
+            left_out.python_files > 0,
+            shown,
+        )
     };
-    let block = block::render(&additions, &discovery.project.env.cfg, layout);
+    // The verification run: `heki check` with the block applied, which gives the counts the
+    // block promises. A contract that reports there is dropped, and the run repeats once.
+    let mut verified = None;
+    for repeated in [false, true] {
+        let additions = additions(&rules, &section, &current);
+        if additions == block::Additions::default() {
+            break;
+        }
+        let mut applied = user.clone();
+        (applied.lint.extend_select).extend(additions.extend_select.iter().cloned());
+        section.declare_in(&mut applied);
+        let mut rules_run: Vec<&str> = additions.extend_select.iter().map(String::as_str).collect();
+        for rule in section.rules() {
+            rules_run.push(rule);
+        }
+        let (analyzed, kept, _) = analyze(project, applied, &rules_run)?;
+        project = analyzed;
+        verified = Some(repeated);
+        rules::recount(
+            &mut rules,
+            &rules::Inputs {
+                current: &current,
+                baseline: baseline.as_ref(),
+                files: &project.files,
+                discovery: &kept,
+            },
+        );
+        if !section.drop_reported(&user, &kept, shown) {
+            break;
+        }
+    }
+    if let Some(repeated) = verified {
+        runs.push(Run {
+            label: RunLabel::Verification,
+            repeated: Some(repeated),
+        });
+    }
+    let block = block::render(&additions(&rules, &section, &current), &user, layout);
     let mut notes = Vec::new();
     if left_out.python_files > 0 {
         notes.push(left_out_note(&left_out));
     }
+    notes.extend(section.notes());
     let mut report = RecommendReport {
         schema: SCHEMA_URL.to_owned(),
         kind: ReportKind::HekiRecommend,
@@ -257,11 +348,12 @@ pub fn recommend(request: Request<'_>) -> Result<RecommendReport, RecommendError
             paths: paths.iter().map(|p| shown(p)).collect(),
             left_out,
         },
-        runs: vec![Run {
-            label: RunLabel::Discovery,
-        }],
+        runs,
         reports_now,
         rules,
+        contracts: section.advice(),
+        rejected_contracts: section.rejected,
+        contracts_not_tried: section.not_tried,
         notes,
         config: block.config,
         config_toml: block.toml,
@@ -271,12 +363,24 @@ pub fn recommend(request: Request<'_>) -> Result<RecommendReport, RecommendError
     Ok(report)
 }
 
-/// The selection of the discovery run: every rule by its code, so that no heuristic report is
-/// withheld, with the configuration's `per-file-ignores`. `MUT103` runs only when the current
-/// selection runs it: it compares with a snapshot the user saves.
+/// The selection of the discovery run: every rule by its code ([`selection_of`]). `MUT103` runs
+/// only when the current selection runs it: it compares with a snapshot the user saves.
 fn discovery_selection(
     lint: &LintConfig,
     current: &RuleSelection,
+) -> Result<RuleSelection, SelectionError> {
+    let every_rule = CORE_RULES
+        .iter()
+        .filter(|r| r.code != "MUT103" || current.is_enabled(r.code))
+        .map(|r| r.code);
+    selection_of(lint, every_rule)
+}
+
+/// The selection of a run of the rules `codes`, each by its code, so that no heuristic report is
+/// withheld, with the configuration's `per-file-ignores`.
+fn selection_of<'c>(
+    lint: &LintConfig,
+    codes: impl IntoIterator<Item = &'c str>,
 ) -> Result<RuleSelection, SelectionError> {
     let lint = LintConfig {
         select: Some(Vec::new()),
@@ -284,18 +388,59 @@ fn discovery_selection(
         ignore: Vec::new(),
         ..lint.clone()
     };
-    let every_rule = CORE_RULES
-        .iter()
-        .filter(|r| r.code != "MUT103" || current.is_enabled(r.code))
-        .map(|r| r.code.to_owned())
-        .collect();
     let selectors = Selectors {
-        select: every_rule,
+        select: codes.into_iter().map(str::to_owned).collect(),
         extend_select: Vec::new(),
         ignore: Vec::new(),
         heuristic: Some(true),
     };
     RuleSelection::resolve(&lint, &selectors)
+}
+
+/// `project` analyzed with the configuration `cfg` in place of its own (it changes contracts
+/// and selected rules only, nothing the catalog, the module layout, or the runtime depend on),
+/// running the rules `codes`: the project with its configuration back, and the reports kept
+/// and dropped by inline suppressions.
+fn analyze(
+    mut project: Project,
+    cfg: HekiConfig,
+    codes: &[&str],
+) -> Result<(Project, Vec<Diagnostic>, Vec<Diagnostic>), RecommendError> {
+    let selection = selection_of(&cfg.lint, codes.iter().copied())?;
+    let own = std::mem::replace(&mut project.env.cfg, cfg);
+    let indexed = Indexed::build(project, selection, None, Facts::Check)?;
+    let (kept, suppressed) = indexed.diagnose_with_suppressed()?;
+    let Indexed {
+        mut project, index, ..
+    } = indexed;
+    drop(index);
+    project.env.cfg = own;
+    Ok((project, kept, suppressed))
+}
+
+/// What the block adds: the rules section 2 enables, the contracts section 3 keeps, and the
+/// contract rules those need that the current selection does not run.
+fn additions(
+    rules: &[rules::RuleAdvice],
+    section: &contracts::Section,
+    current: &RuleSelection,
+) -> block::Additions {
+    let mut extend_select: Vec<String> = rules
+        .iter()
+        .filter(|r| r.in_block)
+        .map(|r| r.code.clone())
+        .chain(section.rules_to_select(current))
+        .collect();
+    extend_select.sort();
+    extend_select.dedup();
+    let (write_owners, read_owners, effect_boundaries) = section.block_entries();
+    block::Additions {
+        extend_select,
+        write_owners,
+        read_owners,
+        effect_boundaries,
+        ..block::Additions::default()
+    }
 }
 
 /// The discovery run's reports that `current` shows, counted as `heki check` prints them.
@@ -424,6 +569,12 @@ pub fn render_text(report: &RecommendReport) -> String {
         );
     }
     rules::render(&mut out, &report.rules, now.baseline.is_some());
+    contracts::render(
+        &mut out,
+        &report.contracts,
+        &report.rejected_contracts,
+        &report.contracts_not_tried,
+    );
     if !report.notes.is_empty() {
         out.push_str("\nNotes\n");
         for note in &report.notes {
@@ -436,7 +587,11 @@ pub fn render_text(report: &RecommendReport) -> String {
     } else {
         let _ = writeln!(out, "\n{file}: keys to add or change");
         for line in report.config_toml.lines() {
-            let _ = writeln!(out, "  {line}");
+            if line.is_empty() {
+                out.push('\n');
+            } else {
+                let _ = writeln!(out, "  {line}");
+            }
         }
     }
     out

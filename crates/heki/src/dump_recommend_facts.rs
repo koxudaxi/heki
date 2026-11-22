@@ -243,7 +243,7 @@ pub(crate) fn run(args: &DumpRecommendFactsArgs) -> Result<ExitCode> {
                     .map(|m| Module {
                         module: m.module,
                         path: shown_text(m.path),
-                        functions: m.functions,
+                        functions: m.functions.len(),
                         blocking: m.blocking.iter().map(|f| f.fqn()).collect(),
                         unseen: m.unseen.iter().map(|f| f.fqn()).collect(),
                     })

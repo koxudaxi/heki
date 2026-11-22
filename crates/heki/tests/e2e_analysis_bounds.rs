@@ -4159,3 +4159,95 @@ fn the_census_of_many_classes_is_one_pass_over_their_sites() {
         "{totals:#}"
     );
 }
+
+/// `heki recommend --output-format json` of the project, which must finish within `limit`.
+fn recommend_within(p: &Project, limit: Duration) -> Value {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_heki"))
+        .args(["recommend", "--output-format", "json", "."])
+        .current_dir(&p.dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+    let reader = std::thread::spawn(move || {
+        let mut out = Vec::new();
+        stdout.read_to_end(&mut out).unwrap();
+        out
+    });
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if started.elapsed() > limit {
+            child.kill().unwrap();
+            panic!("heki recommend ran past {limit:?}");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(status.code(), Some(0));
+    serde_json::from_slice(&reader.join().unwrap()).unwrap()
+}
+
+/// The `write-owners` candidates of thousands of classes, each attribute written in one module
+/// and read in two others, are ranked and capped before the contract trial: the trial declares
+/// the first 32, and the time grows with the classes, not with the candidates times anything.
+#[test]
+fn contract_candidates_of_thousands_of_classes_are_capped_before_the_trial() {
+    let classes = 3_000;
+    let p = Project::new("bounds_recommend_classes");
+    let [models, store, views] = classes_written_in_one_module(classes);
+    let api = views.1.replace("def show", "def dump");
+    for (path, text) in [models, store, views, ("app/api.py".to_owned(), api)] {
+        p.write(&path, &text);
+    }
+    let report = recommend_within(&p, Duration::from_secs(30));
+    // `items` and `state` written by the store, `name` only while constructed.
+    assert_eq!(
+        report["contracts_not_tried"],
+        json!([{"kind": "write-owners", "tried": 32, "candidates": 3 * classes - 32}])
+    );
+    let tried = report["contracts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["kind"] == "write-owners")
+        .count();
+    assert_eq!(tried, 32);
+    assert_eq!(
+        report["runs"],
+        json!([{"label": "discovery"}, {"label": "contract-trial"},
+               {"label": "verification", "repeated": false}])
+    );
+}
+
+/// Thousands of modules in packages of fifty, whose functions reach no blocking call, next to
+/// one that does: each package is one scope, found from the modules' names in one pass, and
+/// the trial declares the first 32 scopes.
+#[test]
+fn boundary_candidates_of_thousands_of_modules_are_one_pass_over_their_names() {
+    let (modules, packages) = (2_000, 40);
+    let p = Project::new("bounds_recommend_modules");
+    p.write("app/__init__.py", "").write(
+        "app/net.py",
+        "import requests\n\n\ndef get(u):\n    return requests.get(u, timeout=5)\n",
+    );
+    let body: String = (0..3)
+        .map(|j| format!("def f{j}(x):\n    return x + {j}\n\n\n"))
+        .collect();
+    for i in 0..modules {
+        p.write(&format!("app/p{}/__init__.py", i % packages), "")
+            .write(&format!("app/p{}/m{i}.py", i % packages), &body);
+    }
+    let report = recommend_within(&p, Duration::from_secs(30));
+    assert_eq!(
+        report["contracts_not_tried"],
+        json!([{"kind": "effect-boundaries", "tried": 32, "candidates": packages - 32}])
+    );
+    let first = &report["contracts"][0];
+    assert_eq!(
+        (&first["target"], &first["evidence"]["modules"]["count"]),
+        (&json!("app.p0"), &json!(modules / packages + 1))
+    );
+}

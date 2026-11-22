@@ -327,7 +327,8 @@ changed, thousands of calls handing a global to a helper that changes it, thousa
 comprehensions or generator expressions, each over a value the function creating them binds just
 before, and, through `heki dump-recommend-facts`, the calls heki is blind to in a chain of
 thousands of helpers below as many `async def`s and the census of the attributes of thousands of
-classes.
+classes, and, through `heki recommend`, the contract candidates of thousands of classes and of
+thousands of modules.
 
 A change to the IR builder, a walk, a fixpoint, or a rule's state is also run over a large
 corpus of real projects before it is merged, every run under a memory cap and a timeout. No

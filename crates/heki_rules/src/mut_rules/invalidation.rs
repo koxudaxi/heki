@@ -88,6 +88,7 @@ pub(crate) fn run(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) -> Result<()
                     target: &report_target,
                     named: &quoted,
                     rank: 0,
+                    contract: usize::from(u.contract),
                 };
                 merged[usize::from(u.contract)].add(
                     unit,

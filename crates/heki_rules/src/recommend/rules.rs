@@ -135,7 +135,13 @@ pub(super) fn advise(inputs: &Inputs<'_>) -> Vec<RuleAdvice> {
         .iter()
         .filter_map(|rule| advice(inputs, rule))
         .collect();
-    out.sort_by(|a, b| {
+    order(&mut out);
+    out
+}
+
+/// The block's rules first, then by reports and code.
+fn order(rules: &mut [RuleAdvice]) {
+    rules.sort_by(|a, b| {
         (
             !a.in_block,
             a.experimental,
@@ -149,7 +155,21 @@ pub(super) fn advise(inputs: &Inputs<'_>) -> Vec<RuleAdvice> {
                 &b.code,
             ))
     });
-    out
+}
+
+/// The counts of the rules the block enables, from `inputs`, the reports of the verification
+/// run: `heki check` with the block applied.
+pub(super) fn recount(rules: &mut [RuleAdvice], inputs: &Inputs<'_>) {
+    for advice in rules.iter_mut().filter(|r| r.in_block) {
+        let meta = crate::find_rule(&advice.code).expect("advice is on a registered rule");
+        if let Some(verified) = self::advice(inputs, meta) {
+            advice.reports = verified.reports;
+            advice.exact = verified.exact;
+            advice.heuristic = verified.heuristic;
+            advice.baseline = verified.baseline;
+        }
+    }
+    order(rules);
 }
 
 fn advice(inputs: &Inputs<'_>, rule: &'static RuleMeta) -> Option<RuleAdvice> {
