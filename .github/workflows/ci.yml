@@ -479,6 +479,8 @@ jobs:
         shell: bash
         env:
           HOOK_REPOSITORY: ${{ github.workspace }}
+          # In GitHub Actions heki prints annotations by default; the step reads the text lines.
+          HEKI_OUTPUT_FORMAT: full
         run: |
           mkdir -p project/app
           cd project

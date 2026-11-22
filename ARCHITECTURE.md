@@ -717,7 +717,7 @@ heki check --diff [PATHS...]                  # preview the fixes
 heki check --select EFF,MUT --ignore MUT101   # rule selection (codes, prefixes, or names)
 heki check --heuristic                        # also the heuristic rules (lint.heuristic = true)
 heki check --fail-on warning                  # warnings fail the run too (lint.fail-on = "warning")
-heki check --output-format full|concise|json|github|sarif
+heki check --output-format full|concise|json|github|sarif   # default: HEKI_OUTPUT_FORMAT, github in GitHub Actions, full
 heki check --color auto|always|never          # colored full / concise / --diff output (NO_COLOR, FORCE_COLOR, as in Ruff)
 heki check --baseline heki-baseline.toml      # Ratchet: more findings fail, fewer ask to shrink the file
 heki check --update-baseline                  # record a new baseline or shrink an existing one (growth is refused)
@@ -785,6 +785,11 @@ message = "render entry points must not mutate model state"
   same syntax as `t-linter` and ty.
 - **Compatible**: `# noqa: EFF101` is accepted too (for users who combine it with
   `lint.external = ["MUT", "EFF", "OPT", "DATA"]` in Ruff).
+- **Opt-in checks of the comments**: `lint.report-unused-suppressions` reports the codes that
+  suppressed nothing (only codes of heki rules that ran; another tool's code and a bare `# noqa`
+  stay) and baseline entries that matched nothing, and `--fix` removes the codes;
+  `lint.require-suppression-codes` reports a bare `# heki: ignore`. They are settings, not rules:
+  the rules are the claims of the Effect & Alias theory about the code.
 - **Profile dumps**: running a program under a profiler costs overhead and permissions (macOS
   needs `sudo` for Tachyon and `py-spy`), so it is never required. heki **reads dumps that were
   already recorded** as an optional add-on: collapsed stacks (Tachyon `--collapsed`, `py-spy`)
