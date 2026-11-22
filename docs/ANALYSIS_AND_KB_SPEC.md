@@ -717,9 +717,11 @@ in source order: a call resolving to no function (`Callee::Unresolved` or `TooMa
 name called and why, from the receiver or the called value (`UnresolvedReason`: an unannotated
 parameter, an annotation giving no class, `Any` or `object`, a `Callable`, a name nothing heki
 sees binds, an unlisted protocol, a call result, an attribute, a computed `getattr` name, more
-implementations than CHA follows, a member heki does not find, any other untyped value); a call
-on `Any`, `object`, or a `Callable`, or of an unbound name, which resolves to a library name no
-library defines (`typing.Any.get`, `builtins.create`), counts as unresolved; and a call of a
+implementations than CHA follows, a member heki does not find, any other untyped value). A call
+on a value of `Any`, `object`, or `Callable` (an instance or a class object), or of an unbound
+name, resolves to no function: its library name (`typing.Any.get`, `builtins.create`) is no
+library's, so the call is unresolved for every consumer (`EffectSummary::unknown_calls`, the
+purity `heki inspect` gives, blind spots); and a call of a
 library function or class outside the project and the standard library without a catalog entry
 (`Blind::Uncatalogued`, with whether the catalog lists its package). They are local facts, never
 propagated, and no rule reads them. `ProjectIndex::blind_spot_reach` walks a function's facts of
