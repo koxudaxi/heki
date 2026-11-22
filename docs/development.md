@@ -203,6 +203,13 @@ follows these rules:
   function's names, its module and qualname, its class), never tried one by one: the cost grows
   with the sites, not with sites times targets, and the targets of every contract of a rule are
   indexed together. The parameters argument lists name are looked up from those a call binds.
+- A function's call sites, and those at one of its instructions, are looked up in an index of the
+  module's call sites by function and position, built once per module: never found by a scan of
+  the module's sites per function or of the function's sites per call.
+- The accesses of one function that a contract rule reports at the same places (an object of the
+  same parameters, one contract and target) walk the callers once, and a report at a call site
+  counts their sites as one group. The generator expressions of a function share one qualname,
+  so each of their call sites stands for the accesses of all of them.
 
 The engines of `heki_ir::walk` apply these rules by construction, and every walk over IR ids,
 the call graph, or the class hierarchy goes through them:

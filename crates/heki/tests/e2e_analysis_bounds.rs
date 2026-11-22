@@ -3369,6 +3369,120 @@ fn the_paths_of_many_packages_merged_in_one_function_are_decided_once() {
     );
 }
 
+/// `functions` functions of one module, each making one project call.
+fn functions_each_calling(functions: usize) -> String {
+    let mut lines = vec!["def g(x):".to_owned(), "    return x".to_owned()];
+    for i in 0..functions {
+        lines.extend([
+            String::new(),
+            String::new(),
+            format!("def call{i}(x):"),
+            "    return g(x)".to_owned(),
+        ]);
+    }
+    lines.join("\n") + "\n"
+}
+
+/// A function handing the read-only value a `readonly-returns` producer returns to `calls`
+/// calls of a function that only reads it, then once to one that changes it.
+fn read_only_value_handed_to_calls(calls: usize) -> String {
+    let mut lines = vec![
+        "def load():".to_owned(),
+        "    return [1, 2, 3]".to_owned(),
+        String::new(),
+        String::new(),
+        "def use(xs):".to_owned(),
+        "    return len(xs)".to_owned(),
+        String::new(),
+        String::new(),
+        "def grow(xs):".to_owned(),
+        "    xs.append(1)".to_owned(),
+        String::new(),
+        String::new(),
+        "def shape():".to_owned(),
+        "    values = load()".to_owned(),
+    ];
+    lines.extend((0..calls).map(|_| "    use(values)".to_owned()));
+    lines.push("    grow(values)".to_owned());
+    lines.join("\n") + "\n"
+}
+
+/// `MUT202` finds the call site of each call instruction in an index of the module's call sites
+/// by function and position, built once per module (forty thousand functions each making a
+/// call), and the facts a call runs, at the call and where the object it returns is used, once
+/// per call target of a function (twenty thousand calls handed one read-only value): neither is
+/// scanned again per function or per call. The one call handing the value to a function that
+/// changes it is still found.
+#[test]
+fn call_sites_and_the_facts_they_run_are_looked_up_not_scanned() {
+    let p = Project::new("bounds_functions_each_calling");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT202\"]\n",
+    )
+    .write("m.py", &functions_each_calling(40_000));
+    assert!(check_within(&p, Duration::from_secs(20)).is_empty());
+
+    let p = Project::new("bounds_read_only_value_handed_to_calls");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT202\"]\n\n\
+         [[tool.heki.readonly-returns]]\nname = \"r\"\nproducers = [\"m.load\"]\n",
+    )
+    .write("m.py", &read_only_value_handed_to_calls(20_000));
+    let found = check_within(&p, Duration::from_secs(20));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0]["rule_code"], "MUT202");
+    assert_eq!(found[0]["line"], 20_015);
+}
+
+/// A function calling `scopes` generator expressions, each reading `Model._given` and calling
+/// `Model.peek` of its parameter.
+fn guarded_accesses_in_generator_expressions(scopes: usize) -> String {
+    let mut lines = vec![
+        "class Model:".to_owned(),
+        "    def __init__(self):".to_owned(),
+        "        self._given = 1".to_owned(),
+        String::new(),
+        "    def peek(self):".to_owned(),
+        "        return 1".to_owned(),
+        String::new(),
+        String::new(),
+        "def shape(xs, out, m: Model):".to_owned(),
+    ];
+    lines.extend(
+        (0..scopes)
+            .map(|_| "    out.append(sum(1 for _ in xs if m._given and m.peek()))".to_owned()),
+    );
+    lines.join("\n") + "\n"
+}
+
+/// The generator expressions of a function share one qualname, so each of their call sites runs
+/// the reads and calls of all of them. `MUT203` and `MUT204` walk the callers once for the
+/// accesses of one function that are reported at the same places, and a report counts the sites
+/// of all of them without adding them to each report one by one: three thousand generator
+/// expressions take time linear in them. Each call site is still reported, standing for every
+/// access.
+#[test]
+fn guarded_accesses_in_many_generator_expressions_walk_their_callers_once() {
+    let p = Project::new("bounds_guarded_accesses_in_generator_expressions");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT203\", \"MUT204\"]\n\n\
+         [[tool.heki.read-owners]]\nname = \"given\"\ntargets = [\"m.Model._given\"]\n\
+         forbidden-readers = [\"m:shape\"]\n\n\
+         [[tool.heki.call-owners]]\nname = \"peek\"\ntargets = [\"m.Model.peek\"]\n\
+         forbidden-callers = [\"m:shape\"]\n",
+    )
+    .write("m.py", &guarded_accesses_in_generator_expressions(3_000));
+    let found = check_within(&p, Duration::from_secs(20));
+    for code in ["MUT203", "MUT204"] {
+        let reports: Vec<&Value> = found.iter().filter(|d| d["rule_code"] == code).collect();
+        assert_eq!(reports.len(), 3_000, "{code}");
+        assert!(reports.iter().all(|d| d["sites"] == 3_000), "{code}");
+    }
+}
+
 /// A function binding a long chain of aliases of a class and a long chain of attribute loads
 /// from a parameter, then deriving classes from the last of each (`class C0(a8000)`, `class
 /// D0(b8000)`): each base is followed along its copies through one table per function and through

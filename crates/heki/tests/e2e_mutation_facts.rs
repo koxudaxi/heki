@@ -1097,6 +1097,74 @@ def consumed(xs: Sequence[int], rec: Record) -> None:
     assert_eq!(reports(&p, "MUT202"), vec![at("app.py", 32, "consumed")]);
 }
 
+/// A call runs what the sites of the object it returns run: where that object is iterated,
+/// handed to a function iterating it, or awaited. Another call of the same function with the
+/// same argument makes another object, whose iteration is not the first call's.
+#[test]
+fn a_call_runs_what_iterating_its_own_object_runs_not_another_calls() {
+    let p = project(
+        "generator_calls_apart",
+        "[[tool.heki.readonly-returns]]\nname = \"shared\"\nproducers = [\"app.load\"]\n",
+    );
+    p.write(
+        "app.py",
+        r#"def load():
+    return [1, 2, 3]
+
+
+def gen(xs):
+    xs.append(1)
+    yield 1
+
+
+def consume(items):
+    for _ in items:
+        pass
+
+
+def sibling():
+    v = load()
+    kept = gen(v)
+    for _ in gen(v):
+        pass
+    return kept is None
+
+
+def later():
+    v = load()
+    rows = gen(v)
+    for _ in rows:
+        pass
+
+
+def handed():
+    v = load()
+    consume(gen(v))
+
+
+async def grow(xs):
+    xs.append(1)
+
+
+async def awaited():
+    v = load()
+    kept = grow(v)
+    pending = grow(v)
+    await pending
+    return kept is None
+"#,
+    );
+    assert_eq!(
+        reports(&p, "MUT202"),
+        vec![
+            at("app.py", 18, "sibling"),
+            at("app.py", 25, "later"),
+            at("app.py", 32, "handed"),
+            at("app.py", 42, "awaited"),
+        ]
+    );
+}
+
 #[test]
 fn any_and_all_stop_early_and_leave_the_rest_of_an_iterator() {
     let p = project("short_circuit_consumers", "");

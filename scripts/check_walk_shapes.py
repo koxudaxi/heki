@@ -81,8 +81,6 @@ PLACED = ("function", "method", "module")
 
 # Shapes known to cost more than the limits, with the walk that costs: (family, placement).
 KNOWN_OVER: dict[tuple[str, str], str] = {
-    ("call_chain", "module"): "MUT202 looks up each call's site in a scan of the function's call "
-    "sites (`mut_rules::site_call`)",
     **{
         ("returned_merge_chain", p): "the roots of each merged value are listed again per merge, "
         "with the call sites through them (summary `iterations`)"
@@ -359,6 +357,38 @@ def cell_reads_of_several_names(n: int) -> Body:
     return Body(("xs", "out"), lines)
 
 
+def guarded_accesses_in_generator_expressions(n: int) -> Body:
+    """Generator expressions each reading a guarded attribute and calling a guarded function: the
+    generator expressions of a function share one qualname, so each of their call sites runs the
+    accesses of all of them."""
+    lines = ["b = Base()"]
+    lines += ["out.append(sum(1 for _ in xs if b.LIMIT and g(b)))" for _ in range(n)]
+    return Body(("xs", "out"), lines)
+
+
+def read_only_value_handed_to_calls(n: int) -> Body:
+    """The value a `readonly-returns` producer returns, handed to many project calls."""
+    return Body(("p",), ["v = load()", *("use(v)" for _ in range(n))])
+
+
+def calls_between_invalidators(n: int) -> Body:
+    """Project calls and calls of an invalidator alternating in one block: the contracts announced
+    after each call, and the call after it, are looked up instead of scanned per call."""
+    lines = ["self.cache = []"]
+    for _ in range(n):
+        lines += ["g(p)", "self.reset()"]
+    return Body(("p",), lines)
+
+
+def calls_under_branches(n: int) -> Body:
+    """Project calls each under its own branch: the next call after each one is found on the
+    post-dominator chain once per block instead of once per call."""
+    lines = ["v = load()"]
+    for _ in range(n):
+        lines += ["if p:", "    use(v)"]
+    return Body(("p",), lines)
+
+
 def passed_iterables(n: int) -> Body:
     """Generator expressions of two clauses, each over a value bound just before it: child scopes
     each receiving their iterable from the function creating them, sized where the IR's loop
@@ -411,6 +441,14 @@ def callers_of_one_helper(n: int) -> str:
     lines = ["def _write(obj: Base):", "    obj.cache = []", ""]
     for i in range(n):
         lines += [f"def call{i}(obj: Base):", "    _write(obj)", "    return obj.m()", ""]
+    return "\n".join(lines)
+
+
+def functions_each_calling(n: int) -> str:
+    """Many functions each making one project call."""
+    lines = []
+    for i in range(n):
+        lines += [f"def call{i}(x):", "    return g(x)", ""]
     return "\n".join(lines)
 
 
@@ -533,12 +571,25 @@ FAMILIES = [
         placements=("function", "method"),
         size=CELL_BINDINGS,
     ),
+    Family("read_only_value_handed_to_calls", read_only_value_handed_to_calls),
+    Family("calls_between_invalidators", calls_between_invalidators, placements=("method",)),
+    Family("calls_under_branches", calls_under_branches),
+    # Every call site is reported, standing for every access: the cost of the reports shows at a
+    # size where the walks the family does not gate stay cheap.
+    Family(
+        "guarded_accesses_in_generator_expressions",
+        guarded_accesses_in_generator_expressions,
+        size=2000,
+    ),
     Family("passed_iterables", passed_iterables),
     Family("path_aliases", path_aliases),
     Family("merged_package_paths", merged_package_paths),
     Family("lazy_init_sites", lazy_init_sites, placements=("method",)),
     Family("wide_hierarchy", project=wide_hierarchy, placements=("project",), size=4000),
     Family("helper_chain", project=helper_chain, placements=("project",), size=2000),
+    Family(
+        "functions_each_calling", project=functions_each_calling, placements=("project",), size=20000
+    ),
     Family("callers_of_one_helper", project=callers_of_one_helper, placements=("project",), size=4000),
     Family(
         "argument_marks",

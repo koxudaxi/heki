@@ -7,8 +7,9 @@
 //! facts.
 
 use super::{
-    Allowance, AllowanceKeys, FunctionMatcher, MergedReports, References, attribution,
-    counts_references, delegated_reports, project_classes, reports_unresolved,
+    AccessGroups, Allowance, AllowanceKeys, DelegatedReport, FunctionMatcher, MergedReports,
+    References, attribution, counts_references, delegated_reports, project_classes,
+    reports_unresolved,
 };
 use crate::{
     CheckContext, DottedPattern, NamePart, RuleConfigError, SitesByCaller, last_name, module_of,
@@ -146,9 +147,10 @@ impl CallTargets {
 /// The class families of the groups of targets that sites call ([`CallTargets::called`]): the
 /// targets' families with the classes defining the methods a site calls that they name, and
 /// their subclasses (an initializer of one of them calling the method on its own `self`
-/// initializes itself). Kept per group and defining classes, which many sites share.
+/// initializes itself). Kept per group and defining classes, which many sites share, each with
+/// its number among the contract's families.
 #[derive(Default)]
-struct Families(FxHashMap<FamilyKey, Rc<FxHashSet<String>>>);
+struct Families(FxHashMap<FamilyKey, (usize, Rc<FxHashSet<String>>)>);
 
 /// A group of targets (indices into the contract's targets) and the classes defining the
 /// methods a site calls that they name, sorted.
@@ -161,7 +163,7 @@ impl Families {
         targets: &CallTargets,
         group: &[usize],
         site: &CallSite,
-    ) -> Rc<FxHashSet<String>> {
+    ) -> (usize, Rc<FxHashSet<String>>) {
         let mut defining = Vec::new();
         for &i in group {
             targets.defining_classes(cx, i, site, &mut defining);
@@ -169,8 +171,8 @@ impl Families {
         defining.sort_unstable();
         defining.dedup();
         let key = (group.to_vec(), defining);
-        if let Some(family) = self.0.get(&key) {
-            return Rc::clone(family);
+        if let Some((id, family)) = self.0.get(&key) {
+            return (*id, Rc::clone(family));
         }
         let mut family: FxHashSet<String> = group
             .iter()
@@ -181,8 +183,9 @@ impl Families {
             family.insert(class.clone());
         }
         let family = Rc::new(family);
-        self.0.insert(key, Rc::clone(&family));
-        family
+        let id = self.0.len();
+        self.0.insert(key, (id, Rc::clone(&family)));
+        (id, family)
     }
 }
 
@@ -737,8 +740,8 @@ pub(super) struct CallOwnerRule<'r> {
 /// `MUT204`: calls of `call-owners` targets outside their allowed callers, reported like the
 /// reads of `MUT203` (private helpers hand them to their callers; functions that only run
 /// inside allowed contexts and a class's own initialization are not reported).
-pub(crate) fn mut204(
-    cx: &CheckContext<'_>,
+pub(crate) fn mut204<'c>(
+    cx: &CheckContext<'c>,
     out: &mut Vec<Diagnostic>,
 ) -> Result<(), RuleConfigError> {
     let (calls, unresolved) = (
@@ -800,6 +803,8 @@ pub(crate) fn mut204(
     let mut reports = MergedReports::default();
     let mut families: Vec<Families> = rules.iter().map(|_| Families::default()).collect();
     for key in callers {
+        let caller = key.fqn();
+        let mut access_groups = AccessGroups::new();
         let calls = sites.get(key).into_iter().flatten().map(|s| (s, false));
         let handed = references.get(key).into_iter().flatten().map(|s| (s, true));
         for (&(path, site), reference) in calls.chain(handed) {
@@ -810,33 +815,26 @@ pub(crate) fn mut204(
                 let rule = &rules[c];
                 for group in groups {
                     let (target, called) = group_texts(&rule.targets, &group, Some(site));
-                    let family = families[c].at(cx, &rule.targets, &group, site);
-                    let found = delegated_reports(
-                        cx,
-                        &sites,
-                        &rule.allowance,
-                        &family,
-                        key,
-                        receiver_params(site),
-                        site.span,
-                    );
-                    for r in found {
+                    let (family_id, family) = families[c].at(cx, &rule.targets, &group, site);
+                    let obj = receiver_params(site);
+                    let walk = || delegated_reports(cx, &sites, &rule.allowance, &family, key, obj);
+                    let add = |reports: &mut MergedReports<'c>, r: &DelegatedReport, sites| {
                         let Some(unit) = cx.index.file_of(&r.func).and_then(|p| cx.unit(p)) else {
-                            continue;
+                            return;
                         };
                         reports.add(
                             unit,
                             &r.func,
-                            r.span,
+                            r.span(site.span),
                             (&target, &called),
-                            (key.fqn(), site.span),
+                            sites,
                             rule.note,
                             || {
                                 let what = call_verb(site, reference);
                                 let via = if r.chain.is_empty() {
                                     String::new()
                                 } else {
-                                    format!(" via `{}`", key.fqn())
+                                    format!(" via `{caller}`")
                                 };
                                 format!(
                                     "`{}` {what} {called}{via} {}",
@@ -862,7 +860,10 @@ pub(crate) fn mut204(
                                 chain
                             },
                         );
-                    }
+                    };
+                    let access = (obj, c, family_id, target.clone(), called.clone());
+                    let site_id = (caller.clone(), site.span);
+                    access_groups.report(&mut reports, access, site_id, walk, add);
                 }
             }
         }

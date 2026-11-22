@@ -332,8 +332,7 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
     // The functions where a builtin calls a project callable once per item: their calls outside
     // loops may repeat too.
     let per_item_callers: FxHashSet<&str> = sites
-        .values()
-        .flatten()
+        .all()
         .filter(|s| s.per_item.is_some())
         .map(|s| s.caller.qualname.as_str())
         .collect();
@@ -386,10 +385,8 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
                 if !iteration && !anchors_call_site(&inst.kind) {
                     continue;
                 }
-                let Some(list) = sites.get(&(key.qualname.clone(), inst.span)) else {
-                    continue;
-                };
-                if depth == 0 && list.iter().all(|s| s.per_item.is_none()) {
+                let list = sites.at(&key.qualname, inst.span);
+                if list.is_empty() || depth == 0 && list.iter().all(|s| s.per_item.is_none()) {
                     continue;
                 }
                 if !seen.insert(inst.span) {

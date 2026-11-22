@@ -14,10 +14,10 @@
 //! lane never trusts.
 
 use crate::mut_rules::{CallInst, site_call};
-use crate::{CheckContext, ModuleUnit};
+use crate::{CheckContext, ModuleUnit, SitesBySpan};
 use heki_ast::Span;
 use heki_diagnostics::{Diagnostic, TextEdit};
-use heki_effect::{CallSite, Items, ProjectDecls, TypeCtx, Val, container_mutator};
+use heki_effect::{Items, ProjectDecls, TypeCtx, Val, container_mutator};
 use heki_ir::walk::{self, Answer, Budget, Def, FnShape, Use};
 use heki_ir::{
     BlockId, BuiltinKind, CompareOpKind, ConstLiteral, FnIndex, FunctionId, Inst, InstKind,
@@ -364,6 +364,7 @@ pub(crate) fn opt112(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
     let tcx = TypeCtx::new(&unit.input, cx.decls, cx.kb);
     let no_types = FxHashMap::default();
     let constants = cx.fixed_constants(unit);
+    let sites = std::cell::OnceCell::new();
     let creators = Creators::new(cx, &tcx, &no_types, unit, &constants);
     for f in &unit.input.ir.functions {
         let shape = FnShape::new(f);
@@ -418,7 +419,8 @@ pub(crate) fn opt112(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
             // the end of the loop only when it reads the list nowhere else, and an index or a
             // count built before the loop stays right only while the loop does not change it.
             let use_of = ListUse::new(&defs, &hot, recv);
-            let changed = use_of.changed() || use_of.handed_to_mutator(cx, unit, f);
+            let changed = use_of.changed()
+                || use_of.handed_to_mutator(cx, sites.get_or_init(|| cx.sites_by_span(unit)), f);
             let advice = match method {
                 "index" if changed => {
                     "the loop changes the list, so keep a `dict` (value → index) up to date with each change".into()
@@ -515,21 +517,13 @@ impl<'d, 'a> ListUse<'d, 'a> {
     fn handed_to_mutator(
         &self,
         cx: &CheckContext<'_>,
-        unit: &ModuleUnit<'_>,
+        sites: &SitesBySpan<'a>,
         f: &IrFunction,
     ) -> bool {
-        let key = CheckContext::key(unit, f);
-        let sites: Vec<&CallSite> = cx
-            .index
-            .files
-            .get(&unit.input.path)
-            .into_iter()
-            .flat_map(|file| &file.call_sites)
-            .filter(|s| s.caller == key)
-            .collect();
+        let sites = sites.of(heki_effect::func_qualname(f));
         let def = |v| self.defs.insts.get(&v).map(|(_, i)| *i);
         self.insts().any(|i| {
-            let call = site_call(&def, &sites, i, false);
+            let call = site_call(&def, sites, i, false);
             call.iter()
                 .flat_map(|c| c.bound_arguments(cx))
                 .any(|(_, summary, pos, v)| {

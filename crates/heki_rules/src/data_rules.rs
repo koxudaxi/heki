@@ -3,7 +3,7 @@
 use crate::eff_rules::{DataOrigins, ItemOrigins, shortest};
 use crate::mut_rules::{CallInst, site_call};
 use crate::opt_rules::{Creators, Sizes};
-use crate::{CheckContext, ModuleUnit};
+use crate::{CheckContext, FnSites, ModuleUnit};
 use heki_diagnostics::Diagnostic;
 use heki_effect::{CallHop, CallSite, CallTarget, SiteEffect, TypeCtx, with_paths};
 use heki_ir::walk::{Answer, Budget, Def, FnShape, Visit, reach};
@@ -70,16 +70,15 @@ pub(crate) fn data101(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Ve
                 if !combines(shape, &defs, &call, lc.phi_var) {
                     return None;
                 }
-                let at: &[&CallSite] = sites
-                    .get(&(key.qualname.clone(), inst.span))
-                    .map_or(&[], Vec::as_slice);
+                let fn_sites = sites.of(&key.qualname);
+                let at = fn_sites.at(inst.span);
                 let effects: Vec<SiteEffect> = at
                     .iter()
                     .flat_map(|s| cx.index.site_effects(&unit.input.path, s))
                     .collect();
                 let chain = shortest(&effects, ExecEffectKind::QuadraticRealloc)?;
                 let reallocates = chain.len() == 1
-                    || reallocates_argument(cx, at, shape, &defs, inst, lc.phi_var);
+                    || reallocates_argument(cx, fn_sites, shape, &defs, inst, lc.phi_var);
                 reallocates.then(|| (inst, chain.to_vec(), *v, at, positions[&call_var]))
             });
             let Some((inst, chain, update, at, position)) = hit else {
@@ -270,13 +269,13 @@ fn carries_only(
     reset == Answer::Known(None)
 }
 
-/// Whether the project call the call instruction `inst` makes (its call site among `sites`:
-/// on the caller's thread, or on a worker an offloading API runs it on) returns a quadratic
-/// reallocation of an argument that carries `previous` (as itself, through copies, or in a
-/// display): a callee's `reallocates_params`.
+/// Whether the project call the call instruction `inst` makes (its call site among the
+/// function's `sites`: on the caller's thread, or on a worker an offloading API runs it on)
+/// returns a quadratic reallocation of an argument that carries `previous` (as itself, through
+/// copies, or in a display): a callee's `reallocates_params`.
 fn reallocates_argument<'i>(
     cx: &CheckContext<'_>,
-    sites: &[&'i CallSite],
+    sites: FnSites<'_, 'i>,
     shape: &FnShape<'_>,
     defs: &FxHashMap<VarId, &'i Inst>,
     inst: &'i Inst,
