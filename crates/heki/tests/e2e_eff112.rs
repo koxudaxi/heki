@@ -657,9 +657,10 @@ def numbers_out(path: Path) -> None:
     writers.save_json(path, list(NUMBERS))
 "##;
 
-/// Shapes that keep or lose the order on the way: a raise for one element at a time, a mapping
-/// read back by key, a key read before and stored again, a set filled with the order, a method
-/// of an unknown receiver, and a sequence of at most one element; and what stays reported.
+/// Shapes that keep or lose the order on the way: a raise for one element at a time (also of
+/// text made from it), a mapping read back by key, a key read before and stored again, a set
+/// filled with the order, a method of an unknown receiver, and a sequence of at most one
+/// element; and what stays reported, text built element by element in a loop among it.
 const NARROWED: &str = r#"import json
 import sys
 
@@ -868,6 +869,42 @@ def read_on_one_side(fields: dict, names: set[str], flag: bool) -> dict:
 
 def show_read_on_one_side(fields: dict, names: set[str], flag: bool) -> None:
     print(json.dumps(read_on_one_side(fields, names, flag)))
+
+
+def check_formatted(names: set[str]):
+    for name in names:
+        require(f"pkg.{name}")
+
+
+def joined_by_hand(names: set[str]) -> str:
+    text = ""
+    for name in names:
+        text += name + ","
+    return text
+
+
+def show_joined_by_hand(names: set[str]) -> None:
+    print(joined_by_hand(names))
+
+
+def formatted_by_hand(names: set[str]) -> str:
+    text = ""
+    for name in names:
+        text = f"{text}{name};"
+    return text
+
+
+def show_formatted_by_hand(names: set[str]) -> None:
+    print(formatted_by_hand(names))
+
+
+def show_line(line: str) -> None:
+    print(line)
+
+
+def show_each(names: set[str]) -> None:
+    for name in names:
+        show_line(f"- {name}")
 "#;
 
 fn project(name: &str) -> Project {
@@ -1026,6 +1063,24 @@ fn expected() -> Vec<(String, u64, String, String)> {
             208,
             "show_read_on_one_side",
             "read_on_one_side:200->json.dumps",
+        ),
+        d(
+            "pkg/narrowed.py",
+            224,
+            "show_joined_by_hand",
+            "joined_by_hand:218->builtins.print",
+        ),
+        d(
+            "pkg/narrowed.py",
+            235,
+            "show_formatted_by_hand",
+            "formatted_by_hand:229->builtins.print",
+        ),
+        d(
+            "pkg/narrowed.py",
+            243,
+            "show_each",
+            "show_each:243->builtins.print",
         ),
         d("pkg/shapes.py", 47, "handed", "handed:47->json.dumps"),
         d(

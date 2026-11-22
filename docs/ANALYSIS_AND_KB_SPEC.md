@@ -1471,7 +1471,9 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      it is appended to or stored in (not a set, which has an order of its own; `insert`,
      `update`, and `setdefault` only on a list or a mapping known by construction or type; a key
      read from the mapping on every path before keeps its place when stored again); an element
-     also passes to what is computed from it (an item looked up by it, a call's result). The
+     also passes to what is computed from it (an item looked up by it, text formatted or
+     concatenated from it, a call's result), and text made from it and added onto a phi (what a
+     loop has built so far) is a whole value in the set's order. The
      ends are a `return`, an output (a catalog `writes_in_order` argument with its sorting
      keyword established off, a stream's `write`, a builtin exception's message; for one element
      at a time only outputs that append: streams and `print`, not a raise, which names the first

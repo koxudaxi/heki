@@ -19,8 +19,9 @@
 //!   by position from a sequence that may hold two, and the containers that keep the order it is
 //!   appended to or stored in (a list, a deque, a mapping, a stream; a set has an order of its
 //!   own, and a key read from a mapping before keeps its place when stored again); an element of
-//!   the set also passes on to what is computed from it (an attribute, an item looked up by it, a
-//!   call's result). `sorted()`, `set()`, `len()`, comparisons, items looked up by key, and calls
+//!   the set also passes on to what is computed from it (an attribute, an item looked up by it,
+//!   text made from it, a call's result), and text added onto what a loop has built so far holds
+//!   the elements in order. `sorted()`, `set()`, `len()`, comparisons, items looked up by key, and calls
 //!   heki cannot resolve end it.
 //! - **Ends**: a `return`, an argument a catalog output call writes in order
 //!   (`EcosystemEntry::writes_in_order`, with its sorting keyword established false) or the
@@ -933,15 +934,18 @@ impl<'f, 'c> LocalFlow<'f, 'c> {
                 kind: BuiltinKind::List | BuiltinKind::Tuple | BuiltinKind::Dict,
                 ..
             }
-            | InstKind::DictLiteral { dst, .. }
-            | InstKind::Format { dst, .. }
-            | InstKind::Convert { dst, .. }
-            | InstKind::BuildString { dst, .. }
-            | InstKind::BinOp {
+            | InstKind::DictLiteral { dst, .. } => out.push(Step::To(*dst, Kind::Ordered)),
+            InstKind::Format { dst, .. } | InstKind::Convert { dst, .. } => out.push(derived(*dst)),
+            InstKind::BuildString { dst, parts } => {
+                out.push(self.concatenated(*dst, parts, v, kind));
+            }
+            InstKind::BinOp {
                 dst,
                 op: BinOpKind::Add | BinOpKind::Mod,
+                lhs,
+                rhs,
                 ..
-            } => out.push(Step::To(*dst, Kind::Ordered)),
+            } => out.push(self.concatenated(*dst, &[*lhs, *rhs], v, kind)),
             InstKind::SubscriptLoad {
                 dst,
                 obj,
@@ -1015,6 +1019,24 @@ impl<'f, 'c> LocalFlow<'f, 'c> {
             } => self.order_call(at, (*dst, args, kwargs), v, kind, out),
             _ => {}
         }
+    }
+
+    /// What text or a sequence `dst` concatenated from `operands`, one of them `v`, carries. Text
+    /// made from one element is that element's, unless it is added onto what a loop has built so
+    /// far (another operand is a phi, also formatted), which then holds the elements in order.
+    fn concatenated(&self, dst: VarId, operands: &[VarId], v: VarId, kind: Kind) -> Step {
+        let onto_carried = operands.iter().filter(|&&x| x != v).any(|&x| {
+            let x = match self.shape.inst(x).map(|i| &i.kind) {
+                Some(InstKind::Format { value, .. } | InstKind::Convert { value, .. }) => *value,
+                _ => x,
+            };
+            matches!(
+                self.shape.def(self.shape.copy_root(x)),
+                heki_ir::walk::Def::Phi(..)
+            )
+        });
+        let kind = if onto_carried { Kind::Ordered } else { kind };
+        Step::To(dst, kind)
     }
 
     /// The stream `recv` writes to, as a report names it: `sys.stdout` or `sys.stderr`, or a

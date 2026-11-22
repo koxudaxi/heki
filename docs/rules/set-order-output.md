@@ -29,8 +29,9 @@ iterates in a different order from run to run.
 The order is taken where the code iterates the set (a loop, a comprehension, a generator
 expression), copies it into a sequence or text (`list()`, `tuple()`, `str.join()`, formatting),
 or picks an element of it (`set.pop()`, `next(iter(...))`, the first element a loop returns). It
-follows the value through assignments, displays, formatting, string concatenation, the
-containers it is appended to or stored in, returns, and the calls of the project.
+follows the value through assignments, displays, formatting, string concatenation (text built
+element by element in a loop included), the containers it is appended to or stored in, returns,
+and the calls of the project.
 
 The outputs are:
 
@@ -60,9 +61,9 @@ It does not report:
   one where an item is read from it (`if len(rest) > 1: ...`, then `rest[0]`);
 - one element at a time written to its own file (`(root / name).write_text(...)` in a loop
   over the set): only an output that appends, such as a stream, writes the set's order;
-- an exception raised for one element at a time (`for name in names: check(name)`, raising
-  with `name`): it names the first element that fails, which depends on the order only when
-  two fail;
+- an exception raised for one element at a time (`for name in names: check(f"pkg.{name}")`,
+  raising with its argument): it names the first element that fails, which depends on the order
+  only when two fail;
 - a mapping read back by key (`summary[path]` for each `path` of `sorted(summary)`), and a key
   read from the mapping before and stored again (`fields[k] = fields[k].strip()`), which keeps
   its place;
