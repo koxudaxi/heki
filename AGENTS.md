@@ -10,7 +10,7 @@ that implements or changes anything here follows the invariants and procedures b
    the gate a new rule has to pass.
 3. `docs/ANALYSIS_AND_KB_SPEC.md`: the IR, `EffectSummary`, the Soundness lane's abstract domain
    and proof obligations, the knowledge bases, and the Stage 0-A measurements.
-4. `docs/DESIGN_HISTORY_AND_ADR.md`: ADR-001 to ADR-019, what was decided and why the
+4. `docs/DESIGN_HISTORY_AND_ADR.md`: ADR-001 to ADR-020, what was decided and why the
    alternatives were rejected.
 
 When a document and the implementation disagree, update the document in the same change.

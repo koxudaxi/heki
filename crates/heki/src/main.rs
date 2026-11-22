@@ -11,6 +11,7 @@ mod check;
 mod dump_facts;
 mod inspect;
 mod prompt;
+mod recommend;
 mod watch;
 
 use anyhow::Result;
@@ -93,6 +94,9 @@ enum Commands {
     /// Experimental: what heki knows about one function (its effects, what it changes, keeps, and
     /// returns, whether it is pure, its callers, reports, and contracts).
     Inspect(InspectArgs),
+    /// Experimental: advice on the configuration of a project, with counts from its analysis, and
+    /// the keys to add (it writes no file).
+    Recommend(RecommendArgs),
     /// Internal/testing: dump `heki_semantic` scope tree as JSON for CPython `symtable` verification.
     #[command(hide = true)]
     DumpSemantic(DumpSemanticArgs),
@@ -216,6 +220,21 @@ struct InspectArgs {
     /// How many caller levels `--callers` lists.
     #[arg(long, requires = "callers", default_value_t = 3, value_parser = clap::value_parser!(u16).range(1..=100))]
     depth: u16,
+    #[command(flatten)]
+    analysis: AnalysisArgs,
+}
+
+#[derive(Debug, Args)]
+struct RecommendArgs {
+    /// The project to analyze, as for `heki check`.
+    #[arg(default_value = ".")]
+    paths: Vec<PathBuf>,
+    /// `text`, or `json` (one object, described by the JSON Schema its `$schema` names).
+    #[arg(long, value_enum, default_value_t = ReportFormat::Text)]
+    output_format: ReportFormat,
+    /// Print the JSON Schema of the object of `--output-format json` and exit.
+    #[arg(long)]
+    output_format_json_schema: bool,
     #[command(flatten)]
     analysis: AnalysisArgs,
 }
@@ -416,6 +435,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Commands::Snapshot(args) => check::run_snapshot(&args),
         Commands::Assumptions(args) => run_assumptions(args),
         Commands::Inspect(args) => inspect::run(&args),
+        Commands::Recommend(args) => recommend::run(&args),
         Commands::DumpSemantic(args) => {
             let src = heki_ast::read_source(&args.file)?;
             let parsed = heki_ast::parse_module(&src)

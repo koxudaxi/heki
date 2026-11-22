@@ -19,6 +19,7 @@ mod opt_rules;
 pub mod precision;
 pub mod premises;
 pub mod project;
+pub mod recommend;
 pub mod selection;
 pub mod snapshot;
 

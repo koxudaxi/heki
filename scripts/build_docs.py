@@ -7,6 +7,8 @@
 - `docs/experimental.md`: the experimental features (`crates/heki_rules/src/experimental.rs`).
 - `docs/precision.md`: the tables of the certifications and the measurements
   (`crates/heki_rules/src/precision.rs`), between the markers of its generated parts.
+- `docs/recommend.md`: the report of `heki recommend` on the example project the page shows.
+- `docs/schemas/recommend-1.json`: the JSON Schema of `heki recommend --output-format json`.
 - `docs/assets/example-check.svg`: `heki check --color always` on the README's examples, drawn
   as a terminal shows it (`scripts/ansi_svg.py`).
 
@@ -43,6 +45,10 @@ CLI_PAGE = DOCS / "cli-reference.md"
 EXPERIMENTAL_PAGE = DOCS / "experimental.md"
 CHANGELOG = ROOT / "CHANGELOG.md"
 PRECISION_PAGE = DOCS / "precision.md"
+RECOMMEND_PAGE = DOCS / "recommend.md"
+RECOMMEND_SCHEMA = DOCS / "schemas" / "recommend-1.json"
+# The command the example of `docs/recommend.md` runs in the project of its Python blocks.
+RECOMMEND_EXAMPLE = ("recommend", "app")
 README = ROOT / "README.md"
 EXAMPLE_IMAGE = DOCS / "assets" / "example-check.svg"
 # The examples at the top of the README, as `crates/heki/tests/e2e_readme_examples.rs` reads
@@ -105,6 +111,7 @@ CLI_COMMANDS = [
     (["snapshot"], "heki snapshot"),
     (["assumptions"], "heki assumptions"),
     (["inspect"], "heki inspect"),
+    (["recommend"], "heki recommend"),
 ]
 
 
@@ -322,21 +329,52 @@ def cli_page(heki: Path) -> str:
     return "\n".join(lines)
 
 
+def example_files(text: str, page: Path) -> dict[str, str]:
+    """The files of the Python blocks of `text`, a part of `page`, each named on its first line
+    (`# app/users.py`)."""
+    files: dict[str, str] = {}
+    for language, block in FENCED_BLOCK.findall(text):
+        if language == "python":
+            path = block.splitlines()[0].removeprefix("# ")
+            if path in files:
+                sys.exit(f"{shown(page)}: two examples write `{path}`")
+            files[path] = block
+    return files
+
+
+def run_in_project(heki: Path, files: dict[str, str], args: list[str]) -> subprocess.CompletedProcess:
+    """`heki <args>` in a new project holding `files` (and a `pyproject.toml`)."""
+    with tempfile.TemporaryDirectory() as directory:
+        project = Path(directory)
+        files = {"pyproject.toml": '[project]\nname = "t"\n', **files}
+        for path, text in files.items():
+            (project / path).parent.mkdir(parents=True, exist_ok=True)
+            (project / path).write_text(text, encoding="utf-8", newline="\n")
+        return subprocess.run(
+            [str(heki), *args], capture_output=True, cwd=project, encoding="utf-8", check=False
+        )
+
+
+def recommend_example(heki: Path) -> str:
+    """The report `heki recommend` prints on the example project of `docs/recommend.md`."""
+    files = example_files(RECOMMEND_PAGE.read_text(encoding="utf-8"), RECOMMEND_PAGE)
+    out = run_in_project(heki, files, list(RECOMMEND_EXAMPLE))
+    if out.returncode != 0:
+        sys.exit(f"`heki recommend` on the example of {shown(RECOMMEND_PAGE)} failed:\n{out.stderr}")
+    return f"```console\n$ heki {' '.join(RECOMMEND_EXAMPLE)}\n{out.stdout}```\n"
+
+
 def readme_examples(readme: str) -> tuple[str, dict[str, str]]:
     """The command the README's examples run, and the files of all of them: each Python block
     names its file on its first line (`# app/users.py`)."""
     start = readme.index("\n### ")
     examples = readme[start : readme.index(EXAMPLES_END, start)]
-    commands = set()
-    files: dict[str, str] = {}
-    for language, text in FENCED_BLOCK.findall(examples):
-        if language == "python":
-            path = text.splitlines()[0].removeprefix("# ")
-            if path in files:
-                sys.exit(f"README.md: two examples write `{path}`")
-            files[path] = text
-        elif language == "console":
-            commands.add(text.splitlines()[0].removeprefix("$ "))
+    files = example_files(examples, README)
+    commands = {
+        text.splitlines()[0].removeprefix("$ ")
+        for language, text in FENCED_BLOCK.findall(examples)
+        if language == "console"
+    }
     if len(commands) != 1:
         sys.exit(f"README.md: the examples run different commands: {sorted(commands)}")
     return commands.pop(), files
@@ -346,19 +384,7 @@ def example_image(heki: Path) -> str:
     """The command of the README's examples, run with `--color always` in one project holding
     the files of all of them, drawn as a terminal shows what it prints."""
     command, files = readme_examples(README.read_text(encoding="utf-8"))
-    with tempfile.TemporaryDirectory() as directory:
-        project = Path(directory)
-        files = {"pyproject.toml": '[project]\nname = "t"\n', **files}
-        for path, text in files.items():
-            (project / path).parent.mkdir(parents=True, exist_ok=True)
-            (project / path).write_text(text, encoding="utf-8", newline="\n")
-        out = subprocess.run(
-            [str(heki), *command.split()[1:], "--color", "always"],
-            capture_output=True,
-            cwd=project,
-            encoding="utf-8",
-            check=False,
-        )
+    out = run_in_project(heki, files, [*command.split()[1:], "--color", "always"])
     # The examples report warnings: printed, and the run passes.
     if out.returncode != 0:
         sys.exit(f"`{command}` on the README's examples failed ({out.returncode}):\n{out.stderr}")
@@ -427,6 +453,8 @@ def outputs(heki: Path, rules: list[dict], registry: dict, precision: dict) -> d
                 "measurements": measurements_table(precision, rules),
             },
         ),
+        RECOMMEND_PAGE: with_generated_parts(RECOMMEND_PAGE, {"report": recommend_example(heki)}),
+        RECOMMEND_SCHEMA: run(heki, "recommend", "--output-format-json-schema"),
         EXAMPLE_IMAGE: example_image(heki),
     }
     for r in rules:

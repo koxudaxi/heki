@@ -411,3 +411,41 @@ fn the_precision_tables_and_rule_measurements_come_from_the_data() {
         "docs/precision.md: no generated part named measurements\n"
     );
 }
+
+#[test]
+fn docs_check_fails_on_a_stale_recommend_example_or_schema() {
+    let docs = DocsTree::new("recommend_page");
+    assert_eq!(docs.build_docs(&[]).0, 0);
+    let page = docs.0.read("docs/recommend.md");
+    assert!(
+        page.contains("```console\n$ heki recommend app\nheki recommend (experimental) on .: ")
+            && page.contains("were not analyzed (tests/test_users.py)"),
+        "{page}"
+    );
+    let schema: Value =
+        serde_json::from_str(&docs.0.read("docs/schemas/recommend-1.json")).unwrap();
+    assert_eq!(
+        schema["$id"],
+        json!("https://heki.koxudaxi.dev/schemas/recommend-1.json")
+    );
+    assert_eq!(docs.build_docs(&["--check"]).0, 0);
+
+    // The report follows the example's files.
+    let (code, out) = docs.check_with(
+        "docs/recommend.md",
+        "# tests/test_users.py",
+        "# app/test_users.py",
+    );
+    assert_eq!(code, 1);
+    assert!(
+        out.starts_with("Generated docs are out of date") && out.contains("docs/recommend.md"),
+        "{out}"
+    );
+    let (code, out) = docs.check_with(
+        "docs/schemas/recommend-1.json",
+        "\"title\": \"heki recommend\"",
+        "\"title\": \"x\"",
+    );
+    assert_eq!(code, 1);
+    assert!(out.contains("docs/schemas/recommend-1.json"), "{out}");
+}

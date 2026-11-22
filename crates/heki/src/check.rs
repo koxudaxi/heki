@@ -16,7 +16,7 @@ use heki_env::{LintConfig, Severity};
 use heki_profile::{HotFunctions, ProfileData, ProfiledFunction};
 use heki_rules::project::{
     Facts, FileError, IndexFacts, Indexed, ParsedFile, Project, ProjectEnv, ProjectOptions,
-    canonical,
+    baseline_key, canonical,
 };
 use heki_rules::{
     RuleSelection, SNAPSHOT_FILE, Selectors, SummarySnapshot, find_rule, fold_root_causes,
@@ -118,16 +118,15 @@ pub(crate) fn annotate_hot(diags: &mut [Diagnostic], hot: Option<&HotFunctions>)
     }
 }
 
-/// Load the project at `paths` (with `overrides` in place of files' text) and build the index
-/// `heki check` builds for `analysis`, with `facts`. `format` is the output format the run's
-/// warnings follow.
-pub(crate) fn load_and_index(
+/// The project at `paths` (with `overrides` in place of files' text), with the rule selection and
+/// the saved summary snapshot `heki check` uses for `analysis`. `format` is the output format the
+/// run's warnings follow.
+pub(crate) fn load(
     paths: &[PathBuf],
     analysis: &AnalysisArgs,
     format: OutputFormat,
     overrides: Option<&FxHashMap<PathBuf, String>>,
-    facts: Facts,
-) -> Result<Indexed> {
+) -> Result<(Project, RuleSelection, Option<SummarySnapshot>)> {
     let project = Project::load(&ProjectOptions {
         paths,
         config: analysis.config.as_deref(),
@@ -138,6 +137,18 @@ pub(crate) fn load_and_index(
     })?;
     let selection = selection(analysis, &project)?;
     let snapshot = snapshot_for(&selection, &project.env.root, format)?;
+    Ok((project, selection, snapshot))
+}
+
+/// [`load`] with the index `heki check` builds for `analysis`, with `facts`.
+pub(crate) fn load_and_index(
+    paths: &[PathBuf],
+    analysis: &AnalysisArgs,
+    format: OutputFormat,
+    overrides: Option<&FxHashMap<PathBuf, String>>,
+    facts: Facts,
+) -> Result<Indexed> {
+    let (project, selection, snapshot) = load(paths, analysis, format, overrides)?;
     Ok(Indexed::build(project, selection, snapshot, facts)?)
 }
 
@@ -232,6 +243,14 @@ pub(crate) fn shown_path(p: &Path) -> PathBuf {
 /// [`shown_path`] as reports write it.
 pub(crate) fn shown_text(p: &Path) -> String {
     path_text(&shown_path(p))
+}
+
+/// [`shown_text`] of a directory: `.` for the working directory itself.
+pub(crate) fn shown_dir(p: &Path) -> String {
+    match shown_text(p) {
+        shown if shown.is_empty() => ".".to_owned(),
+        shown => shown,
+    }
 }
 
 /// File errors as `heki check` prints them: with the paths it prints ([`shown_text`]).
@@ -439,16 +458,6 @@ pub(crate) fn baseline_path(analysis: &AnalysisArgs, env: &ProjectEnv) -> Option
         .or_else(|| env.cfg.baseline.as_ref().map(|b| env.root.join(b)))
 }
 
-/// The path a baseline entry names for a file of `project`: relative to the project root.
-pub(crate) fn baseline_key(project: &Project) -> impl Fn(&Path) -> String + '_ {
-    let rel: FxHashMap<&Path, &str> = project
-        .files
-        .iter()
-        .map(|f| (f.path.as_path(), f.rel.as_str()))
-        .collect();
-    move |p: &Path| rel.get(p).map_or_else(|| path_text(p), |r| (*r).to_owned())
-}
-
 /// Every path of `diags` as the output formats print it ([`shown_path`]).
 pub(crate) fn show_paths(diags: &mut [Diagnostic]) {
     for d in diags {
@@ -469,7 +478,7 @@ pub(crate) fn report(
     withheld: usize,
     styles: &Stylesheet,
 ) -> Result<ExitCode> {
-    let key_path = baseline_key(project);
+    let key_path = baseline_key(&project.files);
     let baseline_path = baseline_path(&args.analysis, &project.env);
     let fmt = args.output_format;
     if args.update_baseline && baseline_path.is_none() {

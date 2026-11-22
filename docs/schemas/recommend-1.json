@@ -1,0 +1,265 @@
+{
+  "$defs": {
+    "Analyzed": {
+      "additionalProperties": false,
+      "description": "The files the report was computed from.",
+      "properties": {
+        "errors": {
+          "description": "The files that could not be read or parsed, as `heki check` reports them.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "files": {
+          "description": "The files analyzed.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "functions": {
+          "description": "The functions in them, module bodies included.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "left_out": {
+          "$ref": "#/$defs/LeftOut"
+        },
+        "paths": {
+          "description": "The paths given on the command line.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "files",
+        "functions",
+        "errors",
+        "paths",
+        "left_out"
+      ],
+      "type": "object"
+    },
+    "BaselineSplit": {
+      "additionalProperties": false,
+      "properties": {
+        "allowed": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "regressions": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "allowed",
+        "regressions"
+      ],
+      "type": "object"
+    },
+    "LeftOut": {
+      "additionalProperties": false,
+      "description": "The Python files below the project root that the paths given leave out: heki takes the\nfiles it analyzed as the whole project.",
+      "properties": {
+        "files": {
+          "description": "The files found, in the order of a walk of the root sorted by name.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "python_files": {
+          "description": "How many were found (when `truncated`, a lower bound).",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "truncated": {
+          "description": "Whether the count stopped before the end: after 50 files, or after the first 10,000\nentries below the root.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "python_files",
+        "files",
+        "truncated"
+      ],
+      "type": "object"
+    },
+    "ReportKind": {
+      "enum": [
+        "heki-recommend"
+      ],
+      "type": "string"
+    },
+    "ReportsNow": {
+      "additionalProperties": false,
+      "description": "What the current configuration shows, as `heki check` prints it: reports that share a root\ncause are folded into one.",
+      "properties": {
+        "baseline": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BaselineSplit"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "With a baseline: the reports it allows, and the regressions `heki check` prints."
+        },
+        "exact": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "heuristic": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "heuristic_rules_off": {
+          "description": "The heuristic rules that are off only because `lint.heuristic` is false.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "shown": {
+          "description": "The reports `heki check` prints without a baseline.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "withheld_heuristic": {
+          "description": "The heuristic reports of exact rules that `lint.heuristic = false` leaves out.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "shown",
+        "exact",
+        "heuristic",
+        "withheld_heuristic",
+        "heuristic_rules_off"
+      ],
+      "type": "object"
+    },
+    "Run": {
+      "additionalProperties": false,
+      "properties": {
+        "label": {
+          "$ref": "#/$defs/RunLabel"
+        }
+      },
+      "required": [
+        "label"
+      ],
+      "type": "object"
+    },
+    "RunLabel": {
+      "oneOf": [
+        {
+          "const": "discovery",
+          "description": "Every rule selected, on the configuration as it is.",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "$id": "https://heki.koxudaxi.dev/schemas/recommend-1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "The JSON object `heki recommend --output-format json` prints.",
+  "properties": {
+    "$schema": {
+      "description": "The URL of this schema.",
+      "type": "string"
+    },
+    "analyzed": {
+      "$ref": "#/$defs/Analyzed"
+    },
+    "config": {
+      "additionalProperties": true,
+      "description": "The keys `config_toml` adds or changes, as the configuration's keys and values.",
+      "type": "object"
+    },
+    "config_file": {
+      "description": "The configuration file the run read, or `null` when the project has none.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "config_toml": {
+      "description": "The keys to add or change, as TOML for `config_file` (empty when nothing is added).",
+      "type": "string"
+    },
+    "content": {
+      "description": "The report as the text output prints it.",
+      "type": "string"
+    },
+    "heki": {
+      "description": "The version of heki that wrote the report.",
+      "type": "string"
+    },
+    "kind": {
+      "$ref": "#/$defs/ReportKind"
+    },
+    "notes": {
+      "description": "What the reader should know to weigh the advice.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "reports_now": {
+      "$ref": "#/$defs/ReportsNow"
+    },
+    "root": {
+      "description": "The project root, as the output writes paths (`.` for the working directory).",
+      "type": "string"
+    },
+    "runs": {
+      "description": "The analyses the report was computed from, in the order they ran.",
+      "items": {
+        "$ref": "#/$defs/Run"
+      },
+      "type": "array"
+    },
+    "table_prefix": {
+      "description": "The table the configuration's keys are under in that file: `tool.heki` in a\n`pyproject.toml`, empty for a file that holds them at its top level (`heki.toml`).",
+      "type": "string"
+    },
+    "version": {
+      "description": "The version of the object's fields: it changes when a field is removed or changes\nmeaning; fields are only added within a version.",
+      "format": "uint32",
+      "maximum": 1,
+      "minimum": 1,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "$schema",
+    "kind",
+    "version",
+    "heki",
+    "root",
+    "table_prefix",
+    "analyzed",
+    "runs",
+    "reports_now",
+    "notes",
+    "config",
+    "config_toml",
+    "content"
+  ],
+  "title": "heki recommend",
+  "type": "object"
+}

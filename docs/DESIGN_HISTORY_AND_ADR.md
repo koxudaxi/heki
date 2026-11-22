@@ -6,7 +6,7 @@
 > Wave 1/2 corpora of 19 million lines, counterexample experiments, a study of
 > datamodel-code-generator's 196,000 lines and its 20,000 lines of in-house checkers, and checks
 > of CPython 3.15 PEP 810 and `ruff_python_parser` 0.17.5), the reasons for every revision from
-> v1.0 to v4.1, and every major decision (ADR-001 to ADR-019). The project's working name was
+> v1.0 to v4.1, and every major decision (ADR-001 to ADR-020). The project's working name was
 > `pyopt`; crate names below use the current `heki_*` names.
 
 ---
@@ -507,6 +507,40 @@ incremental LSP design, and the Stage 0-A Wave 2 decisions.
   (the update did not happen) and pending `--diff` changes (files would change) still exit 1.
   *Rejected*: failing on both severities (the 0.1 behavior); an `--exit-zero` switch (it hides
   the bugs too).
+### ADR-020: `heki recommend`: advice on the configuration from the project's own analysis
+- **Background**: what to enable and declare is the user's question after a first run: which
+  heuristic reports could be made exact, which opt-in rules would report here, which ownership
+  and effect contracts the code already keeps. Answers from names or guesses would be advice
+  heki cannot stand behind, and a false catalog entry would make exact reports false (R3).
+- **Decision**: an experimental subcommand, `heki recommend [PATHS]`, registered as
+  `command.recommend`. It takes `heki check`'s analysis options, which define the configuration
+  the advice is relative to, analyzes the project with `heki check`'s pipeline, and prints
+  sections with counts, reasons, and caveats, a `[tool.heki]` block, and a JSON object with a
+  published JSON Schema generated from the types that write it. Its analysis lives in
+  `heki_rules::recommend`, so the language server can use it later. Exit codes: `0`, or `2`
+  for configuration, I/O, or syntax errors; never `1`. The advice is kept honest by these
+  rules:
+  1. Every count is computed from this project by the pipeline `heki check` runs (inline
+     suppressions, `per-file-ignores`, `relax-async-in-tests`, the baseline).
+  2. A contract enters the block only when a trial run of its rules, with the strict sibling,
+     reports nothing on the code as it is, and a run with the whole block confirms it.
+  3. A catalog entry enters the block only when heki can verify every key it sets. heki cannot
+     verify a library's effects, so library entries never enter it; such calls are listed as
+     questions, with what a trial entry would report. `src` enters only after its trial.
+  4. Annotations and code changes are never in the block.
+  5. Likely truth quotes only published measurements, with their sample, interval, and date,
+     or the open premises of these reports; what is not measured is said so. No score is
+     synthesized.
+  6. Confidence levels are measurable conditions.
+  7. A hypothetical is printed as a conditional and kept out of the block and out of every
+     count of reports.
+  8. Paths narrower than the project root give a note, and lower the confidence of contracts.
+  9. The same input gives the same report: caps are counts, never times, and output is sorted.
+  10. It writes nothing, runs nothing, and keeps every value the configuration sets.
+  11. A cause the facts do not record is shown as not recorded, never guessed.
+  *Rejected*: a `heki check --recommend` flag (it would collide with `check`'s modes and exit
+  codes); catalog entries guessed from names or call shapes (rule 3); a probability or score
+  per rule (rule 5).
 ---
 
 ## 5. Open items
