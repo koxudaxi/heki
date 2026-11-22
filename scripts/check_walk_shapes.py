@@ -359,6 +359,16 @@ def cell_reads_of_several_names(n: int) -> Body:
     return Body(("xs", "out"), lines)
 
 
+def passed_iterables(n: int) -> Body:
+    """Generator expressions of two clauses, each over a value bound just before it: child scopes
+    each receiving their iterable from the function creating them, sized where the IR's loop
+    bounds are refined and again by `OPT113`, which sizes every loop of a function of two."""
+    lines = []
+    for i in range(n):
+        lines += [f"rows = xs[{i}]", f"out[{i}] = (1 for _ in rows for _ in (1, 2))"]
+    return Body(("xs", "out"), lines)
+
+
 def path_aliases(n: int) -> Body:
     """Merges each joining the previous alias of a package's `__path__` and a new read of it,
     each alias read."""
@@ -523,6 +533,7 @@ FAMILIES = [
         placements=("function", "method"),
         size=CELL_BINDINGS,
     ),
+    Family("passed_iterables", passed_iterables),
     Family("path_aliases", path_aliases),
     Family("merged_package_paths", merged_package_paths),
     Family("lazy_init_sites", lazy_init_sites, placements=("method",)),

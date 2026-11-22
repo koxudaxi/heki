@@ -647,6 +647,41 @@ fn module_constants_through_imports_module_bodies_and_tuples() {
     );
 }
 
+const SHARED_ITERABLES: &str = r#"import sqlite3
+
+from pkg.defs import STATUS_ORDER
+
+
+def shared(conn: sqlite3.Connection, rows):
+    pairs = [("a", 1), ("b", 2)]
+    fixed = [conn.execute("SELECT ?", (p,)) for p in pairs]
+    fixed_again = list(conn.execute("SELECT ?", (p,)) for p in pairs)
+    imported = [conn.execute("SELECT ?", (s,)) for s in STATUS_ORDER]
+    imported_again = list(conn.execute("SELECT ?", (s,)) for s in STATUS_ORDER)
+    data = [conn.execute("SELECT ?", (r,)) for r in rows]
+    data_again = list(conn.execute("SELECT ?", (r,)) for r in rows)
+    return fixed, fixed_again, imported, imported_again, data, data_again
+"#;
+
+#[test]
+fn child_scopes_receiving_one_iterable_read_its_size_alike() {
+    // Several child scopes over one value of the function creating them, each sized as one
+    // alone. Not reported: those over a display of this function or over a list another module
+    // fixes. Reported: those over a parameter.
+    let p = Project::new("sizes_shared_iterables");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/defs.py", DEFS)
+        .write("pkg/shared.py", SHARED_ITERABLES);
+    assert_both_versions(
+        &p,
+        "EFF103",
+        &[
+            ("pkg/shared.py:12", "EFF103"),
+            ("pkg/shared.py:13", "EFF103"),
+        ],
+    );
+}
+
 #[test]
 fn an_imported_display_its_module_binds_again_is_no_constant() {
     // Reported: a list another module fixes, read where the importing module binds the name

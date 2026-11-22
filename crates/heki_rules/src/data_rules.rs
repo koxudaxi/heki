@@ -2,7 +2,7 @@
 
 use crate::eff_rules::{DataOrigins, ItemOrigins, shortest};
 use crate::mut_rules::{CallInst, site_call};
-use crate::opt_rules::Sizes;
+use crate::opt_rules::{Creators, Sizes};
 use crate::{CheckContext, ModuleUnit};
 use heki_diagnostics::Diagnostic;
 use heki_effect::{CallHop, CallSite, CallTarget, SiteEffect, TypeCtx, with_paths};
@@ -30,6 +30,7 @@ pub(crate) fn data101(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Ve
     let tcx = TypeCtx::new(&unit.input, cx.decls, cx.kb);
     let no_types = FxHashMap::default();
     let constants = cx.fixed_constants(unit);
+    let creators = Creators::new(cx, &tcx, &no_types, unit, &constants);
     let item_origins: std::cell::OnceCell<ItemOrigins<'_>> = std::cell::OnceCell::new();
     for f in &unit.input.ir.functions {
         if f.is_class_body || f.loop_carried.iter().all(|lc| !lc.self_accumulating) {
@@ -52,7 +53,7 @@ pub(crate) fn data101(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Ve
         let mut hits: Vec<Hit<'_>> = Vec::new();
         for (lc, lp) in accumulating_loops(f)
             .into_iter()
-            .filter(|(_, lp)| sizes.data_sized(lp))
+            .filter(|(_, lp)| sizes.data_sized(lp, &creators))
         {
             // The first update (in block order) that is a quadratic reallocation of the previous
             // value: the reallocating call itself, or a project call returning one of the
