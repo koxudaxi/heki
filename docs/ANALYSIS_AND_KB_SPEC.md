@@ -985,6 +985,16 @@ which module imports which.
    that class, a subclass (known), or a base (open). One report per deep copy, the known claim
    first; the tests are related locations, at most five. What each copied class gives and which
    tests read each class's sentinel are answered once per run.
+6. **Below the attributes** (heuristic): the classes an object may hold in its attributes, by
+   the attribute types its classes declare (`ProjectDecls::classes_in_attributes`: a class, a
+   union's members, a generic container's items one level down, a protocol's structural
+   implementations; classes whose copy a hook or a `copyreg` registration decides left out,
+   `ProjectDecls::copy_decided_by_class`), read once per class. `heki_ir::walk::Closure` joins,
+   per class and once per run, the first class by name and sentinel holding a tested sentinel
+   among those it reaches (an unmetered budget: a walk over the declarations expands each class
+   once per run, and a budget spent in another order by `heki check` and the language server
+   would make them disagree). Each attribute of the copied class gives a heuristic claim naming
+   that attribute.
 
 #### `MUT112`: a value that is new on one path and borrowed on another, changed in place (opt-in)
 1. **What a value holds** (`heki_effect::ownership`): each instruction's `Source` says what the

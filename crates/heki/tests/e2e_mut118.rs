@@ -587,3 +587,163 @@ def copied_reassigned(r: Reassigned):
         vec![("models.py".to_owned(), 28)]
     );
 }
+
+/// An instance held below the copied object's attributes, found by their types (an optional
+/// attribute, the items of a list, the implementations of a protocol): datamodel-code-generator's
+/// own shape, where `copy.deepcopy(field.data_type)` copied the models its references reach. What
+/// the attributes hold at run time may be other objects, so the reports are heuristic. A class
+/// with a copy hook or a `copyreg` registration on the way leads nowhere (it copies its instances
+/// itself), through a tuple or a union too, and so do attributes holding a class object, a
+/// callable, `Self`, or a dict of values of no known class (`Any`, or a name heki cannot
+/// resolve).
+#[test]
+fn an_instance_below_the_copied_objects_attributes() {
+    let p = Project::new("mut118_below");
+    p.write("pkg/__init__.py", "")
+        .write(
+            "pkg/base.py",
+            r#"import copyreg
+from typing import Any, Callable, Optional, Protocol, Self
+
+from pydantic import BaseModel
+
+UNDEFINED: Any = object()
+
+
+class ReferenceSource(Protocol):
+    name: str
+
+
+class Reference(BaseModel):
+    path: str
+    source: Optional[ReferenceSource] = None
+
+
+class DataType(BaseModel):
+    type: Optional[str] = None
+    reference: Optional[Reference] = None
+    data_types: list["DataType"] = []
+
+
+class DataModel:
+    def __init__(self, name: str, default: Any = UNDEFINED) -> None:
+        self.name = name
+        self.default: Any = default
+
+    def has_default(self) -> bool:
+        return self.default is not UNDEFINED
+
+
+class Field(BaseModel):
+    name: str
+    data_type: DataType
+
+
+class Shared:
+    def __init__(self, model: DataModel) -> None:
+        self.model = model
+
+    def __deepcopy__(self, memo):
+        return self
+
+
+class Wrapper:
+    def __init__(self, shared: Shared, label: str) -> None:
+        self.shared = shared
+        self.label = label
+
+
+class Registered:
+    def __init__(self, model: DataModel) -> None:
+        self.model = model
+
+
+copyreg.pickle(Registered, lambda r: (Registered, (r.model,)))
+
+
+class Kept:
+    def __init__(self, registered: Registered) -> None:
+        self.registered = registered
+
+
+class Beta:
+    def __init__(self) -> None:
+        self.flag = UNDEFINED
+
+
+class Alpha:
+    def __init__(self, beta: Beta) -> None:
+        self.beta = beta
+        self.flag = UNDEFINED
+
+
+def flagged(a: Alpha, b: Beta) -> bool:
+    return a.flag is UNDEFINED or b.flag is UNDEFINED
+
+
+class Pair:
+    def __init__(self, alpha: Alpha) -> None:
+        self.alpha = alpha
+
+
+class Bundle:
+    factory: type[DataModel]
+    check: Callable[[DataModel], bool]
+    parent: Self
+    options: dict[str, Any]
+    unknown: dict[str, "NoSuchClass"]
+
+    def __init__(
+        self, pair: tuple[Shared, int], either: Shared | int, kind: type[DataModel]
+    ) -> None:
+        self.pair = pair
+        self.either = either
+        self.kind = kind
+"#,
+        )
+        .write(
+            "pkg/custom.py",
+            r#"import copy
+
+from pkg.base import Bundle, Field, Kept, Pair, Wrapper
+
+
+def isolated_type(field: Field):
+    return copy.deepcopy(field.data_type)
+
+
+def isolated_wrapper(wrapper: Wrapper):
+    return copy.deepcopy(wrapper)
+
+
+def isolated_bundle(bundle: Bundle):
+    return copy.deepcopy(bundle)
+
+
+def isolated_kept(kept: Kept):
+    return copy.deepcopy(kept)
+
+
+def isolated_pair(pair: Pair):
+    return copy.deepcopy(pair)
+"#,
+        );
+    let diags = diagnostics(&p, &[]);
+    assert_eq!(
+        reported(&diags),
+        vec![("custom.py".to_owned(), 7), ("custom.py".to_owned(), 23)]
+    );
+    // Of two holders below `alpha`, the report names the first by name.
+    assert!(
+        diags[1]["message"].as_str().unwrap().starts_with(
+            "`copy.deepcopy` may copy an instance of `Alpha` held in `alpha` or in what it holds,"
+        ),
+        "{}",
+        diags[1]["message"]
+    );
+    assert_eq!(
+        diags[0]["message"],
+        "`copy.deepcopy` may copy an instance of `DataModel` held in `reference` or in what it holds, whose `default` can hold the `object()` sentinel `UNDEFINED` that `DataModel.has_default` tests by identity: the copy holds a new object there, which the test does not match"
+    );
+    assert_eq!(diags[0]["certainty"], "heuristic");
+}
