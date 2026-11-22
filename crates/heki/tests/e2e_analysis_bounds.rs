@@ -4,7 +4,8 @@
 //! creating them, the size of the Soundness lane's proof state, the values
 //! `EFF107` follows from a task factory, the walk to the callable a builtin calls once per item,
 //! contracts with many call targets and argument lists, the walk to the uses handing a reference to
-//! a call target on, the locks `EFF109` follows, and the values class statements pass as bases.
+//! a call target on, the locks `EFF109` follows, the values class statements pass as bases, and
+//! the bindings the deque rewrite's candidates check.
 //!
 //! A shape's cost is counted, not timed: `heki check --walk-steps` writes the steps of each
 //! owner's walks (as `scripts/check_walk_shapes.py` reads them), and a shape is compared with the
@@ -5012,4 +5013,39 @@ fn the_census_of_many_classes_is_one_pass_over_their_sites() {
         }),
         "{totals:#}"
     );
+}
+
+/// A list front-inserted at `inserts` sites of a loop, then bound back and forth between two
+/// variables `16 * inserts` times after the loop: every insert is a candidate of the deque
+/// rewrite (`OPT121`), and each checks every binding of both variables.
+fn front_inserts_then_rebindings(inserts: usize) -> String {
+    let mut lines = vec![
+        "def fill(items):".to_owned(),
+        "    q = []".to_owned(),
+        "    for x in items:".to_owned(),
+    ];
+    lines.extend((0..inserts).map(|_| "        q.insert(0, x)".to_owned()));
+    for _ in 0..16 * inserts {
+        lines.push("    r = q".to_owned());
+        lines.push("    q = r".to_owned());
+    }
+    lines.push("    return list(q)".to_owned());
+    lines.join("\n") + "\n"
+}
+
+/// The deque rewrite's candidates of one function share one budget and one answer per value
+/// about the objects the variables a list reaches may hold: a binding is walked once, not once
+/// per candidate, and every insert keeps its fix.
+#[test]
+fn deque_candidates_of_one_list_walk_its_bindings_once() {
+    let found = check_linear(16, |inserts| {
+        let p = Project::new(&format!("bounds_deque_bindings_{inserts}"));
+        p.write("m.py", &front_inserts_then_rebindings(inserts));
+        p
+    });
+    let fixed = found
+        .iter()
+        .filter(|d| d["rule_code"] == "OPT121" && !d["fix"].is_null())
+        .count();
+    assert_eq!(fixed, 16, "{found:#?}");
 }
