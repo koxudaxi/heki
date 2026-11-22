@@ -325,6 +325,14 @@ def is_tests(n: int) -> Body:
     return Body(("p",), [*lines, "return p"])
 
 
+def alias_identity_tests(n: int) -> Body:
+    """A chain of names each bound to the one before, from an attribute load, each compared by
+    identity: every comparison asks what its operands copy."""
+    lines = ["v0 = p.attr"] + [f"v{i} = v{i - 1}" for i in range(1, n)]
+    lines += [f"x{i} = v{i} is p" for i in range(n)]
+    return Body(("p",), [*lines, "return p"])
+
+
 def match_pass_through(n: int) -> Body:
     """Many `match` statements whose cases slice or pass the value on."""
     lines = ["v = xs"]
@@ -517,6 +525,32 @@ def helper_chain(n: int) -> str:
     for i in range(n):
         lines += [f"def _h{i}(d):", f"    _h{i + 1}(d)", f"    _h{i + 1}(d)", ""]
     lines += [f"def _h{n}(d):", "    d.append(1)", "", "def entry(d):", "    _h0(d)", ""]
+    return "\n".join(lines)
+
+
+def sentinel_subclasses(n: int) -> str:
+    """A dataclass whose field defaults to an `object()` sentinel, with many subclasses, each
+    tested against the sentinel and deep-copied in functions of its own, and the base
+    deep-copied as often."""
+    lines = ["import copy", "from dataclasses import dataclass", "", "MISSING = object()", ""]
+    lines += ["@dataclass", "class Spec:", "    value: object = MISSING", ""]
+    for i in range(n):
+        lines += [f"class Spec{i}(Spec):", "    pass", ""]
+        lines += [f"def given{i}(s: Spec{i}):", "    return s.value is not MISSING", ""]
+        lines += [f"def isolated{i}(s: Spec{i}):", "    return copy.deepcopy(s)", ""]
+        lines += [f"def isolated_base{i}(s: Spec):", "    return copy.deepcopy(s)", ""]
+    return "\n".join(lines)
+
+
+def sentinels_per_class(n: int) -> str:
+    """Many `object()` sentinels, each the default of a field of its own dataclass, tested
+    against it and deep-copied in functions of its own."""
+    lines = ["import copy", "from dataclasses import dataclass", ""]
+    for i in range(n):
+        lines += [f"MISSING{i} = object()", "", "@dataclass", f"class Spec{i}:"]
+        lines += [f"    value: object = MISSING{i}", ""]
+        lines += [f"def given{i}(s: Spec{i}):", f"    return s.value is not MISSING{i}", ""]
+        lines += [f"def isolated{i}(s: Spec{i}):", "    return copy.deepcopy(s)", ""]
     return "\n".join(lines)
 
 
@@ -715,6 +749,7 @@ FAMILIES = [
     Family("item_reads", item_reads),
     Family("merged_flag_loop", merged_flag_loop),
     Family("is_tests", is_tests),
+    Family("alias_identity_tests", alias_identity_tests),
     Family("match_pass_through", match_pass_through),
     Family("with_statements", with_statements),
     Family("attribute_chain", attribute_chain),
@@ -794,6 +829,8 @@ FAMILIES = [
         placements=("project",),
         size=2000,
     ),
+    Family("sentinel_subclasses", project=sentinel_subclasses, placements=("project",), size=2000),
+    Family("sentinels_per_class", project=sentinels_per_class, placements=("project",), size=2000),
 ]
 
 

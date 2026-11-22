@@ -1,8 +1,8 @@
 //! Rule registry spanning all 3 families derived from the single Effect & Alias theory.
 //!
 //! - Family 1 (`MUT`): Mutation & State Effect (`MUT101`, `MUT103`, `MUT106`, `MUT107`, `MUT108`,
-//!   `MUT109`, `MUT110`, `MUT111`, `MUT112`, `MUT113`, `MUT114`, `MUT115`, `MUT201`, `MUT202`, `MUT203`,
-//!   `MUT204`, `MUT205`, `MUT206`, `MUT207`)
+//!   `MUT109`, `MUT110`, `MUT111`, `MUT112`, `MUT113`, `MUT114`, `MUT115`, `MUT118`, `MUT201`,
+//!   `MUT202`, `MUT203`, `MUT204`, `MUT205`, `MUT206`, `MUT207`)
 //! - Family 2 (`EFF` / `DATA`): Execution Effect (`EFF101`, `EFF102`, `EFF103`, `EFF105`, `EFF106`,
 //!   `EFF107`, `EFF109`, `EFF110`, `EFF112`, `EFF201`, `DATA101`)
 //! - Family 3 (`OPT`): Complexity Rewrite (`OPT101`, `OPT102`, `OPT103`, `OPT110`, `OPT111`,
@@ -30,7 +30,8 @@ pub use contracts::{
 pub use eff_rules::{ROOT_CAUSE_GROUP_THRESHOLD, fold_root_causes};
 pub use heki_diagnostics::Certainty;
 pub use mut_rules::{
-    CHAIN_RULES, ChainFacts, StaleWriteKey, chain_facts, family_readers, stale_writes_by_file,
+    CHAIN_RULES, ChainFacts, SentinelTestKey, StaleWriteKey, chain_facts, deep_copy_files,
+    family_readers, sentinel_tests_in, stale_writes_by_file,
 };
 pub use selection::{EffectiveSelectors, RuleSelection, SelectionError, Selectors, heuristic_hint};
 pub use snapshot::{SNAPSHOT_FILE, SnapshotError, SummarySnapshot};
@@ -333,6 +334,18 @@ pub const CORE_RULES: &[RuleMeta] = &[
         auto_fix_default: false,
         summary: "Opt-in: changing in place an object below a shallow copy the function made of state that outlives the call (`dict(x)`, `x.copy()`, `copy.copy(x)`, `model_copy()`): the copied value holds the same object, so the change is seen through it too.",
         doc: include_str!("../rule-docs/MUT115.md"),
+    },
+    RuleMeta {
+        code: "MUT118",
+        slug: "sentinel-lost-in-deepcopy",
+        family: RuleFamily::Mut,
+        certainty: Certainty::Heuristic,
+        activation: Activation::Default,
+        consequence: Consequence::Bug,
+        size_dependent_fix: false,
+        auto_fix_default: false,
+        summary: "`copy.deepcopy` of an instance holding an `object()` sentinel in an attribute that a function tests against the sentinel by identity (the copy holds a new object, which the test does not match).",
+        doc: include_str!("../rule-docs/MUT118.md"),
     },
     RuleMeta {
         code: "MUT201",
@@ -925,6 +938,7 @@ pub fn check_project(
     mut_rules::mut113(&cx, &mut out);
     mut_rules::mut108_mut110(&cx, &mut out);
     mut_rules::mut112(&cx, &mut out);
+    mut_rules::mut118(&cx, &mut out);
     mut_rules::mut109(&cx, &mut out)?;
     mut_rules::mut201(&cx, &mut out)?;
     mut_rules::mut203(&cx, &mut out)?;
