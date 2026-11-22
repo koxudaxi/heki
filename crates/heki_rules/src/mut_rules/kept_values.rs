@@ -14,8 +14,8 @@
 use super::{Method, invalidates, stale_reads};
 use heki_ast::Span;
 use heki_effect::{
-    AttrKeyPath, CacheEvent, CacheFlow, FlowBlock, FuncKey, ProjectDecls, ProjectIndex,
-    SelfAttrWrite,
+    AttrKeyPath, CacheEvent, CacheFlow, FlowBlock, FuncKey, InPlaceChange, ProjectDecls,
+    ProjectIndex, SelfAttrWrite,
 };
 use heki_ir::BlockId;
 use heki_ir::walk::{Budget, Facts, Sparse, fixpoint};
@@ -56,7 +56,7 @@ pub(super) fn established(
     let classes = stale_reads::classes_running(index, decls, writer, prop);
     let read = AttrKeyPath {
         attr: attr.to_owned(),
-        const_key: w.key().map(str::to_owned),
+        const_key: written_key(w).map(str::to_owned),
     };
     let holders: Vec<&String> = classes
         .iter()
@@ -234,10 +234,21 @@ fn plain_write(decls: &ProjectDecls, class: &str, attr: &str, w: &SelfAttrWrite)
                 .iter()
                 .all(|c| !decls.attr_write_runs_code(c, attr));
     }
-    w.change().is_some_and(|change| {
+    in_place_change(w).is_some_and(|change| {
         decls.plain_attr(class, attr)
             && decls.method_not_overridden(change.kind.class(), &change.method, change.by_name)
     })
+}
+
+/// The literal key of the write `w` (`heki_effect::KeptWrite::key`).
+fn written_key(w: &SelfAttrWrite) -> Option<&str> {
+    w.kept.as_ref().and_then(|k| k.key.as_deref())
+}
+
+/// The in-place change of a builtin container the write `w` makes
+/// (`heki_effect::KeptWrite::change`).
+fn in_place_change(w: &SelfAttrWrite) -> Option<&InPlaceChange> {
+    w.kept.as_ref().and_then(|k| k.change.as_ref())
 }
 
 /// **Kept to the return** in one definition of a method, for the value kept under one name:

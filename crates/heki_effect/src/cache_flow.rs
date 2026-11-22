@@ -151,16 +151,6 @@ pub(crate) struct KeptPoint {
 }
 
 impl SelfAttrWrite {
-    /// [`KeptWrite::key`].
-    pub fn key(&self) -> Option<&str> {
-        self.kept.as_ref().and_then(|k| k.key.as_deref())
-    }
-
-    /// [`KeptWrite::change`].
-    pub fn change(&self) -> Option<&InPlaceChange> {
-        self.kept.as_ref().and_then(|k| k.change.as_ref())
-    }
-
     /// A write that fills a memo rather than changing what was computed from the object: a
     /// memo-shaped write (`setdefault`, a store under `if k not in <obj>.<attr>:`), or an
     /// in-place change of an attribute named as a memo or cache ([`is_memo_name`]). Rebinding
