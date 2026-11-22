@@ -133,7 +133,8 @@ Candidates are drawn from what the code does, never from names:
   whose class is used in at least two modules. The entry allows the readers as above.
 - `effect-boundaries`: a module whose functions reach no blocking call, with
   `forbid = ["blocking"]`; a package whose every module qualifies is one scope. A scope has at
-  least three functions. Test code, as `relax-async-in-tests` finds it, gets no boundary.
+  least three functions. Test code, as `relax-async-in-tests` finds it, gets no boundary: a
+  package holding test modules names its other modules one by one, not by a wildcard.
 
 What the configuration already declares is not proposed: an attribute a `write-owners` or
 `read-owners` target names, and a module an effect boundary forbidding every blocking effect

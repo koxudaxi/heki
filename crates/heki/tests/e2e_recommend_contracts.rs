@@ -574,6 +574,35 @@ fn effect_boundaries_cover_modules_and_packages_reaching_no_blocking_call() {
     assert!(report["rejected_contracts"].as_array().unwrap().is_empty());
 }
 
+#[test]
+fn a_package_holding_a_test_module_names_its_other_modules_one_by_one() {
+    let p = layers("recommend_contract_boundary_tests_inside");
+    p.write(
+        "app/domain/test_rules.py",
+        "import time\n\nfrom app.domain.rules import check\n\n\ndef test_check() -> None:\n    \
+         time.sleep(1)\n    assert check(1)\n",
+    );
+    let report = recommend_json(&p, &[]);
+    // A wildcard would cover the test module, and its blocking call would reject the boundary.
+    let domain = candidate(&report, "effect-boundaries", "app.domain");
+    assert_eq!(
+        domain["entry"]["scopes"],
+        json!(["app.domain:*", "app.domain.rules:*"])
+    );
+    assert_eq!(
+        (
+            &domain["evidence"]["modules"]["count"],
+            &domain["evidence"]["modules"]["items"]
+        ),
+        (&json!(2), &json!(["app.domain", "app.domain.rules"])),
+        "{domain:#}"
+    );
+    assert_eq!(domain["confidence"], "high");
+    let lib = candidate(&report, "effect-boundaries", "lib");
+    assert_eq!(lib["entry"]["scopes"], json!(["lib.*:*"]));
+    assert_eq!(report["rejected_contracts"], json!([]), "{report:#}");
+}
+
 /// `existing` with `block` added as a user would: the block's tables after the file's own.
 fn applied(existing: &str, block: &str) -> String {
     format!("{existing}\n{block}")

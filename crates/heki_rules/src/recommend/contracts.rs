@@ -464,7 +464,7 @@ pub(super) fn generate(
             .collect();
         by_kind.insert(
             ContractKind::EffectBoundaries,
-            effect_boundaries(index, &modules, declared),
+            effect_boundaries(index, &modules, &test_modules, declared),
         );
     }
     let mut out = Generated {
@@ -625,9 +625,11 @@ fn read_owner(
 /// The `effect-boundaries` candidates: each module whose functions reach no blocking effect,
 /// a package whose every module does as one scope, with at least [`MIN_SCOPE_FUNCTIONS`]
 /// functions; none for the modules a declared boundary forbidding every blocking effect covers.
+/// `modules` leave out the modules of test code, `test_modules`.
 fn effect_boundaries(
     index: &ProjectIndex,
     modules: &[&ModuleUse<'_>],
+    test_modules: &FxHashSet<&str>,
     declared: &Declared,
 ) -> Vec<Candidate> {
     let qualifies = |m: &ModuleUse<'_>| {
@@ -658,6 +660,10 @@ fn effect_boundaries(
             .push(m);
     }
     scopes.retain(|_, members| defined_functions(members).len() >= MIN_SCOPE_FUNCTIONS);
+    // The packages holding test code: a wildcard below one would cover the tests too.
+    let holding_tests: FxHashSet<&str> = (test_modules.iter())
+        .flat_map(|t| t.match_indices('.').map(|(end, _)| &t[..end]))
+        .collect();
     // Who calls into each scope from outside it.
     let scope_of: FxHashMap<&FuncKey, usize> = (scopes.values().enumerate())
         .flat_map(|(s, members)| {
@@ -686,11 +692,15 @@ fn effect_boundaries(
         .map(|((scope, members), callers)| {
             let package = members.len() > 1 || members[0].module != scope;
             let mut patterns = Vec::new();
-            if members.iter().any(|m| m.module == scope) {
-                patterns.push(format!("{scope}:*"));
-            }
-            if package {
-                patterns.push(format!("{scope}.*:*"));
+            if package && holding_tests.contains(scope) {
+                patterns.extend(members.iter().map(|m| format!("{}:*", m.module)));
+            } else {
+                if members.iter().any(|m| m.module == scope) {
+                    patterns.push(format!("{scope}:*"));
+                }
+                if package {
+                    patterns.push(format!("{scope}.*:*"));
+                }
             }
             let functions = defined_functions(&members);
             let audience = Listed::of(callers.iter().map(|c| c.module.clone()));
