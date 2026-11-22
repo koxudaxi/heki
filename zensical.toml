@@ -15,6 +15,7 @@ nav = [
     { "Configuration" = "configuration.md" },
     { "Fixes and Safety" = "fixes.md" },
     { "Adopting heki in a Code Base" = "adoption.md" },
+    { "Configuration Advice" = "recommend.md" },
     { "CLI Reference" = "cli-reference.md" },
   ]},
   { "Rules" = "rules/index.md" },
