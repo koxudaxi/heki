@@ -1960,6 +1960,38 @@ class Concrete(Abstract):
         return self.a
 
 
+class Viewed:
+    def __init__(self, raw: dict[str, str]) -> None:
+        self.raw = raw
+
+    @property
+    def key(self) -> str:
+        return self.raw.get("k", "")
+
+    @cached_property
+    def p(self) -> str:
+        return self.key
+
+
+class Overridden(Viewed):
+    @property
+    def key(self) -> str:
+        return ""
+
+
+class Plain:
+    def __init__(self, raw: dict[str, str]) -> None:
+        self.raw = raw
+
+    @property
+    def key(self) -> str:
+        return self.raw.get("k", "")
+
+    @cached_property
+    def p(self) -> str:
+        return self.key
+
+
 class Twice:
     def __init__(self) -> None:
         self.a = 1
@@ -2035,6 +2067,10 @@ fn reads_on_every_path_are_the_loads_and_self_calls_every_normal_return_passes()
     assert_eq!(must("Loop.p"), set(&[whole("a")]));
     // An abstract method never runs: what its overrides read counts.
     assert_eq!(must("Abstract.p"), set(&[whole("a")]));
+    // A property read is a `self` call of its getter: `Plain.key` reads `raw` on every path;
+    // `Overridden.key` does not, so `Viewed.p`'s read of `key` establishes nothing.
+    assert_eq!(must("Plain.p"), set(&[whole("key"), whole("raw")]));
+    assert_eq!(must("Viewed.p"), set(&[whole("key")]));
     // Both definitions of a name defined twice read `a`; only one reads `b`.
     assert_eq!(must("Twice.get"), set(&[whole("a")]));
     // A helper one definition calls on every path is not the other's: a name bound twice takes

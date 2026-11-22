@@ -670,10 +670,10 @@ pub struct KeptFacts {
     /// exception edges into handlers included: its own loads that returned, whose value is
     /// read as a whole or, when every use of a load reads an item of a constant key, with that
     /// key (an attribute read as a whole covers each of its keys); and the facts of the `self`
-    /// methods it calls on every such path, when the call's targets are every implementation it
-    /// can run and each runs its body at every call (a cached function, or a callee of the
-    /// function's own call-graph component, adds nothing; over several targets, what every one
-    /// reads).
+    /// methods it calls and properties it reads on every such path, when the call's targets
+    /// are every implementation it can run and each runs its body at every call (a cached
+    /// property or function, or a callee of the function's own call-graph component, adds
+    /// nothing; over several targets, what every one reads).
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub must_read_self_attrs: BTreeSet<AttrKeyPath>,
     /// The values kept in an instance `__dict__` (a `@cached_property`'s) the function may
@@ -1888,7 +1888,9 @@ pub struct CallSite {
     pub under_lock: bool,
     /// The targets are every implementation the call can run under R2 and R5: the receiver
     /// is no protocol, every member of a union resolves, and no project subclass's
-    /// implementation is missing. Computed with [`Self::on_every_return`].
+    /// implementation is missing; for a read that runs property getters, every class the
+    /// object may be finds one of them first (`TypeCtx::getter_targets_complete`). Computed
+    /// with [`Self::on_every_return`].
     pub complete: bool,
     /// Whether the caller has made the call whenever it returns normally (computed when an
     /// enabled rule reads [`EffectSummary::must_exec`]).

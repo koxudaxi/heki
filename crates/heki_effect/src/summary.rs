@@ -2628,16 +2628,11 @@ impl<'a> Extractor<'a> {
         match kind {
             // A property getter the read runs: what it removes is its own, unless the read's
             // targets are not every implementation it can run.
-            InstKind::AttrLoad { obj, attr, .. } => match self.callees.get(&at) {
-                Some(callee @ Callee::Project(..))
-                    if !self
-                        .cx
-                        .method_targets_complete(self.val(*obj), attr, callee) =>
-                {
-                    Some(KeptRemovalKind::Any)
-                }
-                _ => None,
-            },
+            InstKind::AttrLoad { .. } => {
+                (matches!(self.callees.get(&at), Some(Callee::Project(..)))
+                    && !self.targets_complete_at(at))
+                .then_some(KeptRemovalKind::Any)
+            }
             InstKind::AttrDelete { attr, .. } if attr == "__dict__" => Some(KeptRemovalKind::Any),
             InstKind::AttrDelete { attr, .. } => named(attr),
             InstKind::AttrStore { attr, .. } if attr == "__dict__" => Some(KeptRemovalKind::Any),
@@ -6771,6 +6766,15 @@ impl<'a> Extractor<'a> {
                 let value = callee_var.and_then(|v| self.val(v));
                 let callee = self.cx.resolve_call(value);
                 self.cx.call_targets_complete(value, &callee)
+            }
+            // A read that runs property getters ([`Self::property_read`]): the getter each class
+            // the object may be finds for the name (more than CHA follows are none).
+            Some(InstKind::AttrLoad { obj, attr, .. }) => {
+                let recv = self.val(*obj);
+                matches!(
+                    self.cx.resolve_attr_load(recv, attr),
+                    Some(Callee::Project(keys, _)) if self.cx.getter_targets_complete(recv, attr, &keys)
+                )
             }
             _ => false,
         }

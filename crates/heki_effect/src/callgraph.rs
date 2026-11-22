@@ -321,10 +321,10 @@ fn recompute(
 }
 
 /// [`crate::KeptFacts::must_read_self_attrs`] the function gets from the `self` methods it has
-/// called, and that returned, whenever it returns normally: the attributes every target reads
-/// on every path, when the targets are every implementation the call can run and each runs its
-/// body at every call (a cached property or function may hand out what an earlier call
-/// computed). A callee of the function's own call-graph component adds nothing, so the fact
+/// called and the properties it has read, and that returned, whenever it returns normally: the
+/// attributes every target reads on every path, when the targets are every implementation the
+/// call can run and each runs its body at every call (a cached property or function may hand
+/// out what an earlier call computed). A callee of the function's own call-graph component adds nothing, so the fact
 /// needs no fixpoint of its own. A name bound to two definitions gains nothing: each site's
 /// paths are its own definition's, and a call runs one of them.
 fn must_reads_through_self_calls(
