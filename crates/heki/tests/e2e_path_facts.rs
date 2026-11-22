@@ -1,7 +1,8 @@
-//! The path and loop facts of `heki_ir::facts`, end to end through `heki dump-facts`: whether a
-//! call runs whenever its function returns, over the edges into its handlers; whether it runs on
-//! every iteration of a loop that completes; branches the module's constants decide; the trip
-//! counts the code fixes, past 16 too; and where the items a loop steps through come from.
+//! The path and loop facts of `heki_ir::facts`, end to end through `heki dump-facts` (with the
+//! reader the rules have): whether a call runs whenever its function returns, over the edges
+//! into its handlers; whether it runs on every iteration of a loop that completes; branches the
+//! module's constants decide; the trip counts the code fixes, past 16 too; and where the items a
+//! loop steps through come from.
 
 mod common;
 
@@ -84,6 +85,13 @@ def in_with(open_, p, sub):
         data = fh.read()
         sub.run(data)
     return 1
+
+
+def in_open(p, sub):
+    with open(p) as fh:
+        data = fh.read()
+        sub.run(data)
+    return 1
 "#,
     );
     let expect = |qualname: &str, text: &str, called: &str, returned: &str| {
@@ -127,6 +135,9 @@ def in_with(open_, p, sub):
     // A `with` whose manager heki does not resolve may suppress what its body raises.
     expect("in_with", "fh.read()", "not_every", "not_every");
     expect("in_with", "sub.run(data)", "not_every", "not_every");
+    // The facts are those the rules read: the catalog says the file `open` returns suppresses
+    // nothing.
+    expect("in_open", "sub.run(data)", "every", "every");
 }
 
 #[test]
