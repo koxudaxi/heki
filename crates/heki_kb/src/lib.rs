@@ -247,7 +247,8 @@ pub enum Emits {
     /// (`Session.flush`, a driver's `commit()`).
     IfPending,
     /// Only when the receiver has not loaded its results (Django's `QuerySet.count()` on an
-    /// evaluated query set counts its cache).
+    /// evaluated query set counts its cache; a database cursor that is exhausted returns nothing
+    /// without a query).
     UnlessCached,
     /// Only when no open connection is at hand (a pool checkout, Django's
     /// `connection.cursor()`).
@@ -3032,6 +3033,14 @@ mod tests {
                 "django.db.models.query.QuerySet.alast",
                 "django.db.models.query.QuerySet.aexists",
                 "django.db.models.query.QuerySet.acount",
+                "pymongo.cursor.Cursor.__iter__",
+                "pymongo.cursor.Cursor.to_list",
+                "pymongo.asynchronous.cursor.AsyncCursor.__aiter__",
+                "pymongo.asynchronous.cursor.AsyncCursor.to_list",
+                "motor.motor_asyncio.AsyncIOMotorCursor.__aiter__",
+                "motor.motor_asyncio.AsyncIOMotorCursor.to_list",
+                "motor.motor_asyncio.AsyncIOMotorLatentCommandCursor.__aiter__",
+                "motor.motor_asyncio.AsyncIOMotorLatentCommandCursor.to_list",
             ],
         ),
         (

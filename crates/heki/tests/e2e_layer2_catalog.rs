@@ -2333,11 +2333,19 @@ async def tp_async_cursors_run_per_item(coll: AsyncCollection, ids):
         async for doc in coll.find({"_id": i}):
             pass
         await coll.find({"_id": i}).sort("x").to_list()
+
+
+async def tp_exhausted_cursor_reused(coll: AsyncCollection, ids):
+    cursor = coll.find({})
+    for i in ids:
+        await cursor.to_list()
 "#;
 
 /// A cursor or a generator does its I/O while it is iterated, not when it is made: one handed
 /// to a thread runs there, one iterated on the event loop blocks it, and an async cursor is a
-/// query per iteration of the loop around its iteration.
+/// query per iteration of the loop around its iteration. A cursor that is already exhausted
+/// returns nothing without a query, so a consumption in a loop is a possible query, never an
+/// exact one, even where the cursor is made in the loop.
 #[test]
 fn lazy_iterators_do_their_io_when_iterated() {
     assert_eq!(
@@ -2356,13 +2364,13 @@ fn lazy_iterators_do_their_io_when_iterated() {
             ),
             d(
                 17,
-                "EFF101",
+                "EFF111",
                 "tp_iterated_on_the_loop",
                 "pymongo.cursor.Cursor.__iter__"
             ),
             d(
                 18,
-                "EFF101",
+                "EFF111",
                 "tp_iterated_on_the_loop",
                 "pymongo.cursor.Cursor.to_list"
             ),
@@ -2380,8 +2388,14 @@ fn lazy_iterators_do_their_io_when_iterated() {
             ),
             d(
                 34,
-                "EFF103",
+                "EFF113",
                 "tp_async_cursors_run_per_item",
+                "pymongo.asynchronous.cursor.AsyncCursor.to_list"
+            ),
+            d(
+                40,
+                "EFF113",
+                "tp_exhausted_cursor_reused",
                 "pymongo.asynchronous.cursor.AsyncCursor.to_list"
             ),
         ]
@@ -3169,7 +3183,7 @@ fn async_drivers_count_their_queries_and_duckdb_waits_on_nothing_known() {
             ),
             d(
                 42,
-                "EFF103",
+                "EFF113",
                 "tp_motor_in_loops",
                 "motor.motor_asyncio.AsyncIOMotorCursor.to_list"
             ),
