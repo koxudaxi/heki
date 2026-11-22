@@ -4719,39 +4719,33 @@ fn reads_on_every_path_of_many_keys_stay_within_the_function_budget() {
 /// through the merges per operator.
 #[test]
 fn built_values_after_a_write_are_decided_once_per_variable() {
-    let branches = 1_000;
-    let mut lines = vec![
-        "from functools import cached_property".to_owned(),
-        String::new(),
-        String::new(),
-        "class C:".to_owned(),
-        "    def __init__(self):".to_owned(),
-        "        self.a = 0".to_owned(),
-        "        self.flag = False".to_owned(),
-        String::new(),
-        "    @cached_property".to_owned(),
-        "    def p(self):".to_owned(),
-        "        return self.a".to_owned(),
-        String::new(),
-        "    def bump(self):".to_owned(),
-        "        self.a = 1".to_owned(),
-        "        total = 0".to_owned(),
-    ];
-    for _ in 0..branches {
-        lines.push("        if self.flag:".to_owned());
-        lines.push("            total = total + 1".to_owned());
-        lines.push("        else:".to_owned());
-        lines.push("            total = -total".to_owned());
-    }
-    lines.push("        return None".to_owned());
-    let p = Project::new("bounds_built_values");
-    p.write("pyproject.toml", MUT101_CONFIG)
-        .write("m.py", &(lines.join("\n") + "\n"));
-    let found: Vec<String> = check_within(&p, Duration::from_secs(20))
-        .iter()
-        .filter(|d| d["rule_code"] == "MUT101")
-        .map(|d| d["qualname"].as_str().unwrap().to_owned())
-        .collect();
+    let found = kept_value_changes("bounds_built_values", 1_000, &[], |branches| {
+        let mut lines = vec![
+            "from functools import cached_property".to_owned(),
+            String::new(),
+            String::new(),
+            "class C:".to_owned(),
+            "    def __init__(self):".to_owned(),
+            "        self.a = 0".to_owned(),
+            "        self.flag = False".to_owned(),
+            String::new(),
+            "    @cached_property".to_owned(),
+            "    def p(self):".to_owned(),
+            "        return self.a".to_owned(),
+            String::new(),
+            "    def bump(self):".to_owned(),
+            "        self.a = 1".to_owned(),
+            "        total = 0".to_owned(),
+        ];
+        for _ in 0..branches {
+            lines.push("        if self.flag:".to_owned());
+            lines.push("            total = total + 1".to_owned());
+            lines.push("        else:".to_owned());
+            lines.push("            total = -total".to_owned());
+        }
+        lines.push("        return None".to_owned());
+        lines.join("\n") + "\n"
+    });
     assert_eq!(found, vec!["C.bump"]);
 }
 
@@ -4760,18 +4754,21 @@ fn built_values_after_a_write_are_decided_once_per_variable() {
 /// would be handed are inert, are decided once per key, not again per pair of keys.
 #[test]
 fn special_methods_of_a_large_display_after_a_write_are_decided_once_per_key() {
-    let keys = 20_000;
-    let entries: Vec<String> = (0..keys).map(|i| format!("\"k{i}\": {i}")).collect();
-    let source = format!(
-        "from functools import cached_property\n\n\nclass C:\n    def __init__(self):\n        \
-         self.a = 0\n\n    @cached_property\n    def p(self):\n        return self.a\n\n    \
-         def bump(self):\n        self.a = 1\n        table = {{{}}}\n        return table\n",
-        entries.join(", ")
-    );
-    let p = Project::new("bounds_large_display");
-    p.write("pyproject.toml", MUT101_CONFIG)
-        .write("m.py", &source);
-    let found: Vec<(String, String)> = check_within(&p, Duration::from_secs(20))
+    let diagnostics = check_past_budgets(20_000, &[], |keys| {
+        let entries: Vec<String> = (0..keys).map(|i| format!("\"k{i}\": {i}")).collect();
+        let source = format!(
+            "from functools import cached_property\n\n\nclass C:\n    def __init__(self):\n        \
+             self.a = 0\n\n    @cached_property\n    def p(self):\n        return self.a\n\n    \
+             def bump(self):\n        self.a = 1\n        table = {{{}}}\n        return table\n",
+            entries.join(", ")
+        );
+        module_project(
+            &format!("bounds_large_display_{keys}"),
+            MUT101_CONFIG,
+            &source,
+        )
+    });
+    let found: Vec<(String, String)> = diagnostics
         .iter()
         .filter(|d| d["rule_code"] == "MUT101")
         .map(|d| {
