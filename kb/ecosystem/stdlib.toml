@@ -828,6 +828,21 @@ symbol = "builtins.frozenset"
 copy_sanitizer = "shallow"
 opaque_to_layer3 = true
 
+[[entries]]
+symbol = "builtins.bytearray"
+copy_sanitizer = "shallow"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "collections.OrderedDict"
+copy_sanitizer = "shallow"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "collections.deque"
+copy_sanitizer = "shallow"
+opaque_to_layer3 = true
+
 # --- Result types (MUT114: `html.escape(text).split("\n")` is a list by construction) ---
 
 [[entries]]

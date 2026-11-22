@@ -295,6 +295,8 @@ fn changes_text(out: &mut String, r: &InspectReport) {
         for what in p.what.iter().filter(|w| !listed(w)) {
             let name = if what.is_empty() {
                 p.param.clone()
+            } else if what == heki_effect::ELEMENTS_PATH {
+                format!("{}[...]", p.param)
             } else {
                 format!("{}.{what}", p.param)
             };
