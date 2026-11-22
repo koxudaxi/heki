@@ -133,6 +133,9 @@ pub struct WriteOwnerRule {
     /// `"allow"`: a write through the receiver of the method it is judged in (`self`, `cls`,
     /// `super()`) is allowed; `"report"` (default) judges it like any other.
     pub own_receiver: Option<String>,
+    /// Project protocols (class patterns, their subclasses included): a write through a value
+    /// typed with one that declares the attribute is allowed.
+    pub allowed_protocols: Vec<String>,
 }
 
 /// `[[tool.heki.read-owners]]` contract for `MUT203` (the read side of `write-owners`).
@@ -155,6 +158,9 @@ pub struct ReadOwnerRule {
     pub attribution: Option<String>,
     /// `"allow"` or `"report"` (default), as for `WriteOwnerRule`.
     pub own_receiver: Option<String>,
+    /// Project protocols, as for `WriteOwnerRule`: a read through a value typed with one that
+    /// declares the attribute is allowed.
+    pub allowed_protocols: Vec<String>,
 }
 
 /// `[[tool.heki.call-owners]]` contract for `MUT204`: who may call a function or method, or
@@ -190,6 +196,9 @@ pub struct CallOwnerRule {
     /// `"allow"` or `"report"` (default), as for `WriteOwnerRule`: a call of a method bound to
     /// the receiver of the method it is judged in.
     pub own_receiver: Option<String>,
+    /// Project protocols, as for `WriteOwnerRule`: a call through a value typed with one that
+    /// declares the method is allowed.
+    pub allowed_protocols: Vec<String>,
 }
 
 /// `[[tool.heki.effect-boundaries]]` contract for `EFF201`: effects that must not be reached,
@@ -746,6 +755,7 @@ message = "read children through GenerationIndex instead"
 unresolved = "report"
 attribution = "call-graph"
 own-receiver = "allow"
+allowed-protocols = ["*Host"]
 
 [[tool.heki.call-owners]]
 name = "reference-mutators"
@@ -813,6 +823,7 @@ import-probes = "report"
                 unresolved: Some("report".into()),
                 attribution: Some("call-graph".into()),
                 own_receiver: Some("allow".into()),
+                allowed_protocols: vec!["*Host".into()],
             }
         );
         assert_eq!(
@@ -829,6 +840,7 @@ import-probes = "report"
                 references: Some("calls-and-bases".into()),
                 attribution: Some("lexical".into()),
                 own_receiver: Some("report".into()),
+                allowed_protocols: Vec::new(),
             }
         );
         assert_eq!(

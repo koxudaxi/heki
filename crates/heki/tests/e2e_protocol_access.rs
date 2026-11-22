@@ -1,7 +1,9 @@
 //! Reads and calls through a value typed with a project protocol, end to end through the real
 //! binary: when the protocol declares the member, the read and call contracts judge the access
 //! by the protocol, not by the classes implementing it, and what an implementation's private
-//! method does inside stays with it. A write is one of the implementations either way.
+//! method does inside stays with it. A write is one of the implementations either way. With
+//! `allowed-protocols`, an access through a protocol the key names that declares the member is
+//! allowed.
 
 mod common;
 
@@ -318,4 +320,326 @@ fn a_boundary_exempts_a_protocol_call_by_its_declaration() {
         &boundary("allowed-callees = [\"Host._helper\"]\n"),
     );
     assert!(calls(&p).is_empty());
+}
+
+/// `(line, code, function, target)` of every report of `p`: the first two names a message quotes.
+fn named(p: &Project) -> Vec<(u64, String, String, String)> {
+    let (code, stdout, stderr) = p.check(&["--output-format", "json"]);
+    assert!(code == 0 || code == 1, "{stdout}{stderr}");
+    let diags: Vec<Value> = serde_json::from_str(&stdout).unwrap();
+    let mut out: Vec<(u64, String, String, String)> = diags
+        .iter()
+        .map(|d| {
+            let message = d["message"].as_str().unwrap();
+            let quoted: Vec<&str> = message.split('`').skip(1).step_by(2).collect();
+            (
+                d["line"].as_u64().unwrap(),
+                d["rule_code"].as_str().unwrap().to_owned(),
+                quoted[0].to_owned(),
+                quoted[1].to_owned(),
+            )
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+const FLAGS: &str = r#"from __future__ import annotations
+
+from typing import Protocol
+
+
+class RuntimeFlags(Protocol):
+    _has_runtime_expressions: bool
+    _items: list[int]
+
+    def _reset(self) -> None: ...
+"#;
+
+const PARSER: &str = r#"from __future__ import annotations
+
+
+class Parser:
+    def __init__(self) -> None:
+        self._has_runtime_expressions = False
+        self._graph_builder: object = object()
+        self._items: list[int] = []
+        self._other = 1
+
+    def _reset(self) -> None:
+        self._items = []
+
+    def _build(self) -> object:
+        return self._graph_builder
+"#;
+
+const RENDER: &str = r#"from __future__ import annotations
+
+from typing import Protocol
+
+from pkg.parser._flags import RuntimeFlags
+from pkg.parser.base import Parser
+
+
+class RenderHost(RuntimeFlags, Protocol):
+    _graph_builder: object
+
+    def _build(self) -> object: ...
+
+
+def assign(parser: RenderHost) -> object:
+    return parser._graph_builder
+
+
+def flagged(parser: RenderHost) -> bool:
+    return parser._has_runtime_expressions
+
+
+def mark(parser: RenderHost) -> None:
+    parser._has_runtime_expressions = True
+    parser._items.append(1)
+
+
+def build(parser: RenderHost) -> object:
+    parser._reset()
+    return parser._build()
+
+
+def _set(parser: RenderHost) -> None:
+    parser._graph_builder = None
+
+
+def run(parser: RenderHost) -> None:
+    _set(parser)
+
+
+def undeclared(parser: RenderHost) -> object:
+    return parser._other
+
+
+def concrete(parser: Parser) -> object:
+    return parser._graph_builder
+
+
+def bad_read(flags: RuntimeFlags) -> bool:
+    return flags._has_runtime_expressions
+
+
+def bad_write(flags: RuntimeFlags) -> None:
+    flags._has_runtime_expressions = True
+"#;
+
+fn host_project(name: &str, keys: &str) -> Project {
+    let contract = |section: &str, who: &str| {
+        format!(
+            "[[tool.heki.{section}]]\nname = \"{section}\"\ntargets = [\"pkg.parser.base.Parser._*\", \"pkg.parser._flags.RuntimeFlags._*\"]\nforbidden-{who} = [\"pkg.parser._render:*\"]\n{keys}\n"
+        )
+    };
+    let p = Project::new(name);
+    p.write(
+        "pyproject.toml",
+        &format!(
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT201\", \"MUT203\", \"MUT204\"]\n\n{}{}{}",
+            contract("read-owners", "readers"),
+            contract("write-owners", "writers"),
+            contract("call-owners", "callers"),
+        ),
+    )
+    .write("pkg/__init__.py", "")
+    .write("pkg/parser/__init__.py", "")
+    .write("pkg/parser/_flags.py", FLAGS)
+    .write("pkg/parser/base.py", PARSER)
+    .write("pkg/parser/_render.py", RENDER);
+    p
+}
+
+#[test]
+fn allowed_protocols_allow_the_accesses_through_a_named_protocol_declaring_the_member() {
+    let at = |line: u64, code: &str, func: &str, target: &str| {
+        (line, code.to_owned(), func.to_owned(), target.to_owned())
+    };
+    // `RenderHost` matches `*Host` and declares `_graph_builder` and `_build`, and inherits
+    // `_has_runtime_expressions`, `_items`, and `_reset` from `RuntimeFlags`: reading, writing
+    // (also inside a container, and through a private helper), and calling them through it is
+    // allowed. `_other` is no member of the protocol, `concrete` reads through the class, and
+    // `RuntimeFlags` is not named.
+    let kept = || {
+        vec![
+            at(
+                42,
+                "MUT203",
+                "undeclared",
+                "pkg.parser._render.RenderHost._other",
+            ),
+            at(42, "MUT203", "undeclared", "pkg.parser.base.Parser._other"),
+            at(
+                46,
+                "MUT203",
+                "concrete",
+                "pkg.parser.base.Parser._graph_builder",
+            ),
+            at(
+                50,
+                "MUT203",
+                "bad_read",
+                "pkg.parser._flags.RuntimeFlags._has_runtime_expressions",
+            ),
+            at(
+                54,
+                "MUT201",
+                "bad_write",
+                "pkg.parser._flags.RuntimeFlags._has_runtime_expressions",
+            ),
+            at(
+                54,
+                "MUT201",
+                "bad_write",
+                "pkg.parser.base.Parser._has_runtime_expressions",
+            ),
+        ]
+    };
+    let lexical = host_project(
+        "allowed_protocols_lexical",
+        "attribution = \"lexical\"\nallowed-protocols = [\"*Host\"]\n",
+    );
+    assert_eq!(named(&lexical), kept());
+    // By the call graph, `Parser._reset` hands its write of its own `self` to the function
+    // calling it through the protocol: that object is no value typed with the protocol there.
+    let call_graph = host_project(
+        "allowed_protocols_call_graph",
+        "allowed-protocols = [\"*Host\"]\n",
+    );
+    let mut expected = kept();
+    expected.insert(
+        0,
+        at(29, "MUT201", "build", "pkg.parser.base.Parser._items"),
+    );
+    assert_eq!(named(&call_graph), expected);
+    // Without the key, every access through the protocol is reported.
+    let without = named(&host_project(
+        "allowed_protocols_unset",
+        "attribution = \"lexical\"\n",
+    ));
+    assert_eq!(without.len(), 17, "{without:#?}");
+    assert!(
+        without.iter().any(
+            |(line, code, func, _)| (*line, code.as_str(), func.as_str()) == (34, "MUT201", "_set")
+        ),
+        "{without:#?}"
+    );
+}
+
+#[test]
+fn allowed_protocols_name_classes_by_pattern_and_a_bad_glob_is_a_configuration_error() {
+    // A pattern naming only the base protocol names its subprotocol too, as a class pattern
+    // names its subclasses: `RenderHost` derives from `RuntimeFlags`.
+    let base = host_project(
+        "allowed_protocols_base",
+        "attribution = \"lexical\"\nallowed-protocols = [\"RuntimeFlags\"]\n",
+    );
+    let found = named(&base);
+    assert_eq!(
+        found
+            .iter()
+            .map(|(_, _, func, _)| func.as_str())
+            .collect::<Vec<_>>(),
+        vec!["undeclared", "undeclared", "concrete"],
+        "{found:#?}"
+    );
+    let bad = host_project(
+        "allowed_protocols_bad_glob",
+        "allowed-protocols = [\"[Host\"]\n",
+    );
+    let (code, stdout, stderr) = bad.check(&[]);
+    assert_eq!(code, 2, "{stdout}{stderr}");
+    assert!(stderr.contains("allowed-protocols"), "{stderr}");
+}
+
+#[test]
+fn allowed_protocols_leave_the_accesses_through_a_protocol_the_key_does_not_name() {
+    let p = Project::new("allowed_protocols_repro");
+    let contract = |section: &str, who: &str| {
+        format!(
+            "[[tool.heki.{section}]]\nname = \"host-private\"\ntargets = [\"pkg.parser.base.Parser._*\", \"pkg.parser._flags.RuntimeFlags._*\"]\nforbidden-{who} = [\"pkg.parser._render:*\"]\nattribution = \"lexical\"\nallowed-protocols = [\"*Host\"]\n\n"
+        )
+    };
+    p.write(
+        "pyproject.toml",
+        &format!(
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT201\", \"MUT203\"]\n\n{}{}",
+            contract("read-owners", "readers"),
+            contract("write-owners", "writers"),
+        ),
+    )
+    .write("pkg/__init__.py", "")
+    .write("pkg/parser/__init__.py", "")
+    .write(
+        "pkg/parser/_flags.py",
+        "from __future__ import annotations\n\nfrom typing import Protocol\n\n\nclass RuntimeFlags(Protocol):\n    _has_runtime_expressions: bool\n",
+    )
+    .write(
+        "pkg/parser/base.py",
+        "from __future__ import annotations\n\n\nclass Parser:\n    def __init__(self) -> None:\n        self._has_runtime_expressions = False\n        self._graph_builder: object = object()\n",
+    )
+    .write(
+        "pkg/parser/_render.py",
+        r#"from __future__ import annotations
+
+from typing import Protocol
+
+from pkg.parser._flags import RuntimeFlags
+
+
+class RenderHost(RuntimeFlags, Protocol):
+    _graph_builder: object
+
+
+def assign(parser: RenderHost) -> object:
+    return parser._graph_builder
+
+
+def flagged(parser: RenderHost) -> bool:
+    return parser._has_runtime_expressions
+
+
+def mark(parser: RenderHost) -> None:
+    parser._has_runtime_expressions = True
+
+
+def bad_read(flags: RuntimeFlags) -> bool:
+    return flags._has_runtime_expressions
+
+
+def bad_write(flags: RuntimeFlags) -> None:
+    flags._has_runtime_expressions = True
+"#,
+    );
+    let at = |line: u64, code: &str, func: &str, target: &str| {
+        (line, code.to_owned(), func.to_owned(), target.to_owned())
+    };
+    // The write through `RuntimeFlags` is one of the protocol's member and of the attribute of
+    // `Parser`, which implements it: two targets of the contract, one report each.
+    assert_eq!(
+        named(&p),
+        vec![
+            at(
+                25,
+                "MUT203",
+                "bad_read",
+                "pkg.parser._flags.RuntimeFlags._has_runtime_expressions"
+            ),
+            at(
+                29,
+                "MUT201",
+                "bad_write",
+                "pkg.parser._flags.RuntimeFlags._has_runtime_expressions"
+            ),
+            at(
+                29,
+                "MUT201",
+                "bad_write",
+                "pkg.parser.base.Parser._has_runtime_expressions"
+            ),
+        ]
+    );
 }

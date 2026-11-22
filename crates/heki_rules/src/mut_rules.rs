@@ -961,6 +961,9 @@ pub(crate) struct Allowance {
     /// `own-receiver = "allow"`: an access through the receiver of the method judging it is
     /// allowed ([`Self::owns`]).
     own_receiver: bool,
+    /// The project protocols `allowed-protocols` names, with their subclasses
+    /// ([`Self::allows_protocol`]).
+    protocols: FxHashSet<String>,
 }
 
 /// Project functions a `call-owners` / `call-targets` entry names: the whole text by fqn or
@@ -1104,6 +1107,7 @@ impl Allowance {
             targets: None,
             attribution: Attribution::CallGraph,
             own_receiver: false,
+            protocols: FxHashSet::default(),
         };
         for e in keys.exempt.0 {
             if e.contains(['.', ':']) || has_glob_syntax(e) {
@@ -1147,6 +1151,29 @@ impl Allowance {
             attribution,
             ..self
         }
+    }
+
+    /// The same allowance, allowing the accesses through values typed with `protocols`.
+    pub(crate) fn with_protocols(self, protocols: FxHashSet<String>) -> Self {
+        Self { protocols, ..self }
+    }
+
+    /// Whether `allowed-protocols` names a project class.
+    pub(crate) fn names_protocols(&self) -> bool {
+        !self.protocols.is_empty()
+    }
+
+    /// Whether an access of `member` through a value typed with `protocol` is allowed
+    /// (`allowed-protocols`): the key names the protocol, and the protocol declares the member,
+    /// itself or through its protocol bases. The access is allowed wherever it is judged: the
+    /// type the code uses the value through is a property of the access, not of its function.
+    pub(crate) fn allows_protocol(
+        &self,
+        decls: &ProjectDecls,
+        protocol: &str,
+        member: &str,
+    ) -> bool {
+        self.protocols.contains(protocol) && decls.protocol_declares(protocol, member)
     }
 
     /// The same allowance, allowing the accesses through a method's own receiver or not.
@@ -1988,6 +2015,49 @@ pub(crate) enum Attribution {
     Lexical,
 }
 
+/// What the sites of one write share: each class's site of a write through a protocol has them
+/// ([`TypedFieldWriteSite::through_protocol`]).
+type WriteOf<'s> = (&'s str, WriteKind, Span, &'s [std::sync::Arc<CallHop>], u64);
+
+fn write_of(site: &TypedFieldWriteSite) -> WriteOf<'_> {
+    (
+        &site.attr,
+        site.kind,
+        site.span,
+        &site.via_chain,
+        site.obj_params,
+    )
+}
+
+/// The protocol each write through a protocol-typed value among `sites` (one function's) goes
+/// through: the class of the write's site that is a protocol declaring the attribute, whose write
+/// the sites of the implementations' attributes share.
+fn protocols_written_through<'s>(
+    cx: &CheckContext<'_>,
+    sites: &'s BTreeSet<TypedFieldWriteSite>,
+) -> FxHashMap<WriteOf<'s>, &'s str> {
+    sites
+        .iter()
+        .filter(|s| s.through_protocol && cx.decls.protocol_declares(&s.class_qualname, &s.attr))
+        .map(|s| (write_of(s), s.class_qualname.as_str()))
+        .collect()
+}
+
+/// The project classes the `allowed-protocols` patterns of a contract name, with their subclasses
+/// (a class that is no protocol allows nothing, [`Allowance::allows_protocol`]).
+pub(crate) fn named_protocols(
+    cx: &CheckContext<'_>,
+    all: &[ContractClass],
+    patterns: &[String],
+    context: &'static str,
+) -> Result<FxHashSet<String>, RuleConfigError> {
+    let mut out = FxHashSet::default();
+    for p in patterns {
+        out.extend(class_set(cx, &DottedPattern::new(p, context)?, all));
+    }
+    Ok(out)
+}
+
 /// `own-receiver` values; the first is the default.
 const OWN_RECEIVER: &[&str] = &["report", "allow"];
 
@@ -2121,6 +2191,12 @@ pub(crate) fn mut201(
             rule.own_receiver.as_deref(),
             "write-owners",
             &rule.name,
+        )?)
+        .with_protocols(named_protocols(
+            cx,
+            &all_classes,
+            &rule.allowed_protocols,
+            "write-owners.allowed-protocols",
         )?);
         let mut forbid_cached = FxHashSet::default();
         for p in &rule.forbid_cached_property_on {
@@ -2162,6 +2238,7 @@ pub(crate) fn mut201(
         .iter()
         .map(|r| r.targets.iter().map(|_| InsideAllowed::default()).collect())
         .collect();
+    let names_protocols = rules.iter().any(|r| r.allowance.names_protocols());
     for path in paths {
         let file = &cx.index.files[path];
         let Some(unit) = cx.unit(path) else {
@@ -2170,10 +2247,20 @@ pub(crate) fn mut201(
         let mut funcs: Vec<_> = file.functions.iter().collect();
         funcs.sort_by(|a, b| a.0.cmp(b.0));
         for (key, s) in funcs {
+            let protocols = if names_protocols {
+                protocols_written_through(cx, &s.typed_field_write_sites)
+            } else {
+                FxHashMap::default()
+            };
             for site in &s.typed_field_write_sites {
                 for (r, rule) in rules.iter().enumerate() {
                     // Constructing an object is no write of its owners' state.
-                    if rule.allow_fresh && site.construction == Construction::Yes {
+                    if rule.allow_fresh && site.construction == Construction::Yes
+                        || site.through_protocol
+                            && protocols.get(&write_of(site)).is_some_and(|p| {
+                                rule.allowance.allows_protocol(cx.decls, p, &site.attr)
+                            })
+                    {
                         continue;
                     }
                     let lexical = rule.allowance.is_lexical();
@@ -3578,6 +3665,12 @@ pub(crate) fn mut203(
                 rule.own_receiver.as_deref(),
                 "read-owners",
                 &rule.name,
+            )?)
+            .with_protocols(named_protocols(
+                cx,
+                &all_classes,
+                &rule.allowed_protocols,
+                "read-owners.allowed-protocols",
             )?),
             note: rule.message.as_deref(),
             report_unresolved: reports_unresolved(
@@ -3604,6 +3697,12 @@ pub(crate) fn mut203(
             .filter(|r| r.counts_for_contracts())
         {
             for (rule, inside) in rules.iter().zip(&mut inside) {
+                if rule
+                    .allowance
+                    .allows_protocol(cx.decls, &read.class_qualname, &read.attr)
+                {
+                    continue;
+                }
                 for (t, inside) in rule
                     .targets
                     .iter()

@@ -194,8 +194,8 @@ Contracts declare what no type can say. Each kind is an array of tables with its
 - A contract heki cannot use is a configuration error: a target that is not `Class.attr`, an
   invalid glob, a name with more than one colon or an empty module or qualified name, call
   targets whose globs are too many to match together (tens of thousands of complex ones), an
-  argument list heki cannot read, or an unknown value of `forbid`, `fresh-objects`, `unresolved`,
-  `references`, `attribution`, or `own-receiver`.
+  argument list heki cannot read, an invalid glob in `allowed-protocols`, or an unknown value of
+  `forbid`, `fresh-objects`, `unresolved`, `references`, `attribution`, or `own-receiver`.
 - With `unresolved = "report"`, a contract also reports the accesses it cannot tie to a class,
   each under its own rule (`MUT205` writes, `MUT206` reads, `MUT207` calls): an attribute or
   method named like a target, accessed on an object of unknown class (an unannotated parameter,
@@ -231,6 +231,7 @@ unresolved = "report"
 | `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the writes the contract cannot tie to a class are reported under [`MUT205`](rules/unresolved-guarded-write.md). |
 | `attribution` | `"call-graph"` | `"call-graph"` or `"lexical"`: which function a write is judged in. See [How contracts report](#how-contracts-report). |
 | `own-receiver` | `"report"` | `"report"` or `"allow"`: whether a write through the receiver of the method it is judged in (`self`, `cls`, `super()`) is allowed. See [How contracts report](#how-contracts-report). |
+| `allowed-protocols` | `[]` | Project protocols (class patterns, their subclasses included): a write through a value typed with one that declares the attribute, itself or through its protocol bases, is allowed. See [How contracts report](#how-contracts-report). |
 
 A container entry (`Class.attr["key"]`):
 
@@ -276,7 +277,8 @@ A read, or a call (`call-owners`, and an effect boundary's `call-targets` and
 judged by the protocol, the type the code uses it through: `def f(h: Host): h._m` reads
 `Host._m`, not `_m` of the classes implementing `Host`, and a private method of an
 implementation called through the protocol keeps what it reads and calls. A write through such
-a value still writes the implementations' attribute.
+a value still writes the implementations' attribute. `allowed-protocols` allows the reads, calls,
+and writes through the protocols it names (see [How contracts report](#how-contracts-report)).
 
 | Key | Default | Meaning |
 | --- | ------- | ------- |
@@ -289,6 +291,7 @@ a value still writes the implementations' attribute.
 | `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the reads of a target's attribute name on an object of unknown class are reported under [`MUT206`](rules/unresolved-guarded-read.md). |
 | `attribution` | `"call-graph"` | `"call-graph"` or `"lexical"`, as in `write-owners`. |
 | `own-receiver` | `"report"` | `"report"` or `"allow"`, as in `write-owners`. |
+| `allowed-protocols` | `[]` | As in `write-owners`, for a read or a call through the protocol. |
 
 `MUT203` does not see a read through a parameter without a project-class annotation; with
 `unresolved = "report"`, `MUT206` reports it unless every caller binds the parameter to an
@@ -321,6 +324,7 @@ The call side of `write-owners`.
 | `references` | `"ignore"` | `"ignore"`, `"calls"`, or `"calls-and-bases"`: whether a reference handing a target on to be called later counts as a call of it (`[decide]`, `return decide`, `partial(decide)`, `field(default_factory=Rule)`, `obj.callback = self.decide`), and with `"calls-and-bases"` a class statement naming a class target among its bases too (`class Derived(Base)`). |
 | `attribution` | `"call-graph"` | `"call-graph"` or `"lexical"`, as in `write-owners`. |
 | `own-receiver` | `"report"` | `"report"` or `"allow"`, as in `write-owners`. |
+| `allowed-protocols` | `[]` | As in `write-owners`, for a read or a call through the protocol. |
 
 - A call is reported only when every function it may call (each candidate in the class
   hierarchy) is a target: `text.replace(...)` on a `str` is never a call of
@@ -612,8 +616,8 @@ holds for `invalidation` too:
   callers binding a parameter only tell its object's class, allowed callers included. A class's
   own initialization stays allowed, a helper it passes `self` to included when every path of
   project callers above the helper starts in such an initialization; so do `exempt-methods`,
-  `fresh-objects`, and the targets of a call contract calling each other. Effect boundaries have no such key: they judge what their
-  scope functions reach through any number of calls.
+  `fresh-objects`, and the targets of a call contract calling each other. Effect boundaries have
+  no such key: they judge what their scope functions reach through any number of calls.
 - **`own-receiver = "allow"` allows the accesses through a method's own receiver.** An access is
   allowed when the function it is judged in (the function reported, or with `attribution =
   "lexical"` the function holding the access) is a method that is no static method, and the
@@ -625,6 +629,18 @@ holds for `invalidation` too:
   method's `self` (heki does not tie a variable a nested scope captures to the enclosing
   function's parameter) stay reported. By the call graph, a private helper the method hands its
   `self` (`_count(self)`) is judged at the method, and is allowed with it.
+- **`allowed-protocols` allows the accesses through the protocols it names.** A read, call, or
+  write through a value typed with a project protocol a pattern names (or a subprotocol of one)
+  that declares the member, itself or through its protocol bases, is allowed wherever it is
+  judged: `allowed-protocols = ["*Host"]` allows `parser._flag` with `parser: RenderHost` and
+  `class RenderHost(RuntimeFlags, Protocol)` when `RuntimeFlags` declares `_flag`, while the same
+  read through `flags: RuntimeFlags` stays reported. A write through the protocol is allowed for
+  the protocol's member and for each implementation's attribute alike. Accesses through a
+  protocol that does not declare the member, through an implementation's class, through a value
+  of unknown class (`unresolved = "report"`, also a protocol whose implementations heki cannot
+  list), and a protocol-typed value handed to a helper that changes it without typing its
+  parameter stay reported. By the call graph, a private method of an implementation that a call
+  through the protocol runs still hands its writes of its own `self` to the caller.
 - **One report stands for every site behind it.** A report at a call stands for every access
   behind the call, and an effect boundary's report for every site its scope function reaches.
   JSON output gives their number as `sites`, and a

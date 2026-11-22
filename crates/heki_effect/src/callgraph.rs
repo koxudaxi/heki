@@ -1222,6 +1222,7 @@ fn transfer_typed_writes(
                 key: None,
                 construction,
                 contexts,
+                through_protocol: false,
             },
         );
     }
@@ -1256,6 +1257,7 @@ fn transfer_typed_writes(
                 _ => Construction::No,
             },
             contexts: w.contexts | contexts,
+            through_protocol: w.through_protocol,
         };
         insert_site(t, caller, site);
     }
@@ -1621,6 +1623,7 @@ fn insert_site(s: &mut EffectSummary, owner: &FuncKey, site: TypedFieldWriteSite
         key: None,
         construction: Construction::No,
         contexts: 0,
+        through_protocol: false,
     };
     let existing = s
         .typed_field_write_sites

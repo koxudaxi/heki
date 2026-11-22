@@ -9,7 +9,7 @@
 use super::{
     Allowance, AllowanceKeys, FunctionMatcher, InsideAllowed, MergedReports, References,
     allows_own_receiver, attribution, binds_receiver, counts_references, delegated_reports,
-    project_classes, reports_unresolved,
+    named_protocols, project_classes, reports_unresolved,
 };
 use crate::{
     CheckContext, DottedPattern, NamePart, RuleConfigError, SitesByCaller, last_name, module_of,
@@ -713,6 +713,23 @@ pub(crate) fn call_verb(site: &CallSite, reference: bool) -> &'static str {
     }
 }
 
+/// Whether `site` calls a method through a value typed with a protocol `allowance` allows
+/// (`allowed-protocols`): the receiver's protocol declares the method ([`CallSite::declared`]).
+fn through_allowed_protocol(cx: &CheckContext<'_>, allowance: &Allowance, site: &CallSite) -> bool {
+    let Some(declared) = site.declared() else {
+        return false;
+    };
+    let method = declared
+        .qualname
+        .rsplit('.')
+        .next()
+        .unwrap_or(&declared.qualname);
+    site.project_callees()
+        .first()
+        .and_then(|bc| bc.params.first()?.typed_instance.as_deref())
+        .is_some_and(|protocol| allowance.allows_protocol(cx.decls, protocol, method))
+}
+
 /// Parameters of the caller the object `site` looks the called method up on may be: its
 /// receiver (`self._m()`, `cls._m()`, `super()._m()`), or, for a call binding no receiver of its
 /// own (`Class._m(self)`), the object every function a call contract judges it by binds as its
@@ -789,6 +806,12 @@ pub(crate) fn mut204(
                 rule.own_receiver.as_deref(),
                 "call-owners",
                 &rule.name,
+            )?)
+            .with_protocols(named_protocols(
+                cx,
+                &all_classes,
+                &rule.allowed_protocols,
+                "call-owners.allowed-protocols",
             )?),
             note: rule.message.as_deref(),
             report_unresolved: reports_unresolved(
@@ -824,6 +847,9 @@ pub(crate) fn mut204(
                 called.filter(|(c, _)| !reference || rules[*c].references.counts(site))
             {
                 let rule = &rules[c];
+                if through_allowed_protocol(cx, &rule.allowance, site) {
+                    continue;
+                }
                 for group in groups {
                     let (target, called) = group_texts(&rule.targets, &group, Some(site));
                     let (family, inside) = families[c].at(cx, &rule.targets, &group, site);

@@ -73,9 +73,13 @@ its own `self`).
 With `own-receiver = "allow"`, a read through the receiver of the method it is judged in is
 allowed: the function reported (with `attribution = "lexical"`, the function holding the read)
 is a method that is no static method, and the object the member is looked up on may be its first
-parameter (`self._seen`, `cls._kind`, `obj._seen` with `obj = self if flag else peer`), also for a member the class inherits. Another parameter, an attribute of
-the receiver, and a nested `def`, lambda, or comprehension using the enclosing method's `self`
-stay reported.
+parameter (`self._seen`, `cls._kind`, `obj._seen` with `obj = self if flag else peer`), also for
+a member the class inherits. Another parameter, an attribute of the receiver, and a nested
+`def`, lambda, or comprehension using the enclosing method's `self` stay reported.
+
+With `allowed-protocols`, a read through a value typed with a project protocol the key names that
+declares the attribute, itself or through its protocol bases, is allowed wherever it is judged; a
+read through another protocol or the implementation's class stays reported.
 
 ## What a report states
 
@@ -158,6 +162,9 @@ No automatic fix.
     each read is judged in the function holding it.
   - `own-receiver`: `"report"` (default) or `"allow"`: whether a read through the receiver of the
     method it is judged in (`self`, `cls`, `super()`) is allowed.
+  - `allowed-protocols`: project protocols (class patterns, their subclasses included): a read
+    through a value typed with one that declares the attribute, itself or through its protocol
+    bases, is allowed.
 
 Known limitation: a read through a parameter without a project-class annotation
 (`def helper(ref): return ref.children`) is not seen, since the read object's class is unknown

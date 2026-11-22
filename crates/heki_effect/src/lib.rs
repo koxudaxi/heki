@@ -329,6 +329,14 @@ pub struct TypedFieldWriteSite {
     /// differ in it are kept apart, so a path through an allowed writer does not stand for one
     /// around it.
     pub contexts: u64,
+    /// The written object is typed with a project protocol that declares the attribute (itself
+    /// or through its protocol bases): the write is one of the protocol's member, the site whose
+    /// class is the protocol, and of each implementation's attribute, the other sites of the
+    /// write, and every one of them carries this. A flag, not the protocol's name: it fits the
+    /// room the site's layout leaves. Computed only when a `write-owners` contract allows writes
+    /// through protocols ([`Contracts::write_protocols`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub through_protocol: bool,
 }
 
 /// How a function's new object was made: a shallow copy shares the containers of the original

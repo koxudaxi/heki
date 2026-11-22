@@ -3956,6 +3956,10 @@ impl<'a> Extractor<'a> {
                 ));
             }
         }
+        let through_protocol = self.contracts.is_some_and(|c| c.write_protocols())
+            && obj.holder.and_then(|v| self.val(v)).is_some_and(
+                |v| matches!(v, Val::Inst(p) if self.cx.project.protocol_declares(p, attr)),
+            );
         let site = TypedFieldWriteSite {
             class_qualname: class,
             attr: attr.to_owned(),
@@ -3967,6 +3971,7 @@ impl<'a> Extractor<'a> {
             key,
             construction: Construction::No,
             contexts: 0,
+            through_protocol,
         };
         // A site waiting for its answer joins the summary once the function is visited.
         if let Some(holder) = obj.holder.filter(|h| self.track && self.trackable(*h)) {

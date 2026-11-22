@@ -82,6 +82,8 @@ pub(crate) struct ConfigContracts {
     external: ExternalNames,
     /// [`Contracts::own_receiver_calls`].
     own_receiver_calls: bool,
+    /// [`Contracts::write_protocols`].
+    write_protocols: bool,
 }
 
 /// What the effect boundaries forbid outside the project ([`Contracts::external_call`],
@@ -257,6 +259,10 @@ impl ConfigContracts {
                 .call_owners
                 .iter()
                 .any(|r| r.own_receiver.as_deref() == Some("allow")),
+            write_protocols: config
+                .write_owners
+                .iter()
+                .any(|r| !r.allowed_protocols.is_empty()),
         })
     }
 }
@@ -408,6 +414,10 @@ impl Contracts for ConfigContracts {
 
     fn own_receiver_calls(&self) -> bool {
         self.own_receiver_calls
+    }
+
+    fn write_protocols(&self) -> bool {
+        self.write_protocols
     }
 }
 
