@@ -47,6 +47,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 mod imports;
+mod sentinels;
 mod statements;
 
 /// The (value, place) pairs the store walk of `return_origins` may take per byte of a function's
@@ -275,6 +276,16 @@ fn class_bodies_run_by<'m>(ir: &'m ModuleIr, f: &'m IrFunction) -> Vec<&'m IrFun
     out
 }
 
+/// Add the boxed local sites `more` to `into`.
+fn extend_boxed<C>(into: &mut Option<Box<C>>, more: Option<Box<C>>)
+where
+    C: Default + IntoIterator + Extend<<C as IntoIterator>::Item>,
+{
+    if let Some(more) = more {
+        into.get_or_insert_with(Box::default).extend(*more);
+    }
+}
+
 /// Add the facts of a class body the function runs (`body`) to the function's own: its
 /// execution effects and the project attributes it writes and reads.
 fn absorb_class_body(into: &mut EffectSummary, body: EffectSummary) {
@@ -293,6 +304,8 @@ fn absorb_class_body(into: &mut EffectSummary, body: EffectSummary) {
         .extend(body.typed_field_write_sites);
     into.typed_field_read_sites
         .extend(body.typed_field_read_sites);
+    extend_boxed(&mut into.sentinel_tests, body.sentinel_tests);
+    extend_boxed(&mut into.deep_copies, body.deep_copies);
     into.private_calls.extend(body.private_calls);
     into.unknown_calls |= body.unknown_calls;
     add_state_changes(into, body.shared_state.as_deref());
@@ -433,6 +446,8 @@ fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary) {
         .extend(other.typed_field_write_sites);
     into.typed_field_read_sites
         .extend(other.typed_field_read_sites);
+    extend_boxed(&mut into.sentinel_tests, other.sentinel_tests);
+    extend_boxed(&mut into.deep_copies, other.deep_copies);
     into.private_calls.extend(other.private_calls);
     into.offloads_blocking_params |= other.offloads_blocking_params;
     into.unknown_calls |= other.unknown_calls;
@@ -3329,6 +3344,15 @@ impl<'a> Extractor<'a> {
                 }
                 self.property_read(bb, index, *dst, *obj, attr, span);
             }
+            InstKind::Compare {
+                op: CompareOpKind::Is | CompareOpKind::IsNot,
+                lhs,
+                rhs,
+                ..
+            } => {
+                self.sentinel_test(*lhs, *rhs, span);
+                self.sentinel_test(*rhs, *lhs, span);
+            }
             InstKind::SubscriptLoad {
                 obj,
                 index,
@@ -3427,6 +3451,7 @@ impl<'a> Extractor<'a> {
                 }
                 let callee = self.cx.resolve_method(self.val(*recv), method);
                 self.unresolved_access(method, Access::Call, *recv, span);
+                self.deep_copy(&callee, args, kwargs, *star_from, span);
                 // A container method changes its receiver in place, unless the receiver's
                 // class defines the method itself: then what that method does is in its
                 // summary (`Stats.clear()` may change nothing).
@@ -3523,6 +3548,7 @@ impl<'a> Extractor<'a> {
                         .and_then(|n| n.parse::<u32>().ok())
                         .map_or(Callee::Unresolved, |id| self.child_callee(FunctionId(id))),
                 };
+                self.deep_copy(&target, args, kwargs, *star_from, span);
                 let constructs = self.construction(kind);
                 let call = Call {
                     dst: *dst,

@@ -17,8 +17,8 @@ use heki_rules::project::{
 };
 use heki_rules::{
     CHAIN_RULES, ChainFacts, CheckExtras, RuleSelection, SNAPSHOT_FILE, SelectionError,
-    SnapshotError, StaleWriteKey, SummarySnapshot, chain_facts, check_project, family_readers,
-    find_rule, stale_writes_by_file,
+    SentinelTestKey, SnapshotError, StaleWriteKey, SummarySnapshot, chain_facts, check_project,
+    deep_copy_files, family_readers, find_rule, sentinel_tests_in, stale_writes_by_file,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::Serialize;
@@ -87,13 +87,17 @@ enum ShownAt {
     /// A function's own in-place change of the object its parameter holds (the line `MUT110`
     /// names).
     ParamChange(u8),
+    /// A function's own comparison of an attribute with an `object()` sentinel (the tests
+    /// `MUT118` names), by attribute and sentinel.
+    SentinelTest(String, String),
 }
 
 /// The places in its text `source` of the spans of `file` that other files' diagnostics can
 /// show: its call and reference sites and the calls outside the project an effect boundary
 /// forbids (the hops of call chains), the changes its methods make to their own containers (the
-/// methods `MUT113` names), and the in-place changes its functions make to their parameters (the
-/// lines `MUT110` names).
+/// methods `MUT113` names), the in-place changes its functions make to their parameters (the
+/// lines `MUT110` names), and the comparisons with sentinels its functions make (the tests
+/// `MUT118` names).
 fn shown_places(file: &heki_effect::FileSummary, source: &str) -> Vec<SitePlace> {
     let lines = heki_ast::LineIndex::from_source(source);
     let place = |offset: u32| {
@@ -120,6 +124,15 @@ fn shown_places(file: &heki_effect::FileSummary, source: &str) -> Vec<SitePlace>
                 .flat_map(|(p, spans)| spans.iter().map(|span| (*span, ShownAt::ParamChange(*p)))),
         )
         .collect();
+    changes.extend(
+        file.local_functions
+            .values()
+            .flat_map(|s| s.sentinel_test_sites())
+            .map(|t| {
+                let at = ShownAt::SentinelTest(t.attr.clone(), t.sentinel.clone());
+                (t.span, at)
+            }),
+    );
     changes.sort();
     let calls = file
         .call_sites
@@ -219,6 +232,10 @@ pub struct Workspace {
     /// as of the file's latest analysis; kept while `MUT111` is selected: the files reading a
     /// property whose writes change need a new check.
     stale_writes: FxHashMap<PathBuf, BTreeSet<StaleWriteKey>>,
+    /// The comparisons with `object()` sentinels in the functions of each file, as of the file's
+    /// latest analysis; kept while `MUT118` is selected: the files with deep copies need a new
+    /// check when they change.
+    sentinel_tests: FxHashMap<PathBuf, BTreeSet<SentinelTestKey>>,
     /// What the configured contracts read across functions (`Workspace::affected_by`).
     reach: ContractReach,
     stats: EngineStats,
@@ -490,6 +507,16 @@ impl Workspace {
         } else {
             FxHashMap::default()
         };
+        let sentinel_tests = if selection.is_enabled("MUT118") {
+            index
+                .files
+                .keys()
+                .map(|path| (path.clone(), sentinel_tests_in(&index, path)))
+                .filter(|(_, tests)| !tests.is_empty())
+                .collect()
+        } else {
+            FxHashMap::default()
+        };
         let stats = EngineStats {
             indexed_files: index.files.len(),
             ..EngineStats::default()
@@ -511,6 +538,7 @@ impl Workspace {
                 check_reads: CheckReads::default(),
                 patching_builtins,
                 stale_writes,
+                sentinel_tests,
                 reach,
                 stats,
             },
@@ -809,6 +837,26 @@ impl Workspace {
             .collect()
     }
 
+    /// Record the sentinel comparisons in the functions of `path` against the current index; when
+    /// they changed, the deep copies `MUT118` reports may report differently: returns the files
+    /// with deep copies.
+    fn note_sentinel_tests(&mut self, path: &Path) -> Vec<PathBuf> {
+        if !self.selection.is_enabled("MUT118") {
+            return Vec::new();
+        }
+        let now = sentinel_tests_in(&self.index, path);
+        let before = if now.is_empty() {
+            self.sentinel_tests.remove(path)
+        } else {
+            self.sentinel_tests.insert(path.to_path_buf(), now.clone())
+        }
+        .unwrap_or_default();
+        if before == now {
+            return Vec::new();
+        }
+        deep_copy_files(&self.index)
+    }
+
     /// Re-summarize one parsed file; returns the update, what changed in the declarations, and
     /// whether the places other files' diagnostics can show changed ([`shown_places`]).
     fn summarize(
@@ -1056,6 +1104,7 @@ impl Workspace {
         );
         affected.extend(self.note_builtins(&parsed.path, parsed.patches_builtins()));
         affected.extend(self.note_stale_writes(&parsed.path));
+        affected.extend(self.note_sentinel_tests(&parsed.path));
         // Call chains of other files show this file's call sites, and `MUT113` reports the
         // container changes of its methods: when they move, those diagnostics move with them
         // (the summaries copying call sites were re-propagated).
@@ -1164,6 +1213,7 @@ impl Workspace {
         );
         affected.extend(self.note_builtins(path, false));
         affected.extend(self.note_stale_writes(path));
+        affected.extend(self.note_sentinel_tests(path));
         let mut v: Vec<PathBuf> = affected.into_iter().collect();
         v.sort();
         v

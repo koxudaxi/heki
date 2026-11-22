@@ -28,7 +28,7 @@ const CONFIG: &str = r#"[project]
 name = "t"
 
 [tool.heki.lint]
-extend-select = ["MUT101", "MUT107", "MUT108", "MUT111", "EFF107", "MUT112", "MUT113", "EFF109", "EFF110"]
+extend-select = ["MUT101", "MUT107", "MUT108", "MUT111", "EFF107", "MUT112", "MUT113", "EFF109", "EFF110", "MUT118"]
 
 [[tool.heki.write-owners]]
 name = "registry"
@@ -578,6 +578,19 @@ const SAFE_JOURNAL: &str = "from pkg.journal import Journal\n\n\nclass SafeJourn
 const SAFE_JOURNAL_DELEGATING: &str = "from pkg.journal import Journal\n\n\nclass SafeJournal(Journal):\n    def refresh(self, entries):\n        super().refresh(list(entries))\n";
 const HEADLINE: &str = "from pkg.journal import Journal\nfrom pkg.safe_journal import SafeJournal\n\n\ndef headline(journal: Journal):\n    return journal.latest\n\n\ndef safe_headline(journal: SafeJournal):\n    return journal.latest\n";
 
+// Sentinels lost in deep copies (`MUT118`): a module binds an `object()` sentinel, a dataclass
+// in a second module takes it as a field default, a third module tests the field against it,
+// and a fourth deep-copies the dataclass.
+const MARKS: &str = "MISSING = object()\n";
+const MARKS_SENTINEL: &str =
+    "from typing_extensions import Sentinel\n\nMISSING = Sentinel(\"MISSING\")\n";
+const MARKED_SPEC: &str = "from dataclasses import dataclass\n\nfrom pkg.marks import MISSING\n\n\n@dataclass\nclass Spec:\n    name: str\n    value: object = MISSING\n";
+const MARKED_SPEC_HOOKED: &str = "from dataclasses import dataclass\n\nfrom pkg.marks import MISSING\n\n\n@dataclass\nclass Spec:\n    name: str\n    value: object = MISSING\n\n    def __deepcopy__(self, memo):\n        return self\n";
+const MARK_TESTS: &str = "from pkg.marked_spec import Spec\nfrom pkg.marks import MISSING\n\n\ndef given(spec: Spec) -> bool:\n    return spec.value is not MISSING\n";
+const MARK_TESTS_NONE: &str = "from pkg.marked_spec import Spec\nfrom pkg.marks import MISSING\n\n\ndef given(spec: Spec) -> bool:\n    return spec.value is not None\n";
+const MARK_COPIES: &str = "import copy\n\nfrom pkg.marked_spec import Spec\n\n\ndef isolated(spec: Spec) -> Spec:\n    return copy.deepcopy(spec)\n";
+const MARK_SUB: &str = "import copy\n\nfrom pkg.marked_spec import Spec\n\n\nclass NamedSpec(Spec):\n    pass\n\n\ndef isolated_named(spec: NamedSpec) -> NamedSpec:\n    return copy.deepcopy(spec)\n";
+
 // Values new on one path and borrowed on another (`MUT112`): a caller two modules above a
 // function that copies its argument (through a wrapper in a third module), and a class whose
 // subclass in another module reads the list its `__init__` may borrow from the caller.
@@ -888,6 +901,10 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/journal.py", JOURNAL),
         ("pkg/headline.py", HEADLINE),
         ("pkg/safe_journal.py", SAFE_JOURNAL),
+        ("pkg/marks.py", MARKS),
+        ("pkg/marked_spec.py", MARKED_SPEC),
+        ("pkg/mark_tests.py", MARK_TESTS),
+        ("pkg/mark_copies.py", MARK_COPIES),
         ("pkg/fresh_ops.py", FRESH_OPS),
         ("pkg/fresh_build.py", FRESH_BUILD),
         ("pkg/strict_ops.py", STRICT_OPS),
@@ -2746,6 +2763,65 @@ fn steps_mut111() -> Vec<Step> {
     ]
 }
 
+/// `MUT118`: a deep copy follows the sentinel, the class, and the tests in other modules (the
+/// declarations its check reads, and the sentinel tests of each file,
+/// `heki_rules::sentinel_tests_in`): the sentinel becomes one that copies as itself and back,
+/// the class gains a copy hook and loses it, the test goes and comes back a line lower (its
+/// related location moves), and a new module deep-copies an instance of a subclass.
+fn steps_mut118() -> Vec<Step> {
+    let lower = MARK_TESTS.replace("def given", "# The field was given.\ndef given");
+    vec![
+        Step::new(
+            "a deep copy of a dataclass whose default is a sentinel another module tests",
+            Vec::new(),
+        )
+        .present(&[("pkg/mark_copies.py", "MUT118")]),
+        Step::new(
+            "the sentinel copies as itself",
+            vec![save("pkg/marks.py", MARKS_SENTINEL)],
+        )
+        .absent(&[("pkg/mark_copies.py", "MUT118")]),
+        Step::new(
+            "the sentinel is an `object()` again",
+            vec![save("pkg/marks.py", MARKS)],
+        )
+        .present(&[("pkg/mark_copies.py", "MUT118")]),
+        Step::new(
+            "the class gains `__deepcopy__`",
+            vec![save("pkg/marked_spec.py", MARKED_SPEC_HOOKED)],
+        )
+        .absent(&[("pkg/mark_copies.py", "MUT118")]),
+        Step::new(
+            "the class loses it",
+            vec![save("pkg/marked_spec.py", MARKED_SPEC)],
+        )
+        .present(&[("pkg/mark_copies.py", "MUT118")]),
+        Step::new(
+            "the test module compares with `None` instead",
+            vec![save("pkg/mark_tests.py", MARK_TESTS_NONE)],
+        )
+        .absent(&[("pkg/mark_copies.py", "MUT118")]),
+        Step::new(
+            "the test comes back, a line lower",
+            vec![Action::Save("pkg/mark_tests.py", lower)],
+        )
+        .present(&[("pkg/mark_copies.py", "MUT118")]),
+        Step::new(
+            "the test moves again",
+            vec![save("pkg/mark_tests.py", MARK_TESTS)],
+        )
+        .present(&[("pkg/mark_copies.py", "MUT118")]),
+        Step::new(
+            "a new module deep-copies an instance of a subclass",
+            vec![Action::Create("pkg/mark_sub.py", MARK_SUB.to_owned())],
+        )
+        .present(&[
+            ("pkg/mark_sub.py", "MUT118"),
+            ("pkg/mark_copies.py", "MUT118"),
+        ]),
+    ]
+}
+
 /// The blocking helper of `pkg/low.py` with a module-level cache that it reads (`False`) or
 /// clears (`True`) after its blocking call, so that the call keeps its position.
 fn low_with_cache(clears: bool) -> String {
@@ -3431,8 +3507,8 @@ fn steps_configuration() -> Vec<Step> {
         Step::new(
             "the configuration becomes invalid",
             vec![Action::Configure(CONFIG.replace(
-                "extend-select = [\"MUT101\", \"MUT107\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\", \"MUT113\", \"EFF109\", \"EFF110\"]",
-                "extend-select = [\"MUT101\", \"MUT107\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\", \"MUT113\", \"EFF109\", \"EFF110\"]\nselect = [\"NOPE1\"]",
+                "extend-select = [\"MUT101\", \"MUT107\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\", \"MUT113\", \"EFF109\", \"EFF110\", \"MUT118\"]",
+                "extend-select = [\"MUT101\", \"MUT107\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\", \"MUT113\", \"EFF109\", \"EFF110\", \"MUT118\"]\nselect = [\"NOPE1\"]",
             ))],
         )
         .absent(&[("pkg/svc_user.py", "EFF101")]),
@@ -4021,6 +4097,7 @@ sessions!(editing, Session::start, {
     inherited_writers: steps_inherited_writers,
     hash_writers: steps_hash_writers,
     mut111: steps_mut111,
+    mut118: steps_mut118,
     mut112: steps_mut112,
     eff109: steps_eff109,
     mut113: steps_mut113,

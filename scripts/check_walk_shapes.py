@@ -407,6 +407,32 @@ def helper_chain(n: int) -> str:
     return "\n".join(lines)
 
 
+def sentinel_subclasses(n: int) -> str:
+    """A dataclass whose field defaults to an `object()` sentinel, with many subclasses, each
+    tested against the sentinel and deep-copied in functions of its own, and the base
+    deep-copied as often."""
+    lines = ["import copy", "from dataclasses import dataclass", "", "MISSING = object()", ""]
+    lines += ["@dataclass", "class Spec:", "    value: object = MISSING", ""]
+    for i in range(n):
+        lines += [f"class Spec{i}(Spec):", "    pass", ""]
+        lines += [f"def given{i}(s: Spec{i}):", "    return s.value is not MISSING", ""]
+        lines += [f"def isolated{i}(s: Spec{i}):", "    return copy.deepcopy(s)", ""]
+        lines += [f"def isolated_base{i}(s: Spec):", "    return copy.deepcopy(s)", ""]
+    return "\n".join(lines)
+
+
+def sentinels_per_class(n: int) -> str:
+    """Many `object()` sentinels, each the default of a field of its own dataclass, tested
+    against it and deep-copied in functions of its own."""
+    lines = ["import copy", "from dataclasses import dataclass", ""]
+    for i in range(n):
+        lines += [f"MISSING{i} = object()", "", "@dataclass", f"class Spec{i}:"]
+        lines += [f"    value: object = MISSING{i}", ""]
+        lines += [f"def given{i}(s: Spec{i}):", f"    return s.value is not MISSING{i}", ""]
+        lines += [f"def isolated{i}(s: Spec{i}):", "    return copy.deepcopy(s)", ""]
+    return "\n".join(lines)
+
+
 # The functions `argument_marks` defines, each named by an argument list of `marked_targets`.
 MARKED_FUNCTIONS = 1000
 
@@ -538,6 +564,8 @@ FAMILIES = [
         placements=("project",),
         size=2000,
     ),
+    Family("sentinel_subclasses", project=sentinel_subclasses, placements=("project",), size=2000),
+    Family("sentinels_per_class", project=sentinels_per_class, placements=("project",), size=2000),
 ]
 
 
