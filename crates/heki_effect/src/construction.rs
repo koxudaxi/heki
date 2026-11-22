@@ -301,10 +301,11 @@ impl Recorder {
             if list.iter().all(|(_, _, a)| !matches!(a, Action::Query(_))) {
                 continue;
             }
-            match node(block.id).and_then(|i| block_in.get(i)) {
-                Some(entry) => state.clone_from(entry),
-                None => state.clone_from(&empty),
-            }
+            state.clone_from(
+                node(block.id)
+                    .and_then(|i| block_in.get(i))
+                    .unwrap_or(&empty),
+            );
             for (_, _, action) in list {
                 if let Action::Query(i) = action {
                     let var = match self.queries.get(*i) {

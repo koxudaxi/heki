@@ -1114,10 +1114,7 @@ mod tests {
             .map(|i| if i + 1 < n { Some(vec![i + 1]) } else { None })
             .collect();
         let found = post_dominators(&succ, &Budget::unmetered("test"));
-        let Answer::Known(ipdom) = found else {
-            panic!("an unmetered budget is never spent");
-        };
-        assert_eq!(ipdom[0], Some(1));
-        assert_eq!(ipdom[n - 1], Some(n));
+        let ends = found.map(|ipdom| (ipdom[0], ipdom[n - 1]));
+        assert_eq!(ends, Answer::Known((Some(1), Some(n))));
     }
 }
