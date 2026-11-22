@@ -646,6 +646,7 @@ const ML_SHADOW_HOOKED: &str = "from pkg.ml_base import Steady\n\n\nclass Shadow
 // starts and stops rebinding it.
 const LC_SETTINGS: &str = "PAUSE = 0\n";
 const LC_SETTINGS_WAIT: &str = "PAUSE = 1\n";
+const LC_SETTINGS_COMPUTED: &str = "BASE = 2\nPAUSE = BASE - 2\n";
 const LC_USE: &str = "import time\n\nfrom pkg.lc_settings import PAUSE\n\n\nasync def nap():\n    time.sleep(PAUSE)\n";
 const LC_REBIND: &str = "def configure():\n    return None\n";
 const LC_REBIND_STORES: &str =
@@ -1048,10 +1049,21 @@ fn steps_exact_effects() -> Vec<Step> {
 
 /// A catalog argument read from an imported constant (`ModuleDecls::literal_constants`): a sleep
 /// of no time is no wait, one of a second is, and so is one of a constant another module rebinds.
+/// A constant computed from another holds its value too (`heki_ir::ModuleConstants`).
 fn steps_imported_constants() -> Vec<Step> {
     vec![
         Step::new(
             "the imported constant becomes a wait",
+            vec![save("pkg/lc_settings.py", LC_SETTINGS_WAIT)],
+        )
+        .present(&[("pkg/lc_use.py", "EFF101")]),
+        Step::new(
+            "it becomes no time computed from another constant",
+            vec![save("pkg/lc_settings.py", LC_SETTINGS_COMPUTED)],
+        )
+        .absent(&[("pkg/lc_use.py", "EFF101")]),
+        Step::new(
+            "it becomes a wait again",
             vec![save("pkg/lc_settings.py", LC_SETTINGS_WAIT)],
         )
         .present(&[("pkg/lc_use.py", "EFF101")]),

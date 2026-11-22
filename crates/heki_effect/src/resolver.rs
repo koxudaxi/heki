@@ -19,8 +19,8 @@ use heki_ast::Span;
 use heki_env::HekiConfig;
 use heki_ir::walk::{Answer, Budget, FnShape, Visit, reach};
 use heki_ir::{
-    BinOpKind, BlockId, ConstLiteral, FnIndex, FunctionKind, Inst, InstKind, IrFunction, ModuleIr,
-    SmallDisplay, Terminator, VarId,
+    BinOpKind, BlockId, ConstLiteral, FnIndex, FunctionKind, GlobalStores, Inst, InstKind,
+    IrFunction, ModuleIr, SmallDisplay, Terminator, VarId,
 };
 use heki_kb::{
     ArgFact, CopyDepth, EcosystemEntry, EffectiveEcosystemKb, ExecEffectKind, LiteralValue,
@@ -3633,7 +3633,7 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
         }
     }
     decls.aliases = module_aliases(input, &decls);
-    let stores = module_store_counts(input);
+    let stores = GlobalStores::of(&input.ir.functions);
     decls.unknown_globals = unknown_globals(&stores, &decls);
     let rebound = rebound_imports(input, &stores, &decls);
     decls.rebound_imports = (!rebound.is_empty()).then(|| Box::new(rebound));
@@ -4178,7 +4178,7 @@ fn str_constants(input: &ModuleInput<'_>, decls: &ModuleDecls) -> BTreeMap<Strin
         .iter()
         .filter_map(|imp| Some((imp.span, import_target(imp, input)?)))
         .collect();
-    let module_stores = module_store_counts(input);
+    let module_stores = GlobalStores::of(&input.ir.functions);
     let mut out = BTreeMap::new();
     for f in input
         .ir
@@ -4219,7 +4219,7 @@ fn str_constants(input: &ModuleInput<'_>, decls: &ModuleDecls) -> BTreeMap<Strin
         for (name, value) in bindings {
             let q = declared.get(name).copied().unwrap_or_default();
             let (key, once, rebindable) = if f.is_module_body {
-                let once = module_stores.get(name) == Some(&1) && !decls.imports.contains_key(name);
+                let once = module_stores.once(name) && !decls.imports.contains_key(name);
                 (name.to_owned(), once, !q.is_final)
             } else {
                 let once = (q.class_var || q.is_final)
@@ -4255,54 +4255,46 @@ fn str_constants(input: &ModuleInput<'_>, decls: &ModuleDecls) -> BTreeMap<Strin
     out
 }
 
-/// [`ModuleDecls::literal_constants`]: the module body's names stored once, outside a loop, from
-/// a number or boolean literal (through copies), with the conditions of a string constant: no
-/// import binds the name, and neither `exec` / `globals()` nor a star import may rebind it.
+/// [`ModuleDecls::literal_constants`]: the number and boolean constants of the module's IR
+/// (`heki_ir::ModuleConstants`: names its body stores once, outside a loop, that nothing deletes
+/// and no star import or `exec` may rebind), the one view of a module name bound once that the
+/// IR's facts read too. A name not declared `Final` may still be rebound by another module.
 fn literal_constants(
     input: &ModuleInput<'_>,
     decls: &ModuleDecls,
 ) -> BTreeMap<String, LiteralConstant> {
     let resolve = |name: &str| decls.resolve_dotted(name, true);
-    let module_stores = module_store_counts(input);
-    let unfixed = input.ir.constants.dynamic || input.ir.has_star_import;
-    let mut out = BTreeMap::new();
-    for f in input
+    let finals: FxHashSet<&str> = input
         .ir
         .functions
         .iter()
-        .filter(|f| f.is_module_body && !unfixed)
-    {
-        let shape = heki_ir::walk::FnShape::new(f);
-        let finals: FxHashSet<&str> = f
-            .local_annotations
-            .iter()
-            .filter(|a| qualifiers(&a.annotation, &resolve).0.is_final)
-            .map(|a| a.target.as_str())
-            .collect();
-        for b in f.blocks.iter().filter(|b| shape.loop_depth(b.id) == 0) {
-            for inst in &b.insts {
-                let InstKind::StoreGlobal { name, value } = &inst.kind else {
-                    continue;
-                };
-                let once = module_stores.get(name.as_str()) == Some(&1)
-                    && !decls.imports.contains_key(name);
-                if let Some(InstKind::Const {
-                    literal:
-                        value @ (ConstLiteral::Bool(_) | ConstLiteral::Int(_) | ConstLiteral::Float(_)),
-                    ..
-                }) = shape
-                    .inst(shape.copy_root(*value))
-                    .map(|i| &i.kind)
-                    .filter(|_| once)
-                {
-                    let rebindable = !finals.contains(name.as_str());
-                    let value = value.clone();
-                    out.insert(name.clone(), LiteralConstant { value, rebindable });
-                }
-            }
-        }
-    }
-    out
+        .filter(|f| f.is_module_body)
+        .flat_map(|f| &f.local_annotations)
+        .filter(|a| qualifiers(&a.annotation, &resolve).0.is_final)
+        .map(|a| a.target.as_str())
+        .collect();
+    let constants = &input.ir.constants;
+    let ints = constants
+        .ints
+        .iter()
+        .map(|(name, n)| (name, ConstLiteral::Int(*n)));
+    // A dotted key (`t.TYPE_CHECKING`) is no module name.
+    let bools = constants
+        .bools
+        .iter()
+        .filter(|(name, _)| !name.contains('.'))
+        .map(|(name, b)| (name, ConstLiteral::Bool(*b)));
+    let floats = constants
+        .floats
+        .iter()
+        .map(|(name, text)| (name, ConstLiteral::Float(text.clone())));
+    ints.chain(bools)
+        .chain(floats)
+        .map(|(name, value)| {
+            let rebindable = !finals.contains(name.as_str());
+            (name.clone(), LiteralConstant { value, rebindable })
+        })
+        .collect()
 }
 
 /// Whether heki takes `name` to be defined by `base`, a class outside the project: a special
@@ -4389,33 +4381,11 @@ fn returned_param_attr(f: &IrFunction, decls: &ModuleDecls) -> Option<(u8, Strin
     returned.filter(|_| !stores_it)
 }
 
-/// How often the module's code stores or deletes each module global: in the module body, or
-/// in a function after `global name` (deleting a local or a class-body name binds no global).
-fn module_store_counts<'i>(input: &'i ModuleInput<'_>) -> FxHashMap<&'i str, usize> {
-    let mut out: FxHashMap<&str, usize> = FxHashMap::default();
-    for inst in input
-        .ir
-        .functions
-        .iter()
-        .flat_map(|f| f.blocks.iter().flat_map(|b| &b.insts))
-    {
-        if let InstKind::StoreGlobal { name, .. }
-        | InstKind::Delete {
-            name, global: true, ..
-        } = &inst.kind
-        {
-            *out.entry(name.as_str()).or_default() += 1;
-        }
-    }
-    out
-}
-
 /// [`ModuleDecls::unknown_globals`]: the globals the module stores or deletes (`stores`) that are
 /// no runtime import, class, or function of it.
-fn unknown_globals(stores: &FxHashMap<&str, usize>, decls: &ModuleDecls) -> BTreeSet<String> {
+fn unknown_globals(stores: &GlobalStores<'_>, decls: &ModuleDecls) -> BTreeSet<String> {
     stores
-        .keys()
-        .copied()
+        .names()
         .filter(|name| {
             !decls.imports.contains_key(*name)
                 && !decls.classes.contains_key(*name)
@@ -4429,11 +4399,11 @@ fn unknown_globals(stores: &FxHashMap<&str, usize>, decls: &ModuleDecls) -> BTre
 /// the name (`stores`).
 fn rebound_imports(
     input: &ModuleInput<'_>,
-    stores: &FxHashMap<&str, usize>,
+    stores: &GlobalStores<'_>,
     decls: &ModuleDecls,
 ) -> BTreeSet<String> {
     let unfixed = input.ir.constants.dynamic || input.ir.has_star_import;
-    let rebound = |name: &str| unfixed || stores.get(name).is_some_and(|&n| n > 1);
+    let rebound = |name: &str| unfixed || (stores.binds(name) && !stores.once(name));
     decls
         .imports
         .keys()
@@ -4475,7 +4445,7 @@ fn module_aliases(input: &ModuleInput<'_>, decls: &ModuleDecls) -> BTreeMap<Stri
         .filter(|(_, how)| *how == heki_semantic::NameResolution::Builtin)
         .map(|(name, _)| name.as_str())
         .collect();
-    let stores = module_store_counts(input);
+    let stores = GlobalStores::of(&input.ir.functions);
     let insts = || {
         input
             .ir
@@ -4498,7 +4468,7 @@ fn module_aliases(input: &ModuleInput<'_>, decls: &ModuleDecls) -> BTreeMap<Stri
         let InstKind::StoreGlobal { name, value } = &inst.kind else {
             continue;
         };
-        if stores.get(name.as_str()) != Some(&1) || imported.contains(name.as_str()) {
+        if !stores.once(name) || imported.contains(name.as_str()) {
             continue;
         }
         let Some(target) = named.object(*value, &mut known) else {
