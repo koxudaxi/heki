@@ -17,9 +17,9 @@ pub mod walk;
 pub use builder::build_module_ir;
 pub use dominators::{Dominated, DominatorTree, immediate_dominators};
 pub use facts::{
-    Carries, Decided, FnIndex, ItemOrigin, ItemOrigins, ItemSource, LEN_CAP_MAX, ModuleBindings,
-    ModuleConstants, Must, PathReader, Paths, Progress, SMALL_MAX, SmallDisplay, Trips,
-    comprehension_id,
+    Carries, Decided, FnIndex, GlobalStores, ItemOrigin, ItemOrigins, ItemSource, LEN_CAP_MAX,
+    ModuleBindings, ModuleConstants, Must, PathReader, Paths, Progress, SMALL_MAX, SmallDisplay,
+    Trips, comprehension_id,
 };
 
 use heki_ast::Span;
@@ -493,6 +493,10 @@ pub enum InstKind {
         module: Option<String>,
         name: String,
         is_lazy: bool,
+        /// A relative import (`from .typing import X`, `from . import json`): `module` and
+        /// `name` are named from the importing package, not from the import path.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        relative: bool,
     },
 }
 

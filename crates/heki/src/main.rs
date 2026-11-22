@@ -10,6 +10,7 @@ macro_rules! log {
 mod check;
 mod dump_facts;
 mod inspect;
+mod prompt;
 mod watch;
 
 use anyhow::Result;
@@ -49,6 +50,12 @@ enum ColorChoice {
     Auto,
     Always,
     Never,
+}
+
+/// `--output-format-json-schema`: the JSON output whose JSON Schema `heki check` prints.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum JsonSchemaTarget {
+    GeneratePrompt,
 }
 
 /// `--fail-on`: the least severity whose reports make `heki check` fail.
@@ -138,6 +145,22 @@ struct CheckArgs {
     /// Watch for file changes and re-run incrementally.
     #[arg(long)]
     watch: bool,
+    /// Experimental: print a prompt for consulting a language model about this run instead of
+    /// the report: the configuration, the rules that apply, the diagnostics, how to answer, and
+    /// QUESTION when given (put PATHS before the option). `--output-format json` prints it as
+    /// JSON. Writes no file and exits with 0.
+    #[arg(
+        long,
+        value_name = "QUESTION",
+        num_args = 0..=1,
+        default_missing_value = "",
+        conflicts_with_all = ["fix", "diff", "watch", "update_baseline", "profile", "include_size_dependent"]
+    )]
+    generate_prompt: Option<String>,
+    /// Print the JSON Schema of a JSON output and exit: `generate-prompt`, the object of
+    /// `--generate-prompt --output-format json`.
+    #[arg(long, value_enum, value_name = "TARGET")]
+    output_format_json_schema: Option<JsonSchemaTarget>,
     /// Internal: write the steps each owner's walks took per function to this JSON file
     /// (`scripts/check_walk_shapes.py`).
     #[arg(long, hide = true)]
@@ -417,7 +440,19 @@ fn run(cli: Cli) -> Result<ExitCode> {
             let model = heki_semantic::analyze_module(&parsed, &src, profile);
             let ir = heki_ir::build_module_ir(&parsed, &src, &model, profile);
             let kb = heki_kb::EffectiveEcosystemKb::load_builtin(&[])?;
-            let facts = dump_facts::module(&ir, &src, &kb);
+            let input = heki_effect::ModuleInput {
+                module_name: args
+                    .file
+                    .file_stem()
+                    .map_or_else(|| "m".to_owned(), |s| s.to_string_lossy().into_owned()),
+                path: args.file.clone(),
+                is_package: false,
+                root_is_package: false,
+                content_hash: String::new(),
+                semantic: &model,
+                ir: &ir,
+            };
+            let facts = dump_facts::module(&input, &src, &kb);
             println!("{}", serde_json::to_string_pretty(&facts)?);
             Ok(ExitCode::SUCCESS)
         }
