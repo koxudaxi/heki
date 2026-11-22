@@ -5,7 +5,7 @@ use crate::mut_rules::{CallInst, site_call};
 use crate::opt_rules::{Creators, Sizes};
 use crate::premises::{self, OpenCause, Told};
 use crate::{CheckContext, FnSites, ModuleUnit};
-use heki_diagnostics::{Certainty, Diagnostic, OpenPremise};
+use heki_diagnostics::{Certainty, Diagnostic, OpenPremise, OpenRecord};
 use heki_effect::{CallHop, CallSite, CallTarget, SiteEffect, TypeCtx, with_paths};
 use heki_ir::walk::{Answer, Budget, Def, FnShape, Visit, reach};
 use heki_ir::{
@@ -146,7 +146,7 @@ pub(crate) fn data101(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Ve
                 !cx.open_premises || tier == Certainty::Exact || !verdict.open.is_empty(),
                 "a heuristic DATA101 report records why it is not exact"
             );
-            d.open_premises = verdict.open;
+            d.open_records = verdict.open.into_iter().map(OpenRecord::from).collect();
         }
     }
 }

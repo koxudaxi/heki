@@ -3,6 +3,7 @@
 //! Produces the function's local `EffectSummary` plus the `CallSite`s the interprocedural
 //! fixpoint (`callgraph`) maps callee facts through. No IR survives this module.
 
+use crate::blind_spots::{self, Blind, BlindCall, UnresolvedReason};
 use crate::cache_flow::{self, KeptRemovalKind};
 use crate::capacity::{self, Bound, CapacityOf, CapacityWait, SiteQueues, WhileFull};
 use crate::construction::{Escape, Pos, Recorder};
@@ -29,10 +30,10 @@ use crate::{
     Access, ArgBinding, ArgOrigin, ArgTargets, ArgValue, ArgumentValues, AttrKeyPath, BoundCallee,
     CallHop, CallSite, CallTarget, CellChange, ConstArg, Construction, ContractClass, Contracts,
     Dispatch, EffectSummary, FileSummary, FuncKey, GuardSubject, HandedState, Implementers, Items,
-    ListedCache, ModuleInput, MustExec, NewArg, NewCond, NewKind, OnEveryReturn, OptInFacts,
-    PerItem, ProjectDecls, ReadKind, ReturnsNew, Runner, SharedLine, SharedState, SharedStateFacts,
-    SiteRole, Slot, TypedFieldReadSite, TypedFieldWriteSite, Unresolved, UnresolvedAccessSite,
-    UnresolvedWriteSite, WriteKind,
+    KeptFacts, ListedCache, ModuleInput, MustExec, NewArg, NewCond, NewKind, OnEveryReturn,
+    OptInFacts, PerItem, ProjectDecls, ReadKind, ReturnsNew, Runner, SharedLine, SharedState,
+    SharedStateFacts, SiteRole, Slot, TypedFieldReadSite, TypedFieldWriteSite, Unresolved,
+    UnresolvedAccessSite, UnresolvedWriteSite, WriteKind,
 };
 use heki_ast::Span;
 use heki_ir::walk::{Answer, Budget, Closure, Def, FnShape, KeySet, Memo, Use, Visit, reach};
@@ -183,6 +184,7 @@ fn extract_module(
             cells,
             kept_points,
             types,
+            mut blind,
         } = Extractor::new(
             &shape,
             &key,
@@ -211,6 +213,7 @@ fn extract_module(
                 .run();
                 absorb_class_body(&mut summary, facts.summary);
                 external.extend(facts.external);
+                blind.extend(facts.blind);
                 sites.extend(
                     facts
                         .sites
@@ -219,11 +222,13 @@ fn extract_module(
                 );
                 references.extend(facts.references);
             }
-        } else if contracts.is_some_and(|c| c.references() || c.checks_module_bodies()) {
+        } else if opt_in.blind_spots
+            || contracts.is_some_and(|c| c.references() || c.checks_module_bodies())
+        {
             // The module body runs the bodies of its classes: what they hand on (a dataclass
-            // field's `default_factory`) is handed on by the module, and what they take from
-            // outside the project (`sys.platform`) the module takes. Their other facts are not
-            // the module's.
+            // field's `default_factory`) is handed on by the module, what they take from
+            // outside the project (`sys.platform`) the module takes, and the calls heki is
+            // blind to there are the module's. Their other facts are not the module's.
             for body in class_bodies_run_by(input.ir, f) {
                 let body = FnShape::new(body);
                 let facts = Extractor::new(
@@ -238,6 +243,7 @@ fn extract_module(
                 .run();
                 references.extend(facts.references);
                 external.extend(facts.external);
+                blind.extend(facts.blind);
             }
         }
         if let Some(mut flow) = flow {
@@ -280,6 +286,14 @@ fn extract_module(
                 .entry(key.clone())
                 .or_default()
                 .extend(external);
+        }
+        if !blind.is_empty() {
+            // A `finally` body is built once per way out of its `try`: its calls once each.
+            let by_function = file.blind_spots.get_or_insert_with(Box::default);
+            let calls = by_function.entry(key.clone()).or_default();
+            calls.extend(blind);
+            calls.sort();
+            calls.dedup();
         }
         // Same qualname defined twice (conditional definitions): keep the union of facts.
         match file.local_functions.get_mut(&key) {
@@ -480,16 +494,7 @@ fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary) {
         into.iteration_facts_mut().merge(*facts);
     }
     into.invalidates_cached.extend(other.invalidates_cached);
-    // A must-fact: read by both definitions.
-    into.must_read_self_attrs = match (into.must_read_self_attrs.take(), other.must_read_self_attrs)
-    {
-        (Some(a), Some(b)) => {
-            let both = crate::callgraph::must_reads_of_both(&a, &b);
-            (!both.is_empty()).then(|| Box::new(both))
-        }
-        _ => None,
-    };
-    into.removes_kept.join(&other.removes_kept);
+    into.merge_kept(other.kept.as_deref());
     into.typed_field_write_sites
         .extend(other.typed_field_write_sites);
     into.typed_field_read_sites
@@ -681,6 +686,8 @@ struct Extracted {
     kept_points: Vec<cache_flow::KeptPoint>,
     /// The values of the function's variables ([`TypeCtx::infer`]).
     types: FxHashMap<VarId, Val>,
+    /// [`FileSummary::blind_spots`].
+    blind: Vec<BlindCall>,
 }
 
 /// The points of a function that read one `self` attribute ([`Extractor::self_read_points`]).
@@ -856,6 +863,9 @@ struct Extractor<'a> {
     /// The span and argument position of each callable a call is handed that has a project site
     /// of its own ([`Self::as_handed`]), built on first use.
     followed_callables: OnceCell<FxHashSet<(Span, u8)>>,
+    /// The calls heki is blind to (`FileSummary::blind_spots`), with
+    /// [`OptInFacts::blind_spots`].
+    blind: Vec<BlindCall>,
 }
 
 /// A key of a container as [`Extractor::key_present`] compares keys: the same variable through
@@ -1061,6 +1071,16 @@ fn decorated_as(module: &ModuleDecls, f: &IrFunction, names: &[&str]) -> bool {
     f.decorators.iter().any(|d| module.decorator_is(d, names))
 }
 
+/// Whether `text` is a dotted name (`get`, `handler`, `self.on_done`).
+fn is_dotted_name(text: &str) -> bool {
+    text.split('.').all(|part| {
+        part.chars()
+            .next()
+            .is_some_and(|c| c == '_' || c.is_alphabetic())
+            && part.chars().all(|c| c == '_' || c.is_alphanumeric())
+    })
+}
+
 impl<'a> Extractor<'a> {
     fn new(
         shape: &'a FnShape<'a>,
@@ -1098,13 +1118,24 @@ impl<'a> Extractor<'a> {
             is_async: matches!(f.kind, FunctionKind::Async | FunctionKind::AsyncGenerator),
             is_generator: is_generator_function(f),
             is_cached_property: decorated_as(cx.module, f, &["cached_property"]),
-            listed_cache: f.decorators.iter().find_map(|d| {
-                let symbol = cx.module.decorator_symbol(d)?;
-                let listed = cx.kb.cached_property(&symbol)?;
-                Some(ListedCache {
-                    in_slot: listed.slot.is_some(),
+            kept: opt_in
+                .kept_values
+                .then(|| {
+                    f.decorators.iter().find_map(|d| {
+                        let symbol = cx.module.decorator_symbol(d)?;
+                        let listed = cx.kb.cached_property(&symbol)?;
+                        Some(ListedCache {
+                            in_slot: listed.slot.is_some(),
+                        })
+                    })
                 })
-            }),
+                .flatten()
+                .map(|listed| {
+                    Box::new(KeptFacts {
+                        listed_cache: Some(listed),
+                        ..KeptFacts::default()
+                    })
+                }),
             is_lru_cache: decorated_as(cx.module, f, &["lru_cache", "cache"]),
             owner_class_qualname: f.owner_class_qualname.clone(),
             decorators: f.decorators.clone(),
@@ -1187,6 +1218,7 @@ impl<'a> Extractor<'a> {
             kept_points: Vec::new(),
             call_positions: OnceCell::new(),
             followed_callables: OnceCell::new(),
+            blind: Vec::new(),
         };
         ex.ownership = contracts.is_some_and(|c| c.ownership());
         ex.track = ex.ownership && ex.may_construct();
@@ -2547,11 +2579,12 @@ impl<'a> Extractor<'a> {
             cells,
             kept_points: self.kept_points,
             types: self.types,
+            blind: self.blind,
         }
     }
 
     /// The instructions that may remove or replace a value kept in some object's `__dict__`
-    /// ([`cache_flow::KeptPoint`]), and their union into [`EffectSummary::removes_kept`]. A
+    /// ([`cache_flow::KeptPoint`]), and their union into [`KeptFacts::removes_kept`]. A
     /// project call's own removals are its callees' (propagation adds them), unless its targets
     /// are not every implementation it can run.
     fn kept_value_points(&mut self) {
@@ -2559,7 +2592,7 @@ impl<'a> Extractor<'a> {
         if !f.a1_hazards.is_empty() {
             // Code heki cannot follow (`eval`, `exec`, frame introspection) may run in its
             // callers; its own calls are points of their own below.
-            self.summary.removes_kept.set_any();
+            self.summary.kept_mut().removes_kept.set_any();
         }
         let mut points = Vec::new();
         let results = self.callees_by_result();
@@ -2572,8 +2605,8 @@ impl<'a> Extractor<'a> {
         }
         for (block, index, kind) in points {
             match &kind {
-                KeptRemovalKind::Named(name) => self.summary.removes_kept.add(name),
-                KeptRemovalKind::Any => self.summary.removes_kept.set_any(),
+                KeptRemovalKind::Named(name) => self.summary.kept_mut().removes_kept.add(name),
+                KeptRemovalKind::Any => self.summary.kept_mut().removes_kept.set_any(),
                 // The consumer is the caller; a generator's removals are its summary's, which
                 // propagation joins.
                 KeptRemovalKind::Suspends | KeptRemovalKind::Runs(_) => {}
@@ -4203,7 +4236,7 @@ impl<'a> Extractor<'a> {
                     per_item: None,
                     span,
                 };
-                self.call_inst(bb, index, callee, &call);
+                self.call_inst((bb, index), method, callee, &call);
             }
             InstKind::Call {
                 dst,
@@ -4247,7 +4280,7 @@ impl<'a> Extractor<'a> {
                         per_item: None,
                         span,
                     };
-                    self.call_inst(bb, index, target, &call);
+                    self.call_inst((bb, index), &method, target, &call);
                     return;
                 }
                 let target = match callee_var {
@@ -4276,7 +4309,7 @@ impl<'a> Extractor<'a> {
                     per_item: None,
                     span,
                 };
-                self.call_inst(bb, index, target, &call);
+                self.call_inst((bb, index), callee, target, &call);
             }
             // A generator expression's body runs where it is consumed — almost always
             // immediately in the creating frame (`sum(f(x) for x in xs)`).
@@ -4536,7 +4569,7 @@ impl<'a> Extractor<'a> {
             span,
         };
         match dst {
-            Some(_) => self.call_inst(bb, index, callee, &call),
+            Some(_) => self.call_inst((bb, index), attr, callee, &call),
             None => {
                 self.call(bb, &callee, &call);
             }
@@ -5682,10 +5715,20 @@ impl<'a> Extractor<'a> {
         out
     }
 
-    /// [`Self::call`] for a `Call` / `MethodCall` instruction at `(bb, index)`: its callee is
-    /// kept for the iteration flow, and a project call is remembered for the sites of the
-    /// object it returns.
-    fn call_inst(&mut self, bb: BlockId, index: usize, callee: Callee, call: &Call<'_>) {
+    /// [`Self::call`] for a `Call` / `MethodCall` instruction at `(bb, index)`, or a property
+    /// read, of the method or attribute `name` or the value whose source text `name` is: its
+    /// callee is kept for the iteration flow, and a project call is remembered for the sites of
+    /// the object it returns.
+    fn call_inst(
+        &mut self,
+        (bb, index): (BlockId, usize),
+        name: &str,
+        callee: Callee,
+        call: &Call<'_>,
+    ) {
+        if self.opt_in.blind_spots {
+            self.note_blind(bb, name, &callee, call);
+        }
         if let Some((site, params)) = self.call(bb, &callee, call)
             && let Some(dst) = call.dst
         {
@@ -5699,6 +5742,124 @@ impl<'a> Extractor<'a> {
             });
         }
         self.callees.insert((bb, index), callee);
+    }
+
+    /// [`FileSummary::blind_spots`]: the call `call` (of `name`, as for [`Self::call_inst`]) in
+    /// block `bb` when heki resolves it to no function, or to a library name the catalog has no
+    /// entry for.
+    fn note_blind(&mut self, bb: BlockId, name: &str, callee: &Callee, call: &Call<'_>) {
+        // The method called, or the value called when it is a dotted name (`handler`), not an
+        // expression computing it (`make()`, `xs[0]`).
+        let name = || is_dotted_name(name).then(|| name.to_owned());
+        let blind = match callee {
+            Callee::Project(..) => return,
+            Callee::External(symbol) => {
+                // A value whose type says nothing of its methods resolves to a library name
+                // (`typing.Any.get`) that no library defines.
+                match call
+                    .recv_var
+                    .or(call.value)
+                    .and_then(|v| self.opaque_target(v))
+                {
+                    Some(reason) => Blind::Unresolved {
+                        name: name(),
+                        reason,
+                    },
+                    None => {
+                        let Some(registered) = blind_spots::uncatalogued(self.cx, symbol) else {
+                            return;
+                        };
+                        Blind::Uncatalogued {
+                            symbol: symbol.clone(),
+                            registered,
+                        }
+                    }
+                }
+            }
+            Callee::TooMany | Callee::Unresolved => Blind::Unresolved {
+                name: name(),
+                reason: call
+                    .recv_var
+                    .or(call.value)
+                    .map_or(UnresolvedReason::UntypedValue, |subject| {
+                        self.unresolved_reason(callee, subject)
+                    }),
+            },
+        };
+        self.blind.push(BlindCall {
+            span: call.span,
+            loop_depth: self.shape.loop_depth(bb),
+            is_awaited: call.is_awaited,
+            blind,
+        });
+    }
+
+    /// Why heki resolves a call on `subject` (its receiver, or the value it calls) to no
+    /// function (`callee`).
+    fn unresolved_reason(&self, callee: &Callee, subject: VarId) -> UnresolvedReason {
+        if *callee == Callee::TooMany {
+            return UnresolvedReason::TooManyImplementations;
+        }
+        // A value of `Any`, `object`, or `Callable`, or an unbound name, resolves to a library
+        // name ([`Self::opaque_target`]), never to no function.
+        match self.val(subject) {
+            Some(Val::Inst(c)) if self.cx.project.protocol(c) == Some(None) => {
+                UnresolvedReason::UnlistedProtocol
+            }
+            Some(_) => UnresolvedReason::UnknownMember,
+            None => self.untyped_origin(subject),
+        }
+    }
+
+    /// Why a call on `var` reaches no function heki knows although `var` has a type: the type
+    /// says nothing of its methods (`Any`, `object`) or of the function it holds (`Callable`),
+    /// or `var` is a name nothing heki sees binds, which heki looks up in `builtins`.
+    fn opaque_target(&self, var: VarId) -> Option<UnresolvedReason> {
+        match self.val(var)? {
+            Val::Ref(name) => name
+                .strip_prefix("builtins.")
+                .is_some_and(|n| !heki_ir::is_builtin_name(n.split('.').next().unwrap_or(n)))
+                .then_some(UnresolvedReason::UnboundName),
+            Val::Inst(c)
+                if matches!(
+                    c.as_str(),
+                    "typing.Any" | "typing_extensions.Any" | "builtins.object"
+                ) =>
+            {
+                Some(UnresolvedReason::AnyValue)
+            }
+            Val::Inst(c)
+                if matches!(c.as_str(), "typing.Callable" | "collections.abc.Callable") =>
+            {
+                Some(UnresolvedReason::CallableValue)
+            }
+            _ => None,
+        }
+    }
+
+    /// Where `var`, a value heki gives no class, comes from.
+    fn untyped_origin(&self, var: VarId) -> UnresolvedReason {
+        if let Some(&(param, None)) = self.param_alias.get(&var) {
+            let p = &self.f.params[usize::from(param)];
+            let name = p.name.clone();
+            return match p.annotation {
+                None => UnresolvedReason::UnannotatedParameter { param, name },
+                Some(_) => UnresolvedReason::UnresolvedAnnotation { param, name },
+            };
+        }
+        match self.defs.get(&self.shape.copy_root(var)).map(|i| &i.kind) {
+            Some(InstKind::Call {
+                callee_var: Some(f),
+                ..
+            }) if matches!(self.val(*f), Some(Val::Ref(s)) if s == "builtins.getattr") => {
+                UnresolvedReason::ComputedName
+            }
+            Some(InstKind::Call { .. } | InstKind::MethodCall { .. }) => {
+                UnresolvedReason::CallResult
+            }
+            Some(InstKind::AttrLoad { .. }) => UnresolvedReason::Attribute,
+            _ => UnresolvedReason::UntypedValue,
+        }
     }
 
     /// Record one call. A project callee decorated with an offloading decorator
@@ -6493,7 +6654,7 @@ impl<'a> Extractor<'a> {
         })
     }
 
-    /// The points that read each `self` attribute, for [`EffectSummary::must_read_self_attrs`]:
+    /// The points that read each `self` attribute, for [`KeptFacts::must_read_self_attrs`]:
     /// per attribute, the loads whose value is read as a whole, and per constant key the item
     /// loads of a value every use of which is such an item load (the keys `reads_self_attrs`
     /// records).
@@ -6694,7 +6855,7 @@ impl<'a> Extractor<'a> {
                 (must_run, never_returns, must_reads)
             });
         if !must_reads.is_empty() {
-            self.summary.must_read_self_attrs = Some(Box::new(must_reads));
+            self.summary.kept_mut().must_read_self_attrs = must_reads;
         }
         self.must_run = must_run;
         if never_returns && self.opt_in.must_effects {

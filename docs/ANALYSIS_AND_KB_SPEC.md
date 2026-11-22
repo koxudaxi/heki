@@ -456,12 +456,14 @@ EffectSummary(f) = {
     iterates_params:          Bitset,                      // stepped by an iteration on some path: a generator
                                                            // passed there runs there
     reads_self_attrs:         Set<AttrKeyPath>,            // self.<attr> and self.<dict>[const_key] reads
-    must_read_self_attrs:     Set<AttrKeyPath>,            // those read on every path that returns normally,
-                                                           // as a whole or with the key (MUT101; only with
-                                                           // MUT101 or MUT111 selected, OptInFacts::kept_values)
-    removes_kept:             KeptRemoval,                 // the values kept in an instance __dict__ it may remove
-                                                           // or replace on any object: by name, or any (MUT101;
-                                                           // OptInFacts::kept_values)
+    kept:                     Option<Box<KeptFacts>>,      // only with MUT101 or MUT111 selected
+                                                           // (OptInFacts::kept_values):
+                                                           // must_read_self_attrs, those read on every path
+                                                           // that returns normally, as a whole or with the key;
+                                                           // removes_kept, the values kept in an instance
+                                                           // __dict__ it may remove or replace on any object
+                                                           // (by name, or any); and listed_cache, its decorator
+                                                           // is one of the catalog's [[cached_properties]]
     returns_self_attrs:       Set<AttrName>,               // @cached_property: self.<attr> objects the result
                                                            // holds by reference, read for nothing else (MUT101)
     lazily_read_self_attrs:   Set<AttrName>,               // self.<attr> read only where it or a self call
@@ -557,7 +559,6 @@ EffectSummary(f) = {
 
     // Metadata
     is_async, is_generator, is_cached_property, is_lru_cache, owner_class_qualname, decorators,
-    listed_cache: Option<ListedCache>,                    // the decorator is in [[cached_properties]]
 }
 ```
 
@@ -697,6 +698,39 @@ property of its own instance (`del self.<name>`, a constant-key removal from `se
 `self.__dict__.clear()`, `self.<name>`, and calls on `self`, whose callees' summaries say what
 they do). They are local facts, never propagated, and they let `MUT101` decide staleness from the
 index alone, for a method of any indexed file.
+
+`FileSummary.blind_spots` (`heki_effect::BlindCall`, only with `OptInFacts::blind_spots`, which
+`heki_rules::recommend_facts` sets and neither `heki check` nor the language server does) holds,
+per function, the calls heki is blind to in its own body and the class bodies it runs, each once
+in source order: a call resolving to no function (`Callee::Unresolved` or `TooMany`), with the
+name called and why, from the receiver or the called value (`UnresolvedReason`: an unannotated
+parameter, an annotation giving no class, `Any` or `object`, a `Callable`, a name nothing heki
+sees binds, an unlisted protocol, a call result, an attribute, a computed `getattr` name, more
+implementations than CHA follows, a member heki does not find, any other untyped value); a call
+on `Any`, `object`, or a `Callable`, or of an unbound name, which resolves to a library name no
+library defines (`typing.Any.get`, `builtins.create`), counts as unresolved; and a call of a
+library function or class outside the project and the standard library without a catalog entry
+(`Blind::Uncatalogued`, with whether the catalog lists its package). They are local facts, never
+propagated, and no rule reads them. `ProjectIndex::blind_spot_reach` walks a function's facts of
+one kind, its body or what iterating its result runs, as each call hands them on
+(`ProjectIndex::delivery`: a helper returning a generator it does not iterate runs no generator
+body where it is called), once from every `async def` (not through a worker thread) and once from
+the calls inside a loop or once per item, giving the functions on an event loop and below a loop; `heki_rules::blind_spots` counts the calls by package and name and by function and reason,
+and the hidden `heki dump-recommend-facts` prints them.
+
+The census contract candidates are drawn from (`heki_rules::census`) is a pass over the index and
+computes no fact of its own: every local summary keeps the function's own typed read and write
+sites for every project class, whatever the contracts. Per class (the one heki types the accessed
+object with) and attribute it lists the functions writing it outside the initialization of their
+own instance (whether they rebind it, change its object in place, or only fill an object they
+construct), the initializers writing it on their own `self` (`INITIALIZERS` of the class), and
+the functions reading it (a read through a protocol declaring the attribute is the protocol's);
+per class, the modules constructing it or accessing its attributes; per module, its functions,
+those whose final summary reaches a blocking effect, and those reaching code heki does not see
+(`ProjectIndex::reaching_blind_spots`: a blind call, `unknown_calls`, or a body known only from a
+stub, in their own body or in what their calls hand on, as `blind_spot_reach` walks it, one
+`Closure` over those states). Without an ownership contract the summaries keep no write into an entry of an attribute's
+container and do not answer whether a write constructs its object, so a contract trial sees more.
 
 **Guards.** An effect inside a branch of a test of the function's own inputs (`if cache:`,
 `if x is None:`, `isinstance(x, T)`, `hasattr(x, "write")`, also through `and` / `or` / `not`,
@@ -940,7 +974,7 @@ which module imports which.
 6. The writes and the paths after and before them come from `FileSummary.cache_flows`, so the
    stale writes of a method are known without its IR: `MUT101` reports those of the checked
    methods, and `MUT111` reads those of every method.
-7. **Reads on every path** (`EffectSummary::must_read_self_attrs`, computed only when `MUT101`
+7. **Reads on every path** (`KeptFacts::must_read_self_attrs`, computed only when `MUT101`
    or `MUT111` runs: `OptInFacts::kept_values`): the attributes a function reads on every path
    on which it returns normally, exception edges into handlers included. Its own loads of
    `self.<attr>` are points of the path facts (`Progress::Returned`: a load that raised read
@@ -967,11 +1001,11 @@ which module imports which.
    `Calls(span)` at the project calls no `SelfCall` stands for (other receivers, the property
    getters a read of `self.<name>` runs) and at each step of iterating what a project generator
    called at `span` returns, whose callees' summaries say what they remove.
-   `EffectSummary::removes_kept` joins the same points of a function (a `yield` excepted: its
-   consumer is its caller) with what every callee removes. Each write of the flow also records
-   its literal key (`SelfAttrWrite::key`) and, for an in-place change, the builtin list, dict, or
-   set the attribute holds by its type and the method that changes it
-   (`SelfAttrWrite::change`).
+   `KeptFacts::removes_kept` (`EffectSummary::kept`) joins the same points of a function (a
+   `yield` excepted: its consumer is its caller) with what every callee removes. Each write of
+   the flow also records, under the same opt-in (`SelfAttrWrite::kept`), its literal key
+   (`KeptWrite::key`) and, for an in-place change, the builtin list, dict, or set the attribute
+   holds by its type and the method that changes it (`KeptWrite::change`).
 
 #### `MUT111`: readers of a stale `@cached_property` (opt-in)
 1. Reads: the `TypedFieldReadSite`s of each checked function's own body (`self.p`, `obj.p`,
@@ -1028,6 +1062,16 @@ which module imports which.
    that class, a subclass (known), or a base (open). One report per deep copy, the known claim
    first; the tests are related locations, at most five. What each copied class gives and which
    tests read each class's sentinel are answered once per run.
+6. **Below the attributes** (heuristic): the classes an object may hold in its attributes, by
+   the attribute types its classes declare (`ProjectDecls::classes_in_attributes`: a class, a
+   union's members, a generic container's items one level down, a protocol's structural
+   implementations; classes whose copy a hook or a `copyreg` registration decides left out,
+   `ProjectDecls::copy_decided_by_class`), read once per class. `heki_ir::walk::Closure` joins,
+   per class and once per run, the first class by name and sentinel holding a tested sentinel
+   among those it reaches (an unmetered budget: a walk over the declarations expands each class
+   once per run, and a budget spent in another order by `heki check` and the language server
+   would make them disagree). Each attribute of the copied class gives a heuristic claim naming
+   that attribute.
 
 #### `MUT112`: a value that is new on one path and borrowed on another, changed in place (opt-in)
 1. **What a value holds** (`heki_effect::ownership`): each instruction's `Source` says what the
@@ -1297,8 +1341,10 @@ message = "write model state through GenerationStore instead"
      private helper with project callers hands its report to them. Otherwise the outermost
      function is reported, with `message` as the report's help. With
      `unlisted-dict-keys = "report"`, a `dict_direct` site that hits no target, on a class some
-     targets cover, whose key none of them names, is judged the same way once per family of
-     those targets (`OwnerRule::written`), and reported as that key (`Class.key`).
+     targets cover, whose key no target of any `write-owners` contract covering the class names
+     (`NamedDictKeys`, built once per run from every contract's targets), is judged the same way
+     once per family of the contract's targets covering the class (`OwnerRule::written`), and
+     reported as that key (`Class.key`).
   3. Existing code bases migrate with **`heki check --baseline`**: counts are frozen per
      `(path, qualname, "MUT201", "Class.attr")` and can only shrink.
 
@@ -1428,7 +1474,7 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      premises of its claim's row (`heki_rules::premises`) it left open, each with a cause. The
      decisions above tell each step that does not hold (`MustGap`) to whoever asks: a decision
      stops at the first, an explanation goes on. Along the reported chain each call is evaluated
-     (`ProjectIndex::site_must_gaps`): its targets' completeness, whether they run there as
+     (`MustExplainer::gaps_along`): its targets' completeness, whether they run there as
      written, their facts, and, below the first call, whether the caller makes the next call on
      every normal return (`CallSite::made_on_every_return`); the walk goes down while the
      function the chain enters lacks the fact, whose own gap then gives way to the gaps found
@@ -1736,8 +1782,14 @@ its verdict that is not established, with the obligation's kind as the cause
 site is found only in a loop and, for an accumulation, on a value carried around it
 (`find_sites`), and a candidate is reported only when its construction establishes the builtin
 type (`OptCandidate::is_reportable`). A proven size-dependent report in a loop whose trip count
-the code fixes or caps (`OptCandidate::in_exact_tier`) records nothing: no premise of its row is
-open, and the exact tier leaves it out only because a fixed count is no evidence either way.
+the code fixes or caps (`OptCandidate::in_exact_tier`) leaves no premise of its row open: the
+exact tier also asks for a condition that is no premise, "Trip count open"
+(`heki_rules::premises::Condition`, decided in `FnIndex::fixed_trips`; Safety × Profitability,
+ADR-007 and ADR-011: the claim holds, the change does not pay off over a loop the code counts).
+The report records that condition with its cause (`trip-count-fixed`, the bound as its detail)
+in the same list as open premises (`heki_diagnostics::OpenRecord::Condition`, axis
+profitability), so every heuristic report names why it is not exact; the premise rows, the
+claims, and the oracle's strips do not change.
 
 `OPT113`'s exact tier is one decision, `JoinPremises::steps`, which tells each step that does
 not hold to its caller in the order it takes them (the same collection, the same keys, both
@@ -1748,8 +1800,8 @@ budget proportional to the function), so the decisions of the other joins are un
 of an item whose type is unknown, or a load that is no plain attribute of a known class or no
 item of a builtin container) apart from any other work on a mismatch ("Idle on a mismatch"), and
 `steps_run_no_code` an inner iterable of unknown type (an annotation closes it, unless a project
-subclass of a builtin container defines `__iter__`) apart from one that may run code. A fixed
-trip count records nothing, as for the rewrites.
+subclass of a builtin container defines `__iter__`) apart from one that may run code. A trip
+count the code fixes or caps records "Trip count open" at the loop, as for the rewrites.
 
 ---
 
@@ -1868,7 +1920,7 @@ cached-property decorators known to keep the getter's value in the instance `__d
 property's name: `functools.cached_property`, Django's, Werkzeug's, propcache's, and kombu's. Each
 entry names the versions whose source was read, why the value is kept there, how `del obj.<name>`
 and `obj.__dict__.pop(<name>)` act on it, and, for Werkzeug, the slot an instance without a
-`__dict__` keeps it in. `EffectSummary::listed_cache` records that a getter's decorator, resolved
+`__dict__` keeps it in. `KeptFacts::listed_cache` records that a getter's decorator, resolved
 through the module's imports (`ModuleDecls::decorator_symbol`), is listed; only such a getter makes
 a cached property an exact claim's (R3), and any other `cached_property` is one by its name.
 

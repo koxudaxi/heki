@@ -320,7 +320,7 @@ fn recompute(
     s
 }
 
-/// [`EffectSummary::must_read_self_attrs`] the function gets from the `self` methods it has
+/// [`crate::KeptFacts::must_read_self_attrs`] the function gets from the `self` methods it has
 /// called, and that returned, whenever it returns normally: the attributes every target reads
 /// on every path, when the targets are every implementation the call can run and each runs its
 /// body at every call (a cached property or function may hand out what an earlier call
@@ -368,7 +368,7 @@ fn must_reads_through_self_calls(
                         && runs_at_call(callee, site)
                         && crate::decorators::keeps_returned_value(&callee.decorators)
                 })
-                .and_then(|callee| callee.must_read_self_attrs.as_deref());
+                .map(EffectSummary::must_read_self_attrs);
             let reads: BTreeSet<AttrKeyPath> = reads.into_iter().flatten().cloned().collect();
             common = Some(match common {
                 None => reads,
@@ -380,12 +380,10 @@ fn must_reads_through_self_calls(
     if gained.is_empty() {
         return;
     }
-    s.must_read_self_attrs
-        .get_or_insert_with(Box::default)
-        .extend(gained);
+    s.kept_mut().must_read_self_attrs.extend(gained);
 }
 
-/// The reads both `a` and `b` make on every path ([`EffectSummary::must_read_self_attrs`]): an
+/// The reads both `a` and `b` make on every path ([`crate::KeptFacts::must_read_self_attrs`]): an
 /// attribute read as a whole covers each of its keys.
 pub(crate) fn must_reads_of_both(
     a: &BTreeSet<AttrKeyPath>,
@@ -1203,7 +1201,7 @@ fn apply_edge(
         facts,
     };
     transfer(index, target, local, &edge, &lead, rewrite);
-    target.removes_kept.join(&facts.removes_kept);
+    target.join_removes_kept(facts.removes_kept());
     if !index.skips_typed_writes
         && (!facts.typed_field_write_sites.is_empty() || !facts.mutated_param_paths.is_empty())
     {

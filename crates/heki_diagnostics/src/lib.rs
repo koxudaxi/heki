@@ -129,10 +129,50 @@ pub struct Diagnostic {
     /// suppressions and baselines, which see every report (`heki_rules::fold_root_causes`).
     #[serde(skip)]
     pub fold_key: Option<String>,
-    /// The premises of the exact claim a heuristic report did not establish, each with its
+    /// Why a heuristic report of an exact rule is not exact: the premises of its claim it did
+    /// not establish and the conditions of the exact tier that are no premise, each with its
     /// cause; filled only when the run asks for them, and written by no output format.
     #[serde(skip)]
-    pub open_premises: Vec<OpenPremise>,
+    pub open_records: Vec<OpenRecord>,
+}
+
+/// Why a heuristic report of an exact rule is not exact.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OpenRecord {
+    /// A premise of its claim is open: the claim may be false.
+    Premise(OpenPremise),
+    /// A condition of the exact tier that is no premise of the claim is open: the claim holds
+    /// either way.
+    Condition(OpenCondition),
+}
+
+impl From<OpenPremise> for OpenRecord {
+    fn from(premise: OpenPremise) -> Self {
+        Self::Premise(premise)
+    }
+}
+
+/// What a condition of the exact tier that is no premise of the claim is about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Axis {
+    /// Whether the change pays off (Safety × Profitability: the claim is about safety).
+    Profitability,
+}
+
+/// A condition of the exact tier that is no premise of the claim, left open by a report, and
+/// why (`heki_rules::premises::ConditionCause`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct OpenCondition {
+    pub axis: Axis,
+    /// The condition's name (`heki_rules::premises::Condition`).
+    pub condition: &'static str,
+    /// The cause, unique within its condition.
+    pub cause: &'static str,
+    /// Where the condition is open: a loop.
+    pub at: Option<RelatedLocation>,
+    /// What the cause's statement leaves out.
+    pub detail: Option<String>,
 }
 
 /// A premise of an exact claim that a report left open, and why
@@ -913,7 +953,7 @@ mod tests {
             fix: None,
             sites: 1,
             fold_key: None,
-            open_premises: Vec::new(),
+            open_records: Vec::new(),
         }
     }
 

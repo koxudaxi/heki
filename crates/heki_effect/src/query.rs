@@ -2,11 +2,13 @@
 //! set per question and linear in the states it visits (docs/development.md, "Analysis cost").
 
 use crate::{
-    AttrKeyPath, BoundCallee, CallHop, CallSite, CellChange, EffectSummary, Facts, FuncKey,
-    ProjectIndex, SharedState, SiteRole, Slot,
+    AttrKeyPath, BlindSpotReach, BoundCallee, CallHop, CallSite, CellChange, EffectSummary, Facts,
+    FuncKey, ProjectIndex, Runner, SharedState, SiteRole, Slot,
 };
+use heki_ir::walk::{Answer, Budget, Closure, Visit, reach};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::path::Path;
+use std::rc::Rc;
 
 /// What a function changes in place: its parameter itself (`None`) or a slot of it.
 pub type ParamChange = Option<Slot>;
@@ -132,6 +134,127 @@ impl ProjectIndex {
             index: self,
             by_file: FxHashMap::default(),
         }
+    }
+
+    /// [`BlindSpotReach`]: one walk from every `async def` over the calls that run what they
+    /// hand on on the caller's thread, and one from every call inside a loop or once per item,
+    /// each state visited once per walk. The states are a function's facts of one kind, its body
+    /// or what iterating its result runs ([`Facts`]), as calls hand them on ([`Self::delivery`]):
+    /// a helper returning a generator it does not iterate runs no generator body where it is
+    /// called, only where its result is iterated.
+    pub fn blind_spot_reach(&self) -> BlindSpotReach {
+        let mut calls = self.calls_by_caller();
+        let mut async_defs = Vec::new();
+        let mut in_loops = Vec::new();
+        for file in self.files.values() {
+            for (func, s) in &file.functions {
+                if s.is_async {
+                    async_defs.push((func, self.own_facts(func)));
+                }
+            }
+            for site in &file.call_sites {
+                if site.loop_depth > 0 || site.runner == Runner::PerItem {
+                    in_loops.extend(self.handed_on(site, self.own_facts(&site.caller)));
+                }
+            }
+        }
+        BlindSpotReach {
+            on_event_loop: self
+                .run_from(&mut calls, async_defs, |site| site.runner != Runner::Worker),
+            below_loop: self.run_from(&mut calls, in_loops, |_| true),
+        }
+    }
+
+    /// The functions whose own body runs, itself or through what its calls hand on, a call heki
+    /// is blind to (`FileSummary::blind_spots`), a call it cannot resolve or an A1 hazard
+    /// (`EffectSummary::unknown_calls`), or a function whose body it does not know (defined only
+    /// in a stub): what they do is not all seen. One closure over the facts calls hand on, as
+    /// [`Self::blind_spot_reach`] walks them, each state expanded once.
+    pub fn reaching_blind_spots(&self) -> FxHashSet<FuncKey> {
+        let mut calls = self.calls_by_caller();
+        let closure: Closure<(&FuncKey, Facts), bool> = Closure::new();
+        let budget = Budget::unmetered("reaching_blind_spots");
+        let blind = |(func, facts): (&FuncKey, Facts)| {
+            let path = self.file_of(func);
+            facts == self.own_facts(func)
+                && (self.summary(func).is_some_and(|s| s.unknown_calls)
+                    || path.is_some_and(crate::is_stub)
+                    || path.is_some_and(|p| {
+                        (self.files[p].blind_spots.as_ref()).is_some_and(|b| b.contains_key(func))
+                    }))
+        };
+        let mut out = FxHashSet::default();
+        for file in self.files.values() {
+            for func in file.functions.keys() {
+                let start = (func, self.own_facts(func));
+                let reaches = closure.ask(&budget, start, blind, |(func, facts), next| {
+                    for site in calls.of(func) {
+                        next.extend(self.handed_on(site, facts));
+                    }
+                });
+                if reaches == Answer::Known(Rc::new(true)) {
+                    out.insert(func.clone());
+                }
+            }
+        }
+        out
+    }
+
+    /// The facts the calls of `func`'s own body run in: its body, or, for a generator
+    /// function, what iterating its result runs.
+    fn own_facts(&self, func: &FuncKey) -> Facts {
+        if self.summary(func).is_some_and(|s| s.is_generator) {
+            Facts::Result
+        } else {
+            Facts::Body
+        }
+    }
+
+    /// The facts of its project callees that `site` runs in its caller's facts `into`.
+    fn handed_on<'s>(
+        &'s self,
+        site: &'s CallSite,
+        into: Facts,
+    ) -> impl Iterator<Item = (&'s FuncKey, Facts)> {
+        let own = self.own_facts(&site.caller);
+        site.project_callees().iter().filter_map(move |bc| {
+            let d = self.delivery(site, self.summary(&bc.callee)?)?;
+            let lands = if d.into == Facts::Body {
+                own
+            } else {
+                Facts::Result
+            };
+            (lands == into).then_some((&bc.callee, d.from))
+        })
+    }
+
+    /// The functions whose own body runs in `starts` or in what a call `follows` accepts hands
+    /// on from one of them, transitively.
+    fn run_from<'i>(
+        &'i self,
+        calls: &mut CallsByCaller<'i>,
+        starts: Vec<(&'i FuncKey, Facts)>,
+        follows: impl Fn(&CallSite) -> bool,
+    ) -> FxHashSet<FuncKey> {
+        let mut out = FxHashSet::default();
+        let _ = reach::<_, ()>(
+            &Budget::unmetered("blind_spot_reach"),
+            starts,
+            |(func, facts), next| {
+                for site in calls.of(func) {
+                    if follows(site) {
+                        next.extend(self.handed_on(site, facts));
+                    }
+                }
+            },
+            |(func, facts)| {
+                if facts == self.own_facts(func) {
+                    out.insert(func.clone());
+                }
+                Visit::Expand
+            },
+        );
+        out
     }
 
     /// The shortest chain of calls from `start`, whose parameter `param` changes `what` in place,
