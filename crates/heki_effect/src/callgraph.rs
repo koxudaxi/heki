@@ -324,13 +324,17 @@ fn recompute(
 /// on every path, when the targets are every implementation the call can run and each runs its
 /// body at every call (a cached property or function may hand out what an earlier call
 /// computed). A callee of the function's own call-graph component adds nothing, so the fact
-/// needs no fixpoint of its own.
+/// needs no fixpoint of its own. A name bound to two definitions gains nothing: each site's
+/// paths are its own definition's, and a call runs one of them.
 fn must_reads_through_self_calls(
     index: &ProjectIndex,
     sites: &[(PathBuf, usize)],
     in_scc: &dyn Fn(&FuncKey) -> bool,
     s: &mut EffectSummary,
 ) {
+    if s.must_exec.as_ref().is_some_and(|m| m.bound_twice) {
+        return;
+    }
     let mut gained: BTreeSet<AttrKeyPath> = BTreeSet::new();
     for (path, i) in sites {
         let site = &index.files[path].call_sites[*i];
