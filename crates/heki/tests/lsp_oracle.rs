@@ -692,6 +692,15 @@ const FAN_READ_NOTHING: &str =
 const FAN_READ_LOCKED: &str = "import asyncio\n\nLOCK = asyncio.Lock()\n\n\nasync def read_line(reader: asyncio.StreamReader):\n    async with LOCK:\n        return await reader.readline()\n";
 const FAN_USE: &str = "import asyncio\n\nfrom pkg.fan_read import read_line\n\n\nasync def both(reader: asyncio.StreamReader):\n    return await asyncio.gather(read_line(reader), read_line(reader))\n";
 
+// `MUT202` through summaries of changes below a parameter's items: a helper two modules below
+// changes an item of its own copy of what it is handed, then gives that item a new list first; a
+// relay in between hands the helper a copy of its parameter.
+const ITEM_TAG: &str = "def tag(x):\n    draft = dict(x)\n    draft[\"tags\"].append(1)\n";
+const ITEM_TAG_REBINDING: &str =
+    "def tag(x):\n    draft = dict(x)\n    draft[\"tags\"] = []\n    draft[\"tags\"].append(1)\n";
+const ITEM_RELAY: &str = "from pkg.item_tag import tag\n\n\ndef relay(x):\n    tag(dict(x))\n";
+const ITEM_USER: &str = "from pkg.catalog import Catalog\nfrom pkg.item_relay import relay\n\n\ndef use(c: Catalog):\n    relay(c.entry(\"k\"))\n";
+
 /// The project before the first step (every file is opened).
 fn initial_files() -> Vec<(&'static str, String)> {
     [
@@ -812,6 +821,9 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/sniff_more.py", SNIFF_MORE),
         ("pkg/sniff_user.py", SNIFF_USER),
         ("pkg/catalog.py", CATALOG),
+        ("pkg/item_tag.py", ITEM_TAG),
+        ("pkg/item_relay.py", ITEM_RELAY),
+        ("pkg/item_user.py", ITEM_USER),
         ("pkg/lookup.py", LOOKUP),
         ("pkg/tagger.py", TAGGER),
         ("pkg/fields.py", FIELDS),
@@ -2408,6 +2420,44 @@ fn steps_mut110() -> Vec<Step> {
             vec![save("pkg/ro/__init__.py", RO_INIT)],
         )
         .absent(&[("pkg/plot.py", "MUT110")]),
+    ]
+}
+
+/// `MUT202` through the summaries' changes below a parameter's items (`ELEMENTS_PATH`), handed on
+/// through a copy of a parameter (`ArgOrigin::param_copy`) across modules.
+fn steps_item_changes() -> Vec<Step> {
+    vec![
+        Step::new(
+            "the helper two modules below gives the copied item a new list before changing it",
+            vec![save("pkg/item_tag.py", ITEM_TAG_REBINDING)],
+        )
+        .absent(&[("pkg/item_user.py", "MUT202")]),
+        Step::new(
+            "the helper changes the item its copy shares again",
+            vec![save("pkg/item_tag.py", ITEM_TAG)],
+        )
+        .present(&[("pkg/item_user.py", "MUT202")]),
+        Step::new(
+            "the relay hands the helper its parameter's copy of a copy",
+            vec![save(
+                "pkg/item_relay.py",
+                &ITEM_RELAY.replace("tag(dict(x))", "tag(dict(dict(x)))"),
+            )],
+        )
+        .present(&[("pkg/item_user.py", "MUT202")]),
+        Step::new(
+            "the relay hands the helper a new dict",
+            vec![save(
+                "pkg/item_relay.py",
+                &ITEM_RELAY.replace("tag(dict(x))", "tag({\"tags\": []})"),
+            )],
+        )
+        .absent(&[("pkg/item_user.py", "MUT202")]),
+        Step::new(
+            "the relay hands it a copy of its parameter again",
+            vec![save("pkg/item_relay.py", ITEM_RELAY)],
+        )
+        .present(&[("pkg/item_user.py", "MUT202")]),
     ]
 }
 
@@ -4028,6 +4078,7 @@ sessions!(editing, Session::start, {
     small_displays: steps_small_displays,
     queue_capacity: steps_queue_capacity,
     mut114_mut202_mut109: steps_mut114_mut202_mut109,
+    item_changes: steps_item_changes,
     module_patterns: steps_module_patterns,
     indirect_helpers: steps_indirect_helpers,
     inherited_writers: steps_inherited_writers,

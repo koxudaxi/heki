@@ -1420,7 +1420,10 @@ forbid = ["mutates-params"]
     );
     p.write(
         "helpers.py",
-        r#"from inner import changes_its_item, rebinds_and_changes
+        r#"import copy
+from collections import deque
+
+from inner import changes_its_item, copies_a_part, rebinds_and_changes
 
 
 def by_key(orig):
@@ -1448,12 +1451,33 @@ def rebinds_the_item(orig):
 
 def handed_a_copy_it_rebinds(orig):
     rebinds_and_changes(dict(orig))
+
+
+def inserts_into_a_deque_copy(orig):
+    draft = deque(orig)
+    draft.appendleft([])
+    draft[0].append(1)
+
+
+def handed_a_copy_copying_a_part(orig):
+    copies_a_part(copy.copy(orig))
 "#,
     )
     .write(
         "inner.py",
-        r#"def changes_its_item(x):
+        r#"import copy
+
+
+def changes_its_item(x):
     x["tags"].append(1)
+
+
+def copies_a_part(q):
+    clears(copy.copy(q.children))
+
+
+def clears(xs):
+    xs.clear()
 
 
 def rebinds_and_changes(x):
@@ -1464,10 +1488,10 @@ def rebinds_and_changes(x):
     assert_eq!(
         reports(&p, "EFF201"),
         vec![
-            at("helpers.py", 4, "by_key"),
-            at("helpers.py", 8, "through_list"),
-            at("helpers.py", 13, "handed_a_copy"),
-            at("helpers.py", 17, "handed_a_part_of_a_copy"),
+            at("helpers.py", 7, "by_key"),
+            at("helpers.py", 11, "through_list"),
+            at("helpers.py", 16, "handed_a_copy"),
+            at("helpers.py", 20, "handed_a_part_of_a_copy"),
         ]
     );
     let (_, stdout, _) = p.heki(&["inspect", "helpers.through_list", "."]);
