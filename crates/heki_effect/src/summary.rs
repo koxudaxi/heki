@@ -20,6 +20,7 @@ use crate::iterations::{
 };
 use crate::locks::{self, LockStep, ObjRef};
 use crate::one_at_a_time;
+use crate::order_flow;
 use crate::ownership::{self, LocalOrigins, Origins, ParamRole, ReturnOrigins, Source};
 use crate::readonly::{self, Derivation, ProtectedReturn, ReturnStep, Shared, container_mutator};
 use crate::resolver::{
@@ -65,35 +66,6 @@ const MIN_KEPT_PAIRS: usize = 4096;
 /// above a floor: a function past it returns objects of unknown origin.
 const ORIGIN_STEPS_PER_SOURCE_BYTE: usize = 1;
 const MIN_ORIGIN_STEPS: usize = 4096;
-
-/// Augmented assignments changing a container in place, by the container's class: `xs += ys`
-/// extends a list, `s |= t` updates a set (`__iadd__`, `__ior__`, ...).
-const IN_PLACE_OPERATORS: &[(&str, &[BinOpKind])] = &[
-    ("builtins.list", &[BinOpKind::Add, BinOpKind::Mult]),
-    ("builtins.bytearray", &[BinOpKind::Add, BinOpKind::Mult]),
-    (
-        "builtins.set",
-        &[
-            BinOpKind::BitOr,
-            BinOpKind::BitAnd,
-            BinOpKind::Sub,
-            BinOpKind::BitXor,
-        ],
-    ),
-    ("builtins.dict", &[BinOpKind::BitOr]),
-    ("collections.deque", &[BinOpKind::Add, BinOpKind::Mult]),
-    ("collections.OrderedDict", &[BinOpKind::BitOr]),
-    ("collections.defaultdict", &[BinOpKind::BitOr]),
-    (
-        "collections.Counter",
-        &[
-            BinOpKind::Add,
-            BinOpKind::Sub,
-            BinOpKind::BitOr,
-            BinOpKind::BitAnd,
-        ],
-    ),
-];
 
 /// Execution effects `EFF101` treats as blocking the event loop.
 pub const BLOCKING_EFFECTS: &[ExecEffectKind] = ExecEffectKind::BLOCKING;
@@ -713,6 +685,8 @@ struct Extractor<'a> {
     cx: &'a TypeCtx<'a>,
     path: &'a Path,
     types: FxHashMap<VarId, Val>,
+    /// The types of the function's values with their arguments (`list[Model]`, `set[str]`).
+    inferred: std::rc::Rc<crate::infer::Inferred>,
     /// The values `isinstance` checks give variables in the blocks they guard.
     narrowed: FxHashMap<(BlockId, VarId), Val>,
     /// The classes each `isinstance` check names, by its second argument.
@@ -1092,7 +1066,7 @@ impl<'a> Extractor<'a> {
         cell_aliases: &'a CellAliases,
     ) -> Self {
         let f = shape.f;
-        let (types, narrowed, isinstance_classes) = cx.infer_flow(f);
+        let (types, narrowed, isinstance_classes, inferred) = cx.infer_flow(f);
         let mut defs = FxHashMap::default();
         let mut uses: FxHashMap<VarId, Vec<&InstKind>> = FxHashMap::default();
         let mut stored_attrs = Vec::new();
@@ -1154,6 +1128,7 @@ impl<'a> Extractor<'a> {
             types,
             narrowed,
             isinstance_classes,
+            inferred,
             defs,
             live,
             uses,
@@ -1347,10 +1322,20 @@ impl<'a> Extractor<'a> {
         }
     }
 
-    /// [`Self::may_params`]: a monotone fixpoint over copies and phis.
+    /// [`Self::may_params`]: a monotone fixpoint over copies, in-place container operators
+    /// ([`Self::same_object`]), and phis, from the parameters and the reads of the enclosing
+    /// functions' parameters ([`Self::captured_bit`]).
     fn build_may_params(&mut self) {
         for (i, p) in self.f.params.iter().enumerate().take(64) {
             *self.may_params.entry(p.var).or_default() |= 1u64 << i;
+        }
+        for inst in self.f.blocks.iter().flat_map(|b| &b.insts) {
+            if let InstKind::LoadDeref { dst, name } = &inst.kind {
+                let bit = self.captured_bit(name);
+                if bit != 0 {
+                    *self.may_params.entry(*dst).or_default() |= bit;
+                }
+            }
         }
         loop {
             let mut changed = false;
@@ -1361,16 +1346,95 @@ impl<'a> Extractor<'a> {
                     });
                     changed |= or_bits(&mut self.may_params, phi.dst, bits);
                 }
+                self.pos = (bb.id, 0);
                 for inst in &bb.insts {
-                    if let InstKind::Copy { dst, src } = &inst.kind {
-                        let bits = self.may_params.get(src).copied().unwrap_or(0);
-                        changed |= or_bits(&mut self.may_params, *dst, bits);
+                    if let Some((dst, src)) = self.same_object(&inst.kind) {
+                        let bits = self.may_params.get(&src).copied().unwrap_or(0);
+                        changed |= or_bits(&mut self.may_params, dst, bits);
                     }
                 }
             }
             if !changed {
                 return;
             }
+        }
+    }
+
+    /// `(dst, src)` of an instruction whose result is the object it is handed: a copy, or an
+    /// augmented assignment changing a built-in container in place (`items += more`,
+    /// `extras |= other`), which gives the container itself. On any other value
+    /// (`count += 1`) it binds a new object.
+    fn same_object(&self, kind: &InstKind) -> Option<(VarId, VarId)> {
+        match kind {
+            InstKind::Copy { dst, src } => Some((*dst, *src)),
+            InstKind::BinOp {
+                dst,
+                op,
+                lhs,
+                in_place: true,
+                ..
+            } if self.has_in_place_operator(*lhs, *op) => Some((*dst, *lhs)),
+            _ => None,
+        }
+    }
+
+    /// The mask bit of the enclosing function's parameter that the variable `name` the function
+    /// reads from it is on every path (`0`: none). A class body's code is the code of the
+    /// function running it, which binds the cell itself.
+    fn captured_bit(&self, name: &str) -> u64 {
+        self.cx
+            .captured_param(self.f, name)
+            .map_or(0, |(owner, i)| {
+                self.enclosing_param_bit(func_qualname(owner), i)
+            })
+    }
+
+    /// The mask bit of parameter `param` of `owner`, a function of the module enclosing the
+    /// summarized function or the function itself.
+    fn enclosing_param_bit(&self, owner: &str, param: u8) -> u64 {
+        if owner == self.key.qualname {
+            return 1u64 << param;
+        }
+        self.cx
+            .project
+            .function_decl(self.key)
+            .and_then(|d| d.captured_params.as_deref())
+            .map_or(0, |c| c.bit(owner, param))
+    }
+
+    /// The parameter `var` is on every path, as a mask (`0`: none or not known): its own, or an
+    /// enclosing function's that it reads through a closure cell, directly or through copies.
+    fn exact_param(&self, var: VarId) -> u64 {
+        if let Some((i, None)) = self.param_alias.get(&var) {
+            return 1u64 << i;
+        }
+        let root = self.shape.copy_root(var);
+        match self.shape.inst(root).map(|inst| &inst.kind) {
+            Some(InstKind::LoadDeref { name, .. }) => self.captured_bit(name),
+            _ => 0,
+        }
+    }
+
+    /// Bind the parameters of enclosing functions that `callee`, declared by `decl`, has
+    /// ([`resolver::CapturedParams`]) past its own `params`, to what this function holds there:
+    /// its own parameter, or its position of the same one when it is nested in that function
+    /// too. A call away from that function binds nothing.
+    fn bind_captured(&self, callee: &FuncKey, decl: &FunctionDecl, params: &mut Vec<ArgOrigin>) {
+        let Some(captured) = decl
+            .captured_params
+            .as_deref()
+            .filter(|_| callee.module == self.key.module)
+        else {
+            return;
+        };
+        let bits = (captured.params.iter().enumerate())
+            .map(|(j, (owner, param))| (j, self.enclosing_param_bit(owner, *param)));
+        for (j, bit) in bits.filter(|(_, bit)| *bit != 0) {
+            let at = usize::from(captured.first) + j;
+            if params.len() <= at {
+                params.resize(at + 1, ArgOrigin::default());
+            }
+            params[at].may_params = bit;
         }
     }
 
@@ -1422,9 +1486,10 @@ impl<'a> Extractor<'a> {
         }
     }
 
-    /// Alias maps through `AttrLoad`, `Copy`, agreeing phis, the calls and property reads that
-    /// return an attribute of what they are handed, and the closure cells of enclosing functions
-    /// (iterated to a fixpoint).
+    /// Alias maps through `AttrLoad`, copies and in-place container operators
+    /// ([`Self::same_object`]), agreeing phis, the calls and property reads that return an
+    /// attribute of what they are handed, and the closure cells of enclosing functions (iterated
+    /// to a fixpoint).
     fn build_aliases(&mut self) {
         for (i, p) in self.f.params.iter().enumerate() {
             if let Ok(i) = u8::try_from(i)
@@ -1475,33 +1540,10 @@ impl<'a> Extractor<'a> {
                     }
                 }
                 for inst in &bb.insts {
+                    if let Some((dst, src)) = self.same_object(&inst.kind) {
+                        self.alias_same_object(dst, src);
+                    }
                     match &inst.kind {
-                        InstKind::Copy { dst, src } => {
-                            if let Some(a) = self.param_alias.get(src).cloned() {
-                                self.param_alias.insert(*dst, a);
-                            }
-                            if let Some(a) = self.param_slot_alias.get(src).cloned() {
-                                self.param_slot_alias.insert(*dst, a);
-                            }
-                            if let Some(a) = self.param_copy_alias.get(src).cloned() {
-                                self.param_copy_alias.insert(*dst, a);
-                            }
-                            if let Some(a) = self.self_attr_alias.get(src).cloned() {
-                                self.self_attr_alias.insert(*dst, a);
-                            }
-                            if let Some(a) = self.obj_attr_alias.get(src).cloned() {
-                                let copy = ObjAttr { direct: false, ..a };
-                                self.obj_attr_alias.insert(*dst, copy);
-                            }
-                            if let Some(o) = self.dict_of.get(src).cloned() {
-                                self.dict_of.insert(*dst, o);
-                            }
-                            if !self.item_alias.is_empty()
-                                && let Some(i) = self.item_alias.get(src).cloned()
-                            {
-                                self.item_alias.insert(*dst, i);
-                            }
-                        }
                         kind @ (InstKind::AttrLoad { .. }
                         | InstKind::Call { .. }
                         | InstKind::MethodCall { .. }
@@ -1762,6 +1804,34 @@ impl<'a> Extractor<'a> {
             _ => None,
         };
         views.then_some((*recv, ItemStep::Items(index)))
+    }
+
+    /// The aliases of `src` for `dst`, the same object ([`Self::same_object`]).
+    fn alias_same_object(&mut self, dst: VarId, src: VarId) {
+        if let Some(a) = self.param_alias.get(&src).cloned() {
+            self.param_alias.insert(dst, a);
+        }
+        if let Some(a) = self.param_slot_alias.get(&src).cloned() {
+            self.param_slot_alias.insert(dst, a);
+        }
+        if let Some(a) = self.param_copy_alias.get(&src).cloned() {
+            self.param_copy_alias.insert(dst, a);
+        }
+        if let Some(a) = self.self_attr_alias.get(&src).cloned() {
+            self.self_attr_alias.insert(dst, a);
+        }
+        if let Some(a) = self.obj_attr_alias.get(&src).cloned() {
+            let copy = ObjAttr { direct: false, ..a };
+            self.obj_attr_alias.insert(dst, copy);
+        }
+        if let Some(o) = self.dict_of.get(&src).cloned() {
+            self.dict_of.insert(dst, o);
+        }
+        if !self.item_alias.is_empty()
+            && let Some(i) = self.item_alias.get(&src).cloned()
+        {
+            self.item_alias.insert(dst, i);
+        }
     }
 
     /// The alias maps of `dst`, a read of the closure cell `name` of an enclosing function: the
@@ -2529,6 +2599,30 @@ impl<'a> Extractor<'a> {
         if self.opt_in.return_origins {
             self.returned_origins();
         }
+        if self.opt_in.set_order {
+            let calls: Vec<order_flow::OrderCall<'_>> = self
+                .project_calls
+                .iter()
+                .map(|c| order_flow::OrderCall {
+                    at: c.at,
+                    dst: c.dst,
+                    span: self.sites[c.site].span,
+                    candidates: &c.params,
+                    recv: c.recv,
+                })
+                .collect();
+            self.summary.set_order = order_flow::local_facts(
+                order_flow::LocalInput {
+                    f,
+                    shape: self.shape,
+                    cx: self.cx,
+                    types: &self.types,
+                    inferred: &self.inferred,
+                    callees: &self.callees,
+                },
+                &calls,
+            );
+        }
         self.iterations();
         if self.opt_in.iterations {
             let site_spans: FxHashSet<Span> = self.sites.iter().map(|s| s.span).collect();
@@ -3199,7 +3293,7 @@ impl<'a> Extractor<'a> {
         let callees = std::mem::take(&mut self.callees);
         let flow =
             IterFlow::with_callees(self.shape, self.cx, &self.types, Roots::Summary, callees);
-        let it = param_iteration(f, &flow);
+        let it = param_iteration(self.shape, &flow);
         self.summary.consumes_params = it.consumes;
         self.summary.unconditional_forwards = it.unconditional;
         self.summary.iterates_params = it.iterates;
@@ -4832,10 +4926,7 @@ impl<'a> Extractor<'a> {
         match self.val(var) {
             None => true,
             Some(Val::Inst(c)) => {
-                matches!(
-                    c.as_str(),
-                    "typing.Any" | "typing_extensions.Any" | "builtins.object"
-                ) || self.cx.project.protocol(c) == Some(None)
+                resolver::of_any_class(c) || self.cx.project.protocol(c) == Some(None)
             }
             Some(_) => false,
         }
@@ -4855,10 +4946,7 @@ impl<'a> Extractor<'a> {
         if !named || !self.unknown_class(obj) {
             return;
         }
-        let obj_params = match self.param_alias.get(&obj) {
-            Some((i, None)) => 1u64 << i,
-            _ => 0,
-        };
+        let obj_params = self.exact_param(obj);
         self.summary
             .unresolved_access_sites
             .insert(UnresolvedAccessSite {
@@ -4876,10 +4964,7 @@ impl<'a> Extractor<'a> {
         if !self.ownership {
             return;
         }
-        let obj_params = match obj.and_then(|o| self.param_alias.get(&o)) {
-            Some((i, None)) => 1u64 << i,
-            _ => 0,
-        };
+        let obj_params = obj.map_or(0, |o| self.exact_param(o));
         let site = UnresolvedWriteSite {
             what,
             kind,
@@ -4960,9 +5045,7 @@ impl<'a> Extractor<'a> {
     /// Whether `lhs op= ...` changes the built-in container `lhs` holds in place, whatever the
     /// result is stored to.
     fn has_in_place_operator(&self, lhs: VarId, op: BinOpKind) -> bool {
-        matches!(self.val(lhs), Some(Val::Inst(class)) if IN_PLACE_OPERATORS
-            .iter()
-            .any(|(c, ops)| c == class && ops.contains(&op)))
+        matches!(self.val(lhs), Some(Val::Inst(class)) if crate::types::changes_in_place(class, op))
     }
 
     /// Whether the checked container of `self` that `obj` holds has the key `key` at instruction
@@ -5749,26 +5832,12 @@ impl<'a> Extractor<'a> {
         let blind = match callee {
             Callee::Project(..) => return,
             Callee::External(symbol) => {
-                // A value whose type says nothing of its methods resolves to a library name
-                // (`typing.Any.get`) that no library defines.
-                match call
-                    .recv_var
-                    .or(call.value)
-                    .and_then(|v| self.opaque_target(v))
-                {
-                    Some(reason) => Blind::Unresolved {
-                        name: name(),
-                        reason,
-                    },
-                    None => {
-                        let Some(registered) = blind_spots::uncatalogued(self.cx, symbol) else {
-                            return;
-                        };
-                        Blind::Uncatalogued {
-                            symbol: symbol.clone(),
-                            registered,
-                        }
-                    }
+                let Some(registered) = blind_spots::uncatalogued(self.cx, symbol) else {
+                    return;
+                };
+                Blind::Uncatalogued {
+                    symbol: symbol.clone(),
+                    registered,
                 }
             }
             Callee::TooMany | Callee::Unresolved => Blind::Unresolved {
@@ -5795,8 +5864,9 @@ impl<'a> Extractor<'a> {
         if *callee == Callee::TooMany {
             return UnresolvedReason::TooManyImplementations;
         }
-        // A value of `Any`, `object`, or `Callable`, or an unbound name, resolves to a library
-        // name ([`Self::opaque_target`]), never to no function.
+        if let Some(reason) = self.opaque_target(subject) {
+            return reason;
+        }
         match self.val(subject) {
             Some(Val::Inst(c)) if self.cx.project.protocol(c) == Some(None) => {
                 UnresolvedReason::UnlistedProtocol
@@ -5807,28 +5877,24 @@ impl<'a> Extractor<'a> {
     }
 
     /// Why a call on `var` reaches no function heki knows although `var` has a type: the type
-    /// says nothing of its methods (`Any`, `object`) or of the function it holds (`Callable`),
-    /// or `var` is a name nothing heki sees binds, which heki looks up in `builtins`.
+    /// (of the instance or class object, or of a member of the union) says nothing of its
+    /// methods (`Any`, `object`) or of the function it holds (`Callable`), or `var` is a name
+    /// nothing heki sees binds, which heki looks up in `builtins`.
     fn opaque_target(&self, var: VarId) -> Option<UnresolvedReason> {
-        match self.val(var)? {
-            Val::Ref(name) => name
-                .strip_prefix("builtins.")
-                .is_some_and(|n| !heki_ir::is_builtin_name(n.split('.').next().unwrap_or(n)))
-                .then_some(UnresolvedReason::UnboundName),
-            Val::Inst(c)
-                if matches!(
-                    c.as_str(),
-                    "typing.Any" | "typing_extensions.Any" | "builtins.object"
-                ) =>
-            {
+        let of_class = |class: &String| {
+            if resolver::of_any_class(class) {
                 Some(UnresolvedReason::AnyValue)
+            } else {
+                resolver::is_any_callable(class).then_some(UnresolvedReason::CallableValue)
             }
-            Val::Inst(c)
-                if matches!(c.as_str(), "typing.Callable" | "collections.abc.Callable") =>
-            {
-                Some(UnresolvedReason::CallableValue)
+        };
+        match self.val(var)? {
+            Val::Ref(name) => {
+                resolver::is_unbound_name(name).then_some(UnresolvedReason::UnboundName)
             }
-            _ => None,
+            // `super()` is that of a project class, which says what it has.
+            Val::Inst(class) | Val::Class(class) | Val::Super(class) => of_class(class),
+            Val::Union(classes) => classes.iter().find_map(of_class),
         }
     }
 
@@ -6106,6 +6172,7 @@ impl<'a> Extractor<'a> {
                     while params.last().is_some_and(ArgOrigin::is_empty) {
                         params.pop();
                     }
+                    self.bind_captured(key, decl, &mut params);
                     if self.ownership && !offloaded {
                         handovers.push((decl, callees.len(), handed_args));
                     }
@@ -7288,6 +7355,9 @@ impl<'a> Extractor<'a> {
             })
         });
         if from_caller {
+            return 0;
+        }
+        if entry.emits_in(case) == heki_kb::Emits::UnlessConfiguredOtherwise {
             return 0;
         }
         effects

@@ -852,8 +852,11 @@ pub struct Condition {
 pub const TRIP_COUNT_OPEN: Condition = Condition {
     name: "Trip count open",
     axis: Axis::Profitability,
-    states: "the code does not fix or cap the number of times the loop runs, so the cost grows with the data",
-    decided_in: &["heki_ir::facts::FnIndex::fixed_trips"],
+    states: "the data decides the number of times the loop runs, so the cost grows with it: the loop steps through items the data decides, as \"Origin\" establishes them (a parameter, the rows of a query, the lines of a file, the entries of a directory), and the code does not fix or cap their number",
+    decided_in: &[
+        "heki_ir::facts::FnIndex::fixed_trips",
+        "heki_rules::eff_rules::DataOrigins::of_loop_items",
+    ],
 };
 
 /// Why a report left a [`Condition`] open, from a closed list kept next to the condition, as
@@ -874,8 +877,61 @@ pub const TRIP_COUNT_FIXED: ConditionCause = ConditionCause {
     closer: Closer::None,
 };
 
+pub const TRIPS_FIXED_BY_THE_CODE: ConditionCause = ConditionCause {
+    id: FIXED_BY_THE_CODE.id,
+    condition: &TRIP_COUNT_OPEN,
+    states: "some of the loop's items are ones the code fixes (a literal, a display, a module constant, `range` of constants), although it does not fix their number",
+    closer: FIXED_BY_THE_CODE.closer,
+};
+
+pub const TRIPS_NOT_FROM_THE_DATA: ConditionCause = ConditionCause {
+    id: ITEMS_NOT_FROM_THE_DATA.id,
+    condition: &TRIP_COUNT_OPEN,
+    states: "the loop's items come from something heki does not take as the data: a method's receiver (`self.layers`), a project function's result, or a call heki does not resolve, so the program's structure may decide their number",
+    closer: ITEMS_NOT_FROM_THE_DATA.closer,
+};
+
+pub const TRIPS_FROM_A_CALL_WITHOUT_ITEMS: ConditionCause = ConditionCause {
+    id: LIBRARY_CALL_WITHOUT_ITEMS.id,
+    condition: &TRIP_COUNT_OPEN,
+    states: "the loop's items are a library call's result whose catalog entry does not say that the data decides their number (`items`)",
+    closer: LIBRARY_CALL_WITHOUT_ITEMS.closer,
+};
+
+pub const TRIPS_WITHOUT_ITEMS_FOLLOWED: ConditionCause = ConditionCause {
+    id: NO_ITEMS_FOLLOWED.id,
+    condition: &TRIP_COUNT_OPEN,
+    states: "heki follows no items the loop steps through: a `while` loop, `range` of a number that is no constant or length, or an iterable the walk does not decide",
+    closer: NO_ITEMS_FOLLOWED.closer,
+};
+
+/// The causes of "Trip count open" for a loop whose items "Origin" does not establish as the
+/// data's: one for each cause of "Origin", with its id and closer ([`trip_count_cause`]).
+const TRIP_COUNT_ORIGIN_CAUSES: &[&ConditionCause] = &[
+    &TRIPS_FIXED_BY_THE_CODE,
+    &TRIPS_NOT_FROM_THE_DATA,
+    &TRIPS_FROM_A_CALL_WITHOUT_ITEMS,
+    &TRIPS_WITHOUT_ITEMS_FOLLOWED,
+];
+
 /// Every cause of a condition, once.
-pub const CONDITION_CAUSES: &[&ConditionCause] = &[&TRIP_COUNT_FIXED];
+pub const CONDITION_CAUSES: &[&ConditionCause] = &[
+    &TRIP_COUNT_FIXED,
+    &TRIPS_FIXED_BY_THE_CODE,
+    &TRIPS_NOT_FROM_THE_DATA,
+    &TRIPS_FROM_A_CALL_WITHOUT_ITEMS,
+    &TRIPS_WITHOUT_ITEMS_FOLLOWED,
+];
+
+/// The cause of "Trip count open" for a loop whose items are not the data's, `origin` being the
+/// cause of "Origin" that says why ([`TRIP_COUNT_ORIGIN_CAUSES`]).
+pub fn trip_count_cause(origin: &OpenCause) -> &'static ConditionCause {
+    TRIP_COUNT_ORIGIN_CAUSES
+        .iter()
+        .copied()
+        .find(|c| c.id == origin.id)
+        .unwrap_or(&TRIPS_NOT_FROM_THE_DATA)
+}
 
 impl ConditionCause {
     /// The record of this cause on a report: where the condition is open, and what the
@@ -1053,6 +1109,22 @@ mod tests {
                 c.id
             );
             assert_eq!(condition_cause(c.condition.name, c.id), Some(*c));
+        }
+    }
+
+    #[test]
+    fn each_cause_of_origin_has_one_of_trip_count_open_with_its_closer() {
+        let origin: Vec<&OpenCause> = CAUSES
+            .iter()
+            .copied()
+            .filter(|c| *c.premise == ORIGIN)
+            .collect();
+        assert_eq!(origin.len(), TRIP_COUNT_ORIGIN_CAUSES.len());
+        for o in origin {
+            let c = trip_count_cause(o);
+            assert_eq!((c.id, c.closer), (o.id, o.closer), "{}", o.id);
+            assert_eq!(*c.condition, TRIP_COUNT_OPEN);
+            assert!(CONDITION_CAUSES.contains(&c), "{}", o.id);
         }
     }
 

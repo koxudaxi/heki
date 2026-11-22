@@ -11,8 +11,10 @@ Every heki report is **exact** or **heuristic**:
 
 A rule is exact once it is certified (below), and heuristic until then. An exact rule's report
 is exact when it established every premise of the rule's exact claim, and heuristic when one is
-open: an `OPT` rewrite heki could not prove safe, a size-dependent `OPT` rewrite in a loop whose
-trip count the code fixes or caps, an `OPT113` join whose rule page premises do not all hold, or
+open: an `OPT` rewrite heki could not prove safe, a size-dependent `OPT` rewrite over a loop whose
+trip count the data does not decide (the code fixes or caps it, or the loop's items are not a
+parameter, the rows of a query, the lines of a file, or the entries of a directory), an `OPT113`
+join whose rule page premises do not all hold, or
 a `DATA101`, `MUT110`, or `MUT114` report whose rule page premises are not all established. Only exact reports are shown by
 default.
 
@@ -73,11 +75,14 @@ on its own along the reported chain and loop, so they cannot disagree with its t
 [`heki recommend`](recommend.md) counts the heuristic reports by these causes; no output format of
 `heki check` and nothing in the language server shows them. `EFF111` and `EFF113` record them for the claims of `EFF101` and `EFF103`, and the heuristic
 reports of the eight `OPT` rewrite rules, `OPT113`, `DATA101`, `MUT110`, and `MUT114` for their own
-claims. A proven `OPT` rewrite, or an `OPT113` join whose premises all hold, over a loop the code
-fixes at more than 16 trips is heuristic for a condition of the exact tier that is no premise,
+claims. A proven size-dependent `OPT` rewrite, or an `OPT113` join whose premises all hold, over
+a loop the data does not size is heuristic for a condition of the exact tier that is no premise,
 "Trip count open" (the claim holds, but the change pays off only over a loop the data sizes): the
-report records that condition, with its cause, in the same list as the premises it left open,
-if any.
+code fixes the loop at more than 16 trips or caps it, or, for a rewrite, the loop's items are not
+the data's as `EFF103`'s Origin establishes them (a loop over an attribute of `self`, a project
+function's result, `range` of a configured number, or a `while` loop runs as many times as the
+program has parts). The report records that condition, with its cause, in the same list as the
+premises it left open, if any.
 
 An exact report's message states its claim and the witnesses of its premises, nothing else: no
 cost estimate such as "(N+1)", and no advice (that goes into the help).
@@ -170,6 +175,9 @@ before reports reaching one waiting call are folded together.
 | `MUT114` | 0.2.0 | 5 / 0 | 5 / 0 |
 
 <!-- End of the generated certifications. -->
+
+The exact tier of the size-dependent rewrites has since asked that the data decide the loop's trip
+count, which keeps a subset of the reports their census and holdout run checked.
 
 ## Measurements
 

@@ -176,27 +176,27 @@ fn external_targets_match_calls_and_module_reads_by_their_full_names() {
         (
             16,
             "env:reads:os.environ",
-            "`by_environ` reads `os.environ` (module_attr)",
+            "`by_environ` reads `os.environ` (as a module attribute)",
         ),
         (
             20,
             "env:reads:os.environ",
-            "`by_environ_item` reads `os.environ` (module_attr)",
+            "`by_environ_item` reads `os.environ` (as a module attribute)",
         ),
         (
             24,
             "env:reads:sys.version_info",
-            "`by_version_info` reads `sys.version_info` (module_attr)",
+            "`by_version_info` reads `sys.version_info` (as a module attribute)",
         ),
         (
             28,
             "env:reads:sys.platform",
-            "`by_platform` reads `sys.platform` (module_attr)",
+            "`by_platform` reads `sys.platform` (as a module attribute)",
         ),
         (
             32,
             "env:reads:os.name",
-            "`by_os_name` reads `os.name` (module_attr)",
+            "`by_os_name` reads `os.name` (as a module attribute)",
         ),
         (
             36,
