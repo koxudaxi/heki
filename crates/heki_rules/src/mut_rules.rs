@@ -804,7 +804,11 @@ fn private_methods_called_from_init(
 }
 
 mod kept_values;
+mod sentinel_copies;
 mod stale_reads;
+
+pub(crate) use sentinel_copies::mut118;
+pub use sentinel_copies::{SentinelTestKey, deep_copy_files, sentinel_tests_in};
 
 // ==================================================================================== MUT201
 

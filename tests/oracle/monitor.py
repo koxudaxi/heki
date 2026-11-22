@@ -28,10 +28,12 @@ Events (lists, so that the trace is compact JSON):
 - `["resume", seq, act, qualname, path]`: a project generator or coroutine resumed;
 - `["exhaust", loop, act, entry, seq]`: the loop's iterator was exhausted;
 - `["line", line, act, seq_start, seq_end, outcome, chain, before, after, muts, types,
-  names_before, names_after, evals_before, evals_after]`: `names_*` map the captured names to
-  the identity of what they hold when the line starts and ends, `evals_*` the plan's expressions
-  (`a.k`, `a["k"]`) to `[id, type, snapshot]` of what they load without running code of the
-  program (`None` when that cannot be told);
+  names_before, names_after, evals_before, evals_after, attrs_before, attrs_after]`: `names_*`
+  map the captured names to the identity of what they hold when the line starts and ends,
+  `evals_*` the plan's expressions (`a.k`, `a["k"]`) to `[id, type, snapshot]` of what they load
+  without running code of the program (`None` when that cannot be told), and `attrs_*` map
+  `name.attr` to `[object id, classes along its MRO as module.qualname, id of what its __dict__
+  holds under attr or None, that value's type name or None]` for the pairs the plan names;
 - `["ret", ret, act, seq, value_id, type_name, base, self_id]`: `base` is `list`, `dict`, or
   `set` for an instance of one (a subclass too), else the type's name; `self_id` is the identity
   of the frame's first argument (`None` without one), the instance a getter computed for;
@@ -40,7 +42,7 @@ Events (lists, so that the trace is compact JSON):
 - `["kept_ret", ret, act, seq, self_id, kept_id]`: the writer of a kept-value claim returned
   normally; `kept_id` is the identity of what its first argument's `__dict__` holds under the
   property's name then (`None`: nothing). A line of such a writer carries the same facts at its
-  start and end as a last element of its `line` event (`kept_facts`, after `evals_after`);
+  start and end as a last element of its `line` event (`kept_facts`, after `attrs_after`);
 - `["fake", seq, api, kind, waits, detail, stack, input_ids, output_id]`.
 """
 
@@ -386,6 +388,8 @@ class LineExec:
         "names",
         "evals",
         "evals_before",
+        "attrs",
+        "attrs_before",
         "kept",
         "kept_self",
     )
@@ -396,6 +400,8 @@ class LineExec:
         self.names = {}
         self.evals = []
         self.evals_before = {}
+        self.attrs = []
+        self.attrs_before = {}
         self.chain = None
         self.watched = []
         self.before = []
@@ -537,6 +543,28 @@ class Recorder:
                 continue
             self.keep.append(value)
             out[name] = [id(value), type(value).__name__, snapshot(value)]
+        return out
+
+    def _attr_facts(self, local, pairs):
+        """What each `[name, attr]` of `pairs` names in `local`: the object, its classes, and
+        what its `__dict__` holds under the attribute (`snapshot` cannot tell two `object()`s
+        apart)."""
+        out = {}
+        for name, attr in pairs:
+            value = local.get(name, MISSING)
+            if value is MISSING:
+                out[f"{name}.{attr}"] = None
+                continue
+            held = getattr(value, "__dict__", {}).get(attr, MISSING)
+            self.keep.append(value)
+            self.keep.append(held)
+            classes = [f"{c.__module__}.{c.__qualname__}" for c in type(value).__mro__]
+            out[f"{name}.{attr}"] = [
+                id(value),
+                classes,
+                None if held is MISSING else id(held),
+                None if held is MISSING else type(held).__name__,
+            ]
         return out
 
     def _eval_keys(self, frame, keys):
@@ -817,15 +845,17 @@ class Recorder:
 
     def _start_line(self, fs, plans, seq, frame):
         merged = {"id": plans[0]["id"], "capture": [], "types": [], "chain": False, "evals": []}
+        ex = LineExec(plans, seq)
         for plan in plans:
+            ex.attrs.extend(plan.get("attrs", ()))
             merged["capture"].extend(plan.get("capture", ()))
             merged["types"].extend(plan.get("types", ()))
             merged["evals"].extend(plan.get("evals", ()))
             merged["chain"] = merged["chain"] or plan.get("chain", False)
-        ex = LineExec(plans, seq)
         local = frame.f_locals
         ex.evals = sorted(set(merged["evals"]))
         ex.evals_before = self._eval_objects(local, ex.evals)
+        ex.attrs_before = self._attr_facts(local, ex.attrs)
         watched = []
         for name in merged["capture"]:
             value = local.get(name, MISSING)
@@ -917,7 +947,8 @@ class Recorder:
         fs.open_line = None
         after = [[id(v), type(v).__name__, snapshot(v)] for v in ex.watched]
         evals_after = self._eval_objects(fs.frame.f_locals, ex.evals) if ex.evals else {}
-        local = fs.frame.f_locals if ex.names else {}
+        local = fs.frame.f_locals if ex.names or ex.attrs else {}
+        attrs_after = self._attr_facts(local, ex.attrs)
         after_names = {}
         for name in ex.names:
             value = local.get(name, MISSING)
@@ -945,6 +976,8 @@ class Recorder:
                 after_names,
                 ex.evals_before,
                 evals_after,
+                ex.attrs_before,
+                attrs_after,
                 kept_facts,
             ]
         )
@@ -966,6 +999,8 @@ class Recorder:
                     after_names,
                     ex.evals_before,
                     evals_after,
+                    ex.attrs_before,
+                    attrs_after,
                 ]
             )
 

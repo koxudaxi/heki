@@ -70,10 +70,10 @@ pub use readonly::{
 };
 pub use report::{BoundaryReport, boundary_reports, boundary_reports_in};
 pub use resolver::{
-    Callee, ClassDecl, DeclKeys, DeclPasses, FunctionDecl, ModuleDecls, ModuleLayout, ProjectDecls,
-    ReadOnlyAttr, ReadOnlyKind, StrConstant, StrValue, TypeCtx, Val, aliases_of,
-    detect_source_roots, func_qualname, module_name_for_path, resolve_relative_module,
-    self_aliases,
+    Callee, ClassDecl, DeclKeys, DeclPasses, DeepCopy, FunctionDecl, HeldSentinel, ModuleDecls,
+    ModuleLayout, NamedAttr, ProjectDecls, ReadOnlyAttr, ReadOnlyKind, StrConstant, StrValue,
+    TypeCtx, Val, aliases_of, detect_source_roots, func_qualname, module_name_for_path,
+    resolve_relative_module, self_aliases,
 };
 pub use summary::{BLOCKING_EFFECTS, offloaded_callable};
 
@@ -555,6 +555,34 @@ impl TypedFieldReadSite {
     }
 }
 
+/// A comparison by identity of an attribute of an object of a project class with an `object()`
+/// sentinel (`obj.attr is SENTINEL`, `is not`, on either side): a local fact of the comparing
+/// function ([`EffectSummary::sentinel_tests`]).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct SentinelTest {
+    /// Fully qualified name of a class the object may be an instance of, one test per class.
+    pub class_qualname: String,
+    pub attr: String,
+    /// The sentinel's canonical fqn ([`ProjectDecls::object_sentinel`]).
+    pub sentinel: String,
+    /// The object is an instance of that one class or, under R2, of a project subclass (by
+    /// construction or annotation): no other class, protocol, or union member.
+    pub only: bool,
+    pub span: Span,
+}
+
+/// A call of `copy.deepcopy` with one argument and no `memo`, of an object heki knows the
+/// project classes of: a local fact of the calling function ([`EffectSummary::deep_copies`]).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct DeepCopySite {
+    /// Fully qualified names of the project classes the argument may be an instance of.
+    pub classes: Vec<String>,
+    /// The argument is an instance of the one class `classes` holds or, under R2, of a
+    /// project subclass (by construction or annotation).
+    pub only: bool,
+    pub span: Span,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReadKind {
@@ -771,6 +799,14 @@ pub struct EffectSummary {
     pub typed_field_write_sites: BTreeSet<TypedFieldWriteSite>,
     /// The function's own reads of project-class attributes (`MUT203`; never propagated).
     pub typed_field_read_sites: BTreeSet<TypedFieldReadSite>,
+    /// The function's own comparisons by identity of a project-class attribute with an
+    /// `object()` sentinel (`MUT118`; never propagated). Boxed: few functions have any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sentinel_tests: Option<Box<BTreeSet<SentinelTest>>>,
+    /// The function's own `copy.deepcopy` calls of one argument of a project class (`MUT118`;
+    /// never propagated). Boxed: few functions have any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deep_copies: Option<Box<BTreeSet<DeepCopySite>>>,
     /// Names of the private methods the function calls on any receiver (`obj._name(...)`),
     /// resolved or not: `MUT107` leaves the methods a class family's initializers call this
     /// way to initialization. A local fact: never propagated.
@@ -1223,6 +1259,28 @@ impl EffectSummary {
                 site
             })
             .collect();
+        out.sentinel_tests = out.sentinel_tests.map(|tests| {
+            Box::new(
+                tests
+                    .into_iter()
+                    .map(|mut t| {
+                        t.span = Span { start: 0, end: 0 };
+                        t
+                    })
+                    .collect(),
+            )
+        });
+        out.deep_copies = out.deep_copies.map(|sites| {
+            Box::new(
+                sites
+                    .into_iter()
+                    .map(|mut d| {
+                        d.span = Span { start: 0, end: 0 };
+                        d
+                    })
+                    .collect(),
+            )
+        });
         out.param_change_sites.clear();
         if let Some(f) = &mut out.shared_state {
             let f = Arc::make_mut(f);
@@ -1286,6 +1344,8 @@ impl EffectSummary {
     pub fn same_for_callers(&self, other: &Self) -> bool {
         let without_local = |s: &Self| Self {
             typed_field_read_sites: BTreeSet::new(),
+            sentinel_tests: None,
+            deep_copies: None,
             param_change_sites: BTreeMap::new(),
             shared_state: s.shared_state.as_ref().and_then(|f| {
                 let propagated = SharedStateFacts {
@@ -1302,6 +1362,16 @@ impl EffectSummary {
             ..s.clone()
         };
         without_local(self) == without_local(other) && self.same_facts(other)
+    }
+
+    /// [`Self::sentinel_tests`], none when there are none.
+    pub fn sentinel_test_sites(&self) -> impl Iterator<Item = &SentinelTest> {
+        self.sentinel_tests.iter().flat_map(|t| t.iter())
+    }
+
+    /// [`Self::deep_copies`], none when there are none.
+    pub fn deep_copy_sites(&self) -> impl Iterator<Item = &DeepCopySite> {
+        self.deep_copies.iter().flat_map(|d| d.iter())
     }
 
     /// [`Self::iterations`], empty when there are none.

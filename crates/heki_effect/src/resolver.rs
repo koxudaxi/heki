@@ -22,7 +22,9 @@ use heki_ir::{
     BinOpKind, BlockId, ConstLiteral, FnIndex, FunctionKind, GlobalStores, Inst, InstKind,
     IrFunction, ModuleIr, SmallDisplay, Terminator, VarId,
 };
-use heki_kb::{ArgFact, EcosystemEntry, EffectiveEcosystemKb, ExecEffectKind, LiteralValue};
+use heki_kb::{
+    ArgFact, CopyDepth, EcosystemEntry, EffectiveEcosystemKb, ExecEffectKind, LiteralValue,
+};
 use heki_semantic::{ModuleImport, ScopeKind, SemanticModel};
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
@@ -34,6 +36,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 
 mod package_paths;
+mod sentinels;
 
 /// The derived indexes of a [`ProjectDecls`] version (`ProjectDecls::index_changes`).
 struct Indexes {
@@ -47,6 +50,7 @@ struct Indexes {
     grown_elsewhere: FxHashSet<String>,
     rebound_elsewhere: FxHashSet<String>,
     changed_paths: BTreeMap<String, PathChange>,
+    copy_registered: FxHashSet<String>,
 }
 
 /// Names every class has, which a protocol's body defines without requiring them.
@@ -404,6 +408,61 @@ pub struct ClassDecl {
     /// call, which may make a descriptor. Reading such a name on an instance may run code.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub code_attrs: BTreeSet<String>,
+    /// The attributes the class's own code binds to a module-level name that may be an
+    /// `object()` sentinel: one of its module's [`ModuleDecls::object_sentinels`], or a name an
+    /// import binds, whose module decides ([`ProjectDecls::held_sentinels`]).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub named_attrs: BTreeMap<String, NamedAttr>,
+}
+
+/// What the code of a class binds one attribute to among the module-level names
+/// ([`ClassDecl::named_attrs`]), each name by the fqn its module gives it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NamedAttr {
+    /// The class body binds the attribute once, to this name (`attr = NAME`, `attr: T = NAME`,
+    /// and `attr: T = field(default=NAME)` in a stdlib dataclass): the class attribute.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    /// The class body annotates the attribute outside `ClassVar` and `InitVar`: a field, where
+    /// a base the project does not define may build an `__init__` that stores the default.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub annotated: bool,
+    /// The annotation names `validate_default` (`Annotated[T, Field(validate_default=True)]`):
+    /// a library may store what validating the default returns instead of the default.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub validates_default: bool,
+    /// The names an instance holds in the attribute from the class's own code: the default of a
+    /// field that the `__init__` a stdlib `@dataclass` generates stores (`init` left on, no
+    /// `__init__` in the class body), and the names its methods store with `self.attr = NAME`.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub held: BTreeSet<String>,
+}
+
+/// An `object()` sentinel an instance of a class may hold in an attribute
+/// ([`ProjectDecls::held_sentinels`]).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct HeldSentinel {
+    pub attr: String,
+    /// The sentinel's canonical fqn.
+    pub sentinel: String,
+    /// The class's code stores it on the instance itself; otherwise the class only declares it
+    /// as the default of a field that a base heki does not know may store.
+    pub stored: bool,
+}
+
+/// What `copy.deepcopy` makes of a value of a class ([`ProjectDecls::deep_copy_of`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeepCopy {
+    /// A new instance whose attributes hold deep copies of the original's (a new object for an
+    /// `object()` sentinel), for every class the value may be.
+    Attributes,
+    /// A copy hook along the class's own MRO, or a `copyreg` registration of the class, makes
+    /// the copy, and may keep any value.
+    Hooked,
+    /// Heki cannot tell for some class the value may be: a hook in a subclass or a mixin, a
+    /// base outside the project the catalog does not describe, a metaclass, or a `__getattr__`
+    /// / `__getattribute__` that the copy asks for `__deepcopy__`.
+    Open,
 }
 
 /// What `@dataclass` makes of the class attributes of a class's fields ([`ClassDecl::dataclass`]).
@@ -615,6 +674,19 @@ pub struct ModuleDecls {
     /// `STRICT = False`), as [`Self::str_constants`] holds the strings.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub literal_constants: BTreeMap<String, LiteralConstant>,
+    /// Module-level names bound once, outside a loop, to a new object of the builtin `object`
+    /// (`MISSING = object()`), with the conditions of a string constant: no import binds the
+    /// name, and neither `exec` / `globals()` nor a star import may rebind it. Such an object
+    /// is equal only to itself, and `copy.deepcopy` makes a new one
+    /// ([`ProjectDecls::object_sentinel`]).
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub object_sentinels: BTreeSet<String>,
+    /// The classes the module registers with `copyreg` (`copyreg.pickle(C, reduce)`,
+    /// `copyreg.dispatch_table[C] = reduce`), which `copy.deepcopy` then copies by the
+    /// registered function, by the fqn the module's names give them; `*` for a class heki
+    /// cannot name ([`ProjectDecls::copy_registered`]).
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub copy_registrations: BTreeSet<String>,
     /// What the module binds its globals to (in its body, and in functions declaring them
     /// `global`), for the globals one binding of which is a queue: the join of every binding
     /// (`crate::capacity`). Any other global has an unknown capacity.
@@ -1460,6 +1532,9 @@ pub struct ProjectDecls {
     /// changes joined), and the packages heki could not read, as `PathChange::Replaced`; sorted,
     /// so the packages under a name are one range.
     changed_paths: BTreeMap<String, PathChange>,
+    /// The canonical fqns of the classes a project module registers with `copyreg`
+    /// (`ModuleDecls::copy_registrations`), with `*` when one names a class heki cannot.
+    copy_registered: FxHashSet<String>,
     recorder: Recorder,
     /// The C3 linearizations computed so far of classes with multiple inheritance along their
     /// bases (`Self::mro`); cleared with the indexes.
@@ -1605,6 +1680,8 @@ impl ProjectDecls {
         out.grown_globals = differ(&before.grown_elsewhere, &self.grown_elsewhere);
         out.grown_globals
             .extend(differ(&before.rebound_elsewhere, &self.rebound_elsewhere));
+        out.class_facts
+            .extend(differ(&before.copy_registered, &self.copy_registered));
         for package in before.changed_paths.keys().chain(self.changed_paths.keys()) {
             if before.changed_paths.get(package) != self.changed_paths.get(package) {
                 out.package_paths
@@ -1626,6 +1703,7 @@ impl ProjectDecls {
             grown_elsewhere: self.grown_elsewhere.clone(),
             rebound_elsewhere: self.rebound_elsewhere.clone(),
             changed_paths: self.changed_paths.clone(),
+            copy_registered: self.copy_registered.clone(),
         }
     }
 
@@ -1693,6 +1771,12 @@ impl ProjectDecls {
         self.grown_elsewhere = self.globals_changed_elsewhere(|m| &m.grown_globals);
         self.rebound_elsewhere = self.globals_changed_elsewhere(|m| &m.rebound_globals);
         self.changed_paths = self.package_path_changes();
+        self.copy_registered = self
+            .modules
+            .values()
+            .flat_map(|m| &m.copy_registrations)
+            .map(|c| self.canonical(c))
+            .collect();
     }
 
     /// [`Self::changed_paths`].
@@ -2661,6 +2745,198 @@ impl ProjectDecls {
     pub fn plain_attr(&self, class: &str, attr: &str) -> bool {
         let read = self.attr_read(class, attr);
         read.bases_known && read.declared && !read.runs_hook(true) && read.code_binders.is_empty()
+    }
+
+    /// Whether reading `attr` on a value of the class `class` runs no code and gives what the
+    /// instance holds in it, or the class attribute: as [`Self::plain_attr`], except that a class
+    /// body binding the name to an `object()` sentinel ([`Self::object_sentinel`]) binds no
+    /// descriptor (`object` defines no `__get__`), and that a base outside the project may be
+    /// one whose `__setattr__` the catalog describes as storing on the instance, which installs
+    /// no descriptor for the attribute and defines no `__getattribute__` (R3:
+    /// `pydantic.BaseModel`). The bases of every class the value may be count, a subclass's
+    /// too.
+    pub fn plain_sentinel_attr(&self, class: &str, attr: &str, kb: &EffectiveEcosystemKb) -> bool {
+        let read = self.attr_read(class, attr);
+        let known_base = |b: &str| {
+            PLAIN_BASES.contains(&b)
+                || kb
+                    .lookup(&format!("{b}.__setattr__"))
+                    .is_some_and(|e| e.stores_on_instance)
+        };
+        let bases_known = self
+            .mro(class)
+            .iter()
+            .all(|c| self.is_project_class(c) || known_base(c))
+            && self.value_classes(class).iter().all(|c| {
+                self.class(c).is_some_and(|d| {
+                    d.bases.iter().all(|b| {
+                        let b = self.canonical(b);
+                        self.is_project_class(&b) || known_base(&b)
+                    })
+                })
+            });
+        bases_known
+            && read.declared
+            && !read.runs_hook(true)
+            && read.code_binders.iter().all(|c| {
+                self.class(c)
+                    .and_then(|d| d.named_attrs.get(attr)?.body.as_deref())
+                    .and_then(|name| self.object_sentinel(name))
+                    .is_some()
+            })
+    }
+
+    /// The canonical fqn of the `object()` sentinel the module-level name `fqn` holds: through
+    /// re-exports ([`Self::canonical_value`]), one of its module's
+    /// [`ModuleDecls::object_sentinels`] that no other module rebinds or deletes.
+    pub fn object_sentinel(&self, fqn: &str) -> Option<String> {
+        let fqn = self.canonical_value(fqn)?;
+        let (m, rest) = self.split_module(&fqn)?;
+        (m.object_sentinels.contains(rest) && !self.rebound_elsewhere(&fqn)).then_some(fqn)
+    }
+
+    /// The `object()` sentinels the code of the project class `class` itself puts in the
+    /// attributes of its instances ([`ClassDecl::named_attrs`]). Stored where an instance is
+    /// known to hold it: the default of a field that the `__init__` a stdlib dataclass
+    /// generates stores, a store `self.attr = S` in a method, each storing on the instance
+    /// itself (no property, `__setattr__`, or metaclass: [`Self::attr_write_runs_code`]), and
+    /// the default of a public field under a base the catalog describes as keeping hashable
+    /// defaults (R3: `pydantic.BaseModel`) that validates no default ([`NamedAttr`] and
+    /// `Self::may_validate_defaults`). Not stored where the class only annotates a field with the
+    /// sentinel as its default under another base, which may or may not store it.
+    pub fn held_sentinels(&self, class: &str, kb: &EffectiveEcosystemKb) -> Vec<HeldSentinel> {
+        let mut out: Vec<HeldSentinel> = Vec::new();
+        let decl = self.class(class);
+        for (attr, named) in decl.iter().flat_map(|d| &d.named_attrs) {
+            let plain_store = || !self.attr_write_runs_code(class, attr);
+            for name in &named.held {
+                if let Some(sentinel) = self.object_sentinel(name) {
+                    out.push(HeldSentinel {
+                        attr: attr.clone(),
+                        sentinel,
+                        stored: plain_store(),
+                    });
+                }
+            }
+            let default = named
+                .body
+                .as_deref()
+                .filter(|_| named.annotated)
+                .and_then(|name| self.object_sentinel(name));
+            if let Some(sentinel) = default
+                && !out
+                    .iter()
+                    .any(|h| h.attr == *attr && h.sentinel == sentinel)
+                && decl.is_some_and(|d| self.may_store_defaults(class, d))
+            {
+                let kept = !attr.starts_with('_')
+                    && !named.validates_default
+                    && self.keeps_hashable_defaults(class, kb)
+                    && !self.may_validate_defaults(class);
+                out.push(HeldSentinel {
+                    attr: attr.clone(),
+                    sentinel,
+                    stored: kept && plain_store(),
+                });
+            }
+        }
+        out
+    }
+
+    /// Whether code heki does not follow may store the defaults of the class's fields on its
+    /// instances: an `__init__` of a stdlib dataclass's own (which the generated one would
+    /// have stored), a class a project `dataclass_transform` builds, or a base outside the
+    /// project other than `object`, `typing.Generic`, `abc.ABC`, and `NamedTuple`. A class of the
+    /// project's own otherwise holds an annotated default only as its class attribute.
+    fn may_store_defaults(&self, class: &str, decl: &ClassDecl) -> bool {
+        self.read(|k| note(&mut k.class_facts, class));
+        decl.dataclass.is_some() && self.own_method(class, "__init__").is_some()
+            || self.built.contains(class)
+            || self.mro(class).iter().any(|c| {
+                !self.is_project_class(c)
+                    && !PLAIN_BASES.contains(&c.as_str())
+                    && !HOOKLESS_BASES.contains(&c.as_str())
+            })
+    }
+
+    /// Whether a project class along the MRO of `class` binds `model_config` or `Config` in its
+    /// body: a model's configuration may ask it to validate its fields' defaults
+    /// (`validate_default`), and a field doing so holds what the validation returns.
+    fn may_validate_defaults(&self, class: &str) -> bool {
+        self.mro(class).iter().any(|c| {
+            self.class(c)
+                .is_some_and(|d| d.members.contains("model_config") || d.members.contains("Config"))
+        })
+    }
+
+    /// Whether a base of the project class `class` outside the project is one the catalog
+    /// describes as building instances that hold a field's hashable default itself
+    /// (`EcosystemEntry::keeps_hashable_defaults`).
+    fn keeps_hashable_defaults(&self, class: &str, kb: &EffectiveEcosystemKb) -> bool {
+        self.mro(class).into_iter().any(|c| {
+            !self.is_project_class(&c) && kb.lookup(&c).is_some_and(|e| e.keeps_hashable_defaults)
+        })
+    }
+
+    /// What `copy.deepcopy` (without a `memo`) does with a value of the project class `class`,
+    /// an instance of it or, under R2, of a project subclass ([`DeepCopy`]). The copy protocol
+    /// looks for `__deepcopy__` on the instance (where `__getattr__` and `__getattribute__`
+    /// may answer), then for a `copyreg` registration of its exact class, then for
+    /// `__reduce_ex__` / `__reduce__`, whose default reads `__getstate__` and makes the copy
+    /// take the state through `__setstate__` when the class defines one; with none of them, the
+    /// copy is a new instance whose attributes are deep copies of the original's.
+    pub fn deep_copy_of(&self, class: &str, kb: &EffectiveEcosystemKb) -> DeepCopy {
+        let class = self.canonical(class);
+        let registered = |c: &str| {
+            self.read(|k| {
+                note(&mut k.class_facts, c);
+                note(&mut k.class_facts, "*");
+            });
+            self.copy_registered.contains(c) || self.copy_registered.contains("*")
+        };
+        let hooked = |d: &ClassDecl| COPY_HOOKS.iter().any(|h| d.members.contains(*h));
+        // A base outside the project: one known to define none of the hooks, or one whose
+        // `__deepcopy__` the catalog describes as copying the attributes deeply (R3).
+        let known_base = |c: &str| {
+            HOOKLESS_BASES.contains(&c)
+                || kb
+                    .lookup(&format!("{c}.__deepcopy__"))
+                    .is_some_and(|e| e.copy_sanitizer == Some(CopyDepth::Deep))
+        };
+        let mro = self.mro(&class);
+        for c in &mro {
+            self.read(|k| note(&mut k.class_facts, c));
+            if self.class(c).is_some_and(hooked) {
+                return DeepCopy::Hooked;
+            }
+        }
+        if registered(&class) {
+            return DeepCopy::Hooked;
+        }
+        let mut answer = DeepCopy::Attributes;
+        for c in &mro {
+            if !self.is_project_class(c) && !known_base(c) {
+                answer = DeepCopy::Open;
+            }
+        }
+        for c in self.value_classes(&class) {
+            self.read(|k| note(&mut k.class_facts, &c));
+            let Some(d) = self.class(&c) else { continue };
+            let lookup_hooks = ["__getattr__", "__getattribute__"];
+            let unknown_base = d.bases.iter().any(|b| {
+                let b = self.canonical(b);
+                !self.is_project_class(&b) && !known_base(&b)
+            });
+            if hooked(d)
+                || lookup_hooks.iter().any(|h| d.members.contains(*h))
+                || d.custom_metaclass
+                || unknown_base
+                || c != class && registered(&c)
+            {
+                answer = DeepCopy::Open;
+            }
+        }
+        answer
     }
 
     /// Whether reading the method `attr` on an instance of the project class `class` (or, under
@@ -4026,6 +4302,9 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
     }
     decls.str_constants = str_constants(input, &decls);
     decls.literal_constants = literal_constants(input, &decls);
+    decls.object_sentinels = sentinels::object_sentinels(input, &decls);
+    sentinels::named_attrs(input, &mut decls);
+    decls.copy_registrations = sentinels::copy_registrations(input, &decls);
     decls
 }
 
@@ -4144,6 +4423,26 @@ const PLAIN_BASES: &[&str] = &[
     "typing_extensions.NamedTuple",
     "typing.Generic",
     "typing_extensions.Generic",
+];
+
+/// The methods that decide what `copy.deepcopy` makes of an instance in place of copying its
+/// attributes ([`ProjectDecls::deep_copy_of`]).
+const COPY_HOOKS: [&str; 5] = [
+    "__deepcopy__",
+    "__reduce__",
+    "__reduce_ex__",
+    "__getstate__",
+    "__setstate__",
+];
+
+/// The bases outside the project known to define none of the [`COPY_HOOKS`], `__getattr__`, or
+/// `__getattribute__`, and no metaclass other than `type` / `abc.ABCMeta`.
+const HOOKLESS_BASES: &[&str] = &[
+    "object",
+    "builtins.object",
+    "typing.Generic",
+    "typing_extensions.Generic",
+    "abc.ABC",
 ];
 
 /// The field specifiers whose call in a class body declares a field and leaves no descriptor.
@@ -5741,6 +6040,8 @@ static EMPTY_DECLS: ModuleDecls = ModuleDecls {
     path_changes: None,
     str_constants: BTreeMap::new(),
     literal_constants: BTreeMap::new(),
+    object_sentinels: BTreeSet::new(),
+    copy_registrations: BTreeSet::new(),
     global_capacities: BTreeMap::new(),
     unread: false,
 };
