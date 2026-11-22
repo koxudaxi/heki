@@ -830,6 +830,9 @@ struct Extractor<'a> {
     /// The position of each call by its result ([`Self::built_by_builtin_call`]), built on
     /// first use.
     call_positions: OnceCell<FxHashMap<VarId, Position>>,
+    /// The span and argument position of each callable a call is handed that has a project site
+    /// of its own ([`Self::as_handed`]), built on first use.
+    followed_callables: OnceCell<FxHashSet<(Span, u8)>>,
 }
 
 /// A key of a container as [`Extractor::key_present`] compares keys: the same variable through
@@ -1150,6 +1153,7 @@ impl<'a> Extractor<'a> {
             external: Vec::new(),
             kept_points: Vec::new(),
             call_positions: OnceCell::new(),
+            followed_callables: OnceCell::new(),
         };
         ex.ownership = contracts.is_some_and(|c| c.ownership());
         ex.track = ex.ownership && ex.may_construct();
@@ -2369,7 +2373,9 @@ impl<'a> Extractor<'a> {
             match &kind {
                 KeptRemovalKind::Named(name) => self.summary.removes_kept.add(name),
                 KeptRemovalKind::Any => self.summary.removes_kept.set_any(),
-                KeptRemovalKind::Suspends => {}
+                // The consumer is the caller; a generator's removals are its summary's, which
+                // propagation joins.
+                KeptRemovalKind::Suspends | KeptRemovalKind::Runs(_) => {}
             }
             self.kept_points
                 .push(cache_flow::KeptPoint { block, index, kind });
@@ -2437,9 +2443,9 @@ impl<'a> Extractor<'a> {
             }
             // Each step of a loop runs the iteration of what it iterates: at the iterator's
             // creation and at every step.
-            InstKind::MakeIter { iterable, .. } if self.f.var_name(*iterable) != Some(".0") => self
-                .iteration_runs_project_code(*iterable, results)
-                .then_some(KeptRemovalKind::Any),
+            InstKind::MakeIter { iterable, .. } if self.f.var_name(*iterable) != Some(".0") => {
+                self.iteration_removal(*iterable, results)
+            }
             InstKind::IterNext { iter, .. } => {
                 let iterable = match self.defs.get(&self.shape.copy_root(*iter)).map(|i| &i.kind) {
                     Some(InstKind::MakeIter { iterable, .. })
@@ -2449,8 +2455,7 @@ impl<'a> Extractor<'a> {
                     }
                     _ => return None,
                 };
-                self.iteration_runs_project_code(iterable, results)
-                    .then_some(KeptRemovalKind::Any)
+                self.iteration_removal(iterable, results)
             }
             _ => call_operands(kind).and_then(|call| self.kept_removal_of_call(at, &call)),
         }
@@ -2562,25 +2567,37 @@ impl<'a> Extractor<'a> {
         )
     }
 
-    /// Whether iterating `iterable` may run code of the project that no call site of the
-    /// function stands for: what a project call returns runs the body its own site describes; a
-    /// builtin container, string, or range runs its builtin iteration ([`invokes::iterates_builtin`]);
-    /// the iterator a library call returned runs, while it is iterated, what its catalog entry
-    /// says it runs then (`lazy`); anything else may run anything.
-    fn iteration_runs_project_code(
+    /// What iterating `iterable` may remove: a generator a project call returns runs its body
+    /// here, which removes what the generator's summary says (`Runs`, at the call's span); a
+    /// builtin container, string, or range runs its builtin iteration
+    /// ([`invokes::iterates_builtin`]); the iterator a library call returned runs, while it is
+    /// iterated, what its catalog entry says it runs then (`lazy`); anything else, the value
+    /// another project call returns included (its class's iteration has no site), may run
+    /// anything.
+    fn iteration_removal(
         &self,
         iterable: VarId,
         results: &FxHashMap<VarId, &Callee>,
-    ) -> bool {
+    ) -> Option<KeptRemovalKind> {
         let root = self.shape.copy_root(iterable);
+        let any = Some(KeptRemovalKind::Any);
         match results.get(&root) {
-            Some(Callee::Project(..)) => return false,
+            Some(Callee::Project(keys, _))
+                if keys.iter().all(|k| {
+                    self.cx
+                        .project
+                        .function_decl(k)
+                        .is_some_and(|d| d.is_generator)
+                }) =>
+            {
+                return self.defs.get(&root).map(|i| KeptRemovalKind::Runs(i.span));
+            }
             Some(Callee::External(symbol)) => {
                 let lazy = self.cx.kb.invoked(symbol).is_some_and(|e| e.lazy);
                 let call = self.defs.get(&root).and_then(|i| call_operands(&i.kind));
                 if let (true, Some(call)) = (lazy, call) {
                     let recv = call.method.map(|(r, _)| r);
-                    return self.library_call_runs_project_code(
+                    let runs = self.library_call_runs_project_code(
                         symbol,
                         None,
                         recv,
@@ -2589,11 +2606,16 @@ impl<'a> Extractor<'a> {
                         call.star,
                         true,
                     );
+                    return runs.then_some(KeptRemovalKind::Any);
                 }
             }
             _ => {}
         }
-        !invokes::iterates_builtin(self.cx.project, &self.as_handed(iterable, None))
+        if invokes::iterates_builtin(self.cx.project, &self.as_handed(iterable, None)) {
+            None
+        } else {
+            any
+        }
     }
 
     /// Whether `v` is what a call of a builtin constructor returns, an instance of the builtin
@@ -2634,31 +2656,59 @@ impl<'a> Extractor<'a> {
                     | InstKind::MakeGenExpr { .. }
             )
         }) || self.built_by_builtin_call(root);
-        let parts: Vec<VarId> = match def {
-            Some(InstKind::AllocBuiltin { elems, .. }) => elems.clone(),
-            Some(InstKind::DictLiteral { .. }) => def.map(InstKind::operands).unwrap_or_default(),
-            _ => Vec::new(),
+        // A list, dict, or set display used anywhere else may be changed before the call; a
+        // starred element and a `**` unpacking add items of other values. A generator
+        // expression's items, and those of what a builtin call returns, are not known.
+        let used_here_only = v == root && self.uses.get(&root).is_some_and(|u| u.len() == 1);
+        let parts: Option<Vec<VarId>> = match def {
+            Some(InstKind::AllocBuiltin { kind, elems, .. })
+                if (*kind == BuiltinKind::Tuple || used_here_only)
+                    && !elems.iter().any(|e| self.f.is_unpacked(*e)) =>
+            {
+                Some(elems.clone())
+            }
+            Some(kind @ InstKind::DictLiteral { entries, .. })
+                if used_here_only
+                    && !entries
+                        .iter()
+                        .any(|e| matches!(e, DictEntry::Unpack { .. })) =>
+            {
+                Some(kind.operands())
+            }
+            // A constant's, a string's, or a comparison's items (if any) are builtin values.
+            Some(
+                InstKind::Const { .. }
+                | InstKind::BuildString { .. }
+                | InstKind::Format { .. }
+                | InstKind::Convert { .. }
+                | InstKind::Compare { .. },
+            ) => Some(Vec::new()),
+            _ => None,
         };
-        let elems = parts
-            .iter()
-            .map(|e| invokes::Handed {
-                val: self.val(*e),
-                built: self.defs.get(e).is_some_and(|i| {
-                    matches!(
-                        i.kind,
-                        InstKind::Const { .. } | InstKind::BuildString { .. }
-                    )
-                }),
-                ..invokes::Handed::default()
-            })
-            .collect();
+        let elems = parts.map(|parts| {
+            parts
+                .iter()
+                .map(|e| invokes::Handed {
+                    val: self.val(*e),
+                    built: self.defs.get(e).is_some_and(|i| {
+                        matches!(
+                            i.kind,
+                            InstKind::Const { .. } | InstKind::BuildString { .. }
+                        )
+                    }),
+                    ..invokes::Handed::default()
+                })
+                .collect()
+        });
+        let followed_callables = self.followed_callables.get_or_init(|| {
+            self.sites
+                .iter()
+                .filter(|site| !site.project_callees().is_empty())
+                .filter_map(|site| Some((site.span, site.handed_callable?)))
+                .collect()
+        });
         let followed = at.is_some_and(|(span, position)| {
-            self.sites.iter().any(|site| {
-                site.span == span
-                    && site.handed_callable.is_some()
-                    && site.handed_callable == position
-                    && !site.project_callees().is_empty()
-            })
+            position.is_some_and(|i| followed_callables.contains(&(span, i)))
         });
         invokes::Handed {
             val: self.val(v),

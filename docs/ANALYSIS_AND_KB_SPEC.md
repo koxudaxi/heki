@@ -928,9 +928,10 @@ which module imports which.
    nothing); the loads of one attribute whose value is read as a whole, and the item loads of
    one constant key of values read only through such loads, are asked together
    (`Paths::on_every_return_passes_one_of`), so a read on each side of a branch counts. A `self` method
-   called on every such path adds what every one of its targets reads, when the call's targets
-   are every implementation it can run (`CallSite::complete`) and each runs its body at every
-   call (no cache decorator); a callee of the function's own call-graph component adds nothing,
+   called on every such path adds what every one of its targets reads, when the function's name
+   is bound once (each site's paths are its own definition's), the call's targets are every
+   implementation it can run (`CallSite::complete`), and each runs its body at every call (no
+   cache decorator); a callee of the function's own call-graph component adds nothing,
    so propagation needs no fixpoint for it. An attribute read as a whole covers each of its
    keys, also where two definitions or two targets are joined.
 8. **What may remove a kept value** (computed only with `OptInFacts::kept_values`). A method's
@@ -940,9 +941,12 @@ which module imports which.
    `await` or a `yield`, while other code runs; a call heki cannot resolve, of a library outside
    the catalog, or of one that may run project code by its `[[invokes]]` entry, section 4.2; a
    project call whose targets are not every implementation it can run; the iteration of a value
-   that is no builtin container, no project call's result, and no `lazy` call's), and
+   that is no builtin container, no project generator's result, and no `lazy` call's; a
+   library call handed a container whose items heki does not know, such as a display changed
+   after it is built or what a builtin call or a generator expression returns), and
    `Calls(span)` at the project calls no `SelfCall` stands for (other receivers, the property
-   getters a read of `self.<name>` runs), whose callees' summaries say what they remove.
+   getters a read of `self.<name>` runs) and at each step of iterating what a project generator
+   called at `span` returns, whose callees' summaries say what they remove.
    `EffectSummary::removes_kept` joins the same points of a function (a `yield` excepted: its
    consumer is its caller) with what every callee removes. Each write of the flow also records
    its literal key (`SelfAttrWrite::key`) and, for an in-place change, the builtin list, dict, or
