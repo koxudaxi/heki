@@ -12,8 +12,8 @@ Mutating an attribute read by `@cached_property` without invalidating the cache.
 
 ## What it does
 Opt-in: enable it with `extend-select = ["MUT101"]`. Its exact reports are true claims (census
-on the Stage 0-A corpus: 27 exact reports, none false; holdout: 1, none false), but few show real
-harm (1 of the 27 by majority of three reviewers), below the 10% share a default rule needs: most are writes that run before the property
+on the Stage 0-A corpus: 26 exact reports, none false; holdout: 1, none false), but few show real
+harm (1 of the 26 by majority of three reviewers), below the 10% share a default rule needs: most are writes that run before the property
 is first read, keep the value's meaning, or run on objects whose cached value nothing reads
 again.
 
