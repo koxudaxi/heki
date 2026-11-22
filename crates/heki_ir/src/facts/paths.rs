@@ -685,15 +685,13 @@ pub struct BlockDominators {
 }
 
 impl BlockDominators {
-    /// The intervals of the dominator tree `idom`, whose nodes come after their immediate
-    /// dominators; `None` when one does not.
-    fn of(local: FxHashMap<BlockId, u32>, idom: &[u32]) -> Option<Self> {
+    /// The intervals of the dominator tree `idom`. A node comes after its immediate dominator in
+    /// reverse postorder, as [`Paths::immediate_dominators`] already relies on: sizes are summed
+    /// from the last node back, and each child takes the next free numbers of its parent's
+    /// interval from the first node on.
+    fn of(local: FxHashMap<BlockId, u32>, idom: &[u32]) -> Self {
         let reached = |x: usize| idom[x] != UNREACHED;
-        if (1..idom.len()).any(|x| reached(x) && idom[x] as usize >= x) {
-            return None;
-        }
-        // Children come after their parents: sizes are summed from the last node back, and each
-        // child takes the next free numbers of its parent's interval from the first node on.
+        debug_assert!((1..idom.len()).all(|x| !reached(x) || (idom[x] as usize) < x));
         let mut subtree = vec![1u32; idom.len()];
         for x in (1..idom.len()).rev().filter(|&x| reached(x)) {
             subtree[idom[x] as usize] += subtree[x];
@@ -708,11 +706,11 @@ impl BlockDominators {
             next_free[parent] += subtree[x];
             next_free[x] = preorder[x] + 1;
         }
-        Some(Self {
+        Self {
             local,
             preorder,
             subtree,
-        })
+        }
     }
 
     /// Whether every path from the entry to block `to` passes block `through`: also when no
@@ -850,61 +848,55 @@ impl<'p, 'a> Paths<'p, 'a> {
         answer
     }
 
-    /// Whether every iteration of `f.loops[li]` that completes passes one of `points`, to
-    /// `progress`: every path from the header back to it does (also when none does, as no
-    /// iteration completes). One point need not be on every path: a sleep in each branch of an
-    /// `if` paces the loop too.
+    /// Whether every iteration of `f.loops[li]` (an index the function has) that completes passes
+    /// one of `points`, to `progress`: every path from the header back to it does (also when
+    /// none does, as no iteration completes). One point need not be on every path: a sleep in
+    /// each branch of an `if` paces the loop too.
     pub fn on_every_iteration_passes_one_of(
         &self,
         li: usize,
         points: &[(BlockId, usize)],
         progress: Progress,
     ) -> Answer<bool> {
-        let Some(lp) = self.ix.f.loops.get(li) else {
-            return Answer::Open;
-        };
-        let Some(graph) = self.region_graph(Region::Loop(li, lp)) else {
-            return Answer::Open;
-        };
-        let passed: FxHashSet<u32> = points
-            .iter()
-            .filter_map(|&at| {
-                let (block, tail) = self.node_at(at, progress);
-                graph.local.get(&block).map(|k| 2 * k + u32::from(tail))
+        let lp = &self.ix.f.loops[li];
+        // Past the budget the region has no graph, and the answer is open.
+        self.region_graph(Region::Loop(li, lp))
+            .map_or(Answer::Open, |graph| {
+                let passed: FxHashSet<u32> = points
+                    .iter()
+                    .filter_map(|&at| {
+                        let (block, tail) = self.node_at(at, progress);
+                        graph.local.get(&block).map(|k| 2 * k + u32::from(tail))
+                    })
+                    .collect();
+                // Back from the end of an iteration, never through a passed node: reaching the
+                // header is a path around the loop that passes none.
+                reach(
+                    self.budget,
+                    [graph.sink],
+                    |node, next| next.extend(graph.preds[node as usize].iter().copied()),
+                    |node| {
+                        if passed.contains(&node) {
+                            Visit::Prune
+                        } else if node == 0 {
+                            Visit::Stop(())
+                        } else {
+                            Visit::Expand
+                        }
+                    },
+                )
+                .map(|found| found.is_none())
             })
-            .collect();
-        // Back from the end of an iteration, never through a passed node: reaching the header
-        // is a path around the loop that passes none.
-        let around = reach(
-            self.budget,
-            [graph.sink],
-            |node, next| next.extend(graph.preds[node as usize].iter().copied()),
-            |node| {
-                if passed.contains(&node) {
-                    Visit::Prune
-                } else if node == 0 {
-                    Visit::Stop(())
-                } else {
-                    Visit::Expand
-                }
-            },
-        );
-        around.map(|found| found.is_none())
     }
 
     /// Which blocks every path from the entry to another block passes ([`BlockDominators`]), over
     /// the graph `on_every_return` reads: a branch the code decides is not taken, and a block
     /// raises into its handler only where an instruction of it may raise.
     pub fn block_dominators(&self) -> Answer<BlockDominators> {
-        match self
-            .on_return
+        self.on_return
             .get_or_init(|| self.dominance(Region::Function))
-        {
-            Answer::Known(d) => {
-                BlockDominators::of(d.local.clone(), &d.idom).map_or(Answer::Open, Answer::Known)
-            }
-            Answer::Open => Answer::Open,
-        }
+            .as_ref()
+            .map(|d| BlockDominators::of(d.local.clone(), &d.idom))
     }
 
     /// The node that is passed exactly when the point is: the head while no raising
