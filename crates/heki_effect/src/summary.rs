@@ -2438,19 +2438,13 @@ impl<'a> Extractor<'a> {
             InstKind::Yield { .. } => Some(KeptRemovalKind::Suspends),
             // A context manager's `__enter__` and `__exit__`, and an iterable's `__iter__` and its
             // iterator's `__next__`, are not followed in a project class: they may run anything.
-            InstKind::EnterWith { mgr, is_async, .. } => {
-                let protocol: &[&str] = if *is_async {
-                    &["__aenter__", "__aexit__"]
-                } else {
-                    &["__enter__", "__exit__"]
-                };
-                invokes::special_methods_run_project_code(
-                    self.cx.project,
-                    &self.as_handed(*mgr, None),
-                    protocol,
-                )
-                .then_some(KeptRemovalKind::Any)
-            }
+            // (An `async with` suspends, which the arm above takes.)
+            InstKind::EnterWith { mgr, .. } => invokes::special_methods_run_project_code(
+                self.cx.project,
+                &self.as_handed(*mgr, None),
+                &["__enter__", "__exit__"],
+            )
+            .then_some(KeptRemovalKind::Any),
             // Each step of a loop runs the iteration of what it iterates: at the iterator's
             // creation and at every step.
             InstKind::MakeIter { iterable, .. } if self.f.var_name(*iterable) != Some(".0") => {
