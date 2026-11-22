@@ -8,8 +8,8 @@
 //!   returns normally (`KeptFacts::must_read_self_attrs`).
 //! - **Plain write**: the write rebinds or deletes the attribute with a plain store, or changes
 //!   in place the builtin container it holds through a method no project subclass replaces.
-//! - **Kept to the return**: no point between the write and the method's normal return may
-//!   remove the kept value ([`KeptAfterWrites`]).
+//! - **Kept to the return**: no point from the write, its own instruction included, to the
+//!   method's normal return may remove the kept value ([`KeptAfterWrites`]).
 
 use super::{Method, invalidates, stale_reads};
 use heki_ast::Span;
@@ -327,11 +327,13 @@ impl<'f> KeptAfterWrites<'f> {
         }
     }
 
-    /// Whether no path from just after the write `w` to a normal return of the method passes a
-    /// point that may remove the value.
+    /// Whether no path from the write `w` to a normal return of the method passes a point that
+    /// may remove the value. The writing instruction's own point counts: an in-place change runs
+    /// code while it changes the attribute (it iterates its argument, hashes a key), and that code
+    /// may remove the value.
     pub(super) fn kept_to_return(&self, w: &SelfAttrWrite) -> bool {
         let b = w.block.0 as usize;
-        let removed_here = self.returns[b] && self.removals[b].iter().any(|i| *i > w.index);
+        let removed_here = self.returns[b] && self.removals[b].iter().any(|i| *i >= w.index);
         !removed_here && !onward(&self.flow.blocks[b]).any(|s| self.may_remove[s.0 as usize])
     }
 }

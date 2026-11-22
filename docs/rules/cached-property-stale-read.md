@@ -57,14 +57,18 @@ Its premises:
   targets. Established.
 - **Plain write**: the write is a plain store or an in-place change of a builtin container no
   project subclass replaces. Established.
-- **Kept to the return**: nothing between the write and the writer's normal return may remove the
-  kept value. Established.
+- **Kept to the return**: nothing from the write, its own instruction included, to the writer's
+  normal return may remove the kept value. Established.
 - **Reads the property**: the function's own body reads the property on the object (`obj.prop`, a
   constant `getattr`, an item of `obj.__dict__`). Established.
 - **Runs the writer**: every class the object may be (R2) gets the property from a
   `@cached_property` getter and runs a write of it whose `MUT101` report is exact: the first
   definition of the writing method along its MRO, or one that the definitions before it reach
   through `super()` without invalidating the property. Established.
+
+Besides R1-R7, the claim assumes what that `MUT101` report assumes: no finalizer (`__del__`,
+which reference counting or the garbage collector runs when it frees an object) and no other
+thread runs code between the write and the writer's return.
 
 A heuristic report states that the function reads a `@cached_property` that a write `MUT101`
 reports can leave stale on the instances the object may be. Open: the premises of the `MUT101`

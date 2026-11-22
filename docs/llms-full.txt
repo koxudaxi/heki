@@ -4272,9 +4272,11 @@ Its premises:
   change in place the builtin list, dict, or set the attribute holds by its type, through a
   changing method or an item store that no project subclass of the container replaces.
   Established.
-- **Kept to the return**: no point between the write and the method's normal return may remove or
-  replace the kept value, exception edges into handlers included. That rules out a store or a
-  deletion of the property's name, or of an item of a `__dict__` under it, through any reference
+- **Kept to the return**: no point from the write to the method's normal return may remove or
+  replace the kept value, exception edges into handlers included. The write's own instruction
+  counts: an in-place change runs code while it changes the attribute (it iterates its argument
+  or hashes a key). That rules out a store or a deletion of the property's name, or of an item of
+  a `__dict__` under it, through any reference
   (`self`, a parameter, a closure, a global, an item of a container, `*args`, `setattr`,
   `vars()`), except one heki establishes as an object that keeps no value under the name: a
   value the method builds, or an instance of classes none of which (R2) binds a property getter
@@ -4298,6 +4300,11 @@ Its premises:
   access on a library object counts as a call of that attribute), no `raise` may construct a
   value that may be a class of the project, and no class statement or import of a project module
   runs there. Established.
+
+Besides R1-R7, the claim assumes that no finalizer (`__del__`, which reference counting or the
+garbage collector runs when it frees an object) and no other thread runs code between the write
+and the method's return: either may remove the value at any instruction, and no premise rules
+them out.
 
 Not part of the claim: whether the method runs after the property was first read. A write that
 runs only during two-phase setup makes the claim hold vacuously, so a setup step stays heuristic
@@ -4450,14 +4457,18 @@ Its premises:
   targets. Established.
 - **Plain write**: the write is a plain store or an in-place change of a builtin container no
   project subclass replaces. Established.
-- **Kept to the return**: nothing between the write and the writer's normal return may remove the
-  kept value. Established.
+- **Kept to the return**: nothing from the write, its own instruction included, to the writer's
+  normal return may remove the kept value. Established.
 - **Reads the property**: the function's own body reads the property on the object (`obj.prop`, a
   constant `getattr`, an item of `obj.__dict__`). Established.
 - **Runs the writer**: every class the object may be (R2) gets the property from a
   `@cached_property` getter and runs a write of it whose `MUT101` report is exact: the first
   definition of the writing method along its MRO, or one that the definitions before it reach
   through `super()` without invalidating the property. Established.
+
+Besides R1-R7, the claim assumes what that `MUT101` report assumes: no finalizer (`__del__`,
+which reference counting or the garbage collector runs when it frees an object) and no other
+thread runs code between the write and the writer's return.
 
 A heuristic report states that the function reads a `@cached_property` that a write `MUT101`
 reports can leave stale on the instances the object may be. Open: the premises of the `MUT101`

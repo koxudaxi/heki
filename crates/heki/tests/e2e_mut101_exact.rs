@@ -643,6 +643,68 @@ fn kept_to_the_return_stripped_values_whose_class_is_not_established() {
     }
 }
 
+/// A holder whose `add` runs `write`, a generator that removes the cached value between two
+/// items, and a reader of the value.
+fn writing(write: &str) -> String {
+    format!(
+        r#"from collections.abc import Iterator
+from functools import cached_property
+
+
+class Key:
+    def __hash__(self) -> int:
+        return 0
+
+
+class Holder:
+    def __init__(self) -> None:
+        self.items: list[int] = []
+        self.counts: dict[Key, int] = {{}}
+
+    @cached_property
+    def snapshot(self) -> int:
+        return len(self.items) + len(self.counts)
+
+    def add(self, parts: Iterator[int], key: Key) -> None:
+        {write}
+
+
+def forgetting(holder: Holder) -> Iterator[int]:
+    yield 1
+    del holder.snapshot
+    yield 2
+
+
+def total(holder: Holder) -> int:
+    return holder.snapshot
+"#
+    )
+}
+
+#[test]
+fn kept_to_the_return_stripped_code_the_writing_instruction_runs() {
+    // The writing instruction itself may run code of the project while it changes the value:
+    // iterating its argument (which may remove the cached value between two items) or hashing
+    // a key.
+    for write in [
+        "self.items.extend(parts)",
+        "self.items.extend(forgetting(self))",
+        "self.counts[key] = 1",
+    ] {
+        let p = project("mut101_strip_writing", &writing(write));
+        assert_eq!(
+            tiers(&p),
+            vec![report("MUT101", 20, false), report("MUT111", 30, false)],
+            "{write}"
+        );
+    }
+    let p = project("mut101_kept_writing", &writing("self.items.extend([1, 2])"));
+    assert_eq!(
+        tiers(&p),
+        vec![report("MUT101", 20, true), report("MUT111", 30, true)]
+    );
+}
+
 /// A reader of `features`, and the classes it may read it on.
 fn reader(body: &str, extra: &str) -> String {
     holder(

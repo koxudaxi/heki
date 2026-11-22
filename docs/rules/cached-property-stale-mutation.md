@@ -56,9 +56,11 @@ Its premises:
   change in place the builtin list, dict, or set the attribute holds by its type, through a
   changing method or an item store that no project subclass of the container replaces.
   Established.
-- **Kept to the return**: no point between the write and the method's normal return may remove or
-  replace the kept value, exception edges into handlers included. That rules out a store or a
-  deletion of the property's name, or of an item of a `__dict__` under it, through any reference
+- **Kept to the return**: no point from the write to the method's normal return may remove or
+  replace the kept value, exception edges into handlers included. The write's own instruction
+  counts: an in-place change runs code while it changes the attribute (it iterates its argument
+  or hashes a key). That rules out a store or a deletion of the property's name, or of an item of
+  a `__dict__` under it, through any reference
   (`self`, a parameter, a closure, a global, an item of a container, `*args`, `setattr`,
   `vars()`), except one heki establishes as an object that keeps no value under the name: a
   value the method builds, or an instance of classes none of which (R2) binds a property getter
@@ -82,6 +84,11 @@ Its premises:
   access on a library object counts as a call of that attribute), no `raise` may construct a
   value that may be a class of the project, and no class statement or import of a project module
   runs there. Established.
+
+Besides R1-R7, the claim assumes that no finalizer (`__del__`, which reference counting or the
+garbage collector runs when it frees an object) and no other thread runs code between the write
+and the method's return: either may remove the value at any instruction, and no premise rules
+them out.
 
 Not part of the claim: whether the method runs after the property was first read. A write that
 runs only during two-phase setup makes the claim hold vacuously, so a setup step stays heuristic
