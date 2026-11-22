@@ -81,8 +81,6 @@ PLACED = ("function", "method", "module")
 
 # Shapes known to cost more than the limits, with the walk that costs: (family, placement).
 KNOWN_OVER: dict[tuple[str, str], str] = {
-    ("call_chain", "module"): "MUT202 looks up each call's site in a scan of the function's call "
-    "sites (`mut_rules::site_call`)",
     **{
         ("returned_merge_chain", p): "the roots of each merged value are listed again per merge, "
         "with the call sites through them (summary `iterations`)"
@@ -167,6 +165,7 @@ name = "shape-calls"
 targets = ["Base.m", "g"]
 allowed-callers = ["Base.*"]
 unresolved = "report"
+references = "reads"
 
 [[effect-boundaries]]
 name = "shape-boundary"
@@ -235,6 +234,18 @@ def copy_chain_in_loop(n: int) -> Body:
     lines = ["for it in items:", "    y0 = xs"]
     lines += [f"    y{i} = y{i - 1}" for i in range(1, n + 1)]
     return Body(("items", "xs"), [*lines, f"    y{n}.remove(it)"])
+
+
+def unpacked_display_copies(n: int) -> Body:
+    """One dict display copied along a chain, each copy unpacked with `**` into a call."""
+    lines = ['f0 = {"x": p}', *(f"f{i} = f{i - 1}" for i in range(1, n + 1))]
+    return Body(("p",), [*lines, *(f"g(**f{i})" for i in range(n + 1))])
+
+
+def wide_display_unpacked(n: int) -> Body:
+    """A dict display of n entries unpacked with `**` by n calls."""
+    entries = ", ".join(f'"x{i}": p' for i in range(n))
+    return Body(("p",), [f"f = {{{entries}}}", *("g(**f)" for _ in range(n))])
 
 
 def reverse_chain_in_loop(n: int) -> Body:
@@ -389,6 +400,48 @@ def cell_reads_of_several_names(n: int) -> Body:
     return Body(("xs", "out"), lines)
 
 
+def guarded_accesses_in_generator_expressions(n: int) -> Body:
+    """Generator expressions each reading a guarded attribute and calling a guarded function: the
+    generator expressions of a function share one qualname, so each of their call sites runs the
+    accesses of all of them."""
+    lines = ["b = Base()"]
+    lines += ["out.append(sum(1 for _ in xs if b.LIMIT and g(b)))" for _ in range(n)]
+    return Body(("xs", "out"), lines)
+
+
+def read_only_value_handed_to_calls(n: int) -> Body:
+    """The value a `readonly-returns` producer returns, handed to many project calls."""
+    return Body(("p",), ["v = load()", *("use(v)" for _ in range(n))])
+
+
+def calls_between_invalidators(n: int) -> Body:
+    """Project calls and calls of an invalidator alternating in one block: the contracts announced
+    after each call, and the call after it, are looked up instead of scanned per call."""
+    lines = ["self.cache = []"]
+    for _ in range(n):
+        lines += ["g(p)", "self.reset()"]
+    return Body(("p",), lines)
+
+
+def calls_under_branches(n: int) -> Body:
+    """Project calls each under its own branch: the next call after each one is found on the
+    post-dominator chain once per block instead of once per call."""
+    lines = ["v = load()"]
+    for _ in range(n):
+        lines += ["if p:", "    use(v)"]
+    return Body(("p",), lines)
+
+
+def passed_iterables(n: int) -> Body:
+    """Generator expressions of two clauses, each over a value bound just before it: child scopes
+    each receiving their iterable from the function creating them, sized where the IR's loop
+    bounds are refined and again by `OPT113`, which sizes every loop of a function of two."""
+    lines = []
+    for i in range(n):
+        lines += [f"rows = xs[{i}]", f"out[{i}] = (1 for _ in rows for _ in (1, 2))"]
+    return Body(("xs", "out"), lines)
+
+
 def path_aliases(n: int) -> Body:
     """Merges each joining the previous alias of a package's `__path__` and a new read of it,
     each alias read."""
@@ -434,6 +487,14 @@ def callers_of_one_helper(n: int) -> str:
     return "\n".join(lines)
 
 
+def functions_each_calling(n: int) -> str:
+    """Many functions each making one project call."""
+    lines = []
+    for i in range(n):
+        lines += [f"def call{i}(x):", "    return g(x)", ""]
+    return "\n".join(lines)
+
+
 def helper_chain(n: int) -> str:
     """Private helpers each calling the next twice, the last mutating its parameter."""
     lines = []
@@ -441,6 +502,25 @@ def helper_chain(n: int) -> str:
         lines += [f"def _h{i}(d):", f"    _h{i + 1}(d)", f"    _h{i + 1}(d)", ""]
     lines += [f"def _h{n}(d):", "    d.append(1)", "", "def entry(d):", "    _h0(d)", ""]
     return "\n".join(lines)
+
+
+def initialization_steps(n: int) -> str:
+    """A class whose initializer calls n methods, each running one public helper that writes,
+    reads, and calls on its own `self` n times."""
+    lines = ["class Model(Base):", "    def __init__(self):", "        self.items = []"]
+    lines += [f"        self.step{i}()" for i in range(n)]
+    lines += ["", "    def fill(self):"]
+    for _ in range(n):
+        lines += ["        self.items.append(self.LIMIT)", "        self.m()"]
+    for i in range(n):
+        lines += ["", f"    def step{i}(self):", "        self.fill()"]
+    return "\n".join(lines) + "\n"
+
+
+def step_items(n: int) -> str:
+    """A `write-owners` contract on the attribute `initialization_steps` fills, which no
+    `invalidation` contract names."""
+    return '\n[[write-owners]]\nname = "shape-steps"\ntargets = ["Model.items"]\nallowed-writers = ["Base.*"]\n'
 
 
 # The functions `argument_marks` defines, each named by an argument list of `marked_targets`.
@@ -533,6 +613,15 @@ FAMILIES = [
     Family("phi_diamonds", phi_diamonds),
     Family("isinstance_continue", isinstance_continue),
     Family("copy_chain_in_loop", copy_chain_in_loop),
+    # A module body's names are globals: no copy of the display reaches a call.
+    Family("unpacked_display_copies", unpacked_display_copies, placements=("function", "method")),
+    # Every call binds every entry: past the budget, a call passes nothing the display holds.
+    Family(
+        "wide_display_unpacked",
+        wide_display_unpacked,
+        placements=("function", "method"),
+        real_code=False,
+    ),
     Family("reverse_chain_in_loop", reverse_chain_in_loop),
     Family("alias_loops", alias_loops),
     Family("paced_loops", paced_loops),
@@ -559,12 +648,33 @@ FAMILIES = [
         placements=("function", "method"),
         size=CELL_BINDINGS,
     ),
+    Family("read_only_value_handed_to_calls", read_only_value_handed_to_calls),
+    Family("calls_between_invalidators", calls_between_invalidators, placements=("method",)),
+    Family("calls_under_branches", calls_under_branches),
+    # Every call site is reported, standing for every access: the cost of the reports shows at a
+    # size where the walks the family does not gate stay cheap.
+    Family(
+        "guarded_accesses_in_generator_expressions",
+        guarded_accesses_in_generator_expressions,
+        size=2000,
+    ),
+    Family("passed_iterables", passed_iterables),
     Family("path_aliases", path_aliases),
     Family("merged_package_paths", merged_package_paths),
     Family("lazy_init_sites", lazy_init_sites, placements=("method",)),
     Family("wide_hierarchy", project=wide_hierarchy, placements=("project",), size=4000),
     Family("helper_chain", project=helper_chain, placements=("project",), size=2000),
+    Family(
+        "functions_each_calling", project=functions_each_calling, placements=("project",), size=20000
+    ),
     Family("callers_of_one_helper", project=callers_of_one_helper, placements=("project",), size=4000),
+    Family(
+        "initialization_steps",
+        project=initialization_steps,
+        placements=("project",),
+        size=2000,
+        contracts=step_items,
+    ),
     Family(
         "argument_marks",
         project=argument_marks,

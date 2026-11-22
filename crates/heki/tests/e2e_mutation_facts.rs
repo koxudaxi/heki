@@ -814,6 +814,20 @@ def retag_by_dict(p, t):
     return draft
 
 
+def retag_by_vars(p, t):
+    draft = copy.copy(p)
+    vars(draft)["tags"] = []
+    draft.tags.append(t)
+    return draft
+
+
+def retag_in_place(p, t):
+    draft = copy.copy(p)
+    draft.__dict__ |= {"tags": []}
+    draft.tags.append(t)
+    return draft
+
+
 def use(name):
     tag(post(name), "x")
     tag_copy_of_copy(post(name), "x")
@@ -821,13 +835,15 @@ def use(name):
     retag(post(name), "z")
     retag_by_name(post(name), "z")
     retag_by_dict(post(name), "z")
+    retag_by_vars(post(name), "z")
+    retag_in_place(post(name), "z")
 "#,
     );
     // The copy holds the cached post's tag list; its own title is its own, and so is a tag list
-    // it is given before it changes it.
+    // it is given before it changes it (also through its namespace: `vars(draft)`, `|=`).
     assert_eq!(
         reports(&p, "MUT114"),
-        vec![at("app.py", 55, "use"), at("app.py", 56, "use")]
+        vec![at("app.py", 69, "use"), at("app.py", 70, "use")]
     );
 }
 
@@ -1095,6 +1111,74 @@ def consumed(xs: Sequence[int], rec: Record) -> None:
     assert_eq!(reports(&p, "MUT110"), vec![at("app.py", 29, "consumed")]);
     assert_eq!(reports(&p, "MUT108"), vec![at("app.py", 30, "consumed")]);
     assert_eq!(reports(&p, "MUT202"), vec![at("app.py", 32, "consumed")]);
+}
+
+/// A call runs what the sites of the object it returns run: where that object is iterated,
+/// handed to a function iterating it, or awaited. Another call of the same function with the
+/// same argument makes another object, whose iteration is not the first call's.
+#[test]
+fn a_call_runs_what_iterating_its_own_object_runs_not_another_calls() {
+    let p = project(
+        "generator_calls_apart",
+        "[[tool.heki.readonly-returns]]\nname = \"shared\"\nproducers = [\"app.load\"]\n",
+    );
+    p.write(
+        "app.py",
+        r#"def load():
+    return [1, 2, 3]
+
+
+def gen(xs):
+    xs.append(1)
+    yield 1
+
+
+def consume(items):
+    for _ in items:
+        pass
+
+
+def sibling():
+    v = load()
+    kept = gen(v)
+    for _ in gen(v):
+        pass
+    return kept is None
+
+
+def later():
+    v = load()
+    rows = gen(v)
+    for _ in rows:
+        pass
+
+
+def handed():
+    v = load()
+    consume(gen(v))
+
+
+async def grow(xs):
+    xs.append(1)
+
+
+async def awaited():
+    v = load()
+    kept = grow(v)
+    pending = grow(v)
+    await pending
+    return kept is None
+"#,
+    );
+    assert_eq!(
+        reports(&p, "MUT202"),
+        vec![
+            at("app.py", 18, "sibling"),
+            at("app.py", 25, "later"),
+            at("app.py", 32, "handed"),
+            at("app.py", 42, "awaited"),
+        ]
+    );
 }
 
 #[test]
