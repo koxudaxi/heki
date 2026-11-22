@@ -359,6 +359,25 @@ def decided_bypass(rows, db):
         db.one(row)
 
 
+def dead_loop(rows, db):
+    if DEBUG:
+        if len(rows) > 8:
+            raise ValueError(rows)
+        if db.ready():
+            db.one(None)
+        for row in rows:
+            db.one(row)
+
+
+def bypassed_through_dead_code(rows, db):
+    if DEBUG:
+        if len(rows) > 8:
+            raise ValueError(rows)
+        db.one(None)
+    for row in rows:
+        db.one(row)
+
+
 def live_bypass(rows, db, flag):
     if flag:
         db.one(None)
@@ -422,6 +441,10 @@ def live_bypass(rows, db, flag):
     // branch the input decides may skip it.
     assert_eq!(trips("decided_bypass"), vec![capped(8)]);
     assert_eq!(trips("live_bypass"), vec![json!("open")]);
+    // A loop no path reaches is capped by any test (none avoids it); a test only dead code
+    // passes caps no loop that runs.
+    assert_eq!(trips("dead_loop"), vec![capped(8)]);
+    assert_eq!(trips("bypassed_through_dead_code"), vec![json!("open")]);
     // The IR records the count of a loop over what a generator expression's creator passes.
     let genexpr = function(&facts, "generated.<locals>.<genexpr>");
     assert_eq!(genexpr["loops"][0]["fixed_trips"], capped(3));
