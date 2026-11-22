@@ -47,6 +47,7 @@ pub const RULE_POLICY: &[(&str, RulePolicy)] = &[
     ("MUT112", RulePolicy::Enable),
     ("MUT113", RulePolicy::Enable),
     ("MUT114", RulePolicy::Enable),
+    ("MUT115", RulePolicy::Enable),
     ("MUT118", RulePolicy::Enable),
     ("MUT201", RulePolicy::Contract),
     ("MUT202", RulePolicy::Contract),
