@@ -934,6 +934,19 @@ symbol = "builtins.set.copy"
 copy_sanitizer = "shallow"
 opaque_to_layer3 = true
 
+# `os.environ.copy()` is `dict(os.environ)`: a new dict of the environment's strings.
+[[entries]]
+symbol = "os.environ.copy"
+copy_sanitizer = "shallow"
+return_type = "builtins.dict"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "os.environb.copy"
+copy_sanitizer = "shallow"
+return_type = "builtins.dict"
+opaque_to_layer3 = true
+
 # The builtin container constructors make a new container of their argument's elements, which
 # the new container still holds.
 [[entries]]

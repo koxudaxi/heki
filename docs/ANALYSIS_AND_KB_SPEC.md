@@ -504,6 +504,12 @@ EffectSummary(f) = {
                                                            // propagated), the project calls whose results (or
                                                            // elements of them) it may return, by span, and the
                                                            // phis its origin walks met (local)
+    fresh_return:             Option<Box<FreshReturn>>,    // MUT119, absent for most functions: every
+                                                           // returned value is a builtin container of one
+                                                           // kind the call made and keeps nowhere (built, or
+                                                           // a copy); local facts name the project functions
+                                                           // whose results it returns, which propagation
+                                                           // resolves
     unresolved_write_sites:   Set<UnresolvedWrite>,        // target-named writes on objects of unknown class,
                                                            // computed names on guarded classes and on
                                                            // objects of unknown class (MUT205)
@@ -945,7 +951,7 @@ differ); every file that read one of them is re-analyzed. This covers names reso
 re-exports, class hierarchy analysis across modules, and property getters, without depending on
 which module imports which.
 
-### 2.3 Family 1 (`MUT101` / `MUT103` / `MUT106` / `MUT107` / `MUT109` / `MUT111` / `MUT112` / `MUT113` / `MUT118` / `MUT201` / `MUT202` / `MUT203` / `MUT204`)
+### 2.3 Family 1 (`MUT101` / `MUT103` / `MUT106` / `MUT107` / `MUT109` / `MUT111` / `MUT112` / `MUT113` / `MUT118` / `MUT119` / `MUT201` / `MUT202` / `MUT203` / `MUT204`)
 
 #### `MUT101`: mutation of attributes a `@cached_property` depends on, without invalidation (strict Stage 0-A version)
 1. For every `@cached_property` method `p` of a class `C` (with its subclasses; a nested class is
@@ -1090,6 +1096,37 @@ which module imports which.
    once per run, and a budget spent in another order by `heki check` and the language server
    would make them disagree). Each attribute of the copied class gives a heuristic claim naming
    that attribute.
+
+#### `MUT119`: an in-place change lost on a new object (opt-in)
+1. **Sources** (`heki_effect::fresh::source`): what makes the object an instruction defines. Built
+   as the builtin itself: a list, dict, or set display or comprehension, a call of `list`,
+   `dict`, `set`, `bytearray`, `collections.deque`, or `sorted`. Copied: a call the catalog
+   describes as a copy (`copy_sanitizer`: a builtin container's `copy()`, `copy.copy`,
+   `os.environ.copy()`) whose result is of a builtin container type, or a slice of a list or
+   `bytearray`; the type comes from the copied value under R2. Or a call of project functions or
+   a property read (its getters).
+2. **The summary fact** (`EffectSummary::fresh_return`, only while `MUT119` runs:
+   `OptInFacts::fresh_returns`): for a plain function (not `async`, not a generator, no decorator
+   but those that call the body each time, no A1 hazard) with no bare return on a path a run can
+   take, one walk back from the returned values through copies and phis (along the edges a run
+   can take) to their sources, all of one container kind, and one walk forward from the sources
+   through copies, phis, and in-place operators: every use keeps nothing (a method call on the
+   object itself, an item load, store, or delete on it, a comparison, a conversion, an
+   iteration, a call of a builtin that only inspects it); a store, a capture, a yield, a raise,
+   an attribute load (a bound method), or any other call ends the fact. Both walks share one
+   budget per function. `built` says every source is the builtin itself.
+3. **Propagation** (`Resolver::resolve_own`): a local fact naming project functions holds when
+   each has a final fact of the same kind outside the SCC being computed (a recursive function
+   has none), and is `built` only when they all are. Two definitions of one function keep the
+   fact only when both have it with one kind.
+4. **The rule** (`heki_rules::mut_rules::lost_changes`): a changing method of a container kind,
+   an item store, or an item delete, applied to a value with no name that nothing reads but the
+   change (and the item load of an augmented assignment), whose defining instruction is a source
+   of that kind. A method's result must be unused, or `None` bound to names or stored. The tier
+   is exact when the object is built, returned by functions whose facts are built and that the
+   call resolves completely, or copied where no project subclass replaces the copy or the change
+   (R2), and the change is no augmented item assignment; the rule is heuristic until certified,
+   so every report is heuristic for now.
 
 #### `MUT112`: a value that is new on one path and borrowed on another, changed in place (opt-in)
 1. **What a value holds** (`heki_effect::ownership`): each instruction's `Source` says what the
@@ -1901,15 +1938,23 @@ its verdict that is not established, with the obligation's kind as the cause
 (`Kind(subject): reason`) as the detail. The other premises of the row hold for every report: a
 site is found only in a loop and, for an accumulation, on a value carried around it
 (`find_sites`), and a candidate is reported only when its construction establishes the builtin
-type (`OptCandidate::is_reportable`). A proven size-dependent report in a loop whose trip count
-the code fixes or caps (`OptCandidate::in_exact_tier`) leaves no premise of its row open: the
-exact tier also asks for a condition that is no premise, "Trip count open"
-(`heki_rules::premises::Condition`, decided in `FnIndex::fixed_trips`; Safety × Profitability,
-ADR-007 and ADR-011: the claim holds, the change does not pay off over a loop the code counts).
-The report records that condition with its cause (`trip-count-fixed`, the bound as its detail)
-in the same list as open premises (`heki_diagnostics::OpenRecord::Condition`, axis
-profitability), so every heuristic report names why it is not exact; the premise rows, the
-claims, and the oracle's strips do not change.
+type (`OptCandidate::is_reportable`). The exact tier of a size-dependent rewrite also asks for a
+condition that is no premise, "Trip count open" (`heki_rules::premises::Condition`; Safety ×
+Profitability, ADR-007 and ADR-011: the claim holds either way, but the change pays off only
+over a loop the data sizes), which the Advisory lane decides for the loop around the site
+(`OptCandidate::trip_loop`, in `heki_rules::opt_rules::TripCounts::open_record`): the code does
+not fix or cap its trip count (`FnIndex::fixed_trips`, computed with the candidate), and its
+items are the data's as `EFF103`'s "Origin" establishes them (`DataOrigins::of_loop_items`: a
+parameter or a part of one, `*args` included, or the rows, lines, or entries of a call the
+catalog sizes, through `ItemOrigins::of_loop` and `data_origin`; a walk budget per function). A
+loop over a receiver's attribute, a project function's result, `range` of a number that is no
+constant or length, an item of a call's result (`type(x).__mro__`), or a `while` loop runs as
+many times as the program has parts, however large the input. A proven report over such a loop
+leaves no premise of its row open; it records the condition with its cause in the same list as
+open premises (`heki_diagnostics::OpenRecord::Condition`, axis profitability): `trip-count-fixed`
+with the bound as its detail, or the cause of "Origin" that rejected the items, under the same id
+and closer (`premises::trip_count_cause`). Every heuristic report names why it is not exact; the
+premise rows, the claims, and the oracle's strips do not change.
 
 `OPT113`'s exact tier is one decision, `JoinPremises::steps`, which tells each step that does
 not hold to its caller in the order it takes them (the same collection, the same keys, both
@@ -1921,7 +1966,10 @@ of an item whose type is unknown, or a load that is no plain attribute of a know
 item of a builtin container) apart from any other work on a mismatch ("Idle on a mismatch"), and
 `steps_run_no_code` an inner iterable of unknown type (an annotation closes it, unless a project
 subclass of a builtin container defines `__iter__`) apart from one that may run code. A trip
-count the code fixes or caps records "Trip count open" at the loop, as for the rewrites.
+count the code fixes or caps records "Trip count open" at the loop, as for the rewrites. Its
+loops' items need no condition of their own: "Steps through inputs" asks for parameters or parts
+of them, which "Origin" accepts too, so a join over a loop the data does not size is heuristic
+for that premise.
 
 ---
 
@@ -2013,7 +2061,10 @@ Three more keys state when a call waits, which an exact claim needs (ADR-018):
   (`Session.get`), `if-pending` (`Session.flush`, `Session.commit`, a driver's `commit()` /
   `rollback()` without an open transaction does nothing), `unless-cached` (Django's
   `QuerySet.count()` / `exists()` / `first()` / `last()` on an evaluated query set read its
-  cache), `unless-connected` (a pool checkout, Django's `connection.cursor()`). Only `always`
+  cache; an exhausted pymongo or motor cursor returns nothing without a query), `unless-connected` (a pool checkout, Django's `connection.cursor()`),
+  `unless-configured-otherwise` (any effect, on any entry: the library can be configured so the
+  call does not do it, as Celery's `task_always_eager` or an in-memory transport; no effect of
+  the call is certain). Only `always`
   establishes that the call sends or waits on every call.
 - **`items`** on a call whose result's items the environment decides the number of: `rows`
   (`Cursor.fetchall`, a DB-API `execute` whose cursor is iterated, `Session.execute`, pymongo's

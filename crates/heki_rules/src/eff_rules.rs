@@ -24,7 +24,7 @@ use heki_effect::{
     SiteEffect, SiteMust, TypeCtx, WriteKind, anchors_call_site, boundary_reports_in,
 };
 pub(crate) use heki_ir::ItemOrigins;
-use heki_ir::walk::{Answer, Budget, FnShape};
+use heki_ir::walk::{self, Answer, Budget, FnShape, JoinMap, Or, Sparse, fixpoint};
 use heki_ir::{BlockId, Carries, InstKind, IrFunction, ItemOrigin, ItemSource, Must, Progress};
 use heki_kb::{EcosystemEntry, EnvironmentAccess, ExecEffectKind, ResultItems, WaitKind};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -625,9 +625,27 @@ pub(crate) struct DataOrigins {
 }
 
 impl DataOrigins {
+    /// "Origin" but the trip count, which `FnIndex::fixed_trips` decides: the origins of the items
+    /// the loop `li` of function `f` steps through ([`ItemOrigins::of_loop`], charged to
+    /// `budget`), or why they are not the data's (a cause of "Origin"): no items followed (a
+    /// `while` loop, an iterable the walk does not decide, a budget spent), or the first source
+    /// that is not the data's.
+    pub(crate) fn of_loop_items(
+        cx: &CheckContext<'_>,
+        tcx: &TypeCtx<'_>,
+        origins: &ItemOrigins<'_>,
+        budget: &Budget,
+        (f, li): (heki_ir::FunctionId, usize),
+    ) -> Result<Self, &'static OpenCause> {
+        let Answer::Known(found) = origins.of_loop(budget, f, li) else {
+            return Err(&premises::NO_ITEMS_FOLLOWED);
+        };
+        Self::of(cx, tcx, tcx.ir(), &found)
+    }
+
     /// The origins of every item of `found`, or why the first one that is not the data's is not
     /// (a cause of "Origin").
-    pub(crate) fn of(
+    fn of(
         cx: &CheckContext<'_>,
         tcx: &TypeCtx<'_>,
         ir: &heki_ir::ModuleIr,
@@ -718,11 +736,7 @@ fn established_queries(
                     return None;
                 }
             }
-            let Answer::Known(found) = origins.of_loop(&budget, f.id, li) else {
-                let _ = steps(&premises::NO_ITEMS_FOLLOWED);
-                return None;
-            };
-            match DataOrigins::of(cx, tcx, unit.input.ir, &found) {
+            match DataOrigins::of_loop_items(cx, tcx, origins, &budget, (f.id, li)) {
                 Ok(origins) => (!open).then_some(origins),
                 Err(cause) => {
                     let _ = steps(cause);
@@ -1003,6 +1017,8 @@ static FORBID_EXPECTED: LazyLock<String> = LazyLock::new(|| {
 /// One parsed `[[tool.heki.effect-boundaries]]` contract.
 struct Boundary<'r> {
     name: &'r str,
+    /// How a report names the contract ([`heki_env::contract_label`]).
+    label: String,
     scopes: Vec<DottedPattern>,
     effects: BTreeSet<ExecEffectKind>,
     mutates_params: bool,
@@ -1144,10 +1160,20 @@ impl Boundary<'_> {
     }
 }
 
+/// `effect boundary `name``, or the position of a boundary without a name.
+fn boundary_label(index: usize, name: &str) -> String {
+    let label = heki_env::contract_label("effect-boundaries", index, name);
+    if name.is_empty() {
+        label
+    } else {
+        format!("effect boundary {label}")
+    }
+}
+
 fn boundaries<'a>(cx: &CheckContext<'a>) -> Result<Vec<Boundary<'a>>, RuleConfigError> {
     let all_classes = project_classes(cx);
     let mut out = Vec::new();
-    for b in &cx.config.effect_boundaries {
+    for (index, b) in cx.config.effect_boundaries.iter().enumerate() {
         let mut effects = BTreeSet::new();
         for token in &b.forbid {
             let Some((_, kinds)) = FORBID_TOKENS.iter().find(|(t, _)| t == token) else {
@@ -1195,6 +1221,7 @@ fn boundaries<'a>(cx: &CheckContext<'a>) -> Result<Vec<Boundary<'a>>, RuleConfig
         };
         out.push(Boundary {
             name: &b.name,
+            label: boundary_label(index, &b.name),
             scopes: patterns(&b.scopes, "effect-boundaries.scopes")?,
             effects,
             mutates_params: forbids("mutates-params"),
@@ -1333,7 +1360,7 @@ fn note_environment(
         let found = Found {
             chain,
             span,
-            kind: kind.as_str(),
+            kind: kind.describe(),
             sites: BTreeSet::new(),
         };
         (found, kind, name)
@@ -1596,7 +1623,7 @@ impl<'a> Reach<'a> {
                 note(&mut self.writes, bucket, (func.fqn(), w.span), || {
                     let mut chain = chain_to(nodes, i);
                     chain.extend(extra.clone());
-                    (chain, w.span, w.kind.as_str())
+                    (chain, w.span, w.kind.describe())
                 });
             }
         }
@@ -1618,7 +1645,7 @@ impl<'a> Reach<'a> {
             }) {
                 let nodes = &self.nodes;
                 note(&mut self.reads, ti, (func.fqn(), r.span), || {
-                    (chain_to(nodes, i), r.span, r.kind.as_str())
+                    (chain_to(nodes, i), r.span, r.kind.describe())
                 });
             }
         }
@@ -1671,12 +1698,12 @@ impl<'a> Reach<'a> {
             };
             for t in calls {
                 note(&mut self.calls, vec![t], site.clone(), || {
-                    (chain(), a.span, a.kind.as_str())
+                    (chain(), a.span, a.kind.describe())
                 });
             }
             for t in reads {
                 note(&mut self.reads, t, site.clone(), || {
-                    (chain(), a.span, a.kind.as_str())
+                    (chain(), a.span, a.kind.describe())
                 });
             }
             if b.forbids_environment(cx, a) {
@@ -1693,21 +1720,29 @@ impl<'a> Reach<'a> {
     /// whose changes count only below the copy's top level), and the distinct sites of those
     /// changes (each in the body making it).
     fn mutated_params(&self, cx: &CheckContext<'_>, params: usize) -> (u64, BTreeSet<SiteId>) {
-        // `(any change counts, only changes below the top level count)`.
-        let mut alias: FxHashMap<(usize, usize), (u64, u64)> = FxHashMap::default();
-        for p in 0..params.min(64) {
-            alias.insert((0, p), (1u64 << p, 0));
+        // Per node, the scope parameters each of its parameters holds: `(any change counts, only
+        // changes below the top level count)`.
+        type Held = JoinMap<usize, (Or, Or)>;
+        let mut into: Vec<Vec<(usize, &BoundCallee)>> = vec![Vec::new(); self.nodes.len()];
+        let mut out_of: Vec<Vec<usize>> = vec![Vec::new(); self.nodes.len()];
+        for &(from, to, bc) in &self.edges {
+            into[to].push((from, bc));
+            out_of[from].push(to);
         }
-        loop {
-            let mut changed = false;
-            for &(from, to, bc) in &self.edges {
+        let readers = |i: usize, out: &mut Vec<usize>| out.extend(&out_of[i]);
+        let transfer = |node: usize, known: &walk::Facts<Held>| -> Option<Held> {
+            let mut held = Held::new();
+            if node == 0 {
+                for p in 0..params.min(64) {
+                    held.insert(p, (Or(1u64 << p), Or(0)));
+                }
+            }
+            for &(from, bc) in &into[node] {
+                let of = |p: u8| {
+                    let bits = known.get(from).and_then(|h| h.get(&usize::from(p)));
+                    bits.map_or((0, 0), |(full, below)| (full.0, below.0))
+                };
                 for (k, o) in bc.params.iter().enumerate() {
-                    let of = |p: u8| {
-                        alias
-                            .get(&(from, usize::from(p)))
-                            .copied()
-                            .unwrap_or((0, 0))
-                    };
                     // The parameter itself keeps what counts; a part of it, or of a copy of it,
                     // is below the top level.
                     let mut bits = (0, 0);
@@ -1730,18 +1765,36 @@ impl<'a> Reach<'a> {
                         let (full, below) = of(*p);
                         bits.1 |= full | below;
                     }
-                    let slot = alias.entry((to, k)).or_insert((0, 0));
-                    let grown = (slot.0 | bits.0, slot.1 | bits.1);
-                    if grown != *slot {
-                        *slot = grown;
-                        changed = true;
+                    if bits != (0, 0) {
+                        held.insert(k, (Or(bits.0), Or(bits.1)));
                     }
                 }
             }
-            if !changed {
-                break;
-            }
-        }
+            // No bits are no fact: a node holding none gains nothing and requeues no callee.
+            (!held.is_empty()).then_some(held)
+        };
+        // A node is visited once, then again only after a node calling it gains a bit of one of
+        // its parameters' two masks: at most the bits of every node's parameters.
+        let parameters: usize = (0..self.nodes.len())
+            .map(|j| {
+                let called = into[j].iter().map(|(_, bc)| bc.params.len()).max();
+                called.unwrap_or(0).max(if j == 0 { params } else { 0 })
+            })
+            .sum();
+        let spec = Sparse {
+            nodes: self.nodes.len(),
+            readers: &readers,
+            max_visits: u32::try_from(1 + 2 * 64 * parameters).unwrap_or(u32::MAX),
+        };
+        let budget = Budget::unmetered("eff_rules::Reach::mutated_params");
+        // Never open: the budget is unmetered and the visits stay within the limit above. Open,
+        // no change of a parameter would be known, and none reported.
+        let found = fixpoint(&budget, spec, transfer).map(walk::Facts::into_vec);
+        let found = found.open_means(Vec::new());
+        let alias = |i: usize, k: u8| {
+            let bits = (found.get(i).and_then(Option::as_ref)).and_then(|h| h.get(&usize::from(k)));
+            bits.map_or((0, 0), |(full, below)| (full.0, below.0))
+        };
         let mut out = 0;
         let mut sites = BTreeSet::new();
         for (i, (func, facts, _)) in self.nodes.iter().enumerate() {
@@ -1754,7 +1807,7 @@ impl<'a> Reach<'a> {
                 continue;
             };
             for k in (0..64u8).filter(|k| local.mutates_params & (1u64 << k) != 0) {
-                let (full, below) = alias.get(&(i, usize::from(k))).copied().unwrap_or((0, 0));
+                let (full, below) = alias(i, k);
                 let below = below
                     & if local
                         .changed_param_attrs
@@ -1785,7 +1838,7 @@ impl<'a> Reach<'a> {
         key: &FuncKey,
         out: &mut Vec<Diagnostic>,
     ) {
-        let forbids = |what: String| format!("{what}, which effect boundary `{}` forbids", b.name);
+        let forbids = |what: String| format!("{what}, which {} forbids", b.label);
         let help = || b.note.map(str::to_owned);
         let mut emit = |found: &Found, target: String, message: String| {
             let span = found.chain.first().map_or(found.span, |h| h.span);
@@ -1833,8 +1886,8 @@ impl<'a> Reach<'a> {
                 }
                 WriteBucket::Undeclared(attr) => {
                     let message = format!(
-                        "`{}` writes `{attr}` ({}{via}), which effect boundary `{}` does not allow",
-                        key.qualname, found.kind, b.name
+                        "`{}` writes `{attr}` ({}{via}), which {} does not allow",
+                        key.qualname, found.kind, b.label
                     );
                     emit(found, attr.clone(), message);
                 }

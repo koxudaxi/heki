@@ -28,7 +28,7 @@ const CONFIG: &str = r#"[project]
 name = "t"
 
 [tool.heki.lint]
-extend-select = ["MUT101", "MUT107", "MUT108", "MUT111", "EFF107", "MUT112", "MUT113", "EFF109", "EFF110", "EFF112", "EFF114", "EFF115", "MUT115", "MUT118"]
+extend-select = ["MUT101", "MUT107", "MUT108", "MUT111", "EFF107", "MUT112", "MUT113", "EFF109", "EFF110", "EFF112", "EFF114", "EFF115", "MUT115", "MUT118", "MUT119"]
 
 [[tool.heki.write-owners]]
 name = "registry"
@@ -484,6 +484,12 @@ const SPELLED_STUB: &str = "import builtins\n\n\ndef name(x: builtins.str) -> No
 const LEVELS: &str = "LEVELS = [\"low\", \"mid\", \"high\"]\n";
 const LEVELS_GROWN: &str =
     "LEVELS = [\"low\", \"mid\", \"high\"]\n\n\ndef add(level):\n    LEVELS.append(level)\n";
+// The rows a loop steps through (`OPT103`), by the class another module binds the cursor's name
+// to: the rewrite is exact while it is `sqlite3.Cursor`, whose `execute` the catalog sizes, and
+// heuristic once it is a project class ("Trip count open").
+const STORAGE: &str = "from sqlite3 import Cursor\n";
+const STORAGE_OWN: &str = "class Cursor:\n    def execute(self, query):\n        return [query]\n";
+const ROWS_USER: &str = "from pkg.storage import Cursor\n\n\ndef ids(cursor: Cursor):\n    out = ()\n    for row in cursor.execute(\"SELECT id FROM t\"):\n        out = out + (row,)\n    return out\n";
 // A module-level list its own loop treats as fixed, and the module that may grow it.
 const QUEUE_CFG: &str =
     "import httpx\n\nQUEUE = []\n\n\ndef run():\n    for item in QUEUE:\n        httpx.Client()\n";
@@ -591,6 +597,14 @@ const MARK_TESTS_NONE: &str = "from pkg.marked_spec import Spec\nfrom pkg.marks 
 const MARK_COPIES: &str = "import copy\n\nfrom pkg.marked_spec import Spec\n\n\ndef isolated(spec: Spec) -> Spec:\n    return copy.deepcopy(spec)\n";
 const MARK_HOLDER: &str = "import copy\n\nfrom pkg.marked_spec import Spec\n\n\nclass Holder:\n    def __init__(self, spec: Spec):\n        self.spec = spec\n\n\ndef isolated_holder(holder: Holder):\n    return copy.deepcopy(holder)\n";
 const MARK_SUB: &str = "import copy\n\nfrom pkg.marked_spec import Spec\n\n\nclass NamedSpec(Spec):\n    pass\n\n\ndef isolated_named(spec: NamedSpec) -> NamedSpec:\n    return copy.deepcopy(spec)\n";
+
+// Changes lost on new objects (`MUT119`): a function in another module changes an item of what
+// a property returns, whose getter returns a copy of its field, then the field itself, then a
+// copy it keeps on the instance.
+const LOST_SETTINGS: &str = "class Settings:\n    def __init__(self):\n        self._values = {}\n        self._last = None\n\n    @property\n    def values(self):\n        return dict(self._values)\n";
+const LOST_SETTINGS_FIELD: &str = "class Settings:\n    def __init__(self):\n        self._values = {}\n        self._last = None\n\n    @property\n    def values(self):\n        return self._values\n";
+const LOST_SETTINGS_KEPT: &str = "class Settings:\n    def __init__(self):\n        self._values = {}\n        self._last = None\n\n    @property\n    def values(self):\n        copied = dict(self._values)\n        self._last = copied\n        return copied\n";
+const LOST_USE: &str = "from pkg.lost_settings import Settings\n\n\ndef enable(settings: Settings):\n    settings.values[\"debug\"] = True\n";
 
 // Values new on one path and borrowed on another (`MUT112`): a caller two modules above a
 // function that copies its argument (through a wrapper in a third module), and a class whose
@@ -957,6 +971,8 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/marked_spec.py", MARKED_SPEC),
         ("pkg/mark_tests.py", MARK_TESTS),
         ("pkg/mark_copies.py", MARK_COPIES),
+        ("pkg/lost_settings.py", LOST_SETTINGS),
+        ("pkg/lost_use.py", LOST_USE),
         ("pkg/fresh_ops.py", FRESH_OPS),
         ("pkg/fresh_build.py", FRESH_BUILD),
         ("pkg/strict_ops.py", STRICT_OPS),
@@ -1956,6 +1972,27 @@ fn steps_small_displays() -> Vec<Step> {
             vec![save("pkg/sniff_more.py", SNIFF_MORE)],
         )
         .absent(&[("pkg/sniff_user.py", "OPT112")]),
+        // "Trip count open" of a rewrite (`DataOrigins::of_loop_items`): the rows of a call the
+        // catalog sizes, through the class another module binds the receiver's annotation to. The
+        // report stays, exact or heuristic, and the server must change its certainty with the CLI.
+        Step::new(
+            "a module loops over the rows of a cursor class another module re-exports",
+            vec![
+                Action::Create("pkg/storage.py", STORAGE.to_owned()),
+                Action::Create("pkg/rows_user.py", ROWS_USER.to_owned()),
+            ],
+        )
+        .present(&[("pkg/rows_user.py", "OPT103")]),
+        Step::new(
+            "the other module defines a cursor class of its own",
+            vec![save("pkg/storage.py", STORAGE_OWN)],
+        )
+        .present(&[("pkg/rows_user.py", "OPT103")]),
+        Step::new(
+            "it re-exports the library's cursor again",
+            vec![save("pkg/storage.py", STORAGE)],
+        )
+        .present(&[("pkg/rows_user.py", "OPT103")]),
         // `ModuleDecls::grown_globals`: the module owning the list and a third module reading
         // it are re-checked when another module starts or stops growing it.
         Step::new(
@@ -2990,6 +3027,39 @@ fn steps_mut118() -> Vec<Step> {
     ]
 }
 
+/// `MUT119`: an item store through a property of a class in another module, by the final
+/// summary of its getter: the getter returns a copy of its field, then the field itself, then a
+/// copy it also keeps on the instance.
+fn steps_mut119() -> Vec<Step> {
+    vec![
+        Step::new(
+            "an item store on the copy a property in another module returns",
+            Vec::new(),
+        )
+        .present(&[("pkg/lost_use.py", "MUT119")]),
+        Step::new(
+            "the getter returns its field",
+            vec![save("pkg/lost_settings.py", LOST_SETTINGS_FIELD)],
+        )
+        .absent(&[("pkg/lost_use.py", "MUT119")]),
+        Step::new(
+            "the getter returns a copy again",
+            vec![save("pkg/lost_settings.py", LOST_SETTINGS)],
+        )
+        .present(&[("pkg/lost_use.py", "MUT119")]),
+        Step::new(
+            "the getter keeps the copy on the instance",
+            vec![save("pkg/lost_settings.py", LOST_SETTINGS_KEPT)],
+        )
+        .absent(&[("pkg/lost_use.py", "MUT119")]),
+        Step::new(
+            "and returns a copy it does not keep",
+            vec![save("pkg/lost_settings.py", LOST_SETTINGS)],
+        )
+        .present(&[("pkg/lost_use.py", "MUT119")]),
+    ]
+}
+
 /// The blocking helper of `pkg/low.py` with a module-level cache that it reads (`False`) or
 /// clears (`True`) after its blocking call, so that the call keeps its position.
 fn low_with_cache(clears: bool) -> String {
@@ -3739,8 +3809,8 @@ fn steps_configuration() -> Vec<Step> {
         Step::new(
             "the configuration becomes invalid",
             vec![Action::Configure(CONFIG.replace(
-                "extend-select = [\"MUT101\", \"MUT107\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\", \"MUT113\", \"EFF109\", \"EFF110\", \"EFF112\", \"EFF114\", \"EFF115\", \"MUT115\", \"MUT118\"]",
-                "extend-select = [\"MUT101\", \"MUT107\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\", \"MUT113\", \"EFF109\", \"EFF110\", \"EFF112\", \"EFF114\", \"EFF115\", \"MUT115\", \"MUT118\"]\nselect = [\"NOPE1\"]",
+                "extend-select = [\"MUT101\", \"MUT107\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\", \"MUT113\", \"EFF109\", \"EFF110\", \"EFF112\", \"EFF114\", \"EFF115\", \"MUT115\", \"MUT118\", \"MUT119\"]",
+                "extend-select = [\"MUT101\", \"MUT107\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\", \"MUT113\", \"EFF109\", \"EFF110\", \"EFF112\", \"EFF114\", \"EFF115\", \"MUT115\", \"MUT118\", \"MUT119\"]\nselect = [\"NOPE1\"]",
             ))],
         )
         .absent(&[("pkg/svc_user.py", "EFF101")]),
@@ -4397,6 +4467,7 @@ sessions!(editing, Session::start, {
     hash_writers: steps_hash_writers,
     mut111: steps_mut111,
     mut118: steps_mut118,
+    mut119: steps_mut119,
     mut112: steps_mut112,
     eff109: steps_eff109,
     mut113: steps_mut113,

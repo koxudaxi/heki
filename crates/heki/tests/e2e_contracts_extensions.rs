@@ -552,7 +552,7 @@ fn eff201_reads_calls_and_allowed_writes() {
     assert_eq!(
         diags[0]["message"],
         format!(
-            "`decide` reads `DataType.is_optional` (direct_attr via `pkg.helpers.nullable`), {forbids}"
+            "`decide` reads `DataType.is_optional` (by attribute via `pkg.helpers.nullable`), {forbids}"
         )
     );
     assert_eq!(
@@ -564,7 +564,7 @@ fn eff201_reads_calls_and_allowed_writes() {
     );
     assert_eq!(
         diags[3]["message"],
-        format!("`decide_getattr` reads `Model.class_name` (getattr), {forbids}")
+        format!("`decide_getattr` reads `Model.class_name` (with `getattr`), {forbids}")
     );
     assert_eq!(
         diags[5]["message"],
@@ -577,7 +577,7 @@ fn eff201_reads_calls_and_allowed_writes() {
     assert_eq!(related(&diags[6]), ["`seal` calls `pkg.model.FinalFacts`"]);
     assert_eq!(
         diags[7]["message"],
-        "`sort_bases` writes `Model.fields` (container_mut via `pkg.passes._touch`), which effect boundary `pass-sort` does not allow"
+        "`sort_bases` writes `Model.fields` (in place via `pkg.passes._touch`), which effect boundary `pass-sort` does not allow"
     );
 }
 
@@ -794,11 +794,11 @@ fn forbidden_scopes_restrict_owner_contracts() {
     );
     assert_eq!(
         diags[0]["message"],
-        "`p_write` writes `Model.fields` (container_mut) inside the forbidden writers of `parser-writes`"
+        "`p_write` writes `Model.fields` (in place) inside the forbidden writers of `parser-writes`"
     );
     assert_eq!(
         diags[1]["message"],
-        "`p_read` reads `Model.backend_data` (direct_attr) inside the forbidden readers of `backend-inspection`"
+        "`p_read` reads `Model.backend_data` (by attribute) inside the forbidden readers of `backend-inspection`"
     );
     assert_eq!(
         diags[2]["message"],
@@ -806,7 +806,7 @@ fn forbidden_scopes_restrict_owner_contracts() {
     );
     assert_eq!(
         diags[5]["message"],
-        "`r_uses_parser_private` reads `Model.backend_data` (direct_attr) via `pkg.parser.passes._p_private` inside the forbidden readers of `backend-inspection`"
+        "`r_uses_parser_private` reads `Model.backend_data` (by attribute) via `pkg.parser.passes._p_private` inside the forbidden readers of `backend-inspection`"
     );
 }
 

@@ -153,23 +153,24 @@ def build() -> tuple[str, str]:
     pages += [("Rules", "", f"rules/{p.name}") for p in rules]
 
     head = [f"# {project['site_name']}", "", f"> {project['site_description']}", ""]
-    index = list(head)
     full = list(head)
-    current = None
+    # One heading per section: the nav puts top-level pages between its sections.
+    sections: dict[str, list[str]] = {}
     for section, name, path in pages:
-        if section != current:
-            index += ["", f"## {section}", ""]
-            current = section
+        entries = sections.setdefault(section, [])
         if is_external(path):
-            index.append(f"- [{name or path}]({path})")
+            entries.append(f"- [{name or path}]({path})")
             continue
         text = (DOCS / path).read_text(encoding="utf-8")
         text = GENERATED_MARK.sub("", text)
         page_title = name or title(text, path)
         desc = description(text.split("\n", 1)[1] if text.startswith("# ") else text)
-        index.append(f"- [{page_title}]({page_url(site, path)}): {desc}")
+        entries.append(f"- [{page_title}]({page_url(site, path)}): {desc}")
         body = absolute_links(text.strip(), path, site, repo)
         full += ["", "---", "", f"Source: {page_url(site, path)}", "", body, ""]
+    index = list(head)
+    for section, entries in sections.items():
+        index += ["", f"## {section}", "", *entries]
     return "\n".join(index).strip() + "\n", "\n".join(full).strip() + "\n"
 
 

@@ -222,6 +222,11 @@ def main():
         default="both",
         help="generate from the shape grammar, from the premise table (every premise but one kept), or both",
     )
+    parser.add_argument(
+        "--table-rules",
+        nargs="*",
+        help="generate from the premise table only for these rules (a rule's certification run)",
+    )
     parser.add_argument("--run-timeout", type=float, default=2.0, help="seconds per program run")
     parser.add_argument("--minimize", action="store_true", help="shrink refutations to small repros")
     parser.add_argument("--minimize-per-group", type=int, default=1)
@@ -233,6 +238,11 @@ def main():
     args.table = (
         premise_table(os.path.realpath(args.table_heki or args.heki)) if args.mode != "grammar" else {}
     )
+    if args.table_rules:
+        missing = sorted(set(args.table_rules) - set(args.table))
+        if missing:
+            parser.error(f"the premise table has no rows for {', '.join(missing)}")
+        args.table = {code: names for code, names in args.table.items() if code in args.table_rules}
     if args.mode != "grammar":
         premise_generator.check_table(args.table)
     args.open_premises = args.mode != "grammar" and driver.supports_open_premises(args.heki)

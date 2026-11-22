@@ -99,7 +99,8 @@ a rule becomes exact](precision.md#how-a-rule-becomes-exact):
    (`fakes.py`: `time.sleep`, `requests`, `sqlite3`, `socket`, `subprocess`, `urllib`, queues,
    `numpy`, `pandas`), so the program runs offline. `monitor.py` records with `sys.monitoring`
    which call was running, which iteration of a loop, and which line, when each fake was called,
-   what each line changed, and what the objects a line plan names hold in an attribute.
+   what each line changed, what the objects a line plan names hold in an attribute, and how
+   many references the program keeps to the object a change ran on when its line ends.
 4. `checkers.py` refutes a claim from the runs: an `EFF101` call that returned without a waiting
    call during it, an `EFF103` iteration that completed without a statement, a `DATA101`
    iteration whose new value was not built from the previous one, a `MUT110` or `MUT114` line
@@ -107,7 +108,9 @@ a rule becomes exact](precision.md#how-a-rule-becomes-exact):
    object than the copied value held at the access path when the copy line ran (or left it as it
    was, or whose copy held another object there; `monitor.py` loads each path at those lines
    without running code of the program), a `MUT118` deep copy whose copy kept the `object()` the
-   original held in the attribute, an `OPT` accumulator of another type,
+   original held in the attribute, a `MUT119` change whose object the program still holds when
+   the statement ends (or that ran a method of the program, or whose assigned result is not
+   `None`), an `OPT` accumulator of another type,
    or an `OPT113` inner item with a different key that ran more than the comparison. For the
    `OPT` rewrites, the driver applies `heki check --fix --include-size-dependent` to a copy and
    compares results, exceptions, arguments, output, and library calls on the same inputs.
@@ -121,7 +124,8 @@ by construction on an input the program runs. With a premise stripped, an exact 
 rule is a refutation whatever the runs show (step 1 of the certification, premise stripping); a
 base program heki does not report is counted, not refuted. A premise of the table the generator
 cannot strip stops the run, so the generator grows with the table. `--table-heki` takes the
-table from another build, to check a release older than the table with it.
+table from another build, to check a release older than the table with it, and `--table-rules`
+keeps only the rules it names, for the oracle run of one rule's certification.
 
 For the rules whose heuristic reports record the premises they leave open (`OPEN_PREMISE_CODES`
 in `premise_generator.py`: `EFF101` through `EFF111`, `EFF103` through `EFF113`, and the `OPT`
@@ -248,10 +252,16 @@ the call graph, or the class hierarchy goes through them:
   `ProjectIndex`.
 
 `crates/heki/tests/architecture_walks.rs` finds walks written by hand in the analysis crates:
-recursion over IR ids (W1), worklists (W2), passes over every block until nothing changes (W3),
-and the linear lookups `FnShape` answers from a table (W4). `crates/heki/tests/walks.allow` lists
-the functions it still allows, each with its reason. The test fails on a finding the list does
-not allow and on an entry that finds nothing any more, so the list only shrinks as walks move.
+recursion over IR ids (W1), worklists (W2), passes repeated until nothing changes (W3), and the
+linear lookups `FnShape` answers from a table (W4). A repeated pass is a `loop`, a `while`, or a
+`for` over a range whose end is no constant (`0..links`, `1..`), around a sweep of a function's
+blocks, phis, instructions, or reverse postorder, or stopping on the facts `before` the pass, on a
+size, or on a flag each pass clears and sets. Such a pass costs the function once per pass, and a
+chain laid against the order of the sweep takes a pass per link; no walk counts it, so its cost
+shows only in time. A data flow over a function's blocks is a `fixpoint` whose nodes are the
+blocks, and its facts are counted like any other. `crates/heki/tests/walks.allow` lists the
+functions it still allows, each with its reason. The test fails on a finding the list does not
+allow and on an entry that finds nothing any more, so the list only shrinks as walks move.
 
 ```console
 $ cargo build --release
@@ -325,9 +335,14 @@ changing every method of a class of thousands of methods, methods changing a typ
 thousands of times, a method storing under a key after each of hundreds of tests that such a dict
 holds the key, and a function reading attributes down a chain ten thousand deep (`x = x.child`),
 many queue puts each after a branch that may build a new queue, a long chain of helpers handing a
-queue on, named in the opposite order of the calls, a class whose thousands of queue attributes each
-store the one before, with a put on each, and the path facts of a `try` body of thousands of calls
-whose handler returns, of loops nested twenty deep with a call at each depth, of a thousand loops
+queue on, named in the opposite order of the calls, a scope under a boundary forbidding parameter
+changes handing its parameter down a chain of thousands of helpers it called before in turn, a
+function writing an invalidation target before each of thousands of calls, a loop over thousands
+of `if` statements each writing an invalidation target, a new object handed to hundreds of
+helpers each under its own `if` before its attribute is written, a class whose
+thousands of queue attributes each store the one before, with a put on each, and the path facts of
+a `try` body of thousands of calls whose handler returns, of loops nested twenty deep with a call
+at each depth, of a thousand loops
 one after another, and of a chain of hundreds of `and` tests of module constants, and the item
 origins of a chain of thousands of wrappers, of a list filled by appends in a thousand loops, and of
 a phi of sixty branches each choosing a different parameter, and thousands of `call-owners` targets,

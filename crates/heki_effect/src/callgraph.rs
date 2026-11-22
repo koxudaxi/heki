@@ -6,6 +6,7 @@
 //! `ProjectIndex::build` runs it over every function; `ProjectIndex::update_file` over the
 //! edited file's SCC closure and then over the affected callers only.
 
+use crate::fresh::FreshReturn;
 use crate::guards;
 use crate::iterations;
 use crate::scc::tarjan_scc;
@@ -942,6 +943,17 @@ impl Resolver<'_> {
         }
     }
 
+    /// Whether the project function `k` returns a new container of `fact`'s kind on every
+    /// return (by its final summary), joined into `fact`.
+    fn fresh_from(&self, k: &FuncKey, fact: &mut FreshReturn) -> bool {
+        fact.join_callee(
+            self.index
+                .summary(k)
+                .filter(|_| !(self.in_scc)(k))
+                .and_then(|s| s.fresh_return.as_deref()),
+        )
+    }
+
     /// Resolve the conditions of the function's own writes and of its returned object.
     fn resolve_own(&self, s: &mut EffectSummary) {
         let pending: Vec<TypedFieldWriteSite> = s
@@ -986,6 +998,14 @@ impl Resolver<'_> {
                 _ => Construction::No,
             };
             s.typed_field_write_sites.insert(t);
+        }
+        if let Some(fact) = s.fresh_return.as_deref_mut()
+            && !fact.calls.is_empty()
+        {
+            let calls = std::mem::take(&mut fact.calls);
+            if !calls.iter().all(|k| self.fresh_from(k, fact)) {
+                s.fresh_return = None;
+            }
         }
         if let ReturnsNew::New { kind, cond } = &s.returns_new
             && !cond.is_empty()

@@ -575,11 +575,13 @@ fn phi_inputs_after_many_is_tests_find_their_sides_once_per_edge() {
 
 /// A function returning the last of a long chain of conditional expressions, each choosing
 /// between a call of the previous value and the previous value itself
-/// (`x200 = identity(x199) if flag else x199`): each phi is walked once and referred to by the
-/// walks that meet it, instead of every argument walking all the phis before it.
+/// (`x1000 = identity(x999) if flag else x999`): each phi is walked once and referred to by the
+/// walks that meet it, instead of every argument walking all the phis before it. The calls each
+/// argument may be the result of are those of every link before it, so the iterations' facts
+/// grow with the square of the chain: they pass their budget instead.
 #[test]
 fn returned_phis_of_calls_on_the_previous_value_are_walked_once() {
-    let found = check_linear(200, |links| {
+    let found = check_past_budgets(1_000, &["consumption::IterFlow"], |links| {
         let mut lines = vec![
             "def identity(x):".to_owned(),
             "    return x".to_owned(),
@@ -1765,6 +1767,39 @@ fn class_constant_reads_on_a_class_with_many_subclasses_decide_it_once() {
         .collect();
     assert_eq!(reported.len(), 1, "{found:#?}");
     assert_eq!(reported[0]["qualname"], "write");
+}
+
+/// `MUT119` selected (it reads the new containers functions return).
+const MUT119_CONFIG: &str =
+    "[project]\nname = \"t\"\n\n[tool.heki.lint]\nextend-select = [\"MUT119\"]\n";
+
+/// A function returning the last of a long chain of copies of a new dict, each copy rebound on a
+/// branch and read by a builtin that only inspects it, and a caller changing what it returns
+/// (`MUT119`): the walk back to where the dict is made and the walk forward over its uses visit
+/// each value once.
+#[test]
+fn a_new_dict_returned_through_a_long_chain_of_copies_is_walked_once() {
+    // The largest chain whose function the IR budget still models.
+    let found = check_linear(2_000, |links| {
+        let mut lines = vec!["def make(flag):".to_owned(), "    d0 = {}".to_owned()];
+        for i in 1..=links {
+            lines.push(format!("    d{i} = d{}", i - 1));
+            lines.push("    if flag:".to_owned());
+            lines.push(format!("        d{i} = d{}", i - 1));
+            lines.push(format!("    len(d{i})"));
+        }
+        lines.push(format!("    return d{links}"));
+        lines.push(String::new());
+        lines.push(String::new());
+        lines.push("def use():".to_owned());
+        lines.push("    make(True).update(a=1)".to_owned());
+        let p = Project::new(&format!("bounds_fresh_return_chain_{links}"));
+        p.write("pyproject.toml", MUT119_CONFIG)
+            .write("m.py", &(lines.join("\n") + "\n"));
+        p
+    });
+    let reported = found.iter().filter(|d| d["rule_code"] == "MUT119").count();
+    assert_eq!(reported, 1, "{found:#?}");
 }
 
 /// A dataclass whose field defaults to an `object()` sentinel, with thousands of subclasses,
@@ -4661,6 +4696,127 @@ fn library_calls_after_a_write_look_up_handed_callables_once() {
     assert_eq!(found, ["C.put"]);
 }
 
+/// The parameters `p0, p1, ...` of a function of `params` parameters.
+fn parameters(params: usize) -> String {
+    (0..params)
+        .map(|i| format!("p{i}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// A function constructing an object and writing its attribute, then handing thousands of its
+/// parameters to a project helper: the construction walk takes a step per value it is asked
+/// about, each parameter too, and past its budget no object is known to be new, so the write is
+/// reported. With a few parameters the write constructs its object and is allowed.
+#[test]
+fn objects_past_the_construction_budget_are_not_new() {
+    let shape = |params: usize| {
+        let ps = parameters(params);
+        let p = Project::new(&format!("bounds_construction_{params}"));
+        p.write(
+            "pyproject.toml",
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT201\"]\n\n\
+             [[tool.heki.write-owners]]\nname = \"attrs\"\ntargets = [\"m.Model.attr\"]\n\
+             allowed-writers = [\"m.Model.*\"]\n",
+        )
+        .write(
+            "m.py",
+            &format!(
+                "class Model:\n    def __init__(self):\n        self.attr = 0\n\n\n\
+                 def keep(*items):\n    return items\n\n\n\
+                 def build({ps}):\n    m = Model()\n    m.attr = 1\n    keep({ps})\n    return m\n"
+            ),
+        );
+        p
+    };
+    let writes = |found: &[Value]| found.iter().filter(|d| d["rule_code"] == "MUT201").count();
+    assert_eq!(writes(&check(&shape(8))), 0);
+    let found = check_past_budgets(4_096, &["construction::Recorder"], shape);
+    assert_eq!(writes(&found), 1);
+}
+
+/// A function constructing an object, handing it to hundreds of project helpers, each call
+/// under its own `if`, then writing its attribute: the data flow of what may keep the object
+/// holds, at each block, the objects handed to every helper before it, so it grows with the
+/// blocks times the helpers and passes the budget, and the write is reported. With a few
+/// helpers it constructs its object and is allowed.
+#[test]
+fn objects_handed_to_many_helpers_pass_the_construction_budget() {
+    let shape = |helpers: usize| {
+        let mut lines = vec![
+            "class Model:".to_owned(),
+            "    def __init__(self):".to_owned(),
+            "        self.attr = 0".to_owned(),
+        ];
+        for i in 0..helpers {
+            lines.push(format!("def keep{i}(m):"));
+            lines.push("    return 1".to_owned());
+        }
+        lines.push("def build(flags):".to_owned());
+        lines.push("    m = Model()".to_owned());
+        for i in 0..helpers {
+            lines.push(format!("    if flags[{i}]:"));
+            lines.push(format!("        keep{i}(m)"));
+        }
+        lines.push("    m.attr = 1".to_owned());
+        lines.push("    return m".to_owned());
+        let p = Project::new(&format!("bounds_construction_helpers_{helpers}"));
+        p.write(
+            "pyproject.toml",
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT201\"]\n\n\
+             [[tool.heki.write-owners]]\nname = \"attrs\"\ntargets = [\"m.Model.attr\"]\n\
+             allowed-writers = [\"m.Model.*\"]\n",
+        )
+        .write("m.py", &(lines.join("\n") + "\n"));
+        p
+    };
+    let writes = |found: &[Value]| found.iter().filter(|d| d["rule_code"] == "MUT201").count();
+    assert_eq!(writes(&check(&shape(64))), 0);
+    let found = check_past_budgets(512, &["construction::Recorder"], shape);
+    assert_eq!(writes(&found), 1);
+}
+
+/// A function of thousands of parameters a nested function captures: the walk to the values
+/// that may be grown starts from each captured variable, and past its budget anything may be
+/// grown, so the module list the function reads is no constant, and another function's query
+/// per item of it is reported. With a few parameters the list keeps its size.
+#[test]
+fn values_past_the_budget_of_the_grown_variables_may_be_grown() {
+    let shape = |params: usize| {
+        let ps = parameters(params);
+        let p = Project::new(&format!("bounds_grown_variables_{params}"));
+        p.write(
+            "pyproject.toml",
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"EFF103\", \"EFF113\"]\n",
+        )
+        .write(
+            "m.py",
+            &format!(
+                "import sqlite3\n\nSTATUS = [\"a\", \"b\"]\n\n\n\
+                 def query(conn: sqlite3.Connection):\n    for s in STATUS:\n        \
+                 conn.execute(\"SELECT ?\", (s,))\n\n\n\
+                 def build({ps}):\n    def inner():\n        return ({ps})\n    \
+                 return inner, STATUS[0]\n"
+            ),
+        );
+        p
+    };
+    let queries = |found: &[Value]| -> Vec<(String, u64)> {
+        (found.iter())
+            .map(|d| {
+                (
+                    d["rule_code"].as_str().unwrap().to_owned(),
+                    d["line"].as_u64().unwrap(),
+                )
+            })
+            .collect()
+    };
+    assert_eq!(queries(&check(&shape(8))), []);
+    let grown_vars = "heki_ir::facts::FnIndex::grown_vars";
+    let found = check_past_budgets(6_000, &[grown_vars], shape);
+    assert_eq!(queries(&found), [("EFF113".to_owned(), 8)]);
+}
+
 /// Open premises along shared chains are decided once per call: thousands of `async def`s each
 /// reach a sleep through the same chain of hundreds of helpers, none of which makes the next
 /// call on every return. Each report walks only its own chain, and each call on it is looked up
@@ -4815,6 +4971,161 @@ fn changes_down_a_long_item_chain_decide_each_element_once() {
         .map(|d| d["line"].as_u64().unwrap())
         .collect();
     assert_eq!(found, vec![1]);
+}
+
+/// A scope under a `mutates-params` boundary calling two thousand helpers in turn before handing
+/// its parameter to the last of them, each helper handing its own to the one before, the first
+/// changing it: the calls are found in the scope's order, against the order the parameter flows
+/// in. Which scope parameter each helper's parameters hold is joined from the calls into it, a
+/// helper visited again only when what it is handed grows, not in passes over every call until
+/// nothing changes.
+#[test]
+fn parameter_changes_down_a_chain_found_in_reverse_are_joined_once() {
+    let shape = |helpers: usize| {
+        let mut lines = vec!["def h0(x):".to_owned(), "    x.append(1)".to_owned()];
+        for i in 1..=helpers {
+            lines.push(format!("def h{i}(x=None):"));
+            lines.push(format!("    h{}(x)", i - 1));
+        }
+        lines.push("def entry(p):".to_owned());
+        lines.extend((0..helpers).map(|i| format!("    h{i}()")));
+        lines.push(format!("    h{helpers}(p)"));
+        let p = Project::new(&format!("bounds_reversed_param_chain_{helpers}"));
+        p.write(
+            "pyproject.toml",
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"EFF201\"]\n\n[[tool.heki.effect-boundaries]]\nname = \"pure\"\nscopes = [\"m.entry\"]\nforbid = [\"mutates-params\"]\n",
+        )
+        .write("m.py", &(lines.join("\n") + "\n"));
+        p
+    };
+    let found: Vec<String> = check_linear(2_000, shape)
+        .iter()
+        .filter(|d| d["rule_code"] == "EFF201")
+        .map(|d| d["qualname"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(found, vec!["entry"]);
+}
+
+/// A scope under a `mutates-params` boundary changing its parameter and calling a helper, then a
+/// thousand parameterless functions each calling that helper: a caller handing on no parameter
+/// holds no fact, so the helper is not visited again for each of them, and the scope's own change
+/// is reported.
+#[test]
+fn many_callers_handing_on_no_parameter_leave_a_scopes_change_reported() {
+    let shape = |callers: usize| {
+        let mut lines = vec![
+            "def sink():".to_owned(),
+            "    pass".to_owned(),
+            "def entry(p):".to_owned(),
+            "    p.append(1)".to_owned(),
+            "    sink()".to_owned(),
+        ];
+        lines.extend((0..callers).map(|i| format!("    c{i}()")));
+        for i in 0..callers {
+            lines.push(format!("def c{i}():"));
+            lines.push("    sink()".to_owned());
+        }
+        let p = Project::new(&format!("bounds_callers_handing_no_parameter_{callers}"));
+        p.write(
+            "pyproject.toml",
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"EFF201\"]\n\n[[tool.heki.effect-boundaries]]\nname = \"pure\"\nscopes = [\"m.entry\"]\nforbid = [\"mutates-params\"]\n",
+        )
+        .write("m.py", &(lines.join("\n") + "\n"));
+        p
+    };
+    let found: Vec<String> = check_linear(1_000, shape)
+        .iter()
+        .filter(|d| d["rule_code"] == "EFF201")
+        .map(|d| d["qualname"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(found, vec!["entry"]);
+}
+
+/// A function writing an invalidation target four thousand times, each write followed by a call
+/// of a helper that announces nothing (`MUT109`): what the calls after a write announce is
+/// answered once per call site along the chain of next calls, not walked to the end again for
+/// each write.
+#[test]
+fn writes_before_many_calls_follow_the_calls_after_them_once() {
+    let shape = |writes: usize| {
+        let mut lines = vec![
+            "class Model:".to_owned(),
+            "    def __init__(self):".to_owned(),
+            "        self.value = 0".to_owned(),
+            "def helper():".to_owned(),
+            "    pass".to_owned(),
+            "def notify():".to_owned(),
+            "    pass".to_owned(),
+            "def touch(model: Model):".to_owned(),
+        ];
+        for i in 0..writes {
+            lines.push(format!("    model.value = {i}"));
+            lines.push("    helper()".to_owned());
+        }
+        let p = Project::new(&format!("bounds_writes_before_calls_{writes}"));
+        p.write(
+            "pyproject.toml",
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT109\"]\n\n[[tool.heki.invalidation]]\nname = \"m\"\ntargets = [\"Model.value\"]\ninvalidators = [\"m.notify\"]\n",
+        )
+        .write("m.py", &(lines.join("\n") + "\n"));
+        p
+    };
+    let found = check_linear(4_000, shape);
+    assert_eq!(
+        found.iter().filter(|d| d["rule_code"] == "MUT109").count(),
+        4_000
+    );
+}
+
+/// A loop over two thousand `if` statements, each writing an invalidation target and calling a
+/// helper, every other one announcing the write (`MUT109`): what every path from a point
+/// announces is a data flow over the blocks, and the next call on every path comes from the
+/// post-dominators, each block visited a bounded number of times. The writes announced on no
+/// path past them are reported.
+#[test]
+fn writes_under_many_branches_of_a_loop_decide_each_block_a_few_times() {
+    // The source, and the lines of the writes no `notify()` follows.
+    let source = |writes: usize| {
+        let mut lines = vec![
+            "class Model:".to_owned(),
+            "    def __init__(self):".to_owned(),
+            "        self.value = 0".to_owned(),
+            "def helper():".to_owned(),
+            "    pass".to_owned(),
+            "def notify():".to_owned(),
+            "    pass".to_owned(),
+            "def touch(model: Model, items):".to_owned(),
+            "    for i in items:".to_owned(),
+        ];
+        let mut unannounced = Vec::new();
+        for i in 0..writes {
+            lines.push(format!("        if i == {i}:"));
+            lines.push(format!("            model.value = {i}"));
+            if i % 2 == 0 {
+                lines.push("            helper()".to_owned());
+                lines.push("            notify()".to_owned());
+            } else {
+                unannounced.push(lines.len() as u64);
+                lines.push("            helper()".to_owned());
+            }
+        }
+        (lines.join("\n") + "\n", unannounced)
+    };
+    let shape = |writes: usize| {
+        let p = Project::new(&format!("bounds_writes_under_branches_{writes}"));
+        p.write(
+            "pyproject.toml",
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT109\"]\n\n[[tool.heki.invalidation]]\nname = \"m\"\ntargets = [\"Model.value\"]\ninvalidators = [\"m.notify\"]\n",
+        )
+        .write("m.py", &source(writes).0);
+        p
+    };
+    let found: Vec<u64> = check_linear(2_000, shape)
+        .iter()
+        .filter(|d| d["rule_code"] == "MUT109")
+        .map(|d| d["line"].as_u64().unwrap())
+        .collect();
+    assert_eq!(found, source(2_000).1);
 }
 
 /// Five thousand shallow copies of one parameter, each changing one of its items, and a loop
@@ -5012,4 +5323,90 @@ fn the_census_of_many_classes_is_one_pass_over_their_sites() {
         }),
         "{totals:#}"
     );
+}
+
+/// `OPT103` and `OPT111` selected.
+const OPT_CONFIG: &str =
+    "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"OPT103\", \"OPT111\"]\n";
+
+/// The iterables of the loops of [`rewrite_candidates_over_mixed_iterables`]: parameters, a
+/// structural attribute, and the end of a chain of copies read plain, as text, and as pieces.
+const MIXED_ITERABLES: [&str; 8] = [
+    "items",
+    "self.layers",
+    "{z}",
+    "{z}.upper()",
+    "{z}.split()",
+    "{z}[0]",
+    "extra",
+    "self.layers",
+];
+
+/// One method of eight loops over iterables of mixed origin (a parameter, `self.layers`, and the
+/// last of `chain` copies of a parameter), each holding a tuple concatenation and a
+/// de-duplicating append to a list of its own.
+fn rewrite_candidates_over_mixed_iterables(chain: usize) -> String {
+    let mut lines = vec![
+        "class Net:".to_owned(),
+        "    def __init__(self):".to_owned(),
+        "        self.layers = [1, 2, 3]".to_owned(),
+        String::new(),
+        "    def run(self, items, extra, source):".to_owned(),
+        "        z0 = source".to_owned(),
+    ];
+    for i in 1..=chain {
+        lines.push(format!("        z{i} = z{}", i - 1));
+    }
+    let end = format!("z{chain}");
+    for (i, iterable) in MIXED_ITERABLES.iter().enumerate() {
+        lines.push(format!("        t{i} = ()"));
+        lines.push(format!("        seen{i} = []"));
+        lines.push(format!(
+            "        for x{i} in {}:",
+            iterable.replace("{z}", &end)
+        ));
+        lines.push(format!("            t{i} = t{i} + (x{i},)"));
+        lines.push(format!("            if x{i} not in seen{i}:"));
+        lines.push(format!("                seen{i}.append(x{i})"));
+    }
+    lines.push("        return t0".to_owned());
+    lines.join("\n") + "\n"
+}
+
+fn rewrite_candidates_project(name: &str, chain: usize) -> Project {
+    let p = Project::new(name);
+    p.write("pyproject.toml", OPT_CONFIG)
+        .write("m.py", &rewrite_candidates_over_mixed_iterables(chain));
+    p
+}
+
+/// The trip counts of the rewrite candidates of one method (`OPT103`, `OPT111`) are asked of
+/// loops sharing a long chain of copies and iterables of mixed origin within one walk budget
+/// proportional to the method, and every candidate is still reported.
+#[test]
+fn rewrite_candidates_over_loops_sharing_iterables_take_linear_time() {
+    // 400 copies at the full size.
+    let found = check_linear(SCALE, |k| {
+        rewrite_candidates_project(&format!("bounds_opt_rewrites_{k}"), 50 * k)
+    });
+    let count = |rule: &str| found.iter().filter(|d| d["rule_code"] == rule).count();
+    assert_eq!(count("OPT103"), MIXED_ITERABLES.len(), "{found:#?}");
+    assert_eq!(count("OPT111"), MIXED_ITERABLES.len(), "{found:#?}");
+}
+
+/// The open premises of those candidates are explained by the same walks: every report is
+/// listed, and each de-duplicating append names what it leaves open.
+#[test]
+fn open_premises_of_rewrite_candidates_over_shared_iterables_are_explained() {
+    let p = rewrite_candidates_project("bounds_opt_rewrites_premises", 400);
+    let out = heki_json(
+        &p,
+        &["dump-open-premises", "--select", "OPT103,OPT111", "."],
+    );
+    let reports = out["reports"].as_array().unwrap();
+    assert_eq!(reports.len(), 2 * MIXED_ITERABLES.len(), "{out:#?}");
+    for r in reports.iter().filter(|r| r["rule"] == "OPT111") {
+        assert_eq!(r["certainty"], "heuristic", "{r:#?}");
+        assert!(!r["open_premises"].as_array().unwrap().is_empty(), "{r:#?}");
+    }
 }

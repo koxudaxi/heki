@@ -30,6 +30,7 @@ pub mod consumption;
 mod contracts;
 pub(crate) mod decorators;
 mod environment;
+pub mod fresh;
 pub mod guards;
 pub mod held;
 mod infer;
@@ -56,7 +57,7 @@ pub use capacity::{Bound, Capacity, CapacityOf, CapacityWait, ParamOf, SiteQueue
 pub use contracts::{ContractClass, Contracts};
 pub use environment::{AccessKind, ExternalAccess};
 pub use invalidation::{
-    FlowWrite, FuncFlow, INITIALIZERS, Reach, SiteFlow, UnmetWrite, body_runs_at,
+    CoveredAfter, FlowWrite, FuncFlow, INITIALIZERS, Reach, SiteFlow, UnmetWrite, body_runs_at,
     builds_written_object, delegates_to_callers, is_initializer, reach_across,
 };
 pub use iterations::{
@@ -611,11 +612,12 @@ pub enum ReadKind {
 }
 
 impl ReadKind {
-    pub fn as_str(self) -> &'static str {
+    /// The kind in words, for report messages.
+    pub fn describe(self) -> &'static str {
         match self {
-            Self::DirectAttr => "direct_attr",
-            Self::GetAttr => "getattr",
-            Self::DictDirect => "dict_direct",
+            Self::DirectAttr => "by attribute",
+            Self::GetAttr => "with `getattr`",
+            Self::DictDirect => "as a `__dict__` item",
         }
     }
 }
@@ -665,6 +667,22 @@ impl WriteKind {
             Self::DictDirect => "dict_direct",
             Self::IndirectHelper => "indirect_helper",
             Self::ItemMut => "item_mut",
+        }
+    }
+}
+
+impl WriteKind {
+    /// The kind in words, for report messages (`as_str` is the stable machine name).
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::DirectAttr => "by attribute",
+            Self::AttrDelete => "by deleting the attribute",
+            Self::ContainerMut => "in place",
+            Self::AliasContainerMut => "in place through an alias",
+            Self::SetAttr => "with `setattr`",
+            Self::DictDirect => "as a `__dict__` item",
+            Self::IndirectHelper => "through a helper",
+            Self::ItemMut => "in place inside an item",
         }
     }
 }
@@ -865,6 +883,12 @@ pub struct EffectSummary {
     /// [`Self::return_origin_facts`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub return_origins: Option<Box<ReturnOrigins>>,
+    /// `MUT119`: every value the function returns is a builtin container of one kind that the
+    /// call made and that nothing else holds (computed only while the rule runs:
+    /// [`OptInFacts::fresh_returns`]; a local fact names the project functions whose results it
+    /// returns, which propagation resolves).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fresh_return: Option<Box<fresh::FreshReturn>>,
     /// The function's own writes heki cannot tie to a class (`MUT205`; never propagated).
     pub unresolved_write_sites: BTreeSet<UnresolvedWriteSite>,
     /// The function's own reads and calls heki cannot tie to a class (`MUT206`, `MUT207`; never
@@ -2334,8 +2358,9 @@ pub enum TypedWrites {
 /// `CallSite::state_tests`), and `EFF110`'s one-at-a-time uses (`EffectSummary::exclusive`,
 /// `CallSite::under_lock`), `EFF112`'s set-order flows (`EffectSummary::set_order`), `EFF114`'s
 /// call cycles (`EffectSummary::call_cycle`), and the shared state functions change
-/// (`EffectSummary::shared_state`), which only `heki inspect` reads, and the calls heki is
-/// blind to (`FileSummary::blind_spots`), which only `heki recommend` reads.
+/// (`EffectSummary::shared_state`), which only `heki inspect` reads, the calls heki is blind to
+/// (`FileSummary::blind_spots`), which only `heki recommend` reads, and `MUT119`'s new returned
+/// containers (`EffectSummary::fresh_return`).
 /// `CallSite::returned`, which `MUT202` reads too, is always computed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OptInFacts {
@@ -2356,6 +2381,8 @@ pub struct OptInFacts {
     pub call_cycles: bool,
     /// [`FileSummary::unawaited_handoffs`] (`EFF115`).
     pub unawaited_handoffs: bool,
+    /// [`EffectSummary::fresh_return`].
+    pub fresh_returns: bool,
 }
 
 impl OptInFacts {
@@ -2373,6 +2400,7 @@ impl OptInFacts {
         set_order: true,
         call_cycles: true,
         unawaited_handoffs: true,
+        fresh_returns: true,
     };
 
     /// Whether the call sites carry [`CallSite::complete`] and [`CallSite::on_every_return`].

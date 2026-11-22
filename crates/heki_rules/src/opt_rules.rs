@@ -6,13 +6,14 @@
 //! whether `--fix` applies it by default is the rule's `auto_fix_default` (`OPT101` / `OPT102`).
 //! A report whose rewrite is not `Safe` has a premise it did not establish, so it is heuristic
 //! whatever its rule's certainty (ADR-018: the proven reports are the rule's exact tier), and so
-//! is a size-dependent one in a loop whose trip count the code fixes past 16
-//! (`OptCandidate::in_exact_tier`).
+//! is a size-dependent one over a loop whose trip count the data does not decide
+//! ([`TripCounts::open_record`]).
 //!
 //! `OPT112` / `OPT113` are Advisory-lane reports without a rewrite: they use the Advisory
 //! receiver types (`heki_effect::TypeCtx`, PEP 484 annotations included), which the Soundness
 //! lane never trusts.
 
+use crate::eff_rules::DataOrigins;
 use crate::mut_rules::{CallInst, site_call};
 use crate::premises::{self, OpenCause, Told};
 use crate::{CheckContext, ModuleUnit, SitesBySpan};
@@ -64,6 +65,7 @@ pub(crate) fn opt(
     if !any_enabled {
         return;
     }
+    let mut trip_counts = TripCounts::new(cx, unit);
     for c in analyze_module(unit.input.ir, unit.source, cx.soundness, opts) {
         if !c.is_reportable() {
             continue;
@@ -83,10 +85,14 @@ pub(crate) fn opt(
             // This `OPT` rule is not selected for the file.
             continue;
         };
-        let tier = premises::tier(c.rule.code(), c.in_exact_tier());
+        // Asked only where it can change the tier or the records.
+        let trips = (c.is_safe() || cx.open_premises)
+            .then(|| trip_counts.open_record(&c))
+            .flatten();
+        let tier = premises::tier(c.rule.code(), c.is_safe() && trips.is_none());
         d.certainty = tier.at_most(d.certainty);
         if cx.open_premises && tier == Certainty::Heuristic {
-            d.open_records = rewrite_open_records(&c);
+            d.open_records = rewrite_open_records(&c, trips);
         }
         d.evidence = c.cost_evidence.clone().map(|cost| match c.verdict.tier {
             SafetyTier::Safe => format!("{cost}; established: {}", c.verdict.evidence()),
@@ -105,14 +111,14 @@ pub(crate) fn opt(
     }
 }
 
-/// Why an `OPT` rewrite's heuristic report is not exact (`OptCandidate::in_exact_tier`): "Rewrite
-/// proven safe" open, once for each obligation of its verdict that is not established, and a
-/// trip count the code fixes or caps, which leaves "Trip count open" open, a condition that is no
-/// premise. The other premises hold for every report: its sites are in loops and carry the value
-/// around them (`heki_soundness::opt_rules::find_sites`), and it reports only a value whose
-/// builtin type its construction establishes (`OptCandidate::is_reportable`; for `OPT130`, a
-/// call of the builtin constructor, the only call a site is).
-fn rewrite_open_records(c: &OptCandidate) -> Vec<OpenRecord> {
+/// Why an `OPT` rewrite's heuristic report is not exact: "Rewrite proven safe" open, once for each
+/// obligation of its verdict that is not established, and `trips`, the record of "Trip count
+/// open", a condition that is no premise ([`TripCounts::open_record`]). The other premises hold
+/// for every report: its sites are in loops and carry the value around them
+/// (`heki_soundness::opt_rules::find_sites`), and it reports only a value whose builtin type its
+/// construction establishes (`OptCandidate::is_reportable`; for `OPT130`, a call of the builtin
+/// constructor, the only call a site is).
+fn rewrite_open_records(c: &OptCandidate, trips: Option<OpenRecord>) -> Vec<OpenRecord> {
     // The A1 hazard that blocks a verdict on its own is an obligation of every candidate too.
     debug_assert!(
         c.is_safe() || c.verdict.obligations.iter().any(|o| !o.is_established()),
@@ -128,11 +134,58 @@ fn rewrite_open_records(c: &OptCandidate) -> Vec<OpenRecord> {
                 .open_at(None, Some(o.describe()))
                 .into()
         });
-    let trips = c.fixed_trips.map(|n| {
-        let at_most = format!("the loop runs at most {n} times");
-        premises::TRIP_COUNT_FIXED.open_at(None, Some(at_most))
-    });
     obligations.chain(trips).collect()
+}
+
+/// "Trip count open" for the loops of one module's size-dependent rewrites (Safety ×
+/// Profitability, ADR-007 and ADR-011): the type context, the items' origins, and a walk budget
+/// for each function, made when a rewrite first asks.
+struct TripCounts<'a, 'c> {
+    cx: &'c CheckContext<'a>,
+    unit: &'c ModuleUnit<'a>,
+    tcx: Option<TypeCtx<'c>>,
+    origins: ItemOrigins<'c>,
+    budgets: FxHashMap<FunctionId, Budget>,
+}
+
+impl<'a, 'c> TripCounts<'a, 'c> {
+    fn new(cx: &'c CheckContext<'a>, unit: &'c ModuleUnit<'a>) -> Self {
+        Self {
+            cx,
+            unit,
+            tcx: None,
+            origins: ItemOrigins::new(unit.input.ir),
+            budgets: FxHashMap::default(),
+        }
+    }
+
+    /// Why the data does not decide the trip count of the loop `c` pays off over, as the record
+    /// of "Trip count open"; `None` when it does, or when `c` pays off from one iteration
+    /// (`OPT101`, `OPT102`). The code fixes or caps the count (`OptCandidate::fixed_trips`), or the
+    /// loop's items are not the data's as `EFF103`'s "Origin" establishes them
+    /// ([`DataOrigins::of_loop_items`]): a loop over a receiver's attribute, a project function's
+    /// result, or `range` of a configured number runs as many times as the program's structure
+    /// has parts, however large the input, and the rewrite pays off only with a large count.
+    fn open_record(&mut self, c: &OptCandidate) -> Option<OpenRecord> {
+        let (f, li) = c.trip_loop?;
+        if let Some(n) = c.fixed_trips {
+            let at_most = format!("the loop runs at most {n} times");
+            return Some(premises::TRIP_COUNT_FIXED.open_at(None, Some(at_most)));
+        }
+        let (cx, unit) = (self.cx, self.unit);
+        let tcx = self
+            .tcx
+            .get_or_insert_with(|| TypeCtx::new(&unit.input, cx.decls, cx.kb));
+        let ir = unit.input.ir;
+        let budget = self.budgets.entry(f).or_insert_with(|| {
+            Budget::of_function(
+                "heki_rules::opt_rules::TripCounts::open_record",
+                ir.function(f),
+            )
+        });
+        let origin = DataOrigins::of_loop_items(cx, tcx, &self.origins, budget, (f, li)).err()?;
+        Some(premises::trip_count_cause(origin).open_at(None, None))
+    }
 }
 
 // ============================================================================= loop sizes

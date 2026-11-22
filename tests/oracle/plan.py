@@ -21,6 +21,7 @@ EXACT_RULES = (
     "MUT114",
     "MUT115",
     "MUT118",
+    "MUT119",
     "OPT101",
     "OPT102",
     "OPT103",
@@ -342,6 +343,53 @@ def _rebinds(source, line, attr):
     return False
 
 
+def _loaded_target(source, target):
+    """An assignment target as an expression `monitor.static_eval` loads without running code
+    (`env`, `self.env`, `opts[k]`), or `None`."""
+    if isinstance(target, ast.Name):
+        return target.id
+    if isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name):
+        return ast.get_source_segment(source.text, target)
+    if (
+        isinstance(target, ast.Subscript)
+        and isinstance(target.value, ast.Name)
+        and isinstance(target.slice, (ast.Constant, ast.Name))
+    ):
+        return ast.get_source_segment(source.text, target)
+    return None
+
+
+def _alone_on_its_line(source, statement):
+    """Whether `statement` is on one line that no other statement shares: the monitor's line
+    event ends when execution moves to another line, so it holds exactly one run of the
+    statement."""
+    line = statement.lineno
+    if statement.end_lineno != line:
+        return False
+    ancestors = set()
+    node = getattr(statement, "parent", None)
+    while node is not None:
+        ancestors.add(id(node))
+        node = getattr(node, "parent", None)
+    for other in ast.walk(source.tree):
+        if not isinstance(other, ast.stmt) or other is statement:
+            continue
+        if other.lineno == line or (other.end_lineno == line and id(other) not in ancestors):
+            return False
+    return True
+
+
+def _base_kind(node):
+    """How the changed object's expression makes it, as the checker tells the cases apart."""
+    if isinstance(node, (ast.List, ast.Dict, ast.Set, ast.ListComp, ast.DictComp, ast.SetComp)):
+        return "display"
+    if isinstance(node, ast.Subscript):
+        return "slice"
+    if isinstance(node, ast.Attribute):
+        return "attribute"
+    return "call"
+
+
 def resolve_function(root, dotted, sources):
     """`app.m.Class.method` as (path, qualname), when a project file defines it."""
     parts = dotted.split(".")
@@ -576,6 +624,48 @@ class Planner:
         result = statement.targets[0].id
         self._line(claim, pos[0], attrs=[[arg.id, attr], [result, attr]])
         claim.update(original=arg.id, copy=result, attr=attr, class_qualname=class_qualname)
+        return True
+
+    def _mut119(self, claim, source, pos, report):
+        """The change is a statement alone on one line: a call of the changing method whose
+        result is unused or bound or stored (`env = os.environ.copy().update(...)`), an item
+        assignment, or an item deletion. The line records the object the change ran on (the
+        method's receiver, or what project code at the subscript's object returned), whether
+        anything holds it when the line ends, and what the assignment's targets hold then."""
+        node = source.node_at(pos, (ast.Call, ast.Assign, ast.Subscript))
+        targets = []
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            form, change, base, statement = "method", node, node.func.value, getattr(node, "parent", None)
+            if isinstance(statement, ast.Assign) and statement.value is node:
+                targets = statement.targets
+            elif not isinstance(statement, ast.Expr):
+                return False
+        elif isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Subscript):
+            form, change, statement = "store", node.targets[0], node
+            base = change.value
+        elif isinstance(node, ast.Subscript) and isinstance(getattr(node, "parent", None), ast.Delete):
+            form, change, base, statement = "delete", node, node.value, node.parent
+        else:
+            return False
+        if not _alone_on_its_line(source, statement):
+            return False
+        loaded = [_loaded_target(source, t) for t in targets]
+        results = [r for r in loaded if r is not None]
+        lost = {"change": _node_pos(change), "base": _node_pos(base), "results": results}
+        if isinstance(base, ast.Subscript) and isinstance(base.slice, ast.Slice):
+            bounds = [base.slice.lower, base.slice.upper, base.slice.step]
+            if all(b is None or isinstance(b, ast.Constant) for b in bounds):
+                lost["sliced"] = _loaded_target(source, base.value)
+        self._line(claim, statement.lineno, lost=lost)
+        kind, _, member = (report.get("target") or "").partition(".")
+        claim.update(
+            form=form,
+            kind=kind,
+            member=member,
+            base=_base_kind(base),
+            results=results,
+            unloaded_results=len(loaded) - len(results),
+        )
         return True
 
     def _opt_type(self, claim, source, pos, report):

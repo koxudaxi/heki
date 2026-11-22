@@ -548,6 +548,185 @@ class Mut118(unittest.TestCase):
         self.assertEqual(result["violations"][0]["assumption"], "R2")
 
 
+def lost(facts, outcome="ok"):
+    full = {"made": None, "method": None, "store": None, "held": None, "results": {}}
+    full.update(facts)
+    return ["lost", "N0", 1, 2, 9, outcome, full]
+
+
+class Mut119(unittest.TestCase):
+    method = {"id": "k0", "rule": "MUT119", "line_id": "N0", "form": "method", "base": "call"}
+    store = {"id": "k0", "rule": "MUT119", "line_id": "N0", "form": "store", "base": "call"}
+    sort = ["sort", True, None]
+
+    def held(self, count, named=()):
+        return {"held": count, "holders": ["list"], "named": list(named), "type": ["builtins", "list"]}
+
+    def check(self, claim, *events):
+        result = checkers.check(claim, [run(*events)])
+        return result["checked"], [(f["kind"], f["premise"].split(":")[0]) for f in result["refutations"]]
+
+    def test_an_object_nothing_holds_confirms(self):
+        facts = {"method": self.sort, **self.held(0), "results": {"env": "NoneType", "out[k]": None}}
+        self.assertEqual(self.check(self.method, lost(facts)), (1, []))
+
+    def test_an_object_still_held_refutes_new_object(self):
+        facts = {"method": self.sort, **self.held(1)}
+        self.assertEqual(self.check(self.method, lost(facts)), (1, [("still-held", "New object")]))
+
+    def test_a_name_the_statement_binds_refutes_unnamed(self):
+        facts = {"method": self.sort, **self.held(1, named=["items"])}
+        self.assertEqual(self.check(self.method, lost(facts)), (1, [("still-held", "Unnamed")]))
+
+    def test_a_method_of_the_program_or_no_changing_method_refutes_changed_in_place(self):
+        for method in (["sort", False, "Log.sort"], ["copy", False, None]):
+            facts = {"method": method, **self.held(0)}
+            self.assertEqual(self.check(self.method, lost(facts)), (1, [("not-changed-in-place", "Changed in place")]))
+
+    def test_an_item_assignment_running_the_programs_setitem_refutes_changed_in_place(self):
+        facts = {"store": "Log.__setitem__", **self.held(0)}
+        self.assertEqual(self.check(self.store, lost(facts)), (1, [("not-changed-in-place", "Changed in place")]))
+
+    def test_a_target_holding_another_value_refutes_changed_in_place(self):
+        facts = {"method": ["pop", True, None], **self.held(0), "results": {"top": "int"}}
+        self.assertEqual(self.check(self.method, lost(facts)), (1, [("result-not-none", "Changed in place")]))
+
+    def test_an_object_the_line_did_not_see_counts_when_a_builtin_made_it(self):
+        display = dict(self.store, base="display")
+        self.assertEqual(self.check(display, lost({})), (1, []))
+        self.assertEqual(self.check(self.store, lost({"made": ["call", "dict", True]})), (1, []))
+        self.assertEqual(self.check(self.store, lost({"made": ["call", "_Environ.copy", False]})), (0, []))
+        sliced = dict(self.store, base="slice")
+        self.assertEqual(self.check(sliced, lost({"made": ["slice", "list", True]})), (1, []))
+        self.assertEqual(self.check(sliced, lost({"made": ["slice", "Rows", False]})), (0, []))
+
+    def test_a_method_that_did_not_run_or_a_line_that_raised_checks_nothing(self):
+        self.assertEqual(self.check(self.method, lost({})), (0, []))
+        self.assertEqual(self.check(self.method, lost({"method": self.sort, **self.held(1)}, outcome="exc")), (0, []))
+
+    def test_the_change_maps_when_it_is_a_statement_alone_on_its_line(self):
+        import plan
+
+        for text, reported, mapped in [
+            ("def f(xs):\n    list(xs).sort()\n", "list(xs).sort()", "method"),
+            ("def f(xs, out, k):\n    out[k] = list(xs).sort()\n", "list(xs).sort()", "method"),
+            ("def f(t):\n    t.env['a'] = 1\n", "t.env['a'] = 1", "store"),
+            ("def f(t):\n    del t.env['a']\n", "t.env['a']", "delete"),
+            ("def f(xs):\n    list(xs).sort(); g()\n", "list(xs).sort()", None),
+            ("def f(xs):\n    list(xs).sort(\n    )\n", "list(xs).sort(\n    )", None),
+            ("def f(xs):\n    top = list(xs).sort() or 0\n", "list(xs).sort()", None),
+            ("def f(k):\n    {'a': []}['a'] += [k]\n", "{'a': []}['a'] += [k]", None),
+        ]:
+            start = text.index(reported)
+            end = start + len(reported)
+            pos = (
+                text[:start].count("\n") + 1,
+                start - text.rindex("\n", 0, start) - 1,
+                text[:end].count("\n") + 1,
+                end - text.rindex("\n", 0, end) - 1,
+            )
+            claim = {"id": "k0", "path": "app/m.py"}
+            got = plan.Planner("/")._mut119(claim, _source(text), pos, {"target": "list.sort"})
+            self.assertEqual(claim.get("form") if got else None, mapped, text)
+
+
+class RecordedLostChanges(unittest.TestCase):
+    """The plan of `MUT119` claims and the recorder on real changes: an object nothing holds
+    confirms the claim; a getter's field, a name the statement binds, and a subclass's change
+    refute it."""
+
+    SOURCE = (
+        "class Log(dict):\n"
+        "    def update(self, *args, **kwargs):\n"
+        "        return super().update(*args, **kwargs)\n"
+        "class Task:\n"
+        "    def __init__(self):\n"
+        "        self.kept = {}\n"
+        "    @property\n"
+        "    def env(self):\n"
+        "        return {}\n"
+        "    @property\n"
+        "    def field(self):\n"
+        "        return self.kept\n"
+        "def run(xs, out, k, t):\n"
+        "    env = dict(a=1).update(b=2)\n"
+        "    out[k] = list(xs).extend(xs)\n"
+        "    t.env['a'] = 1\n"
+        "    {}[k] = 1\n"
+        "    xs[:][0] = 9\n"
+        "    t.field['a'] = 1\n"
+        "    (items := list(xs)).sort()\n"
+        "    Log().update(a=1)\n"
+        "    return env, items\n"
+    )
+    CHANGES = [
+        ("dict(a=1).update(b=2)", "dict.update"),
+        ("list(xs).extend(xs)", "list.extend"),
+        ("t.env['a'] = 1", "dict.__setitem__"),
+        ("{}[k] = 1", "dict.__setitem__"),
+        ("xs[:][0] = 9", "list.__setitem__"),
+        ("t.field['a'] = 1", "dict.__setitem__"),
+        ("(items := list(xs)).sort()", "list.sort"),
+        ("Log().update(a=1)", "dict.update"),
+    ]
+
+    def test_what_holds_the_changed_object_when_the_line_ends(self):
+        import importlib
+        import tempfile
+
+        import plan
+
+        root = os.path.realpath(tempfile.mkdtemp(prefix="oracle-lost-"))
+        with open(os.path.join(root, "lost_mod.py"), "w", encoding="utf-8") as f:
+            f.write(self.SOURCE)
+        reports = []
+        for text, target in self.CHANGES:
+            start = self.SOURCE.index(text)
+            reports.append(
+                {
+                    "rule_code": "MUT119",
+                    "certainty": "exact",
+                    "path": "lost_mod.py",
+                    "line": self.SOURCE[:start].count("\n") + 1,
+                    "column": 5,
+                    "span": {"start": start, "end": start + len(text)},
+                    "message": "lost",
+                    "target": target,
+                }
+            )
+        planner = plan.build(root, reports)
+        self.assertEqual(planner.unmapped, [])
+        recorder = monitor.Recorder(root, planner.plan)
+        sys.path.insert(0, root)
+        try:
+            module = importlib.import_module("lost_mod")
+            recorder.install()
+            recorder.begin_run()
+            module.run([2, 1], {}, "k", module.Task())
+            trace = run(*recorder.end_run())
+        finally:
+            recorder.uninstall()
+            sys.path.remove(root)
+        self.assertEqual(recorder.errors, [])
+        found = []
+        for claim in planner.claims:
+            result = checkers.check(claim, [trace])
+            found.append((result["checked"], [f["premise"].split(":")[0] for f in result["refutations"]]))
+        self.assertEqual(
+            found,
+            [
+                (1, []),
+                (1, []),
+                (1, []),
+                (1, []),
+                (1, []),
+                (1, ["New object"]),
+                (1, ["Unnamed"]),
+                (1, ["Changed in place"]),
+            ],
+        )
+
+
 class Mut114(unittest.TestCase):
     claim = {
         "id": "k0",
