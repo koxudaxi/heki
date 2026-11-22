@@ -670,7 +670,7 @@ holds for `invalidation` too:
 - **`allowed-protocols` allows the accesses through the protocols it names.** A read, call, or
   write through a value typed with a project protocol a pattern names (or a subprotocol of one)
   that declares the member, itself or through its protocol bases, is allowed wherever it is
-  judged: `allowed-protocols = ["*Host"]` allows `parser._flag` with `parser: RenderHost` and
+  judged, and so is a reference that `references` counts (`return h._helper`): `allowed-protocols = ["*Host"]` allows `parser._flag` with `parser: RenderHost` and
   `class RenderHost(RuntimeFlags, Protocol)` when `RuntimeFlags` declares `_flag`, while the same
   read through `flags: RuntimeFlags` stays reported. A write through the protocol is allowed for
   the protocol's member and for each implementation's attribute alike. Accesses through a

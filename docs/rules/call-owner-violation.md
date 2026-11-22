@@ -152,8 +152,9 @@ through its class (`Resolver._norm(x)`), a call on another parameter, and a nest
 or comprehension calling through the enclosing method's `self` stay reported.
 
 With `allowed-protocols`, a call through a value typed with a project protocol the key names that
-declares the method, itself or through its protocol bases, is allowed wherever it is judged; a call
-through another protocol or the implementation's class stays reported.
+declares the method, itself or through its protocol bases, is allowed wherever it is judged, and so
+is a reference handing the method on through such a value (`return h._helper` with `references`);
+a call through another protocol or the implementation's class stays reported.
 
 ## What a report states
 

@@ -643,3 +643,42 @@ def bad_write(flags: RuntimeFlags) -> None:
         ]
     );
 }
+
+/// A reference handing on a method through a protocol-typed value (`references`) keeps no
+/// declaration of the protocol: `allowed-protocols` allows it by the receiver's protocol and the
+/// method it names.
+#[test]
+fn allowed_protocols_allow_the_references_through_a_named_protocol() {
+    let run = |keys: &str| {
+        let p = Project::new(&format!("allowed_protocols_references_{}", keys.len()));
+        p.write(
+            "pyproject.toml",
+            &format!(
+                "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT204\"]\n\n[[tool.heki.call-owners]]\nname = \"c\"\ntargets = [\"pkg.host.Concrete._*\"]\nforbidden-callers = [\"pkg.use:*\"]\nreferences = \"reads\"\n{keys}"
+            ),
+        )
+        .write("pkg/__init__.py", "")
+        .write(
+            "pkg/host.py",
+            "from typing import Protocol\n\n\nclass Host(Protocol):\n    def _helper(self) -> int: ...\n\n\nclass Port(Protocol):\n    def _helper(self) -> int: ...\n\n\nclass Concrete:\n    def _helper(self) -> int:\n        return 1\n",
+        )
+        .write(
+            "pkg/use.py",
+            "from pkg.host import Host, Port\n\n\ndef hand(h: Host) -> object:\n    return h._helper\n\n\ndef other(p: Port) -> object:\n    return p._helper\n",
+        );
+        named(&p)
+    };
+    let at = |line: u64, func: &str| {
+        (
+            line,
+            "MUT204".to_owned(),
+            func.to_owned(),
+            "pkg.host.Concrete._helper".to_owned(),
+        )
+    };
+    assert_eq!(run(""), vec![at(5, "hand"), at(9, "other")]);
+    assert_eq!(
+        run("allowed-protocols = [\"Host\"]\n"),
+        vec![at(9, "other")]
+    );
+}

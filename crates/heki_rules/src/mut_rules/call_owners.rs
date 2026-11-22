@@ -717,21 +717,24 @@ pub(crate) fn call_verb(site: &CallSite, reference: bool) -> &'static str {
     }
 }
 
-/// Whether `site` calls a method through a value typed with a protocol `allowance` allows
-/// (`allowed-protocols`): the receiver's protocol declares the method ([`CallSite::declared`]).
+/// Whether `site` calls, or names (`references`), a method through a value typed with a protocol
+/// `allowance` allows (`allowed-protocols`) that declares it: the receiver's class is the
+/// protocol, and the method is the protocol's declaration ([`CallSite::declared`]) or, for a
+/// reference, which keeps none, the one the site names.
 fn through_allowed_protocol(cx: &CheckContext<'_>, allowance: &Allowance, site: &CallSite) -> bool {
-    let Some(declared) = site.declared() else {
+    let Some(bc) = site.project_callees().first() else {
         return false;
     };
-    let method = declared
+    let Some(protocol) = bc.params.first().and_then(|o| o.typed_instance.as_deref()) else {
+        return false;
+    };
+    let method = site.declared().unwrap_or(&bc.callee);
+    let name = method
         .qualname
         .rsplit('.')
         .next()
-        .unwrap_or(&declared.qualname);
-    site.project_callees()
-        .first()
-        .and_then(|bc| bc.params.first()?.typed_instance.as_deref())
-        .is_some_and(|protocol| allowance.allows_protocol(cx.decls, protocol, method))
+        .unwrap_or(&method.qualname);
+    allowance.allows_protocol(cx.decls, protocol, name)
 }
 
 /// Parameters of the caller the object `site` looks the called method up on may be: its
