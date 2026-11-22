@@ -5217,37 +5217,57 @@ opaque_to_layer3 = true
 # Vertex AI mode without a project or API key it also looks up the default credentials.
 # The requests (`client.chat.completions.create(...)`) are made through attributes of the
 # client, which the catalog does not type, so they are not listed.
+# An `http_client=` that is a known `httpx` client shares that client's pool and allocates
+# nothing. google-genai takes its client inside `http_options`, which a case cannot reach.
 
 [[entries]]
 symbol = "openai.OpenAI"
 effects = ["unpooled_client_alloc"]
+cases = [
+    { param = "http_client", instance_of = ["httpx.Client", "httpx.AsyncClient"], effects = [] },
+]
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "openai.AzureOpenAI"
 effects = ["unpooled_client_alloc"]
+cases = [
+    { param = "http_client", instance_of = ["httpx.Client", "httpx.AsyncClient"], effects = [] },
+]
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "openai.AsyncOpenAI"
 effects = ["unpooled_client_alloc"]
+cases = [
+    { param = "http_client", instance_of = ["httpx.Client", "httpx.AsyncClient"], effects = [] },
+]
 async_safe = true
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "openai.AsyncAzureOpenAI"
 effects = ["unpooled_client_alloc"]
+cases = [
+    { param = "http_client", instance_of = ["httpx.Client", "httpx.AsyncClient"], effects = [] },
+]
 async_safe = true
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "anthropic.Anthropic"
 effects = ["unpooled_client_alloc"]
+cases = [
+    { param = "http_client", instance_of = ["httpx.Client", "httpx.AsyncClient"], effects = [] },
+]
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "anthropic.AsyncAnthropic"
 effects = ["unpooled_client_alloc"]
+cases = [
+    { param = "http_client", instance_of = ["httpx.Client", "httpx.AsyncClient"], effects = [] },
+]
 async_safe = true
 opaque_to_layer3 = true
 

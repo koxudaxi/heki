@@ -1475,6 +1475,16 @@ mod tests {
         }
     }
 
+    /// An LLM SDK client built over an `httpx` client made elsewhere shares that client's pool.
+    fn shared_http_client() -> ArgCase {
+        ArgCase {
+            param: Some("http_client".into()),
+            instance_of: s(&["httpx.Client", "httpx.AsyncClient"]),
+            effects: Some(vec![]),
+            ..ArgCase::default()
+        }
+    }
+
     fn with_cases(cases: Vec<ArgCase>, e: EcosystemEntry) -> EcosystemEntry {
         EcosystemEntry { cases, ..e }
     }
@@ -2014,12 +2024,13 @@ mod tests {
                     "redis.ConnectionPool.from_url",
                     "redis.BlockingConnectionPool.from_url",
                     "psycopg_pool.ConnectionPool",
-                    "openai.OpenAI",
-                    "openai.AzureOpenAI",
-                    "anthropic.Anthropic",
                     "google.genai.Client",
                 ]),
                 entry(&[UnpooledClientAlloc]),
+            ),
+            (
+                s(&["openai.OpenAI", "openai.AzureOpenAI", "anthropic.Anthropic"]),
+                with_cases(vec![shared_http_client()], entry(&[UnpooledClientAlloc])),
             ),
             (
                 // `connect=True` (the default) resolves a `mongodb+srv://` URI at once.
@@ -2065,11 +2076,19 @@ mod tests {
                     "pymongo.AsyncMongoClient",
                     "psycopg_pool.AsyncConnectionPool",
                     "motor.motor_asyncio.AsyncIOMotorClient",
+                ]),
+                async_safe(entry(&[UnpooledClientAlloc])),
+            ),
+            (
+                s(&[
                     "openai.AsyncOpenAI",
                     "openai.AsyncAzureOpenAI",
                     "anthropic.AsyncAnthropic",
                 ]),
-                async_safe(entry(&[UnpooledClientAlloc])),
+                async_safe(with_cases(
+                    vec![shared_http_client()],
+                    entry(&[UnpooledClientAlloc]),
+                )),
             ),
             (
                 [
