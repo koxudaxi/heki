@@ -1569,6 +1569,90 @@ fn class_constant_reads_on_a_class_with_many_subclasses_decide_it_once() {
     assert_eq!(reported[0]["qualname"], "write");
 }
 
+/// A dataclass whose field defaults to an `object()` sentinel, with thousands of subclasses,
+/// each tested against the sentinel and deep-copied in functions of its own, and the base
+/// deep-copied as often (`MUT118`): what a deep copy of each class gives, and which tests read the
+/// sentinel on each class holding it, are decided once per class, and a report lists a few tests.
+#[test]
+fn deep_copies_of_a_sentinel_class_with_many_subclasses_decide_each_class_once() {
+    let classes = 3_000;
+    let mut lines = vec![
+        "import copy".to_owned(),
+        "from dataclasses import dataclass".to_owned(),
+        String::new(),
+        "MISSING = object()".to_owned(),
+        String::new(),
+        String::new(),
+        "@dataclass".to_owned(),
+        "class Spec:".to_owned(),
+        "    value: object = MISSING".to_owned(),
+    ];
+    for i in 0..classes {
+        lines.extend([
+            String::new(),
+            String::new(),
+            format!("class Spec{i}(Spec):"),
+            "    pass".to_owned(),
+            String::new(),
+            String::new(),
+            format!("def given{i}(s: Spec{i}):"),
+            "    return s.value is not MISSING".to_owned(),
+            String::new(),
+            String::new(),
+            format!("def isolated{i}(s: Spec{i}):"),
+            "    return copy.deepcopy(s)".to_owned(),
+            String::new(),
+            String::new(),
+            format!("def isolated_base{i}(s: Spec):"),
+            "    return copy.deepcopy(s)".to_owned(),
+        ]);
+    }
+    let p = Project::new("bounds_sentinel_subclasses");
+    p.write("m.py", &(lines.join("\n") + "\n"));
+    let found = check_within(&p, Duration::from_secs(20));
+    let reported: Vec<&Value> = found
+        .iter()
+        .filter(|d| d["rule_code"] == "MUT118")
+        .collect();
+    assert_eq!(reported.len(), 2 * classes);
+    assert!(
+        reported
+            .iter()
+            .all(|d| d["related"].as_array().unwrap().len() == 5)
+    );
+}
+
+/// Functions binding thousands of names each to the one before, from an attribute load, and
+/// comparing each with an `object()` sentinel by identity (`MUT118`'s tests): what each operand
+/// copies is read from the function's copy-root table, not walked back along the chain per
+/// comparison.
+#[test]
+fn identity_tests_of_a_long_alias_chain_read_each_copy_root_once() {
+    let names = 8_000;
+    let mut lines = vec![
+        "MISSING = object()".to_owned(),
+        String::new(),
+        String::new(),
+        "class Node:".to_owned(),
+        "    def __init__(self):".to_owned(),
+        "        self.mark = MISSING".to_owned(),
+    ];
+    for f in 0..4 {
+        lines.extend([
+            String::new(),
+            String::new(),
+            format!("def scan{f}(node: Node):"),
+            "    v0 = node.mark".to_owned(),
+        ]);
+        lines.extend((1..names).map(|i| format!("    v{i} = v{} ", i - 1)));
+        lines.extend((0..names).map(|i| format!("    x{i} = v{i} is MISSING")));
+        lines.push("    return node".to_owned());
+    }
+    let p = Project::new("bounds_alias_identity_tests");
+    p.write("m.py", &(lines.join("\n") + "\n"));
+    check_within(&p, Duration::from_secs(5));
+}
+
 /// A class with thousands of subclasses whose `reset` a call target naming no class names, and
 /// a function calling `Base.reset(obj)` as many times: the class family of each call (the
 /// classes defining the method it reaches, with their subclasses) is expanded once per target

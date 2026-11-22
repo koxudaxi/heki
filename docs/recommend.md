@@ -120,13 +120,13 @@ def test_load_user() -> None:
 $ heki recommend app
 heki recommend (experimental) on .: 3 file(s), 9 function(s)
 
-Reports now  1 shown (1 exact, 0 heuristic), 1 heuristic withheld, 4 heuristic rule(s) off
+Reports now  1 shown (1 exact, 0 heuristic), 1 heuristic withheld, 5 heuristic rule(s) off
 
 Rules worth enabling here
   rule    reports  exact  consequence  right about the code (published)  real harm  block
   MUT106        1      -  bug          not measured                      -          yes
   OPT110        1      0  slowdown     78% (65-87%), n=50, 2026-11-21    6%         no: slower code, not a bug
-  No reports here: EFF102, EFF105, EFF106, EFF107, EFF109, EFF110, EFF111, EFF113, EFF114, MUT101, MUT107, MUT108, MUT111, MUT112, MUT113, MUT115, OPT112
+  No reports here: EFF102, EFF105, EFF106, EFF107, EFF109, EFF110, EFF111, EFF113, EFF114, MUT101, MUT107, MUT108, MUT111, MUT112, MUT113, MUT115, MUT118, OPT112
   MUT103: it compares with a saved summary snapshot: run `heki snapshot --write`, then select it.
 
 Notes
