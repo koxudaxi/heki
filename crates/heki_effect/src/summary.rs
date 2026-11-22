@@ -1351,10 +1351,19 @@ impl<'a> Extractor<'a> {
         }
     }
 
-    /// [`Self::may_params`]: a monotone fixpoint over copies and phis.
+    /// [`Self::may_params`]: a monotone fixpoint over copies and phis, from the parameters and
+    /// the reads of the enclosing functions' parameters ([`Self::captured_bit`]).
     fn build_may_params(&mut self) {
         for (i, p) in self.f.params.iter().enumerate().take(64) {
             *self.may_params.entry(p.var).or_default() |= 1u64 << i;
+        }
+        for inst in self.f.blocks.iter().flat_map(|b| &b.insts) {
+            if let InstKind::LoadDeref { dst, name } = &inst.kind {
+                let bit = self.captured_bit(name);
+                if bit != 0 {
+                    *self.may_params.entry(*dst).or_default() |= bit;
+                }
+            }
         }
         loop {
             let mut changed = false;
@@ -1375,6 +1384,66 @@ impl<'a> Extractor<'a> {
             if !changed {
                 return;
             }
+        }
+    }
+
+    /// The mask bit of the enclosing function's parameter that the variable `name` the function
+    /// reads from it is on every path (`0`: none). A class body's code is the code of the
+    /// function running it, which binds the cell itself.
+    fn captured_bit(&self, name: &str) -> u64 {
+        self.cx
+            .captured_param(self.f, name)
+            .map_or(0, |(owner, i)| {
+                self.enclosing_param_bit(func_qualname(owner), i)
+            })
+    }
+
+    /// The mask bit of parameter `param` of `owner`, a function of the module enclosing the
+    /// summarized function or the function itself.
+    fn enclosing_param_bit(&self, owner: &str, param: u8) -> u64 {
+        if owner == self.key.qualname {
+            return 1u64 << param;
+        }
+        self.cx
+            .project
+            .function_decl(self.key)
+            .and_then(|d| d.captured_params.as_deref())
+            .map_or(0, |c| c.bit(owner, param))
+    }
+
+    /// The parameter `var` is on every path, as a mask (`0`: none or not known): its own, or an
+    /// enclosing function's that it reads through a closure cell, directly or through copies.
+    fn exact_param(&self, var: VarId) -> u64 {
+        if let Some((i, None)) = self.param_alias.get(&var) {
+            return 1u64 << i;
+        }
+        let root = self.shape.copy_root(var);
+        match self.shape.inst(root).map(|inst| &inst.kind) {
+            Some(InstKind::LoadDeref { name, .. }) => self.captured_bit(name),
+            _ => 0,
+        }
+    }
+
+    /// Bind the parameters of enclosing functions that `callee`, declared by `decl`, has
+    /// ([`resolver::CapturedParams`]) past its own `params`, to what this function holds there:
+    /// its own parameter, or its position of the same one when it is nested in that function
+    /// too. A call away from that function binds nothing.
+    fn bind_captured(&self, callee: &FuncKey, decl: &FunctionDecl, params: &mut Vec<ArgOrigin>) {
+        let Some(captured) = decl
+            .captured_params
+            .as_deref()
+            .filter(|_| callee.module == self.key.module)
+        else {
+            return;
+        };
+        let bits = (captured.params.iter().enumerate())
+            .map(|(j, (owner, param))| (j, self.enclosing_param_bit(owner, *param)));
+        for (j, bit) in bits.filter(|(_, bit)| *bit != 0) {
+            let at = usize::from(captured.first) + j;
+            if params.len() <= at {
+                params.resize(at + 1, ArgOrigin::default());
+            }
+            params[at].may_params = bit;
         }
     }
 
@@ -4880,10 +4949,7 @@ impl<'a> Extractor<'a> {
         if !named || !self.unknown_class(obj) {
             return;
         }
-        let obj_params = match self.param_alias.get(&obj) {
-            Some((i, None)) => 1u64 << i,
-            _ => 0,
-        };
+        let obj_params = self.exact_param(obj);
         self.summary
             .unresolved_access_sites
             .insert(UnresolvedAccessSite {
@@ -4901,10 +4967,7 @@ impl<'a> Extractor<'a> {
         if !self.ownership {
             return;
         }
-        let obj_params = match obj.and_then(|o| self.param_alias.get(&o)) {
-            Some((i, None)) => 1u64 << i,
-            _ => 0,
-        };
+        let obj_params = obj.map_or(0, |o| self.exact_param(o));
         let site = UnresolvedWriteSite {
             what,
             kind,
@@ -6114,6 +6177,7 @@ impl<'a> Extractor<'a> {
                     while params.last().is_some_and(ArgOrigin::is_empty) {
                         params.pop();
                     }
+                    self.bind_captured(key, decl, &mut params);
                     if self.ownership && !offloaded {
                         handovers.push((decl, callees.len(), handed_args));
                     }
