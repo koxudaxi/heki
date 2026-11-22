@@ -19,7 +19,7 @@
 
 pub mod cache_flow;
 mod callgraph;
-pub use callgraph::SiteMust;
+pub use callgraph::{HopGap, MustExplainer, MustGap, SiteMust};
 pub mod capacity;
 mod paths;
 pub use paths::with_paths;
@@ -1813,6 +1813,24 @@ impl CallSite {
             span: Span { start: 0, end: 0 },
             made_by: None,
             ..self.clone()
+        }
+    }
+
+    /// Whether the targets' bodies run at the call, on the caller's thread: a callable an API
+    /// runs (on a worker, once per item) does not, nor does what a call returns when it is
+    /// iterated or handed on. Only such a site's completeness and paths ([`Self::complete`],
+    /// [`Self::on_every_return`]) are about those bodies.
+    pub fn runs_targets_here(&self) -> bool {
+        self.role == SiteRole::Call && self.runner == Runner::Caller
+    }
+
+    /// Whether the caller has made the call whenever it returns normally, as its must-facts
+    /// take it: a Layer 2 call also when it raised (its effect ran), a project call only when it
+    /// returned (a callee that raised may not have run its effect).
+    pub fn made_on_every_return(&self) -> bool {
+        match self.target {
+            CallTarget::Layer2 { .. } => self.on_every_return.called,
+            CallTarget::Project(_) => self.on_every_return.returned,
         }
     }
 
