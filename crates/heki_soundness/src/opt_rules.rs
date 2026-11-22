@@ -221,15 +221,18 @@ impl<'a> ModuleCtx<'a> {
         let imports = module_fn.blocks.iter().flat_map(|b| &b.insts);
         for inst in imports {
             let InstKind::Import {
-                dst, module, name, ..
+                dst,
+                module,
+                name,
+                relative,
+                ..
             } = &inst.kind
             else {
                 continue;
             };
             let bound = module_fn.var_name(*dst).unwrap_or_default();
             // `from .collections import deque` names another module.
-            let single =
-                bindings.bound_once(bound) && !crate::imports::is_relative_from(source, inst.span);
+            let single = bindings.bound_once(bound) && !relative;
             if module.as_deref() == Some("collections") && name == "deque" && single {
                 deque = Some(DequeRef {
                     spelling: bound.to_owned(),

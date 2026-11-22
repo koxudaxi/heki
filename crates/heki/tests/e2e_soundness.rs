@@ -1630,6 +1630,16 @@ fn deque_import_reuse_and_placement() {
             INSERTED,
             true,
         ),
+        // A package's own `typing` module decides nothing: the import may not run.
+        (
+            "from .typing import TYPE_CHECKING\n\nif not TYPE_CHECKING:\n    from collections import deque\n",
+            &[
+                "import collections\n\n",
+                "collections.deque([1, 2, 3, *range(n)])",
+                "q.popleft()",
+            ],
+            false,
+        ),
         // A name a function deletes, or that a star import may rebind, may not hold the import
         // when the function runs: the module bindings the path facts trust decide it.
         (
@@ -1639,7 +1649,11 @@ fn deque_import_reuse_and_placement() {
         ),
         // With a star import, `import collections` could be rebound too: the rewrite is left
         // to be made by hand.
-        ("from collections import deque\nfrom os.path import *\n", &[], true),
+        (
+            "from collections import deque\nfrom os.path import *\n",
+            &[],
+            true,
+        ),
         // `from .collections import deque` is another module's `deque`.
         (
             "from .collections import deque\n",
