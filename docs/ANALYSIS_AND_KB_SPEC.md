@@ -470,7 +470,8 @@ EffectSummary(f) = {
                                                            // elements of them) it may return, by span, and the
                                                            // phis its origin walks met (local)
     unresolved_write_sites:   Set<UnresolvedWrite>,        // target-named writes on objects of unknown class,
-                                                           // computed names on guarded classes (MUT205)
+                                                           // computed names on guarded classes and on
+                                                           // objects of unknown class (MUT205)
     unresolved_access_sites:  Set<UnresolvedAccess>,       // reads and method calls named like a strict
                                                            // contract's target on objects of unknown class;
                                                            // never propagated (MUT206, MUT207)
@@ -1122,11 +1123,17 @@ message = "write model state through GenerationStore instead"
      - reassignment, deletion, and augmented assignment (`obj.a = ...`, `del obj.a`,
        `obj.a += ...`);
      - `setattr(obj, "a", ...)` / `object.__setattr__(obj, "a", ...)` /
-       `obj.__dict__["a"] = ...`;
+       `obj.__dict__["a"] = ...`, the namespace being `obj.__dict__`, `getattr(obj, "__dict__")`,
+       or `vars(obj)` (the builtin: `resolver::namespace_load`, which `MUT101`'s invalidations
+       read too); `update`, `popitem`, `clear`, and `|=` on it write names heki cannot tell;
      - **container mutation through an alias**: `xs = obj.a; xs.append(...)` / `xs[i] = ...` /
        `xs.clear()` / `xs.sort()` / `xs |= ...` (through alias tracking and
        `mutated_param_paths`, **handing `obj.a` to `helper(obj.a)` that calls `.append()` is
-       caught across calls**). `getattr(obj, "a"[, default])` with a constant name loads
+       caught across calls**). An alias is one in the scopes nested in its function too: a
+       read of its closure cell joins the aliases of every value the function binds to it, as
+       a phi joins its inputs (the function is summarized before the scopes nested in it), and
+       a cell a nested scope rebinds (`nonlocal`) is no alias. `getattr(obj, "a"[, default])`
+       with a constant name loads
        `obj.a`, and so does a call or property read whose every project callee returns
        attribute `a` of the parameter the object binds on every `return`
        (`FunctionDecl::returns_param_attr`: `node.members().append(1)` and
@@ -1139,7 +1146,10 @@ message = "write model state through GenerationStore instead"
      initializer of the target's class family writes its own `self`, or when the reporting
      function only runs inside allowed contexts (every path of project callers starts in one); a
      private helper with project callers hands its report to them. Otherwise the outermost
-     function is reported, with `message` as the report's help.
+     function is reported, with `message` as the report's help. With
+     `unlisted-dict-keys = "report"`, a `dict_direct` site that hits no target, on a class some
+     targets cover, whose key none of them names, is judged the same way once per family of
+     those targets (`OwnerRule::written`), and reported as that key (`Class.key`).
   3. Existing code bases migrate with **`heki check --baseline`**: counts are frozen per
      `(path, qualname, "MUT201", "Class.attr")` and can only shrink.
 

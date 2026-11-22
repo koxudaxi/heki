@@ -528,6 +528,9 @@ Missed findings close as heki learns more:
 - `setattr` and `object.__setattr__` are followed through a module-level name bound once to them
   (`_set = object.__setattr__`), and `getattr(obj, "fields")` is `obj.fields` itself: changing
   what it returns changes the attribute's object.
+- `vars(obj)` (the builtin, not a name shadowing it) is `obj.__dict__`: an entry stored, deleted,
+  set by a container method, or updated in place (`vars(obj) |= other`, also on
+  `obj.__dict__`) through either is a write of the attribute it names.
 - A write-owners contract sees a container change through what a method or a property returns
   when it returns the attribute itself on every `return` (`node.members().append(x)` with
   `return self.items`) and every class the object may be runs it. A `cached_property` hands out
@@ -1137,14 +1140,14 @@ Contracts declare what no type can say. Each kind is an array of tables with its
   invalid glob, a name with more than one colon or an empty module or qualified name, call
   targets whose globs are too many to match together (tens of thousands of complex ones), an
   argument list heki cannot read, or an unknown value of `forbid`, `fresh-objects`, `unresolved`,
-  `references`, or `attribution`.
+  `references`, `attribution`, or `unlisted-dict-keys`.
 - With `unresolved = "report"`, a contract also reports the accesses it cannot tie to a class,
   each under its own rule (`MUT205` writes, `MUT206` reads, `MUT207` calls): an attribute or
   method named like a target, accessed on an object of unknown class (an unannotated parameter,
   a loop variable, an untyped call result, `Any`, a protocol whose implementations heki cannot
   list). A baseline counts them apart from the violations the typed rules prove.
-- An attribute named through a string (`setattr`, `getattr`, `__dict__`) is followed when the
-  string is a constant: see [Dynamic names](https://heki.koxudaxi.dev/scope/#dynamic-names).
+- An attribute named through a string (`setattr`, `getattr`, `__dict__`, `vars`) is followed
+  when the string is a constant: see [Dynamic names](https://heki.koxudaxi.dev/scope/#dynamic-names).
 
 ### `write-owners`
 
@@ -1172,6 +1175,7 @@ unresolved = "report"
 | `fresh-objects` | `"allow"` | `"allow"` or `"report"`: whether a write that constructs the object it writes is reported. |
 | `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the writes the contract cannot tie to a class are reported under [`MUT205`](https://heki.koxudaxi.dev/rules/unresolved-guarded-write/). |
 | `attribution` | `"call-graph"` | `"call-graph"` or `"lexical"`: which function a write is judged in. See [How contracts report](https://heki.koxudaxi.dev/configuration/#how-contracts-report). |
+| `unlisted-dict-keys` | `"ignore"` | `"ignore"` or `"report"`: whether a `__dict__` key of a target's class that no target names is reported when it is written. |
 
 A container entry (`Class.attr["key"]`):
 
@@ -1191,11 +1195,21 @@ With `fresh-objects = "allow"`, a write is no violation when it constructs the o
 
 A shallow copy's containers are the original's: only rebinding its attributes constructs it.
 
+With `unlisted-dict-keys = "report"`, `MUT201` also reports a constant key written through the
+namespace of an object of a class a target covers (`field.__dict__[KEY] = v`,
+`field.__dict__.setdefault("_cache", v)`, `del vars(field)["k"]`) when no target covering that
+class names the key, so a new cache key needs a target first. A target names the keys its
+attribute pattern matches (`Field._*` names `_cache`), and an entry target names its container.
+The contract's allowance applies as to a target write. A key computed at run time has no name to
+check (`MUT205`, with `unresolved = "report"`), and neither has a write in a helper that does not
+type the object.
+
 With `unresolved = "report"`, `MUT205` reports:
 
 - an attribute named like a target, written on an object of unknown class;
-- a computed attribute name (`setattr(obj, name, v)`, `obj.__dict__[name] = v`) written on a
-  target class.
+- a computed attribute name (`setattr(obj, name, v)`, `obj.__dict__[name] = v`,
+  `obj.__dict__.update(...)`, `vars(obj) |= other`) written on a target class, or on an object
+  of unknown class, where it may be any target.
 
 ### `read-owners`
 
@@ -1525,9 +1539,10 @@ What needs no announcement:
 - writes to objects the function gets from a call;
 - a function whose every caller announces the change after calling it.
 
-A write is followed through local aliases, container methods, `setattr` / `__dict__`, and
-helpers. A helper changing an argument it does not type writes the field or instance its caller
-binds to it. At most 64 `invalidation` contracts can be declared.
+A write is followed through local aliases (also in the scopes nested in the function),
+container methods, `setattr` / `__dict__`, and helpers. A helper changing an argument it does
+not type writes the field or instance its caller binds to it. At most 64 `invalidation`
+contracts can be declared.
 
 ### How contracts report
 
@@ -3919,8 +3934,9 @@ It does not report:
 - constant dictionary keys the property never reads (`self.params["proxy"]` while the property
   reads `self.params["outtmpl"]`);
 - writes after which every path invalidates the property (`del self.prop`,
-  `self.__dict__.pop("prop", None)`, also with the key in a string constant as `MUT201` follows
-  it, a `self` method that does), or before which every path already did and nothing read it
+  `self.__dict__.pop("prop", None)` or `vars(self).pop("prop", None)`, also with the key in a
+  string constant as `MUT201` follows it, a `self` method that does), or before which every path
+  already did and nothing read it
   since; an invalidation under a condition, such as
   `if clear:`, leaves the other path stale and is reported;
 - private helpers whose every caller invalidates the property;
@@ -3996,8 +4012,9 @@ method that changes an attribute the property reads without invalidating the cac
 
 A read is one in the function's own body, on any object of the class: `self.prop`, `obj.prop`
 on a parameter, attribute, or value whose class heki knows (as for `MUT203`),
-`getattr(obj, "prop")`, and `obj.__dict__["prop"]` / `obj.__dict__.get("prop")`. The object may
-be an instance of the read's class or of any project subclass of it. The read is reported when
+`getattr(obj, "prop")`, and `obj.__dict__["prop"]` / `obj.__dict__.get("prop")` (also on
+`vars(obj)`). The object may be an instance of the read's class or of any project subclass of
+it. The read is reported when
 an instance of one of those classes runs both the cached property and the method that leaves it
 stale: the first definition of each along its MRO, or one that the definitions before it call
 through `super()` without invalidating the property themselves. A method of a sibling class, or
@@ -4581,10 +4598,10 @@ count for a read.
     object it allocated), as for `MUT201`;
   - `reads-targets`: reads of the `Class.attr` entries of `read-targets` (and their
     subclasses), in every form `MUT203` follows (`obj.attr`, `getattr(obj, "attr")`,
-    `obj.__dict__["attr"]`, a property getter that reads it); an initializer reading its own
-    instance is no read. An entry also names an attribute of a module outside the project by its
-    full dotted name (`sys.platform`), read as `sys.platform` or through
-    `from sys import platform`;
+    `obj.__dict__["attr"]` or `vars(obj)["attr"]`, a property getter that reads it); an
+    initializer reading its own instance is no read. An entry also names an attribute of a module
+    outside the project by its full dotted name (`sys.platform`), read as `sys.platform` or
+    through `from sys import platform`;
   - `calls`: calls of the `call-targets` entries, matched as the targets of `MUT204`: a function,
     a method (with its overrides in subclasses, through bound-method aliases and `getattr` with a
     constant name), or a class (constructing it); a call is one only when every function it may
@@ -6767,8 +6784,8 @@ the allowed readers:
 - directly (`ref.children`), also on `self` and through local aliases;
 - through `getattr(ref, "children"[, default])` or `object.__getattribute__(ref, "children")`
   with a constant name: a string literal or a string constant, as for `MUT201`;
-- through `ref.__dict__["children"]` or `ref.__dict__.get("children")`, also with a string
-  constant for the key.
+- through `ref.__dict__["children"]` or `ref.__dict__.get("children")` (also on `vars(ref)`),
+  also with a string constant for the key.
 
 A target names a class and an attribute; it covers the class's subclasses too. A container
 entry (`Class.attr["key"]`) is a write target only: reading an entry reads the attribute, so a
@@ -7533,8 +7550,8 @@ call heki does not resolve, a value annotated `Any` or `object` (unless an `isin
 around the read narrows it to a class), a protocol whose implementations heki cannot list (one
 without members, or implemented by more than eight classes), or a variable of an enclosing
 function that a nested scope rebinds (`nonlocal`). `obj.children`, a local alias of it,
-`getattr(obj, "children")` with a constant name, and `obj.__dict__["children"]` count, as for
-`MUT203`.
+`getattr(obj, "children")` with a constant name, and `obj.__dict__["children"]` (also
+`vars(obj)["children"]`) count, as for `MUT203`.
 
 The rules of `MUT203` for what is allowed apply: allowed readers, exempt methods, functions that
 only run inside allowed readers, and `forbidden-readers` (the reading function must be one).
@@ -7618,7 +7635,7 @@ Strict mode of a `write-owners` contract (`unresolved = "report"`): writing an a
 ## What it does
 The strict mode of a `[[tool.heki.write-owners]]` contract that sets `unresolved = "report"`:
 reports the writes outside the write owners that `MUT201` cannot tie to a target class, so a clean
-`MUT201` run says how much it did not check. Two kinds of writes are reported, each once, at the
+`MUT201` run says how much it did not check. Three kinds of writes are reported, each once, at the
 write:
 
 - an attribute named like a target attribute (`fields` for `Model.fields`, any name for
@@ -7629,22 +7646,28 @@ write:
   heki cannot list (one without members, or implemented by more than eight classes), or a
   variable of an enclosing function that a nested scope rebinds (`nonlocal`). Rebinding
   (`obj.fields = []`), deleting, `setattr` with a constant name, and changing the container the
-  attribute holds (`obj.fields.append(x)`, `obj.meta["k"][name] = v`) count;
+  attribute holds (`obj.fields.append(x)`, `obj.meta["k"][name] = v`, also through an alias, in
+  the function or in a scope nested in it) count;
 - an attribute name computed at run time written on an instance of a target class:
-  `setattr(model, name, v)`, `model.__dict__[name] = v`, `model.__dict__.update(...)`, and a
+  `setattr(model, name, v)`, `model.__dict__[name] = v`, `model.__dict__.update(...)`,
+  `model.__dict__ |= other` (also through `vars(model)` or a local alias of the namespace), and a
   `__dict__` key in a name that is no constant: a module-level name bound twice, in a loop, or
   before a star import, or rebound by another module, a class attribute without `ClassVar` or
   `Final` (an instance may hold its own), one a subclass defines again or inherits first from
   another base, a `Final` field of a dataclass read on an instance (or on a class object with
   `slots=True` along the way), and one stored on its class, a subclass, or an instance outside
-  the class body (`Model.KEY = "x"`).
+  the class body (`Model.KEY = "x"`);
+- an attribute name computed at run time written on an object of unknown class (an unannotated
+  `target` in `setattr(target, name, v)` or `target.__dict__[key] = v`), which may be any target.
 
 The rules of `MUT201` for what is allowed apply: allowed writers, exempt methods, a class's own
 initialization (`setattr(self, name, v)` in `__init__`), functions that only run inside allowed
 writers, `forbidden-writers`, and, with `fresh-objects = "allow"`, writes that construct the object
 they write. A parameter that every caller path binds to an object of a project class is not
-reported: `MUT201` reports the write at those callers. A computed name written on an object of
-unknown class is not reported (neither the class nor the attribute is known). With
+reported: `MUT201` reports the write at those callers. For a computed name on a parameter, a
+caller binding an object of a target class leaves the write to `MUT205` (`MUT201` has no name to
+report at that caller), unless it is that class's own initialization handing over its `self`,
+and one binding an object of another class ties it there. With
 `attribution = "lexical"`, a function that only runs inside allowed writers is not allowed, and a
 caller path through an allowed writer counts like any other.
 
@@ -7652,11 +7675,12 @@ caller path through an allowed writer counts like any other.
 
 A report states that, outside the write owners, the function writes an attribute named like a target
 of the `write-owners` contract on an object whose class heki does not know, or a computed attribute
-name on a guarded class.
+name on a guarded class or on an object whose class heki does not know.
 
 Its premises:
 
-- **Named like a target**: the attribute's name matches a target's. Established.
+- **Named like a target**: the attribute's name matches a target's, or is computed at run time.
+  Established.
 - **Unknown class**: heki did not resolve the class of the object. Established: the claim is about
   heki's own resolution.
 - **Outside the owners**: the function is not in the allowed modules and classes, nor runs only
@@ -7686,6 +7710,10 @@ def touch(model) -> None:  # no annotation: heki cannot tell what `model` is
 
 def fill(model: Model, name: str) -> None:
     setattr(model, name, [])  # MUT205: the attribute is computed at run time
+
+
+def fill_any(target, name: str) -> None:
+    setattr(target, name, [])  # MUT205: neither the class nor the attribute is known
 
 
 def read_only(model: Model) -> int:
@@ -7826,15 +7854,20 @@ reserves for a set of allowed writer functions. A write is reported when it happ
 allowed writers:
 
 - directly (`model.fields = [...]`, `model.fields.append(...)`, `del model.fields`);
-- through a local alias (`fields = model.fields; fields.append(...)`), also one `getattr` with a
-  constant name loads (`getattr(model, "fields").append(...)`), or what a method, property, or
+- through a local alias (`fields = model.fields; fields.append(...)`), also one a scope nested
+  in the function reads from it (a nested function, a lambda, a comprehension, or a generator
+  expression: `lambda: fields.append(x)`) unless a nested scope rebinds it (`nonlocal`), one
+  `getattr` with a constant name loads (`getattr(model, "fields").append(...)`), or what a
+  method, property, or
   function returns when it returns the attribute itself on every `return`
   (`model.field_list().append(...)` with `return self.fields`), stores no attribute of that name
   itself, and every class the object may be runs it (no `cached_property`, no class attribute of
   the name coming first); the object must be passed by position (no keyword-only parameter, no
   `*args` unpacking);
 - through `setattr(model, "fields", ...)` / `object.__setattr__` (also through a module-level
-  name bound once to it: `_set = object.__setattr__`) or `model.__dict__["fields"]`,
+  name bound once to it: `_set = object.__setattr__`) or `model.__dict__["fields"]` (also
+  `vars(model)["fields"]`, `model.__dict__.setdefault("fields", v)`, and a local alias of the
+  namespace),
   also with a string constant for the name (`model.__dict__[FIELDS_KEY]`, imported or not):
   a module-level name declared `Final` or bound once in its module and rebound by no other, or
   a class-body name declared `ClassVar` or `Final` and bound once (`self.KEY`, `cls.KEY`,
@@ -7858,7 +7891,14 @@ allowed writers:
   only hands the value on to an allowed writer or an exempt method writes inside the owner.
 
 A target names a class and an attribute; it covers the class's subclasses too (the target's
-class family). A target can also name one entry of the container an attribute holds,
+class family). With `unlisted-dict-keys = "report"`, a constant key written through the
+namespace of an object of a class a target covers (`field.__dict__["_cache"] = v`,
+`vars(field).setdefault(KEY, v)`, `del field.__dict__[KEY]`) is reported too when no target
+covering that class names it (`writes `pkg.model.Field._cache` (dict_direct), a `__dict__` key
+no target names`), so a new key needs a target first. A target names the keys its attribute
+pattern matches, and an entry target names its container. A computed key, a plain attribute
+store (`field._cache = v`, `setattr`), and a write in a helper that does not see the object's
+class are not such writes. A target can also name one entry of the container an attribute holds,
 `Class.attr["key"]`: it matches the writes of that key (`field.extras["init"] = v`,
 `field.extras[INIT]` with a string constant, `field.extras.pop("init")`,
 `del field.extras["init"]`, `field.extras["init"].append(v)`), not a write of the whole
@@ -7951,12 +7991,15 @@ reported. `fresh-objects = "report"` reports these writes like any other.
 
 A report states that the function writes a target of a `write-owners` contract (an attribute, or the
 container it holds) outside the contract's write owners, directly, through an alias, or through the
-helpers shown.
+helpers shown; with `unlisted-dict-keys = "report"`, also that it writes a `__dict__` key of a
+target's class that no target names.
 
 Its premises:
 
 - **Target**: the object is an instance of a class the contract names, or of a subclass, by
-  construction or annotation (assumption R2). Open: an alias bound on one path is enough.
+  construction or annotation (assumption R2), and the attribute is a target's (with
+  `unlisted-dict-keys = "report"`, or a `__dict__` key no target names). Open: an alias bound
+  on one path is enough.
 - **Outside the owners**: the function is not in the allowed modules and classes, nor runs only
   inside allowed contexts (with `attribution = "lexical"`: the function holding the write is
   not allowed). Established from the contract.
@@ -8036,6 +8079,8 @@ No automatic fix.
   - `attribution`: `"call-graph"` (default) or `"lexical"`: whether a private helper hands its
     writes to its callers and a function that only runs inside allowed writers is allowed, or
     each write is judged in the function holding it.
+  - `unlisted-dict-keys`: `"ignore"` (default) or `"report"`: also report a constant `__dict__`
+    key of a target's class that no target names.
 
 
 ---

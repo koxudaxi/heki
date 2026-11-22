@@ -202,7 +202,7 @@ pub(crate) struct Scopes {
 type ChildRun = (FunctionId, Option<Ty>, CellFacts);
 
 /// The closure cell of a function, by the function and the cell's name there.
-type CellKey = (FunctionId, String);
+pub(crate) type CellKey = (FunctionId, String);
 
 /// The closure cells a scope can read, by the name it reads each with.
 type Cells = BTreeMap<String, CellKey>;
@@ -407,6 +407,35 @@ fn with_comprehension_cells(
 /// binds to it, when that is one class ([`TypeCtx::captured`]).
 type Captured = (String, Option<String>);
 
+/// The variables binding each closure cell of `f`, by the cell's name. A cell holds every value
+/// the function binds to it: its parameter's, and those of the instructions naming it (an
+/// unassigned read, `LoadName`, binds none). A read of the cell in a nested scope is a phi of
+/// them all.
+pub(crate) fn cell_bindings(f: &IrFunction) -> FxHashMap<&str, Vec<VarId>> {
+    let mut cell_vars: FxHashMap<&str, Vec<VarId>> = f
+        .captured_vars
+        .iter()
+        .map(|name| (name.as_str(), Vec::new()))
+        .collect();
+    if cell_vars.is_empty() {
+        return cell_vars;
+    }
+    for p in &f.params {
+        if let Some(vars) = cell_vars.get_mut(p.name.as_str()) {
+            vars.push(p.var);
+        }
+    }
+    for inst in f.blocks.iter().flat_map(|b| &b.insts) {
+        if let Some(d) = inst.kind.dst()
+            && !matches!(inst.kind, InstKind::LoadName { .. })
+            && let Some(vars) = f.var_name(d).and_then(|n| cell_vars.get_mut(n))
+        {
+            vars.push(d);
+        }
+    }
+    cell_vars
+}
+
 /// The function id of a non-inlined comprehension call (Python 3.11).
 fn comprehension_id(callee: &str) -> FunctionId {
     FunctionId(
@@ -471,6 +500,14 @@ impl TypeCtx<'_> {
             })
             .collect();
         Seed { iterated, cells }
+    }
+
+    /// The cell the variable `name` that scope `f` reads from an enclosing function is, when the
+    /// values that function binds to it are all it holds: no nested scope rebinds it
+    /// (`nonlocal`).
+    pub(crate) fn bound_cell(&self, f: &IrFunction, name: &str) -> Option<&CellKey> {
+        let nesting = self.nesting();
+        nesting.bound_only(nesting.visible.get(&f.id)?.get(name)?)
     }
 
     /// What the variable `name` that scope `f` reads from an enclosing function is: the
@@ -842,28 +879,9 @@ impl<'e, 'a> Engine<'e, 'a> {
                 }
             }
         }
-        // A cell holds every value the function binds to it: its parameter's, and those of the
-        // instructions naming it (an unassigned read, `LoadName`, binds none).
-        let mut cell_vars: FxHashMap<&str, Vec<VarId>> = f
-            .captured_vars
-            .iter()
-            .map(|name| (name.as_str(), Vec::new()))
-            .collect();
+        let cell_vars = cell_bindings(f);
         if !cell_vars.is_empty() {
             self.nested_read = true;
-            for p in &f.params {
-                if let Some(vars) = cell_vars.get_mut(p.name.as_str()) {
-                    vars.push(p.var);
-                }
-            }
-            for inst in insts() {
-                if let Some(d) = inst.kind.dst()
-                    && !matches!(inst.kind, InstKind::LoadName { .. })
-                    && let Some(vars) = f.var_name(d).and_then(|n| cell_vars.get_mut(n))
-                {
-                    vars.push(d);
-                }
-            }
         }
         for (name, vars) in cell_vars {
             self.bound_at

@@ -1222,10 +1222,11 @@ fn strict_mode_reports_the_writes_heki_cannot_tie_to_a_class() {
             d(u, 8, "MUT205", "touch", "fields"),
             d(u, 17, "MUT205", "loop", "fields"),
             d(u, 22, "MUT205", "anything", "name"),
-            // A computed name on a guarded class (`setattr`, `__dict__`); not on an object of
-            // unknown class.
+            // A computed name on a guarded class (`setattr`, `__dict__`), and on an object of
+            // unknown class, which may be any attribute of any class.
             d(u, 23, "MUT205", "anything", "DataModel"),
             d(u, 24, "MUT205", "anything", "DataModel"),
+            d(u, 25, "MUT205", "anything", "*"),
             // Typed by its caller: `MUT201` reports the caller.
             typed,
             // Untyped by every caller.
@@ -1242,6 +1243,141 @@ fn strict_mode_reports_the_writes_heki_cannot_tie_to_a_class() {
         ),
         "{diags:#?}"
     );
+    assert_eq!(
+        message_at(&diags, u, 25),
+        "`anything` writes an attribute named at run time (set_attr) on an object of unknown class outside the write owners of `store`: heki cannot tell whether it writes `DataModel.fields` or `DataModel.name`"
+    );
+}
+
+const RUN_TIME_NAMES: &str = r#"from typing import Any
+
+from pkg.model import DataModel, Other
+
+
+def copy_by_name(target, source: object, names: list[str]) -> None:
+    for name in names:
+        setattr(target, name, getattr(source, name))
+
+
+def store_by_key(target, key: str, value: object) -> None:
+    target.__dict__[key] = value
+
+
+def namespace(target: Any, values: dict) -> None:
+    vars(target).update(values)
+    target.__dict__.clear()
+
+
+def _fill(target, name: str) -> None:
+    setattr(target, name, 1)
+
+
+def fill_model(model: DataModel) -> None:
+    _fill(model, "x")
+
+
+def _fill_other(target, name: str) -> None:
+    setattr(target, name, 1)
+
+
+def fill_other(other: Other) -> None:
+    _fill_other(other, "x")
+
+
+def plain(d: dict, name: str) -> None:
+    setattr(d, name, 1)
+
+
+def narrowed(target, name: str) -> None:
+    if isinstance(target, Other):
+        setattr(target, name, 1)
+
+
+def control_typed(target: DataModel, name: str, value: object) -> None:
+    setattr(target, name, value)
+
+
+def control_named(target) -> None:
+    target.name = "x"
+"#;
+
+/// A computed attribute name written on an object of unknown class (`setattr` with a computed
+/// name, `__dict__` with a computed key, `vars(obj).update(...)`, `__dict__.clear()`) may write
+/// any target: it is reported, unless every caller path binds the object to a class that is no
+/// target's (`MUT201` sees no name at a caller binding a target class, so that caller leaves the
+/// write to `MUT205`). A builtin container, an object an `isinstance` test narrows to another
+/// class, and the allowed writers are no such write.
+#[test]
+fn strict_mode_reports_a_run_time_name_on_an_object_of_unknown_class() {
+    let p = strict_project("strict_run_time_names", true);
+    p.write("pkg/names.py", RUN_TIME_NAMES).write(
+        "pkg/store.py",
+        "def save(model, name: str) -> None:\n    setattr(model, name, [])\n",
+    );
+    let n = "pkg/names.py";
+    let diags = diagnostics(&p, &[]);
+    let names: Vec<_> = found(&diags).into_iter().filter(|x| x.0 == n).collect();
+    assert_eq!(
+        names,
+        vec![
+            d(n, 8, "MUT205", "copy_by_name", "*"),
+            d(n, 12, "MUT205", "store_by_key", "*"),
+            d(n, 16, "MUT205", "namespace", "*"),
+            d(n, 17, "MUT205", "namespace", "*"),
+            d(n, 21, "MUT205", "_fill", "*"),
+            d(n, 46, "MUT205", "control_typed", "DataModel"),
+            d(n, 50, "MUT205", "control_named", "name"),
+        ]
+    );
+    assert_eq!(
+        message_at(&diags, n, 12),
+        "`store_by_key` writes an attribute named at run time (dict_direct) on an object of unknown class outside the write owners of `store`: heki cannot tell whether it writes `DataModel.fields` or `DataModel.name`"
+    );
+    // Off by default.
+    let p = strict_project("strict_run_time_names_off", false);
+    p.write("pkg/names.py", RUN_TIME_NAMES);
+    assert!(
+        found(&diagnostics(&p, &[]))
+            .iter()
+            .all(|x| x.0 != n || x.2 != "MUT205")
+    );
+}
+
+const INITIALIZING_HELPERS: &str = r#"from pkg.model import DataModel
+
+
+def _setup(obj, name: str, value: object) -> None:
+    setattr(obj, name, value)
+
+
+def _setup_also_later(obj, name: str, value: object) -> None:
+    setattr(obj, name, value)
+
+
+class Configured(DataModel):
+    def __init__(self, name: str) -> None:
+        super().__init__()
+        _setup(self, name, 1)
+        _setup_also_later(self, name, 1)
+
+    def reset(self, name: str) -> None:
+        _setup_also_later(self, name, 2)
+"#;
+
+/// A run-time name written on an object of unknown class may write any target, so an
+/// initializer of any target's class handing its own `self` to the helper is that class's own
+/// initialization: a helper only such initializers run is not reported, one a method runs too
+/// is.
+#[test]
+fn strict_mode_leaves_a_run_time_name_to_the_initialization_running_it() {
+    let p = strict_project("strict_run_time_names_init", true);
+    p.write("pkg/setup.py", INITIALIZING_HELPERS);
+    let s = "pkg/setup.py";
+    let found: Vec<_> = found(&diagnostics(&p, &[]))
+        .into_iter()
+        .filter(|x| x.0 == s)
+        .collect();
+    assert_eq!(found, vec![d(s, 9, "MUT205", "_setup_also_later", "*")]);
 }
 
 /// Objects of unknown class that `isinstance` tests narrow to a class of the standard library.
@@ -2839,6 +2975,285 @@ fn only_a_change_through_the_dict_of_module_globals_unfixes_its_constants() {
     let mut sorted = expected.clone();
     sorted.sort();
     assert_eq!(codes, sorted);
+}
+
+// ================================================================ an object's namespace
+
+const NAMESPACE_MODEL: &str = r#"CACHE_KEY = "_cache_key"
+
+
+class Field:
+    def __init__(self) -> None:
+        self.required = False
+
+
+class Other:
+    def __init__(self) -> None:
+        self.required = False
+"#;
+
+const NAMESPACE_USE: &str = r#"from collections.abc import Mapping
+
+from pkg.model import CACHE_KEY, Field, Other
+
+
+def through_vars(field: Field) -> None:
+    vars(field)[CACHE_KEY] = 1
+
+
+def update_through_vars(field: Field) -> None:
+    vars(field).update(required=True)
+
+
+def in_place_namespace(field: Field) -> None:
+    field.__dict__ |= {"required": True}
+
+
+def in_place_alias(field: Field) -> None:
+    values = field.__dict__
+    values |= {"required": True}
+
+
+def control_subscript(field: Field) -> None:
+    field.__dict__[CACHE_KEY] = 1
+
+
+def control_update(field: Field) -> None:
+    field.__dict__.update(required=True)
+
+
+def setdefault_vars(field: Field) -> None:
+    vars(field).setdefault("required", True)
+
+
+def delete_vars(field: Field) -> None:
+    del vars(field)["required"]
+
+
+def alias_vars(field: Field, other: Mapping[str, object]) -> None:
+    ns = vars(field)
+    ns["required"] = True
+    ns |= other
+
+
+def another_class(other: Other) -> None:
+    vars(other)["required"] = True
+    other.__dict__ |= {"required": True}
+
+
+def reads(field: Field) -> object:
+    return vars(field)["required"], vars(field).get("required")
+
+
+def plain_dict(d: dict[str, object]) -> None:
+    d |= {"required": True}
+
+
+def fresh() -> Field:
+    made = Field()
+    vars(made)["required"] = True
+    return made
+"#;
+
+const NAMESPACE_SHADOWED: &str = r#"from pkg.model import Field
+
+
+def vars(obj: object) -> dict[str, object]:
+    return {}
+
+
+def shadowed(field: Field) -> None:
+    vars(field)["required"] = True
+"#;
+
+/// `vars(obj)` (the builtin) is `obj.__dict__`, and `|=` updates either in place: an entry
+/// stored, deleted, or set by a container method through it is a write of the attribute it
+/// names, and `update` and `|=` write names heki cannot tell (`MUT205`). A read through it is a
+/// read (`MUT203`); a name shadowing the builtin, another class, a plain dict, and an object the
+/// function constructs (nothing holds it: `vars` only reads it) are not writes of a target.
+#[test]
+fn vars_is_the_namespace_and_in_place_or_writes_through_it() {
+    let p = Project::new("namespace_forms");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT201\", \"MUT205\", \"MUT203\"]\n\n\
+         [[tool.heki.write-owners]]\nname = \"store\"\n\
+         targets = [\"pkg.model.Field.required\", \"pkg.model.Field._cache_key\"]\n\
+         allowed-writers = [\"pkg.store:*\"]\nunresolved = \"report\"\n\n\
+         [[tool.heki.read-owners]]\nname = \"reads\"\ntargets = [\"pkg.model.Field.required\"]\n\
+         allowed-readers = [\"pkg.store:*\"]\n",
+    )
+    .write("pkg/__init__.py", "")
+    .write("pkg/model.py", NAMESPACE_MODEL)
+    .write("pkg/use.py", NAMESPACE_USE)
+    .write("pkg/shadowed.py", NAMESPACE_SHADOWED);
+    let u = "pkg/use.py";
+    let (cache, required, field) = (
+        "pkg.model.Field._cache_key",
+        "pkg.model.Field.required",
+        "Field",
+    );
+    let diags = diagnostics(&p, &[]);
+    assert_eq!(
+        found(&diags),
+        vec![
+            d(u, 7, "MUT201", "through_vars", cache),
+            d(u, 11, "MUT205", "update_through_vars", field),
+            d(u, 15, "MUT205", "in_place_namespace", field),
+            d(u, 20, "MUT205", "in_place_alias", field),
+            d(u, 24, "MUT201", "control_subscript", cache),
+            d(u, 28, "MUT205", "control_update", field),
+            d(u, 32, "MUT201", "setdefault_vars", required),
+            d(u, 36, "MUT201", "delete_vars", required),
+            d(u, 41, "MUT201", "alias_vars", required),
+            d(u, 42, "MUT205", "alias_vars", field),
+            d(u, 51, "MUT203", "reads", required),
+            d(u, 51, "MUT203", "reads", required),
+        ]
+    );
+    assert!(
+        message_at(&diags, u, 15).contains(
+            "`in_place_namespace` writes an attribute named at run time (dict_direct) on `Field`"
+        ),
+        "{diags:#?}"
+    );
+}
+
+// ======================================================== `__dict__` keys no target names
+
+const UNLISTED_MODEL: &str = r#"CACHE_KEY = "_cache_key"
+
+
+class Base:
+    def __init__(self) -> None:
+        self.kind = ""
+
+
+class Field(Base):
+    def __init__(self) -> None:
+        super().__init__()
+        self.extras: dict[str, object] = {}
+        self.__dict__["_init_cache"] = {}
+
+
+class Sub(Field):
+    pass
+
+
+class Other:
+    def __init__(self) -> None:
+        self.kind = ""
+"#;
+
+const UNLISTED_USE: &str = r#"from pkg.model import CACHE_KEY, Base, Field, Other, Sub
+
+OTHER_KEY = "_type_cache"
+
+
+def listed(field: Field) -> None:
+    field.__dict__[CACHE_KEY] = 1
+
+
+def unlisted(field: Field) -> None:
+    field.__dict__[OTHER_KEY] = 1
+
+
+def unlisted_literal(field: Field) -> None:
+    field.__dict__.setdefault("_name_cache", "x")
+
+
+def through_vars(field: Field) -> None:
+    del vars(field)["_gone"]
+
+
+def on_a_subclass(sub: Sub) -> None:
+    sub.__dict__.pop("_sub_cache", None)
+
+
+def container_of_an_entry_target(field: Field) -> None:
+    field.__dict__["extras"] = {}
+
+
+def on_a_base(base: Base) -> None:
+    base.__dict__["_base_cache"] = 1
+
+
+def on_another_class(other: Other) -> None:
+    other.__dict__["_other_cache"] = 1
+
+
+def computed(field: Field, name: str) -> None:
+    field.__dict__[name] = 1
+
+
+def plain_attributes(field: Field) -> None:
+    field._plain = 1
+    setattr(field, "_named", 1)
+"#;
+
+fn unlisted_project(name: &str, mode: &str) -> Project {
+    let p = Project::new(name);
+    p.write(
+        "pyproject.toml",
+        &format!(
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT201\", \"MUT205\"]\n\n\
+             [[tool.heki.write-owners]]\nname = \"caches\"\n\
+             targets = [\"pkg.model.Field._cache_key\", 'pkg.model.Field.extras[\"init\"]']\n\
+             allowed-writers = [\"pkg.store.*\"]\n{mode}"
+        ),
+    )
+    .write("pkg/__init__.py", "")
+    .write("pkg/model.py", UNLISTED_MODEL)
+    .write("pkg/use.py", UNLISTED_USE)
+    .write(
+        "pkg/store.py",
+        "from pkg.model import Field\n\n\ndef save(field: Field) -> None:\n    field.__dict__[\"_stored\"] = 1\n",
+    );
+    p
+}
+
+/// With `unlisted-dict-keys = "report"`, a constant key written through the namespace of an
+/// object of a target's class (or a subclass) that no target covering it names is a `MUT201`
+/// write, under the contract's allowance. A key a target names (an entry target names its
+/// container), a base class the targets do not cover, another class, a computed key, plain
+/// attribute stores, the class's own initialization, and the allowed writers are not.
+#[test]
+fn unlisted_dict_keys_reports_the_namespace_keys_no_target_names() {
+    let u = "pkg/use.py";
+    let listed = d(u, 7, "MUT201", "listed", "pkg.model.Field._cache_key");
+    let p = unlisted_project("unlisted_keys_off", "");
+    assert_eq!(found(&diagnostics(&p, &[])), vec![listed.clone()]);
+    let p = unlisted_project("unlisted_keys_on", "unlisted-dict-keys = \"report\"\n");
+    let diags = diagnostics(&p, &[]);
+    assert_eq!(
+        found(&diags),
+        vec![
+            listed,
+            d(u, 11, "MUT201", "unlisted", "Field._type_cache"),
+            d(u, 15, "MUT201", "unlisted_literal", "Field._name_cache"),
+            d(u, 19, "MUT201", "through_vars", "Field._gone"),
+            d(u, 23, "MUT201", "on_a_subclass", "Sub._sub_cache"),
+        ]
+    );
+    assert_eq!(
+        message_at(&diags, u, 11),
+        "`unlisted` writes `pkg.model.Field._type_cache` (dict_direct), a `__dict__` key no target names, outside the write owners of `caches`"
+    );
+    // The same writes judged lexically.
+    let p = unlisted_project(
+        "unlisted_keys_lexical",
+        "unlisted-dict-keys = \"report\"\nattribution = \"lexical\"\n",
+    );
+    assert_eq!(found(&diagnostics(&p, &[])).len(), 5);
+    let p = unlisted_project("unlisted_keys_bad", "unlisted-dict-keys = \"all\"\n");
+    let (code, stdout, stderr) = p.check(&[]);
+    assert_eq!(code, 2, "{stdout}{stderr}");
+    assert!(
+        stderr.contains(
+            "unknown `unlisted-dict-keys` value `all` in write-owners `caches` (expected `ignore` or `report`)"
+        ),
+        "{stderr}"
+    );
 }
 
 /// A star import binds the names its module exports, which heki does not read, so it may bind

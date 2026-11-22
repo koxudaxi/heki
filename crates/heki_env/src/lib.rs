@@ -145,6 +145,10 @@ pub struct WriteOwnerRule {
     /// a private helper hands its writes to its callers, and a function that only runs inside
     /// allowed writers is allowed.
     pub attribution: Option<String>,
+    /// `"report"`: also report (`MUT201`) a constant key written through the namespace of an
+    /// object of a target's class (`obj.__dict__[KEY] = v`, `vars(obj)`) that no target covering
+    /// the class names; `"ignore"` (default) does not.
+    pub unlisted_dict_keys: Option<String>,
 }
 
 /// `[[tool.heki.read-owners]]` contract for `MUT203` (the read side of `write-owners`).
@@ -755,6 +759,7 @@ message = "use Store.set_fields() instead"
 fresh-objects = "report"
 unresolved = "report"
 attribution = "lexical"
+unlisted-dict-keys = "report"
 
 [[tool.heki.read-owners]]
 name = "reference-children"
@@ -815,6 +820,10 @@ import-probes = "report"
         assert_eq!(cfg.write_owners[0].fresh_objects.as_deref(), Some("report"));
         assert_eq!(cfg.write_owners[0].unresolved.as_deref(), Some("report"));
         assert_eq!(cfg.write_owners[0].attribution.as_deref(), Some("lexical"));
+        assert_eq!(
+            cfg.write_owners[0].unlisted_dict_keys.as_deref(),
+            Some("report")
+        );
         assert_eq!(
             cfg.write_owners[0].message.as_deref(),
             Some("use Store.set_fields() instead")

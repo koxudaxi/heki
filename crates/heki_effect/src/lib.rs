@@ -448,8 +448,8 @@ impl ReturnsNew {
 }
 
 /// A write heki cannot tie to a class (`MUT205`): an attribute written on an object of unknown
-/// class, or a computed attribute name written on a project class. A local fact, never
-/// propagated.
+/// class, or a computed attribute name written on a project class or on an object of unknown
+/// class. A local fact, never propagated.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct UnresolvedWriteSite {
     pub what: Unresolved,
@@ -471,6 +471,9 @@ pub enum Unresolved {
     /// A computed attribute name (`setattr(obj, name, v)`, `obj.__dict__[name] = v`) written on
     /// an instance of this project class (fqn).
     Name(String),
+    /// A computed attribute name written on an object of unknown class: any attribute of any
+    /// class.
+    Anything,
 }
 
 /// A read or a call heki cannot tie to a class (`MUT206`, `MUT207`): an attribute read, or a

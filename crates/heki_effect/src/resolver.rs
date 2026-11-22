@@ -4947,6 +4947,32 @@ pub fn func_qualname(f: &IrFunction) -> &str {
     }
 }
 
+/// `(dst, obj)` of an instruction loading the namespace of `obj`, the dict of its attributes:
+/// `obj.__dict__`, or `vars(obj)`, which returns it (`val` gives what the called name holds: the
+/// builtin itself, not a name shadowing it).
+pub(crate) fn namespace_load<'v>(
+    kind: &InstKind,
+    val: impl FnOnce(VarId) -> Option<&'v Val>,
+) -> Option<(VarId, VarId)> {
+    match kind {
+        InstKind::AttrLoad { dst, obj, attr } if attr == "__dict__" => Some((*dst, *obj)),
+        InstKind::Call {
+            dst,
+            callee_var: Some(f),
+            args,
+            kwargs,
+            star_from: None,
+            ..
+        } if args.len() == 1
+            && kwargs.is_empty()
+            && matches!(val(*f), Some(Val::Ref(s)) if s == "builtins.vars") =>
+        {
+            Some((*dst, args[0]))
+        }
+        _ => None,
+    }
+}
+
 /// Variables that alias `root` through `Copy` and phis whose inputs all alias it.
 pub fn self_aliases(f: &IrFunction, root: VarId) -> FxHashSet<VarId> {
     aliases_of(f, [root])

@@ -1860,6 +1860,9 @@ const UNRESOLVED: &[&str] = &["ignore", "report"];
 /// `fresh-objects` values; the first is the default (writes that construct an object are no
 /// violation).
 const FRESH_OBJECTS: &[&str] = &["allow", "report"];
+/// `unlisted-dict-keys` values; the first is the default (a `__dict__` key no target names is
+/// no target's write).
+const UNLISTED_DICT_KEYS: &[&str] = &["ignore", "report"];
 /// The values of `import-probes`, the default first.
 const IMPORT_PROBES: &[&str] = &["allow", "report"];
 
@@ -2029,6 +2032,43 @@ struct OwnerRule<'r> {
     allow_fresh: bool,
     /// `unresolved = "report"`: writes heki cannot tie to a class are reported (`MUT205`).
     report_unresolved: bool,
+    /// `unlisted-dict-keys = "report"`: the `__dict__` keys of the targets' classes that no
+    /// target names are reported too.
+    report_unlisted_keys: bool,
+}
+
+impl OwnerRule<'_> {
+    /// What `site` writes of the contract: the targets it hits, or, with `unlisted-dict-keys =
+    /// "report"`, a key written through the namespace of an object of a class some targets cover
+    /// (a `dict_direct` write) that none of them names, once for each family of those targets.
+    fn written<'s>(&'s self, site: &TypedFieldWriteSite) -> Vec<Written<'s>> {
+        let hits = write_hits(&self.targets, site);
+        if !hits.is_empty() || !self.report_unlisted_keys || site.kind != WriteKind::DictDirect {
+            return hits.into_iter().map(|(_, t)| Written::Target(t)).collect();
+        }
+        let covering: Vec<&ContractTarget> = self
+            .targets
+            .iter()
+            .filter(|t| t.classes.contains(&site.class_qualname))
+            .collect();
+        if covering.iter().any(|t| t.matches_attr(&site.attr)) {
+            return Vec::new();
+        }
+        let mut families: Vec<&FxHashSet<String>> = Vec::new();
+        for t in covering {
+            if !families.contains(&&t.classes) {
+                families.push(&t.classes);
+            }
+        }
+        families.into_iter().map(Written::UnlistedKey).collect()
+    }
+}
+
+/// What a write site writes of a `write-owners` contract ([`OwnerRule::written`]).
+enum Written<'r> {
+    Target(&'r ContractTarget),
+    /// A `__dict__` key no target names, on an object of this target family's class.
+    UnlistedKey(&'r FxHashSet<String>),
 }
 
 pub(crate) fn mut201(
@@ -2083,6 +2123,14 @@ pub(crate) fn mut201(
                 "write-owners",
                 &rule.name,
             )?,
+            report_unlisted_keys: mode(
+                rule.unlisted_dict_keys.as_deref(),
+                UNLISTED_DICT_KEYS,
+                "`ignore` or `report`",
+                "write-owners",
+                &rule.name,
+                "unlisted-dict-keys",
+            )? == "report",
         });
     }
 
@@ -2127,7 +2175,11 @@ pub(crate) fn mut201(
                     let judged = rule.allowance.judged(cx.decls, key);
                     // The parameters of a scope a function holds are none of the function's.
                     let obj_params = if *judged == *key { site.obj_params } else { 0 };
-                    for (_, t) in write_hits(&rule.targets, site) {
+                    for written in rule.written(site) {
+                        let family = match written {
+                            Written::Target(t) => &t.classes,
+                            Written::UnlistedKey(family) => family,
+                        };
                         let mut chain: Vec<FuncKey> = vec![judged.clone().into_owned()];
                         chain.extend(
                             site.via_chain
@@ -2161,7 +2213,7 @@ pub(crate) fn mut201(
                             })
                         };
                         if !lexical && (kept_below() || delegates(cx, sites, key, Handover::Every))
-                            || initializes_itself(cx, &judged, &t.classes, obj_params)
+                            || initializes_itself(cx, &judged, family, obj_params)
                         {
                             continue;
                         }
@@ -2181,7 +2233,7 @@ pub(crate) fn mut201(
                                 cx,
                                 sites,
                                 &rule.allowance,
-                                &t.classes,
+                                family,
                                 key,
                                 site.obj_params,
                             )
@@ -2193,20 +2245,29 @@ pub(crate) fn mut201(
                             .via_chain
                             .last()
                             .map_or_else(|| key.fqn(), |h| h.callee.clone());
-                        let named = matched_name(&t.text, || {
-                            let entry = t.key.as_ref().map(|k| format!("[\"{k}\"]"));
-                            format!(
-                                "{}.{}{}",
-                                site.class_qualname,
-                                site.attr,
-                                entry.unwrap_or_default()
-                            )
-                        });
+                        let member = format!("{}.{}", site.class_qualname, site.attr);
+                        // The report's target: the configured one, or the unlisted key as a
+                        // target naming it would (`Class.key`).
+                        let (text, named, unlisted) = match written {
+                            Written::Target(t) => {
+                                let named = matched_name(&t.text, || {
+                                    let entry = t.key.as_ref().map(|k| format!("[\"{k}\"]"));
+                                    format!("{member}{}", entry.unwrap_or_default())
+                                });
+                                (t.text.clone(), named, "")
+                            }
+                            Written::UnlistedKey(_) => {
+                                let class = &site.class_qualname;
+                                let qualname = cx.decls.class_qualname(class).unwrap_or(class);
+                                let text = format!("{qualname}.{}", site.attr);
+                                (text, member, ", a `__dict__` key no target names,")
+                            }
+                        };
                         reports.add(
                             unit,
                             &judged,
                             span,
-                            (&t.text, &named),
+                            (&text, &named),
                             (writer, site.span),
                             rule.note,
                             || {
@@ -2216,7 +2277,7 @@ pub(crate) fn mut201(
                                     .map(|h| format!(" via `{}`", h.callee))
                                     .unwrap_or_default();
                                 format!(
-                                    "`{}` writes `{named}` ({}){via} {}",
+                                    "`{}` writes `{named}` ({}){via}{unlisted} {}",
                                     judged.qualname,
                                     site.kind.as_str(),
                                     rule.allowance.where_text(
