@@ -16,16 +16,14 @@
 //! releases without holding it: another thread gives that lock back as a signal (a handoff),
 //! so taking it again waits for that thread, by design.
 
-use crate::{CheckContext, ModuleUnit};
+use crate::{CheckContext, ModuleUnit, SitesBySpan};
 use heki_ast::Span;
 use heki_diagnostics::{Diagnostic, RelatedLocation};
 use heki_effect::held;
 use heki_effect::locks::{self, LockSteps, ObjRef, SiteLock, Taken};
 use heki_effect::ownership;
-use heki_effect::{CallSite, EffectSummary, FuncKey, TypeCtx, anchors_call_site};
+use heki_effect::{EffectSummary, FuncKey, TypeCtx, anchors_call_site};
 
-/// Call sites of a module by `(caller qualname, span)` (`CheckContext::sites_by_span`).
-type SitesBySpan<'s> = FxHashMap<(String, Span), Vec<&'s CallSite>>;
 use heki_ir::walk::{Answer, FnShape};
 use heki_ir::{BlockId, Inst, InstKind, IrFunction, VarId};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -215,8 +213,8 @@ fn lock_steps<'f>(
         let own = locks::rebound_name(tcx, f, key, &types, &def, &inst.kind);
         let mut names: Vec<ObjRef> = own.into_iter().collect();
         if anchors_call_site(&inst.kind) {
-            let here = sites.get(&(key.qualname.clone(), inst.span));
-            names.extend((here.into_iter().flatten()).flat_map(|site| cx.index.site_rebinds(site)));
+            let here = sites.at(&key.qualname, inst.span);
+            names.extend(here.iter().flat_map(|site| cx.index.site_rebinds(site)));
         }
         names
     };
@@ -246,11 +244,7 @@ fn retakes(
         out.push((lock.clone(), Vec::new()));
     }
     if anchors_call_site(&inst.kind) {
-        for site in sites
-            .get(&(key.qualname.clone(), inst.span))
-            .into_iter()
-            .flatten()
-        {
+        for site in sites.at(&key.qualname, inst.span) {
             for found in cx.index.site_locks(&unit.input.path, site) {
                 if !holder.guards(cx, &found) {
                     out.push((found.lock, found.chain));

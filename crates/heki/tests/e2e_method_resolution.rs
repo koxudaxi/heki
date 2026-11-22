@@ -3,8 +3,8 @@
 //! subclass's) and calling a method through it, class methods called through their class,
 //! calling an instance (`__call__`), constructions through a module, the targets of `with`
 //! statements, module-level names bound twice, the parameters `*` arguments bind, project
-//! methods named like container mutators, augmented assignments, and what calling and awaiting
-//! an `async def` give.
+//! methods named like container mutators, augmented assignments, the bases of class statements
+//! in functions, and what calling and awaiting an `async def` give.
 //!
 //! Every fixture marks the lines that must be reported with the rule code in a comment
 //! (`# EFF101`); every other line must not be.
@@ -940,6 +940,178 @@ fn a_class_derives_from_the_import_its_own_name_shadows() {
             ("pkg/rebound.py", REBOUND_FIRST),
             ("pkg/cycle.py", CYCLE),
         ],
+        &["EFF101"],
+    );
+}
+
+const SCOPED_BASE_CLASSES: &str = r#"import time
+
+
+class Parser:
+    def parse(self):
+        time.sleep(1)
+
+
+class Quiet:
+    def parse(self):
+        return 1
+
+
+class Calm:
+    def parse(self):
+        return 1
+"#;
+
+/// A class statement in a function takes each base as the value it passes there: a parameter
+/// of the imported class's name is another class, whose methods the class does not inherit and
+/// whose subclasses it is not; the class the function reads from the module is the base.
+const SCOPED_BASES: &str = r#"import time
+
+from pkg.base_classes import Calm, Parser, Quiet
+
+
+async def through_a_parameter(Parser):
+    class Local(Parser):
+        pass
+
+    Local().parse()
+
+
+async def through_the_module():
+    class Local(Parser):
+        pass
+
+    Local().parse()  # EFF101
+
+
+def overriding_a_parameter(Quiet):
+    class Loud(Quiet):
+        def parse(self):
+            time.sleep(1)
+
+    return Loud
+
+
+async def through_quiet(q: Quiet):
+    q.parse()
+
+
+def overriding_the_module_class():
+    class Loud(Calm):
+        def parse(self):
+            time.sleep(1)
+
+    return Loud
+
+
+async def through_calm(c: Calm):
+    c.parse()  # EFF111
+"#;
+
+/// A function too large to model holding a class statement: heki does not know the value it
+/// passes as a base, here a parameter of the imported class's name.
+fn unmodeled_class_statement() -> String {
+    let mut lines = vec![
+        "import time".to_owned(),
+        String::new(),
+        "from pkg.base_classes import Quiet".to_owned(),
+        String::new(),
+        String::new(),
+        "def huge(Quiet, xs):".to_owned(),
+        "    class Huge(Quiet):".to_owned(),
+        "        def parse(self):".to_owned(),
+        "            time.sleep(1)".to_owned(),
+        String::new(),
+    ];
+    let mut pad = "    ".to_owned();
+    for i in 0..14 {
+        lines.push(format!("{pad}try:"));
+        lines.push(format!("{pad}    if xs:"));
+        lines.push(format!("{pad}        return {i}"));
+        lines.push(format!("{pad}    print(xs)"));
+        lines.push(format!("{pad}finally:"));
+        pad.push_str("    ");
+    }
+    lines.push(format!("{pad}print(Huge)"));
+    format!("{}\n", lines.join("\n"))
+}
+
+#[test]
+fn a_class_statement_in_a_function_names_its_bases_there() {
+    check_marks(
+        "scoped_bases",
+        &[
+            ("pkg/base_classes.py", SCOPED_BASE_CLASSES),
+            ("pkg/scoped.py", SCOPED_BASES),
+            ("pkg/huge.py", &unmodeled_class_statement()),
+        ],
+        &["EFF101"],
+    );
+}
+
+/// Bases heki names no class for are classes of their own: in `Leaf(Left, Right)`, with an
+/// unknown base before `Root` in `Left` and after it in `Right`, the C3 linearization puts
+/// `Right` before `Root`, so `Right.parse` overrides `Root.parse` as in Python.
+const UNKNOWN_BASES_APART: &str = r#"import time
+
+
+def make_a():
+    return object
+
+
+def make_b():
+    return object
+
+
+class Root:
+    def parse(self):
+        time.sleep(1)
+
+
+class Left(make_a(), Root):
+    pass
+
+
+class Right(Root, make_b()):
+    def parse(self):
+        return 1
+
+
+class Leaf(Left, Right):
+    pass
+
+
+async def through_leaf(x: Leaf):
+    x.parse()
+
+
+class Quiet:
+    def parse(self):
+        return 1
+
+
+class Up(make_a(), Quiet):
+    pass
+
+
+class Down(Quiet, make_b()):
+    def parse(self):
+        time.sleep(1)
+
+
+class Bottom(Up, Down):
+    pass
+
+
+async def through_bottom(x: Bottom):
+    x.parse()  # EFF101
+"#;
+
+#[test]
+fn unknown_bases_never_order_each_other() {
+    check_marks(
+        "unknown_bases_apart",
+        &[("pkg/diamond.py", UNKNOWN_BASES_APART)],
         &["EFF101"],
     );
 }

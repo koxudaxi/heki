@@ -154,6 +154,7 @@ pub(super) fn named_attrs(input: &ModuleInput<'_>, decls: &mut ModuleDecls) {
             let entry = c.named_attrs.entry(attr).or_default();
             entry.body = entry.body.take().or(named.body);
             entry.annotated |= named.annotated;
+            entry.validates_default |= named.validates_default;
             entry.held.extend(named.held);
         }
     }
@@ -230,13 +231,16 @@ fn class_body_names(
         && !decls
             .functions
             .contains_key(&format!("{}.__init__", body.qualname));
-    let fields: FxHashMap<&str, bool> = body
+    // Per annotated name: whether it declares a field, and whether it asks to validate the default.
+    let fields: FxHashMap<&str, (bool, bool)> = body
         .local_annotations
         .iter()
         .filter(|a| !a.target.contains('.'))
         .map(|a| {
             let (q, _) = qualifiers(&a.annotation, &resolve);
-            (a.target.as_str(), !q.class_var && !q.pseudo_field)
+            let field = !q.class_var && !q.pseudo_field;
+            let validates = a.annotation.contains("validate_default");
+            (a.target.as_str(), (field, validates))
         })
         .collect();
     for (name, values) in bindings {
@@ -244,7 +248,7 @@ fn class_body_names(
         if deleted.contains(&name) {
             continue;
         }
-        let field = fields.get(name).copied().unwrap_or(false);
+        let (field, validates_default) = fields.get(name).copied().unwrap_or((false, false));
         // `attr: T = field(default=NAME)`: a stdlib dataclass makes `NAME` the class attribute,
         // and `init=False` leaves the field out of `__init__`.
         let (named, init) = match field_default(&shape, value, &resolve) {
@@ -263,6 +267,7 @@ fn class_body_names(
         let attr = NamedAttr {
             body: Some(named),
             annotated: field,
+            validates_default,
             held,
         };
         found.push((body.qualname.clone(), name.to_owned(), attr));
