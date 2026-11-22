@@ -16,13 +16,17 @@
 //! - **Order flow**: a value keeps the order of what it is built from through copies, phis,
 //!   list, tuple, and dict displays, formatting, string concatenation, `str.join`, `list()` and
 //!   the other builtins of [`KEEPING_BUILTINS`], `.items()` / `.keys()` / `.values()`, items read
-//!   by position, and the containers it is appended to or stored in; an element of the set also
-//!   passes on to what is computed from it (an attribute, an item looked up by it, a call's
-//!   result). `sorted()`, `set()`, `len()`, comparisons, and calls heki cannot resolve end it.
+//!   by position from a sequence that may hold two, and the containers that keep the order it is
+//!   appended to or stored in (a list, a deque, a mapping, a stream; a set has an order of its
+//!   own, and a key read from a mapping before keeps its place when stored again); an element of
+//!   the set also passes on to what is computed from it (an attribute, an item looked up by it, a
+//!   call's result). `sorted()`, `set()`, `len()`, comparisons, items looked up by key, and calls
+//!   heki cannot resolve end it.
 //! - **Ends**: a `return`, an argument a catalog output call writes in order
 //!   (`EcosystemEntry::writes_in_order`, with its sorting keyword established false) or the
 //!   message of a builtin exception it constructs, and an argument of a project call (resolved
-//!   through the callee's facts during propagation).
+//!   through the callee's facts during propagation). One element at a time reaches only an output
+//!   that appends (a stream): a raise for each element names the first that fails.
 //!
 //! Each function keeps, IR-free, the ends each source reaches: the orders it takes, its
 //! parameters, and the results of its project calls ([`SetOrderFacts::flows`]). Propagation
@@ -113,6 +117,29 @@ const FILLING_METHODS: &[&str] = &[
     "setdefault",
     "write",
     "writelines",
+];
+
+/// The filling methods only a container keeping its insertion order (a list, a deque, a
+/// mapping) or a stream has; the others (`insert`, `update`, `setdefault`) also name a set's
+/// method or one returning a new value.
+const ORDERED_FILLING_METHODS: &[&str] = &["append", "extend", "appendleft", "write", "writelines"];
+
+/// Classes whose instances keep the order items are put into them.
+const ORDERED_CONTAINERS: &[&str] = &[
+    "builtins.list",
+    "builtins.dict",
+    "collections.deque",
+    "collections.OrderedDict",
+    "collections.defaultdict",
+    "collections.Counter",
+];
+
+/// Mapping classes: an item is read from one by key.
+const MAPPINGS: &[&str] = &[
+    "builtins.dict",
+    "collections.OrderedDict",
+    "collections.defaultdict",
+    "collections.Counter",
 ];
 
 /// What a function does with set iteration order ([`EffectSummary::set_order`]).
@@ -276,7 +303,7 @@ pub(crate) fn local_facts(
         callees,
     } = input;
     let budget = Budget::of_function("EFF112 order flow", f);
-    let flow = LocalFlow {
+    let mut flow = LocalFlow {
         f,
         shape,
         cx,
@@ -285,10 +312,17 @@ pub(crate) fn local_facts(
         calls: calls.iter().map(|c| (c.at, c)).collect(),
         inferred,
         sets: Closure::new(),
+        elements: FxHashSet::default(),
+        item_reads: std::cell::OnceCell::new(),
         budget: &budget,
     };
     let mut sources: Vec<(OrderSource, VarId, Kind)> = Vec::new();
     flow.order_takes(&mut sources);
+    flow.elements = sources
+        .iter()
+        .filter(|(_, _, kind)| *kind == Kind::Element)
+        .map(|(_, v, _)| *v)
+        .collect();
     for (i, p) in f.params.iter().enumerate().take(64) {
         sources.push((OrderSource::Param(i as u8), p.var, Kind::Ordered));
     }
@@ -349,8 +383,16 @@ struct LocalFlow<'f, 'c> {
     inferred: &'c crate::infer::Inferred,
     /// Whether a value is a set, and of text ([`Self::hashes_vary`]).
     sets: Closure<VarId, (bool, bool)>,
+    /// The elements the function's loops over sets take.
+    elements: FxHashSet<VarId>,
+    /// Where the function reads an item, by the mapping's copy root and the key.
+    item_reads: std::cell::OnceCell<ItemReads>,
     budget: &'c Budget,
 }
+
+/// The places (block, instruction) of the item reads `obj[index]` of a function, by the copy
+/// root of `obj` and `index`.
+type ItemReads = FxHashMap<(VarId, VarId), Vec<(BlockId, usize)>>;
 
 impl<'f, 'c> LocalFlow<'f, 'c> {
     fn inst_at(&self, at: (BlockId, usize)) -> &'f Inst {
@@ -480,15 +522,22 @@ impl<'f, 'c> LocalFlow<'f, 'c> {
     /// Whether `callee` names a list or dict comprehension lowered as a function of its own,
     /// whose result keeps the order of what it iterates.
     fn ordered_comprehension(&self, callee: &str) -> bool {
-        callee
-            .strip_prefix("__comp_")
-            .and_then(|n| n.parse::<u32>().ok())
-            .is_some_and(|id| {
-                matches!(
-                    self.cx.ir().function(heki_ir::FunctionId(id)).name.as_str(),
-                    "<listcomp>" | "<dictcomp>"
-                )
-            })
+        matches!(
+            self.comprehension(callee),
+            Some("<listcomp>" | "<dictcomp>")
+        )
+    }
+
+    /// Whether `callee` names a dict comprehension lowered as a function of its own.
+    fn dict_comprehension(&self, callee: &str) -> bool {
+        self.comprehension(callee) == Some("<dictcomp>")
+    }
+
+    /// The name of the comprehension `callee` names when it is lowered as a function of its
+    /// own (`__comp_<id>`, before Python 3.12).
+    fn comprehension(&self, callee: &str) -> Option<&'f str> {
+        let id = callee.strip_prefix("__comp_")?.parse::<u32>().ok()?;
+        Some(self.cx.ir().function(heki_ir::FunctionId(id)).name.as_str())
     }
 
     /// Whether a use in block `at` takes the order of `v`: a set of run-dependent hashes that
@@ -501,7 +550,17 @@ impl<'f, 'c> LocalFlow<'f, 'c> {
     /// (`TEXT`), each part decided where the value is made or joined from the values it is
     /// made of ([`Self::set_sources`]).
     fn hashes_vary(&self, v: VarId) -> bool {
-        let (set, text) = *self
+        let (set, text) = self.set_and_text(v);
+        set && text
+    }
+
+    /// Whether `v` is a set, of any elements.
+    fn is_set(&self, v: VarId) -> bool {
+        self.set_and_text(v).0
+    }
+
+    fn set_and_text(&self, v: VarId) -> (bool, bool) {
+        *self
             .sets
             .ask(
                 self.budget,
@@ -509,8 +568,7 @@ impl<'f, 'c> LocalFlow<'f, 'c> {
                 |x| self.set_own(x),
                 |x, out| self.set_sources(x, out),
             )
-            .open_means(std::rc::Rc::default());
-        set && text
+            .open_means(std::rc::Rc::default())
     }
 
     /// Whether `v` itself is a set, and whether its elements are text, as where it is made says:
@@ -661,6 +719,92 @@ impl<'f, 'c> LocalFlow<'f, 'c> {
         })
     }
 
+    /// Whether `obj[index]` looks an item up by key: `obj` is a mapping, or the key is text.
+    fn looked_up(&self, obj: VarId, index: VarId) -> bool {
+        self.is_mapping(obj)
+            || self
+                .inferred_ty(index)
+                .is_some_and(|t| matches!(&t, Ty::Inst(o) if o.class == "builtins.str" || o.class == "builtins.bytes"))
+    }
+
+    /// Whether `v` is a mapping: a dict display or comprehension, a mapping class called, or
+    /// a value of an inferred mapping type.
+    fn is_mapping(&self, v: VarId) -> bool {
+        let root = self.shape.copy_root(v);
+        match self.shape.inst(root).map(|i| &i.kind) {
+            Some(
+                InstKind::DictLiteral { .. }
+                | InstKind::AllocBuiltin {
+                    kind: BuiltinKind::Dict,
+                    ..
+                },
+            ) => true,
+            Some(InstKind::Call { callee, .. }) if self.dict_comprehension(callee) => true,
+            _ => {
+                self.external_defining(root).is_some_and(|s| MAPPINGS.contains(&s))
+                    || self.inferred_ty(root).is_some_and(|t| {
+                        matches!(&t, Ty::Inst(o) if matches!(o.args, Args::Map(..)) || MAPPINGS.contains(&o.class.as_str()))
+                    })
+            }
+        }
+    }
+
+    /// Whether `method` called on `recv` puts its arguments into a container that keeps their
+    /// order. A set keeps an order of its own, which a later iteration of it takes anew.
+    fn fills_in_order(&self, recv: VarId, method: &str) -> bool {
+        let root = self.shape.copy_root(recv);
+        !self.is_set(root)
+            && (ORDERED_FILLING_METHODS.contains(&method) || self.keeps_insertion_order(root))
+    }
+
+    /// Whether `v` is a container keeping its insertion order: a list or dict display or
+    /// comprehension, such a class called, or a value of such an inferred type.
+    fn keeps_insertion_order(&self, v: VarId) -> bool {
+        match self.shape.inst(v).map(|i| &i.kind) {
+            Some(
+                InstKind::DictLiteral { .. }
+                | InstKind::AllocBuiltin {
+                    kind: BuiltinKind::List | BuiltinKind::Dict,
+                    ..
+                },
+            ) => true,
+            Some(InstKind::Call { callee, .. }) if self.ordered_comprehension(callee) => true,
+            _ => self
+                .external_defining(v)
+                .is_some_and(|s| ORDERED_CONTAINERS.contains(&s))
+                || self.inferred_ty(v).is_some_and(
+                    |t| matches!(&t, Ty::Inst(o) if ORDERED_CONTAINERS.contains(&o.class.as_str())),
+                ),
+        }
+    }
+
+    /// Whether the function reads `obj[index]` on every path to the instruction at `at`: a read
+    /// earlier in its block, or in a block dominating it.
+    fn read_before(&self, obj: VarId, index: VarId, at: (BlockId, usize)) -> bool {
+        let reads = self.item_reads.get_or_init(|| {
+            let mut reads = ItemReads::default();
+            for bb in &self.f.blocks {
+                for (i, inst) in bb.insts.iter().enumerate() {
+                    if let InstKind::SubscriptLoad { obj, index, .. } = &inst.kind {
+                        let key = (self.shape.copy_root(*obj), *index);
+                        reads.entry(key).or_default().push((bb.id, i));
+                    }
+                }
+            }
+            reads
+        });
+        let doms = self.shape.dominators();
+        let key = (self.shape.copy_root(obj), index);
+        reads.get(&key).into_iter().flatten().any(|&(b, i)| {
+            self.budget.take(1)
+                && if b == at.0 {
+                    i < at.1
+                } else {
+                    doms.dominates(b, at.0)
+                }
+        })
+    }
+
     /// The inferred type of mapping `v` has text keys.
     fn text_keys(&self, v: VarId) -> bool {
         self.inferred_ty(v).is_some_and(|t| {
@@ -801,18 +945,32 @@ impl<'f, 'c> LocalFlow<'f, 'c> {
             InstKind::SubscriptLoad {
                 dst,
                 obj,
+                index,
                 key_const,
                 ..
             } => {
-                // An item read by position from an ordered value is a pick; an item looked up by
-                // an element is that element's.
-                let picked = *obj == v && key_const.is_none();
+                // An item read by position from an ordered sequence that may hold two items is a
+                // pick; an item looked up by key, or by an element, is that key's.
+                let picked = *obj == v
+                    && key_const.is_none()
+                    && !self.looked_up(*obj, *index)
+                    && !self.bounded_to_one(*obj, at.0);
                 if picked || *obj != v && element {
                     out.push(derived(*dst));
                 }
             }
-            InstKind::SubscriptStore { obj, .. } if *obj != v => {
-                out.push(Step::To(self.shape.copy_root(*obj), Kind::Ordered));
+            InstKind::SubscriptStore {
+                obj, index, value, ..
+            } if *obj != v => {
+                // A key read from the mapping before is in it: storing at it again keeps the
+                // mapping's order, and a value computed from the element that is the key is that
+                // key's alone.
+                let own_key = *index == v && *value != v
+                    || element && self.elements.contains(&self.shape.copy_root(*index));
+                let rewritten = own_key && self.read_before(*obj, *index, at);
+                if !rewritten {
+                    out.push(Step::To(self.shape.copy_root(*obj), Kind::Ordered));
+                }
             }
             InstKind::MethodCall {
                 dst,
@@ -839,7 +997,8 @@ impl<'f, 'c> LocalFlow<'f, 'c> {
             }
             InstKind::MethodCall { recv, method, .. }
                 if FILLING_METHODS.contains(&method.as_str())
-                    && !matches!(self.callees.get(&at), Some(Callee::Project(..))) =>
+                    && !matches!(self.callees.get(&at), Some(Callee::Project(..)))
+                    && self.fills_in_order(*recv, method) =>
             {
                 out.push(Step::To(self.shape.copy_root(*recv), Kind::Ordered));
             }
@@ -926,7 +1085,7 @@ impl<'f, 'c> LocalFlow<'f, 'c> {
                 }
                 if let Some(output) = self.written_output(span, (dst, args, kwargs), symbol, v) {
                     // One element at a time writes the set's order only where the writes add
-                    // up: a stream, or the first exception raised.
+                    // up: a stream.
                     if kind == Kind::Ordered || appends(symbol) {
                         out.push(Step::End(output));
                     }
@@ -992,13 +1151,13 @@ impl<'f, 'c> LocalFlow<'f, 'c> {
 }
 
 /// Whether the output `symbol` adds what each call writes to what earlier calls wrote: a stream
-/// (`print`, `pprint.pprint`, a stream's `write`), or raises (the first exception raised ends
-/// the writes).
+/// (`print`, `pprint.pprint`, a stream's `write`). A raise is not one: an exception raised for one
+/// element at a time names the first element that fails, which follows the set's order only when
+/// two of them fail.
 pub fn appends(symbol: &str) -> bool {
     matches!(symbol, "builtins.print" | "pprint.pprint" | "pprint.pp")
         || symbol.ends_with(".write")
         || symbol.ends_with(".writelines")
-        || is_builtin_exception(symbol)
 }
 
 /// `a op b` read as `b op' a`.

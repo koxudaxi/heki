@@ -3370,8 +3370,9 @@ changed, thousands of calls handing a global to a helper that changes it, thousa
 comprehensions or generator expressions, each over a value the function creating them binds just
 before, and, for the set orders `EFF112` follows, a chain of thousands of functions returning a
 value in a set's order up to the one writing it, a value handed down thousands of helpers to the
-one writing it, hundreds of comprehensions over one set appended to one written list, and a value
-chosen among a set and hundreds of sorted lists by a chain of branches.
+one writing it, hundreds of comprehensions over one set appended to one written list, a value
+chosen among a set and hundreds of sorted lists by a chain of branches, and a thousand stores of
+a set's element as a key, each after reads of other mappings by the same key.
 
 A change to the IR builder, a walk, a fixpoint, or a rule's state is also run over a large
 corpus of real projects before it is merged, every run under a memory cap and a timeout. No
@@ -7557,7 +7558,8 @@ The outputs are:
 - serializers: `json.dumps` / `json.dump` unless `sort_keys=True`, `yaml.dump` /
   `yaml.safe_dump` with `sort_keys=False`, `pprint.pprint` / `pprint.pformat` with
   `sort_dicts=False`, and `pprint.pp`;
-- the message of a raised builtin exception (`ValueError(...)`).
+- the message of a raised builtin exception built from the whole value
+  (`ValueError("unknown: " + ", ".join(names))`).
 
 Add your own writers with `writes-in-order` in `[[tool.heki.ecosystem]]`. The report is placed
 where the ordered value meets the output: the call whose result is written, or the place the
@@ -7573,13 +7575,23 @@ It does not report:
 - a value sorted on the way (`sorted(...)`), turned back into a set, measured (`len`), compared,
   or only tested for membership;
 - a set holding at most one element on every path to where its order is taken
-  (`if len(s) > 1: return None`, then `s.pop()`);
+  (`if len(s) > 1: return None`, then `s.pop()`), or a sequence copied from it holding at most
+  one where an item is read from it (`if len(rest) > 1: ...`, then `rest[0]`);
 - one element at a time written to its own file (`(root / name).write_text(...)` in a loop
   over the set): only an output that appends, such as a stream, writes the set's order;
+- an exception raised for one element at a time (`for name in names: check(name)`, raising
+  with `name`): it names the first element that fails, which depends on the order only when
+  two fail;
+- a mapping read back by key (`summary[path]` for each `path` of `sorted(summary)`), and a key
+  read from the mapping before and stored again (`fields[k] = fields[k].strip()`), which keeps
+  its place;
+- a set filled with the elements (`seen.update(...)`): a set has an order of its own, and
+  iterating it is a take of its own; `insert`, `update`, and `setdefault` on a value heki does
+  not know as a list or a mapping;
 - a writer whose sorting switch heki cannot evaluate (`json.dumps(data, sort_keys=flag)`), and
   `logging` and `warnings.warn`;
-- a value passed through code heki does not follow: a template engine, a container read back
-  by key, a call it cannot resolve.
+- a value passed through code heki does not follow: a template engine, a call it cannot
+  resolve.
 
 ## What a report states
 

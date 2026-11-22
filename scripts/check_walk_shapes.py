@@ -546,6 +546,19 @@ def set_or_sorted_branches(n: int) -> str:
     return SET_ORDER_HELPERS + "\n".join(lines)
 
 
+def stores_after_reads(n: int) -> str:
+    """A loop over a set storing each element as a key of one mapping, each store after a read of
+    another mapping by the same key and of the stored mapping by another key."""
+    lines = ["def filled(table: dict[str, int], other: dict[str, int], k: str) -> dict:"]
+    lines += ["    fields = {}", "    for name in names(table):"]
+    for i in range(n):
+        lines += [f"        a{i} = {{}}", f"        x{i} = a{i}[name] if other else fields[k]"]
+        lines += ["        fields[name] = other"]
+    lines += ["    return fields", "", "def top(table: dict[str, int], other: dict[str, int], path: Path) -> None:"]
+    lines += ['    path.write_text(json.dumps(filled(table, other, "k")))', ""]
+    return SET_ORDER_HELPERS + "\n".join(lines)
+
+
 # The functions `argument_marks` defines, each named by an argument list of `marked_targets`.
 MARKED_FUNCTIONS = 1000
 
@@ -695,6 +708,7 @@ FAMILIES = [
     Family(
         "set_or_sorted_branches", project=set_or_sorted_branches, placements=("project",), size=400
     ),
+    Family("stores_after_reads", project=stores_after_reads, placements=("project",), size=1000),
     Family("callers_of_one_helper", project=callers_of_one_helper, placements=("project",), size=4000),
     Family(
         "initialization_steps",

@@ -1466,12 +1466,17 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      (one memoized answer per value). The flow is a `Closure` over `(value, kind)` nodes: a whole
      value in the set's order passes through copies, phis, list / tuple / dict displays,
      formatting, `+` / `%`, `str.join`, the builtins that keep an order, `.items()` and the other
-     keeping methods, positional item reads, and into the containers it is appended to or stored
-     in; an element also passes to what is computed from it (an item looked up by it, a call's
-     result). The ends are a `return`, an output (a catalog `writes_in_order` argument with its
-     sorting keyword established off, a stream's `write`, a builtin exception's message; for one
-     element at a time only outputs that append: streams, `print`, a raise), and a project
-     call's argument (with the callee and parameter; `each` for one element at a time).
+     keeping methods, positional item reads (not from a mapping, by a text key, or from a
+     sequence the code bounds to one element there), and into the containers keeping the order
+     it is appended to or stored in (not a set, which has an order of its own; `insert`,
+     `update`, and `setdefault` only on a list or a mapping known by construction or type; a key
+     read from the mapping on every path before keeps its place when stored again); an element
+     also passes to what is computed from it (an item looked up by it, a call's result). The
+     ends are a `return`, an output (a catalog `writes_in_order` argument with its sorting
+     keyword established off, a stream's `write`, a builtin exception's message; for one element
+     at a time only outputs that append: streams and `print`, not a raise, which names the first
+     element that fails), and a project call's argument (with the callee and parameter; `each`
+     for one element at a time).
    - Propagation (`order_flow::propagate`) resolves the flows against the callees' facts: what a
      call's result carries (the callee's `returns`, or, through a callee returning a parameter,
      what the argument carries: a fixpoint over the flows that visits a flow again only when it

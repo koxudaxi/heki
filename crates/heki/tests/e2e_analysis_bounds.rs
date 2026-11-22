@@ -3802,3 +3802,34 @@ fn a_phi_of_hundreds_of_branches_is_decided_once() {
         1
     );
 }
+
+/// A loop over a set storing each element as a key of a mapping a thousand times, each store
+/// after reads of a thousand other mappings by the same key and of the stored mapping itself by
+/// another: whether the key was read from the stored mapping before is looked up by mapping and
+/// key, once per store.
+#[test]
+fn stores_after_reads_by_the_same_key_are_decided_once_each() {
+    let n = 1_000;
+    let mut lines = vec![SET_ORDER_HEAD.to_owned()];
+    lines.extend([
+        "def filled(table: dict[str, int], other: dict[str, int], k: str) -> dict:".to_owned(),
+        "    fields = {}".to_owned(),
+        "    for name in names(table):".to_owned(),
+    ]);
+    for i in 0..n {
+        lines.push(format!("        a{i} = {{}}"));
+        lines.push(format!("        x{i} = a{i}[name] if other else fields[k]"));
+        lines.push("        fields[name] = other".to_owned());
+    }
+    lines.extend([
+        "    return fields".to_owned(),
+        String::new(),
+        String::new(),
+        "def top(table: dict[str, int], other: dict[str, int], path: Path) -> None:".to_owned(),
+        "    path.write_text(json.dumps(filled(table, other, \"k\")))".to_owned(),
+    ]);
+    assert_eq!(
+        set_order_outputs("bounds_order_stores", &(lines.join("\n") + "\n")),
+        1
+    );
+}

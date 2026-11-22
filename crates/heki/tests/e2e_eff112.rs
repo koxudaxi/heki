@@ -657,6 +657,219 @@ def numbers_out(path: Path) -> None:
     writers.save_json(path, list(NUMBERS))
 "##;
 
+/// Shapes that keep or lose the order on the way: a raise for one element at a time, a mapping
+/// read back by key, a key read before and stored again, a set filled with the order, a method
+/// of an unknown receiver, and a sequence of at most one element; and what stays reported.
+const NARROWED: &str = r#"import json
+import sys
+
+FLAGS = {"draft", "hidden", "pinned"}
+NAMES = {"lat", "latitude", "LAT"}
+
+
+def require(name):
+    if not name.isidentifier():
+        raise ValueError(f"not an identifier: {name}")
+    return name
+
+
+def check_all(names: set[str]):
+    for name in names:
+        require(name)
+
+
+def message_of_all(names: set[str]):
+    raise ValueError("unknown: " + ", ".join(names))
+
+
+def normalized(fields: dict) -> dict:
+    for flag in FLAGS:
+        if isinstance(fields.get(flag), str):
+            fields[flag] = fields[flag].lower() == "true"
+    return fields
+
+
+def emit(fields: dict) -> None:
+    print(json.dumps(normalized(fields)))
+
+
+def counts(paths: set[str]) -> dict[str, int]:
+    found = {}
+    for path in paths:
+        found[path] = len(path)
+    return found
+
+
+def show_counts(paths: set[str]) -> None:
+    summary = counts(paths)
+    for path in sorted(summary):
+        print(f"{path}: {summary[path]}")
+
+
+def show_all_counts(paths: set[str]) -> None:
+    print(json.dumps(counts(paths)))
+
+
+def scan(paths: set[str]):
+    seen = set()
+    seen.update(p.upper() for p in paths)
+    return len(paths), seen
+
+
+def report_scan(paths: set[str]) -> None:
+    n, seen = scan(paths)
+    print(f"scanned={n} seen={len(seen)}")
+
+
+def widen(data, names: set[str]):
+    for name in names:
+        data.insert(0, name)
+    return data
+
+
+def show_widened(data, names: set[str]) -> None:
+    sys.stdout.write(str(widen(data, names)))
+
+
+def gather(names: set[str]):
+    out = []
+    for name in names:
+        out.insert(0, name)
+    return out
+
+
+def show_gathered(names: set[str]) -> None:
+    print(gather(names))
+
+
+def only(names: set[str]) -> str:
+    rest = list(names - {"x"})
+    if len(rest) > 1:
+        return "several"
+    return rest[0]
+
+
+def show_only(names: set[str]) -> None:
+    print(only(names))
+
+
+def first(names: set[str]) -> str:
+    rest = list(names)
+    return rest[0]
+
+
+def show_first(names: set[str]) -> None:
+    print(first(names))
+
+
+def column(columns: list[str]) -> str:
+    for c in NAMES:
+        if c in columns:
+            return c
+    return ""
+
+
+def show_column(columns: list[str]) -> None:
+    print(json.dumps({"lat": column(columns)}))
+
+
+def by_comprehension(paths: set[str]) -> None:
+    summary = {p: len(p) for p in paths}
+    for path in sorted(summary):
+        print(f"{path}: {summary[path]}")
+
+
+def by_dict_call(paths: set[str]) -> dict:
+    found = dict()
+    for path in paths:
+        found[path] = 0
+    return found
+
+
+def show_by_dict_call(paths: set[str]) -> None:
+    summary = by_dict_call(paths)
+    for path in sorted(summary):
+        print(summary[path])
+
+
+def by_key(table, key: str) -> str:
+    return table[key]
+
+
+def ordered_keys(paths: set[str]) -> list[str]:
+    return [p for p in paths]
+
+
+def show_by_key(paths: set[str]) -> None:
+    print(by_key(ordered_keys(paths), "a"))
+
+
+def into_listed(names: set[str], seed: list[str]):
+    out = [s for s in seed]
+    for name in names:
+        out.insert(0, name)
+    return out
+
+
+def show_into_listed(names: set[str]) -> None:
+    print(into_listed(names, []))
+
+
+def into_typed(names: set[str], out: list[str]):
+    for name in names:
+        out.insert(0, name)
+    return out
+
+
+def show_into_typed(names: set[str]) -> None:
+    print(into_typed(names, []))
+
+
+def into_mapping(names: set[str]):
+    out = dict()
+    for name in names:
+        out.setdefault(name, 0)
+    return out
+
+
+def show_into_mapping(names: set[str]) -> None:
+    print(into_mapping(names))
+
+
+def rewritten_later(fields: dict, names: set[str]) -> dict:
+    for name in names:
+        value = fields[name]
+        if value:
+            fields[name] = str(value)
+    return fields
+
+
+def show_rewritten_later(fields: dict, names: set[str]) -> None:
+    print(json.dumps(rewritten_later(fields, names)))
+
+
+def stored_after_other_read(fields: dict, other: dict, names: set[str]) -> dict:
+    for name in names:
+        fields[name] = other[name]
+    return fields
+
+
+def show_stored_after_other_read(fields: dict, other: dict, names: set[str]) -> None:
+    print(json.dumps(stored_after_other_read(fields, other, names)))
+
+
+def read_on_one_side(fields: dict, names: set[str], flag: bool) -> dict:
+    for name in names:
+        if flag:
+            print(fields[name])
+        fields[name] = 1
+    return fields
+
+
+def show_read_on_one_side(fields: dict, names: set[str], flag: bool) -> None:
+    print(json.dumps(read_on_one_side(fields, names, flag)))
+"#;
+
 fn project(name: &str) -> Project {
     let p = Project::new(name);
     p.write("pkg/__init__.py", "")
@@ -664,7 +877,8 @@ fn project(name: &str) -> Project {
         .write("pkg/messages.py", MESSAGES)
         .write("pkg/writers.py", WRITERS)
         .write("pkg/shapes.py", SHAPES)
-        .write("pkg/more.py", MORE);
+        .write("pkg/more.py", MORE)
+        .write("pkg/narrowed.py", NARROWED);
     p
 }
 
@@ -759,6 +973,60 @@ fn expected() -> Vec<(String, u64, String, String)> {
             "tags_either:217->json.dumps",
         ),
         d("pkg/more.py", 222, "tags_kept", "tags_kept:222->json.dumps"),
+        d(
+            "pkg/narrowed.py",
+            48,
+            "show_all_counts",
+            "counts:36->json.dumps",
+        ),
+        d(
+            "pkg/narrowed.py",
+            80,
+            "show_gathered",
+            "gather:74->builtins.print",
+        ),
+        d(
+            "pkg/narrowed.py",
+            100,
+            "show_first",
+            "first:95->builtins.print",
+        ),
+        d(
+            "pkg/narrowed.py",
+            111,
+            "show_column",
+            "column:104->json.dumps",
+        ),
+        d(
+            "pkg/narrowed.py",
+            153,
+            "show_into_listed",
+            "into_listed:147->builtins.print",
+        ),
+        d(
+            "pkg/narrowed.py",
+            163,
+            "show_into_typed",
+            "into_typed:157->builtins.print",
+        ),
+        d(
+            "pkg/narrowed.py",
+            174,
+            "show_into_mapping",
+            "into_mapping:168->builtins.print",
+        ),
+        d(
+            "pkg/narrowed.py",
+            196,
+            "show_stored_after_other_read",
+            "stored_after_other_read:190->json.dumps",
+        ),
+        d(
+            "pkg/narrowed.py",
+            208,
+            "show_read_on_one_side",
+            "read_on_one_side:200->json.dumps",
+        ),
         d("pkg/shapes.py", 47, "handed", "handed:47->json.dumps"),
         d(
             "pkg/shapes.py",

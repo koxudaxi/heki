@@ -313,8 +313,9 @@ changed, thousands of calls handing a global to a helper that changes it, thousa
 comprehensions or generator expressions, each over a value the function creating them binds just
 before, and, for the set orders `EFF112` follows, a chain of thousands of functions returning a
 value in a set's order up to the one writing it, a value handed down thousands of helpers to the
-one writing it, hundreds of comprehensions over one set appended to one written list, and a value
-chosen among a set and hundreds of sorted lists by a chain of branches.
+one writing it, hundreds of comprehensions over one set appended to one written list, a value
+chosen among a set and hundreds of sorted lists by a chain of branches, and a thousand stores of
+a set's element as a key, each after reads of other mappings by the same key.
 
 A change to the IR builder, a walk, a fixpoint, or a rule's state is also run over a large
 corpus of real projects before it is merged, every run under a memory cap and a timeout. No
