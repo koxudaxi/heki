@@ -102,6 +102,14 @@ release can change rules, configuration keys, diagnostics, and output formats.
   on stays a hand-on, and a read is matched as a construction is. The other values report as
   before.
 
+- The ecosystem catalog says what a call writes in the order of its elements (`writes_in_order`):
+  the argument a call writes to a file or a stream, or serializes into text, and the keyword
+  argument that sorts mapping keys first, with whether the call sorts without it. Entries:
+  `print`, `pathlib.Path.write_text` / `write_bytes`, `json.dumps` / `json.dump` (`sort_keys`),
+  `pprint.pprint` / `pprint.pformat` (`sort_dicts`, sorting by default), `pprint.pp`, and
+  PyYAML's `yaml.dump` / `yaml.safe_dump` (`sort_keys`, sorting by default).
+  `[[tool.heki.ecosystem]]` takes `writes-in-order` for library symbols.
+
 ### Changed
 
 - `MUT201`, `MUT203`, `MUT204`: an access matching several targets of one contract is reported
