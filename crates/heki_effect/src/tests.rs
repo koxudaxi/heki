@@ -2045,6 +2045,7 @@ fn reads_on_every_path_are_the_loads_and_self_calls_every_normal_return_passes()
 }
 
 const KEPT_REMOVALS_PY: &str = r#"
+import asyncio
 import functools
 import json
 
@@ -2179,6 +2180,11 @@ def merged(first: str, extra: dict[str, int]) -> list[str]:
     return sorted({first: 1, **extra})
 
 
+async def locked(h: Holder, lock: asyncio.Lock) -> None:
+    async with lock:
+        h.items.append("x")
+
+
 class Feed:
     def __init__(self) -> None:
         self.items: list[str] = []
@@ -2259,6 +2265,8 @@ fn removals_of_kept_values_by_name_and_by_unknown_code() {
     // A dict display used once hands on its keys; a `**` unpacking adds keys of another value.
     assert_eq!(removes("keyed"), KeptRemoval::Nothing);
     assert_eq!(removes("merged"), KeptRemoval::Any);
+    // Leaving an `async with` awaits `__aexit__`: other tasks run then, whatever the manager.
+    assert_eq!(removes("locked"), KeptRemoval::Any);
     // A generator runs its body while what it returns is iterated: each step of the loop is a
     // point of the generator's removals (its summary's), after the write before the loop.
     assert_eq!(removes("Feed.refill"), named("count"));

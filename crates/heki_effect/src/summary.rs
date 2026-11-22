@@ -2423,8 +2423,11 @@ impl<'a> Extractor<'a> {
                     None => Some(KeptRemovalKind::Any),
                 }
             }
-            // Another coroutine or the generator's consumer runs while the function waits.
-            InstKind::Await { .. } | InstKind::YieldFrom { .. } => Some(KeptRemovalKind::Any),
+            // Another coroutine or the generator's consumer runs while the function waits: at
+            // an `await`, the implicit awaits of `async for` and `async with` (`__anext__`,
+            // `__aenter__`, `__aexit__`), and `yield from`.
+            kind if kind.suspends() => Some(KeptRemovalKind::Any),
+            InstKind::YieldFrom { .. } => Some(KeptRemovalKind::Any),
             InstKind::Yield { .. } => Some(KeptRemovalKind::Suspends),
             // A context manager's `__enter__` and `__exit__`, and an iterable's `__iter__` and its
             // iterator's `__next__`, are not followed in a project class: they may run anything.

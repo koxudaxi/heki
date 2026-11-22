@@ -938,7 +938,8 @@ which module imports which.
    `CacheFlow` also holds the points that may remove or replace a value kept in some object's
    `__dict__`: `MayRemove(name)` (`del obj.<name>`, an item of a `__dict__` stored or removed
    under that key), `MayRemoveAny` (a `__dict__` cleared, replaced, or handed to a call; an
-   `await` or a `yield`, while other code runs; a call heki cannot resolve, of a library outside
+   `await`, the implicit awaits of `async for` and `async with`, or a `yield`, while other code
+   runs; a call heki cannot resolve, of a library outside
    the catalog, or of one that may run project code by its `[[invokes]]` entry, section 4.2; a
    project call whose targets are not every implementation it can run; the iteration of a value
    that is no builtin container, no project generator's result, and no `lazy` call's; a
