@@ -156,11 +156,12 @@ impl Rule<'_, '_> {
                 continue;
             }
             let (target, what) = self.what(&ro, &w.attr);
-            let message = format!(
-                "`{}` changes {what} in place ({})",
-                key.qualname,
-                w.kind.as_str()
-            );
+            // `describe` says "in place", which the message already does.
+            let how = match w.kind {
+                WriteKind::AliasContainerMut => " (through an alias)",
+                _ => "",
+            };
+            let message = format!("`{}` changes {what} in place{how}", key.qualname);
             self.emit(out, "MUT108", unit, key, w.span, target, message, FIX, &[]);
         }
     }
@@ -377,7 +378,7 @@ impl Rule<'_, '_> {
         }
         let (target, named) = self.what(&ro, attr);
         let message = format!(
-            "`{}` changes {named} in place via `{}` (indirect_helper)",
+            "`{}` changes {named} in place via `{}`",
             call.site.caller.qualname,
             call.bc.callee.fqn()
         );

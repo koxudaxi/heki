@@ -62,6 +62,19 @@ impl Join for Or {
     }
 }
 
+/// A bit mask that holds on every path (contracts announced), the intersection of the masks
+/// joined: a must-question's fact, which grows by losing bits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct And(pub u64);
+
+impl Join for And {
+    fn join(&mut self, other: &Self) -> bool {
+        let grew = self.0 & !other.0 != 0;
+        self.0 &= other.0;
+        grew
+    }
+}
+
 /// A set of keys, ordered without duplicates: a result listing a key twice cannot be built,
 /// and joining a set costs about its own size.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

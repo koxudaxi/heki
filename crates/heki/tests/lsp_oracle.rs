@@ -509,6 +509,12 @@ const SPELLED_STUB: &str = "import builtins\n\n\ndef name(x: builtins.str) -> No
 const LEVELS: &str = "LEVELS = [\"low\", \"mid\", \"high\"]\n";
 const LEVELS_GROWN: &str =
     "LEVELS = [\"low\", \"mid\", \"high\"]\n\n\ndef add(level):\n    LEVELS.append(level)\n";
+// The rows a loop steps through (`OPT103`), by the class another module binds the cursor's name
+// to: the rewrite is exact while it is `sqlite3.Cursor`, whose `execute` the catalog sizes, and
+// heuristic once it is a project class ("Trip count open").
+const STORAGE: &str = "from sqlite3 import Cursor\n";
+const STORAGE_OWN: &str = "class Cursor:\n    def execute(self, query):\n        return [query]\n";
+const ROWS_USER: &str = "from pkg.storage import Cursor\n\n\ndef ids(cursor: Cursor):\n    out = ()\n    for row in cursor.execute(\"SELECT id FROM t\"):\n        out = out + (row,)\n    return out\n";
 // A module-level list its own loop treats as fixed, and the module that may grow it.
 const QUEUE_CFG: &str =
     "import httpx\n\nQUEUE = []\n\n\ndef run():\n    for item in QUEUE:\n        httpx.Client()\n";
@@ -1974,6 +1980,27 @@ fn steps_small_displays() -> Vec<Step> {
             vec![save("pkg/sniff_more.py", SNIFF_MORE)],
         )
         .absent(&[("pkg/sniff_user.py", "OPT112")]),
+        // "Trip count open" of a rewrite (`DataOrigins::of_loop_items`): the rows of a call the
+        // catalog sizes, through the class another module binds the receiver's annotation to. The
+        // report stays, exact or heuristic, and the server must change its certainty with the CLI.
+        Step::new(
+            "a module loops over the rows of a cursor class another module re-exports",
+            vec![
+                Action::Create("pkg/storage.py", STORAGE.to_owned()),
+                Action::Create("pkg/rows_user.py", ROWS_USER.to_owned()),
+            ],
+        )
+        .present(&[("pkg/rows_user.py", "OPT103")]),
+        Step::new(
+            "the other module defines a cursor class of its own",
+            vec![save("pkg/storage.py", STORAGE_OWN)],
+        )
+        .present(&[("pkg/rows_user.py", "OPT103")]),
+        Step::new(
+            "it re-exports the library's cursor again",
+            vec![save("pkg/storage.py", STORAGE)],
+        )
+        .present(&[("pkg/rows_user.py", "OPT103")]),
         // `ModuleDecls::grown_globals`: the module owning the list and a third module reading
         // it are re-checked when another module starts or stops growing it.
         Step::new(
@@ -3819,6 +3846,71 @@ fn steps_configuration() -> Vec<Step> {
     ]
 }
 
+const MEMBER_PYPROJECT: &str = "[project]\nname = \"member\"\n";
+const MEMBER_HELPER: &str = "import time\n\n\ndef wait():\n    time.sleep(1)\n";
+const MEMBER_CALLER: &str = "from acme_core.io import wait\n\n\nasync def go():\n    wait()\n";
+const MEMBER_CALL: &[(&str, &str)] = &[("packages/api/acme_api/server.py", "EFF101")];
+
+/// The members of a workspace are source roots: the workspace tables, a member's
+/// `pyproject.toml`, and a `hatch.toml` change while the server runs.
+fn steps_workspace_members() -> Vec<Step> {
+    let uv = format!("{CONFIG}\n[tool.uv.workspace]\nmembers = [\"packages/*\"]\n");
+    vec![
+        Step::new(
+            "two directories that are not yet members",
+            vec![
+                Action::Write("packages/core/pyproject.toml", MEMBER_PYPROJECT.to_owned()),
+                Action::Create(
+                    "packages/core/src/acme_core/io.py",
+                    MEMBER_HELPER.to_owned(),
+                ),
+                Action::Write("packages/api/pyproject.toml", MEMBER_PYPROJECT.to_owned()),
+                Action::Create("packages/api/acme_api/__init__.py", String::new()),
+                Action::Create("packages/api/acme_api/server.py", MEMBER_CALLER.to_owned()),
+            ],
+        )
+        .absent(MEMBER_CALL),
+        Step::new(
+            "the configuration makes them workspace members",
+            vec![Action::Configure(uv.clone())],
+        )
+        .present(MEMBER_CALL),
+        Step::new(
+            "a member loses its pyproject.toml",
+            vec![Action::Delete("packages/core/pyproject.toml")],
+        )
+        .absent(MEMBER_CALL),
+        Step::new(
+            "the member's pyproject.toml is back",
+            vec![Action::Write(
+                "packages/core/pyproject.toml",
+                MEMBER_PYPROJECT.to_owned(),
+            )],
+        )
+        .present(MEMBER_CALL),
+        Step::new(
+            "an exclude glob drops the member",
+            vec![Action::Configure(format!(
+                "{uv}exclude = [\"packages/core\"]\n"
+            ))],
+        )
+        .absent(MEMBER_CALL),
+        Step::new(
+            "a hatch.toml lists the members",
+            vec![Action::Write(
+                "hatch.toml",
+                "[envs.default]\nworkspace.members = [\"packages/core\"]\n".to_owned(),
+            )],
+        )
+        .present(MEMBER_CALL),
+        Step::new(
+            "the hatch.toml is deleted",
+            vec![Action::Delete("hatch.toml")],
+        )
+        .absent(MEMBER_CALL),
+    ]
+}
+
 /// Project-wide assumptions: a module patching builtins, and a typing stub importing them.
 fn steps_project_assumptions() -> Vec<Step> {
     vec![
@@ -4421,6 +4513,7 @@ sessions!(editing, Session::start, {
     keys_fresh_strict: steps_keys_fresh_strict,
     files: steps_files,
     configuration: steps_configuration,
+    workspace_members: steps_workspace_members,
     project_assumptions: steps_project_assumptions,
     declarations: steps_declarations,
     re_exports: steps_re_exports,
