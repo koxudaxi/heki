@@ -73,9 +73,9 @@ pub use readonly::{
 };
 pub use report::{BoundaryReport, boundary_reports, boundary_reports_in};
 pub use resolver::{
-    Callee, ClassDecl, DeclKeys, DeclPasses, DeepCopy, FunctionDecl, HeldSentinel, ModuleDecls,
-    ModuleLayout, NamedAttr, ProjectDecls, ReadOnlyAttr, ReadOnlyKind, StrConstant, StrValue,
-    TypeCtx, Val, aliases_of, detect_source_roots, func_qualname, module_name_for_path,
+    Callee, CapturedParams, ClassDecl, DeclKeys, DeclPasses, DeepCopy, FunctionDecl, HeldSentinel,
+    ModuleDecls, ModuleLayout, NamedAttr, ProjectDecls, ReadOnlyAttr, ReadOnlyKind, StrConstant,
+    StrValue, TypeCtx, Val, aliases_of, detect_source_roots, func_qualname, module_name_for_path,
     resolve_relative_module, self_aliases,
 };
 pub use summary::{BLOCKING_EFFECTS, offloaded_callable};
