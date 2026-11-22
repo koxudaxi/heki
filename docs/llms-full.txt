@@ -2319,14 +2319,14 @@ Shared state written behind its owner's back: stale caches, write-ownership cont
 
 | Code | Name | Message | |
 | ---- | ---- | ------- | ------: |
-| MUT101 | [cached-property-stale-mutation](https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/) | Mutating an attribute read by `@cached_property` without invalidating the cache. | ≈ 🔌 🧪 |
+| MUT101 | [cached-property-stale-mutation](https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/) | Mutating an attribute read by `@cached_property` without invalidating the cache. | 🔌 🧪 |
 | MUT103 | [summary-effect-regression](https://heki.koxudaxi.dev/rules/summary-effect-regression/) | Interprocedural mutation/escape/effect regression against saved summary snapshot. | ≈ 🔌 |
 | MUT106 | [iterator-double-consumption](https://heki.koxudaxi.dev/rules/iterator-double-consumption/) | Opt-in: consuming a single-pass iterator or generator a second time (the second pass sees no items). | ≈ 🔌 |
 | MUT107 | [hash-attr-mutation](https://heki.koxudaxi.dev/rules/hash-attr-mutation/) | Opt-in: a method other than the initializers rebinds or changes in place an attribute that the `__hash__` of its instances reads. | ≈ 🔌 |
 | MUT108 | [readonly-type-mutation](https://heki.koxudaxi.dev/rules/readonly-type-mutation/) | Opt-in: changing in place a field that a standard type declares read-only (frozen dataclass / `NamedTuple` / `dataclass_transform` fields, `Final` / `ReadOnly` attributes, `ReadOnly` `TypedDict` keys), directly, through an alias, or in a helper. | ≈ 🔌 |
 | MUT109 | [write-without-invalidation](https://heki.koxudaxi.dev/rules/write-without-invalidation/) | Writing a declared `invalidation` target (directly, via alias, or via helper) without reaching one of its invalidators on every path to the function's return. | ≈ 📜 |
 | MUT110 | [readonly-param-mutation](https://heki.koxudaxi.dev/rules/readonly-param-mutation/) | Handing a `Sequence` / `Mapping` / `ReadOnly` parameter, as itself, to a function whose body (or a helper's) changes it in place at a named line. |  |
-| MUT111 | [cached-property-stale-read](https://heki.koxudaxi.dev/rules/cached-property-stale-read/) | Opt-in: reading a `@cached_property` that a method of its class family can leave stale (a write `MUT101` reports). | ≈ 🔌 🧪 |
+| MUT111 | [cached-property-stale-read](https://heki.koxudaxi.dev/rules/cached-property-stale-read/) | Opt-in: reading a `@cached_property` that a method of its class family can leave stale (a write `MUT101` reports). | 🔌 🧪 |
 | MUT112 | [conditional-ownership-mutation](https://heki.koxudaxi.dev/rules/conditional-ownership-mutation/) | Opt-in: changing in place a value that is a new object on one path and borrowed state (a parameter, an attribute, a global, or what a function returns of such state) on another. | ≈ 🔌 🧪 |
 | MUT113 | [iterated-container-mutation](https://heki.koxudaxi.dev/rules/iterated-container-mutation/) | Opt-in: a dict, set, or deque of the instance changed while a method iterates it, by another method while a generator is suspended in the loop or by a function the loop's body calls (the next step raises `RuntimeError`). | ≈ 🔌 🧪 |
 | MUT114 | [cached-result-mutation](https://heki.koxudaxi.dev/rules/cached-result-mutation/) | Changing in place the list, dict, or set that a `functools.lru_cache` / `functools.cache` function returned (the cache hands the same object to later calls with the same arguments), directly or through the functions that return it. |  |
@@ -2522,7 +2522,14 @@ report, whose rewrite needed the set-order obligation, left the tier); the holdo
 every exact report of one run on the 100 packages of the frozen holdout corpus. `OPT113`'s
 census reports are those of its exact tier with the plain-key premise, all among the reports
 the census of the earlier tier checked by hand. The census of `EFF101` counts its boundaries
-before reports reaching one waiting call are folded together.
+before reports reaching one waiting call are folded together. `MUT101` and `MUT111` are
+certified but opt-in: their census was checked with the build that moves setup steps to the
+heuristic tier, and their holdout run with the build before it, whose exact reports include every
+one of the later build's. Reviewers judged their harm: of `MUT101`'s 27 exact reports 1 is P and
+26 are B (two of three reviewers judged the three changes of a Django `Q` that its cached
+`identity` hashes benign: Django changes only new `Q` objects in place); of `MUT111`'s 61, 0 are
+P by one reviewer and 2 by the other. The real-harm share is below the 10% a default rule needs
+(`heki recommend`'s bar), so both stay off by default.
 
 | Rule | Certified | Census: reports / false | Holdout: reports / false |
 | ---- | --------- | ----------------------: | -----------------------: |
@@ -2540,6 +2547,8 @@ before reports reaching one waiting call are folded together.
 | `DATA101` | 0.2.0 | 6 / 0 | 0 / 0 |
 | `MUT110` | 0.2.0 | 5 / 0 | 2 / 0 |
 | `MUT114` | 0.2.0 | 5 / 0 | 5 / 0 |
+| `MUT101` | 0.2.3 (opt-in, experimental) | 27 / 0 | 1 / 0 |
+| `MUT111` | 0.2.3 (opt-in, experimental) | 61 / 0 | 2 / 0 |
 
 ## Measurements
 
@@ -3941,20 +3950,20 @@ Source: https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/
 
 # cached-property-stale-mutation (MUT101)
 
-Family: Mutation & State (MUT) · Heuristic · Opt-in · Experimental · Severity `error` (a bug) · No automatic fix
+Family: Mutation & State (MUT) · Exact · Opt-in · Experimental · Severity `error` (a bug) · No automatic fix
 
 Mutating an attribute read by `@cached_property` without invalidating the cache.
-
-!!! note "Heuristic"
-
-    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs only when `select` or `extend-select` names its code or name. It has not been measured yet. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 !!! warning "Experimental"
 
     Its precision outside a few code bases is still low. Experimental features can still change in behavior or precision, or be removed, in any release, and each change is listed in the release notes. An opt-in rule that is not experimental is stable and only off by default. See [Experimental Features](https://heki.koxudaxi.dev/experimental/).
 
 ## What it does
-Opt-in: enable it with `extend-select = ["MUT101"]`.
+Opt-in: enable it with `extend-select = ["MUT101"]`. Its exact reports are true claims (census
+on the Stage 0-A corpus: 27 exact reports, none false; holdout: 1, none false), but few show real
+harm (1 of the 27 by majority of three reviewers), below the 10% share a default rule needs: most are writes that run before the property
+is first read, keep the value's meaning, or run on objects whose cached value nothing reads
+again.
 
 Checks for methods that rebind or mutate an attribute that a `@functools.cached_property`
 of the same class (or of a subclass) reads, without invalidating the cached value. A method the
@@ -3966,18 +3975,55 @@ not (a `def cache(fn)` of its own), and a name bound by neither counts by its sp
 
 ## What a report states
 
-A report states that a method that can run after initialization rebinds or changes an attribute that
-a `@cached_property` of the class family reads, and that a path after the write leaves the cached
-value in place.
+An exact report states that whenever the method runs to its normal return on an instance of any
+class that runs it, that instance holds either no value of the cached property or the value the
+getter computed before the write, from the attribute the write rebinds or changes: the next read
+of the property returns a value computed from the attribute's earlier state.
 
 Its premises:
 
-- **Reads**: the cached property reads the attribute, directly or through calls and property reads.
-  Open through a call: one path of the callee is enough.
-- **After initialization**: the method is not an initialization hook. Open: hooks are recognized by
-  their names (listed above).
-- **Not invalidated**: some path from the write to the method's return clears no cache. Established
-  on the method's control flow.
+- **Cached property**: every class the instance may be (R2, R5) that names the property gets it
+  from a synchronous getter, the first definition along its MRO with no base heki does not know
+  before it, decorated by a cached-property decorator the ecosystem catalog lists as keeping the
+  value in the instance `__dict__` (`[[cached_properties]]`: `functools.cached_property` and
+  Django's, Werkzeug's, propcache's, and kombu's, R3; with Werkzeug's, which keeps it in a slot on
+  an instance without a `__dict__`, no class along the MRO defines `__slots__`), and none has a
+  metaclass other than `type` or `abc.ABCMeta`. An instance of a class that names nothing under
+  the property's name holds no value of it, so the claim says nothing of it. Established.
+- **Reads on every path**: the getter reads the written attribute, with the written constant key
+  or as a whole, on every path on which it returns normally, itself or through `self` methods and
+  property reads it makes on every such path. Each of those runs its body at every call (no cache
+  decorator) and has the fact. Established.
+- **Every implementation**: each of those calls has as its targets every implementation it can
+  run (R2, R5). Established.
+- **Plain write**: the write is one of two kinds. It may rebind or delete the attribute with a
+  plain store: no property, descriptor, `__setattr__`, `__delattr__`, or metaclass heki does not
+  know in a class the instance may be, and every base a project class or a plain one. Or it may
+  change in place the builtin list, dict, or set the attribute holds by its type, through a
+  changing method or an item store that no project subclass of the container replaces.
+  Established.
+- **Kept to the return**: no point between the write and the method's normal return may remove or
+  replace the kept value, exception edges into handlers included. That rules out a `del`, store,
+  or `__dict__` removal of it, clearing or replacing a `__dict__`, an `await` (also the implicit
+  ones of `async for` and `async with`), and a `yield`. It also rules out every call except two
+  kinds: a project call whose targets are every implementation it can run and remove nothing, and
+  a call of a library the catalog covers that runs no project code by its `[[invokes]]` entry, or,
+  without one, is handed no callable, no instance of a project class, and no value of unknown
+  type (R3). Established.
+
+Not part of the claim: whether the method runs after the property was first read. A write that
+runs only during two-phase setup makes the claim hold vacuously, so a setup step stays heuristic
+(**After setup** is open): a finalizer (`__del__`), a method that an `__init__` along the MRO of a
+class the instance may be calls on the instance or stores through (a property setter), and lazy
+setup through a second cached property (the writer is a listed cached-property getter that no
+function of the project invalidates by name, and the property's getter reads it on every path).
+
+A heuristic report states that a method that can run after initialization rebinds or changes an
+attribute that a `@cached_property` of the class family reads, and that a path after the write
+leaves the cached value in place. Open: the property may read the attribute on some paths only
+(through a call, one path of the callee is enough), initialization hooks are recognized by their
+names, a `cached_property` of a library the catalog does not list counts by its name, and calls
+after the write may remove the value.
 
 ## Why is this bad?
 A `cached_property` computes its value once and stores it in the instance `__dict__`. Once the
@@ -4061,13 +4107,9 @@ Source: https://heki.koxudaxi.dev/rules/cached-property-stale-read/
 
 # cached-property-stale-read (MUT111)
 
-Family: Mutation & State (MUT) · Heuristic · Opt-in · Experimental · Severity `error` (a bug) · No automatic fix
+Family: Mutation & State (MUT) · Exact · Opt-in · Experimental · Severity `error` (a bug) · No automatic fix
 
 Opt-in: reading a `@cached_property` that a method of its class family can leave stale (a write `MUT101` reports).
-
-!!! note "Heuristic"
-
-    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs only when `select` or `extend-select` names its code or name. It has not been measured yet. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 !!! warning "Experimental"
 
@@ -4077,7 +4119,10 @@ Opt-in: reading a `@cached_property` that a method of its class family can leave
 Checks for functions that read a `@functools.cached_property` that a method can leave stale: a
 method that changes an attribute the property reads without invalidating the cached value, as
 `MUT101` reports it. The rule is opt-in: enable it with `--extend-select MUT111` or
-`extend-select = ["MUT111"]`.
+`extend-select = ["MUT111"]`. Its exact reports are true claims (census on the Stage 0-A corpus:
+61 exact reports, none false; holdout: 2, none false), but at most 2 of the 61 show real harm,
+below the 10% share a default rule needs: they read values that the writers behind them leave
+stale only in setup or on objects nothing reads again.
 
 A read is one in the function's own body, on any object of the class: `self.prop`, `obj.prop`
 on a parameter, attribute, or value whose class heki knows (as for `MUT203`),
@@ -4101,13 +4146,34 @@ initialization, or that no method changes.
 
 ## What a report states
 
-A report states that the function reads a `@cached_property` that a write `MUT101` reports can leave
-stale on the instances the object may be.
+An exact report states that the function's own body reads the cached property on an object every
+class of which runs a write that `MUT101` reports exact: the value read may have been computed
+before that write and kept after it.
+
+The first five premises are those of that `MUT101` report, as its page states them.
 
 Its premises:
 
-- **Stale**: the premises of the `MUT101` report behind it, which are open where its page says so.
-- **Reads**: the function's own body reads the property. Established.
+- **Cached property**: the getter's decorator is one the catalog lists, the first definition along
+  each class's MRO. Established.
+- **Reads on every path**: the getter reads the written attribute on every path on which it
+  returns normally. Established.
+- **Every implementation**: each call on the getter's chain has every implementation as its
+  targets. Established.
+- **Plain write**: the write is a plain store or an in-place change of a builtin container no
+  project subclass replaces. Established.
+- **Kept to the return**: nothing between the write and the writer's normal return may remove the
+  kept value. Established.
+- **Reads the property**: the function's own body reads the property on the object (`obj.prop`, a
+  constant `getattr`, an item of `obj.__dict__`). Established.
+- **Runs the writer**: every class the object may be (R2) gets the property from a
+  `@cached_property` getter and runs a write of it whose `MUT101` report is exact: the first
+  definition of the writing method along its MRO, or one that the definitions before it reach
+  through `super()` without invalidating the property. Established.
+
+A heuristic report states that the function reads a `@cached_property` that a write `MUT101`
+reports can leave stale on the instances the object may be. Open: the premises of the `MUT101`
+report behind it, which are open where its page says so.
 
 ## Why is this bad?
 A `cached_property` computes its value once and keeps it in the instance `__dict__`. After a

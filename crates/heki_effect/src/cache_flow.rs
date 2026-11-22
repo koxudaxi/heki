@@ -85,6 +85,15 @@ pub enum KeptRemoval {
 }
 
 impl KeptRemoval {
+    /// Whether the value kept under `name` may be removed or replaced.
+    pub fn removes(&self, name: &str) -> bool {
+        match self {
+            Self::Nothing => false,
+            Self::Named(names) => names.contains(name),
+            Self::Any => true,
+        }
+    }
+
     pub fn add(&mut self, name: &str) {
         match self {
             Self::Nothing => *self = Self::Named(Box::new(BTreeSet::from([name.to_owned()]))),

@@ -2,20 +2,20 @@
 
 # cached-property-stale-mutation (MUT101)
 
-Family: Mutation & State (MUT) · Heuristic · Opt-in · Experimental · Severity `error` (a bug) · No automatic fix
+Family: Mutation & State (MUT) · Exact · Opt-in · Experimental · Severity `error` (a bug) · No automatic fix
 
 Mutating an attribute read by `@cached_property` without invalidating the cache.
-
-!!! note "Heuristic"
-
-    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs only when `select` or `extend-select` names its code or name. It has not been measured yet. See [Rule Precision](../precision.md).
 
 !!! warning "Experimental"
 
     Its precision outside a few code bases is still low. Experimental features can still change in behavior or precision, or be removed, in any release, and each change is listed in the release notes. An opt-in rule that is not experimental is stable and only off by default. See [Experimental Features](../experimental.md).
 
 ## What it does
-Opt-in: enable it with `extend-select = ["MUT101"]`.
+Opt-in: enable it with `extend-select = ["MUT101"]`. Its exact reports are true claims (census
+on the Stage 0-A corpus: 27 exact reports, none false; holdout: 1, none false), but few show real
+harm (1 of the 27 by majority of three reviewers), below the 10% share a default rule needs: most are writes that run before the property
+is first read, keep the value's meaning, or run on objects whose cached value nothing reads
+again.
 
 Checks for methods that rebind or mutate an attribute that a `@functools.cached_property`
 of the same class (or of a subclass) reads, without invalidating the cached value. A method the
@@ -27,18 +27,55 @@ not (a `def cache(fn)` of its own), and a name bound by neither counts by its sp
 
 ## What a report states
 
-A report states that a method that can run after initialization rebinds or changes an attribute that
-a `@cached_property` of the class family reads, and that a path after the write leaves the cached
-value in place.
+An exact report states that whenever the method runs to its normal return on an instance of any
+class that runs it, that instance holds either no value of the cached property or the value the
+getter computed before the write, from the attribute the write rebinds or changes: the next read
+of the property returns a value computed from the attribute's earlier state.
 
 Its premises:
 
-- **Reads**: the cached property reads the attribute, directly or through calls and property reads.
-  Open through a call: one path of the callee is enough.
-- **After initialization**: the method is not an initialization hook. Open: hooks are recognized by
-  their names (listed above).
-- **Not invalidated**: some path from the write to the method's return clears no cache. Established
-  on the method's control flow.
+- **Cached property**: every class the instance may be (R2, R5) that names the property gets it
+  from a synchronous getter, the first definition along its MRO with no base heki does not know
+  before it, decorated by a cached-property decorator the ecosystem catalog lists as keeping the
+  value in the instance `__dict__` (`[[cached_properties]]`: `functools.cached_property` and
+  Django's, Werkzeug's, propcache's, and kombu's, R3; with Werkzeug's, which keeps it in a slot on
+  an instance without a `__dict__`, no class along the MRO defines `__slots__`), and none has a
+  metaclass other than `type` or `abc.ABCMeta`. An instance of a class that names nothing under
+  the property's name holds no value of it, so the claim says nothing of it. Established.
+- **Reads on every path**: the getter reads the written attribute, with the written constant key
+  or as a whole, on every path on which it returns normally, itself or through `self` methods and
+  property reads it makes on every such path. Each of those runs its body at every call (no cache
+  decorator) and has the fact. Established.
+- **Every implementation**: each of those calls has as its targets every implementation it can
+  run (R2, R5). Established.
+- **Plain write**: the write is one of two kinds. It may rebind or delete the attribute with a
+  plain store: no property, descriptor, `__setattr__`, `__delattr__`, or metaclass heki does not
+  know in a class the instance may be, and every base a project class or a plain one. Or it may
+  change in place the builtin list, dict, or set the attribute holds by its type, through a
+  changing method or an item store that no project subclass of the container replaces.
+  Established.
+- **Kept to the return**: no point between the write and the method's normal return may remove or
+  replace the kept value, exception edges into handlers included. That rules out a `del`, store,
+  or `__dict__` removal of it, clearing or replacing a `__dict__`, an `await` (also the implicit
+  ones of `async for` and `async with`), and a `yield`. It also rules out every call except two
+  kinds: a project call whose targets are every implementation it can run and remove nothing, and
+  a call of a library the catalog covers that runs no project code by its `[[invokes]]` entry, or,
+  without one, is handed no callable, no instance of a project class, and no value of unknown
+  type (R3). Established.
+
+Not part of the claim: whether the method runs after the property was first read. A write that
+runs only during two-phase setup makes the claim hold vacuously, so a setup step stays heuristic
+(**After setup** is open): a finalizer (`__del__`), a method that an `__init__` along the MRO of a
+class the instance may be calls on the instance or stores through (a property setter), and lazy
+setup through a second cached property (the writer is a listed cached-property getter that no
+function of the project invalidates by name, and the property's getter reads it on every path).
+
+A heuristic report states that a method that can run after initialization rebinds or changes an
+attribute that a `@cached_property` of the class family reads, and that a path after the write
+leaves the cached value in place. Open: the property may read the attribute on some paths only
+(through a call, one path of the callee is enough), initialization hooks are recognized by their
+names, a `cached_property` of a library the catalog does not list counts by its name, and calls
+after the write may remove the value.
 
 ## Why is this bad?
 A `cached_property` computes its value once and stores it in the instance `__dict__`. Once the

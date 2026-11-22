@@ -2,13 +2,9 @@
 
 # cached-property-stale-read (MUT111)
 
-Family: Mutation & State (MUT) · Heuristic · Opt-in · Experimental · Severity `error` (a bug) · No automatic fix
+Family: Mutation & State (MUT) · Exact · Opt-in · Experimental · Severity `error` (a bug) · No automatic fix
 
 Opt-in: reading a `@cached_property` that a method of its class family can leave stale (a write `MUT101` reports).
-
-!!! note "Heuristic"
-
-    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs only when `select` or `extend-select` names its code or name. It has not been measured yet. See [Rule Precision](../precision.md).
 
 !!! warning "Experimental"
 
@@ -18,7 +14,10 @@ Opt-in: reading a `@cached_property` that a method of its class family can leave
 Checks for functions that read a `@functools.cached_property` that a method can leave stale: a
 method that changes an attribute the property reads without invalidating the cached value, as
 `MUT101` reports it. The rule is opt-in: enable it with `--extend-select MUT111` or
-`extend-select = ["MUT111"]`.
+`extend-select = ["MUT111"]`. Its exact reports are true claims (census on the Stage 0-A corpus:
+61 exact reports, none false; holdout: 2, none false), but at most 2 of the 61 show real harm,
+below the 10% share a default rule needs: they read values that the writers behind them leave
+stale only in setup or on objects nothing reads again.
 
 A read is one in the function's own body, on any object of the class: `self.prop`, `obj.prop`
 on a parameter, attribute, or value whose class heki knows (as for `MUT203`),
@@ -42,13 +41,34 @@ initialization, or that no method changes.
 
 ## What a report states
 
-A report states that the function reads a `@cached_property` that a write `MUT101` reports can leave
-stale on the instances the object may be.
+An exact report states that the function's own body reads the cached property on an object every
+class of which runs a write that `MUT101` reports exact: the value read may have been computed
+before that write and kept after it.
+
+The first five premises are those of that `MUT101` report, as its page states them.
 
 Its premises:
 
-- **Stale**: the premises of the `MUT101` report behind it, which are open where its page says so.
-- **Reads**: the function's own body reads the property. Established.
+- **Cached property**: the getter's decorator is one the catalog lists, the first definition along
+  each class's MRO. Established.
+- **Reads on every path**: the getter reads the written attribute on every path on which it
+  returns normally. Established.
+- **Every implementation**: each call on the getter's chain has every implementation as its
+  targets. Established.
+- **Plain write**: the write is a plain store or an in-place change of a builtin container no
+  project subclass replaces. Established.
+- **Kept to the return**: nothing between the write and the writer's normal return may remove the
+  kept value. Established.
+- **Reads the property**: the function's own body reads the property on the object (`obj.prop`, a
+  constant `getattr`, an item of `obj.__dict__`). Established.
+- **Runs the writer**: every class the object may be (R2) gets the property from a
+  `@cached_property` getter and runs a write of it whose `MUT101` report is exact: the first
+  definition of the writing method along its MRO, or one that the definitions before it reach
+  through `super()` without invalidating the property. Established.
+
+A heuristic report states that the function reads a `@cached_property` that a write `MUT101`
+reports can leave stale on the instances the object may be. Open: the premises of the `MUT101`
+report behind it, which are open where its page says so.
 
 ## Why is this bad?
 A `cached_property` computes its value once and keeps it in the instance `__dict__`. After a

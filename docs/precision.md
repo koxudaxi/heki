@@ -134,7 +134,14 @@ report, whose rewrite needed the set-order obligation, left the tier); the holdo
 every exact report of one run on the 100 packages of the frozen holdout corpus. `OPT113`'s
 census reports are those of its exact tier with the plain-key premise, all among the reports
 the census of the earlier tier checked by hand. The census of `EFF101` counts its boundaries
-before reports reaching one waiting call are folded together.
+before reports reaching one waiting call are folded together. `MUT101` and `MUT111` are
+certified but opt-in: their census was checked with the build that moves setup steps to the
+heuristic tier, and their holdout run with the build before it, whose exact reports include every
+one of the later build's. Reviewers judged their harm: of `MUT101`'s 27 exact reports 1 is P and
+26 are B (two of three reviewers judged the three changes of a Django `Q` that its cached
+`identity` hashes benign: Django changes only new `Q` objects in place); of `MUT111`'s 61, 0 are
+P by one reviewer and 2 by the other. The real-harm share is below the 10% a default rule needs
+(`heki recommend`'s bar), so both stay off by default.
 
 | Rule | Certified | Census: reports / false | Holdout: reports / false |
 | ---- | --------- | ----------------------: | -----------------------: |
@@ -152,6 +159,8 @@ before reports reaching one waiting call are folded together.
 | `DATA101` | 0.2.0 | 6 / 0 | 0 / 0 |
 | `MUT110` | 0.2.0 | 5 / 0 | 2 / 0 |
 | `MUT114` | 0.2.0 | 5 / 0 | 5 / 0 |
+| `MUT101` | 0.2.3 (opt-in, experimental) | 27 / 0 | 1 / 0 |
+| `MUT111` | 0.2.3 (opt-in, experimental) | 61 / 0 | 2 / 0 |
 
 ## Measurements
 

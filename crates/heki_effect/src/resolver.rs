@@ -3247,6 +3247,16 @@ impl ProjectDecls {
         missing == Answer::Known(None)
     }
 
+    /// Whether a project class along the MRO of `class` defines `__slots__`: an instance may then
+    /// have no `__dict__`.
+    pub fn defines_slots(&self, class: &str) -> bool {
+        self.mro(&self.canonical(class)).into_iter().any(|c| {
+            self.read(|k| note(&mut k.class_facts, &c));
+            self.class(&c)
+                .is_some_and(|d| d.members.contains("__slots__"))
+        })
+    }
+
     /// Whether an instance of exactly `class` calling `method` runs one of `callee`: the
     /// definition its MRO finds is a target (a library one, [`Self::inherited_external`], only
     /// as the call's single target), or it has none and the call raises. A protocol has

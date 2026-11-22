@@ -1,0 +1,441 @@
+//! `MUT101` (`cached-property-stale-mutation`) and `MUT111` (`cached-property-stale-read`), both
+//! opt-in, end to end: their exact claims, one counterexample per premise of those claims, and the shapes of
+//! datamodel-code-generator's parsers that the claims must and must not cover.
+
+mod common;
+
+use common::Project;
+use serde_json::Value;
+
+/// `(rule, line, exact)` of every `MUT101` and `MUT111` report, with only the rule's own
+/// default selection.
+fn tiers(p: &Project) -> Vec<(String, u64, bool)> {
+    let (code, stdout, stderr) = p.check(&["--select", "MUT101,MUT111", "--output-format", "json"]);
+    assert!(code == 0 || code == 1, "{stdout}{stderr}");
+    let diags: Vec<Value> = serde_json::from_str(&stdout).unwrap();
+    diags
+        .iter()
+        .map(|d| {
+            (
+                d["rule_code"].as_str().unwrap().to_owned(),
+                d["line"].as_u64().unwrap(),
+                d["certainty"] == "exact",
+            )
+        })
+        .collect()
+}
+
+fn project(name: &str, source: &str) -> Project {
+    let p = Project::new(name);
+    p.write("pyproject.toml", "[project]\nname = \"t\"\n")
+        .write("app.py", source);
+    p
+}
+
+fn report(rule: &str, line: u64, exact: bool) -> (String, u64, bool) {
+    (rule.to_owned(), line, exact)
+}
+
+/// The shape of a parser that reads a dialect from the document it parses: `schema_features`
+/// reads `self.raw_obj` on its one path, `parse_files` rebinds it in a loop and then only calls
+/// project methods and `list.append` on a list it built.
+const PARSER: &str = r#"from functools import cached_property
+
+
+class Parser:
+    def __init__(self, raw_obj: dict[str, str]) -> None:
+        self.raw_obj = raw_obj
+
+    @cached_property
+    def schema_features(self) -> str:
+        return self.raw_obj.get("$schema", "")
+
+    def parse_files(self, documents: list[dict[str, str]]) -> list[bool]:
+        results = []
+        for document in documents:
+            self.raw_obj = document
+            results.append(self.ref_siblings_apply())
+        return results
+
+    def ref_siblings_apply(self) -> bool:
+        return self.schema_features.endswith("2020-12/schema")
+
+
+class FormatsParser:
+    def __init__(self, raw_obj: dict[str, str], *, read_uuid_formats: bool) -> None:
+        self.raw_obj = raw_obj
+        self.read_uuid_formats = read_uuid_formats
+
+    @cached_property
+    def data_formats(self) -> tuple[str, ...]:
+        return ("uuid", "uuid7") if self.read_uuid_formats else ("uuid",)
+
+    def parse_files(self, documents: list[dict[str, str]]) -> list[bool]:
+        results = []
+        for document in documents:
+            self.raw_obj = document
+            results.append("uuid7" in self.data_formats)
+        return results
+
+
+class Constraints:
+    def __init__(self, values: dict[str, int]) -> None:
+        self._values = dict(values)
+
+    @cached_property
+    def has_constraints(self) -> bool:
+        return any(value is not None for value in self._values.values())
+
+    def describe(self) -> str:
+        return f"constraints={self.has_constraints}"
+"#;
+
+#[test]
+fn a_parser_rebinding_what_its_cached_dialect_read_is_exact_when_selected() {
+    let p = project("mut101_exact_parser", PARSER);
+    assert_eq!(
+        tiers(&p),
+        vec![report("MUT101", 15, true), report("MUT111", 20, true)]
+    );
+    // Both are opt-in: nothing by default. Selected, nothing on `data_formats` (it reads an
+    // option set in `__init__`) or on `has_constraints` (no method changes what it reads after
+    // `__init__`).
+    let (code, stdout, _) = p.check(&["--output-format", "concise"]);
+    assert_eq!(code, 0, "{stdout}");
+    let (code, stdout, _) = p.check(&[
+        "--output-format",
+        "concise",
+        "--extend-select",
+        "MUT101,MUT111",
+    ]);
+    assert_eq!(code, 1, "{stdout}");
+    assert!(stdout.contains("app.py:15:13: MUT101 "), "{stdout}");
+    assert!(stdout.contains("app.py:20:16: MUT111 "), "{stdout}");
+    assert!(!stdout.contains("app.py:35:"), "{stdout}");
+}
+
+/// The holder of every counterexample: `features` reads `self.raw` (`READ` stands for the read),
+/// `replace` rebinds it (`WRITE`), then runs `AFTER`.
+fn holder(read: &str, write: &str, after: &str, extra: &str) -> String {
+    format!(
+        r#"import functools
+
+
+class Holder:
+    def __init__(self, raw: dict[str, str], flag: bool) -> None:
+        self.raw = raw
+        self.flag = flag
+        self.items: list[str] = []
+
+    @functools.cached_property
+    def features(self) -> str:
+        {read}
+
+    def replace(self, raw: dict[str, str], hook) -> None:
+        {write}
+        {after}
+
+    def look(self) -> str:
+        return self.raw.get("k", "")
+
+    def hook(self) -> str:
+        return self.raw.get("k", "")
+{extra}"#
+    )
+}
+
+const READ: &str = r#"return self.raw.get("k", "")"#;
+const WRITE: &str = "self.raw = raw";
+
+#[test]
+fn every_premise_established_makes_an_exact_report() {
+    let p = project("mut101_exact_base", &holder(READ, WRITE, "return None", ""));
+    assert_eq!(tiers(&p), vec![report("MUT101", 15, true)]);
+    // Through a `self` method that reads on every path, and as an in-place change of a list
+    // built in `__init__`.
+    let p = project(
+        "mut101_exact_helper",
+        &holder("return self.look()", WRITE, "return None", ""),
+    );
+    assert_eq!(tiers(&p), vec![report("MUT101", 15, true)]);
+    let p = project(
+        "mut101_exact_in_place",
+        &holder(
+            r#"return ",".join(self.items)"#,
+            r#"self.items.append("x")"#,
+            "return None",
+            "",
+        ),
+    );
+    assert_eq!(tiers(&p), vec![report("MUT101", 15, true)]);
+}
+
+#[test]
+fn cached_property_stripped_a_subclass_defines_a_plain_property() {
+    let extra = "\n\nclass Plain(Holder):\n    @property\n    def features(self) -> str:\n        return \"plain\"\n";
+    let p = project(
+        "mut101_strip_cached",
+        &holder(READ, WRITE, "return None", extra),
+    );
+    assert_eq!(tiers(&p), vec![report("MUT101", 15, false)]);
+    // A subclass that names nothing under the property's name holds no value of it.
+    let extra = "\n\nclass Other(Holder):\n    def other(self) -> int:\n        return 1\n";
+    let p = project(
+        "mut101_strip_cached_holders",
+        &holder(READ, WRITE, "return None", extra),
+    );
+    assert_eq!(tiers(&p), vec![report("MUT101", 15, true)]);
+}
+
+#[test]
+fn reads_on_every_path_stripped_the_read_is_on_one_branch() {
+    for read in [
+        r#"return self.raw.get("k", "") if self.flag else """#,
+        r#"return self.look() if self.flag else """#,
+    ] {
+        let p = project(
+            "mut101_strip_reads",
+            &holder(read, WRITE, "return None", ""),
+        );
+        assert_eq!(tiers(&p), vec![report("MUT101", 15, false)], "{read}");
+    }
+}
+
+#[test]
+fn every_implementation_stripped_an_override_does_not_read() {
+    let extra = "\n\nclass Other(Holder):\n    def hook(self) -> str:\n        return \"other\"\n";
+    let p = project(
+        "mut101_strip_dispatch",
+        &holder("return self.hook()", WRITE, "return None", extra),
+    );
+    assert_eq!(tiers(&p), vec![report("MUT101", 15, false)]);
+}
+
+#[test]
+fn plain_write_stripped_a_list_subclass_whose_append_changes_nothing() {
+    let extra = "\n\nclass Quiet(list):\n    def append(self, item):\n        return None\n";
+    let p = project(
+        "mut101_strip_plain",
+        &holder(
+            r#"return ",".join(self.items)"#,
+            r#"self.items.append("x")"#,
+            "return None",
+            extra,
+        ),
+    );
+    assert_eq!(tiers(&p), vec![report("MUT101", 15, false)]);
+}
+
+#[test]
+fn kept_to_the_return_stripped_code_heki_does_not_follow_runs_after_the_write() {
+    for after in [
+        "hook(self)",
+        "print(hook)",
+        "await_nothing = [x for x in hook]",
+    ] {
+        let p = project("mut101_strip_kept", &holder(READ, WRITE, after, ""));
+        assert_eq!(tiers(&p), vec![report("MUT101", 15, false)], "{after}");
+    }
+    // A removal on one branch of a project call made after the write.
+    let extra = "\n\ndef forget(obj: Holder, flag: bool) -> None:\n    if flag:\n        obj.__dict__.pop(\"features\", None)\n";
+    let p = project(
+        "mut101_strip_kept_callee",
+        &holder(READ, WRITE, "forget(self, self.flag)", extra),
+    );
+    assert_eq!(tiers(&p), vec![report("MUT101", 15, false)]);
+    // Library calls that run no project code keep it.
+    let p = project(
+        "mut101_kept_library",
+        &holder(
+            READ,
+            WRITE,
+            r#"self.items.append(str(1) + ",".join(raw))"#,
+            "",
+        ),
+    );
+    assert_eq!(tiers(&p), vec![report("MUT101", 15, true)]);
+}
+
+/// A reader of `features`, and the classes it may read it on.
+fn reader(body: &str, extra: &str) -> String {
+    holder(
+        READ,
+        WRITE,
+        "return None",
+        &format!("{extra}\n\ndef check(obj: Holder) -> bool:\n    {body}\n"),
+    )
+}
+
+#[test]
+fn mut111_is_exact_when_every_class_of_the_object_runs_an_exact_write() {
+    let p = project(
+        "mut111_exact",
+        &reader(r#"return obj.features.startswith("x")"#, ""),
+    );
+    assert_eq!(
+        tiers(&p),
+        vec![report("MUT101", 15, true), report("MUT111", 26, true)]
+    );
+}
+
+#[test]
+fn runs_the_writer_stripped_a_subclass_replaces_the_writer() {
+    let extra = "\n\nclass Sibling(Holder):\n    def replace(self, raw, hook) -> None:\n        return None\n";
+    let p = project(
+        "mut111_strip_runs",
+        &reader(r#"return obj.features.startswith("x")"#, extra),
+    );
+    let found = tiers(&p);
+    assert!(found.contains(&report("MUT101", 15, true)), "{found:?}");
+    assert!(found.iter().all(|r| r.0 != "MUT111" || !r.2), "{found:?}");
+}
+
+#[test]
+fn reads_the_property_stripped_a_name_the_code_does_not_show() {
+    let p = project(
+        "mut111_strip_reads",
+        &reader(
+            r#"return bool(getattr(obj, "".join(("feat", "ures"))))"#,
+            "",
+        ),
+    );
+    assert_eq!(tiers(&p), vec![report("MUT101", 15, true)]);
+}
+
+/// `holder` with the cached property's decorator imported by `import` and written `decorator`
+/// (the import stays on the first line).
+fn holder_decorated(import: &str, decorator: &str, extra: &str) -> String {
+    holder(READ, WRITE, "return None", extra)
+        .replacen("import functools", import, 1)
+        .replacen("@functools.cached_property", decorator, 1)
+}
+
+#[test]
+fn cached_property_only_of_a_decorator_the_catalog_lists() {
+    let cases = [
+        // A library's decorator the catalog lists, and `functools`' under an alias.
+        (
+            "django",
+            "from django.utils.functional import cached_property",
+            "@cached_property",
+            "",
+            true,
+        ),
+        (
+            "alias",
+            "from functools import cached_property as memo",
+            "@memo",
+            "",
+            true,
+        ),
+        // A `cached_property` of a library the catalog does not list.
+        (
+            "lookalike",
+            "from mylib import cached_property",
+            "@cached_property",
+            "",
+            false,
+        ),
+        // Werkzeug keeps the value in a slot on an instance without a `__dict__`.
+        (
+            "werkzeug",
+            "from werkzeug.utils import cached_property",
+            "@cached_property",
+            "",
+            true,
+        ),
+        (
+            "werkzeug_slots",
+            "from werkzeug.utils import cached_property",
+            "@cached_property",
+            "\n\nclass Slotted(Holder):\n    __slots__ = (\"_cache_features\",)\n",
+            false,
+        ),
+    ];
+    for (name, import, decorator, extra, exact) in cases {
+        let p = project(
+            &format!("mut101_cached_{name}"),
+            &holder_decorated(import, decorator, extra),
+        );
+        assert_eq!(tiers(&p), vec![report("MUT101", 15, exact)], "{name}");
+    }
+}
+
+#[test]
+fn plain_write_stripped_a_base_heki_does_not_know() {
+    // In the writer's own class: the base may define `__setattr__` or a data descriptor.
+    let source = holder(READ, WRITE, "return None", "")
+        .replacen(
+            "import functools",
+            "import functools; from vendor import Base",
+            1,
+        )
+        .replacen("class Holder:", "class Holder(Base):", 1);
+    let p = project("mut101_strip_unknown_base", &source);
+    assert_eq!(tiers(&p), vec![report("MUT101", 15, false)]);
+    // In a project subclass that may be the instance's class, after the class that defines the
+    // property (so the getter is still the first definition along its MRO).
+    let extra = "\n\nfrom vendor import Mixin\n\n\nclass Traced(Holder, Mixin):\n    pass\n";
+    let p = project(
+        "mut101_strip_unknown_subclass_base",
+        &holder(READ, WRITE, "return None", extra),
+    );
+    assert_eq!(tiers(&p), vec![report("MUT101", 15, false)]);
+}
+
+#[test]
+fn setup_steps_stay_heuristic() {
+    // A finalizer: no read of the instance follows it.
+    let source = holder(READ, WRITE, "return None", "")
+        .replacen(
+            "def replace(self, raw: dict[str, str], hook) -> None:",
+            "def __del__(self) -> None:",
+            1,
+        )
+        .replacen(
+            "        self.raw = raw\n        return None\n",
+            "        self.raw = {}\n        return None\n",
+            1,
+        );
+    let p = project("mut101_setup_finalizer", &source);
+    assert_eq!(tiers(&p), vec![report("MUT101", 15, false)]);
+    // A step of two-phase setup: a method `__init__` calls on the instance.
+    let source = holder(READ, WRITE, "return None", "").replacen(
+        "        self.items: list[str] = []\n",
+        "        self.items: list[str] = []\n        self.replace(raw, None)\n",
+        1,
+    );
+    let p = project("mut101_setup_two_phase", &source);
+    assert_eq!(tiers(&p), vec![report("MUT101", 16, false)]);
+    // Lazy setup through a second cached property that nothing invalidates, which the property's
+    // getter reads on every path.
+    let lazy = r#"import functools
+
+
+class Holder:
+    def __init__(self, raw: dict[str, str]) -> None:
+        self.raw = raw
+
+    @functools.cached_property
+    def loaded(self) -> bool:
+        self.raw = {"k": "v"}
+        return True
+
+    @functools.cached_property
+    def features(self) -> str:
+        if self.loaded:
+            return self.raw.get("k", "")
+        return self.raw.get("k", "")
+"#;
+    let p = project("mut101_setup_lazy", lazy);
+    assert_eq!(tiers(&p), vec![report("MUT101", 10, false)]);
+    // Once the property's getter does not read it, the write is exact.
+    let p = project(
+        "mut101_setup_lazy_unread",
+        &lazy.replace(
+            "        if self.loaded:\n            return self.raw.get(\"k\", \"\")\n",
+            "",
+        ),
+    );
+    assert_eq!(tiers(&p), vec![report("MUT101", 10, true)]);
+}

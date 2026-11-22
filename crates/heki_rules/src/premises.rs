@@ -205,6 +205,64 @@ pub const SAME_COLLECTION_SAME_KEYS: Premise = Premise {
     ],
 };
 
+pub const CACHED_PROPERTY: Premise = Premise {
+    name: "Cached property",
+    states: "every class the instance may be (R2, R5) that names the property gets it from a synchronous getter, the first definition along its MRO with no base heki does not know before it, of a cached-property decorator the ecosystem catalog lists as keeping the value in the instance `__dict__` (`[[cached_properties]]`: `functools`, Django, Werkzeug, propcache, kombu; R3; for one that keeps it in a slot on an instance without a `__dict__`, no class along the MRO defines `__slots__`), and none has a metaclass other than `type` or `abc.ABCMeta`; an instance of a class that names nothing so holds no value of it",
+    decided_in: &[
+        "heki_rules::mut_rules::stale_reads::classes_running",
+        "heki_rules::mut_rules::kept_values::may_hold",
+        "heki_rules::mut_rules::kept_values::cached_getter_reads",
+        "heki_effect::resolver::ProjectDecls::function_taken",
+        "heki_effect::resolver::ProjectDecls::defines_slots",
+        "heki_effect::resolver::ProjectDecls::has_custom_metaclass",
+        "heki_kb::EffectiveEcosystemKb::cached_property",
+    ],
+};
+
+pub const READS_ON_EVERY_PATH: Premise = Premise {
+    name: "Reads on every path",
+    states: "the getter reads the written attribute, with the written constant key or as a whole, on every path on which it returns normally, itself or through `self` methods and properties it calls on every such path, each of whose implementations runs its body at every call and has the fact",
+    decided_in: &[
+        "heki_effect::summary::Extractor::must_self_reads",
+        "heki_effect::callgraph::must_reads_through_self_calls",
+    ],
+};
+
+pub const PLAIN_WRITE: Premise = Premise {
+    name: "Plain write",
+    states: "the write rebinds or deletes the attribute with a plain store (no property, descriptor, `__setattr__`, `__delattr__`, or metaclass in a class the instance may be, and every base a project class or a plain one), or changes in place the builtin list, dict, or set the attribute holds by its type through a changing method or an item store that no project subclass replaces",
+    decided_in: &[
+        "heki_rules::mut_rules::kept_values::plain_write",
+        "heki_effect::cache_flow::in_place_change",
+        "heki_effect::resolver::ProjectDecls::method_not_overridden",
+    ],
+};
+
+pub const KEPT_TO_THE_RETURN: Premise = Premise {
+    name: "Kept to the return",
+    states: "no point between the write and the method's normal return may remove or replace the kept value: no `del`, store, or `__dict__` removal of it, no clearing or replacing of a `__dict__`, no `await` or `yield`, no call whose targets may do so, and every call on those paths is a project call whose targets are every implementation it can run or a call of a library the catalog covers handed no callable, no instance of a project class, and no value of unknown type (R3); exception edges into handlers included",
+    decided_in: &[
+        "heki_effect::summary::Extractor::kept_value_points",
+        "heki_effect::cache_flow::cache_flow",
+        "heki_rules::mut_rules::kept_values::KeptAfterWrites::kept_to_return",
+    ],
+};
+
+pub const READS_THE_PROPERTY: Premise = Premise {
+    name: "Reads the property",
+    states: "the function's own body reads the property on the object (`obj.p`, a constant `getattr`, an item of `obj.__dict__`)",
+    decided_in: &["heki_rules::mut_rules::stale_reads::CachedReads::of"],
+};
+
+pub const RUNS_THE_WRITER: Premise = Premise {
+    name: "Runs the writer",
+    states: "every class the object may be (R2) gets the property from a `@cached_property` getter and runs a write of it whose `MUT101` report is exact: the first definition of the writing method along its MRO, or one the definitions before it reach through `super()` without invalidating the property",
+    decided_in: &[
+        "heki_rules::mut_rules::stale_reads::CachedReads::exact_read",
+        "heki_rules::mut_rules::stale_reads::classes_running",
+    ],
+};
+
 /// Every premise of the table, once.
 pub const ALL: &[&Premise] = &[
     &EVERY_RETURN,
@@ -231,6 +289,20 @@ pub const ALL: &[&Premise] = &[
     &STEPS_THROUGH_INPUTS,
     &IDLE_ON_A_MISMATCH,
     &SAME_COLLECTION_SAME_KEYS,
+    &CACHED_PROPERTY,
+    &READS_ON_EVERY_PATH,
+    &PLAIN_WRITE,
+    &KEPT_TO_THE_RETURN,
+    &READS_THE_PROPERTY,
+    &RUNS_THE_WRITER,
+];
+
+const MUT101_CLAIM: &[&Premise] = &[
+    &CACHED_PROPERTY,
+    &READS_ON_EVERY_PATH,
+    &EVERY_IMPLEMENTATION,
+    &PLAIN_WRITE,
+    &KEPT_TO_THE_RETURN,
 ];
 
 const OPT_ACCUMULATION: &[&Premise] = &[
@@ -267,6 +339,16 @@ pub fn of_rule(code: &str) -> &'static [&'static Premise] {
             &READ_ONLY_PARAMETER,
             &PASSED_AS_ITSELF,
             &CHANGED_AT_THE_LINE,
+        ],
+        "MUT101" => MUT101_CLAIM,
+        "MUT111" => &[
+            &CACHED_PROPERTY,
+            &READS_ON_EVERY_PATH,
+            &EVERY_IMPLEMENTATION,
+            &PLAIN_WRITE,
+            &KEPT_TO_THE_RETURN,
+            &READS_THE_PROPERTY,
+            &RUNS_THE_WRITER,
         ],
         "MUT114" => &[
             &CACHED,

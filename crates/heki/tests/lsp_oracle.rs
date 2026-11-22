@@ -692,6 +692,21 @@ const FAN_READ_NOTHING: &str =
 const FAN_READ_LOCKED: &str = "import asyncio\n\nLOCK = asyncio.Lock()\n\n\nasync def read_line(reader: asyncio.StreamReader):\n    async with LOCK:\n        return await reader.readline()\n";
 const FAN_USE: &str = "import asyncio\n\nfrom pkg.fan_read import read_line\n\n\nasync def both(reader: asyncio.StreamReader):\n    return await asyncio.gather(read_line(reader), read_line(reader))\n";
 
+// Kept values (`MUT101` / `MUT111` exact claims): a cached property reads `raw` through a helper
+// of a base class in another file; the writer calls a method of that base class and a function of
+// a third file after its write; a subclass in a fourth file holds no value of the property, and
+// a reader in a fifth reads it.
+const KEPT_BASE: &str = "class Base:\n    def _key(self) -> str:\n        return self.raw.get(\"k\", \"\")\n\n    def after(self) -> None:\n        return None\n";
+const KEPT_BASE_ONE_BRANCH: &str = "class Base:\n    def _key(self) -> str:\n        if self.flag:\n            return self.raw.get(\"k\", \"\")\n        return \"\"\n\n    def after(self) -> None:\n        return None\n";
+const KEPT_BASE_INVALIDATING: &str = "class Base:\n    def _key(self) -> str:\n        return self.raw.get(\"k\", \"\")\n\n    def after(self) -> None:\n        self.__dict__.pop(\"features\", None)\n";
+const KEPT_DROP: &str = "def cleanup(obj) -> None:\n    return None\n";
+const KEPT_DROP_DELETING: &str = "def cleanup(obj) -> None:\n    del obj.features\n";
+const KEPT_HOLDER: &str = "from functools import cached_property\n\nfrom pkg.kept_base import Base\nfrom pkg.kept_drop import cleanup\n\n\nclass Holder(Base):\n    def __init__(self, raw: dict[str, str], flag: bool) -> None:\n        self.raw = raw\n        self.flag = flag\n\n    @cached_property\n    def features(self) -> str:\n        return self._key()\n\n    def replace(self, raw: dict[str, str]) -> None:\n        self.raw = raw\n        self.after()\n        cleanup(self)\n";
+const KEPT_SUB: &str = "from pkg.kept_holder import Holder\n\n\nclass Sub(Holder):\n    def extra(self) -> int:\n        return 1\n";
+const KEPT_SUB_PLAIN: &str = "from pkg.kept_holder import Holder\n\n\nclass Sub(Holder):\n    @property\n    def features(self) -> str:\n        return \"plain\"\n";
+const KEPT_READER: &str =
+    "from pkg.kept_holder import Holder\n\n\ndef show(h: Holder) -> str:\n    return h.features\n";
+
 /// The project before the first step (every file is opened).
 fn initial_files() -> Vec<(&'static str, String)> {
     [
@@ -705,6 +720,11 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/token_user.py", TOKEN_USER),
         ("pkg/remote.py", REMOTE),
         ("pkg/reader.py", READER),
+        ("pkg/kept_base.py", KEPT_BASE),
+        ("pkg/kept_drop.py", KEPT_DROP),
+        ("pkg/kept_holder.py", KEPT_HOLDER),
+        ("pkg/kept_sub.py", KEPT_SUB),
+        ("pkg/kept_reader.py", KEPT_READER),
         ("pkg/guard_net.py", GUARD_NET),
         ("pkg/guard_use.py", GUARD_USE),
         ("pkg/guard_default_use.py", GUARD_DEFAULT_USE),
@@ -993,6 +1013,53 @@ impl Step {
         self.propagates = true;
         self
     }
+}
+
+/// The tier of `MUT101` and of the `MUT111` reader behind it follows the facts other files give
+/// the writer and the getter: a helper of a base class the getter reads through
+/// (`EffectSummary::must_read_self_attrs`), a method of that class called after the write that
+/// starts invalidating, a function of another file called after the write that starts removing
+/// the kept value (`EffectSummary::removes_kept`), and a subclass that defines the name as a plain
+/// property (the cached property is no longer the first definition along its MRO).
+fn steps_kept_values() -> Vec<Step> {
+    const BOTH: &[(&str, &str)] = &[
+        ("pkg/kept_holder.py", "MUT101"),
+        ("pkg/kept_reader.py", "MUT111"),
+    ];
+    vec![
+        Step::new(
+            "the base-class helper the getter calls reads the attribute on one branch only",
+            vec![save("pkg/kept_base.py", KEPT_BASE_ONE_BRANCH)],
+        )
+        .present(BOTH),
+        Step::new(
+            "the base-class method called after the write starts invalidating the property",
+            vec![save("pkg/kept_base.py", KEPT_BASE_INVALIDATING)],
+        )
+        .absent(BOTH),
+        Step::new(
+            "the base class is as before; a function of another file called after the write \
+             starts removing the kept value",
+            vec![
+                save("pkg/kept_base.py", KEPT_BASE),
+                save("pkg/kept_drop.py", KEPT_DROP_DELETING),
+            ],
+        )
+        .present(BOTH),
+        Step::new(
+            "the function stops; a subclass in another file defines the name as a plain property",
+            vec![
+                save("pkg/kept_drop.py", KEPT_DROP),
+                save("pkg/kept_sub.py", KEPT_SUB_PLAIN),
+            ],
+        )
+        .present(BOTH),
+        Step::new(
+            "the subclass is as before",
+            vec![save("pkg/kept_sub.py", KEPT_SUB)],
+        )
+        .present(BOTH),
+    ]
 }
 
 /// Exact effect reports follow every implementation of a call across modules (the targets of
@@ -4018,6 +4085,7 @@ sessions!(editing, Session::start, {
     initial_index: steps_initial_index,
     blocking_chain: steps_blocking_chain,
     property_getters: steps_property_getters,
+    kept_values: steps_kept_values,
     guarded_effects: steps_guarded_effects,
     mut108: steps_mut108,
     mut110: steps_mut110,
