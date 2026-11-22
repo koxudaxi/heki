@@ -38,12 +38,14 @@ module-name = "heki"
 # catalogs with `include_str!`, and `cargo test --workspace` embeds or reads the test inputs:
 # `docs/index.md`, whose examples must equal README.md's, the pages, changelog, and generator
 # scripts the documentation checks run on, and the Agent Skill with its Claude Code marketplace,
-# which a test checks against the binary and the pages. CI builds and runs the Linux tests in the
-# unpacked archive, so a file missing here fails a pull request, not a release.
+# which a test checks against the binary and the pages it links (`docs/llms.txt` among them). CI
+# builds and runs the Linux tests in the unpacked archive, so a file missing here fails a pull
+# request, not a release.
 include = [
     { path = "kb/**/*.toml", format = "sdist" },
     { path = "tests/**/*", format = "sdist" },
     { path = "docs/**/*.md", format = "sdist" },
+    { path = "docs/llms.txt", format = "sdist" },
     { path = "scripts/build_docs.py", format = "sdist" },
     { path = "scripts/ansi_svg.py", format = "sdist" },
     { path = "zensical.toml", format = "sdist" },
