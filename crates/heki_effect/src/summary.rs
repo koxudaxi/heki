@@ -1403,20 +1403,16 @@ impl<'a> Extractor<'a> {
     }
 
     /// The parameter `var` is on every path, as a mask (`0`: none or not known): its own, or an
-    /// enclosing function's that it reads through a closure cell.
+    /// enclosing function's that it reads through a closure cell, directly or through copies.
     fn exact_param(&self, var: VarId) -> u64 {
         if let Some((i, None)) = self.param_alias.get(&var) {
             return 1u64 << i;
         }
-        let mut cur = var;
-        for _ in 0..16 {
-            match self.defs.get(&cur).map(|inst| &inst.kind) {
-                Some(InstKind::Copy { src, .. }) => cur = *src,
-                Some(InstKind::LoadDeref { name, .. }) => return self.captured_bit(name),
-                _ => break,
-            }
+        let root = self.shape.copy_root(var);
+        match self.shape.inst(root).map(|inst| &inst.kind) {
+            Some(InstKind::LoadDeref { name, .. }) => self.captured_bit(name),
+            _ => 0,
         }
-        0
     }
 
     /// Bind the parameters of enclosing functions that `callee`, declared by `decl`, has
