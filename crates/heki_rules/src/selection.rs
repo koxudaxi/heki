@@ -54,6 +54,8 @@ pub struct RuleSelection {
     exact_reports_only: BTreeSet<&'static str>,
     /// `lint.heuristic`, the command line's over the configuration's.
     heuristic: bool,
+    /// The rules `ignore` names (by code, slug, or prefix).
+    ignored: BTreeSet<&'static str>,
 }
 
 /// The selectors a run applies: the command line's `select` over the configuration's (`None`:
@@ -211,6 +213,7 @@ impl RuleSelection {
             heuristic_off,
             exact_reports_only,
             heuristic,
+            ignored,
         })
     }
 
@@ -236,6 +239,16 @@ impl RuleSelection {
     /// enable them with it, and `ignore` does not name them.
     pub fn heuristic_off(&self) -> &BTreeSet<&'static str> {
         &self.heuristic_off
+    }
+
+    /// Whether `ignore` (of the configuration or the command line) names the rule `code`.
+    pub fn is_ignored(&self, code: &str) -> bool {
+        self.ignored.contains(code)
+    }
+
+    /// Whether the enabled rule `code` shows only its exact reports ([`Self::withhold_heuristic`]).
+    pub fn withholds_heuristic(&self, code: &str) -> bool {
+        self.exact_reports_only.contains(code)
     }
 
     /// Remove the heuristic reports of the rules that show only their exact ones, and return
@@ -310,6 +323,7 @@ mod tests {
 
         let ign = sel(&lint, &[], &[], &["MUT", "loop-db-query"]);
         assert!(!ign.is_enabled("MUT101") && !ign.is_enabled("EFF103") && ign.is_enabled("EFF101"));
+        assert!(ign.is_ignored("MUT101") && ign.is_ignored("EFF103") && !ign.is_ignored("EFF101"));
     }
 
     #[test]
@@ -386,6 +400,7 @@ mod tests {
             fix: None,
             sites: 1,
             fold_key: None,
+            open_premises: Vec::new(),
         };
         let selection = RuleSelection {
             enabled: BTreeSet::from(["OPT110", "OPT111"]),
@@ -393,12 +408,16 @@ mod tests {
             heuristic_off: BTreeSet::new(),
             exact_reports_only: BTreeSet::from(["OPT110"]),
             heuristic: false,
+            ignored: BTreeSet::new(),
         };
         let mut diags = vec![
             report("OPT110", Certainty::Exact),
             report("OPT110", Certainty::Heuristic),
             report("OPT111", Certainty::Heuristic),
         ];
+        assert!(
+            selection.withholds_heuristic("OPT110") && !selection.withholds_heuristic("OPT111")
+        );
         assert_eq!(selection.withhold_heuristic(&mut diags), 1);
         let left: Vec<_> = diags
             .iter()

@@ -1693,6 +1693,11 @@ impl<'e, 'a> Engine<'e, 'a> {
             "typing.cast" | "typing_extensions.cast" if !args.is_empty() => {
                 return Ok(self.type_form(args[0]));
             }
+            // A library class that copies its argument (`collections.deque(xs)`) makes an
+            // instance of itself.
+            "collections.deque" | "collections.OrderedDict" | "builtins.bytearray" => {
+                return Ok(self.cx.call_result(fqn, |i, k| self.passed(call, i, k)));
+            }
             // A copy (`copy.copy`, `copy.deepcopy`, `dataclasses.replace`) has its original's
             // type.
             _ if !args.is_empty()

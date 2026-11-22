@@ -32,6 +32,9 @@ listed there that costs less than a quarter of the limits fails the gate until i
 band between keeps a shape near the limit from failing on one machine and passing on another
 (shapes scale differently across machines than the calibration shape does).
 
+A family marked `open_premises` runs `heki dump-open-premises` instead of `heki check`: the
+premises its heuristic reports leave open are explained only there.
+
 `--shard k/n` runs every n-th shape, starting at the k-th (each placement of a family is a shape),
 after the same calibration: CI runs the shapes in parallel jobs.
 
@@ -356,6 +359,36 @@ def with_statements(n: int) -> Body:
     return Body(("p",), lines)
 
 
+def element_change_chain(n: int) -> Body:
+    """Names each bound to an item of the one before, each changed in place."""
+    lines = ["e0 = p"]
+    for i in range(1, n + 1):
+        lines += [f"e{i} = e{i - 1}['k']", f"e{i}.append({i})"]
+    return Body(("p",), lines)
+
+
+def copied_item_changes(n: int) -> Body:
+    """Shallow copies of one parameter, each followed by a change of one of its items."""
+    lines = []
+    for i in range(n):
+        lines += [f"d{i} = dict(p)", f"d{i}['k'].append({i})"]
+    return Body(("p",), lines)
+
+
+def copy_chain(n: int) -> Body:
+    """Each name a shallow copy of the one before, an item of the last changed."""
+    lines = ["c0 = p", *(f"c{i} = dict(c{i - 1})" for i in range(1, n + 1))]
+    return Body(("p",), [*lines, f"c{n}['k'].append(1)"])
+
+
+def copy_rebound_branches(n: int) -> Body:
+    """A loop rebinding an item of a shallow copy on one branch per test, then changing it."""
+    lines = ["c = dict(p)", "for x in xs:"]
+    for i in range(n):
+        lines += [f"    if x == {i}:", "        c['k'] = []"]
+    return Body(("p", "xs"), [*lines, "    c['k'].append(x)"])
+
+
 def attribute_chain(n: int) -> Body:
     """Names each bound to an attribute of the one before."""
     lines = ["a0 = p", *(f"a{i} = a{i - 1}.attr" for i in range(1, n + 1))]
@@ -486,6 +519,19 @@ def callers_of_one_helper(n: int) -> str:
     return "\n".join(lines)
 
 
+def reports_sharing_a_chain(n: int) -> str:
+    """Many `async def`s each reaching a sleep through one chain of helpers, none of which makes
+    the next call on every return: each report's open premises are explained along the chain."""
+    depth = 100
+    lines = ["import time", "", "def helper0(flag):", "    if flag:", "        return None"]
+    lines += ["    time.sleep(1)", ""]
+    for i in range(1, depth):
+        lines += [f"def helper{i}(flag):", f"    helper{i - 1}(flag)", ""]
+    for j in range(n):
+        lines += [f"async def handler{j}(flag):", f"    helper{depth - 1}(flag)", ""]
+    return "\n".join(lines)
+
+
 def functions_each_calling(n: int) -> str:
     """Many functions each making one project call."""
     lines = []
@@ -603,6 +649,8 @@ class Family:
     real_code: bool = True
     # Contracts of its own, added to `CONTRACTS` for its runs.
     contracts: Callable[[int], str] | None = None
+    # Run through `heki dump-open-premises`, which explains the reports' open premises.
+    open_premises: bool = False
 
 
 FAMILIES = [
@@ -633,6 +681,12 @@ FAMILIES = [
     Family("match_pass_through", match_pass_through),
     Family("with_statements", with_statements),
     Family("attribute_chain", attribute_chain),
+    Family("element_change_chain", element_change_chain),
+    Family("copied_item_changes", copied_item_changes),
+    # A module body of thousands of such assignments takes the IR builder past its time limit
+    # before any analysis runs.
+    Family("copy_chain", copy_chain, placements=("function", "method")),
+    Family("copy_rebound_branches", copy_rebound_branches),
     # A module body's names are globals, not closure cells.
     Family("cell_reads", cell_reads, placements=("function", "method"), size=CELL_BINDINGS),
     Family(
@@ -665,6 +719,13 @@ FAMILIES = [
     ),
     Family("self_helper_chain", project=self_helper_chain, placements=("project",), size=2000),
     Family("callers_of_one_helper", project=callers_of_one_helper, placements=("project",), size=4000),
+    Family(
+        "reports_sharing_a_chain",
+        project=reports_sharing_a_chain,
+        placements=("project",),
+        size=4000,
+        open_premises=True,
+    ),
     Family(
         "initialization_steps",
         project=initialization_steps,
@@ -798,11 +859,19 @@ class Runner:
         return low, None
 
     def check(
-        self, text: str, watch: bool, steps: Path | None = None, timeout: float = TIMEOUT_SECONDS
+        self,
+        text: str,
+        watch: bool,
+        steps: Path | None = None,
+        timeout: float = TIMEOUT_SECONDS,
+        open_premises: bool = False,
     ) -> tuple[float, float, int]:
         self.write(text)
-        args = ["check", "--select", self.select, "--config", "shapes.toml"]
-        args += ["--output-format", "json", "m.py"]
+        if open_premises:
+            args = ["dump-open-premises", "--select", self.select, "--config", "shapes.toml", "m.py"]
+        else:
+            args = ["check", "--select", self.select, "--config", "shapes.toml"]
+            args += ["--output-format", "json", "m.py"]
         env = {}
         if watch:
             args.insert(1, "--watch")
@@ -899,16 +968,20 @@ def main() -> int:
             if failed is not None:
                 print(f"{family.name}/{placement} n={n}: building the IR {failed}", flush=True)
                 over.append("build")
-            for watch in () if failed is not None else (False,) if listed else (False, True):
+            single = listed or family.open_premises
+            for watch in () if failed is not None else (False,) if single else (False, True):
                 # A listed shape only has to show when it drops under the limits.
                 timeout = base_seconds + 2 * limit_seconds if listed else TIMEOUT_SECONDS
-                seconds, peak, code = runner.check(text, watch, timeout=timeout)
+                explain = family.open_premises
+                seconds, peak, code = runner.check(
+                    text, watch, timeout=timeout, open_premises=explain
+                )
                 cost = (seconds - base_seconds, peak - base_peak)
                 if not listed and (cost[0] > limit_seconds or cost[1] > LIMIT_MIB or code == -9):
                     # Once more, against noise.
-                    seconds, peak, code = runner.check(text, watch)
+                    seconds, peak, code = runner.check(text, watch, open_premises=explain)
                     cost = (seconds - base_seconds, peak - base_peak)
-                mode = "watch" if watch else "check"
+                mode = "open-premises" if explain else "watch" if watch else "check"
                 if code == -9:
                     spent = f"stopped after {cost[0]:.0f} s"
                 elif code not in (0, 1):

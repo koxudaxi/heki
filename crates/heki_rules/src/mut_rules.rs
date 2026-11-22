@@ -1,12 +1,13 @@
 //! Family 1 rules: `MUT101`, `MUT106`, `MUT107`, `MUT108`, `MUT109`, `MUT110`, `MUT112`,
 //! `MUT113`, `MUT201`, `MUT202`, `MUT203`, `MUT204` (docs/ANALYSIS_AND_KB_SPEC.md section 2.3).
 
+use crate::premises::{self, OpenCause, Told};
 use crate::{
     CheckContext, DottedPattern, FnSites, ModuleUnit, RuleConfigError, SitesByCaller, SitesBySpan,
     has_glob_syntax, split_last_dot,
 };
 use heki_ast::Span;
-use heki_diagnostics::Diagnostic;
+use heki_diagnostics::{Certainty, Diagnostic, OpenPremise};
 use heki_effect::readonly::{self, Derivation};
 use heki_effect::{
     AttrKeyPath, BoundCallee, CacheEvent, CacheFlow, CallHop, CallSite, CallTarget, Callee,
@@ -20,6 +21,7 @@ use heki_ir::{BlockId, FnIndex, Inst, InstKind, IrFunction, VarId};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
 // ==================================================================================== MUT101
@@ -2940,16 +2942,20 @@ pub(crate) fn mut202(
     returns: &ReadOnlyReturns,
     out: &mut Vec<Diagnostic>,
 ) {
-    if !cx.enabled("MUT202", unit) && !cx.enabled("MUT114", unit) {
+    if !["MUT202", "MUT114", "MUT115"]
+        .iter()
+        .any(|code| cx.enabled(code, unit))
+    {
         return;
     }
     let tcx = TypeCtx::new(&unit.input, cx.decls, cx.kb);
     let sites = cx.sites_by_span(unit);
+    let classes = below_copies::ClassAnswers::default();
     for f in &unit.input.ir.functions {
         if f.is_class_body {
             continue;
         }
-        Mut202Fn::new(cx, unit, &tcx, returns, &sites, f).run(out);
+        Mut202Fn::new(cx, unit, &tcx, returns, &sites, &classes, f).run(out);
     }
 }
 
@@ -2958,6 +2964,8 @@ struct Mut202Fn<'a> {
     unit: &'a ModuleUnit<'a>,
     tcx: &'a TypeCtx<'a>,
     returns: &'a ReadOnlyReturns,
+    /// `MUT115`'s class decisions asked so far in the module's check.
+    classes: &'a below_copies::ClassAnswers,
     f: &'a IrFunction,
     /// The facts and tables of `f`: the defining instruction of each variable, looked up per
     /// call operand.
@@ -2975,6 +2983,9 @@ struct Mut202Fn<'a> {
     cached: std::cell::OnceCell<FxHashMap<VarId, MustResult<'a>>>,
     /// The function's tables of definitions and block order (built on the first need).
     shape: std::cell::OnceCell<FnShape<'a>>,
+    /// The project functions the function calls, by their dotted names (built on the first
+    /// explanation of a `MUT114` report, [`Self::cached_function`]).
+    callees_by_fqn: std::cell::OnceCell<FxHashMap<String, &'a FuncKey>>,
 }
 
 /// Per call ([`CallSite::of_call`]) and project callee, the distinct facts of the callee that the
@@ -3024,6 +3035,7 @@ impl<'a> Mut202Fn<'a> {
         tcx: &'a TypeCtx<'a>,
         returns: &'a ReadOnlyReturns,
         sites: &'a SitesBySpan<'a>,
+        classes: &'a below_copies::ClassAnswers,
         f: &'a IrFunction,
     ) -> Self {
         let key = CheckContext::key(unit, f);
@@ -3032,6 +3044,7 @@ impl<'a> Mut202Fn<'a> {
             unit,
             tcx,
             returns,
+            classes,
             f,
             ix: FnIndex::new(f, &unit.input.ir.constants),
             sites: sites.of(&key.qualname),
@@ -3041,6 +3054,7 @@ impl<'a> Mut202Fn<'a> {
             facts_by_call: std::cell::OnceCell::new(),
             cached: std::cell::OnceCell::new(),
             shape: std::cell::OnceCell::new(),
+            callees_by_fqn: std::cell::OnceCell::new(),
         }
     }
 
@@ -3048,9 +3062,11 @@ impl<'a> Mut202Fn<'a> {
         self.shape.get_or_init(|| FnShape::new(self.f))
     }
 
-    /// The cached function whose result each variable is on every path: a direct call of one
-    /// project function with a [`heki_effect::CachedResult`], through copies, and through phis
-    /// whose every input is a result of the same function. An optimistic fixpoint: a variable
+    /// The project function whose result each variable is on every path: a direct call of one
+    /// project function, through copies, and through phis whose every input is a result of the
+    /// same function (`MUT114`'s claim also needs the function's
+    /// [`heki_effect::CachedResult`], which "Same object" leaves to the cached function's own
+    /// premises). An optimistic fixpoint: a variable
     /// starts unset and only moves down (unset, then one function, then other), so a loop
     /// passing the value around keeps it. In reverse postorder each pass carries the values
     /// across one more back edge, so the passes follow the nesting of loops, which Python limits
@@ -3096,7 +3112,7 @@ impl<'a> Mut202Fn<'a> {
                         let value = match &inst.kind {
                             InstKind::Copy { src, .. } => get(&state, *src),
                             _ => self
-                                .cached_callee(inst)
+                                .single_callee(inst)
                                 .map_or(MustResult::Other, MustResult::Of),
                         };
                         changed |= state.insert(dst, value) != Some(value);
@@ -3110,47 +3126,84 @@ impl<'a> Mut202Fn<'a> {
         })
     }
 
-    /// The one project function the call instruction `inst` runs, when a `functools` cache
-    /// keeps its results ([`heki_effect::CachedResult`]).
-    fn cached_callee(&self, inst: &'a Inst) -> Option<&'a FuncKey> {
+    /// The one project function the call instruction `inst` runs.
+    fn single_callee(&self, inst: &'a Inst) -> Option<&'a FuncKey> {
         let shape = self.shape();
         let call = site_call(&|v| shape.inst(v), self.sites, inst, false)?;
         let callees = call.site?.project_callees();
         let bc = callees.first().filter(|_| callees.len() == 1)?;
-        let summary = self.cx.index.summary(&bc.callee)?;
-        summary.cached_result.is_some().then_some(&bc.callee)
+        self.cx.index.summary(&bc.callee).map(|_| &bc.callee)
     }
 
-    /// `MUT114`'s exact claim at `inst`: it changes in place the list, dict, or set that a cached
-    /// function returned, the same object on every path. The cached function and its result.
-    fn changes_cached_result(
+    /// `MUT114`'s exact claim at `inst`, which changes `changed`, a value from the cached
+    /// function that `r` names, through the calls `chain` (empty: at `inst` itself): it changes
+    /// in place the list, dict, or set that a cached function returned, the same object on every
+    /// path. Each premise that does not hold is told to `steps` with its cause and what the cause
+    /// is about; a decision stops at the first, an explanation goes on. The cached function and
+    /// its result when every premise holds.
+    fn cached_change_steps(
         &self,
         inst: &'a Inst,
+        changed: VarId,
+        r: &Ro,
+        chain: &[CallHop],
+        steps: &mut dyn FnMut((&'static OpenCause, Option<String>)) -> ControlFlow<()>,
     ) -> Option<(&'a FuncKey, heki_effect::CachedResult)> {
-        let (operand, change, method) = match &inst.kind {
-            InstKind::SubscriptStore { obj, .. } => (*obj, Change::Item, "__setitem__"),
-            InstKind::SubscriptDelete { obj, .. } => (*obj, Change::Item, "__delitem__"),
-            InstKind::MethodCall { recv, method, .. } => {
-                (*recv, Change::Method(method), method.as_str())
-            }
-            InstKind::BinOp {
-                lhs,
-                op,
-                in_place: true,
-                ..
-            } => (*lhs, Change::InPlace(*op), op.in_place_method()),
-            _ => return None,
+        let mut told = Told::new(steps);
+        let named = |key: &FuncKey| Some(format!("`{}`", key.fqn()));
+        // "Same object": the result of a direct call of one function on every path.
+        let result_of = match self.must_results().get(&changed).copied() {
+            Some(MustResult::Of(key)) if r.via.is_empty() => Some(key),
+            _ => None,
         };
-        let MustResult::Of(key) = self.must_results().get(&operand).copied()? else {
+        if let Some(wrapper) = r.via.first() {
+            let about = Some(format!("`{}`", wrapper.callee));
+            if told.step((&premises::RETURNED_THROUGH_A_FUNCTION, about)) {
+                return None;
+            }
+        } else if result_of.is_none() && told.step((&premises::NOT_THE_RESULT_ON_EVERY_PATH, None))
+        {
+            return None;
+        }
+        // "Cached", "Keyed", and "Container kind": one fact of the cached function's summary.
+        let cached_fn = result_of.or_else(|| self.cached_function(r));
+        let cached = cached_fn.and_then(|key| self.cx.index.summary(key)?.cached_result);
+        if cached.is_none() {
+            for cause in premises::CACHED_RESULT_NOT_ESTABLISHED {
+                if told.step((cause, cached_fn.and_then(named))) {
+                    return None;
+                }
+            }
+        }
+        // "Changed in place": at the line itself, a change of a container of that kind.
+        if let Some(hop) = chain.first() {
+            let about = Some(format!("`{}`", hop.callee));
+            told.step((&premises::CHANGED_IN_A_CALLED_FUNCTION, about));
+            return None;
+        }
+        let change = match &inst.kind {
+            InstKind::SubscriptStore { .. } => Some((Change::Item, "__setitem__")),
+            InstKind::SubscriptDelete { .. } => Some((Change::Item, "__delitem__")),
+            InstKind::MethodCall { method, .. } => Some((Change::Method(method), method.as_str())),
+            InstKind::BinOp {
+                op, in_place: true, ..
+            } => Some((Change::InPlace(*op), op.in_place_method())),
+            _ => None,
+        };
+        let Some((change, method)) = change else {
+            told.step((&premises::NOT_A_CHANGE_OF_THE_KIND, None));
             return None;
         };
-        let cached = self.cx.index.summary(key)?.cached_result?;
+        let cached = cached?;
         let by_name = matches!(change, Change::Method(_));
         let changes = match change {
             Change::Item => cached.kind.takes_item_stores(),
             Change::Method(m) => cached.kind.mutator(m),
             Change::InPlace(op) => cached.kind.in_place_op(op),
         };
+        if !changes && told.step((&premises::NOT_A_CHANGE_OF_THE_KIND, None)) {
+            return None;
+        }
         // Under R2 a result the return annotation names may be an instance of a project subclass
         // of the builtin, whose own `method` runs instead; one built in the function (a display,
         // `list(...)`) is the builtin itself.
@@ -3159,7 +3212,30 @@ impl<'a> Mut202Fn<'a> {
                 .cx
                 .decls
                 .method_not_overridden(cached.kind.class(), method, by_name);
-        (changes && builtin).then_some((key, cached))
+        if !builtin {
+            told.step((&premises::REPLACED_BY_A_SUBCLASS, cached_fn.and_then(named)));
+        }
+        (!told.open).then_some((cached_fn?, cached))
+    }
+
+    /// The cached function `r` names, when the value's identity is not established: the callee
+    /// of the last call through a wrapper, or of a call of this function.
+    fn cached_function(&self, r: &Ro) -> Option<&'a FuncKey> {
+        let Some(hop) = r.via.last() else {
+            let callees = self.callees_by_fqn.get_or_init(|| {
+                self.sites
+                    .all()
+                    .flat_map(CallSite::project_callees)
+                    .map(|bc| (bc.callee.fqn(), &bc.callee))
+                    .collect()
+            });
+            return callees.get(&r.producer).copied();
+        };
+        let site = self.cx.must_explainer.as_ref()?.site_of(hop)?;
+        site.project_callees()
+            .iter()
+            .map(|bc| &bc.callee)
+            .find(|key| key.fqn() == r.producer)
     }
 
     /// The distinct facts of the project callee `key` that the call at `span` (a site of it)
@@ -3386,6 +3462,10 @@ impl<'a> Mut202Fn<'a> {
     }
 
     fn run(mut self, out: &mut Vec<Diagnostic>) {
+        self.below_copies(out);
+        if !self.cx.enabled("MUT202", self.unit) && !self.cx.enabled("MUT114", self.unit) {
+            return;
+        }
         self.propagate();
         if self.ro.is_empty() {
             return;
@@ -3412,19 +3492,26 @@ impl<'a> Mut202Fn<'a> {
                     continue;
                 }
                 let (hit, chain) = self.violation(inst);
-                if let Some(r) = hit
+                if let Some((r, changed)) = hit
                     && reported.insert(inst.span)
                 {
-                    self.report(out, inst, &r, chain);
+                    self.report(out, inst, changed, &r, chain);
                 }
             }
         }
     }
 
-    /// Report the change `inst` makes to the shared value `r` (through the helper calls
-    /// `chain`): under `MUT202` for a declared producer, else under `MUT114`, exact when its
-    /// narrowed claim holds ([`Self::changes_cached_result`]).
-    fn report(&self, out: &mut Vec<Diagnostic>, inst: &'a Inst, r: &Ro, chain: Vec<CallHop>) {
+    /// Report the change `inst` makes to `changed`, the shared value `r` (through the helper
+    /// calls `chain`): under `MUT202` for a declared producer, else under `MUT114`, exact when
+    /// its narrowed claim holds ([`Self::cached_change_steps`]).
+    fn report(
+        &self,
+        out: &mut Vec<Diagnostic>,
+        inst: &'a Inst,
+        changed: VarId,
+        r: &Ro,
+        chain: Vec<CallHop>,
+    ) {
         // A value from a wrapper: the wrapper called here, then the hops down to the producer,
         // then the hop to the mutating helper.
         let through = r
@@ -3451,9 +3538,8 @@ impl<'a> Mut202Fn<'a> {
             );
             return;
         }
-        let exact = self
-            .changes_cached_result(inst)
-            .filter(|_| chain.is_empty() && r.via.is_empty());
+        let exact =
+            self.cached_change_steps(inst, changed, r, &chain, &mut |_| ControlFlow::Break(()));
         let (message, help) = match exact {
             Some((key, cached)) => (
                 format!(
@@ -3487,30 +3573,39 @@ impl<'a> Mut202Fn<'a> {
         ) else {
             return;
         };
-        let tier = crate::premises::tier("MUT114", exact.is_some());
+        let tier = premises::tier("MUT114", exact.is_some());
         d.certainty = tier.at_most(d.certainty);
+        if self.cx.open_premises && tier == Certainty::Heuristic {
+            let mut open: Vec<OpenPremise> = Vec::new();
+            self.cached_change_steps(inst, changed, r, &chain, &mut |(cause, about)| {
+                open.push(cause.open_at(None, about));
+                ControlFlow::Continue(())
+            });
+            debug_assert!(!open.is_empty(), "a heuristic MUT114 report records why");
+            d.open_premises = open;
+        }
     }
 
-    fn violation(&self, inst: &Inst) -> (Option<Ro>, Vec<CallHop>) {
-        let direct = match &inst.kind {
+    /// The shared value `inst` changes, and the value it holds it in, with the call that hands
+    /// it to a project function changing it (empty: `inst` changes it itself).
+    fn violation(&self, inst: &Inst) -> (Option<(Ro, VarId)>, Vec<CallHop>) {
+        let changed = match &inst.kind {
             InstKind::AttrStore { obj, .. }
             | InstKind::AttrDelete { obj, .. }
             | InstKind::SubscriptStore { obj, .. }
-            | InstKind::SubscriptDelete { obj, .. } => self.guarded(*obj),
-            InstKind::MethodCall { recv, method, .. }
-                if container_mutator(method) =>
-            {
-                self.guarded(*recv)
-            }
+            | InstKind::SubscriptDelete { obj, .. } => Some(*obj),
+            InstKind::MethodCall { recv, method, .. } if container_mutator(method) => Some(*recv),
             InstKind::BinOp {
-                lhs, in_place: true, ..
-            } => self.guarded(*lhs).filter(|_| {
-                matches!(self.types.get(lhs), Some(Val::Inst(t)) if MUTABLE_BUILTINS.contains(&t.as_str()))
-            }),
+                lhs,
+                in_place: true,
+                ..
+            } if matches!(self.types.get(lhs), Some(Val::Inst(t)) if MUTABLE_BUILTINS.contains(&t.as_str())) => {
+                Some(*lhs)
+            }
             _ => None,
         };
-        if direct.is_some() {
-            return (direct.cloned(), Vec::new());
+        if let Some((v, r)) = changed.and_then(|v| Some((v, self.guarded(v)?))) {
+            return (Some((r.clone(), v)), Vec::new());
         }
         // Passing a read-only value to a project function that mutates that parameter, also
         // through an offloading API that calls it on a worker thread.
@@ -3526,8 +3621,9 @@ impl<'a> Mut202Fn<'a> {
             };
             // Summaries track parameters 0..64 (`mutated_param_paths` keys are `u8`).
             // A shallow copy shares only the objects below its top level: rebinding its
-            // attributes changes the copy alone. Filling a memo of the shared object, or
-            // initializing one of its attributes lazily, leaves what it computes as it was.
+            // attributes changes the copy alone; a producer that is not deep shares only the
+            // object itself, not what it holds as items. Filling a memo of the shared object,
+            // or initializing one of its attributes lazily, leaves what it computes as it was.
             let p = u8::try_from(pos).ok().filter(|p| *p < 64);
             let mutates = self.facts_run_by_call(inst.span, key).iter().any(|facts| {
                 p.is_some_and(|p| {
@@ -3536,8 +3632,10 @@ impl<'a> Mut202Fn<'a> {
                             .changed_param_attrs
                             .get(&p)
                             .is_some_and(|attrs| facts.changes_param_state(p, Some(attrs)))
-                    } else {
+                    } else if r.deep {
                         facts.changes_param_state(p, None)
+                    } else {
+                        facts.changes_param_object(p)
                     }
                 })
             });
@@ -3548,12 +3646,16 @@ impl<'a> Mut202Fn<'a> {
                     span: inst.span,
                     path: self.unit.input.path.clone(),
                 };
-                return (Some(r.clone()), vec![hop]);
+                return (Some((r.clone(), var)), vec![hop]);
             }
         }
         (None, Vec::new())
     }
 }
+
+// ==================================================================================== MUT115
+
+mod below_copies;
 
 // ==================================================================================== MUT107
 
