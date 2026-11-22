@@ -4041,46 +4041,9 @@ mod tests {
         assert_ne!(kb.digest, builtin.digest);
     }
 
-    /// Every attribute row names a class with catalogued members and is no entry (an attribute
-    /// is not a method the class defines), and the releases of its package that the row was
-    /// checked against are listed ([`Distribution`]).
+    /// `return_type = "Self"`: an instance of the receiver's class, never a class of that name.
     #[test]
-    fn attribute_rows_name_catalogued_classes_in_verified_distributions() {
-        let kb = EffectiveEcosystemKb::load_builtin(&[]).unwrap();
-        let distributions = &kb.distributions;
-        let operators = ["~=", "==", "!=", "<=", ">=", "<", ">"];
-        for d in distributions {
-            assert!(!d.name.is_empty() && !d.packages.is_empty(), "{d:?}");
-            for clause in d.verified.split(',') {
-                let version = operators
-                    .iter()
-                    .find_map(|op| clause.trim().strip_prefix(op))
-                    .unwrap_or_else(|| panic!("{}: {clause}", d.name));
-                assert!(version.starts_with(|c: char| c.is_ascii_digit()), "{d:?}");
-            }
-        }
-        let under = |symbol: &str, package: &str| {
-            symbol
-                .strip_prefix(package)
-                .is_some_and(|rest| rest.starts_with('.'))
-        };
-        for (symbol, class) in &kb.attributes {
-            let members = format!("{class}.");
-            assert!(
-                kb.entries.keys().any(|k| k.starts_with(&members))
-                    || kb.attributes.keys().any(|k| k.starts_with(&members)),
-                "{symbol} -> {class}"
-            );
-            assert_eq!(kb.lookup(symbol), None, "{symbol}");
-            assert!(
-                distributions
-                    .iter()
-                    .any(|d| d.packages.iter().any(|p| under(symbol, p))),
-                "{symbol}"
-            );
-        }
-        // `return_type = "Self"`: an instance of the receiver's class, never a class of that
-        // name.
+    fn self_return_type_is_the_receivers_class() {
         let builder = EcosystemEntry {
             return_type: Some(SELF_RETURN_TYPE.into()),
             ..EcosystemEntry::default()

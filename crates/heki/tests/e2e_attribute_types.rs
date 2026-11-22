@@ -179,11 +179,13 @@ async def handler() -> None:
     client.chat.completions.create(model="m")
 "#;
 
-/// A project subclass of the library class takes the row along its MRO, and a value annotated
-/// with it is typed too; a project class the value may be that binds the name (in its body, on
-/// `self`, or on the class object), defines `__getattribute__`, has a metaclass heki does not
-/// know, or puts a base heki knows nothing of first leaves every read of the attribute on the
-/// library class untyped.
+/// A project subclass of the library class takes the row along its MRO, past a builtin type
+/// without one (`object`, which a project base deriving from it by name puts before the library
+/// class), and a value annotated with it is typed too; a project class the value may be that
+/// binds the name (in its body, on `self`, or on the class object), defines `__getattribute__`,
+/// has a metaclass heki does not know, or puts a library class without the row or a base heki
+/// knows nothing of first leaves every read of the attribute on the library class untyped, and
+/// a base heki knows nothing of leaves the subclass's own reads untyped too.
 #[test]
 fn project_subclasses_keep_or_withdraw_the_row() {
     let plain = r#"from acme import Client
@@ -196,6 +198,18 @@ class Mine(Client):
 async def read(m: Mine) -> None:
     m.chat.completions.create(model="m")
     super(Mine, m).chat.completions.create(model="m")
+
+
+class Logged(object):
+    pass
+
+
+class Mixed(Logged, Client):
+    pass
+
+
+async def mixed(m: Mixed) -> None:
+    m.chat.completions.create(model="m")
 "#;
     assert_eq!(
         check(
@@ -204,6 +218,7 @@ async def read(m: Mine) -> None:
         ),
         [
             d("sub.py", 9, "EFF101", "read"),
+            d("sub.py", 22, "EFF101", "mixed"),
             d("svc.py", 7, "EFF101", "handler"),
         ]
     );
@@ -229,8 +244,12 @@ async def read(m: Mine) -> None:
             "from acme import Client\n\n\nclass Meta(type):\n    pass\n\n\nclass Mine(Client, metaclass=Meta):\n    pass\n",
         ),
         (
-            "unknown-base",
+            "library-base",
             "from acme import Client\nfrom other import Base\n\n\nclass Mine(Base, Client):\n    pass\n",
+        ),
+        (
+            "expression-base",
+            "from acme import Client\nfrom mixins import mixin\n\n\nclass Mine(mixin(), Client):\n    pass\n\n\nasync def read(m: Mine) -> None:\n    m.chat.completions.create(model=\"m\")\n",
         ),
         (
             "local-base",
