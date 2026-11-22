@@ -1442,7 +1442,7 @@ fn a_source_root_stays_out_when_a_name_the_configuration_uses_would_change() {
     );
     // Two files that would define one module.
     let r = subdirectory_app("recommend_source_root_shared");
-    r.write("main.py", "").write("backend/__init__.py", "");
+    r.write("main.py", "");
     assert_eq!(
         reason(&r, &[]),
         "backend/main.py and main.py would both define module `main`"
@@ -1676,21 +1676,41 @@ fn an_import_below_several_directories_is_the_one_of_the_importing_files_own() {
              utils.a()\n",
         )
         .write("svc_b/utils.py", "def b():\n    pass\n")
-        // Below both, and in neither: no candidate's.
-        .write("tool.py", "import utils\n");
-    let (_, report, _) = recommend_json(&p, &[]);
-    let roots = &report["blind_spots"]["source_roots"];
-    assert_eq!(roots.as_array().unwrap().len(), 1, "{roots:#}");
-    assert_eq!(
+        // Below both, and in neither: no candidate's. With `svc_a` a source root it would name
+        // svc_a/utils.py, which nothing shows it means.
+        .write("tool.py", "import utils\n")
+        // A candidate taken whether `svc_a` is or not.
+        .write("tools/helpers/run.py", "")
+        .write("tools/cli.py", "import helpers.run\n");
+    let verdict = |p: &Project| {
+        let (_, report, _) = recommend_json(p, &[]);
+        assert_follows_the_schema(&report);
+        let roots = &report["blind_spots"]["source_roots"];
+        assert_eq!(roots.as_array().unwrap().len(), 2, "{roots:#}");
+        assert_eq!(
+            (&roots[0]["directory"], &roots[0]["imports"]),
+            (&json!("svc_a"), &json!(4))
+        );
         (
-            &roots[0]["directory"],
-            &roots[0]["imports"],
-            &roots[0]["in_block"]
-        ),
-        (&json!("svc_a"), &json!(4), &json!(true))
+            roots[0]["in_block"].clone(),
+            roots[0]["reason"].clone(),
+            report["config"].clone(),
+        )
+    };
+    // Left out, `svc_a` lets the others be tried again without it.
+    assert_eq!(
+        verdict(&p),
+        (
+            json!(false),
+            json!(
+                "`utils` in tool.py would name svc_a/utils.py below source root `svc_a`, not the \
+                 one of tool.py: heki cannot tell it is the file meant"
+            ),
+            json!({"src": ["tools"]})
+        )
     );
-    assert_eq!(report["config"], json!({"src": ["svc_a"]}));
-    assert_follows_the_schema(&report);
+    p.write("tool.py", "");
+    assert_eq!(verdict(&p).2, json!({"src": ["svc_a", "tools"]}));
     let (_, out, _) = p.heki(&["recommend"]);
     assert!(
         out.contains(
@@ -1699,6 +1719,24 @@ fn an_import_below_several_directories_is_the_one_of_the_importing_files_own() {
         ),
         "{out}"
     );
+}
+
+#[test]
+fn a_regular_package_is_no_source_root_candidate() {
+    let p = Project::new("recommend_source_root_package");
+    // As a source root, backend/__init__.py would be a module named `__init__`.
+    p.write("backend/__init__.py", "")
+        .write("backend/config/env.py", "def load():\n    pass\n")
+        .write(
+            "backend/main.py",
+            "import config.env\n\n\ndef run():\n    config.env.load()\n",
+        );
+    let (_, report, _) = recommend_json(&p, &[]);
+    let blind = &report["blind_spots"];
+    assert_eq!(blind["source_roots"], json!([]));
+    assert_eq!(report["config"], json!({}));
+    // No source root makes heki follow it: the call stays one heki takes for a library's.
+    assert_eq!(blind["uncatalogued"][0]["package"], json!("config"));
 }
 
 #[test]
