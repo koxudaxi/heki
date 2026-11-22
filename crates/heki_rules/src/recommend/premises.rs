@@ -247,20 +247,18 @@ fn aggregate(heuristic: &[Diagnostic], shown: &dyn Fn(&Path) -> String) -> OpenP
                     only_open: usize::from(only),
                 }),
             }
-            if row.examples.len() < MAX_LISTED {
-                let (at, detail) = match record {
-                    OpenRecord::Premise(p) => (&p.at, &p.detail),
-                    OpenRecord::Condition(c) => (&c.at, &c.detail),
-                };
-                row.examples.push(ReportAt {
-                    path: shown(&d.path),
-                    line: d.line,
-                    column: d.column,
-                    rule: d.rule_code.clone(),
-                    at: at.as_ref().map(location),
-                    detail: detail.clone(),
-                });
-            }
+            let (at, detail) = match record {
+                OpenRecord::Premise(p) => (&p.at, &p.detail),
+                OpenRecord::Condition(c) => (&c.at, &c.detail),
+            };
+            row.examples.push(ReportAt {
+                path: shown(&d.path),
+                line: d.line,
+                column: d.column,
+                rule: d.rule_code.clone(),
+                at: at.as_ref().map(location),
+                detail: detail.clone(),
+            });
         }
     }
     let mut by_cause: Vec<(CauseKey, CauseRow)> = rows.into_iter().collect();
@@ -272,6 +270,7 @@ fn aggregate(heuristic: &[Diagnostic], shown: &dyn Fn(&Path) -> String) -> OpenP
         )
     });
     for (_, row) in &mut by_cause {
+        row.examples.truncate(MAX_LISTED);
         row.rules
             .sort_by(|a, b| (&a.rule, &a.reported_as).cmp(&(&b.rule, &b.reported_as)));
     }
@@ -551,17 +550,19 @@ mod tests {
 
     #[test]
     fn reports_without_a_recorded_cause_are_said_so() {
-        let section = aggregate(
-            &[report("MUT114", 1, &[]), report("OPT110", 2, &[UNIQUE])],
-            &|p| p.display().to_string(),
-        );
+        let mut reports = vec![report("MUT114", 1, &[])];
+        reports.extend((2..=5).map(|line| report("OPT110", line, &[UNIQUE])));
+        let section = aggregate(&reports, &|p| p.display().to_string());
         let mut out = String::new();
         render(&mut out, &section);
         assert!(
             out.contains("\n  causes not recorded yet: MUT114 1\n"),
             "{out}"
         );
-        assert!(out.contains("\n  Rewrite proven safe: unique "), "{out}");
+        assert!(
+            out.contains("\n    e.g. app.py:2 OPT110, app.py:3 OPT110, app.py:4 OPT110, ...\n"),
+            "{out}"
+        );
     }
 
     #[test]
