@@ -392,6 +392,65 @@ def check_mut114(claim, runs, sources=None):
 
 
 # ---------------------------------------------------------------------------------------------
+# MUT115: an object below a shallow copy, which the copied value held there
+# ---------------------------------------------------------------------------------------------
+def check_mut115(claim, runs, sources=None):
+    """At each run of the change line that completes, the object it changes is the one the
+    copied value held at the access path when the activation last ran the copy line (else
+    Still shared), the copy held that object there when the copy line ended (else Shallow
+    copy), and the line changed it (else Changed below the copy). A path heki cannot load
+    without running code is not checked."""
+    result = Result(claim)
+    for run in valid_runs(runs):
+        copies = {}
+        events = sorted(
+            (e for e in run["events"] if e[0] == "line" and e[1] in (claim["copy_line_id"], claim["line_id"])),
+            key=lambda e: e[3],
+        )
+        for event in events:
+            evals_before = event[13] if len(event) > 13 else {}
+            evals_after = event[14] if len(event) > 14 else {}
+            if event[1] == claim["copy_line_id"]:
+                if event[5] == "ok":
+                    copies[event[2]] = (evals_before.get(claim["held_expr"]), evals_after.get(claim["copy_expr"]))
+                continue
+            if event[5] != "ok" or event[2] not in copies:
+                continue
+            held, in_copy = copies[event[2]]
+            changed_before = evals_before.get(claim["changed_expr"])
+            changed_after = evals_after.get(claim["changed_expr"])
+            if held is None or changed_before is None:
+                continue
+            result.checked += 1
+            if in_copy is not None and in_copy[0] != held[0]:
+                result.refute(
+                    "copy-holds-another-object",
+                    "Shallow copy: the copy does not hold the object the copied value holds there",
+                    run,
+                    {"held": held[1], "in_copy": in_copy[1]},
+                )
+                continue
+            if changed_before[0] != held[0]:
+                result.refute(
+                    "not-the-copied-object",
+                    "Still shared: the line changes another object than the copied value held there",
+                    run,
+                    {"held": held[1:], "changed": changed_before[1:]},
+                )
+                continue
+            same_after = changed_after is not None and changed_after[0] == changed_before[0]
+            mutated = any(m[0] == changed_before[0] for m in event[9])
+            if same_after and changed_after[2] == changed_before[2] and not mutated:
+                result.refute(
+                    "unchanged",
+                    "Changed below the copy: the line ran and left the object as it was",
+                    run,
+                    {"object": changed_before[1:]},
+                )
+    return result
+
+
+# ---------------------------------------------------------------------------------------------
 # OPT proven tier: the accumulator's type when the statement runs
 # ---------------------------------------------------------------------------------------------
 def check_opt_type(claim, runs, sources=None):
@@ -515,6 +574,7 @@ CHECKERS = {
     "DATA101": check_data101,
     "MUT110": check_mut110,
     "MUT114": check_mut114,
+    "MUT115": check_mut115,
     "OPT101": check_opt_type,
     "OPT102": check_opt_type,
     "OPT103": check_opt_type,

@@ -17,6 +17,7 @@ EXACT_RULES = (
     "DATA101",
     "MUT110",
     "MUT114",
+    "MUT115",
     "OPT101",
     "OPT102",
     "OPT103",
@@ -228,6 +229,54 @@ def _all(names):
     return sorted({*names["receivers"], *names["stores"], *names["augs"]})
 
 
+def _changed_expression(source, line):
+    """The source of the object a statement on `line` changes in place: the receiver of a method
+    call, the object of a subscript or attribute store or `del`, or of an augmented
+    assignment's target (`a["k"]["n"] += 1` changes `a["k"]`)."""
+    for node in ast.walk(source.tree):
+        if getattr(node, "lineno", None) != line:
+            continue
+        target = None
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
+            func = node.value.func
+            if isinstance(func, ast.Attribute):
+                target = func.value
+        elif isinstance(node, (ast.Assign, ast.Delete)):
+            targets = node.targets
+            if len(targets) == 1 and isinstance(targets[0], (ast.Subscript, ast.Attribute)):
+                target = targets[0].value
+        elif isinstance(node, ast.AugAssign):
+            if isinstance(node.target, (ast.Subscript, ast.Attribute)):
+                target = node.target.value
+            elif isinstance(node.target, ast.Name):
+                return node.target.id
+        if target is not None:
+            return ast.get_source_segment(source.text, target)
+    return None
+
+
+def _copied_expression(source, line):
+    """The source of the value a shallow copy on `line` copies: the receiver of `x.copy()` /
+    `x.model_copy()`, the argument of `dict(x)` / `copy.copy(x)`, the value a display unpacks
+    (`{**x}`, `[*x]`), the value sliced."""
+    for node in ast.walk(source.tree):
+        if getattr(node, "lineno", None) != line:
+            continue
+        if isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Attribute) and func.attr in ("copy", "model_copy") and not node.args:
+                return ast.get_source_segment(source.text, func.value)
+            if node.args and not isinstance(node.args[0], ast.Starred):
+                return ast.get_source_segment(source.text, node.args[0])
+        if isinstance(node, ast.Dict) and node.keys == [None]:
+            return ast.get_source_segment(source.text, node.values[0])
+        if isinstance(node, ast.List) and len(node.elts) == 1 and isinstance(node.elts[0], ast.Starred):
+            return ast.get_source_segment(source.text, node.elts[0].value)
+        if isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Slice):
+            return ast.get_source_segment(source.text, node.value)
+    return None
+
+
 def _function_of(source, line):
     best = None
     for node in ast.walk(source.tree):
@@ -365,6 +414,38 @@ class Planner:
         claim.update(names)
         function = _function_of(source, pos[0])
         claim["function"] = function.name if function is not None else None
+        return True
+
+    def _mut115(self, claim, source, pos, report):
+        """The copy call (the first related location) and the change: what the copied value
+        holds at the access path when the copy line starts, what the copy holds there when it
+        ends, and the object the change line changes."""
+        related = report.get("related", [])
+        copy_var = report.get("target") or ""
+        changed = _changed_expression(source, pos[0])
+        if not related or not copy_var.isidentifier() or not changed:
+            return False
+        if not (changed == copy_var or changed.startswith((copy_var + ".", copy_var + "["))):
+            return False
+        path = changed[len(copy_var):]
+        copy_line = related[0]["line"]
+        original = _copied_expression(source, copy_line)
+        if not path or not original:
+            return False
+        copy_id = f"Nc{claim['id'][1:]}"
+        self.plan["lines"].append(
+            {
+                "id": copy_id,
+                "path": claim["path"],
+                "line": copy_line,
+                "evals": [f"({original}){path}", f"{copy_var}{path}"],
+            }
+        )
+        self._line(claim, pos[0], evals=[changed])
+        claim["copy_line_id"] = copy_id
+        claim["held_expr"] = f"({original}){path}"
+        claim["copy_expr"] = f"{copy_var}{path}"
+        claim["changed_expr"] = changed
         return True
 
     def _opt_type(self, claim, source, pos, report):
