@@ -634,6 +634,21 @@ const EXACT_SUB_BLOCKING: &str = "import requests\n\nfrom pkg.exact_base import 
 const EXACT_USE: &str =
     "from pkg.exact_base import Base\n\n\nasync def serve(b: Base):\n    b.fetch(\"u\")\n";
 
+// Store types (`ModuleDecls::global_types`, `ClassDecl::attr_stores`): an `async def` calls a
+// method on a module global, in its module and through an import, and on an instance attribute;
+// another function of the module, a third module, and a subclass in another file start and stop
+// storing an async client there.
+const ST_CLIENT: &str = "import httpx\n\nclient = httpx.Client()\n\n\ndef configure():\n    return None\n\n\nasync def handler():\n    client.get(\"u\")\n";
+const ST_CLIENT_REBOUND: &str = "import httpx\n\nclient = httpx.Client()\n\n\ndef configure():\n    global client\n    client = httpx.AsyncClient()\n\n\nasync def handler():\n    client.get(\"u\")\n";
+const ST_USE: &str =
+    "from pkg.st_client import client\n\n\nasync def serve():\n    client.get(\"u\")\n";
+const ST_REBIND: &str = "def configure():\n    return None\n";
+const ST_REBIND_STORES: &str = "import httpx\n\nimport pkg.st_client\n\n\ndef configure():\n    pkg.st_client.client = httpx.AsyncClient()\n";
+const ST_REBIND_SAME: &str = "import httpx\n\nimport pkg.st_client\n\n\ndef configure():\n    pkg.st_client.client = httpx.Client(timeout=1)\n";
+const ST_HOLDER: &str = "import httpx\n\n\nclass Holder:\n    def __init__(self):\n        self.client = httpx.Client()\n\n    async def handle(self):\n        self.client.get(\"u\")\n";
+const ST_CHILD: &str = "class Other:\n    pass\n";
+const ST_CHILD_SWAPPING: &str = "import httpx\n\nfrom pkg.st_holder import Holder\n\n\nclass Child(Holder):\n    def swap(self):\n        self.client = httpx.AsyncClient()\n";
+
 // Method lookups (`ProjectDecls::method_read_runs_no_code`): a helper looks up a method before it
 // sleeps, inside a `try` whose handler goes on; a subclass in another module comes and goes.
 const ML_BASE: &str = "class Steady:\n    def ready(self):\n        return True\n";
@@ -973,6 +988,11 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/exact_base.py", EXACT_BASE),
         ("pkg/exact_sub.py", EXACT_SUB),
         ("pkg/exact_use.py", EXACT_USE),
+        ("pkg/st_client.py", ST_CLIENT),
+        ("pkg/st_use.py", ST_USE),
+        ("pkg/st_rebind.py", ST_REBIND),
+        ("pkg/st_holder.py", ST_HOLDER),
+        ("pkg/st_child.py", ST_CHILD),
         ("pkg/lc_settings.py", LC_SETTINGS),
         ("pkg/lc_use.py", LC_USE),
         ("pkg/ml_base.py", ML_BASE),
@@ -1088,6 +1108,55 @@ fn steps_exact_effects() -> Vec<Step> {
         )
         .present(&[("pkg/exact_use.py", "EFF101")])
         .absent(&[("pkg/exact_use.py", "EFF111")]),
+    ]
+}
+
+/// A global's and an attribute's type is what every store of it binds: a store of another class
+/// in another function of the module, in a third module, or in a subclass in another file makes
+/// the calls on it unresolved, which the language server sees in every reader.
+fn steps_store_types() -> Vec<Step> {
+    const READERS: &[(&str, &str)] = &[("pkg/st_client.py", "EFF101"), ("pkg/st_use.py", "EFF101")];
+    vec![
+        Step::new(
+            "another function rebinds the global to an async client",
+            vec![save("pkg/st_client.py", ST_CLIENT_REBOUND)],
+        )
+        .absent(READERS),
+        Step::new(
+            "the function stops rebinding it",
+            vec![save("pkg/st_client.py", ST_CLIENT)],
+        )
+        .present(READERS),
+        Step::new(
+            "a third module stores an async client into the global",
+            vec![save("pkg/st_rebind.py", ST_REBIND_STORES)],
+        )
+        .absent(READERS),
+        Step::new(
+            "the third module stores a client of the same class",
+            vec![save("pkg/st_rebind.py", ST_REBIND_SAME)],
+        )
+        .present(READERS),
+        Step::new(
+            "the third module stores an async client again",
+            vec![save("pkg/st_rebind.py", ST_REBIND_STORES)],
+        )
+        .absent(READERS),
+        Step::new(
+            "the third module stops storing into it",
+            vec![save("pkg/st_rebind.py", ST_REBIND)],
+        )
+        .present(READERS),
+        Step::new(
+            "a subclass in another file stores an async client into the attribute",
+            vec![save("pkg/st_child.py", ST_CHILD_SWAPPING)],
+        )
+        .absent(&[("pkg/st_holder.py", "EFF101")]),
+        Step::new(
+            "the subclass goes away",
+            vec![save("pkg/st_child.py", ST_CHILD)],
+        )
+        .present(&[("pkg/st_holder.py", "EFF101")]),
     ]
 }
 
@@ -4382,6 +4451,7 @@ sessions!(editing, Session::start, {
     receiver_typing: steps_receiver_typing,
     effect_index: steps_effect_index,
     exact_effects: steps_exact_effects,
+    store_types: steps_store_types,
     helper_witnesses: steps_helper_witnesses,
     imported_constants: steps_imported_constants,
     method_lookups: steps_method_lookups,

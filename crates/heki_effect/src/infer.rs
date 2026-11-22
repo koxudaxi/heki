@@ -139,6 +139,16 @@ impl Inferred {
         }
     }
 
+    /// The type of the value a store of `var` binds: `None` when no value reaches it (`None`,
+    /// on which every call raises), `Some(None)` when its type is unknown.
+    pub(crate) fn stored(&self, var: VarId) -> Option<Option<&Ty>> {
+        match &self.facts[var.0 as usize] {
+            Fact::Unset => None,
+            Fact::Known(t) => Some(Some(t)),
+            Fact::Unknown => Some(None),
+        }
+    }
+
     /// The values consumers see of the variables `isinstance` checks narrow, by block.
     pub(crate) fn narrowed_vals(&self) -> FxHashMap<(BlockId, VarId), Val> {
         self.narrowed
@@ -1764,9 +1774,9 @@ impl<'e, 'a> Engine<'e, 'a> {
         }
         let cx = self.cx;
         let (class, skip_self, self_ty) = self.static_receiver(recv)?;
-        cx.project
-            .member_type(class, attr, skip_self)
-            .and_then(|t| cx.project.declared_ty(t))
+        cx.assumed_member(class, attr, skip_self)
+            .or_else(|| cx.project.member_type(class, attr, skip_self))
+            .and_then(|t| cx.project.declared_ty(&t))
             .and_then(|t| t.bind_self(Some(&self_ty)))
     }
 

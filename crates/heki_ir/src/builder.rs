@@ -143,6 +143,7 @@ pub fn build_module_ir(
         module_fn,
         has_future_annotations: semantic.has_future_annotations,
         has_star_import: ctx.has_star_import,
+        last_star_import: ctx.last_star_import,
         constants,
         class_bases,
         statement_uses,

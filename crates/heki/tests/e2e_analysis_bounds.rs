@@ -1,10 +1,11 @@
 //! The cost of the analyses past the IR, end to end through the real binary: `isinstance`
 //! narrowing through phis, the passes of the type inference and of the classes of merged values,
 //! the closure cells child scopes read, the iterables child scopes receive from the functions
-//! creating them, the size of the Soundness lane's proof state, the values
-//! `EFF107` follows from a task factory, the walk to the callable a builtin calls once per item,
-//! contracts with many call targets and argument lists, the walk to the uses handing a reference to
-//! a call target on, the locks `EFF109` follows, and the values class statements pass as bases.
+//! creating them, the rounds joining the stores of attributes, the size of the Soundness lane's
+//! proof state, the values `EFF107` follows from a task factory, the walk to the callable a
+//! builtin calls once per item, contracts with many call targets and argument lists, the walk to
+//! the uses handing a reference to a call target on, the locks `EFF109` follows, and the values
+//! class statements pass as bases.
 //!
 //! A shape's cost is counted, not timed: `heki check --walk-steps` writes the steps of each
 //! owner's walks (as `scripts/check_walk_shapes.py` reads them), and a shape is compared with the
@@ -303,6 +304,43 @@ fn types_past_the_inference_pass_bound_are_unknown() {
     };
     let blocking = |found: Vec<Value>| found.iter().filter(|d| d["rule_code"] == "EFF101").count();
     assert_eq!(blocking(check(&shape(4))), 1);
+    assert_eq!(blocking(check_linear(30, shape)), 0);
+}
+
+/// A class whose `__init__` binds an attribute to a client, then `links` attributes in turn each
+/// to the one before, and an `async def` calling the client's blocking method through the last.
+fn attribute_chain_before_blocking_call(links: usize) -> String {
+    let mut out = vec![
+        "import httpx".to_owned(),
+        String::new(),
+        String::new(),
+        "class Holder:".to_owned(),
+        "    def __init__(self):".to_owned(),
+        "        self.a0 = httpx.Client()".to_owned(),
+    ];
+    for k in 1..=links {
+        out.push(format!("        self.a{k} = self.a{}", k - 1));
+    }
+    out.push(String::new());
+    out.push("    async def handle(self):".to_owned());
+    out.push(format!(
+        "        self.a{links}.get(\"https://example.com\")"
+    ));
+    out.join("\n") + "\n"
+}
+
+/// The stores of a module's attributes are joined in a bounded number of rounds, each reading the
+/// attributes with the types the one before established: an attribute reached past them has no
+/// type, so the receiver of the call is unknown and nothing is reported.
+#[test]
+fn attributes_past_the_store_join_rounds_are_unknown() {
+    let shape = |links: usize| {
+        let p = Project::new(&format!("bounds_store_rounds_{links}"));
+        p.write("m.py", &attribute_chain_before_blocking_call(links));
+        p
+    };
+    let blocking = |found: Vec<Value>| found.iter().filter(|d| d["rule_code"] == "EFF101").count();
+    assert_eq!(blocking(check(&shape(2))), 1);
     assert_eq!(blocking(check_linear(30, shape)), 0);
 }
 

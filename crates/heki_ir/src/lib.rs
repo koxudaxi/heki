@@ -1011,6 +1011,10 @@ pub struct ModuleIr {
     /// may be rebound by it (`heki_soundness` builtin-shadowing protection, Assumption A1(b)).
     #[serde(default)]
     pub has_star_import: bool,
+    /// The end of the module's last star import, which may rebind every name the module body
+    /// binds before it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_star_import: Option<u32>,
     /// Module-level names the code fixes (integer constants and small displays), for the
     /// size facts of [`FnIndex`] and the declarations other modules read.
     #[serde(default)]

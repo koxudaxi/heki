@@ -1086,8 +1086,9 @@ fn names_a_queue(cx: &TypeCtx<'_>, ty: &Ty) -> bool {
 /// globals, as a queue (`self.events: Queue = EVENTS` with `Queue` imported from a project
 /// module).
 fn types_a_queue(cx: &TypeCtx<'_>, decls: &ModuleDecls) -> bool {
-    let attrs = decls.classes.values().flat_map(|c| c.attr_types.values());
+    let attrs = decls.classes.values().flat_map(|c| c.typed_attrs());
     attrs
+        .map(|(_, t)| t)
         .chain(decls.global_types.values())
         .any(|t| names_a_queue(cx, t))
 }
