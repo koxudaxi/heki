@@ -26,6 +26,10 @@ use std::path::{Path, PathBuf};
 
 // ==================================================================================== MUT101
 
+/// The rules whose exact claims read the kept-value facts
+/// ([`heki_effect::OptInFacts::kept_values`]).
+pub(crate) const KEPT_VALUE_RULES: &[&str] = &["MUT101", "MUT111"];
+
 /// Filter 1: initialization / two-phase initialization methods.
 const INIT_METHODS: &[&str] = &[
     "__init__",
@@ -520,6 +524,10 @@ impl CacheEvents {
                     CacheEvent::LoadAttr(name) => (false, flow.name(name) == prop),
                     CacheEvent::ClearDict => (true, false),
                     CacheEvent::SelfCall(span) => self_call(span),
+                    // Points that may remove the value are no invalidation the code states.
+                    CacheEvent::MayRemove(_) | CacheEvent::MayRemoveAny | CacheEvent::Calls(_) => {
+                        (false, false)
+                    }
                 };
                 if invalidates {
                     out.invalidations.insert((b, index));

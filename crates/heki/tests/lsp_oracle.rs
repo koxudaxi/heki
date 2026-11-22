@@ -28,7 +28,7 @@ const CONFIG: &str = r#"[project]
 name = "t"
 
 [tool.heki.lint]
-extend-select = ["MUT101", "MUT107", "MUT108", "MUT111", "EFF107", "MUT112", "MUT113", "EFF109", "EFF110", "MUT115", "MUT118"]
+extend-select = ["MUT101", "MUT107", "MUT108", "MUT111", "EFF107", "MUT112", "MUT113", "EFF109", "EFF110", "EFF112", "EFF114", "MUT115", "MUT118"]
 
 [[tool.heki.write-owners]]
 name = "registry"
@@ -706,6 +706,18 @@ const FAN_READ_NOTHING: &str =
 const FAN_READ_LOCKED: &str = "import asyncio\n\nLOCK = asyncio.Lock()\n\n\nasync def read_line(reader: asyncio.StreamReader):\n    async with LOCK:\n        return await reader.readline()\n";
 const FAN_USE: &str = "import asyncio\n\nfrom pkg.fan_read import read_line\n\n\nasync def both(reader: asyncio.StreamReader):\n    return await asyncio.gather(read_line(reader), read_line(reader))\n";
 
+// A dict built in a set's order in one module and written in another (`EFF112`): the builder
+// sorts and stops, the writer sorts the keys and stops.
+const ORDER_SRC: &str =
+    "def table(d: dict[str, int]) -> dict[str, int]:\n    return {k: d[k] for k in set(d)}\n";
+const ORDER_SRC_SORTED: &str = "def table(d: dict[str, int]) -> dict[str, int]:\n    return {k: d[k] for k in sorted(set(d))}\n";
+const ORDER_USE: &str = "import json\nfrom pathlib import Path\n\nfrom pkg.order_src import table\n\n\ndef save(d: dict[str, int], path: Path) -> None:\n    path.write_text(json.dumps(table(d)))\n";
+const ORDER_USE_SORTED: &str = "import json\nfrom pathlib import Path\n\nfrom pkg.order_src import table\n\n\ndef save(d: dict[str, int], path: Path) -> None:\n    path.write_text(json.dumps(table(d), sort_keys=True))\n";
+// A clause around a call into another module (`EFF114`): the call cycle closes and opens there.
+const REC_HANDLER: &str = "from pkg.rec_walk import descend\n\n\ndef visit(node):\n    return descend(node)\n\n\ndef measure(node):\n    try:\n        return visit(node)\n    except Exception:\n        return 0\n";
+const REC_WALK: &str = "def descend(node):\n    return len(node)\n";
+const REC_WALK_BACK: &str = "from pkg import rec_handler\n\n\ndef descend(node):\n    return sum(rec_handler.visit(child) for child in node)\n";
+
 // `MUT115`: the declarations of a copied class and of the builtin containers' subclasses in
 // other modules, and a helper in another module, decide whether a change below a copy states
 // the exact claim.
@@ -797,6 +809,10 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/lock_use.py", LOCK_USE),
         ("pkg/fan_read.py", FAN_READ),
         ("pkg/fan_use.py", FAN_USE),
+        ("pkg/order_src.py", ORDER_SRC),
+        ("pkg/order_use.py", ORDER_USE),
+        ("pkg/rec_handler.py", REC_HANDLER),
+        ("pkg/rec_walk.py", REC_WALK),
         ("pkg/plot.py", RO_PLOT),
         ("pkg/loops.py", LOOPS),
         ("pkg/compat.py", COMPAT),
@@ -3268,6 +3284,52 @@ fn steps_eff110() -> Vec<Step> {
     ]
 }
 
+/// `EFF112`: whether a call's result is in a set's order comes from the callee's summary
+/// (`EffectSummary::set_order`), and whether the writer keeps it from the writer's own call: the
+/// builder in another module sorts and stops sorting, the writer sorts the keys and stops.
+fn steps_eff112() -> Vec<Step> {
+    vec![
+        Step::new(
+            "the builder in another module sorts the set first",
+            vec![save("pkg/order_src.py", ORDER_SRC_SORTED)],
+        )
+        .absent(&[("pkg/order_use.py", "EFF112")]),
+        Step::new(
+            "the builder iterates the set again",
+            vec![save("pkg/order_src.py", ORDER_SRC)],
+        )
+        .present(&[("pkg/order_use.py", "EFF112")]),
+        Step::new(
+            "the writer sorts the keys",
+            vec![save("pkg/order_use.py", ORDER_USE_SORTED)],
+        )
+        .absent(&[("pkg/order_use.py", "EFF112")]),
+        Step::new(
+            "the writer stops sorting them",
+            vec![save("pkg/order_use.py", ORDER_USE)],
+        )
+        .present(&[("pkg/order_use.py", "EFF112")]),
+    ]
+}
+
+/// `EFF114`: whether a call in the `try` body runs a call cycle comes from the summaries of the
+/// functions it calls (`EffectSummary::call_cycle`): the module below starts calling back into
+/// the handler's module, closing a cycle, and stops again.
+fn steps_eff114() -> Vec<Step> {
+    vec![
+        Step::new(
+            "the module below calls back into the handler's module",
+            vec![save("pkg/rec_walk.py", REC_WALK_BACK)],
+        )
+        .present(&[("pkg/rec_handler.py", "EFF114")]),
+        Step::new(
+            "the module below stops calling back",
+            vec![save("pkg/rec_walk.py", REC_WALK)],
+        )
+        .absent(&[("pkg/rec_handler.py", "EFF114")]),
+    ]
+}
+
 /// The initial index.
 fn steps_initial_index() -> Vec<Step> {
     vec![Step::new("initial index", Vec::new()).present(&[
@@ -3289,6 +3351,7 @@ fn steps_initial_index() -> Vec<Step> {
         ("pkg/natives_use.py", "EFF101"),
         ("pkg/lock_use.py", "EFF109"),
         ("pkg/fan_use.py", "EFF110"),
+        ("pkg/order_use.py", "EFF112"),
     ])]
 }
 
@@ -3436,12 +3499,12 @@ fn steps_property_getters() -> Vec<Step> {
             "a getter read from an async def in another file starts blocking",
             vec![save("pkg/remote.py", REMOTE_BLOCKING)],
         )
-        .present(&[("pkg/reader.py", "EFF111")]),
+        .present(&[("pkg/reader.py", "EFF101")]),
         Step::new(
             "the getter stops blocking",
             vec![save("pkg/remote.py", REMOTE)],
         )
-        .absent(&[("pkg/reader.py", "EFF111")]),
+        .absent(&[("pkg/reader.py", "EFF101")]),
     ]
 }
 
@@ -3652,8 +3715,8 @@ fn steps_configuration() -> Vec<Step> {
         Step::new(
             "the configuration becomes invalid",
             vec![Action::Configure(CONFIG.replace(
-                "extend-select = [\"MUT101\", \"MUT107\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\", \"MUT113\", \"EFF109\", \"EFF110\", \"MUT115\", \"MUT118\"]",
-                "extend-select = [\"MUT101\", \"MUT107\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\", \"MUT113\", \"EFF109\", \"EFF110\", \"MUT115\", \"MUT118\"]\nselect = [\"NOPE1\"]",
+                "extend-select = [\"MUT101\", \"MUT107\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\", \"MUT113\", \"EFF109\", \"EFF110\", \"EFF112\", \"EFF114\", \"MUT115\", \"MUT118\"]",
+                "extend-select = [\"MUT101\", \"MUT107\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\", \"MUT113\", \"EFF109\", \"EFF110\", \"EFF112\", \"EFF114\", \"MUT115\", \"MUT118\"]\nselect = [\"NOPE1\"]",
             ))],
         )
         .absent(&[("pkg/svc_user.py", "EFF101")]),
@@ -3797,7 +3860,7 @@ fn steps_re_exports() -> Vec<Step> {
                 &UI_IMPL.replace("    def data", "    @property\n    def data"),
             )],
         )
-        .present(&[("pkg/consumer.py", "EFF111")]),
+        .present(&[("pkg/consumer.py", "EFF101")]),
         Step::new(
             "the getter `__hash__` reads becomes a property reading a mutated attribute",
             vec![save(
@@ -3821,7 +3884,7 @@ fn steps_re_exports() -> Vec<Step> {
             "the re-exported classes are plain again",
             vec![save("pkg/ui/impl.py", UI_IMPL)],
         )
-        .absent(&[("pkg/consumer.py", "EFF111"), ("pkg/consumer.py", "MUT107")]),
+        .absent(&[("pkg/consumer.py", "EFF101"), ("pkg/consumer.py", "MUT107")]),
     ]
 }
 
@@ -4249,6 +4312,8 @@ sessions!(editing, Session::start, {
     eff109: steps_eff109,
     mut113: steps_mut113,
     eff110: steps_eff110,
+    eff112: steps_eff112,
+    eff114: steps_eff114,
     receiver_typing: steps_receiver_typing,
     effect_index: steps_effect_index,
     exact_effects: steps_exact_effects,

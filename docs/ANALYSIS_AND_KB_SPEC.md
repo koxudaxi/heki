@@ -288,6 +288,10 @@ Compound expressions are flattened into **basic instructions in explicit left-to
     the same handler and every path to them passes the first, so moving their edges to the head
     changes no dominator. The graph of a region is built once, its dominators found in at most
     four passes in reverse postorder; past the budget the answer is `Open`.
+    `Paths::on_every_return_passes_one_of` and `Paths::on_every_iteration_passes_one_of` ask it
+    of a set of points (every path that completes the region passes one of them, also when none
+    completes it): a walk back from the region's end over the same graph, never entering a
+    passed node, does not reach its root.
   - `ItemOrigins::of_loop` (`heki_ir::facts::origin`): where the items a `for` loop steps
     through come from, as a set of `ItemOrigin`s: a parameter (`Param`), an attribute or item of
     one (`ParamPart`), the method's receiver (`Receiver`), a collection the code fixes (`Fixed`),
@@ -452,6 +456,14 @@ EffectSummary(f) = {
     iterates_params:          Bitset,                      // stepped by an iteration on some path: a generator
                                                            // passed there runs there
     reads_self_attrs:         Set<AttrKeyPath>,            // self.<attr> and self.<dict>[const_key] reads
+    kept:                     Option<Box<KeptFacts>>,      // only with MUT101 or MUT111 selected
+                                                           // (OptInFacts::kept_values):
+                                                           // must_read_self_attrs, those read on every path
+                                                           // that returns normally, as a whole or with the key;
+                                                           // removes_kept, the values kept in an instance
+                                                           // __dict__ it may remove or replace on any object
+                                                           // (by name, or any); and listed_cache, its decorator
+                                                           // is one of the catalog's [[cached_properties]]
     returns_self_attrs:       Set<AttrName>,               // @cached_property: self.<attr> objects the result
                                                            // holds by reference, read for nothing else (MUT101)
     lazily_read_self_attrs:   Set<AttrName>,               // self.<attr> read only where it or a self call
@@ -544,6 +556,17 @@ EffectSummary(f) = {
                                                            // while a lock is held,
                                                            // CallSite::under_lock; only with EFF110
                                                            // selected, OptInFacts::exclusive)
+
+    // Set orders (EFF112; only with EFF112 selected, OptInFacts::set_order)
+    set_order:                Option<SetOrderFacts>,       // flows: the ends (return, an output call,
+                                                           // a project call's argument) each source
+                                                           // reaches (a take of a set's order, a
+                                                           // parameter, a project call's result),
+                                                           // local; returns / returns_params /
+                                                           // writes_params, propagated
+    // Call cycles (EFF114; propagated; only with EFF114 selected, OptInFacts::call_cycles)
+    call_cycle:               Option<CallCycle>,           // none, Reaches (a function its body runs
+                                                           // is on a call cycle), or On (itself)
 
     // Metadata
     is_async, is_generator, is_cached_property, is_lru_cache, owner_class_qualname, decorators,
@@ -962,6 +985,40 @@ which module imports which.
 6. The writes and the paths after and before them come from `FileSummary.cache_flows`, so the
    stale writes of a method are known without its IR: `MUT101` reports those of the checked
    methods, and `MUT111` reads those of every method.
+7. **Reads on every path** (`KeptFacts::must_read_self_attrs`, computed only when `MUT101`
+   or `MUT111` runs: `OptInFacts::kept_values`): the attributes a function reads on every path
+   on which it returns normally, exception edges into handlers included. Its own loads of
+   `self.<attr>` are points of the path facts (`Progress::Returned`: a load that raised read
+   nothing); the loads of one attribute whose value is read as a whole, and the item loads of
+   one constant key of values read only through such loads, are asked together
+   (`Paths::on_every_return_passes_one_of`), so a read on each side of a branch counts. A `self` method
+   called on every such path, or a property read there (its getters' call), adds what every one
+   of its targets reads, when the function's name is bound once (each site's paths are its own
+   definition's), the call's targets are every implementation it can run (`CallSite::complete`;
+   for a read, the getter every class the object may be finds first:
+   `TypeCtx::getter_targets_complete`), and each runs its body at every call (no cache
+   decorator); a callee of the function's own call-graph component adds nothing,
+   so propagation needs no fixpoint for it. An attribute read as a whole covers each of its
+   keys, also where two definitions or two targets are joined.
+8. **What may remove a kept value** (computed only with `OptInFacts::kept_values`). A method's
+   `CacheFlow` also holds the points that may remove or replace a value kept in some object's
+   `__dict__`: `MayRemove(name)` (`del obj.<name>`, an item of a `__dict__` stored or removed
+   under that key), `MayRemoveAny` (a `__dict__` cleared, replaced, or handed to a call; an
+   `await`, the implicit awaits of `async for` and `async with`, or a `yield`, while other code
+   runs; a call heki cannot resolve, of a library outside
+   the catalog, or of one that may run project code by its `[[invokes]]` entry, section 4.2; a
+   project call whose targets are not every implementation it can run; the iteration of a value
+   that is no builtin container, no project generator's result, and no `lazy` call's; a
+   library call handed a container whose items heki does not know, such as a display changed
+   after it is built or what a builtin call or a generator expression returns), and
+   `Calls(span)` at the project calls no `SelfCall` stands for (other receivers, the property
+   getters a read of `self.<name>` runs) and at each step of iterating what a project generator
+   called at `span` returns, whose callees' summaries say what they remove.
+   `KeptFacts::removes_kept` (`EffectSummary::kept`) joins the same points of a function (a
+   `yield` excepted: its consumer is its caller) with what every callee removes. Each write of
+   the flow also records, under the same opt-in (`SelfAttrWrite::kept`), its literal key
+   (`KeptWrite::key`) and, for an in-place change, the builtin list, dict, or set the attribute
+   holds by its type and the method that changes it (`KeptWrite::change`).
 
 #### `MUT111`: readers of a stale `@cached_property` (opt-in)
 1. Reads: the `TypedFieldReadSite`s of each checked function's own body (`self.p`, `obj.p`,
@@ -1395,7 +1452,7 @@ deep = true   # changes to attributes and nested containers below are forbidden 
   callers, with the same initializer and allowed-context rules as `MUT201`. Reads through
   parameters without a project-class type are not seen.
 
-### 2.4 Family 2 (`EFF101`–`EFF103`, `EFF105`–`EFF107`, `EFF109`, `EFF110`, `EFF111`, `EFF113`, `EFF201`, `DATA101`): precision, sanitizers, and aggregation
+### 2.4 Family 2 (`EFF101`–`EFF103`, `EFF105`–`EFF107`, `EFF109`, `EFF110`, `EFF111`, `EFF112`, `EFF113`, `EFF114`, `EFF201`, `DATA101`): precision, sanitizers, and aggregation
 0. **Must-facts and the exact tier** (`EffectSummary::must_exec`, computed only when `EFF101`,
    `EFF111`, `EFF103`, or `EFF113` runs: `OptInFacts::must_effects`):
    - Per call instruction, the path facts (`heki_ir::Paths`, with the reader of
@@ -1408,8 +1465,15 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      subclasses (at most `DISPATCH_CLASS_LIMIT`, 64), the definition its MRO finds is a target;
      every member of a union resolves; a protocol receiver never is complete. A call of a
      property's value is complete when calling a value of the type the getter declares is
-     (`TypeCtx::targets_complete_on`), whatever the receiver; the getters it runs, as a read of
-     the property, never are.
+     (`TypeCtx::targets_complete_on`), whatever the receiver. A read of a property, the call of
+     its getters, is complete when each class the object may be (at most
+     `DISPATCH_CLASS_LIMIT`) takes the name from one of them (`ProjectDecls::function_taken`: the
+     first class along its MRO that names the name defines it as that getter, no class before it
+     stores the name on the class object outside its body, and no base heki does not know comes
+     before it), and none defines `__getattribute__` or has a metaclass heki does not know
+     (`TypeCtx::getter_targets_complete`). A class that finds a class attribute, a method, or
+     nothing first runs no getter. Through `super()`, each class takes the name from one of them
+     after the class `super()` is in, along its own MRO (`ProjectDecls::super_getters_complete`).
    - A Layer 2 call has an effect unconditionally (`CallTarget::Layer2::unconditional`) when its
      entry `emits` it on every call and no case of the entry tests an argument that may be a
      parameter of the caller (R6 covers the arguments heki cannot evaluate).
@@ -1580,7 +1644,85 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      an operation on the object, its own, an awaited call reaching one, or a fan-out whose
      tasks use it; kill at `"unbinds"`) leaves out a fan-out that every path reaches after a
      use.
-10. **`EFF201`** (contract): a breadth-first search over the IR-free call graph from each scope
+10. **`EFF112`** (opt-in): the iteration order of a set of strings reaching an output across a
+   call.
+   - `heki_effect::order_flow` decides, per function and IR-free afterwards, which sources reach
+     which ends. A source is a take of a set's order (the elements of a loop or comprehension over
+     the set, `list()` / `tuple()` / `iter()` / `str.join()` / formatting of it, `set.pop()`, a
+     generator expression over it, a comprehension of its own before Python 3.12 handed it; a set
+     the code bounds to one element on every path to the take, by a test of `len` whose bounding
+     edge is the only way in, also an operand of a short-circuit `or` / `and` on the side of the
+     whole that decides every operand, takes none), a parameter, or a project call's result. The set has
+     run-dependent hashes when it is a `set` / `frozenset` of `str` or `bytes` (or tuples of
+     them): a display of text, `set()` / `frozenset()` of text, a set operator with such an
+     operand (a mapping's `keys()` of text keys included), a module name bound once to such a
+     display (`TypeCtx::string_set_global`), a phi of one, or a value whose inferred type is one
+     (one memoized answer per value). The flow is a `Closure` over `(value, kind)` nodes: a whole
+     value in the set's order passes through copies, phis, list / tuple / dict displays,
+     formatting, `+` / `%`, `str.join`, the builtins that keep an order, `.items()` and the other
+     keeping methods, positional item reads (not from a mapping, by a text key, or from a
+     sequence the code bounds to one element there), and into the containers keeping the order
+     it is appended to or stored in (not a set, which has an order of its own; `insert`,
+     `update`, and `setdefault` only on a list or a mapping known by construction or type; a key
+     read from the mapping on every path before keeps its place when stored again); an element
+     also passes to what is computed from it (an item looked up by it, text formatted or
+     concatenated from it, a call's result), and text made from it and added onto a phi (what a
+     loop has built so far) is a whole value in the set's order. The
+     ends are a `return`, an output (a catalog `writes_in_order` argument with its sorting
+     keyword established off, a stream's `write`, a builtin exception's message; for one element
+     at a time only outputs that append: streams and `print`, not a raise, which names the first
+     element that fails), and a project call's argument (with the callee and parameter; `each`
+     for one element at a time).
+   - Propagation (`order_flow::propagate`) resolves the flows against the callees' facts: what a
+     call's result carries (the callee's `returns`, or, through a callee returning a parameter,
+     what the argument carries: a fixpoint over the flows that visits a flow again only when it
+     grows; one element at a time hands no order back), then `returns` (the first origin),
+     `returns_params`, and `writes_params` (the shortest chain to an output; through an `each`
+     argument only to an appending output).
+   - The rule (`eff_rules::set_order_output`) reads the same resolution where the ordered value
+     meets the output: a call's result written (it came back across a call), or a take handed to
+     a call whose parameter reaches an output. A take written in its own function is a linter's
+     and is not reported.
+11. **`EFF114`** (opt-in): an `except` clause that turns the `RecursionError` of a call cycle
+   into a value.
+   - A function is on a call cycle when it is a member of a component, of more than one node or
+     with a call of itself, of the propagation region's call graph restricted to the calls whose
+     callee's body runs on the caller's stack (`callgraph::on_call_cycles`: a call that runs at
+     the call, not a coroutine only created or a generator only made, or a generator iterated
+     there; never a callable run on a worker thread). The components are computed once per
+     propagation; a region always holds every member of a cycle it touches (an edit's region
+     holds every function sharing a cycle with it, a caller region every caller of a changed
+     function). `EffectSummary::call_cycle` is `On` for a member and `Reaches` for a function
+     whose delivered callee facts reach one (joined during propagation like the other facts, so
+     a generator's or a returned generator's iteration counts where it runs), and takes part in
+     Early Cutoff.
+   - The rule (`eff_rules::recursion_handlers`) reads, per `try`, the clauses its dispatch block
+     tests in turn (the `CatchException` that starts each clause body) and takes the first whose
+     classes include `RecursionError`: a bare `except`, or class values the type inference gives
+     as `builtins.RecursionError`, `RuntimeError`, `Exception`, or `BaseException` (a tuple
+     display of them included). A class is known when it is a builtin (a name Python binds in
+     `builtins`) or a project class statement, which makes a new class; an earlier clause of
+     any other class (one of a dependency or the standard library, which may be bound to
+     `RuntimeError`, as `threading.ThreadError` is, or a name only a star import may bind),
+     of a value heki does not know, or an `except*` clause (by its source text), leaves the
+     `try` undecided. The `try` body is every block whose
+     exception reaches that dispatch block, past `with` exits and past the dispatch of an inner
+     `try` none of whose clauses takes it (one walk per exception target). A call site in the
+     body whose delivered callee facts reach a call cycle (`ProjectIndex::delivery`, into the
+     body; never a worker thread) is the witness. When the witness's callee only reaches the
+     cycle, a walk down its calls (`reach`, under the function's budget; past it, no finding)
+     ends at a function on the cycle or at one an earlier walk of the module's check decided,
+     and each function on the way keeps its first call down: every function's call is decided
+     once for all the chains through it, and a report lists the first eight calls of its chain. The clause completes normally when a walk over
+     the blocks the start of its body dominates, along normal edges, finds no `raise`, no call ending
+     the process (`sys.exit`, `os._exit`, `os.abort`, `exit`, `quit`), and no call of project
+     functions that return on no path (`MustExec::never_returns`, which `EFF114` has computed);
+     leaving those blocks or
+     returning completes it. A clause reporting the error (`print(..., file=sys.stderr)`,
+     `sys.stderr.write`, `traceback.print_exc`, a `logging` call with the exception, also on a
+     logger of unknown class by its method name) and returning an integer constant on every
+     `return` is a CLI boundary and is left out.
+12. **`EFF201`** (contract): a breadth-first search over the IR-free call graph from each scope
    function (and each module body a scope names as `<module>`,
    `DottedPattern::names_module_bodies`) finds the shortest chain to each forbidden effect,
    without entering `allowed-callees`, other scope functions, or bodies that do not run at the
@@ -1789,7 +1931,10 @@ from a deep copy of an unhashable one, then holds what validating the default re
 field validates it: pydantic 2's `BaseModel`), `return_type` (factories such as
 `sqlite3.connect`), `sync_lock_or_tx` (`threading.Lock`, `Session.begin`: `EFF106`),
 `non_reentrant_lock` (`threading.Lock`, `asyncio.Lock`: `EFF109`), `one_at_a_time`
-(`asyncio.StreamReader.readline`, `AsyncSession.execute`: `EFF110`),
+(`asyncio.StreamReader.readline`, `AsyncSession.execute`: `EFF110`), `writes_in_order` (the
+argument a call writes or serializes in the order of its elements, with the keyword that sorts
+mapping keys first and whether it sorts by default: `json.dumps`, `yaml.safe_dump`,
+`pprint.pprint`, `pathlib.Path.write_text`, `print`: `EFF112`),
 `waits_until_done` / `done_when_awaited` (futures), `bounded_by` / `waits_while_full` (queues:
 section 2.2), `environment` (`"call"`: calling the function reads the environment the program runs
 in, `os.getenv`, `platform.system`, `shutil.which`; `"read"`: reading the module attribute does,
@@ -1819,7 +1964,7 @@ is a parameter of the calling function (`shutdown(wait=wait)`) becomes a guard: 
 switches off need the parameter to be true, which the callers decide (`close(wait=False)`). A file lists its `opaque_packages`. Projects add or
 override entries with `[[tool.heki.ecosystem]]` (`symbol`, `effects`, `async-safe`,
 `offloads-blocking-arg`, `excluded`, `copy-sanitizer`, `return-type`, `sync-lock-or-tx`,
-`non-reentrant-lock`, `one-at-a-time`): an
+`non-reentrant-lock`, `one-at-a-time`, `writes-in-order`): an
 override sets the keys it lists and keeps the built-in entry's others. A `[[tool.heki.ecosystem]]`
 entry naming a project function applies to its summary (the built-in catalog never does: a
 package's own source is followed through its bodies): its `effects` are direct effects (chain: the function itself),
@@ -1854,6 +1999,31 @@ Three more keys state when a call waits, which an exact claim needs (ADR-018):
   `false` when `__exit__` / `__aexit__` returns a false value on every path (files, locks, HTTP
   sessions and pools, database connections), `true` when it can suppress the body's exception
   (`contextlib.suppress`). A manager the catalog does not describe may suppress.
+
+A separate table, `[[invokes]]`, says what a call runs of the values it is handed (R3; read by
+`heki_effect::invokes`, so that no other fact sees an entry there): per argument (by position,
+`rest` for every position from it on, by keyword, `"*"` for any keyword, or the receiver), the
+special methods it runs on the value's class (`methods`, looked up on the metaclass for a class
+object; `"*"` for any attribute, read by a name the call is handed), on the classes of the
+value's items (`item_methods`), and whether it calls the value (`calls`). An argument an entry
+does not list runs nothing there. A `lazy` entry returns an iterator that runs the same code
+again while it is iterated (`enumerate`, `map`, `iter`). A value runs code of the project there
+only when its class may define the method in the project: a project class, a builtin class a
+project subclass replaces it in (R2), or a class heki does not know. Two rules keep the entries
+short: a key a dict or set looks up is compared with the keys it holds only on a hash collision,
+which an entry leaves out, and a builtin dict or set hands on its keys with the hashes it stored
+for them. A call of a catalogued library without such an entry runs code of the project only
+when it is handed a value not established as an instance of a library class that is not
+callable; `eval`, `exec`, `__import__`, `importlib.import_module`, and `pickle.loads` always may.
+
+A third table, `[[cached_properties]]` (`heki_kb::CachedPropertyDecorator`), lists the
+cached-property decorators known to keep the getter's value in the instance `__dict__` under the
+property's name: `functools.cached_property`, Django's, Werkzeug's, propcache's, and kombu's. Each
+entry names the versions whose source was read, why the value is kept there, how `del obj.<name>`
+and `obj.__dict__.pop(<name>)` act on it, and, for Werkzeug, the slot an instance without a
+`__dict__` keeps it in. `KeptFacts::listed_cache` records that a getter's decorator, resolved
+through the module's imports (`ModuleDecls::decorator_symbol`), is listed; only such a getter makes
+a cached property an exact claim's (R3), and any other `cached_property` is one by its name.
 
 The entries follow the public API of each package, with three conventions:
 - An async API is `async_safe` and carries no blocking effect: it is often called without a

@@ -10,9 +10,9 @@ use crate::guards;
 use crate::iterations;
 use crate::scc::tarjan_scc;
 use crate::{
-    ArgOrigin, AttrKeyPath, BoundCallee, CallHop, CallSite, CallTarget, CellChange, Construction,
-    Delivery, EffectSummary, Facts, FuncKey, LocalOrigins, NewArg, NewCond, NewKind, Origins,
-    ProjectIndex, ProtectedReturn, ReturnsNew, Runner, Shared, SharedChain, SharedLine,
+    ArgOrigin, AttrKeyPath, BoundCallee, CallCycle, CallHop, CallSite, CallTarget, CellChange,
+    Construction, Delivery, EffectSummary, Facts, FuncKey, LocalOrigins, NewArg, NewCond, NewKind,
+    Origins, ProjectIndex, ProtectedReturn, ReturnsNew, Runner, Shared, SharedChain, SharedLine,
     SharedState, SiteRole, Slot, TypedFieldWriteSite, UnresolvedWriteSite, WriteKind, cache_flow,
 };
 use heki_ast::Span;
@@ -179,6 +179,11 @@ pub(crate) fn propagate_with_budget(
         p.sort_unstable();
         p.dedup();
     }
+    let on_cycle = if index.opt_in.call_cycles {
+        on_call_cycles(index, &out, &nodes, &pos)
+    } else {
+        vec![false; nodes.len()]
+    };
 
     for scc in tarjan_scc(nodes.len(), &succ) {
         let members: FxHashSet<usize> = scc.iter().copied().collect();
@@ -195,7 +200,7 @@ pub(crate) fn propagate_with_budget(
                 break;
             }
             let in_scc = |k: &FuncKey| pos.get(k).is_some_and(|j| members.contains(j));
-            let new = recompute(index, &out, &nodes[i], &in_scc);
+            let new = recompute(index, &out, &nodes[i], &in_scc, on_cycle[i]);
             if index.summary(&nodes[i]) != Some(&new) {
                 store(index, &nodes[i], new);
                 for &p in &preds[i] {
@@ -230,17 +235,73 @@ fn store(index: &mut ProjectIndex, func: &FuncKey, summary: EffectSummary) {
     file.functions.insert(func.clone(), summary);
 }
 
-/// Final summary of `func` = its local facts joined with every outgoing edge's transfer.
+/// The propagation nodes on a call cycle ([`CallCycle`]): the members of the components, over
+/// the calls whose callee's body runs on the caller's stack ([`body_runs_on_stack`]), of more
+/// than one node or with a call of the node itself. A cycle lies within the region a
+/// propagation recomputes: the region holds every function sharing a cycle with an edited one,
+/// and every caller of a changed one, each member of its cycle included.
+fn on_call_cycles(
+    index: &ProjectIndex,
+    out: &OutSites,
+    nodes: &[FuncKey],
+    pos: &FxHashMap<&FuncKey, usize>,
+) -> Vec<bool> {
+    let mut succ: Vec<Vec<usize>> = vec![Vec::new(); nodes.len()];
+    for (i, f) in nodes.iter().enumerate() {
+        for (path, si) in out.get(f).into_iter().flatten() {
+            let site = &index.files[path].call_sites[*si];
+            for c in site.project_callees() {
+                let runs = index
+                    .summary(&c.callee)
+                    .is_some_and(|callee| body_runs_on_stack(site, callee));
+                if let (true, Some(&j)) = (runs, pos.get(&c.callee)) {
+                    succ[i].push(j);
+                }
+            }
+        }
+    }
+    let mut on_cycle = vec![false; nodes.len()];
+    for component in tarjan_scc(nodes.len(), &succ) {
+        if let [only] = component[..]
+            && !succ[only].contains(&only)
+        {
+            continue;
+        }
+        for i in component {
+            on_cycle[i] = true;
+        }
+    }
+    on_cycle
+}
+
+/// Whether the callee's body runs on the caller's stack at `site`: called there (not a
+/// coroutine only created, nor a generator only made), or a generator iterated there, never on a
+/// worker thread.
+fn body_runs_on_stack(site: &CallSite, callee: &EffectSummary) -> bool {
+    site.runner != Runner::Worker
+        && match site.role {
+            SiteRole::Call => runs_at_call(callee, site),
+            SiteRole::Iterate => callee.is_generator,
+            SiteRole::Return | SiteRole::Through { .. } => false,
+        }
+}
+
+/// Final summary of `func` = its local facts joined with every outgoing edge's transfer;
+/// `on_cycle`: `func` is on a call cycle ([`on_call_cycles`]).
 fn recompute(
     index: &ProjectIndex,
     out: &FxHashMap<FuncKey, Vec<(PathBuf, usize)>>,
     func: &FuncKey,
     in_scc: &dyn Fn(&FuncKey) -> bool,
+    on_cycle: bool,
 ) -> EffectSummary {
     let path = &index.func_files[func];
     let file = &index.files[path];
     let local = &file.local_functions[func];
     let mut s = EffectSummary::clone(local);
+    if on_cycle {
+        s.call_cycle = Some(CallCycle::On);
+    }
     index.param_capacities.realize(local, &mut s);
     s.sync_driven_only = file
         .functions
@@ -281,10 +342,21 @@ fn recompute(
             &mut s,
         );
     }
+    if index.opt_in.set_order {
+        crate::order_flow::propagate(&|k| index.summary(k), func, path, &mut s);
+    }
     if index.opt_in.must_effects {
         must_through_calls(
             index,
             out.get(func).map(Vec::as_slice).unwrap_or(&[]),
+            &mut s,
+        );
+    }
+    if index.opt_in.kept_values {
+        must_reads_through_self_calls(
+            index,
+            out.get(func).map(Vec::as_slice).unwrap_or(&[]),
+            in_scc,
             &mut s,
         );
     }
@@ -310,6 +382,89 @@ fn recompute(
     }
     s.refresh_typed_field_writes();
     s
+}
+
+/// [`crate::KeptFacts::must_read_self_attrs`] the function gets from the `self` methods it has
+/// called and the properties it has read, and that returned, whenever it returns normally: the
+/// attributes every target reads on every path, when the targets are every implementation the
+/// call can run and each runs its body at every call (a cached property or function may hand
+/// out what an earlier call computed). A callee of the function's own call-graph component adds nothing, so the fact
+/// needs no fixpoint of its own. A name bound to two definitions gains nothing: each site's
+/// paths are its own definition's, and a call runs one of them.
+fn must_reads_through_self_calls(
+    index: &ProjectIndex,
+    sites: &[(PathBuf, usize)],
+    in_scc: &dyn Fn(&FuncKey) -> bool,
+    s: &mut EffectSummary,
+) {
+    if s.must_exec.as_ref().is_some_and(|m| m.bound_twice) {
+        return;
+    }
+    let mut gained: BTreeSet<AttrKeyPath> = BTreeSet::new();
+    for (path, i) in sites {
+        let site = &index.files[path].call_sites[*i];
+        if !site.recv_is_self
+            || !site.complete
+            || !site.on_every_return.returned
+            || site.role != SiteRole::Call
+            || site.runner != Runner::Caller
+        {
+            continue;
+        }
+        let mut common: Option<BTreeSet<AttrKeyPath>> = None;
+        for bc in site.project_callees() {
+            let callee = index.summary(&bc.callee);
+            // An abstract method never runs: an override does.
+            if callee.is_some_and(EffectSummary::is_abstract) {
+                continue;
+            }
+            let reads = callee
+                .filter(|callee| {
+                    let bound_to_self = callee.owner_class_qualname.is_some()
+                        && !callee.decorators.iter().any(|d| {
+                            matches!(
+                                crate::decorators::last_name(d),
+                                "staticmethod" | "classmethod"
+                            )
+                        });
+                    bound_to_self
+                        && !in_scc(&bc.callee)
+                        && runs_at_call(callee, site)
+                        && crate::decorators::keeps_returned_value(&callee.decorators)
+                })
+                .map(EffectSummary::must_read_self_attrs);
+            let reads: BTreeSet<AttrKeyPath> = reads.into_iter().flatten().cloned().collect();
+            common = Some(match common {
+                None => reads,
+                Some(c) => must_reads_of_both(&c, &reads),
+            });
+        }
+        gained.extend(common.into_iter().flatten());
+    }
+    if gained.is_empty() {
+        return;
+    }
+    s.kept_mut().must_read_self_attrs.extend(gained);
+}
+
+/// The reads both `a` and `b` make on every path ([`crate::KeptFacts::must_read_self_attrs`]): an
+/// attribute read as a whole covers each of its keys.
+pub(crate) fn must_reads_of_both(
+    a: &BTreeSet<AttrKeyPath>,
+    b: &BTreeSet<AttrKeyPath>,
+) -> BTreeSet<AttrKeyPath> {
+    let covers = |reads: &BTreeSet<AttrKeyPath>, r: &AttrKeyPath| {
+        reads.contains(r)
+            || reads.contains(&AttrKeyPath {
+                attr: r.attr.clone(),
+                const_key: None,
+            })
+    };
+    a.iter()
+        .chain(b)
+        .filter(|r| covers(a, r) && covers(b, r))
+        .cloned()
+        .collect()
 }
 
 /// The must-facts the function gets from the project calls it makes whenever it returns
@@ -1110,6 +1265,7 @@ fn apply_edge(
         facts,
     };
     transfer(index, target, local, &edge, &lead, rewrite);
+    target.join_removes_kept(facts.removes_kept());
     if !index.skips_typed_writes
         && (!facts.typed_field_write_sites.is_empty() || !facts.mutated_param_paths.is_empty())
     {
@@ -1204,6 +1360,11 @@ fn transfer(
         facts,
     } = *edge;
     let origin = |k: usize| bc.params.get(k);
+
+    // A recursion raises on the stack it runs on: a worker thread's is not the caller's.
+    if facts.call_cycle.is_some() && site.runner != Runner::Worker {
+        t.call_cycle = t.call_cycle.max(Some(CallCycle::Reaches));
+    }
 
     // a. Offload wrappers: a callee offloading its parameter k offloads the caller's
     //    parameter p when argument k is p. The offloaded callable is never called here,
