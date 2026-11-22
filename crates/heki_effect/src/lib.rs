@@ -281,7 +281,7 @@ pub struct Dispatch {
     /// parameter of the callees does not tell it ([`CallSite::recv_params`]). Kept only when a
     /// `call-owners` contract allows calls through a method's own receiver
     /// ([`Contracts::own_receiver_calls`]).
-    #[serde(default, skip_serializing_if = "is_zero")]
+    #[serde(default)]
     pub recv_params: u64,
 }
 
@@ -1707,10 +1707,6 @@ pub struct CallSite {
     /// project call, or awaited): the span of that call. `None` for a call's own site.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub made_by: Option<Span>,
-}
-
-fn is_zero(value: &u64) -> bool {
-    *value == 0
 }
 
 /// How an API runs a callable it is handed ([`CallSite::runner`]).

@@ -544,6 +544,36 @@ fn allowed_protocols_name_classes_by_pattern_and_a_bad_glob_is_a_configuration_e
     assert!(stderr.contains("allowed-protocols"), "{stderr}");
 }
 
+/// Each contract kind reads its own `allowed-protocols`, so a bad pattern in any one of them is a
+/// configuration error naming that contract's key.
+#[test]
+fn a_bad_allowed_protocols_pattern_is_a_configuration_error_in_each_contract_kind() {
+    for (section, who, rule) in [
+        ("read-owners", "readers", "MUT203"),
+        ("write-owners", "writers", "MUT201"),
+        ("call-owners", "callers", "MUT204"),
+    ] {
+        let p = Project::new(&format!("allowed_protocols_bad_glob_{rule}"));
+        p.write(
+            "pyproject.toml",
+            &format!(
+                "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"{rule}\"]\n\n[[tool.heki.{section}]]\nname = \"c\"\ntargets = [\"pkg.parser.base.Parser._*\"]\nforbidden-{who} = [\"pkg.parser._render:*\"]\nallowed-protocols = [\"[Host\"]\n"
+            ),
+        )
+        .write("pkg/__init__.py", "")
+        .write("pkg/parser/__init__.py", "")
+        .write("pkg/parser/_flags.py", FLAGS)
+        .write("pkg/parser/base.py", PARSER)
+        .write("pkg/parser/_render.py", RENDER);
+        let (code, stdout, stderr) = p.check(&[]);
+        assert_eq!(code, 2, "{section}: {stdout}{stderr}");
+        assert!(
+            stderr.contains(&format!("{section}.allowed-protocols")),
+            "{section}: {stderr}"
+        );
+    }
+}
+
 #[test]
 fn allowed_protocols_leave_the_accesses_through_a_protocol_the_key_does_not_name() {
     let p = Project::new("allowed_protocols_repro");
