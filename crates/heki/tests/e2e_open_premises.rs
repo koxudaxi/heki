@@ -1226,6 +1226,29 @@ fn a_change_that_is_not_one_of_the_kind_at_the_line() {
         "MUT114",
         &[("Changed in place", "not-a-change-of-the-kind")],
     );
+    // An attribute store, on the result or on an item of it.
+    let attribute = APPEND.replace("    result.append(\"x\")\n", "    result.tag = \"x\"\n");
+    own_heuristic(
+        "op_mut114_attribute",
+        "MUT114",
+        &cached(KEEPS, TABLE, &attribute),
+        "MUT114",
+        &[("Changed in place", "not-a-change-of-the-kind")],
+    );
+    own_heuristic(
+        "op_mut114_item",
+        "MUT114",
+        &cached(
+            KEEPS,
+            TABLE,
+            &attribute.replace("result.tag", "result[0].tag"),
+        ),
+        "MUT114",
+        &[
+            ("Same object", "not-the-result-on-every-path"),
+            ("Changed in place", "not-a-change-of-the-kind"),
+        ],
+    );
     exact(
         "op_mut114_change_closed",
         "MUT114",

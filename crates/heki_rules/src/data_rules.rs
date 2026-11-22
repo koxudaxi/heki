@@ -128,24 +128,25 @@ pub(crate) fn data101(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Ve
                 ),
             };
             let tier = premises::tier("DATA101", established.is_some());
-            if let Some(d) = cx.emit(
-                out,
-                "DATA101",
-                unit,
-                span,
-                &key.qualname,
-                var.clone(),
-                format!("`{var}` is rebuilt from itself with `{root}` {every}"),
-                help,
-                chain,
-            ) {
-                d.certainty = tier.at_most(d.certainty);
-                debug_assert!(
-                    !cx.open_premises || tier == Certainty::Exact || !verdict.open.is_empty(),
-                    "a heuristic DATA101 report records why it is not exact"
-                );
-                d.open_premises = verdict.open;
-            }
+            let d = cx
+                .emit(
+                    out,
+                    "DATA101",
+                    unit,
+                    span,
+                    &key.qualname,
+                    var.clone(),
+                    format!("`{var}` is rebuilt from itself with `{root}` {every}"),
+                    help,
+                    chain,
+                )
+                .expect("the rule runs on the unit: it returned at its start otherwise");
+            d.certainty = tier.at_most(d.certainty);
+            debug_assert!(
+                !cx.open_premises || tier == Certainty::Exact || !verdict.open.is_empty(),
+                "a heuristic DATA101 report records why it is not exact"
+            );
+            d.open_premises = verdict.open;
         }
     }
 }
