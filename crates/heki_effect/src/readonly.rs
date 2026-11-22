@@ -52,16 +52,80 @@ pub fn subscript_step(shape: &FnShape<'_>, inst: &Inst, obj_type: Option<&str>) 
 /// ([`ReturnStep::SHALLOW_COPY`]). A dict display with more entries (`{**m, "k": []}`,
 /// `{**m, **fresh}`) is not followed: which of its items are the copied ones depends on keys
 /// the shared value does not carry.
-pub fn display_copies(f: &IrFunction, kind: &InstKind) -> Vec<VarId> {
+pub fn display_copies<'i>(f: &IrFunction, kind: &'i InstKind) -> &'i [VarId] {
     match kind {
         InstKind::DictLiteral { entries, .. } => match entries.as_slice() {
-            [DictEntry::Unpack { dict }] => vec![*dict],
-            _ => Vec::new(),
+            [DictEntry::Unpack { dict }] => std::slice::from_ref(dict),
+            _ => &[],
         },
-        InstKind::AllocBuiltin { elems, .. } if elems.iter().all(|v| f.is_unpacked(*v)) => {
-            elems.clone()
+        InstKind::AllocBuiltin { elems, .. } if elems.iter().all(|v| f.is_unpacked(*v)) => elems,
+        _ => &[],
+    }
+}
+
+/// A copy an instruction makes of the values it is given alone ([`copy_of`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CopyOf<'i> {
+    /// The copied values: the receiver, the one argument, or the unpacked values of a display.
+    pub operands: &'i [VarId],
+    /// It copies what they hold too.
+    pub deep: bool,
+}
+
+/// The copy the instruction `kind` (a call resolved as `callee`) makes of the values it is
+/// given alone, by the one table of copies: a display that only unpacks them
+/// ([`display_copies`]: `{**m}`, `[*xs]`), or a call copying its receiver or its one argument
+/// ([`call_derivation`]: `x.copy()`, `dict(x)`, `copy.copy(x)`, `copy.deepcopy(x)`). A copy
+/// given other arguments (`dict(m, k=v)`, `replace(x, f=v)`, `model_copy(update=...)`) holds
+/// values of its own besides the copied ones, so it is no copy here.
+pub fn copy_of<'i>(
+    f: &IrFunction,
+    kind: &'i InstKind,
+    callee: &Callee,
+    kb: &EffectiveEcosystemKb,
+) -> Option<CopyOf<'i>> {
+    let (operands, method) = match kind {
+        InstKind::DictLiteral { .. } | InstKind::AllocBuiltin { .. } => {
+            let operands = display_copies(f, kind);
+            return (!operands.is_empty()).then_some(CopyOf {
+                operands,
+                deep: false,
+            });
         }
-        _ => Vec::new(),
+        InstKind::MethodCall {
+            recv,
+            method,
+            args,
+            kwargs,
+            ..
+        } if args.is_empty() && kwargs.is_empty() => {
+            (std::slice::from_ref(recv), Some(method.as_str()))
+        }
+        // A function of a module (`copy.copy(x)`) is a method call on the module.
+        InstKind::Call {
+            args,
+            kwargs,
+            star_from: None,
+            ..
+        }
+        | InstKind::MethodCall {
+            args,
+            kwargs,
+            star_from: None,
+            ..
+        } if args.len() == 1 && kwargs.is_empty() => (args.as_slice(), None),
+        _ => return None,
+    };
+    match call_derivation(method, callee, kb, false, false)? {
+        Derivation::DeepCopy => Some(CopyOf {
+            operands,
+            deep: true,
+        }),
+        Derivation::Step(ReturnStep::SHALLOW_COPY) => Some(CopyOf {
+            operands,
+            deep: false,
+        }),
+        Derivation::Step(_) => None,
     }
 }
 
@@ -638,7 +702,7 @@ pub(crate) fn returned_values<'t>(
             }
             InstKind::DictLiteral { .. } | InstKind::AllocBuiltin { .. } => {
                 for copied in display_copies(f, &inst.kind) {
-                    work.push((copied, step.after(ReturnStep::SHALLOW_COPY)));
+                    work.push((*copied, step.after(ReturnStep::SHALLOW_COPY)));
                 }
             }
             // A call's result derives from its receiver or first argument when it copies or

@@ -28,8 +28,10 @@ Events (lists, so that the trace is compact JSON):
 - `["resume", seq, act, qualname, path]`: a project generator or coroutine resumed;
 - `["exhaust", loop, act, entry, seq]`: the loop's iterator was exhausted;
 - `["line", line, act, seq_start, seq_end, outcome, chain, before, after, muts, types,
-  names_before, names_after]`: `names_*` map the captured names to the identity of what they
-  hold when the line starts and ends;
+  names_before, names_after, evals_before, evals_after]`: `names_*` map the captured names to
+  the identity of what they hold when the line starts and ends, `evals_*` the plan's expressions
+  (`a.k`, `a["k"]`) to `[id, type, snapshot]` of what they load without running code of the
+  program (`None` when that cannot be told);
 - `["ret", ret, act, seq, value_id, type_name, base, self_id]`: `base` is `list`, `dict`, or
   `set` for an instance of one (a subclass too), else the type's name; `self_id` is the identity
   of the frame's first argument (`None` without one), the instance a getter computed for;
@@ -38,7 +40,7 @@ Events (lists, so that the trace is compact JSON):
 - `["kept_ret", ret, act, seq, self_id, kept_id]`: the writer of a kept-value claim returned
   normally; `kept_id` is the identity of what its first argument's `__dict__` holds under the
   property's name then (`None`: nothing). A line of such a writer carries the same facts at its
-  start and end as a last element of its `line` event (`kept_facts`);
+  start and end as a last element of its `line` event (`kept_facts`, after `evals_after`);
 - `["fake", seq, api, kind, waits, detail, stack, input_ids, output_id]`.
 """
 
@@ -382,6 +384,8 @@ class LineExec:
         "types",
         "raised",
         "names",
+        "evals",
+        "evals_before",
         "kept",
         "kept_self",
     )
@@ -390,6 +394,8 @@ class LineExec:
         self.plan = plan
         self.start = start
         self.names = {}
+        self.evals = []
+        self.evals_before = {}
         self.chain = None
         self.watched = []
         self.before = []
@@ -810,13 +816,16 @@ class Recorder:
         )
 
     def _start_line(self, fs, plans, seq, frame):
-        merged = {"id": plans[0]["id"], "capture": [], "types": [], "chain": False}
+        merged = {"id": plans[0]["id"], "capture": [], "types": [], "chain": False, "evals": []}
         for plan in plans:
             merged["capture"].extend(plan.get("capture", ()))
             merged["types"].extend(plan.get("types", ()))
+            merged["evals"].extend(plan.get("evals", ()))
             merged["chain"] = merged["chain"] or plan.get("chain", False)
         ex = LineExec(plans, seq)
         local = frame.f_locals
+        ex.evals = sorted(set(merged["evals"]))
+        ex.evals_before = self._eval_objects(local, ex.evals)
         watched = []
         for name in merged["capture"]:
             value = local.get(name, MISSING)
@@ -892,10 +901,22 @@ class Recorder:
             frame = frame.f_back
         return chain
 
+    def _eval_objects(self, local, exprs):
+        out = {}
+        for expr in exprs:
+            value = static_eval(expr, local)
+            if value is UNKNOWN:
+                out[expr] = None
+                continue
+            self.keep.append(value)
+            out[expr] = [id(value), type(value).__name__, snapshot(value)]
+        return out
+
     def _end_line(self, fs, seq, outcome):
         ex = fs.open_line
         fs.open_line = None
         after = [[id(v), type(v).__name__, snapshot(v)] for v in ex.watched]
+        evals_after = self._eval_objects(fs.frame.f_locals, ex.evals) if ex.evals else {}
         local = fs.frame.f_locals if ex.names else {}
         after_names = {}
         for name in ex.names:
@@ -922,6 +943,8 @@ class Recorder:
                 ex.types,
                 ex.names,
                 after_names,
+                ex.evals_before,
+                evals_after,
                 kept_facts,
             ]
         )
@@ -941,6 +964,8 @@ class Recorder:
                     ex.types,
                     ex.names,
                     after_names,
+                    ex.evals_before,
+                    evals_after,
                 ]
             )
 

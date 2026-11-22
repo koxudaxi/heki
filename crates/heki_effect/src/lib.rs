@@ -19,7 +19,7 @@
 
 pub mod cache_flow;
 mod callgraph;
-pub use callgraph::SiteMust;
+pub use callgraph::{HopGap, MustExplainer, MustGap, SiteMust};
 pub mod capacity;
 mod paths;
 pub use paths::with_paths;
@@ -257,6 +257,13 @@ pub struct OnEveryReturn {
 }
 
 /// The bit of `e` in a mask of execution effects (`CallTarget::Layer2::unconditional`).
+/// The path of [`EffectSummary::mutated_param_paths`] and
+/// [`EffectSummary::changed_param_attrs`] for a change of an object the argument holds as an item
+/// or an element of its iteration, or of one below it (`p["k"].append(x)`, `p[0].name = v`,
+/// `for row in p: row.clear()`), also through a shallow copy of the argument (`dict(p)["k"]`).
+/// No attribute has this name.
+pub const ELEMENTS_PATH: &str = "[]";
+
 pub const fn effect_bit(e: ExecEffectKind) -> u16 {
     1 << (e as u16)
 }
@@ -667,7 +674,8 @@ pub struct EffectSummary {
     /// generator only to its first `yield` and does not count.
     pub iterates_params: u64,
     /// `param index -> paths`: `""` = container mutation of the argument itself,
-    /// `"a"` = write to / mutation of the argument's attribute `a`.
+    /// `"a"` = write to / mutation of the argument's attribute `a`, [`ELEMENTS_PATH`] = a change
+    /// of an object the argument holds as an item or an element, or of one below it.
     pub mutated_param_paths: BTreeMap<u8, BTreeSet<String>>,
     /// `param index -> paths` of `mutated_param_paths` that every change, in the function and
     /// through its calls, only fills a memo or initializes lazily
@@ -681,8 +689,9 @@ pub struct EffectSummary {
     pub memo_param_paths: Option<Box<BTreeMap<u8, BTreeSet<String>>>>,
     /// `param index -> attributes` of the argument whose objects are changed, in place or
     /// deeper (`p.a.append(...)`, `p.a.b = v`), also through local copies and calls: the
-    /// `mutated_param_paths` that are not just a rebinding of the attribute (`p.a = v`). A
-    /// shallow copy of the argument shares exactly these objects (`MUT202`).
+    /// `mutated_param_paths` that are not just a rebinding of the attribute (`p.a = v`), and
+    /// [`ELEMENTS_PATH`] when objects it holds as items or elements are. A shallow copy of the
+    /// argument shares exactly these objects (`MUT202`).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub changed_param_attrs: BTreeMap<u8, BTreeSet<String>>,
     /// `param index -> spans` of the function's own changes of the argument (a local fact,
@@ -1394,12 +1403,23 @@ impl EffectSummary {
     }
 
     /// Whether the function changes parameter `p` other than by filling a memo or initializing
-    /// lazily (`memo_param_paths`); `attrs`: only below those of its attributes.
+    /// lazily (`memo_param_paths`); `attrs`: only below those of its attributes (and items,
+    /// [`ELEMENTS_PATH`]).
     pub fn changes_param_state(&self, p: u8, attrs: Option<&BTreeSet<String>>) -> bool {
+        self.changes_param_paths(p, |path| attrs.is_none_or(|a| a.contains(path)))
+    }
+
+    /// [`Self::changes_param_state`] of the argument's own object: itself or its attributes,
+    /// leaving out the changes of the objects it holds as items or elements.
+    pub fn changes_param_object(&self, p: u8) -> bool {
+        self.changes_param_paths(p, |path| path != ELEMENTS_PATH)
+    }
+
+    fn changes_param_paths(&self, p: u8, counts: impl Fn(&str) -> bool) -> bool {
         let memos = self.memo_param_paths.as_deref().and_then(|m| m.get(&p));
         let paths = self.mutated_param_paths.get(&p).into_iter().flatten();
         paths
-            .filter(|path| attrs.is_none_or(|a| a.contains(*path)))
+            .filter(|path| counts(path))
             .any(|path| memos.is_none_or(|m| !m.contains(path)))
     }
 
@@ -1493,6 +1513,15 @@ pub struct ArgOrigin {
     pub param: Option<(u8, Option<String>)>,
     /// A slot of caller parameter `i` itself, one level deep (`p.a`, `p["k"]`).
     pub param_slot: Option<(u8, Slot)>,
+    /// The caller parameters `i` whose items or elements the argument may be, or be below,
+    /// each with the path a change of it is to the parameter ([`ELEMENTS_PATH`], or the
+    /// attribute it is below: `p.a[0]`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub param_elements: Vec<(u8, String)>,
+    /// A shallow copy of caller parameter `i` itself (`None`) or of its attribute `a`
+    /// (`dict(p)`, `copy.copy(p.a)`): it shares the objects below its top level with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub param_copy: Option<(u8, Option<String>)>,
     /// `self.<attr>` of the calling method.
     pub self_attr: Option<String>,
     /// `obj.<attr>` where `obj` has project class type: `(class_fqn, attr)`.
@@ -1801,6 +1830,24 @@ impl CallSite {
             span: Span { start: 0, end: 0 },
             made_by: None,
             ..self.clone()
+        }
+    }
+
+    /// Whether the targets' bodies run at the call, on the caller's thread: a callable an API
+    /// runs (on a worker, once per item) does not, nor does what a call returns when it is
+    /// iterated or handed on. Only such a site's completeness and paths ([`Self::complete`],
+    /// [`Self::on_every_return`]) are about those bodies.
+    pub fn runs_targets_here(&self) -> bool {
+        self.role == SiteRole::Call && self.runner == Runner::Caller
+    }
+
+    /// Whether the caller has made the call whenever it returns normally, as its must-facts
+    /// take it: a Layer 2 call also when it raised (its effect ran), a project call only when it
+    /// returned (a callee that raised may not have run its effect).
+    pub fn made_on_every_return(&self) -> bool {
+        match self.target {
+            CallTarget::Layer2 { .. } => self.on_every_return.called,
+            CallTarget::Project(_) => self.on_every_return.returned,
         }
     }
 
