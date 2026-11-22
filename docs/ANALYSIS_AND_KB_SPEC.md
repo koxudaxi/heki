@@ -1616,7 +1616,10 @@ the caller's thread with a synchronous facade over an async connection), `exclud
 deeply unless `update=` hands it values by reference: `MUT202`), `return_type` (factories such as
 `sqlite3.connect`), `sync_lock_or_tx` (`threading.Lock`, `Session.begin`: `EFF106`),
 `non_reentrant_lock` (`threading.Lock`, `asyncio.Lock`: `EFF109`), `one_at_a_time`
-(`asyncio.StreamReader.readline`, `AsyncSession.execute`: `EFF110`),
+(`asyncio.StreamReader.readline`, `AsyncSession.execute`: `EFF110`), `writes_in_order` (the
+argument a call writes or serializes in the order of its elements, with the keyword that sorts
+mapping keys first and whether it sorts by default: `json.dumps`, `yaml.safe_dump`,
+`pprint.pprint`, `pathlib.Path.write_text`, `print`: `EFF112`),
 `waits_until_done` / `done_when_awaited` (futures), `bounded_by` / `waits_while_full` (queues:
 section 2.2), `environment` (`"call"`: calling the function reads the environment the program runs
 in, `os.getenv`, `platform.system`, `shutil.which`; `"read"`: reading the module attribute does,
@@ -1646,7 +1649,7 @@ is a parameter of the calling function (`shutdown(wait=wait)`) becomes a guard: 
 switches off need the parameter to be true, which the callers decide (`close(wait=False)`). A file lists its `opaque_packages`. Projects add or
 override entries with `[[tool.heki.ecosystem]]` (`symbol`, `effects`, `async-safe`,
 `offloads-blocking-arg`, `excluded`, `copy-sanitizer`, `return-type`, `sync-lock-or-tx`,
-`non-reentrant-lock`, `one-at-a-time`): an
+`non-reentrant-lock`, `one-at-a-time`, `writes-in-order`): an
 override sets the keys it lists and keeps the built-in entry's others. A `[[tool.heki.ecosystem]]`
 entry naming a project function applies to its summary (the built-in catalog never does: a
 package's own source is followed through its bodies): its `effects` are direct effects (chain: the function itself),

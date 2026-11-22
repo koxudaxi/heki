@@ -7,7 +7,8 @@ opaque_packages = [
     "builtins", "asyncio", "socket", "ssl", "subprocess", "time", "io", "os",
     "pathlib", "shutil", "sqlite3", "urllib", "http", "logging", "copy", "functools",
     "itertools", "collections", "threading", "multiprocessing", "concurrent", "dataclasses",
-    "queue", "contextlib", "importlib", "platform", "sys", "sysconfig", "html",
+    "queue", "contextlib", "importlib", "platform", "sys", "sysconfig", "html", "json",
+    "pprint",
 ]
 
 # --- Sleep ---
@@ -90,11 +91,13 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "pathlib.Path.write_text"
 effects = ["blocking_fs"]
+writes_in_order = { arg = 0, param = "data" }
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "pathlib.Path.write_bytes"
 effects = ["blocking_fs"]
+writes_in_order = { arg = 0, param = "data" }
 opaque_to_layer3 = true
 
 [[entries]]
@@ -650,6 +653,42 @@ symbol = "asyncio.BaseEventLoop.run_in_executor"
 async_safe = true
 offloads_blocking_arg = 1
 return_type = "asyncio.Future"
+opaque_to_layer3 = true
+
+# --- Written in order (EFF112, opt-in) ---
+# The call writes an argument, or serializes it into text, in the order of its elements: a
+# mapping's keys and a sequence's items in their iteration order. `sorted_by` names the keyword
+# that sorts mapping keys first, `sorted_by_default` whether the call sorts without it. `print`
+# writes every positional argument.
+
+[[entries]]
+symbol = "builtins.print"
+writes_in_order = {}
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "json.dumps"
+writes_in_order = { arg = 0, param = "obj", sorted_by = "sort_keys" }
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "json.dump"
+writes_in_order = { arg = 0, param = "obj", sorted_by = "sort_keys" }
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pprint.pprint"
+writes_in_order = { arg = 0, param = "object", sorted_by = "sort_dicts", sorted_by_default = true }
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pprint.pformat"
+writes_in_order = { arg = 0, param = "object", sorted_by = "sort_dicts", sorted_by_default = true }
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pprint.pp"
+writes_in_order = { arg = 0, param = "object", sorted_by = "sort_dicts" }
 opaque_to_layer3 = true
 
 # --- Excluded (logging) ---
