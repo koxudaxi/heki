@@ -251,6 +251,11 @@ pub(crate) fn eff101_105(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
                 ),
             };
             let fold_key = format!("{target}|{}", effect_name(r.effect));
+            let open_premises = if cx.open_premises && code == "EFF111" {
+                eff111_open_premises(cx, r)
+            } else {
+                Vec::new()
+            };
             if let Some(d) = cx.emit(
                 out,
                 code,
@@ -263,9 +268,7 @@ pub(crate) fn eff101_105(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
                 &chain,
             ) {
                 d.fold_key = Some(fold_key);
-                if cx.open_premises && code == "EFF111" {
-                    d.open_premises = eff111_open_premises(cx, r);
-                }
+                d.open_premises = open_premises;
             }
         }
     }

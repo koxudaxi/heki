@@ -943,3 +943,18 @@ fn a_file_the_rule_is_ignored_in_gets_no_report() {
         )]
     );
 }
+
+/// A configuration heki cannot load (an unknown rule) prints no report and exits 2, as
+/// `heki check` does.
+#[test]
+fn an_unknown_rule_is_a_configuration_error() {
+    let p = Project::new("open_unknown_rule");
+    p.write("app.py", "import time\n");
+    let (code, stdout, stderr) = p.heki(&["dump-open-premises", "--select", "NOTARULE", "."]);
+    assert_eq!(code, 2, "{stdout}{stderr}");
+    assert!(
+        stderr.contains("unknown rule selector `NOTARULE`"),
+        "{stderr}"
+    );
+    assert!(stdout.is_empty(), "{stdout}");
+}
