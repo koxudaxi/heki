@@ -17,8 +17,8 @@ use crate::{FrameState, KindMask, ObligationStatus, ProfitabilityTier, SafetyTie
 use heki_ast::{LineIndex, Span};
 use heki_ir::walk::{Answer, Def, FnShape};
 use heki_ir::{
-    BinOpKind, BlockId, BuiltinKind, CompareOpKind, DictEntry, FnIndex, Inst, InstKind, IrFunction,
-    LoopBound, ModuleBindings, ModuleIr, NaturalLoop, Terminator, VarId,
+    BinOpKind, BlockId, BuiltinKind, CompareOpKind, DictEntry, FnIndex, FunctionId, Inst, InstKind,
+    IrFunction, LoopBound, ModuleBindings, ModuleIr, NaturalLoop, Terminator, VarId,
 };
 use heki_kb::{EffectiveSoundnessKb, SoundnessParamEffect};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -102,8 +102,10 @@ pub struct OptCandidate {
     pub not_profitable: Option<String>,
     /// What proves the quadratic / linear cost (`None`: nothing does, e.g. `x in param`).
     pub cost_evidence: Option<String>,
-    /// The most times the loop runs, when the code fixes or caps it (`FnIndex::fixed_trips`),
-    /// for a size-dependent rewrite; `None` for the others.
+    /// The loop a size-dependent rewrite pays off over, as its function and its index into that
+    /// function's loops; `None` for the others.
+    pub trip_loop: Option<(FunctionId, usize)>,
+    /// The most times that loop runs, when the code fixes or caps it (`FnIndex::fixed_trips`).
     pub fixed_trips: Option<u32>,
     pub edits: Vec<TextEdit>,
 }
@@ -119,14 +121,6 @@ impl OptCandidate {
         self.verdict.tier != SafetyTier::Disproved
             && self.not_profitable.is_none()
             && self.cost_evidence.is_some()
-    }
-
-    /// In its rule's exact tier (ADR-018, decisions 4 and 9): the rewrite is proven safe, and a
-    /// size-dependent one is in a loop whose trip count the code does not fix. A fixed count is
-    /// no evidence either way, so such a report is true but heuristic (a bound of 16 or fewer
-    /// that the loop's `LoopBound` shows is not profitable, and not reported at all).
-    pub fn in_exact_tier(&self) -> bool {
-        self.is_safe() && self.fixed_trips.is_none()
     }
 
     /// The edits, when the rewrite is proven safe.
@@ -941,6 +935,7 @@ impl<'a, 'c> Rules<'a, 'c> {
             profitability: rule.profitability(),
             not_profitable,
             cost_evidence,
+            trip_loop: lp.and_then(|lp| Some((self.f().id, self.ix.shape.index_of(lp)?))),
             fixed_trips: lp.and_then(|lp| match self.ix.fixed_trips(lp, &mut |_| None) {
                 Answer::Known(trips) => Some(trips.at_most()),
                 Answer::Open => None,
