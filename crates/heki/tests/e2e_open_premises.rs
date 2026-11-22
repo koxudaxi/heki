@@ -1373,22 +1373,78 @@ fn an_unknown_rule_is_a_configuration_error() {
 
 // ------------------------------------------------------ conditions of the tier that are no premise
 
-/// `(condition, cause, detail)` of each open condition of `report`.
-fn conditions_of(report: &Value) -> Vec<(String, String, Option<String>)> {
+/// `(condition, cause, closer, detail)` of each open condition of `report`.
+fn conditions_of(report: &Value) -> Vec<(String, String, String, Option<String>)> {
     report["open_conditions"]
         .as_array()
         .unwrap()
         .iter()
         .map(|o| {
             assert_eq!(o["axis"], "profitability");
-            assert_eq!(o["closer"], "none");
             (
                 o["condition"].as_str().unwrap().to_owned(),
                 o["cause"].as_str().unwrap().to_owned(),
+                o["closer"].as_str().unwrap().to_owned(),
                 o["detail"].as_str().map(str::to_owned),
             )
         })
         .collect()
+}
+
+/// A proven size-dependent rewrite of each rule, in a loop over `ITER`, in a function taking
+/// the parameters `SIG` (`trip_source`).
+const TRIP_SHAPES: [(&str, &str); 6] = [
+    (
+        "OPT103",
+        "def build(SIG):\n    x = ()\n    for i in ITER:\n        x = x + (i,)\n    return x\n",
+    ),
+    (
+        "OPT110",
+        "def count(SIG):\n    allowed = list(range(0, 50, 3))\n    hits = []\n    for p in ITER:\n        if int(p) in allowed:\n            hits.append(p)\n    return hits\n",
+    ),
+    (
+        "OPT111",
+        "def dedup(SIG):\n    seen = []\n    for v in ITER:\n        w = int(v) % 7\n        if w not in seen:\n            seen.append(w)\n    return seen\n",
+    ),
+    (
+        "OPT120",
+        "def drain(SIG):\n    q = [0, 1, 2, *items]\n    out = []\n    for _ in ITER:\n        out.append(q.pop(0))\n    return out\n",
+    ),
+    (
+        "OPT121",
+        "def front(SIG):\n    q = []\n    for i in ITER:\n        q.insert(0, i)\n    return list(q)\n",
+    ),
+    (
+        "OPT130",
+        "def rebuild(SIG):\n    keys = [1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610, 987, 1597, 2584]\n    hits = 0\n    for p in ITER:\n        if p in set(keys):\n            hits += 1\n    return hits\n",
+    ),
+];
+
+/// A module with the function of `shape` looping over `iterable`: a method of a class when
+/// `method`, after a module-level list of 20 items (`STAGES`), a list the module grows
+/// (`HOOKS`), and a project function (`stages`).
+fn trip_source(shape: &str, iterable: &str, method: bool) -> String {
+    let sig = "items, path, cursor: sqlite3.Cursor, config, obj, *args";
+    let mut function = shape.replace("ITER", iterable).replace("SIG", sig);
+    if method {
+        function = function.replacen("(items", "(self, items", 1);
+        let indented: Vec<String> = function
+            .lines()
+            .map(|l| {
+                if l.is_empty() {
+                    String::new()
+                } else {
+                    format!("    {l}")
+                }
+            })
+            .collect();
+        function = format!("class Model:\n{}\n", indented.join("\n"));
+    }
+    let stages: Vec<String> = (0..20).map(|i| i.to_string()).collect();
+    format!(
+        "import inspect\nimport os\nimport sqlite3\n\nSTAGES = [{}]\nHOOKS = []\n\n\ndef hook(f):\n    HOOKS.append(f)\n    return f\n\n\ndef stages(config):\n    return config.stages\n\n\n{function}",
+        stages.join(", ")
+    )
 }
 
 /// A size-dependent rewrite heki proves in a loop whose trip count the code fixes is heuristic
@@ -1396,44 +1452,12 @@ fn conditions_of(report: &Value) -> Vec<(String, String, Option<String>)> {
 /// that is no premise ("Trip count open"). The same rewrite over a loop the data sizes is exact.
 #[test]
 fn a_rewrite_in_a_loop_the_code_counts_leaves_the_trip_count_open() {
-    let cases = [
-        (
-            "OPT103",
-            "def build(items):\n    x = ()\n    for i in ITER:\n        x = x + (i,)\n    return x\n",
-            "items",
-        ),
-        (
-            "OPT110",
-            "def count(probes):\n    allowed = list(range(0, 50, 3))\n    hits = []\n    for p in ITER:\n        if p in allowed:\n            hits.append(p)\n    return hits\n",
-            "range(probes)",
-        ),
-        (
-            "OPT111",
-            "def dedup(n):\n    seen = []\n    for v in ITER:\n        w = v % 7\n        if w not in seen:\n            seen.append(w)\n    return seen\n",
-            "range(n)",
-        ),
-        (
-            "OPT120",
-            "def drain(items):\n    q = [0, 1, 2, *items]\n    out = []\n    for _ in ITER:\n        out.append(q.pop(0))\n    return out\n",
-            "items",
-        ),
-        (
-            "OPT121",
-            "def front(items):\n    q = []\n    for i in ITER:\n        q.insert(0, i)\n    return list(q)\n",
-            "items",
-        ),
-        (
-            "OPT130",
-            "def rebuild(probes):\n    keys = [1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610, 987, 1597, 2584]\n    hits = 0\n    for p in ITER:\n        if p in set(keys):\n            hits += 1\n    return hits\n",
-            "range(probes)",
-        ),
-    ];
-    for (rule, shape, data) in cases {
+    for (rule, shape) in TRIP_SHAPES {
         let name = rule.to_lowercase();
         let fixed = reports(
             &format!("cond_{name}"),
             OPT,
-            &shape.replace("ITER", "range(40)"),
+            &trip_source(shape, "range(40)", false),
         );
         assert_eq!(fixed.len(), 1, "{rule}: {fixed:#?}");
         assert_eq!(fixed[0]["rule"], rule);
@@ -1444,6 +1468,7 @@ fn a_rewrite_in_a_loop_the_code_counts_leaves_the_trip_count_open() {
             vec![(
                 "Trip count open".to_owned(),
                 "trip-count-fixed".to_owned(),
+                "none".to_owned(),
                 Some("the loop runs at most 40 times".to_owned())
             )],
             "{rule}"
@@ -1451,10 +1476,100 @@ fn a_rewrite_in_a_loop_the_code_counts_leaves_the_trip_count_open() {
         exact(
             &format!("cond_{name}_closed"),
             OPT,
-            &shape.replace("ITER", data),
+            &trip_source(shape, "items", false),
             rule,
         );
     }
+}
+
+/// The exact tier of a size-dependent rewrite asks for a loop whose items the data decides, as
+/// `EFF103`'s "Origin" establishes them: a parameter (`*args` included), the lines of a file, the
+/// rows of a query, the entries of a directory.
+#[test]
+fn a_rewrite_over_a_loop_the_data_sizes_is_exact() {
+    let data = [
+        "items",
+        "args",
+        "open(path)",
+        "cursor.execute(\"SELECT id FROM t\")",
+        "os.listdir(path)",
+    ];
+    for (rule, shape) in TRIP_SHAPES {
+        for (i, iterable) in data.iter().enumerate() {
+            let name = format!("cond_data_{}_{i}", rule.to_lowercase());
+            exact(&name, OPT, &trip_source(shape, iterable, false), rule);
+        }
+    }
+}
+
+/// A loop over the program's structure runs as many times as it has parts (layers, stages, the
+/// classes of an MRO), however large the input: a proven rewrite over it is heuristic with every
+/// premise established, and records "Trip count open" with the cause of "Origin" that says why
+/// its items are not the data's.
+#[test]
+fn a_rewrite_over_the_program_structure_leaves_the_trip_count_open() {
+    let structure = [
+        ("self.layers", true, "items-not-from-the-data", "none"),
+        ("stages(config)", false, "items-not-from-the-data", "none"),
+        (
+            "range(config.num_layers)",
+            false,
+            "no-items-followed",
+            "none",
+        ),
+        ("type(obj).__mro__", false, "no-items-followed", "none"),
+        ("STAGES", false, "no-items-followed", "none"),
+        ("HOOKS", false, "no-items-followed", "none"),
+        (
+            "inspect.getmro(type(obj))",
+            false,
+            "library-call-without-items",
+            "heki-catalog",
+        ),
+    ];
+    for (rule, shape) in TRIP_SHAPES {
+        for (i, (iterable, method, cause, closer)) in structure.iter().enumerate() {
+            let name = format!("cond_structure_{}_{i}", rule.to_lowercase());
+            let found = reports(&name, OPT, &trip_source(shape, iterable, *method));
+            assert_eq!(found.len(), 1, "{rule} {iterable}: {found:#?}");
+            assert_eq!(found[0]["rule"], rule);
+            assert_eq!(found[0]["certainty"], "heuristic", "{rule} {iterable}");
+            assert!(open_of(&found[0]).is_empty(), "{rule} {iterable}");
+            assert_eq!(
+                conditions_of(&found[0]),
+                vec![(
+                    "Trip count open".to_owned(),
+                    (*cause).to_owned(),
+                    (*closer).to_owned(),
+                    None
+                )],
+                "{rule} {iterable}"
+            );
+        }
+    }
+}
+
+/// A `while` loop steps through no items "Origin" follows: front removals that drain a queue are
+/// heuristic, and the same removals in a loop over a parameter are exact.
+#[test]
+fn front_removals_in_a_while_loop_leave_the_trip_count_open() {
+    let open = "def drain(items):\n    q = list(items)\n    out = []\n    while q:\n        out.append(q.pop(0))\n    return out\n";
+    let found = reports("cond_while_opt120", OPT, open);
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert_eq!(found[0]["rule"], "OPT120");
+    assert_eq!(found[0]["certainty"], "heuristic");
+    assert!(open_of(&found[0]).is_empty(), "{:#?}", found[0]);
+    assert_eq!(
+        conditions_of(&found[0]),
+        vec![(
+            "Trip count open".to_owned(),
+            "no-items-followed".to_owned(),
+            "none".to_owned(),
+            None
+        )]
+    );
+    let closed = open.replace("    while q:\n", "    for _ in items:\n");
+    exact("cond_while_opt120_closed", OPT, &closed, "OPT120");
 }
 
 /// A join over loops whose trip count a length test caps (above the 16 under which heki reports
@@ -1475,6 +1590,7 @@ fn a_join_over_a_capped_loop_leaves_the_trip_count_open() {
         vec![(
             "Trip count open".to_owned(),
             "trip-count-fixed".to_owned(),
+            "none".to_owned(),
             None
         )]
     );

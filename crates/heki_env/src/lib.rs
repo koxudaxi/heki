@@ -348,6 +348,16 @@ pub enum CopySanitizerSetting {
     Depth(String),
 }
 
+/// How a report names the contract at `index` (0-based, in configuration order) of the
+/// `[[tool.heki.<table>]]` array: by its `name`, or by its position when it has none.
+pub fn contract_label(table: &str, index: usize, name: &str) -> String {
+    if name.is_empty() {
+        format!("the `{table}` contract at position {}", index + 1)
+    } else {
+        format!("`{name}`")
+    }
+}
+
 /// Top-level `[tool.heki]` or `heki.toml` configuration.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
