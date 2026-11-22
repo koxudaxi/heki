@@ -928,9 +928,10 @@ which module imports which.
    nothing); the loads of one attribute whose value is read as a whole, and the item loads of
    one constant key of values read only through such loads, are asked together
    (`Paths::on_every_return_passes_one_of`), so a read on each side of a branch counts. A `self` method
-   called on every such path adds what every one of its targets reads, when the call's targets
-   are every implementation it can run (`CallSite::complete`) and each runs its body at every
-   call (no cache decorator); a callee of the function's own call-graph component adds nothing,
+   called on every such path adds what every one of its targets reads, when the function's name
+   is bound once (each site's paths are its own definition's), the call's targets are every
+   implementation it can run (`CallSite::complete`), and each runs its body at every call (no
+   cache decorator); a callee of the function's own call-graph component adds nothing,
    so propagation needs no fixpoint for it. An attribute read as a whole covers each of its
    keys, also where two definitions or two targets are joined.
 8. **What may remove a kept value** (computed only with `OptInFacts::kept_values`). A method's

@@ -1972,6 +1972,16 @@ class Twice:
         def get(self) -> int:
             return self.a + self.b
 
+    if FLAG:
+        def via(self) -> int:
+            return self._b()
+    else:
+        def via(self) -> int:
+            return 0
+
+    def _b(self) -> int:
+        return self.b
+
 
 class Loop:
     def __init__(self) -> None:
@@ -2029,6 +2039,9 @@ fn reads_on_every_path_are_the_loads_and_self_calls_every_normal_return_passes()
     assert_eq!(must("Abstract.p"), set(&[whole("a")]));
     // Both definitions of a name defined twice read `a`; only one reads `b`.
     assert_eq!(must("Twice.get"), set(&[whole("a")]));
+    // A helper one definition calls on every path is not the other's: a name bound twice takes
+    // nothing from its calls.
+    assert_eq!(must("Twice.via"), set(&[]));
 }
 
 const KEPT_REMOVALS_PY: &str = r#"
