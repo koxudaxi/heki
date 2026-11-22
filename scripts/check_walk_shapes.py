@@ -354,6 +354,20 @@ def copied_item_changes(n: int) -> Body:
     return Body(("p",), lines)
 
 
+def copy_chain(n: int) -> Body:
+    """Each name a shallow copy of the one before, an item of the last changed."""
+    lines = ["c0 = p", *(f"c{i} = dict(c{i - 1})" for i in range(1, n + 1))]
+    return Body(("p",), [*lines, f"c{n}['k'].append(1)"])
+
+
+def copy_rebound_branches(n: int) -> Body:
+    """A loop rebinding an item of a shallow copy on one branch per test, then changing it."""
+    lines = ["c = dict(p)", "for x in xs:"]
+    for i in range(n):
+        lines += [f"    if x == {i}:", "        c['k'] = []"]
+    return Body(("p", "xs"), [*lines, "    c['k'].append(x)"])
+
+
 def attribute_chain(n: int) -> Body:
     """Names each bound to an attribute of the one before."""
     lines = ["a0 = p", *(f"a{i} = a{i - 1}.attr" for i in range(1, n + 1))]
@@ -622,6 +636,10 @@ FAMILIES = [
     Family("attribute_chain", attribute_chain),
     Family("element_change_chain", element_change_chain),
     Family("copied_item_changes", copied_item_changes),
+    # A module body of thousands of such assignments takes the IR builder past its time limit
+    # before any analysis runs.
+    Family("copy_chain", copy_chain, placements=("function", "method")),
+    Family("copy_rebound_branches", copy_rebound_branches),
     # A module body's names are globals, not closure cells.
     Family("cell_reads", cell_reads, placements=("function", "method"), size=CELL_BINDINGS),
     Family(

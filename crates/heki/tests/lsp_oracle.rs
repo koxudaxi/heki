@@ -28,7 +28,7 @@ const CONFIG: &str = r#"[project]
 name = "t"
 
 [tool.heki.lint]
-extend-select = ["MUT101", "MUT107", "MUT108", "MUT111", "EFF107", "MUT112", "MUT113", "EFF109", "EFF110"]
+extend-select = ["MUT101", "MUT107", "MUT108", "MUT111", "EFF107", "MUT112", "MUT113", "EFF109", "EFF110", "MUT115"]
 
 [[tool.heki.write-owners]]
 name = "registry"
@@ -692,6 +692,17 @@ const FAN_READ_NOTHING: &str =
 const FAN_READ_LOCKED: &str = "import asyncio\n\nLOCK = asyncio.Lock()\n\n\nasync def read_line(reader: asyncio.StreamReader):\n    async with LOCK:\n        return await reader.readline()\n";
 const FAN_USE: &str = "import asyncio\n\nfrom pkg.fan_read import read_line\n\n\nasync def both(reader: asyncio.StreamReader):\n    return await asyncio.gather(read_line(reader), read_line(reader))\n";
 
+// `MUT115`: the declarations of a copied class and of the builtin containers' subclasses in
+// other modules, and a helper in another module, decide whether a change below a copy states
+// the exact claim.
+const COPIED_NODE: &str =
+    "class Node:\n    def __init__(self) -> None:\n        self.children: list[int] = []\n";
+const COPIED_NODE_HOOKED: &str = "class Node:\n    def __init__(self) -> None:\n        self.children: list[int] = []\n\n    def __copy__(self):\n        node = Node()\n        node.children = list(self.children)\n        return node\n";
+const COPY_USER: &str = "import copy\n\nfrom pkg.copied_node import Node\n\n\ndef adopted(node: Node) -> Node:\n    clone = copy.copy(node)\n    clone.children.append(1)\n    return clone\n\n\ndef with_base(options: dict[str, list[str]]) -> None:\n    result = options.copy()\n    result[\"bases\"].append(\"x\")\n";
+const COPY_HELPER: &str = "def grow(rows):\n    return len(rows)\n";
+const COPY_HELPER_GROWING: &str = "def grow(rows):\n    rows.append(1)\n";
+const COPY_HANDED: &str = "from pkg.copy_helper import grow\n\n\ndef handed(options: dict[str, list[int]]) -> None:\n    result = dict(options)\n    grow(result[\"rows\"])\n";
+
 // `MUT202` through summaries of changes below a parameter's items: a helper two modules below
 // changes an item of its own copy of what it is handed, then gives that item a new list first; a
 // relay in between hands the helper a copy of its parameter.
@@ -830,6 +841,10 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/fields_user.py", FIELDS_USER),
         ("pkg/glyphs.py", GLYPHS),
         ("pkg/glyph_user.py", GLYPH_USER),
+        ("pkg/copied_node.py", COPIED_NODE),
+        ("pkg/copy_user.py", COPY_USER),
+        ("pkg/copy_helper.py", COPY_HELPER),
+        ("pkg/copy_handed.py", COPY_HANDED),
         ("pkg/nodes.py", NODES),
         ("pkg/announce.py", ANNOUNCE),
         ("pkg/dials.py", DIALS),
@@ -2423,6 +2438,46 @@ fn steps_mut110() -> Vec<Step> {
     ]
 }
 
+/// `MUT115`: the declarations a change below a copy reads in other modules (the copied class's
+/// copy hooks, the project subclasses of the builtin containers) and a helper's summary.
+fn steps_mut115() -> Vec<Step> {
+    vec![
+        Step::new(
+            "the copied class in another module copies its children itself: the claim is open",
+            vec![save("pkg/copied_node.py", COPIED_NODE_HOOKED)],
+        )
+        .present(&[("pkg/copy_user.py", "MUT115")]),
+        Step::new(
+            "the copied class leaves copying to `copy.copy` again",
+            vec![save("pkg/copied_node.py", COPIED_NODE)],
+        )
+        .present(&[("pkg/copy_user.py", "MUT115")]),
+        Step::new(
+            "a new module subclasses dict and replaces its `copy` (R2): the claim is open",
+            vec![Action::Create(
+                "pkg/deep_dict.py",
+                "class DeepDict(dict):\n    def copy(self):\n        return {k: list(v) for k, v in self.items()}\n".to_owned(),
+            )],
+        )
+        .present(&[("pkg/copy_user.py", "MUT115")]),
+        Step::new(
+            "the subclass is deleted",
+            vec![Action::Delete("pkg/deep_dict.py")],
+        )
+        .present(&[("pkg/copy_user.py", "MUT115")]),
+        Step::new(
+            "the helper in another module starts changing the list it is handed",
+            vec![save("pkg/copy_helper.py", COPY_HELPER_GROWING)],
+        )
+        .present(&[("pkg/copy_handed.py", "MUT115")]),
+        Step::new(
+            "the helper only reads it again",
+            vec![save("pkg/copy_helper.py", COPY_HELPER)],
+        )
+        .absent(&[("pkg/copy_handed.py", "MUT115")]),
+    ]
+}
+
 /// `MUT202` through the summaries' changes below a parameter's items (`ELEMENTS_PATH`), handed on
 /// through a copy of a parameter (`ArgOrigin::param_copy`) across modules.
 fn steps_item_changes() -> Vec<Step> {
@@ -3493,8 +3548,8 @@ fn steps_configuration() -> Vec<Step> {
         Step::new(
             "the configuration becomes invalid",
             vec![Action::Configure(CONFIG.replace(
-                "extend-select = [\"MUT101\", \"MUT107\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\", \"MUT113\", \"EFF109\", \"EFF110\"]",
-                "extend-select = [\"MUT101\", \"MUT107\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\", \"MUT113\", \"EFF109\", \"EFF110\"]\nselect = [\"NOPE1\"]",
+                "extend-select = [\"MUT101\", \"MUT107\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\", \"MUT113\", \"EFF109\", \"EFF110\", \"MUT115\"]",
+                "extend-select = [\"MUT101\", \"MUT107\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\", \"MUT113\", \"EFF109\", \"EFF110\", \"MUT115\"]\nselect = [\"NOPE1\"]",
             ))],
         )
         .absent(&[("pkg/svc_user.py", "EFF101")]),
@@ -4078,6 +4133,7 @@ sessions!(editing, Session::start, {
     small_displays: steps_small_displays,
     queue_capacity: steps_queue_capacity,
     mut114_mut202_mut109: steps_mut114_mut202_mut109,
+    mut115: steps_mut115,
     item_changes: steps_item_changes,
     module_patterns: steps_module_patterns,
     indirect_helpers: steps_indirect_helpers,
