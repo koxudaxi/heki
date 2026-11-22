@@ -16,7 +16,7 @@ use heki_env::LintConfig;
 use heki_lsp::{CONFIG_FILES, EditOutcome, Source, Workspace};
 use heki_profile::{ProfileData, ProfiledFunction};
 use heki_rules::project::{
-    FileError, ProjectEnv, ProjectOptions, collect_files, display_path, exclude_set,
+    Facts, FileError, ProjectEnv, ProjectOptions, collect_files, display_path, exclude_set,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{Hash, Hasher};
@@ -182,7 +182,7 @@ impl Watcher<'_> {
             &self.opts(),
             &crate::check::selectors(&self.args.analysis),
             self.args.analysis.baseline.as_deref(),
-            false,
+            Facts::Check,
         )?;
         Ok(Loaded {
             ws,
