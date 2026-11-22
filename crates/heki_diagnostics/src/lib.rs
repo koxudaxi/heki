@@ -129,6 +129,24 @@ pub struct Diagnostic {
     /// suppressions and baselines, which see every report (`heki_rules::fold_root_causes`).
     #[serde(skip)]
     pub fold_key: Option<String>,
+    /// The premises of the exact claim a heuristic report did not establish, each with its
+    /// cause; filled only when the run asks for them, and written by no output format.
+    #[serde(skip)]
+    pub open_premises: Vec<OpenPremise>,
+}
+
+/// A premise of an exact claim that a report left open, and why
+/// (`heki_rules::premises::OpenCause`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct OpenPremise {
+    /// The premise's name in the premise table.
+    pub premise: &'static str,
+    /// The cause, unique within its premise.
+    pub cause: &'static str,
+    /// Where the premise is open: the call of a chain's hop, or a loop.
+    pub at: Option<RelatedLocation>,
+    /// What the cause's statement leaves out: the function or class it is about.
+    pub detail: Option<String>,
 }
 
 fn one() -> u32 {
@@ -895,6 +913,7 @@ mod tests {
             fix: None,
             sites: 1,
             fold_key: None,
+            open_premises: Vec::new(),
         }
     }
 

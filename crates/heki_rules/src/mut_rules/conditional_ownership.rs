@@ -647,9 +647,16 @@ impl<'a, 'u> FnCheck<'a, 'u> {
                     .iter()
                     .any(|s| s.constructs.is_some());
                 let callee = self.call_of(inst).map(|c| c.callee);
-                ownership::source(&inst.kind, callee.as_ref(), constructs, kb, made_here)
+                ownership::source(
+                    self.f,
+                    &inst.kind,
+                    callee.as_ref(),
+                    constructs,
+                    kb,
+                    made_here,
+                )
             }
-            kind => ownership::source(kind, None, false, kb, made_here),
+            kind => ownership::source(self.f, kind, None, false, kb, made_here),
         }
     }
 
@@ -748,6 +755,14 @@ impl<'a, 'u> FnCheck<'a, 'u> {
         let own = |v: &VarId| self.own.get(v);
         match self.source(inst) {
             Source::New => Some(Own::new_at(inst.span, starts_empty(&inst.kind))),
+            // A shallow copy is new; its elements are what the copied values' elements are.
+            Source::Copy(copied) => Some(Own {
+                items: copied
+                    .iter()
+                    .filter_map(|v| own(v)?.element()?.borrowed)
+                    .next(),
+                ..Own::new_at(inst.span, starts_empty(&inst.kind))
+            }),
             Source::Held(Holder::Cell(name)) => Some(self.captured_value(name)),
             Source::Held(h) => Some(Own::borrowing(self.holder(h))),
             Source::Same(v) => own(&v).cloned(),
@@ -923,7 +938,7 @@ impl<'a, 'u> FnCheck<'a, 'u> {
     fn picked_copy(&self, phi: &PhiNode, from: BlockId, v: VarId) -> Option<VarId> {
         let def = self.defs.get(&self.shape.copy_root(v))?;
         let callee = self.call_of(def).map(|c| c.callee);
-        let copied = ownership::copied_operand(&def.kind, callee.as_ref(), self.u.cx.kb)?;
+        let copied = ownership::copied_operand(self.f, &def.kind, callee.as_ref(), self.u.cx.kb)?;
         let original = self.shape.copy_root(copied);
         let other_input = phi
             .incoming

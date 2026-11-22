@@ -1512,3 +1512,55 @@ fn mut112_lsp_follows_returns_and_class_families_in_other_files() {
     lsp.diagnostics(&base, <[Value]>::is_empty);
     lsp.stop(true);
 }
+
+/// A shallow copy is a new object holding the elements of what it copies: an item of a copy of
+/// a parameter is the parameter's item, borrowed, also when a callee returns it.
+const COPIED_ELEMENTS: &str = r#"import copy
+
+
+def first_tags(rows):
+    return list(rows)[0]
+
+
+def tags_of(options, flag):
+    tags = dict(options)["tags"] if flag else []
+    tags.append("x")
+
+
+def attr_of(node, flag):
+    children = copy.copy(node).children if flag else []
+    children.append(1)
+
+
+def returned(rows, flag):
+    tags = first_tags(rows) if flag else []
+    tags.append("x")
+
+
+def deep(options, flag):
+    tags = copy.deepcopy(options)["tags"] if flag else []
+    tags.append("x")
+
+
+def the_copy_itself(options, flag):
+    merged = dict(options) if flag else {}
+    merged["k"] = 1
+"#;
+
+#[test]
+fn mut112_takes_an_element_of_a_shallow_copy_as_the_copied_values() {
+    let p = Project::new("mut112_copied_elements");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/copies.py", COPIED_ELEMENTS);
+    let diags = diagnostics(&p, &["--select", "MUT112"]);
+    let f = "pkg/copies.py";
+    assert_eq!(
+        found(&diags),
+        vec![
+            d(f, 10, "tags_of", "tags"),
+            d(f, 15, "attr_of", "children"),
+            d(f, 20, "returned", "tags"),
+        ],
+        "{diags:#?}"
+    );
+}

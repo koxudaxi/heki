@@ -328,7 +328,7 @@ fn docs_check_fails_where_a_page_marks_a_rule_heuristic_differently_from_the_rul
             && out.contains(": the row of EFF101 says heuristic"),
         "{out}"
     );
-    // A heuristic rule's measurement is read into its page: a stale page fails.
+    // The measurements table is written from the data: a row edited by hand is stale.
     let (code, out) = docs.check_with(
         "docs/precision.md",
         "| 50 | 0 / 2 / 25 / 23 | 54% |",
@@ -337,7 +337,115 @@ fn docs_check_fails_where_a_page_marks_a_rule_heuristic_differently_from_the_rul
     assert_eq!(code, 1);
     assert!(
         out.starts_with("Generated docs are out of date")
-            && out.contains("loop-unpooled-client.md"),
+            && out.contains("docs/precision.md")
+            && !out.contains("loop-unpooled-client.md"),
         "{out}"
     );
+}
+
+#[test]
+fn the_precision_tables_and_rule_measurements_come_from_the_data() {
+    let p = Project::new("precision_data");
+    let (code, out, _) = p.heki(&["dump-precision"]);
+    assert_eq!(code, 0);
+    let published: Value = serde_json::from_str(&out).unwrap();
+    let eff101 = &published["certifications"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["rule"] == "EFF101")
+        .unwrap();
+    assert_eq!(
+        (&eff101["census"], &eff101["holdout"]),
+        (
+            &json!({"reports": 287, "false_claims": 0}),
+            &json!({"reports": 152, "false_claims": 0})
+        )
+    );
+    let (_, out, _) = p.heki(&["rule", "EFF102", "--output-format", "json"]);
+    let rule: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(
+        rule["measurement"],
+        json!({
+            "rule": "EFF102", "round": 3, "date": "2026-11-21", "sample": 50, "confirmed": 0,
+            "plausible": 2, "benign": 25, "false_claims": 23, "right_percent": 54,
+            "interval_percent": [40, 67], "real_harm_percent": 4
+        })
+    );
+    assert_eq!(rule["certification"], Value::Null);
+    let (_, out, _) = p.heki(&["rule", "MUT201", "--output-format", "json"]);
+    let contract: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(
+        (&contract["measurement"], &contract["certification"]),
+        (&Value::Null, &Value::Null)
+    );
+
+    let docs = DocsTree::new("precision_page");
+    assert_eq!(docs.build_docs(&[]).0, 0);
+    let page = docs.0.read("docs/precision.md");
+    assert!(
+        page.contains("| `EFF101` | 0.2.0 | 287 / 0 | 152 / 0 |\n")
+            && page.contains(
+                "| `EFF102` | heuristic | round 3, 2026-11-21 | 50 | 0 / 2 / 25 / 23 | 54% | \
+                 40-67% | 4% |\n"
+            ),
+        "{page}"
+    );
+    // A page whose markers are gone cannot be written.
+    let original = docs.0.read("docs/precision.md");
+    let unmarked = original.replace("<!-- End of the generated measurements. -->", "");
+    docs.0.write("docs/precision.md", &unmarked);
+    let out = Command::new(python())
+        .args([
+            "scripts/build_docs.py",
+            "--check",
+            "--heki",
+            env!("CARGO_BIN_EXE_heki"),
+        ])
+        .current_dir(&docs.0.dir)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr).trim_end(),
+        "docs/precision.md: no generated part named measurements"
+    );
+}
+
+#[test]
+fn docs_check_fails_on_a_stale_recommend_example_or_schema() {
+    let docs = DocsTree::new("recommend_page");
+    assert_eq!(docs.build_docs(&[]).0, 0);
+    let page = docs.0.read("docs/recommend.md");
+    assert!(
+        page.contains("```console\n$ heki recommend app\nheki recommend (experimental) on .: ")
+            && page.contains("were not analyzed (tests/test_users.py)"),
+        "{page}"
+    );
+    let schema: Value =
+        serde_json::from_str(&docs.0.read("docs/schemas/recommend-1.json")).unwrap();
+    assert_eq!(
+        schema["$id"],
+        json!("https://heki.koxudaxi.dev/schemas/recommend-1.json")
+    );
+    assert_eq!(docs.build_docs(&["--check"]).0, 0);
+
+    // The report follows the example's files.
+    let (code, out) = docs.check_with(
+        "docs/recommend.md",
+        "# tests/test_users.py",
+        "# app/test_users.py",
+    );
+    assert_eq!(code, 1);
+    assert!(
+        out.starts_with("Generated docs are out of date") && out.contains("docs/recommend.md"),
+        "{out}"
+    );
+    let (code, out) = docs.check_with(
+        "docs/schemas/recommend-1.json",
+        "\"title\": \"heki recommend\"",
+        "\"title\": \"x\"",
+    );
+    assert_eq!(code, 1);
+    assert!(out.contains("docs/schemas/recommend-1.json"), "{out}");
 }

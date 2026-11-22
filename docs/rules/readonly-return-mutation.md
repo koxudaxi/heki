@@ -30,8 +30,11 @@ reference), and the deep copy sanitizers of the ecosystem knowledge base clear i
 sanitizer declared `copy-sanitizer = "shallow"`, and slices of builtin lists, other builtin
 sequences, and values whose class heki cannot infer, `rows()[:]`) free the top level only: the
 values below stay shared, so a helper rebinding an attribute of the copy (`b.name = "new"`)
-changes nothing shared, and one changing the object an attribute holds (`b.tags.append(x)`, also
-on its own shallow copy of the argument) does. A slice of an object of another known class may
+changes nothing shared, and one changing the object an attribute or an item holds
+(`b.tags.append(x)`, `b["tags"].append(x)`, `for row in b: row.clear()`, also on its own
+shallow copy of the argument) does, unless it gave that item a new object first. A producer
+that is not `deep` shares only the object itself: a helper changing what it holds as items does
+not change it. A slice of an object of another known class may
 be a view of it (`numpy`) and stays shared. A `copy()` method of a project class copies as
 deeply as its body does: its result is shared only when the method returns a shared value. A
 wrapper that returns a copy on one path and the shared value on another still returns a shared
