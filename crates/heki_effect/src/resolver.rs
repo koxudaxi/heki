@@ -3106,16 +3106,23 @@ impl ProjectDecls {
     /// `None` when a plain class or instance attribute comes first (reading it runs nothing), a
     /// class on the way stores the name outside its body, a base outside the project comes
     /// first (heki does not know what it binds), or none binds it.
-    pub(crate) fn function_taken(&self, class: &str, name: &str) -> Option<FuncKey> {
-        for c in self.mro(class) {
-            let decl = self.class(&c)?;
+    pub fn function_taken(&self, class: &str, name: &str) -> Option<FuncKey> {
+        self.function_taken_along(&self.mro(class), name)
+    }
+
+    /// [`Self::function_taken`] along `mro`: an MRO, or the part of one after a class (what
+    /// `super()` in that class looks up).
+    fn function_taken_along(&self, mro: &[String], name: &str) -> Option<FuncKey> {
+        for c in mro {
+            self.read(|k| note(&mut k.class_facts, c));
+            let decl = self.class(c)?;
             // Stored on the class object outside its body (`Child.view = []`), the name holds
             // what was stored there from then on.
             if decl.rebound_attrs.contains(name) {
                 return None;
             }
             if decl.members.contains(name) {
-                return self.own_method(&c, name);
+                return self.own_method(c, name);
             }
         }
         None
@@ -3182,28 +3189,54 @@ impl ProjectDecls {
     }
 
     /// Whether reading `attr` on every instance of the project class `class` or of a project
-    /// subclass (R2) runs one of the getters `keys`: what each such class finds first for the
-    /// name is one of them ([`Self::first_definition`]), and no class is a protocol, defines
-    /// `__getattribute__`, or has a metaclass heki does not know. A class that finds a plain
-    /// attribute or a method first, or no definition, runs no getter.
+    /// subclass (R2) runs one of the getters `keys`: what each such class takes the name from is
+    /// one of them ([`Self::function_taken`]: not a plain attribute, a method, or a value stored on
+    /// the class outside its body, and no base outside the project before it), and no class is a
+    /// protocol, defines `__getattribute__`, or has a metaclass heki does not know.
     pub(crate) fn getters_complete(&self, class: &str, attr: &str, keys: &[FuncKey]) -> bool {
         let class = self.canonical(class);
         let read = self.attr_read(&class, attr);
         if read.getattribute || read.custom_metaclass {
             return false;
         }
-        let budget = Budget::unmetered("heki_effect::resolver::ProjectDecls::getters_complete");
+        self.every_class_finds(&class, keys, |c| {
+            self.protocol(c)
+                .is_none()
+                .then(|| self.function_taken(c, attr))
+                .flatten()
+        })
+    }
+
+    /// Whether reading `attr` through `super()` in the project class `owner` runs one of the
+    /// getters `keys` on every instance (R2): for the owner and each project subclass, what its
+    /// MRO takes the name from after the owner ([`Self::function_taken`] from there) is one of
+    /// them, also when a subclass's MRO puts another class there.
+    pub(crate) fn super_getters_complete(&self, owner: &str, attr: &str, keys: &[FuncKey]) -> bool {
+        let owner = self.canonical(owner);
+        self.every_class_finds(&owner, keys, |c| {
+            let mro = self.mro(c);
+            let after = mro.iter().position(|m| *m == owner).map_or(0, |i| i + 1);
+            self.function_taken_along(&mro[after..], attr)
+        })
+    }
+
+    /// Whether `find` gives one of `keys` for the project class `class` and for each of its
+    /// project subclasses, at most `DISPATCH_CLASS_LIMIT` of them.
+    fn every_class_finds(
+        &self,
+        class: &str,
+        keys: &[FuncKey],
+        find: impl Fn(&str) -> Option<FuncKey>,
+    ) -> bool {
+        let budget = Budget::unmetered("heki_effect::resolver::ProjectDecls::every_class_finds");
         let mut visited = 0;
         let missing = reach(
             &budget,
-            [class.as_str()],
+            [class],
             |c, out| out.extend(self.direct_subclasses(c).iter().map(String::as_str)),
             |c| {
                 visited += 1;
-                let runs = self.protocol(c).is_none()
-                    && self
-                        .first_definition(c, attr)
-                        .is_some_and(|k| keys.contains(&k));
+                let runs = find(c).is_some_and(|k| keys.contains(&k));
                 if visited > DISPATCH_CLASS_LIMIT || !runs {
                     Visit::Stop(())
                 } else {
@@ -3212,26 +3245,6 @@ impl ProjectDecls {
             },
         );
         missing == Answer::Known(None)
-    }
-
-    /// The project function reading `name` on an instance of exactly the project class `class`
-    /// finds: the first class along its MRO that names `name` (`ClassDecl::members`) defines it
-    /// as a function, and only project classes and plain bases (`object`, `NamedTuple`,
-    /// `Generic`, `abc.ABC`) come before it. `None` when that class binds the name otherwise (a
-    /// class attribute shadows a base's property), a base heki does not know comes first (it
-    /// may define the name), or no class names it. Unlike [`Self::mro_method`], which skips
-    /// what is not a function.
-    pub fn first_definition(&self, class: &str, name: &str) -> Option<FuncKey> {
-        for c in self.mro(&self.canonical(class)) {
-            self.read(|k| note(&mut k.class_facts, &c));
-            match self.class(&c) {
-                Some(d) if d.members.contains(name) => return self.own_method(&c, name),
-                Some(_) => {}
-                None if PLAIN_BASES.contains(&c.as_str()) => {}
-                None => return None,
-            }
-        }
-        None
     }
 
     /// Whether an instance of exactly `class` calling `method` runs one of `callee`: the
@@ -5933,10 +5946,10 @@ impl<'a> TypeCtx<'a> {
 
     /// Whether `keys`, the property getters [`Self::resolve_attr_load`] resolves reading
     /// `recv.attr` to, are every getter the read can run (`CallSite::complete`): on an instance,
-    /// each class the value may be (R2) finds one of them first along its MRO
-    /// ([`ProjectDecls::getters_complete`]), on each member of a union too. Through `super()` the
-    /// read runs the one getter it resolves to, as a method call through `super()` does
-    /// ([`Self::targets_complete_on`]); a read on a class or module object runs no getter.
+    /// each class the value may be (R2) takes the name from one of them
+    /// ([`ProjectDecls::getters_complete`]), on each member of a union too; through `super()`,
+    /// each class finds one of them after the class `super()` is in
+    /// ([`ProjectDecls::super_getters_complete`]).
     pub fn getter_targets_complete(
         &self,
         recv: Option<&Val>,
@@ -5944,11 +5957,15 @@ impl<'a> TypeCtx<'a> {
         keys: &[FuncKey],
     ) -> bool {
         match recv {
-            Some(Val::Inst(class)) => self.project.getters_complete(class, attr, keys),
             Some(Val::Union(classes)) => classes
                 .iter()
                 .all(|c| self.project.getters_complete(c, attr, keys)),
-            _ => matches!(recv, Some(Val::Super(_))),
+            Some(Val::Super(owner)) => self.project.super_getters_complete(owner, attr, keys),
+            // A read on a class or module object runs no getter (`resolve_attr_load` resolves
+            // none).
+            _ => {
+                matches!(recv, Some(Val::Inst(class)) if self.project.getters_complete(class, attr, keys))
+            }
         }
     }
 

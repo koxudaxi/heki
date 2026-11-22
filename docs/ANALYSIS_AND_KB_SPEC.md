@@ -1340,11 +1340,13 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      property's value is complete when calling a value of the type the getter declares is
      (`TypeCtx::targets_complete_on`), whatever the receiver. A read of a property, the call of
      its getters, is complete when each class the object may be (at most
-     `DISPATCH_CLASS_LIMIT`) finds one of them first (`ProjectDecls::first_definition`: the first
-     class along its MRO that names the name defines it as that getter, and no base heki does
-     not know comes before it), and none defines `__getattribute__` or has a metaclass heki does
-     not know (`TypeCtx::getter_targets_complete`). A class that finds a class attribute, a
-     method, or nothing first runs no getter.
+     `DISPATCH_CLASS_LIMIT`) takes the name from one of them (`ProjectDecls::function_taken`: the
+     first class along its MRO that names the name defines it as that getter, no class before it
+     stores the name on the class object outside its body, and no base heki does not know comes
+     before it), and none defines `__getattribute__` or has a metaclass heki does not know
+     (`TypeCtx::getter_targets_complete`). A class that finds a class attribute, a method, or
+     nothing first runs no getter. Through `super()`, each class takes the name from one of them
+     after the class `super()` is in, along its own MRO (`ProjectDecls::super_getters_complete`).
    - A Layer 2 call has an effect unconditionally (`CallTarget::Layer2::unconditional`) when its
      entry `emits` it on every call and no case of the entry tests an argument that may be a
      parameter of the caller (R6 covers the arguments heki cannot evaluate).

@@ -213,11 +213,27 @@ class Feed:
 
 class StaticFeed(Feed):
     entries = []
+
+
+class Middle(Base):
+    remote = "local"
+
+
+class Child(Middle):
+    async def via_super(self):
+        return super().remote
+
+
+class Rebound(Base):
+    pass
+
+
+Rebound.remote = "local"
 "#;
 
 const HANDLERS: &str = r#"import requests
 
-from pkg.api import Audited, Base, Client, Feed, Lazy, Other, Pool, Shape, Slow, Sub, Traced, Wrapped
+from pkg.api import Audited, Base, Client, Feed, Lazy, Other, Pool, Rebound, Shape, Slow, Sub, Traced, Wrapped
 
 
 async def direct(c: Client):
@@ -296,6 +312,10 @@ async def audited(a: Audited):
 
 async def feed_entries(f: Feed):
     return f.entries
+
+
+async def rebound(r: Rebound):
+    return r.remote
 "#;
 
 const LOCKS: &str = r#"import threading
@@ -328,6 +348,9 @@ fn execution_effects_run_property_getters() {
             // An `async` getter is an `async def`: it reports its own boundary, and reading it
             // (`not_awaited`, `awaited`) reports nothing.
             d(a, 77, "EFF101", "Lazy.value", "requests.get"),
+            // `super().remote` in `Child` finds `Middle`'s class attribute after `Child`, not
+            // `Base`'s getter.
+            d(a, 141, "EFF111", "Child.via_super", "requests.get"),
             d(h, 7, "EFF101", "direct", "requests.get"),
             // One helper deeper.
             d(h, 11, "EFF101", "one_deeper", "requests.get"),
@@ -353,6 +376,9 @@ fn execution_effects_run_property_getters() {
             d(h, 73, "EFF111", "traced", "requests.get"),
             d(h, 77, "EFF111", "audited", "requests.get"),
             d(h, 81, "EFF111", "feed_entries", "requests.get"),
+            // A value stored on the class object outside its body (`Rebound.remote = ...`) is
+            // what the read finds.
+            d(h, 85, "EFF111", "rebound", "requests.get"),
         ],
         "{diags:#?}"
     );
