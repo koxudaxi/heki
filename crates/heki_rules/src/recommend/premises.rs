@@ -550,6 +550,21 @@ mod tests {
     }
 
     #[test]
+    fn reports_without_a_recorded_cause_are_said_so() {
+        let section = aggregate(
+            &[report("MUT114", 1, &[]), report("OPT110", 2, &[UNIQUE])],
+            &|p| p.display().to_string(),
+        );
+        let mut out = String::new();
+        render(&mut out, &section);
+        assert!(
+            out.contains("\n  causes not recorded yet: MUT114 1\n"),
+            "{out}"
+        );
+        assert!(out.contains("\n  Rewrite proven safe: unique "), "{out}");
+    }
+
+    #[test]
     fn a_heuristic_side_counts_under_the_claim_of_its_exact_rule() {
         let section = aggregate(&[report("EFF111", 1, &[RETURN])], &|p| {
             p.display().to_string()
