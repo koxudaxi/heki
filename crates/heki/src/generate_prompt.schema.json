@@ -99,6 +99,10 @@
           "description": "src when the src setting lists the source roots, detected when heki found them.",
           "enum": ["src", "detected"]
         },
+        "member_packages": {
+          "description": "The packages of the detected workspace members without a source root of their own, each named below its member; absent when there are none.",
+          "$ref": "#/$defs/string_list"
+        },
         "selection": {
           "$ref": "#/$defs/selection"
         },

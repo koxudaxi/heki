@@ -360,6 +360,19 @@ pub struct HekiConfig {
     /// `[tool.heki]` key): the `<project-name>` source root of the detected layout.
     #[serde(skip)]
     pub project_name: Option<String>,
+    /// The workspace tables of the project's `pyproject.toml` and `hatch.toml` (read by the
+    /// loaders, not a `[tool.heki]` key): their members are detected source roots.
+    #[serde(skip)]
+    pub workspaces: Vec<WorkspaceMembers>,
+}
+
+/// The members one workspace table lists (`[tool.uv.workspace]`, the `workspace` of a Hatch
+/// environment, `[tool.pdm.workspace]`): directories given as globs relative to the project
+/// root (`packages/*`), less the ones an `exclude` glob matches.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorkspaceMembers {
+    pub members: Vec<String>,
+    pub exclude: Vec<String>,
 }
 
 #[derive(Debug, Error)]
@@ -466,9 +479,11 @@ impl ConfigLayout {
                     });
                 }
                 let wrapper: PyProjectWrapper = toml::from_str(text).map_err(toml_error)?;
+                let workspaces = wrapper.workspaces(path);
                 HekiConfig {
                     requires_python: wrapper.requires_python(),
                     project_name: wrapper.project_name(),
+                    workspaces,
                     ..wrapper.tool.heki.unwrap_or_default()
                 }
                 .with_source_roots(path)
@@ -482,9 +497,11 @@ impl ConfigLayout {
                 let cfg: HekiConfig = toml::from_str(text).map_err(toml_error)?;
                 let dir = path.parent().unwrap_or(Path::new(""));
                 let sibling = sibling_pyproject(&dir.join("pyproject.toml"));
+                let pyproject = dir.join("pyproject.toml");
                 HekiConfig {
                     requires_python: sibling.as_ref().and_then(PyProjectWrapper::requires_python),
                     project_name: sibling.as_ref().and_then(PyProjectWrapper::project_name),
+                    workspaces: sibling.unwrap_or_default().workspaces(&pyproject),
                     ..cfg
                 }
                 .with_source_roots(path)
@@ -517,6 +534,51 @@ impl PyProjectWrapper {
 
     fn project_name(&self) -> Option<String> {
         self.project.name.as_ref()?.as_str().map(str::to_owned)
+    }
+
+    /// The workspace tables of this `pyproject.toml` (at `path`) and of the `hatch.toml` next
+    /// to it: uv's, every Hatch environment's (`[tool.hatch.envs.<env>]`, `[envs.<env>]` in
+    /// `hatch.toml`), and PDM's. A malformed table only loses its members.
+    fn workspaces(&self, path: &Path) -> Vec<WorkspaceMembers> {
+        let hatch_toml = path
+            .parent()
+            .and_then(|dir| std::fs::read_to_string(dir.join("hatch.toml")).ok())
+            .and_then(|text| toml::from_str::<toml::Value>(&text).ok());
+        let hatch_envs = [self.tool.hatch.as_ref(), hatch_toml.as_ref()]
+            .into_iter()
+            .flatten()
+            .filter_map(|hatch| hatch.get("envs")?.as_table())
+            .flat_map(|envs| envs.values())
+            .filter_map(|env| env.get("workspace"));
+        let uv = self.tool.uv.as_ref().and_then(|uv| uv.get("workspace"));
+        let pdm = self.tool.pdm.as_ref().and_then(|pdm| pdm.get("workspace"));
+        uv.into_iter()
+            .chain(hatch_envs)
+            .chain(pdm)
+            .map(WorkspaceMembers::of)
+            .filter(|w| !w.members.is_empty())
+            .collect()
+    }
+}
+
+impl WorkspaceMembers {
+    /// The `members` and `exclude` of a workspace table. A member is a path string, or a Hatch
+    /// table naming it by `path` (`{path = "packages/core", features = ["dev"]}`).
+    fn of(table: &toml::Value) -> Self {
+        let paths = |key: &str| -> Vec<String> {
+            table
+                .get(key)
+                .and_then(toml::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|entry| entry.as_str().or_else(|| entry.get("path")?.as_str()))
+                .map(str::to_owned)
+                .collect()
+        };
+        Self {
+            members: paths("members"),
+            exclude: paths("exclude"),
+        }
     }
 }
 
@@ -676,9 +738,13 @@ impl VersionClause {
     }
 }
 
+/// The tables of other tools are kept as raw values, like [`ProjectSection`].
 #[derive(Debug, Default, Deserialize)]
 struct ToolSection {
     heki: Option<HekiConfig>,
+    uv: Option<toml::Value>,
+    hatch: Option<toml::Value>,
+    pdm: Option<toml::Value>,
 }
 
 impl HekiConfig {
@@ -1119,6 +1185,7 @@ one-at-a-time = "always"
             ecosystem: Vec::new(),
             requires_python: None,
             project_name: None,
+            workspaces: Vec::new(),
         };
         let table = toml::Table::try_from(&all).unwrap();
         let mut keys: Vec<&str> = table.keys().map(String::as_str).collect();
