@@ -1580,4 +1580,16 @@ def rebinds_and_changes(x):
     );
     let (_, stdout, _) = p.heki(&["inspect", "helpers.through_list", "."]);
     assert!(stdout.contains("orig[...]"), "{stdout}");
+    // A store under the same key into another object leaves the item possibly the function's
+    // own: the container the item holds is changed in place, with no change of the parameter's
+    // elements recorded, so no line of the source is shown for it.
+    p.write(
+        "slots.py",
+        "def other_key(orig, other):\n    other[\"tags\"] = 1\n    orig[\"tags\"].append(1)\n",
+    );
+    let (_, stdout, _) = p.heki(&["inspect", "slots.other_key", "."]);
+    assert!(
+        stdout.contains("orig[\"tags\"]  in place, directly\n"),
+        "{stdout}"
+    );
 }
