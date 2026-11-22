@@ -369,8 +369,9 @@ pub struct EcosystemEntry {
     /// `EFF115`: the call calls the callable passed here as a plain function, now or later, on
     /// this thread or another, and never awaits what it returns (`threading.Thread(target=f)`,
     /// `atexit.register(f)`, `filter(f, xs)`). An offloading API's callable
-    /// ([`Self::offloads_blocking_arg`]) is one too ([`Self::unawaited_callable`]).
-    pub calls_unawaited: Option<UnawaitedCall>,
+    /// ([`Self::offloads_blocking_arg`]) is one too ([`Self::unawaited_callable`]). Boxed: few
+    /// entries have one, and every entry of the catalog stays in memory.
+    pub calls_unawaited: Option<Box<UnawaitedCall>>,
 }
 
 /// A callable argument a call calls without awaiting what it returns
@@ -530,7 +531,7 @@ impl EcosystemEntry {
     /// one `calls_unawaited` names, or an offloading API's, which a worker thread calls and
     /// whose result the call hands back as it is.
     pub fn unawaited_callable(&self) -> Option<UnawaitedCall> {
-        self.calls_unawaited.clone().or_else(|| {
+        self.calls_unawaited.as_deref().cloned().or_else(|| {
             self.offloads_blocking_arg.map(|k| UnawaitedCall {
                 arg: Some(k),
                 ..UnawaitedCall::default()
@@ -3154,10 +3155,12 @@ mod tests {
                 let calls_unawaited = UNAWAITED_CALLS
                     .iter()
                     .find(|(.., symbols)| symbols.contains(&symbol.as_str()))
-                    .map(|(arg, param, tests_result, _)| UnawaitedCall {
-                        arg: *arg,
-                        param: param.map(Into::into),
-                        tests_result: *tests_result,
+                    .map(|(arg, param, tests_result, _)| {
+                        Box::new(UnawaitedCall {
+                            arg: *arg,
+                            param: param.map(Into::into),
+                            tests_result: *tests_result,
+                        })
                     });
                 let expected = EcosystemEntry {
                     symbol: symbol.clone(),
