@@ -11,6 +11,7 @@ An experimental rule is never enabled by default: it runs only when `select` or 
 | `cli-option.generate-prompt` | cli-option | `heki check --generate-prompt` | 0.2.2 | - |
 | `cli-option.profile` | cli-option | `heki check --profile` | 0.1.1 | - |
 | `command.inspect` | command | `heki inspect` | 0.2.1 | - |
+| `command.recommend` | command | `heki recommend` | 0.2.2 | - |
 | `rule.EFF109` | rule | [`EFF109`](rules/lock-reacquired-while-held.md) | 0.2.1 | - |
 | `rule.EFF110` | rule | [`EFF110`](rules/exclusive-object-fanout.md) | 0.2.1 | - |
 | `rule.EFF114` | rule | [`EFF114`](rules/recursion-error-as-value.md) | 0.2.2 | - |
@@ -42,6 +43,14 @@ It reads the output of CPython 3.15's sampling profiler, and that format can sti
 - **Since:** 0.2.1
 
 The facts it shows, its purity verdict, and its JSON object can still change as heki's summaries close gaps; the object's `version` changes when a field is removed or changes meaning.
+
+## `command.recommend`
+
+- **Kind:** command
+- **Target:** `heki recommend`
+- **Since:** 0.2.2
+
+The sections, their policies, the candidates it infers, and its JSON object can still change as the policies are calibrated; the object's `version` changes when a field is removed or changes meaning.
 
 ## `rule.EFF109`
 
