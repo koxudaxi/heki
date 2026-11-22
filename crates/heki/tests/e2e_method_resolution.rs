@@ -1049,6 +1049,73 @@ fn a_class_statement_in_a_function_names_its_bases_there() {
     );
 }
 
+/// Bases heki names no class for are classes of their own: in `Leaf(Left, Right)`, with an
+/// unknown base before `Root` in `Left` and after it in `Right`, the C3 linearization puts
+/// `Right` before `Root`, so `Right.parse` overrides `Root.parse` as in Python.
+const UNKNOWN_BASES_APART: &str = r#"import time
+
+
+def make_a():
+    return object
+
+
+def make_b():
+    return object
+
+
+class Root:
+    def parse(self):
+        time.sleep(1)
+
+
+class Left(make_a(), Root):
+    pass
+
+
+class Right(Root, make_b()):
+    def parse(self):
+        return 1
+
+
+class Leaf(Left, Right):
+    pass
+
+
+async def through_leaf(x: Leaf):
+    x.parse()
+
+
+class Quiet:
+    def parse(self):
+        return 1
+
+
+class Up(make_a(), Quiet):
+    pass
+
+
+class Down(Quiet, make_b()):
+    def parse(self):
+        time.sleep(1)
+
+
+class Bottom(Up, Down):
+    pass
+
+
+async def through_bottom(x: Bottom):
+    x.parse()  # EFF101
+"#;
+
+#[test]
+fn unknown_bases_never_order_each_other() {
+    check_marks(
+        "unknown_bases_apart",
+        &[("pkg/diamond.py", UNKNOWN_BASES_APART)],
+        &["EFF101"],
+    );
+}
+
 /// Calling an `async def` gives a coroutine, and awaiting it gives what the function's
 /// annotation says it returns: the awaited store's method runs, a coroutine has no `save`, and
 /// awaiting either of two coroutines gives either result, also for a coroutine kept in an
