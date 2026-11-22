@@ -1757,24 +1757,33 @@ impl<'e, 'a> Engine<'e, 'a> {
     }
 
     /// The declared type of reading `attr` on a value of type `recv`: a property getter's
-    /// return annotation or the attribute's annotation along its MRO (`Self` bound to it).
+    /// return annotation or the attribute's annotation along its MRO (`Self` bound to it); on
+    /// an instance whose MRO declares none, the class the catalog gives the attribute of a
+    /// library class.
     fn member(&self, recv: &Ty, attr: &str) -> Option<Ty> {
         if let Ty::Union(os) = recv {
             return join_all(os.iter().map(|o| self.member(&Ty::Inst(o.clone()), attr)));
         }
         let cx = self.cx;
         let (class, skip_self, self_ty) = self.static_receiver(recv)?;
-        cx.project
-            .member_type(class, attr, skip_self)
-            .and_then(|t| cx.project.declared_ty(t))
-            .and_then(|t| t.bind_self(Some(&self_ty)))
+        match cx.project.member_type(class, attr, skip_self) {
+            Some(t) => cx
+                .project
+                .declared_ty(t)
+                .and_then(|t| t.bind_self(Some(&self_ty))),
+            None if matches!(recv, Ty::Inst(_)) => cx
+                .project
+                .catalog_attribute(class, attr, cx.kb)
+                .map(Ty::inst),
+            None => None,
+        }
     }
 
     /// What calling method `method` on a value of type `recv` returns: the return annotation of
     /// the definition the receiver's MRO finds first (`Self` bound to the receiver), as for a
     /// type checker; past the project classes, what the ecosystem knowledge base says of the
-    /// method of the first external base: a copy (`model_copy`, `list.copy`) has its receiver's
-    /// type.
+    /// method of the first external base: a copy (`model_copy`, `list.copy`) and a fluent
+    /// builder (`return_type = "Self"`) have their receiver's type.
     fn member_call(&self, recv: &Ty, method: &str, call: Passed<'_>) -> Option<Ty> {
         if let Ty::Union(os) = recv {
             return join_all(
@@ -1802,9 +1811,10 @@ impl<'e, 'a> Engine<'e, 'a> {
         }
         match cx.project.method_targets(class, method, skip_self, cx.kb) {
             Callee::External(symbol)
-                if cx
-                    .catalog(&symbol)
-                    .is_some_and(|e| e.copy_sanitizer.is_some()) =>
+                if cx.catalog(&symbol).is_some_and(|e| {
+                    e.copy_sanitizer.is_some()
+                        || e.returns_receiver_in(e.case_for(|i, k| self.passed(call, i, k)))
+                }) =>
             {
                 Some(self_ty)
             }

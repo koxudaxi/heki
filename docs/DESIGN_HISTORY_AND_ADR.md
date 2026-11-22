@@ -541,6 +541,26 @@ incremental LSP design, and the Stage 0-A Wave 2 decisions.
   *Rejected*: a `heki check --recommend` flag (it would collide with `check`'s modes and exit
   codes); catalog entries guessed from names or call shapes (rule 3); a probability or score
   per rule (rule 5).
+### ADR-021: Attribute types of library classes in the catalog
+- **Background**: the LLM SDKs make their calls through attributes of a client
+  (`client.chat.completions.create(...)`), and the receiver typing read an attribute's type only
+  from project declarations, so a catalog entry for `Completions.create` was reached only through
+  an annotated `Completions`. The catalog described calls only.
+- **Decision**: an `[[attributes]]` table types a read of an attribute on an instance of a library
+  class (`openai.OpenAI.chat` gives `openai.resources.chat.Chat`), consulted only where the
+  project declares nothing for the name and the row is established (the classes the value may be
+  under R2 find the row first, with no binder, `__getattribute__`, unknown metaclass, or unknown
+  base on the way): anywhere else the read stays untyped, in both tiers, since types carry no
+  provenance. A builder returning its receiver's class is `return_type = "Self"`. Rows are
+  checked against the releases of their distribution (`[[distributions]]`, `verified`), and the
+  analysis never reads a project's versions, so its output does not depend on the environment.
+  Projects add rows with `attribute-type`.
+  *Rejected*: entries keyed by access path (`openai.OpenAI.chat.completions.create`: they do
+  not unify with an annotated `Completions` nor join over two clients); a `__getattr__`
+  catch-all (that the installed release has no real member of the name cannot be established);
+  version facts in the engine from lock files and specifiers (a later step, if the verified
+  ranges prove too narrow); reading the installed packages or their stubs (ADR-005, and output
+  that would depend on the environment).
 ---
 
 ## 5. Open items

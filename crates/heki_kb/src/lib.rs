@@ -51,6 +51,10 @@ pub enum KbError {
         "invalid one-at-a-time `{0}` in user ecosystem override (`always`, `when_unbound`, or `unbinds`)"
     )]
     InvalidOneAtATime(String),
+    #[error(
+        "`attribute-type` in the user ecosystem override of `{0}` takes no other key: it describes reading an attribute, not calling it"
+    )]
+    AttributeTypeWithCallKeys(String),
 }
 
 /// Layer 1 parameter effect (Soundness lane ONLY — no advisory I/O effects).
@@ -309,7 +313,8 @@ pub struct EcosystemEntry {
     pub keeps_hashable_defaults: bool,
     pub opaque_to_layer3: bool,
     /// Optional instance class returned by a factory function or method
-    /// (e.g. `sqlite3.connect` -> `sqlite3.Connection`, `sqlite3.Connection.cursor` -> `sqlite3.Cursor`).
+    /// (e.g. `sqlite3.connect` -> `sqlite3.Connection`, `sqlite3.Connection.cursor` -> `sqlite3.Cursor`),
+    /// or [`SELF_RETURN_TYPE`] for a method returning an instance of its receiver's class.
     pub return_type: Option<String>,
     /// `EFF106`: a `with` block over an instance of this class (a synchronous `threading` lock)
     /// or over the result of this call (a DB transaction starter such as
@@ -549,11 +554,27 @@ impl EcosystemEntry {
         case.and_then(|c| c.emits).unwrap_or(self.emits)
     }
 
+    /// The class of what the call returns, when the catalog names one.
     pub fn return_type_in<'e>(&'e self, case: Option<&'e ArgCase>) -> Option<&'e str> {
+        self.declared_return_in(case)
+            .filter(|t| *t != SELF_RETURN_TYPE)
+    }
+
+    /// Whether the method returns an instance of its receiver's class ([`SELF_RETURN_TYPE`]).
+    pub fn returns_receiver_in(&self, case: Option<&ArgCase>) -> bool {
+        self.declared_return_in(case) == Some(SELF_RETURN_TYPE)
+    }
+
+    fn declared_return_in<'e>(&'e self, case: Option<&'e ArgCase>) -> Option<&'e str> {
         case.and_then(|c| c.return_type.as_deref())
             .or(self.return_type.as_deref())
     }
 }
+
+/// The `return_type` of a method returning an instance of its receiver's class: a fluent
+/// builder (`openai.OpenAI.with_options`) called on an instance of a project subclass returns
+/// one of that subclass.
+pub const SELF_RETURN_TYPE: &str = "Self";
 
 /// A validated `[[tool.heki.ecosystem]]` entry: the keys it sets on the entry for `symbol`
 /// (`None`: left out, the built-in value stays).
@@ -571,6 +592,9 @@ pub struct EcosystemPatch {
     pub non_reentrant_lock: Option<bool>,
     pub one_at_a_time: Option<OneAtATime>,
     pub writes_in_order: Option<OrderedOutput>,
+    /// The `[[attributes]]` row of `symbol` ([`AttributeType`]); a patch setting it sets
+    /// nothing else.
+    pub attribute_type: Option<String>,
 }
 
 impl EcosystemPatch {
@@ -633,7 +657,7 @@ impl TryFrom<&EcosystemOverride> for EcosystemPatch {
                 _ => return Err(KbError::InvalidCopyDepth(depth.clone())),
             })),
         };
-        Ok(Self {
+        let patch = Self {
             symbol: value.symbol.clone(),
             effects,
             async_safe: value.async_safe,
@@ -654,7 +678,17 @@ impl TryFrom<&EcosystemOverride> for EcosystemPatch {
                 sorted_by: w.sorted_by.clone(),
                 sorted_by_default: w.sorted_by_default,
             }),
-        })
+            attribute_type: value.attribute_type.clone(),
+        };
+        let sets_call_keys = Self {
+            symbol: String::new(),
+            attribute_type: None,
+            ..patch.clone()
+        } != Self::default();
+        if patch.attribute_type.is_some() && sets_call_keys {
+            return Err(KbError::AttributeTypeWithCallKeys(patch.symbol));
+        }
+        Ok(patch)
     }
 }
 
@@ -727,6 +761,36 @@ pub struct CachedPropertyDecorator {
     pub slot: Option<String>,
 }
 
+/// What reading an attribute on an instance of a library class gives (`[[attributes]]`): in
+/// every release the distribution's `verified` range admits ([`Distribution`]), the value read
+/// has the catalogued members of the class `type`. It says nothing of the value's identity or
+/// of what the read runs, so a plain attribute, a property, and a cached property are alike to
+/// it. A separate table from `[[entries]]`, which describe calls: an attribute is no method a
+/// class takes from its base.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AttributeType {
+    /// `package.module.Class.attribute`, the class named as an import, a constructor call, a
+    /// `return_type`, or another row's `type` names it.
+    pub symbol: String,
+    #[serde(rename = "type")]
+    pub class: String,
+}
+
+/// A distribution whose catalog rows were checked against its releases
+/// (`[[distributions]]`): every entry and attribute row under `packages` holds in each release
+/// `verified` admits. The analysis never reads the project's versions.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Distribution {
+    /// The name on PyPI (`google-genai`).
+    pub name: String,
+    /// The import packages whose rows it covers (`google.genai`).
+    pub packages: Vec<String>,
+    /// A PEP 440 version specifier (`>=1.66,<3`).
+    pub verified: String,
+}
+
 /// On-disk shape of one `kb/ecosystem/*.toml` file.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -734,7 +798,11 @@ struct EcosystemKbFile {
     #[serde(default)]
     opaque_packages: Vec<String>,
     #[serde(default)]
+    distributions: Vec<Distribution>,
+    #[serde(default)]
     entries: Vec<EcosystemEntry>,
+    #[serde(default)]
+    attributes: Vec<AttributeType>,
     #[serde(default)]
     invokes: Vec<Invokes>,
     #[serde(default)]
@@ -762,6 +830,12 @@ pub struct EffectiveEcosystemKb {
     /// The cached-property decorators known to keep the value in the instance `__dict__`
     /// ([`CachedPropertyDecorator`]).
     pub cached_properties: BTreeMap<String, CachedPropertyDecorator>,
+    /// `Class.attribute` -> the class of what reading it on an instance gives
+    /// ([`AttributeType`]), the built-in rows and the users' `attribute-type`.
+    pub attributes: BTreeMap<String, String>,
+    /// The releases each distribution's rows were checked against ([`Distribution`]); the
+    /// analysis never reads them.
+    pub distributions: Vec<Distribution>,
     pub digest: String,
 }
 
@@ -787,6 +861,8 @@ impl EffectiveEcosystemKb {
             user_symbols: BTreeSet::new(),
             invokes: BTreeMap::new(),
             cached_properties: BTreeMap::new(),
+            attributes: BTreeMap::new(),
+            distributions: Vec::new(),
             digest,
         }
     }
@@ -799,9 +875,13 @@ impl EffectiveEcosystemKb {
         let mut opaque_packages = Vec::new();
         let mut invokes = BTreeMap::new();
         let mut cached_properties = BTreeMap::new();
+        let mut attributes = BTreeMap::new();
+        let mut distributions = Vec::new();
         for &(file, text) in ECOSYSTEM_KB_FILES {
             let parsed = parse_ecosystem_file(file, text)?;
+            distributions.extend(parsed.distributions);
             raw.extend(parsed.entries.into_iter().map(|e| (e.symbol.clone(), e)));
+            attributes.extend(parsed.attributes.into_iter().map(|a| (a.symbol, a.class)));
             opaque_packages.extend(parsed.opaque_packages);
             invokes.extend(parsed.invokes.into_iter().map(|i| (i.symbol.clone(), i)));
             cached_properties.extend(
@@ -814,6 +894,10 @@ impl EffectiveEcosystemKb {
         opaque_packages.sort();
         opaque_packages.dedup();
         for patch in overrides {
+            if let Some(class) = &patch.attribute_type {
+                attributes.insert(patch.symbol.clone(), class.clone());
+                continue;
+            }
             let package = top_level_package(&patch.symbol);
             let entry = raw
                 .entry(patch.symbol.clone())
@@ -827,12 +911,19 @@ impl EffectiveEcosystemKb {
         let mut kb = Self::materialize(raw.into_values().collect(), opaque_packages);
         let listed = serde_json::to_string(&invokes).unwrap_or_default();
         let caches = serde_json::to_string(&cached_properties).unwrap_or_default();
-        kb.digest = blake3::hash(format!("{}|{listed}|{caches}", kb.digest).as_bytes())
+        let read = serde_json::to_string(&attributes).unwrap_or_default();
+        kb.digest = blake3::hash(format!("{}|{listed}|{caches}|{read}", kb.digest).as_bytes())
             .to_hex()
             .to_string();
         kb.invokes = invokes;
         kb.cached_properties = cached_properties;
-        kb.user_symbols = overrides.iter().map(|p| p.symbol.clone()).collect();
+        kb.attributes = attributes;
+        kb.distributions = distributions;
+        kb.user_symbols = overrides
+            .iter()
+            .filter(|p| p.attribute_type.is_none())
+            .map(|p| p.symbol.clone())
+            .collect();
         if !kb.user_symbols.is_empty() {
             let users: Vec<&str> = kb.user_symbols.iter().map(String::as_str).collect();
             let keyed = format!("{}|{}", kb.digest, users.join(","));
@@ -869,6 +960,14 @@ impl EffectiveEcosystemKb {
     /// keeping the value in the instance `__dict__` ([`CachedPropertyDecorator`]).
     pub fn cached_property(&self, symbol: &str) -> Option<&CachedPropertyDecorator> {
         self.cached_properties.get(symbol)
+    }
+
+    /// The class of what reading `attr` on an instance of exactly the library class `class`
+    /// gives, when the catalog lists it ([`AttributeType`]).
+    pub fn attribute_type(&self, class: &str, attr: &str) -> Option<&str> {
+        self.attributes
+            .get(&format!("{class}.{attr}"))
+            .map(String::as_str)
     }
 }
 
@@ -3102,11 +3201,11 @@ mod tests {
     fn layer2_return_types_name_catalogued_classes() {
         let kb = EffectiveEcosystemKb::load_builtin(&[]).unwrap();
         for (symbol, e) in &kb.entries {
-            if let Some(class) = &e.return_type {
+            if let Some(class) = e.return_type_in(None) {
                 let methods = format!("{class}.");
                 assert!(
                     kb.entries.keys().any(|k| k.starts_with(&methods))
-                        || FUTURE_CLASSES.contains(&class.as_str())
+                        || FUTURE_CLASSES.contains(&class)
                         || class.starts_with("builtins."),
                     "{symbol} -> {class}"
                 );
@@ -3526,6 +3625,11 @@ mod tests {
                 async_safe: Some(true),
                 ..patch("pymongo.MongoClient")
             },
+            // An attribute row, which adds no entry.
+            EcosystemPatch {
+                attribute_type: Some("vendor.Chat".into()),
+                ..patch("vendor.Client.chat")
+            },
         ];
         let kb = EffectiveEcosystemKb::load_builtin(&overrides).unwrap();
         let got = |symbol: &str| kb.lookup(symbol).cloned().unwrap();
@@ -3604,6 +3708,12 @@ mod tests {
             [vec![UnpooledClientAlloc], vec![UnpooledClientAlloc]]
         );
         assert_eq!(kb.entries.len(), builtin.entries.len() + 4);
+        assert_eq!(
+            kb.attribute_type("vendor.Client", "chat"),
+            Some("vendor.Chat")
+        );
+        assert_eq!(kb.attributes.len(), builtin.attributes.len() + 1);
+        assert_eq!(kb.declared("vendor.Client.chat"), None);
         // Only what the configuration names is a declaration of project code.
         assert!(kb.declared("mypkg.db.open").is_some());
         assert!(kb.declared("time.sleep").is_some());
@@ -3611,6 +3721,60 @@ mod tests {
         assert_eq!(builtin.declared("time.sleep"), None);
         assert_eq!(kb.opaque_packages, builtin.opaque_packages);
         assert_ne!(kb.digest, builtin.digest);
+    }
+
+    /// Every attribute row names a class with catalogued members and is no entry (an attribute
+    /// is not a method the class defines), and the releases of its package that the row was
+    /// checked against are listed ([`Distribution`]).
+    #[test]
+    fn attribute_rows_name_catalogued_classes_in_verified_distributions() {
+        let kb = EffectiveEcosystemKb::load_builtin(&[]).unwrap();
+        let distributions = &kb.distributions;
+        let operators = ["~=", "==", "!=", "<=", ">=", "<", ">"];
+        for d in distributions {
+            assert!(!d.name.is_empty() && !d.packages.is_empty(), "{d:?}");
+            for clause in d.verified.split(',') {
+                let version = operators
+                    .iter()
+                    .find_map(|op| clause.trim().strip_prefix(op))
+                    .unwrap_or_else(|| panic!("{}: {clause}", d.name));
+                assert!(version.starts_with(|c: char| c.is_ascii_digit()), "{d:?}");
+            }
+        }
+        let under = |symbol: &str, package: &str| {
+            symbol
+                .strip_prefix(package)
+                .is_some_and(|rest| rest.starts_with('.'))
+        };
+        for (symbol, class) in &kb.attributes {
+            let members = format!("{class}.");
+            assert!(
+                kb.entries.keys().any(|k| k.starts_with(&members))
+                    || kb.attributes.keys().any(|k| k.starts_with(&members)),
+                "{symbol} -> {class}"
+            );
+            assert_eq!(kb.lookup(symbol), None, "{symbol}");
+            assert!(
+                distributions
+                    .iter()
+                    .any(|d| d.packages.iter().any(|p| under(symbol, p))),
+                "{symbol}"
+            );
+        }
+        // `return_type = "Self"`: an instance of the receiver's class, never a class of that
+        // name.
+        let builder = EcosystemEntry {
+            return_type: Some(SELF_RETURN_TYPE.into()),
+            ..EcosystemEntry::default()
+        };
+        assert!(builder.returns_receiver_in(None));
+        assert_eq!(builder.return_type_in(None), None);
+        let factory = EcosystemEntry {
+            return_type: Some("sqlite3.Connection".into()),
+            ..EcosystemEntry::default()
+        };
+        assert!(!factory.returns_receiver_in(None));
+        assert_eq!(factory.return_type_in(None), Some("sqlite3.Connection"));
     }
 
     #[test]
@@ -3679,6 +3843,7 @@ mod tests {
                 sorted_by: Some("sort_keys".into()),
                 sorted_by_default: true,
             }),
+            attribute_type: None,
         };
         assert_eq!(
             EcosystemPatch::try_from(&ok).unwrap(),
@@ -3699,8 +3864,31 @@ mod tests {
                     sorted_by: Some("sort_keys".into()),
                     sorted_by_default: true,
                 }),
+                attribute_type: None,
             }
         );
+        // An attribute's type is a row of its own: it takes no key of a call.
+        let read = EcosystemOverride {
+            symbol: "vendor.Client.chat".into(),
+            attribute_type: Some("vendor.Chat".into()),
+            ..EcosystemOverride::default()
+        };
+        assert_eq!(
+            EcosystemPatch::try_from(&read).unwrap(),
+            EcosystemPatch {
+                symbol: "vendor.Client.chat".into(),
+                attribute_type: Some("vendor.Chat".into()),
+                ..EcosystemPatch::default()
+            }
+        );
+        let mixed = EcosystemOverride {
+            effects: Some(vec!["blocking_net".into()]),
+            ..read.clone()
+        };
+        assert!(matches!(
+            EcosystemPatch::try_from(&mixed),
+            Err(KbError::AttributeTypeWithCallKeys(s)) if s == "vendor.Client.chat"
+        ));
         for (name, kind) in [
             ("always", OneAtATime::Always),
             ("unbinds", OneAtATime::Unbinds),

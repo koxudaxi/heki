@@ -420,9 +420,23 @@ outside the project but builtin types may, allocate an instance of `C` without r
 `__init__`: a construction of `C`.
 
 Layer 2 `return_type` entries type the results of factories (`sqlite3.connect()` →
-`sqlite3.Connection`, `asyncio.get_running_loop()` → `asyncio.AbstractEventLoop`). A call that
-cannot be resolved is not followed (`unknown_calls`); an external function that Layer 2 does not
-list has no effect.
+`sqlite3.Connection`, `asyncio.get_running_loop()` → `asyncio.AbstractEventLoop`); `"Self"` types
+a builder's result as its receiver (`client.with_options(...)`, an instance of a project subclass
+included). A call that cannot be resolved is not followed (`unknown_calls`); an external function
+that Layer 2 does not list has no effect.
+
+Reading an attribute on an instance whose MRO declares no type for it takes the class an
+`[[attributes]]` row of Layer 2 gives (`client.chat` of an `openai.OpenAI` → `Chat`, whose
+`completions` is `Completions`, whose `create` the catalog lists), only where the row is
+established (`ProjectDecls::catalog_attribute`): the value is an instance (a class object, a
+union, `Any`, and the result of a factory the catalog does not know are not typed), the class it
+may be under R2 (the class, every project subclass) each finds the same row first along its MRO,
+no project class on the way binds the name (in its body, on `self`, or on the class object: an
+untyped override is no absent one), none defines `__getattribute__` or has a metaclass heki does
+not know, and no base heki knows nothing of, or a library class without the row, comes first.
+Anywhere else the read is untyped and neither tier reports what follows: `Ty` carries no
+provenance, so there is no heuristic type. A store of the attribute (`client.chat = fake`) is
+covered by R1, as a replaced library method is.
 
 ### 2.2 One `EffectSummary`, propagated bottom-up over Tarjan SCCs
 A worklist fixpoint in reverse topological order of the call graph's Tarjan SCCs computes
@@ -1966,7 +1980,8 @@ is a parameter of the calling function (`shutdown(wait=wait)`) becomes a guard: 
 switches off need the parameter to be true, which the callers decide (`close(wait=False)`). A file lists its `opaque_packages`. Projects add or
 override entries with `[[tool.heki.ecosystem]]` (`symbol`, `effects`, `async-safe`,
 `offloads-blocking-arg`, `excluded`, `copy-sanitizer`, `return-type`, `sync-lock-or-tx`,
-`non-reentrant-lock`, `one-at-a-time`, `writes-in-order`): an
+`non-reentrant-lock`, `one-at-a-time`, `writes-in-order`, and `attribute-type`, which adds an
+`[[attributes]]` row and takes no other key): an
 override sets the keys it lists and keeps the built-in entry's others. A `[[tool.heki.ecosystem]]`
 entry naming a project function applies to its summary (the built-in catalog never does: a
 package's own source is followed through its bodies): its `effects` are direct effects (chain: the function itself),
@@ -2017,6 +2032,19 @@ which an entry leaves out, and a builtin dict or set hands on its keys with the 
 for them. A call of a catalogued library without such an entry runs code of the project only
 when it is handed a value not established as an instance of a library class that is not
 callable; `eval`, `exec`, `__import__`, `importlib.import_module`, and `pickle.loads` always may.
+
+A fourth table, `[[attributes]]` (`heki_kb::AttributeType`), gives the class of what reading an
+attribute on an instance of a library class gives (`symbol = "openai.OpenAI.chat"`,
+`type = "openai.resources.chat.Chat"`), read as section 2.1 says. A row states that in every
+release its distribution's verified range admits, the value read has the catalogued members of
+that class; it says nothing of its identity or of what the read runs, so a plain attribute, a
+property, and a cached property are alike to it. It is a table of its own because an attribute is
+no method a class takes from its base (`external_defines`). The synchronous and asynchronous
+clients of a library have rows of their own at every step, and a row whose meaning changes
+across the verified releases under one name is left out. `[[distributions]]`
+(`heki_kb::Distribution`) names, per distribution (its PyPI name), the import packages its rows
+cover and the PEP 440 range of releases they were checked against (`verified`). The analysis never
+reads a project's versions: its output does not depend on the installed environment.
 
 A third table, `[[cached_properties]]` (`heki_kb::CachedPropertyDecorator`), lists the
 cached-property decorators known to keep the getter's value in the instance `__dict__` under the

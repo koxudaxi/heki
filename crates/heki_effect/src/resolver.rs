@@ -3481,6 +3481,78 @@ impl ProjectDecls {
         }
     }
 
+    /// The class the catalog gives reading `attr` on an instance of `class`
+    /// (`heki_kb::AttributeType`, R3): the row of the class outside the project that each class
+    /// the value may be under R2 (`class` and every project subclass) finds first along its MRO,
+    /// the same row for all of them. `None` when a project class on the way binds the name (its
+    /// own declaration types the read, or nothing does), a base heki knows nothing of or a
+    /// library class without the row comes first (it may define the name), a class the value
+    /// may be defines `__getattribute__` or has a metaclass heki does not know, or there are
+    /// more than [`DISPATCH_CLASS_LIMIT`] classes.
+    pub(crate) fn catalog_attribute<'k>(
+        &self,
+        class: &str,
+        attr: &str,
+        kb: &'k EffectiveEcosystemKb,
+    ) -> Option<&'k str> {
+        let class = self.canonical(class);
+        let found = self.attribute_row_along(&self.mro(&class), attr, kb)?;
+        let read = self.attr_read(&class, attr);
+        if read.getattribute || read.custom_metaclass {
+            return None;
+        }
+        let budget = Budget::unmetered("heki_effect::resolver::ProjectDecls::catalog_attribute");
+        let mut visited = 0;
+        let differs = reach(
+            &budget,
+            [class.as_str()],
+            |c, out| out.extend(self.direct_subclasses(c).iter().map(String::as_str)),
+            |c| {
+                visited += 1;
+                let same = self.attribute_row_along(&self.mro(c), attr, kb) == Some(found);
+                if visited > DISPATCH_CLASS_LIMIT || !same {
+                    Visit::Stop(())
+                } else {
+                    Visit::Expand
+                }
+            },
+        );
+        (differs == Answer::Known(None)).then_some(found)
+    }
+
+    /// The `[[attributes]]` row reading `attr` finds along `mro`: that of the first class
+    /// outside the project, a builtin type without one passed over; none past a project class
+    /// binding the name, in its body, on `self`, or on the class object outside its body.
+    fn attribute_row_along<'k>(
+        &self,
+        mro: &[String],
+        attr: &str,
+        kb: &'k EffectiveEcosystemKb,
+    ) -> Option<&'k str> {
+        for c in mro {
+            if self.is_project_class(c) {
+                self.read(|k| note(&mut k.class_facts, c));
+                let binds = self
+                    .class(c)
+                    .is_some_and(|d| d.members.contains(attr) || d.rebound_attrs.contains(attr));
+                if binds {
+                    return None;
+                }
+                continue;
+            }
+            if is_unknown_base(c) || self.under_unread(c) {
+                return None;
+            }
+            if let Some(found) = kb.attribute_type(c, attr) {
+                return Some(found);
+            }
+            if !c.starts_with("builtins.") {
+                return None;
+            }
+        }
+        None
+    }
+
     /// Whether no class of the MRO of the project class `class` has the member `name`: no
     /// project class defines it, and every base outside the project is a builtin type that
     /// does not ([`Self::inherited_external`]).
@@ -3714,7 +3786,8 @@ impl ProjectDecls {
     /// definition when it is a getter, plus the getters of overriding project subclasses
     /// (Priority 4 CHA), at most `CHA_CANDIDATE_LIMIT` of them (`TooMany` beyond). `None` when
     /// no modeled getter runs: a plain attribute, a method, an attribute of an external class
-    /// (never a Layer 2 symbol: the catalog describes calls), or a property with a setter or
+    /// (never a Layer 2 symbol: an `[[attributes]]` row types what a read gives, not what it
+    /// runs), or a property with a setter or
     /// deleter (`FunctionDecl::is_property`).
     pub(crate) fn property_targets(
         &self,
