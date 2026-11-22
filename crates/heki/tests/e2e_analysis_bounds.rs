@@ -1612,6 +1612,54 @@ fn deep_copies_of_a_sentinel_class_with_many_subclasses_decide_each_class_once()
     );
 }
 
+/// A chain of thousands of classes, each holding the next in a typed attribute and each
+/// deep-copied, the last holding a tested `object()` sentinel (`MUT118`): what each class reaches
+/// below its attributes is joined once per class (`heki_ir::walk::Closure`), not walked again from
+/// each copy, so every copy reports it in linear time.
+#[test]
+fn deep_copies_along_a_long_chain_of_held_classes_join_one_fact_per_class() {
+    let classes = 3_000;
+    let mut lines = vec![
+        "import copy".to_owned(),
+        String::new(),
+        "MISSING = object()".to_owned(),
+    ];
+    for i in 0..classes {
+        let init = if i + 1 == classes {
+            "        self.mark = MISSING".to_owned()
+        } else {
+            "        self.next = following".to_owned()
+        };
+        let params = if i + 1 == classes {
+            "self".to_owned()
+        } else {
+            format!("self, following: \"C{}\"", i + 1)
+        };
+        lines.extend([
+            String::new(),
+            String::new(),
+            format!("class C{i}:"),
+            format!("    def __init__({params}):"),
+            init,
+            String::new(),
+            String::new(),
+            format!("def isolated{i}(c: C{i}):"),
+            "    return copy.deepcopy(c)".to_owned(),
+        ]);
+    }
+    lines.extend([
+        String::new(),
+        String::new(),
+        format!("def marked(c: C{}):", classes - 1),
+        "    return c.mark is MISSING".to_owned(),
+    ]);
+    let p = Project::new("bounds_sentinel_chain");
+    p.write("m.py", &(lines.join("\n") + "\n"));
+    let found = check_within(&p, Duration::from_secs(20));
+    let reported = found.iter().filter(|d| d["rule_code"] == "MUT118").count();
+    assert_eq!(reported, classes);
+}
+
 /// Functions binding thousands of names each to the one before, from an attribute load, and
 /// comparing each with an `object()` sentinel by identity (`MUT118`'s tests): what each operand
 /// copies is read from the function's copy-root table, not walked back along the chain per

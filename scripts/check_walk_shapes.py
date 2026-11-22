@@ -555,6 +555,35 @@ def sentinels_per_class(n: int) -> str:
     return "\n".join(lines)
 
 
+def sentinel_attribute_chain(n: int) -> str:
+    """Classes each holding the next in a typed attribute and each deep-copied, the last holding a
+    tested `object()` sentinel."""
+    lines = ["import copy", "", "MISSING = object()", ""]
+    for i in range(n):
+        last = i + 1 == n
+        params = "self" if last else f'self, following: "C{i + 1}"'
+        store = "self.mark = MISSING" if last else "self.next = following"
+        lines += [f"class C{i}:", f"    def __init__({params}):", f"        {store}", ""]
+        lines += [f"def isolated{i}(c: C{i}):", "    return copy.deepcopy(c)", ""]
+    lines += [f"def marked(c: C{n - 1}):", "    return c.mark is MISSING", ""]
+    return "\n".join(lines)
+
+
+def sentinel_attribute_ring(n: int) -> str:
+    """Classes in a ring, each holding the next in a typed attribute, the last the first, and each
+    deep-copied; one holds a tested `object()` sentinel."""
+    lines = ["import copy", "", "MISSING = object()", ""]
+    for i in range(n):
+        lines += [f"class C{i}:", f'    def __init__(self, following: "C{(i + 1) % n}"):']
+        lines += ["        self.next = following"]
+        if i == n // 2:
+            lines += ["        self.mark = MISSING"]
+        lines += [""]
+        lines += [f"def isolated{i}(c: C{i}):", "    return copy.deepcopy(c)", ""]
+    lines += [f"def marked(c: C{n // 2}):", "    return c.mark is MISSING", ""]
+    return "\n".join(lines)
+
+
 def initialization_steps(n: int) -> str:
     """A class whose initializer calls n methods, each running one public helper that writes,
     reads, and calls on its own `self` n times."""
@@ -779,6 +808,10 @@ FAMILIES = [
     ),
     Family("sentinel_subclasses", project=sentinel_subclasses, placements=("project",), size=2000),
     Family("sentinels_per_class", project=sentinels_per_class, placements=("project",), size=2000),
+    Family(
+        "sentinel_attribute_chain", project=sentinel_attribute_chain, placements=("project",), size=2000
+    ),
+    Family("sentinel_attribute_ring", project=sentinel_attribute_ring, placements=("project",), size=2000),
     Family(
         "blind_calls_below_async",
         project=blind_calls_below_async,
