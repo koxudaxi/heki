@@ -169,12 +169,33 @@ fn fix_removes_unused_codes_only_when_asked() {
 }
 
 #[test]
+fn several_unused_codes_of_one_comment_are_one_report() {
+    let p = project(
+        "unused_several",
+        UNUSED,
+        "async def handler():\n    return 1  # heki: ignore[EFF101, DATA101]\n",
+    );
+    let (code, stdout, _) = p.heki(&["check", "--output-format", "json"]);
+    assert_eq!(code, 1);
+    let reports = json_reports(&stdout);
+    assert_eq!(
+        found(&reports),
+        [(2, "unused-suppression", "EFF101, DATA101")]
+    );
+    assert_eq!(
+        reports[0]["message"],
+        "No `EFF101` or `DATA101` report on this line to suppress"
+    );
+}
+
+#[test]
 fn a_bare_heki_ignore_is_reported_when_codes_are_required_and_still_suppresses() {
     let p = project("codes_off", "", SUPPRESSED);
     let (code, stdout, _) = p.heki(&["check", "--output-format", "json"]);
     assert_eq!((code, json_reports(&stdout).len()), (0, 0), "{stdout}");
 
-    let source = "import time\n\n\nasync def handler():\n    time.sleep(1)  # heki: ignore\n    x = 1  # heki: ignore\n    time.sleep(2)  # noqa\n";
+    // Without `report-unused-suppressions`, a code that suppresses nothing (line 8) is not reported.
+    let source = "import time\n\n\nasync def handler():\n    time.sleep(1)  # heki: ignore\n    x = 1  # heki: ignore\n    time.sleep(2)  # noqa\n    y = 2  # heki: ignore[EFF101]\n";
     let p = project("codes_on", CODES_REQUIRED, source);
     let (code, stdout, stderr) = p.heki(&["check", "--output-format", "json"]);
     assert_eq!(code, 1, "{stderr}");
@@ -354,4 +375,35 @@ fn the_server_reports_unused_codes_and_removes_them() {
     let actions = lsp.code_actions(&a, &diags[2]["range"], &diags[2..3]);
     assert_eq!(actions[0]["title"], "Remove the suppression");
     lsp.stop(true);
+}
+
+#[test]
+fn baseline_entries_of_reports_on_comments_are_judged_by_their_settings() {
+    let both =
+        "[tool.heki.lint]\nreport-unused-suppressions = true\nrequire-suppression-codes = true\n";
+    let p = project(
+        "entries_of_comments",
+        both,
+        "def f():\n    x = 1  # heki: ignore\n    y = 2  # heki: ignore[EFF101]\n    return x + y\n",
+    );
+    let (code, _, stderr) = p.heki(&["check", "--baseline", "b.toml", "--update-baseline"]);
+    assert_eq!(code, 0, "{stderr}");
+    let recorded = p.read("b.toml");
+    for code in ["unused-suppression", "suppression-without-code"] {
+        assert!(
+            recorded.contains(&format!("rule_code = \"{code}\"")),
+            "{recorded}"
+        );
+    }
+    let (code, _, stderr) = p.heki(&["check", "--baseline", "b.toml"]);
+    assert_eq!(code, 0, "{stderr}");
+    p.write("a.py", "def f():\n    return 3\n");
+    let (code, _, stderr) = p.heki(&["check", "--baseline", "b.toml"]);
+    assert_eq!(code, 1, "{stderr}");
+    for entry in [
+        "a.py::f suppression-without-code `# heki: ignore` matched no report",
+        "a.py::f unused-suppression `EFF101` matched no report",
+    ] {
+        assert!(stderr.contains(entry), "{stderr}");
+    }
 }

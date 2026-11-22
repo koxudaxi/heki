@@ -886,15 +886,14 @@ pub fn retain_unsuppressed<'f>(
         .collect();
     let judged = run.unused_reported() || run.codes_required();
     diags.retain(|d| {
-        let Some((_, ign, suppressed)) = ignores.get_mut(d.path.as_path()) else {
-            return true;
-        };
         let mut kept = true;
-        for i in ign.suppressing(d.line, &d.rule_code, &d.rule_slug) {
-            if judged {
-                suppressed[i].insert(d.rule_code.clone());
+        if let Some((_, ign, suppressed)) = ignores.get_mut(d.path.as_path()) {
+            for i in ign.suppressing(d.line, &d.rule_code, &d.rule_slug) {
+                if judged {
+                    suppressed[i].insert(d.rule_code.clone());
+                }
+                kept = false;
             }
-            kept = false;
         }
         kept
     });

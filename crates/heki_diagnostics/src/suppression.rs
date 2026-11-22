@@ -268,10 +268,8 @@ mod tests {
             ("x = 1 # heki: ignore[EFF101]\r\n", &[0], "x = 1\r\n"),
         ] {
             let ignores = InlineIgnores::from_comments(src, &comments(src));
-            let [s] = ignores.suppressions() else {
-                panic!("{src:?}: {ignores:?}");
-            };
-            let edit = s.without(src, unused);
+            assert_eq!(ignores.suppressions().len(), 1, "{src:?}");
+            let edit = ignores.suppressions()[0].without(src, unused);
             let mut out = src.to_owned();
             out.replace_range(
                 edit.span.start as usize..edit.span.end as usize,
