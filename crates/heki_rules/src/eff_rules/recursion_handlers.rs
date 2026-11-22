@@ -368,7 +368,7 @@ fn takes_recursion_error(
     };
     let mut takes = Takes::No;
     for class in classes {
-        match class_named(f, tcx, clause.test, class).map(|fqn| class_takes(decls, &fqn)) {
+        match class_named(f, tcx, decls, clause.test, class).map(|fqn| class_takes(decls, &fqn)) {
             Some(Takes::Yes) => return Takes::Yes,
             Some(Takes::No) => {}
             Some(Takes::Unknown) | None => takes = Takes::Unknown,
@@ -391,15 +391,22 @@ fn class_takes(decls: &ProjectDecls, fqn: &str) -> Takes {
                 Takes::No
             }
         }
-        _ if decls.is_project_class(&decls.canonical(fqn)) => Takes::No,
+        _ if decls.is_project_class(fqn) => Takes::No,
         _ => Takes::Unknown,
     }
 }
 
 /// The fqn of the object the value `v` of a clause's class expression (computed in block
-/// `test`) names: a module-level name, or an attribute of one naming a module
-/// (`builtins.RuntimeError`); `None` for anything else (a local variable, a call).
-fn class_named(f: &IrFunction, tcx: &TypeCtx<'_>, test: BlockId, v: VarId) -> Option<String> {
+/// `test`) names, through re-exports and module aliases: a module-level name, or an attribute of
+/// one naming a module (`builtins.RuntimeError`, `errors.Base` for `Base = Exception`); `None`
+/// for anything else (a local variable, a call).
+fn class_named(
+    f: &IrFunction,
+    tcx: &TypeCtx<'_>,
+    decls: &ProjectDecls,
+    test: BlockId,
+    v: VarId,
+) -> Option<String> {
     let defined = |v: VarId| {
         f.block(test)
             .insts
@@ -414,7 +421,10 @@ fn class_named(f: &IrFunction, tcx: &TypeCtx<'_>, test: BlockId, v: VarId) -> Op
         _ => None,
     };
     match defined(v)? {
-        InstKind::AttrLoad { obj, attr, .. } => Some(format!("{}.{attr}", global(defined(*obj))?)),
+        InstKind::AttrLoad { obj, attr, .. } => {
+            let module = global(defined(*obj))?;
+            Some(decls.object_named(&format!("{module}.{attr}")))
+        }
         kind => global(Some(kind)),
     }
 }

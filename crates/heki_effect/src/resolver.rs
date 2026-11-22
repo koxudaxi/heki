@@ -2157,7 +2157,7 @@ impl ProjectDecls {
     /// The object the name `fqn` stands for: through re-exports, as [`Self::canonical`], and
     /// through the module aliases it names (`pkg.model._set` for `_set = object.__setattr__` in
     /// `pkg.model`). The name itself stays the alias's: only values are the object.
-    pub(crate) fn object_named(&self, fqn: &str) -> String {
+    pub fn object_named(&self, fqn: &str) -> String {
         self.chase(fqn, true)
     }
 

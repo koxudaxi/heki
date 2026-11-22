@@ -540,6 +540,10 @@ def descend(node: dict) -> int:
 /// A module whose `Exception` is a class of the project.
 const ERRORS: &str = r#"class Exception(ValueError):
     pass
+
+
+Failure = Exception
+Fatal = RuntimeError
 "#;
 const REBOUND: &str = r#"from pkg.errors import Exception
 from pkg.shapes import depth
@@ -554,11 +558,13 @@ def guarded(tree: dict) -> int:
 
 /// Clauses before an `except Exception`: names from a dependency (`library`, not installed) and
 /// the standard library (`threading.ThreadError` is `RuntimeError`), which may hold
-/// `RecursionError`, and a project class and a builtin, which cannot.
+/// `RecursionError`, and a project class and a builtin, which cannot, also through a module alias
+/// (`errors.Failure`); and a module alias of `RuntimeError` (`errors.Fatal`), which takes it.
 const EARLIER: &str = r#"import threading
 
 import library
 from library import ERRORS
+from pkg import errors
 from pkg.errors import Exception as ProjectError
 from pkg.shapes import depth
 
@@ -606,6 +612,22 @@ def builtin_class_first(tree: dict) -> int | None:
         raise
     except Exception:
         return None
+
+
+def project_alias_first(tree: dict) -> int | None:
+    try:
+        return depth(tree)
+    except errors.Failure:
+        raise
+    except Exception:
+        return None
+
+
+def builtin_alias(tree: dict) -> int | None:
+    try:
+        return depth(tree)
+    except errors.Fatal:
+        return None
 "#;
 
 /// A name only a star import from a dependency may bind.
@@ -644,8 +666,10 @@ fn clauses_turning_a_recursion_error_into_a_value_are_reported() {
         found(&diags),
         vec![
             d("pkg/cycle_a.py", 11, "measure"),
-            d("pkg/earlier.py", 41, "project_class_first"),
-            d("pkg/earlier.py", 50, "builtin_class_first"),
+            d("pkg/earlier.py", 42, "project_class_first"),
+            d("pkg/earlier.py", 51, "builtin_class_first"),
+            d("pkg/earlier.py", 60, "project_alias_first"),
+            d("pkg/earlier.py", 67, "builtin_alias"),
             d("pkg/shapes.py", 24, "bare"),
             d("pkg/shapes.py", 31, "base"),
             d("pkg/shapes.py", 38, "tupled"),
