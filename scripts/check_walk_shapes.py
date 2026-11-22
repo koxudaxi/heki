@@ -698,6 +698,37 @@ def stores_after_reads(n: int) -> str:
     return SET_ORDER_HELPERS + "\n".join(lines)
 
 
+def try_statements_into_a_cycle(n: int) -> str:
+    """One function of many `try` statements, each calling into one recursion and taking its
+    `RecursionError` in a clause that completes."""
+    lines = ["def rec(x):", "    return rec(x)", "", "def shape(x):"]
+    for _ in range(n):
+        lines += ["    try:", "        rec(x)", "    except Exception:", "        pass"]
+    return "\n".join(lines) + "\n"
+
+
+def cycle_of_functions(n: int) -> str:
+    """A call cycle through many functions, each calling the next inside a `try`."""
+    lines = []
+    for i in range(n):
+        lines += [f"def f{i}(x):", "    try:", f"        return f{(i + 1) % n}(x)"]
+        lines += ["    except Exception:", "        return None", ""]
+    return "\n".join(lines)
+
+
+def lattice_above_a_cycle(n: int) -> str:
+    """A lattice of calls n levels deep, two functions a level, each calling both of the level
+    below inside a `try`, above a function calling itself."""
+    lines = ["def bottom(x):", "    return bottom(x)", ""]
+    for level in range(n):
+        below = ["bottom"] if level == 0 else [f"a{level - 1}", f"b{level - 1}"]
+        for side in ("a", "b"):
+            lines += [f"def {side}{level}(x):", "    try:"]
+            lines += [f"        {callee}(x)" for callee in below]
+            lines += ["    except Exception:", "        return None", ""]
+    return "\n".join(lines)
+
+
 # The functions `argument_marks` defines, each named by an argument list of `marked_targets`.
 MARKED_FUNCTIONS = 1000
 
@@ -922,6 +953,14 @@ FAMILIES = [
     Family(
         "container_subclass_chain", project=container_subclass_chain, placements=("project",), size=1400
     ),
+    Family(
+        "try_statements_into_a_cycle",
+        project=try_statements_into_a_cycle,
+        placements=("project",),
+        size=2000,
+    ),
+    Family("cycle_of_functions", project=cycle_of_functions, placements=("project",), size=4000),
+    Family("lattice_above_a_cycle", project=lattice_above_a_cycle, placements=("project",), size=30),
     Family(
         "package_paths_merged_in_functions",
         project=package_paths_merged_in_functions,

@@ -508,12 +508,16 @@ pub fn opt_in_facts(selection: &RuleSelection) -> OptInFacts {
         locks: selection.is_enabled("EFF109"),
         set_order: selection.is_enabled("EFF112"),
         exclusive: selection.is_enabled("EFF110"),
+        // `EFF114` reads which project functions never return normally
+        // (`MustExec::never_returns`).
         must_effects: crate::eff_rules::MUST_EFFECT_RULES
             .iter()
+            .chain(&["EFF114"])
             .any(|code| selection.is_enabled(code)),
         kept_values: crate::mut_rules::KEPT_VALUE_RULES
             .iter()
             .any(|code| selection.is_enabled(code)),
+        call_cycles: selection.is_enabled("EFF114"),
         shared_state: false,
         blind_spots: false,
     }

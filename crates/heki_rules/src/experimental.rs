@@ -125,6 +125,15 @@ pub const EXPERIMENTAL_FEATURES: &[ExperimentalFeature] = &[
         tracking: None,
     },
     ExperimentalFeature {
+        id: "rule.EFF114",
+        kind: ExperimentalKind::Rule,
+        target: "EFF114",
+        since: "0.2.4",
+        reason: "Its precision is measured on a sample of reports of one corpus only, and its \
+            premises are not yet certified.",
+        tracking: None,
+    },
+    ExperimentalFeature {
         id: "cli-option.profile",
         kind: ExperimentalKind::CliOption,
         target: "heki check --profile",

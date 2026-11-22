@@ -3910,6 +3910,69 @@ fn many_comprehensions_over_one_set_share_their_flows() {
     );
 }
 
+/// The `EFF114` reports of `heki check --extend-select EFF114` on the module `m.py` of `source`,
+/// which must finish within 20 seconds.
+fn recursion_handlers(name: &str, source: &str) -> usize {
+    let p = Project::new(name);
+    p.write("m.py", source);
+    check_selecting_within(&p, &["EFF114"], Duration::from_secs(20))
+        .iter()
+        .filter(|d| d["rule_code"] == "EFF114")
+        .count()
+}
+
+/// Two thousand `try` statements in one function, each calling into one recursion: each body's
+/// blocks are found from one pass over the function, and each clause is walked once.
+#[test]
+fn many_try_statements_into_one_cycle_are_decided_once_each() {
+    let n = 2_000;
+    let mut lines = vec![
+        "def rec(x):".to_owned(),
+        "    return rec(x)".to_owned(),
+        String::new(),
+        String::new(),
+        "def shape(x):".to_owned(),
+    ];
+    for _ in 0..n {
+        lines.extend(
+            [
+                "    try:",
+                "        rec(x)",
+                "    except Exception:",
+                "        pass",
+            ]
+            .map(str::to_owned),
+        );
+    }
+    assert_eq!(
+        recursion_handlers("bounds_many_try_statements", &(lines.join("\n") + "\n")),
+        n
+    );
+}
+
+/// A call cycle through four thousand functions, each calling the next inside a `try`: the cycle
+/// is found once, by the components of the propagation.
+#[test]
+fn a_cycle_through_thousands_of_functions_is_found_once() {
+    let n = 4_000;
+    let mut lines = Vec::new();
+    for i in 0..n {
+        lines.extend([
+            format!("def f{i}(x):"),
+            "    try:".to_owned(),
+            format!("        return f{}(x)", (i + 1) % n),
+            "    except Exception:".to_owned(),
+            "        return None".to_owned(),
+            String::new(),
+            String::new(),
+        ]);
+    }
+    assert_eq!(
+        recursion_handlers("bounds_cycle_of_functions", &(lines.join("\n") + "\n")),
+        n
+    );
+}
+
 /// A value chosen among a set and hundreds of sorted lists by a chain of branches, then
 /// iterated and handed to a writer: whether it is such a set is decided once per value.
 #[test]
@@ -3964,6 +4027,158 @@ fn stores_after_reads_by_the_same_key_are_decided_once_each() {
         set_order_outputs("bounds_order_stores", &(lines.join("\n") + "\n")),
         1
     );
+}
+
+/// A lattice thirty levels deep, two functions a level, each calling both of the level below
+/// inside a `try`, above a function calling itself (2^30 paths down to it): whether a call
+/// reaches the cycle is a join over its callees.
+#[test]
+fn a_lattice_above_a_cycle_joins_each_call_once() {
+    let mut lines = vec![
+        "def bottom(x):".to_owned(),
+        "    return bottom(x)".to_owned(),
+    ];
+    for level in 0..30 {
+        let below = if level == 0 {
+            vec!["bottom".to_owned()]
+        } else {
+            vec![format!("a{}", level - 1), format!("b{}", level - 1)]
+        };
+        for side in ["a", "b"] {
+            lines.extend([
+                String::new(),
+                String::new(),
+                format!("def {side}{level}(x):"),
+                "    try:".to_owned(),
+            ]);
+            lines.extend(below.iter().map(|f| format!("        {f}(x)")));
+            lines.extend(["    except Exception:", "        return None"].map(str::to_owned));
+        }
+    }
+    assert_eq!(
+        recursion_handlers("bounds_lattice_above_a_cycle", &(lines.join("\n") + "\n")),
+        60
+    );
+}
+
+/// A ladder of four thousand helpers above a function calling itself, each calling the one
+/// below, and as many handlers, each calling one helper inside a `try`, in either order: each
+/// helper's first call down to the cycle is decided once for all the chains through it, and a
+/// report lists the first eight calls of its chain (four thousand calls for the top one).
+#[test]
+fn chains_down_a_ladder_of_helpers_are_walked_once_and_listed_in_part() {
+    let n = 4_000;
+    for top_first in [false, true] {
+        let mut lines = vec![
+            "def rec(x):".to_owned(),
+            "    return rec(x)".to_owned(),
+            String::new(),
+            String::new(),
+            "def h0(x):".to_owned(),
+            "    return rec(x)".to_owned(),
+        ];
+        for i in 1..n {
+            lines.extend([
+                String::new(),
+                String::new(),
+                format!("def h{i}(x):"),
+                format!("    return h{}(x)", i - 1),
+            ]);
+        }
+        let handlers: Vec<usize> = match top_first {
+            true => (0..n).rev().collect(),
+            false => (0..n).collect(),
+        };
+        for i in handlers {
+            lines.extend([
+                String::new(),
+                String::new(),
+                format!("def g{i}(x):"),
+                "    try:".to_owned(),
+                format!("        return h{i}(x)"),
+                "    except Exception:".to_owned(),
+                "        return None".to_owned(),
+            ]);
+        }
+        let p = Project::new(&format!("bounds_ladder_of_helpers_{top_first}"));
+        p.write("m.py", &(lines.join("\n") + "\n"));
+        let diags = check_selecting_within(&p, &["EFF114"], Duration::from_secs(20));
+        let reports: Vec<&Value> = diags
+            .iter()
+            .filter(|d| d["rule_code"] == "EFF114")
+            .collect();
+        assert_eq!(reports.len(), n);
+        let related = |d: &Value| d["related"].as_array().unwrap().len();
+        assert!(reports.iter().all(|d| related(d) <= 9));
+        let top = reports
+            .iter()
+            .find(|d| d["qualname"] == format!("g{}", n - 1))
+            .unwrap();
+        assert_eq!(related(top), 9);
+        assert!(
+            top["message"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("the recursion of `rec` below `h{}`", n - 1))
+        );
+    }
+}
+
+/// A ladder of helpers above a function calling itself, longer than the steps of a small
+/// function's budget, and two handlers calling a helper inside a `try`: the walk down from the top
+/// helper spends the first handler's budget, which reports nothing and decides no helper; the
+/// walk from four thousand helpers above the cycle fits the second handler's.
+#[test]
+fn chains_down_more_helpers_than_the_budget_steps_are_not_reported() {
+    let n = 4_500;
+    let mut lines = vec![
+        "def rec(x):".to_owned(),
+        "    return rec(x)".to_owned(),
+        String::new(),
+        String::new(),
+        "def h0(x):".to_owned(),
+        "    return rec(x)".to_owned(),
+    ];
+    for i in 1..n {
+        lines.extend([
+            String::new(),
+            String::new(),
+            format!("def h{i}(x):"),
+            format!("    return h{}(x)", i - 1),
+        ]);
+    }
+    for (handler, helper) in [("top", n - 1), ("within", 3_999)] {
+        lines.extend([
+            String::new(),
+            String::new(),
+            format!("def {handler}(x):"),
+            "    try:".to_owned(),
+            format!("        return h{helper}(x)"),
+            "    except Exception:".to_owned(),
+            "        return None".to_owned(),
+        ]);
+    }
+    let p = Project::new("bounds_ladder_past_the_budget");
+    p.write("m.py", &(lines.join("\n") + "\n"));
+    let reported: Vec<Value> = check_selecting_within(&p, &["EFF114"], Duration::from_secs(20))
+        .into_iter()
+        .filter(|d| d["rule_code"] == "EFF114")
+        .map(|d| d["qualname"].clone())
+        .collect();
+    assert_eq!(reported, ["within"]);
+}
+
+/// A clause of a tuple of three thousand classes, the last one taking `RecursionError`: each
+/// class is looked up in the function's table of definitions, not found by a scan of the block
+/// testing the clause.
+#[test]
+fn a_clause_of_thousands_of_classes_looks_each_up_once() {
+    let n = 3_000;
+    let classes = vec!["KeyError"; n].join(", ");
+    let source = format!(
+        "def rec(x):\n    return rec(x)\n\n\ndef shape(x):\n    try:\n        rec(x)\n    except ({classes}, Exception):\n        pass\n"
+    );
+    assert_eq!(recursion_handlers("bounds_wide_except_tuple", &source), 1);
 }
 
 /// `MUT101` selected: the facts of its exact claim are computed (`OptInFacts::kept_values`).
