@@ -85,13 +85,14 @@ one.
   dotted path of an import that names no project module is a file (`backend/config/env.py` for
   `import config.env`) is a candidate for `src`. An import of the standard library or of a
   package heki's catalog covers is no candidate's, and neither is one whose path is below
-  several directories none of which holds the importing file. A trial computes the module names with the
-  directory added to `src` (the source roots heki detects are written out with it, since setting
-  `src` turns detection off) and takes the directory into the block only when its imports
-  resolve, no two files of one kind then define one module, every import that names a project
-  module still does, and no contract of the configuration and no baseline entry names a module
-  whose name would change. The first 8 candidates by imports are tried, each with those already
-  taken. The calls of names of those files are left out of the library names.
+  several directories none of which holds the importing file. The first 8 candidates by imports
+  are tried, each added to `src` with those already taken (the source roots heki detects are
+  written out with them, since setting `src` turns detection off). A trial computes the module
+  names with the directory added and takes it into the block only when its imports resolve, no
+  two files of one kind then define one module, every import that names a module of the project
+  now, and every import a directory already taken was taken for, still names the same module of
+  the same file, and no contract of the configuration and no baseline entry names a module whose
+  name would change. The calls of names of those files are left out of the library names.
 - **Functions with an A1 hazard** (frame introspection, `exec`, a body too large to model):
   the Soundness lane proves nothing in them. `heki assumptions` lists them.
 
