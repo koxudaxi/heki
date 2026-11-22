@@ -456,6 +456,7 @@ mod tests {
                     },
                 )
                 .collect(),
+            contracts: Vec::new(),
         }
     }
 
