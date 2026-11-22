@@ -4621,6 +4621,90 @@ fn lsp_diagnostics_equal_a_full_check_for_bases_named_in_their_scope() {
     s.lsp.stop(true);
 }
 
+// --------------------------------------------------------------------- reads of a guarded class
+
+const READS_CONFIG: &str = r#"[project]
+name = "t"
+
+[tool.heki.lint]
+select = ["MUT204"]
+
+[[tool.heki.call-owners]]
+name = "home"
+targets = ["pkg.core.Rule"]
+allowed-callers = ["pkg.core.*"]
+references = "reads"
+"#;
+
+const READS_CORE: &str = "class Rule:\n    pass\n";
+const READS_OPS: &str =
+    "from pkg.core import Rule\n\n\ndef _matches(value):\n    return isinstance(value, Rule)\n";
+const READS_SITE: &str =
+    "from pkg.ops import _matches\n\n\ndef check(value):\n    return _matches(value)\n";
+
+/// `references = "reads"`: a private helper of another module reads the guarded class, which is
+/// reported at its caller; the read turns into a class pattern, goes away, comes back, the class
+/// is renamed and restored in its own module, and the key stops counting reads.
+#[test]
+fn lsp_diagnostics_equal_a_full_check_for_reads_of_a_guarded_class() {
+    let files = vec![
+        ("pkg/__init__.py", String::new()),
+        ("pkg/core.py", READS_CORE.to_owned()),
+        ("pkg/ops.py", READS_OPS.to_owned()),
+        ("pkg/site.py", READS_SITE.to_owned()),
+    ];
+    let mut s = Session::start_with("lsp_oracle_reads", READS_CONFIG, files, false);
+    let reported: &[(&str, &str)] = &[("pkg/site.py", "MUT204")];
+    let helper = |body: &str| READS_OPS.replace("    return isinstance(value, Rule)\n", body);
+    let steps = [
+        Step::new("initial index", Vec::new()).present(reported),
+        Step::new(
+            "the helper matches a class pattern instead",
+            vec![save(
+                "pkg/ops.py",
+                &helper("    match value:\n        case Rule():\n            return True\n    return False\n"),
+            )],
+        )
+        .present(reported),
+        Step::new(
+            "the helper reads an attribute of its argument only",
+            vec![save("pkg/ops.py", &helper("    return value.flag\n"))],
+        )
+        .absent(reported),
+        Step::new(
+            "the helper reads the class again",
+            vec![save("pkg/ops.py", READS_OPS)],
+        )
+        .present(reported),
+        Step::new(
+            "the guarded class is renamed",
+            vec![save(
+                "pkg/core.py",
+                &READS_CORE.replace("class Rule", "class Slip"),
+            )],
+        )
+        .absent(reported),
+        Step::new(
+            "the guarded class is restored",
+            vec![save("pkg/core.py", READS_CORE)],
+        )
+        .present(reported),
+        Step::new(
+            "the key counts bases only",
+            vec![Action::Configure(
+                READS_CONFIG.replace("\"reads\"", "\"calls-and-bases\""),
+            )],
+        )
+        .absent(reported),
+    ];
+    let mut failures = Vec::new();
+    for step in &steps {
+        failures.extend(s.run(step));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+    s.lsp.stop(true);
+}
+
 // ----------------------------------------------------------- package paths an import goes through
 
 const PATHS_CONFIG: &str = r#"[project]

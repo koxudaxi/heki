@@ -2376,11 +2376,10 @@ fn argument_lists_are_looked_up_from_the_bound_parameters() {
 }
 
 /// Thousands of references to a `call-owners` target, each a rebinding of one name that a long
-/// chain of phis carries to one `return` (`references = "calls"`): which values reach a use
-/// handing them on is found in one walk of the function, not once per reference (a function
-/// twice as long passes the IR's size budget).
-#[test]
-fn references_carried_by_a_long_phi_chain_are_found_in_one_walk() {
+/// chain of phis carries to one use, `last` (with `references`): which values reach a use taking
+/// them is found in one walk of the function, not once per reference (a function twice as long
+/// passes the IR's size budget).
+fn reference_phi_chain(name: &str, references: &str, last: &str) -> Project {
     let rebindings = 2000;
     let mut lines = vec![
         "def decide():".to_owned(),
@@ -2394,19 +2393,38 @@ fn references_carried_by_a_long_phi_chain_are_found_in_one_walk() {
         lines.push(format!("    if flags[{i}]:"));
         lines.push("        chosen = decide".to_owned());
     }
-    lines.push("    return chosen".to_owned());
-    let p = Project::new("bounds_reference_phi_chain");
+    lines.push(last.to_owned());
+    let p = Project::new(name);
     p.write(
         "pyproject.toml",
-        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT204\"]\n\n[[tool.heki.call-owners]]\nname = \"home\"\ntargets = [\"m.decide\"]\nallowed-callers = [\"m.decide\"]\nreferences = \"calls\"\n",
+        &format!("[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT204\"]\n\n[[tool.heki.call-owners]]\nname = \"home\"\ntargets = [\"m.decide\"]\nallowed-callers = [\"m.decide\"]\nreferences = \"{references}\"\n"),
     )
     .write("m.py", &(lines.join("\n") + "\n"));
-    let found = check_within(&p, Duration::from_secs(20));
-    let handed = found
-        .iter()
-        .filter(|d| d["rule_code"] == "MUT204" && d["qualname"] == "pick")
-        .count();
-    assert_eq!(handed, rebindings);
+    p
+}
+
+#[test]
+fn references_carried_by_a_long_phi_chain_are_found_in_one_walk() {
+    for (references, last, verb) in [
+        ("calls", "    return chosen", "hands on"),
+        ("reads", "    return chosen.__name__", "reads"),
+    ] {
+        let p = reference_phi_chain(
+            &format!("bounds_reference_phi_chain_{references}"),
+            references,
+            last,
+        );
+        let found = check_within(&p, Duration::from_secs(20));
+        let taken = found
+            .iter()
+            .filter(|d| {
+                d["rule_code"] == "MUT204"
+                    && d["qualname"] == "pick"
+                    && d["message"].as_str().is_some_and(|m| m.contains(verb))
+            })
+            .count();
+        assert_eq!(taken, 2000, "{references}");
+    }
 }
 
 /// Puts after each of many branches that may build a new unbounded queue: the queue of each put

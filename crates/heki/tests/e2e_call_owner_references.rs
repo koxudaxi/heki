@@ -339,6 +339,40 @@ fn references_handing_a_target_on_count_as_calls_only_with_the_key() {
         )),
         with
     );
+
+    // Every other use counts too, as a read: the uses that only name a target, a subscript, a
+    // receiver of an attribute load, an `except` clause, and a test of a display holding one. A
+    // name nothing uses, the annotations, and the module binding another name stay silent.
+    let reads = |line: u64, column: u64, func: &str, target: &str| {
+        (
+            line,
+            column,
+            format!("`{func}` reads `{target}` outside the call owners of `home`"),
+        )
+    };
+    with.extend([
+        reads(12, 5, "<module>", "pkg.core.Rule"),
+        reads(13, 9, "<module>", "pkg.core.Rule"),
+        reads(77, 24, "method_refs", "pkg.core.Rule"),
+        reads(82, 14, "names_only", "pkg.core.Rule"),
+        reads(83, 13, "names_only", "pkg.core.Error"),
+        reads(85, 19, "names_only", "pkg.core.Error"),
+        reads(86, 15, "names_only", "pkg.core.decide"),
+        reads(88, 26, "names_only", "pkg.core.Rule"),
+        reads(88, 50, "names_only", "pkg.core.Rule"),
+        reads(88, 56, "names_only", "pkg.core.Error"),
+        reads(88, 84, "names_only", "pkg.core.Rule"),
+        reads(88, 98, "names_only", "pkg.core.decide"),
+        reads(113, 4, "<module>", "pkg.core.decide"),
+    ]);
+    with.sort();
+    assert_eq!(
+        reports(&project(
+            "references_counted_with_reads",
+            "references = \"reads\"\n"
+        )),
+        with
+    );
 }
 
 const BASES: &str = r#"from dataclasses import dataclass
@@ -824,6 +858,246 @@ fn a_scope_nested_in_a_function_hands_on_the_names_it_imports() {
     }
 }
 
+const READ_CORE: &str = r#"from dataclasses import dataclass
+from enum import Enum
+
+
+@dataclass
+class Keys:
+    names: tuple[str, ...]
+
+    @classmethod
+    def of(cls, names: list[str]) -> "Keys":
+        return cls(tuple(names))
+
+
+class Code(Enum):
+    OK = 0
+
+
+class Error(Exception):
+    pass
+
+
+def decide(func: object) -> object:
+    return func
+
+
+def register(callback: object) -> None:
+    pass
+"#;
+
+// The uses of a target's value besides calling it and handing it on. The annotations (of
+// functions, module and class names, also subscripted and joined with `|`) are evaluated before
+// 3.14 and deferred from then on: neither is a read.
+const READS: &str = r#"from typing import TypeAlias
+
+import pkg.core
+from pkg.core import Code, Error, Keys, decide, register
+
+Pair: TypeAlias = tuple[Keys, int]
+FIELDS = tuple(Keys.__annotations__)
+Alias = Keys
+Keys
+LOOKUP = {Keys: "keys"}
+
+
+def receiver(names: list[str]) -> Keys:
+    return Keys.of(names)
+
+
+def attributes() -> object:
+    Keys.cache = {}
+    del Keys.cache
+    return Code.OK
+
+
+def tests(value: object, f: object) -> bool:
+    if decide:
+        pass
+    return isinstance(value, Keys) or f is decide or value == Code.OK
+
+
+def pattern(value: object) -> str:
+    match value:
+        case Keys():
+            return "keys"
+        case Code.OK:
+            return "ok"
+    return "other"
+
+
+def operands() -> object:
+    members = [member for member in Code]
+    return Keys | None, f"{Keys}", members
+
+
+def handled() -> None:
+    try:
+        register(1)
+    except Error:
+        pass
+
+
+def never_raised() -> None:
+    try:
+        pass
+    except Error:
+        pass
+
+
+def keyed() -> dict[object, int]:
+    return {Keys: 1}
+
+
+def decorated() -> object:
+    @decide
+    def inner() -> None:
+        pass
+
+    def defaulted(kind: object = Keys) -> object:
+        return kind
+
+    return inner, defaulted
+
+
+class Base:
+    def __init_subclass__(cls, kind: object = None) -> None:
+        pass
+
+
+class Child(Base, kind=Keys):
+    pass
+
+
+def caused() -> None:
+    raise ValueError("bad") from Error
+
+
+def nested() -> object:
+    from pkg.core import Keys as Local
+
+    return lambda names: Local.of(names)
+
+
+def _helper(names: list[str]) -> object:
+    return Keys.of(names)
+
+
+def through_helper(names: list[str]) -> object:
+    return _helper(names)
+
+
+def handed_on() -> None:
+    register(Keys)
+
+
+def silent(keys: Keys, values: list[int]) -> Keys:
+    local: Keys = keys
+    alias = Keys
+    keys.names
+    Keys(("a",))
+    sorted(values, key=decide)
+    pkg.core
+    return local
+
+
+from dataclasses import dataclass, field
+
+LIMITS: list[Keys] = []
+
+
+@dataclass
+class Holder:
+    keys: Keys
+    code: Code = Code.OK
+    others: list[Keys] = field(default_factory=list)
+
+
+def annotated(value: list[Keys], other: "Keys | None" = None) -> Keys | None:
+    return None
+"#;
+
+#[test]
+fn every_other_use_of_a_target_counts_with_reads() {
+    let p = Project::new("references_reads");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\nrequires-python = \">=3.11\"\n\n[tool.heki.lint]\nselect = [\"MUT204\"]\n\n[[tool.heki.call-owners]]\nname = \"home\"\ntargets = [\"pkg.core.Keys\", \"pkg.core.Code\", \"pkg.core.Error\", \"pkg.core.decide\"]\nallowed-callers = [\"pkg.core.*\"]\nreferences = \"reads\"\n",
+    )
+    .write("pkg/__init__.py", "")
+    .write("pkg/core.py", READ_CORE)
+    .write("pkg/uses.py", READS);
+    let reads = |line: u64, column: u64, func: &str, target: &str| {
+        (
+            line,
+            column,
+            format!("`{func}` reads `pkg.core.{target}` outside the call owners of `home`"),
+        )
+    };
+    // At the load, or for a name the module's import binds, at the expression using it (the
+    // subscript, the attribute, the display a module name holds, the class keyword). An `except`
+    // clause no exception reaches never runs. A private helper's read counts at its caller, a
+    // value handed on is a hand-on only, and a call is a call.
+    let mut expected = vec![
+        reads(6, 19, "<module>", "Keys"),
+        reads(7, 16, "<module>", "Keys"),
+        reads(10, 1, "<module>", "Keys"),
+        reads(14, 12, "receiver", "Keys"),
+        reads(18, 5, "attributes", "Keys"),
+        reads(19, 9, "attributes", "Keys"),
+        reads(20, 12, "attributes", "Code"),
+        reads(24, 8, "tests", "decide"),
+        reads(26, 30, "tests", "Keys"),
+        reads(26, 44, "tests", "decide"),
+        reads(26, 63, "tests", "Code"),
+        reads(31, 14, "pattern", "Keys"),
+        reads(33, 14, "pattern", "Code"),
+        reads(39, 37, "operands", "Code"),
+        reads(40, 12, "operands", "Keys"),
+        reads(40, 28, "operands", "Keys"),
+        reads(46, 12, "handled", "Error"),
+        reads(58, 13, "keyed", "Keys"),
+        reads(62, 6, "decorated", "decide"),
+        reads(66, 34, "decorated", "Keys"),
+        reads(77, 24, "<module>", "Keys"),
+        reads(82, 34, "caused", "Error"),
+        reads(88, 26, "nested.<locals>.<lambda>", "Keys"),
+        (
+            96,
+            12,
+            "`through_helper` reads `pkg.core.Keys` via `pkg.uses._helper` outside the call owners of `home`"
+                .to_owned(),
+        ),
+        (
+            100,
+            14,
+            "`handed_on` hands on `pkg.core.Keys` outside the call owners of `home`".to_owned(),
+        ),
+        (
+            107,
+            5,
+            "`silent` constructs `pkg.core.Keys` outside the call owners of `home`".to_owned(),
+        ),
+        (
+            108,
+            5,
+            "`silent` calls `pkg.core.decide` outside the call owners of `home`".to_owned(),
+        ),
+        // A class-body default is a value; the annotations around it, evaluated or not, are
+        // none.
+        reads(121, 18, "<module>", "Code"),
+    ];
+    expected.sort();
+    for version in ["py311", "py314"] {
+        assert_eq!(
+            reports_with(&p, &["--target-version", version]),
+            expected,
+            "{version}"
+        );
+    }
+}
+
 #[test]
 fn an_effect_boundary_counts_references_for_calls_only_with_the_key() {
     let boundary = |references: &str| {
@@ -892,6 +1166,40 @@ fn an_effect_boundary_counts_class_bases_with_calls_and_bases() {
     );
     // A parameter of the imported class's name is another class.
     assert!(!stdout.contains("`paint`"), "{stdout}");
+}
+
+#[test]
+fn an_effect_boundary_counts_reads_with_reads() {
+    let boundary = |references: &str| {
+        let p = Project::new(&format!("references_boundary_reads_{}", references.len()));
+        p.write(
+            "pyproject.toml",
+            &format!(
+                "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"EFF201\"]\n\n[[tool.heki.effect-boundaries]]\nname = \"pure\"\nscopes = [\"pkg.pure\"]\nforbid = [\"calls\"]\ncall-targets = [\"pkg.core.Keys\"]\nreferences = \"{references}\"\n"
+            ),
+        )
+        .write("pkg/__init__.py", "")
+        .write("pkg/core.py", READ_CORE)
+        .write(
+            "pkg/pure_ops.py",
+            "from pkg.core import Keys\n\n\ndef helper(value: object) -> bool:\n    return isinstance(value, Keys)\n",
+        )
+        .write(
+            "pkg/pure.py",
+            "from pkg.pure_ops import helper\n\n\ndef render(value: object) -> bool:\n    return helper(value)\n",
+        );
+        p.check(&["--output-format", "concise"])
+    };
+    let (code, stdout, stderr) = boundary("calls-and-bases");
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    let (code, stdout, stderr) = boundary("reads");
+    assert_eq!(code, 1, "{stdout}{stderr}");
+    assert!(
+        stdout.contains(
+            "pkg/pure.py:5:12: EFF201 [heuristic] `render` reads `pkg.core.Keys` (via `pkg.pure_ops.helper`), which effect boundary `pure` forbids"
+        ),
+        "{stdout}"
+    );
 }
 
 #[test]

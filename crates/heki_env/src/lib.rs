@@ -178,7 +178,8 @@ pub struct CallOwnerRule {
     /// `"calls"`: a reference to a target that hands it on to be called later (`[decide]`,
     /// `return decide`, `partial(decide)`, `field(default_factory=Rule)`) counts as a call of
     /// it; `"calls-and-bases"` also a class statement naming a class target among its bases;
-    /// `"ignore"` (default) neither.
+    /// `"reads"` also every other use of a target's value (`Keys.of(...)`, `isinstance(x,
+    /// Keys)`); `"ignore"` (default) none of them.
     pub references: Option<String>,
     /// `"lexical"` or `"call-graph"` (default), as for `WriteOwnerRule`.
     pub attribution: Option<String>,
@@ -215,8 +216,9 @@ pub struct EffectBoundaryRule {
     /// `"allow"` (default) or `"report"`, as for `write-owners`: whether writes that construct
     /// the object they write count as writes of the boundary.
     pub fresh_objects: Option<String>,
-    /// `"calls"`, `"calls-and-bases"`, or `"ignore"` (default), as for `call-owners`: whether a
-    /// reference handing a `call-targets` entry on counts as a call of it for `calls`.
+    /// `"calls"`, `"calls-and-bases"`, `"reads"`, or `"ignore"` (default), as for `call-owners`:
+    /// whether a reference handing a `call-targets` entry on (or using it otherwise) counts as a
+    /// call of it for `calls`.
     pub references: Option<String>,
     /// `"allow"` (default) or `"report"`: whether `reads-environment` also forbids the imports
     /// that probe whether a module is installed (`try: import yaml` / `except ImportError:`).

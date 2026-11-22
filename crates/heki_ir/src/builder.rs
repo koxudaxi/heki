@@ -83,6 +83,8 @@ pub fn build_module_ir(
         lazy_import_names,
         functions: Vec::new(),
         class_bases: Vec::new(),
+        statement_uses: Vec::new(),
+        annotations: Vec::new(),
         free_names: Vec::new(),
         lowered_at: FxHashMap::default(),
         loop_hints: Vec::new(),
@@ -129,6 +131,12 @@ pub fn build_module_ir(
     // Nested functions finish before the functions holding them.
     class_bases.sort_unstable_by_key(|&(function, _, _)| function);
     class_bases.shrink_to_fit();
+    let mut statement_uses = ctx.statement_uses;
+    statement_uses.sort_by_key(|&(function, _, _)| function);
+    statement_uses.shrink_to_fit();
+    let mut annotations = ctx.annotations;
+    annotations.sort_unstable_by_key(|&(function, span)| (function, span.start));
+    annotations.shrink_to_fit();
     ModuleIr {
         functions,
         module_fn,
@@ -136,6 +144,8 @@ pub fn build_module_ir(
         has_star_import: ctx.has_star_import,
         constants,
         class_bases,
+        statement_uses,
+        annotations,
     }
 }
 
@@ -307,6 +317,10 @@ struct ModuleLowerer<'a> {
     functions: Vec<IrFunction>,
     /// The class bases of every lowered function (`ModuleIr::class_bases`).
     class_bases: Vec<(FunctionId, VarId, u32)>,
+    /// The statement uses of every lowered function (`ModuleIr::statement_uses`).
+    statement_uses: Vec<(FunctionId, VarId, Span)>,
+    /// The annotations every lowered function evaluates (`ModuleIr::annotations`).
+    annotations: Vec<(FunctionId, Span)>,
     /// The free variables of every lowered function, by `FunctionId` (sorted).
     free_names: Vec<Vec<String>>,
     /// The function lowered from each definition, by its span.
@@ -526,13 +540,22 @@ impl<'a> ModuleLowerer<'a> {
             }
         }
 
-        let (ir_fn, bases) = builder.finish();
-        self.functions[fn_id.0 as usize] = ir_fn;
+        let lowered = builder.finish();
+        self.functions[fn_id.0 as usize] = lowered.function;
         self.class_bases.extend(
-            bases
+            lowered
+                .class_bases
                 .into_iter()
                 .map(|(class, index)| (fn_id, class, index)),
         );
+        self.statement_uses.extend(
+            lowered
+                .statement_uses
+                .into_iter()
+                .map(|(value, span)| (fn_id, value, span)),
+        );
+        self.annotations
+            .extend(lowered.annotations.into_iter().map(|span| (fn_id, span)));
         fn_id
     }
 }
@@ -659,6 +682,10 @@ struct FnBuilder<'m, 'a> {
     class_bases: Vec<(VarId, u32)>,
     /// `IrFunction::str_heads`.
     str_heads: Vec<(VarId, String)>,
+    /// The statement uses of the function (`ModuleIr::statement_uses`).
+    statement_uses: Vec<(VarId, Span)>,
+    /// The annotations the function evaluates (`ModuleIr::annotations`).
+    annotations: Vec<Span>,
     /// Local names bound by importing a frame-introspection function, with its kind.
     introspection_locals: FxHashMap<String, &'static str>,
 
@@ -669,6 +696,15 @@ struct FnBuilder<'m, 'a> {
     units_left: usize,
     /// The budget ran out: no further statement is lowered, and `finish` replaces the body.
     unmodeled: bool,
+}
+
+/// A lowered function, and the facts of it its module keeps (`ModuleIr::class_bases`,
+/// `ModuleIr::statement_uses`, `ModuleIr::annotations`).
+struct Lowered {
+    function: IrFunction,
+    class_bases: Vec<(VarId, u32)>,
+    statement_uses: Vec<(VarId, Span)>,
+    annotations: Vec<Span>,
 }
 
 impl<'m, 'a> FnBuilder<'m, 'a> {
@@ -740,6 +776,8 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             starred: Vec::new(),
             class_bases: Vec::new(),
             str_heads: Vec::new(),
+            statement_uses: Vec::new(),
+            annotations: Vec::new(),
             introspection_locals: FxHashMap::default(),
             comp_target_renames: Vec::new(),
             units_left: unit_budget(span),
@@ -1373,7 +1411,8 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             Stmt::Raise(r) => {
                 let exc = r.exc.as_ref().map(|e| self.lower_expr(e));
                 if let Some(cause) = &r.cause {
-                    let _ = self.lower_expr(cause);
+                    let value = self.lower_expr(cause);
+                    self.note_statement_use(value, cause);
                 }
                 self.terminate_at(Terminator::Raise(exc), Span::from(r.range));
             }
@@ -1525,12 +1564,16 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         let mut decorators = Vec::new();
         for dec in &func.decorator_list {
             decorators.push(self.module.slice_text(Span::from(dec.expression.range())));
-            let _ = self.lower_expr(&dec.expression);
+            let value = self.lower_expr(&dec.expression);
+            self.note_statement_use(value, &dec.expression);
         }
         // The function object keeps its defaults (`__defaults__`, `__kwdefaults__`) and its
         // eagerly evaluated annotations (`__annotations__`).
         let mut retained: Vec<VarId> = parameter_defaults(&func.parameters)
-            .map(|d| self.lower_expr(d))
+            .map(|d| {
+                let value = self.lower_expr(d);
+                self.note_statement_use(value, d)
+            })
             .collect();
         let annotations = function_annotations(&func.parameters, func.returns.as_deref());
         let lazily_read = self.lower_annotations(&annotations, &mut retained);
@@ -1589,6 +1632,13 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         self.write_var(func.name.as_str(), dst, span);
     }
 
+    /// Record `value`, which `expr` evaluates to, as a value its statement uses without an
+    /// instruction reading it (`ModuleIr::statement_uses`).
+    fn note_statement_use(&mut self, value: VarId, expr: &Expr) -> VarId {
+        self.statement_uses.push((value, Span::from(expr.range())));
+        value
+    }
+
     /// Evaluate annotations the way the definition does: eagerly before 3.14 (their values
     /// pushed to `retained`, the dict that holds them), not at all under
     /// `from __future__ import annotations`, and from 3.14 in a lazily run `__annotate__`
@@ -1603,7 +1653,10 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         } else if self.module.profile.pep649_deferred_annotations {
             names_loaded(annotations)
         } else {
-            retained.extend(annotations.iter().map(|a| self.lower_expr(a)));
+            for a in annotations {
+                self.annotations.push(Span::from(a.range()));
+                retained.push(self.lower_expr(a));
+            }
             Vec::new()
         }
     }
@@ -1629,7 +1682,8 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         let mut decorators = Vec::new();
         for dec in &cls.decorator_list {
             decorators.push(self.module.slice_text(Span::from(dec.expression.range())));
-            let _ = self.lower_expr(&dec.expression);
+            let value = self.lower_expr(&dec.expression);
+            self.note_statement_use(value, &dec.expression);
         }
         // The class keeps its bases and hands its keywords to the metaclass and to
         // `__init_subclass__`.
@@ -1639,7 +1693,8 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 retained.push(self.lower_expr(arg));
             }
             for kw in &args.keywords {
-                retained.push(self.lower_expr(&kw.value));
+                let value = self.lower_expr(&kw.value);
+                retained.push(self.note_statement_use(value, &kw.value));
             }
         }
 
@@ -2420,7 +2475,8 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             let cond = match &eh.type_ {
                 Some(ty) => {
                     exc_types.push(self.module.slice_text(Span::from(ty.range())));
-                    let _ = self.lower_expr(ty);
+                    let value = self.lower_expr(ty);
+                    self.note_statement_use(value, ty);
                     self.emit_const(ConstLiteral::Other, span)
                 }
                 None => self.emit_const(ConstLiteral::Bool(true), span),
@@ -2634,7 +2690,8 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                 }
             }
             Pattern::MatchClass(mc) => {
-                let _ = self.lower_expr(&mc.cls);
+                let value = self.lower_expr(&mc.cls);
+                self.note_statement_use(value, &mc.cls);
                 self.structural_test(fail, span);
                 // A positional sub-pattern reads the attribute `__match_args__` names, which
                 // the IR does not know.
@@ -3072,7 +3129,10 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                     .parameters
                     .iter()
                     .flat_map(|params| parameter_defaults(params))
-                    .map(|d| self.lower_expr(d))
+                    .map(|d| {
+                        let value = self.lower_expr(d);
+                        self.note_statement_use(value, d)
+                    })
                     .collect();
                 let child_outer = self.child_outer_locals();
                 let qualname = format!("{}.<locals>.<lambda>", self.qualname);
@@ -3847,6 +3907,8 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         self.starred.clear();
         self.class_bases.clear();
         self.str_heads.clear();
+        self.statement_uses.clear();
+        self.annotations.clear();
         self.a1_hazards.push(A1Hazard {
             kind: crate::UNMODELED.to_owned(),
             span: self.span,
@@ -3857,8 +3919,8 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
     // Finalization: seal remaining blocks, apply trivial-Phi replacements,
     // and compute `LoopCarriedInfo` for every natural loop.
     // -------------------------------------------------------------------------
-    /// The function, and its class bases (`ModuleIr::class_bases`).
-    fn finish(mut self) -> (IrFunction, Vec<(VarId, u32)>) {
+    /// The function, and the facts of it its module keeps.
+    fn finish(mut self) -> Lowered {
         if self.unmodeled {
             self.replace_body_with_opaque_call();
         }
@@ -3884,6 +3946,9 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                     Terminator::Return(Some(v)) | Terminator::Raise(Some(v)) => *v = resolve(*v),
                     _ => {}
                 }
+            }
+            for (v, _) in &mut self.statement_uses {
+                *v = resolve(*v);
             }
         }
 
@@ -3919,6 +3984,8 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             .push((self.id, std::mem::take(&mut self.finished_hints)));
 
         let class_bases = std::mem::take(&mut self.class_bases);
+        let statement_uses = std::mem::take(&mut self.statement_uses);
+        let annotations = std::mem::take(&mut self.annotations);
         let f = IrFunction {
             id: self.id,
             name: self.name,
@@ -3944,7 +4011,12 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             is_class_body: self.is_class_body,
             passed_from: None,
         };
-        (f, class_bases)
+        Lowered {
+            function: f,
+            class_bases,
+            statement_uses,
+            annotations,
+        }
     }
 }
 

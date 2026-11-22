@@ -1655,6 +1655,10 @@ pub struct CallSite {
     /// unless it overrides it ([`Contracts::reference_bases`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_base: bool,
+    /// A reference site that uses its target without handing it on or calling it
+    /// (`Keys.of(...)`, `isinstance(x, Keys)`, `case Keys():`, [`Contracts::reference_reads`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_read: bool,
     /// The constants the call passes for the parameters a call target's argument list names
     /// (computed only for those, [`Contracts::marked_params`]; boxed: few calls have any).
     #[serde(default, skip_serializing_if = "Option::is_none")]

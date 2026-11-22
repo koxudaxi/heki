@@ -991,6 +991,21 @@ pub struct ModuleIr {
     /// hold a class statement.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub class_bases: Vec<(FunctionId, VarId, u32)>,
+    /// The values a statement uses that no instruction reads, by function (sorted), with the
+    /// span of the expression giving each: a decorator, which the statement applies to what it
+    /// decorates; a default of a function or lambda and a keyword of a class statement, which
+    /// the object made keeps (`MakeClosure` holds them among its captures and annotations
+    /// without telling them apart); the class of a class pattern and the types of an `except`
+    /// clause, which the statement tests a value against; and the cause of `raise ... from`.
+    /// Kept by module, as the class bases are: few functions hold such a statement.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub statement_uses: Vec<(FunctionId, VarId, Span)>,
+    /// The annotations a function evaluates when it runs, by function and position (sorted):
+    /// the span of each annotation expression of a definition it makes, and of each annotated
+    /// name of a module or class body, evaluated eagerly (before 3.14, without `from __future__
+    /// import annotations`). The instructions inside one evaluate an annotation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub annotations: Vec<(FunctionId, Span)>,
 }
 
 impl ModuleIr {
@@ -1006,6 +1021,24 @@ impl ModuleIr {
             .iter()
             .take_while(move |b| b.0 == id)
             .map(|&(_, class, index)| (class, index))
+    }
+
+    /// The statement uses of function `id` ([`Self::statement_uses`]).
+    pub fn statement_uses_of(&self, id: FunctionId) -> impl Iterator<Item = (VarId, Span)> + '_ {
+        let start = self.statement_uses.partition_point(|u| u.0 < id);
+        self.statement_uses[start..]
+            .iter()
+            .take_while(move |u| u.0 == id)
+            .map(|&(_, value, span)| (value, span))
+    }
+
+    /// The spans of the annotations function `id` evaluates ([`Self::annotations`]), in order.
+    pub fn annotations_of(&self, id: FunctionId) -> impl Iterator<Item = Span> + '_ {
+        let start = self.annotations.partition_point(|a| a.0 < id);
+        self.annotations[start..]
+            .iter()
+            .take_while(move |a| a.0 == id)
+            .map(|&(_, span)| span)
     }
 
     pub fn all_a1_hazards(&self) -> Vec<(&IrFunction, &A1Hazard)> {

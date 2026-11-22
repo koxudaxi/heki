@@ -393,7 +393,11 @@ impl Contracts for ConfigContracts {
     }
 
     fn reference_bases(&self) -> bool {
-        self.references == References::CallsAndBases
+        self.references >= References::CallsAndBases
+    }
+
+    fn reference_reads(&self) -> bool {
+        self.references == References::Reads
     }
 
     fn marked_params(&self) -> &FxHashSet<String> {
@@ -402,12 +406,13 @@ impl Contracts for ConfigContracts {
 }
 
 /// The most a contract of `config` counts as calls ([`Contracts::references`],
-/// [`Contracts::reference_bases`]; the values are checked where the rules parse them).
+/// [`Contracts::reference_bases`], [`Contracts::reference_reads`]; the values are checked where
+/// the rules parse them).
 fn counts_references(config: &HekiConfig) -> References {
-    let counted = |references: &Option<String>| match references.as_deref() {
-        Some("calls") => References::Calls,
-        Some("calls-and-bases") => References::CallsAndBases,
-        _ => References::Ignored,
+    let counted = |references: &Option<String>| {
+        references
+            .as_deref()
+            .map_or(References::Ignored, References::named)
     };
     let calls = config.call_owners.iter().map(|r| counted(&r.references));
     let boundaries = config

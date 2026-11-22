@@ -1839,7 +1839,7 @@ pub(crate) fn allows_fresh(
 }
 
 /// `references` values; the first is the default (a reference handing a target on is no call).
-const REFERENCES: &[&str] = &["ignore", "calls", "calls-and-bases"];
+const REFERENCES: &[&str] = &["ignore", "calls", "calls-and-bases", "reads"];
 
 /// What a call contract counts as a call of a target besides calling it (`references`), each
 /// value counting more than the one before.
@@ -1851,15 +1851,30 @@ pub(crate) enum References {
     Calls,
     /// A reference handing it on, or a class statement naming it among its bases.
     CallsAndBases,
+    /// Any use of its value: a reference handing it on, a class statement naming it among its
+    /// bases, or a read using it for anything else.
+    Reads,
 }
 
 impl References {
+    /// What the `references` value `value` counts (a value outside [`REFERENCES`] counts
+    /// nothing; it is checked where the rules parse it).
+    pub(crate) fn named(value: &str) -> Self {
+        match value {
+            "calls" => Self::Calls,
+            "calls-and-bases" => Self::CallsAndBases,
+            "reads" => Self::Reads,
+            _ => Self::Ignored,
+        }
+    }
+
     /// Whether the reference site `site` counts as a call.
     pub(crate) fn counts(self, site: &CallSite) -> bool {
         match self {
             Self::Ignored => false,
-            Self::Calls => !site.is_base,
-            Self::CallsAndBases => true,
+            Self::Calls => !site.is_base && !site.is_read,
+            Self::CallsAndBases => !site.is_read,
+            Self::Reads => true,
         }
     }
 }
@@ -1873,16 +1888,12 @@ pub(crate) fn counts_references(
     let value = mode(
         value,
         REFERENCES,
-        "`ignore`, `calls`, or `calls-and-bases`",
+        "`ignore`, `calls`, `calls-and-bases`, or `reads`",
         section,
         contract,
         "references",
     )?;
-    Ok(match value {
-        "calls" => References::Calls,
-        "calls-and-bases" => References::CallsAndBases,
-        _ => References::Ignored,
-    })
+    Ok(References::named(value))
 }
 
 /// `attribution` values; the first is the default (the call graph decides which function an
