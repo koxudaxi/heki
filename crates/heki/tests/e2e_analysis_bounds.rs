@@ -5049,3 +5049,89 @@ fn deque_candidates_of_one_list_walk_its_bindings_once() {
         .count();
     assert_eq!(fixed, 16, "{found:#?}");
 }
+
+/// `OPT103` and `OPT111` selected.
+const OPT_CONFIG: &str =
+    "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"OPT103\", \"OPT111\"]\n";
+
+/// The iterables of the loops of [`rewrite_candidates_over_mixed_iterables`]: parameters, a
+/// structural attribute, and the end of a chain of copies read plain, as text, and as pieces.
+const MIXED_ITERABLES: [&str; 8] = [
+    "items",
+    "self.layers",
+    "{z}",
+    "{z}.upper()",
+    "{z}.split()",
+    "{z}[0]",
+    "extra",
+    "self.layers",
+];
+
+/// One method of eight loops over iterables of mixed origin (a parameter, `self.layers`, and the
+/// last of `chain` copies of a parameter), each holding a tuple concatenation and a
+/// de-duplicating append to a list of its own.
+fn rewrite_candidates_over_mixed_iterables(chain: usize) -> String {
+    let mut lines = vec![
+        "class Net:".to_owned(),
+        "    def __init__(self):".to_owned(),
+        "        self.layers = [1, 2, 3]".to_owned(),
+        String::new(),
+        "    def run(self, items, extra, source):".to_owned(),
+        "        z0 = source".to_owned(),
+    ];
+    for i in 1..=chain {
+        lines.push(format!("        z{i} = z{}", i - 1));
+    }
+    let end = format!("z{chain}");
+    for (i, iterable) in MIXED_ITERABLES.iter().enumerate() {
+        lines.push(format!("        t{i} = ()"));
+        lines.push(format!("        seen{i} = []"));
+        lines.push(format!(
+            "        for x{i} in {}:",
+            iterable.replace("{z}", &end)
+        ));
+        lines.push(format!("            t{i} = t{i} + (x{i},)"));
+        lines.push(format!("            if x{i} not in seen{i}:"));
+        lines.push(format!("                seen{i}.append(x{i})"));
+    }
+    lines.push("        return t0".to_owned());
+    lines.join("\n") + "\n"
+}
+
+fn rewrite_candidates_project(name: &str, chain: usize) -> Project {
+    let p = Project::new(name);
+    p.write("pyproject.toml", OPT_CONFIG)
+        .write("m.py", &rewrite_candidates_over_mixed_iterables(chain));
+    p
+}
+
+/// The trip counts of the rewrite candidates of one method (`OPT103`, `OPT111`) are asked of
+/// loops sharing a long chain of copies and iterables of mixed origin within one walk budget
+/// proportional to the method, and every candidate is still reported.
+#[test]
+fn rewrite_candidates_over_loops_sharing_iterables_take_linear_time() {
+    // 400 copies at the full size.
+    let found = check_linear(SCALE, |k| {
+        rewrite_candidates_project(&format!("bounds_opt_rewrites_{k}"), 50 * k)
+    });
+    let count = |rule: &str| found.iter().filter(|d| d["rule_code"] == rule).count();
+    assert_eq!(count("OPT103"), MIXED_ITERABLES.len(), "{found:#?}");
+    assert_eq!(count("OPT111"), MIXED_ITERABLES.len(), "{found:#?}");
+}
+
+/// The open premises of those candidates are explained by the same walks: every report is
+/// listed, and each de-duplicating append names what it leaves open.
+#[test]
+fn open_premises_of_rewrite_candidates_over_shared_iterables_are_explained() {
+    let p = rewrite_candidates_project("bounds_opt_rewrites_premises", 400);
+    let out = heki_json(
+        &p,
+        &["dump-open-premises", "--select", "OPT103,OPT111", "."],
+    );
+    let reports = out["reports"].as_array().unwrap();
+    assert_eq!(reports.len(), 2 * MIXED_ITERABLES.len(), "{out:#?}");
+    for r in reports.iter().filter(|r| r["rule"] == "OPT111") {
+        assert_eq!(r["certainty"], "heuristic", "{r:#?}");
+        assert!(!r["open_premises"].as_array().unwrap().is_empty(), "{r:#?}");
+    }
+}

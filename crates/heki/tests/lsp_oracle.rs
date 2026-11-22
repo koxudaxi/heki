@@ -484,6 +484,12 @@ const SPELLED_STUB: &str = "import builtins\n\n\ndef name(x: builtins.str) -> No
 const LEVELS: &str = "LEVELS = [\"low\", \"mid\", \"high\"]\n";
 const LEVELS_GROWN: &str =
     "LEVELS = [\"low\", \"mid\", \"high\"]\n\n\ndef add(level):\n    LEVELS.append(level)\n";
+// The rows a loop steps through (`OPT103`), by the class another module binds the cursor's name
+// to: the rewrite is exact while it is `sqlite3.Cursor`, whose `execute` the catalog sizes, and
+// heuristic once it is a project class ("Trip count open").
+const STORAGE: &str = "from sqlite3 import Cursor\n";
+const STORAGE_OWN: &str = "class Cursor:\n    def execute(self, query):\n        return [query]\n";
+const ROWS_USER: &str = "from pkg.storage import Cursor\n\n\ndef ids(cursor: Cursor):\n    out = ()\n    for row in cursor.execute(\"SELECT id FROM t\"):\n        out = out + (row,)\n    return out\n";
 // A module-level list its own loop treats as fixed, and the module that may grow it.
 const QUEUE_CFG: &str =
     "import httpx\n\nQUEUE = []\n\n\ndef run():\n    for item in QUEUE:\n        httpx.Client()\n";
@@ -1949,6 +1955,27 @@ fn steps_small_displays() -> Vec<Step> {
             vec![save("pkg/sniff_more.py", SNIFF_MORE)],
         )
         .absent(&[("pkg/sniff_user.py", "OPT112")]),
+        // "Trip count open" of a rewrite (`DataOrigins::of_loop_items`): the rows of a call the
+        // catalog sizes, through the class another module binds the receiver's annotation to. The
+        // report stays, exact or heuristic, and the server must change its certainty with the CLI.
+        Step::new(
+            "a module loops over the rows of a cursor class another module re-exports",
+            vec![
+                Action::Create("pkg/storage.py", STORAGE.to_owned()),
+                Action::Create("pkg/rows_user.py", ROWS_USER.to_owned()),
+            ],
+        )
+        .present(&[("pkg/rows_user.py", "OPT103")]),
+        Step::new(
+            "the other module defines a cursor class of its own",
+            vec![save("pkg/storage.py", STORAGE_OWN)],
+        )
+        .present(&[("pkg/rows_user.py", "OPT103")]),
+        Step::new(
+            "it re-exports the library's cursor again",
+            vec![save("pkg/storage.py", STORAGE)],
+        )
+        .present(&[("pkg/rows_user.py", "OPT103")]),
         // `ModuleDecls::grown_globals`: the module owning the list and a third module reading
         // it are re-checked when another module starts or stops growing it.
         Step::new(

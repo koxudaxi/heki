@@ -1811,7 +1811,11 @@ $ heki check --fix --profile profile.txt         # size-dependent rewrites in ho
 
 - A fix comes with a report: `--fix` applies only the fixes of the reports shown. A report whose
   rewrite heki proves safe is [exact](https://heki.koxudaxi.dev/precision/#certifications) and shown by default, so a
-  run without configuration applies the fixes of `OPT101` and `OPT102`.
+  run without configuration applies the fixes of `OPT101` and `OPT102`. A size-dependent one is
+  exact only over a loop the data sizes (its items are a parameter, the rows of a query, the
+  lines of a file, or the entries of a directory, and the code does not fix their number); over
+  another loop it is heuristic, and its fix applies with `--heuristic` or when its rule is
+  selected.
 - `--diff` takes the same flags as `--fix` and writes nothing.
 - `--include-size-dependent` applies the size-dependent rewrites in every function, with or
   without `--profile`.
@@ -1840,8 +1844,8 @@ Two independent questions decide whether heki offers the rewrite:
 | Profitability | Rules | Certainty | Applied by |
 | ------------- | ----- | --------- | ---------- |
 | Unconditional (faster from the first iteration) | `OPT101`, `OPT102` | exact (the proven reports) | `heki check --fix` |
-| Size-dependent | `OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130` | exact (the proven reports) | `heki check --fix --include-size-dependent`, or `--fix --profile <dump>` in hot functions |
-| Size-dependent, no rewrite | `OPT103`, `OPT112`, `OPT113` | `OPT103` exact (the proven reports), `OPT113` exact (its exact tier), `OPT112` heuristic | none: suggestion only |
+| Size-dependent | `OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130` | exact (the proven reports over a loop the data sizes) | `heki check --fix --include-size-dependent`, or `--fix --profile <dump>` in hot functions |
+| Size-dependent, no rewrite | `OPT103`, `OPT112`, `OPT113` | `OPT103` exact (the proven reports over a loop the data sizes), `OPT113` exact (its exact tier), `OPT112` heuristic | none: suggestion only |
 
 ### When the size is fixed
 
@@ -2051,20 +2055,22 @@ staged files only:
 ```yaml
 # .pre-commit-config.yaml
 repos:
-  - repo: https://github.com/koxudaxi/heki
-    rev: v0.2.2
+  - repo: https://github.com/koxudaxi/heki-pre-commit
+    rev: v0.2.3
     hooks:
       - id: heki
 ```
 
-The first run builds heki from the source of that release: pre-commit installs the repository as
-a Python package, which maturin compiles with cargo (Rust 1.99 or newer; when cargo is not on
-`PATH`, the build installs Rust into a cache directory first). That takes a few minutes, and
-pre-commit keeps the installed hook for later runs. `pre-commit autoupdate` moves `rev` to the
-latest release.
+[heki-pre-commit](https://github.com/koxudaxi/heki-pre-commit) installs heki from its PyPI wheel, so
+there is no compile and no Rust toolchain. Its tags follow heki releases, so `pre-commit autoupdate`
+moves `rev` to the latest release.
 
-heki also ships as one binary on PyPI, so a local hook can run it without a compile or a Rust
-toolchain:
+To build heki from source instead, point `repo` at `https://github.com/koxudaxi/heki` with a release
+`rev`. pre-commit then installs the repository as a Python package, which maturin compiles with cargo
+(Rust 1.99 or newer; when cargo is not on `PATH`, the build installs Rust into a cache directory
+first). That takes a few minutes, and pre-commit keeps the installed hook for later runs.
+
+A local hook can run any version of the PyPI wheel, also without a compile or a Rust toolchain:
 
 === "uv"
 
@@ -2698,8 +2704,10 @@ Every heki report is **exact** or **heuristic**:
 
 A rule is exact once it is certified (below), and heuristic until then. An exact rule's report
 is exact when it established every premise of the rule's exact claim, and heuristic when one is
-open: an `OPT` rewrite heki could not prove safe, a size-dependent `OPT` rewrite in a loop whose
-trip count the code fixes or caps, an `OPT113` join whose rule page premises do not all hold, or
+open: an `OPT` rewrite heki could not prove safe, a size-dependent `OPT` rewrite over a loop whose
+trip count the data does not decide (the code fixes or caps it, or the loop's items are not a
+parameter, the rows of a query, the lines of a file, or the entries of a directory), an `OPT113`
+join whose rule page premises do not all hold, or
 a `DATA101`, `MUT110`, or `MUT114` report whose rule page premises are not all established. Only exact reports are shown by
 default.
 
@@ -2760,11 +2768,14 @@ on its own along the reported chain and loop, so they cannot disagree with its t
 are internal for now: no output format of `heki check` and nothing in the language server shows
 them. `EFF111` and `EFF113` record them for the claims of `EFF101` and `EFF103`, and the heuristic
 reports of the eight `OPT` rewrite rules, `OPT113`, `DATA101`, `MUT110`, and `MUT114` for their own
-claims. A proven `OPT` rewrite, or an `OPT113` join whose premises all hold, over a loop the code
-fixes at more than 16 trips is heuristic for a condition of the exact tier that is no premise,
+claims. A proven size-dependent `OPT` rewrite, or an `OPT113` join whose premises all hold, over
+a loop the data does not size is heuristic for a condition of the exact tier that is no premise,
 "Trip count open" (the claim holds, but the change pays off only over a loop the data sizes): the
-report records that condition, with its cause, in the same list as the premises it left open,
-if any.
+code fixes the loop at more than 16 trips or caps it, or, for a rewrite, the loop's items are not
+the data's as `EFF103`'s Origin establishes them (a loop over an attribute of `self`, a project
+function's result, `range` of a configured number, or a `while` loop runs as many times as the
+program has parts). The report records that condition, with its cause, in the same list as the
+premises it left open, if any.
 
 An exact report's message states its claim and the witnesses of its premises, nothing else: no
 cost estimate such as "(N+1)", and no advice (that goes into the help).
@@ -2853,6 +2864,9 @@ before reports reaching one waiting call are folded together.
 | `DATA101` | 0.2.0 | 6 / 0 | 0 / 0 |
 | `MUT110` | 0.2.0 | 5 / 0 | 2 / 0 |
 | `MUT114` | 0.2.0 | 5 / 0 | 5 / 0 |
+
+The exact tier of the size-dependent rewrites has since asked that the data decide the loop's trip
+count, which keeps a subset of the reports their census and holdout run checked.
 
 ## Measurements
 
@@ -5587,9 +5601,14 @@ Its premises:
 Not part of the claim: how many times the statement runs (one under a branch inside the loop
 counts), and how large the loop or the value is. The message claims no size and no cost estimate. A
 loop or a value that the code fixes at 16 or fewer items is not reported, since the rewrite would
-not pay off. A proven report in a loop whose trip count the code fixes at more, or caps with a
-length test every path to the loop passes, is heuristic: it is true, but a fixed count is no
-evidence either way, so the exact tier leaves it out.
+not pay off. The exact tier also asks that the data decide how many times the loop runs: the loop
+steps through a parameter (`*args` included) or a part of one, the rows of a query, the lines of a
+file, or the entries of a directory, as `EFF103`'s Origin establishes them, and the code does not
+fix or cap their number. A proven report over any other loop is heuristic, for example over a loop
+whose trip count the code fixes at more than 16 or caps with a length test every path to the loop
+passes, over the program's structure (an attribute of `self`, a project function's result, `range`
+of a configured number, a class's MRO, a module-level list), or in a `while` loop. Such a report is
+true, but its loop usually runs a few times, however large the input.
 
 ## Why is this bad?
 Each concatenation copies everything accumulated so far.
@@ -5917,9 +5936,14 @@ Its premises:
 Not part of the claim: how many times the statement runs (one under a branch inside the loop
 counts), and how large the loop or the list is. The message claims no size and no cost estimate. A
 loop or a list that the code fixes at 16 or fewer items is not reported, since the rewrite would not
-pay off. A proven report in a loop whose trip count the code fixes at more, or caps with a length
-test every path to the loop passes, is heuristic: it is true, but a fixed count is no evidence
-either way, so the exact tier leaves it out.
+pay off. The exact tier also asks that the data decide how many times the loop runs: the loop steps
+through a parameter (`*args` included) or a part of one, the rows of a query, the lines of a file,
+or the entries of a directory, as `EFF103`'s Origin establishes them, and the code does not fix or
+cap their number. A proven report over any other loop is heuristic, for example over a loop whose
+trip count the code fixes at more than 16 or caps with a length test every path to the loop passes,
+over the program's structure (an attribute of `self`, a project function's result, `range` of a
+configured number, a class's MRO, a module-level list), or in a `while` loop. Such a report is true,
+but its loop usually runs a few times, however large the input.
 
 ## Why is this bad?
 Inserting at the front shifts every element, so building a list this way is quadratic.
@@ -5992,9 +6016,14 @@ Its premises:
 Not part of the claim: how many times the statement runs (one under a branch inside the loop
 counts), and how large the loop or the list is. The message claims no size and no cost estimate. A
 loop or a list that the code fixes at 16 or fewer items is not reported, since the rewrite would not
-pay off. A proven report in a loop whose trip count the code fixes at more, or caps with a length
-test every path to the loop passes, is heuristic: it is true, but a fixed count is no evidence
-either way, so the exact tier leaves it out.
+pay off. The exact tier also asks that the data decide how many times the loop runs: the loop steps
+through a parameter (`*args` included) or a part of one, the rows of a query, the lines of a file,
+or the entries of a directory, as `EFF103`'s Origin establishes them, and the code does not fix or
+cap their number. A proven report over any other loop is heuristic, for example over a loop whose
+trip count the code fixes at more than 16 or caps with a length test every path to the loop passes,
+over the program's structure (an attribute of `self`, a project function's result, `range` of a
+configured number, a class's MRO, a module-level list), or in a `while` loop. Such a report is true,
+but its loop usually runs a few times, however large the input.
 
 ## Why is this bad?
 Removing the first element shifts every remaining element, so a queue drained this way is
@@ -6589,9 +6618,14 @@ Its premises:
 Not part of the claim: how many times the statement runs (one under a branch inside the loop
 counts), and how large the loop or the container is. The message claims no size and no cost
 estimate. A loop or a container that the code fixes at 16 or fewer items is not reported, since the
-rewrite would not pay off. A proven report in a loop whose trip count the code fixes at more, or
-caps with a length test every path to the loop passes, is heuristic: it is true, but a fixed count
-is no evidence either way, so the exact tier leaves it out.
+rewrite would not pay off. The exact tier also asks that the data decide how many times the loop
+runs: the loop steps through a parameter (`*args` included) or a part of one, the rows of a query,
+the lines of a file, or the entries of a directory, as `EFF103`'s Origin establishes them, and the
+code does not fix or cap their number. A proven report over any other loop is heuristic, for example
+over a loop whose trip count the code fixes at more than 16 or caps with a length test every path to
+the loop passes, over the program's structure (an attribute of `self`, a project function's result,
+`range` of a configured number, a class's MRO, a module-level list), or in a `while` loop. Such a
+report is true, but its loop usually runs a few times, however large the input.
 
 The rewrite also needs what the container is built from to stay the same during the loop
 (`ValueLoopInvariant`), which only a proven report establishes.
@@ -6670,9 +6704,14 @@ Its premises:
 Not part of the claim: how many times the statement runs (one under a branch inside the loop
 counts), and how large the loop or the list is. The message claims no size and no cost estimate. A
 loop or a list that the code fixes at 16 or fewer items is not reported, since the rewrite would not
-pay off. A proven report in a loop whose trip count the code fixes at more, or caps with a length
-test every path to the loop passes, is heuristic: it is true, but a fixed count is no evidence
-either way, so the exact tier leaves it out.
+pay off. The exact tier also asks that the data decide how many times the loop runs: the loop steps
+through a parameter (`*args` included) or a part of one, the rows of a query, the lines of a file,
+or the entries of a directory, as `EFF103`'s Origin establishes them, and the code does not fix or
+cap their number. A proven report over any other loop is heuristic, for example over a loop whose
+trip count the code fixes at more than 16 or caps with a length test every path to the loop passes,
+over the program's structure (an attribute of `self`, a project function's result, `range` of a
+configured number, a class's MRO, a module-level list), or in a `while` loop. Such a report is true,
+but its loop usually runs a few times, however large the input.
 
 ## Why is this bad?
 The membership test scans the list, so de-duplicating `n` items costs `n²` comparisons.
@@ -6848,11 +6887,16 @@ Its premises:
 Not part of the claim: how many times the statement runs (one under a branch inside the loop
 counts), and how large the loop or the list is. The message claims no size and no cost estimate. A
 loop or a list that the code fixes at 16 or fewer items is not reported, since the rewrite would not
-pay off. A proven report in a loop whose trip count the code fixes at more, or caps with a length
-test every path to the loop passes, is heuristic: it is true, but a fixed count is no evidence
-either way, so the exact tier leaves it out. Nor is whether a `set` can replace the list: elements
-that cannot be hashed, or a list that changes during the loop, block the rewrite (the help names the
-obligation); the scan happens either way.
+pay off. The exact tier also asks that the data decide how many times the loop runs: the loop steps
+through a parameter (`*args` included) or a part of one, the rows of a query, the lines of a file,
+or the entries of a directory, as `EFF103`'s Origin establishes them, and the code does not fix or
+cap their number. A proven report over any other loop is heuristic, for example over a loop whose
+trip count the code fixes at more than 16 or caps with a length test every path to the loop passes,
+over the program's structure (an attribute of `self`, a project function's result, `range` of a
+configured number, a class's MRO, a module-level list), or in a `while` loop. Such a report is true,
+but its loop usually runs a few times, however large the input. Whether a `set` can replace the list
+is not part of the claim either: elements that cannot be hashed, or a list that changes during the
+loop, block the rewrite (the help names the obligation); the scan happens either way.
 
 ## Why is this bad?
 `e in lst` scans the list, so the loop costs the product of both sizes. A set lookup is

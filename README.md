@@ -291,20 +291,25 @@ $ heki server                                   # LSP server for editors
 
 ## 🪜 pre-commit and CI
 
-A pre-commit hook (heki follows calls across files, so it checks the whole project):
+A pre-commit hook (heki follows calls across files, so it checks the whole project). The
+[heki-pre-commit](https://github.com/koxudaxi/heki-pre-commit) repository installs heki from its PyPI
+wheel, so there is no compile and no Rust toolchain:
 
 ```yaml
 # .pre-commit-config.yaml
 repos:
-  - repo: https://github.com/koxudaxi/heki
-    rev: v0.2.2
+  - repo: https://github.com/koxudaxi/heki-pre-commit
+    rev: v0.2.3
     hooks:
       - id: heki
 ```
 
-pre-commit builds heki from that release's source with cargo on the first run, which takes a few
-minutes, and installs Rust for the build when cargo is missing. A local hook that runs the wheel
-from PyPI needs no compile:
+Its tags follow heki releases, so `pre-commit autoupdate` works. To build heki from source instead,
+use `repo: https://github.com/koxudaxi/heki` with a release `rev`; pre-commit then builds that
+release with cargo on the first run, which takes a few minutes, and installs Rust for the build when
+cargo is missing.
+
+A local hook can run any version of the PyPI wheel, also without a compile:
 
 ```yaml
 # .pre-commit-config.yaml
