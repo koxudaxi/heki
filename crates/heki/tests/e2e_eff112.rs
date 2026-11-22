@@ -945,6 +945,16 @@ def either_side(paths: set[str], flag: bool) -> str:
 def show_single(paths: set[str], flag: bool) -> None:
     print(json.dumps([single_or(paths, flag), single_and(paths, flag)]))
     print(json.dumps(either_side(paths, flag)))
+
+
+def single_of_many(paths: set[str], count: int, flag: bool) -> str:
+    if count > 2 or not flag or len(paths) != 1:
+        return ""
+    return next(iter(paths))
+
+
+def show_single_of_many(paths: set[str], count: int, flag: bool) -> None:
+    print(single_of_many(paths, count, flag))
 "#;
 
 fn project(name: &str) -> Project {
