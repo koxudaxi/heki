@@ -383,6 +383,24 @@ def read_only_value_handed_to_calls(n: int) -> Body:
     return Body(("p",), ["v = load()", *("use(v)" for _ in range(n))])
 
 
+def calls_between_invalidators(n: int) -> Body:
+    """Project calls and calls of an invalidator alternating in one block: the contracts announced
+    after each call, and the call after it, are looked up instead of scanned per call."""
+    lines = ["self.cache = []"]
+    for _ in range(n):
+        lines += ["g(p)", "self.reset()"]
+    return Body(("p",), lines)
+
+
+def calls_under_branches(n: int) -> Body:
+    """Project calls each under its own branch: the next call after each one is found on the
+    post-dominator chain once per block instead of once per call."""
+    lines = ["v = load()"]
+    for _ in range(n):
+        lines += ["if p:", "    use(v)"]
+    return Body(("p",), lines)
+
+
 def passed_iterables(n: int) -> Body:
     """Generator expressions of two clauses, each over a value bound just before it: child scopes
     each receiving their iterable from the function creating them, sized where the IR's loop
@@ -575,6 +593,8 @@ FAMILIES = [
         size=CELL_BINDINGS,
     ),
     Family("read_only_value_handed_to_calls", read_only_value_handed_to_calls),
+    Family("calls_between_invalidators", calls_between_invalidators, placements=("method",)),
+    Family("calls_under_branches", calls_under_branches),
     # Every call site is reported, standing for every access: the cost of the reports shows at a
     # size where the walks the family does not gate stay cheap.
     Family(
