@@ -296,16 +296,18 @@ fn extract_module(
         }
         if !blind.is_empty() {
             // A `finally` body is built once per way out of its `try`: its calls once each.
-            let by_function = file.blind_spots.get_or_insert_with(Box::default);
-            let calls = by_function.entry(key.clone()).or_default();
+            let calls = (file.opt_in_tables_mut().blind_spots)
+                .entry(key.clone())
+                .or_default();
             calls.extend(blind);
             calls.sort();
             calls.dedup();
         }
         if !unawaited.is_empty() {
             // A `finally` body is built once per way out of its `try`: its calls once each.
-            let by_function = file.unawaited_handoffs.get_or_insert_with(Box::default);
-            let handoffs = by_function.entry(key.clone()).or_default();
+            let handoffs = (file.opt_in_tables_mut().unawaited_handoffs)
+                .entry(key.clone())
+                .or_default();
             handoffs.extend(unawaited);
             handoffs.sort_by_key(|h| h.span);
             handoffs.dedup();
@@ -712,7 +714,7 @@ struct Extracted {
     kept_points: Vec<cache_flow::KeptPoint>,
     /// The values of the function's variables ([`TypeCtx::infer`]).
     types: FxHashMap<VarId, Val>,
-    /// [`FileSummary::blind_spots`].
+    /// [`FileSummary::blind_calls`].
     blind: Vec<BlindCall>,
     /// [`FileSummary::unawaited_handoffs`].
     unawaited: Vec<UnawaitedHandoff>,
@@ -893,11 +895,11 @@ struct Extractor<'a> {
     /// The span and argument position of each callable a call is handed that has a project site
     /// of its own ([`Self::as_handed`]), built on first use.
     followed_callables: OnceCell<FxHashSet<(Span, u8)>>,
-    /// The calls heki is blind to (`FileSummary::blind_spots`), with
+    /// The calls heki is blind to (`OptInTables::blind_spots`), with
     /// [`OptInFacts::blind_spots`].
     blind: Vec<BlindCall>,
     /// The project functions handed to a library call that calls them without awaiting what
-    /// they return (`FileSummary::unawaited_handoffs`), with
+    /// they return (`OptInTables::unawaited_handoffs`), with
     /// [`OptInFacts::unawaited_handoffs`].
     unawaited: Vec<UnawaitedHandoff>,
 }
@@ -5832,7 +5834,7 @@ impl<'a> Extractor<'a> {
         self.callees.insert((bb, index), callee);
     }
 
-    /// [`FileSummary::blind_spots`]: the call `call` (of `name`, as for [`Self::call_inst`]) in
+    /// [`FileSummary::blind_calls`]: the call `call` (of `name`, as for [`Self::call_inst`]) in
     /// block `bb` when heki resolves it to no function, or to a library name the catalog has no
     /// entry for.
     fn note_blind(&mut self, bb: BlockId, name: &str, callee: &Callee, call: &Call<'_>) {
@@ -6542,7 +6544,7 @@ impl<'a> Extractor<'a> {
     }
 
     /// A project function handed to the library call `call` of `symbol` that calls it without
-    /// awaiting what it returns (`FileSummary::unawaited_handoffs`): the callable the catalog
+    /// awaiting what it returns (`OptInTables::unawaited_handoffs`): the callable the catalog
     /// names (`heki_kb::EcosystemEntry::unawaited_callable`), through a `functools.partial`
     /// object and a bound method. A class constructs an object instead.
     fn unawaited_handoff(&mut self, symbol: &str, call: &Call<'_>) {

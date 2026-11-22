@@ -719,12 +719,13 @@ property of its own instance (`del self.<name>`, a constant-key removal from `se
 they do). They are local facts, never propagated, and they let `MUT101` decide staleness from the
 index alone, for a method of any indexed file.
 
-`FileSummary.blind_spots` (`heki_effect::BlindCall`, only with `OptInFacts::blind_spots`, which
-`heki_rules::recommend_facts` sets and neither `heki check` nor the language server does) holds,
-per function, the calls heki is blind to in its own body and the class bodies it runs, each once
-in source order: a call resolving to no function (`Callee::Unresolved` or `TooMany`), with the
-name called and why, from the receiver or the called value (`UnresolvedReason`: an unannotated
-parameter, an annotation giving no class, `Any` or `object`, a `Callable`, a name nothing heki
+`OptInTables::blind_spots` (`heki_effect::BlindCall`, in `FileSummary::opt_in_tables`, the one
+box per file that holds the opt-in tables of its functions; only with `OptInFacts::blind_spots`,
+which `heki_rules::recommend_facts` sets and neither `heki check` nor the language server does)
+holds, per function, the calls heki is blind to in its own body and the class bodies it runs,
+each once in source order: a call resolving to no function (`Callee::Unresolved` or `TooMany`),
+with the name called and why, from the receiver or the called value (`UnresolvedReason`: an
+unannotated parameter, an annotation giving no class, `Any` or `object`, a `Callable`, a name nothing heki
 sees binds, an unlisted protocol, a call result, an attribute, a computed `getattr` name, more
 implementations than CHA follows, a member heki does not find, any other untyped value). A call
 on a value of `Any`, `object`, or `Callable` (an instance or a class object), or of an unbound
@@ -1773,8 +1774,8 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      `calls_unawaited`, or its `offloads_blocking_arg`), the project functions the argument calls
      (a `functools.partial` object followed to the function it holds, a bound method resolved to
      the implementations it may run; a class constructs instead and is left out), in
-     `FileSummary::unawaited_handoffs` by calling function, the class bodies a function or the
-     module body runs included. The record holds every such function, `def` or `async def`.
+     `OptInTables::unawaited_handoffs` (`FileSummary::opt_in_tables`) by calling function, the
+     class bodies a function or the module body runs included. The record holds every such function, `def` or `async def`.
    - The rule (`eff_rules::unawaited_callables`) reads the declarations of the recorded
      functions at check time (`FunctionDecl::is_async`, `is_generator`, `called_as_defined`), so
      a change of a function between `def` and `async def` in another module re-checks the

@@ -2147,18 +2147,26 @@ pub struct FileSummary {
     /// boundary names such an access, [`Contracts::external_call`]).
     #[serde(default, skip_serializing_if = "FxHashMap::is_empty")]
     pub external_accesses: FxHashMap<FuncKey, Vec<ExternalAccess>>,
-    /// The calls of each function of the file that heki is blind to, in its own body and in
-    /// the class bodies it runs, each once, in source order (local, IR-free; `None` unless
-    /// [`OptInFacts::blind_spots`], so that a run without them keeps one word per file). Read
-    /// through [`Self::blind_calls`].
+    /// The facts of the file's functions that only opt-in readers ask for (local, IR-free;
+    /// `None` while the file has none of them, so that a run without them keeps one word per
+    /// file). Read through [`Self::blind_calls`] and [`Self::unawaited_handoffs`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub blind_spots: Option<Box<FxHashMap<FuncKey, Vec<BlindCall>>>>,
-    /// The project functions each function of the file hands to a library call that calls
-    /// them without awaiting what they return, in its own body and in the class bodies it runs
-    /// (local, IR-free; `None` unless [`OptInFacts::unawaited_handoffs`]). Read through
-    /// [`Self::unawaited_handoffs`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub unawaited_handoffs: Option<Box<FxHashMap<FuncKey, Vec<UnawaitedHandoff>>>>,
+    pub opt_in_tables: Option<Box<OptInTables>>,
+}
+
+/// The opt-in facts of a file's functions, each table by function
+/// ([`FileSummary::opt_in_tables`]); a table stays empty unless its [`OptInFacts`] flag is set.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OptInTables {
+    /// The calls heki is blind to, in the function's own body and in the class bodies it runs,
+    /// each once, in source order ([`OptInFacts::blind_spots`]).
+    #[serde(default, skip_serializing_if = "FxHashMap::is_empty")]
+    pub blind_spots: FxHashMap<FuncKey, Vec<BlindCall>>,
+    /// The project functions the function hands to a library call that calls them without
+    /// awaiting what they return, in its own body and in the class bodies it runs, in source
+    /// order ([`OptInFacts::unawaited_handoffs`]).
+    #[serde(default, skip_serializing_if = "FxHashMap::is_empty")]
+    pub unawaited_handoffs: FxHashMap<FuncKey, Vec<UnawaitedHandoff>>,
 }
 
 /// A project function handed to a library call that calls it as a plain function and never
@@ -2177,17 +2185,25 @@ pub struct UnawaitedHandoff {
 }
 
 impl FileSummary {
-    /// [`Self::blind_spots`], by function.
+    /// [`OptInTables::blind_spots`], by function.
     pub fn blind_calls(&self) -> impl Iterator<Item = (&FuncKey, &[BlindCall])> {
-        (self.blind_spots.iter().flat_map(|b| b.iter())).map(|(f, calls)| (f, calls.as_slice()))
+        self.opt_in_tables
+            .iter()
+            .flat_map(|t| &t.blind_spots)
+            .map(|(f, calls)| (f, calls.as_slice()))
     }
 
-    /// [`Self::unawaited_handoffs`] of the function `func`.
-    pub fn unawaited_handoffs_of(&self, func: &FuncKey) -> &[UnawaitedHandoff] {
-        self.unawaited_handoffs
-            .as_ref()
-            .and_then(|by_function| by_function.get(func))
-            .map_or(&[], Vec::as_slice)
+    /// [`OptInTables::unawaited_handoffs`], by function.
+    pub fn unawaited_handoffs(&self) -> impl Iterator<Item = (&FuncKey, &[UnawaitedHandoff])> {
+        self.opt_in_tables
+            .iter()
+            .flat_map(|t| &t.unawaited_handoffs)
+            .map(|(f, handoffs)| (f, handoffs.as_slice()))
+    }
+
+    /// The opt-in tables of the file, made when it first has one of their facts.
+    pub(crate) fn opt_in_tables_mut(&mut self) -> &mut OptInTables {
+        self.opt_in_tables.get_or_insert_with(Box::default)
     }
 
     /// The summary of a project file heki could not read or parse: a module that defines
@@ -2359,7 +2375,7 @@ pub enum TypedWrites {
 /// `CallSite::under_lock`), `EFF112`'s set-order flows (`EffectSummary::set_order`), `EFF114`'s
 /// call cycles (`EffectSummary::call_cycle`), and the shared state functions change
 /// (`EffectSummary::shared_state`), which only `heki inspect` reads, the calls heki is blind to
-/// (`FileSummary::blind_spots`), which only `heki recommend` reads, and `MUT119`'s new returned
+/// (`OptInTables::blind_spots`), which only `heki recommend` reads, and `MUT119`'s new returned
 /// containers (`EffectSummary::fresh_return`).
 /// `CallSite::returned`, which `MUT202` reads too, is always computed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2379,7 +2395,7 @@ pub struct OptInFacts {
     pub blind_spots: bool,
     pub set_order: bool,
     pub call_cycles: bool,
-    /// [`FileSummary::unawaited_handoffs`] (`EFF115`).
+    /// [`OptInTables::unawaited_handoffs`] (`EFF115`).
     pub unawaited_handoffs: bool,
     /// [`EffectSummary::fresh_return`].
     pub fresh_returns: bool,

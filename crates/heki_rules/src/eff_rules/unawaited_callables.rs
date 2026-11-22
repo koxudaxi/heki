@@ -5,7 +5,7 @@
 //! not run there.
 //!
 //! The summary records each project function handed to such a call
-//! (`FileSummary::unawaited_handoffs`, through a `functools.partial` object or a bound method);
+//! (`OptInTables::unawaited_handoffs`, through a `functools.partial` object or a bound method);
 //! the rule reads the declarations of the functions it calls, so a change of one between `def`
 //! and `async def` re-checks the file. A project function that takes a callable is never such a
 //! call, whatever it does with it (`inspect.iscoroutinefunction` tests included).
@@ -22,15 +22,10 @@ pub(super) fn run(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Di
         cx.index.opt_in_facts().unawaited_handoffs,
         "`opt_in_facts` decides for EFF115"
     );
-    let Some(by_function) = cx
-        .index
-        .files
-        .get(&unit.input.path)
-        .and_then(|file| file.unawaited_handoffs.as_deref())
-    else {
+    let Some(file) = cx.index.files.get(&unit.input.path) else {
         return;
     };
-    for (func, handoffs) in by_function {
+    for (func, handoffs) in file.unawaited_handoffs() {
         for handoff in handoffs {
             report(cx, unit, func, handoff, out);
         }
