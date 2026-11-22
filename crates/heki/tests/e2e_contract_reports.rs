@@ -599,3 +599,26 @@ fn a_contract_without_a_name_is_named_by_its_position() {
         "`outside` writes `Model.fields` (by attribute) outside the write owners of the `write-owners` contract at position 2"
     );
 }
+
+#[test]
+fn an_effect_boundary_without_a_name_is_named_by_its_position() {
+    let p = project(
+        "unnamed_boundary",
+        "[[tool.heki.effect-boundaries]]\nname = \"first\"\nscopes = [\"pkg.other\"]\nforbid = [\"calls\"]\ncall-targets = [\"Store.*\"]\n\n[[tool.heki.effect-boundaries]]\nscopes = [\"pkg.render\"]\nforbid = [\"calls\"]\ncall-targets = [\"Store.*\"]\n",
+    );
+    p.write("pkg/__init__.py", "")
+        .write(
+            "pkg/store.py",
+            "class Store:\n    def save(self) -> None:\n        pass\n",
+        )
+        .write(
+            "pkg/render.py",
+            "from pkg.store import Store\n\n\ndef page(store: Store) -> None:\n    store.save()\n",
+        );
+    let (_, stdout, stderr) = p.check(&["--select", "EFF201", "--output-format", "json"]);
+    let diags: Vec<Value> = serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("{e}{stderr}"));
+    assert_eq!(
+        diags[0]["message"],
+        "`page` calls `Store.*`, which the `effect-boundaries` contract at position 2 forbids"
+    );
+}

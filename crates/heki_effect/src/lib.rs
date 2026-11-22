@@ -611,17 +611,7 @@ pub enum ReadKind {
 }
 
 impl ReadKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::DirectAttr => "direct_attr",
-            Self::GetAttr => "getattr",
-            Self::DictDirect => "dict_direct",
-        }
-    }
-}
-
-impl ReadKind {
-    /// The kind in words, for report messages (`as_str` is the stable machine name).
+    /// The kind in words, for report messages.
     pub fn describe(self) -> &'static str {
         match self {
             Self::DirectAttr => "by attribute",

@@ -26,17 +26,7 @@ pub enum AccessKind {
 }
 
 impl AccessKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Call => "calls",
-            Self::Read => "module_attr",
-            Self::ImportProbe => "import_probe",
-        }
-    }
-}
-
-impl AccessKind {
-    /// The kind in words, for report messages (`as_str` is the stable machine name).
+    /// The kind in words, for report messages.
     pub fn describe(self) -> &'static str {
         match self {
             Self::Call => "calls",
