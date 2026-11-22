@@ -98,7 +98,10 @@ a rule becomes exact](precision.md#how-a-rule-becomes-exact):
 4. `checkers.py` refutes a claim from the runs: an `EFF101` call that returned without a waiting
    call during it, an `EFF103` iteration that completed without a statement, a `DATA101`
    iteration whose new value was not built from the previous one, a `MUT110` or `MUT114` line
-   that ran without changing the object the report names, an `OPT` accumulator of another type,
+   that ran without changing the object the report names, a `MUT115` line that changed another
+   object than the copied value held at the access path when the copy line ran (or left it as it
+   was, or whose copy held another object there; `monitor.py` loads each path at those lines
+   without running code of the program), an `OPT` accumulator of another type,
    or an `OPT113` inner item with a different key that ran more than the comparison. For the
    `OPT` rewrites, the driver applies `heki check --fix --include-size-dependent` to a copy and
    compares results, exceptions, arguments, output, and library calls on the same inputs.
@@ -113,6 +116,15 @@ rule is a refutation whatever the runs show (step 1 of the certification, premis
 base program heki does not report is counted, not refuted. A premise of the table the generator
 cannot strip stops the run, so the generator grows with the table. `--table-heki` takes the
 table from another build, to check a release older than the table with it.
+
+For the rules whose heuristic reports record the premises they leave open (`OPEN_PREMISE_CODES`
+in `premise_generator.py`: `EFF101` through `EFF111`, `EFF103` through `EFF113`, and the `OPT`
+rewrites, `OPT113`, `DATA101`, `MUT110`, and `MUT114` through their own codes), a program with a
+premise stripped is also run through `heki dump-open-premises`: each heuristic report of the claim
+has to name the stripped premise among its open ones, since the causes come from the decision that
+made the report heuristic. A report that does not is an oracle finding of its own kind, written to
+`unrecorded/` beside the refutations and counted with them for `--fail-on-refutation`. A heki
+without the command (an older release) skips the check.
 
 A refutation is a heki bug unless the program breaks one of the assumptions R1 to R7; the oracle
 reports such a case as a violation instead (for example a library call whose deciding argument is
@@ -336,15 +348,17 @@ $ uvx --from "zensical==0.1.2" zensical serve
   away in any release, and the release notes list each change; once it is stable, its entry is
   removed.
 - Each rule's certainty (`exact` or `heuristic`) and activation (`Default`, `OptIn`, or
-  `Contract`) are fields of its entry in `crates/heki_rules/src/lib.rs`. The generator marks the
-  heuristic rules on the generated pages, copies each rule's measurement from
-  [Rule Precision](precision.md) into its page, and fails when a hand-written table row says
-  "heuristic" other than exactly when a rule it names is heuristic, when an exact rule lacks a
-  certification there with no false claim in its census and holdout run, when a rule's
-  documentation has no "What a report states" section, or when an exact rule's page lists other
-  premises under "Its premises:" than the premise table (`crates/heki_rules/src/premises.rs`,
-  which `heki rule --output-format json` prints with each rule), in another order or under other
-  names.
+  `Contract`) are fields of its entry in `crates/heki_rules/src/lib.rs`, and the certifications
+  and measurements of [Rule Precision](precision.md) are data in
+  `crates/heki_rules/src/precision.rs`, which `heki rule --output-format json` prints with each
+  rule. The generator marks the heuristic rules on the generated pages, writes the two tables of
+  Rule Precision between the markers of their generated parts, copies each rule's measurement into
+  its page, and fails when a hand-written table row says "heuristic" other than exactly when a
+  rule it names is heuristic, when an exact rule lacks a certification with no false claim in its
+  census and holdout run, when a rule's documentation has no "What a report states" section, or
+  when an exact rule's page lists other premises under "Its premises:" than the premise table
+  (`crates/heki_rules/src/premises.rs`, which `heki rule --output-format json` prints with each
+  rule), in another order or under other names.
 - The Docs workflow deploys the site to Cloudflare Pages (heki.koxudaxi.dev) once a published
   release is on PyPI (the newest release only), or when it is run by hand on `main`, so the site
   documents the released version. That job runs in the `docs-production` environment, which
@@ -500,7 +514,7 @@ The workspace is split by responsibility (`crates/`):
 | `heki_env` | configuration loading and the runtime profile of the target Python version |
 | `heki_effect` | call graph, per-function effect summaries, incremental project index |
 | `heki_soundness` | the alias analysis and proof obligations behind `OPT` rewrites (never depends on `heki_effect`, never reads annotations) |
-| `heki_rules` | the rules, rule selection, project discovery |
+| `heki_rules` | the rules, rule selection, project discovery and indexing |
 | `heki_diagnostics` | output formats, inline suppressions, Ratchet baselines, fix application |
 | `heki_profile` | offline profile dumps |
 | `heki_lsp` | the incremental LSP server and the `--watch` engine |

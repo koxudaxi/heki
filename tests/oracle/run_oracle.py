@@ -12,7 +12,8 @@ $ python3.15 tests/oracle/run_oracle.py --heki target/release/heki --seeds 2000 
 
 The output directory holds `summary.json` and `refutations/<RULE>-<kind>/seed-<n>/` (the project,
 `finding.json`, and with `--minimize` the shrunk project in `min/`). Assumption violations go to
-`violations/` the same way. The exit code is 1 when a refutation was found and
+`violations/` the same way, and heuristic reports that do not record a stripped premise as open to
+`unrecorded/`. The exit code is 1 when a refutation or an unrecorded premise was found and
 `--fail-on-refutation` is given, 2 when the oracle itself failed (heki failed on a project, a
 child process crashed or timed out, the recorder failed, a generated program did not import),
 and 0 otherwise.
@@ -38,7 +39,9 @@ import premise_generator  # noqa: E402
 
 
 def check_seed(seed, args):
-    tools = driver.Tools(args.heki, args.python, run_timeout=args.run_timeout)
+    tools = driver.Tools(
+        args.heki, args.python, run_timeout=args.run_timeout, open_premises=args.open_premises
+    )
     work = os.path.join(args.out, "work", f"seed-{seed}")
     if os.path.exists(work):
         shutil.rmtree(work)
@@ -57,6 +60,7 @@ def check_seed(seed, args):
         ("refutations", result["refutations"]),
         ("violations", result["violations"]),
         ("departures", result["departures"]),
+        ("unrecorded", result["unrecorded"]),
     ):
         for finding in findings:
             target = os.path.join(args.out, kind, f"{finding['rule']}-{finding['kind']}", f"seed-{seed}")
@@ -97,6 +101,8 @@ def summarize(results, started, args):
         "instances_checked": collections.Counter(),
         "refutations": collections.Counter(),
         "violations": collections.Counter(),
+        "unrecorded": collections.Counter(),
+        "recorded_checked": 0,
         "unmapped": collections.Counter(),
         "runs": collections.Counter(),
         "errors": collections.Counter(),
@@ -108,6 +114,7 @@ def summarize(results, started, args):
         summary["exact_reports"].update(result["reports"])
         summary["instances_checked"].update(result["checked"])
         summary["runs"].update(result["runs"])
+        summary["recorded_checked"] += result["recorded_checked"]
         for rule, _path, _line in result["unmapped"]:
             summary["unmapped"][rule] += 1
         for error in result["errors"]:
@@ -123,7 +130,11 @@ def summarize(results, started, args):
             row["refuted"] += any(f["rule"] == premise["rule"] for f in result["refutations"])
         for finding in result.get("departures", []):
             summary["departures"][f"{finding['rule']} / {finding['detail']['stripped']}"] += 1
-        for kind, findings in (("refutations", result["refutations"]), ("violations", result["violations"])):
+        for kind, findings in (
+            ("refutations", result["refutations"]),
+            ("violations", result["violations"]),
+            ("unrecorded", result["unrecorded"]),
+        ):
             for finding in findings:
                 summary[kind][finding["rule"]] += 1
                 key = f"{kind}/{finding['rule']}-{finding['kind']}"
@@ -153,6 +164,11 @@ def print_summary(summary):
         print("exact reports with a relevance premise stripped:", dict(summary["departures"]))
     print("refutations per rule:", dict(sorted(summary["refutations"].items())) or "none")
     print("assumption violations per rule:", dict(sorted(summary["violations"].items())) or "none")
+    print("heuristic reports whose open premises were checked:", summary["recorded_checked"])
+    print(
+        "stripped premises a heuristic report does not record as open, per rule:",
+        dict(sorted(summary["unrecorded"].items())) or "none",
+    )
     for key, group in sorted(summary["groups"].items()):
         seeds = group["seeds"]
         note = f" (assumption {group['assumption']})" if group.get("assumption") else ""
@@ -219,6 +235,7 @@ def main():
     )
     if args.mode != "grammar":
         premise_generator.check_table(args.table)
+    args.open_premises = args.mode != "grammar" and driver.supports_open_premises(args.heki)
     os.makedirs(args.out, exist_ok=True)
     started = time.monotonic()
     results = []
@@ -263,7 +280,7 @@ def main():
     # a generated program that does not import: the run checked less than it says.
     if summary["errors"]:
         return 2
-    if args.fail_on_refutation and summary["refutations"]:
+    if args.fail_on_refutation and (summary["refutations"] or summary["unrecorded"]):
         return 1
     return 0
 

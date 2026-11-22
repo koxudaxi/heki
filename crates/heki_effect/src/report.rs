@@ -1,11 +1,13 @@
 //! Boundary-Only Reporting for `EFF101` / `EFF105` (docs/ANALYSIS_AND_KB_SPEC.md section 2.4).
 //! Rule wiring (codes, severities) and Root-Cause Grouping of the output are in `heki_rules`.
 
+use crate::callgraph::{HopGap, MustExplainer, MustGap, site_must_steps};
 use crate::summary::BLOCKING_EFFECTS;
-use crate::{CallHop, FuncKey, ProjectIndex, SiteMust, SiteRole};
+use crate::{CallHop, CallSite, FuncKey, ProjectIndex, SiteMust, SiteRole};
 use heki_ast::Span;
 use heki_kb::ExecEffectKind;
 use std::collections::BTreeMap;
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
 /// An `async def` call site that crosses into blocking synchronous code.
@@ -27,6 +29,9 @@ pub struct BoundaryReport {
     /// implementation the call can run is a synchronous function or a Layer 2 call that has run
     /// it ([`ProjectIndex::site_must`]). `None` when that is not established.
     pub must: Option<SiteMust>,
+    /// Why `must` is not established, along `chain` (`HopGap::hop` indexes it): filled only
+    /// when [`boundary_reports_in`] is asked to explain, and empty when `must` is set.
+    pub gaps: Vec<HopGap>,
 }
 
 /// Boundary-Only Reporting: in `async A -> await async B -> sync C -> time.sleep()` only `B`
@@ -36,18 +41,22 @@ pub struct BoundaryReport {
 /// Offloads never fire: offload APIs carry no blocking effects and the offloaded callable is
 /// not called. Functions marked `sync_driven_only` are skipped.
 pub fn boundary_reports(index: &ProjectIndex) -> Vec<BoundaryReport> {
-    boundary_reports_in(index, index.files.keys().map(PathBuf::as_path))
+    boundary_reports_in(index, index.files.keys().map(PathBuf::as_path), None)
 }
 
-/// [`boundary_reports`] restricted to the call sites of `paths` (single-file checks).
+/// [`boundary_reports`] restricted to the call sites of `paths` (single-file checks). With an
+/// `explainer`, each report whose `must` is not established says why ([`BoundaryReport::gaps`]).
 pub fn boundary_reports_in<'p>(
     index: &ProjectIndex,
     paths: impl IntoIterator<Item = &'p Path>,
+    explainer: Option<&MustExplainer<'_>>,
 ) -> Vec<BoundaryReport> {
-    // `(file, span, function, effect) -> (shortest chain, it starts at an iteration, what the
-    // call has run whenever it returns)`.
-    type Best =
-        BTreeMap<(PathBuf, Span, FuncKey, ExecEffectKind), (Vec<CallHop>, bool, Option<SiteMust>)>;
+    // `(file, span, function, effect) -> (shortest chain, its call site, it starts at an
+    // iteration, what the call has run whenever it returns)`.
+    type Best<'i> = BTreeMap<
+        (PathBuf, Span, FuncKey, ExecEffectKind),
+        (Vec<CallHop>, Option<&'i CallSite>, bool, Option<SiteMust>),
+    >;
     let mut best = Best::new();
     for (path, file) in paths
         .into_iter()
@@ -70,41 +79,108 @@ pub fn boundary_reports_in<'p>(
                 .into_iter()
                 .filter(|se| !se.callee_is_async && BLOCKING_EFFECTS.contains(&se.effect))
                 .map(|se| (se.effect, se.chain));
-            // An `async def` target runs its blocking calls under its own boundary; a call the
-            // code never reaches establishes nothing.
-            let synchronous = site.on_every_return.live
-                && site
-                    .project_callees()
-                    .iter()
-                    .all(|bc| index.summary(&bc.callee).is_some_and(|c| !c.is_async));
             for (effect, chain) in found {
                 let key = (path.clone(), site.span, site.caller.clone(), effect);
-                let must = synchronous
-                    .then(|| index.site_must(path, site, effect))
-                    .flatten();
+                let must =
+                    boundary_must(index, path, site, effect, &mut |_| ControlFlow::Break(()));
                 let slot = best.entry(key).or_default();
                 if slot.0.is_empty() || chain.len() < slot.0.len() {
                     slot.0 = chain;
-                    slot.1 = iterates;
+                    slot.1 = Some(site);
+                    slot.2 = iterates;
                 }
-                if slot.2.is_none() {
-                    slot.2 = must;
+                if slot.3.is_none() {
+                    slot.3 = must;
                 }
             }
         }
     }
     best.into_iter()
         .map(
-            |((path, span, function, effect), (chain, iterates, must))| BoundaryReport {
-                root_cause: chain.last().map(|h| h.callee.clone()).unwrap_or_default(),
-                path,
-                span,
-                function,
-                effect,
-                chain,
-                iterates,
-                must,
+            |((path, span, function, effect), (chain, site, iterates, must))| {
+                let gaps = match (site, explainer) {
+                    (Some(site), Some(explainer)) if must.is_none() => {
+                        boundary_gaps(index, explainer, &path, site, effect, &chain)
+                    }
+                    _ => Vec::new(),
+                };
+                BoundaryReport {
+                    root_cause: chain.last().map(|h| h.callee.clone()).unwrap_or_default(),
+                    path,
+                    span,
+                    function,
+                    effect,
+                    chain,
+                    iterates,
+                    must,
+                    gaps,
+                }
             },
         )
         .collect()
+}
+
+/// Whether the call at `site` of an `async def` has run `e` on the event loop's thread whenever
+/// it returns ([`ProjectIndex::site_must`]), telling each step that does not hold to `gaps`
+/// ([`boundary_steps`], then `callgraph::site_must_steps`).
+fn boundary_must(
+    index: &ProjectIndex,
+    path: &Path,
+    site: &CallSite,
+    e: ExecEffectKind,
+    gaps: &mut impl FnMut(MustGap) -> ControlFlow<()>,
+) -> Option<SiteMust> {
+    let ControlFlow::Continue(open) = boundary_steps(index, site, gaps) else {
+        return None;
+    };
+    site_must_steps(index, path, site, e, gaps).filter(|_| !open)
+}
+
+/// The steps of a boundary's call before its targets' facts: a call the code never reaches
+/// establishes nothing, and an `async def` target runs its blocking calls under its own
+/// boundary. `Continue(true)` when one does not hold and the decision goes on; `Break` when it
+/// stops there. A call that runs no target's body there is left to `site_must_steps`.
+fn boundary_steps(
+    index: &ProjectIndex,
+    site: &CallSite,
+    gaps: &mut impl FnMut(MustGap) -> ControlFlow<()>,
+) -> ControlFlow<(), bool> {
+    let mut open = false;
+    if !site.runs_targets_here() {
+        return ControlFlow::Continue(open);
+    }
+    if !site.on_every_return.live {
+        open = true;
+        gaps(MustGap::NotReached)?;
+    }
+    for bc in site.project_callees() {
+        if index.summary(&bc.callee).is_some_and(|c| c.is_async) {
+            open = true;
+            gaps(MustGap::NotRunAtCall(Some(bc.callee.clone())))?;
+        }
+    }
+    ControlFlow::Continue(open)
+}
+
+/// [`boundary_steps`]' gaps at the call, then those of `chain` from it
+/// ([`MustExplainer::gaps_along`]), each told once.
+fn boundary_gaps(
+    index: &ProjectIndex,
+    explainer: &MustExplainer<'_>,
+    path: &Path,
+    site: &CallSite,
+    e: ExecEffectKind,
+    chain: &[CallHop],
+) -> Vec<HopGap> {
+    let mut out: Vec<HopGap> = Vec::new();
+    let _ = boundary_steps(index, site, &mut |gap| {
+        out.push(HopGap { hop: 0, gap });
+        ControlFlow::Continue(())
+    });
+    for gap in explainer.gaps_along(path, site, e, chain) {
+        if !out.contains(&gap) {
+            out.push(gap);
+        }
+    }
+    out
 }

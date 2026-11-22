@@ -8,18 +8,19 @@ use crate::mut_rules::{
     project_classes, reports_import_probes, site_callee, write_hits,
 };
 use crate::opt_rules::{Creators, Sizes};
+use crate::premises::{self, OpenCause};
 use crate::{
     CheckContext, DottedPattern, ModuleUnit, RuleConfigError, SitesByCaller, has_glob_syntax,
     split_last_dot,
 };
 use heki_ast::Span;
-use heki_diagnostics::{Certainty, Diagnostic};
+use heki_diagnostics::{Certainty, Diagnostic, OpenPremise};
 use heki_effect::guards::{loop_bit, per_item_bit};
 use heki_effect::with_paths;
 use heki_effect::{
     AccessKind, BLOCKING_EFFECTS, BoundCallee, BoundaryReport, CallHop, CallSite, CallTarget,
-    Construction, EffectSummary, ExternalAccess, Facts, FuncKey, PerItem, Runner, SiteEffect,
-    SiteMust, TypeCtx, WriteKind, anchors_call_site, boundary_reports_in,
+    Construction, EffectSummary, ExternalAccess, Facts, FuncKey, HopGap, MustGap, PerItem, Runner,
+    SiteEffect, SiteMust, TypeCtx, WriteKind, anchors_call_site, boundary_reports_in,
 };
 pub(crate) use heki_ir::ItemOrigins;
 use heki_ir::walk::{Answer, Budget, FnShape};
@@ -27,6 +28,7 @@ use heki_ir::{BlockId, Carries, InstKind, IrFunction, ItemOrigin, ItemSource, Mu
 use heki_kb::{EcosystemEntry, EnvironmentAccess, ExecEffectKind, ResultItems, WaitKind};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::ControlFlow;
 use std::path::Path;
 use std::sync::{Arc, LazyLock};
 
@@ -85,15 +87,65 @@ pub(crate) fn is_test_code(qualname: &str, rel_path: &str) -> bool {
 fn boundary_code(r: &BoundaryReport) -> &'static str {
     if r.effect == ExecEffectKind::BlockingFs {
         "EFF105"
-    } else if crate::premises::tier(
-        "EFF101",
-        r.must.is_some() && r.effect.wait_kind() == Some(WaitKind::Io),
-    ) == Certainty::Exact
+    } else if premises::tier("EFF101", r.must.is_some() && waits_for_io(r.effect))
+        == Certainty::Exact
     {
         "EFF101"
     } else {
         "EFF111"
     }
+}
+
+/// The half of `EFF101`'s "Waits" the effect decides: a wait for input or output, not for
+/// another thread's progress.
+fn waits_for_io(effect: ExecEffectKind) -> bool {
+    effect.wait_kind() == Some(WaitKind::Io)
+}
+
+/// The premises of `EFF101`'s claim an `EFF111` report leaves open: the steps of its must-fact
+/// that do not hold along its chain (`BoundaryReport::gaps`), and the effect when it is no wait
+/// for input or output.
+fn eff111_open_premises(cx: &CheckContext<'_>, r: &BoundaryReport) -> Vec<OpenPremise> {
+    let mut open = chain_open_premises(cx, &premises::CONDITIONAL_WAIT, &r.chain, &r.gaps);
+    if !waits_for_io(r.effect) {
+        let last = r.chain.last().map(|h| cx.hop_location(h));
+        open.push(premises::WAITS_ON_ANOTHER_THREAD.open_at(last, None));
+    }
+    debug_assert!(
+        !open.is_empty(),
+        "an EFF111 report records why it is not EFF101"
+    );
+    open
+}
+
+/// The open premises the gaps of a must-fact along `chain` stand for (each at its hop), with
+/// `conditional` the cause of a last call whose effect the catalog makes conditional: "Waits"
+/// for `EFF101`, "Sends" for `EFF103`.
+fn chain_open_premises(
+    cx: &CheckContext<'_>,
+    conditional: &'static OpenCause,
+    chain: &[CallHop],
+    gaps: &[HopGap],
+) -> Vec<OpenPremise> {
+    gaps.iter()
+        .map(|g| {
+            let (cause, about): (&'static OpenCause, Option<&FuncKey>) = match &g.gap {
+                MustGap::NotReached => (&premises::NEVER_REACHED, None),
+                MustGap::NeverReturns => (&premises::NEVER_RETURNS, None),
+                MustGap::NotOnEveryReturn => (&premises::NOT_MADE_ON_EVERY_RETURN, None),
+                MustGap::IncompleteTargets => (&premises::INCOMPLETE_TARGETS, None),
+                MustGap::NotRunAtCall(target) => (&premises::NOT_RUN_AT_THE_CALL, target.as_ref()),
+                MustGap::Decorated(target) => (&premises::DECORATED, Some(target)),
+                MustGap::DefinedTwice(target) => (&premises::DEFINED_TWICE, Some(target)),
+                MustGap::WithoutTheFact(target) => {
+                    (&premises::IMPLEMENTATION_WITHOUT_THE_FACT, Some(target))
+                }
+                MustGap::Conditional => (conditional, None),
+            };
+            let at = chain.get(g.hop).map(|h| cx.hop_location(h));
+            cause.open_at(at, about.map(|k| format!("`{}`", k.fqn())))
+        })
+        .collect()
 }
 
 /// The message of an `EFF101` report: the waiting call the reported call is, the one it always
@@ -146,7 +198,11 @@ pub(crate) fn eff101_105(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
     let mut eff105: Vec<BoundaryReport> = Vec::new();
     // The boundaries of the checked files: all of them for `heki check`, the edited one for
     // the LSP engine.
-    let reports = boundary_reports_in(cx.index, cx.units.iter().map(|u| u.input.path.as_path()));
+    let reports = boundary_reports_in(
+        cx.index,
+        cx.units.iter().map(|u| u.input.path.as_path()),
+        cx.must_explainer.as_ref(),
+    );
     for r in reports {
         let code = boundary_code(&r);
         let unit = cx.unit(&r.path).expect(REPORTS_OF_UNITS);
@@ -195,6 +251,11 @@ pub(crate) fn eff101_105(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
                 ),
             };
             let fold_key = format!("{target}|{}", effect_name(r.effect));
+            let open_premises = if cx.open_premises && code == "EFF111" {
+                eff111_open_premises(cx, r)
+            } else {
+                Vec::new()
+            };
             if let Some(d) = cx.emit(
                 out,
                 code,
@@ -207,6 +268,7 @@ pub(crate) fn eff101_105(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
                 &chain,
             ) {
                 d.fold_key = Some(fold_key);
+                d.open_premises = open_premises;
             }
         }
     }
@@ -392,14 +454,14 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
                 if !seen.insert(inst.span) {
                     continue;
                 }
-                let effects: Vec<(SiteEffect, Option<&PerItem>)> = list
+                let effects: Vec<(SiteEffect, &CallSite)> = list
                     .iter()
                     .filter(|s| !iteration || s.project_callees().is_empty())
                     .flat_map(|s| {
                         cx.index
                             .site_effects(&unit.input.path, s)
                             .into_iter()
-                            .map(|e| (e, s.per_item.as_deref()))
+                            .map(|e| (e, *s))
                     })
                     .filter(|(e, _)| wanted(e))
                     .collect();
@@ -418,22 +480,26 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
                         .fold(0, |mask, (_, lp)| mask | loop_bit(lp))
                 });
                 // The shortest chain of an effect of `kind` that some data-sized loop runs on
-                // every iteration, and the builtin whose loop over its items does.
+                // every iteration, the builtin whose loop over its items does, and the call site
+                // the chain starts at.
                 let per_iteration = |kind: ExecEffectKind| {
                     effects
                         .iter()
                         .filter(|(e, _)| e.effect == kind)
-                        .filter_map(|(e, per_item)| {
+                        .filter_map(|(e, site)| {
+                            let per_item = site.per_item.as_deref();
                             let items = per_item
                                 .filter(|p| sizes.items_data_sized(inst, &p.items))
                                 .map_or(0, |_| per_item_bit(depth));
                             let repeated = (around | items) & !e.once_loops;
                             let by = per_item.filter(|_| repeated & items != 0);
-                            (repeated != 0).then_some((e.chain.as_slice(), Repeats(by)))
+                            (repeated != 0).then_some((e.chain.as_slice(), Repeats(by), *site))
                         })
-                        .min_by_key(|(chain, _)| chain.len())
+                        .min_by_key(|(chain, _, _)| chain.len())
                 };
-                if let Some((chain, repeats)) = per_iteration(ExecEffectKind::UnpooledClientAlloc) {
+                if let Some((chain, repeats, _)) =
+                    per_iteration(ExecEffectKind::UnpooledClientAlloc)
+                {
                     let root = chain.last().map(|h| h.callee.clone()).unwrap_or_default();
                     cx.emit(
                         out,
@@ -455,11 +521,12 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
                         chain,
                     );
                 }
-                if let Some((chain, repeats)) = per_iteration(ExecEffectKind::DbQuery) {
+                if let Some((chain, repeats, chain_site)) = per_iteration(ExecEffectKind::DbQuery) {
                     queries.push(LoopQuery {
                         at: (bb.id, index),
                         span: inst.span,
                         chain: chain.to_vec(),
+                        chain_site,
                         repeats,
                         sites: list,
                     });
@@ -471,11 +538,12 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
         }
         // The split is the same whichever of the two rules runs: `EFF113` reports the rest.
         let origins = item_origins.get_or_init(|| ItemOrigins::new(unit.input.ir));
-        let exact = established_queries(cx, unit, &tcx, f, origins, &queries);
-        for (q, exact) in queries.iter().zip(exact) {
+        let verdicts = established_queries(cx, unit, &tcx, f, origins, &queries);
+        for (q, verdict) in queries.iter().zip(verdicts) {
             let root = q.chain.last().map(|h| h.callee.clone()).unwrap_or_default();
-            let tier = crate::premises::tier("EFF103", exact.is_some());
-            match exact.filter(|_| tier == Certainty::Exact) {
+            let exact = verdict.exact;
+            let tier = premises::tier("EFF103", exact.is_some());
+            let reported = match exact.filter(|_| tier == Certainty::Exact) {
                 // An exact report names and keys the call it claims.
                 Some(e) if cx.enabled("EFF103", unit) => cx.emit(
                     out,
@@ -507,6 +575,13 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
                 ),
                 None => None,
             };
+            if let Some(d) = reported.filter(|d| d.rule_code == "EFF113") {
+                debug_assert!(
+                    !cx.open_premises || !verdict.open.is_empty(),
+                    "an EFF113 report records why it is not EFF103"
+                );
+                d.open_premises = verdict.open;
+            }
         }
     }
 }
@@ -518,6 +593,8 @@ struct LoopQuery<'s> {
     span: Span,
     /// The shortest chain to the query.
     chain: Vec<CallHop>,
+    /// The call site `chain` starts at.
+    chain_site: &'s CallSite,
     repeats: Repeats<'s>,
     /// The call sites at the instruction.
     sites: &'s [&'s CallSite],
@@ -530,6 +607,13 @@ struct EstablishedQuery {
     must: SiteMust,
 }
 
+/// The decision on one `EFF103` claim ([`established_queries`]): established, or, when the run
+/// records them ([`CheckContext::open_premises`]), the premises it leaves open.
+struct QueryVerdict {
+    exact: Option<EstablishedQuery>,
+    open: Vec<OpenPremise>,
+}
+
 /// Where the items of a loop over data come from, as a report names them
 /// ([`data_origin`]).
 pub(crate) struct DataOrigins {
@@ -540,21 +624,22 @@ pub(crate) struct DataOrigins {
 }
 
 impl DataOrigins {
-    /// The origins of every item of `found`, or `None` when one is not the data's.
+    /// The origins of every item of `found`, or why the first one that is not the data's is not
+    /// (a cause of "Origin").
     pub(crate) fn of(
         cx: &CheckContext<'_>,
         tcx: &TypeCtx<'_>,
         ir: &heki_ir::ModuleIr,
         found: &std::collections::BTreeSet<ItemOrigin>,
-    ) -> Option<Self> {
+    ) -> Result<Self, &'static OpenCause> {
         let names = found
             .iter()
             .map(|o| data_origin(cx, tcx, ir, *o))
-            .collect::<Option<Vec<String>>>()?;
-        (!names.is_empty()).then(|| Self {
-            names,
-            counts_only: found.iter().any(|o| o.carries == Carries::Count),
-        })
+            .collect::<Result<Vec<String>, _>>()?;
+        let counts_only = found.iter().any(|o| o.carries == Carries::Count);
+        (!names.is_empty())
+            .then_some(Self { names, counts_only })
+            .ok_or(&premises::NO_ITEMS_FOLLOWED)
     }
 
     /// "every iteration over parameter `ids`", or "every iteration, once for each item of
@@ -596,7 +681,9 @@ impl EstablishedQuery {
 /// of a loop around it, exception edges included, whose items the data decides: a parameter or a
 /// part of one, or a catalog call's rows, lines, directory entries, or the lines of its text
 /// (`heki_kb::EcosystemEntry::items`). A loop whose trip count the code fixes is not one, at any
-/// count.
+/// count. When the run records open premises, a claim that is not established says which, from
+/// the same steps: those of the must-fact along the reported chain, and those of the loop around
+/// the call that leaves the fewest open (the first such).
 fn established_queries(
     cx: &CheckContext<'_>,
     unit: &ModuleUnit<'_>,
@@ -604,65 +691,177 @@ fn established_queries(
     f: &IrFunction,
     origins: &ItemOrigins<'_>,
     queries: &[LoopQuery<'_>],
-) -> Vec<Option<EstablishedQuery>> {
+) -> Vec<QueryVerdict> {
     let types = tcx.infer(f);
     let owner = "heki_rules::eff_rules::established_queries";
     let budget = Budget::of_function(owner, f);
+    let path = &unit.input.path;
     with_paths(tcx, f, &types, owner, |paths, ix| {
+        // The premises of loop `li` for the call at `at` sending with `progress`, told to
+        // `steps` ("Every iteration", then "Origin"): the items' origins when every one holds.
+        let loop_steps = |li: usize,
+                          at: (BlockId, usize),
+                          progress: Progress,
+                          steps: &mut dyn FnMut(&'static OpenCause) -> ControlFlow<()>|
+         -> Option<DataOrigins> {
+            let mut open = false;
+            if paths.on_every_iteration(li, at, progress) != Answer::Known(Must::Every) {
+                open = true;
+                if steps(&premises::NOT_EVERY_ITERATION).is_break() {
+                    return None;
+                }
+            }
+            if !ix.fixed_trips(&f.loops[li], &mut |_| None).is_open() {
+                open = true;
+                if steps(&premises::FIXED_BY_THE_CODE).is_break() {
+                    return None;
+                }
+            }
+            let Answer::Known(found) = origins.of_loop(&budget, f.id, li) else {
+                let _ = steps(&premises::NO_ITEMS_FOLLOWED);
+                return None;
+            };
+            match DataOrigins::of(cx, tcx, unit.input.ir, &found) {
+                Ok(origins) => (!open).then_some(origins),
+                Err(cause) => {
+                    let _ = steps(cause);
+                    None
+                }
+            }
+        };
+        let loops_around =
+            |at: (BlockId, usize)| (0..f.loops.len()).filter(move |&li| ix.shape.in_loop(li, at.0));
+        // The open premises of the loop around `q` that leaves the fewest open.
+        let loop_open_premises = |q: &LoopQuery<'_>, progress: Progress| {
+            let mut fewest: Option<Vec<OpenPremise>> = None;
+            for li in loops_around(q.at) {
+                let mut open: Vec<OpenPremise> = Vec::new();
+                // The loop's first instruction in the source: its header's, or for a `while`
+                // loop whose test is a phi, its body's.
+                let lp = &f.loops[li];
+                let first = std::iter::once(&lp.header)
+                    .chain(&lp.body)
+                    .filter_map(|b| f.block(*b).insts.first())
+                    .min_by_key(|i| i.span.start);
+                let at = first
+                    .map(|i| cx.related_at(path, i.span, "the loop around the call".to_owned()));
+                loop_steps(li, q.at, progress, &mut |cause| {
+                    let premise = cause.open_at(at.clone(), None);
+                    if !open.contains(&premise) {
+                        open.push(premise);
+                    }
+                    ControlFlow::Continue(())
+                });
+                if fewest.as_ref().is_none_or(|f| open.len() < f.len()) {
+                    fewest = Some(open);
+                }
+            }
+            fewest.unwrap_or_default()
+        };
         queries
             .iter()
             .map(|q| {
-                if q.repeats.0.is_some() {
-                    return None;
-                }
-                let (site, must) = q.sites.iter().find_map(|s| {
-                    cx.index
-                        .site_must(&unit.input.path, s, ExecEffectKind::DbQuery)
-                        .map(|m| (s, m))
-                })?;
-                let progress = match site.target {
-                    CallTarget::Layer2 { .. } => Progress::Called,
-                    CallTarget::Project(_) => Progress::Returned,
-                };
-                f.loops.iter().enumerate().find_map(|(li, lp)| {
-                    if !ix.shape.in_loop(li, q.at.0)
-                        || paths.on_every_iteration(li, q.at, progress)
-                            != Answer::Known(Must::Every)
-                        || !ix.fixed_trips(lp, &mut |_| None).is_open()
-                    {
-                        return None;
-                    }
-                    let found = origins.of_loop(&budget, f.id, li);
-                    let Answer::Known(found) = found else {
-                        return None;
+                if let Some(by) = q.repeats.0 {
+                    let open = cx.open_premises.then(|| {
+                        let mut open = query_chain_open_premises(cx, path, q);
+                        let at = cx.related_at(path, q.span, "the call".to_owned());
+                        let builtin = format!("`{}`", by.api);
+                        open.push(premises::REPEATED_BY_A_BUILTIN.open_at(Some(at), Some(builtin)));
+                        open
+                    });
+                    return QueryVerdict {
+                        exact: None,
+                        open: open.unwrap_or_default(),
                     };
+                }
+                let established = q.sites.iter().find_map(|s| {
+                    cx.index
+                        .site_must(path, s, ExecEffectKind::DbQuery)
+                        .map(|m| (*s, m))
+                });
+                let Some((site, must)) = established else {
+                    let open = cx.open_premises.then(|| {
+                        let mut open = query_chain_open_premises(cx, path, q);
+                        open.extend(loop_open_premises(q, progress_of(q.chain_site)));
+                        open
+                    });
+                    return QueryVerdict {
+                        exact: None,
+                        open: open.unwrap_or_default(),
+                    };
+                };
+                let exact = loops_around(q.at).find_map(|li| {
+                    let origins =
+                        loop_steps(li, q.at, progress_of(site), &mut |_| ControlFlow::Break(()))?;
                     Some(EstablishedQuery {
-                        origins: DataOrigins::of(cx, tcx, unit.input.ir, &found)?,
+                        origins,
                         must: must.clone(),
                     })
-                })
+                });
+                let open = (exact.is_none() && cx.open_premises)
+                    .then(|| loop_open_premises(q, progress_of(site)));
+                QueryVerdict {
+                    exact,
+                    open: open.unwrap_or_default(),
+                }
             })
             .collect()
     })
 }
 
+/// How far a call has to get for what it sends to count: a Layer 2 call when it is made (its
+/// statement went out also when it raised), a project call when it returned.
+fn progress_of(site: &CallSite) -> Progress {
+    match site.target {
+        CallTarget::Layer2 { .. } => Progress::Called,
+        CallTarget::Project(_) => Progress::Returned,
+    }
+}
+
+/// The premises of `EFF103`'s claim the must-fact of the query `q` leaves open along its chain
+/// (`heki_effect::MustExplainer::gaps_along`).
+fn query_chain_open_premises(
+    cx: &CheckContext<'_>,
+    path: &Path,
+    q: &LoopQuery<'_>,
+) -> Vec<OpenPremise> {
+    let gaps = cx
+        .must_explainer
+        .as_ref()
+        .map_or_else(Vec::new, |explainer| {
+            explainer.gaps_along(path, q.chain_site, ExecEffectKind::DbQuery, &q.chain)
+        });
+    chain_open_premises(cx, &premises::CONDITIONAL_STATEMENT, &q.chain, &gaps)
+}
+
 /// How a report names `origin` when the data decides the number of its items: a parameter or
 /// a part of one, or a catalog call sizing its result (`heki_kb::EcosystemEntry::items`), in
 /// the function the origin names (a generator expression's loop reads its creator's iterable).
-/// `None` for a method's receiver, a fixed collection, or a call the catalog does not size.
+/// Otherwise why the data does not (a cause of "Origin"): a fixed collection, a method's
+/// receiver or a call heki does not take as the data, or a library call the catalog does not
+/// size.
 pub(crate) fn data_origin(
     cx: &CheckContext<'_>,
     tcx: &TypeCtx<'_>,
     ir: &heki_ir::ModuleIr,
     origin: ItemOrigin,
-) -> Option<String> {
+) -> Result<String, &'static OpenCause> {
+    let not_the_data = &premises::ITEMS_NOT_FROM_THE_DATA;
     let f = ir.function(origin.function);
-    let param = |p: u8| f.params.get(usize::from(p)).map(|p| p.name.as_str());
+    let param = |p: u8| {
+        f.params
+            .get(usize::from(p))
+            .map(|p| p.name.as_str())
+            .ok_or(not_the_data)
+    };
     let named = match origin.source {
         ItemSource::Param(p) => format!("parameter `{}`", param(p)?),
         ItemSource::ParamPart(p) => format!("a part of parameter `{}`", param(p)?),
         ItemSource::Call { block, index } => {
-            let inst = f.block(block).insts.get(usize::try_from(index).ok()?)?;
+            let inst = usize::try_from(index)
+                .ok()
+                .and_then(|i| f.block(block).insts.get(i))
+                .ok_or(not_the_data)?;
             let types = tcx.infer(f);
             let callee = match &inst.kind {
                 InstKind::Call { callee_var, .. } => {
@@ -671,25 +870,27 @@ pub(crate) fn data_origin(
                 InstKind::MethodCall { recv, method, .. } => {
                     tcx.resolve_method(types.get(recv), method)
                 }
-                _ => return None,
+                _ => return Err(not_the_data),
             };
             let heki_effect::Callee::External(symbol) = callee else {
-                return None;
+                return Err(not_the_data);
             };
-            let entry = cx.kb.lookup(&symbol)?;
-            let what = match (entry.items?, origin.text) {
+            let unsized_call = &premises::LIBRARY_CALL_WITHOUT_ITEMS;
+            let entry = cx.kb.lookup(&symbol).ok_or(unsized_call)?;
+            let what = match (entry.items.ok_or(unsized_call)?, origin.text) {
                 (ResultItems::Rows, false) => "the rows",
                 (ResultItems::Lines, false) => "the lines",
                 (ResultItems::Entries, false) => "the entries",
                 (ResultItems::Text, true) => "the lines of the text",
-                _ => return None,
+                _ => return Err(unsized_call),
             };
             // A catalog class's method is named by the library API it is.
             format!("{what} of `{}`", entry.api.as_deref().unwrap_or(&symbol))
         }
-        ItemSource::Receiver | ItemSource::Fixed => return None,
+        ItemSource::Receiver => return Err(not_the_data),
+        ItemSource::Fixed => return Err(&premises::FIXED_BY_THE_CODE),
     };
-    Some(named)
+    Ok(named)
 }
 
 /// The advice of an `EFF103` / `EFF113` report, which its message leaves out.
@@ -1466,24 +1667,52 @@ impl<'a> Reach<'a> {
     }
 
     /// Parameters of the scope function that a reached function mutates, through followed
-    /// edges only (a forward flow of "callee parameter k is scope parameter p" bits), and the
-    /// distinct sites of those changes (each in the body making it).
+    /// edges only (a forward flow of "callee parameter k is scope parameter p, or an object it
+    /// holds" bits, and of "callee parameter k is a shallow copy of scope parameter p" bits,
+    /// whose changes count only below the copy's top level), and the distinct sites of those
+    /// changes (each in the body making it).
     fn mutated_params(&self, cx: &CheckContext<'_>, params: usize) -> (u64, BTreeSet<SiteId>) {
-        let mut alias: FxHashMap<(usize, usize), u64> = FxHashMap::default();
+        // `(any change counts, only changes below the top level count)`.
+        let mut alias: FxHashMap<(usize, usize), (u64, u64)> = FxHashMap::default();
         for p in 0..params.min(64) {
-            alias.insert((0, p), 1u64 << p);
+            alias.insert((0, p), (1u64 << p, 0));
         }
         loop {
             let mut changed = false;
             for &(from, to, bc) in &self.edges {
                 for (k, o) in bc.params.iter().enumerate() {
-                    let Some((p, _)) = &o.param else {
-                        continue;
+                    let of = |p: u8| {
+                        alias
+                            .get(&(from, usize::from(p)))
+                            .copied()
+                            .unwrap_or((0, 0))
                     };
-                    let bits = alias.get(&(from, usize::from(*p))).copied().unwrap_or(0);
-                    let slot = alias.entry((to, k)).or_insert(0);
-                    if *slot | bits != *slot {
-                        *slot |= bits;
+                    // The parameter itself keeps what counts; a part of it, or of a copy of it,
+                    // is below the top level.
+                    let mut bits = (0, 0);
+                    if let Some((p, part)) = &o.param {
+                        let (full, below) = of(*p);
+                        bits.0 |= full;
+                        if part.is_some() {
+                            bits.0 |= below;
+                        } else {
+                            bits.1 |= below;
+                        }
+                    }
+                    for (p, _) in &o.param_elements {
+                        let (full, below) = of(*p);
+                        bits.0 |= full | below;
+                    }
+                    // A copy of it, or of a part of it, shares only what is below its own top
+                    // level.
+                    if let Some((p, _)) = &o.param_copy {
+                        let (full, below) = of(*p);
+                        bits.1 |= full | below;
+                    }
+                    let slot = alias.entry((to, k)).or_insert((0, 0));
+                    let grown = (slot.0 | bits.0, slot.1 | bits.1);
+                    if grown != *slot {
+                        *slot = grown;
                         changed = true;
                     }
                 }
@@ -1504,7 +1733,18 @@ impl<'a> Reach<'a> {
                 continue;
             };
             for k in (0..64u8).filter(|k| local.mutates_params & (1u64 << k) != 0) {
-                let scope_params = alias.get(&(i, usize::from(k))).copied().unwrap_or(0);
+                let (full, below) = alias.get(&(i, usize::from(k))).copied().unwrap_or((0, 0));
+                let below = below
+                    & if local
+                        .changed_param_attrs
+                        .get(&k)
+                        .is_some_and(|a| !a.is_empty())
+                    {
+                        u64::MAX
+                    } else {
+                        0
+                    };
+                let scope_params = full | below;
                 if scope_params != 0 {
                     out |= scope_params;
                     let spans = local.param_change_sites.get(&k).into_iter().flatten();

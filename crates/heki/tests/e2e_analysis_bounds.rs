@@ -3798,3 +3798,227 @@ fn library_calls_after_a_write_look_up_handed_callables_once() {
         .collect();
     assert_eq!(found, ["C.put"]);
 }
+
+/// Open premises along shared chains are decided once per call: thousands of `async def`s each
+/// reach a sleep through the same chain of hundreds of helpers, none of which makes the next
+/// call on every return. Each report walks only its own chain, and each call on it is looked up
+/// and explained once for all of them.
+#[test]
+fn open_premises_along_shared_chains_are_explained_once_per_call() {
+    let (depth, handlers) = (200, 4000);
+    let mut lines = vec![
+        "import time".to_owned(),
+        String::new(),
+        "def helper0(flag):".to_owned(),
+        "    if flag:".to_owned(),
+        "        return None".to_owned(),
+        "    time.sleep(1)".to_owned(),
+    ];
+    for i in 1..depth {
+        lines.push(format!("def helper{i}(flag):"));
+        lines.push(format!("    helper{}(flag)", i - 1));
+    }
+    for j in 0..handlers {
+        lines.push(format!("async def handler{j}(flag):"));
+        lines.push(format!("    helper{}(flag)", depth - 1));
+    }
+    let p = Project::new("bounds_open_premises_chains");
+    p.write("m.py", &(lines.join("\n") + "\n"));
+    let started = Instant::now();
+    let (code, stdout, stderr) = p.heki(&["dump-open-premises", "--select", "EFF111", "."]);
+    assert!(
+        started.elapsed() < Duration::from_secs(20),
+        "heki dump-open-premises ran {:?}",
+        started.elapsed()
+    );
+    assert_eq!(code, 0, "{stderr}");
+    let out: Value = serde_json::from_str(&stdout).unwrap();
+    let reports = out["reports"].as_array().unwrap();
+    assert_eq!(reports.len(), handlers);
+    assert_eq!(
+        reports[0]["open_premises"][0]["cause"],
+        json!("not-made-on-every-return")
+    );
+}
+
+/// The open premises of many heuristic reports in one function are explained within budgets
+/// proportional to it: hundreds of joins of one outer loop (`OPT113`) share one explanation
+/// budget, as do a hundred accumulators reset on a path (`DATA101`), and hundreds of changes
+/// of values that are a cached function's result on some paths only (`MUT114`) look the cached
+/// function up in one table of the function's callees.
+#[test]
+fn open_premises_of_many_reports_in_one_function_are_explained_within_its_budgets() {
+    let (joins, accumulators, changes) = (400, 100, 400);
+    let mut lines = vec![
+        "import functools".to_owned(),
+        "import numpy as np".to_owned(),
+    ];
+    lines.push("def join(lefts, rights):".to_owned());
+    lines.push("    out = []".to_owned());
+    lines.push("    for a in lefts:".to_owned());
+    for i in 0..joins {
+        lines.push(format!("        for b{i} in rights:"));
+        lines.push(format!("            if a.key == b{i}.key:"));
+        lines.push("                out.append(a)".to_owned());
+    }
+    lines.push("    return out".to_owned());
+    lines.push("def build(items: list[str]):".to_owned());
+    for i in 0..accumulators {
+        lines.push(format!("    acc{i} = np.array([])"));
+    }
+    lines.push("    for c in items:".to_owned());
+    for i in 0..accumulators {
+        lines.push(format!("        acc{i} = np.append(acc{i}, c)"));
+        lines.push(format!("        if c == \"{i}\":"));
+        lines.push(format!("            acc{i} = np.array([])"));
+    }
+    lines.push("    return acc0".to_owned());
+    lines.push("@functools.lru_cache(maxsize=None)".to_owned());
+    lines.push("def table(name) -> list[str]:".to_owned());
+    lines.push("    return [name, \"id\"]".to_owned());
+    lines.push("def use(name, flag):".to_owned());
+    for i in 0..changes {
+        lines.push(format!("    r{i} = table(name) if flag else []"));
+        lines.push(format!("    r{i}.append(\"x\")"));
+    }
+    lines.push("    return None".to_owned());
+    let p = Project::new("bounds_open_premises_one_function");
+    p.write("m.py", &(lines.join("\n") + "\n"));
+    let started = Instant::now();
+    let (code, stdout, stderr) = p.heki(&[
+        "dump-open-premises",
+        "--select",
+        "OPT113,DATA101,MUT114",
+        ".",
+    ]);
+    assert!(
+        started.elapsed() < Duration::from_secs(20),
+        "heki dump-open-premises ran {:?}",
+        started.elapsed()
+    );
+    assert_eq!(code, 0, "{stderr}");
+    let out: Value = serde_json::from_str(&stdout).unwrap();
+    let reports = out["reports"].as_array().unwrap();
+    let count = |rule: &str, cause: &str| {
+        reports
+            .iter()
+            .filter(|r| {
+                r["rule"] == rule
+                    && r["open_premises"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|o| o["cause"] == cause)
+            })
+            .count()
+    };
+    assert_eq!(count("OPT113", "item-type-unknown"), joins);
+    assert_eq!(count("DATA101", "reset-on-a-path"), accumulators);
+    assert_eq!(count("MUT114", "not-the-result-on-every-path"), changes);
+}
+
+/// A function binding names each to an item of the one before (`e = e["k"]`) five thousand deep,
+/// each changed in place, under a `mutates-params` boundary: which parameter's items each changed
+/// object may be is decided once per value, not by a walk back up the chain at every change.
+#[test]
+fn changes_down_a_long_item_chain_decide_each_element_once() {
+    let links = 5_000;
+    let mut lines = vec!["def walk(p):".to_owned(), "    e = p".to_owned()];
+    for i in 0..links {
+        lines.push("    e = e[\"k\"]".to_owned());
+        lines.push(format!("    e.append({i})"));
+    }
+    let p = Project::new("bounds_element_chain");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[[tool.heki.effect-boundaries]]\nname = \"pure\"\nscopes = [\"m.*\"]\nforbid = [\"mutates-params\"]\n",
+    )
+    .write("m.py", &(lines.join("\n") + "\n"));
+    let found: Vec<u64> = check_within(&p, Duration::from_secs(20))
+        .iter()
+        .filter(|d| d["rule_code"] == "EFF201")
+        .map(|d| d["line"].as_u64().unwrap())
+        .collect();
+    assert_eq!(found, vec![1]);
+}
+
+/// Five thousand shallow copies of one parameter, each changing one of its items, and a loop
+/// rebinding an item of a copy on one branch per test before changing it: which copy each
+/// changed object is below, and whether a store before it rebinds its level, are decided once
+/// per value, not by a walk over every store at every load.
+#[test]
+fn changes_below_many_copies_decide_each_copy_once() {
+    let copies = 5_000;
+    let mut lines = vec!["def copies(p: dict[str, list[int]]):".to_owned()];
+    for i in 0..copies {
+        lines.push(format!("    c{i} = dict(p)"));
+        lines.push(format!("    c{i}[\"k\"].append({i})"));
+    }
+    lines.extend(
+        [
+            "",
+            "",
+            "def rebound(p: dict[str, list[int]], xs):",
+            "    c = dict(p)",
+            "    for x in xs:",
+        ]
+        .map(str::to_owned),
+    );
+    for i in 0..2_000 {
+        lines.push(format!("        if x == {i}:"));
+        lines.push("            c[\"k\"] = []".to_owned());
+    }
+    lines.push("        c[\"k\"].append(x)".to_owned());
+    let p = Project::new("bounds_copies");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nextend-select = [\"MUT115\"]\n",
+    )
+    .write("m.py", &(lines.join("\n") + "\n"));
+    let found: Vec<u64> = check_within(&p, Duration::from_secs(20))
+        .iter()
+        .filter(|d| d["rule_code"] == "MUT115")
+        .map(|d| d["line"].as_u64().unwrap())
+        .collect();
+    assert_eq!(found.len(), copies + 1);
+}
+
+/// A copied class with a chain of two thousand subclasses, copied and changed below the copy in
+/// a thousand functions: the classes a value of it may be are walked once per question, not
+/// once per subclass along each subclass's bases.
+#[test]
+fn copies_of_a_class_with_a_deep_subclass_chain_walk_each_class_once() {
+    let depth = 2_000;
+    let mut lines = vec![
+        "import copy".to_owned(),
+        String::new(),
+        String::new(),
+        "class C0:".to_owned(),
+        "    def __init__(self) -> None:".to_owned(),
+        "        self.children: list[int] = []".to_owned(),
+    ];
+    for i in 1..depth {
+        lines.push(String::new());
+        lines.push(String::new());
+        lines.push(format!("class C{i}(C{}):", i - 1));
+        lines.push("    pass".to_owned());
+    }
+    for i in 0..1_000 {
+        lines.push(String::new());
+        lines.push(String::new());
+        lines.push(format!("def adopt{i}(node: C0) -> None:"));
+        lines.push("    clone = copy.copy(node)".to_owned());
+        lines.push("    clone.children.append(1)".to_owned());
+    }
+    let p = Project::new("bounds_copied_hierarchy");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nextend-select = [\"MUT115\"]\n",
+    )
+    .write("m.py", &(lines.join("\n") + "\n"));
+    let found = check_within(&p, Duration::from_secs(30))
+        .iter()
+        .filter(|d| d["rule_code"] == "MUT115")
+        .count();
+    assert_eq!(found, 1_000);
+}
