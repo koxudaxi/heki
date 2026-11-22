@@ -2747,9 +2747,6 @@ impl<'a, 'c> Rules<'a, 'c> {
             &name,
             match &bad_use {
                 Some(why) => blocked(why.clone()),
-                None if init_sites.is_empty() => {
-                    blocked("no list display or `list(...)` to turn into a deque")
-                }
                 None => established("every use has a `collections.deque` equivalent"),
             },
         ));
