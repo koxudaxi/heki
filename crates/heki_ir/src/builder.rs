@@ -1450,6 +1450,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                             module: None,
                             name: alias.name.to_string(),
                             is_lazy: imp.is_lazy,
+                            relative: false,
                         },
                         span,
                     );
@@ -1486,6 +1487,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
                             module: module.clone(),
                             name: alias.name.to_string(),
                             is_lazy: imp.is_lazy,
+                            relative: imp.level > 0,
                         },
                         span,
                     );
