@@ -1650,7 +1650,8 @@ impl<'a> FnIndex<'a> {
     /// Whether every path from the entry to block `at` passes block `through`, over the graph of
     /// the path facts (`paths::Paths`): a branch the module's constants decide is not taken, and
     /// a block raises into its handler only where an instruction of it may raise. Past the
-    /// budget of that walk, the dominator tree of every edge answers.
+    /// budget of that walk, or where it cannot order the dominators, the dominator tree of every
+    /// edge answers.
     fn every_path_passes(&self, through: BlockId, at: BlockId) -> bool {
         let dominators = self.block_dominators.get_or_init(|| {
             let budget = Budget::of_function("heki_ir::facts::FnIndex::every_path_passes", self.f);
@@ -2144,9 +2145,19 @@ impl<'a> FnIndex<'a> {
 /// Whether every iteration of `f.loops[li]` that completes runs a call that waits (a sleep, or
 /// a wait with a timeout) to its return: the loop is paced by time, as a poll or a retry is, and
 /// the data decides nothing about how often it runs. The iterations are those of the path facts
-/// ([`Paths::on_every_iteration_passes_one_of`]): a branch the module's constants decide is not
+/// (the function's, which `paths` gives once a loop waits at all,
+/// [`Paths::on_every_iteration_passes_one_of`]): a branch the module's constants decide is not
 /// taken, and an exception raised before the wait returns skips it.
-fn waits_every_iteration(ix: &FnIndex<'_>, li: usize, lp: &NaturalLoop) -> bool {
+fn waits_every_iteration<'q, 'r, 's>(
+    ix: &FnIndex<'_>,
+    li: usize,
+    lp: &NaturalLoop,
+    paths: impl FnOnce() -> &'q Paths<'r, 's>,
+) -> bool
+where
+    'r: 'q,
+    's: 'r,
+{
     let f = ix.f;
     let waits: Vec<(BlockId, usize)> = lp
         .body
@@ -2163,12 +2174,7 @@ fn waits_every_iteration(ix: &FnIndex<'_>, li: usize, lp: &NaturalLoop) -> bool 
     if waits.is_empty() {
         return false;
     }
-    let budget = Budget::of_function("heki_ir::facts::waits_every_iteration", f);
-    Paths::new(ix, &PathReader::ir(), &budget).on_every_iteration_passes_one_of(
-        li,
-        &waits,
-        Progress::Returned,
-    ) == Answer::Known(true)
+    paths().on_every_iteration_passes_one_of(li, &waits, Progress::Returned) == Answer::Known(true)
 }
 
 /// A call that waits before the program goes on: a sleep of a duration other than a literal
@@ -2692,10 +2698,13 @@ fn bool_constant(ix: &FnIndex<'_>, name: &str, value: VarId) -> Option<(String, 
             literal: ConstLiteral::Bool(b),
             ..
         } => Some((name.to_owned(), *b)),
+        // A package's own `typing` module (`from .typing import TYPE_CHECKING`) is not the
+        // standard library's.
         InstKind::Import {
             module: Some(module),
             name: imported,
             is_lazy: false,
+            relative: false,
             ..
         } if TYPING.contains(&module.as_str()) && imported == "TYPE_CHECKING" => {
             Some((name.to_owned(), false))
@@ -2704,6 +2713,7 @@ fn bool_constant(ix: &FnIndex<'_>, name: &str, value: VarId) -> Option<(String, 
             module: None,
             name: imported,
             is_lazy: false,
+            relative: false,
             ..
         } if TYPING.contains(&imported.as_str()) => Some((format!("{name}.TYPE_CHECKING"), false)),
         _ => None,
@@ -2829,6 +2839,9 @@ fn refine_round(
             continue;
         }
         let ix = FnIndex::new(f, constants);
+        // One reader and one budget for the function's loops.
+        let budget = Budget::of_function("heki_ir::facts::waits_every_iteration", f);
+        let paths = OnceCell::new();
         for (li, (lp, hint)) in f.loops.iter().zip(loop_hints).enumerate() {
             let mut bound = lp.bound;
             if bound == LoopBound::Unbounded
@@ -2845,7 +2858,11 @@ fn refine_round(
             if bound == LoopBound::Unbounded {
                 bound = if let Some(n) = ix.counted_trips(lp, SMALL_MAX) {
                     LoopBound::ConstSmall(n)
-                } else if hint.repeats && waits_every_iteration(&ix, li, lp) {
+                } else if hint.repeats
+                    && waits_every_iteration(&ix, li, lp, || {
+                        paths.get_or_init(|| Paths::new(&ix, &PathReader::ir(), &budget))
+                    })
+                {
                     if hint.forever {
                         LoopBound::DaemonPolling
                     } else {

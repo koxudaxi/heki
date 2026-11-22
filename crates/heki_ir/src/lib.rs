@@ -493,6 +493,10 @@ pub enum InstKind {
         module: Option<String>,
         name: String,
         is_lazy: bool,
+        /// A relative import (`from .typing import X`, `from . import json`): `module` and
+        /// `name` are named from the importing package, not from the import path.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        relative: bool,
     },
 }
 

@@ -47,6 +47,8 @@ fn a_call_runs_whenever_its_function_returns_over_the_edges_into_handlers() {
         "paths_on_return",
         r#"import subprocess
 
+from . import subprocess as local_proc
+
 
 def own_handler(cmd):
     try:
@@ -78,6 +80,14 @@ def receiver_first(conn):
     except ValueError:
         return []
     return rows
+
+
+def relative_module(cmd):
+    try:
+        r = local_proc.run(["git", cmd], timeout=10)
+    except FileNotFoundError:
+        return None
+    return r
 
 
 def in_with(open_, p, sub):
@@ -129,6 +139,13 @@ def in_open(p, sub):
     expect(
         "receiver_first",
         "conn.execute(\"q\").fetchall()",
+        "not_every",
+        "not_every",
+    );
+    // A package's own module is not the standard library's: looking up its member may raise.
+    expect(
+        "relative_module",
+        "local_proc.run([\"git\", cmd], timeout=10)",
         "not_every",
         "not_every",
     );
