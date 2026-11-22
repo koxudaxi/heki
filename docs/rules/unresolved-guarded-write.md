@@ -13,7 +13,7 @@ Strict mode of a `write-owners` contract (`unresolved = "report"`): writing an a
 ## What it does
 The strict mode of a `[[tool.heki.write-owners]]` contract that sets `unresolved = "report"`:
 reports the writes outside the write owners that `MUT201` cannot tie to a target class, so a clean
-`MUT201` run says how much it did not check. Two kinds of writes are reported, each once, at the
+`MUT201` run says how much it did not check. Three kinds of writes are reported, each once, at the
 write:
 
 - an attribute named like a target attribute (`fields` for `Model.fields`, any name for
@@ -34,14 +34,17 @@ write:
   `Final` (an instance may hold its own), one a subclass defines again or inherits first from
   another base, a `Final` field of a dataclass read on an instance (or on a class object with
   `slots=True` along the way), and one stored on its class, a subclass, or an instance outside
-  the class body (`Model.KEY = "x"`).
+  the class body (`Model.KEY = "x"`);
+- an attribute name computed at run time written on an object of unknown class (an unannotated
+  `target` in `setattr(target, name, v)` or `target.__dict__[key] = v`), which may be any target.
 
 The rules of `MUT201` for what is allowed apply: allowed writers, exempt methods, a class's own
 initialization (`setattr(self, name, v)` in `__init__`), functions that only run inside allowed
 writers, `forbidden-writers`, and, with `fresh-objects = "allow"`, writes that construct the object
 they write. A parameter that every caller path binds to an object of a project class is not
-reported: `MUT201` reports the write at those callers. A computed name written on an object of
-unknown class is not reported (neither the class nor the attribute is known). With
+reported: `MUT201` reports the write at those callers. For a computed name on a parameter, a
+caller binding an object of a target class leaves the write to `MUT205` (`MUT201` has no name to
+report at that caller), and one binding an object of another class ties it there. With
 `attribution = "lexical"`, a function that only runs inside allowed writers is not allowed, and a
 caller path through an allowed writer counts like any other.
 
@@ -49,11 +52,12 @@ caller path through an allowed writer counts like any other.
 
 A report states that, outside the write owners, the function writes an attribute named like a target
 of the `write-owners` contract on an object whose class heki does not know, or a computed attribute
-name on a guarded class.
+name on a guarded class or on an object whose class heki does not know.
 
 Its premises:
 
-- **Named like a target**: the attribute's name matches a target's. Established.
+- **Named like a target**: the attribute's name matches a target's, or is computed at run time.
+  Established.
 - **Unknown class**: heki did not resolve the class of the object. Established: the claim is about
   heki's own resolution.
 - **Outside the owners**: the function is not in the allowed modules and classes, nor runs only
@@ -83,6 +87,10 @@ def touch(model) -> None:  # no annotation: heki cannot tell what `model` is
 
 def fill(model: Model, name: str) -> None:
     setattr(model, name, [])  # MUT205: the attribute is computed at run time
+
+
+def fill_any(target, name: str) -> None:
+    setattr(target, name, [])  # MUT205: neither the class nor the attribute is known
 
 
 def read_only(model: Model) -> int:

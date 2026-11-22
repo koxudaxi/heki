@@ -420,7 +420,8 @@ EffectSummary(f) = {
                                                            // elements of them) it may return, by span, and the
                                                            // phis its origin walks met (local)
     unresolved_write_sites:   Set<UnresolvedWrite>,        // target-named writes on objects of unknown class,
-                                                           // computed names on guarded classes (MUT205)
+                                                           // computed names on guarded classes and on
+                                                           // objects of unknown class (MUT205)
     unresolved_access_sites:  Set<UnresolvedAccess>,       // reads and method calls named like a strict
                                                            // contract's target on objects of unknown class;
                                                            // never propagated (MUT206, MUT207)

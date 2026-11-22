@@ -253,7 +253,8 @@ With `unresolved = "report"`, `MUT205` reports:
 
 - an attribute named like a target, written on an object of unknown class;
 - a computed attribute name (`setattr(obj, name, v)`, `obj.__dict__[name] = v`,
-  `obj.__dict__.update(...)`, `vars(obj) |= other`) written on a target class.
+  `obj.__dict__.update(...)`, `vars(obj) |= other`) written on a target class, or on an object
+  of unknown class, where it may be any target.
 
 ### `read-owners`
 

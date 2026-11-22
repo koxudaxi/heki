@@ -4243,12 +4243,16 @@ impl<'a> Extractor<'a> {
     }
 
     /// A computed attribute name written on `owner`'s object (`setattr(obj, name, v)`,
-    /// `obj.__dict__[name] = v`): unresolved when the object has a project class.
+    /// `obj.__dict__[name] = v`): unresolved when the object has a project class, or when heki
+    /// knows nothing of its class.
     fn computed_name(&mut self, owner: &Owner, kind: WriteKind, span: Span) {
         let Some(var) = owner.var else { return };
         self.change_object(var, span);
         for class in &owner.typed_classes {
             self.unresolved(Unresolved::Name(class.clone()), Some(var), kind, span);
+        }
+        if owner.typed_classes.is_empty() && self.unknown_class(var) {
+            self.unresolved(Unresolved::Anything, Some(var), kind, span);
         }
     }
 

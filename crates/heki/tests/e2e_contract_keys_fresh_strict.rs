@@ -1221,10 +1221,11 @@ fn strict_mode_reports_the_writes_heki_cannot_tie_to_a_class() {
             d(u, 8, "MUT205", "touch", "fields"),
             d(u, 17, "MUT205", "loop", "fields"),
             d(u, 22, "MUT205", "anything", "name"),
-            // A computed name on a guarded class (`setattr`, `__dict__`); not on an object of
-            // unknown class.
+            // A computed name on a guarded class (`setattr`, `__dict__`), and on an object of
+            // unknown class, which may be any attribute of any class.
             d(u, 23, "MUT205", "anything", "DataModel"),
             d(u, 24, "MUT205", "anything", "DataModel"),
+            d(u, 25, "MUT205", "anything", "*"),
             // Typed by its caller: `MUT201` reports the caller.
             typed,
             // Untyped by every caller.
@@ -1240,6 +1241,104 @@ fn strict_mode_reports_the_writes_heki_cannot_tie_to_a_class() {
             "writes an attribute named at run time (set_attr) on `DataModel` outside the write owners of `store`: heki cannot tell whether it writes `DataModel.fields` or `DataModel.name`"
         ),
         "{diags:#?}"
+    );
+    assert_eq!(
+        message_at(&diags, u, 25),
+        "`anything` writes an attribute named at run time (set_attr) on an object of unknown class outside the write owners of `store`: heki cannot tell whether it writes `DataModel.fields` or `DataModel.name`"
+    );
+}
+
+const RUN_TIME_NAMES: &str = r#"from typing import Any
+
+from pkg.model import DataModel, Other
+
+
+def copy_by_name(target, source: object, names: list[str]) -> None:
+    for name in names:
+        setattr(target, name, getattr(source, name))
+
+
+def store_by_key(target, key: str, value: object) -> None:
+    target.__dict__[key] = value
+
+
+def namespace(target: Any, values: dict) -> None:
+    vars(target).update(values)
+    target.__dict__.clear()
+
+
+def _fill(target, name: str) -> None:
+    setattr(target, name, 1)
+
+
+def fill_model(model: DataModel) -> None:
+    _fill(model, "x")
+
+
+def _fill_other(target, name: str) -> None:
+    setattr(target, name, 1)
+
+
+def fill_other(other: Other) -> None:
+    _fill_other(other, "x")
+
+
+def plain(d: dict, name: str) -> None:
+    setattr(d, name, 1)
+
+
+def narrowed(target, name: str) -> None:
+    if isinstance(target, Other):
+        setattr(target, name, 1)
+
+
+def control_typed(target: DataModel, name: str, value: object) -> None:
+    setattr(target, name, value)
+
+
+def control_named(target) -> None:
+    target.name = "x"
+"#;
+
+/// A computed attribute name written on an object of unknown class (`setattr` with a computed
+/// name, `__dict__` with a computed key, `vars(obj).update(...)`, `__dict__.clear()`) may write
+/// any target: it is reported, unless every caller path binds the object to a class that is no
+/// target's (`MUT201` sees no name at a caller binding a target class, so that caller leaves the
+/// write to `MUT205`). A builtin container, an object an `isinstance` test narrows to another
+/// class, and the allowed writers are no such write.
+#[test]
+fn strict_mode_reports_a_run_time_name_on_an_object_of_unknown_class() {
+    let p = strict_project("strict_run_time_names", true);
+    p.write("pkg/names.py", RUN_TIME_NAMES).write(
+        "pkg/store.py",
+        "def save(model, name: str) -> None:\n    setattr(model, name, [])\n",
+    );
+    let n = "pkg/names.py";
+    let diags = diagnostics(&p, &[]);
+    let names: Vec<_> = found(&diags).into_iter().filter(|x| x.0 == n).collect();
+    assert_eq!(
+        names,
+        vec![
+            d(n, 8, "MUT205", "copy_by_name", "*"),
+            d(n, 12, "MUT205", "store_by_key", "*"),
+            d(n, 16, "MUT205", "namespace", "*"),
+            d(n, 17, "MUT205", "namespace", "*"),
+            d(n, 21, "MUT205", "_fill", "*"),
+            d(n, 46, "MUT205", "control_typed", "DataModel"),
+            d(n, 50, "MUT205", "control_named", "name"),
+        ]
+    );
+    assert_eq!(
+        message_at(&diags, n, 12),
+        "`store_by_key` writes an attribute named at run time (dict_direct) on an object of unknown class outside the write owners of `store`: heki cannot tell whether it writes `DataModel.fields` or `DataModel.name`"
+    );
+    // Off by default.
+    let p = strict_project("strict_run_time_names_off", false);
+    p.write("pkg/names.py", RUN_TIME_NAMES);
+    assert!(
+        found(&diagnostics(&p, &[]))
+            .iter()
+            .all(|x| x.0 != n || x.2 != "MUT205")
     );
 }
 
