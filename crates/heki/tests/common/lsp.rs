@@ -92,7 +92,7 @@ impl Lsp {
         let msg = match self.rx.recv_timeout(timeout) {
             Ok(msg) => msg,
             Err(RecvTimeoutError::Timeout) => panic!(
-                "{what}: the server answered nothing for {HANG:?}, it hangs; backlog: {:#?}",
+                "{what} did not come within {HANG:?}: the server hangs; backlog: {:#?}",
                 self.backlog
             ),
             Err(RecvTimeoutError::Disconnected) => panic!(
@@ -157,8 +157,9 @@ impl Lsp {
         reply["result"].clone()
     }
 
-    /// The first message (backlog first) matching `pred`, which must arrive within [`HANG`]:
-    /// for a reply, which the server sends once the analysis it waits for has ended.
+    /// The first message (backlog first) matching `pred`, which must arrive within [`HANG`]. A
+    /// reply comes once the analysis holding the server's state has ended, so a slow analysis
+    /// delays it without failing it.
     fn wait(&mut self, what: &str, pred: impl Fn(&Value) -> bool) -> Value {
         if let Some(i) = self.backlog.iter().position(&pred) {
             return self.backlog.remove(i);

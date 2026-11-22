@@ -70,9 +70,9 @@ fn heki_json(p: &Project, args: &[&str]) -> Value {
     serde_json::from_slice(&run(p, args, &[0])).unwrap()
 }
 
-/// `heki check --output-format json` of the project, counted by no comparison: a shape that
+/// `heki check --output-format json` of the project, run once without counting: a shape that
 /// guards only against a run that never ends, or a size too small to count that a test checks
-/// next to a large one.
+/// next to a full one.
 fn check(p: &Project) -> Vec<Value> {
     let out = run(
         p,
