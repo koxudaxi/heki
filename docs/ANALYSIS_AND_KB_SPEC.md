@@ -547,6 +547,7 @@ EffectSummary(f) = {
 
     // Metadata
     is_async, is_generator, is_cached_property, is_lru_cache, owner_class_qualname, decorators,
+    listed_cache: Option<ListedCache>,                    // the decorator is in [[cached_properties]]
 }
 ```
 
@@ -1739,6 +1740,15 @@ which an entry leaves out, and a builtin dict or set hands on its keys with the 
 for them. A call of a catalogued library without such an entry runs code of the project only
 when it is handed a value not established as an instance of a library class that is not
 callable; `eval`, `exec`, `__import__`, `importlib.import_module`, and `pickle.loads` always may.
+
+A third table, `[[cached_properties]]` (`heki_kb::CachedPropertyDecorator`), lists the
+cached-property decorators known to keep the getter's value in the instance `__dict__` under the
+property's name: `functools.cached_property`, Django's, Werkzeug's, propcache's, and kombu's. Each
+entry names the versions whose source was read, why the value is kept there, how `del obj.<name>`
+and `obj.__dict__.pop(<name>)` act on it, and, for Werkzeug, the slot an instance without a
+`__dict__` keeps it in. `EffectSummary::listed_cache` records that a getter's decorator, resolved
+through the module's imports (`ModuleDecls::decorator_symbol`), is listed; only such a getter makes
+a cached property an exact claim's (R3), and any other `cached_property` is one by its name.
 
 The entries follow the public API of each package, with three conventions:
 - An async API is `async_safe` and carries no blocking effect: it is often called without a

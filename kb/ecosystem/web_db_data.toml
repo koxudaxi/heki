@@ -3706,3 +3706,31 @@ opaque_to_layer3 = true
 symbol = "numpy.insert"
 effects = ["quadratic_realloc"]
 opaque_to_layer3 = true
+
+# --- Cached-property decorators that keep the value in the instance `__dict__` ---
+# See `[[cached_properties]]` in stdlib.toml.
+
+[[cached_properties]]
+symbol = "django.utils.functional.cached_property"
+versions = "Django 2.2, 3.2, 4.2, 5.0, 6.1.3"
+keeps = "a non-data descriptor whose __get__ stores the getter's value in instance.__dict__[name], which later reads find before the descriptor"
+invalidation = "del obj.<name> and obj.__dict__.pop(<name>) remove the entry (the descriptor defines no __delete__)"
+
+[[cached_properties]]
+symbol = "werkzeug.utils.cached_property"
+versions = "Werkzeug 0.9.6, 0.12.2, 0.14.1, 0.15.6, 0.16.1, 1.0.1, 2.0.0, 2.0.3, 2.1.0, 2.3.8, 3.0.6, 3.1.9"
+keeps = "__get__ returns obj.__dict__[name] when present and stores the getter's value there otherwise; a non-data descriptor in 0.9.6, a property subclass with __set__ (storing into obj.__dict__) from 0.12"
+invalidation = "obj.__dict__.pop(<name>) removes the entry in every version; del obj.<name> raises AttributeError before 2.0 (no deleter) and deletes the entry from 2.0 (__delete__)"
+slot = "_cache_<name> (from 2.1, for an instance without a __dict__)"
+
+[[cached_properties]]
+symbol = "propcache.api.cached_property"
+versions = "propcache 0.2.0, 0.3.0, 0.5.4"
+keeps = "the C extension's non-data descriptor stores the getter's value in inst.__dict__[name] and returns it on later reads; the pure-Python fallback is functools.cached_property"
+invalidation = "del obj.<name> and obj.__dict__.pop(<name>) remove the entry (no __delete__)"
+
+[[cached_properties]]
+symbol = "kombu.utils.objects.cached_property"
+versions = "kombu 5.0.0, 5.3.0, 5.7.0"
+keeps = "a data descriptor whose __get__ stores the getter's value in obj.__dict__[name] (from 5.3 through functools.cached_property.__get__) and returns it on later reads; __set__ stores into obj.__dict__"
+invalidation = "del obj.<name> runs __delete__, which pops the entry from obj.__dict__ (then a deleter hook if one is set); obj.__dict__.pop(<name>) removes it too"

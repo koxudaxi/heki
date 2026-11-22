@@ -2289,3 +2289,46 @@ fn removals_of_kept_values_by_name_and_by_unknown_code() {
     // project call returns runs its class's iteration, which may be anything.
     assert_eq!(removes("Feed.from_factory"), KeptRemoval::Any);
 }
+
+const LISTED_CACHES_PY: &str = r#"
+import functools
+from functools import cached_property as cp
+
+from mylib import cached_property
+from werkzeug.utils import cached_property as wcp
+
+
+class A:
+    @functools.cached_property
+    def by_module(self) -> int:
+        return 1
+
+    @cp
+    def by_alias(self) -> int:
+        return 1
+
+    @cached_property
+    def lookalike(self) -> int:
+        return 1
+
+    @wcp
+    def in_slot(self) -> int:
+        return 1
+"#;
+
+#[test]
+fn cached_property_decorators_the_catalog_lists_keep_their_value_in_the_instance_dict() {
+    let index = project(&[("lc.py", LISTED_CACHES_PY)]);
+    let of = |q: &str| {
+        let s = summary(&index, "lc", q);
+        (s.is_cached_property, s.listed_cache)
+    };
+    let listed = |in_slot| Some(ListedCache { in_slot });
+    assert_eq!(of("A.by_module"), (true, listed(false)));
+    // An alias import names the decorator it imports.
+    assert_eq!(of("A.by_alias"), (true, listed(false)));
+    // A `cached_property` of a library the catalog does not list is one by its name only.
+    assert_eq!(of("A.lookalike"), (true, None));
+    // Werkzeug keeps the value of an instance without a `__dict__` in a slot.
+    assert_eq!(of("A.in_slot"), (true, listed(true)));
+}
