@@ -1291,7 +1291,9 @@ fn subdirectory_app(name: &str) -> Project {
         "backend/main.py",
         "from config.env import load\nimport config.env\n\n\nasync def handler():\n    return \
          load()\n\n\nasync def other():\n    return config.env.load()\n",
-    );
+    )
+    // An import that names a project module now, and still does with the source root.
+    .write("backend/config/settings.py", "from . import env\n");
     p
 }
 
@@ -1385,4 +1387,173 @@ fn a_source_root_stays_out_when_a_name_the_configuration_uses_would_change() {
         reason(&r, &[]),
         "backend/main.py and main.py would both define module `main`"
     );
+}
+
+#[test]
+fn a_report_naming_several_library_names_counts_for_the_first() {
+    let p = Project::new("recommend_several_names");
+    // Every implementation `x.go()` runs calls a library name of its own.
+    p.write(
+        "app.py",
+        "import stripe\n\n\nclass Base:\n    def go(self):\n        stripe.a()\n\n\n\
+         class Sub(Base):\n    def go(self):\n        stripe.b()\n\n\n\
+         async def handle(x: Base):\n    x.go()\n",
+    );
+    let (_, report, _) = recommend_json(&p, &[]);
+    let symbols = &report["blind_spots"]["uncatalogued"][0]["symbols"];
+    assert_eq!(
+        (&symbols[0]["symbol"], &symbols[0]["if_waits"]["EFF101"]),
+        (&json!("stripe.a"), &json!(1))
+    );
+    assert_eq!(
+        (&symbols[1]["symbol"], &symbols[1]["if_waits"]["EFF101"]),
+        (&json!("stripe.b"), &json!(0))
+    );
+    assert!(
+        report["notes"].as_array().unwrap().contains(&json!(
+            "A report naming several of the library names tried counts for the first by name."
+        )),
+        "{report:#}"
+    );
+}
+
+#[test]
+fn the_text_lists_the_unresolved_calls_with_the_most_reach_first() {
+    let p = Project::new("recommend_unresolved_many");
+    let jobs: String = (0..12)
+        .map(|i| format!("def job_{i:02}(client):\n    client.run()\n\n\n"))
+        .collect();
+    p.write(
+        "app.py",
+        &format!("{jobs}async def poll(client):\n    job_11(client)\n"),
+    );
+    let (_, report, _) = recommend_json(&p, &[]);
+    let blind = &report["blind_spots"];
+    assert_eq!(blind["totals"]["unresolved_groups"], json!(12));
+    // The call on the event loop first, then by function.
+    assert_eq!(blind["unresolved"][0]["function"], json!("app.job_11"));
+    assert_eq!(blind["unresolved"][1]["function"], json!("app.job_00"));
+    let (_, out, _) = p.heki(&["recommend"]);
+    assert!(
+        out.contains("\n    app.job_08      1      0      0  parameter `client` has no annotation (run)\n    and 2 more\n"),
+        "{out}"
+    );
+}
+
+#[test]
+fn a_project_heki_sees_whole_says_so() {
+    let p = Project::new("recommend_nothing_unseen");
+    p.write("__init__.py", "")
+        .write("other.py", "def f() -> int:\n    return 1\n")
+        .write(
+            "mod.py",
+            "from . import other\n\n\ndef g() -> int:\n    return other.f()\n",
+        );
+    let (_, out, _) = p.heki(&["recommend"]);
+    assert!(
+        out.contains(
+            "\nWhat heki cannot see (no report either way)\n  Nothing: every call resolves, every \
+             library name called has a catalog entry, and every function is modeled.\n"
+        ),
+        "{out}"
+    );
+}
+
+#[test]
+fn an_import_below_several_directories_is_the_one_of_the_importing_files_own() {
+    let p = Project::new("recommend_source_root_services");
+    p.write("svc_a/utils.py", "def a():\n    pass\n")
+        .write("svc_a/jobs.py", "")
+        .write("svc_a/views.py", "")
+        .write("svc_a/forms.py", "")
+        .write(
+            "svc_a/main.py",
+            "import forms\nimport jobs\nimport utils\nimport views\n\n\ndef run():\n    \
+             utils.a()\n",
+        )
+        .write("svc_b/utils.py", "def b():\n    pass\n")
+        // Below both, and in neither: no candidate's.
+        .write("tool.py", "import utils\n");
+    let (_, report, _) = recommend_json(&p, &[]);
+    let roots = &report["blind_spots"]["source_roots"];
+    assert_eq!(roots.as_array().unwrap().len(), 1, "{roots:#}");
+    assert_eq!(
+        (
+            &roots[0]["directory"],
+            &roots[0]["imports"],
+            &roots[0]["in_block"]
+        ),
+        (&json!("svc_a"), &json!(4), &json!(true))
+    );
+    assert_eq!(report["config"], json!({"src": ["svc_a"]}));
+    assert_follows_the_schema(&report);
+    let (_, out, _) = p.heki(&["recommend"]);
+    assert!(
+        out.contains(
+            "\n  source root `svc_a`: 4 import(s) name its files (forms, jobs, utils, ...): in the \
+             block\n"
+        ),
+        "{out}"
+    );
+}
+
+#[test]
+fn a_directory_above_a_source_root_does_not_resolve_what_the_root_names() {
+    let p = Project::new("recommend_source_root_above");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki]\nsrc = [\"backend/lib\"]\n",
+    )
+    .write("backend/lib/config/env.py", "def load():\n    pass\n")
+    .write("backend/main.py", "import lib.config.env\n");
+    let (_, report, _) = recommend_json(&p, &[]);
+    let roots = &report["blind_spots"]["source_roots"];
+    assert_eq!(
+        (
+            &roots[0]["directory"],
+            &roots[0]["in_block"],
+            &roots[0]["reason"]
+        ),
+        (
+            &json!("backend"),
+            &json!(false),
+            &json!("`lib.config.env` would still name no project module")
+        )
+    );
+}
+
+#[test]
+fn names_the_catalog_lacks_come_by_what_heki_would_report_through_them() {
+    let p = Project::new("recommend_catalog_may_miss");
+    p.write(
+        "app.py",
+        "import requests\nimport stripe\n# Past the top of the package tree: no module.\n\
+         from .. import nothing\n\n\nasync def link(path: str):\n    return \
+         requests.utils.quote(path)\n\n\nasync def unlink(path: str):\n    a = \
+         requests.utils.unquote(path)\n    b = requests.utils.unquote(path)\n    return a, b\n\n\n\
+         def fetch_one(x, flag):\n    if flag:\n        return None\n    return \
+         stripe.Charge.retrieve(x)\n\n\ndef fetch_all(items: list[str], flag: bool):\n    for x \
+         in items:\n        fetch_one(x, flag)\n",
+    );
+    let (_, report, _) = recommend_json(&p, &[]);
+    let blind = &report["blind_spots"];
+    let missing: Vec<(Value, Value)> = blind["catalog_may_miss"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| (s["symbol"].clone(), s["if_waits"]["EFF101"].clone()))
+        .collect();
+    assert_eq!(
+        missing,
+        [
+            (json!("requests.utils.unquote"), json!(2)),
+            (json!("requests.utils.quote"), json!(1))
+        ]
+    );
+    // A query on some paths only would be reported as heuristic.
+    assert_eq!(
+        blind["uncatalogued"][0]["symbols"][0]["if_queries"],
+        json!({"EFF103": 0, "EFF113": 1})
+    );
+    assert_follows_the_schema(&report);
 }

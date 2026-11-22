@@ -400,13 +400,14 @@ pub(super) fn hypothetical_catalog(
         };
         trial.several |= named.next().is_some();
         let (waits, queries) = trial.found.entry(first.to_owned()).or_default();
-        match d.rule_code.as_str() {
-            "EFF101" => waits.eff101 += 1,
-            "EFF111" => waits.eff111 += 1,
-            "EFF103" => queries.eff103 += 1,
-            "EFF113" => queries.eff113 += 1,
-            _ => {}
-        }
+        let count = match d.rule_code.as_str() {
+            "EFF101" => &mut waits.eff101,
+            "EFF111" => &mut waits.eff111,
+            "EFF103" => &mut queries.eff103,
+            // The run selects these four rules only.
+            _ => &mut queries.eff113,
+        };
+        *count += 1;
     }
     Ok((project, trial))
 }
@@ -1176,6 +1177,107 @@ mod tests {
             ("pkg.backend.config", "pkg.backend", true),
         ] {
             assert_eq!(names_module(text, name), named, "{text} {name}");
+        }
+    }
+
+    #[test]
+    fn the_text_says_why_a_call_is_not_resolved() {
+        for (reason, parameter, names, said) in [
+            (
+                "unannotated-parameter",
+                Some("client"),
+                vec!["get", "post"],
+                "parameter `client` has no annotation (get, post)",
+            ),
+            (
+                "unresolved-annotation",
+                Some("x"),
+                vec![],
+                "the annotation of parameter `x` names no class heki knows",
+            ),
+            (
+                "any-value",
+                None,
+                vec![],
+                "a value annotated `Any` or `object`",
+            ),
+            (
+                "callable-value",
+                None,
+                vec![],
+                "a value annotated `Callable`",
+            ),
+            (
+                "unbound-name",
+                None,
+                vec![],
+                "a name nothing heki sees binds",
+            ),
+            (
+                "unlisted-protocol",
+                None,
+                vec![],
+                "a protocol whose implementations heki cannot list",
+            ),
+            (
+                "call-result",
+                None,
+                vec![],
+                "a call's result heki gives no class",
+            ),
+            (
+                "attribute",
+                None,
+                vec![],
+                "an attribute heki gives no class",
+            ),
+            (
+                "computed-name",
+                None,
+                vec![],
+                "a method named at run time (`getattr`)",
+            ),
+            (
+                "too-many-implementations",
+                None,
+                vec![],
+                "more implementations than heki follows",
+            ),
+            (
+                "unknown-member",
+                None,
+                vec!["m"],
+                "a member heki does not find: a base it knows nothing of, or a module it could \
+                 not read (m)",
+            ),
+            ("untyped-value", None, vec![], "a value heki gives no class"),
+        ] {
+            let calls = UnresolvedCalls {
+                function: "f".into(),
+                path: "a.py".into(),
+                reason: reason.into(),
+                parameter: parameter.map(str::to_owned),
+                names: names.into_iter().map(str::to_owned).collect(),
+                counts: Counts::default(),
+                examples: Vec::new(),
+            };
+            assert_eq!(why(&calls), said, "{reason}");
+        }
+    }
+
+    #[test]
+    fn a_name_not_tried_is_told_apart_from_one_that_reports_nothing() {
+        for (counts, tried, said) in [
+            (
+                &[("EFF101", 2), ("EFF111", 1)][..],
+                true,
+                "EFF101 2, EFF111 1",
+            ),
+            (&[("EFF101", 0), ("EFF111", 3)], true, "EFF111 3"),
+            (&[("EFF103", 0), ("EFF113", 0)], true, "-"),
+            (&[("EFF103", 0), ("EFF113", 0)], false, "not tried"),
+        ] {
+            assert_eq!(hypothetical(counts, tried), said);
         }
     }
 
