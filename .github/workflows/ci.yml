@@ -78,41 +78,165 @@ jobs:
             fi
           done
 
-  test:
-    name: test (${{ matrix.os }})
+  # The test binaries, built once per platform in the `ci` profile (optimized dependencies, see
+  # Cargo.toml) and archived for that platform's `test` shards, which wait for their own build
+  # only. Linux builds them from the unpacked source distribution, so its shards run every test
+  # from it: platforms without a wheel build from the source distribution, and packagers run its
+  # tests, so it must carry every file the build and the tests embed or read (`pyproject.toml`).
+  # The other platforms build the checkout.
+  test-build-linux:
+    name: build tests (${{ matrix.os }})
     if: *full-run
     strategy:
-      fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-15, windows-2025]
+        os: [ubuntu-24.04]
     runs-on: ${{ matrix.os }}
-    steps:
-      # The ruff crates come from a git tag (ADR-009 / ADR-016), and the ruff repository holds
-      # test snapshots whose paths pass Windows' 260-character limit once cargo checks them out.
+    steps: &test-build-steps
       - name: Allow long paths in git checkouts
+        # The ruff crates come from a git tag (ADR-009 / ADR-016), and the ruff repository holds
+        # test snapshots whose paths pass Windows' 260-character limit once cargo checks them out.
         if: runner.os == 'Windows'
         run: git config --system core.longpaths true
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - if: runner.os == 'Linux'
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          command: sdist
+          args: --out dist
+      - name: Unpack the source distribution
+        if: runner.os == 'Linux'
+        run: &unpack-sdist |
+          mkdir sdist-tree
+          tar -xzf dist/*.tar.gz -C sdist-tree --strip-components 1
       - uses: dtolnay/rust-toolchain@92e73e19cbfb3981e63ef478a16f95f415e634d3 # 1.99.0
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          # The cache key of the three jobs; rust-cache adds the platform to it.
+          shared-key: test-build
+          workspaces: ${{ runner.os == 'Linux' && 'sdist-tree -> target' || '. -> target' }}
+      - &install-nextest
+        uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
+        with:
+          # install-action checks the download against the checksum it pins for this version.
+          tool: cargo-nextest@0.9.152
+      - name: Build and archive the tests
+        shell: bash
+        env:
+          TREE: ${{ runner.os == 'Linux' && 'sdist-tree' || '.' }}
+          CARGO_NET_GIT_FETCH_WITH_CLI: ${{ runner.os == 'Windows' && 'true' || 'false' }}
+        run: >-
+          cargo nextest archive --workspace --locked --cargo-profile ci
+          --manifest-path "$TREE/Cargo.toml" --archive-file tests.tar.zst
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: tests-${{ matrix.os }}
+          path: |
+            tests.tar.zst
+            dist/*.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  test-build-macos:
+    name: build tests (${{ matrix.os }})
+    if: *full-run
+    strategy:
+      matrix:
+        os: [macos-15]
+    runs-on: ${{ matrix.os }}
+    steps: *test-build-steps
+
+  test-build-windows:
+    name: build tests (${{ matrix.os }})
+    if: *full-run
+    strategy:
+      matrix:
+        os: [windows-2025]
+    runs-on: ${{ matrix.os }}
+    steps: *test-build-steps
+
+  # Each shard runs a fixed part of its platform's archived tests (`--partition count:k/n`: every
+  # n-th test). The tests read the files of the tree they were built in (`CARGO_MANIFEST_DIR`)
+  # and run `heki` from where it was built (`CARGO_BIN_EXE_heki`), so a shard checks out (or
+  # unpacks) the same tree at the same path and extracts the binaries back into it.
+  test-linux:
+    name: test (${{ matrix.os }}, ${{ matrix.shard }}/${{ matrix.shards }})
+    needs: test-build-linux
+    if: *full-run
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04]
+        shard: [1, 2, 3, 4]
+        shards: [4]
+    runs-on: ${{ matrix.os }}
+    steps: &test-steps
+      - if: runner.os != 'Linux'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: tests-${{ matrix.os }}
+      - name: Unpack the source distribution
+        if: runner.os == 'Linux'
+        run: *unpack-sdist
       - id: python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.15"
           allow-prereleases: true
+      - *install-nextest
       # The `--fix` differential tests run the rewritten programs on real CPython.
-      # `--no-fail-fast`: one run reports the failures of every test binary.
-      - run: cargo test --workspace --no-fail-fast
+      # `--no-fail-fast`: one run reports every failure of the shard.
+      - name: Run the shard
+        shell: bash
         env:
           HEKI_TEST_PYTHON: ${{ steps.python.outputs.python-path }}
-          CARGO_NET_GIT_FETCH_WITH_CLI: ${{ runner.os == 'Windows' && 'true' || 'false' }}
+          TREE: ${{ runner.os == 'Linux' && 'sdist-tree' || '.' }}
+          PARTITION: count:${{ matrix.shard }}/${{ matrix.shards }}
+        run: >-
+          cargo nextest run --archive-file tests.tar.zst --extract-to "$TREE" --extract-overwrite
+          --workspace-remap "$TREE" --partition "$PARTITION" --no-fail-fast
 
-  coverage:
-    name: coverage (100% lines)
+  test-macos:
+    # The account runs at most 5 macOS jobs at once: the build, then these 4.
+    name: test (${{ matrix.os }}, ${{ matrix.shard }}/${{ matrix.shards }})
+    needs: test-build-macos
+    if: *full-run
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15]
+        shard: [1, 2, 3, 4]
+        shards: [4]
+    runs-on: ${{ matrix.os }}
+    steps: *test-steps
+
+  test-windows:
+    name: test (${{ matrix.os }}, ${{ matrix.shard }}/${{ matrix.shards }})
+    needs: test-build-windows
+    if: *full-run
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2025]
+        shard: [1, 2, 3, 4, 5]
+        shards: [5]
+    runs-on: ${{ matrix.os }}
+    steps: *test-steps
+
+  coverage-build:
+    # The instrumented test binaries, in the `ci` profile like the tests. cargo-llvm-cov builds
+    # into `coverage/target`, a directory named `target`, so the shards can extract the archive
+    # back to the path the binaries were built at.
+    name: build coverage tests
     if: *full-run
     runs-on: ubuntu-24.04
+    env:
+      CARGO_LLVM_COV_TARGET_DIR: coverage/target
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -121,23 +245,115 @@ jobs:
         with:
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
         with:
-          tool: cargo-llvm-cov
+          workspaces: ". -> coverage/target"
+      - &install-llvm-cov
+        uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
+        with:
+          tool: cargo-llvm-cov@0.9.1,cargo-nextest@0.9.152
+      - run: >-
+          cargo llvm-cov nextest-archive --workspace --locked --cargo-profile ci
+          --archive-file coverage-tests.tar.zst
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-tests
+          path: coverage-tests.tar.zst
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  coverage-test:
+    # A shard of the instrumented tests, as in `test`. Every process writes its counters into
+    # its own raw profile (cargo-llvm-cov's file pattern); the shard merges them into one.
+    name: coverage tests (${{ matrix.shard }}/${{ matrix.shards }})
+    needs: coverage-build
+    if: *full-run
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
+        shards: [6]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # `llvm-profdata` of the toolchain the binaries were built with.
+      - uses: dtolnay/rust-toolchain@92e73e19cbfb3981e63ef478a16f95f415e634d3 # 1.99.0
+        with:
+          components: llvm-tools-preview
+      - *install-nextest
       - id: python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.15"
           allow-prereleases: true
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: coverage-tests
+      - name: Run the shard
+        env:
+          HEKI_TEST_PYTHON: ${{ steps.python.outputs.python-path }}
+          PARTITION: count:${{ matrix.shard }}/${{ matrix.shards }}
+          LLVM_PROFILE_FILE: ${{ github.workspace }}/coverage/target/heki-%p-%14m.profraw
+        run: |
+          mkdir -p coverage
+          cargo nextest run --archive-file coverage-tests.tar.zst --extract-to coverage \
+            --extract-overwrite --workspace-remap . --partition "$PARTITION" --no-fail-fast
+      - name: Merge the shard's profiles
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          llvm_profdata="$(rustc --print target-libdir)/../bin/llvm-profdata"
+          find coverage/target -maxdepth 1 -name '*.profraw' > profraw-list
+          "$llvm_profdata" merge -sparse -f profraw-list -o "coverage-$SHARD.profdata"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-profile-${{ matrix.shard }}
+          path: coverage-*.profdata
+          if-no-files-found: error
+          retention-days: 1
+
+  coverage:
+    name: coverage (100% lines)
+    needs: coverage-test
+    if: *full-run
+    runs-on: ubuntu-24.04
+    env:
+      CARGO_LLVM_COV_TARGET_DIR: coverage/target
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@92e73e19cbfb3981e63ef478a16f95f415e634d3 # 1.99.0
+        with:
+          components: llvm-tools-preview
+      - *install-llvm-cov
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: coverage-tests
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: coverage-profile-*
+          path: profiles
+          merge-multiple: true
+      # The report reads the binaries where they were built, and merges every `*.profraw` of
+      # its target directory with `llvm-profdata merge`, which also reads the shards' merged
+      # (indexed) profiles.
+      - name: Unpack the binaries and the shards' profiles
+        run: |
+          mkdir -p coverage
+          tar --zstd -xf coverage-tests.tar.zst -C coverage
+          for profile in profiles/*.profdata; do
+            cp "$profile" "coverage/target/$(basename "$profile" .profdata).profraw"
+          done
       # Every line is covered except 3 that cannot run: the `_ => {}` arms for assignment,
       # augmented-assignment and `del` targets in `heki_ir/src/builder.rs`, which ruff's parser
       # rejects (see `docs/development.md`). Lower the limit whenever one goes away.
-      - run: cargo llvm-cov --workspace --lcov --output-path lcov.info --fail-uncovered-lines 3
-        env:
-          HEKI_TEST_PYTHON: ${{ steps.python.outputs.python-path }}
+      - run: cargo llvm-cov report --profile ci --lcov --output-path lcov.info --fail-uncovered-lines 3
       # On failure too: the summary lists the uncovered lines, the artifact has the full report.
       - if: always()
-        run: cargo llvm-cov report --summary-only --show-missing-lines
+        run: cargo llvm-cov report --profile ci --summary-only --show-missing-lines
       - if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -184,8 +400,14 @@ jobs:
           python tests/oracle/run_oracle.py --heki target/debug/heki --seeds 200 --jobs 4 --time-limit 300 --out "$RUNNER_TEMP/oracle" --fail-on-refutation
 
   memory:
-    name: peak memory
+    # Shard 1 measures the peak memory; both shards run half of the generated shapes of the
+    # analysis-cost gate (`--shard`), each after its own calibration.
+    name: peak memory and analysis cost (${{ matrix.shard }}/2)
     if: *full-run
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -198,50 +420,24 @@ jobs:
       # generated project: fails when one's peak heap exceeds its budget in the script. The
       # counting build reads the same bytes on every run.
       - name: Peak heap within budget
+        if: matrix.shard == 1
         run: python3 scripts/check_memory.py --heki target/release/heki
       # Generated shapes at the largest size heki models, in a function, a method, and a module
       # body: fails when one costs more than 1 s (scaled to the runner by a fixed linear shape on
       # the same build) or 1 GiB of heap beyond an empty module, or when an owner's walk steps
       # grow faster than linearly.
       - name: Analysis cost of generated shapes
-        run: python3 scripts/check_walk_shapes.py --heki target/release/heki
+        env:
+          SHARD: ${{ matrix.shard }}/2
+        run: python3 scripts/check_walk_shapes.py --heki target/release/heki --shard "$SHARD"
       # At release time (release.yml calls this workflow), and on a manual run: the peak RSS of
       # a release build, which also holds the allocator's fragmentation and mappings, under a
       # coarse budget.
-      - if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
+      - if: matrix.shard == 1 && (github.event_name == 'release' || github.event_name == 'workflow_dispatch')
         run: cargo build --release -p heki
       - name: Peak RSS within budget
-        if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
+        if: matrix.shard == 1 && (github.event_name == 'release' || github.event_name == 'workflow_dispatch')
         run: python3 scripts/check_memory.py --heki target/release/heki --measure rss
-
-  sdist:
-    name: source distribution tests
-    if: *full-run
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
-        with:
-          command: sdist
-          args: --out dist
-      - uses: dtolnay/rust-toolchain@92e73e19cbfb3981e63ef478a16f95f415e634d3 # 1.99.0
-      - id: python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.15"
-          allow-prereleases: true
-      # Platforms without a wheel build from the source distribution, and packagers run its
-      # tests: it must carry every file the build and the tests embed or read. Running them on
-      # every pull request keeps a missing file from failing only the release.
-      - name: The tests pass in the unpacked source distribution
-        env:
-          HEKI_TEST_PYTHON: ${{ steps.python.outputs.python-path }}
-        run: |
-          mkdir sdist-tree
-          tar -xzf dist/*.tar.gz -C sdist-tree --strip-components 1
-          cargo test --workspace --locked --manifest-path sdist-tree/Cargo.toml
 
   release-scripts:
     # The release workflows run only on main or for a release, so their scripts are tested here,
@@ -299,7 +495,23 @@ jobs:
     # The one required check: every job passed, or, in the middle of a stack, every job but the
     # always-on ones was skipped.
     if: always()
-    needs: [fmt, clippy, architecture, test, coverage, cpython, memory, sdist, release-scripts, pre-commit-hook]
+    needs:
+      - fmt
+      - clippy
+      - architecture
+      - test-build-linux
+      - test-build-macos
+      - test-build-windows
+      - test-linux
+      - test-macos
+      - test-windows
+      - coverage-build
+      - coverage-test
+      - coverage
+      - cpython
+      - memory
+      - release-scripts
+      - pre-commit-hook
     runs-on: ubuntu-24.04
     steps:
       - name: Every job passed or was skipped as the stack position allows

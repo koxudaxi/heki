@@ -32,6 +32,22 @@ $ cargo llvm-cov --workspace --show-missing-lines --fail-uncovered-lines 3
   completely from one side: end to end for analysis code, unit tests only for small guard
   functions.
 
+### In CI
+
+```console
+$ cargo nextest run --workspace --cargo-profile ci
+```
+
+- CI builds the tests once per platform in the `ci` profile of `Cargo.toml` (the workspace crates
+  as in `dev`, the dependencies optimized) and runs them in parallel shards with
+  [cargo-nextest](https://nexte.st), each test in a process of its own. A test that holds a long
+  sequence of steps, such as the language server's editing sessions, is split into independent
+  tests, so the shards stay short.
+- On Linux the tests are built and run from the unpacked source distribution, which must
+  therefore carry every file they embed or read (`include` in `pyproject.toml`).
+- Coverage runs the same way, in the same profile, whose workspace crates give the report the
+  lines of `dev`: each shard merges its profiles, and one job reports and enforces the limit.
+
 ## Checks against CPython
 
 ```console
@@ -225,17 +241,18 @@ $ python3 scripts/check_walk_shapes.py --heki target/release/heki
 ```
 
 `scripts/check_walk_shapes.py` runs generated shapes on the release binary, and CI runs it next to
-the memory gate. A shape that lives in one function is placed in a function, a method, and a module
-body, and grown to the largest size whose function the IR budget still models, so a builder change
-moves the size with it; a shape spread over a project (a wide class hierarchy, a chain of private
-helpers, thousands of argument lists) has a fixed size, and so has a shape in one function whose
-cost already shows at a smaller size, where the walks it does not gate stay cheap. Each runs with
-every rule and one contract of each kind (a family may add its own), through `heki check` and the
-`--watch` engine, and fails when it costs more than 1 s (on the machine the limits were measured on,
-scaled to the machine running the gate by linear shapes of calls and of loops) or 1 GiB beyond an
-empty module. `heki check --walk-steps <path>` (hidden) writes the steps each owner's walks took per
-function as JSON: the gate also fails when an owner's steps grow more than 2.5 times from half the
-size to the full size, or when a budget is spent on a shape like real code.
+the memory gate, in two jobs that each run half of the shapes (`--shard 1/2` and `--shard 2/2`).
+A shape that lives in one function is placed in a function, a method, and a module body, and grown
+to the largest size whose function the IR budget still models, so a builder change moves the size
+with it; a shape spread over a project (a wide class hierarchy, a chain of private helpers,
+thousands of argument lists) has a fixed size, and so has a shape in one function whose cost
+already shows at a smaller size, where the walks it does not gate stay cheap. Each runs with every
+rule and one contract of each kind (a family may add its own), through `heki check` and the
+`--watch` engine, and fails when it costs more than 1 s (on the machine the limits were measured
+on, scaled to the machine running the gate by linear shapes of calls and of loops) or 1 GiB beyond
+an empty module. `heki check --walk-steps <path>` (hidden) writes the steps each owner's walks took
+per function as JSON: the gate also fails when an owner's steps grow more than 2.5 times from half
+the size to the full size, or when a budget is spent on a shape like real code.
 `KNOWN_OVER` in the script lists the shapes known to cost more, and only shrinks: a listed shape
 runs only through `heki check` (not the `--watch` engine), with a short timeout, and fails the gate
 once it costs under a quarter of the limits. `KNOWN_STEPS` lists, the same way, the shapes whose
