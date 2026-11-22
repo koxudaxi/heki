@@ -497,10 +497,12 @@ impl ModuleBindings {
                 {
                     continue;
                 }
+                // `from . import json` binds the package's own module, not `json`.
                 if let Some(InstKind::Import {
                     module: None,
                     name: imported,
                     is_lazy: false,
+                    relative: false,
                     ..
                 }) = ix.source(*value).map(|i| &i.kind)
                 {

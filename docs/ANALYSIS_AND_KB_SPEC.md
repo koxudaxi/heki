@@ -238,7 +238,8 @@ Compound expressions are flattened into **basic instructions in explicit left-to
   - `FnIndex::decided` (`Decided`): a branch whose test the code fixes never takes its other
     side, and code only that side reaches is dead for every fact. The tests are literals, module
     constants (`ModuleConstants::ints`, `strs`, `bools`, and `typing.TYPE_CHECKING`, which is
-    false whenever the code runs), `not`, `==` / `!=` / `is` of two such values, and the phis of
+    false whenever the code runs; a relative import, `from .typing import TYPE_CHECKING`, names
+    the package's own module and fixes nothing), `not`, `==` / `!=` / `is` of two such values, and the phis of
     `and` / `or` along the edges that can run (one pass in reverse postorder: a phi's input along
     a back edge leaves it undecided).
   - Exception edges: an instruction raises into its block's handler unless the assumptions every
@@ -246,7 +247,8 @@ Compound expressions are flattened into **basic instructions in explicit left-to
     as configured, the catalog describes the library, and no asynchronous or resource-exhaustion
     exception arises (`KeyboardInterrupt`, `MemoryError`). A load of a module name the module
     body binds once on every path (`ModuleBindings`) or of a real builtin does not raise, nor does
-    an attribute load of a member of a module a plain `import` binds once, nor a list or tuple
+    an attribute load of a member of a module a plain `import` binds once (`from . import json`
+    binds the package's own module, `InstKind::Import::relative`), nor a list or tuple
     display without unpacking. Attribute loads of other objects (unless the reader finds the
     attribute on the object's class, `PathReader::attribute_found`: a catalog method, or a
     project method no decorator replaces, where no class the object may be under R2, a project
