@@ -359,8 +359,14 @@ impl<'a> FnShape<'a> {
     /// Whether `b` is in the body of `lp`, one of `f.loops`. The builder gives each loop a
     /// header block of its own, which debug builds check, so the header names the loop.
     pub fn in_body(&self, lp: &NaturalLoop, b: BlockId) -> bool {
-        let headed = self.loops_table().headed.get(lp.header.0 as usize);
-        headed.is_some_and(|&li| self.in_loop(li as usize, b))
+        self.index_of(lp).is_some_and(|li| self.in_loop(li, b))
+    }
+
+    /// The index of `lp`, one of `f.loops`, into `f.loops`: its header names it
+    /// ([`Self::in_body`]).
+    pub fn index_of(&self, lp: &NaturalLoop) -> Option<usize> {
+        let li = *self.loops_table().headed.get(lp.header.0 as usize)?;
+        (li != u32::MAX).then_some(li as usize)
     }
 
     /// The deepest loop whose body holds `b` (the last listed of equally deep ones), as an

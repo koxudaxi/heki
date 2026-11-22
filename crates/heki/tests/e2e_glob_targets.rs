@@ -173,26 +173,26 @@ fn a_glob_call_target_names_members_and_reports_name_what_they_matched() {
     // Reads name the attribute of the class they read.
     assert_eq!(
         message(5, "MUT203"),
-        "`typed` reads `pkg.types.DataType._flag` (direct_attr) inside the forbidden readers of `host-private`"
+        "`typed` reads `pkg.types.DataType._flag` (by attribute) inside the forbidden readers of `host-private`"
     );
     // One report of a glob target stands for every member a helper writes; it names the first
     // and lists the others. A literal target is named as configured.
     assert_eq!(
         message(25, "MUT201"),
-        "`writes` writes `pkg.types.DataType._flag` (direct_attr) via `pkg.parser._concern._both` outside the write owners of `flags` (also `pkg.types.DataType._mark`)"
+        "`writes` writes `pkg.types.DataType._flag` (by attribute) via `pkg.parser._concern._both` outside the write owners of `flags` (also `pkg.types.DataType._mark`)"
     );
     assert_eq!(
         message(25, "MUT109"),
-        "`writes` writes `pkg.types.DataType._flag` (direct_attr) via `pkg.parser._concern._both` and returns on some path without calling an invalidator of `revisions` (also `pkg.types.DataType._mark`)"
+        "`writes` writes `pkg.types.DataType._flag` (by attribute) via `pkg.parser._concern._both` and returns on some path without calling an invalidator of `revisions` (also `pkg.types.DataType._mark`)"
     );
     assert_eq!(
         message(26, "MUT201"),
-        "`writes` writes `DataType.name` (direct_attr) outside the write owners of `flags`"
+        "`writes` writes `DataType.name` (by attribute) outside the write owners of `flags`"
     );
     // The key of an entry target is no glob.
     assert_eq!(
         message(35, "MUT201"),
-        "`tag` writes `DataType.tags[\"k\"]` (container_mut) outside the write owners of `flags`"
+        "`tag` writes `DataType.tags[\"k\"]` (in place) outside the write owners of `flags`"
     );
 }
 

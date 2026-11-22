@@ -6,7 +6,7 @@
 //! A phi's incoming value is used at the end of its predecessor, not at the phi's block.
 
 use crate::interpreter::term_use;
-use heki_ir::walk::FnShape;
+use heki_ir::walk::{Answer, Budget, Facts, FnShape, Join, Sparse, fixpoint};
 use heki_ir::{BlockId, IrFunction, VarId};
 
 /// Dense bit set over `VarId`s.
@@ -48,6 +48,16 @@ impl VarSet {
     }
 }
 
+impl Join for VarSet {
+    fn join(&mut self, other: &Self) -> bool {
+        self.union_with(other)
+    }
+
+    fn weight(&self) -> usize {
+        self.0.len().max(1)
+    }
+}
+
 pub(crate) struct Liveness {
     /// Live at the end of each block, on its normal-flow edges.
     live_out: Vec<VarSet>,
@@ -56,15 +66,18 @@ pub(crate) struct Liveness {
 }
 
 impl Liveness {
-    pub fn compute(shape: &FnShape<'_>) -> Self {
+    /// Open past the budget of the function.
+    pub fn compute(shape: &FnShape<'_>) -> Answer<Self> {
         let f = shape.f;
         let nvars = f.var_names.len();
         let n = f.blocks.len();
-        let mut live_in = vec![VarSet::new(nvars); n];
-        let mut live_out = vec![VarSet::new(nvars); n];
-        let mut live_at_raise = vec![VarSet::new(nvars); n];
-        let entering = |live_in: &[VarSet], b: BlockId, s: BlockId| {
-            let mut live = live_in[s.0 as usize].clone();
+        // The blocks the entry reaches, in postorder, so that a block is first visited after
+        // its successors.
+        let order: Vec<BlockId> = shape.rpo().iter().rev().copied().collect();
+        let node = |b: BlockId| shape.rpo_index(b).map(|i| order.len() - 1 - i as usize);
+        let entering = |live_in: &Facts<VarSet>, b: BlockId, s: BlockId| {
+            let mut live = (node(s).and_then(|i| live_in.get(i)).cloned())
+                .unwrap_or_else(|| VarSet::new(nvars));
             for phi in &f.block(s).phis {
                 for &(p, v) in &phi.incoming {
                     if p == b {
@@ -74,42 +87,50 @@ impl Liveness {
             }
             live
         };
-        loop {
-            let mut changed = false;
-            for &b in shape.rpo().iter().rev() {
-                let bi = b.0 as usize;
-                let bb = f.block(b);
-                let mut out = VarSet::new(nvars);
-                for s in bb.terminator.successors() {
-                    out.union_with(&entering(&live_in, b, s));
-                }
-                let at_raise = bb
-                    .exc_target
-                    .map_or_else(|| VarSet::new(nvars), |e| entering(&live_in, b, e));
-                let inn = Self::backward(bb, out.clone(), &at_raise, bb.insts.len());
-                let inn = bb.phis.iter().fold(inn, |mut live, phi| {
-                    live.remove(phi.dst);
-                    live
-                });
-                for (slot, new) in [
-                    (&mut live_out[bi], out),
-                    (&mut live_at_raise[bi], at_raise),
-                    (&mut live_in[bi], inn),
-                ] {
-                    if *slot != new {
-                        *slot = new;
-                        changed = true;
-                    }
-                }
+        // What is live at the end of `b` on its normal edges, and where it may raise.
+        let exits = |live_in: &Facts<VarSet>, b: BlockId| {
+            let bb = f.block(b);
+            let mut out = VarSet::new(nvars);
+            for s in bb.terminator.successors() {
+                out.union_with(&entering(live_in, b, s));
             }
-            if !changed {
-                break;
+            let at_raise = bb
+                .exc_target
+                .map_or_else(|| VarSet::new(nvars), |e| entering(live_in, b, e));
+            (out, at_raise)
+        };
+        let transfer = |i: usize, live_in: &Facts<VarSet>| {
+            let bb = f.block(order[i]);
+            let (out, at_raise) = exits(live_in, order[i]);
+            let inn = Self::backward(bb, out, &at_raise, bb.insts.len());
+            Some(bb.phis.iter().fold(inn, |mut live, phi| {
+                live.remove(phi.dst);
+                live
+            }))
+        };
+        let readers = |i: usize, out: &mut Vec<usize>| {
+            out.extend(shape.preds(order[i]).iter().filter_map(|p| node(*p)));
+        };
+        // A block is visited once, then once per variable a successor's set gains.
+        let spec = Sparse {
+            nodes: order.len(),
+            readers: &readers,
+            max_visits: u32::try_from(1 + 3 * (1 + nvars)).unwrap_or(u32::MAX),
+        };
+        let budget = Budget::of_function("soundness::Liveness", f);
+        fixpoint(&budget, spec, transfer).map(|live_in| {
+            let mut live_out = vec![VarSet::new(nvars); n];
+            let mut live_at_raise = vec![VarSet::new(nvars); n];
+            for &b in &order {
+                let (out, at_raise) = exits(&live_in, b);
+                live_out[b.0 as usize] = out;
+                live_at_raise[b.0 as usize] = at_raise;
             }
-        }
-        Self {
-            live_out,
-            live_at_raise,
-        }
+            Self {
+                live_out,
+                live_at_raise,
+            }
+        })
     }
 
     /// Walk the `last` instructions of `bb` backward from its end: `live` is what its normal

@@ -15,7 +15,11 @@ $ heki check --fix --profile profile.txt         # size-dependent rewrites in ho
 
 - A fix comes with a report: `--fix` applies only the fixes of the reports shown. A report whose
   rewrite heki proves safe is [exact](precision.md#certifications) and shown by default, so a
-  run without configuration applies the fixes of `OPT101` and `OPT102`.
+  run without configuration applies the fixes of `OPT101` and `OPT102`. A size-dependent one is
+  exact only over a loop the data sizes (its items are a parameter, the rows of a query, the
+  lines of a file, or the entries of a directory, and the code does not fix their number); over
+  another loop it is heuristic, and its fix applies with `--heuristic` or when its rule is
+  selected.
 - `--diff` takes the same flags as `--fix` and writes nothing.
 - `--include-size-dependent` applies the size-dependent rewrites in every function, with or
   without `--profile`.
@@ -44,8 +48,8 @@ Two independent questions decide whether heki offers the rewrite:
 | Profitability | Rules | Certainty | Applied by |
 | ------------- | ----- | --------- | ---------- |
 | Unconditional (faster from the first iteration) | `OPT101`, `OPT102` | exact (the proven reports) | `heki check --fix` |
-| Size-dependent | `OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130` | exact (the proven reports) | `heki check --fix --include-size-dependent`, or `--fix --profile <dump>` in hot functions |
-| Size-dependent, no rewrite | `OPT103`, `OPT112`, `OPT113` | `OPT103` exact (the proven reports), `OPT113` exact (its exact tier), `OPT112` heuristic | none: suggestion only |
+| Size-dependent | `OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130` | exact (the proven reports over a loop the data sizes) | `heki check --fix --include-size-dependent`, or `--fix --profile <dump>` in hot functions |
+| Size-dependent, no rewrite | `OPT103`, `OPT112`, `OPT113` | `OPT103` exact (the proven reports over a loop the data sizes), `OPT113` exact (its exact tier), `OPT112` heuristic | none: suggestion only |
 
 ### When the size is fixed
 
@@ -135,6 +139,9 @@ Would fix 1 issue(s) in 1 file(s).
 
 - An annotation the fix cannot rewrite (`Sequence[int]`, a union), or another annotated
   declaration of the variable, blocks the fix.
+- So does a variable the list reaches that is also bound to another object (`s = [...]` before
+  `s = queue`, or a parameter `s`): a type checker gives the variable one type, which would
+  not accept the deque.
 - `import collections` goes into the module's block of standard-library imports, in the order
   that block follows: straight imports first, or sorted by module as with
   `force-sort-within-sections`.

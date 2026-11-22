@@ -12,8 +12,8 @@
 //! nothing kept so far, under conditions on the callees, which propagation resolves.
 
 use crate::{FuncKey, NewArg, NewCond, NewKind};
-use heki_ir::walk::FnShape;
-use heki_ir::{InstKind, IrFunction, VarId};
+use heki_ir::walk::{Answer, Budget, Closure, Def, Facts, FnShape, Join, Or, Sparse, fixpoint};
+use heki_ir::{InstKind, VarId};
 use rustc_hash::FxHashMap;
 
 /// Position of an instruction: block, index in the block (`insts.len()` for the terminator).
@@ -57,13 +57,9 @@ struct State {
     handed: Vec<(u64, u64)>,
 }
 
-impl State {
-    fn join(&mut self, other: &Self) {
-        self.absorb(other);
-    }
-
-    /// `self |= other`; whether it grew.
-    fn absorb(&mut self, other: &Self) -> bool {
+/// What may be kept on some path: the union of the states joined.
+impl Join for State {
+    fn join(&mut self, other: &Self) -> bool {
         let before = (self.allocs, self.params);
         self.allocs |= other.allocs;
         self.params |= other.params;
@@ -75,6 +71,10 @@ impl State {
             grew |= was != *a;
         }
         grew
+    }
+
+    fn weight(&self) -> usize {
+        1 + self.handed.len()
     }
 }
 
@@ -143,8 +143,6 @@ impl Recorder {
             return (Vec::new(), None);
         }
         let f = shape.f;
-        let roots = self.roots(f, may_params, param_of);
-        let trackable = |v: VarId| roots.may.contains_key(&v) || param_of(v).is_some();
         let returned: Vec<(Pos, VarId)> = if returns {
             f.blocks
                 .iter()
@@ -158,20 +156,37 @@ impl Recorder {
         } else {
             Vec::new()
         };
+        let asked = (self.queries.iter().map(|(_, v)| *v))
+            .chain(returned.iter().map(|(_, v)| *v))
+            .chain(self.escapes.iter().map(|(_, v, _)| *v));
+        let budget = Budget::of_function("construction::Recorder", f);
+        // Past the budget, no object is known to be new, as past the allocations recorded.
+        let Answer::Known(roots) = self.roots(shape, &budget, asked, may_params, param_of) else {
+            return (vec![NewArg::Old; self.queries.len()], None);
+        };
+        let trackable = |v: VarId| roots.may.contains_key(&v) || param_of(v).is_some();
         let any_return_new = !returned.is_empty() && returned.iter().all(|(_, v)| trackable(*v));
         if !self.queries.iter().any(|(_, v)| trackable(*v)) && !any_return_new {
             return (vec![NewArg::Old; self.queries.len()], None);
         }
-        // Hand-over ids.
-        let mut handed_ids: FxHashMap<(u32, u16, u8), usize> = FxHashMap::default();
-        let mut handed_keys: Vec<(u32, u16, u8)> = Vec::new();
+        // Hand-over ids, one per callee and parameter: the answers name only those, so the
+        // calls of one helper share a hand-over.
+        let mut handed_ids: FxHashMap<(FuncKey, u8), usize> = FxHashMap::default();
+        let mut handed_keys: Vec<(FuncKey, u8)> = Vec::new();
+        let mut escape_ids: Vec<Option<usize>> = Vec::with_capacity(self.escapes.len());
         for (_, _, how) in &self.escapes {
-            if let Escape::Handed(s, c, p) = how
-                && !handed_ids.contains_key(&(*s, *c, *p))
-            {
-                handed_ids.insert((*s, *c, *p), handed_keys.len());
-                handed_keys.push((*s, *c, *p));
-            }
+            escape_ids.push(match how {
+                Escape::Definite => None,
+                Escape::Handed(s, c, p) => {
+                    let key = (callee_of(*s, *c), *p);
+                    let next = handed_keys.len();
+                    let id = *handed_ids.entry(key.clone()).or_insert(next);
+                    if id == next {
+                        handed_keys.push(key);
+                    }
+                    Some(id)
+                }
+            });
         }
         // Every action in position order (queries, escapes, kills at one position), and the
         // range of each block's actions.
@@ -185,11 +200,7 @@ impl Recorder {
         for (i, (pos, _)) in returned.iter().enumerate() {
             actions.push((*pos, 0, Action::Query(self.queries.len() + i)));
         }
-        for (pos, var, how) in &self.escapes {
-            let id = match how {
-                Escape::Definite => None,
-                Escape::Handed(s, c, p) => Some(handed_ids[&(*s, *c, *p)]),
-            };
+        for ((pos, var, _), id) in self.escapes.iter().zip(escape_ids) {
             actions.push((*pos, 1, Action::Escape(*var, id)));
         }
         for (r, a) in self.allocs.iter().enumerate() {
@@ -234,47 +245,74 @@ impl Recorder {
             }
             Action::Query(_) => {}
         };
-        // The forward data flow to a fixpoint (states only grow: kills apply inside a block).
-        // The two buffers are reused, so the iterations allocate nothing.
-        let mut block_in: Vec<State> = vec![empty.clone(); n];
-        let (mut state, mut exc) = (empty.clone(), empty);
-        loop {
-            let mut changed = false;
-            for &b in shape.rpo() {
-                let bi = b.0 as usize;
-                state.clone_from(&block_in[bi]);
-                exc.clone_from(&state);
-                for (_, _, action) in of(bi) {
-                    apply(&mut state, action);
-                    exc.join(&state);
+        // The forward data flow over the blocks the entry reaches, in reverse postorder: the
+        // state on entering a block joins what each predecessor may have kept on its way out,
+        // through its normal edges, and at any of its points through its exception edge. Kills
+        // apply inside a block, so the states only grow.
+        let rpo = shape.rpo();
+        let node = |b: heki_ir::BlockId| shape.rpo_index(b).map(|i| i as usize);
+        let out_of = |p: heki_ir::BlockId, facts: &Facts<State>| {
+            let mut state = node(p)
+                .and_then(|i| facts.get(i))
+                .map_or_else(|| empty.clone(), Clone::clone);
+            let mut exc = state.clone();
+            for (_, _, action) in of(p.0 as usize) {
+                apply(&mut state, action);
+                exc.join(&state);
+            }
+            (state, exc)
+        };
+        let transfer = |i: usize, facts: &Facts<State>| {
+            let b = rpo[i];
+            let mut entry = empty.clone();
+            for &p in shape.preds(b).iter().filter(|p| node(**p).is_some()) {
+                let (out, exc) = out_of(p, facts);
+                let pb = f.block(p);
+                if pb.terminator.successors().contains(&b) {
+                    entry.join(&out);
                 }
-                let block = f.block(b);
-                for succ in block.terminator.successors() {
-                    changed |= block_in[succ.0 as usize].absorb(&state);
-                }
-                if let Some(t) = block.exc_target {
-                    changed |= block_in[t.0 as usize].absorb(&exc);
+                if pb.exc_target == Some(b) {
+                    entry.join(&exc);
                 }
             }
-            if !changed {
-                break;
-            }
-        }
-        // Answer the queries with the state before each one.
+            Some(entry)
+        };
+        let readers = |i: usize, out: &mut Vec<usize>| {
+            out.extend(shape.succs(rpo[i]).filter_map(node));
+        };
+        // A block is visited once, then once per bit a predecessor's state gains.
+        let bits = 2 * 64 * (1 + handed_keys.len());
+        let most_preds = (rpo.iter().map(|b| shape.preds(*b).len()).max()).unwrap_or(0);
+        let spec = Sparse {
+            nodes: rpo.len(),
+            readers: &readers,
+            max_visits: u32::try_from(1 + most_preds * (1 + bits)).unwrap_or(u32::MAX),
+        };
+        // Past the budget, no object is known to be new, as past the roots' walk.
+        let Answer::Known(block_in) = fixpoint(&budget, spec, transfer) else {
+            return (vec![NewArg::Old; self.queries.len()], None);
+        };
+        // Answer the queries with the state before each one (a block the entry does not reach
+        // keeps nothing).
         let mut answers = vec![NewArg::Old; self.queries.len() + returned.len()];
-        for (bi, entry) in block_in.iter().enumerate() {
+        let mut state = empty.clone();
+        for (bi, block) in f.blocks.iter().enumerate() {
             let list = of(bi);
             if list.iter().all(|(_, _, a)| !matches!(a, Action::Query(_))) {
                 continue;
             }
-            state.clone_from(entry);
+            state.clone_from(
+                node(block.id)
+                    .and_then(|i| block_in.get(i))
+                    .unwrap_or(&empty),
+            );
             for (_, _, action) in list {
                 if let Action::Query(i) = action {
                     let var = match self.queries.get(*i) {
                         Some((_, v)) => *v,
                         None => returned[*i - self.queries.len()].1,
                     };
-                    answers[*i] = self.answer(&roots, &state, &handed_keys, callee_of, var);
+                    answers[*i] = self.answer(&roots, &state, &handed_keys, var);
                 } else {
                     apply(&mut state, action);
                 }
@@ -298,93 +336,67 @@ impl Recorder {
         (answers, returns_new)
     }
 
-    /// The allocation roots of every variable, through copies and phis (a monotone fixpoint).
+    /// The allocation roots each of `asked` may hold, through copies and phis: `may`, the roots
+    /// of every value a value reaches through their inputs, and `all`, whether every value on the
+    /// way holds allocations only. Open past the budget.
     fn roots<'f>(
         &self,
-        f: &IrFunction,
+        shape: &FnShape<'_>,
+        budget: &Budget,
+        asked: impl Iterator<Item = VarId>,
         may_params: &'f FxHashMap<VarId, u64>,
         param_of: &'f dyn Fn(VarId) -> Option<u8>,
-    ) -> Roots<'f> {
-        let mut may: FxHashMap<VarId, u64> = FxHashMap::default();
-        for (r, a) in self.allocs.iter().enumerate() {
-            *may.entry(a.dst).or_default() |= 1u64 << r;
-        }
-        if may.is_empty() {
-            return Roots {
-                may,
-                all: FxHashMap::default(),
-                may_params,
-                param_of,
-            };
-        }
-        // Copies and phis (phi inputs other than the phi itself).
-        let mut copies: Vec<(VarId, VarId)> = Vec::new();
-        let mut phis: Vec<&heki_ir::PhiNode> = Vec::new();
-        for bb in &f.blocks {
-            phis.extend(&bb.phis);
-            for inst in &bb.insts {
-                if let InstKind::Copy { dst, src } = &inst.kind {
-                    copies.push((*dst, *src));
-                }
-            }
-        }
-        let inputs = |phi: &heki_ir::PhiNode| {
-            let dst = phi.dst;
-            phi.incoming
-                .iter()
-                .map(|(_, v)| *v)
-                .filter(move |v| *v != dst)
-                .collect::<Vec<_>>()
-        };
-        let phi_inputs: Vec<(VarId, Vec<VarId>)> =
-            phis.iter().map(|p| (p.dst, inputs(p))).collect();
-        let flows = || {
-            copies
-                .iter()
-                .map(|(d, s)| (*d, std::slice::from_ref(s)))
-                .chain(phi_inputs.iter().map(|(d, i)| (*d, i.as_slice())))
-        };
-        // `may`: a union over every input, to the least fixpoint.
-        loop {
-            let mut changed = false;
-            for (dst, inputs) in flows() {
-                let bits = inputs
-                    .iter()
-                    .fold(0, |acc, v| acc | may.get(v).copied().unwrap_or(0));
-                if bits != 0 {
-                    let slot = may.entry(dst).or_default();
-                    if *slot | bits != *slot {
-                        *slot |= bits;
-                        changed = true;
-                    }
-                }
-            }
-            if !changed {
-                break;
-            }
-        }
-        // `all`: every input holds allocations only, to the greatest fixpoint.
-        let mut all: FxHashMap<VarId, bool> = may.keys().map(|v| (*v, true)).collect();
-        loop {
-            let mut changed = false;
-            for (dst, inputs) in flows() {
-                if all.get(&dst) == Some(&true)
-                    && !inputs.iter().all(|v| all.get(v).copied().unwrap_or(false))
-                {
-                    all.insert(dst, false);
-                    changed = true;
-                }
-            }
-            if !changed {
-                break;
-            }
-        }
-        Roots {
-            may,
-            all,
+    ) -> Answer<Roots<'f>> {
+        let mut roots = Roots {
+            may: FxHashMap::default(),
+            all: FxHashMap::default(),
             may_params,
             param_of,
+        };
+        let mut own: FxHashMap<VarId, u64> = FxHashMap::default();
+        for (r, a) in self.allocs.iter().enumerate() {
+            *own.entry(a.dst).or_default() |= 1u64 << r;
         }
+        if own.is_empty() {
+            return Answer::Known(roots);
+        }
+        let f = shape.f;
+        // A copy's source, a phi's inputs other than itself.
+        let inputs = |v: VarId, out: &mut Vec<VarId>| match shape.def(v) {
+            Def::Inst(b, i) => {
+                if let InstKind::Copy { src, .. } = f.block(b).insts[i as usize].kind {
+                    out.push(src);
+                }
+            }
+            Def::Phi(b, i) => out.extend(
+                (f.block(b).phis[i as usize].incoming.iter().map(|(_, x)| *x)).filter(|x| *x != v),
+            ),
+            Def::Param | Def::None => {}
+        };
+        let held: Closure<VarId, Or> = Closure::new();
+        let may = |v: VarId| {
+            let own = |u: VarId| Or(own.get(&u).copied().unwrap_or(0));
+            held.ask(budget, v, own, inputs).map(|bits| bits.0)
+        };
+        let lacking: Closure<VarId, bool> = Closure::new();
+        for v in asked {
+            // A value on the way that holds no allocation.
+            let none = |u: VarId| !matches!(may(u), Answer::Known(b) if b != 0);
+            let held = may(v).and_then(|bits| {
+                if bits == 0 || roots.may.contains_key(&v) {
+                    return Answer::Known(None);
+                }
+                (lacking.ask(budget, v, none, inputs)).map(|lacks| Some((bits, !*lacks)))
+            });
+            let Answer::Known(held) = held else {
+                return Answer::Open;
+            };
+            if let Some((bits, all)) = held {
+                roots.may.insert(v, bits);
+                roots.all.insert(v, all);
+            }
+        }
+        Answer::Known(roots)
     }
 
     /// Whether `var` holds, at a point with escape state `state`, a new object or a parameter
@@ -393,8 +405,7 @@ impl Recorder {
         &self,
         roots: &Roots<'_>,
         state: &State,
-        handed_keys: &[(u32, u16, u8)],
-        callee_of: &dyn Fn(u32, u16) -> FuncKey,
+        handed_keys: &[(FuncKey, u8)],
         var: VarId,
     ) -> NewArg {
         let (a, p) = roots.masks(var);
@@ -406,8 +417,7 @@ impl Recorder {
         let mut keeps = Vec::new();
         for (i, (ha, hp)) in state.handed.iter().enumerate() {
             if ha & a != 0 || hp & p != 0 {
-                let (s, c, k) = handed_keys[i];
-                keeps.push((callee_of(s, c), k));
+                keeps.push(handed_keys[i].clone());
             }
         }
         if let Some(param) = param {
