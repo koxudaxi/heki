@@ -265,7 +265,7 @@ report names the missing obligation instead of offering a fix. See [Fixes and sa
 - 🎯 See what heki [covers and does not cover](https://heki.koxudaxi.dev/scope/).
 - 📦 [Install heki](https://heki.koxudaxi.dev/installation/) and 🚀 [run it on a project](https://heki.koxudaxi.dev/getting-started/).
 - ⚙️ [Configure](https://heki.koxudaxi.dev/configuration/) rule selection, contracts, and the Python version.
-- 📏 Browse the [40 rules](https://heki.koxudaxi.dev/rules/), and see [how precise each one is](https://heki.koxudaxi.dev/precision/).
+- 📏 Browse the [41 rules](https://heki.koxudaxi.dev/rules/), and see [how precise each one is](https://heki.koxudaxi.dev/precision/).
 - 🔧 Read how [fixes are proven safe](https://heki.koxudaxi.dev/fixes/).
 - 🪜 [Adopt it gradually](https://heki.koxudaxi.dev/adoption/) with a Ratchet baseline in CI.
 - 🖥️ Use it from [your editor](https://heki.koxudaxi.dev/lsp/) or 🤖 [a coding agent](https://heki.koxudaxi.dev/coding-agents/).
@@ -689,8 +689,8 @@ The proofs heki can make, on five axes:
 
 | Axis | What heki establishes | Used by |
 | ---- | --------------------- | ------- |
-| Control flow | which statements can run after which: CFG paths, loops and their bounds, exception edges | `MUT106`, `MUT109`, `MUT113`, `EFF102`, `EFF103`, `EFF106`, `EFF109`, `EFF110`, `DATA101`, `OPT` |
-| Calls | which functions a call reaches across modules, and what they do (summaries propagated over the call graph) | `EFF101`, `EFF109`, `EFF110`, `EFF201`, `MUT103`, `MUT108`, `MUT109`, `MUT110`, `MUT112`, `MUT113`, `MUT201`–`MUT204` |
+| Control flow | which statements can run after which: CFG paths, loops and their bounds, exception edges | `MUT106`, `MUT109`, `MUT113`, `EFF102`, `EFF103`, `EFF106`, `EFF109`, `EFF110`, `EFF114`, `DATA101`, `OPT` |
+| Calls | which functions a call reaches across modules, and what they do (summaries propagated over the call graph) | `EFF101`, `EFF109`, `EFF110`, `EFF114`, `EFF201`, `MUT103`, `MUT108`, `MUT109`, `MUT110`, `MUT112`, `MUT113`, `MUT201`–`MUT204` |
 | Aliases | which names, iterators, and views refer to one object; whether it is unique to its frame and of an exact builtin type | `MUT202`, `MUT201`, `MUT204`, `MUT108`, `MUT110`, `MUT112`, `EFF107`, `EFF109`, `EFF110`, `OPT101`–`OPT130` |
 | Effects | which blocking, network, file, or database work runs, from the catalog of library behavior | `EFF101`–`EFF106`, `EFF201`, `DATA101` |
 | State | which attributes and containers a function reads, writes, or mutates, and who may do so | `MUT101`, `MUT107`, `MUT108`, `MUT109`, `MUT110`, `MUT111`, `MUT112`, `MUT113`, `MUT201`–`MUT204` |
@@ -1080,8 +1080,9 @@ supported version that every clause admits:
 - A run of `full` or `concise` output that leaves heuristic rules off, or heuristic reports out,
   says how many.
 - A prefix or `ALL` never enables the opt-in rules (`EFF105`, `EFF106`, `EFF107`, `EFF109`,
-  `EFF110`, `MUT101`, `MUT103`, `MUT106`, `MUT107`, `MUT108`, `MUT111`, `MUT112`, `MUT113`): they
-  need their exact code or name. In `ignore`, a prefix covers every rule it matches.
+  `EFF110`, `EFF114`, `MUT101`, `MUT103`, `MUT106`, `MUT107`, `MUT108`, `MUT111`, `MUT112`,
+  `MUT113`): they need their exact code or name. In `ignore`, a prefix covers every rule it
+  matches.
 - The command line wins: `--select` replaces `select`, `--extend-select` and `--ignore` add to the
   configured lists, and `--heuristic` / `--no-heuristic` replace `heuristic`.
 
@@ -2211,7 +2212,7 @@ Source: https://heki.koxudaxi.dev/rules/
 
 # Rules
 
-heki has 40 rules in four families. A rule is exact when it reports only what it established and was certified on the corpus, and heuristic (≈) when a report can be wrong about the code: [Rule Precision](https://heki.koxudaxi.dev/precision/) says how a rule is certified and what each one measured. Each rule's page says what a report states.
+heki has 41 rules in four families. A rule is exact when it reports only what it established and was certified on the corpus, and heuristic (≈) when a report can be wrong about the code: [Rule Precision](https://heki.koxudaxi.dev/precision/) says how a rule is certified and what each one measured. Each rule's page says what a report states.
 
 - The exact rules run by default, and for a prefix such as `EFF` or `ALL`. A report of an exact rule that did not establish every premise (an `OPT` report whose rewrite is not proven) is shown where a heuristic rule would run.
 - A heuristic rule runs when `select` / `extend-select` names its code or name. With `lint.heuristic = true` (`--heuristic`), the heuristic rules that are not opt-in also run by default and for a prefix or `ALL`.
@@ -2268,6 +2269,7 @@ Work that runs where it should not: blocking calls on the event loop, clients an
 | EFF107 | [unretained-async-task](https://heki.koxudaxi.dev/rules/unretained-async-task/) | Opt-in: an `asyncio.create_task` result bound to a local variable but never awaited, returned, or stored. | ≈ 🔌 |
 | EFF109 | [lock-reacquired-while-held](https://heki.koxudaxi.dev/rules/lock-reacquired-while-held/) | Opt-in: a non-reentrant lock (`threading.Lock`, `asyncio.Lock`) taken again, directly or through a call, while it is held (the thread or task waits for itself). | ≈ 🔌 🧪 |
 | EFF110 | [exclusive-object-fanout](https://heki.koxudaxi.dev/rules/exclusive-object-fanout/) | Opt-in: an object allowing one operation at a time (`asyncio.StreamReader`, an asyncpg connection, a WebSocket) used by tasks started together (`asyncio.gather`, a task group). | ≈ 🔌 🧪 |
+| EFF114 | [recursion-error-as-value](https://heki.koxudaxi.dev/rules/recursion-error-as-value/) | Opt-in: an `except` clause around a recursion (a call cycle reached from its `try` body) takes the `RecursionError` and goes on without raising, so the result depends on the stack depth. | ≈ 🔌 🧪 |
 | EFF201 | [effect-boundary-violation](https://heki.koxudaxi.dev/rules/effect-boundary-violation/) | Reaching a forbidden effect (directly or through calls) from a declared `effect-boundaries` scope. | ≈ 📜 |
 
 ## Data Pipelines (DATA)
@@ -2505,6 +2507,7 @@ An experimental rule is never enabled by default: it runs only when `select` or 
 | `command.inspect` | command | `heki inspect` | 0.2.1 | - |
 | `rule.EFF109` | rule | [`EFF109`](https://heki.koxudaxi.dev/rules/lock-reacquired-while-held/) | 0.2.1 | - |
 | `rule.EFF110` | rule | [`EFF110`](https://heki.koxudaxi.dev/rules/exclusive-object-fanout/) | 0.2.1 | - |
+| `rule.EFF114` | rule | [`EFF114`](https://heki.koxudaxi.dev/rules/recursion-error-as-value/) | 0.2.2 | - |
 | `rule.MUT101` | rule | [`MUT101`](https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/) | 0.1.0 | - |
 | `rule.MUT111` | rule | [`MUT111`](https://heki.koxudaxi.dev/rules/cached-property-stale-read/) | 0.1.1 | - |
 | `rule.MUT112` | rule | [`MUT112`](https://heki.koxudaxi.dev/rules/conditional-ownership-mutation/) | 0.2.0 | - |
@@ -2541,6 +2544,14 @@ Its precision is measured on a small sample of reports only.
 - **Since:** 0.2.1
 
 Its precision is measured on a small sample of reports only.
+
+## `rule.EFF114`
+
+- **Kind:** rule
+- **Target:** [`EFF114`](https://heki.koxudaxi.dev/rules/recursion-error-as-value/)
+- **Since:** 0.2.2
+
+Its precision is measured on a sample of reports of one corpus only, and its premises are not yet certified.
 
 ## `rule.MUT101`
 
@@ -2700,7 +2711,7 @@ On a save, the edit reaches other files only through what it changes:
 
 | The edit changes | Also re-analyzed |
 | ---------------- | ---------------- |
-| a function's effects, the locks it takes (`EFF109`), the objects it uses one operation at a time (`EFF110`), or what the object it returns may be (a new one, its argument, or state it keeps) | its callers, and the functions of a call cycle through it (their effects change with it) |
+| a function's effects, the locks it takes (`EFF109`), the objects it uses one operation at a time (`EFF110`), whether it reaches a call cycle (`EFF114`), or what the object it returns may be (a new one, its argument, or state it keeps) | its callers, and the functions of a call cycle through it (their effects change with it) |
 | a declaration that names resolve through: a re-exported class, a new method or base class, a property getter, a subclass, an offloading decorator | every file that resolved names through it |
 | a method of a class family | the classes of that family; with `MUT112` selected, every changed method counts: a value stored in `self.<attr>` is reported when a method of the family changes that attribute in place |
 | what a function changes of its own containers, or what it does with the generators it calls (`MUT113`, when selected) | the classes of its family with generators suspending inside an iteration of their containers, and those of the generators it calls |
@@ -3168,7 +3179,10 @@ a long chain of phis carries to one `return`, an argument handed down through th
 of one module to the one that changes it, thousands of reports whose call chains enter one module,
 the callers of the bottom of a lattice of calls thirty levels deep, the chains `heki inspect` walks
 down thousands of calls of one module, a value chosen among a thousand module globals before it is
-changed, and thousands of calls handing a global to a helper that changes it.
+changed, thousands of calls handing a global to a helper that changes it, and, for the call cycles
+`EFF114` follows, thousands of `try` statements in one function calling into one recursion, a call
+cycle through thousands of functions each calling the next inside a `try`, and a lattice of calls
+thirty levels deep with a `try` at each level above a recursion.
 
 A change to the IR builder, a walk, a fixpoint, or a rule's state is also run over a large
 corpus of real projects before it is merged, every run under a memory cap and a timeout. No
@@ -7135,6 +7149,129 @@ No automatic fix.
 - `lint.extend-select = ["MUT108"]` (or `--extend-select MUT108`) enables the rule. It is
   opt-in: selecting the `MUT` prefix does not enable it.
 - No other configuration: the rule reads standard `typing` and `dataclasses` declarations only.
+
+
+---
+
+Source: https://heki.koxudaxi.dev/rules/recursion-error-as-value/
+
+# recursion-error-as-value (EFF114)
+
+Family: Execution Effects (EFF) · Heuristic · Opt-in · Experimental · Severity `error` (a bug) · No automatic fix
+
+Opt-in: an `except` clause around a recursion (a call cycle reached from its `try` body) takes the `RecursionError` and goes on without raising, so the result depends on the stack depth.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs only when `select` or `extend-select` names its code or name. It has not been measured yet. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
+
+!!! warning "Experimental"
+
+    Its precision is measured on a sample of reports of one corpus only, and its premises are not yet certified. Experimental features can still change in behavior or precision, or be removed, in any release, and each change is listed in the release notes. An opt-in rule that is not experimental is stable and only off by default. See [Experimental Features](https://heki.koxudaxi.dev/experimental/).
+
+## What it does
+Checks for an `except` clause that takes the `RecursionError` a recursion can raise and goes on
+without raising: its `try` body calls a function on a call cycle, directly or through other
+calls, across modules, and every path through the clause falls through, returns, breaks, or
+continues. The rule is opt-in: enable it with `--extend-select EFF114` or
+`extend-select = ["EFF114"]`.
+
+A function is on a call cycle when it can call itself again through calls whose bodies run on
+the caller's stack: plain calls, awaited coroutines, property getters, generators iterated
+there, generator expressions where they are written, and functions builtins call there
+(`map(self.depth, children)`). A clause takes a `RecursionError` when it names
+`RecursionError`, `RuntimeError`, `Exception`, or `BaseException` (also in a tuple, or imported
+from `builtins`), or is a bare `except`, and no earlier clause of the same `try` takes it. The
+rule reports the clause, with the call in the `try` body as a related location.
+
+A `RecursionError` raised in a `with` body inside the `try` counts (the context manager is taken
+to let it through), and so does one raised in an inner `try` none of whose clauses takes it.
+
+It does not report:
+
+- a clause after one that takes `RecursionError` first (`except RecursionError: raise`), or after
+  one whose classes heki cannot tell (a name bound to a tuple of classes);
+- a clause that raises on some path (`if isinstance(error, RecursionError): raise`), or calls
+  `sys.exit`, `os._exit`, `os.abort`, `exit`, or `quit`;
+- a CLI boundary: a clause that reports the error (`print(..., file=sys.stderr)`,
+  `sys.stderr.write`, `traceback.print_exc()`, or a `logging` call with the exception:
+  `logger.exception(...)`, `exc_info=...`, or the exception as an argument) and returns an
+  integer constant, an exit status, on every `return`;
+- a `try` body whose calls reach no call cycle, or reach one only through a call heki cannot
+  resolve, a coroutine only created, or a function run on another thread
+  (`asyncio.to_thread`, `loop.run_in_executor`);
+- `except*` clauses, and a `RecursionError` that reaches the clause only through a `finally`
+  body.
+
+## What a report states
+
+A report states that the clause takes the `RecursionError` that a call cycle its `try` body
+reaches can raise, and that no path through it raises, so the function goes on with a value
+that depends on the depth of the stack instead of the error.
+
+Its premises:
+
+- **Call cycle**: a call in the `try` body runs, through calls whose bodies run on its stack, a
+  function that can call itself again through such calls. Open through a method call: one
+  candidate implementation on the way is enough.
+- **Catches RecursionError**: the clause's classes include `RecursionError`, as the builtins the
+  module does not rebind (assumption R1), and no earlier clause of the same `try` takes it.
+  Established.
+- **Completes normally**: every path through the clause's body ends in a fall-through, a
+  `return`, a `break`, or a `continue`, none in a `raise` or a call that ends the process. Open:
+  an instruction in the body that may raise is not counted.
+
+## Why is this bad?
+How deep a recursion may go before Python raises `RecursionError` depends on the recursion limit
+and on how much of the stack the caller already uses, not on the data. A broad clause around a
+recursion turns that limit into an answer: a long chain of references reads as circular, a deep
+tree as unreadable, and the result changes with the caller, the platform, or
+`sys.setrecursionlimit`. The error the code meant to catch (a missing key, a bad value) and the
+stack running out look the same to it.
+
+## Example
+```python
+class RefWalker:
+    def __init__(self, graph: dict[str, list[str]]) -> None:
+        self.graph = graph
+
+    def is_circular(self, ref: str) -> bool:
+        try:
+            return self._reaches(ref, ref, set())
+        except Exception:  # EFF114
+            return True
+
+    def _reaches(self, target: str, ref: str, seen: set[str]) -> bool:
+        for following in self.graph.get(ref, []):
+            if following == target:
+                return True
+            if following not in seen:
+                seen.add(following)
+                if self._reaches(target, following, seen):
+                    return True
+        return False
+```
+
+Use instead:
+```python
+    def is_circular(self, ref: str) -> bool:
+        try:
+            return self._reaches(ref, ref, set())
+        except RecursionError:
+            raise
+        except Exception:
+            return True
+```
+
+Or walk the graph with an explicit stack, so that its depth is limited by memory, not by the
+recursion limit.
+
+## Fix safety
+No automatic fix.
+
+## Options
+- `lint.extend-select = ["EFF114"]` (or `--extend-select EFF114`) enables the rule. It is
+  opt-in: selecting the `EFF` prefix does not enable it.
 
 
 ---

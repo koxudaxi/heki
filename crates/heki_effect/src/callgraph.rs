@@ -10,9 +10,9 @@ use crate::guards;
 use crate::iterations;
 use crate::scc::tarjan_scc;
 use crate::{
-    ArgOrigin, AttrKeyPath, BoundCallee, CallHop, CallSite, CallTarget, CellChange, Construction,
-    Delivery, EffectSummary, Facts, FuncKey, LocalOrigins, NewArg, NewCond, NewKind, Origins,
-    ProjectIndex, ProtectedReturn, ReturnsNew, Runner, Shared, SharedChain, SharedLine,
+    ArgOrigin, AttrKeyPath, BoundCallee, CallCycle, CallHop, CallSite, CallTarget, CellChange,
+    Construction, Delivery, EffectSummary, Facts, FuncKey, LocalOrigins, NewArg, NewCond, NewKind,
+    Origins, ProjectIndex, ProtectedReturn, ReturnsNew, Runner, Shared, SharedChain, SharedLine,
     SharedState, SiteRole, Slot, TypedFieldWriteSite, UnresolvedWriteSite, WriteKind, cache_flow,
 };
 use heki_ast::Span;
@@ -178,6 +178,11 @@ pub(crate) fn propagate_with_budget(
         p.sort_unstable();
         p.dedup();
     }
+    let on_cycle = if index.opt_in.call_cycles {
+        on_call_cycles(index, &out, &nodes, &pos)
+    } else {
+        vec![false; nodes.len()]
+    };
 
     for scc in tarjan_scc(nodes.len(), &succ) {
         let members: FxHashSet<usize> = scc.iter().copied().collect();
@@ -194,7 +199,7 @@ pub(crate) fn propagate_with_budget(
                 break;
             }
             let in_scc = |k: &FuncKey| pos.get(k).is_some_and(|j| members.contains(j));
-            let new = recompute(index, &out, &nodes[i], &in_scc);
+            let new = recompute(index, &out, &nodes[i], &in_scc, on_cycle[i]);
             if index.summary(&nodes[i]) != Some(&new) {
                 store(index, &nodes[i], new);
                 for &p in &preds[i] {
@@ -229,17 +234,73 @@ fn store(index: &mut ProjectIndex, func: &FuncKey, summary: EffectSummary) {
     file.functions.insert(func.clone(), summary);
 }
 
-/// Final summary of `func` = its local facts joined with every outgoing edge's transfer.
+/// The propagation nodes on a call cycle ([`CallCycle`]): the members of the components, over
+/// the calls whose callee's body runs on the caller's stack ([`body_runs_on_stack`]), of more
+/// than one node or with a call of the node itself. A cycle lies within the region a
+/// propagation recomputes: the region holds every function sharing a cycle with an edited one,
+/// and every caller of a changed one, each member of its cycle included.
+fn on_call_cycles(
+    index: &ProjectIndex,
+    out: &OutSites,
+    nodes: &[FuncKey],
+    pos: &FxHashMap<&FuncKey, usize>,
+) -> Vec<bool> {
+    let mut succ: Vec<Vec<usize>> = vec![Vec::new(); nodes.len()];
+    for (i, f) in nodes.iter().enumerate() {
+        for (path, si) in out.get(f).into_iter().flatten() {
+            let site = &index.files[path].call_sites[*si];
+            for c in site.project_callees() {
+                let runs = index
+                    .summary(&c.callee)
+                    .is_some_and(|callee| body_runs_on_stack(site, callee));
+                if let (true, Some(&j)) = (runs, pos.get(&c.callee)) {
+                    succ[i].push(j);
+                }
+            }
+        }
+    }
+    let mut on_cycle = vec![false; nodes.len()];
+    for component in tarjan_scc(nodes.len(), &succ) {
+        if let [only] = component[..]
+            && !succ[only].contains(&only)
+        {
+            continue;
+        }
+        for i in component {
+            on_cycle[i] = true;
+        }
+    }
+    on_cycle
+}
+
+/// Whether the callee's body runs on the caller's stack at `site`: called there (not a
+/// coroutine only created, nor a generator only made), or a generator iterated there, never on a
+/// worker thread.
+fn body_runs_on_stack(site: &CallSite, callee: &EffectSummary) -> bool {
+    site.runner != Runner::Worker
+        && match site.role {
+            SiteRole::Call => runs_at_call(callee, site),
+            SiteRole::Iterate => callee.is_generator,
+            SiteRole::Return | SiteRole::Through { .. } => false,
+        }
+}
+
+/// Final summary of `func` = its local facts joined with every outgoing edge's transfer;
+/// `on_cycle`: `func` is on a call cycle ([`on_call_cycles`]).
 fn recompute(
     index: &ProjectIndex,
     out: &FxHashMap<FuncKey, Vec<(PathBuf, usize)>>,
     func: &FuncKey,
     in_scc: &dyn Fn(&FuncKey) -> bool,
+    on_cycle: bool,
 ) -> EffectSummary {
     let path = &index.func_files[func];
     let file = &index.files[path];
     let local = &file.local_functions[func];
     let mut s = EffectSummary::clone(local);
+    if on_cycle {
+        s.call_cycle = CallCycle::On;
+    }
     index.param_capacities.realize(local, &mut s);
     s.sync_driven_only = file
         .functions
@@ -977,6 +1038,11 @@ fn transfer(
         facts,
     } = *edge;
     let origin = |k: usize| bc.params.get(k);
+
+    // A recursion raises on the stack it runs on: a worker thread's is not the caller's.
+    if facts.call_cycle != CallCycle::None && site.runner != Runner::Worker {
+        t.call_cycle = t.call_cycle.max(CallCycle::Reaches);
+    }
 
     // a. Offload wrappers: a callee offloading its parameter k offloads the caller's
     //    parameter p when argument k is p. The offloaded callable is never called here,

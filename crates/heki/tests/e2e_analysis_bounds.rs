@@ -16,8 +16,18 @@ use std::time::{Duration, Instant};
 
 /// `heki check --output-format json` of the project, which must finish within `limit`.
 fn check_within(p: &Project, limit: Duration) -> Vec<Value> {
+    check_selecting_within(p, &[], limit)
+}
+
+/// [`check_within`], with the rules `select` names (opt-in rules) enabled too.
+fn check_selecting_within(p: &Project, select: &[&str], limit: Duration) -> Vec<Value> {
+    let extend = select.join(",");
+    let mut args = vec!["check", "--heuristic", "--output-format", "json", "."];
+    if !select.is_empty() {
+        args.extend(["--extend-select", extend.as_str()]);
+    }
     let mut child = Command::new(env!("CARGO_BIN_EXE_heki"))
-        .args(["check", "--heuristic", "--output-format", "json", "."])
+        .args(&args)
         .current_dir(&p.dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -3271,5 +3281,100 @@ fn the_paths_of_many_packages_merged_in_one_function_are_decided_once() {
             .map(|d| d["qualname"].as_str().unwrap())
             .collect::<Vec<_>>(),
         vec!["plugin"]
+    );
+}
+
+/// The `EFF114` reports of `heki check --extend-select EFF114` on the module `m.py` of `source`,
+/// which must finish within 20 seconds.
+fn recursion_handlers(name: &str, source: &str) -> usize {
+    let p = Project::new(name);
+    p.write("m.py", source);
+    check_selecting_within(&p, &["EFF114"], Duration::from_secs(20))
+        .iter()
+        .filter(|d| d["rule_code"] == "EFF114")
+        .count()
+}
+
+/// Two thousand `try` statements in one function, each calling into one recursion: each body's
+/// blocks are found from one pass over the function, and each clause is walked once.
+#[test]
+fn many_try_statements_into_one_cycle_are_decided_once_each() {
+    let n = 2_000;
+    let mut lines = vec![
+        "def rec(x):".to_owned(),
+        "    return rec(x)".to_owned(),
+        String::new(),
+        String::new(),
+        "def shape(x):".to_owned(),
+    ];
+    for _ in 0..n {
+        lines.extend(
+            [
+                "    try:",
+                "        rec(x)",
+                "    except Exception:",
+                "        pass",
+            ]
+            .map(str::to_owned),
+        );
+    }
+    assert_eq!(
+        recursion_handlers("bounds_many_try_statements", &(lines.join("\n") + "\n")),
+        n
+    );
+}
+
+/// A call cycle through four thousand functions, each calling the next inside a `try`: the cycle
+/// is found once, by the components of the propagation.
+#[test]
+fn a_cycle_through_thousands_of_functions_is_found_once() {
+    let n = 4_000;
+    let mut lines = Vec::new();
+    for i in 0..n {
+        lines.extend([
+            format!("def f{i}(x):"),
+            "    try:".to_owned(),
+            format!("        return f{}(x)", (i + 1) % n),
+            "    except Exception:".to_owned(),
+            "        return None".to_owned(),
+            String::new(),
+            String::new(),
+        ]);
+    }
+    assert_eq!(
+        recursion_handlers("bounds_cycle_of_functions", &(lines.join("\n") + "\n")),
+        n
+    );
+}
+
+/// A lattice thirty levels deep, two functions a level, each calling both of the level below
+/// inside a `try`, above a function calling itself (2^30 paths down to it): whether a call
+/// reaches the cycle is a join over its callees.
+#[test]
+fn a_lattice_above_a_cycle_joins_each_call_once() {
+    let mut lines = vec![
+        "def bottom(x):".to_owned(),
+        "    return bottom(x)".to_owned(),
+    ];
+    for level in 0..30 {
+        let below = if level == 0 {
+            vec!["bottom".to_owned()]
+        } else {
+            vec![format!("a{}", level - 1), format!("b{}", level - 1)]
+        };
+        for side in ["a", "b"] {
+            lines.extend([
+                String::new(),
+                String::new(),
+                format!("def {side}{level}(x):"),
+                "    try:".to_owned(),
+            ]);
+            lines.extend(below.iter().map(|f| format!("        {f}(x)")));
+            lines.extend(["    except Exception:", "        return None"].map(str::to_owned));
+        }
+    }
+    assert_eq!(
+        recursion_handlers("bounds_lattice_above_a_cycle", &(lines.join("\n") + "\n")),
+        60
     );
 }

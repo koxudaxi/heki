@@ -474,6 +474,10 @@ EffectSummary(f) = {
                                                            // CallSite::under_lock; only with EFF110
                                                            // selected, OptInFacts::exclusive)
 
+    // Call cycles (EFF114; propagated; only with EFF114 selected, OptInFacts::call_cycles)
+    call_cycle:               CallCycle,                   // None, Reaches (a function its body runs
+                                                           // is on a call cycle), or On (itself)
+
     // Metadata
     is_async, is_generator, is_cached_property, is_lru_cache, owner_class_qualname, decorators,
 }
@@ -1168,7 +1172,7 @@ deep = true   # changes to attributes and nested containers below are forbidden 
   callers, with the same initializer and allowed-context rules as `MUT201`. Reads through
   parameters without a project-class type are not seen.
 
-### 2.4 Family 2 (`EFF101`–`EFF103`, `EFF105`–`EFF107`, `EFF109`, `EFF110`, `EFF111`, `EFF113`, `EFF201`, `DATA101`): precision, sanitizers, and aggregation
+### 2.4 Family 2 (`EFF101`–`EFF103`, `EFF105`–`EFF107`, `EFF109`, `EFF110`, `EFF111`, `EFF113`, `EFF114`, `EFF201`, `DATA101`): precision, sanitizers, and aggregation
 0. **Must-facts and the exact tier** (`EffectSummary::must_exec`, computed only when `EFF101`,
    `EFF111`, `EFF103`, or `EFF113` runs: `OptInFacts::must_effects`):
    - Per call instruction, the path facts (`heki_ir::Paths`, with the reader of
@@ -1328,7 +1332,36 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      an operation on the object, its own, an awaited call reaching one, or a fan-out whose
      tasks use it; kill at `"unbinds"`) leaves out a fan-out that every path reaches after a
      use.
-10. **`EFF201`** (contract): a breadth-first search over the IR-free call graph from each scope
+10. **`EFF114`** (opt-in): an `except` clause that turns the `RecursionError` of a call cycle
+   into a value.
+   - A function is on a call cycle when it is a member of a component, of more than one node or
+     with a call of itself, of the propagation region's call graph restricted to the calls whose
+     callee's body runs on the caller's stack (`callgraph::on_call_cycles`: a call that runs at
+     the call, not a coroutine only created or a generator only made, or a generator iterated
+     there; never a callable run on a worker thread). The components are computed once per
+     propagation; a region always holds every member of a cycle it touches (an edit's region
+     holds every function sharing a cycle with it, a caller region every caller of a changed
+     function). `EffectSummary::call_cycle` is `On` for a member and `Reaches` for a function
+     whose delivered callee facts reach one (joined during propagation like the other facts, so
+     a generator's or a returned generator's iteration counts where it runs), and takes part in
+     Early Cutoff.
+   - The rule (`eff_rules::recursion_handlers`) reads, per `try`, the clauses its dispatch block
+     tests in turn (the `CatchException` that starts each clause body) and takes the first whose
+     classes include `RecursionError`: a bare `except`, or class values the type inference gives
+     as `builtins.RecursionError`, `RuntimeError`, `Exception`, or `BaseException` (a tuple
+     display of them included). An earlier clause of unknown classes, or an `except*` clause (by
+     its source text), leaves the `try` undecided. The `try` body is every block whose
+     exception reaches that dispatch block, past `with` exits and past the dispatch of an inner
+     `try` none of whose clauses takes it (one walk per exception target). A call site in the
+     body whose delivered callee facts reach a call cycle (`ProjectIndex::delivery`, into the
+     body; never a worker thread) is the witness. The clause completes normally when a walk over
+     the blocks the start of its body dominates, along normal edges, finds no `raise` and no call ending
+     the process (`sys.exit`, `os._exit`, `os.abort`, `exit`, `quit`); leaving those blocks or
+     returning completes it. A clause reporting the error (`print(..., file=sys.stderr)`,
+     `sys.stderr.write`, `traceback.print_exc`, a `logging` call with the exception, also on a
+     logger of unknown class by its method name) and returning an integer constant on every
+     `return` is a CLI boundary and is left out.
+11. **`EFF201`** (contract): a breadth-first search over the IR-free call graph from each scope
    function (and each module body a scope names as `<module>`,
    `DottedPattern::names_module_bodies`) finds the shortest chain to each forbidden effect,
    without entering `allowed-callees`, other scope functions, or bodies that do not run at the

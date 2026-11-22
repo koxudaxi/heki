@@ -28,7 +28,7 @@ const CONFIG: &str = r#"[project]
 name = "t"
 
 [tool.heki.lint]
-extend-select = ["MUT101", "MUT107", "MUT108", "MUT111", "EFF107", "MUT112", "MUT113", "EFF109", "EFF110"]
+extend-select = ["MUT101", "MUT107", "MUT108", "MUT111", "EFF107", "MUT112", "MUT113", "EFF109", "EFF110", "EFF114"]
 
 [[tool.heki.write-owners]]
 name = "registry"
@@ -691,6 +691,11 @@ const FAN_READ_NOTHING: &str =
 const FAN_READ_LOCKED: &str = "import asyncio\n\nLOCK = asyncio.Lock()\n\n\nasync def read_line(reader: asyncio.StreamReader):\n    async with LOCK:\n        return await reader.readline()\n";
 const FAN_USE: &str = "import asyncio\n\nfrom pkg.fan_read import read_line\n\n\nasync def both(reader: asyncio.StreamReader):\n    return await asyncio.gather(read_line(reader), read_line(reader))\n";
 
+// A clause around a call into another module (`EFF114`): the call cycle closes and opens there.
+const REC_HANDLER: &str = "from pkg.rec_walk import descend\n\n\ndef visit(node):\n    return descend(node)\n\n\ndef measure(node):\n    try:\n        return visit(node)\n    except Exception:\n        return 0\n";
+const REC_WALK: &str = "def descend(node):\n    return len(node)\n";
+const REC_WALK_BACK: &str = "from pkg import rec_handler\n\n\ndef descend(node):\n    return sum(rec_handler.visit(child) for child in node)\n";
+
 /// The project before the first step (every file is opened).
 fn initial_files() -> Vec<(&'static str, String)> {
     [
@@ -762,6 +767,8 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/lock_use.py", LOCK_USE),
         ("pkg/fan_read.py", FAN_READ),
         ("pkg/fan_use.py", FAN_USE),
+        ("pkg/rec_handler.py", REC_HANDLER),
+        ("pkg/rec_walk.py", REC_WALK),
         ("pkg/plot.py", RO_PLOT),
         ("pkg/loops.py", LOOPS),
         ("pkg/compat.py", COMPAT),
@@ -3047,6 +3054,24 @@ fn steps_eff110() -> Vec<Step> {
     ]
 }
 
+/// `EFF114`: whether a call in the `try` body runs a call cycle comes from the summaries of the
+/// functions it calls (`EffectSummary::call_cycle`): the module below starts calling back into
+/// the handler's module, closing a cycle, and stops again.
+fn steps_eff114() -> Vec<Step> {
+    vec![
+        Step::new(
+            "the module below calls back into the handler's module",
+            vec![save("pkg/rec_walk.py", REC_WALK_BACK)],
+        )
+        .present(&[("pkg/rec_handler.py", "EFF114")]),
+        Step::new(
+            "the module below stops calling back",
+            vec![save("pkg/rec_walk.py", REC_WALK)],
+        )
+        .absent(&[("pkg/rec_handler.py", "EFF114")]),
+    ]
+}
+
 /// The initial index.
 fn steps_initial_index() -> Vec<Step> {
     vec![Step::new("initial index", Vec::new()).present(&[
@@ -3431,8 +3456,8 @@ fn steps_configuration() -> Vec<Step> {
         Step::new(
             "the configuration becomes invalid",
             vec![Action::Configure(CONFIG.replace(
-                "extend-select = [\"MUT101\", \"MUT107\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\", \"MUT113\", \"EFF109\", \"EFF110\"]",
-                "extend-select = [\"MUT101\", \"MUT107\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\", \"MUT113\", \"EFF109\", \"EFF110\"]\nselect = [\"NOPE1\"]",
+                "extend-select = [\"MUT101\", \"MUT107\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\", \"MUT113\", \"EFF109\", \"EFF110\", \"EFF114\"]",
+                "extend-select = [\"MUT101\", \"MUT107\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\", \"MUT113\", \"EFF109\", \"EFF110\", \"EFF114\"]\nselect = [\"NOPE1\"]",
             ))],
         )
         .absent(&[("pkg/svc_user.py", "EFF101")]),
@@ -4025,6 +4050,7 @@ sessions!(editing, Session::start, {
     eff109: steps_eff109,
     mut113: steps_mut113,
     eff110: steps_eff110,
+    eff114: steps_eff114,
     receiver_typing: steps_receiver_typing,
     effect_index: steps_effect_index,
     exact_effects: steps_exact_effects,

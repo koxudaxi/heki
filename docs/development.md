@@ -301,7 +301,10 @@ a long chain of phis carries to one `return`, an argument handed down through th
 of one module to the one that changes it, thousands of reports whose call chains enter one module,
 the callers of the bottom of a lattice of calls thirty levels deep, the chains `heki inspect` walks
 down thousands of calls of one module, a value chosen among a thousand module globals before it is
-changed, and thousands of calls handing a global to a helper that changes it.
+changed, thousands of calls handing a global to a helper that changes it, and, for the call cycles
+`EFF114` follows, thousands of `try` statements in one function calling into one recursion, a call
+cycle through thousands of functions each calling the next inside a `try`, and a lattice of calls
+thirty levels deep with a `try` at each level above a recursion.
 
 A change to the IR builder, a walk, a fixpoint, or a rule's state is also run over a large
 corpus of real projects before it is merged, every run under a memory cap and a timeout. No

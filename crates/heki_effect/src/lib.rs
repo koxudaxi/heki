@@ -242,6 +242,29 @@ impl MustExec {
     }
 }
 
+/// What running a function's body runs of a call cycle: a function that can call itself again
+/// through calls whose bodies run on the caller's stack (called there, or a generator iterated
+/// there; never a coroutine only created, nor a callable a worker thread runs), so that a deep
+/// enough input raises `RecursionError` ([`EffectSummary::call_cycle`]).
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum CallCycle {
+    #[default]
+    None,
+    /// A function it calls, through any number of such calls, is on a call cycle.
+    Reaches,
+    /// The function itself is on a call cycle.
+    On,
+}
+
+impl CallCycle {
+    pub fn is_none(&self) -> bool {
+        *self == Self::None
+    }
+}
+
 /// Whether a caller has made a call whenever it returns normally (`heki_ir::Paths`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct OnEveryReturn {
@@ -783,6 +806,10 @@ pub struct EffectSummary {
     pub is_generator: bool,
     pub is_cached_property: bool,
     pub is_lru_cache: bool,
+    /// What running the function's body runs of a call cycle (`EFF114`; propagated, computed
+    /// only while the rule runs: [`OptInFacts::call_cycles`]).
+    #[serde(default, skip_serializing_if = "CallCycle::is_none")]
+    pub call_cycle: CallCycle,
     /// A `functools` cache keeps the function's results, each a builtin container of one kind
     /// (`MUT114`; a local fact, never propagated).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2003,9 +2030,9 @@ pub enum TypedWrites {
 /// `ArgOrigin::origins`), `MUT113`'s iteration facts (`EffectSummary::iterations`,
 /// `CallSite::result_held`), `EFF109`'s lock facts (`EffectSummary::locks`,
 /// `CallSite::state_tests`), and `EFF110`'s one-at-a-time uses (`EffectSummary::exclusive`,
-/// `CallSite::under_lock`), and the shared state functions change
-/// (`EffectSummary::shared_state`), which only `heki inspect` reads. `CallSite::returned`,
-/// which `MUT202` reads too, is always computed.
+/// `CallSite::under_lock`), `EFF114`'s call cycles (`EffectSummary::call_cycle`), and the
+/// shared state functions change (`EffectSummary::shared_state`), which only `heki inspect`
+/// reads. `CallSite::returned`, which `MUT202` reads too, is always computed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OptInFacts {
     pub return_origins: bool,
@@ -2015,6 +2042,7 @@ pub struct OptInFacts {
     pub shared_state: bool,
     /// [`EffectSummary::must_exec`] and what computes it at call sites.
     pub must_effects: bool,
+    pub call_cycles: bool,
 }
 
 impl OptInFacts {
@@ -2026,6 +2054,7 @@ impl OptInFacts {
         exclusive: true,
         shared_state: true,
         must_effects: true,
+        call_cycles: true,
     };
 }
 

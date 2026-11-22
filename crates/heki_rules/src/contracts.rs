@@ -484,6 +484,7 @@ pub fn opt_in_facts(selection: &RuleSelection) -> OptInFacts {
         must_effects: crate::eff_rules::MUST_EFFECT_RULES
             .iter()
             .any(|code| selection.is_enabled(code)),
+        call_cycles: selection.is_enabled("EFF114"),
         shared_state: false,
     }
 }
