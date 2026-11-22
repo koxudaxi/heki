@@ -235,6 +235,18 @@ pub fn module_name_for_path(rel: &Path) -> Option<(String, bool)> {
     Some((parts.join("."), is_package))
 }
 
+/// The longest dotted prefix of `name` (itself included) that `is_module` accepts: the module a
+/// dotted name resolves into, the rest of the name naming something in it.
+pub fn module_prefix(name: &str, mut is_module: impl FnMut(&str) -> bool) -> Option<&str> {
+    let mut end = name.len();
+    loop {
+        if is_module(&name[..end]) {
+            return Some(&name[..end]);
+        }
+        end = name[..end].rfind('.')?;
+    }
+}
+
 /// Resolve the module part of `from <level dots><module> import ...` inside `current`.
 /// A package `__init__` is its own base; a plain module's base is its parent package. `None`
 /// when the level climbs past the top-level package, where Python raises `ImportError`; when
@@ -2080,15 +2092,12 @@ impl ProjectDecls {
 
     /// Longest project-module prefix of `fqn` and the remaining dotted part.
     fn split_module<'s>(&self, fqn: &'s str) -> Option<(&ModuleDecls, &'s str)> {
-        let mut end = fqn.len();
-        loop {
-            let prefix = &fqn[..end];
-            if let Some(m) = self.module(prefix) {
-                let rest = fqn.get(end + 1..).unwrap_or("");
-                return Some((m, rest));
-            }
-            end = prefix.rfind('.')?;
-        }
+        let mut found = None;
+        let module = module_prefix(fqn, |prefix| {
+            found = self.module(prefix);
+            found.is_some()
+        })?;
+        Some((found?, fqn.get(module.len() + 1..).unwrap_or("")))
     }
 
     /// The direct project subclasses of the canonical class `class`.

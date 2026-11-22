@@ -80,18 +80,23 @@ one.
   an annotation is an edit of the program, so none enters the block.
 - **Source roots**: a directory below the project root, neither a source root nor a regular
   package (a directory with `__init__.py` is imported by its own name, so heki never takes one
-  for a source root), below which the dotted path of an import that names no project module is
-  a file (`backend/config/env.py` for `import config.env`) is a candidate for `src`. An import of
+  for a source root), below which the dotted path of an import that names no project module is a
+  file (`backend/config/env.py` for `import config.env`) is a candidate for `src`. An import of
   the standard library or of a package heki's catalog covers is no candidate's, and neither is
   one whose path is below several directories none of which holds the importing file. The first
   8 candidates by imports are tried, each added to `src` with those already taken (the source
   roots heki detects are written out with them, since setting `src` turns detection off). A
-  trial computes the module names with the directory added and takes it into the block only
-  when its imports resolve, no two files of one kind then define one module, every import that
-  names a module of the project now, and every import a directory already taken was taken for,
-  still names the same module of the same file, and no contract of the configuration and no
-  baseline entry names a module whose name would change. The block is then checked whole: when
-  it would make some other import resolve into a file below a source root that does not hold the
+  trial computes the module names with the directory added for every Python file below the
+  project root, those the paths given leave out included (heki reads them for this; when they
+  are more than the 50 it reads, no directory is tried), resolves each import as heki's index
+  does, and takes the directory into the block only when the imports it was tried for name its
+  own files, no two files of one kind then define one module unless just those files did before,
+  every import that names a module of the project now, and every import a directory already
+  taken was taken for, still names the same module of the same file, and every contract of the
+  configuration and every baseline entry still names what it names now (the rules' matchers
+  judge each definition by its name now and its name with the directory; a baseline entry must
+  not spell a module whose name would change). The block is then checked whole: when it would
+  make some other import resolve into a file below a source root that does not hold the
   importing file (`import utils` in `tool.py`, below `svc_a/` and `svc_b/`, would name
   `svc_a/utils.py`), the directory that file is below stays out and the others are tried again.
   heki cannot tell such a file is the one meant, and the block holds only what the trial

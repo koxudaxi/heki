@@ -1054,6 +1054,27 @@ fn cha_priority_4_limit() {
 // =================================================================== module names (2.2)
 
 #[test]
+fn a_name_resolves_into_the_longest_module_it_is_or_is_below() {
+    let modules: rustc_hash::FxHashSet<&str> =
+        ["config", "config.env", "app"].into_iter().collect();
+    for (name, module) in [
+        ("config.env", Some("config.env")),
+        ("config.env.load", Some("config.env")),
+        ("config", Some("config")),
+        ("config.envs", Some("config")),
+        ("app.models.Order", Some("app")),
+        ("application", None),
+        ("settings.env", None),
+    ] {
+        assert_eq!(
+            module_prefix(name, |p| modules.contains(p)),
+            module,
+            "{name}"
+        );
+    }
+}
+
+#[test]
 fn module_names_and_relative_imports() {
     let name = |p: &str, roots: &[&str]| {
         let layout = ModuleLayout {

@@ -1366,41 +1366,187 @@ fn a_source_root_stays_out_when_a_name_the_configuration_uses_would_change() {
         assert_follows_the_schema(&report);
         roots[0]["reason"].as_str().unwrap().to_owned()
     };
-    // A baseline entry naming a module below the directory.
+    // A baseline entry naming a module below the directory: the reports' keys would name it
+    // otherwise.
     let p = subdirectory_app("recommend_source_root_baseline");
     p.write(
         "b.toml",
         "version = 2\n\n[[entries]]\npath = \"backend/main.py\"\nqualname = \"handler\"\n\
-         rule_code = \"EFF201\"\ntarget = \"backend.config.env.load\"\ncount = 1\n",
+         rule_code = \"EFF201\"\ntarget = \"backend.config.env.load->await\"\ncount = 1\n",
     );
     assert_eq!(
         reason(&p, &["--baseline", "b.toml"]),
-        "the baseline names `backend`, whose modules would be named otherwise"
+        "the baseline names `backend.config.env.load`, which heki would write `config.env.load`"
     );
-    // A contract naming one.
+    // A contract whose rule names a definition there, by the matchers the rules use: a glob
+    // in the module part, a class in it, or a pattern that would name a definition it does not
+    // name now.
+    let contract = |scope: &str| {
+        p.write(
+            "pyproject.toml",
+            &format!(
+                "[project]\nname = \"t\"\n\n[[tool.heki.effect-boundaries]]\nname = \"config\"\n\
+                 scopes = [\"{scope}\"]\nforbid = [\"blocking\"]\n"
+            ),
+        );
+        reason(&p, &[])
+    };
+    assert_eq!(
+        contract("backen[d].config.env:*"),
+        "`backen[d].config.env:*` (scopes) of the effect-boundaries contract `config` names \
+         module `backend.config.env`, and would not name it as module `config.env`"
+    );
+    assert_eq!(
+        contract("backend.config.env.load"),
+        "`backend.config.env.load` (scopes) of the effect-boundaries contract `config` names \
+         `backend.config.env.load`, and would not name it as `config.env.load`"
+    );
+    assert_eq!(
+        contract("config.env:*"),
+        "`config.env:*` (scopes) of the effect-boundaries contract `config` would name module \
+         `backend.config.env` as module `config.env`, which it does not name now"
+    );
+    // A pattern that names the same definitions under both names lets the directory in; the
+    // definitions of files left out, read or not, are judged too.
     p.write(
         "pyproject.toml",
         "[project]\nname = \"t\"\n\n[[tool.heki.effect-boundaries]]\nname = \"config\"\n\
-         scopes = [\"backend.config.*:*\"]\nforbid = [\"blocking\"]\n",
+         scopes = [\"*.env:*\"]\nforbid = [\"blocking\"]\n",
+    )
+    .write("backend/jobs.py", "def run():\n    pass\n")
+    .write("backend/broken.py", "def broken(:\n")
+    .write("scripts/broken.py", "def broken(:\n");
+    let paths = ["backend/main.py", "backend/config", "backend/broken.py"];
+    let (_, report, _) = recommend_json(&p, &paths);
+    assert_eq!(
+        report["analyzed"]["left_out"]["files"],
+        json!(["backend/jobs.py", "scripts/broken.py"])
     );
     assert_eq!(
-        reason(&p, &[]),
-        "a contract of the configuration names `backend`, whose modules would be named otherwise"
+        report["config"]["src"],
+        json!(["backend"]),
+        "{:#}",
+        report["blind_spots"]["source_roots"]
     );
-    // An import that resolves now and would not.
+    // An import that resolves now and would not, also in a file the paths given leave out.
     let q = subdirectory_app("recommend_source_root_import");
-    q.write("tools.py", "import backend.config.env\n");
-    assert_eq!(
-        reason(&q, &[]),
-        "`backend.config.env` in tools.py would name no project module, not backend/config/env.py"
-    );
-    // Two files that would define one module.
+    q.write("tools.py", "import time\nimport backend.config.env\n");
+    let lost =
+        "`backend.config.env` in tools.py would name no project module, not backend/config/env.py";
+    assert_eq!(reason(&q, &[]), lost);
+    assert_eq!(reason(&q, &["backend"]), lost);
+    // Two files that would define one module, one of which heki cannot parse.
     let r = subdirectory_app("recommend_source_root_shared");
-    r.write("main.py", "");
+    r.write("main.py", "def broken(:\n");
     assert_eq!(
         reason(&r, &[]),
-        "backend/main.py and main.py would both define module `main`"
+        "backend/main.py and main.py would each define module `main`"
     );
+}
+
+#[test]
+fn a_source_root_is_not_tried_when_heki_does_not_read_the_files_left_out() {
+    let p = subdirectory_app("recommend_source_root_left_out_caps");
+    for i in 0..55 {
+        p.write(&format!("tests/test_{i:02}.py"), "");
+    }
+    let (_, report, _) = recommend_json(&p, &["backend"]);
+    let roots = &report["blind_spots"]["source_roots"];
+    assert_eq!(
+        (&roots[0]["in_block"], &roots[0]["reason"]),
+        (
+            &json!(false),
+            &json!(
+                "not tried: the paths given leave out more Python files below the project root \
+                 than heki reads (50), and a source root may change what those import"
+            )
+        )
+    );
+    assert_eq!(report["config"], json!({}));
+}
+
+#[test]
+fn a_source_root_stays_out_when_a_module_would_gain_a_file() {
+    let p = Project::new("recommend_source_root_gains_a_file");
+    // `util` is defined twice already; `z` would define it a third time, `w` not.
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki]\nsrc = [\"x\", \"y\"]\n",
+    )
+    .write("x/util.py", "")
+    .write("y/util.py", "")
+    .write("z/util.py", "")
+    .write("z/jobs/run.py", "")
+    .write("z/main.py", "import jobs.run\n")
+    .write("w/tools/run.py", "")
+    .write("w/cli.py", "import tools.run\n");
+    let (_, report, _) = recommend_json(&p, &[]);
+    let verdicts: Vec<(&Value, &Value, &Value)> = (report["blind_spots"]["source_roots"])
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| (&r["directory"], &r["in_block"], &r["reason"]))
+        .collect();
+    assert_eq!(
+        verdicts,
+        [
+            (
+                &json!("w"),
+                &json!(true),
+                &json!(
+                    "its imports resolve, and no import, contract, or baseline entry loses its \
+                     module"
+                )
+            ),
+            (
+                &json!("z"),
+                &json!(false),
+                &json!("x/util.py, y/util.py and z/util.py would each define module `util`")
+            )
+        ]
+    );
+    assert_eq!(report["config"], json!({"src": ["x", "y", "w"]}));
+}
+
+#[test]
+fn a_source_root_stays_out_when_its_import_would_name_another_roots_file() {
+    let p = Project::new("recommend_source_root_own_file");
+    // With `a/lib` a source root, `a/lib/c.py` is `c`: once `b` is taken, `lib.c` of `a` names
+    // `b`'s file, so `a` stays out, and with it `b`, under which an import `a` was not taken
+    // for names a file.
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki]\nsrc = [\"a/lib\"]\n",
+    )
+    .write("a/lib/c.py", "")
+    .write("a/run.py", "import lib.c\n")
+    .write("b/lib/c.py", "")
+    .write("b/server.py", "import lib.c\n")
+    .write("b/worker.py", "import lib.c\n");
+    let (_, report, _) = recommend_json(&p, &[]);
+    let verdicts: Vec<(&Value, &Value)> = (report["blind_spots"]["source_roots"])
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| (&r["directory"], &r["reason"]))
+        .collect();
+    assert_eq!(
+        verdicts,
+        [
+            (
+                &json!("b"),
+                &json!(
+                    "`lib.c` in a/run.py would name b/lib/c.py below source root `b`, not the \
+                     one of a/run.py: heki cannot tell it is the file meant"
+                )
+            ),
+            (
+                &json!("a"),
+                &json!("`lib.c` would still name no project module")
+            )
+        ]
+    );
+    assert_eq!(report["config"], json!({}));
 }
 
 #[test]
