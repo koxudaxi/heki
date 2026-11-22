@@ -775,9 +775,17 @@ struct Extractor<'a> {
     /// ([`Self::constant_display`]).
     displays: Memo<VarId, Option<DisplayEntries>>,
     /// The budget of the walks over the function's values ([`Self::global_roots`],
-    /// [`Self::constant_display`]) and of the display entries calls bind
-    /// ([`Self::passed_keywords`]).
+    /// [`Self::constant_display`], [`Self::element_paths`]) and of the display entries calls
+    /// bind ([`Self::passed_keywords`]).
     walk_budget: Budget,
+    /// What the function may rebind (set by `build_aliases`).
+    rebound: OnceCell<Rebound<'a>>,
+    /// The parameter and copy aliases of the values whose items the function stores, deletes,
+    /// or adds ([`Self::keeps_items`]).
+    items_changed: OnceCell<FxHashSet<(u8, Option<String>)>>,
+    /// The parameters whose items or elements each value may be, or be below
+    /// ([`Self::element_paths`]), on the function's tables and budget.
+    elements: Closure<(VarId, ItemStep), KeySet<(u8, String)>>,
     /// Allocations, escapes, and construction queries (`construction`).
     rec: Recorder,
     pending_sites: Vec<PendingSite>,
@@ -1121,6 +1129,9 @@ impl<'a> Extractor<'a> {
             roots: Closure::new(),
             displays: Memo::new(),
             walk_budget: Budget::of_function("summary::walks", f),
+            rebound: OnceCell::new(),
+            items_changed: OnceCell::new(),
+            elements: Closure::new(),
             rec: Recorder::default(),
             pending_sites: Vec::new(),
             pending_args: Vec::new(),
@@ -1441,6 +1452,19 @@ impl<'a> Extractor<'a> {
                             is_slice,
                             ..
                         } => {
+                            // A slice of a builtin sequence is a shallow copy of it.
+                            if *is_slice
+                                && let Some(original) = self
+                                    .param_alias
+                                    .get(obj)
+                                    .or_else(|| self.param_copy_alias.get(obj))
+                                && ownership::slice_copies(match self.val(*obj) {
+                                    Some(Val::Inst(class)) => Some(class.as_str()),
+                                    _ => None,
+                                })
+                            {
+                                self.param_copy_alias.insert(*dst, original.clone());
+                            }
                             // `p["key"]` of a parameter, `td["key"]` of a `TypedDict`: a key of a
                             // typed dict is its field.
                             if let Some(key) = key_const {
@@ -1514,6 +1538,159 @@ impl<'a> Extractor<'a> {
                 break;
             }
         }
+        let _ = self.rebound.set(rebound);
+    }
+
+    /// The parameters whose items or elements the object `var` holds may be, or be below, each
+    /// with the path a change of it is to the parameter ([`crate::ELEMENTS_PATH`], or the
+    /// attribute it is below: `p.a[0]`): an item (`p["k"]`, `p[i]`), a step of iterating it
+    /// (`for x in p`), an element that a method outside the project returns or views
+    /// (`p.get(k)`, `p.values()`), an attribute or item of one, through copies and phis, of a
+    /// parameter, of the object `p.a` holds, or of a shallow copy of one, while the function
+    /// leaves those items as the original's ([`Rebound::keeps_items`]). Empty past the function's
+    /// budget.
+    fn element_paths(&self, var: VarId) -> Vec<(u8, String)> {
+        if self.param_alias.is_empty() {
+            return Vec::new();
+        }
+        let (f, shape) = (self.f, self.shape);
+        let container = |v: &VarId| {
+            self.param_alias
+                .get(v)
+                .or_else(|| self.param_copy_alias.get(v))
+        };
+        let own = |(v, step): (VarId, ItemStep)| {
+            let ItemStep::Items(index) = step else {
+                return KeySet::new();
+            };
+            let key = index.and_then(|i| shape.str_const(i));
+            container(&v)
+                .filter(|alias| self.keeps_items(alias, key))
+                .map(|(i, path)| {
+                    let path = path.clone();
+                    (*i, path.unwrap_or_else(|| crate::ELEMENTS_PATH.to_owned()))
+                })
+                .into_iter()
+                .collect()
+        };
+        let next = |(v, step): (VarId, ItemStep), out: &mut Vec<(VarId, ItemStep)>| {
+            let below = (v, ItemStep::Below);
+            match shape.def(v) {
+                Def::Phi(b, i) => out
+                    .extend((f.block(b).phis[i as usize].incoming.iter()).map(|(_, w)| (*w, step))),
+                Def::Inst(b, i) => match (&f.block(b).insts[i as usize].kind, step) {
+                    (InstKind::Copy { src, .. }, _) => out.push((*src, step)),
+                    // The items of a parameter or of its copy are its own (`own`); those of any
+                    // other value are below it.
+                    (_, ItemStep::Items(_)) if container(&v).is_none() => out.push(below),
+                    (_, ItemStep::Items(_)) => {}
+                    (
+                        InstKind::SubscriptLoad {
+                            obj,
+                            index,
+                            is_slice: false,
+                            ..
+                        },
+                        ItemStep::Below,
+                    ) => out.push((*obj, ItemStep::Items(Some(*index)))),
+                    (InstKind::IterNext { iter, .. }, ItemStep::Below) => {
+                        if let Some(InstKind::MakeIter { iterable, .. }) =
+                            shape.inst(*iter).map(|i| &i.kind)
+                        {
+                            out.push((*iterable, ItemStep::Items(None)));
+                        }
+                    }
+                    (kind, ItemStep::Below) => match self.attr_load(kind) {
+                        // An attribute of a parameter or of its copy is `param_alias`'s.
+                        Some((_, obj, _)) if container(&obj).is_none() => out.push((obj, step)),
+                        Some(_) => {}
+                        None => out.extend(self.element_view(kind)),
+                    },
+                },
+                Def::Param | Def::None => {}
+            }
+        };
+        match self
+            .elements
+            .ask(&self.walk_budget, (var, ItemStep::Below), own, next)
+        {
+            Answer::Known(paths) => paths.iter().cloned().collect(),
+            Answer::Open => Vec::new(),
+        }
+    }
+
+    /// Whether the function leaves as the original's the item under the constant `key` of the
+    /// parameters and copies with the alias `container` (`param_alias`, `param_copy_alias`): it
+    /// stores or deletes that key on no object ([`Rebound::keeps_key`]); and for `None`, every
+    /// item at every position: it stores, deletes, or adds no item of a value with that alias
+    /// (`c[i] = v`, `c.append(v)`, `c.insert(0, v)`, `c.appendleft(v)`, `c.update(...)`).
+    fn keeps_items(&self, container: &(u8, Option<String>), key: Option<&str>) -> bool {
+        let rebound = self
+            .rebound
+            .get()
+            .expect("build_aliases sets what the function rebinds");
+        if let Some(key) = key {
+            return rebound.keeps_key(key);
+        }
+        let changed = self.items_changed.get_or_init(|| {
+            let alias = |v: &VarId| {
+                self.param_alias
+                    .get(v)
+                    .or_else(|| self.param_copy_alias.get(v))
+                    .cloned()
+            };
+            let insts = self.f.blocks.iter().flat_map(|b| &b.insts);
+            insts
+                .filter_map(|inst| match &inst.kind {
+                    InstKind::SubscriptStore { obj, .. }
+                    | InstKind::SubscriptDelete { obj, .. } => alias(obj),
+                    InstKind::MethodCall { recv, method, .. }
+                        if matches!(
+                            method.as_str(),
+                            "append"
+                                | "appendleft"
+                                | "extend"
+                                | "extendleft"
+                                | "insert"
+                                | "update"
+                                | "setdefault"
+                                | "__setitem__"
+                                | "__delitem__"
+                        ) =>
+                    {
+                        alias(recv)
+                    }
+                    _ => None,
+                })
+                .collect()
+        });
+        !changed.contains(container)
+    }
+
+    /// The receiver whose element (under the key the index names, `None`: any) the result of
+    /// `kind` is, when it is a method of a class outside the project that returns an element of
+    /// its receiver or a view of its elements (`p.get("k")`, `p.values()`,
+    /// [`readonly::ELEMENT_ACCESSORS`]).
+    fn element_view(&self, kind: &InstKind) -> Option<(VarId, ItemStep)> {
+        let InstKind::MethodCall {
+            recv, method, args, ..
+        } = kind
+        else {
+            return None;
+        };
+        if matches!(
+            self.cx.resolve_method(self.val(*recv), method),
+            Callee::Project(..)
+        ) {
+            return None;
+        }
+        let views = (self.derivations(kind).into_iter())
+            .any(|(v, d)| v == *recv && d == Derivation::Step(ReturnStep::ELEMENT));
+        let index = match method.as_str() {
+            "get" | "__getitem__" => args.first().copied(),
+            _ => None,
+        };
+        views.then_some((*recv, ItemStep::Items(index)))
     }
 
     /// The alias maps of `dst`, a read of the closure cell `name` of an enclosing function: the
@@ -2099,6 +2276,8 @@ impl<'a> Extractor<'a> {
         let mut origin = ArgOrigin {
             param: self.param_alias.get(&var).cloned(),
             param_slot: self.param_slot_alias.get(&var).cloned(),
+            param_elements: self.element_paths(var),
+            param_copy: self.param_copy_alias.get(&var).cloned(),
             self_attr: self.self_attr_alias.get(&var).cloned(),
             targets: None,
             typed_field,
@@ -2161,33 +2340,33 @@ impl<'a> Extractor<'a> {
     }
 
     /// The parameter (or the object `p.a` holds) the result of `kind` is a shallow copy of
-    /// (`EffectSummary::changed_param_attrs`), holding nothing else: a copy call of the catalog
-    /// or a copy method without other arguments (`copy.copy(p)`, `dict(p)`, `p.copy()`), or a
-    /// display that only unpacks it (`{**p}`, `[*p]`, [`readonly::display_copies`]), of the
-    /// parameter itself, of `p.a`, or of such a copy.
+    /// (`EffectSummary::changed_param_attrs`), holding nothing else ([`readonly::copy_of`]: a copy
+    /// call of the catalog or a copy method given it alone, `copy.copy(p)`, `dict(p)`,
+    /// `p.copy()`, or a display that only unpacks it, `{**p}`, `[*p]`), of the parameter itself,
+    /// of `p.a`, or of such a copy.
     fn shallow_copied_param(&self, kind: &InstKind) -> Option<(u8, Option<String>)> {
-        let copied: Vec<VarId> = match kind {
-            InstKind::Call { args, kwargs, .. } | InstKind::MethodCall { args, kwargs, .. }
-                if kwargs.is_empty() && args.len() <= 1 =>
-            {
-                self.derivations(kind)
-                    .into_iter()
-                    .filter(|(_, d)| *d == Derivation::Step(ReturnStep::SHALLOW_COPY))
-                    .map(|(v, _)| v)
-                    .collect()
-            }
-            InstKind::DictLiteral { .. } | InstKind::AllocBuiltin { .. } => {
-                readonly::display_copies(self.f, kind)
-            }
-            _ => return None,
-        };
-        let mut originals = copied.iter().filter_map(|v| {
+        let callee = self.callee_of(kind);
+        let copy = readonly::copy_of(self.f, kind, &callee, self.cx.kb).filter(|c| !c.deep)?;
+        let mut originals = copy.operands.iter().filter_map(|v| {
             self.param_alias
                 .get(v)
                 .or_else(|| self.param_copy_alias.get(v))
         });
         let first = originals.next()?;
         originals.all(|o| o == first).then(|| first.clone())
+    }
+
+    /// What the call instruction `kind` calls (`Unresolved` for any other instruction).
+    fn callee_of(&self, kind: &InstKind) -> Callee {
+        match kind {
+            InstKind::Call { callee_var, .. } => {
+                self.cx.resolve_call(callee_var.and_then(|v| self.val(v)))
+            }
+            InstKind::MethodCall { recv, method, .. } => {
+                self.cx.resolve_method(self.val(*recv), method)
+            }
+            _ => Callee::Unresolved,
+        }
     }
 
     /// `MUT202` derivations of a call's result from its receiver and from its first argument
@@ -3193,7 +3372,7 @@ impl<'a> Extractor<'a> {
             (InstKind::AttrLoad { .. }, Some(Callee::Project(..))) => Source::Project,
             (kind, callee) => {
                 let constructs = self.construction(kind).is_some();
-                ownership::source(kind, callee, constructs, self.cx.kb, made_here)
+                ownership::source(self.f, kind, callee, constructs, self.cx.kb, made_here)
             }
         }
     }
@@ -4047,6 +4226,14 @@ impl<'a> Extractor<'a> {
         self.mutate_param(i, attr, span);
     }
 
+    /// A change of the object `var` holds, when it may be one a parameter holds as an item or
+    /// an element, or one below it ([`Self::element_paths`]).
+    fn change_param_element(&mut self, var: Option<VarId>, span: Span) {
+        for (i, path) in var.map(|v| self.element_paths(v)).unwrap_or_default() {
+            self.change_below_param_attr(i, path, span);
+        }
+    }
+
     /// The function's own change, at `span`, of parameter `i` at `path`.
     fn mutate_param(&mut self, i: u8, path: String, span: Span) {
         let memo = self.memo_fills.contains(&self.pos);
@@ -4180,7 +4367,7 @@ impl<'a> Extractor<'a> {
         match owner.param {
             Some((i, None)) => self.mutate_param(i, attr.to_owned(), span),
             Some((i, Some(path))) => self.change_below_param_attr(i, path, span),
-            None => {}
+            None => self.change_param_element(owner.var, span),
         }
         for class in owner.typed_classes {
             self.typed_site(class, attr, None, kind, span, written);
@@ -4684,7 +4871,7 @@ impl<'a> Extractor<'a> {
                 self.mutate_param(i, String::new(), span);
             }
             Some((i, Some(path))) => self.change_below_param_attr(i, path, span),
-            None => {}
+            None => self.change_param_element(Some(var), span),
         }
         if let Some((i, slot)) = self.param_slot_alias.get(&var).cloned() {
             self.summary
@@ -6457,13 +6644,7 @@ impl<'a> Extractor<'a> {
             .copied()
             .filter(|e| unconditional & crate::effect_bit(*e) != 0)
             .collect();
-        if !must.is_empty() && self.must_run.get(&self.pos).is_some_and(|r| r.called) {
-            let hop = Arc::new(self.hop(api.clone(), span));
-            let facts = self.summary.must_exec.get_or_insert_with(Box::default);
-            for e in must {
-                facts.effects.insert_new(e, || vec![Arc::clone(&hop)]);
-            }
-        }
+        let hop = (!must.is_empty()).then(|| Arc::new(self.hop(api.clone(), span)));
         let target = CallTarget::Layer2 {
             symbol: api,
             effects,
@@ -6472,6 +6653,12 @@ impl<'a> Extractor<'a> {
             unconditional,
         };
         let site = self.site(bb, target, is_awaited, span);
+        if let Some(hop) = hop.filter(|_| site.made_on_every_return()) {
+            let facts = self.summary.must_exec.get_or_insert_with(Box::default);
+            for e in must {
+                facts.effects.insert_new(e, || vec![Arc::clone(&hop)]);
+            }
+        }
         let queues = while_full.map(|w| {
             Box::new(SiteQueues {
                 while_full: Some(w),
@@ -6969,11 +7156,21 @@ fn construction_of(answer: &NewArg, rebinds: bool) -> Construction {
 }
 
 /// Give `dst` the alias shared by every aliased phi input (if they all agree).
+/// A step of [`Extractor::element_paths`]: the object a value holds is below another value's
+/// object, or is one of its items (under the constant key the index names; any item for
+/// `None`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ItemStep {
+    Below,
+    Items(Option<VarId>),
+}
+
 /// What a function may rebind on some object: the attribute names it stores or deletes (also
 /// through `setattr` / `delattr` and `__dict__`), `None` when it may set one it does not name;
 /// and the constant keys it stores or deletes, `None` when it stores under a key it does not name
 /// (`d[k] = v`, `d.update(...)`). An attribute or item of a shallow copy that the function may
-/// rebind may hold a value of its own rather than the original's (`param_copy_alias`).
+/// rebind may hold a value of its own rather than the original's (`param_copy_alias`), and so
+/// may an item of a parameter ([`Extractor::keeps_items`]).
 struct Rebound<'f> {
     attrs: Option<FxHashSet<&'f str>>,
     keys: Option<FxHashSet<&'f str>>,

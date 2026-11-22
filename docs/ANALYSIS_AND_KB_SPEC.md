@@ -439,9 +439,13 @@ EffectSummary(f) = {
 
     // Family 1: mutation and state effects (MUT1xx / MUT2xx)
     mutates_params:           Bitset,                      // parameter i or its elements / attributes changed
-    mutated_param_paths:      Map<ParamIdx, Set<AttrPath>>,// attributes / containers changed through parameter i
-    changed_param_attrs:      Map<ParamIdx, Set<AttrName>>,// attributes whose objects change (in place or deeper),
-                                                           // not just rebound: what a shallow copy shares (MUT202)
+    mutated_param_paths:      Map<ParamIdx, Set<AttrPath>>,// attributes / containers changed through parameter i;
+                                                           // "[]": an object it holds as an item or an element
+                                                           // (p["k"].append(x), for x in p: x.clear()), also
+                                                           // through a shallow copy of it (ELEMENTS_PATH)
+    changed_param_attrs:      Map<ParamIdx, Set<AttrName>>,// attributes (and "[]") whose objects change (in place
+                                                           // or deeper), not just rebound: what a shallow copy
+                                                           // shares (MUT202)
     param_change_sites:       Map<ParamIdx, Set<Span>>,    // own changes of parameter i only, never propagated
                                                            // (EFF201 mutates-params counts them)
     escapes_params:           Bitset,                      // stored in an attribute / container / global / closure variable
@@ -853,7 +857,12 @@ re-propagated into their summaries, so that the incremental index always equals 
 the language server re-checks the files whose diagnostics show a moved call site. The call chains
 of `MUT108` / `MUT110` reports are no summary facts: the rule walks the own summaries and project
 calls of the functions below the call (`FileSummary::local_functions` and `call_sites`) down to
-the first function whose body makes the change. The language server compares these facts of the
+the first function whose body makes the change. A heuristic `MUT110` report, whose chain names no
+line, records "Changed at the line" open when the run asks (`CheckExtras::open_premises`): no
+function on the chain makes the change in its own body (a generator another function returns is
+iterated), or the one that does is not where its own summary establishes a builtin container whose
+changing method no project subclass replaces (`EffectSummary::param_inplace_sites`, which keeps no
+reason). The language server compares these facts of the
 edited file's functions that change a parameter in place (`heki_rules::chain_facts`) and
 re-checks the files with such reports above a function whose facts changed. Likewise, while
 `MUT111` is selected, it keeps the stale writes `MUT101` finds in each file's methods, with the
@@ -1244,13 +1253,17 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      level only), a display that only unpacks tagged values (`{**x}` with no other entry,
      `[*xs, *ys]`, `readonly::display_copies`) is a shallow copy of them, and a slice is a shallow copy unless
      the value's class is inferred and is not a builtin sequence
-     (`readonly::subscript_step`, shared with the return flow). A copy method of a project class
+     (`readonly::subscript_step`, shared with the return flow). `readonly::copy_of` is the one
+     table of the copies an instruction makes of the values it is given alone, which
+     `MUT112`'s origins (`ownership::source`: a shallow copy is a new object holding the copied
+     values' elements) and the summaries' copies of parameters read too. A copy method of a project class
      (`Image.copy`) is a call of that method, not a copy by its name (`readonly::call_derivation`).
      A copy keeps its original's class for receiver typing. A phi joins the tags of all its
      incoming values, to a fixpoint.
   3. A direct attribute write or container mutation of a tagged value, or passing it in a
      parameter position the callee changes (`mutated_param_paths` minus `memo_param_paths`; for a
-     shallow copy, below the attributes `changed_param_attrs` names), is reported as **`MUT202`**
+     shallow copy, below the attributes `changed_param_attrs` names; for a producer that is not
+     deep, not below its items), is reported as **`MUT202`**
      with the call hop, or as **`MUT114`** when the value comes from an `@lru_cache` / `@cache`
      function rather than a declared producer. A `MUT114` report is exact when the cached
      function carries a `CachedResult` (a `functools` cache resolved by import, with a `maxsize`
@@ -1258,7 +1271,14 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      live return, by its return annotation or by construction), the changed value is that one
      function's result on every path (`MustResult`, an optimistic fixpoint over copies and phis:
      a value starts unset and moves only down, to one cached function, then to anything else),
-     and the instruction changes a container of that kind in place. Filling a memo of the shared object or initializing one of its attributes
+     and the instruction changes a container of that kind in place. One decision,
+     `Mut202Fn::cached_change_steps`, tells each premise that does not hold, which a heuristic
+     report records as open when the run asks (`CheckExtras::open_premises`): "Same object" from
+     `MustResult` (over the result of any one project function, so that the cached function's
+     own premises stay apart) or a wrapper on the way, "Cached", "Keyed", and "Container kind"
+     together from a missing `CachedResult` (it keeps no reason, so all three are recorded), and
+     "Changed in place" from a change through a called function, a line that is no change of the
+     kind, or a subclass the annotation admits that replaces the method. Filling a memo of the shared object or initializing one of its attributes
      lazily (`SelfAttrWrite::fills_memo`, `lazy_init`, on any object a parameter or a tagged value
      holds; through a call, a change of the object a memo-named attribute holds) is no change:
      what the object computes stays the same. A change below a shallow copy
@@ -1330,6 +1350,21 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      of a loop over a parameter, a part of one, or a catalog call's `items`, whose trip count the
      code does not fix (`heki_ir::ItemOrigins`, `FnIndex::fixed_trips`), and has sent a statement
      whenever it returns. Everything else the heuristic tier finds is `EFF111` / `EFF113`.
+   - Open premises (`CheckExtras::open_premises`, off in `heki check` and the language server,
+     on in the hidden `heki dump-open-premises`): an `EFF111` / `EFF113` report records which
+     premises of its claim's row (`heki_rules::premises`) it left open, each with a cause. The
+     decisions above tell each step that does not hold (`MustGap`) to whoever asks: a decision
+     stops at the first, an explanation goes on. Along the reported chain each call is evaluated
+     (`ProjectIndex::site_must_gaps`): its targets' completeness, whether they run there as
+     written, their facts, and, below the first call, whether the caller makes the next call on
+     every normal return (`CallSite::made_on_every_return`); the walk goes down while the
+     function the chain enters lacks the fact, whose own gap then gives way to the gaps found
+     below it. For `EFF103` the loop premises are evaluated on every loop around the call, and
+     the loop that leaves the fewest open (the first such) gives them. A cause stands for the
+     cases its facts cannot tell apart yet: `CallSite::complete` keeps no reason, so a protocol
+     receiver, an unknown base, more than 64 classes, and an unresolved union member are one
+     cause, and `CallTarget::Layer2::unconditional` keeps none either (it is computed only for a
+     complete call, so at an incomplete last call "Waits" / "Sends" is not evaluated).
 1. **Offload wrapper propagation** (from datamodel-code-generator `bodies.py:112`):
    - When a function `w(fn, *args)` calls `asyncio.to_thread(fn, ...)` (`offloads_blocking_arg =
      0`) or similar, the parameter index of `fn` is recorded in `w`'s `offloads_blocking_params`
@@ -1365,7 +1400,14 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      concatenation and padding in a loop are excluded, and so is a value rebuilt only from
      arithmetic on the previous one (`x = np.concatenate((x - d, [a]))`): an operator holds an
      operand only as list or tuple concatenation and repetition or dict union, and an operand
-     sliced or computed from the previous array or frame makes it work entry by entry.
+     sliced or computed from the previous array or frame makes it work entry by entry. The exact
+     tier is one decision (`UpdateDecision::steps`), told the premises that do not hold in the
+     order it takes them: the update is a catalog call that reallocates on every call
+     ("Reallocates"), the previous value is held and every path around the back edge carries
+     the update ("Loop-carried on every path"), every iteration, and the loop's trip count and
+     items ("Origin", as for `EFF103`). A decision stops at the first and asks for the loop's
+     items whatever the steps before it found, as it always did; an explanation (when the run
+     records open premises) goes on with a budget the function's explanations share.
 4. **Duplicate aggregation (boundary-only reporting and root-cause grouping)**:
    - In `async A → await async B → sync C → blocking D`, only the first crossing into the
      synchronous world (`async B`) is reported; when more than a threshold (10) of the reports
@@ -1613,6 +1655,29 @@ Every candidate also needs `A1HazardFree` (no frame introspection in the functio
 | **OPT120** / **OPT121** | `size-dependent` | `Unique(q)` (no escape, not returned), `ExactType(q, list)`, only operations `deque` supports equally (`DequeEquivalentOps`: no `list(*a)` / `list(**kw)`, no iterator live at a change or consumed by it, iterators used only for their elements, `q = q[1:]` exactly) | `NotConstSmall`, **no index `q[i]` other than the ends (`0`, `-1`)** | S12, `sort()`, $O(n)$ middle indexes, `q.extend(reversed(q))`, `type(iter(q))` |
 | **OPT130** | `size-dependent` | Every argument `ValueLoopInvariant`, `SideEffectFree` (no method arguments), `ZeroTripExceptionSafe` (no `*` arguments), the built container used by the membership test only (`ValueLoopInvariant(call)`) | `NotConstSmall` (100 times slower when the loop runs zero times: A.8), not a `ConstSmall` / retry loop, not `tuple(t)` of a tuple | S22, S28, A.8 |
 
+Open premises (`CheckExtras::open_premises`, as for `EFF111` / `EFF113` in section 2.4): a
+heuristic report of an `OPT` rewrite records "Rewrite proven safe" once for each obligation of
+its verdict that is not established, with the obligation's kind as the cause
+(`heki_rules::premises::OBLIGATION_CAUSES`, one row per `ObligationKind`) and its description
+(`Kind(subject): reason`) as the detail. The other premises of the row hold for every report: a
+site is found only in a loop and, for an accumulation, on a value carried around it
+(`find_sites`), and a candidate is reported only when its construction establishes the builtin
+type (`OptCandidate::is_reportable`). A proven size-dependent report in a loop whose trip count
+the code fixes or caps (`OptCandidate::in_exact_tier`) records nothing: no premise of its row is
+open, and the exact tier leaves it out only because a fixed count is no evidence either way.
+
+`OPT113`'s exact tier is one decision, `JoinPremises::steps`, which tells each step that does
+not hold to its caller in the order it takes them (the same collection, the same keys, both
+loops through inputs, both trip counts open, idle on a mismatch, the inner loop advanced
+without code): the decision stops at the first, so it spends the function's shared walk budget
+as before, and an explanation goes on with a budget the function's explanations share (one more
+budget proportional to the function), so the decisions of the other joins are unchanged. `idle_on_mismatch` tells a key load that may run code ("Equality of keys":
+of an item whose type is unknown, or a load that is no plain attribute of a known class or no
+item of a builtin container) apart from any other work on a mismatch ("Idle on a mismatch"), and
+`steps_run_no_code` an inner iterable of unknown type (an annotation closes it, unless a project
+subclass of a builtin container defines `__iter__`) apart from one that may run code. A fixed
+trip count records nothing, as for the rewrites.
+
 ---
 
 ## 4. Knowledge bases, the Ratchet baseline, and profile dumps
@@ -1632,8 +1697,15 @@ The single place for every execution-effect origin. An entry has `symbol`, `effe
 `offloads_blocking_arg` (`asyncio.to_thread`; with `0`, also an offloading decorator such as
 `asgiref.sync.sync_to_async`), `sync_facade_arg` (`AsyncSession.run_sync`: the callable runs on
 the caller's thread with a synchronous facade over an async connection), `excluded` (`logging.Logger.*`), `copy_sanitizer` (`"deep"`:
-`copy.deepcopy`; `"shallow"`: `copy.copy`, `BaseModel.model_copy`, whose `deep=True` copies
-deeply unless `update=` hands it values by reference: `MUT202`), `return_type` (factories such as
+`copy.deepcopy`, `BaseModel.__deepcopy__`; `"shallow"`: `copy.copy`, `BaseModel.model_copy`, whose
+`deep=True` copies deeply unless `update=` hands it values by reference: `MUT202`),
+`stores_on_instance` (a class's `__setattr__` / `__delattr__` that stores the value, possibly a
+validated conversion of it, or deletes the attribute on the instance itself, or raises, handing
+the value to no other object, in a class that installs no descriptor for it and defines no
+`__getattribute__`, so a read finds the stored value: `pydantic.BaseModel.__setattr__`), `keeps_hashable_defaults` (an
+instance built without a field starts from the field's default itself when it is hashable, and
+from a deep copy of an unhashable one, then holds what validating the default returns where the
+field validates it: pydantic 2's `BaseModel`), `return_type` (factories such as
 `sqlite3.connect`), `sync_lock_or_tx` (`threading.Lock`, `Session.begin`: `EFF106`),
 `non_reentrant_lock` (`threading.Lock`, `asyncio.Lock`: `EFF109`), `one_at_a_time`
 (`asyncio.StreamReader.readline`, `AsyncSession.execute`: `EFF110`),

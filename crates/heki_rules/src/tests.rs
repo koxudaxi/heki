@@ -78,6 +78,7 @@ fn check_with(files: &[(&str, &str)], config: &HekiConfig, select: &[&str]) -> V
         decls: None,
         project_patches_builtins: None,
         text_of: None,
+        open_premises: false,
     };
     check_project(&units, config, &kb, &index, &selection, &extras).unwrap()
 }
@@ -473,6 +474,7 @@ fn mut201_glob_writers_and_bad_targets() {
         decls: None,
         project_patches_builtins: None,
         text_of: None,
+        open_premises: false,
             }
         ),
         Err(RuleConfigError::InvalidTarget { section: "write-owners", target: t }) if t == "nodot"
@@ -910,6 +912,7 @@ fn check_against(checked: &[Built], indexed: &[Built], select: &[&str]) -> Vec<D
         decls: Some(&decls),
         project_patches_builtins: None,
         text_of: None,
+        open_premises: false,
     };
     check_project(&units, &config, &kb, &index, &selection, &extras).unwrap()
 }

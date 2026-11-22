@@ -1,12 +1,18 @@
 //! Project discovery and parsing shared by `heki check`, `heki snapshot`, `--watch`, and the
 //! LSP server: configuration lookup, file discovery (`.gitignore` / `.hekiignore` / `exclude`),
-//! parallel parse → semantic model → IR, and inline-suppression filtering.
+//! parallel parse → semantic model → IR, inline-suppression filtering, and the index the
+//! commands that report from `heki check`'s analysis build.
 
-use crate::ModuleUnit;
+use crate::{
+    CheckExtras, ModuleUnit, RuleConfigError, RuleSelection, SummarySnapshot, check_project,
+};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use heki_ast::{LineIndex, Span};
-use heki_diagnostics::{Diagnostic, InlineIgnores};
-use heki_effect::{ModuleInput, ModuleLayout, UnreadModule};
+use heki_diagnostics::{Diagnostic, InlineIgnores, RatchetBaseline};
+use heki_effect::{
+    Contracts, ModuleInput, ModuleLayout, OptInFacts, ProjectIndex, TypedWrites, UnreadModule,
+    analyze_project_for,
+};
 use heki_env::{ConfigError, HekiConfig, PythonVersion, RuntimeProfile};
 use heki_ir::ModuleIr;
 use heki_kb::{EcosystemPatch, EffectiveEcosystemKb, EffectiveSoundnessKb, KbError};
@@ -14,6 +20,7 @@ use heki_semantic::SemanticModel;
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 use thiserror::Error;
 
 /// Directories skipped during discovery unless `exclude` replaces this list (Ruff-style).
@@ -256,6 +263,18 @@ fn walk(dir: &Path) -> ignore::WalkBuilder {
     builder
 }
 
+/// [`walk`] of `dir` that never enters a directory `exclude` leaves out (it may not even be
+/// readable).
+fn walk_project(dir: &Path, root: &Path, exclude: &GlobSet) -> ignore::WalkBuilder {
+    let mut builder = walk(dir);
+    let (dir_root, dir_exclude) = (root.to_path_buf(), exclude.clone());
+    builder.filter_entry(move |e| {
+        !e.file_type().is_some_and(|t| t.is_dir())
+            || !is_excluded(&rel_posix(e.path(), &dir_root), &dir_exclude)
+    });
+    builder
+}
+
 /// A file the walk keeps when no ignore file or `exclude` leaves it out.
 fn walked_python(path: &Path, root: &Path, exclude: &GlobSet) -> bool {
     path.extension().is_some_and(|e| e == "py" || e == "pyi")
@@ -277,14 +296,7 @@ pub fn collect_files(
             files.push(p.clone());
             continue;
         }
-        let mut builder = walk(p);
-        // An excluded directory is never entered (it may not even be readable).
-        let (dir_root, dir_exclude) = (root.to_path_buf(), exclude.clone());
-        builder.filter_entry(move |e| {
-            !e.file_type().is_some_and(|t| t.is_dir())
-                || !is_excluded(&rel_posix(e.path(), &dir_root), &dir_exclude)
-        });
-        for entry in builder.build() {
+        for entry in walk_project(p, root, exclude).build() {
             let entry = entry.map_err(|cause| ProjectError::Walk {
                 path: p.clone(),
                 cause,
@@ -299,6 +311,38 @@ pub fn collect_files(
     files.retain(|f| seen.insert(canonical_or_given(f)));
     files.sort();
     Ok(files)
+}
+
+/// The Python files below `root` that [`collect_files`] over it finds and `analyzed` does not
+/// hold (by project-relative path), in the order of a walk sorted by name: at most `limit` of
+/// them, among the first `max_entries` entries of the walk. Returns them with whether the walk
+/// saw every entry: an entry it cannot read leaves them a lower bound.
+pub fn files_left_out(
+    root: &Path,
+    exclude: &GlobSet,
+    analyzed: &dyn Fn(&str) -> bool,
+    limit: usize,
+    max_entries: usize,
+) -> (Vec<PathBuf>, bool) {
+    let mut builder = walk_project(root, root, exclude);
+    builder.sort_by_file_name(|a, b| a.cmp(b));
+    let mut found = Vec::new();
+    let mut complete = true;
+    for (seen, entry) in builder.build().enumerate() {
+        if seen == max_entries || found.len() == limit {
+            return (found, false);
+        }
+        let Ok(entry) = entry else {
+            complete = false;
+            continue;
+        };
+        let path = entry.path();
+        if path.is_file() && walked_python(path, root, exclude) && !analyzed(&rel_posix(path, root))
+        {
+            found.push(path.to_path_buf());
+        }
+    }
+    (found, complete)
 }
 
 /// Whether [`collect_files`] over the directory `dir` finds `file` (both absolute): the same
@@ -417,6 +461,8 @@ pub struct ProjectOptions<'a> {
 /// Configuration and knowledge bases of a project root.
 pub struct ProjectEnv {
     pub root: PathBuf,
+    /// The file `cfg` was read from (`--config`, or the first configuration file at the root).
+    pub config_file: Option<PathBuf>,
     pub cfg: HekiConfig,
     pub runtime: RuntimeProfile,
     pub kb: EffectiveEcosystemKb,
@@ -436,9 +482,13 @@ impl ProjectEnv {
             None => std::env::current_dir().unwrap_or_else(|_| first.clone()),
         };
         let root = find_root(&first, &working_dir);
-        let cfg = match opts.config {
+        let config_file = opts
+            .config
+            .map(Path::to_path_buf)
+            .or_else(|| HekiConfig::file_in(&root));
+        let cfg = match &config_file {
             Some(path) => HekiConfig::load_from_file(path)?,
-            None => HekiConfig::load_from_dir(&root)?,
+            None => HekiConfig::default(),
         };
         let runtime = match opts.target_version.or(cfg.target_version.as_deref()) {
             Some(t) => PythonVersion::parse_tag(t)
@@ -459,6 +509,7 @@ impl ProjectEnv {
         });
         Ok(Self {
             root,
+            config_file,
             cfg,
             runtime,
             kb,
@@ -574,6 +625,170 @@ impl Project {
     pub fn units(&self) -> Vec<ModuleUnit<'_>> {
         self.files.iter().map(ParsedFile::unit).collect()
     }
+
+    /// The index of the project's files with `facts`.
+    pub fn index(&self, facts: IndexFacts) -> ProjectIndex {
+        let inputs = self.inputs();
+        analyze_project_for(
+            &inputs,
+            &self.unread,
+            &self.env.kb,
+            facts.contracts,
+            facts.typed_writes,
+            facts.opt_in,
+        )
+    }
+}
+
+/// Which facts an index holds besides those the selected rules read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Facts {
+    /// None: `heki check` and its `--watch` engine.
+    Check,
+    /// Also what `heki inspect` shows ([`crate::inspect_facts`]): `heki inspect` and the language
+    /// server.
+    Inspect,
+}
+
+/// What an index is built with: the contracts its summaries depend on, whether typed writes
+/// propagate, and the opt-in facts it extracts.
+pub struct IndexFacts {
+    pub contracts: Option<Arc<dyn Contracts>>,
+    pub typed_writes: TypedWrites,
+    pub opt_in: OptInFacts,
+}
+
+impl IndexFacts {
+    /// The facts the rules `selection` runs on `config` read, with `facts`.
+    pub fn of(
+        facts: Facts,
+        config: &HekiConfig,
+        kb: &EffectiveEcosystemKb,
+        selection: &RuleSelection,
+    ) -> Result<Self, RuleConfigError> {
+        let opt_in = match facts {
+            Facts::Check => crate::opt_in_facts(selection),
+            Facts::Inspect => crate::inspect_facts(selection),
+        };
+        Ok(Self {
+            contracts: crate::summary_contracts(config, kb)?,
+            typed_writes: crate::typed_writes(config, selection),
+            opt_in,
+        })
+    }
+
+    /// Every fact, with no contract: what a summary snapshot records (`MUT103`).
+    pub fn snapshot() -> Self {
+        Self {
+            contracts: None,
+            typed_writes: TypedWrites::Propagated,
+            opt_in: OptInFacts::ALL,
+        }
+    }
+}
+
+/// A loaded project with the analysis `heki check` runs on it: the rule selection, the saved
+/// summary snapshot `MUT103` compares with, and the index built with the configuration's
+/// contracts and the selection's typed-write mode.
+pub struct Indexed {
+    pub project: Project,
+    pub selection: RuleSelection,
+    pub snapshot: Option<SummarySnapshot>,
+    pub index: ProjectIndex,
+}
+
+impl Indexed {
+    /// Index `project` for the rules `selection` runs, with `facts`.
+    pub fn build(
+        project: Project,
+        selection: RuleSelection,
+        snapshot: Option<SummarySnapshot>,
+        facts: Facts,
+    ) -> Result<Self, RuleConfigError> {
+        let env = &project.env;
+        let index = project.index(IndexFacts::of(facts, &env.cfg, &env.kb, &selection)?);
+        Ok(Self {
+            project,
+            selection,
+            snapshot,
+            index,
+        })
+    }
+
+    /// The diagnostics of every enabled rule in the project's files, after inline suppressions
+    /// and without the heuristic reports the selection withholds, and how many those are.
+    pub fn diagnose(&self) -> Result<(Vec<Diagnostic>, usize), RuleConfigError> {
+        self.diagnose_units(&self.project.units(), false)
+    }
+
+    /// [`Self::diagnose`] in `units` (some or all of the project's files): the rules read the
+    /// other files through the index only. `open_premises`: the heuristic reports of exact
+    /// claims record the premises they left open ([`CheckExtras::open_premises`]).
+    pub fn diagnose_units(
+        &self,
+        units: &[ModuleUnit<'_>],
+        open_premises: bool,
+    ) -> Result<(Vec<Diagnostic>, usize), RuleConfigError> {
+        let env = &self.project.env;
+        let decls = self.index.project_decls();
+        let sources: FxHashMap<&Path, &str> = self
+            .project
+            .files
+            .iter()
+            .map(|f| (f.path.as_path(), f.source.as_str()))
+            .collect();
+        let text_of = |p: &Path| sources.get(p).map(|t| (*t).to_owned());
+        let extras = CheckExtras {
+            soundness_kb: &env.soundness_kb,
+            snapshot: self.snapshot.as_ref(),
+            decls: Some(&decls),
+            project_patches_builtins: Some(
+                self.project.files.iter().any(ParsedFile::patches_builtins),
+            ),
+            text_of: Some(&text_of),
+            open_premises,
+        };
+        let mut diags = check_project(
+            units,
+            &env.cfg,
+            &env.kb,
+            &self.index,
+            &self.selection,
+            &extras,
+        )?;
+        retain_unsuppressed(&mut diags, &self.project.files);
+        let withheld = self.selection.withhold_heuristic(&mut diags);
+        Ok((diags, withheld))
+    }
+}
+
+/// The path a baseline entry names for a file of `files`: relative to the project root.
+pub fn baseline_key(files: &[ParsedFile]) -> impl Fn(&Path) -> String + '_ {
+    let rel: FxHashMap<&Path, &str> = files
+        .iter()
+        .map(|f| (f.path.as_path(), f.rel.as_str()))
+        .collect();
+    move |p: &Path| {
+        rel.get(p)
+            .map_or_else(|| heki_diagnostics::path_text(p), |r| (*r).to_owned())
+    }
+}
+
+/// For each of `diags` (reports on `files`), whether `baseline` counts it among the regressions,
+/// the reports `heki check` prints with the baseline.
+pub fn regressed(
+    baseline: &RatchetBaseline,
+    diags: &[Diagnostic],
+    files: &[ParsedFile],
+) -> Vec<bool> {
+    let mut regressions = diags.to_vec();
+    baseline.keep_regressions(&mut regressions, &baseline_key(files));
+    // `keep_regressions` keeps the regressions in their order, so one pass pairs them up.
+    let mut next = regressions.iter().peekable();
+    diags
+        .iter()
+        .map(|d| next.next_if(|r| *r == d).is_some())
+        .collect()
 }
 
 /// Drop diagnostics suppressed by `# heki: ignore[...]` / `# noqa` comments of their file.

@@ -3,7 +3,7 @@
 //! symbol names no single function or a file could not be analyzed (the report is still
 //! printed).
 
-use crate::check::{Indexed, baseline_key, baseline_path, load_and_index, shown_errors};
+use crate::check::{baseline_path, load_and_index, shown_errors};
 use crate::{InspectArgs, OutputFormat, ReportFormat};
 use anyhow::Result;
 use heki_diagnostics::{Diagnostic, RatchetBaseline, path_text};
@@ -12,7 +12,7 @@ use heki_rules::inspect::{
     InspectInputs, InspectQuery, MAX_CANDIDATES, Resolution, Symbol, inspect, render_text,
     resolve_line, resolve_name,
 };
-use heki_rules::project::{ParsedFile, canonical};
+use heki_rules::project::{Facts, Indexed, ParsedFile, canonical, regressed};
 use rustc_hash::FxHashMap;
 use serde_json::json;
 use std::path::Path;
@@ -39,7 +39,13 @@ pub(crate) fn run(args: &InspectArgs) -> Result<ExitCode> {
             return fail(args, json, &failure, None, &[]);
         }
     };
-    let indexed = load_and_index(&args.paths, &args.analysis, OutputFormat::Full, None, true)?;
+    let indexed = load_and_index(
+        &args.paths,
+        &args.analysis,
+        OutputFormat::Full,
+        None,
+        Facts::Inspect,
+    )?;
     let errors = shown_errors(&indexed.project.errors);
     let decls = indexed.index.project_decls();
     let resolution = match resolve(&indexed, &decls, &symbol) {
@@ -231,7 +237,7 @@ fn build(
         }
     }
     let units: Vec<_> = files.iter().map(|f| f.unit()).collect();
-    let (diags, _) = indexed.diagnose_units(&units)?;
+    let (diags, _) = indexed.diagnose_units(&units, false)?;
     let reports = with_baseline(args, indexed, diags)?;
     let roles = |key| {
         let (cfg, kb, soundness) = (&env.cfg, &env.kb, &env.soundness_kb);
@@ -275,31 +281,17 @@ fn with_baseline(
     indexed: &Indexed,
     diags: Vec<Diagnostic>,
 ) -> Result<Vec<(Diagnostic, Option<&'static str>)>> {
-    let project = &indexed.project;
-    let Some(path) = baseline_path(&args.analysis, &project.env) else {
+    let Some(path) = baseline_path(&args.analysis, &indexed.project.env) else {
         return Ok(diags.into_iter().map(|d| (d, None)).collect());
     };
     let baseline = RatchetBaseline::load(&path)?;
-    let key_path = baseline_key(project);
-    let mut regressions = diags.clone();
-    baseline.keep_regressions(&mut regressions, &key_path);
-    let regressed = |d: &Diagnostic| {
-        regressions.iter().any(|r| {
-            r.path == d.path
-                && r.span == d.span
-                && r.rule_code == d.rule_code
-                && r.target == d.target
-        })
-    };
+    let regressed = regressed(&baseline, &diags, &indexed.project.files);
     Ok(diags
-        .iter()
-        .map(|d| {
-            let status = if regressed(d) {
-                "regression"
-            } else {
-                "allowed"
-            };
-            (d.clone(), Some(status))
+        .into_iter()
+        .zip(regressed)
+        .map(|(d, regressed)| {
+            let status = if regressed { "regression" } else { "allowed" };
+            (d, Some(status))
         })
         .collect())
 }
