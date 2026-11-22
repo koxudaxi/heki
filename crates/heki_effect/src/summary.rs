@@ -491,6 +491,15 @@ fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary) {
         into.iteration_facts_mut().merge(*facts);
     }
     into.invalidates_cached.extend(other.invalidates_cached);
+    // A must-fact: read by both definitions.
+    into.must_read_self_attrs = match (into.must_read_self_attrs.take(), other.must_read_self_attrs)
+    {
+        (Some(a), Some(b)) => {
+            let both = crate::callgraph::must_reads_of_both(&a, &b);
+            (!both.is_empty()).then(|| Box::new(both))
+        }
+        _ => None,
+    };
     into.typed_field_write_sites
         .extend(other.typed_field_write_sites);
     into.typed_field_read_sites
@@ -682,6 +691,15 @@ struct Extracted {
     types: FxHashMap<VarId, Val>,
     /// [`FileSummary::blind_spots`].
     blind: Vec<BlindCall>,
+}
+
+/// The points of a function that read one `self` attribute ([`Extractor::self_read_points`]).
+#[derive(Default)]
+struct SelfReadPoints<'a> {
+    /// The loads whose value is read as a whole.
+    whole: Vec<Position>,
+    /// Per constant key, the item loads of a value read only through such loads.
+    keyed: BTreeMap<&'a str, Vec<Position>>,
 }
 
 /// A typed write site waiting for the answer of its construction query.
@@ -2452,7 +2470,7 @@ impl<'a> Extractor<'a> {
 
     fn run(mut self) -> Extracted {
         let f = self.f;
-        if self.opt_in.must_effects {
+        if self.opt_in.site_paths() {
             self.path_facts();
         }
         let reads_external = self.contracts.is_some_and(|c| c.reads_external());
@@ -6214,7 +6232,12 @@ impl<'a> Extractor<'a> {
     /// A call site in block `bb` with the caller's guards there.
     /// Nothing reads `v`: no instruction, phi, or terminator (a call made as a statement).
     fn discards(&self, v: VarId) -> bool {
-        let flow_uses = self.flow_uses.get_or_init(|| {
+        !self.uses.contains_key(&v) && !self.flow_uses().contains(&v)
+    }
+
+    /// The variables a phi or a block's terminator reads.
+    fn flow_uses(&self) -> &FxHashSet<VarId> {
+        self.flow_uses.get_or_init(|| {
             let mut out = FxHashSet::default();
             for bb in &self.f.blocks {
                 out.extend(
@@ -6232,13 +6255,63 @@ impl<'a> Extractor<'a> {
                 }
             }
             out
-        });
-        !self.uses.contains_key(&v) && !flow_uses.contains(&v)
+        })
+    }
+
+    /// The points that read each `self` attribute, for [`EffectSummary::must_read_self_attrs`]:
+    /// per attribute, the loads whose value is read as a whole, and per constant key the item
+    /// loads of a value every use of which is such an item load (the keys `reads_self_attrs`
+    /// records).
+    fn self_read_points(&self) -> BTreeMap<&'a str, SelfReadPoints<'a>> {
+        let f = self.f;
+        // The constant-key item loads of each value.
+        let mut items: FxHashMap<VarId, Vec<(&'a str, Position)>> = FxHashMap::default();
+        for bb in &f.blocks {
+            for (i, inst) in bb.insts.iter().enumerate() {
+                if let InstKind::SubscriptLoad {
+                    obj,
+                    key_const: Some(k),
+                    ..
+                } = &inst.kind
+                {
+                    items
+                        .entry(*obj)
+                        .or_default()
+                        .push((k.as_str(), (bb.id, i)));
+                }
+            }
+        }
+        let mut out: BTreeMap<&'a str, SelfReadPoints<'a>> = BTreeMap::new();
+        for bb in &f.blocks {
+            for (i, inst) in bb.insts.iter().enumerate() {
+                let InstKind::AttrLoad { dst, obj, attr } = &inst.kind else {
+                    continue;
+                };
+                if attr == "__dict__" || !self.self_vars.contains(obj) {
+                    continue;
+                }
+                let uses = self.uses.get(dst).map(Vec::as_slice).unwrap_or(&[]);
+                let keyed = !uses.is_empty()
+                    && !self.flow_uses().contains(dst)
+                    && uses.iter().all(|u| {
+                        matches!(u, InstKind::SubscriptLoad { obj, key_const: Some(_), .. } if obj == dst)
+                    });
+                let points = out.entry(attr.as_str()).or_default();
+                if keyed {
+                    for (k, at) in items.get(dst).into_iter().flatten() {
+                        points.keyed.entry(k).or_default().push(*at);
+                    }
+                } else {
+                    points.whole.push((bb.id, i));
+                }
+            }
+        }
+        out
     }
 
     fn site(&self, bb: BlockId, target: CallTarget, is_awaited: bool, span: Span) -> CallSite {
         let cx = self.guard_inputs();
-        let (complete, on_every_return) = if self.opt_in.must_effects {
+        let (complete, on_every_return) = if self.opt_in.site_paths() {
             (
                 self.targets_complete(),
                 self.must_run.get(&self.pos).copied().unwrap_or_default(),
@@ -6326,7 +6399,12 @@ impl<'a> Extractor<'a> {
         let f = self.f;
         let every = |a: Answer<Must>| a == Answer::Known(Must::Every);
         let owner = "heki_effect::summary::Extractor::path_facts";
-        let (must_run, never_returns) =
+        let read_points = if self.opt_in.kept_values {
+            self.self_read_points()
+        } else {
+            BTreeMap::new()
+        };
+        let (must_run, never_returns, must_reads) =
             crate::with_paths(self.cx, f, &self.types, owner, |paths, _| {
                 let mut must_run = FxHashMap::default();
                 for bb in &f.blocks {
@@ -6350,10 +6428,37 @@ impl<'a> Extractor<'a> {
                     paths.on_every_return((entry.id, 0), Progress::Called)
                         == Answer::Known(Must::NeverCompletes)
                 });
-                (must_run, never_returns)
+                let mut must_reads = BTreeSet::new();
+                for (attr, points) in &read_points {
+                    let read = |at: &[Position]| {
+                        paths.on_every_return_passes_one_of(at, Progress::Returned)
+                            == Answer::Known(true)
+                    };
+                    if read(&points.whole) {
+                        must_reads.insert(AttrKeyPath {
+                            attr: (*attr).to_owned(),
+                            const_key: None,
+                        });
+                        continue;
+                    }
+                    for (key, at) in &points.keyed {
+                        let either: Vec<Position> =
+                            points.whole.iter().chain(at).copied().collect();
+                        if read(&either) {
+                            must_reads.insert(AttrKeyPath {
+                                attr: (*attr).to_owned(),
+                                const_key: Some((*key).to_owned()),
+                            });
+                        }
+                    }
+                }
+                (must_run, never_returns, must_reads)
             });
+        if !must_reads.is_empty() {
+            self.summary.must_read_self_attrs = Some(Box::new(must_reads));
+        }
         self.must_run = must_run;
-        if never_returns {
+        if never_returns && self.opt_in.must_effects {
             self.summary.must_exec = Some(Box::new(MustExec {
                 never_returns,
                 ..MustExec::default()

@@ -288,6 +288,10 @@ Compound expressions are flattened into **basic instructions in explicit left-to
     the same handler and every path to them passes the first, so moving their edges to the head
     changes no dominator. The graph of a region is built once, its dominators found in at most
     four passes in reverse postorder; past the budget the answer is `Open`.
+    `Paths::on_every_return_passes_one_of` and `Paths::on_every_iteration_passes_one_of` ask it
+    of a set of points (every path that completes the region passes one of them, also when none
+    completes it): a walk back from the region's end over the same graph, never entering a
+    passed node, does not reach its root.
   - `ItemOrigins::of_loop` (`heki_ir::facts::origin`): where the items a `for` loop steps
     through come from, as a set of `ItemOrigin`s: a parameter (`Param`), an attribute or item of
     one (`ParamPart`), the method's receiver (`Receiver`), a collection the code fixes (`Fixed`),
@@ -452,6 +456,9 @@ EffectSummary(f) = {
     iterates_params:          Bitset,                      // stepped by an iteration on some path: a generator
                                                            // passed there runs there
     reads_self_attrs:         Set<AttrKeyPath>,            // self.<attr> and self.<dict>[const_key] reads
+    must_read_self_attrs:     Set<AttrKeyPath>,            // those read on every path that returns normally,
+                                                           // as a whole or with the key (MUT101; only with
+                                                           // MUT101 or MUT111 selected, OptInFacts::kept_values)
     returns_self_attrs:       Set<AttrName>,               // @cached_property: self.<attr> objects the result
                                                            // holds by reference, read for nothing else (MUT101)
     lazily_read_self_attrs:   Set<AttrName>,               // self.<attr> read only where it or a self call
@@ -962,6 +969,19 @@ which module imports which.
 6. The writes and the paths after and before them come from `FileSummary.cache_flows`, so the
    stale writes of a method are known without its IR: `MUT101` reports those of the checked
    methods, and `MUT111` reads those of every method.
+7. **Reads on every path** (`EffectSummary::must_read_self_attrs`, computed only when `MUT101`
+   or `MUT111` runs: `OptInFacts::kept_values`): the attributes a function reads on every path
+   on which it returns normally, exception edges into handlers included. Its own loads of
+   `self.<attr>` are points of the path facts (`Progress::Returned`: a load that raised read
+   nothing); the loads of one attribute whose value is read as a whole, and the item loads of
+   one constant key of values read only through such loads, are asked together
+   (`Paths::on_every_return_passes_one_of`), so a read on each side of a branch counts. A `self` method
+   called on every such path adds what every one of its targets reads, when the function's name
+   is bound once (each site's paths are its own definition's), the call's targets are every
+   implementation it can run (`CallSite::complete`), and each runs its body at every call (no
+   cache decorator); a callee of the function's own call-graph component adds nothing,
+   so propagation needs no fixpoint for it. An attribute read as a whole covers each of its
+   keys, also where two definitions or two targets are joined.
 
 #### `MUT111`: readers of a stale `@cached_property` (opt-in)
 1. Reads: the `TypedFieldReadSite`s of each checked function's own body (`self.p`, `obj.p`,

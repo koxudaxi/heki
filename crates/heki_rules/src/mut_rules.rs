@@ -26,6 +26,10 @@ use std::path::{Path, PathBuf};
 
 // ==================================================================================== MUT101
 
+/// The rules whose exact claims read the kept-value facts
+/// ([`heki_effect::OptInFacts::kept_values`]).
+pub(crate) const KEPT_VALUE_RULES: &[&str] = &["MUT101", "MUT111"];
+
 /// Filter 1: initialization / two-phase initialization methods.
 const INIT_METHODS: &[&str] = &[
     "__init__",

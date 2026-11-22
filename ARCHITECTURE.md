@@ -340,6 +340,7 @@ EffectSummary(f) = {
     mutated_param_paths:      Map<ParamIdx, Set<AttrPath>>, // attributes / elements changed through parameter i
                                                     // ("[]": below its items, also through a shallow copy)
     reads_self_attrs:         Set<AttrKeyPath>,     // reads of self.<attr> (constant dict keys included)
+    must_read_self_attrs:     Set<AttrKeyPath>,     // those read on every path that returns normally (MUT101)
     mutates_self_attrs:       Set<AttrKeyPath>,     // reassignment or in-place change of self.<attr>
     invalidates_cached:       Set<AttrName>,        // del self.<prop>, self.__dict__.pop("<prop>", ...)
     typed_field_write_sites:  Set<(Class, Attr, WriteKind, Chain)>, // own and indirect writes, and those handed
