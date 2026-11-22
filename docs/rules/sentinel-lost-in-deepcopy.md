@@ -32,6 +32,11 @@ whose class heki knows (as for `MUT203`). The deep copy is a call of `copy.deepc
 argument, of an object of the class or of a subclass; the report is at that call, with the tests
 as related locations, so one new deep copy is one new diagnostic under a Ratchet baseline.
 
+A deep copy also copies what the object holds in its attributes. An instance of the class held
+there, by the attributes' types (an optional attribute, the items of a list or dict, the classes
+implementing a protocol), down to 64 classes below, is a heuristic report naming the attribute
+path (`reference.source`): what the attributes hold when the program runs may be other objects.
+
 It does not report:
 
 - a sentinel that copies as itself (`typing_extensions.Sentinel`, an instance of a class with
@@ -74,7 +79,8 @@ Its premises:
   registered with `copyreg`, or derives from a class outside the project other than `object`,
   `typing.Generic`, `abc.ABC`, or one whose `__deepcopy__` the catalog describes as copying the
   attributes deeply (R3). Open when the argument may be of a subclass of its class that holds
-  the sentinel, or when a subclass, a base, or a metaclass may decide the copy.
+  the sentinel, when it may hold such an instance below its attributes (by their types), or
+  when a subclass, a base, or a metaclass may decide the copy.
 
 ## Why is this bad?
 `copy.deepcopy` copies every attribute of the instance, the sentinel included: an `object()`
@@ -112,8 +118,8 @@ MISSING = Sentinel("MISSING")  # copies and pickles as itself
 ```
 
 ## Known limitations
-- A sentinel reached through a container or another object's attributes
-  (`copy.deepcopy([field])`, `copy.deepcopy(model)` holding fields) is not followed.
+- A deep copy of a container (`copy.deepcopy([field])`) is not followed, and an instance below
+  the copied object's attributes is found only by their types.
 - A sentinel bound in a class body, or under another name (`MISSING = UNDEFINED`), is not
   recognized.
 - A deep copy or a test in the body of a class defined at module level (`class Defaults:

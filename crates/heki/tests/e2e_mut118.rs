@@ -583,3 +583,106 @@ def copied_reassigned(r: Reassigned):
         vec![("models.py".to_owned(), 28)]
     );
 }
+
+/// An instance held below the copied object's attributes, found by their types (an optional
+/// attribute, the items of a list, the implementations of a protocol): datamodel-code-generator's
+/// own shape, where `copy.deepcopy(field.data_type)` copied the models its references reach. What
+/// the attributes hold at run time may be other objects, so the reports are heuristic. A class
+/// with a copy hook on the way leads nowhere, through a tuple or a union too, and so do attributes
+/// holding a class object, a callable, or `Self`.
+#[test]
+fn an_instance_below_the_copied_objects_attributes() {
+    let p = Project::new("mut118_below");
+    p.write("pkg/__init__.py", "")
+        .write(
+            "pkg/base.py",
+            r#"from typing import Any, Callable, Optional, Protocol, Self
+
+from pydantic import BaseModel
+
+UNDEFINED: Any = object()
+
+
+class ReferenceSource(Protocol):
+    name: str
+
+
+class Reference(BaseModel):
+    path: str
+    source: Optional[ReferenceSource] = None
+
+
+class DataType(BaseModel):
+    type: Optional[str] = None
+    reference: Optional[Reference] = None
+    data_types: list["DataType"] = []
+
+
+class DataModel:
+    def __init__(self, name: str, default: Any = UNDEFINED) -> None:
+        self.name = name
+        self.default: Any = default
+
+    def has_default(self) -> bool:
+        return self.default is not UNDEFINED
+
+
+class Field(BaseModel):
+    name: str
+    data_type: DataType
+
+
+class Shared:
+    def __init__(self, model: DataModel) -> None:
+        self.model = model
+
+    def __deepcopy__(self, memo):
+        return self
+
+
+class Wrapper:
+    def __init__(self, shared: Shared, label: str) -> None:
+        self.shared = shared
+        self.label = label
+
+
+class Bundle:
+    factory: type[DataModel]
+    check: Callable[[DataModel], bool]
+    parent: Self
+
+    def __init__(
+        self, pair: tuple[Shared, int], either: Shared | int, kind: type[DataModel]
+    ) -> None:
+        self.pair = pair
+        self.either = either
+        self.kind = kind
+"#,
+        )
+        .write(
+            "pkg/custom.py",
+            r#"import copy
+
+from pkg.base import Bundle, Field, Wrapper
+
+
+def isolated_type(field: Field):
+    return copy.deepcopy(field.data_type)
+
+
+def isolated_wrapper(wrapper: Wrapper):
+    return copy.deepcopy(wrapper)
+
+
+def isolated_bundle(bundle: Bundle):
+    return copy.deepcopy(bundle)
+"#,
+        );
+    let diags = diagnostics(&p, &[]);
+    assert_eq!(reported(&diags), vec![("custom.py".to_owned(), 7)]);
+    assert_eq!(
+        diags[0]["message"],
+        "`copy.deepcopy` may copy, in `reference.source`, an instance of `DataModel`, whose `default` can hold the `object()` sentinel `UNDEFINED` that `DataModel.has_default` tests by identity: the copy holds a new object there, which the test does not match"
+    );
+    assert_eq!(diags[0]["certainty"], "heuristic");
+}

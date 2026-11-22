@@ -433,6 +433,20 @@ def sentinels_per_class(n: int) -> str:
     return "\n".join(lines)
 
 
+def sentinel_attribute_chain(n: int) -> str:
+    """Classes each holding the next in a typed attribute and each deep-copied, the last holding a
+    tested `object()` sentinel."""
+    lines = ["import copy", "", "MISSING = object()", ""]
+    for i in range(n):
+        last = i + 1 == n
+        params = "self" if last else f'self, following: "C{i + 1}"'
+        store = "self.mark = MISSING" if last else "self.next = following"
+        lines += [f"class C{i}:", f"    def __init__({params}):", f"        {store}", ""]
+        lines += [f"def isolated{i}(c: C{i}):", "    return copy.deepcopy(c)", ""]
+    lines += [f"def marked(c: C{n - 1}):", "    return c.mark is MISSING", ""]
+    return "\n".join(lines)
+
+
 # The functions `argument_marks` defines, each named by an argument list of `marked_targets`.
 MARKED_FUNCTIONS = 1000
 
@@ -566,6 +580,9 @@ FAMILIES = [
     ),
     Family("sentinel_subclasses", project=sentinel_subclasses, placements=("project",), size=2000),
     Family("sentinels_per_class", project=sentinels_per_class, placements=("project",), size=2000),
+    Family(
+        "sentinel_attribute_chain", project=sentinel_attribute_chain, placements=("project",), size=2000
+    ),
 ]
 
 

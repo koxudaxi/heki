@@ -871,6 +871,12 @@ which module imports which.
    that class, a subclass (known), or a base (open). One report per deep copy, the known claim
    first; the tests are related locations, at most five. What each copied class gives and which
    tests read each class's sentinel are answered once per run.
+6. **Below the attributes** (heuristic): the classes an object may hold in its attributes, by
+   the attribute types its classes declare (`ProjectDecls::classes_in_attributes`: a class, a
+   union's members, a generic container's items, a protocol's structural implementations;
+   classes with a copy hook left out), read once per class; a breadth-first walk from the copied
+   class reaches at most 64 classes, each with the first attribute path to it, and each one's
+   sentinels and tests give a heuristic claim naming the path.
 
 #### `MUT112`: a value that is new on one path and borrowed on another, changed in place (opt-in)
 1. **What a value holds** (`heki_effect::ownership`): each instruction's `Source` says what the

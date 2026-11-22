@@ -589,6 +589,7 @@ const MARKED_SPEC_HOOKED: &str = "from dataclasses import dataclass\n\nfrom pkg.
 const MARK_TESTS: &str = "from pkg.marked_spec import Spec\nfrom pkg.marks import MISSING\n\n\ndef given(spec: Spec) -> bool:\n    return spec.value is not MISSING\n";
 const MARK_TESTS_NONE: &str = "from pkg.marked_spec import Spec\nfrom pkg.marks import MISSING\n\n\ndef given(spec: Spec) -> bool:\n    return spec.value is not None\n";
 const MARK_COPIES: &str = "import copy\n\nfrom pkg.marked_spec import Spec\n\n\ndef isolated(spec: Spec) -> Spec:\n    return copy.deepcopy(spec)\n";
+const MARK_HOLDER: &str = "import copy\n\nfrom pkg.marked_spec import Spec\n\n\nclass Holder:\n    def __init__(self, spec: Spec):\n        self.spec = spec\n\n\ndef isolated_holder(holder: Holder):\n    return copy.deepcopy(holder)\n";
 const MARK_SUB: &str = "import copy\n\nfrom pkg.marked_spec import Spec\n\n\nclass NamedSpec(Spec):\n    pass\n\n\ndef isolated_named(spec: NamedSpec) -> NamedSpec:\n    return copy.deepcopy(spec)\n";
 
 // Values new on one path and borrowed on another (`MUT112`): a caller two modules above a
@@ -2767,7 +2768,9 @@ fn steps_mut111() -> Vec<Step> {
 /// declarations its check reads, and the sentinel tests of each file,
 /// `heki_rules::sentinel_tests_in`): the sentinel becomes one that copies as itself and back,
 /// the class gains a copy hook and loses it, the test goes and comes back a line lower (its
-/// related location moves), and a new module deep-copies an instance of a subclass.
+/// related location moves), a new module deep-copies an instance of a subclass, and another
+/// deep-copies a holder whose typed attribute keeps the dataclass while the dataclass gains a
+/// copy hook and loses it.
 fn steps_mut118() -> Vec<Step> {
     let lower = MARK_TESTS.replace("def given", "# The field was given.\ndef given");
     vec![
@@ -2819,6 +2822,21 @@ fn steps_mut118() -> Vec<Step> {
             ("pkg/mark_sub.py", "MUT118"),
             ("pkg/mark_copies.py", "MUT118"),
         ]),
+        Step::new(
+            "a new module deep-copies a holder whose typed attribute keeps the dataclass",
+            vec![Action::Create("pkg/mark_holder.py", MARK_HOLDER.to_owned())],
+        )
+        .present(&[("pkg/mark_holder.py", "MUT118")]),
+        Step::new(
+            "the dataclass gains `__deepcopy__` again",
+            vec![save("pkg/marked_spec.py", MARKED_SPEC_HOOKED)],
+        )
+        .absent(&[("pkg/mark_holder.py", "MUT118")]),
+        Step::new(
+            "and loses it",
+            vec![save("pkg/marked_spec.py", MARKED_SPEC)],
+        )
+        .present(&[("pkg/mark_holder.py", "MUT118")]),
     ]
 }
 

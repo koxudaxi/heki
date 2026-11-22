@@ -13,13 +13,16 @@ use heki_diagnostics::{Certainty, Diagnostic};
 use heki_effect::{
     DeepCopy, DeepCopySite, FuncKey, HeldSentinel, ProjectDecls, ProjectIndex, SentinelTest,
 };
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 /// The most tests one report lists as related locations: a sentinel may be tested in thousands
 /// of functions, and each deep copy reports once.
 const MAX_RELATED_TESTS: usize = 5;
+
+/// The most classes a walk below a copied object's attributes reaches: it stops there.
+const MAX_CLASSES_BELOW: usize = 64;
 
 /// A comparison of an attribute with a sentinel by identity, with where it is.
 struct TestAt<'a> {
@@ -68,6 +71,9 @@ struct Candidate {
     class: String,
     surely: bool,
     held: HeldSentinel,
+    /// The attribute path below the copied object that may hold the instance
+    /// ([`Facts::classes_below`]); `None` when the copied object is the instance.
+    below: Option<String>,
     /// Every premise but the deep copy's own (one argument of one class) is established.
     exact: bool,
 }
@@ -81,6 +87,9 @@ struct Facts<'c, 't> {
     tested: FxHashMap<(String, String, String), Tested<'t>>,
     ancestors: FxHashMap<String, Vec<String>>,
     plain: FxHashMap<(String, String), bool>,
+    in_attributes: FxHashMap<String, Vec<(String, String)>>,
+    held: FxHashMap<String, Vec<HeldSentinel>>,
+    subclasses: FxHashMap<String, Vec<String>>,
 }
 
 impl<'c, 't> Facts<'c, 't> {
@@ -93,6 +102,22 @@ impl<'c, 't> Facts<'c, 't> {
         self.ancestors
             .entry(class.to_owned())
             .or_insert_with(|| decls.ancestors_of(class))
+    }
+
+    fn held(&mut self, class: &str) -> Vec<HeldSentinel> {
+        let (decls, kb) = (self.cx.decls, self.cx.kb);
+        self.held
+            .entry(class.to_owned())
+            .or_insert_with(|| decls.held_sentinels(class, kb))
+            .clone()
+    }
+
+    fn subclasses(&mut self, class: &str) -> Vec<String> {
+        let decls = self.cx.decls;
+        self.subclasses
+            .entry(class.to_owned())
+            .or_insert_with(|| decls.subclasses_of(class))
+            .clone()
     }
 
     fn plain(&mut self, class: &str, attr: &str) -> bool {
@@ -125,10 +150,10 @@ impl<'c, 't> Facts<'c, 't> {
             .chain(self.ancestors(copied).iter().cloned())
             .map(|c| (c, true))
             .collect::<Vec<_>>();
-        let maybe = decls.subclasses_of(copied).into_iter().map(|c| (c, false));
+        let maybe = self.subclasses(copied).into_iter().map(|c| (c, false));
         let mut out = Vec::new();
         for (class, surely) in surely.into_iter().chain(maybe) {
-            for held in decls.held_sentinels(&class, self.cx.kb) {
+            for held in self.held(&class) {
                 let Some(tested) = self.tested(&class, &held.attr, &held.sentinel) else {
                     continue;
                 };
@@ -141,13 +166,68 @@ impl<'c, 't> Facts<'c, 't> {
                     class: class.clone(),
                     surely,
                     held,
+                    below: None,
                     exact,
                 });
             }
         }
+        // An instance held below the copied object's attributes, by their types: what they hold
+        // at run time may be another object, so these claims are heuristic.
+        for (held_class, below) in self.classes_below(copied) {
+            let mut family = vec![held_class.clone()];
+            family.extend(self.ancestors(&held_class).iter().cloned());
+            family.extend(self.subclasses(&held_class));
+            for class in family {
+                for held in self.held(&class) {
+                    if self.tested(&class, &held.attr, &held.sentinel).is_some() {
+                        out.push(Candidate {
+                            class: class.clone(),
+                            surely: false,
+                            held,
+                            below: Some(below.clone()),
+                            exact: false,
+                        });
+                    }
+                }
+            }
+        }
         out.sort_by(|a, b| {
-            (!a.exact, !a.surely, &a.class, &a.held).cmp(&(!b.exact, !b.surely, &b.class, &b.held))
+            let rank = |c: &Candidate| (!c.exact, c.below.is_some(), !c.surely);
+            (rank(a), &a.class, &a.held).cmp(&(rank(b), &b.class, &b.held))
         });
+        out
+    }
+
+    /// The project classes whose instances an object of `copied` may hold below its attributes,
+    /// each once with the first attribute path that reaches it (`reference.source`), in the
+    /// order a breadth-first walk finds them, at most [`MAX_CLASSES_BELOW`]
+    /// ([`ProjectDecls::classes_in_attributes`], read once per class).
+    fn classes_below(&mut self, copied: &str) -> Vec<(String, String)> {
+        let decls = self.cx.decls;
+        let mut seen: FxHashSet<String> = FxHashSet::from_iter([copied.to_owned()]);
+        let mut queue = std::collections::VecDeque::from([(copied.to_owned(), String::new())]);
+        let mut out: Vec<(String, String)> = Vec::new();
+        while let Some((class, path)) = queue.pop_front() {
+            let held = self
+                .in_attributes
+                .entry(class.clone())
+                .or_insert_with(|| decls.classes_in_attributes(&class));
+            for (h, attr) in held.iter() {
+                if !seen.insert(h.clone()) {
+                    continue;
+                }
+                let below = if path.is_empty() {
+                    attr.clone()
+                } else {
+                    format!("{path}.{attr}")
+                };
+                out.push((h.clone(), below.clone()));
+                if out.len() == MAX_CLASSES_BELOW {
+                    return out;
+                }
+                queue.push_back((h.clone(), below));
+            }
+        }
         out
     }
 
@@ -219,6 +299,9 @@ pub(crate) fn mut118(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
         tested: FxHashMap::default(),
         ancestors: FxHashMap::default(),
         plain: FxHashMap::default(),
+        in_attributes: FxHashMap::default(),
+        held: FxHashMap::default(),
+        subclasses: FxHashMap::default(),
     };
     for (unit, func, site) in sites {
         // One argument of one class: the deep copy's own premises.
@@ -269,10 +352,10 @@ fn report(
         .next()
         .unwrap_or(&claim.held.sentinel);
     let tester = &tests[0].func.qualname;
-    let receives = if claim.surely {
-        "receives"
-    } else {
-        "may receive"
+    let receives = match (&claim.below, claim.surely) {
+        (Some(below), _) => format!("may copy, in `{below}`,"),
+        (None, true) => "receives".to_owned(),
+        (None, false) => "may receive".to_owned(),
     };
     let related = tests
         .iter()

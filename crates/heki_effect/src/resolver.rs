@@ -2726,6 +2726,44 @@ impl ProjectDecls {
             })
     }
 
+    /// The project classes whose instances an object of the project class `class` may hold in
+    /// its attributes, by the attribute types its classes declare (`ClassDecl::attr_types`: a
+    /// class, the members of a union, the items of a generic container, the structural
+    /// implementations of a protocol), each once with the first attribute that holds it. A class
+    /// with a copy hook along its MRO is left out: what a deep copy makes of it is the hook's.
+    /// A walk below several levels of attributes reads this once per class it reaches.
+    pub fn classes_in_attributes(&self, class: &str) -> Vec<(String, String)> {
+        let hooked = |c: &str| {
+            self.mro(c).iter().any(|m| {
+                self.class(m)
+                    .is_some_and(|d| COPY_HOOKS.iter().any(|h| d.members.contains(*h)))
+            })
+        };
+        let mut seen = FxHashSet::from_iter([self.canonical(class)]);
+        let mut out: Vec<(String, String)> = Vec::new();
+        let declared = self.mro(class).into_iter().filter_map(|m| self.class(&m));
+        for (attr, ty) in declared.flat_map(|d| &d.attr_types) {
+            let mut found = Vec::new();
+            ty_classes(ty, &mut found);
+            let mut held: Vec<String> = Vec::new();
+            for t in found.iter().map(|t| self.canonical(t)) {
+                held.extend(
+                    self.protocol_implementers(&t)
+                        .into_iter()
+                        .flatten()
+                        .cloned(),
+                );
+                held.push(t);
+            }
+            for h in held {
+                if self.is_project_class(&h) && seen.insert(h.clone()) && !hooked(&h) {
+                    out.push((h, attr.clone()));
+                }
+            }
+        }
+        out
+    }
+
     /// Whether a base of the project class `class` outside the project is one the catalog
     /// describes as building instances that hold a field's hashable default itself
     /// (`EcosystemEntry::keeps_hashable_defaults`).
@@ -4020,6 +4058,30 @@ const PLAIN_BASES: &[&str] = &[
     "typing.Generic",
     "typing_extensions.Generic",
 ];
+
+/// The classes a type names: an instance's class and those of its type arguments, the members of
+/// a union.
+fn ty_classes(ty: &Ty, out: &mut Vec<String>) {
+    let objs: &[crate::types::Obj] = match ty {
+        Ty::Inst(obj) => std::slice::from_ref(obj),
+        Ty::Union(objs) => objs,
+        _ => &[],
+    };
+    for obj in objs {
+        out.push(obj.class.clone());
+        let elems: Vec<&Elem> = match &obj.args {
+            Args::None => Vec::new(),
+            Args::Items(e) => vec![e.as_ref()],
+            Args::Map(k, v) => vec![k.as_ref(), v.as_ref()],
+            Args::Tuple(es) => es.iter().collect(),
+        };
+        for elem in elems {
+            if let Elem::Of(inner) = elem {
+                ty_classes(inner, out);
+            }
+        }
+    }
+}
 
 /// The methods that decide what `copy.deepcopy` makes of an instance in place of copying its
 /// attributes ([`ProjectDecls::deep_copy_of`]).
