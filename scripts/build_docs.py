@@ -8,6 +8,8 @@
 - `docs/precision.md`: the tables of the certifications and the measurements
   (`crates/heki_rules/src/precision.rs`), between the markers of its generated parts.
 - `docs/recommend.md`: the report of `heki recommend` on the example project the page shows.
+- `docs/getting-started.md`: the list of the exact rules, between the markers of its generated
+  part.
 - `docs/schemas/recommend-1.json`: the JSON Schema of `heki recommend --output-format json`.
 - `docs/assets/example-check.svg`: `heki check --color always` on the README's examples, drawn
   as a terminal shows it (`scripts/ansi_svg.py`).
@@ -45,6 +47,7 @@ CLI_PAGE = DOCS / "cli-reference.md"
 EXPERIMENTAL_PAGE = DOCS / "experimental.md"
 CHANGELOG = ROOT / "CHANGELOG.md"
 PRECISION_PAGE = DOCS / "precision.md"
+GETTING_STARTED_PAGE = DOCS / "getting-started.md"
 RECOMMEND_PAGE = DOCS / "recommend.md"
 RECOMMEND_SCHEMA = DOCS / "schemas" / "recommend-1.json"
 # The command the example of `docs/recommend.md` runs in the project of its Python blocks.
@@ -429,6 +432,14 @@ def measurements_table(precision: dict, rules: list[dict]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def exact_rules_list(rules: list[dict]) -> str:
+    return "".join(
+        f"- [`{r['code']}` ({r['slug']})](rules/{r['slug']}.md)\n"
+        for r in rules
+        if r["certainty"] == "exact"
+    )
+
+
 def with_generated_parts(page: Path, parts: dict[str, str]) -> str:
     """The text of the hand-written `page` with the body of each generated part in `parts`
     replaced."""
@@ -458,6 +469,9 @@ def outputs(heki: Path, rules: list[dict], registry: dict, precision: dict) -> d
             },
         ),
         RECOMMEND_PAGE: with_generated_parts(RECOMMEND_PAGE, {"report": recommend_example(heki)}),
+        GETTING_STARTED_PAGE: with_generated_parts(
+            GETTING_STARTED_PAGE, {"exact-rules": exact_rules_list(rules)}
+        ),
         RECOMMEND_SCHEMA: run(heki, "recommend", "--output-format-json-schema"),
         EXAMPLE_IMAGE: example_image(heki),
     }

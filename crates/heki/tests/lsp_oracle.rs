@@ -28,7 +28,7 @@ const CONFIG: &str = r#"[project]
 name = "t"
 
 [tool.heki.lint]
-extend-select = ["MUT101", "MUT107", "MUT108", "MUT111", "EFF107", "MUT112", "MUT113", "EFF109", "EFF110", "MUT115", "MUT118"]
+extend-select = ["MUT101", "MUT107", "MUT108", "MUT111", "EFF107", "MUT112", "MUT113", "EFF109", "EFF110", "EFF112", "EFF114", "MUT115", "MUT118"]
 
 [[tool.heki.write-owners]]
 name = "registry"
@@ -442,6 +442,11 @@ const KID_USER: &str = "from pkg.kid_gen import _grow_kids\nfrom pkg.nodes impor
 const RACK: &str = "class Rack:\n    def __init__(self):\n        self.items = []\n";
 const RACK_OPS: &str = "def empty(xs):\n    xs.clear()\n\n\ndef refill(xs):\n    empty(xs)\n";
 const RACK_VIEW: &str = "from pkg.rack import Rack\nfrom pkg.rack_ops import refill\n\n\ndef show(s: Rack):\n    refill(s.items)\n";
+// A private method of a `Registry` subclass filling the entries of its own `self` in a
+// generator expression, which reads `self` from a closure cell, and a subclass in another module
+// whose initializer calls it (`steps_captured_parameters`).
+const REG_LOAD: &str = "from pkg.model import Registry\n\n\nclass Loading(Registry):\n    def _load(self, peer: Registry, xs):\n        any(self.entries.append(x) for x in xs)\n";
+const REG_SUB: &str = "from pkg.model import Registry\nfrom pkg.reg_load import Loading\n\n\nclass Loaded(Loading):\n    def __init__(self, other: Registry, xs):\n        super().__init__()\n        self._load(other, xs)\n";
 // Inherited writers (`MUT101`): a subclass in another module gains a cached property that an
 // inherited method's write leaves stale, then overrides that method.
 const NAMED: &str = "class Named:\n    def __init__(self, name):\n        self.name = name\n\n    def rename(self, name):\n        self.name = name\n";
@@ -484,6 +489,12 @@ const SPELLED_STUB: &str = "import builtins\n\n\ndef name(x: builtins.str) -> No
 const LEVELS: &str = "LEVELS = [\"low\", \"mid\", \"high\"]\n";
 const LEVELS_GROWN: &str =
     "LEVELS = [\"low\", \"mid\", \"high\"]\n\n\ndef add(level):\n    LEVELS.append(level)\n";
+// The rows a loop steps through (`OPT103`), by the class another module binds the cursor's name
+// to: the rewrite is exact while it is `sqlite3.Cursor`, whose `execute` the catalog sizes, and
+// heuristic once it is a project class ("Trip count open").
+const STORAGE: &str = "from sqlite3 import Cursor\n";
+const STORAGE_OWN: &str = "class Cursor:\n    def execute(self, query):\n        return [query]\n";
+const ROWS_USER: &str = "from pkg.storage import Cursor\n\n\ndef ids(cursor: Cursor):\n    out = ()\n    for row in cursor.execute(\"SELECT id FROM t\"):\n        out = out + (row,)\n    return out\n";
 // A module-level list its own loop treats as fixed, and the module that may grow it.
 const QUEUE_CFG: &str =
     "import httpx\n\nQUEUE = []\n\n\ndef run():\n    for item in QUEUE:\n        httpx.Client()\n";
@@ -727,6 +738,18 @@ const KEPT_FORGET_DELETING: &str = "def forget(obj) -> None:\n    del obj.loaded
 const KEPT_READER: &str =
     "from pkg.kept_holder import Holder\n\n\ndef show(h: Holder) -> str:\n    return h.features\n";
 
+// A dict built in a set's order in one module and written in another (`EFF112`): the builder
+// sorts and stops, the writer sorts the keys and stops.
+const ORDER_SRC: &str =
+    "def table(d: dict[str, int]) -> dict[str, int]:\n    return {k: d[k] for k in set(d)}\n";
+const ORDER_SRC_SORTED: &str = "def table(d: dict[str, int]) -> dict[str, int]:\n    return {k: d[k] for k in sorted(set(d))}\n";
+const ORDER_USE: &str = "import json\nfrom pathlib import Path\n\nfrom pkg.order_src import table\n\n\ndef save(d: dict[str, int], path: Path) -> None:\n    path.write_text(json.dumps(table(d)))\n";
+const ORDER_USE_SORTED: &str = "import json\nfrom pathlib import Path\n\nfrom pkg.order_src import table\n\n\ndef save(d: dict[str, int], path: Path) -> None:\n    path.write_text(json.dumps(table(d), sort_keys=True))\n";
+// A clause around a call into another module (`EFF114`): the call cycle closes and opens there.
+const REC_HANDLER: &str = "from pkg.rec_walk import descend\n\n\ndef visit(node):\n    return descend(node)\n\n\ndef measure(node):\n    try:\n        return visit(node)\n    except Exception:\n        return 0\n";
+const REC_WALK: &str = "def descend(node):\n    return len(node)\n";
+const REC_WALK_BACK: &str = "from pkg import rec_handler\n\n\ndef descend(node):\n    return sum(rec_handler.visit(child) for child in node)\n";
+
 // `MUT115`: the declarations of a copied class and of the builtin containers' subclasses in
 // other modules, and a helper in another module, decide whether a change below a copy states
 // the exact claim.
@@ -825,6 +848,10 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/lock_use.py", LOCK_USE),
         ("pkg/fan_read.py", FAN_READ),
         ("pkg/fan_use.py", FAN_USE),
+        ("pkg/order_src.py", ORDER_SRC),
+        ("pkg/order_use.py", ORDER_USE),
+        ("pkg/rec_handler.py", REC_HANDLER),
+        ("pkg/rec_walk.py", REC_WALK),
         ("pkg/plot.py", RO_PLOT),
         ("pkg/loops.py", LOOPS),
         ("pkg/compat.py", COMPAT),
@@ -2045,6 +2072,27 @@ fn steps_small_displays() -> Vec<Step> {
             vec![save("pkg/sniff_more.py", SNIFF_MORE)],
         )
         .absent(&[("pkg/sniff_user.py", "OPT112")]),
+        // "Trip count open" of a rewrite (`DataOrigins::of_loop_items`): the rows of a call the
+        // catalog sizes, through the class another module binds the receiver's annotation to. The
+        // report stays, exact or heuristic, and the server must change its certainty with the CLI.
+        Step::new(
+            "a module loops over the rows of a cursor class another module re-exports",
+            vec![
+                Action::Create("pkg/storage.py", STORAGE.to_owned()),
+                Action::Create("pkg/rows_user.py", ROWS_USER.to_owned()),
+            ],
+        )
+        .present(&[("pkg/rows_user.py", "OPT103")]),
+        Step::new(
+            "the other module defines a cursor class of its own",
+            vec![save("pkg/storage.py", STORAGE_OWN)],
+        )
+        .present(&[("pkg/rows_user.py", "OPT103")]),
+        Step::new(
+            "it re-exports the library's cursor again",
+            vec![save("pkg/storage.py", STORAGE)],
+        )
+        .present(&[("pkg/rows_user.py", "OPT103")]),
         // `ModuleDecls::grown_globals`: the module owning the list and a third module reading
         // it are re-checked when another module starts or stops growing it.
         Step::new(
@@ -2773,6 +2821,47 @@ fn steps_module_patterns() -> Vec<Step> {
     ]
 }
 
+/// The parameters of its enclosing function that a nested scope reads from closure cells are
+/// parameters of the scope (`CapturedParams`): a private method's generator expression filling
+/// the entries of its `self` writes the method's own receiver, which an initializer in another
+/// module calls while it initializes (`MUT201`). The generator expression turns to the method's
+/// other parameter, which the initializer binds to an argument, and back; then the method rebinds
+/// `self` before it, so the cell is no parameter any more.
+fn steps_captured_parameters() -> Vec<Step> {
+    let peer = REG_LOAD.replace("any(self.entries", "any(peer.entries");
+    let rebound = REG_LOAD.replace("        any(", "        self = peer\n        any(");
+    vec![
+        Step::new(
+            "an initializer in another module calls a private method filling its own entries in a generator expression",
+            vec![
+                Action::Create("pkg/reg_load.py", REG_LOAD.to_owned()),
+                Action::Create("pkg/reg_sub.py", REG_SUB.to_owned()),
+            ],
+        )
+        .absent(&[("pkg/reg_sub.py", "MUT201"), ("pkg/reg_load.py", "MUT201")]),
+        Step::new(
+            "the generator expression fills the entries of the method's other parameter",
+            vec![Action::Save("pkg/reg_load.py", peer)],
+        )
+        .present(&[("pkg/reg_sub.py", "MUT201")]),
+        Step::new(
+            "the generator expression fills the method's own entries again",
+            vec![save("pkg/reg_load.py", REG_LOAD)],
+        )
+        .absent(&[("pkg/reg_sub.py", "MUT201")]),
+        Step::new(
+            "the method rebinds `self` to its other parameter before the generator expression",
+            vec![Action::Save("pkg/reg_load.py", rebound)],
+        )
+        .present(&[("pkg/reg_sub.py", "MUT201")]),
+        Step::new(
+            "the method stops rebinding `self`",
+            vec![save("pkg/reg_load.py", REG_LOAD)],
+        )
+        .absent(&[("pkg/reg_sub.py", "MUT201")]),
+    ]
+}
+
 /// A helper handed a typed field starts changing it itself, besides through the allowed
 /// callee, while its final summary stays the same: the writes the boundary and the owner
 /// contract count are decided from the helpers' own changes (`EFF201`, `MUT201`).
@@ -3380,6 +3469,52 @@ fn steps_eff110() -> Vec<Step> {
     ]
 }
 
+/// `EFF112`: whether a call's result is in a set's order comes from the callee's summary
+/// (`EffectSummary::set_order`), and whether the writer keeps it from the writer's own call: the
+/// builder in another module sorts and stops sorting, the writer sorts the keys and stops.
+fn steps_eff112() -> Vec<Step> {
+    vec![
+        Step::new(
+            "the builder in another module sorts the set first",
+            vec![save("pkg/order_src.py", ORDER_SRC_SORTED)],
+        )
+        .absent(&[("pkg/order_use.py", "EFF112")]),
+        Step::new(
+            "the builder iterates the set again",
+            vec![save("pkg/order_src.py", ORDER_SRC)],
+        )
+        .present(&[("pkg/order_use.py", "EFF112")]),
+        Step::new(
+            "the writer sorts the keys",
+            vec![save("pkg/order_use.py", ORDER_USE_SORTED)],
+        )
+        .absent(&[("pkg/order_use.py", "EFF112")]),
+        Step::new(
+            "the writer stops sorting them",
+            vec![save("pkg/order_use.py", ORDER_USE)],
+        )
+        .present(&[("pkg/order_use.py", "EFF112")]),
+    ]
+}
+
+/// `EFF114`: whether a call in the `try` body runs a call cycle comes from the summaries of the
+/// functions it calls (`EffectSummary::call_cycle`): the module below starts calling back into
+/// the handler's module, closing a cycle, and stops again.
+fn steps_eff114() -> Vec<Step> {
+    vec![
+        Step::new(
+            "the module below calls back into the handler's module",
+            vec![save("pkg/rec_walk.py", REC_WALK_BACK)],
+        )
+        .present(&[("pkg/rec_handler.py", "EFF114")]),
+        Step::new(
+            "the module below stops calling back",
+            vec![save("pkg/rec_walk.py", REC_WALK)],
+        )
+        .absent(&[("pkg/rec_handler.py", "EFF114")]),
+    ]
+}
+
 /// The initial index.
 fn steps_initial_index() -> Vec<Step> {
     vec![Step::new("initial index", Vec::new()).present(&[
@@ -3401,6 +3536,7 @@ fn steps_initial_index() -> Vec<Step> {
         ("pkg/natives_use.py", "EFF101"),
         ("pkg/lock_use.py", "EFF109"),
         ("pkg/fan_use.py", "EFF110"),
+        ("pkg/order_use.py", "EFF112"),
     ])]
 }
 
@@ -3764,8 +3900,8 @@ fn steps_configuration() -> Vec<Step> {
         Step::new(
             "the configuration becomes invalid",
             vec![Action::Configure(CONFIG.replace(
-                "extend-select = [\"MUT101\", \"MUT107\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\", \"MUT113\", \"EFF109\", \"EFF110\", \"MUT115\", \"MUT118\"]",
-                "extend-select = [\"MUT101\", \"MUT107\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\", \"MUT113\", \"EFF109\", \"EFF110\", \"MUT115\", \"MUT118\"]\nselect = [\"NOPE1\"]",
+                "extend-select = [\"MUT101\", \"MUT107\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\", \"MUT113\", \"EFF109\", \"EFF110\", \"EFF112\", \"EFF114\", \"MUT115\", \"MUT118\"]",
+                "extend-select = [\"MUT101\", \"MUT107\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\", \"MUT113\", \"EFF109\", \"EFF110\", \"EFF112\", \"EFF114\", \"MUT115\", \"MUT118\"]\nselect = [\"NOPE1\"]",
             ))],
         )
         .absent(&[("pkg/svc_user.py", "EFF101")]),
@@ -3774,6 +3910,71 @@ fn steps_configuration() -> Vec<Step> {
             vec![Action::Configure(CONFIG.to_owned())],
         )
         .present(&[("pkg/svc_user.py", "EFF101")]),
+    ]
+}
+
+const MEMBER_PYPROJECT: &str = "[project]\nname = \"member\"\n";
+const MEMBER_HELPER: &str = "import time\n\n\ndef wait():\n    time.sleep(1)\n";
+const MEMBER_CALLER: &str = "from acme_core.io import wait\n\n\nasync def go():\n    wait()\n";
+const MEMBER_CALL: &[(&str, &str)] = &[("packages/api/acme_api/server.py", "EFF101")];
+
+/// The members of a workspace are source roots: the workspace tables, a member's
+/// `pyproject.toml`, and a `hatch.toml` change while the server runs.
+fn steps_workspace_members() -> Vec<Step> {
+    let uv = format!("{CONFIG}\n[tool.uv.workspace]\nmembers = [\"packages/*\"]\n");
+    vec![
+        Step::new(
+            "two directories that are not yet members",
+            vec![
+                Action::Write("packages/core/pyproject.toml", MEMBER_PYPROJECT.to_owned()),
+                Action::Create(
+                    "packages/core/src/acme_core/io.py",
+                    MEMBER_HELPER.to_owned(),
+                ),
+                Action::Write("packages/api/pyproject.toml", MEMBER_PYPROJECT.to_owned()),
+                Action::Create("packages/api/acme_api/__init__.py", String::new()),
+                Action::Create("packages/api/acme_api/server.py", MEMBER_CALLER.to_owned()),
+            ],
+        )
+        .absent(MEMBER_CALL),
+        Step::new(
+            "the configuration makes them workspace members",
+            vec![Action::Configure(uv.clone())],
+        )
+        .present(MEMBER_CALL),
+        Step::new(
+            "a member loses its pyproject.toml",
+            vec![Action::Delete("packages/core/pyproject.toml")],
+        )
+        .absent(MEMBER_CALL),
+        Step::new(
+            "the member's pyproject.toml is back",
+            vec![Action::Write(
+                "packages/core/pyproject.toml",
+                MEMBER_PYPROJECT.to_owned(),
+            )],
+        )
+        .present(MEMBER_CALL),
+        Step::new(
+            "an exclude glob drops the member",
+            vec![Action::Configure(format!(
+                "{uv}exclude = [\"packages/core\"]\n"
+            ))],
+        )
+        .absent(MEMBER_CALL),
+        Step::new(
+            "a hatch.toml lists the members",
+            vec![Action::Write(
+                "hatch.toml",
+                "[envs.default]\nworkspace.members = [\"packages/core\"]\n".to_owned(),
+            )],
+        )
+        .present(MEMBER_CALL),
+        Step::new(
+            "the hatch.toml is deleted",
+            vec![Action::Delete("hatch.toml")],
+        )
+        .absent(MEMBER_CALL),
     ]
 }
 
@@ -4354,6 +4555,7 @@ sessions!(editing, Session::start, {
     item_changes: steps_item_changes,
     module_patterns: steps_module_patterns,
     indirect_helpers: steps_indirect_helpers,
+    captured_parameters: steps_captured_parameters,
     inherited_writers: steps_inherited_writers,
     hash_writers: steps_hash_writers,
     mut111: steps_mut111,
@@ -4362,6 +4564,8 @@ sessions!(editing, Session::start, {
     eff109: steps_eff109,
     mut113: steps_mut113,
     eff110: steps_eff110,
+    eff112: steps_eff112,
+    eff114: steps_eff114,
     receiver_typing: steps_receiver_typing,
     effect_index: steps_effect_index,
     exact_effects: steps_exact_effects,
@@ -4377,6 +4581,7 @@ sessions!(editing, Session::start, {
     keys_fresh_strict: steps_keys_fresh_strict,
     files: steps_files,
     configuration: steps_configuration,
+    workspace_members: steps_workspace_members,
     project_assumptions: steps_project_assumptions,
     declarations: steps_declarations,
     re_exports: steps_re_exports,

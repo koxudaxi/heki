@@ -5,6 +5,158 @@ All notable changes to heki are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). heki is experimental: until 1.0, any
 release can change rules, configuration keys, diagnostics, and output formats.
 
+## [0.2.4] - 2026-11-23
+
+### Added
+
+- `EFF112` (`set-order-output`, opt-in, heuristic, experimental): the iteration order of a set of
+  `str` or `bytes` values, which changes between runs as their hashes are randomized per process,
+  reaches an output across a call: a value built in that order (iterated, copied into a sequence
+  or text, formatted, or an element picked) returned up to the caller that writes it, or handed
+  down to a writer. Outputs are the catalog's `writes_in_order` calls with their sorting switch
+  off (`json.dumps` without `sort_keys=True`, `yaml.safe_dump(..., sort_keys=False)`, `pprint.pp`,
+  `Path.write_text`, `print`), writes to `sys.stdout`, `sys.stderr`, or a file the function opens,
+  and the message of a raised builtin exception built from the whole value; `logging` and
+  `warnings.warn` are not. A flow inside one function, a sorted value, a set bounded to one
+  element, one element written per file or raised per element, a mapping read back by key, a key
+  stored again after a read, and a set filled with the elements are not reported. The report
+  sits where the ordered value meets the output, with the order-taking line and the calls on the
+  way as related locations.
+- `EFF114` (`recursion-error-as-value`, opt-in, heuristic, experimental): an `except` clause that
+  takes the `RecursionError` a recursion reached from its `try` body can raise (`Exception`,
+  `BaseException`, `RuntimeError`, `RecursionError`, a bare `except`, or a tuple with one), when
+  no path through the clause raises, so the function goes on with a value that depends on the
+  depth of the stack. The recursion is a call cycle through calls whose bodies run on the
+  caller's stack, across modules; the report names the function on the cycle and the first calls
+  down to it. A clause after one that re-raises `RecursionError` or whose classes heki cannot
+  tell (a tuple, a class of a dependency or of the standard library), a clause that raises on a
+  path, exits, calls a project function that raises on every path, or reports the error and
+  returns an exit status (a CLI boundary) is not reported.
+- The ecosystem catalog says what a call writes in the order of its elements (`writes_in_order`):
+  the argument a call writes to a file or a stream, or serializes into text, and the keyword
+  argument that sorts mapping keys first, with whether the call sorts without it. Entries:
+  `print`, `pathlib.Path.write_text` / `write_bytes`, `json.dumps` / `json.dump` (`sort_keys`),
+  `pprint.pprint` / `pprint.pformat` (`sort_dicts`, sorting by default), `pprint.pp`, and
+  PyYAML's `yaml.dump` / `yaml.safe_dump` (`sort_keys`, sorting by default).
+  `[[tool.heki.ecosystem]]` takes `writes-in-order` for library symbols. `EFF112` reads it.
+- Without `src`, heki detects the members of uv, Hatch, and PDM workspaces as source roots, so
+  calls between the packages of a monorepo resolve without configuration. It reads
+  `[tool.uv.workspace]` (`members`, `exclude`), the `workspace.members` and `workspace.exclude`
+  of every Hatch environment (in `pyproject.toml` or `hatch.toml`), and
+  `[tool.pdm.workspace]` (`members`); a member must hold a `pyproject.toml`. A member's own
+  `src` (or `python`, or the directory named after it) is a source root; a member in the flat
+  layout has its packages named below it, while its other files (`main.py`, `scripts/`) keep
+  their names below the project root. An explicit `src` still replaces the detection. See
+  "Workspaces and monorepos" in the configuration docs.
+
+### Changed
+
+- The size-dependent `OPT` rewrites (`OPT103`, `OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130`)
+  report in the exact tier, the default view, only over a loop whose items the data decides: a
+  parameter (`*args` included) or a part of one, the rows of a query, the lines of a file, or the
+  entries of a directory, as `EFF103` establishes them. A proven rewrite over any other loop, for
+  example one over `self.layers`, `range(config.num_layers)`, a class's MRO, a module-level list,
+  or a `while` loop, is now heuristic: it shows with `--heuristic` or when its rule is selected,
+  and `--fix --include-size-dependent` or `--fix --profile` applies its fix only then. Such loops
+  run as many times as the program has parts, however large the input, so the rewrite rarely pays
+  off. `OPT113` is unchanged: it already asks for loops over parameters.
+- In a workspace without `src`, the default output can change: more calls between members
+  resolve, so reports through them can appear, and the module names of member files (in
+  messages and baseline targets) are now relative to the member's source root. The language
+  server and `heki check --watch` also reload when `hatch.toml` changes.
+- Contract reports name the write kind in words ("through a helper", "by attribute", "as a
+  `__dict__` item") instead of an internal tag, and name a contract without a `name` by its table
+  and position.
+- The README and the adoption guide recommend the
+  [heki-pre-commit](https://github.com/koxudaxi/heki-pre-commit) mirror for the pre-commit hook:
+  it installs heki from the PyPI wheel, so no Rust toolchain is needed, and its tags follow heki
+  releases, so `pre-commit autoupdate` works. The in-repo hook, which builds from source, stays.
+- The README and the documentation home page show the report a broken `write-owners` contract
+  prints, and list the six contract kinds with what each one keeps and its main keys.
+
+### Fixed
+
+- `heki inspect` no longer calls a function pure when it calls a method on a value typed `Any`
+  or `object`, calls a value typed `Callable`, or calls a name nothing binds. Such a call now
+  counts as unresolved for every consumer: the purity verdict is `unknown` with
+  `unresolved_calls`, and `unknown_at` names the function. `heki recommend` now also lists a
+  call on a union with such a member (`x: Any | None`) as a blind spot. No rule's reports
+  change.
+
+## [0.2.3] - 2026-11-22
+
+### Added
+
+- `MUT115` (`shallow-copy-nested-mutation`, opt-in, heuristic): changing in place an object below
+  a shallow copy the function made of state that outlives the call (`result = options.copy();
+  result["bases"].append(base)`, `copied = field.model_copy(); copied.aliases.append(a)`,
+  `clone = copy.copy(node); clone.children.append(child)`): the copied value holds the same
+  object, so it sees the change. Reported directly or through a helper; a change of the copy
+  itself, a level rebound before the change or named by `update=` / a `replace` keyword, deep
+  copies, `__dict__` stores, and iterations over the copy are no report.
+- `MUT118` (`sentinel-lost-in-deepcopy`), heuristic: a `copy.deepcopy` call that copies an
+  instance holding a module-level `object()` sentinel in an attribute that a function tests
+  against the sentinel with `is` / `is not`. The copy holds a new object in the attribute, so
+  the test gives the opposite answer on the copy. A class holds the sentinel when its own code
+  stores it: the default of a field that a stdlib dataclass's generated `__init__` stores,
+  `self.attr = SENTINEL`, `self.attr = param` of a parameter declared `param=SENTINEL`, or the
+  default of a field of a `pydantic.BaseModel` subclass that nothing may validate (no
+  `validate_default` in the field's annotation, and no `model_config` or `Config` in the class
+  or a project base). An instance holding the sentinel below the deep-copied object's
+  attributes, found by the attributes' types (an optional attribute, the items of a list or
+  dict, the classes implementing a protocol; down to 64 classes below), is a heuristic report
+  naming the attribute path (`copy.deepcopy` may copy, in `reference.source`, an instance of
+  `DataModel`). No report when the sentinel copies as itself (`typing_extensions.Sentinel`),
+  when the class or a base decides how it is copied (`__deepcopy__`, `__reduce__`,
+  `__reduce_ex__`, `__getstate__`, `__setstate__`, a `copyreg` registration), or when the call
+  passes a `memo`. `heki recommend` lists it as worth enabling. It runs when named
+  (`--extend-select MUT118`) or with `--heuristic`.
+- `protocol-subclasses` on `write-owners`, `read-owners`, and `call-owners` (default `true`, the
+  behaviour so far): with `false`, an `allowed-protocols` pattern names only the protocols it
+  matches, so accesses through a protocol deriving from an allowed one under another name stay
+  judged.
+- The ecosystem catalog describes how a pydantic model stores its attributes
+  (`pydantic.BaseModel.__setattr__` / `__delattr__` store on the instance itself or raise, and a
+  field read finds the stored value: `stores_on_instance`), deep-copies
+  (`pydantic.BaseModel.__deepcopy__`, a deep copy sanitizer), and keeps a hashable field default
+  as the default object itself (`pydantic.BaseModel`: `keeps_hashable_defaults`).
+
+### Changed
+
+- `EFF101` and `EFF103`: a read of a property is followed into its getter when every class the
+  object may be finds one of the project's getters first for the name (no base heki does not know
+  before it, no `__getattribute__`, no metaclass heki does not know, no class attribute shadowing
+  it). An `async def` reading a property whose getter waits on every path is now an exact
+  `EFF101` report (it was `EFF111`), and a loop reading a property that queries on every path an
+  exact `EFF103` report (it was `EFF113`). A `functools.cached_property` read stays heuristic.
+- `abc.ABC` counts as a base that runs no code when an attribute is read (it defines nothing but
+  an empty `__slots__`, and `abc.ABCMeta` installs no descriptor): an `OPT113` join keyed by an
+  attribute of an instance of a class deriving from it (`a.key == b.key`) can now be an exact
+  report, as it is for a class without bases, so the default output can show it.
+- `OPT130`: the page says where "Builtin type by construction" is established (heki reports only
+  a call of the builtin constructor) and that an argument of unknown type leaves "Rewrite proven
+  safe" open, not the builtin type.
+
+### Fixed
+
+- A function changing an object its parameter holds as an item or an element
+  (`p["tags"].append(x)`, `p[0].x = v`, `for row in p: row.clear()`, `p.get("k").append(x)`),
+  also through its own shallow copy of the parameter (`draft = dict(p); draft["tags"].append(x)`,
+  a slice), now changes that parameter in its summary: `MUT202` follows such a helper of a shared
+  value, `EFF201` `mutates-params` reports it (also through a copy handed to a reached function),
+  and `heki inspect` lists it as `p[...]`. A function that first gives that item a new object
+  (`draft["tags"] = []`) changes only its copy. A producer that is not `deep` shares only its
+  object: a helper changing its items does not change it.
+- `MUT112` takes an item or attribute of a shallow copy of borrowed state (`dict(x)["k"]`) as the
+  item of `x` it holds, borrowed, and `copy.deepcopy(x)` / `copy.copy(x)` called on the `copy`
+  module as a copy (a copy a flag of the caller's picks).
+- `collections.OrderedDict(x)`, `collections.deque(x)`, and `bytearray(x)` are shallow copies for
+  `MUT202` and `MUT114`, which follow the objects below them.
+- `MUT201`: with `unlisted-dict-keys = "report"`, a `__dict__` key that another `write-owners`
+  contract's target names for the written object's class is no longer reported as "a `__dict__`
+  key no target names"; that contract judges the write alone. A contract with
+  `allowed-writers = ["*"]` lists the keys its targets name.
+
 ## [0.2.2] - 2026-11-22
 
 ### Added
@@ -1080,6 +1232,8 @@ The first public preview.
 - Wheels for Linux (x86_64 and aarch64 with glibc, x86_64 with musl), macOS (arm64 and x86_64),
   and Windows (x86_64), and a source distribution.
 
+[0.2.4]: https://github.com/koxudaxi/heki/compare/v0.2.3...v0.2.4
+[0.2.3]: https://github.com/koxudaxi/heki/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/koxudaxi/heki/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/koxudaxi/heki/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/koxudaxi/heki/compare/v0.1.2...v0.2.0

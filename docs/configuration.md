@@ -47,7 +47,9 @@ The file's name decides, as Ruff reads `pyproject.toml` and `ruff.toml`:
 
 - A file named `pyproject.toml` holds the settings in `[tool.heki]` (`[tool.heki.lint]`,
   `[[tool.heki.ecosystem]]`, ...). Its other tables belong to the packaging standards and other
-  tools, and heki does not read them.
+  tools. heki reads only what it infers from them: the default target version
+  (`project.requires-python`) and the detected source roots (`project.name` and the workspace
+  tables, see [Workspaces and monorepos](#workspaces-and-monorepos)).
 - Any other file (`heki.toml`, `.heki.toml`, or the file `--config` names, whatever its name)
   holds the same keys at its top level, without the `tool.heki` prefix (`[lint]`,
   `[[ecosystem]]`).
@@ -76,9 +78,54 @@ are relative to the project root.
   directory of the same name (`acme/acme/`), and `python` (the maturin layout), each when it is
   a directory and not a package (no `__init__.py`). A source root that is a package is imported
   by its own name (`src.helpers`).
+- Without `src`, heki also detects the members of the project's uv, Hatch, and PDM workspaces
+  (see [Workspaces and monorepos](#workspaces-and-monorepos)).
 - Other layouts need `src`: a subdirectory application whose directories are imported as
   top-level packages (`backend/config/env.py` imported as `config.env`) takes
   `src = ["backend"]`, and a `lib/` layout (`lib/matplotlib`) takes `src = ["lib"]`.
+
+#### Workspaces and monorepos
+
+In a workspace, each member is a package of its own, installed from its own directory. Without
+`src`, heki reads the workspace tables of the root's `pyproject.toml` and names each member's
+modules the way installing the member names them, so a call from one member into another
+resolves without configuration:
+
+- the members: uv's `[tool.uv.workspace]` (`members` and `exclude`), the `workspace.members`
+  and `workspace.exclude` of every Hatch environment (`[tool.hatch.envs.<env>]`, or
+  `[envs.<env>]` in a `hatch.toml` next to it; a member may be a `{path = ...}` table), and
+  PDM's `[tool.pdm.workspace]` (`members`). Members are directories relative to the project root
+  or globs (`packages/*`; `**` spans directories), and a member must hold a `pyproject.toml`. An
+  `exclude` glob drops the members of its own table it matches, and its `*` spans directories
+  as uv matches it.
+- a member's source roots are the ones detected for the project root, below the member:
+  `packages/core/src`, the directory named after the member (`packages/core/core` when it holds
+  `core/`), and `python`.
+- a member without one (a flat layout) has its packages named below it: `packages/api/acme_api/`
+  is the package `acme_api`. Its other files keep their names below the project root
+  (`packages/api/main.py` is `packages.api.main`): several members often hold a `main.py` or a
+  `scripts/` package, and these would otherwise share a name. A package that several members
+  hold is named below the project root for the same reason.
+
+For example, this uv workspace:
+
+```text
+pyproject.toml                  # [tool.uv.workspace] members = ["packages/*"]
+packages/core/pyproject.toml
+packages/core/src/acme_core/io.py
+packages/api/pyproject.toml
+packages/api/acme_api/server.py # from acme_core.io import wait
+packages/api/main.py
+```
+
+has the source root `packages/core/src` and the member package `packages/api/acme_api`:
+`acme_core.io` is `packages/core/src/acme_core/io.py`, so `heki check` run at the root follows
+`server.py`'s call to `wait` into the other member. `heki check --generate-prompt` lists both.
+
+The `src` setting replaces the detection, members included: `src = ["packages/core/src",
+"packages/api"]` lists the same roots by hand, with `packages/api` naming all of the member's
+files below it. Run heki at the workspace root: run inside a member, the member's own
+`pyproject.toml` makes the member the project root, and the other members are outside it.
 
 Without a configuration file the project root is where heki runs (see above): in a repository
 without one, `heki check` run in `services/api/` names `services/api/app.py` `app`, and its
@@ -143,9 +190,9 @@ supported version that every clause admits:
 - A run of `full` or `concise` output that leaves heuristic rules off, or heuristic reports out,
   says how many.
 - A prefix or `ALL` never enables the opt-in rules (`EFF105`, `EFF106`, `EFF107`, `EFF109`,
-  `EFF110`, `MUT101`, `MUT103`, `MUT106`, `MUT107`, `MUT108`, `MUT111`, `MUT112`, `MUT113`,
-  `MUT115`): they
-  need their exact code or name. In `ignore`, a prefix covers every rule it matches.
+  `EFF110`, `EFF112`, `EFF114`, `MUT101`, `MUT103`, `MUT106`, `MUT107`, `MUT108`, `MUT111`, `MUT112`,
+  `MUT113`, `MUT115`): they need their exact code or name. In `ignore`, a prefix covers every
+  rule it matches.
 - The command line wins: `--select` replaces `select`, `--extend-select` and `--ignore` add to the
   configured lists, and `--heuristic` / `--no-heuristic` replace `heuristic`.
 
@@ -248,7 +295,10 @@ A container entry (`Class.attr["key"]`):
 - is reported once, under the entry, when its container is a target too.
 
 A write into the entries of a target's container (`model.meta["kw"][name] = v`) is a write of
-the target.
+the target. So is a write through a local alias of the container (`kw = model.meta["kw"]`), also
+after an augmented assignment that changes the container in place and so keeps it
+(`kw |= other`, `items += more`, `-=`, `&=`, `^=` on a set); one on any other value
+(`count += 1`) binds a new object.
 
 With `fresh-objects = "allow"`, a write is no violation when it constructs the object it writes:
 
@@ -658,6 +708,15 @@ holds for `invalidation` too:
 - **A class's own initialization is allowed.** An initializer (`__init__`, `__post_init__`,
   `__new__`, `model_post_init`, `__setstate__`) of a target class or a subclass may access its own
   `self`: directly, through `super().__init__()`, or through helpers it passes `self` to.
+- **A nested scope uses the parameters of the functions enclosing it.** A comprehension,
+  generator expression, lambda, or nested `def` reading a parameter of an enclosing function
+  (`[self._fmt(x) for x in xs]`) reaches that parameter's object, as a helper the function hands
+  it does: a call of the scope by that function, or by another scope nested in it, hands the
+  object over. So a comprehension in `__init__` writing `self.imports` is part of the class's own
+  initialization. The variable is another object when the function or a nested scope rebinds it
+  (`self = other`, `nonlocal self`). A closure called away from the function (stored, then
+  called later elsewhere) still reads the same object, but heki does not tie it to the
+  parameter: no call of the function hands it over.
 - **A function that only runs inside allowed functions is allowed.** Every path of project
   callers above it starts in an allowed function, an exempt method, or such an initialization.
 - **A private helper reports at its callers.** An access in a private helper (`_name`) with
@@ -667,24 +726,28 @@ holds for `invalidation` too:
   apply: an access is judged in the function whose code holds it, whoever calls that function.
   A lambda, comprehension, or generator expression is part of the function it is written in, a
   class body's code part of the function running the class statement, and a nested `def` a
-  function of its own. For `write-owners`, a call handing a typed object to a helper that
-  changes it without knowing its class is the caller's write. With `unresolved = "report"`, the
-  callers binding a parameter only tell its object's class, allowed callers included. A class's
-  own initialization stays allowed, a helper it passes `self` to included when every path of
-  project callers above the helper starts in such an initialization; so do `exempt-methods`,
-  `fresh-objects`, and the targets of a call contract calling each other. Effect boundaries have
-  no such key: they judge what their scope functions reach through any number of calls.
+  function of its own; the parameters of the function a lambda, comprehension, or generator
+  expression reads are the function's, wherever it runs. For `write-owners`, a call handing a
+  typed object to a helper that changes it without knowing its class is the caller's write.
+  With `unresolved = "report"`, the callers binding a parameter only tell its object's class,
+  allowed callers included. A class's own initialization stays allowed, a helper it passes
+  `self` to included when every path of project callers above the helper starts in such an
+  initialization; so do `exempt-methods`, `fresh-objects`, and the targets of a call contract
+  calling each other. Effect boundaries have no such key: they judge what their scope functions
+  reach through any number of calls.
 - **`own-receiver = "allow"` allows the accesses through a method's own receiver.** An access is
   allowed when the function it is judged in (the function reported, or with `attribution =
   "lexical"` the function holding the access) is a method that is no static method, and the
   object the member is looked up on may be its first parameter: `self._cache[k] = v`,
   `self._seen`, `cls._kind()`, `super()._label()`, `self._norm(x)` of a static method,
   `Resolver._label(self)`. A member the class inherits counts like its own. Another parameter, an
-  attribute of the receiver, a static method called through its class, the parameter of a static
-  method or of a function, and a nested `def`, lambda, or comprehension using the enclosing
-  method's `self` (heki does not tie a variable a nested scope captures to the enclosing
-  function's parameter) stay reported. By the call graph, a private helper the method hands its
-  `self` (`_count(self)`) is judged at the method, and is allowed with it.
+  attribute of the receiver, a static method called through its class, and the parameter of a
+  static method or of a function stay reported. By the call graph, a private helper the method
+  hands its `self` (`_count(self)`) is judged at the method, and is allowed with it, and so are
+  a comprehension, generator expression, lambda, or private nested `def` the method runs that
+  uses its `self`; a public nested `def` reports itself, as a public helper does. With
+  `attribution = "lexical"`, a lambda, comprehension, or generator expression using the method's
+  `self` is allowed wherever it runs, and a nested `def` is judged by itself, as any helper is.
 - **`allowed-protocols` allows the accesses through the protocols it names.** A read, call, or
   write through a value typed with a project protocol a pattern names (or a subprotocol of one)
   that declares the member, itself or through its protocol bases, is allowed wherever it is
@@ -740,6 +803,7 @@ excluded = true               # never reported
 | `sync-lock-or-tx` | A `with` over an instance of this class, or over the result of this call, holds a synchronous lock or a database transaction (`EFF106`). |
 | `non-reentrant-lock` | An instance of this class is a lock its holder cannot take again: acquiring it while the same thread or task holds it waits forever (`EFF109`). |
 | `one-at-a-time` | Tasks may not be inside this method on one object at once (`EFF110`): `"always"` (a second task's call raises), `"when_unbound"` (only while the object holds no connection, as an `AsyncSession`), or `"unbinds"` (as `"when_unbound"`, and the object holds no connection after the call: `commit`). |
+| `writes-in-order` | The call writes an argument to a file or a stream, or serializes it into text, in the order of its elements (`EFF112`): a mapping's keys and a sequence's items in their iteration order. `{ arg = 0, param = "data" }` names the argument (a position not counting the receiver, or a keyword; `{}`: every positional argument, as `print`), `sorted-by = "sort_keys"` the keyword argument that sorts mapping keys first, and `sorted-by-default = true` a call that sorts them unless told otherwise. |
 
 - An override sets the keys it lists on the built-in entry for the same symbol. The keys it leaves
   out keep their built-in values; `effects = []` removes every effect.
@@ -755,7 +819,7 @@ For a project function:
 | `async-safe` | keeps the blocking effects of the body from its callers |
 | `return-type` | types its result, over its annotation |
 | `offloads-blocking-arg` | the parameter the body offloads, counted as for a library method |
-| `copy-sanitizer`, `sync-lock-or-tx`, `non-reentrant-lock`, `one-at-a-time` | not read: library symbols only |
+| `copy-sanitizer`, `sync-lock-or-tx`, `non-reentrant-lock`, `one-at-a-time`, `writes-in-order` | not read: library symbols only |
 
 ## Inline suppressions
 

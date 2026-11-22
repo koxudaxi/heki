@@ -1,4 +1,5 @@
 use crate::facts::{LoopHint, SMALL_MAX};
+use crate::walk::FnShape;
 use crate::{
     A1Hazard, BasicBlock, BinOpKind, BlockId, BuiltinKind, CompareOpKind, ConstLiteral, Conversion,
     DictEntry, FunctionId, FunctionKind, Inst, InstKind, IrFunction, LocalAnnotation, LoopBound,
@@ -9,7 +10,9 @@ use heki_ast::{ParsedModule, Ranged, Span};
 use heki_env::RuntimeProfile;
 use heki_semantic::{ClassId, SemanticModel};
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::cell::OnceCell;
 use std::collections::VecDeque;
+use std::rc::Rc;
 
 /// The attribute a positional class-pattern argument reads (`case Point(x)`), named by the
 /// class's `__match_args__`, which the IR does not resolve: its `AttrLoad` names the slot,
@@ -109,7 +112,7 @@ pub fn build_module_ir(
         span: full_span,
         is_module_body: true,
         is_class_body: false,
-        outer_locals: FxHashSet::default(),
+        outer_locals: OuterLocals::default(),
         walrus_target: WalrusTarget::OwnScope,
         walrus_globals: FxHashSet::default(),
         body: FunctionBody::Suite(parsed.suite()),
@@ -164,12 +167,7 @@ fn record_module_introspection_aliases(
         .iter()
         .map(|h| (h.span, h.kind.as_str()))
         .collect();
-    let defs: FxHashMap<VarId, &Inst> = module
-        .blocks
-        .iter()
-        .flat_map(|b| &b.insts)
-        .filter_map(|i| Some((i.kind.dst()?, i)))
-        .collect();
+    let shape = FnShape::new(module);
     let mut aliases: FxHashMap<String, String> = FxHashMap::default();
     for inst in module.blocks.iter().flat_map(|b| &b.insts) {
         let InstKind::StoreGlobal { name, value } = &inst.kind else {
@@ -178,25 +176,22 @@ fn record_module_introspection_aliases(
         if imported.contains_key(name) {
             continue;
         }
-        let mut v = *value;
-        while let Some(def) = defs.get(&v) {
-            match &def.kind {
-                InstKind::Copy { src, .. } => v = *src,
-                InstKind::Import {
-                    module: Some(m),
-                    name: imported,
-                    ..
-                } => {
-                    if let Some(kind) = introspection_kind(&format!("{m}.{imported}"), true) {
-                        aliases.insert(name.clone(), kind.to_owned());
-                    }
-                    break;
+        let Some(def) = shape.inst(shape.copy_root(*value)) else {
+            continue;
+        };
+        match &def.kind {
+            InstKind::Import {
+                module: Some(m),
+                name: imported,
+                ..
+            } => {
+                if let Some(kind) = introspection_kind(&format!("{m}.{imported}"), true) {
+                    aliases.insert(name.clone(), kind.to_owned());
                 }
-                _ => {
-                    if let Some(kind) = hazard_at.get(&def.span) {
-                        aliases.insert(name.clone(), (*kind).to_owned());
-                    }
-                    break;
+            }
+            _ => {
+                if let Some(kind) = hazard_at.get(&def.span) {
+                    aliases.insert(name.clone(), (*kind).to_owned());
                 }
             }
         }
@@ -295,11 +290,24 @@ struct FunctionSpec<'a> {
     span: Span,
     is_module_body: bool,
     is_class_body: bool,
-    outer_locals: FxHashSet<String>,
+    outer_locals: OuterLocals,
     walrus_target: WalrusTarget,
     /// The names the function an assignment expression binds in declares `global`.
     walrus_globals: FxHashSet<String>,
     body: FunctionBody<'a>,
+}
+
+/// The names a scope may read from the function scopes around it: one layer per enclosing
+/// function, its locals, shared by every scope nested in it, and the iteration variables of the
+/// inlined comprehensions being lowered where the scope is nested (PEP 709 keeps those as cells
+/// of their frame). A scope copies the layers, never the names in them.
+#[derive(Clone, Default)]
+struct OuterLocals(Vec<Rc<FxHashSet<String>>>);
+
+impl OuterLocals {
+    fn contains(&self, name: &str) -> bool {
+        self.0.iter().any(|layer| layer.contains(name))
+    }
 }
 
 struct ModuleLowerer<'a> {
@@ -469,7 +477,7 @@ impl<'a> ModuleLowerer<'a> {
             spec.is_module_body,
             spec.is_class_body,
             scope_info,
-            &spec.outer_locals,
+            spec.outer_locals,
             spec.walrus_target,
             spec.walrus_globals,
         );
@@ -642,8 +650,10 @@ struct FnBuilder<'m, 'a> {
     is_class_body: bool,
 
     scope: ScopeBindings,
-    /// Union of outer function locals (to recognize closure captures).
-    outer_locals: FxHashSet<String>,
+    /// The locals of the enclosing functions (to recognize closure captures).
+    outer_locals: OuterLocals,
+    /// `scope.locals`, shared by the scopes nested here (made for the first of them).
+    own_locals: OnceCell<Rc<FxHashSet<String>>>,
     walrus_target: WalrusTarget,
     walrus_globals: FxHashSet<String>,
     /// Variables in THIS function captured by nested functions/lambdas/genexprs.
@@ -724,7 +734,7 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
         is_module_body: bool,
         is_class_body: bool,
         scope: ScopeBindings,
-        outer_locals: &FxHashSet<String>,
+        outer_locals: OuterLocals,
         walrus_target: WalrusTarget,
         walrus_globals: FxHashSet<String>,
     ) -> Self {
@@ -752,7 +762,8 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
             is_module_body,
             is_class_body,
             scope,
-            outer_locals: outer_locals.clone(),
+            outer_locals,
+            own_locals: OnceCell::new(),
             walrus_target,
             walrus_globals,
             captured_by_children: FxHashSet::default(),
@@ -1752,13 +1763,16 @@ impl<'m, 'a> FnBuilder<'m, 'a> {
     /// The names a scope nested here may read from enclosing function scopes: the enclosing
     /// functions' locals, this function's own, and the iteration variables of the inlined
     /// comprehensions being lowered (PEP 709 keeps those as cells of this frame).
-    fn child_outer_locals(&self) -> FxHashSet<String> {
+    fn child_outer_locals(&self) -> OuterLocals {
         let mut out = self.outer_locals.clone();
         if !self.is_module_body && !self.is_class_body {
-            out.extend(self.scope.locals.iter().cloned());
+            let own = self
+                .own_locals
+                .get_or_init(|| Rc::new(self.scope.locals.clone()));
+            out.0.push(Rc::clone(own));
         }
         for renames in &self.comp_target_renames {
-            out.extend(renames.keys().cloned());
+            out.0.push(Rc::new(renames.keys().cloned().collect()));
         }
         out
     }
