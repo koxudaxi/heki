@@ -319,11 +319,11 @@ fn semantic_module_imports_and_classes() {
             .all(|i| i["imported_name"] != "*")
     );
 
-    // Lightweight CHA: dotted / subscripted bases are kept, call bases are not.
+    // Lightweight CHA: dotted / subscripted bases are named, a call base keeps its place unnamed.
     let forms = class(&m, "ClassForms");
     assert_eq!(
-        strs(&forms["bases"]),
-        ["Base", "cabc.Sized", "typing.Generic"]
+        forms["bases"],
+        serde_json::json!(["Base", "cabc.Sized", "typing.Generic", null])
     );
     assert_eq!(strs(&forms["methods"]), ["method", "prop", "static"]);
     let nested = class(&m, "ClassForms.Nested");
@@ -1570,6 +1570,8 @@ fn ir_comprehensions_follow_pep709() {
 fn ir_loop_bounds_and_loop_carried_values() {
     let ir = ir(TOUR, "py315");
     let small = |n: u64| json!({ "const_small": n });
+    // The tour's star import may bind `range` (heki does not read which names `os.path`
+    // exports), so no `range(...)` loop of it has a fixed count; the displays still do.
     assert_eq!(
         bounds(function(&ir, "loop_bounds")),
         vec![
@@ -1578,12 +1580,11 @@ fn ir_loop_bounds_and_loop_carried_values() {
             json!("unbounded"),
             small(2),
             json!("unbounded"),
-            // `range(0, 10, 2)`: a constant step counts too.
-            small(5),
-            small(4),
             json!("unbounded"),
-            small(5),
-            small(3),
+            json!("unbounded"),
+            json!("unbounded"),
+            json!("unbounded"),
+            json!("unbounded"),
             json!("unbounded"),
             json!("unbounded"),
             json!("unbounded"),
@@ -1617,6 +1618,16 @@ fn ir_loop_bounds_and_loop_carried_values() {
     assert_eq!(
         bounds(function(&ir, "async_retry")),
         vec![json!("daemon_polling")]
+    );
+    // The same `range(...)` loops in a module without a star import: `range(0, 10, 2)`, a
+    // constant step counts too.
+    let ranges = "def ranges():\n    for _ in range(0, 10, 2):\n        pass\n    \
+                  for _ in range(2, 6):\n        pass\n    for _ in range(-2, +3):\n        pass\n    \
+                  for _ in range(+3):\n        pass\n";
+    let plain = dump_source("dump-ir", "fe_ranges", ranges, "py315");
+    assert_eq!(
+        bounds(function(&plain, "ranges")),
+        vec![small(5), small(4), small(5), small(3)]
     );
 
     // CPython's `base64.encode` shape: a nested `while` whose condition short-circuits. Only

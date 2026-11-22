@@ -90,11 +90,10 @@ pub struct ClassInfo {
     pub qualname: String,
     /// The class whose body holds this class statement directly.
     pub parent_class: Option<ClassId>,
-    pub bases: Vec<String>,
-    /// A positional base is no dotted name (`with_metaclass(Meta)`, `*bases`), so `bases` leaves
-    /// it out: heki cannot name the class it evaluates to.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub unnamed_bases: bool,
+    /// The positional bases in order: each one's dotted name (`Base`, `core.Base`, `Base` of
+    /// `Base[int]`), or `None` for another expression (`with_metaclass(Meta)`, `*bases`), whose
+    /// class heki cannot name.
+    pub bases: Vec<Option<String>>,
     /// Class keywords with the source text of their value (`metaclass=Meta`, `frozen=False`);
     /// `**kwargs` is left out.
     pub keywords: Vec<(String, String)>,
@@ -976,14 +975,10 @@ impl<'a> Analyzer<'a> {
             self.push_type_params_scope(cls.type_params.as_deref(), cls.name.as_str(), line);
 
         let mut bases = Vec::new();
-        let mut unnamed_bases = false;
         let mut keywords = Vec::new();
         if let Some(args) = &cls.arguments {
             for arg in &args.args {
-                match expr_dotted_name(arg) {
-                    Some(b) => bases.push(b),
-                    None => unnamed_bases = true,
-                }
+                bases.push(expr_dotted_name(arg));
                 self.visit_expr(arg);
             }
             for kw in &args.keywords {
@@ -1007,7 +1002,6 @@ impl<'a> Analyzer<'a> {
             qualname,
             parent_class,
             bases,
-            unnamed_bases,
             keywords,
             methods: Vec::new(),
             span: Span::from(cls.range),
@@ -1726,7 +1720,7 @@ class Child(Base):
         assert_eq!(m315.classes.len(), 3);
         let child = m315.classes.iter().find(|c| c.name == "Child").unwrap();
         let nested = m315.classes.iter().find(|c| c.name == "Nested").unwrap();
-        assert_eq!(child.bases, vec!["Base"]);
+        assert_eq!(child.bases, vec![Some("Base".to_owned())]);
         assert_eq!(nested.parent_class, Some(child.id));
         assert_eq!(nested.qualname, "Child.Nested");
         // Python 3.11 vs 3.12 PEP 709 comprehension scope difference

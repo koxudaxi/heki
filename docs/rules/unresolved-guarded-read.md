@@ -20,8 +20,8 @@ call heki does not resolve, a value annotated `Any` or `object` (unless an `isin
 around the read narrows it to a class), a protocol whose implementations heki cannot list (one
 without members, or implemented by more than eight classes), or a variable of an enclosing
 function that a nested scope rebinds (`nonlocal`). `obj.children`, a local alias of it,
-`getattr(obj, "children")` with a constant name, and `obj.__dict__["children"]` count, as for
-`MUT203`.
+`getattr(obj, "children")` with a constant name, and `obj.__dict__["children"]` (also
+`vars(obj)["children"]`) count, as for `MUT203`.
 
 The rules of `MUT203` for what is allowed apply: allowed readers, exempt methods, functions that
 only run inside allowed readers, and `forbidden-readers` (the reading function must be one).

@@ -16,15 +16,20 @@ reserves for a set of allowed writer functions. A write is reported when it happ
 allowed writers:
 
 - directly (`model.fields = [...]`, `model.fields.append(...)`, `del model.fields`);
-- through a local alias (`fields = model.fields; fields.append(...)`), also one `getattr` with a
-  constant name loads (`getattr(model, "fields").append(...)`), or what a method, property, or
+- through a local alias (`fields = model.fields; fields.append(...)`), also one a scope nested
+  in the function reads from it (a nested function, a lambda, a comprehension, or a generator
+  expression: `lambda: fields.append(x)`) unless a nested scope rebinds it (`nonlocal`), one
+  `getattr` with a constant name loads (`getattr(model, "fields").append(...)`), or what a
+  method, property, or
   function returns when it returns the attribute itself on every `return`
   (`model.field_list().append(...)` with `return self.fields`), stores no attribute of that name
   itself, and every class the object may be runs it (no `cached_property`, no class attribute of
   the name coming first); the object must be passed by position (no keyword-only parameter, no
   `*args` unpacking);
 - through `setattr(model, "fields", ...)` / `object.__setattr__` (also through a module-level
-  name bound once to it: `_set = object.__setattr__`) or `model.__dict__["fields"]`,
+  name bound once to it: `_set = object.__setattr__`) or `model.__dict__["fields"]` (also
+  `vars(model)["fields"]`, `model.__dict__.setdefault("fields", v)`, and a local alias of the
+  namespace),
   also with a string constant for the name (`model.__dict__[FIELDS_KEY]`, imported or not):
   a module-level name declared `Final` or bound once in its module and rebound by no other, or
   a class-body name declared `ClassVar` or `Final` and bound once (`self.KEY`, `cls.KEY`,
@@ -48,7 +53,14 @@ allowed writers:
   only hands the value on to an allowed writer or an exempt method writes inside the owner.
 
 A target names a class and an attribute; it covers the class's subclasses too (the target's
-class family). A target can also name one entry of the container an attribute holds,
+class family). With `unlisted-dict-keys = "report"`, a constant key written through the
+namespace of an object of a class a target covers (`field.__dict__["_cache"] = v`,
+`vars(field).setdefault(KEY, v)`, `del field.__dict__[KEY]`) is reported too when no target
+covering that class names it (`writes `pkg.model.Field._cache` (dict_direct), a `__dict__` key
+no target names`), so a new key needs a target first. A target names the keys its attribute
+pattern matches, and an entry target names its container. A computed key, a plain attribute
+store (`field._cache = v`, `setattr`), and a write in a helper that does not see the object's
+class are not such writes. A target can also name one entry of the container an attribute holds,
 `Class.attr["key"]`: it matches the writes of that key (`field.extras["init"] = v`,
 `field.extras[INIT]` with a string constant, `field.extras.pop("init")`,
 `del field.extras["init"]`, `field.extras["init"].append(v)`), not a write of the whole
@@ -141,12 +153,15 @@ reported. `fresh-objects = "report"` reports these writes like any other.
 
 A report states that the function writes a target of a `write-owners` contract (an attribute, or the
 container it holds) outside the contract's write owners, directly, through an alias, or through the
-helpers shown.
+helpers shown; with `unlisted-dict-keys = "report"`, also that it writes a `__dict__` key of a
+target's class that no target names.
 
 Its premises:
 
 - **Target**: the object is an instance of a class the contract names, or of a subclass, by
-  construction or annotation (assumption R2). Open: an alias bound on one path is enough.
+  construction or annotation (assumption R2), and the attribute is a target's (with
+  `unlisted-dict-keys = "report"`, or a `__dict__` key no target names). Open: an alias bound
+  on one path is enough.
 - **Outside the owners**: the function is not in the allowed modules and classes, nor runs only
   inside allowed contexts (with `attribution = "lexical"`: the function holding the write is
   not allowed). Established from the contract.
@@ -226,3 +241,5 @@ No automatic fix.
   - `attribution`: `"call-graph"` (default) or `"lexical"`: whether a private helper hands its
     writes to its callers and a function that only runs inside allowed writers is allowed, or
     each write is judged in the function holding it.
+  - `unlisted-dict-keys`: `"ignore"` (default) or `"report"`: also report a constant `__dict__`
+    key of a target's class that no target names.

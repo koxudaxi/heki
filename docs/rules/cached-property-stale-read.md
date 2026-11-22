@@ -22,8 +22,9 @@ method that changes an attribute the property reads without invalidating the cac
 
 A read is one in the function's own body, on any object of the class: `self.prop`, `obj.prop`
 on a parameter, attribute, or value whose class heki knows (as for `MUT203`),
-`getattr(obj, "prop")`, and `obj.__dict__["prop"]` / `obj.__dict__.get("prop")`. The object may
-be an instance of the read's class or of any project subclass of it. The read is reported when
+`getattr(obj, "prop")`, and `obj.__dict__["prop"]` / `obj.__dict__.get("prop")` (also on
+`vars(obj)`). The object may be an instance of the read's class or of any project subclass of
+it. The read is reported when
 an instance of one of those classes runs both the cached property and the method that leaves it
 stale: the first definition of each along its MRO, or one that the definitions before it call
 through `super()` without invalidating the property themselves. A method of a sibling class, or

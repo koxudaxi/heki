@@ -1,9 +1,10 @@
 //! The cost of the analyses past the IR, end to end through the real binary: `isinstance`
 //! narrowing through phis, the passes of the type inference and of the classes of merged values,
-//! the closure cells child scopes read, the size of the Soundness lane's proof state, the values
+//! the closure cells child scopes read, the iterables child scopes receive from the functions
+//! creating them, the size of the Soundness lane's proof state, the values
 //! `EFF107` follows from a task factory, the walk to the callable a builtin calls once per item,
 //! contracts with many call targets and argument lists, the walk to the uses handing a reference to
-//! a call target on, and the locks `EFF109` follows.
+//! a call target on, the locks `EFF109` follows, and the values class statements pass as bases.
 
 mod common;
 
@@ -214,6 +215,57 @@ fn scopes_reading_a_cell_bound_many_times_read_its_joined_fact() {
         assert_eq!(
             found.iter().filter(|d| d["rule_code"] == "MUT203").count(),
             names
+        );
+    }
+}
+
+/// A function creating `children` child scopes, each over a value it binds just before and
+/// opening a session per item, then one over a display of two items: comprehensions, which are
+/// functions of their own before 3.12, or generator expressions.
+fn child_scopes_over_bound_values(children: usize, comprehension: bool) -> String {
+    let child = |iterable: &str| {
+        if comprehension {
+            format!("[requests.Session() for _ in {iterable}]")
+        } else {
+            format!("list(requests.Session() for _ in {iterable})")
+        }
+    };
+    let mut lines = vec![
+        "import requests".to_owned(),
+        String::new(),
+        String::new(),
+        "def load(i):".to_owned(),
+        "    return [i]".to_owned(),
+        String::new(),
+        String::new(),
+        "def shape(out):".to_owned(),
+    ];
+    for i in 0..children {
+        lines.push(format!("    rows = load({i})"));
+        lines.push(format!("    out.append({})", child("rows")));
+    }
+    lines.push(format!("    out.append({})", child("[1, 2]")));
+    lines.join("\n") + "\n"
+}
+
+/// The iterable a child scope receives is sized where the function creating it evaluates it, on
+/// one index of that function for all its child scopes, both when the IR's loop bounds are
+/// refined and when a rule asks whether a loop is data-sized: a session per item of every child
+/// scope but the one over the display.
+#[test]
+fn child_scopes_size_their_iterables_on_one_index_of_their_creator() {
+    let config = "[project]\nname = \"t\"\n\n[tool.heki]\ntarget-version = \"py311\"\n\n\
+                  [tool.heki.lint]\nselect = [\"EFF102\"]\n";
+    for (comprehension, children) in [(true, 8_000), (false, 5_000)] {
+        let p = Project::new(&format!("bounds_child_scopes_{comprehension}"));
+        p.write("pyproject.toml", config).write(
+            "m.py",
+            &child_scopes_over_bound_values(children, comprehension),
+        );
+        let found = check_within(&p, Duration::from_secs(20));
+        assert_eq!(
+            found.iter().filter(|d| d["rule_code"] == "EFF102").count(),
+            children
         );
     }
 }
@@ -3304,4 +3356,160 @@ fn calls_unpacking_copies_of_one_display_decide_it_once() {
     let found = check_within(&p, Duration::from_secs(20));
     let calls = found.iter().filter(|d| d["rule_code"] == "MUT204").count();
     assert_eq!(calls, copies + 1);
+}
+
+/// `functions` functions of one module, each making one project call.
+fn functions_each_calling(functions: usize) -> String {
+    let mut lines = vec!["def g(x):".to_owned(), "    return x".to_owned()];
+    for i in 0..functions {
+        lines.extend([
+            String::new(),
+            String::new(),
+            format!("def call{i}(x):"),
+            "    return g(x)".to_owned(),
+        ]);
+    }
+    lines.join("\n") + "\n"
+}
+
+/// A function handing the read-only value a `readonly-returns` producer returns to `calls`
+/// calls of a function that only reads it, then once to one that changes it.
+fn read_only_value_handed_to_calls(calls: usize) -> String {
+    let mut lines = vec![
+        "def load():".to_owned(),
+        "    return [1, 2, 3]".to_owned(),
+        String::new(),
+        String::new(),
+        "def use(xs):".to_owned(),
+        "    return len(xs)".to_owned(),
+        String::new(),
+        String::new(),
+        "def grow(xs):".to_owned(),
+        "    xs.append(1)".to_owned(),
+        String::new(),
+        String::new(),
+        "def shape():".to_owned(),
+        "    values = load()".to_owned(),
+    ];
+    lines.extend((0..calls).map(|_| "    use(values)".to_owned()));
+    lines.push("    grow(values)".to_owned());
+    lines.join("\n") + "\n"
+}
+
+/// `MUT202` finds the call site of each call instruction in an index of the module's call sites
+/// by function and position, built once per module (forty thousand functions each making a
+/// call), and the facts a call runs, at the call and where the object it returns is used, once
+/// per call target of a function (twenty thousand calls handed one read-only value): neither is
+/// scanned again per function or per call. The one call handing the value to a function that
+/// changes it is still found.
+#[test]
+fn call_sites_and_the_facts_they_run_are_looked_up_not_scanned() {
+    let p = Project::new("bounds_functions_each_calling");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT202\"]\n",
+    )
+    .write("m.py", &functions_each_calling(40_000));
+    assert!(check_within(&p, Duration::from_secs(20)).is_empty());
+
+    let p = Project::new("bounds_read_only_value_handed_to_calls");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT202\"]\n\n\
+         [[tool.heki.readonly-returns]]\nname = \"r\"\nproducers = [\"m.load\"]\n",
+    )
+    .write("m.py", &read_only_value_handed_to_calls(20_000));
+    let found = check_within(&p, Duration::from_secs(20));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0]["rule_code"], "MUT202");
+    assert_eq!(found[0]["line"], 20_015);
+}
+
+/// A function calling `scopes` generator expressions, each reading `Model._given` and calling
+/// `Model.peek` of its parameter.
+fn guarded_accesses_in_generator_expressions(scopes: usize) -> String {
+    let mut lines = vec![
+        "class Model:".to_owned(),
+        "    def __init__(self):".to_owned(),
+        "        self._given = 1".to_owned(),
+        String::new(),
+        "    def peek(self):".to_owned(),
+        "        return 1".to_owned(),
+        String::new(),
+        String::new(),
+        "def shape(xs, out, m: Model):".to_owned(),
+    ];
+    lines.extend(
+        (0..scopes)
+            .map(|_| "    out.append(sum(1 for _ in xs if m._given and m.peek()))".to_owned()),
+    );
+    lines.join("\n") + "\n"
+}
+
+/// The generator expressions of a function share one qualname, so each of their call sites runs
+/// the reads and calls of all of them. `MUT203` and `MUT204` walk the callers once for the
+/// accesses of one function that are reported at the same places, and a report counts the sites
+/// of all of them without adding them to each report one by one: three thousand generator
+/// expressions take time linear in them. Each call site is still reported, standing for every
+/// access.
+#[test]
+fn guarded_accesses_in_many_generator_expressions_walk_their_callers_once() {
+    let p = Project::new("bounds_guarded_accesses_in_generator_expressions");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT203\", \"MUT204\"]\n\n\
+         [[tool.heki.read-owners]]\nname = \"given\"\ntargets = [\"m.Model._given\"]\n\
+         forbidden-readers = [\"m:shape\"]\n\n\
+         [[tool.heki.call-owners]]\nname = \"peek\"\ntargets = [\"m.Model.peek\"]\n\
+         forbidden-callers = [\"m:shape\"]\n",
+    )
+    .write("m.py", &guarded_accesses_in_generator_expressions(3_000));
+    let found = check_within(&p, Duration::from_secs(20));
+    for code in ["MUT203", "MUT204"] {
+        let reports: Vec<&Value> = found.iter().filter(|d| d["rule_code"] == code).collect();
+        assert_eq!(reports.len(), 3_000, "{code}");
+        assert!(reports.iter().all(|d| d["sites"] == 3_000), "{code}");
+    }
+}
+
+/// A function binding a long chain of aliases of a class and a long chain of attribute loads
+/// from a parameter, then deriving classes from the last of each (`class C0(a8000)`, `class
+/// D0(b8000)`): each base is followed along its copies through one table per function and through
+/// a bounded number of attribute loads, so the classes of the alias derive from the class and
+/// those of the attribute from an unknown base.
+#[test]
+fn class_statements_deriving_from_long_chains_name_each_base_in_bounded_steps() {
+    let (links, classes) = (8_000, 200);
+    let mut lines = vec![
+        "class K:".to_owned(),
+        "    pass".to_owned(),
+        String::new(),
+        String::new(),
+        "def build(node):".to_owned(),
+        "    a0 = K".to_owned(),
+        "    b0 = node".to_owned(),
+    ];
+    lines.extend((1..=links).map(|i| format!("    a{i} = a{}", i - 1)));
+    lines.extend((1..=links).map(|i| format!("    b{i} = b{}.child", i - 1)));
+    for i in 0..classes {
+        lines.push(format!("    class C{i}(a{links}):"));
+        lines.push("        pass".to_owned());
+        lines.push(format!("    class D{i}(b{links}):"));
+        lines.push("        pass".to_owned());
+    }
+    lines.push("    return C0(), D0()".to_owned());
+    let p = Project::new("bounds_class_base_chains");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT204\"]\n\n[[tool.heki.call-owners]]\nname = \"home\"\ntargets = [\"m.K\"]\nallowed-callers = [\"m.K.*\"]\n",
+    )
+    .write("m.py", &(lines.join("\n") + "\n"));
+    let found: Vec<String> = check_within(&p, Duration::from_secs(20))
+        .iter()
+        .map(|d| d["message"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(
+        found,
+        vec!["`build` constructs `m.K` outside the call owners of `home`"]
+    );
 }

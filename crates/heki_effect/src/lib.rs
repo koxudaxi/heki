@@ -413,7 +413,7 @@ pub enum Construction {
 }
 
 /// What a call argument is for the construction of the objects its callee writes.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NewArg {
     #[default]
@@ -448,8 +448,8 @@ impl ReturnsNew {
 }
 
 /// A write heki cannot tie to a class (`MUT205`): an attribute written on an object of unknown
-/// class, or a computed attribute name written on a project class. A local fact, never
-/// propagated.
+/// class, or a computed attribute name written on a project class or on an object of unknown
+/// class. A local fact, never propagated.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct UnresolvedWriteSite {
     pub what: Unresolved,
@@ -471,6 +471,9 @@ pub enum Unresolved {
     /// A computed attribute name (`setattr(obj, name, v)`, `obj.__dict__[name] = v`) written on
     /// an instance of this project class (fqn).
     Name(String),
+    /// A computed attribute name written on an object of unknown class: any attribute of any
+    /// class.
+    Anything,
 }
 
 /// A read or a call heki cannot tie to a class (`MUT206`, `MUT207`): an attribute read, or a
@@ -1021,7 +1024,7 @@ pub struct ArgumentValues(pub Vec<(String, ArgValue)>);
 /// What a caller knows about the value of a callee parameter at one call, when the argument
 /// binds the parameter exactly: the receiver, a keyword, a position before any `*` unpacking,
 /// or the literal default of an omitted parameter.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ArgBinding {
     pub constant: Option<ConstArg>,
     /// The caller's own input the argument is (a guard subject of the caller).
@@ -1436,7 +1439,7 @@ pub struct Delivery<'a> {
 }
 
 /// Where a call argument comes from, as seen by the caller (used to map callee facts back).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ArgOrigin {
     /// Caller parameter `i` itself (`None`) or its attribute `a` (`Some(a)`).
     pub param: Option<(u8, Option<String>)>,
@@ -1479,7 +1482,7 @@ pub struct ArgOrigin {
 
 /// [`ArgOrigin::targets`]: what the argument's class and field are to the `invalidation`
 /// contracts, which propagation cannot look up (it has no class hierarchy).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ArgTargets {
     /// The contracts whose targets include the field the argument is (`typed_field`): changing
     /// the value in place writes it.
@@ -1514,7 +1517,7 @@ impl ArgOrigin {
 }
 
 /// The classes a protocol-typed argument is an instance of ([`ArgOrigin::implementers`]).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Implementers {
     /// The project classes implementing the protocol structurally (none: no project class does).
     Listed(Vec<String>),
@@ -1523,7 +1526,7 @@ pub enum Implementers {
 }
 
 /// One resolved project callee with the caller-side origin of each callee parameter.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct BoundCallee {
     pub callee: FuncKey,
     /// Indexed by the callee's parameter position (receiver included for bound methods).
@@ -1538,7 +1541,7 @@ impl BoundCallee {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CallTarget {
     /// Project functions (1 candidate, or up to `CHA_CANDIDATE_LIMIT` CHA candidates).
     Project(Vec<BoundCallee>),
@@ -1680,6 +1683,10 @@ pub struct CallSite {
     /// Whether the caller has made the call whenever it returns normally (computed when an
     /// enabled rule reads [`EffectSummary::must_exec`]).
     pub on_every_return: OnEveryReturn,
+    /// For a site of the object a call returns (where it is iterated, returned, handed to a
+    /// project call, or awaited): the span of that call. `None` for a call's own site.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub made_by: Option<Span>,
 }
 
 /// How an API runs a callable it is handed ([`CallSite::runner`]).
@@ -1726,6 +1733,23 @@ pub enum Items {
 }
 
 impl CallSite {
+    /// The call a site stands for, shared by the call's own site and every site of the object
+    /// it returns: the call's span and target. Other calls of the same callees with the same
+    /// arguments have the target too, but not the span.
+    pub fn of_call(&self) -> (Span, &CallTarget) {
+        (self.made_by.unwrap_or(self.span), &self.target)
+    }
+
+    /// The site without its source positions (Early Cutoff compares what callers see of their
+    /// calls without them).
+    pub fn unplaced(&self) -> Self {
+        Self {
+            span: Span { start: 0, end: 0 },
+            made_by: None,
+            ..self.clone()
+        }
+    }
+
     /// Whether the effect `e` of the callees does not block the caller's thread here.
     pub fn hides(&self, e: ExecEffectKind) -> bool {
         match self.runner {
