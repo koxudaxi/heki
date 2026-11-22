@@ -117,6 +117,18 @@ fn reports_now_are_what_heki_check_shows_and_withholds() {
          Reports now  2 shown (2 exact, 0 heuristic), 2 heuristic withheld, 4 heuristic rule(s) \
          off\n\
          \n\
+         Rules worth enabling here\n\
+         \x20 rule    reports  exact  consequence  right about the code (published)  real harm  \
+         block\n\
+         \x20 OPT110        2      0  slowdown     78% (65-87%), n=50, 2026-11-21    6%         \
+         no: slower code, not a bug\n\
+         \x20 EFF111        1      -  slowdown     not measured                      -          \
+         no: slower code, not a bug\n\
+         \x20 No reports here: EFF102, EFF105, EFF106, EFF107, EFF109, EFF110, EFF113, MUT101, \
+         MUT106, MUT107, MUT108, MUT111, MUT112, MUT113, OPT112\n\
+         \x20 MUT103: it compares with a saved summary snapshot: run `heki snapshot --write`, then \
+         select it.\n\
+         \n\
          pyproject.toml: nothing to add\n"
     );
     let (_, _, note) = p.heki(&["check"]);
@@ -475,5 +487,344 @@ fn the_count_of_files_left_out_stops_at_its_caps() {
     assert_eq!(
         report["analyzed"]["left_out"],
         json!({"python_files": 1, "files": ["aa/one.py"], "truncated": true})
+    );
+}
+
+/// Reports of opt-in rules: `MUT106` and `EFF107` (bugs, not measured), `MUT107` (a bug whose
+/// measurement shows real harm below 10%), and the experimental `EFF109`.
+const OPT_IN: &str = "\
+import asyncio
+import threading
+
+lock = threading.Lock()
+
+def total_and_count(rows):
+    items = (r for r in rows)
+    total = sum(items)
+    count = len(list(items))
+    return total, count
+
+async def work():
+    await asyncio.sleep(1)
+
+async def start():
+    task = asyncio.create_task(work())
+    await asyncio.sleep(0)
+
+class Point:
+    def __init__(self, x):
+        self.x = x
+
+    def __hash__(self):
+        return hash(self.x)
+
+    def move(self, dx):
+        self.x += dx
+
+def twice():
+    with lock:
+        with lock:
+            pass
+";
+
+fn shop_with_opt_in(name: &str) -> Project {
+    let p = shop(name);
+    p.write("app/opt_in.py", OPT_IN);
+    p
+}
+
+/// The advice on the rule `code`.
+fn rule<'r>(report: &'r Value, code: &str) -> &'r Value {
+    report["rules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["code"] == code)
+        .unwrap_or_else(|| panic!("no advice on {code}: {report:#}"))
+}
+
+/// Every rule code but `MUT103`, comma-separated: naming them all withholds nothing.
+fn every_rule() -> String {
+    let (_, out, _) =
+        Project::new("recommend_rules").heki(&["rule", "--all", "--output-format", "json"]);
+    let rules: Vec<Value> = serde_json::from_str(&out).unwrap();
+    rules
+        .iter()
+        .map(|r| r["code"].as_str().unwrap())
+        .filter(|code| *code != "MUT103")
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+#[test]
+fn rules_worth_enabling_follow_the_policy() {
+    let p = shop_with_opt_in("recommend_rules_policy");
+    let (code, out, _) = p.heki(&["recommend"]);
+    assert_eq!(code, 0);
+    let section = out
+        .split("\nRules worth enabling here\n")
+        .nth(1)
+        .and_then(|rest| rest.split("\n\n").next())
+        .unwrap_or_else(|| panic!("{out}"));
+    assert_eq!(
+        section,
+        "  rule    reports  exact  consequence  right about the code (published)  real harm  block\n\
+        \x20 EFF107        1      -  bug          not measured                      -          yes\n\
+        \x20 MUT106        1      -  bug          not measured                      -          yes\n\
+        \x20 OPT110        2      0  slowdown     78% (65-87%), n=50, 2026-11-21    6%         no: slower code, not a bug\n\
+        \x20 EFF111        1      -  slowdown     not measured                      -          no: slower code, not a bug\n\
+        \x20 MUT107        1      -  bug          78% (65-87%), n=50, 2026-11-21    4%         no: real harm below 10%\n\
+        \x20 Optional (experimental, never in the block)\n\
+        \x20 EFF109        1      -  bug          not measured                      -          no: experimental\n\
+        \x20 No reports here: EFF102, EFF105, EFF106, EFF110, EFF113, MUT101, MUT108, MUT111, MUT112, MUT113, OPT112\n\
+        \x20 MUT103: it compares with a saved summary snapshot: run `heki snapshot --write`, then select it."
+    );
+    assert!(
+        out.ends_with(
+            "\npyproject.toml: keys to add or change\n  [tool.heki.lint]\n  extend-select = \
+             [\"EFF107\", \"MUT106\"]  # adds EFF107, MUT106\n"
+        ),
+        "{out}"
+    );
+    let (_, report, _) = recommend_json(&p, &[]);
+    assert_eq!(
+        rule(&report, "EFF107"),
+        &json!({"code": "EFF107", "slug": "unretained-async-task", "certainty": "heuristic",
+                "activation": "opt-in", "experimental": false, "consequence": "bug",
+                "enabled_now": false, "reports": 1, "exact": 0, "heuristic": 1, "baseline": null,
+                "measurement": null, "in_block": true, "reason": "a bug, reported here",
+                "caveats": ["not measured"]})
+    );
+    // The heuristic reports an exact rule withholds, with its measurement quoted.
+    let opt110 = rule(&report, "OPT110");
+    assert_eq!(
+        (
+            &opt110["enabled_now"],
+            &opt110["reports"],
+            &opt110["heuristic"]
+        ),
+        (&json!(true), &json!(2), &json!(2))
+    );
+    assert_eq!(
+        opt110["measurement"],
+        json!({"rule": "OPT110", "round": 3, "date": "2026-11-21", "sample": 50, "confirmed": 0,
+               "plausible": 3, "benign": 36, "false_claims": 11, "right_percent": 78,
+               "interval_percent": [65, 87], "real_harm_percent": 6})
+    );
+    assert_eq!(rule(&report, "MUT103")["reports"], Value::Null);
+    assert_eq!(
+        report["config"],
+        json!({"lint": {"extend-select": ["EFF107", "MUT106"]}})
+    );
+    // Rules the current selection runs in full, and contract rules, are not listed.
+    for code in ["EFF101", "OPT101", "MUT201", "EFF201"] {
+        assert!(
+            report["rules"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|r| r["code"] != code),
+            "{code}"
+        );
+    }
+    assert_follows_the_schema(&report);
+    // A rule the configuration ignores stays out.
+    let (_, ignoring, _) = recommend_json(&p, &["--ignore", "MUT106"]);
+    let mut106 = rule(&ignoring, "MUT106");
+    assert_eq!(
+        (&mut106["in_block"], &mut106["reason"]),
+        (&json!(false), &json!("the configuration ignores it"))
+    );
+    assert_eq!(
+        ignoring["config"],
+        json!({"lint": {"extend-select": ["EFF107"]}})
+    );
+    // A selected `MUT103` is not advice.
+    let (_, selected, _) = recommend_json(&p, &["--extend-select", "MUT103"]);
+    assert!(
+        selected["rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["code"] != "MUT103")
+    );
+}
+
+#[test]
+fn the_block_enables_exactly_the_reports_it_promises() {
+    for (file, existing) in [
+        ("pyproject.toml", "[project]\nname = \"t\"\n"),
+        ("heki.toml", "[lint]\nextend-select = [\"EFF105\"]\n"),
+    ] {
+        let p = shop_with_opt_in("recommend_round_trip");
+        if file == "heki.toml" {
+            std::fs::remove_file(p.dir.join("pyproject.toml")).unwrap();
+        }
+        p.write(file, existing);
+        let (_, report, _) = recommend_json(&p, &[]);
+        let block = report["config_toml"].as_str().unwrap();
+        // The user adds the keys: the array is written whole, so it replaces the line.
+        let merged = if existing.contains("extend-select") {
+            let line = block
+                .lines()
+                .find(|l| l.starts_with("extend-select"))
+                .unwrap();
+            existing.replace("extend-select = [\"EFF105\"]", line)
+        } else {
+            format!("{existing}\n{block}")
+        };
+        p.write(file, &merged);
+        let after = checked(&p, &[]);
+        let promised: Vec<&Value> = report["rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|r| r["in_block"] == true)
+            .collect();
+        assert!(!promised.is_empty(), "{file}");
+        for r in &promised {
+            let code = r["code"].as_str().unwrap();
+            let found = after.iter().filter(|d| d["rule_code"] == code).count();
+            assert_eq!(json!(found), r["reports"], "{file}: {code}");
+        }
+        let added: u64 = promised
+            .iter()
+            .map(|r| r["reports"].as_u64().unwrap())
+            .sum();
+        assert_eq!(
+            json!(after.len() as u64),
+            json!(report["reports_now"]["shown"].as_u64().unwrap() + added),
+            "{file}: {merged}"
+        );
+    }
+}
+
+#[test]
+fn a_rules_reports_do_not_depend_on_the_other_rules_selected() {
+    let p = shop_with_opt_in("recommend_independence");
+    let all = every_rule();
+    let everything = checked(&p, &["--select", &all]);
+    let key = |d: &Value| {
+        (
+            d["path"].clone(),
+            d["line"].clone(),
+            d["column"].clone(),
+            d["message"].clone(),
+            d["certainty"].clone(),
+        )
+    };
+    let codes: std::collections::BTreeSet<&str> = everything
+        .iter()
+        .map(|d| d["rule_code"].as_str().unwrap())
+        .collect();
+    assert!(codes.len() >= 6, "{codes:?}");
+    for code in codes {
+        let alone: Vec<_> = checked(&p, &["--select", code]).iter().map(key).collect();
+        let among: Vec<_> = everything
+            .iter()
+            .filter(|d| d["rule_code"] == code)
+            .map(key)
+            .collect();
+        assert_eq!(alone, among, "{code}");
+    }
+}
+
+#[test]
+fn a_baseline_splits_each_rules_reports() {
+    let p = shop_with_opt_in("recommend_rules_baseline");
+    p.write("app/opt_in.py", "");
+    let (code, _, err) = p.heki(&[
+        "check",
+        "--select",
+        &every_rule(),
+        "--baseline",
+        "b.toml",
+        "--update-baseline",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    p.write("app/opt_in.py", OPT_IN);
+    p.write(
+        "app/lists.py",
+        &format!("{LISTS}\ndef more_names(names, source):\n    known = list(source)\n    return [n for n in names if n in known]\n"),
+    );
+    let (_, report, _) = recommend_json(&p, &["--baseline", "b.toml"]);
+    assert_eq!(
+        rule(&report, "MUT106")["baseline"],
+        json!({"allowed": 0, "regressions": 1})
+    );
+    // The baseline holds the two heuristic `OPT110` reports; the third is new.
+    assert_eq!(
+        rule(&report, "OPT110")["baseline"],
+        json!({"allowed": 2, "regressions": 1})
+    );
+    let (_, out, _) = p.heki(&["recommend", "--baseline", "b.toml"]);
+    assert!(
+        out.contains("  rule    reports  exact  regressions  consequence  ")
+            && out.contains("\n  MUT106        1      -            1  bug  "),
+        "{out}"
+    );
+    assert_follows_the_schema(&report);
+}
+
+#[test]
+fn a_rarely_harmful_bug_is_listed_without_entering_the_block() {
+    let p = shop("recommend_minor_bug");
+    p.write(
+        "app/fill.py",
+        "from collections.abc import Sequence\n\n\ndef push(items, x):\n    items.append(x)\n\n\n\
+         def push_seq(items: Sequence[int], x: int) -> None:\n    push(items, x)\n",
+    );
+    // `MUT110` runs by default; a selection without it leaves its report off.
+    let (_, report, _) = recommend_json(&p, &["--select", "EFF101"]);
+    let mut110 = rule(&report, "MUT110");
+    assert_eq!(
+        (&mut110["consequence"], &mut110["reports"], &mut110["exact"]),
+        (&json!("minor-bug"), &json!(1), &json!(0))
+    );
+    assert_eq!(
+        (&mut110["in_block"], &mut110["reason"]),
+        (&json!(false), &json!("a bug that is rarely harmful"))
+    );
+    let (_, out, _) = p.heki(&["recommend", "--select", "EFF101"]);
+    assert!(
+        out.contains(
+            "\n  MUT110        1      0  minor bug    100% (51-100%), n=4, 2026-11-21   0%         \
+             no: a bug that is rarely harmful\n"
+        ),
+        "{out}"
+    );
+}
+
+#[test]
+fn paths_are_written_as_heki_check_writes_them() {
+    let p = shop("recommend_below_root");
+    p.write("app/sub/__init__.py", "");
+    // Run from below the project root: the root and the files outside the working directory
+    // are written as they are, the files below it relative to it.
+    let out = Command::new(env!("CARGO_BIN_EXE_heki"))
+        .args(["recommend", "--output-format", "json", "sub"])
+        .current_dir(p.dir.join("app"))
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let root = report["root"].as_str().unwrap();
+    let name = p.dir.file_name().unwrap().to_str().unwrap();
+    assert!(root.ends_with(name) && root != name, "{root}");
+    assert_eq!(
+        report["config_file"],
+        json!(format!("{root}/pyproject.toml"))
+    );
+    assert_eq!(report["analyzed"]["paths"], json!(["sub"]));
+    let left_out: Vec<&str> = report["analyzed"]["left_out"]["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f.as_str().unwrap())
+        .collect();
+    assert!(
+        left_out.contains(&"api.py")
+            && left_out.contains(&format!("{root}/tests/test_a.py").as_str()),
+        "{left_out:?}"
     );
 }

@@ -25,6 +25,12 @@ It takes the options of `heki check` that decide what is analyzed: `--select`,
   reports (reports sharing a root cause count once, as `heki check` folds them), the heuristic
   reports of exact rules that `lint.heuristic = false` withholds, and the heuristic rules it
   leaves off. With a baseline, the reports it allows and the regressions.
+- **Rules worth enabling here**: every rule the configuration leaves off, and every exact rule
+  whose heuristic reports it withholds, with the reports naming it in `extend-select` would add
+  (exact and heuristic, and with a baseline the regressions among them), its consequence, and
+  the published measurement of how often its reports are right about the code
+  ([Rule Precision](precision.md)), or "not measured". Rules without reports here are named on
+  one line.
 - **Notes**: what to know to weigh the advice. When the paths given leave out Python files
   below the project root, the note names them: heki takes the files it analyzed as the whole
   project, so what it says about callers, readers, and writers holds for those files only. It
@@ -35,10 +41,26 @@ It takes the options of `heki check` that decide what is analyzed: `--select`,
   `pyproject.toml`. The block only adds: an array the file already sets is written whole, with
   the additions named in a comment, since TOML cannot append to an array.
 
+## Which rules the block enables
+
+A rule enters the block when it reports here, is not experimental, reports bugs (its severity
+is `error`), and no published measurement shows real harm below 10%. The other rules are
+listed with the reason they stay out:
+
+- slower code, and bugs that are rarely harmful, are worth reading but not worth failing a run
+  for;
+- experimental rules are listed apart, under "Optional", and never enabled;
+- a rule the configuration ignores stays ignored;
+- `MUT103` compares with a summary snapshot you save with `heki snapshot --write`;
+- contract rules run when their contract is declared, so they are not listed here.
+
 ## How the advice is kept honest
 
 - Every count comes from the project, through the analysis `heki check` runs: inline
-  suppressions, `per-file-ignores`, and the baseline apply as they do there.
+  suppressions, `per-file-ignores`, and the baseline apply as they do there. With the block
+  applied, `heki check` prints the reports it promises.
+- How often a rule's reports are right is quoted only from published measurements, with their
+  sample, interval, and date; a rule without one is "not measured". No score is computed.
 - The same input, configuration, and heki version give the same report, on any machine and
   with any number of threads.
 - It writes nothing and keeps every value the configuration sets.
@@ -48,7 +70,7 @@ records these rules and the decisions behind the command.
 
 ## Example
 
-A project with two modules and a test file:
+A project with three modules and a test file:
 
 ```python
 # app/users.py
@@ -70,6 +92,15 @@ def known_names(names: list[str], source: list[str]) -> list[str]:
 ```
 
 ```python
+# app/report.py
+def total_and_count(rows: list[int]) -> tuple[int, int]:
+    items = (r for r in rows)
+    total = sum(items)
+    count = len(list(items))
+    return total, count
+```
+
+```python
 # app/api.py
 from app.users import load_user
 
@@ -87,14 +118,23 @@ def test_load_user() -> None:
 
 ```console
 $ heki recommend app
-heki recommend (experimental) on .: 2 file(s), 6 function(s)
+heki recommend (experimental) on .: 3 file(s), 9 function(s)
 
 Reports now  1 shown (1 exact, 0 heuristic), 1 heuristic withheld, 4 heuristic rule(s) off
+
+Rules worth enabling here
+  rule    reports  exact  consequence  right about the code (published)  real harm  block
+  MUT106        1      -  bug          not measured                      -          yes
+  OPT110        1      0  slowdown     78% (65-87%), n=50, 2026-11-21    6%         no: slower code, not a bug
+  No reports here: EFF102, EFF105, EFF106, EFF107, EFF109, EFF110, EFF111, EFF113, MUT101, MUT107, MUT108, MUT111, MUT112, MUT113, OPT112
+  MUT103: it compares with a saved summary snapshot: run `heki snapshot --write`, then select it.
 
 Notes
   - 1 Python file(s) below the project root were not analyzed (tests/test_users.py): heki takes the analyzed files as the whole project, so what it says about callers, readers, and writers holds for those files only.
 
-pyproject.toml: nothing to add
+pyproject.toml: keys to add or change
+  [tool.heki.lint]
+  extend-select = ["MUT106"]  # adds MUT106
 ```
 
 <!-- End of the generated report. -->
@@ -114,6 +154,7 @@ changes meaning.
 | `analyzed` | the files and functions analyzed, the files that could not be read or parsed, the paths given, and the Python files below the root they leave out |
 | `runs` | the analyses the report was computed from |
 | `reports_now` | the counts of "Reports now" |
+| `rules` | each rule of "Rules worth enabling here": its metadata, the reports it would add, its published measurement, whether the block enables it, and why |
 | `notes` | the notes |
 | `config`, `config_toml` | the keys to add or change, as keys and values and as TOML |
 | `content` | the report as the text output prints it |
