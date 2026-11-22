@@ -20,14 +20,15 @@ use heki_diagnostics::{Diagnostic, TextEdit};
 use heki_effect::{Items, ProjectDecls, TypeCtx, Val, container_mutator};
 use heki_ir::walk::{self, Answer, Budget, Def, FnShape, Use};
 use heki_ir::{
-    BlockId, BuiltinKind, CompareOpKind, ConstLiteral, FnIndex, Inst, InstKind, IrFunction,
-    ItemOrigins, ItemSource, LoopBound, ModuleConstants, NaturalLoop, PhiNode, SMALL_MAX,
-    SmallDisplay, Terminator, UnaryOpKind, VarId,
+    BlockId, BuiltinKind, CompareOpKind, ConstLiteral, FnIndex, FunctionId, Inst, InstKind,
+    IrFunction, ItemOrigins, ItemSource, LoopBound, ModuleConstants, NaturalLoop, PhiNode,
+    SMALL_MAX, SmallDisplay, Terminator, UnaryOpKind, VarId,
 };
 use heki_soundness::{
     AnalysisOptions, OptCandidate, ProfitabilityTier, SafetyTier, analyze_module,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::cell::RefCell;
 
 /// Suffix of the help saying what `--fix` does with one candidate.
 fn fix_note(c: &OptCandidate) -> String {
@@ -111,7 +112,6 @@ pub(crate) struct Sizes<'a, 'c> {
     /// Receiver types for attribute loads (empty: attributes are not resolved).
     types: &'c FxHashMap<VarId, Val>,
     pub ix: FnIndex<'c>,
-    constants: &'c ModuleConstants,
     /// Some display the module's own code fixes may grow in another module
     /// (`CheckContext::fixed_constants`): the IR's fixed trip counts are decided again.
     withheld: bool,
@@ -128,8 +128,7 @@ impl<'a, 'c> Sizes<'a, 'c> {
         unit: &'c ModuleUnit<'_>,
         constants: &'c ModuleConstants,
     ) -> Self {
-        let withheld = constants.displays.len() != unit.input.ir.constants.displays.len();
-        Self::of(cx, tcx, types, shape, constants, withheld)
+        Self::of(cx, tcx, types, shape, constants, withholds(unit, constants))
     }
 
     fn of(
@@ -146,7 +145,6 @@ impl<'a, 'c> Sizes<'a, 'c> {
             tcx,
             types,
             ix: if withheld { ix.redeciding_trips() } else { ix },
-            constants,
             withheld,
         }
     }
@@ -155,8 +153,8 @@ impl<'a, 'c> Sizes<'a, 'c> {
     /// IR's verdict, or a fixed count from a module display another module may grow), and it
     /// does not iterate a small display of another module or an attribute (or a builtin
     /// wrapper of one: `enumerate(PREFIXES)`), here or where the function creating this one
-    /// evaluates the iterable it passes (a generator expression's).
-    pub(crate) fn data_sized(&self, lp: &NaturalLoop) -> bool {
+    /// evaluates the iterable it passes (a generator expression's, asked through `creators`).
+    pub(crate) fn data_sized(&self, lp: &NaturalLoop, creators: &Creators<'_, '_>) -> bool {
         let decided_again = match lp.bound {
             LoopBound::Unbounded => true,
             LoopBound::ConstSmall(_) => self.withheld,
@@ -167,7 +165,7 @@ impl<'a, 'c> Sizes<'a, 'c> {
                 .ix
                 .fixed_trip(lp, &mut |inst| self.leaf_len(inst), SMALL_MAX)
                 .is_none()
-            && self.passed_trip(lp).is_none()
+            && self.passed_trip(lp, creators).is_none()
     }
 
     /// How many items a load of a global or an attribute gives, when the declarations fix it
@@ -180,23 +178,12 @@ impl<'a, 'c> Sizes<'a, 'c> {
     /// The trip count of a loop over the iterable this function receives from the one creating
     /// it (`.0` of a generator expression, or of a comprehension before 3.12), as the creator
     /// sees that iterable.
-    fn passed_trip(&self, lp: &NaturalLoop) -> Option<u32> {
+    fn passed_trip(&self, lp: &NaturalLoop, creators: &Creators<'_, '_>) -> Option<u32> {
         let f = self.ix.f;
         let (creator, iterable) = f.passed_from?;
         let it = self.ix.loop_iterable(lp)?;
         (f.var_name(it) == Some(".0")).then_some(())?;
-        let untyped = FxHashMap::default();
-        let outer = Sizes::of(
-            self.cx,
-            self.tcx,
-            &untyped,
-            FnShape::new(self.tcx.ir().function(creator)),
-            self.constants,
-            self.withheld,
-        );
-        outer
-            .ix
-            .iter_bound(iterable, &mut |inst| outer.leaf_len(inst))
+        creators.trip(creator, iterable)
     }
 
     /// The loop of a builtin calling a callable once per item (`map(f, xs)`, `sorted(xs,
@@ -294,6 +281,72 @@ impl<'a, 'c> Sizes<'a, 'c> {
     }
 }
 
+/// `constants` (`CheckContext::fixed_constants`) lack a display of the module's own constants,
+/// which another module may grow.
+fn withholds(unit: &ModuleUnit<'_>, constants: &ModuleConstants) -> bool {
+    constants.displays.len() != unit.input.ir.constants.displays.len()
+}
+
+/// The functions of a module that create child scopes, as one rule run over the module sees
+/// the iterables they pass ([`Sizes::passed_trip`]): a view of each creator, built once, and
+/// the trip count of a loop over each iterable, however many child scopes receive it.
+pub(crate) struct Creators<'a, 'c> {
+    cx: &'c CheckContext<'a>,
+    tcx: &'c TypeCtx<'a>,
+    /// The creators' attribute loads are not resolved.
+    untyped: &'c FxHashMap<VarId, Val>,
+    constants: &'c ModuleConstants,
+    withheld: bool,
+    views: RefCell<FxHashMap<FunctionId, Sizes<'a, 'c>>>,
+    trips: RefCell<FxHashMap<(FunctionId, VarId), Option<u32>>>,
+}
+
+impl<'a, 'c> Creators<'a, 'c> {
+    /// `constants`: the module's constants the project leaves fixed
+    /// (`CheckContext::fixed_constants`); `untyped`: an empty map.
+    pub(crate) fn new(
+        cx: &'c CheckContext<'a>,
+        tcx: &'c TypeCtx<'a>,
+        untyped: &'c FxHashMap<VarId, Val>,
+        unit: &ModuleUnit<'_>,
+        constants: &'c ModuleConstants,
+    ) -> Self {
+        Self {
+            cx,
+            tcx,
+            untyped,
+            constants,
+            withheld: withholds(unit, constants),
+            views: RefCell::default(),
+            trips: RefCell::default(),
+        }
+    }
+
+    /// The trip count of a loop over `iterable`, a value of the function `creator`, as a view of
+    /// `creator` that has answered nothing else gives it (`FnIndex::iter_bound_alone`).
+    fn trip(&self, creator: FunctionId, iterable: VarId) -> Option<u32> {
+        if let Some(known) = self.trips.borrow().get(&(creator, iterable)) {
+            return *known;
+        }
+        let mut views = self.views.borrow_mut();
+        let outer: &Sizes<'a, 'c> = views.entry(creator).or_insert_with(|| {
+            Sizes::of(
+                self.cx,
+                self.tcx,
+                self.untyped,
+                FnShape::new(self.tcx.ir().function(creator)),
+                self.constants,
+                self.withheld,
+            )
+        });
+        let trip = outer
+            .ix
+            .iter_bound_alone(iterable, &mut |inst| outer.leaf_len(inst));
+        self.trips.borrow_mut().insert((creator, iterable), trip);
+        trip
+    }
+}
+
 // ==================================================================================== OPT112
 
 /// `list` methods that scan the whole list.
@@ -309,8 +362,10 @@ pub(crate) fn opt112(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
         return;
     }
     let tcx = TypeCtx::new(&unit.input, cx.decls, cx.kb);
+    let no_types = FxHashMap::default();
     let constants = cx.fixed_constants(unit);
     let sites = std::cell::OnceCell::new();
+    let creators = Creators::new(cx, &tcx, &no_types, unit, &constants);
     for f in &unit.input.ir.functions {
         let shape = FnShape::new(f);
         // `index(x, start)` scans from a position, usually one that advances (a linear walk).
@@ -348,7 +403,7 @@ pub(crate) fn opt112(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
                     defs.shape.in_body(lp, bb)
                         && runs_again(defs.shape, lp, bb)
                         && sizes.ix.lives_across(lp, recv)
-                        && sizes.data_sized(lp)
+                        && sizes.data_sized(lp, &creators)
                 })
                 .collect();
             if !is_list || hot.is_empty() || sizes.small_container(recv, LIST) {
@@ -1010,6 +1065,7 @@ pub(crate) fn opt113(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
     let tcx = TypeCtx::new(&unit.input, cx.decls, cx.kb);
     let no_types = FxHashMap::default();
     let constants = cx.fixed_constants(unit);
+    let creators = Creators::new(cx, &tcx, &no_types, unit, &constants);
     // Asked only for a reported join.
     let origins = ItemOrigins::new(unit.input.ir);
     for f in &unit.input.ir.functions {
@@ -1026,7 +1082,7 @@ pub(crate) fn opt113(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
             .loops
             .iter()
             .enumerate()
-            .filter(|(_, lp)| sizes.data_sized(lp))
+            .filter(|(_, lp)| sizes.data_sized(lp, &creators))
             .filter_map(|(i, lp)| defs.for_loop(i, lp))
             .collect();
         for inner in &fors {
