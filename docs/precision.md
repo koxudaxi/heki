@@ -13,7 +13,7 @@ A rule is exact once it is certified (below), and heuristic until then. An exact
 is exact when it established every premise of the rule's exact claim, and heuristic when one is
 open: an `OPT` rewrite heki could not prove safe, a size-dependent `OPT` rewrite in a loop whose
 trip count the code fixes or caps, an `OPT113` join whose rule page premises do not all hold, or
-a `DATA101`, `MUT110`, or `MUT114` report whose rule page premises are not all established. Only exact reports are shown by
+a `DATA101`, `MUT110`, `MUT114`, or `MUT119` report whose rule page premises are not all established. Only exact reports are shown by
 default.
 
 - A heuristic rule runs when `select` or `extend-select` names its code or name. With
@@ -26,7 +26,7 @@ default.
   ends with a note saying how many.
 
 See [Rule selection](configuration.md#rule-selection-toolhekilint). `EFF101`, `EFF103`,
-`DATA101`, `MUT110`, `MUT114`, the proven tier of the eight `OPT` rewrite rules, and the exact
+`DATA101`, `MUT110`, `MUT114`, `MUT119`, the proven tier of the eight `OPT` rewrite rules, and the exact
 tier of `OPT113` are exact (certified below); the other rules are heuristic.
 
 ## What a report states
@@ -72,7 +72,7 @@ causes come from the steps of the decision that made the report heuristic, each 
 on its own along the reported chain and loop, so they cannot disagree with its tier. The records
 are internal for now: no output format of `heki check` and nothing in the language server shows
 them. `EFF111` and `EFF113` record them for the claims of `EFF101` and `EFF103`, and the heuristic
-reports of the eight `OPT` rewrite rules, `OPT113`, `DATA101`, `MUT110`, and `MUT114` for their own
+reports of the eight `OPT` rewrite rules, `OPT113`, `DATA101`, `MUT110`, `MUT114`, and `MUT119` for their own
 claims. A proven `OPT` rewrite, or an `OPT113` join whose premises all hold, over a loop the code
 fixes at more than 16 trips is heuristic for a condition of the exact tier that is no premise,
 "Trip count open" (the claim holds, but the change pays off only over a loop the data sizes): the
@@ -168,6 +168,7 @@ before reports reaching one waiting call are folded together.
 | `DATA101` | 0.2.0 | 6 / 0 | 0 / 0 |
 | `MUT110` | 0.2.0 | 5 / 0 | 2 / 0 |
 | `MUT114` | 0.2.0 | 5 / 0 | 5 / 0 |
+| `MUT119` | 0.2.5 | 23 / 0 | 2 / 0 |
 
 <!-- End of the generated certifications. -->
 

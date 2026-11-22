@@ -729,6 +729,21 @@ pub const KEYS_MAY_CHANGE: OpenCause = OpenCause {
     closer: Closer::Code,
 };
 
+pub const NEW_OBJECT: Premise = Premise {
+    name: "New object",
+    states: "the object is built as the builtin itself where it is changed, copied there by a copy the catalog describes from a value of a builtin container type no project subclass copies otherwise (R2), or returned by project functions whose every return is such an object that they keep nowhere, and the call or property read resolves to every function it can run",
+    decided_in: &[
+        "heki_effect::fresh::source",
+        "heki_effect::fresh::FreshReturn::join_callee",
+    ],
+};
+
+pub const UNNAMED: Premise = Premise {
+    name: "Unnamed",
+    states: "the object is only the value of the changed expression; nothing reads it but the change and, for an augmented item assignment, the item load it starts with",
+    decided_in: &["heki_rules::mut_rules::lost_changes::changes"],
+};
+
 /// Every premise of the table, once.
 pub const ALL: &[&Premise] = &[
     &EVERY_RETURN,
@@ -755,6 +770,8 @@ pub const ALL: &[&Premise] = &[
     &STEPS_THROUGH_INPUTS,
     &IDLE_ON_A_MISMATCH,
     &SAME_COLLECTION_SAME_KEYS,
+    &NEW_OBJECT,
+    &UNNAMED,
 ];
 
 /// Every open cause, once, in the order of their premises in [`ALL`].
@@ -943,6 +960,7 @@ pub fn of_rule(code: &str) -> &'static [&'static Premise] {
             &SAME_OBJECT,
             &CHANGED_IN_PLACE,
         ],
+        "MUT119" => &[&NEW_OBJECT, &UNNAMED, &CHANGED_IN_PLACE],
         "OPT101" | "OPT102" | "OPT103" => OPT_ACCUMULATION,
         "OPT110" | "OPT111" | "OPT120" | "OPT121" | "OPT130" => OPT_SCAN,
         "OPT113" => &[

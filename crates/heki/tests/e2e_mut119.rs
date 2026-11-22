@@ -86,10 +86,10 @@ fn changes_of_new_objects_found_on_a_corpus() {
         diags[3]["help"],
         "bind the new `dict` to a name and change it there, or build the changed value in one expression (`sorted(...)`, `{**a, **b}`, `[*a, *b]`)"
     );
-    // An experimental opt-in rule: heuristic until it is certified, and off unless named.
-    assert!(diags.iter().all(|d| d["certainty"] == "heuristic"));
-    let (_, stdout, _) = p.heki(&["check", "--output-format", "json", "--heuristic"]);
-    assert!(!stdout.contains("MUT119"), "{stdout}");
+    // A default rule: its report is exact where every premise holds, and a plain run shows it.
+    assert!(diags.iter().all(|d| d["certainty"] == "exact"));
+    let (_, stdout, _) = p.heki(&["check", "--output-format", "json"]);
+    assert!(stdout.contains("MUT119"), "{stdout}");
 }
 
 /// Every builtin container kind, made by its constructor, a display, a copy, or a slice; a value

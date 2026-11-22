@@ -172,6 +172,7 @@ These rules are exact and run by default. Each report shows the chain of calls t
 | A database statement on every iteration of a loop over data | [`EFF103`](https://heki.koxudaxi.dev/rules/loop-db-query/) |
 | A `Sequence` / `Mapping` argument changed in place by a helper | [`MUT110`](https://heki.koxudaxi.dev/rules/readonly-param-mutation/) |
 | A list, dict, or set that an `lru_cache` / `cache` function returned, changed in place | [`MUT114`](https://heki.koxudaxi.dev/rules/cached-result-mutation/) |
+| A change of a builtin container that is lost because the object is new and nothing holds it (`list(xs).sort()`) | [`MUT119`](https://heki.koxudaxi.dev/rules/change-lost-on-new-object/) |
 | A DataFrame or array concatenated with itself on every loop iteration | [`DATA101`](https://heki.koxudaxi.dev/rules/loop-carried-concat/) |
 | A quadratic list, dict, set, bytes, or queue pattern | `OPT101`-`OPT103`, `OPT110`, `OPT111`, `OPT113`, `OPT120`, `OPT121`, `OPT130` ([fixes](https://heki.koxudaxi.dev/fixes/)) |
 
@@ -795,7 +796,7 @@ The first command runs the exact rules and the rules of the [contracts](https://
 you declare. An exact rule is certified: every report it made on the development corpus and on a
 frozen holdout corpus was checked by hand, and none was false
 ([Rule Precision](https://heki.koxudaxi.dev/precision/#certifications)). In 0.2.0 the exact rules are `EFF101`,
-`EFF103`, `DATA101`, `MUT110`, `MUT114`, the proven tier of the `OPT` rewrite rules (the reports
+`EFF103`, `DATA101`, `MUT110`, `MUT114`, `MUT119`, the proven tier of the `OPT` rewrite rules (the reports
 whose rewrite heki proves safe), and the exact tier of `OPT113`. A text run says how many
 heuristic rules it left off. `--heuristic` runs those too; their reports can be wrong about the
 code, and every output labels them.
@@ -1136,7 +1137,7 @@ supported version that every clause admits:
   says how many.
 - A prefix or `ALL` never enables the opt-in rules (`EFF105`, `EFF106`, `EFF107`, `EFF109`,
   `EFF110`, `EFF112`, `EFF114`, `MUT101`, `MUT103`, `MUT106`, `MUT107`, `MUT108`, `MUT111`, `MUT112`,
-  `MUT113`, `MUT115`, `MUT119`): they need their exact code or name. In `ignore`, a prefix covers every
+  `MUT113`, `MUT115`): they need their exact code or name. In `ignore`, a prefix covers every
   rule it matches.
 - The command line wins: `--select` replaces `select`, `--extend-select` and `--ignore` add to the
   configured lists, and `--heuristic` / `--no-heuristic` replace `heuristic`.
@@ -2295,7 +2296,7 @@ Rules worth enabling here
   rule    reports  exact  consequence  right about the code (published)  real harm  block
   MUT106        1      -  bug          not measured                      -          yes
   OPT110        1      0  slowdown     78% (65-87%), n=50, 2026-11-21    6%         no: slower code, not a bug
-  No reports here: EFF102, EFF105, EFF106, EFF107, EFF109, EFF110, EFF111, EFF112, EFF113, EFF114, MUT101, MUT107, MUT108, MUT111, MUT112, MUT113, MUT115, MUT118, MUT119, OPT112
+  No reports here: EFF102, EFF105, EFF106, EFF107, EFF109, EFF110, EFF111, EFF112, EFF113, EFF114, MUT101, MUT107, MUT108, MUT111, MUT112, MUT113, MUT115, MUT118, OPT112
   MUT103: it compares with a saved summary snapshot: run `heki snapshot --write`, then select it.
 
 Notes
@@ -2601,7 +2602,7 @@ Shared state written behind its owner's back: stale caches, write-ownership cont
 | MUT114 | [cached-result-mutation](https://heki.koxudaxi.dev/rules/cached-result-mutation/) | Changing in place the list, dict, or set that a `functools.lru_cache` / `functools.cache` function returned (the cache hands the same object to later calls with the same arguments), directly or through the functions that return it. |  |
 | MUT115 | [shallow-copy-nested-mutation](https://heki.koxudaxi.dev/rules/shallow-copy-nested-mutation/) | Opt-in: changing in place an object below a shallow copy the function made of state that outlives the call (`dict(x)`, `x.copy()`, `copy.copy(x)`, `model_copy()`): the copied value holds the same object, so the change is seen through it too. | ≈ 🔌 |
 | MUT118 | [sentinel-lost-in-deepcopy](https://heki.koxudaxi.dev/rules/sentinel-lost-in-deepcopy/) | `copy.deepcopy` of an instance holding an `object()` sentinel in an attribute that a function tests against the sentinel by identity (the copy holds a new object, which the test does not match). | ≈ |
-| MUT119 | [change-lost-on-new-object](https://heki.koxudaxi.dev/rules/change-lost-on-new-object/) | Opt-in: an in-place change of a builtin container applied to a new object that nothing else holds and no name keeps (`list(xs).sort()`, `env = os.environ.copy().update(...)`, `obj.settings[k] = v` with a getter returning a new dict): the change is lost when the statement ends. | ≈ 🔌 🧪 |
+| MUT119 | [change-lost-on-new-object](https://heki.koxudaxi.dev/rules/change-lost-on-new-object/) | An in-place change of a builtin container applied to a new object that nothing else holds and no name keeps (`list(xs).sort()`, `env = os.environ.copy().update(...)`, `obj.settings[k] = v` with a getter returning a new dict): the change is lost when the statement ends. |  |
 | MUT201 | [write-owner-violation](https://heki.koxudaxi.dev/rules/write-owner-violation/) | Writing a guarded attribute/container (directly, via alias, or via helper) outside declared `write-owners`. | ≈ 📜 |
 | MUT202 | [readonly-return-mutation](https://heki.koxudaxi.dev/rules/readonly-return-mutation/) | Mutating a shared object returned by a declared `readonly-returns` producer, directly or through the functions that return it. | ≈ 📜 |
 | MUT203 | [read-owner-violation](https://heki.koxudaxi.dev/rules/read-owner-violation/) | Reading a guarded attribute (directly, via alias, `getattr`, or `__dict__`) outside declared `read-owners`. | ≈ 📜 |
@@ -2675,7 +2676,7 @@ A rule is exact once it is certified (below), and heuristic until then. An exact
 is exact when it established every premise of the rule's exact claim, and heuristic when one is
 open: an `OPT` rewrite heki could not prove safe, a size-dependent `OPT` rewrite in a loop whose
 trip count the code fixes or caps, an `OPT113` join whose rule page premises do not all hold, or
-a `DATA101`, `MUT110`, or `MUT114` report whose rule page premises are not all established. Only exact reports are shown by
+a `DATA101`, `MUT110`, `MUT114`, or `MUT119` report whose rule page premises are not all established. Only exact reports are shown by
 default.
 
 - A heuristic rule runs when `select` or `extend-select` names its code or name. With
@@ -2688,7 +2689,7 @@ default.
   ends with a note saying how many.
 
 See [Rule selection](https://heki.koxudaxi.dev/configuration/#rule-selection-toolhekilint). `EFF101`, `EFF103`,
-`DATA101`, `MUT110`, `MUT114`, the proven tier of the eight `OPT` rewrite rules, and the exact
+`DATA101`, `MUT110`, `MUT114`, `MUT119`, the proven tier of the eight `OPT` rewrite rules, and the exact
 tier of `OPT113` are exact (certified below); the other rules are heuristic.
 
 ## What a report states
@@ -2734,7 +2735,7 @@ causes come from the steps of the decision that made the report heuristic, each 
 on its own along the reported chain and loop, so they cannot disagree with its tier. The records
 are internal for now: no output format of `heki check` and nothing in the language server shows
 them. `EFF111` and `EFF113` record them for the claims of `EFF101` and `EFF103`, and the heuristic
-reports of the eight `OPT` rewrite rules, `OPT113`, `DATA101`, `MUT110`, and `MUT114` for their own
+reports of the eight `OPT` rewrite rules, `OPT113`, `DATA101`, `MUT110`, `MUT114`, and `MUT119` for their own
 claims. A proven `OPT` rewrite, or an `OPT113` join whose premises all hold, over a loop the code
 fixes at more than 16 trips is heuristic for a condition of the exact tier that is no premise,
 "Trip count open" (the claim holds, but the change pays off only over a loop the data sizes): the
@@ -2828,6 +2829,7 @@ before reports reaching one waiting call are folded together.
 | `DATA101` | 0.2.0 | 6 / 0 | 0 / 0 |
 | `MUT110` | 0.2.0 | 5 / 0 | 2 / 0 |
 | `MUT114` | 0.2.0 | 5 / 0 | 5 / 0 |
+| `MUT119` | 0.2.5 | 23 / 0 | 2 / 0 |
 
 ## Measurements
 
@@ -2887,7 +2889,6 @@ An experimental rule is never enabled by default: it runs only when `select` or 
 | `rule.MUT111` | rule | [`MUT111`](https://heki.koxudaxi.dev/rules/cached-property-stale-read/) | 0.1.1 | - |
 | `rule.MUT112` | rule | [`MUT112`](https://heki.koxudaxi.dev/rules/conditional-ownership-mutation/) | 0.2.0 | - |
 | `rule.MUT113` | rule | [`MUT113`](https://heki.koxudaxi.dev/rules/iterated-container-mutation/) | 0.2.0 | - |
-| `rule.MUT119` | rule | [`MUT119`](https://heki.koxudaxi.dev/rules/change-lost-on-new-object/) | 0.2.5 | - |
 
 ## `cli-option.generate-prompt`
 
@@ -2984,14 +2985,6 @@ Its precision on real code bases is still low: much of what it reports is code t
 - **Since:** 0.2.0
 
 It has few reports, and most of them are still false.
-
-## `rule.MUT119`
-
-- **Kind:** rule
-- **Target:** [`MUT119`](https://heki.koxudaxi.dev/rules/change-lost-on-new-object/)
-- **Since:** 0.2.5
-
-Its precision has not been measured yet, and its premises are not yet certified.
 
 
 ---
@@ -4917,17 +4910,9 @@ Source: https://heki.koxudaxi.dev/rules/change-lost-on-new-object/
 
 # change-lost-on-new-object (MUT119)
 
-Family: Mutation & State (MUT) · Heuristic · Opt-in · Experimental · Severity `error` (a bug) · No automatic fix
+Family: Mutation & State (MUT) · Exact · Enabled by default · Severity `error` (a bug) · No automatic fix
 
-Opt-in: an in-place change of a builtin container applied to a new object that nothing else holds and no name keeps (`list(xs).sort()`, `env = os.environ.copy().update(...)`, `obj.settings[k] = v` with a getter returning a new dict): the change is lost when the statement ends.
-
-!!! note "Heuristic"
-
-    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs only when `select` or `extend-select` names its code or name. It has not been measured yet. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
-
-!!! warning "Experimental"
-
-    Its precision has not been measured yet, and its premises are not yet certified. Experimental features can still change in behavior or precision, or be removed, in any release, and each change is listed in the release notes. An opt-in rule that is not experimental is stable and only off by default. See [Experimental Features](https://heki.koxudaxi.dev/experimental/).
+An in-place change of a builtin container applied to a new object that nothing else holds and no name keeps (`list(xs).sort()`, `env = os.environ.copy().update(...)`, `obj.settings[k] = v` with a getter returning a new dict): the change is lost when the statement ends.
 
 ## What it does
 Checks in-place changes of a builtin container (`list`, `dict`, `set`, `bytearray`,
@@ -4935,7 +4920,6 @@ Checks in-place changes of a builtin container (`list`, `dict`, `set`, `bytearra
 names: `list(xs).sort()`, `env = os.environ.copy().update(HOME=home)`,
 `task.environment["KEY"] = value` when the `environment` getter returns a new dict. Nothing can
 read the object after the statement, so the change is lost.
-The rule is opt-in: enable it with `--extend-select MUT119` or `extend-select = ["MUT119"]`.
 
 The object is the value of the expression the change is applied to, and it is new when it is:
 
@@ -4967,6 +4951,9 @@ It does not report:
 - what a function returns when it may return state that outlives the call, keeps the new object
   somewhere, returns `None` on some path, is a generator or `async def`, or is decorated with a
   cache (`functools.cache`, `cached_property`): the change is then seen elsewhere.
+
+A test that changes a returned copy on purpose to check that it is a copy is reported; suppress
+it there.
 
 Type checkers report one of these shapes: mypy reports a `None` result stored into an item or an
 attribute (`opts[k] = list(v).extend(w)`) as `func-returns-value`, in the functions it checks,

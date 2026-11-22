@@ -15,7 +15,7 @@ The first command runs the exact rules and the rules of the [contracts](configur
 you declare. An exact rule is certified: every report it made on the development corpus and on a
 frozen holdout corpus was checked by hand, and none was false
 ([Rule Precision](precision.md#certifications)). In 0.2.0 the exact rules are `EFF101`,
-`EFF103`, `DATA101`, `MUT110`, `MUT114`, the proven tier of the `OPT` rewrite rules (the reports
+`EFF103`, `DATA101`, `MUT110`, `MUT114`, `MUT119`, the proven tier of the `OPT` rewrite rules (the reports
 whose rewrite heki proves safe), and the exact tier of `OPT113`. A text run says how many
 heuristic rules it left off. `--heuristic` runs those too; their reports can be wrong about the
 code, and every output labels them.
