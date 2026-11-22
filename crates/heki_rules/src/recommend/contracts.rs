@@ -1023,22 +1023,6 @@ impl Section {
         self.rejected.len() > before
     }
 
-    /// Drop the block's contracts the verification run, a run of `cfg` with the block declared
-    /// ([`Self::declare_in`]), reported for; whether there was one.
-    pub(super) fn drop_reported(
-        &mut self,
-        cfg: &HekiConfig,
-        kept: &[Diagnostic],
-        shown: &dyn Fn(&Path) -> String,
-    ) -> bool {
-        let reports = attribute_reports(cfg, &self.entries(), kept, &[]);
-        let trials = (self.kept.iter())
-            .zip(&reports)
-            .map(|(k, reports)| tally(k.candidate.entry.kind(), reports, shown))
-            .collect();
-        self.reject(RunLabel::Verification, trials)
-    }
-
     /// The candidates the block declares, as the report lists them.
     pub(super) fn advice(&self) -> Vec<ContractAdvice> {
         (self.kept.iter())

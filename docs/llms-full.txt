@@ -2286,8 +2286,7 @@ is left out when the one on its base class is kept: a target covers the subclass
 Every candidate carries the caveat that accesses inside code heki cannot follow are not seen.
 
 The verification run then applies the whole block, the rules it enables and the contracts it
-declares, as `heki check` would; the counts of the block's rules come from it. A contract that
-reports there is dropped, and the run repeats once.
+declares, as `heki check` would; the counts of the block's rules come from it.
 
 ## How the advice is kept honest
 
@@ -2434,7 +2433,7 @@ changes meaning.
 | `kind`, `version`, `heki` | `heki-recommend`, the version of the object, and the version of heki |
 | `root`, `config_file`, `table_prefix` | the project root, the configuration file (`null` without one), and the table its keys are under (`tool.heki`, or empty) |
 | `analyzed` | the files and functions analyzed, the files that could not be read or parsed, the paths given, and the Python files below the root they leave out |
-| `runs` | the analyses the report was computed from: `discovery`, then `source-roots` (the source-root trial) and `hypothetical-catalog` (the trial of library names) when they ran, `contract-trial` when there are contract candidates, and `verification` (with whether it `repeated`) when the block adds rules or contracts |
+| `runs` | the analyses the report was computed from: `discovery`, then `source-roots` (the source-root trial) and `hypothetical-catalog` (the trial of library names) when they ran, `contract-trial` when there are contract candidates, and `verification` when the block adds rules or contracts |
 | `reports_now` | the counts of "Reports now" |
 | `open_premises` | the counts of "What keeps reports heuristic": by code; by premise or condition and cause, with what the cause states, what closes it, the reports, the reports it is the only open cause of, and the first 50 reports; the sets of causes that reports leave open together |
 | `blind_spots` | the counts of "What heki cannot see": the calls of library names without a catalog entry, by package and name, with what the trial run found; the names heki's catalog lacks in packages it covers; the calls heki does not resolve, by function and reason; the source-root candidates and their trials; the functions with an A1 hazard; the totals |

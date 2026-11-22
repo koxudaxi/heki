@@ -246,7 +246,7 @@ fn the_json_object_names_the_project_and_its_run() {
     assert_eq!(
         report["runs"],
         json!([{"label": "discovery"}, {"label": "contract-trial"},
-               {"label": "verification", "repeated": false}])
+               {"label": "verification"}])
     );
     assert_eq!(
         (&report["notes"], &report["config"], &report["config_toml"]),
@@ -1239,7 +1239,7 @@ fn library_names_without_a_catalog_entry_are_listed_with_what_heki_would_report(
     assert_eq!(
         report["runs"],
         json!([{"label": "discovery"}, {"label": "hypothetical-catalog"},
-               {"label": "contract-trial"}, {"label": "verification", "repeated": false}])
+               {"label": "contract-trial"}, {"label": "verification"}])
     );
     // No catalog entry enters the block, and no count of reports takes the trial's.
     let keys: Vec<&String> = report["config"].as_object().unwrap().keys().collect();

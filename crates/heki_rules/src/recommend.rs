@@ -174,9 +174,6 @@ pub struct LeftOut {
 #[schemars(deny_unknown_fields)]
 pub struct Run {
     pub label: RunLabel,
-    /// The verification run: whether it ran again after dropping a contract that reported.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub repeated: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
@@ -252,7 +249,6 @@ pub fn recommend(request: Request<'_>) -> Result<RecommendReport, RecommendError
     let selection = discovery_selection(&env.cfg.lint, &current)?;
     let mut runs = vec![Run {
         label: RunLabel::Discovery,
-        repeated: None,
     }];
     let discovery = Indexed::build(project, selection, snapshot, Facts::Recommend)?;
     // The heuristic reports of exact claims record what they leave open, and why.
@@ -285,7 +281,6 @@ pub fn recommend(request: Request<'_>) -> Result<RecommendReport, RecommendError
     if !roots.candidates.is_empty() {
         runs.push(Run {
             label: RunLabel::SourceRoots,
-            repeated: None,
         });
     }
     let tried = discovered.to_try(&roots);
@@ -294,7 +289,6 @@ pub fn recommend(request: Request<'_>) -> Result<RecommendReport, RecommendError
     } else {
         runs.push(Run {
             label: RunLabel::HypotheticalCatalog,
-            repeated: None,
         });
         blind_spots::hypothetical_catalog(project, tried)?
     };
@@ -303,7 +297,7 @@ pub fn recommend(request: Request<'_>) -> Result<RecommendReport, RecommendError
     let user = project.env.cfg.clone();
     // The candidates name modules as the files are named now, from an analysis without the
     // imports a new source root resolves: with `src` in the block, a run after it proposes them.
-    let mut section = if src.is_some() {
+    let section = if src.is_some() {
         contracts::Section::deferred(generated)
     } else if generated.is_empty() {
         contracts::Section::untried(generated)
@@ -314,7 +308,6 @@ pub fn recommend(request: Request<'_>) -> Result<RecommendReport, RecommendError
         project = analyzed;
         runs.push(Run {
             label: RunLabel::ContractTrial,
-            repeated: None,
         });
         contracts::judge(
             generated,
@@ -325,24 +318,25 @@ pub fn recommend(request: Request<'_>) -> Result<RecommendReport, RecommendError
         )
     };
     // The verification run: `heki check` with the block's rules and contracts applied, which
-    // gives the counts the block promises. A contract that reports there is dropped, and the run
-    // repeats once.
-    let mut verified = None;
-    for repeated in [false, true] {
-        let additions = additions(&rules, &section, &current);
-        if additions == block::Additions::default() {
-            break;
-        }
+    // gives the counts the block promises. One run suffices: discovery ran every rule, so it has
+    // every fact this run has, and the contracts come from its census, so a kept contract never
+    // reports here.
+    let verification = additions(&rules, &section, &current);
+    let verified = verification != block::Additions::default();
+    if verified {
         let mut applied = user.clone();
-        (applied.lint.extend_select).extend(additions.extend_select.iter().cloned());
+        (applied.lint.extend_select).extend(verification.extend_select.iter().cloned());
         section.declare_in(&mut applied);
-        let mut rules_run: Vec<&str> = additions.extend_select.iter().map(String::as_str).collect();
+        let mut rules_run: Vec<&str> = verification
+            .extend_select
+            .iter()
+            .map(String::as_str)
+            .collect();
         for rule in section.rules() {
             rules_run.push(rule);
         }
         let (analyzed, kept, _) = analyze(project, applied, &rules_run)?;
         project = analyzed;
-        verified = Some(repeated);
         rules::recount(
             &mut rules,
             &rules::Inputs {
@@ -352,14 +346,10 @@ pub fn recommend(request: Request<'_>) -> Result<RecommendReport, RecommendError
                 discovery: &kept,
             },
         );
-        if !section.drop_reported(&user, &kept, shown) {
-            break;
-        }
     }
-    if let Some(repeated) = verified {
+    if verified {
         runs.push(Run {
             label: RunLabel::Verification,
-            repeated: Some(repeated),
         });
     }
     let additions = block::Additions {

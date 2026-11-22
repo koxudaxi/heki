@@ -1110,13 +1110,6 @@
       "properties": {
         "label": {
           "$ref": "#/$defs/RunLabel"
-        },
-        "repeated": {
-          "description": "The verification run: whether it ran again after dropping a contract that reported.",
-          "type": [
-            "boolean",
-            "null"
-          ]
         }
       },
       "required": [

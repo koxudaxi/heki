@@ -4411,7 +4411,7 @@ fn contract_candidates_of_thousands_of_classes_are_capped_before_the_trial() {
     assert_eq!(
         report["runs"],
         json!([{"label": "discovery"}, {"label": "contract-trial"},
-               {"label": "verification", "repeated": false}])
+               {"label": "verification"}])
     );
 }
 
