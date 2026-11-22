@@ -819,8 +819,8 @@ message = "render entry points must not mutate model state"
 | v1.x | `MUT106`, `MUT107`, `MUT203`, `EFF106`, `EFF107`, `EFF201`, `OPT112`, `OPT113`, `MUT108`, `MUT109`, `MUT110`, `MUT204`, the `EFF201` extensions, the `MUT201` extensions, the `MUT202` return flow, `MUT205`, `MUT111`, and contract keys, entries, and fresh objects (31 rules) |
 | v0.2.0 | `MUT206`, `MUT207`, `MUT112`, `MUT113`, string constants bound once and class constants as keys (35 rules) |
 | v0.2.1 | `EFF109` and `EFF110`: a non-reentrant lock taken again while it is held, and an object allowing one operation at a time used by tasks started together |
-| v0.2.2 | `EFF112`: the iteration order of a set of strings reaching an output across a call |
-| v0.2.2 | `EFF114`: a `RecursionError` a broad `except` around a recursion turns into a value |
+| v0.2.4 | `EFF112`: the iteration order of a set of strings reaching an output across a call |
+| v0.2.4 | `EFF114`: a `RecursionError` a broad `except` around a recursion turns into a value |
 
 ### Gates for every release (from Stage 0-B)
 1. **Semantic consistency**: zero disagreements with the CPython `symtable` on scopes and bindings.
