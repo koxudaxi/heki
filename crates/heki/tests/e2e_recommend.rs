@@ -444,6 +444,25 @@ fn reports_sharing_a_root_cause_count_once_as_heki_check_prints_them() {
     assert_eq!(regressions.len(), 1, "{regressions:#?}");
 }
 
+// Unix only: the directory is made unreadable with permission bits; on Windows that takes an
+// access control list, which std cannot set.
+#[cfg(unix)]
+#[test]
+fn a_directory_the_count_cannot_read_leaves_it_a_lower_bound() {
+    use std::os::unix::fs::PermissionsExt;
+    let p = shop("recommend_left_out_unreadable");
+    p.write("locked/l.py", "");
+    let locked = p.dir.join("locked");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let readable = std::fs::read_dir(&locked).is_ok(); // running as root
+    let (code, report, _) = recommend_json(&p, &["app"]);
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(code, 0);
+    let left_out = &report["analyzed"]["left_out"];
+    assert_eq!(left_out["truncated"], json!(!readable));
+    assert_eq!(left_out["files"][0], json!("tests/test_a.py"));
+}
+
 #[test]
 fn the_count_of_files_left_out_stops_at_its_caps() {
     let p = shop("recommend_left_out_caps");
@@ -476,23 +495,4 @@ fn the_count_of_files_left_out_stops_at_its_caps() {
         report["analyzed"]["left_out"],
         json!({"python_files": 1, "files": ["aa/one.py"], "truncated": true})
     );
-}
-
-// Unix only: the directory is made unreadable with permission bits; on Windows that takes an
-// access control list, which std cannot set.
-#[cfg(unix)]
-#[test]
-fn a_directory_the_count_cannot_read_leaves_it_a_lower_bound() {
-    use std::os::unix::fs::PermissionsExt;
-    let p = shop("recommend_left_out_unreadable");
-    p.write("locked/l.py", "");
-    let locked = p.dir.join("locked");
-    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
-    let readable = std::fs::read_dir(&locked).is_ok(); // running as root
-    let (code, report, _) = recommend_json(&p, &["app"]);
-    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
-    assert_eq!(code, 0);
-    let left_out = &report["analyzed"]["left_out"];
-    assert_eq!(left_out["truncated"], json!(!readable));
-    assert_eq!(left_out["files"][0], json!("tests/test_a.py"));
 }
