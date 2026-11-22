@@ -659,9 +659,9 @@ def numbers_out(path: Path) -> None:
 
 /// Shapes that keep or lose the order on the way: a raise for one element at a time (also of
 /// text made from it), a mapping read back by key, a key read before and stored again, a set
-/// filled with the order, a method of an unknown receiver, a sequence of at most one element,
-/// and `|` of two mappings; and what stays reported, text built element by element in a loop
-/// and a set operator on two mappings' key views among it.
+/// filled with the order, a method of an unknown receiver, a sequence of at most one element
+/// (also by a test inside `or` / `and`), and `|` of two mappings; and what stays reported, text
+/// built element by element in a loop and a set operator on two mappings' key views among it.
 const NARROWED: &str = r#"import json
 import sys
 
@@ -922,6 +922,29 @@ def added(a: dict[str, int], b: dict[str, int]) -> list[str]:
 
 def show_added(a: dict[str, int], b: dict[str, int]) -> None:
     print(added(a, b))
+
+
+def single_or(paths: set[str], flag: bool) -> str:
+    if len(paths) != 1 or flag:
+        return ""
+    return next(iter(paths))
+
+
+def single_and(paths: set[str], flag: bool) -> str:
+    if flag and len(paths) == 1:
+        return next(iter(paths))
+    return ""
+
+
+def either_side(paths: set[str], flag: bool) -> str:
+    if flag or len(paths) == 1:
+        return next(iter(paths))
+    return ""
+
+
+def show_single(paths: set[str], flag: bool) -> None:
+    print(json.dumps([single_or(paths, flag), single_and(paths, flag)]))
+    print(json.dumps(either_side(paths, flag)))
 "#;
 
 fn project(name: &str) -> Project {
@@ -1104,6 +1127,12 @@ fn expected() -> Vec<(String, u64, String, String)> {
             260,
             "show_added",
             "added:256->builtins.print",
+        ),
+        d(
+            "pkg/narrowed.py",
+            283,
+            "show_single",
+            "either_side:277->json.dumps",
         ),
         d("pkg/shapes.py", 47, "handed", "handed:47->json.dumps"),
         d(

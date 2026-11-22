@@ -842,7 +842,7 @@ impl<'f, 'c> LocalFlow<'f, 'c> {
                 then_bb,
                 else_bb,
             } = self.f.block(d).terminator
-                && let Some(holds) = self.length_at_most_one(cond, root)
+                && let Some(holds) = self.bounding_side(cond, root)
             {
                 // The edge into `side` is on every path to `at` when `side` is entered only by it
                 // and dominates `at`.
@@ -854,6 +854,46 @@ impl<'f, 'c> LocalFlow<'f, 'c> {
             b = d;
         }
         false
+    }
+
+    /// For a branch on `cond`, the side bounding the length of `set` to one (`Some(true)`: the
+    /// test holding): `cond` compares `len(set)` with a constant, or it is the value of a
+    /// short-circuit `or` (`and`) one of whose operands does so on its failing (holding) side,
+    /// which the whole failing (holding) implies of every operand.
+    fn bounding_side(&self, cond: VarId, set: VarId) -> Option<bool> {
+        if let Some(holds) = self.length_at_most_one(cond, set) {
+            return Some(holds);
+        }
+        let heki_ir::walk::Def::Phi(merge, i) = self.shape.def(cond) else {
+            return None;
+        };
+        let incoming = &self.f.block(merge).phis[i as usize].incoming;
+        // Each operand but the last branches to the merge on the side that decides the whole
+        // (holding for `or`, failing for `and`); the last jumps there. The other side of the
+        // whole is then known of every operand.
+        let mut known = None;
+        for (pred, x) in incoming {
+            let side = match self.f.block(*pred).terminator {
+                Terminator::Branch {
+                    cond: c,
+                    then_bb,
+                    else_bb,
+                } if c == *x && (then_bb == merge) != (else_bb == merge) => Some(else_bb == merge),
+                Terminator::Jump(to) if to == merge => None,
+                _ => return None,
+            };
+            match (known, side) {
+                (_, None) => {}
+                (None, Some(s)) => known = Some(s),
+                (Some(k), Some(s)) if k != s => return None,
+                _ => {}
+            }
+        }
+        let known = known?;
+        incoming
+            .iter()
+            .any(|(_, x)| self.length_at_most_one(*x, set) == Some(known))
+            .then_some(known)
     }
 
     /// For a branch on `cond`, a comparison of `len(set)` with a constant: `Some(true)` when the

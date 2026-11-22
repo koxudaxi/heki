@@ -1458,7 +1458,8 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      the set, `list()` / `tuple()` / `iter()` / `str.join()` / formatting of it, `set.pop()`, a
      generator expression over it, a comprehension of its own before Python 3.12 handed it; a set
      the code bounds to one element on every path to the take, by a test of `len` whose bounding
-     edge is the only way in, takes none), a parameter, or a project call's result. The set has
+     edge is the only way in, also an operand of a short-circuit `or` / `and` on the side of the
+     whole that decides every operand, takes none), a parameter, or a project call's result. The set has
      run-dependent hashes when it is a `set` / `frozenset` of `str` or `bytes` (or tuples of
      them): a display of text, `set()` / `frozenset()` of text, a set operator with such an
      operand (a mapping's `keys()` of text keys included), a module name bound once to such a
