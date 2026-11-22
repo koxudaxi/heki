@@ -37,6 +37,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 
 mod package_paths;
 mod sentinels;
+mod workspace;
 
 /// The derived indexes of a [`ProjectDecls`] version (`ProjectDecls::index_changes`).
 struct Indexes {
@@ -125,6 +126,11 @@ pub struct ModuleLayout {
     /// The source roots below the project root: project-relative POSIX directories whose files
     /// are named relative to them (`src/acme/io.py` is `acme.io` under `src`).
     pub source_roots: Vec<String>,
+    /// The packages of the workspace members without a source root of their own (a flat
+    /// layout: `packages/b/beta/__init__.py`), each named below its member (`beta.io`) as
+    /// installing the member names it. The member's other files (`main.py`, `tests/`) keep their
+    /// names below the project root, where the same files of other members do not clash.
+    pub member_packages: Vec<String>,
     /// The project root is a package itself (`__init__.py`, and no other source root): heki names
     /// its modules top-level, and relative imports may climb to it.
     pub root_is_package: bool,
@@ -132,7 +138,8 @@ pub struct ModuleLayout {
 
 impl ModuleLayout {
     /// The layout of the project at `root`: the `src` setting's directories, else the ones ty
-    /// detects ([`detect_source_roots`]).
+    /// detects ([`detect_source_roots`]) and those of the members of the project's uv, Hatch,
+    /// and PDM workspaces (`HekiConfig::workspaces`).
     pub fn detect(root: &Path, cfg: &HekiConfig) -> Self {
         Self::detect_without(root, cfg, &|_| false)
     }
@@ -142,24 +149,42 @@ impl ModuleLayout {
     /// its last handle closes).
     pub fn detect_without(root: &Path, cfg: &HekiConfig, gone: &dyn Fn(&Path) -> bool) -> Self {
         let is_file = |p: &Path| p.is_file() && !gone(p);
-        let source_roots: Vec<String> = match &cfg.src {
-            Some(dirs) => dirs.iter().filter(|d| !d.is_empty()).cloned().collect(),
-            None => source_roots(root, cfg.project_name.as_deref(), &is_file),
+        let (source_roots, member_packages) = match &cfg.src {
+            Some(dirs) => (
+                dirs.iter().filter(|d| !d.is_empty()).cloned().collect(),
+                Vec::new(),
+            ),
+            None => {
+                let mut roots = source_roots(root, cfg.project_name.as_deref(), &is_file);
+                let members = workspace::member_layout(root, &cfg.workspaces, &is_file);
+                roots.extend(members.source_roots);
+                (roots, members.packages)
+            }
         };
         Self {
-            root_is_package: source_roots.is_empty() && is_file(&root.join("__init__.py")),
+            root_is_package: source_roots.is_empty()
+                && member_packages.is_empty()
+                && is_file(&root.join("__init__.py")),
             source_roots,
+            member_packages,
         }
     }
 
     /// Module name of `rel` (the normalized project-relative path `rel_posix` produces) below
-    /// the deepest source root holding it, else below the project root
+    /// the deepest source root or member holding it, else below the project root
     /// ([`module_name_for_path`]).
     pub fn module_name(&self, rel: &Path) -> Option<(String, bool)> {
+        let below_member = self
+            .member_packages
+            .iter()
+            .map(Path::new)
+            .filter(|package| rel.starts_with(package))
+            .filter_map(|package| rel.strip_prefix(package.parent()?).ok());
         let below_root = self
             .source_roots
             .iter()
             .filter_map(|r| rel.strip_prefix(r).ok())
+            .chain(below_member)
             .min_by_key(|rest| rest.components().count());
         module_name_for_path(below_root.unwrap_or(rel))
     }
@@ -3428,7 +3453,7 @@ impl ProjectDecls {
             };
         }
         declared.obj().is_some_and(|d| {
-            matches!(d.class.as_str(), "typing.Any" | "builtins.object")
+            of_any_class(&d.class)
                 || t.obj()
                     .is_some_and(|i| i.class != d.class && self.is_subclass(&i.class, &d.class))
         })
@@ -5978,6 +6003,42 @@ pub(crate) enum Recv<'v> {
     Super(&'v str),
 }
 
+impl Recv<'_> {
+    /// Whether the receiver says nothing of the code a call on it runs: a value of `Any` or
+    /// `object` ([`of_any_class`]) or of `Callable` ([`is_any_callable`]), or a name nothing heki
+    /// sees binds ([`is_unbound_name`]: one a star import of a library binds, or none, and the
+    /// call raises `NameError`). Its library name (`typing.Any.save`, `builtins.undefined`) is
+    /// no library's function, so the call is unresolved, with effects heki does not know.
+    fn says_nothing(self) -> bool {
+        match self {
+            Recv::Inst(class) | Recv::Class(class) => of_any_class(class) || is_any_callable(class),
+            Recv::Ref(fqn) => is_unbound_name(fqn),
+            Recv::Super(_) => false,
+        }
+    }
+}
+
+/// Whether a value of `class` may be an object of any class: `Any` and `object` say nothing of
+/// the methods it has.
+pub(crate) fn of_any_class(class: &str) -> bool {
+    matches!(
+        class,
+        "typing.Any" | "typing_extensions.Any" | "builtins.object"
+    )
+}
+
+/// Whether a value of `class` may be any function: `Callable` says nothing of the function.
+pub(crate) fn is_any_callable(class: &str) -> bool {
+    matches!(class, "typing.Callable" | "collections.abc.Callable")
+}
+
+/// Whether `fqn` is a name heki looks up in `builtins` because nothing it sees binds it, and
+/// that Python's `builtins` does not define.
+pub(crate) fn is_unbound_name(fqn: &str) -> bool {
+    fqn.strip_prefix("builtins.")
+        .is_some_and(|n| !heki_ir::is_builtin_name(n.split('.').next().unwrap_or(n)))
+}
+
 impl Val {
     /// The project class the value is the class object of: a class named exactly, or one that
     /// may be a subclass (`cls`). Calling it constructs that class.
@@ -6402,7 +6463,7 @@ impl<'a> TypeCtx<'a> {
     /// Calling a named class constructs exactly that class: its `__init__` is the one its MRO
     /// finds. A class object that may be a subclass (`cls(...)`) runs any of theirs.
     pub(crate) fn call_targets(&self, callee: Option<Recv<'_>>) -> Callee {
-        match callee {
+        match callee.filter(|c| !c.says_nothing()) {
             Some(Recv::Ref(fqn)) => match self.called_symbol(fqn) {
                 Symbol::Function(key, _) => Callee::Project(vec![key], false),
                 Symbol::Class(_) => constructor(
@@ -6524,7 +6585,7 @@ impl<'a> TypeCtx<'a> {
     }
 
     pub(crate) fn method_call_targets(&self, recv: Option<Recv<'_>>, method: &str) -> Callee {
-        match recv {
+        match recv.filter(|r| !r.says_nothing()) {
             Some(Recv::Ref(fqn)) => {
                 if self.project.is_project_class(fqn) {
                     return self.through_class(self.project.class_targets(fqn, method, self.kb));

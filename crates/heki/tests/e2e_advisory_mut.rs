@@ -285,15 +285,15 @@ def choose(a: Model, b: Model, flag):
     assert_eq!(
         kinds,
         vec![
-            "container_mut",
-            "container_mut",
-            "container_mut",
-            "indirect_helper",
-            "direct_attr",
-            "set_attr",
-            "container_mut",
-            "alias_container_mut",
-            "set_attr",
+            "in place",
+            "in place",
+            "in place",
+            "through a helper",
+            "by attribute",
+            "with `setattr`",
+            "in place",
+            "in place through an alias",
+            "with `setattr`",
         ]
     );
     // `deep_write` mutates `m.inner`, not a guarded field.
@@ -413,7 +413,7 @@ fn mut201_tells_apart_the_objects_a_helper_writes_through_its_arguments() {
         diags[0]["message"]
             .as_str()
             .unwrap()
-            .contains("(indirect_helper) via `app._both`"),
+            .contains("(through a helper) via `app._both`"),
         "{diags:#?}"
     );
     assert!(diags.iter().all(|x| x.get("sites").is_none()), "{diags:#?}");

@@ -403,7 +403,10 @@ Module names come from the paths below a source root (`pkg/mod.py` → `pkg.mod`
 `pkg/__init__.py` → `pkg`), the deepest one holding the file, else the project root. The `src`
 setting lists the source roots; without it they are detected as ty detects them: `src/`, the
 directory named after the project when it holds one of the same name (`acme/acme/`), and
-`python/`, each when it is not itself a package (no `__init__.py`). `src/acme/io.py` is
+`python/`, each when it is not itself a package (no `__init__.py`), plus the members of the
+project's uv, Hatch, and PDM workspaces: a member's own detected source roots, else its top-level
+packages named below it (`packages/api/acme_api/` is `acme_api`; configuration.md, "Workspaces
+and monorepos"). `src/acme/io.py` is
 `acme.io`, for regular and namespace packages and for modules directly under `src/`. A module name that several files share is defined by one of them, in full and
 incremental analysis alike: an implementation before its `.pyi` stub, a package
 (`pkg/__init__.py`) before a module file of the same name (`pkg.py`, which Python does not import
@@ -731,9 +734,11 @@ in source order: a call resolving to no function (`Callee::Unresolved` or `TooMa
 name called and why, from the receiver or the called value (`UnresolvedReason`: an unannotated
 parameter, an annotation giving no class, `Any` or `object`, a `Callable`, a name nothing heki
 sees binds, an unlisted protocol, a call result, an attribute, a computed `getattr` name, more
-implementations than CHA follows, a member heki does not find, any other untyped value); a call
-on `Any`, `object`, or a `Callable`, or of an unbound name, which resolves to a library name no
-library defines (`typing.Any.get`, `builtins.create`), counts as unresolved; and a call of a
+implementations than CHA follows, a member heki does not find, any other untyped value). A call
+on a value of `Any`, `object`, or `Callable` (an instance or a class object), or of an unbound
+name, resolves to no function: its library name (`typing.Any.get`, `builtins.create`) is no
+library's, so the call is unresolved for every consumer (`EffectSummary::unknown_calls`, the
+purity `heki inspect` gives, blind spots); and a call of a
 library function or class outside the project and the standard library without a catalog entry
 (`Blind::Uncatalogued`, with whether the catalog lists its package). They are local facts, never
 propagated, and no rule reads them. `ProjectIndex::blind_spot_reach` walks a function's facts of
@@ -1896,15 +1901,23 @@ its verdict that is not established, with the obligation's kind as the cause
 (`Kind(subject): reason`) as the detail. The other premises of the row hold for every report: a
 site is found only in a loop and, for an accumulation, on a value carried around it
 (`find_sites`), and a candidate is reported only when its construction establishes the builtin
-type (`OptCandidate::is_reportable`). A proven size-dependent report in a loop whose trip count
-the code fixes or caps (`OptCandidate::in_exact_tier`) leaves no premise of its row open: the
-exact tier also asks for a condition that is no premise, "Trip count open"
-(`heki_rules::premises::Condition`, decided in `FnIndex::fixed_trips`; Safety × Profitability,
-ADR-007 and ADR-011: the claim holds, the change does not pay off over a loop the code counts).
-The report records that condition with its cause (`trip-count-fixed`, the bound as its detail)
-in the same list as open premises (`heki_diagnostics::OpenRecord::Condition`, axis
-profitability), so every heuristic report names why it is not exact; the premise rows, the
-claims, and the oracle's strips do not change.
+type (`OptCandidate::is_reportable`). The exact tier of a size-dependent rewrite also asks for a
+condition that is no premise, "Trip count open" (`heki_rules::premises::Condition`; Safety ×
+Profitability, ADR-007 and ADR-011: the claim holds either way, but the change pays off only
+over a loop the data sizes), which the Advisory lane decides for the loop around the site
+(`OptCandidate::trip_loop`, in `heki_rules::opt_rules::TripCounts::open_record`): the code does
+not fix or cap its trip count (`FnIndex::fixed_trips`, computed with the candidate), and its
+items are the data's as `EFF103`'s "Origin" establishes them (`DataOrigins::of_loop_items`: a
+parameter or a part of one, `*args` included, or the rows, lines, or entries of a call the
+catalog sizes, through `ItemOrigins::of_loop` and `data_origin`; a walk budget per function). A
+loop over a receiver's attribute, a project function's result, `range` of a number that is no
+constant or length, an item of a call's result (`type(x).__mro__`), or a `while` loop runs as
+many times as the program has parts, however large the input. A proven report over such a loop
+leaves no premise of its row open; it records the condition with its cause in the same list as
+open premises (`heki_diagnostics::OpenRecord::Condition`, axis profitability): `trip-count-fixed`
+with the bound as its detail, or the cause of "Origin" that rejected the items, under the same id
+and closer (`premises::trip_count_cause`). Every heuristic report names why it is not exact; the
+premise rows, the claims, and the oracle's strips do not change.
 
 `OPT113`'s exact tier is one decision, `JoinPremises::steps`, which tells each step that does
 not hold to its caller in the order it takes them (the same collection, the same keys, both
@@ -1916,7 +1929,10 @@ of an item whose type is unknown, or a load that is no plain attribute of a know
 item of a builtin container) apart from any other work on a mismatch ("Idle on a mismatch"), and
 `steps_run_no_code` an inner iterable of unknown type (an annotation closes it, unless a project
 subclass of a builtin container defines `__iter__`) apart from one that may run code. A trip
-count the code fixes or caps records "Trip count open" at the loop, as for the rewrites.
+count the code fixes or caps records "Trip count open" at the loop, as for the rewrites. Its
+loops' items need no condition of their own: "Steps through inputs" asks for parameters or parts
+of them, which "Origin" accepts too, so a join over a loop the data does not size is heuristic
+for that premise.
 
 ---
 

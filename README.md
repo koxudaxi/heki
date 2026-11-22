@@ -120,7 +120,9 @@ Run `uvx heki check` (or `heki check` once installed) in the directory with `pyp
 
 The checks above need no configuration: `EFF101` and `EFF103` are exact and run by default.
 The rules of your own project, which you keep today by review, by AST scripts, or by run-time
-guards in tests, can be added as a few lines of it:
+guards in tests, can be added as a few lines of it.
+
+For example, these lines say that only the functions in `app.store` may change `Order.items`:
 
 ```toml
 [[tool.heki.write-owners]]
@@ -129,9 +131,30 @@ targets = ["app.models.Order.items"]
 allowed-writers = ["app.store.*"]
 ```
 
+A function in `app/api.py` that appends to `order.items` through a helper breaks it:
+
+```console
+$ heki check
+app/api.py:9:5: MUT201 (write-owner-violation) [error, heuristic] `add_gift_wrap` writes `app.models.Order.items` (through a helper) via `app.api._append` outside the write owners of `order-store`
+  |
+9 |     _append(order.items, "gift-wrap")
+  |     ^
+  = related: app/api.py:9:5: `add_gift_wrap` calls `app.api._append`
+```
+
 heki follows aliases, helpers, and subclasses, with no decorators and nothing running at run
-time. The other contracts are `read-owners`, `call-owners`, `readonly-returns`, `invalidation`,
-and `effect-boundaries`.
+time. Each kind of rule has its own contract:
+
+| What you want to keep | Contract | Main keys |
+| --------------------- | -------- | --------- |
+| Only `app.store` changes `Order.items` | `write-owners` | `targets = ["Order.items"]`, `allowed-writers = ["app.store.*"]` |
+| Only `app.billing` reads `Order.card_token` | `read-owners` | `targets = ["Order.card_token"]`, `allowed-readers = ["app.billing.*"]` |
+| Only `app.admin` calls `app.db.reset` | `call-owners` | `targets = ["app.db.reset"]`, `allowed-callers = ["app.admin.*"]` |
+| No caller changes the settings `load_settings` returns to everyone | `readonly-returns` | `producers = ["app.config.load_settings"]`, `deep = true` |
+| Every change of `Order.items` is followed by `order_changed()` | `invalidation` | `targets = ["Order.items"]`, `invalidators = ["app.cache.order_changed"]` |
+| Code in `app.render` makes no blocking call | `effect-boundaries` | `scopes = ["app.render.*"]`, `forbid = ["blocking"]` |
+
+See [Contracts](https://heki.koxudaxi.dev/configuration/#contracts) for every key.
 
 > [!WARNING]
 > 🧪 **Experimental.** The exact rules are certified, but heki is still under active development:
@@ -268,20 +291,25 @@ $ heki server                                   # LSP server for editors
 
 ## 🪜 pre-commit and CI
 
-A pre-commit hook (heki follows calls across files, so it checks the whole project):
+A pre-commit hook (heki follows calls across files, so it checks the whole project). The
+[heki-pre-commit](https://github.com/koxudaxi/heki-pre-commit) repository installs heki from its PyPI
+wheel, so there is no compile and no Rust toolchain:
 
 ```yaml
 # .pre-commit-config.yaml
 repos:
-  - repo: https://github.com/koxudaxi/heki
-    rev: v0.2.2
+  - repo: https://github.com/koxudaxi/heki-pre-commit
+    rev: v0.2.3
     hooks:
       - id: heki
 ```
 
-pre-commit builds heki from that release's source with cargo on the first run, which takes a few
-minutes, and installs Rust for the build when cargo is missing. A local hook that runs the wheel
-from PyPI needs no compile:
+Its tags follow heki releases, so `pre-commit autoupdate` works. To build heki from source instead,
+use `repo: https://github.com/koxudaxi/heki` with a release `rev`; pre-commit then builds that
+release with cargo on the first run, which takes a few minutes, and installs Rust for the build when
+cargo is missing.
+
+A local hook can run any version of the PyPI wheel, also without a compile:
 
 ```yaml
 # .pre-commit-config.yaml
