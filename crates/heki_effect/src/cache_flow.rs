@@ -600,22 +600,21 @@ fn flow_blocks(
         kept_at.entry((p.block, p.index)).or_default().push(&p.kind);
     }
     let mut blocks = vec![FlowBlock::default(); f.blocks.len()];
+    let kept_events = |bb: BlockId, at: u32, names: &mut Names, events: &mut Vec<_>| {
+        for kind in kept_at.get(&(bb, at)).into_iter().flatten() {
+            let event = match kind {
+                KeptRemovalKind::Named(name) => CacheEvent::MayRemove(names.index(name)),
+                KeptRemovalKind::Any | KeptRemovalKind::Suspends => CacheEvent::MayRemoveAny,
+                KeptRemovalKind::Runs(span) => CacheEvent::Calls(*span),
+            };
+            events.push((at, event));
+        }
+    };
     for bb in &f.blocks {
         let mut events = Vec::new();
         for (index, inst) in bb.insts.iter().enumerate() {
             let at = u32::try_from(index).unwrap_or(u32::MAX);
-            for kind in kept_at.get(&(bb.id, at)).into_iter().flatten() {
-                events.push((
-                    at,
-                    match kind {
-                        KeptRemovalKind::Named(name) => CacheEvent::MayRemove(names.index(name)),
-                        KeptRemovalKind::Any | KeptRemovalKind::Suspends => {
-                            CacheEvent::MayRemoveAny
-                        }
-                        KeptRemovalKind::Runs(span) => CacheEvent::Calls(*span),
-                    },
-                ));
-            }
+            kept_events(bb.id, at, names, &mut events);
             let self_call = matches!(
                 inst.kind,
                 InstKind::MethodCall { .. } | InstKind::Call { .. }
@@ -656,6 +655,9 @@ fn flow_blocks(
                 events.push((u32::try_from(index).unwrap_or(u32::MAX), event));
             }
         }
+        // The block's end (a branch's truth test, a `raise`) is a point past its instructions.
+        let end = u32::try_from(bb.insts.len()).unwrap_or(u32::MAX);
+        kept_events(bb.id, end, names, &mut events);
         // The index keeps the flow for the whole run: no room for more events.
         events.shrink_to_fit();
         blocks[bb.id.0 as usize] = FlowBlock {

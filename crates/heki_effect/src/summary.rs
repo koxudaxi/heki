@@ -38,9 +38,9 @@ use crate::{
 use heki_ast::Span;
 use heki_ir::walk::{Answer, Budget, Closure, Def, FnShape, KeySet, Memo, Use, Visit, reach};
 use heki_ir::{
-    BinOpKind, BlockId, BuiltinKind, CompareOpKind, ConstLiteral, DictEntry, FunctionId,
-    FunctionKind, Inst, InstKind, IrFunction, ModuleIr, Must, NaturalLoop, PhiNode, Progress,
-    Terminator, UnaryOpKind, VarId,
+    BasicBlock, BinOpKind, BlockId, BuiltinKind, CompareOpKind, ConstLiteral, DictEntry,
+    FunctionId, FunctionKind, Inst, InstKind, IrFunction, ModuleIr, Must, NaturalLoop, PhiNode,
+    Progress, Terminator, UnaryOpKind, VarId,
 };
 use heki_kb::{EffectiveEcosystemKb, EnvironmentAccess, ExecEffectKind, LiteralValue};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -264,6 +264,13 @@ fn extract_module(
             let slot = file.flows.entry(key.clone()).or_default();
             slot.entries.extend(flow.entries);
             slot.writes.extend(flow.writes);
+        }
+        for point in &kept_points {
+            if let cache_flow::KeptRemovalKind::Named(name) = &point.kind {
+                file.kept_removals
+                    .get_or_insert_default()
+                    .insert(name.clone());
+            }
         }
         let kept = opt_in.kept_values.then_some(kept_points.as_slice());
         if let Some(flow) = cache_flow::cache_flow(&shape, &key, &sites, &cx, &types, kept) {
@@ -857,9 +864,10 @@ struct Extractor<'a> {
     external: Vec<ExternalAccess>,
     /// [`Extracted::kept_points`].
     kept_points: Vec<cache_flow::KeptPoint>,
-    /// The position of each call by its result ([`Self::built_by_builtin_call`]), built on
-    /// first use.
-    call_positions: OnceCell<FxHashMap<VarId, Position>>,
+    /// Per variable, whether it may hold a value [`Self::built`] does not establish
+    /// ([`Self::unbuilt_values`]), and the variables a builtin call returning only builtin
+    /// values set ([`invokes::HOLDS_BUILTINS`]), built on first use.
+    unbuilt: OnceCell<(Vec<bool>, FxHashSet<VarId>)>,
     /// The span and argument position of each callable a call is handed that has a project site
     /// of its own ([`Self::as_handed`]), built on first use.
     followed_callables: OnceCell<FxHashSet<(Span, u8)>>,
@@ -1216,7 +1224,7 @@ impl<'a> Extractor<'a> {
             handed: FxHashSet::default(),
             external: Vec::new(),
             kept_points: Vec::new(),
-            call_positions: OnceCell::new(),
+            unbuilt: OnceCell::new(),
             followed_callables: OnceCell::new(),
             blind: Vec::new(),
         };
@@ -2598,9 +2606,26 @@ impl<'a> Extractor<'a> {
         let results = self.callees_by_result();
         for bb in &f.blocks {
             for (index, inst) in bb.insts.iter().enumerate() {
-                if let Some(kind) = self.kept_removal_at((bb.id, index), &inst.kind, &results) {
-                    points.push((bb.id, u32::try_from(index).unwrap_or(u32::MAX), kind));
+                let at = u32::try_from(index).unwrap_or(u32::MAX);
+                let kind = self.kept_removal_at((bb.id, index), &inst.kind, &results);
+                // A deletion by name that may also run other code still removes the value kept
+                // under the name (`FileSummary::kept_removals`).
+                if let (InstKind::AttrDelete { attr, .. }, Some(KeptRemovalKind::Any)) =
+                    (&inst.kind, &kind)
+                    && attr != "__dict__"
+                {
+                    points.push((bb.id, at, KeptRemovalKind::Named(attr.clone())));
                 }
+                if let Some(kind) = kind {
+                    points.push((bb.id, at, kind));
+                }
+            }
+            if let Some(kind) = self.kept_removal_at_end(bb) {
+                points.push((
+                    bb.id,
+                    u32::try_from(bb.insts.len()).unwrap_or(u32::MAX),
+                    kind,
+                ));
             }
         }
         for (block, index, kind) in points {
@@ -2617,25 +2642,61 @@ impl<'a> Extractor<'a> {
     }
 
     /// What the instruction `kind` at `(bb, index)` may do to the values kept in an object's
-    /// `__dict__`.
+    /// `__dict__`. Every instruction kind has an answer: code of the project it may run that no
+    /// event stands for (a special method of an operand's class, attribute access through a
+    /// hook or a descriptor heki does not resolve, a class statement, an import) may remove
+    /// anything.
     fn kept_removal_at(
         &self,
         at: Position,
         kind: &InstKind,
         results: &FxHashMap<VarId, &Callee>,
     ) -> Option<KeptRemovalKind> {
+        let any = Some(KeptRemovalKind::Any);
+        if self
+            .f
+            .special_methods(kind)
+            .iter()
+            .any(|s| self.special_methods_run_project_code(s))
+        {
+            return any;
+        }
         let named = |name: &str| Some(KeptRemovalKind::Named(name.to_owned()));
+        let attribute_runs = |obj: VarId, attr: &str, access| {
+            invokes::attribute_access_runs_project_code(
+                self.cx.project,
+                self.cx.kb,
+                &self.as_handed(obj, None),
+                attr,
+                access,
+            )
+        };
         match kind {
-            // A property getter the read runs: what it removes is its own, unless the read's
-            // targets are not every implementation it can run.
-            InstKind::AttrLoad { .. } => {
-                (matches!(self.callees.get(&at), Some(Callee::Project(..)))
-                    && !self.targets_complete_at(at))
-                .then_some(KeptRemovalKind::Any)
+            // A property getter the read runs is a project call of its own: what it removes is
+            // its own, unless the read's targets are not every implementation it can run.
+            InstKind::AttrLoad { obj, attr, .. } => match self.callees.get(&at) {
+                Some(Callee::Project(..)) => {
+                    (!self.targets_complete_at(at)).then_some(KeptRemovalKind::Any)
+                }
+                _ => attribute_runs(*obj, attr, invokes::AttrAccess::Read)
+                    .then_some(KeptRemovalKind::Any),
+            },
+            InstKind::AttrDelete { attr, .. } | InstKind::AttrStore { attr, .. }
+                if attr == "__dict__" =>
+            {
+                any
             }
-            InstKind::AttrDelete { attr, .. } if attr == "__dict__" => Some(KeptRemovalKind::Any),
-            InstKind::AttrDelete { attr, .. } => named(attr),
-            InstKind::AttrStore { attr, .. } if attr == "__dict__" => Some(KeptRemovalKind::Any),
+            InstKind::AttrDelete { obj, attr } => {
+                if attribute_runs(*obj, attr, invokes::AttrAccess::Write) {
+                    any
+                } else {
+                    named(attr)
+                }
+            }
+            InstKind::AttrStore { obj, attr, .. } => {
+                attribute_runs(*obj, attr, invokes::AttrAccess::Write)
+                    .then_some(KeptRemovalKind::Any)
+            }
             InstKind::SubscriptStore {
                 obj,
                 index,
@@ -2649,29 +2710,20 @@ impl<'a> Extractor<'a> {
             } if self.dict_of.contains_key(obj) => {
                 match self.key_of(key_const.as_deref(), *index) {
                     Some(k) => named(&k),
-                    None => Some(KeptRemovalKind::Any),
+                    None => any,
                 }
             }
             // Another coroutine or the generator's consumer runs while the function waits: at
             // an `await`, the implicit awaits of `async for` and `async with` (`__anext__`,
             // `__aenter__`, `__aexit__`), and `yield from`.
-            kind if kind.suspends() => Some(KeptRemovalKind::Any),
-            InstKind::YieldFrom { .. } => Some(KeptRemovalKind::Any),
+            kind if kind.suspends() => any,
+            InstKind::YieldFrom { .. } => any,
             InstKind::Yield { .. } => Some(KeptRemovalKind::Suspends),
-            // A context manager's `__enter__` and `__exit__`, and an iterable's `__iter__` and its
-            // iterator's `__next__`, are not followed in a project class: they may run anything.
-            // (An `async with` suspends, which the arm above takes.)
-            InstKind::EnterWith { mgr, .. } => invokes::special_methods_run_project_code(
-                self.cx.project,
-                &self.as_handed(*mgr, None),
-                &["__enter__", "__exit__"],
-            )
-            .then_some(KeptRemovalKind::Any),
             // Each step of a loop runs the iteration of what it iterates: at the iterator's
             // creation and at every step.
-            InstKind::MakeIter { iterable, .. } if self.f.var_name(*iterable) != Some(".0") => {
-                self.iteration_removal(*iterable, results)
-            }
+            InstKind::MakeIter { iterable, .. } => (self.f.var_name(*iterable) != Some(".0"))
+                .then(|| self.iteration_removal(*iterable, results))
+                .flatten(),
             InstKind::IterNext { iter, .. } => {
                 let iterable = match self.defs.get(&self.shape.copy_root(*iter)).map(|i| &i.kind) {
                     Some(InstKind::MakeIter { iterable, .. })
@@ -2683,8 +2735,87 @@ impl<'a> Extractor<'a> {
                 };
                 self.iteration_removal(iterable, results)
             }
-            _ => call_operands(kind).and_then(|call| self.kept_removal_of_call(at, &call)),
+            // A class statement runs the metaclass, the bases' `__init_subclass__`, and the
+            // attributes' `__set_name__`.
+            InstKind::MakeClosure {
+                func_id: Some(id), ..
+            } if self.cx.ir().function(*id).is_class_body => any,
+            // The first import of a project module runs its body.
+            InstKind::Import { .. } => {
+                let target = self
+                    .f
+                    .block(at.0)
+                    .insts
+                    .get(at.1)
+                    .and_then(|i| self.cx.import_target(i.span));
+                match target {
+                    Some(t)
+                        if matches!(
+                            self.cx.project.symbol(t),
+                            crate::resolver::Symbol::External
+                        ) =>
+                    {
+                        None
+                    }
+                    _ => any,
+                }
+            }
+            InstKind::Call { .. } | InstKind::MethodCall { .. } => {
+                call_operands(kind).and_then(|call| self.kept_removal_of_call(at, &call))
+            }
+            // What these run is a special method of an operand (decided above), or nothing.
+            InstKind::Const { .. }
+            | InstKind::AllocBuiltin { .. }
+            | InstKind::DictLiteral { .. }
+            | InstKind::LoadGlobal { .. }
+            | InstKind::LoadDeref { .. }
+            | InstKind::LoadName { .. }
+            | InstKind::StoreGlobal { .. }
+            | InstKind::StoreDeref { .. }
+            | InstKind::Copy { .. }
+            | InstKind::Delete { .. }
+            | InstKind::BinOp { .. }
+            | InstKind::UnaryOp { .. }
+            | InstKind::Compare { .. }
+            | InstKind::Convert { .. }
+            | InstKind::Format { .. }
+            | InstKind::BuildString { .. }
+            | InstKind::SubscriptLoad { .. }
+            | InstKind::SubscriptStore { .. }
+            | InstKind::SubscriptDelete { .. }
+            | InstKind::MakeGenExpr { .. }
+            | InstKind::MakeClosure { .. }
+            | InstKind::Await { .. }
+            | InstKind::EnterWith { .. }
+            | InstKind::ExitWith { .. }
+            | InstKind::CatchException { .. } => None,
         }
+    }
+
+    /// What the end of `bb` may do to the values kept in an object's `__dict__`: a branch's
+    /// truth test may run its condition's `__bool__` or `__len__`, and a `raise` of a class
+    /// constructs it.
+    fn kept_removal_at_end(&self, bb: &BasicBlock) -> Option<KeptRemovalKind> {
+        let runs = match &bb.terminator {
+            Terminator::Raise(Some(v)) => self
+                .val(*v)
+                .is_some_and(|v| v.class_object(self.cx.project).is_some()),
+            _ => bb
+                .end_special_methods()
+                .is_some_and(|s| self.special_methods_run_project_code(&s)),
+        };
+        runs.then_some(KeptRemovalKind::Any)
+    }
+
+    /// Whether one of the special methods `s` names may be code of the project, on the class
+    /// of the value or of its items ([`invokes::special_methods_run_project_code`]).
+    fn special_methods_run_project_code(&self, s: &heki_ir::SpecialMethods) -> bool {
+        invokes::special_methods_run_project_code(
+            self.cx.project,
+            &self.as_handed(s.value, None),
+            s.methods,
+            s.item_methods,
+        )
     }
 
     /// What the call `call` at `(bb, index)` may do to the values kept in an object's
@@ -2844,35 +2975,60 @@ impl<'a> Extractor<'a> {
         }
     }
 
-    /// Whether `v` is what a call of a builtin constructor returns, an instance of the builtin
-    /// itself (`list(...)`, `sorted(...)`, `d.copy()`, `s.split()`).
-    fn built_by_builtin_call(&self, v: VarId) -> bool {
-        let at = self.call_positions.get_or_init(|| {
-            let mut out = FxHashMap::default();
-            for bb in &self.f.blocks {
-                for (i, inst) in bb.insts.iter().enumerate() {
-                    if let (Some(dst), true) =
-                        (inst.kind.dst(), self.callees.contains_key(&(bb.id, i)))
-                    {
-                        out.insert(dst, (bb.id, i));
-                    }
-                }
-            }
-            out
-        });
-        let callee = at.get(&v).and_then(|p| self.callees.get(p));
-        matches!(callee, Some(Callee::External(symbol)) if invokes::BUILT_BY.contains(&symbol.as_str()))
+    /// The builtin function or method the call at `(bb, i)` calls, as the catalog names it, also
+    /// a method of a literal ([`Self::built_class`]): whether it returns an instance of a builtin
+    /// class itself is [`invokes::BUILT_BY`].
+    fn builtin_result_at(&self, (bb, i): Position) -> Option<String> {
+        match self.callees.get(&(bb, i)) {
+            Some(Callee::External(symbol)) => Some(symbol.clone()),
+            Some(Callee::TooMany | Callee::Unresolved) => match &self.f.block(bb).insts[i].kind {
+                InstKind::MethodCall { recv, method, .. } => self
+                    .built_class(*recv)
+                    .map(|class| format!("{class}.{method}")),
+                _ => None,
+            },
+            _ => None,
+        }
     }
 
-    /// `v` as a library call is handed it ([`invokes::Handed`]); `at`: the call's position and
-    /// the argument's (`None` for a keyword), where a callable it is handed has its own site.
-    fn as_handed(&self, v: VarId, at: Option<(Span, Option<u8>)>) -> invokes::Handed<'_> {
-        let root = self.shape.copy_root(v);
-        let def = self.defs.get(&root).map(|i| &i.kind);
-        let built = def.is_some_and(|kind| {
-            matches!(
-                kind,
-                InstKind::Const { .. }
+    /// Whether `v` holds a builtin value of its exact class built in the function: a constant,
+    /// a display, a string, a comparison's result, a generator expression, what a builtin call
+    /// returns ([`invokes::BUILT_BY`]), the result of an operator on such values
+    /// (`total + 1`, `not x`), and a merge of them (a loop's counter).
+    fn built(&self, v: VarId) -> bool {
+        let (unbuilt, _) = self.unbuilt.get_or_init(|| self.unbuilt_values());
+        !unbuilt.get(v.0 as usize).copied().unwrap_or(true)
+    }
+
+    /// Per variable, whether it may hold a value [`Self::built`] does not establish: a least
+    /// fixpoint over copies, operators, and phis, each variable visited once and again for each
+    /// operand that turns; and the variables a builtin call returning only builtin values set.
+    fn unbuilt_values(&self) -> (Vec<bool>, FxHashSet<VarId>) {
+        let f = self.f;
+        let n = f.var_names.len();
+        let mut operands: Vec<Vec<usize>> = vec![Vec::new(); n];
+        let mut readers: Vec<Vec<usize>> = vec![Vec::new(); n];
+        let mut own: Vec<Option<bool>> = vec![None; n];
+        let mut holding_builtins = FxHashSet::default();
+        let mut link = |dst: VarId, srcs: &mut dyn Iterator<Item = VarId>| {
+            for s in srcs {
+                if (s.0 as usize) < n && (dst.0 as usize) < n {
+                    operands[dst.0 as usize].push(s.0 as usize);
+                    readers[s.0 as usize].push(dst.0 as usize);
+                }
+            }
+        };
+        for bb in &f.blocks {
+            for phi in &bb.phis {
+                link(phi.dst, &mut phi.incoming.iter().map(|(_, v)| *v));
+                if let Some(slot) = own.get_mut(phi.dst.0 as usize) {
+                    *slot = Some(false);
+                }
+            }
+            for (i, inst) in bb.insts.iter().enumerate() {
+                let Some(dst) = inst.kind.dst() else { continue };
+                let unbuilt = match &inst.kind {
+                    InstKind::Const { .. }
                     | InstKind::AllocBuiltin { .. }
                     | InstKind::DictLiteral { .. }
                     | InstKind::BuildString { .. }
@@ -2880,8 +3036,76 @@ impl<'a> Extractor<'a> {
                     | InstKind::Convert { .. }
                     | InstKind::Compare { .. }
                     | InstKind::MakeGenExpr { .. }
-            )
-        }) || self.built_by_builtin_call(root);
+                    | InstKind::UnaryOp {
+                        op: UnaryOpKind::Not,
+                        ..
+                    } => false,
+                    InstKind::Copy { src, .. } => {
+                        link(dst, &mut std::iter::once(*src));
+                        false
+                    }
+                    InstKind::BinOp { lhs, rhs, .. } => {
+                        link(dst, &mut [*lhs, *rhs].into_iter());
+                        false
+                    }
+                    InstKind::UnaryOp { operand, .. } => {
+                        link(dst, &mut std::iter::once(*operand));
+                        false
+                    }
+                    InstKind::Call { .. } | InstKind::MethodCall { .. } => {
+                        let symbol = self.builtin_result_at((bb.id, i));
+                        if symbol
+                            .as_deref()
+                            .is_some_and(|s| invokes::HOLDS_BUILTINS.contains(&s))
+                        {
+                            holding_builtins.insert(dst);
+                        }
+                        !symbol.is_some_and(|s| invokes::BUILT_BY.contains(&s.as_str()))
+                    }
+                    _ => true,
+                };
+                if let Some(slot) = own.get_mut(dst.0 as usize) {
+                    *slot = Some(unbuilt);
+                }
+            }
+        }
+        let max_visits = operands.iter().map(Vec::len).max().unwrap_or(0) + 1;
+        let read = |v: usize, out: &mut Vec<usize>| out.extend(&readers[v]);
+        let budget = Budget::unmetered("heki_effect::summary::Extractor::unbuilt_values");
+        let facts = heki_ir::walk::fixpoint(
+            &budget,
+            heki_ir::walk::Sparse {
+                nodes: n,
+                readers: &read,
+                max_visits: u32::try_from(max_visits).unwrap_or(u32::MAX),
+            },
+            |v, facts: &heki_ir::walk::Facts<bool>| {
+                // A variable no instruction or phi defines is a parameter or a name bound
+                // elsewhere.
+                let on = own[v].is_none_or(|own| {
+                    own || operands[v].iter().any(|o| facts.get(*o) == Some(&true))
+                });
+                on.then_some(true)
+            },
+        );
+        let unbuilt = facts
+            .map(|facts| {
+                facts
+                    .into_vec()
+                    .into_iter()
+                    .map(|f| f == Some(true))
+                    .collect()
+            })
+            .open_means(vec![true; n]);
+        (unbuilt, holding_builtins)
+    }
+
+    /// `v` as a library call is handed it ([`invokes::Handed`]); `at`: the call's position and
+    /// the argument's (`None` for a keyword), where a callable it is handed has its own site.
+    fn as_handed(&self, v: VarId, at: Option<(Span, Option<u8>)>) -> invokes::Handed<'_> {
+        let root = self.shape.copy_root(v);
+        let def = self.defs.get(&root).map(|i| &i.kind);
+        let built = self.built(root);
         // A list, dict, or set display used anywhere else may be changed before the call; a
         // starred element and a `**` unpacking add items of other values. A generator
         // expression's items, and those of what a builtin call returns, are not known.
@@ -2901,7 +3125,8 @@ impl<'a> Extractor<'a> {
             {
                 Some(kind.operands())
             }
-            // A constant's, a string's, or a comparison's items (if any) are builtin values.
+            // A constant's, a string's, or a comparison's items (if any) are builtin values, and
+            // so are those of what a builtin returning only builtin values returns.
             Some(
                 InstKind::Const { .. }
                 | InstKind::BuildString { .. }
@@ -2909,6 +3134,15 @@ impl<'a> Extractor<'a> {
                 | InstKind::Convert { .. }
                 | InstKind::Compare { .. },
             ) => Some(Vec::new()),
+            Some(InstKind::Call { .. } | InstKind::MethodCall { .. })
+                if self
+                    .unbuilt
+                    .get_or_init(|| self.unbuilt_values())
+                    .1
+                    .contains(&root) =>
+            {
+                Some(Vec::new())
+            }
             _ => None,
         };
         let elems = parts.map(|parts| {

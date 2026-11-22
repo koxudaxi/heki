@@ -1,5 +1,6 @@
 //! What a library call runs of the values it is handed (R3; `MUT101`'s "Kept to the return"):
-//! whether a call of a library the ecosystem catalog covers may run code of the project. The
+//! whether a call of a library the ecosystem catalog covers may run code of the project, and
+//! whether the special methods and the attribute access an instruction runs on a value may. The
 //! catalog's `[[invokes]]` table says, per call, the special methods it runs on each argument's
 //! class, on its items' classes, and the arguments it calls; a value runs code of the project
 //! there only when its class may define that method in the project (a project class, a builtin
@@ -69,6 +70,60 @@ pub(crate) const BUILT_BY: &[&str] = &[
     "builtins.str.rsplit",
     "builtins.str.splitlines",
     "builtins.str.join",
+    "builtins.str.strip",
+    "builtins.str.lstrip",
+    "builtins.str.rstrip",
+    "builtins.str.lower",
+    "builtins.str.upper",
+    "builtins.str.replace",
+    "builtins.str.format",
+    "builtins.str.startswith",
+    "builtins.str.endswith",
+    "builtins.len",
+    "builtins.bool",
+    "builtins.int",
+    "builtins.float",
+    "builtins.repr",
+    "builtins.ascii",
+    "builtins.format",
+    "builtins.hash",
+    "builtins.id",
+    "builtins.isinstance",
+    "builtins.issubclass",
+    "builtins.hasattr",
+    "builtins.callable",
+];
+
+/// The builtin calls of [`BUILT_BY`] whose result holds no value of another class: a string, a
+/// list of strings, a number, a boolean.
+pub(crate) const HOLDS_BUILTINS: &[&str] = &[
+    "builtins.str",
+    "builtins.str.split",
+    "builtins.str.rsplit",
+    "builtins.str.splitlines",
+    "builtins.str.join",
+    "builtins.str.strip",
+    "builtins.str.lstrip",
+    "builtins.str.rstrip",
+    "builtins.str.lower",
+    "builtins.str.upper",
+    "builtins.str.replace",
+    "builtins.str.format",
+    "builtins.str.startswith",
+    "builtins.str.endswith",
+    "builtins.len",
+    "builtins.bool",
+    "builtins.int",
+    "builtins.float",
+    "builtins.repr",
+    "builtins.ascii",
+    "builtins.format",
+    "builtins.hash",
+    "builtins.id",
+    "builtins.isinstance",
+    "builtins.issubclass",
+    "builtins.hasattr",
+    "builtins.callable",
 ];
 
 /// The special methods iterating a value runs on its class: `__iter__`, `__next__` of an
@@ -163,14 +218,87 @@ fn value_runs(project: &ProjectDecls, h: &Handed<'_>, v: &InvokedValue, iterated
             .any(|m| items_may_define(project, h, m))
 }
 
-/// Whether one of the special methods `names` Python runs on the class of `h` (a context
-/// manager's, an iterable's) may be code of the project.
+/// Whether one of the special methods Python runs on the class of `h` (`methods`) or on the
+/// classes of its items (`item_methods`) may be code of the project.
 pub(crate) fn special_methods_run_project_code(
     project: &ProjectDecls,
     h: &Handed<'_>,
-    names: &[&str],
+    methods: &[&str],
+    item_methods: &[&str],
 ) -> bool {
-    names.iter().any(|m| may_define(project, h, m, false))
+    methods.iter().any(|m| may_define(project, h, m, false))
+        || item_methods.iter().any(|m| items_may_define(project, h, m))
+}
+
+/// An access of an attribute ([`attribute_access_runs_project_code`]).
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum AttrAccess {
+    Read,
+    /// A store or a delete.
+    Write,
+}
+
+/// Attributes every object has, which reading runs no code of the class but its
+/// `__getattribute__`.
+const OBJECT_ATTRS: &[&str] = &["__class__", "__dict__"];
+
+/// Whether accessing `attr` on `h` may run code of the project that is no property getter heki
+/// resolves: on an instance of a project class, a read that finds no plain attribute and no
+/// plain method, or a write that may run a property setter, `__setattr__`, `__delattr__`, a
+/// descriptor, or code of a base heki does not know; on an instance of a library class, the
+/// access as a call of that class's attribute (`__setattr__` for a write) under R3
+/// ([`runs_project_code`]); on a project class object, what its metaclass or a descriptor of
+/// the name may run. A module, a function, or a library class object holds its attributes in
+/// a dictionary. A value of unknown class may run anything.
+pub(crate) fn attribute_access_runs_project_code(
+    project: &ProjectDecls,
+    kb: &EffectiveEcosystemKb,
+    h: &Handed<'_>,
+    attr: &str,
+    access: AttrAccess,
+) -> bool {
+    if h.built {
+        return false;
+    }
+    let reads_plainly = |class: &str| {
+        if OBJECT_ATTRS.contains(&attr) {
+            !project.attr_read(class, attr).runs_hook(false)
+        } else {
+            project.plain_attr(class, attr) || project.method_read_runs_no_code(class, attr)
+        }
+    };
+    let instance = |class: &str| {
+        if !project.is_project_class(class) {
+            let member = match access {
+                AttrAccess::Read => attr,
+                AttrAccess::Write => "__setattr__",
+            };
+            let symbol = format!("{class}.{member}");
+            return runs_project_code(project, kb, &symbol, Some(h), &[], &[], false, false);
+        }
+        match access {
+            AttrAccess::Read => !reads_plainly(class),
+            AttrAccess::Write => {
+                !project.attr_read(class, attr).bases_known
+                    || project
+                        .value_classes(class)
+                        .iter()
+                        .any(|c| project.attr_write_runs_code(c, attr))
+            }
+        }
+    };
+    match h.val {
+        Some(Val::Inst(class)) => instance(class),
+        Some(Val::Union(classes)) => classes.iter().any(|c| instance(c)),
+        Some(Val::Class(class) | Val::Ref(class)) if project.is_project_class(class) => {
+            match access {
+                AttrAccess::Read => !reads_plainly(class),
+                AttrAccess::Write => project.has_custom_metaclass(class),
+            }
+        }
+        Some(Val::Class(_) | Val::Ref(_)) => false,
+        Some(Val::Super(_)) | None => true,
+    }
 }
 
 /// Whether iterating `h` runs only its builtin class's own iteration: a builtin container,
@@ -181,11 +309,11 @@ pub(crate) fn iterates_builtin(project: &ProjectDecls, h: &Handed<'_>) -> bool {
     h.built
         || match h.val {
             Some(Val::Inst(class)) => {
-                builtin(class) && !special_methods_run_project_code(project, h, ITERATION)
+                builtin(class) && !special_methods_run_project_code(project, h, ITERATION, &[])
             }
             Some(Val::Union(classes)) => {
                 classes.iter().all(|c| builtin(c))
-                    && !special_methods_run_project_code(project, h, ITERATION)
+                    && !special_methods_run_project_code(project, h, ITERATION, &[])
             }
             _ => false,
         }
@@ -240,10 +368,19 @@ fn items_may_define(project: &ProjectDecls, h: &Handed<'_>, name: &str) -> bool 
         }
         _ => return true,
     };
+    // A string's items are strings; a number holds none.
     let builtin_items = matches!(
         class.as_str(),
-        "builtins.str" | "builtins.bytes" | "builtins.bytearray"
-    );
+        "builtins.str"
+            | "builtins.bytes"
+            | "builtins.bytearray"
+            | "builtins.int"
+            | "builtins.float"
+            | "builtins.bool"
+            | "builtins.complex"
+    ) && ITERATION
+        .iter()
+        .all(|m| project.method_not_overridden(class, m, false));
     // A builtin dict or set hands its keys on with the hashes it stored for them, and a dict
     // its entries as pairs it does not unpack through their own iteration.
     let stored = match class.as_str() {

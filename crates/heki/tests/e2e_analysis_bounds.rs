@@ -3891,6 +3891,48 @@ fn reads_on_every_path_of_many_keys_stay_within_the_function_budget() {
     assert_eq!(found, vec!["C.put"]);
 }
 
+/// A writer counting through thousands of branches after its write, each merging two
+/// arithmetic results of the one before: whether an operator's operand is a builtin value the
+/// function built is decided once per variable for the whole function, not by a walk back
+/// through the merges per operator.
+#[test]
+fn built_values_after_a_write_are_decided_once_per_variable() {
+    let branches = 1_000;
+    let mut lines = vec![
+        "from functools import cached_property".to_owned(),
+        String::new(),
+        String::new(),
+        "class C:".to_owned(),
+        "    def __init__(self):".to_owned(),
+        "        self.a = 0".to_owned(),
+        "        self.flag = False".to_owned(),
+        String::new(),
+        "    @cached_property".to_owned(),
+        "    def p(self):".to_owned(),
+        "        return self.a".to_owned(),
+        String::new(),
+        "    def bump(self):".to_owned(),
+        "        self.a = 1".to_owned(),
+        "        total = 0".to_owned(),
+    ];
+    for _ in 0..branches {
+        lines.push("        if self.flag:".to_owned());
+        lines.push("            total = total + 1".to_owned());
+        lines.push("        else:".to_owned());
+        lines.push("            total = -total".to_owned());
+    }
+    lines.push("        return None".to_owned());
+    let p = Project::new("bounds_built_values");
+    p.write("pyproject.toml", MUT101_CONFIG)
+        .write("m.py", &(lines.join("\n") + "\n"));
+    let found: Vec<String> = check_within(&p, Duration::from_secs(20))
+        .iter()
+        .filter(|d| d["rule_code"] == "MUT101")
+        .map(|d| d["qualname"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(found, vec!["C.bump"]);
+}
+
 /// A writer making thousands of project calls and library calls after its write: whether a
 /// callable a library call is handed has a site of its own is looked up once per argument, not
 /// by a scan of every site of the function (which took time quadratic in its calls).

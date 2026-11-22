@@ -256,6 +256,140 @@ fn kept_to_the_return_stripped_code_heki_does_not_follow_runs_after_the_write() 
     assert_eq!(tiers(&p), vec![report("MUT101", 15, true)]);
 }
 
+/// A class every special method and attribute hook of which is code of the project.
+const HOOKED: &str = r#"
+
+
+class Hooked:
+    value = 0
+
+    def __add__(self, other):
+        return 0
+
+    def __eq__(self, other):
+        return False
+
+    def __hash__(self):
+        return 0
+
+    def __contains__(self, item):
+        return False
+
+    def __format__(self, spec):
+        return ""
+
+    def __getitem__(self, key):
+        return 0
+
+    def __bool__(self):
+        return True
+
+    def __neg__(self):
+        return 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return None
+
+    def __getattr__(self, name):
+        return 0
+
+    def __setattr__(self, name, value):
+        return None
+
+
+class Plain:
+    value = 0
+
+
+class Boom(Exception):
+    def __init__(self) -> None:
+        super().__init__("boom")
+"#;
+
+#[test]
+fn kept_to_the_return_stripped_implicit_calls_of_project_code() {
+    // A special method of an operand's class, an attribute hook, raising a class (which
+    // constructs it), a class statement, and an import of a project module run code of the
+    // project after the write.
+    let typed = |class: &str, after: &str| {
+        holder(READ, WRITE, after, HOOKED)
+            .replacen(
+                "raw: dict[str, str], hook)",
+                &format!("raw: dict[str, str], hook: {class})"),
+                1,
+            )
+            .replacen(
+                "import functools\n",
+                "import functools\nimport json\nimport logging\n",
+                1,
+            )
+    };
+    for after in [
+        "unused = hook + 1",
+        "unused = hook == 1",
+        "unused = 1 in hook",
+        "unused = {hook}",
+        r#"unused = f"{hook}""#,
+        "unused = hook[0]",
+        "unused = -hook",
+        "if hook:\n            return None",
+        "with hook:\n            pass",
+        "unused = hook.missing",
+        "hook.value = 1",
+        "del hook.value",
+        "try:\n            raise Boom\n        except Boom:\n            pass",
+        "class Local:\n            pass",
+        "import app",
+    ] {
+        let p = project("mut101_strip_implicit", &typed("Hooked", after));
+        assert_eq!(tiers(&p), vec![report("MUT101", 17, false)], "{after}");
+    }
+    // An attribute of a value that may be of either class runs the hook of one.
+    let p = project(
+        "mut101_strip_union_attr",
+        &typed("Hooked | Plain", "unused = hook.value"),
+    );
+    assert_eq!(tiers(&p), vec![report("MUT101", 17, false)]);
+    // An attribute of a value of unknown class may be a property of the project.
+    let p = project(
+        "mut101_strip_unknown_attr",
+        &holder(READ, WRITE, "unused = hook.value", HOOKED),
+    );
+    assert_eq!(tiers(&p), vec![report("MUT101", 15, false)]);
+    // The same on builtin values and on classes without such methods run no code of the project.
+    for after in [
+        "unused = hook == 1",
+        "unused = len(raw) + 1",
+        r#"unused = "%d" % len(raw)"#,
+        "unused = {len(raw)}",
+        r#"unused = raw["k"]"#,
+        "unused = [len(raw)][0:1]",
+        "unused = hook.value",
+        "unused = Plain.value",
+        "unused = self.__class__",
+        "unused = raw.get",
+        "unused = json.dumps",
+        r#"unused = "abc".upper"#,
+        "hook.value = 1",
+        "Plain.value = 1",
+        "total = 0\n        for key in raw:\n            total += 1",
+        "if raw:\n            return None",
+        "import json",
+    ] {
+        let p = project("mut101_kept_implicit", &typed("Plain", after));
+        assert_eq!(tiers(&p), vec![report("MUT101", 17, true)], "{after}");
+    }
+    // An attribute of an object of a library class the catalog covers, read or stored, is a
+    // call of that library handed no project code.
+    for after in ["unused = hook.level", "hook.level = 10"] {
+        let p = project("mut101_kept_library_attr", &typed("logging.Logger", after));
+        assert_eq!(tiers(&p), vec![report("MUT101", 17, true)], "{after}");
+    }
+}
+
 /// A reader of `features`, and the classes it may read it on.
 fn reader(body: &str, extra: &str) -> String {
     holder(
@@ -438,4 +572,35 @@ class Holder:
         ),
     );
     assert_eq!(tiers(&p), vec![report("MUT101", 10, true)]);
+    // A function of the project that removes the lazy property's value by name, whatever else
+    // it may run there, makes its getter run again: the write is no setup step.
+    let p = project(
+        "mut101_setup_lazy_removed",
+        &format!("{lazy}\n\ndef forget(obj) -> None:\n    del obj.loaded\n"),
+    );
+    assert_eq!(tiers(&p), vec![report("MUT101", 10, true)]);
+}
+
+#[test]
+fn cached_property_stripped_by_a_subclass() {
+    // A subclass with a metaclass of its own may turn the attribute into a descriptor.
+    let extra =
+        "\n\nclass Meta(type):\n    pass\n\n\nclass Sub(Holder, metaclass=Meta):\n    pass\n";
+    let p = project(
+        "mut101_strip_sub_metaclass",
+        &holder(READ, WRITE, "return None", extra),
+    );
+    assert_eq!(tiers(&p), vec![report("MUT101", 15, false)]);
+    // A subclass that runs no write and defines the name as a plain property: the write's claim
+    // holds on the classes that run it, but a reader of an object that may be of the subclass
+    // may read no cached value.
+    let extra = "\n\nclass Sub(Holder):\n    @property\n    def features(self) -> str:\n        return \"plain\"\n\n    def replace(self, raw: dict[str, str], hook) -> None:\n        return None\n";
+    let p = project(
+        "mut111_strip_sub_plain",
+        &reader(r#"return obj.features.startswith("x")"#, extra),
+    );
+    assert_eq!(
+        tiers(&p),
+        vec![report("MUT101", 15, true), report("MUT111", 35, false)]
+    );
 }

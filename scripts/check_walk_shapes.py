@@ -336,6 +336,15 @@ def writes_then_library_calls(n: int) -> Body:
     return Body(("xs", "out"), [*lines, "return seen"])
 
 
+def counters_after_writes(n: int) -> Body:
+    """A write of a `self` attribute, then branches merging arithmetic on a counter: whether each
+    operand is a builtin value the function built is decided once per variable."""
+    lines = ["self.a = 0", "total = 0"]
+    for _ in range(n):
+        lines += ["if c:", "    total = total + 1", "else:", "    total = -total"]
+    return Body(("c",), [*lines, "return total"])
+
+
 def is_tests(n: int) -> Body:
     """Many `is` tests, each followed by a conditional expression on the tested parameter."""
     lines = []
@@ -812,6 +821,7 @@ FAMILIES = [
     # Adversarial: a getter with as many branches as keys asks one walk per key, past the budget.
     Family("self_item_reads", self_item_reads, placements=("method",), real_code=False),
     Family("writes_then_library_calls", writes_then_library_calls, placements=("method",)),
+    Family("counters_after_writes", counters_after_writes, placements=("method",)),
     Family("blind_calls", blind_calls, facts=True),
     Family("wide_hierarchy", project=wide_hierarchy, placements=("project",), size=4000),
     Family("helper_chain", project=helper_chain, placements=("project",), size=2000),

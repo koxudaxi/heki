@@ -697,7 +697,10 @@ successors, returns, exception targets) with the points that invalidate or read 
 property of its own instance (`del self.<name>`, a constant-key removal from `self.__dict__`,
 `self.__dict__.clear()`, `self.<name>`, and calls on `self`, whose callees' summaries say what
 they do). They are local facts, never propagated, and they let `MUT101` decide staleness from the
-index alone, for a method of any indexed file.
+index alone, for a method of any indexed file. `FileSummary.kept_removals` (only with
+`OptInFacts::kept_values`) holds the names under which the file's functions remove a value an
+object keeps in its `__dict__`: a project-wide fact the language server compares per file
+(`Workspace::note_kept_removals`), as it does the sentinel comparisons of `MUT118`.
 
 `FileSummary.blind_spots` (`heki_effect::BlindCall`, only with `OptInFacts::blind_spots`, which
 `heki_rules::recommend_facts` sets and neither `heki check` nor the language server does) holds,
@@ -999,12 +1002,29 @@ which module imports which.
    project call whose targets are not every implementation it can run; the iteration of a value
    that is no builtin container, no project generator's result, and no `lazy` call's; a
    library call handed a container whose items heki does not know, such as a display changed
-   after it is built or what a builtin call or a generator expression returns), and
-   `Calls(span)` at the project calls no `SelfCall` stands for (other receivers, the property
-   getters a read of `self.<name>` runs) and at each step of iterating what a project generator
-   called at `span` returns, whose callees' summaries say what they remove.
+   after it is built or what a builtin call or a generator expression returns; a special method
+   an instruction runs on an operand's class that may be code of the project, as
+   `heki_ir::IrFunction::special_methods` lists them: an operator and its reflection, a
+   comparison, `in`, `%` formatting, a conversion or format, a subscript and its key, a key a set
+   or dict display hashes, a `**` unpacking, a generator expression's outer iterable, entering
+   and leaving a `with`, and a branch's truth test (not a loop's test of its next item); an
+   attribute access that may run code of the project besides a getter heki resolves
+   (`heki_effect::invokes::attribute_access_runs_project_code`: on a project class, a read that
+   finds no plain attribute or method, a write through a property, `__setattr__`, `__delattr__`,
+   or a base heki does not know; on a library object, the access as a call of that attribute
+   under R3; on a value of unknown class, anything); a class statement; an import of a project
+   module; a `raise` of a class), and `Calls(span)` at the project calls no `SelfCall` stands
+   for (other receivers, the property getters a read of `self.<name>` runs) and at each step of
+   iterating what a project generator called at `span` returns, whose callees' summaries say
+   what they remove. A value built in the function as a builtin of its exact class (a literal,
+   a display, what a builtin returning one returns, an operator's result on such values, and a
+   merge of them, such as a loop's counter) runs no code of the project.
    `KeptFacts::removes_kept` (`EffectSummary::kept`) joins the same points of a function (a
-   `yield` excepted: its consumer is its caller) with what every callee removes. Each write of
+   `yield` excepted: its consumer is its caller) with what every callee removes, and
+   `FileSummary::kept_removals` the names under which the file's functions themselves remove a
+   value (also where the deletion may run other code): the lazy-setup filter asks whether any
+   function of the project does, and the language server checks again the files of the lazy
+   setup getters of a name whose removals change. Each write of
    the flow also records, under the same opt-in (`SelfAttrWrite::kept`), its literal key
    (`KeptWrite::key`) and, for an in-place change, the builtin list, dict, or set the attribute
    holds by its type and the method that changes it (`KeptWrite::change`).

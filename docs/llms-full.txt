@@ -4240,10 +4240,12 @@ not (a `def cache(fn)` of its own), and a name bound by neither counts by its sp
 
 ## What a report states
 
-An exact report states that whenever the method runs to its normal return on an instance of any
-class that runs it, that instance holds either no value of the cached property or the value the
-getter computed before the write, from the attribute the write rebinds or changes: the next read
-of the property returns a value computed from the attribute's earlier state.
+An exact report states that whenever the method runs on an instance of any class that runs it,
+and that instance holds a value of the cached property when the write runs, the getter computed
+that value from the attribute the write rebinds or changes, and the instance still holds it when
+the method returns normally: the next read of the property returns a value computed from the
+attribute's state before the write. An instance that holds no value when the write runs makes
+the claim hold vacuously, whatever a later read keeps.
 
 Its premises:
 
@@ -4274,7 +4276,12 @@ Its premises:
   kinds: a project call whose targets are every implementation it can run and remove nothing, and
   a call of a library the catalog covers that runs no project code by its `[[invokes]]` entry, or,
   without one, is handed no callable, no instance of a project class, and no value of unknown
-  type (R3). Established.
+  type (R3). Implicit calls count the same: no special method an instruction runs on an operand's
+  class (an operator, a comparison, `in`, a conversion or format, a subscript and its key, a key
+  a set or dict display hashes, a truth test, `with`) may be code of the project, no attribute
+  access may run a `__getattr__`, `__setattr__`, property, or other descriptor of the project
+  that heki does not resolve (an access on a library object counts as a call of that attribute),
+  and no class statement or import of a project module runs there. Established.
 
 Not part of the claim: whether the method runs after the property was first read. A write that
 runs only during two-phase setup makes the claim hold vacuously, so a setup step stays heuristic

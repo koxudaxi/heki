@@ -807,6 +807,7 @@ mod kept_values;
 mod sentinel_copies;
 mod stale_reads;
 
+pub use kept_values::{kept_removals_in, lazy_setup_files};
 pub(crate) use sentinel_copies::mut118;
 pub use sentinel_copies::{SentinelTestKey, deep_copy_files, sentinel_tests_in};
 

@@ -18,8 +18,10 @@ use heki_effect::{
     SelfAttrWrite,
 };
 use heki_ir::BlockId;
-use heki_ir::walk::{Answer, Budget, Facts, Sparse, fixpoint};
+use heki_ir::walk::{Budget, Facts, Sparse, fixpoint};
 use rustc_hash::FxHashMap;
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 
 /// The project callees of a method's call sites, by the call's position in its source.
 pub(super) type CallsBySpan<'i> = FxHashMap<Span, Vec<&'i FuncKey>>;
@@ -130,14 +132,47 @@ fn setup_step(
         })
 }
 
-/// Whether a function of the project invalidates the cached property `name` by its name, on
-/// its own instance or on another object.
+/// Whether a function of the project removes the value kept under `name` by its name, on its
+/// own instance or on another object (`FileSummary::kept_removals`). The language server
+/// checks again the files of the setup steps this reads when a file's removals change
+/// ([`lazy_setup_files`]).
 fn invalidated_anywhere(index: &ProjectIndex, name: &str) -> bool {
     index
         .files
         .values()
-        .flat_map(|f| f.local_functions.values())
-        .any(|s| invalidates(s, name) || matches!(s.removes_kept(), heki_effect::KeptRemoval::Named(names) if names.contains(name)))
+        .any(|f| f.kept_removals().any(|n| n == name))
+}
+
+/// The names under which the functions of `path` remove a kept value by name
+/// (`FileSummary::kept_removals`).
+pub fn kept_removals_in(index: &ProjectIndex, path: &Path) -> BTreeSet<String> {
+    index
+        .files
+        .get(path)
+        .into_iter()
+        .flat_map(|f| f.kept_removals())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The files of the cached-property getters named one of `names` that write a `self`
+/// attribute: the writers whose lazy-setup step reads whether a function of the project
+/// removes their value ([`setup_step`]).
+pub fn lazy_setup_files(index: &ProjectIndex, names: &BTreeSet<&str>) -> Vec<PathBuf> {
+    index
+        .files
+        .values()
+        .filter(|f| {
+            f.cache_flows.keys().any(|key| {
+                let name = key.qualname.rsplit('.').next().unwrap_or(&key.qualname);
+                names.contains(name)
+                    && f.local_functions
+                        .get(key)
+                        .is_some_and(|s| s.is_cached_property)
+            })
+        })
+        .map(|f| f.path.clone())
+        .collect()
 }
 
 /// Whether an instance of `class` may hold a value under the property's name `prop`: a class
@@ -153,9 +188,10 @@ fn may_hold(decls: &ProjectDecls, class: &str, prop: &str) -> bool {
 /// heki does not know comes before, decorated by a cached-property decorator the catalog lists
 /// as keeping the value in the instance `__dict__` (`KeptFacts::listed_cache`, R3; with one
 /// that keeps it in a slot on an instance without a `__dict__`, no project class along the MRO
-/// defines `__slots__`), the class has no metaclass heki does not know, and the getter reads
-/// `read` on every path on which it returns normally: the attribute with the written key, or as
-/// a whole.
+/// defines `__slots__`), and the getter reads `read` on every path on which it returns
+/// normally: the attribute with the written key, or as a whole. A metaclass heki does not know
+/// along the MRO, which may replace the property, fails [`plain_write`] for the class, which
+/// every class the claim covers passes too.
 fn cached_getter_reads(
     index: &ProjectIndex,
     decls: &ProjectDecls,
@@ -163,13 +199,10 @@ fn cached_getter_reads(
     prop: &str,
     read: &AttrKeyPath,
 ) -> bool {
-    if decls.has_custom_metaclass(class) {
-        return false;
-    }
-    let Some(getter) = decls.function_taken(class, prop) else {
-        return false;
-    };
-    let Some(s) = index.summary(&getter) else {
+    let Some(s) = decls
+        .function_taken(class, prop)
+        .and_then(|getter| index.summary(&getter))
+    else {
         return false;
     };
     let Some(listed) = s.listed_cache().filter(|_| s.is_cached_property) else {
@@ -209,26 +242,27 @@ fn plain_write(decls: &ProjectDecls, class: &str, attr: &str, w: &SelfAttrWrite)
 
 /// **Kept to the return** in one definition of a method, for the value kept under one name:
 /// the points that may remove or replace it, and per block whether some path from its start to
-/// a normal return passes one. Exception edges into handlers count (any instruction may raise
-/// into its block's handler); a path that leaves the method by an exception makes no claim.
+/// a normal return passes one. Exception edges into handlers count (any instruction may raise into its block's
+/// handler); a path that leaves the method by an exception makes no claim.
 pub(super) struct KeptAfterWrites<'f> {
     flow: &'f CacheFlow,
-    /// Per block, the instruction indices of the points that may remove the value.
+    /// Per block, the instruction indices of the points that may remove or replace the value
+    /// (the block's end is the index past its instructions).
     removals: Vec<Vec<u32>>,
-    /// Per block, whether some path from its start to a normal return passes such a point
-    /// (`None`: past the walk's bound, so nothing is established).
-    may_remove: Option<Vec<bool>>,
+    /// Per block, whether some path from its start to a normal return passes such a point.
+    may_remove: Vec<bool>,
     /// Per block, whether some path from its start reaches a normal return.
-    returns: Option<Vec<bool>>,
+    returns: Vec<bool>,
 }
 
 impl<'f> KeptAfterWrites<'f> {
     /// The fact for the value kept under `prop` in the instances of the method whose definition
     /// `flow` is and whose call sites are `calls`. The points are `del self.<prop>`, its removal
     /// from `self.__dict__` or a clearing of it, a store of `self.<prop>`, a point that may
-    /// remove it in any object ([`CacheEvent::MayRemove`], [`CacheEvent::MayRemoveAny`]), and a
-    /// project call any of whose targets removes it, invalidates it, or stores it, in its own
-    /// instance or in an object it is handed.
+    /// remove it in any object ([`CacheEvent::MayRemove`], [`CacheEvent::MayRemoveAny`]: code
+    /// of the project an operand's special method or an attribute access may run included),
+    /// and a project call any of whose targets removes it, invalidates it, or stores it, in its
+    /// own instance or in an object it is handed.
     pub(super) fn of(
         index: &ProjectIndex,
         calls: &CallsBySpan<'_>,
@@ -256,6 +290,8 @@ impl<'f> KeptAfterWrites<'f> {
                     | CacheEvent::MayRemove(name) => flow.name(name) == prop,
                     CacheEvent::ClearDict | CacheEvent::MayRemoveAny => true,
                     CacheEvent::SelfCall(span) | CacheEvent::Calls(span) => call_removes(span),
+                    // A read returns the value kept when the write ran; the claim says nothing
+                    // of an instance that held none then.
                     CacheEvent::LoadAttr(_) => false,
                 };
                 if removes {
@@ -268,9 +304,7 @@ impl<'f> KeptAfterWrites<'f> {
         }
         let preds = continued_from(flow);
         let returns = backward(flow, &preds, |b| flow.blocks[b].returns);
-        let may_remove = returns
-            .as_ref()
-            .and_then(|returns| backward(flow, &preds, |b| !removals[b].is_empty() && returns[b]));
+        let may_remove = backward(flow, &preds, |b| !removals[b].is_empty() && returns[b]);
         Self {
             flow,
             removals,
@@ -282,12 +316,9 @@ impl<'f> KeptAfterWrites<'f> {
     /// Whether no path from just after the write `w` to a normal return of the method passes a
     /// point that may remove the value.
     pub(super) fn kept_to_return(&self, w: &SelfAttrWrite) -> bool {
-        let (Some(may_remove), Some(returns)) = (&self.may_remove, &self.returns) else {
-            return false;
-        };
         let b = w.block.0 as usize;
-        let removed_here = returns[b] && self.removals[b].iter().any(|i| *i > w.index);
-        !removed_here && !onward(&self.flow.blocks[b]).any(|s| may_remove[s.0 as usize])
+        let removed_here = self.returns[b] && self.removals[b].iter().any(|i| *i > w.index);
+        !removed_here && !onward(&self.flow.blocks[b]).any(|s| self.may_remove[s.0 as usize])
     }
 }
 
@@ -311,12 +342,9 @@ fn continued_from(flow: &CacheFlow) -> Vec<Vec<usize>> {
 
 /// Per block, whether some path from its start reaches a block where `holds` (over normal and
 /// exception edges): a backward reach to a fixpoint, each block visited once, then once more
-/// for each of the blocks it continues to whose fact turns true.
-fn backward(
-    flow: &CacheFlow,
-    preds: &[Vec<usize>],
-    holds: impl Fn(usize) -> bool,
-) -> Option<Vec<bool>> {
+/// for each of the blocks it continues to whose fact turns true. A fact turns true once, so the
+/// visits stay within the bound; past it every block would count as reaching one.
+fn backward(flow: &CacheFlow, preds: &[Vec<usize>], holds: impl Fn(usize) -> bool) -> Vec<bool> {
     let readers = |b: usize, out: &mut Vec<usize>| out.extend(&preds[b]);
     let out_degree = flow
         .blocks
@@ -338,14 +366,13 @@ fn backward(
             on.then_some(true)
         },
     );
-    match facts {
-        Answer::Known(facts) => Some(
+    facts
+        .map(|facts| {
             facts
                 .into_vec()
                 .into_iter()
                 .map(|f| f == Some(true))
-                .collect(),
-        ),
-        Answer::Open => None,
-    }
+                .collect()
+        })
+        .open_means(vec![true; flow.blocks.len()])
 }

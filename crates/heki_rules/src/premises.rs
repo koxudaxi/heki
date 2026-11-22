@@ -750,9 +750,11 @@ pub const PLAIN_WRITE: Premise = Premise {
 
 pub const KEPT_TO_THE_RETURN: Premise = Premise {
     name: "Kept to the return",
-    states: "no point between the write and the method's normal return may remove or replace the kept value: no `del`, store, or `__dict__` removal of it, no clearing or replacing of a `__dict__`, no `await` or `yield`, no call whose targets may do so, and every call on those paths is a project call whose targets are every implementation it can run or a call of a library the catalog covers handed no callable, no instance of a project class, and no value of unknown type (R3); exception edges into handlers included",
+    states: "no point between the write and the method's normal return may remove or replace the kept value: no `del`, store, or `__dict__` removal of it, no clearing or replacing of a `__dict__`, no `await` or `yield`, no call whose targets may do so, and every call on those paths is a project call whose targets are every implementation it can run or a call of a library the catalog covers handed no callable, no instance of a project class, and no value of unknown type (R3); no special method an instruction runs on an operand's class (an operator, a comparison, `in`, a conversion or format, a subscript and its key, a hashed display key, a truth test, `with`) and no attribute access (`__getattr__`, `__setattr__`, a property heki does not resolve, another descriptor) may be code of the project, and no class statement or import of a project module runs there; exception edges into handlers included",
     decided_in: &[
         "heki_effect::summary::Extractor::kept_value_points",
+        "heki_ir::IrFunction::special_methods",
+        "heki_effect::invokes::attribute_access_runs_project_code",
         "heki_effect::cache_flow::cache_flow",
         "heki_rules::mut_rules::kept_values::KeptAfterWrites::kept_to_return",
     ],
