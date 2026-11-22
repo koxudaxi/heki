@@ -2783,8 +2783,8 @@ fn path_facts_decide_each_region_once() {
 }
 
 /// Past the budget of the path facts (a loop dispatching on hundreds of `isinstance` tests, each
-/// ending in `continue`), whether a length test is on every path to a later loop is decided by
-/// the dominator tree of every edge: the cap still holds.
+/// ending in `continue`), whether a length test is on every path to a later loop (past a branch
+/// between them) is decided by the dominator tree of every edge: the cap still holds.
 #[test]
 fn length_caps_past_the_path_facts_budget_read_the_dominator_tree() {
     let mut lines = vec![
@@ -2801,6 +2801,8 @@ fn length_caps_past_the_path_facts_budget_read_the_dominator_tree() {
             "        db.one(cur)",
             "    if len(rows) > 8:",
             "        raise ValueError(rows)",
+            "    if db.ready():",
+            "        db.one(None)",
             "    for row in rows:",
             "        db.one(row)",
         ]
