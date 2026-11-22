@@ -425,6 +425,21 @@ def strings(names: list[str]) -> None:
 def untyped(models) -> None:
     for model in models:
         model.fields = []
+
+
+def extended(source: Mapping[str, Model]) -> None:
+    picked = []
+    picked += [source[key] for key in source]
+    for model in picked:
+        model.fields = []
+
+
+def extended_then_appended(source: Mapping[str, Model]) -> None:
+    picked = []
+    picked += []
+    picked.append(source["a"])
+    for model in picked:
+        model.fields = []
 "#;
 
 const SHELF: &str = r#"from __future__ import annotations
@@ -746,6 +761,8 @@ fn items_of_wrapping_builtins_displays_scopes_and_other_modules() {
             "nodes",
             "mixed",
             "shifted",
+            "extended",
+            "extended_then_appended",
         ] {
             assert!(
                 found.contains(name),

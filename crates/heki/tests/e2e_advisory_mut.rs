@@ -305,6 +305,75 @@ def choose(a: Model, b: Model, flag):
     );
 }
 
+const IN_PLACE: &str = r#"class Field:
+    def __init__(self) -> None:
+        self.extras: dict[str, object] = {}
+        self.items: list[list[int]] = []
+        self.tags: set[str] = set()
+        self.count: int = 0
+
+
+def merge(f: Field) -> None:
+    extras = f.extras
+    extras |= {}
+    extras["init"] = 1
+
+
+def extend(f: Field) -> None:
+    items = f.items
+    items += []
+    items[0].append(1)
+
+
+def narrow(f: Field) -> None:
+    tags = f.tags
+    tags -= set()
+    tags &= {"a"}
+    tags ^= set()
+    tags.add("b")
+
+
+def union(f: Field) -> None:
+    extras = f.extras
+    extras = extras | {}
+    extras["init"] = 1
+
+
+def bump(f: Field) -> int:
+    count = f.count
+    count += 1
+    return count
+"#;
+
+#[test]
+fn mut201_keeps_the_alias_an_in_place_operator_changes() {
+    let p = Project::new("mut201_in_place");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[[tool.heki.write-owners]]\nname = \"fields\"\ntargets = ['Field.extras[\"init\"]', \"Field.items\", \"Field.tags\", \"Field.count\"]\n",
+    )
+    .write("app.py", IN_PLACE);
+    let diags = diagnostics(&p, &["--select", "MUT201"]);
+    let a = "app.py";
+    // An augmented assignment on a built-in container changes it in place and gives the
+    // container itself, so the name still holds the guarded container: the entry written after
+    // `|=`, the item changed after `+=`, and every set operator after the first are writes of
+    // it. A binary operator builds a new container, and `+=` on an int binds a new int.
+    assert_eq!(
+        found(&diags),
+        vec![
+            d(a, 12, "MUT201", "merge"),
+            d(a, 17, "MUT201", "extend"),
+            d(a, 18, "MUT201", "extend"),
+            d(a, 23, "MUT201", "narrow"),
+            d(a, 24, "MUT201", "narrow"),
+            d(a, 25, "MUT201", "narrow"),
+            d(a, 26, "MUT201", "narrow"),
+        ],
+        "{diags:#?}"
+    );
+}
+
 const BOTH: &str = r#"class Model:
     def __init__(self, other: "Model") -> None:
         self.items: list[int] = []
