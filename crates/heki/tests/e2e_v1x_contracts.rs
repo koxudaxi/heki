@@ -208,7 +208,7 @@ fn mut201_exempt_methods_messages_and_class_family_initializers() {
     );
     assert_eq!(
         diags[0]["message"],
-        "`DataModel.reset` writes `DataModel.fields` (direct_attr) outside the write owners of `generation-store`"
+        "`DataModel.reset` writes `DataModel.fields` (by attribute) outside the write owners of `generation-store`"
     );
     assert_eq!(
         diags[1]["message"],
@@ -218,7 +218,7 @@ fn mut201_exempt_methods_messages_and_class_family_initializers() {
         diags[3]["message"]
             .as_str()
             .unwrap()
-            .contains("(direct_attr) via `model.Other._copy_into`"),
+            .contains("(by attribute) via `model.Other._copy_into`"),
         "{diags:#?}"
     );
     assert_eq!(
@@ -400,7 +400,7 @@ fn mut203_reads_aliases_getattr_dict_and_private_delegation() {
     );
     assert_eq!(
         diags[0]["message"],
-        "`direct` reads `Reference.children` (direct_attr) outside the read owners of `reference-children`"
+        "`direct` reads `Reference.children` (by attribute) outside the read owners of `reference-children`"
     );
     let kinds: Vec<&str> = messages(&diags)
         .iter()
@@ -409,19 +409,19 @@ fn mut203_reads_aliases_getattr_dict_and_private_delegation() {
     assert_eq!(
         kinds[..7],
         [
-            "direct_attr",
-            "direct_attr",
-            "getattr",
-            "getattr",
-            "dict_direct",
-            "dict_direct",
-            "direct_attr"
+            "by attribute",
+            "by attribute",
+            "with `getattr`",
+            "with `getattr`",
+            "as a `__dict__` item",
+            "as a `__dict__` item",
+            "by attribute"
         ]
     );
     let deep = &diags[8];
     assert_eq!(
         deep["message"],
-        "`build` reads `Reference.children` (direct_attr) via `pkg.app._kids` outside the read owners of `reference-children`"
+        "`build` reads `Reference.children` (by attribute) via `pkg.app._kids` outside the read owners of `reference-children`"
     );
     assert_eq!(
         related(deep),
@@ -771,18 +771,18 @@ fn eff201_writes_targets_and_mutates_params() {
     );
     assert_eq!(
         msgs[1],
-        format!("`Renderer.direct` writes `DataModel.fields` (direct_attr){forbids}")
+        format!("`Renderer.direct` writes `DataModel.fields` (by attribute){forbids}")
     );
     assert_eq!(
         msgs[3],
         format!(
-            "`Renderer.indirect` writes `DataModel.fields` (indirect_helper via `pkg.model._push`){forbids}"
+            "`Renderer.indirect` writes `DataModel.fields` (through a helper via `pkg.model._push`){forbids}"
         )
     );
     assert_eq!(
         msgs[5],
         format!(
-            "`Renderer.deep` writes `DataModel.fields` (container_mut via `pkg.model.touch`){forbids}"
+            "`Renderer.deep` writes `DataModel.fields` (in place via `pkg.model.touch`){forbids}"
         )
     );
     assert_eq!(
@@ -1304,7 +1304,7 @@ fn eff201_reports_a_write_a_private_helper_hands_over_once() {
         ],
         "{diags:#?}"
     );
-    assert!(messages(&diags)[1].contains("(direct_attr via `pkg.render_mod._reset`)"));
+    assert!(messages(&diags)[1].contains("(by attribute via `pkg.render_mod._reset`)"));
 }
 
 /// A scope function's work on a worker thread is not its own (the sleep there blocks no scope),
