@@ -1075,20 +1075,22 @@ fn module_constants_class_attributes_and_elif_comparisons() {
         .write("pkg/views.py", CLASS_ATTRIBUTES)
         .write("pkg/pairs.py", TWO_KEYS);
     let diags = diagnostics(&p, &["--select", "OPT112,OPT113"]);
-    // A star import rebinds only the public names bound before it; a class attribute read
-    // through `cls` is small when the class family only assigns small displays; an `elif`
-    // comparison only sees the pairs the `if` before it rejected (a join filtered by
-    // `continue` is still one).
+    // A star import may rebind every name bound before it (its module's `__all__` may list a
+    // `_private` one); a class attribute read through `cls` is small when the class family only
+    // assigns small displays; an `elif` comparison only sees the pairs the `if` before it
+    // rejected (a join filtered by `continue` is still one).
     assert_eq!(
         reported(&diags),
         pairs(&[
             ("guarded", "OPT113"),
             ("ops", "OPT112"),
+            ("ops", "OPT112"),
             ("Grown.fields", "OPT112"),
         ]),
         "{diags:#?}"
     );
-    assert_eq!(diags[1]["target"], "PUBLIC");
+    assert_eq!(diags[1]["target"], "_OPS");
+    assert_eq!(diags[2]["target"], "PUBLIC");
 }
 
 // ============================================================== the IR facts themselves
@@ -1103,7 +1105,7 @@ fn loop_trip_counts_and_caps_the_code_fixes() {
     // `STEP = LIMIT // 2` is not folded; `gone` is deleted.
     assert_eq!(
         ir["constants"],
-        serde_json::json!({"ints": {"LIMIT": 8, "WIDTH": 1}, "dynamic": false})
+        serde_json::json!({"ints": {"LIMIT": 8, "WIDTH": 1}, "bools": {"DEBUG": false}, "dynamic": false})
     );
     let small = |n: u64| serde_json::json!({ "const_small": n });
     let unbounded = serde_json::json!("unbounded");
@@ -1187,6 +1189,11 @@ fn loop_trip_counts_and_caps_the_code_fixes() {
         ),
         ("paced_over_items", unbounded.clone()),
         ("sleeps_on_one_path", unbounded.clone()),
+        // A path back the module's constants rule out is no path back.
+        (
+            "paced_past_a_decided_branch",
+            serde_json::json!("daemon_polling"),
+        ),
         ("sleeps_after_a_raise", unbounded.clone()),
         ("zero_sleep", unbounded.clone()),
         ("waits_for_tasks", unbounded.clone()),
