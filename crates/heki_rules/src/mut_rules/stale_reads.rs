@@ -132,6 +132,7 @@ impl<'a> CachedReads<'a> {
                     .flat_map(move |(reader, s)| {
                         s.typed_field_read_sites
                             .iter()
+                            .filter(|site| !site.class_object)
                             .map(move |site| (unit, reader, site))
                     })
             });

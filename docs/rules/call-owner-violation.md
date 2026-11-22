@@ -22,8 +22,12 @@ the allowed callers and resolves to a target:
   `replace(ref)`) or `getattr(data_type, "replace_reference")(...)` with a constant name;
 - a module-level function (`pkg.util.reset_cache()`);
 - a class: constructing it or a subclass (`FinalFacts(...)`, `pkg.facts.FinalFacts(...)`,
-  `cls(...)` in a class method), also for a dataclass or another class without an `__init__` of
-  its own; with `subclasses = false`, constructing exactly the class.
+  `cls(...)` in a class method, a value typed `type[FinalFacts]` or `typing.Type[FinalFacts]`,
+  `type(facts)(...)`), also for a dataclass or another class without an `__init__` of its own;
+  with `subclasses = false`, constructing exactly the class;
+- what a property returns, called (`self.data_type(is_dict=True)` with a property `data_type`
+  returning `type[DataType]` constructs `DataType`): the value the getter's return annotation
+  names is called, and the getter runs as reading the property does.
 
 A target ending in an argument list names only the calls passing those constants:
 `DataType(is_dict=True)` is `DataType(is_dict=True)`, not `DataType(is_list=True)`, and
@@ -126,8 +130,8 @@ that it hands one on; with `references = "calls-and-bases"`, also that it subcla
 Its premises:
 
 - **Target**: the receiver or the callee is an instance of a class the contract names, or of a
-  subclass, by construction or annotation (assumption R2). Open: an alias bound on one path is
-  enough.
+  subclass, or the class object of one, by construction or annotation (assumption R2). Open: an
+  alias bound on one path is enough.
 - **Outside the owners**: the function is not in the allowed modules and classes, nor runs only
   inside allowed contexts (with `attribution = "lexical"`: the function holding the call is not
   allowed). Established from the contract.

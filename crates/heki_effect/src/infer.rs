@@ -1059,15 +1059,11 @@ impl<'e, 'a> Engine<'e, 'a> {
             .set(i, fact);
     }
 
-    /// What `type(value)` returns for a value of type `t`: a class object that is the class of
-    /// the instance or a subclass of it, as `cls` in a class method is. Unknown for a union, a
-    /// protocol (its implementations need not be subclasses), and a class outside the project.
-    /// (`value.__class__` is not this: a class or a subclass may rebind it, as proxies do.)
+    /// What `type(value)` returns for a value of type `t`: the class object of the instance's
+    /// class ([`ProjectDecls::class_object`]); unknown for a union. (`value.__class__` is not
+    /// this: a class or a subclass may rebind it, as proxies do.)
     fn class_of(&self, t: &Ty) -> Option<Ty> {
-        let project = self.cx.project;
-        let o = t.obj()?;
-        (project.is_project_class(&o.class) && project.protocol(&o.class).is_none())
-            .then(|| Ty::Class(o.class.clone()))
+        self.cx.project.class_object(&t.obj()?.class)
     }
 
     /// [`Self::need`] without the `isinstance` checks guarding the current block.
@@ -1766,11 +1762,14 @@ impl<'e, 'a> Engine<'e, 'a> {
         let cx = self.cx;
         let (class, skip_self, self_ty) = self.static_receiver(recv)?;
         if let Some(key) = cx.project.mro_definition(class, method, skip_self) {
-            // Calling what a property returns is calling its value, not the getter.
-            let decl = cx
-                .project
-                .function_decl(&key)
-                .filter(|d| d.property_type.is_none())?;
+            let decl = cx.project.function_decl(&key)?;
+            // Calling what a property returns is calling its value, not the getter; a class
+            // object holds the property object itself, which raises when called.
+            if decl.reads_as_property() {
+                let on_instance = matches!(recv, Ty::Inst(_) | Ty::Super(_));
+                let value = on_instance.then(|| self.member(recv, method)).flatten();
+                return value.and_then(|v| self.called(&v, call));
+            }
             return decl
                 .return_type
                 .as_ref()

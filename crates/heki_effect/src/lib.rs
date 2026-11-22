@@ -500,7 +500,8 @@ pub enum Access {
 /// summary keeps exactly its own reads.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct TypedFieldReadSite {
-    /// Fully qualified class name of the read object (`pkg.model.Reference`).
+    /// Fully qualified class name of the read object (`pkg.model.Reference`), or of the class a
+    /// class object read through is (`Reference.KIND`, `cls.KIND`).
     pub class_qualname: String,
     pub attr: String,
     pub kind: ReadKind,
@@ -512,6 +513,10 @@ pub struct TypedFieldReadSite {
     /// ([`Self::counts_for_contracts`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub through_protocol: bool,
+    /// The read is through a class object: it reads the class attribute, never a value an
+    /// instance holds (a `cached_property` gives its descriptor there).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub class_object: bool,
 }
 
 impl TypedFieldReadSite {

@@ -1205,7 +1205,9 @@ unresolved = "report"
 ```
 
 The read side of `write-owners`. A read is `ref.children`, a read through a local alias,
-`getattr(ref, "children")`, or `ref.__dict__["children"]`.
+`getattr(ref, "children")`, or `ref.__dict__["children"]`, also through a class object, which
+reads the class attribute (`Reference.children`, `cls.children`, a value typed
+`type[Reference]`).
 
 A read, or a call (`call-owners`, and an effect boundary's `call-targets` and
 `allowed-callees`), through a value typed with a project protocol that declares the member is
@@ -4070,8 +4072,12 @@ the allowed callers and resolves to a target:
   `replace(ref)`) or `getattr(data_type, "replace_reference")(...)` with a constant name;
 - a module-level function (`pkg.util.reset_cache()`);
 - a class: constructing it or a subclass (`FinalFacts(...)`, `pkg.facts.FinalFacts(...)`,
-  `cls(...)` in a class method), also for a dataclass or another class without an `__init__` of
-  its own; with `subclasses = false`, constructing exactly the class.
+  `cls(...)` in a class method, a value typed `type[FinalFacts]` or `typing.Type[FinalFacts]`,
+  `type(facts)(...)`), also for a dataclass or another class without an `__init__` of its own;
+  with `subclasses = false`, constructing exactly the class;
+- what a property returns, called (`self.data_type(is_dict=True)` with a property `data_type`
+  returning `type[DataType]` constructs `DataType`): the value the getter's return annotation
+  names is called, and the getter runs as reading the property does.
 
 A target ending in an argument list names only the calls passing those constants:
 `DataType(is_dict=True)` is `DataType(is_dict=True)`, not `DataType(is_list=True)`, and
@@ -4174,8 +4180,8 @@ that it hands one on; with `references = "calls-and-bases"`, also that it subcla
 Its premises:
 
 - **Target**: the receiver or the callee is an instance of a class the contract names, or of a
-  subclass, by construction or annotation (assumption R2). Open: an alias bound on one path is
-  enough.
+  subclass, or the class object of one, by construction or annotation (assumption R2). Open: an
+  alias bound on one path is enough.
 - **Outside the owners**: the function is not in the allowed modules and classes, nor runs only
   inside allowed contexts (with `attribution = "lexical"`: the function holding the call is not
   allowed). Established from the contract.
@@ -6634,6 +6640,9 @@ allowed reader functions: the read side of `MUT201`. A read is reported when it 
 the allowed readers:
 
 - directly (`ref.children`), also on `self` and through local aliases;
+- through a class object, which reads the class attribute: the class itself
+  (`Reference.children`), `cls` in a class method, `type(ref)`, or a value typed
+  `type[Reference]` / `typing.Type[Reference]`;
 - through `getattr(ref, "children"[, default])` or `object.__getattribute__(ref, "children")`
   with a constant name: a string literal or a string constant, as for `MUT201`;
 - through `ref.__dict__["children"]` or `ref.__dict__.get("children")`, also with a string
@@ -6693,8 +6702,9 @@ read owners, directly, through an alias, `getattr`, or `__dict__`, or through th
 
 Its premises:
 
-- **Target**: the object is an instance of a class the contract names, or of a subclass, by
-  construction or annotation (assumption R2). Open: an alias bound on one path is enough.
+- **Target**: the object is an instance of a class the contract names, or of a subclass, or the
+  class object of one, by construction or annotation (assumption R2). Open: an alias bound on
+  one path is enough.
 - **Outside the owners**: the function is not in the allowed modules and classes, nor runs only
   inside allowed contexts (with `attribution = "lexical"`: the function holding the read is not
   allowed). Established from the contract.

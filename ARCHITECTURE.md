@@ -304,14 +304,17 @@ out by loops, subscripts, unpacking, dict views, and the builtins that wrap iter
 getters' and methods' return annotations along the MRO, as a type checker reads them; `Self`;
 copies; `functools.partial`; `typing.cast`; unions of up to three classes; `isinstance`
 narrowing; the closure cells of enclosing functions, which hold every value the function binds
-to them unless a nested scope rebinds them; `type(obj)`, a class object that may be a subclass
-as `cls` is; and the structural implementations of project `Protocol`s (up to eight).
+to them unless a nested scope rebinds them; `type(obj)` and a `type[C]` / `typing.Type[C]`
+annotation, a class object that may be a subclass as `cls` is; and the structural
+implementations of project `Protocol`s (up to eight).
 
 Reading a property is a call: `obj.attr` on an instance of a project class whose `attr` is a
 getter-only `@property` / `cached_property` (found along the MRO and in overriding subclasses, at
 most 8) is a call site of the getter that binds the receiver, at the read. A property with a
 setter or deleter is not modeled, because the setter shares the getter's qualname and summary.
-`FunctionDecl.is_property` is a declaration fact, so `ProjectIndex` stays IR-free.
+`FunctionDecl.is_property` is a declaration fact, so `ProjectIndex` stays IR-free. Calling a
+property's value, `obj.attr(...)`, is that read and a call of what the getter returns, typed by
+its return annotation (`FunctionDecl.property_type`, also for a property with a setter).
 
 #### One `EffectSummary`, propagated bottom-up over Tarjan SCCs
 For the project's functions, a worklist fixpoint in reverse topological order of the call

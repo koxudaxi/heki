@@ -299,9 +299,14 @@ A method called on an instance is the definition the class's MRO (Python's C3 li
 its project bases) finds first, plus the overrides of its project subclasses (Priority 4). A
 named class is exactly that class: constructing it runs the `__init__` its MRO finds, and
 `Base.method(obj)` the `method` it finds; `cls` in a class method may be any subclass, so
-`cls()` and `cls.method()` dispatch like a call on an instance, and so is `type(obj)` of an
+`cls()` and `cls.method()` dispatch like a call on an instance, and so do `type(obj)` of an
 instance of a project class that is not a protocol (`obj.__class__` is not: a class or a
-subclass may rebind it). A method's calls on its own
+subclass may rebind it) and a value annotated `type[C]` or `typing.Type[C]` (`Ty::Class`; the
+class object of a protocol, of `Any`, or of one of several classes is of no known class). A call
+of a property's value (`obj.prop(...)`, the getter found first along the MRO, with or without a
+setter) runs the getter as reading `obj.prop` does and calls the value it gives, typed by the
+getter's return annotation (`self.data_type(is_dict=True)` of a property returning
+`type[DataType]` constructs `DataType`). A method's calls on its own
 `self` run the overrides of every subclass, so a mixin's summary holds the effects of every
 class sharing it; an execution effect reached only through the override of a subclass records
 that class (`EffectSummary::receiver_effects`), and a call on a receiver of known class runs it
@@ -403,7 +408,8 @@ EffectSummary(f) = {
     typed_params:             Bitset,                      // parameters the function types itself (its sites
                                                            // cover their changes)
     typed_field_read_sites:   Set<TypedFieldReadSite>,     // own reads of (class, attr): attribute, getattr,
-                                                           // __dict__; never propagated (MUT203)
+                                                           // __dict__, through an instance or a class
+                                                           // object; never propagated (MUT203)
     returns_protected:        Option<ProtectedReturn>,     // may return a protected value: producer, depth,
                                                            // call chain (MUT202)
     must_invalidate:          Bitset,                      // invalidation contracts announced on every
@@ -812,7 +818,8 @@ which module imports which.
 
 #### `MUT111`: readers of a stale `@cached_property` (opt-in)
 1. Reads: the `TypedFieldReadSite`s of each checked function's own body (`self.p`, `obj.p`,
-   `getattr(obj, "p")`, `obj.__dict__["p"]` / `.get("p")`), whose class `K` heki knows.
+   `getattr(obj, "p")`, `obj.__dict__["p"]` / `.get("p")`), whose class `K` heki knows; a read
+   through a class object gives the property's descriptor, not a cached value, and is none.
 2. For `K` and each project subclass `X` of it, the getter an instance of `X` runs for `p` (the
    first definition along its MRO); a `@cached_property` getter is a candidate.
 3. Its stale writes are `MUT101`'s (whatever is selected, suppressions included). A write by `m`

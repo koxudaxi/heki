@@ -268,7 +268,9 @@ unresolved = "report"
 ```
 
 The read side of `write-owners`. A read is `ref.children`, a read through a local alias,
-`getattr(ref, "children")`, or `ref.__dict__["children"]`.
+`getattr(ref, "children")`, or `ref.__dict__["children"]`, also through a class object, which
+reads the class attribute (`Reference.children`, `cls.children`, a value typed
+`type[Reference]`).
 
 A read, or a call (`call-owners`, and an effect boundary's `call-targets` and
 `allowed-callees`), through a value typed with a project protocol that declares the member is
