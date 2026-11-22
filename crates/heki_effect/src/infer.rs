@@ -570,7 +570,7 @@ struct Seed {
     cells: FxHashMap<String, Fact>,
 }
 
-impl TypeCtx<'_> {
+impl<'a> TypeCtx<'a> {
     /// The types of `f`'s variables.
     pub(crate) fn infer_types(&self, f: &IrFunction) -> Rc<Inferred> {
         if let Some(done) = self.scopes.enclosing.borrow().get(&f.id) {
@@ -626,7 +626,11 @@ impl TypeCtx<'_> {
 
     /// The function enclosing scope `f` whose parameter the variable `name` `f` reads from it is
     /// on every path, and that parameter.
-    pub(crate) fn captured_param(&self, f: &IrFunction, name: &str) -> Option<(&IrFunction, u8)> {
+    pub(crate) fn captured_param(
+        &self,
+        f: &IrFunction,
+        name: &str,
+    ) -> Option<(&'a IrFunction, u8)> {
         self.nesting().captured_param(self.ir(), f, name)
     }
 

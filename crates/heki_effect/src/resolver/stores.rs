@@ -940,21 +940,7 @@ fn insts(f: &IrFunction) -> impl Iterator<Item = &Inst> {
 /// instance (before their types are inferred): those with a global or attribute store, a load
 /// of a namespace, or a call of `__setattr__` or of what `cx` may type as `setattr`,
 /// `object.__setattr__`, or `vars`.
-fn storing_functions<'f>(input: &'f ModuleInput<'_>, cx: &TypeCtx<'_>) -> Vec<StoringFn<'f>> {
-    // Each method's class and the name of its `self`, for the functions nested in it.
-    let methods: FxHashMap<&str, (&str, &str)> = input
-        .ir
-        .functions
-        .iter()
-        .filter(|f| is_summarized_function(f) && !f.has_decorator(&["staticmethod", "classmethod"]))
-        .filter_map(|f| {
-            let owner = f.owner_class_qualname.as_deref()?;
-            Some((
-                f.qualname.as_str(),
-                (owner, f.params.first()?.name.as_str()),
-            ))
-        })
-        .collect();
+fn storing_functions<'f>(input: &'f ModuleInput<'_>, cx: &TypeCtx<'f>) -> Vec<StoringFn<'f>> {
     // Whether a module-level name may hold one of `STORE_BUILTINS`, by name.
     let named: RefCell<FxHashMap<&str, bool>> = RefCell::default();
     let names_builtin = |name: &'f str| {
@@ -975,9 +961,7 @@ fn storing_functions<'f>(input: &'f ModuleInput<'_>, cx: &TypeCtx<'_>) -> Vec<St
         if !insts(f).any(|inst| calls.may_store(&inst.kind)) {
             continue;
         }
-        let selfs = is_summarized_function(f)
-            .then(|| self_of(f, &methods))
-            .flatten();
+        let selfs = is_summarized_function(f).then(|| self_of(cx, f)).flatten();
         let method = selfs.is_some() && f.owner_class_qualname.is_some();
         out.push(StoringFn {
             f,
@@ -1074,31 +1058,39 @@ const STORE_BUILTINS: &[&str] = &[
 ];
 
 /// The class whose instance `f` stores into as `self`, and the variables holding it: a method's
-/// first parameter, or in a function nested in a method the closure cell of that parameter
-/// (`f` binding no name of its own like it), each with their copies.
-fn self_of<'f>(
-    f: &'f IrFunction,
-    methods: &FxHashMap<&str, (&'f str, &'f str)>,
-) -> Option<(&'f str, FxHashSet<VarId>)> {
+/// first parameter, or in a scope nested in methods the closure cell of the first parameter of
+/// the innermost one whose `self` it reads ([`TypeCtx::captured_param`]), each with their copies.
+fn self_of<'f>(cx: &TypeCtx<'f>, f: &'f IrFunction) -> Option<(&'f str, FxHashSet<VarId>)> {
     if f.owner_class_qualname.is_some() {
-        let (owner, _) = methods.get(f.qualname.as_str())?;
-        return Some((owner, self_aliases(f, f.params.first()?.var)));
+        return Some((self_class(f)?, self_aliases(f, f.params.first()?.var)));
     }
-    let mut enclosing = f.qualname.as_str();
-    let (owner, name) = loop {
-        enclosing = enclosing.rsplit_once(".<locals>.")?.0;
-        if let Some(found) = methods.get(enclosing) {
-            break *found;
-        }
-    };
-    if f.params.iter().any(|p| p.name == name) {
-        return None;
-    }
-    let cells = insts(f).filter_map(|inst| match &inst.kind {
-        InstKind::LoadDeref { dst, name: n } if n == name => Some(*dst),
-        _ => None,
-    });
-    Some((owner, aliases_of(f, cells)))
+    let reads: Vec<(&IrFunction, VarId)> = insts(f)
+        .filter_map(|inst| match &inst.kind {
+            InstKind::LoadDeref { dst, name } => match cx.captured_param(f, name)? {
+                (method, 0) if self_class(method).is_some() => Some((method, *dst)),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    // The methods enclosing `f` enclose each other: the innermost has the longest qualname.
+    let (method, _) = *reads.iter().max_by_key(|(m, _)| m.qualname.len())?;
+    let cells = reads
+        .iter()
+        .filter(|(m, _)| m.id == method.id)
+        .map(|(_, v)| *v);
+    Some((self_class(method)?, aliases_of(f, cells)))
+}
+
+/// The class of a method called with its instance as the first parameter (no `staticmethod`
+/// or `classmethod`).
+fn self_class(f: &IrFunction) -> Option<&str> {
+    let summarized_method = is_summarized_function(f)
+        && !f.params.is_empty()
+        && !f.has_decorator(&["staticmethod", "classmethod"]);
+    f.owner_class_qualname
+        .as_deref()
+        .filter(|_| summarized_method)
 }
 
 /// What a receiver holds, for the stores through it.

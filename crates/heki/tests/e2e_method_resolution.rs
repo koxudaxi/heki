@@ -1394,7 +1394,8 @@ fn a_global_has_the_type_every_store_of_it_binds() {
 
 /// An instance attribute `__init__` binds has the type every store into an instance agrees
 /// on: of the class's other methods, of a subclass's, through `setattr` or the instance's
-/// namespace, and of a function nested in a method through its closure cell. A store of the
+/// namespace, and of a function nested in a method through its closure cell (into what the cell
+/// holds when the method rebinds `self`). A store of the
 /// same class, of `None`, of a value computed from the attribute that keeps its type, or one
 /// that only `__init__` makes keeps it, and so does an annotation; a namespace written under a
 /// key naming another attribute does too.
@@ -1522,6 +1523,23 @@ class Callback:
 
     async def handle(self) -> None:
         self.client.get("https://example.com")
+
+
+class Lent:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")
+
+
+class Lender:
+    def lend(self, other: Lent) -> None:
+        def swap() -> None:
+            self.client = httpx.AsyncClient()
+
+        self = other
+        swap()
 
 
 class KeyedNamespace:
