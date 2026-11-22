@@ -1135,7 +1135,7 @@ Contracts declare what no type can say. Each kind is an array of tables with its
   invalid glob, a name with more than one colon or an empty module or qualified name, call
   targets whose globs are too many to match together (tens of thousands of complex ones), an
   argument list heki cannot read, or an unknown value of `forbid`, `fresh-objects`, `unresolved`,
-  `references`, or `attribution`.
+  `references`, `attribution`, or `unlisted-dict-keys`.
 - With `unresolved = "report"`, a contract also reports the accesses it cannot tie to a class,
   each under its own rule (`MUT205` writes, `MUT206` reads, `MUT207` calls): an attribute or
   method named like a target, accessed on an object of unknown class (an unannotated parameter,
@@ -1170,6 +1170,7 @@ unresolved = "report"
 | `fresh-objects` | `"allow"` | `"allow"` or `"report"`: whether a write that constructs the object it writes is reported. |
 | `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the writes the contract cannot tie to a class are reported under [`MUT205`](https://heki.koxudaxi.dev/rules/unresolved-guarded-write/). |
 | `attribution` | `"call-graph"` | `"call-graph"` or `"lexical"`: which function a write is judged in. See [How contracts report](https://heki.koxudaxi.dev/configuration/#how-contracts-report). |
+| `unlisted-dict-keys` | `"ignore"` | `"ignore"` or `"report"`: whether a `__dict__` key of a target's class that no target names is reported when it is written. |
 
 A container entry (`Class.attr["key"]`):
 
@@ -1188,6 +1189,15 @@ With `fresh-objects = "allow"`, a write is no violation when it constructs the o
   write.
 
 A shallow copy's containers are the original's: only rebinding its attributes constructs it.
+
+With `unlisted-dict-keys = "report"`, `MUT201` also reports a constant key written through the
+namespace of an object of a class a target covers (`field.__dict__[KEY] = v`,
+`field.__dict__.setdefault("_cache", v)`, `del vars(field)["k"]`) when no target covering that
+class names the key, so a new cache key needs a target first. A target names the keys its
+attribute pattern matches (`Field._*` names `_cache`), and an entry target names its container.
+The contract's allowance applies as to a target write. A key computed at run time has no name to
+check (`MUT205`, with `unresolved = "report"`), and neither has a write in a helper that does not
+type the object.
 
 With `unresolved = "report"`, `MUT205` reports:
 
@@ -7749,7 +7759,14 @@ allowed writers:
   only hands the value on to an allowed writer or an exempt method writes inside the owner.
 
 A target names a class and an attribute; it covers the class's subclasses too (the target's
-class family). A target can also name one entry of the container an attribute holds,
+class family). With `unlisted-dict-keys = "report"`, a constant key written through the
+namespace of an object of a class a target covers (`field.__dict__["_cache"] = v`,
+`vars(field).setdefault(KEY, v)`, `del field.__dict__[KEY]`) is reported too when no target
+covering that class names it (`writes `pkg.model.Field._cache` (dict_direct), a `__dict__` key
+no target names`), so a new key needs a target first. A target names the keys its attribute
+pattern matches, and an entry target names its container. A computed key, a plain attribute
+store (`field._cache = v`, `setattr`), and a write in a helper that does not see the object's
+class are not such writes. A target can also name one entry of the container an attribute holds,
 `Class.attr["key"]`: it matches the writes of that key (`field.extras["init"] = v`,
 `field.extras[INIT]` with a string constant, `field.extras.pop("init")`,
 `del field.extras["init"]`, `field.extras["init"].append(v)`), not a write of the whole
@@ -7842,12 +7859,15 @@ reported. `fresh-objects = "report"` reports these writes like any other.
 
 A report states that the function writes a target of a `write-owners` contract (an attribute, or the
 container it holds) outside the contract's write owners, directly, through an alias, or through the
-helpers shown.
+helpers shown; with `unlisted-dict-keys = "report"`, also that it writes a `__dict__` key of a
+target's class that no target names.
 
 Its premises:
 
 - **Target**: the object is an instance of a class the contract names, or of a subclass, by
-  construction or annotation (assumption R2). Open: an alias bound on one path is enough.
+  construction or annotation (assumption R2), and the attribute is a target's (with
+  `unlisted-dict-keys = "report"`, or a `__dict__` key no target names). Open: an alias bound
+  on one path is enough.
 - **Outside the owners**: the function is not in the allowed modules and classes, nor runs only
   inside allowed contexts (with `attribution = "lexical"`: the function holding the write is
   not allowed). Established from the contract.
@@ -7927,6 +7947,8 @@ No automatic fix.
   - `attribution`: `"call-graph"` (default) or `"lexical"`: whether a private helper hands its
     writes to its callers and a function that only runs inside allowed writers is allowed, or
     each write is judged in the function holding it.
+  - `unlisted-dict-keys`: `"ignore"` (default) or `"report"`: also report a constant `__dict__`
+    key of a target's class that no target names.
 
 
 ---

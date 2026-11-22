@@ -1091,7 +1091,10 @@ message = "write model state through GenerationStore instead"
      initializer of the target's class family writes its own `self`, or when the reporting
      function only runs inside allowed contexts (every path of project callers starts in one); a
      private helper with project callers hands its report to them. Otherwise the outermost
-     function is reported, with `message` as the report's help.
+     function is reported, with `message` as the report's help. With
+     `unlisted-dict-keys = "report"`, a `dict_direct` site that hits no target, on a class some
+     targets cover, whose key none of them names, is judged the same way once per family of
+     those targets (`OwnerRule::written`), and reported as that key (`Class.key`).
   3. Existing code bases migrate with **`heki check --baseline`**: counts are frozen per
      `(path, qualname, "MUT201", "Class.attr")` and can only shrink.
 

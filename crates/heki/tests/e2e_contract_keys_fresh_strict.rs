@@ -3073,3 +3073,140 @@ fn vars_is_the_namespace_and_in_place_or_writes_through_it() {
         "{diags:#?}"
     );
 }
+
+// ======================================================== `__dict__` keys no target names
+
+const UNLISTED_MODEL: &str = r#"CACHE_KEY = "_cache_key"
+
+
+class Base:
+    def __init__(self) -> None:
+        self.kind = ""
+
+
+class Field(Base):
+    def __init__(self) -> None:
+        super().__init__()
+        self.extras: dict[str, object] = {}
+        self.__dict__["_init_cache"] = {}
+
+
+class Sub(Field):
+    pass
+
+
+class Other:
+    def __init__(self) -> None:
+        self.kind = ""
+"#;
+
+const UNLISTED_USE: &str = r#"from pkg.model import CACHE_KEY, Base, Field, Other, Sub
+
+OTHER_KEY = "_type_cache"
+
+
+def listed(field: Field) -> None:
+    field.__dict__[CACHE_KEY] = 1
+
+
+def unlisted(field: Field) -> None:
+    field.__dict__[OTHER_KEY] = 1
+
+
+def unlisted_literal(field: Field) -> None:
+    field.__dict__.setdefault("_name_cache", "x")
+
+
+def through_vars(field: Field) -> None:
+    del vars(field)["_gone"]
+
+
+def on_a_subclass(sub: Sub) -> None:
+    sub.__dict__.pop("_sub_cache", None)
+
+
+def container_of_an_entry_target(field: Field) -> None:
+    field.__dict__["extras"] = {}
+
+
+def on_a_base(base: Base) -> None:
+    base.__dict__["_base_cache"] = 1
+
+
+def on_another_class(other: Other) -> None:
+    other.__dict__["_other_cache"] = 1
+
+
+def computed(field: Field, name: str) -> None:
+    field.__dict__[name] = 1
+
+
+def plain_attributes(field: Field) -> None:
+    field._plain = 1
+    setattr(field, "_named", 1)
+"#;
+
+fn unlisted_project(name: &str, mode: &str) -> Project {
+    let p = Project::new(name);
+    p.write(
+        "pyproject.toml",
+        &format!(
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT201\", \"MUT205\"]\n\n\
+             [[tool.heki.write-owners]]\nname = \"caches\"\n\
+             targets = [\"pkg.model.Field._cache_key\", 'pkg.model.Field.extras[\"init\"]']\n\
+             allowed-writers = [\"pkg.store.*\"]\n{mode}"
+        ),
+    )
+    .write("pkg/__init__.py", "")
+    .write("pkg/model.py", UNLISTED_MODEL)
+    .write("pkg/use.py", UNLISTED_USE)
+    .write(
+        "pkg/store.py",
+        "from pkg.model import Field\n\n\ndef save(field: Field) -> None:\n    field.__dict__[\"_stored\"] = 1\n",
+    );
+    p
+}
+
+/// With `unlisted-dict-keys = "report"`, a constant key written through the namespace of an
+/// object of a target's class (or a subclass) that no target covering it names is a `MUT201`
+/// write, under the contract's allowance. A key a target names (an entry target names its
+/// container), a base class the targets do not cover, another class, a computed key, plain
+/// attribute stores, the class's own initialization, and the allowed writers are not.
+#[test]
+fn unlisted_dict_keys_reports_the_namespace_keys_no_target_names() {
+    let u = "pkg/use.py";
+    let listed = d(u, 7, "MUT201", "listed", "pkg.model.Field._cache_key");
+    let p = unlisted_project("unlisted_keys_off", "");
+    assert_eq!(found(&diagnostics(&p, &[])), vec![listed.clone()]);
+    let p = unlisted_project("unlisted_keys_on", "unlisted-dict-keys = \"report\"\n");
+    let diags = diagnostics(&p, &[]);
+    assert_eq!(
+        found(&diags),
+        vec![
+            listed,
+            d(u, 11, "MUT201", "unlisted", "Field._type_cache"),
+            d(u, 15, "MUT201", "unlisted_literal", "Field._name_cache"),
+            d(u, 19, "MUT201", "through_vars", "Field._gone"),
+            d(u, 23, "MUT201", "on_a_subclass", "Sub._sub_cache"),
+        ]
+    );
+    assert_eq!(
+        message_at(&diags, u, 11),
+        "`unlisted` writes `pkg.model.Field._type_cache` (dict_direct), a `__dict__` key no target names, outside the write owners of `caches`"
+    );
+    // The same writes judged lexically.
+    let p = unlisted_project(
+        "unlisted_keys_lexical",
+        "unlisted-dict-keys = \"report\"\nattribution = \"lexical\"\n",
+    );
+    assert_eq!(found(&diagnostics(&p, &[])).len(), 5);
+    let p = unlisted_project("unlisted_keys_bad", "unlisted-dict-keys = \"all\"\n");
+    let (code, stdout, stderr) = p.check(&[]);
+    assert_eq!(code, 2, "{stdout}{stderr}");
+    assert!(
+        stderr.contains(
+            "unknown `unlisted-dict-keys` value `all` in write-owners `caches` (expected `ignore` or `report`)"
+        ),
+        "{stderr}"
+    );
+}
