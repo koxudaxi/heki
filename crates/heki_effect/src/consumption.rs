@@ -584,7 +584,7 @@ impl IterFlow {
     ///
     /// The answer of each value asked is kept, and a walk joins the answer of a value asked
     /// before instead of walking on through it: asked in their order, the links of a chain take
-    /// one step each and the weight of their answers. Only the values asked about have one: a
+    /// one step each and the weight of the answers they keep and join. Only the values asked about have one: a
     /// merge of many roots asked at its end takes one walk, not a set per merge on the way.
     pub fn may_roots(&self, v: VarId) -> Vec<VarId> {
         if self.root_of.contains_key(&v) {
@@ -606,7 +606,11 @@ impl IterFlow {
             }
             match self.merged.borrow().get(&u) {
                 Some(known) => {
-                    found.extend(known);
+                    // Each query joining a kept answer copies it, so its weight is taken again;
+                    // past the budget the answer is none.
+                    if self.budget.take(known.len()) {
+                        found.extend(known);
+                    }
                     Visit::Prune
                 }
                 None => Visit::Expand,

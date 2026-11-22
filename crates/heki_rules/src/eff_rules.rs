@@ -1735,7 +1735,8 @@ impl<'a> Reach<'a> {
                     }
                 }
             }
-            Some(held)
+            // No bits are no fact: a node holding none gains nothing and requeues no callee.
+            (!held.is_empty()).then_some(held)
         };
         // A node is visited once, then again only after a node calling it gains a bit of one of
         // its parameters' two masks: at most the bits of every node's parameters.

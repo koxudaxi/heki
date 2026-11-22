@@ -4973,6 +4973,41 @@ fn parameter_changes_down_a_chain_found_in_reverse_are_joined_once() {
     assert_eq!(found, vec!["entry"]);
 }
 
+/// A scope under a `mutates-params` boundary changing its parameter and calling a helper, then a
+/// thousand parameterless functions each calling that helper: a caller handing on no parameter
+/// holds no fact, so the helper is not visited again for each of them, and the scope's own change
+/// is reported.
+#[test]
+fn many_callers_handing_on_no_parameter_leave_a_scopes_change_reported() {
+    let shape = |callers: usize| {
+        let mut lines = vec![
+            "def sink():".to_owned(),
+            "    pass".to_owned(),
+            "def entry(p):".to_owned(),
+            "    p.append(1)".to_owned(),
+            "    sink()".to_owned(),
+        ];
+        lines.extend((0..callers).map(|i| format!("    c{i}()")));
+        for i in 0..callers {
+            lines.push(format!("def c{i}():"));
+            lines.push("    sink()".to_owned());
+        }
+        let p = Project::new(&format!("bounds_callers_handing_no_parameter_{callers}"));
+        p.write(
+            "pyproject.toml",
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"EFF201\"]\n\n[[tool.heki.effect-boundaries]]\nname = \"pure\"\nscopes = [\"m.entry\"]\nforbid = [\"mutates-params\"]\n",
+        )
+        .write("m.py", &(lines.join("\n") + "\n"));
+        p
+    };
+    let found: Vec<String> = check_linear(1_000, shape)
+        .iter()
+        .filter(|d| d["rule_code"] == "EFF201")
+        .map(|d| d["qualname"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(found, vec!["entry"]);
+}
+
 /// A function writing an invalidation target four thousand times, each write followed by a call
 /// of a helper that announces nothing (`MUT109`): what the calls after a write announce is
 /// answered once per call site along the chain of next calls, not walked to the end again for
@@ -5016,7 +5051,8 @@ fn writes_before_many_calls_follow_the_calls_after_them_once() {
 /// path past them are reported.
 #[test]
 fn writes_under_many_branches_of_a_loop_decide_each_block_a_few_times() {
-    let shape = |writes: usize| {
+    // The source, and the lines of the writes no `notify()` follows.
+    let source = |writes: usize| {
         let mut lines = vec![
             "class Model:".to_owned(),
             "    def __init__(self):".to_owned(),
@@ -5028,27 +5064,35 @@ fn writes_under_many_branches_of_a_loop_decide_each_block_a_few_times() {
             "def touch(model: Model, items):".to_owned(),
             "    for i in items:".to_owned(),
         ];
+        let mut unannounced = Vec::new();
         for i in 0..writes {
             lines.push(format!("        if i == {i}:"));
             lines.push(format!("            model.value = {i}"));
-            lines.push("            helper()".to_owned());
             if i % 2 == 0 {
+                lines.push("            helper()".to_owned());
                 lines.push("            notify()".to_owned());
+            } else {
+                unannounced.push(lines.len() as u64);
+                lines.push("            helper()".to_owned());
             }
         }
+        (lines.join("\n") + "\n", unannounced)
+    };
+    let shape = |writes: usize| {
         let p = Project::new(&format!("bounds_writes_under_branches_{writes}"));
         p.write(
             "pyproject.toml",
             "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT109\"]\n\n[[tool.heki.invalidation]]\nname = \"m\"\ntargets = [\"Model.value\"]\ninvalidators = [\"m.notify\"]\n",
         )
-        .write("m.py", &(lines.join("\n") + "\n"));
+        .write("m.py", &source(writes).0);
         p
     };
-    let found = check_linear(2_000, shape);
-    assert_eq!(
-        found.iter().filter(|d| d["rule_code"] == "MUT109").count(),
-        1_000
-    );
+    let found: Vec<u64> = check_linear(2_000, shape)
+        .iter()
+        .filter(|d| d["rule_code"] == "MUT109")
+        .map(|d| d["line"].as_u64().unwrap())
+        .collect();
+    assert_eq!(found, source(2_000).1);
 }
 
 /// Five thousand shallow copies of one parameter, each changing one of its items, and a loop

@@ -330,9 +330,26 @@ fn is_constant(expr: &Expr) -> bool {
     }
 }
 
+/// Whether `block` leaves the loop around it: a `break` or a `return` outside a closure.
+fn leaves(block: &syn::Block) -> bool {
+    struct Leaves(bool);
+    impl<'ast> Visit<'ast> for Leaves {
+        fn visit_expr_break(&mut self, _: &'ast syn::ExprBreak) {
+            self.0 = true;
+        }
+        fn visit_expr_return(&mut self, _: &'ast syn::ExprReturn) {
+            self.0 = true;
+        }
+        fn visit_expr_closure(&mut self, _: &'ast syn::ExprClosure) {}
+    }
+    let mut leaves = Leaves(false);
+    leaves.visit_block(block);
+    leaves.0
+}
+
 /// Whether a `for` loop repeats its body a number of times that grows with the input: over a
-/// range whose end is not a constant (`0..links`, `1..`), unless the body stops the loop variable
-/// at a constant (`if pass > MAX_PASSES`).
+/// range whose end is not a constant (`0..links`, `1..`), unless the body leaves the loop on a
+/// comparison of the loop variable with a constant (`if pass > MAX_PASSES { break }`).
 fn repeats_unboundedly(f: &syn::ExprForLoop) -> bool {
     let Expr::Range(range) = &*f.expr else {
         return false;
@@ -343,14 +360,29 @@ fn repeats_unboundedly(f: &syn::ExprForLoop) -> bool {
     let Pat::Ident(var) = &*f.pat else {
         return true;
     };
-    struct Stop<'v>(&'v syn::Ident, bool);
-    impl<'ast> Visit<'ast> for Stop<'_> {
+    struct Compares<'v>(&'v syn::Ident, bool);
+    impl<'ast> Visit<'ast> for Compares<'_> {
         fn visit_expr_binary(&mut self, b: &'ast syn::ExprBinary) {
+            use syn::BinOp::{Eq, Ge, Gt, Le, Lt, Ne};
+            let compares = matches!(b.op, Eq(_) | Ne(_) | Lt(_) | Le(_) | Gt(_) | Ge(_));
             let is_var = |e: &Expr| matches!(e, Expr::Path(p) if p.path.is_ident(self.0));
-            self.1 |= (is_var(&b.left) && is_constant(&b.right))
-                || (is_var(&b.right) && is_constant(&b.left));
+            self.1 |= compares
+                && ((is_var(&b.left) && is_constant(&b.right))
+                    || (is_var(&b.right) && is_constant(&b.left)));
             visit::visit_expr_binary(self, b);
         }
+    }
+    struct Stop<'v>(&'v syn::Ident, bool);
+    impl<'ast> Visit<'ast> for Stop<'_> {
+        fn visit_expr_if(&mut self, i: &'ast syn::ExprIf) {
+            if leaves(&i.then_branch) {
+                let mut compares = Compares(self.0, false);
+                compares.visit_expr(&i.cond);
+                self.1 |= compares.1;
+            }
+            visit::visit_expr_if(self, i);
+        }
+        fn visit_expr_closure(&mut self, _: &'ast syn::ExprClosure) {}
     }
     let mut stop = Stop(&var.ident, false);
     stop.visit_block(&f.body);
@@ -370,7 +402,9 @@ enum Stop<'e> {
 /// Whether a loop repeats a pass until nothing changes: its body iterates over a function's
 /// blocks, phis, or instructions or its reverse postorder, or the loop stops on a comparison with
 /// the facts `before` the pass, on a size (a `loop` or `while`), or on a flag each pass clears
-/// and sets (`changed = false`, then `changed = true` or `changed |= ..`).
+/// and sets (`changed = false`, then `changed = true` or `changed |= ..`). A closure in the body
+/// is taken to run in each pass, so its sweeps and flag changes count, but no test in it stops
+/// the loop.
 fn dense_body(body: &syn::Block, stop: Stop<'_>) -> bool {
     #[derive(Default)]
     struct Dense {
@@ -383,6 +417,8 @@ fn dense_body(body: &syn::Block, stop: Stop<'_>) -> bool {
         /// Names read by a `while` condition, or by the condition of an `if` that leaves the
         /// loop.
         tested: BTreeSet<String>,
+        /// The closures around the expression visited.
+        closures: usize,
     }
     fn names(expr: &Expr, out: &mut BTreeSet<String>) {
         struct Names<'o>(&'o mut BTreeSet<String>);
@@ -394,21 +430,6 @@ fn dense_body(body: &syn::Block, stop: Stop<'_>) -> bool {
             }
         }
         Names(out).visit_expr(expr);
-    }
-    fn leaves(block: &syn::Block) -> bool {
-        struct Leaves(bool);
-        impl<'ast> Visit<'ast> for Leaves {
-            fn visit_expr_break(&mut self, _: &'ast syn::ExprBreak) {
-                self.0 = true;
-            }
-            fn visit_expr_return(&mut self, _: &'ast syn::ExprReturn) {
-                self.0 = true;
-            }
-            fn visit_expr_closure(&mut self, _: &'ast syn::ExprClosure) {}
-        }
-        let mut leaves = Leaves(false);
-        leaves.visit_block(block);
-        leaves.0
     }
     fn bool_literal(expr: &Expr) -> Option<bool> {
         match expr {
@@ -471,16 +492,22 @@ fn dense_body(body: &syn::Block, stop: Stop<'_>) -> bool {
             visit::visit_local(self, l);
         }
         fn visit_expr_if(&mut self, i: &'ast syn::ExprIf) {
-            if leaves(&i.then_branch) {
+            if self.closures == 0 && leaves(&i.then_branch) {
                 names(&i.cond, &mut self.tested);
             }
             visit::visit_expr_if(self, i);
+        }
+        fn visit_expr_closure(&mut self, c: &'ast syn::ExprClosure) {
+            self.closures += 1;
+            visit::visit_expr_closure(self, c);
+            self.closures -= 1;
         }
         fn visit_item_fn(&mut self, _: &'ast syn::ItemFn) {}
     }
     let mut dense = Dense::default();
     if let Stop::While(cond) = stop {
         names(cond, &mut dense.tested);
+        dense.visit_expr(cond);
     }
     dense.visit_block(body);
     let flag = (dense.cleared.intersection(&dense.set)).any(|name| dense.tested.contains(name));
@@ -939,4 +966,33 @@ fn hand_written_walks_are_only_those_allowed() {
         ));
     }
     assert!(problems.is_empty(), "{}", problems.join("\n\n"));
+}
+
+/// W3 by how a loop stops: a pass count only a test that leaves the loop caps, a flag or a
+/// comparison with `before` of the loop itself (in a `while` condition too), not of a closure
+/// in it.
+#[test]
+fn dense_loops_are_told_by_how_they_stop() {
+    let dense = |code: &str| {
+        let f: syn::ItemFn = syn::parse_str(code).unwrap();
+        let mut scan = Scan::default();
+        scan.visit_block(&f.block);
+        scan.dense
+    };
+    assert!(!dense(
+        "fn f() { for pass in 0..n { if pass > MAX_PASSES { break; } for b in f.blocks {} } }"
+    ));
+    assert!(dense(
+        "fn f() { for pass in 0..n { let next = pass + 1; for b in f.blocks {} } }"
+    ));
+    assert!(dense(
+        "fn f() { loop { let mut changed = false; changed |= step(); if !changed { return; } } }"
+    ));
+    assert!(!dense(
+        "fn f() { loop { let s = || { let mut changed = false; changed |= step(); \
+         if !changed { return; } }; s(); break; } }"
+    ));
+    assert!(dense(
+        "fn f() { while facts != before { before = facts.clone(); step(&mut facts); } }"
+    ));
 }

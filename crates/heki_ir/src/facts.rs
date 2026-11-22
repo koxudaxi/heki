@@ -1080,15 +1080,26 @@ impl<'a> FnIndex<'a> {
     fn aliases(&self, roots: &[VarId], budget: &Budget) -> Answer<FxHashSet<VarId>> {
         let f = self.f;
         let mut alias: FxHashSet<VarId> = FxHashSet::default();
+        // A `min` of many aliases is reached once per argument: its arguments are indexed once,
+        // not scanned at each. Only they are sources, not the callee or a keyword value.
+        let mut arguments: FxHashMap<(BlockId, u32), FxHashSet<VarId>> = FxHashMap::default();
         let holders = |v: VarId, out: &mut Vec<VarId>| {
             for u in self.shape.readers(v) {
                 match *u {
                     Use::Phi(b, k) => out.push(f.block(b).phis[k as usize].dst),
                     Use::Inst(b, k) => {
-                        if let Some((dst, sources)) =
+                        let Some((dst, sources)) =
                             self.alias_of_operands(&f.block(b).insts[k as usize])
-                            && sources.contains(&v)
-                        {
+                        else {
+                            continue;
+                        };
+                        let source = match sources {
+                            [only] => *only == v,
+                            _ => (arguments.entry((b, k)))
+                                .or_insert_with(|| sources.iter().copied().collect())
+                                .contains(&v),
+                        };
+                        if source {
                             out.push(dst);
                         }
                     }
