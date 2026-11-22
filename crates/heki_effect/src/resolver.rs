@@ -5848,9 +5848,21 @@ pub(crate) fn arg_fact<'i>(
     ArgFact {
         literal: literal(&def, globals, var),
         names_file: names_a_file(&def, &name_of, globals, var),
-        class: class_of(var),
+        class: class_of(var).or_else(|| bytes_literal_class(&def, var)),
         flags: set_flags(&def, &name_of, var),
     }
+}
+
+/// The class of a `bytes` literal, which carries no inferred type of its own.
+fn bytes_literal_class<'i>(def: &impl Fn(VarId) -> Option<&'i Inst>, var: VarId) -> Option<String> {
+    matches!(
+        def(var)?.kind,
+        InstKind::Const {
+            literal: ConstLiteral::Bytes,
+            ..
+        }
+    )
+    .then(|| "builtins.bytes".to_owned())
 }
 
 /// Whether a database name opens a database in memory (`sqlite3.connect`), or opens none that

@@ -2743,6 +2743,19 @@ mod tests {
             prefix: s(&["http://", "https://"]),
             ..source_case("source", true)
         };
+        // Raw `bytes` and in-memory buffers are parsed without I/O.
+        let polars_data = ArgCase {
+            instance_of: s(&["builtins.bytes", "io.StringIO", "io.BytesIO"]),
+            ..source_case("source", false)
+        };
+        // A connection opened in memory sends the query without waiting; one only annotated as
+        // a `sqlite3.Connection` waits only on disk, as `sqlite3` calls do.
+        let polars_connection = |class: &str| ArgCase {
+            arg: Some(1),
+            param: Some("connection".into()),
+            instance_of: s(&[class]),
+            ..ArgCase::default()
+        };
         let buffer = |arg: u8| ArgCase {
             arg: Some(arg),
             param: Some("f".into()),
@@ -2765,13 +2778,26 @@ mod tests {
                         "read_ods",
                     ],
                 ),
+                with_cases(vec![polars_url, polars_data], entry(&[BlockingFs])),
+            ),
+            (
+                s(&["polars.read_database"]),
                 with_cases(
-                    vec![polars_url, source_case("source", false)],
-                    entry(&[BlockingFs]),
+                    vec![
+                        ArgCase {
+                            effects: Some(vec![DbQuery]),
+                            ..polars_connection("sqlite3.connect(\":memory:\")")
+                        },
+                        ArgCase {
+                            emits: Some(Emits::IfOnDisk),
+                            ..polars_connection("sqlite3.Connection")
+                        },
+                    ],
+                    entry(&[BlockingDb, DbQuery]),
                 ),
             ),
             (
-                with_prefix("polars", &["read_database", "read_database_uri"]),
+                s(&["polars.read_database_uri"]),
                 entry(&[BlockingDb, DbQuery]),
             ),
             (
@@ -3602,7 +3628,7 @@ mod tests {
                     "{symbol}"
                 );
                 assert!(
-                    case.effects.is_some() || case.return_type.is_some(),
+                    case.effects.is_some() || case.return_type.is_some() || case.emits.is_some(),
                     "{symbol}"
                 );
                 if let Some(class) = &case.return_type {

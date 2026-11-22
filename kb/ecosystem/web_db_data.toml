@@ -5720,8 +5720,8 @@ opaque_to_layer3 = true
 
 # --- Data: polars I/O ---
 # Readers of files are `blocking_fs` (EFF105, opt-in): an `http(s)://` URL is downloaded, an
-# in-memory buffer is parsed without I/O. The `scan_*` functions return a lazy frame that
-# reads when it is collected. `read_database` runs its query on the connection it is handed,
+# in-memory buffer or raw `bytes` is parsed without I/O. The `scan_*` functions return a lazy
+# frame that reads when it is collected. `read_database` runs its query on the connection it is handed,
 # `read_database_uri` on a connection it opens; `DataFrame.write_database` inserts the rows.
 # `concat` is not listed: by default (`rechunk=False`) it appends the frames' chunks without
 # copying their data.
@@ -5731,7 +5731,7 @@ symbol = "polars.read_csv"
 effects = ["blocking_fs"]
 cases = [
     { arg = 0, param = "source", prefix = ["http://", "https://"], effects = ["blocking_net"] },
-    { arg = 0, param = "source", instance_of = ["io.StringIO", "io.BytesIO"], effects = [] },
+    { arg = 0, param = "source", instance_of = ["builtins.bytes", "io.StringIO", "io.BytesIO"], effects = [] },
 ]
 opaque_to_layer3 = true
 
@@ -5740,7 +5740,7 @@ symbol = "polars.read_parquet"
 effects = ["blocking_fs"]
 cases = [
     { arg = 0, param = "source", prefix = ["http://", "https://"], effects = ["blocking_net"] },
-    { arg = 0, param = "source", instance_of = ["io.StringIO", "io.BytesIO"], effects = [] },
+    { arg = 0, param = "source", instance_of = ["builtins.bytes", "io.StringIO", "io.BytesIO"], effects = [] },
 ]
 opaque_to_layer3 = true
 
@@ -5749,7 +5749,7 @@ symbol = "polars.read_json"
 effects = ["blocking_fs"]
 cases = [
     { arg = 0, param = "source", prefix = ["http://", "https://"], effects = ["blocking_net"] },
-    { arg = 0, param = "source", instance_of = ["io.StringIO", "io.BytesIO"], effects = [] },
+    { arg = 0, param = "source", instance_of = ["builtins.bytes", "io.StringIO", "io.BytesIO"], effects = [] },
 ]
 opaque_to_layer3 = true
 
@@ -5758,7 +5758,7 @@ symbol = "polars.read_ndjson"
 effects = ["blocking_fs"]
 cases = [
     { arg = 0, param = "source", prefix = ["http://", "https://"], effects = ["blocking_net"] },
-    { arg = 0, param = "source", instance_of = ["io.StringIO", "io.BytesIO"], effects = [] },
+    { arg = 0, param = "source", instance_of = ["builtins.bytes", "io.StringIO", "io.BytesIO"], effects = [] },
 ]
 opaque_to_layer3 = true
 
@@ -5767,7 +5767,7 @@ symbol = "polars.read_ipc"
 effects = ["blocking_fs"]
 cases = [
     { arg = 0, param = "source", prefix = ["http://", "https://"], effects = ["blocking_net"] },
-    { arg = 0, param = "source", instance_of = ["io.StringIO", "io.BytesIO"], effects = [] },
+    { arg = 0, param = "source", instance_of = ["builtins.bytes", "io.StringIO", "io.BytesIO"], effects = [] },
 ]
 opaque_to_layer3 = true
 
@@ -5776,7 +5776,7 @@ symbol = "polars.read_avro"
 effects = ["blocking_fs"]
 cases = [
     { arg = 0, param = "source", prefix = ["http://", "https://"], effects = ["blocking_net"] },
-    { arg = 0, param = "source", instance_of = ["io.StringIO", "io.BytesIO"], effects = [] },
+    { arg = 0, param = "source", instance_of = ["builtins.bytes", "io.StringIO", "io.BytesIO"], effects = [] },
 ]
 opaque_to_layer3 = true
 
@@ -5785,7 +5785,7 @@ symbol = "polars.read_excel"
 effects = ["blocking_fs"]
 cases = [
     { arg = 0, param = "source", prefix = ["http://", "https://"], effects = ["blocking_net"] },
-    { arg = 0, param = "source", instance_of = ["io.StringIO", "io.BytesIO"], effects = [] },
+    { arg = 0, param = "source", instance_of = ["builtins.bytes", "io.StringIO", "io.BytesIO"], effects = [] },
 ]
 opaque_to_layer3 = true
 
@@ -5794,13 +5794,19 @@ symbol = "polars.read_ods"
 effects = ["blocking_fs"]
 cases = [
     { arg = 0, param = "source", prefix = ["http://", "https://"], effects = ["blocking_net"] },
-    { arg = 0, param = "source", instance_of = ["io.StringIO", "io.BytesIO"], effects = [] },
+    { arg = 0, param = "source", instance_of = ["builtins.bytes", "io.StringIO", "io.BytesIO"], effects = [] },
 ]
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "polars.read_database"
 effects = ["blocking_db", "db_query"]
+# What the connection waits on is what `sqlite3` calls say: a connection opened in memory sends
+# the query without waiting, one that may be in memory (only annotated) waits only on disk.
+cases = [
+    { arg = 1, param = "connection", instance_of = ['sqlite3.connect(":memory:")'], effects = ["db_query"] },
+    { arg = 1, param = "connection", instance_of = ["sqlite3.Connection"], emits = "if-on-disk" },
+]
 opaque_to_layer3 = true
 
 [[entries]]

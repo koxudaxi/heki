@@ -3207,6 +3207,7 @@ fn async_drivers_count_their_queries_and_duckdb_waits_on_nothing_known() {
 }
 
 const API_CLIENTS_AND_DATA: &str = r#"import io
+import sqlite3
 
 import anthropic
 import celery
@@ -3268,10 +3269,14 @@ async def tp_polars(conn, path):
     pl.read_database("SELECT 1", conn)
     pl.read_csv("https://example.com/a.csv")
     pl.read_parquet(path)
+    pl.read_database("SELECT 1", sqlite3.connect("app.db"))
 
 
 async def tn_polars_in_memory(data: bytes):
     pl.read_csv(io.BytesIO(data))
+    pl.read_csv(b"a\n1\n")
+    pl.read_ndjson(b"{}")
+    pl.read_database("SELECT 1", sqlite3.connect(":memory:"))
     pl.scan_parquet("a.parquet")
 
 
@@ -3313,35 +3318,37 @@ fn api_clients_task_queues_and_data_libraries() {
             "EFF101,EFF111,EFF102,EFF103,EFF113,EFF105,DATA101"
         ),
         vec![
-            d(16, "EFF111", "tp_celery", "celery.Celery.send_task"),
-            d(17, "EFF111", "tp_celery", "celery.Task.delay"),
-            d(22, "EFF102", "tp_clients_in_loops", "openai.OpenAI"),
-            d(23, "EFF102", "tp_clients_in_loops", "anthropic.Anthropic"),
-            d(24, "EFF102", "tp_clients_in_loops", "google.genai.Client"),
+            d(17, "EFF111", "tp_celery", "celery.Celery.send_task"),
+            d(18, "EFF111", "tp_celery", "celery.Task.delay"),
+            d(23, "EFF102", "tp_clients_in_loops", "openai.OpenAI"),
+            d(24, "EFF102", "tp_clients_in_loops", "anthropic.Anthropic"),
+            d(25, "EFF102", "tp_clients_in_loops", "google.genai.Client"),
             d(
-                43,
+                44,
                 "EFF102",
                 "tp_clients_with_unknown_http_client",
                 "openai.OpenAI"
             ),
             d(
-                48,
+                49,
                 "EFF102",
                 "tp_async_clients_in_loops",
                 "openai.AsyncOpenAI"
             ),
             d(
-                49,
+                50,
                 "EFF102",
                 "tp_async_clients_in_loops",
                 "anthropic.AsyncAnthropic"
             ),
-            d(60, "EFF101", "tp_polars", "polars.read_database"),
-            d(61, "EFF101", "tp_polars", "polars.read_csv"),
-            d(62, "EFF105", "tp_polars", "polars.read_parquet"),
-            d(73, "DATA101", "tp_torch_accumulation", "acc"),
-            d(85, "EFF105", "tp_torch_io", "torch.save"),
-            d(86, "EFF105", "tp_torch_io", "torch.load"),
+            d(61, "EFF111", "tp_polars", "polars.read_database"),
+            d(62, "EFF101", "tp_polars", "polars.read_csv"),
+            d(63, "EFF105", "tp_polars", "polars.read_parquet"),
+            d(64, "EFF101", "tp_polars", "polars.read_database"),
+            d(64, "EFF101", "tp_polars", "sqlite3.connect"),
+            d(78, "DATA101", "tp_torch_accumulation", "acc"),
+            d(90, "EFF105", "tp_torch_io", "torch.save"),
+            d(91, "EFF105", "tp_torch_io", "torch.load"),
         ]
     );
 }
