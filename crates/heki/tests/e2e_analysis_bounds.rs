@@ -3891,6 +3891,46 @@ fn reads_on_every_path_of_many_keys_stay_within_the_function_budget() {
     assert_eq!(found, vec!["C.put"]);
 }
 
+/// A writer making thousands of project calls and library calls after its write: whether a
+/// callable a library call is handed has a site of its own is looked up once per argument, not
+/// by a scan of every site of the function (which took time quadratic in its calls).
+#[test]
+fn library_calls_after_a_write_look_up_handed_callables_once() {
+    let calls = 4_000;
+    let mut lines = vec![
+        "from functools import cached_property".to_owned(),
+        String::new(),
+        String::new(),
+        "def helper(x):".to_owned(),
+        "    return x".to_owned(),
+        String::new(),
+        String::new(),
+        "class C:".to_owned(),
+        "    def __init__(self):".to_owned(),
+        "        self.d = {}".to_owned(),
+        String::new(),
+        "    @cached_property".to_owned(),
+        "    def p(self):".to_owned(),
+        "        return self.d[\"k\"]".to_owned(),
+        String::new(),
+        "    def put(self, value):".to_owned(),
+        "        self.d[\"k\"] = value".to_owned(),
+    ];
+    for _ in 0..calls {
+        lines.push("        helper(value)".to_owned());
+        lines.push("        len(value)".to_owned());
+    }
+    let p = Project::new("bounds_handed_callables");
+    p.write("pyproject.toml", MUT101_CONFIG)
+        .write("m.py", &(lines.join("\n") + "\n"));
+    let found: Vec<String> = check_within(&p, Duration::from_secs(20))
+        .iter()
+        .filter(|d| d["rule_code"] == "MUT101")
+        .map(|d| d["qualname"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(found, ["C.put"]);
+}
+
 /// Open premises along shared chains are decided once per call: thousands of `async def`s each
 /// reach a sleep through the same chain of hundreds of helpers, none of which makes the next
 /// call on every return. Each report walks only its own chain, and each call on it is looked up

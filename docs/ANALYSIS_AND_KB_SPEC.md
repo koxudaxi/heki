@@ -456,9 +456,14 @@ EffectSummary(f) = {
     iterates_params:          Bitset,                      // stepped by an iteration on some path: a generator
                                                            // passed there runs there
     reads_self_attrs:         Set<AttrKeyPath>,            // self.<attr> and self.<dict>[const_key] reads
-    must_read_self_attrs:     Set<AttrKeyPath>,            // those read on every path that returns normally,
-                                                           // as a whole or with the key (MUT101; only with
-                                                           // MUT101 or MUT111 selected, OptInFacts::kept_values)
+    kept:                     Option<Box<KeptFacts>>,      // only with MUT101 or MUT111 selected
+                                                           // (OptInFacts::kept_values):
+                                                           // must_read_self_attrs, those read on every path
+                                                           // that returns normally, as a whole or with the key;
+                                                           // removes_kept, the values kept in an instance
+                                                           // __dict__ it may remove or replace on any object
+                                                           // (by name, or any); and listed_cache, its decorator
+                                                           // is one of the catalog's [[cached_properties]]
     returns_self_attrs:       Set<AttrName>,               // @cached_property: self.<attr> objects the result
                                                            // holds by reference, read for nothing else (MUT101)
     lazily_read_self_attrs:   Set<AttrName>,               // self.<attr> read only where it or a self call
@@ -969,7 +974,7 @@ which module imports which.
 6. The writes and the paths after and before them come from `FileSummary.cache_flows`, so the
    stale writes of a method are known without its IR: `MUT101` reports those of the checked
    methods, and `MUT111` reads those of every method.
-7. **Reads on every path** (`EffectSummary::must_read_self_attrs`, computed only when `MUT101`
+7. **Reads on every path** (`KeptFacts::must_read_self_attrs`, computed only when `MUT101`
    or `MUT111` runs: `OptInFacts::kept_values`): the attributes a function reads on every path
    on which it returns normally, exception edges into handlers included. Its own loads of
    `self.<attr>` are points of the path facts (`Progress::Returned`: a load that raised read
@@ -982,6 +987,25 @@ which module imports which.
    cache decorator); a callee of the function's own call-graph component adds nothing,
    so propagation needs no fixpoint for it. An attribute read as a whole covers each of its
    keys, also where two definitions or two targets are joined.
+8. **What may remove a kept value** (computed only with `OptInFacts::kept_values`). A method's
+   `CacheFlow` also holds the points that may remove or replace a value kept in some object's
+   `__dict__`: `MayRemove(name)` (`del obj.<name>`, an item of a `__dict__` stored or removed
+   under that key), `MayRemoveAny` (a `__dict__` cleared, replaced, or handed to a call; an
+   `await`, the implicit awaits of `async for` and `async with`, or a `yield`, while other code
+   runs; a call heki cannot resolve, of a library outside
+   the catalog, or of one that may run project code by its `[[invokes]]` entry, section 4.2; a
+   project call whose targets are not every implementation it can run; the iteration of a value
+   that is no builtin container, no project generator's result, and no `lazy` call's; a
+   library call handed a container whose items heki does not know, such as a display changed
+   after it is built or what a builtin call or a generator expression returns), and
+   `Calls(span)` at the project calls no `SelfCall` stands for (other receivers, the property
+   getters a read of `self.<name>` runs) and at each step of iterating what a project generator
+   called at `span` returns, whose callees' summaries say what they remove.
+   `KeptFacts::removes_kept` (`EffectSummary::kept`) joins the same points of a function (a
+   `yield` excepted: its consumer is its caller) with what every callee removes. Each write of
+   the flow also records, under the same opt-in (`SelfAttrWrite::kept`), its literal key
+   (`KeptWrite::key`) and, for an in-place change, the builtin list, dict, or set the attribute
+   holds by its type and the method that changes it (`KeptWrite::change`).
 
 #### `MUT111`: readers of a stale `@cached_property` (opt-in)
 1. Reads: the `TypedFieldReadSite`s of each checked function's own body (`self.p`, `obj.p`,
@@ -1874,6 +1898,31 @@ Three more keys state when a call waits, which an exact claim needs (ADR-018):
   `false` when `__exit__` / `__aexit__` returns a false value on every path (files, locks, HTTP
   sessions and pools, database connections), `true` when it can suppress the body's exception
   (`contextlib.suppress`). A manager the catalog does not describe may suppress.
+
+A separate table, `[[invokes]]`, says what a call runs of the values it is handed (R3; read by
+`heki_effect::invokes`, so that no other fact sees an entry there): per argument (by position,
+`rest` for every position from it on, by keyword, `"*"` for any keyword, or the receiver), the
+special methods it runs on the value's class (`methods`, looked up on the metaclass for a class
+object; `"*"` for any attribute, read by a name the call is handed), on the classes of the
+value's items (`item_methods`), and whether it calls the value (`calls`). An argument an entry
+does not list runs nothing there. A `lazy` entry returns an iterator that runs the same code
+again while it is iterated (`enumerate`, `map`, `iter`). A value runs code of the project there
+only when its class may define the method in the project: a project class, a builtin class a
+project subclass replaces it in (R2), or a class heki does not know. Two rules keep the entries
+short: a key a dict or set looks up is compared with the keys it holds only on a hash collision,
+which an entry leaves out, and a builtin dict or set hands on its keys with the hashes it stored
+for them. A call of a catalogued library without such an entry runs code of the project only
+when it is handed a value not established as an instance of a library class that is not
+callable; `eval`, `exec`, `__import__`, `importlib.import_module`, and `pickle.loads` always may.
+
+A third table, `[[cached_properties]]` (`heki_kb::CachedPropertyDecorator`), lists the
+cached-property decorators known to keep the getter's value in the instance `__dict__` under the
+property's name: `functools.cached_property`, Django's, Werkzeug's, propcache's, and kombu's. Each
+entry names the versions whose source was read, why the value is kept there, how `del obj.<name>`
+and `obj.__dict__.pop(<name>)` act on it, and, for Werkzeug, the slot an instance without a
+`__dict__` keeps it in. `KeptFacts::listed_cache` records that a getter's decorator, resolved
+through the module's imports (`ModuleDecls::decorator_symbol`), is listed; only such a getter makes
+a cached property an exact claim's (R3), and any other `cached_property` is one by its name.
 
 The entries follow the public API of each package, with three conventions:
 - An async API is `async_safe` and carries no blocking effect: it is often called without a

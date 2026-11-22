@@ -800,16 +800,24 @@ impl ModuleDecls {
     /// defines is its own decorator and none of `names` (an identity `def cache(fn)` caches
     /// nothing); a head bound by neither (a builtin, a star import) counts by its spelling.
     pub fn decorator_is(&self, text: &str, names: &[&str]) -> bool {
+        self.decorator_symbol(text)
+            .is_some_and(|s| names.contains(&s.rsplit('.').next().unwrap_or(&s)))
+    }
+
+    /// The symbol the head of the decorator `text` names, through this module's imports and
+    /// aliases (`functools.cached_property` of `@cached_property` after `from functools import
+    /// cached_property`); `None` for a class or function the module defines; a name the module
+    /// neither imports nor defines as written.
+    pub fn decorator_symbol(&self, text: &str) -> Option<String> {
         let (head, _) = decorator_parts(text);
         let first = head.split('.').next().unwrap_or(head);
-        let symbol = if self.imports.contains_key(first) || self.aliases.contains_key(first) {
+        if self.imports.contains_key(first) || self.aliases.contains_key(first) {
             self.resolve_dotted(head, false)
         } else if self.classes.contains_key(first) || self.functions.contains_key(first) {
             None
         } else {
             Some(head.to_owned())
-        };
-        symbol.is_some_and(|s| names.contains(&s.rsplit('.').next().unwrap_or(&s)))
+        }
     }
 
     /// Resolve a dotted name written in this module (runtime imports, then aliases and local

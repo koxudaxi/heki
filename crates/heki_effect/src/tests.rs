@@ -2003,10 +2003,8 @@ fn reads_on_every_path_are_the_loads_and_self_calls_every_normal_return_passes()
     let index = project(&[("kept.py", KEPT_READS_PY)]);
     let must = |q: &str| -> BTreeSet<(String, Option<String>)> {
         summary(&index, "kept", q)
-            .must_read_self_attrs
-            .as_deref()
-            .into_iter()
-            .flatten()
+            .must_read_self_attrs()
+            .iter()
             .map(|r| (r.attr.clone(), r.const_key.clone()))
             .collect()
     };
@@ -2042,4 +2040,293 @@ fn reads_on_every_path_are_the_loads_and_self_calls_every_normal_return_passes()
     // A helper one definition calls on every path is not the other's: a name bound twice takes
     // nothing from its calls.
     assert_eq!(must("Twice.via"), set(&[]));
+}
+
+const KEPT_REMOVALS_PY: &str = r#"
+import asyncio
+import functools
+import json
+
+
+class Holder:
+    def __init__(self) -> None:
+        self.items: list[str] = []
+
+    @functools.cached_property
+    def size(self) -> int:
+        return len(self.items)
+
+
+def drop(h: Holder) -> None:
+    del h.size
+
+
+def pop(h: Holder) -> None:
+    h.__dict__.pop("size", None)
+
+
+def clear(h: Holder) -> None:
+    h.__dict__.clear()
+
+
+def calls_drop(h: Holder) -> None:
+    drop(h)
+
+
+def unknown(callback) -> None:
+    callback()
+
+
+def library_only(names: list[str]) -> int:
+    parts = []
+    parts.append("x")
+    parts.append(",".join(names))
+    parts.append(f"{names}".strip())
+    return len(parts) + len("abc")
+
+
+def handed_unknown(value) -> int:
+    return len(value)
+
+
+def class_check(value: Holder) -> bool:
+    return isinstance(value, Holder)
+
+
+async def waits(h: Holder) -> None:
+    await h.items_ready()
+
+
+class Row:
+    def __init__(self, raw: str) -> None:
+        self.raw = raw
+
+
+class Ranker:
+    def __call__(self, name: str) -> int:
+        return len(name)
+
+
+def dumps(h: Holder) -> str:
+    return json.dumps(h.__dict__)
+
+
+def copied(names: list[str] | tuple[str, ...]) -> list[str]:
+    out: list[str] = []
+    for name in names:
+        out.append(name)
+    return out
+
+
+def ordered(names: list[str] | tuple[str, ...]) -> list[str]:
+    return sorted(names)
+
+
+def checks(value: object, cls: type[Holder]) -> bool:
+    return isinstance(value, cls)
+
+
+def present(first: str, last: str) -> list[str]:
+    out: list[str] = []
+    for part in filter(None, [first, last]):
+        out.append(part)
+    return out
+
+
+def built_rows(cls: type[Row], raws: list[str]) -> int:
+    total = 0
+    for _ in map(cls, raws):
+        total += 1
+    return total
+
+
+def by_len(first: str, last: str) -> list[str]:
+    return sorted([first, last], key=len)
+
+
+def by_partial(first: str, last: str, key: functools.partial[int]) -> list[str]:
+    return sorted([first, last], key=key)
+
+
+def by_ranker(first: str, last: str, ranker: Ranker) -> list[str]:
+    return sorted([first, last], key=ranker)
+
+
+def by_unknown(first: str, last: str, key) -> list[str]:
+    return sorted([first, last], key=key)
+
+
+def appended(h: Holder) -> bool:
+    found = []
+    found.append(h)
+    return any(found)
+
+
+def copied_list(h: Holder) -> bool:
+    return any(list((h,)))
+
+
+def generated(names: list[str]) -> bool:
+    return any(name for name in names)
+
+
+def keyed(first: str, last: str) -> list[str]:
+    return sorted({first: 1, last: 2})
+
+
+def merged(first: str, extra: dict[str, int]) -> list[str]:
+    return sorted({first: 1, **extra})
+
+
+async def locked(h: Holder, lock: asyncio.Lock) -> None:
+    async with lock:
+        h.items.append("x")
+
+
+class Feed:
+    def __init__(self) -> None:
+        self.items: list[str] = []
+
+    @functools.cached_property
+    def count(self) -> int:
+        return len(self.items)
+
+    def rows(self):
+        del self.count
+        yield 1
+
+    def make(self) -> list[int]:
+        return [1]
+
+    def refill(self) -> int:
+        self.items.append("x")
+        total = 0
+        for _ in self.rows():
+            total += 1
+        return total
+
+    def from_factory(self, h: Holder) -> int:
+        total = 0
+        for _ in self.make():
+            total += 1
+        for _ in factory(h):
+            total += 1
+        return total
+
+
+def factory(h: Holder):
+    return h
+"#;
+
+#[test]
+fn removals_of_kept_values_by_name_and_by_unknown_code() {
+    let index = project(&[("rm.py", KEPT_REMOVALS_PY)]);
+    let removes = |q: &str| summary(&index, "rm", q).removes_kept().clone();
+    let named = |n: &str| KeptRemoval::Named(Box::new(set(&[n.to_owned()])));
+    assert_eq!(removes("drop"), named("size"));
+    assert_eq!(removes("pop"), named("size"));
+    assert_eq!(removes("clear"), KeptRemoval::Any);
+    assert_eq!(removes("calls_drop"), named("size"));
+    assert_eq!(removes("unknown"), KeptRemoval::Any);
+    // `list.append` and `len` of a builtin list or string run no code of the project.
+    assert_eq!(removes("library_only"), KeptRemoval::Nothing);
+    // `len` of a value of a class heki does not know runs its `__len__`.
+    assert_eq!(removes("handed_unknown"), KeptRemoval::Any);
+    // `isinstance` looks up `__class__` on its first argument, and runs the metaclass's
+    // `__instancecheck__` of its second, which a class without a metaclass of its own does not
+    // define in the project.
+    assert_eq!(removes("class_check"), KeptRemoval::Nothing);
+    // Other tasks run while a coroutine waits.
+    assert_eq!(removes("waits"), KeptRemoval::Any);
+    // A call handed an object's `__dict__` may change it.
+    assert_eq!(removes("dumps"), KeptRemoval::Any);
+    // Iterating builtin containers runs their own iteration; the items `sorted` compares are of
+    // classes heki does not know.
+    assert_eq!(removes("copied"), KeptRemoval::Nothing);
+    assert_eq!(removes("ordered"), KeptRemoval::Any);
+    // A class object's `__instancecheck__` is its metaclass's.
+    assert_eq!(removes("checks"), KeptRemoval::Nothing);
+    // `filter(None, ...)` calls nothing; `map` calls a project class while it is iterated.
+    assert_eq!(removes("present"), KeptRemoval::Nothing);
+    assert_eq!(removes("built_rows"), KeptRemoval::Any);
+    // A key function: a builtin runs no project code; a `functools.partial`, an instance whose
+    // class defines `__call__`, and a value of unknown type may.
+    assert_eq!(removes("by_len"), KeptRemoval::Nothing);
+    assert_eq!(removes("by_partial"), KeptRemoval::Any);
+    assert_eq!(removes("by_ranker"), KeptRemoval::Any);
+    assert_eq!(removes("by_unknown"), KeptRemoval::Any);
+    // Items heki does not know: a display changed after it is built, what a builtin call or a
+    // generator expression returns.
+    assert_eq!(removes("appended"), KeptRemoval::Any);
+    assert_eq!(removes("copied_list"), KeptRemoval::Any);
+    assert_eq!(removes("generated"), KeptRemoval::Any);
+    // A dict display used once hands on its keys; a `**` unpacking adds keys of another value.
+    assert_eq!(removes("keyed"), KeptRemoval::Nothing);
+    assert_eq!(removes("merged"), KeptRemoval::Any);
+    // Leaving an `async with` awaits `__aexit__`: other tasks run then, whatever the manager.
+    assert_eq!(removes("locked"), KeptRemoval::Any);
+    // A generator runs its body while what it returns is iterated: each step of the loop is a
+    // point of the generator's removals (its summary's), after the write before the loop.
+    assert_eq!(removes("Feed.refill"), named("count"));
+    let file = &index.files[&PathBuf::from("rm.py")];
+    let refill = &file.cache_flows[&key("rm", "Feed.refill")][0];
+    let rows_call = file
+        .call_sites
+        .iter()
+        .find(|s| s.caller == key("rm", "Feed.refill") && s.recv_is_self)
+        .map(|s| s.span)
+        .unwrap();
+    let steps = refill
+        .blocks
+        .iter()
+        .flat_map(|b| &b.events)
+        .filter(|(_, e)| *e == CacheEvent::Calls(rows_call))
+        .count();
+    assert!(steps > 0, "the loop's steps run the generator: {refill:#?}");
+    // A builtin list a project method declares it returns iterates as a builtin; what another
+    // project call returns runs its class's iteration, which may be anything.
+    assert_eq!(removes("Feed.from_factory"), KeptRemoval::Any);
+}
+
+const LISTED_CACHES_PY: &str = r#"
+import functools
+from functools import cached_property as cp
+
+from mylib import cached_property
+from werkzeug.utils import cached_property as wcp
+
+
+class A:
+    @functools.cached_property
+    def by_module(self) -> int:
+        return 1
+
+    @cp
+    def by_alias(self) -> int:
+        return 1
+
+    @cached_property
+    def lookalike(self) -> int:
+        return 1
+
+    @wcp
+    def in_slot(self) -> int:
+        return 1
+"#;
+
+#[test]
+fn cached_property_decorators_the_catalog_lists_keep_their_value_in_the_instance_dict() {
+    let index = project(&[("lc.py", LISTED_CACHES_PY)]);
+    let of = |q: &str| {
+        let s = summary(&index, "lc", q);
+        (s.is_cached_property, s.listed_cache())
+    };
+    let listed = |in_slot| Some(ListedCache { in_slot });
+    assert_eq!(of("A.by_module"), (true, listed(false)));
+    // An alias import names the decorator it imports.
+    assert_eq!(of("A.by_alias"), (true, listed(false)));
+    // A `cached_property` of a library the catalog does not list is one by its name only.
+    assert_eq!(of("A.lookalike"), (true, None));
+    // Werkzeug keeps the value of an instance without a `__dict__` in a slot.
+    assert_eq!(of("A.in_slot"), (true, listed(true)));
 }

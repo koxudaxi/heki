@@ -34,6 +34,7 @@ pub mod guards;
 pub mod held;
 mod infer;
 mod invalidation;
+mod invokes;
 pub mod iterations;
 pub mod locks;
 pub mod one_at_a_time;
@@ -47,7 +48,8 @@ mod summary;
 pub mod types;
 
 pub use cache_flow::{
-    CacheEvent, CacheFlow, FlowBlock, SelfAttrWrite, attr_writes, self_attr_writes,
+    CacheEvent, CacheFlow, FlowBlock, InPlaceChange, KeptRemoval, SelfAttrWrite, attr_writes,
+    self_attr_writes,
 };
 pub use capacity::{Bound, Capacity, CapacityOf, CapacityWait, ParamOf, SiteQueues, WhileFull};
 pub use contracts::{ContractClass, Contracts};
@@ -653,6 +655,39 @@ impl WriteKind {
     }
 }
 
+/// What the catalog says of a cached property's decorator ([`KeptFacts::listed_cache`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListedCache {
+    /// An instance without a `__dict__` keeps the value in a slot instead
+    /// (`heki_kb::CachedPropertyDecorator::slot`).
+    pub in_slot: bool,
+}
+
+/// What `MUT101`'s exact claim reads of a function ([`EffectSummary::kept`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeptFacts {
+    /// The `self` attributes the function reads on every path on which it returns normally,
+    /// exception edges into handlers included: its own loads that returned, whose value is
+    /// read as a whole or, when every use of a load reads an item of a constant key, with that
+    /// key (an attribute read as a whole covers each of its keys); and the facts of the `self`
+    /// methods it calls on every such path, when the call's targets are every implementation it
+    /// can run and each runs its body at every call (a cached function, or a callee of the
+    /// function's own call-graph component, adds nothing; over several targets, what every one
+    /// reads).
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub must_read_self_attrs: BTreeSet<AttrKeyPath>,
+    /// The values kept in an instance `__dict__` (a `@cached_property`'s) the function may
+    /// remove or replace, on any object, itself or through the calls it makes
+    /// ([`KeptRemoval`]).
+    #[serde(default)]
+    pub removes_kept: KeptRemoval,
+    /// The cached property's decorator is one the catalog lists as keeping the value in the
+    /// instance `__dict__` (`heki_kb::CachedPropertyDecorator`); any other `cached_property` is
+    /// one by its name only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listed_cache: Option<ListedCache>,
+}
+
 /// Unified interprocedural summary propagated bottom-up over Tarjan SCCs.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EffectSummary {
@@ -763,16 +798,11 @@ pub struct EffectSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub iterations: Option<Box<IterationFacts>>,
     pub invalidates_cached: BTreeSet<String>,
-    /// The `self` attributes the function reads on every path on which it returns normally,
-    /// exception edges into handlers included: its own loads that returned, whose value is
-    /// read as a whole or, when every use of a load reads an item of a constant key, with that
-    /// key (an attribute read as a whole covers each of its keys); and the facts of the `self`
-    /// methods it calls on every such path, when the call's targets are every implementation it
-    /// can run and each runs its body at every call (a cached function, or a callee of the
-    /// function's own call-graph component, adds nothing; over several targets, what every one
-    /// reads). Computed while an enabled rule reads it ([`OptInFacts::kept_values`]; `MUT101`).
+    /// What `MUT101`'s exact claim reads of the function ([`KeptFacts`]), boxed as it is
+    /// computed only while an enabled rule reads it ([`OptInFacts::kept_values`]; `MUT101`).
+    /// `None` when every fact is empty, so that two summaries of the same facts are equal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub must_read_self_attrs: Option<Box<BTreeSet<AttrKeyPath>>>,
+    pub kept: Option<Box<KeptFacts>>,
     /// The facts of every typed write the function reaches, through any callee.
     pub typed_field_writes: BTreeSet<TypedFieldWrite>,
     /// The function's own writes of project-class attributes, the `IndirectHelper` writes of
@@ -1113,6 +1143,55 @@ pub struct ArgBinding {
 }
 
 impl EffectSummary {
+    /// [`KeptFacts::must_read_self_attrs`] (none while the facts are not computed).
+    pub fn must_read_self_attrs(&self) -> &BTreeSet<AttrKeyPath> {
+        static NONE: BTreeSet<AttrKeyPath> = BTreeSet::new();
+        self.kept
+            .as_ref()
+            .map_or(&NONE, |k| &k.must_read_self_attrs)
+    }
+
+    /// [`KeptFacts::removes_kept`] (nothing while the facts are not computed).
+    pub fn removes_kept(&self) -> &KeptRemoval {
+        static NOTHING: KeptRemoval = KeptRemoval::Nothing;
+        self.kept.as_ref().map_or(&NOTHING, |k| &k.removes_kept)
+    }
+
+    /// [`KeptFacts::listed_cache`].
+    pub fn listed_cache(&self) -> Option<ListedCache> {
+        self.kept.as_ref().and_then(|k| k.listed_cache)
+    }
+
+    /// The [`KeptFacts`] to add to, made on the first need.
+    pub(crate) fn kept_mut(&mut self) -> &mut KeptFacts {
+        self.kept.get_or_insert_with(Box::default)
+    }
+
+    /// Adds `removes` to [`KeptFacts::removes_kept`], making the facts only when it removes
+    /// something.
+    pub(crate) fn join_removes_kept(&mut self, removes: &KeptRemoval) {
+        if *removes != KeptRemoval::Nothing {
+            self.kept_mut().removes_kept.join(removes);
+        }
+    }
+
+    /// Joins the [`KeptFacts`] of another definition bound to the same name: a call runs one of
+    /// them, so the function reads on every path what both read, and removes what either does.
+    pub(crate) fn merge_kept(&mut self, other: Option<&KeptFacts>) {
+        let mut kept = self.kept.take().unwrap_or_default();
+        kept.must_read_self_attrs = match other {
+            Some(other) => callgraph::must_reads_of_both(
+                &kept.must_read_self_attrs,
+                &other.must_read_self_attrs,
+            ),
+            None => BTreeSet::new(),
+        };
+        if let Some(other) = other {
+            kept.removes_kept.join(&other.removes_kept);
+        }
+        self.kept = (*kept != KeptFacts::default()).then_some(kept);
+    }
+
     /// [`SharedStateFacts::changed`].
     pub fn changed_state(&self) -> &[(SharedState, Span)] {
         self.shared_state.as_ref().map_or(&[], |f| &f.changed)
@@ -2211,9 +2290,10 @@ pub struct OptInFacts {
     pub shared_state: bool,
     /// [`EffectSummary::must_exec`] and what computes it at call sites.
     pub must_effects: bool,
-    /// What `MUT101`'s exact claim reads of a kept value: [`EffectSummary::must_read_self_attrs`]
-    /// and the call-site facts it is computed from ([`CallSite::complete`],
-    /// [`CallSite::on_every_return`]).
+    /// What `MUT101`'s exact claim reads of a kept value: [`EffectSummary::must_read_self_attrs`],
+    /// [`KeptFacts::removes_kept`], the points of a method that may remove one
+    /// ([`CacheEvent::MayRemove`]), and the call-site facts they are computed from
+    /// ([`CallSite::complete`], [`CallSite::on_every_return`]).
     pub kept_values: bool,
     pub blind_spots: bool,
 }
