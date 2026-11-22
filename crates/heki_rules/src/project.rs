@@ -887,7 +887,8 @@ pub fn retain_unsuppressed<'f>(
     let judged = run.unused_reported() || run.codes_required();
     diags.retain(|d| {
         let mut kept = true;
-        if let Some((_, ign, suppressed)) = ignores.get_mut(d.path.as_path()) {
+        // A diagnostic on a path without a checked source has no suppressions: no iteration.
+        for (_, ign, suppressed) in ignores.get_mut(d.path.as_path()).into_iter() {
             for i in ign.suppressing(d.line, &d.rule_code, &d.rule_slug) {
                 if judged {
                     suppressed[i].insert(d.rule_code.clone());
