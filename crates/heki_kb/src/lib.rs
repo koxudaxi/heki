@@ -4168,8 +4168,11 @@ mod tests {
                 reached.push(t.clone());
             }
         }
-        // `return_type = "Self"`: an instance of the receiver's class, never a class of that
-        // name.
+    }
+
+    /// `return_type = "Self"`: an instance of the receiver's class, never a class of that name.
+    #[test]
+    fn self_return_type_is_the_receivers_class() {
         let builder = EcosystemEntry {
             return_type: Some(SELF_RETURN_TYPE.into()),
             ..EcosystemEntry::default()
