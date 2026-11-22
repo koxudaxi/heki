@@ -18,6 +18,7 @@ use heki_env::HekiConfig;
 use heki_ir::walk::{Budget, FnShape, Visit, reach};
 use heki_ir::{BlockId, FnIndex, Inst, InstKind, IrFunction, VarId};
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
@@ -1707,6 +1708,24 @@ pub(crate) type SiteId = (String, Span);
 #[derive(Default)]
 pub(crate) struct MergedReports<'u> {
     reports: BTreeMap<(FuncKey, Span, String), MergedReport<'u>>,
+    /// The sites of each group of accesses reported at the same places ([`AccessGroups`]).
+    groups: Vec<BTreeSet<SiteId>>,
+}
+
+/// A group of sites of [`MergedReports`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct SiteGroup(usize);
+
+/// What a report stands for: one violation site, or every site of a group.
+pub(crate) enum Sites {
+    One(SiteId),
+    Group(SiteGroup),
+}
+
+impl From<SiteId> for Sites {
+    fn from(site: SiteId) -> Self {
+        Self::One(site)
+    }
 }
 
 /// The name a report gives the target an access matched: the configured text, or, for a glob
@@ -1734,11 +1753,23 @@ struct MergedReport<'u> {
     help: Option<String>,
     chain: Vec<CallHop>,
     sites: BTreeSet<SiteId>,
+    groups: BTreeSet<SiteGroup>,
 }
 
 impl<'u> MergedReports<'u> {
+    /// A new, empty group of sites.
+    pub(crate) fn group(&mut self) -> SiteGroup {
+        self.groups.push(BTreeSet::new());
+        SiteGroup(self.groups.len() - 1)
+    }
+
+    /// Add `site` to `group`: every report standing for the group stands for it too.
+    pub(crate) fn add_to_group(&mut self, group: SiteGroup, site: SiteId) {
+        self.groups[group.0].insert(site);
+    }
+
     /// Add a report of `func` at `span` for `target` (the configured text) and the member it
-    /// matched (`named`, [`matched_name`]), standing for `site`, with the contract's `message`
+    /// matched (`named`, [`matched_name`]), standing for `sites`, with the contract's `message`
     /// as its help (`note`); `message` and `chain` are only built for the first report of the
     /// key.
     #[allow(clippy::too_many_arguments)]
@@ -1748,7 +1779,7 @@ impl<'u> MergedReports<'u> {
         func: &FuncKey,
         span: Span,
         (target, named): (&str, &str),
-        site: SiteId,
+        sites: impl Into<Sites>,
         note: Option<&str>,
         message: impl FnOnce() -> String,
         chain: impl FnOnce() -> Vec<CallHop>,
@@ -1764,16 +1795,42 @@ impl<'u> MergedReports<'u> {
                 help: note.map(str::to_owned),
                 chain: chain(),
                 sites: BTreeSet::new(),
+                groups: BTreeSet::new(),
             });
         if report.named != named {
             report.also.insert(named.to_owned());
         }
-        report.sites.insert(site);
+        match sites.into() {
+            Sites::One(site) => {
+                report.sites.insert(site);
+            }
+            Sites::Group(group) => {
+                report.groups.insert(group);
+            }
+        }
     }
 
     pub(crate) fn emit(self, cx: &CheckContext<'_>, code: &'static str, out: &mut Vec<Diagnostic>) {
-        for ((func, span, target), r) in self.reports {
-            let sites = u32::try_from(r.sites.len()).unwrap_or(u32::MAX);
+        // Reports standing for the same sites and groups (the call sites of a function, each
+        // running the accesses of the same groups) count their union once.
+        type Union<'r> = (&'r BTreeSet<SiteId>, &'r BTreeSet<SiteGroup>);
+        let mut unions: FxHashMap<Union<'_>, usize> = FxHashMap::default();
+        let mut counted = Vec::with_capacity(self.reports.len());
+        for r in self.reports.values() {
+            let mut groups = r.groups.iter();
+            let distinct = match (groups.next(), groups.next()) {
+                (None, _) => r.sites.len(),
+                (Some(g), None) if r.sites.is_empty() => self.groups[g.0].len(),
+                _ => *unions.entry((&r.sites, &r.groups)).or_insert_with(|| {
+                    let grouped = r.groups.iter().flat_map(|g| &self.groups[g.0]);
+                    let union: BTreeSet<&SiteId> = r.sites.iter().chain(grouped).collect();
+                    union.len()
+                }),
+            };
+            counted.push(distinct);
+        }
+        for (((func, span, target), r), distinct) in self.reports.into_iter().zip(counted) {
+            let sites = u32::try_from(distinct).unwrap_or(u32::MAX);
             let mut message = r.message;
             if !r.also.is_empty() {
                 let also: Vec<String> = r.also.iter().map(|m| format!("`{m}`")).collect();
@@ -3417,16 +3474,85 @@ struct ReadOwnerRule<'r> {
 /// Where one access (a read, a call) is reported.
 pub(crate) struct DelegatedReport {
     pub func: FuncKey,
-    pub span: Span,
     /// Hops from `func` down to the accessing function (empty: `func` accesses itself).
     pub chain: Vec<CallHop>,
+}
+
+impl DelegatedReport {
+    /// The span of the report of the access at `access`: the access itself, or the call of the
+    /// first hop.
+    pub(crate) fn span(&self, access: Span) -> Span {
+        self.chain.first().map_or(access, |hop| hop.span)
+    }
+}
+
+/// The reports of the accesses of one function, by groups of accesses that [`delegated_reports`]
+/// reports at the same places (the same object parameters, allowance, and family, and one target
+/// and member named): the walk runs once per group, and a report at a call site stands for the
+/// sites of every access of its group, so the work grows with the accesses plus the reports, not
+/// with their product. The generator expressions of a function share one qualname, and so one
+/// key whose every call site runs the accesses of all of them.
+pub(crate) struct AccessGroups<K> {
+    groups: FxHashMap<K, AccessGroup>,
+}
+
+struct AccessGroup {
+    sites: SiteGroup,
+    /// The reports the walk finds at the access itself, where every access of the group is
+    /// reported.
+    at_access: Vec<DelegatedReport>,
+}
+
+impl<K: Eq + std::hash::Hash> AccessGroups<K> {
+    pub(crate) fn new() -> Self {
+        Self {
+            groups: FxHashMap::default(),
+        }
+    }
+
+    /// Report the access at `site` of the group `key`, whose reports `walk` finds for its first
+    /// access: `add` adds a report found there, standing for `sites`.
+    pub(crate) fn report<'u>(
+        &mut self,
+        reports: &mut MergedReports<'u>,
+        key: K,
+        site: SiteId,
+        walk: impl FnOnce() -> Vec<DelegatedReport>,
+        mut add: impl FnMut(&mut MergedReports<'u>, &DelegatedReport, Sites),
+    ) {
+        match self.groups.entry(key) {
+            Entry::Occupied(group) => {
+                let group = group.get();
+                reports.add_to_group(group.sites, site.clone());
+                for r in &group.at_access {
+                    add(reports, r, Sites::One(site.clone()));
+                }
+            }
+            Entry::Vacant(group) => {
+                let sites = reports.group();
+                reports.add_to_group(sites, site.clone());
+                let found = walk();
+                // In the walk's order: the first report of a key gives its message and chain.
+                for r in &found {
+                    let stands_for = if r.chain.is_empty() {
+                        Sites::One(site.clone())
+                    } else {
+                        Sites::Group(sites)
+                    };
+                    add(reports, r, stands_for);
+                }
+                let at_access = found.into_iter().filter(|r| r.chain.is_empty()).collect();
+                group.insert(AccessGroup { sites, at_access });
+            }
+        }
+    }
 }
 
 /// `MUT203`: reads of `read-owners` targets outside their allowed readers. Read sites are
 /// local facts; a read in a private helper with project callers is reported at the call sites
 /// of its outermost non-private callers, found by walking the reverse call graph.
-pub(crate) fn mut203(
-    cx: &CheckContext<'_>,
+pub(crate) fn mut203<'c>(
+    cx: &CheckContext<'c>,
     out: &mut Vec<Diagnostic>,
 ) -> Result<(), RuleConfigError> {
     let (reads, unresolved) = (
@@ -3473,45 +3599,48 @@ pub(crate) fn mut203(
     let sites = cx.sites_by_caller();
     let mut reports = MergedReports::default();
     for (key, s) in cx.defined_functions() {
+        let reader = key.fqn();
+        let mut groups = AccessGroups::new();
         for read in s
             .typed_field_read_sites
             .iter()
             .filter(|r| r.counts_for_contracts())
         {
-            for rule in &rules {
-                for t in rule
+            for (r, rule) in rules.iter().enumerate() {
+                for (k, t) in rule
                     .targets
                     .iter()
-                    .filter(|t| t.matches(&read.class_qualname, &read.attr))
+                    .enumerate()
+                    .filter(|(_, t)| t.matches(&read.class_qualname, &read.attr))
                 {
-                    let found = delegated_reports(
-                        cx,
-                        &sites,
-                        &rule.allowance,
-                        &t.classes,
-                        key,
-                        read.obj_params,
-                        read.span,
-                    );
-                    for r in found {
+                    let named =
+                        matched_name(&t.text, || format!("{}.{}", read.class_qualname, read.attr));
+                    let walk = || {
+                        delegated_reports(
+                            cx,
+                            &sites,
+                            &rule.allowance,
+                            &t.classes,
+                            key,
+                            read.obj_params,
+                        )
+                    };
+                    let add = |reports: &mut MergedReports<'c>, r: &DelegatedReport, sites| {
                         let Some(unit) = cx.index.file_of(&r.func).and_then(|p| cx.unit(p)) else {
-                            continue;
+                            return;
                         };
-                        let named = matched_name(&t.text, || {
-                            format!("{}.{}", read.class_qualname, read.attr)
-                        });
                         reports.add(
                             unit,
                             &r.func,
-                            r.span,
+                            r.span(read.span),
                             (&t.text, &named),
-                            (key.fqn(), read.span),
+                            sites,
                             rule.note,
                             || {
                                 let via = if r.chain.is_empty() {
                                     String::new()
                                 } else {
-                                    format!(" via `{}`", key.fqn())
+                                    format!(" via `{reader}`")
                                 };
                                 format!(
                                     "`{}` reads `{named}` ({}){via} {}",
@@ -3526,7 +3655,9 @@ pub(crate) fn mut203(
                             },
                             || r.chain.clone(),
                         );
-                    }
+                    };
+                    let group = (read.obj_params, r, k, named.clone());
+                    groups.report(&mut reports, group, (reader.clone(), read.span), walk, add);
                 }
             }
         }
@@ -3569,7 +3700,6 @@ pub(crate) fn delegated_reports(
     family: &FxHashSet<String>,
     func: &FuncKey,
     obj: u64,
-    span: Span,
 ) -> Vec<DelegatedReport> {
     if allowance.is_lexical() {
         let judged = allowance.judged(cx.decls, func);
@@ -3583,7 +3713,6 @@ pub(crate) fn delegated_reports(
         }
         return vec![DelegatedReport {
             func: judged.into_owned(),
-            span,
             chain: Vec::new(),
         }];
     }
@@ -3602,7 +3731,6 @@ pub(crate) fn delegated_reports(
         }
         return vec![DelegatedReport {
             func: func.clone(),
-            span,
             chain: Vec::new(),
         }];
     }
@@ -3630,10 +3758,13 @@ pub(crate) fn delegated_reports(
         }
         DelegatedReport {
             func: func.clone(),
-            span: chain.first().map_or(span, |hop| hop.span),
             chain,
         }
     };
+    // What a caller's call sites hand over or keep is decided once per caller, whichever of its
+    // sites the walk reaches (a function calling its generator expressions at many sites).
+    let mut delegating: FxHashMap<&FuncKey, bool> = FxHashMap::default();
+    let mut reporting: FxHashMap<(&FuncKey, u64, bool), bool> = FxHashMap::default();
     let mut out = Vec::new();
     let mut i = 0;
     while i < states.len() {
@@ -3693,7 +3824,10 @@ pub(crate) fn delegated_reports(
             let in_scope = below_in_scope
                 || allowance.in_scope(c.caller)
                 || c.via.is_some_and(|p| allowance.in_scope(p));
-            if delegates(cx, sites, c.caller, Handover::ByImplementation) {
+            let delegating = *delegating
+                .entry(c.caller)
+                .or_insert_with(|| delegates(cx, sites, c.caller, Handover::ByImplementation));
+            if delegating {
                 if visited.insert((c.caller.clone(), c.into, caller_obj, in_scope)) {
                     states.push(WalkState {
                         func: c.caller.clone(),
@@ -3704,7 +3838,12 @@ pub(crate) fn delegated_reports(
                         down: Some((i, hops)),
                     });
                 }
-            } else if reports_itself(c.caller, caller_obj, in_scope, FirstCallers::All) {
+            } else if *reporting
+                .entry((c.caller, caller_obj, in_scope))
+                .or_insert_with(|| {
+                    reports_itself(c.caller, caller_obj, in_scope, FirstCallers::All)
+                })
+            {
                 out.push(report_at(&states, i, c.caller, hops));
             }
         }

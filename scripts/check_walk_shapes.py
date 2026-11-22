@@ -347,6 +347,15 @@ def cell_reads_of_several_names(n: int) -> Body:
     return Body(("xs", "out"), lines)
 
 
+def guarded_accesses_in_generator_expressions(n: int) -> Body:
+    """Generator expressions each reading a guarded attribute and calling a guarded function: the
+    generator expressions of a function share one qualname, so each of their call sites runs the
+    accesses of all of them."""
+    lines = ["b = Base()"]
+    lines += ["out.append(sum(1 for _ in xs if b.LIMIT and g(b)))" for _ in range(n)]
+    return Body(("xs", "out"), lines)
+
+
 def read_only_value_handed_to_calls(n: int) -> Body:
     """The value a `readonly-returns` producer returns, handed to many project calls."""
     return Body(("p",), ["v = load()", *("use(v)" for _ in range(n))])
@@ -524,6 +533,13 @@ FAMILIES = [
         size=CELL_BINDINGS,
     ),
     Family("read_only_value_handed_to_calls", read_only_value_handed_to_calls),
+    # Every call site is reported, standing for every access: the cost of the reports shows at a
+    # size where the walks the family does not gate stay cheap.
+    Family(
+        "guarded_accesses_in_generator_expressions",
+        guarded_accesses_in_generator_expressions,
+        size=2000,
+    ),
     Family("path_aliases", path_aliases),
     Family("merged_package_paths", merged_package_paths),
     Family("lazy_init_sites", lazy_init_sites, placements=("method",)),
