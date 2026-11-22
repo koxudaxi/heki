@@ -19,8 +19,9 @@ use heki_ast::Span;
 use heki_kb::ExecEffectKind;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{BTreeSet, VecDeque};
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 /// Recomputations allowed per SCC member before the SCC is declared non-converged.
 const MAX_ITERATIONS_PER_SCC_MEMBER: usize = 16;
@@ -312,15 +313,15 @@ fn recompute(
 }
 
 /// The must-facts the function gets from the project calls it makes whenever it returns
-/// normally (`OnEveryReturn::returned`: a callee that raised may not have run its effect): an
-/// effect every target of a complete call has run whenever it returns ([`site_must_chain`]).
+/// normally ([`CallSite::made_on_every_return`]): an effect every target of a complete call has
+/// run whenever it returns ([`site_must_chain`]).
 fn must_through_calls(index: &ProjectIndex, sites: &[(PathBuf, usize)], s: &mut EffectSummary) {
     if s.must_exec.as_ref().is_some_and(|m| m.bound_twice) {
         return;
     }
     for (path, i) in sites {
         let site = &index.files[path].call_sites[*i];
-        if !site.on_every_return.returned || site.project_callees().is_empty() {
+        if site.project_callees().is_empty() || !site.made_on_every_return() {
             continue;
         }
         let kinds: BTreeSet<ExecEffectKind> = site
@@ -363,8 +364,76 @@ pub(crate) fn site_must_chain(
     site: &CallSite,
     e: ExecEffectKind,
 ) -> Option<SiteMust> {
-    // A callable an API runs on a worker or once per item does not run at the call.
-    if !site.complete || site.role != SiteRole::Call || site.runner != Runner::Caller {
+    site_must_steps(index, path, site, e, &mut |_| ControlFlow::Break(()))
+}
+
+/// A step of a must-fact that does not hold: why a call has not been established to have run
+/// an effect whenever it returns, or a call of a chain to have made the next one.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MustGap {
+    /// No path reaches the call: it is behind a branch the code decides against.
+    NotReached,
+    /// The call never returns normally: every target is abstract or always raises.
+    NeverReturns,
+    /// The caller returns normally on a path on which it has not made the call
+    /// ([`CallSite::made_on_every_return`]).
+    NotOnEveryReturn,
+    /// The targets may not be every implementation the call can run ([`CallSite::complete`]).
+    IncompleteTargets,
+    /// The call does not run a body there and then: it iterates or hands on what a call
+    /// returns, an API runs the callable, or the target (`Some`) is a generator or an
+    /// `async def`.
+    NotRunAtCall(Option<FuncKey>),
+    /// A decorator of the target may not run its body on every call.
+    Decorated(FuncKey),
+    /// The target's name is bound to more than one definition.
+    DefinedTwice(FuncKey),
+    /// The target has not run the effect whenever it returns.
+    WithoutTheFact(FuncKey),
+    /// The Layer 2 call does not have the effect on every call
+    /// (`CallTarget::Layer2::unconditional`).
+    Conditional,
+}
+
+/// A [`MustGap`] at the call of the hop `hop` of a reported chain.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct HopGap {
+    pub hop: usize,
+    pub gap: MustGap,
+}
+
+/// The steps [`site_must_steps`] found open, told to `gaps`: a decision stops at the first one
+/// (`ControlFlow::Break`), an explanation goes on through the others.
+struct Steps<'g, G> {
+    gaps: &'g mut G,
+    open: bool,
+}
+
+impl<G: FnMut(MustGap) -> ControlFlow<()>> Steps<'_, G> {
+    /// Records `gap`; true when the decision stops at it.
+    fn stops_at(&mut self, gap: MustGap) -> bool {
+        self.open = true;
+        (self.gaps)(gap).is_break()
+    }
+}
+
+/// The decision of [`site_must_chain`], telling each step that does not hold to `gaps`. Every
+/// step that makes the decision fail is told, so the result is `None` exactly when `gaps` heard
+/// of one. Past a call that runs no body at the call, the targets' facts are not read: they are
+/// not what runs there.
+pub(crate) fn site_must_steps(
+    index: &ProjectIndex,
+    path: &Path,
+    site: &CallSite,
+    e: ExecEffectKind,
+    gaps: &mut impl FnMut(MustGap) -> ControlFlow<()>,
+) -> Option<SiteMust> {
+    let mut steps = Steps { gaps, open: false };
+    if !site.runs_targets_here() {
+        steps.stops_at(MustGap::NotRunAtCall(None));
+        return None;
+    }
+    if !site.complete && steps.stops_at(MustGap::IncompleteTargets) {
         return None;
     }
     match &site.target {
@@ -373,31 +442,54 @@ pub(crate) fn site_must_chain(
             effects,
             unconditional,
             ..
-        } => (effects.contains(&e) && unconditional & crate::effect_bit(e) != 0).then(|| {
-            let hop = Arc::new(site_hop(site, path, symbol.clone()));
-            SiteMust {
-                chain: vec![Arc::clone(&hop)],
-                witnesses: vec![hop],
+        } => {
+            // The mask is computed only for a complete call: of another, it tells nothing.
+            let has_it = effects.contains(&e) && unconditional & crate::effect_bit(e) != 0;
+            if site.complete && !has_it && steps.stops_at(MustGap::Conditional) {
+                return None;
             }
-        }),
+            (!steps.open).then(|| {
+                let hop = Arc::new(site_hop(site, path, symbol.clone()));
+                SiteMust {
+                    chain: vec![Arc::clone(&hop)],
+                    witnesses: vec![hop],
+                }
+            })
+        }
         CallTarget::Project(callees) => {
             let mut out = SiteMust::default();
             for bc in callees {
-                let callee = index.summary(&bc.callee).filter(|c| !c.is_abstract());
-                let Some(callee) = callee.filter(|c| c.must_exec.is_some()) else {
-                    // An abstract method never runs; a summary without facts has none.
-                    match index.summary(&bc.callee) {
-                        Some(c) if c.is_abstract() => continue,
-                        _ => return None,
+                let key = || bc.callee.clone();
+                let callee = index.summary(&bc.callee);
+                // An abstract method never runs.
+                if callee.is_some_and(EffectSummary::is_abstract) {
+                    continue;
+                }
+                // What the body has run is not what runs at a call that does not run it.
+                if callee.is_some_and(|c| !runs_at_call(c, site)) {
+                    if steps.stops_at(MustGap::NotRunAtCall(Some(key()))) {
+                        return None;
                     }
-                };
-                if !runs_at_call(callee, site)
-                    || !crate::decorators::keeps_returned_value(&callee.decorators)
+                    continue;
+                }
+                if callee.is_some_and(|c| !crate::decorators::keeps_returned_value(&c.decorators))
+                    && steps.stops_at(MustGap::Decorated(key()))
                 {
                     return None;
                 }
-                let must = callee.must_exec.as_deref();
-                let chain = must.and_then(|m| m.chain(e))?;
+                // A summary without facts has none.
+                let must = callee.and_then(|c| c.must_exec.as_deref());
+                let Some(chain) = must.and_then(|m| m.chain(e)) else {
+                    let gap = if must.is_some_and(|m| m.bound_twice) {
+                        MustGap::DefinedTwice(key())
+                    } else {
+                        MustGap::WithoutTheFact(key())
+                    };
+                    if steps.stops_at(gap) {
+                        return None;
+                    }
+                    continue;
+                };
                 let Some(sink) = chain.last() else {
                     continue;
                 };
@@ -418,8 +510,143 @@ pub(crate) fn site_must_chain(
                         .collect();
                 }
             }
-            (!out.chain.is_empty()).then_some(out)
+            if !steps.open && out.chain.is_empty() && steps.stops_at(MustGap::NeverReturns) {
+                return None;
+            }
+            (!steps.open).then_some(out)
         }
+    }
+}
+
+/// Why must-facts do not hold, for the reports of one run: the call site each chain hop names,
+/// found in a table built once, and each call's own gaps ([`site_must_steps`]) decided once and
+/// shared by every report whose chain passes it. A report's walk visits only the hops of its
+/// own chain, so the work grows with the chains the reports show.
+pub struct MustExplainer<'i> {
+    index: &'i ProjectIndex,
+    sites: FxHashMap<(&'i Path, &'i FuncKey, Span), Vec<&'i CallSite>>,
+    gaps: Mutex<SiteGaps>,
+}
+
+/// The gaps of each call site (by its address) for an effect ([`MustExplainer::site_gaps`]).
+type SiteGaps = FxHashMap<(usize, ExecEffectKind), Arc<[MustGap]>>;
+
+impl<'i> MustExplainer<'i> {
+    pub fn new(index: &'i ProjectIndex) -> Self {
+        let mut sites: FxHashMap<(&Path, &FuncKey, Span), Vec<&CallSite>> = FxHashMap::default();
+        for (path, file) in &index.files {
+            for site in &file.call_sites {
+                sites
+                    .entry((path.as_path(), &site.caller, site.span))
+                    .or_default()
+                    .push(site);
+            }
+        }
+        Self {
+            index,
+            sites,
+            gaps: Mutex::default(),
+        }
+    }
+
+    /// The call site a chain's hop stands for: the call of its callee its caller makes there.
+    pub fn site_of(&self, hop: &CallHop) -> Option<&'i CallSite> {
+        let calls = |site: &&CallSite| match &site.target {
+            CallTarget::Layer2 { symbol, .. } => *symbol == hop.callee,
+            CallTarget::Project(callees) => callees.iter().any(|bc| bc.callee.fqn() == hop.callee),
+        };
+        self.sites
+            .get(&(hop.path.as_path(), &hop.caller, hop.span))?
+            .iter()
+            .copied()
+            .find(calls)
+    }
+
+    /// The gaps of [`site_must_steps`] at `site` for `e`, each told once.
+    fn site_gaps(&self, path: &Path, site: &CallSite, e: ExecEffectKind) -> Arc<[MustGap]> {
+        // The index is borrowed for the explainer's life, so a site's address names it.
+        let key = (std::ptr::from_ref(site) as usize, e);
+        let kept = self
+            .gaps
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&key)
+            .cloned();
+        kept.unwrap_or_else(|| {
+            let mut gaps = Vec::new();
+            site_must_steps(self.index, path, site, e, &mut |gap| {
+                gaps.push(gap);
+                ControlFlow::Continue(())
+            });
+            let gaps: Arc<[MustGap]> = gaps.into();
+            self.gaps
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(key, Arc::clone(&gaps));
+            gaps
+        })
+    }
+
+    /// Why the call at `site` (in `path`) has not been established to have run `e` whenever it
+    /// returns, along `chain`, the chain a report shows from it: the gaps of each call on the
+    /// chain, the first one's from [`site_must_steps`] and the others' also from their callers'
+    /// returns ([`CallSite::made_on_every_return`]). The walk goes down while the function the
+    /// chain enters has not run `e` whenever it returns, and that function's own gap gives way
+    /// to the gaps found below it. Empty when the call has the fact.
+    pub fn gaps_along(
+        &self,
+        path: &Path,
+        site: &CallSite,
+        e: ExecEffectKind,
+        chain: &[CallHop],
+    ) -> Vec<HopGap> {
+        let mut out: Vec<HopGap> = Vec::new();
+        // Per hop, the gap of the function the chain enters there, which the gaps below replace.
+        let mut entered_gaps: Vec<(usize, usize)> = Vec::new();
+        let mut at = Some((path, site));
+        for hop in 0..chain.len() {
+            let Some((path, site)) = at.take() else {
+                break;
+            };
+            if hop > 0 && !site.made_on_every_return() {
+                out.push(HopGap {
+                    hop,
+                    gap: MustGap::NotOnEveryReturn,
+                });
+            }
+            let entered = chain.get(hop + 1).map(|h| &h.caller);
+            for gap in self.site_gaps(path, site, e).iter() {
+                if matches!(gap, MustGap::WithoutTheFact(k) if Some(k) == entered) {
+                    entered_gaps.push((hop, out.len()));
+                }
+                out.push(HopGap {
+                    hop,
+                    gap: gap.clone(),
+                });
+            }
+            let Some(next) = chain.get(hop + 1) else {
+                break;
+            };
+            let entered_has_it = self
+                .index
+                .summary(&next.caller)
+                .and_then(|c| c.must_exec.as_deref()?.chain(e))
+                .is_some();
+            if !entered_has_it {
+                at = self.site_of(next).map(|s| (next.path.as_path(), s));
+            }
+        }
+        let deepest = out.last().map_or(0, |g| g.hop);
+        let replaced: FxHashSet<usize> = entered_gaps
+            .into_iter()
+            .filter(|&(hop, _)| deepest > hop)
+            .map(|(_, i)| i)
+            .collect();
+        out.into_iter()
+            .enumerate()
+            .filter(|(i, _)| !replaced.contains(i))
+            .map(|(_, g)| g)
+            .collect()
     }
 }
 
