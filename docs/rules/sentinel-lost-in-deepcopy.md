@@ -33,9 +33,11 @@ argument, of an object of the class or of a subclass; the report is at that call
 as related locations, so one new deep copy is one new diagnostic under a Ratchet baseline.
 
 A deep copy also copies what the object holds in its attributes. An instance of the class held
-there, by the attributes' types (an optional attribute, the items of a list or dict, the classes
-implementing a protocol), down to 64 classes below, is a heuristic report naming the attribute
-path (`reference.source`): what the attributes hold when the program runs may be other objects.
+there or below, by the attributes' types (an optional attribute, the items of a list or dict,
+the classes implementing a protocol), is a heuristic report naming the copied object's attribute
+it is in or below (`reference`): what the attributes hold when the program runs may be other
+objects. A class that copies its instances itself (a copy hook, a `copyreg` registration) is not
+followed.
 
 It does not report:
 
