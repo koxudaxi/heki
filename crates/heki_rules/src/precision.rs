@@ -6,6 +6,7 @@
 //!   the hidden `heki dump-precision`) and copies each rule's measurement into its page; it fails
 //!   when an exact rule has no certification free of false claims.
 
+use schemars::JsonSchema;
 use serde::{Serialize, Serializer};
 
 /// The certification of an exact rule (docs/precision.md, "How a rule becomes exact").
@@ -83,29 +84,18 @@ impl Measurement {
     pub fn real_harm_percent(&self) -> u32 {
         percent(self.confirmed + self.plausible, self.sample())
     }
-}
 
-/// The counts with the shares derived from them, as the tables print them.
-impl Serialize for Measurement {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        #[derive(Serialize)]
-        struct Published {
-            rule: &'static str,
-            round: u32,
-            date: &'static str,
-            sample: u32,
-            confirmed: u32,
-            plausible: u32,
-            benign: u32,
-            false_claims: u32,
-            right_percent: u32,
-            interval_percent: [u32; 2],
-            real_harm_percent: u32,
-        }
-        Published {
-            rule: self.rule,
+    /// Whether the share of real harm, exactly, is below `percent`.
+    pub fn real_harm_below(&self, percent: u32) -> bool {
+        100 * (self.confirmed + self.plausible) < percent * self.sample()
+    }
+
+    /// The counts with the shares derived from them, as the tables print them.
+    pub fn published(&self) -> PublishedMeasurement {
+        PublishedMeasurement {
+            rule: self.rule.to_owned(),
             round: self.round,
-            date: self.date,
+            date: self.date.to_owned(),
             sample: self.sample(),
             confirmed: self.confirmed,
             plausible: self.plausible,
@@ -115,7 +105,40 @@ impl Serialize for Measurement {
             interval_percent: self.interval_percent(),
             real_harm_percent: self.real_harm_percent(),
         }
-        .serialize(serializer)
+    }
+}
+
+/// A measurement as published: the classes of the sampled reports, and the shares derived
+/// from them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct PublishedMeasurement {
+    pub rule: String,
+    /// The round of the measurement protocol.
+    pub round: u32,
+    /// The date of the build the round measured.
+    pub date: String,
+    /// The reports sampled.
+    pub sample: u32,
+    /// Reports whose problem is real and observable from the code.
+    pub confirmed: u32,
+    /// Reports that are right, of code that does harm at realistic sizes.
+    pub plausible: u32,
+    /// Reports that are right, of code that is deliberate or harmless at realistic sizes.
+    pub benign: u32,
+    /// Reports that are wrong about the code.
+    pub false_claims: u32,
+    /// The share right about the code (confirmed, plausible, and benign), in percent.
+    pub right_percent: u32,
+    /// The 95% Wilson score interval of `right_percent`.
+    pub interval_percent: [u32; 2],
+    /// The share of real harm (confirmed and plausible), in percent.
+    pub real_harm_percent: u32,
+}
+
+impl Serialize for Measurement {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.published().serialize(serializer)
     }
 }
 
@@ -247,5 +270,9 @@ mod tests {
             assert_eq!(m.interval_percent(), interval, "{classes:?}");
             assert_eq!(m.real_harm_percent(), harm, "{classes:?}");
         }
+        // 3 of 28 is 10.7%, not below 10%; 2 of 20 is exactly 10%, not below either.
+        assert!(!sampled([0, 3, 17, 8]).real_harm_below(10));
+        assert!(!sampled([0, 2, 18, 0]).real_harm_below(10));
+        assert!(sampled([1, 1, 37, 11]).real_harm_below(10));
     }
 }
