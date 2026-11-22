@@ -3933,6 +3933,35 @@ fn built_values_after_a_write_are_decided_once_per_variable() {
     assert_eq!(found, vec!["C.bump"]);
 }
 
+/// A writer building a dict display of tens of thousands of keys after its write, each hashed:
+/// what the keys' special methods may run, and whether the other operands an implementation
+/// would be handed are inert, are decided once per key, not again per pair of keys.
+#[test]
+fn special_methods_of_a_large_display_after_a_write_are_decided_once_per_key() {
+    let keys = 20_000;
+    let entries: Vec<String> = (0..keys).map(|i| format!("\"k{i}\": {i}")).collect();
+    let source = format!(
+        "from functools import cached_property\n\n\nclass C:\n    def __init__(self):\n        \
+         self.a = 0\n\n    @cached_property\n    def p(self):\n        return self.a\n\n    \
+         def bump(self):\n        self.a = 1\n        table = {{{}}}\n        return table\n",
+        entries.join(", ")
+    );
+    let p = Project::new("bounds_large_display");
+    p.write("pyproject.toml", MUT101_CONFIG)
+        .write("m.py", &source);
+    let found: Vec<(String, String)> = check_within(&p, Duration::from_secs(20))
+        .iter()
+        .filter(|d| d["rule_code"] == "MUT101")
+        .map(|d| {
+            (
+                d["qualname"].as_str().unwrap().to_owned(),
+                d["certainty"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    assert_eq!(found, vec![("C.bump".to_owned(), "exact".to_owned())]);
+}
+
 /// A writer making thousands of project calls and library calls after its write: whether a
 /// callable a library call is handed has a site of its own is looked up once per argument, not
 /// by a scan of every site of the function (which took time quadratic in its calls).

@@ -160,8 +160,8 @@ const CERTIFIED: &[(&str, &str, [u32; 2], [u32; 2])] = &[
     ("DATA101", "0.2.0", [6, 0], [0, 0]),
     ("MUT110", "0.2.0", [5, 0], [2, 0]),
     ("MUT114", "0.2.0", [5, 0], [5, 0]),
-    ("MUT101", "0.2.3", [26, 0], [1, 0]),
-    ("MUT111", "0.2.3", [60, 0], [2, 0]),
+    ("MUT101", "0.2.4", [26, 0], [1, 0]),
+    ("MUT111", "0.2.4", [60, 0], [2, 0]),
 ];
 
 /// The latest measurement of each measured rule, in the order the table lists them: the round,

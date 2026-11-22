@@ -18,8 +18,9 @@ fn looked_up(stmt: &str) -> Vec<String> {
     let f = ir.functions.iter().find(|f| f.name == "f").expect("f");
     let named = |s: &SpecialMethods| {
         let name = f.var_name(s.value).unwrap_or("_");
+        let keyed = if s.keyed { " (keyed)" } else { "" };
         format!(
-            "{name}: {} / {}",
+            "{name}: {} / {}{keyed}",
             s.methods.join(" "),
             s.item_methods.join(" ")
         )
@@ -39,14 +40,38 @@ fn looked_up(stmt: &str) -> Vec<String> {
 #[test]
 fn operators_comparisons_conversions_subscripts_displays_and_tests_look_up_special_methods() {
     let cases: &[(&str, &[&str])] = &[
-        ("x = a + b", &["a: __add__ / ", "b: __radd__ / "]),
-        ("a += b", &["a: __iadd__ __add__ / ", "b: __radd__ / "]),
+        ("x = a + b", &["a: __add__ / ", "b: __radd__ __buffer__ / "]),
+        (
+            "a += b",
+            &[
+                "a: __iadd__ __add__ / ",
+                "b: __radd__ __iter__ __next__ __getitem__ __buffer__ / ",
+            ],
+        ),
+        (
+            "a |= b",
+            &[
+                "a: __ior__ __or__ / ",
+                "b: __ror__ keys __getitem__ __iter__ __next__ / __hash__ __eq__ __iter__ __next__ __getitem__",
+            ],
+        ),
+        (
+            "x = a * b",
+            &["a: __mul__ __index__ / ", "b: __rmul__ __index__ / "],
+        ),
+        (
+            "a *= b",
+            &[
+                "a: __imul__ __mul__ __index__ / ",
+                "b: __rmul__ __index__ / ",
+            ],
+        ),
         ("x = a @ b", &["a: __matmul__ / ", "b: __rmatmul__ / "]),
         (
             "x = a % b",
             &[
                 "a: __mod__ / ",
-                "b: __rmod__ __str__ __repr__ __index__ __int__ __float__ __getitem__ keys / __str__ __repr__ __index__ __int__ __float__",
+                "b: __rmod__ __str__ __repr__ __bytes__ __buffer__ __index__ __int__ __float__ __getitem__ keys / __str__ __repr__ __bytes__ __buffer__ __index__ __int__ __float__",
             ],
         ),
         ("x = not a", &["a: __bool__ __len__ / "]),
@@ -85,28 +110,47 @@ fn operators_comparisons_conversions_subscripts_displays_and_tests_look_up_speci
         (
             "x = a[b]",
             &[
-                "a: __getitem__ __class_getitem__ __missing__ / ",
+                "a: __getitem__ __class_getitem__ __missing__ __iter__ __next__ /  (keyed)",
                 "b: __hash__ __eq__ __index__ / __hash__ __eq__",
             ],
         ),
         (
             "x = a[1:b]",
             &[
-                "a: __getitem__ __class_getitem__ __missing__ / ",
+                "a: __getitem__ __class_getitem__ __missing__ __iter__ __next__ /  (keyed)",
                 "_:  / __index__",
             ],
         ),
+        // An unpacking reads the value by subscripts of constant indices.
+        (
+            "x, y = a",
+            &[
+                "a: __getitem__ __class_getitem__ __missing__ __iter__ __next__ /  (keyed)",
+                "_: __hash__ __eq__ __index__ / __hash__ __eq__",
+                "a: __getitem__ __class_getitem__ __missing__ __iter__ __next__ /  (keyed)",
+                "_: __hash__ __eq__ __index__ / __hash__ __eq__",
+            ],
+        ),
+        (
+            "x = f(*a, **b)",
+            &[
+                "a: __iter__ __next__ __getitem__ / ",
+                "b: keys __getitem__ __iter__ __next__ / __hash__ __eq__",
+            ],
+        ),
+        ("x = a.m(1, *b)", &["b: __iter__ __next__ __getitem__ / "]),
+        ("x = f(a, k=b)", &[]),
         (
             "a[b] = 1",
             &[
-                "a: __setitem__ / ",
+                "a: __setitem__ /  (keyed)",
                 "b: __hash__ __eq__ __index__ / __hash__ __eq__",
             ],
         ),
         (
             "del a[b]",
             &[
-                "a: __delitem__ / ",
+                "a: __delitem__ /  (keyed)",
                 "b: __hash__ __eq__ __index__ / __hash__ __eq__",
             ],
         ),

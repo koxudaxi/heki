@@ -345,6 +345,15 @@ def counters_after_writes(n: int) -> Body:
     return Body(("c",), [*lines, "return total"])
 
 
+def displays_after_writes(n: int) -> Body:
+    """A write of a `self` attribute, then a set display hashing as many elements and a dict
+    display as many keys: what each operand's special methods may run, and whether the other
+    operands are inert, are decided once per operand."""
+    elements = ", ".join(["p"] * n)
+    entries = ", ".join(f'"k{i}": p' for i in range(n))
+    return Body(("p",), ["self.a = 0", f"seen = {{{elements}}}", f"keyed = {{{entries}}}", "return seen, keyed"])
+
+
 def is_tests(n: int) -> Body:
     """Many `is` tests, each followed by a conditional expression on the tested parameter."""
     lines = []
@@ -822,6 +831,7 @@ FAMILIES = [
     Family("self_item_reads", self_item_reads, placements=("method",), real_code=False),
     Family("writes_then_library_calls", writes_then_library_calls, placements=("method",)),
     Family("counters_after_writes", counters_after_writes, placements=("method",)),
+    Family("displays_after_writes", displays_after_writes, placements=("method",)),
     Family("blind_calls", blind_calls, facts=True),
     Family("wide_hierarchy", project=wide_hierarchy, placements=("project",), size=4000),
     Family("helper_chain", project=helper_chain, placements=("project",), size=2000),

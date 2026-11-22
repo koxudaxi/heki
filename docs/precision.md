@@ -149,11 +149,12 @@ every exact report of one run on the 100 packages of the frozen holdout corpus. 
 census reports are those of its exact tier with the plain-key premise, all among the reports
 the census of the earlier tier checked by hand. The census of `EFF101` counts its boundaries
 before reports reaching one waiting call are folded together. `MUT101` and `MUT111` are
-certified but opt-in: their census counts the exact reports of the build that also takes the
-implicit calls of project code (special methods of operands, attribute hooks) as points that may
-remove the kept value, all among those the reviewers checked with the build before it, which moves
-setup steps to the heuristic tier; their holdout run used an earlier build, whose exact reports
-include every one of the later builds'. Reviewers judged their harm: of `MUT101`'s 26 exact
+certified but opt-in: their census counts the exact reports of the build that decides what may
+remove or replace the kept value positively (a store or deletion of the property's name through
+any reference heki does not establish as another object, implicit calls of project code, values
+whose class it does not establish), all among those the reviewers checked with the builds before
+it, which moved setup steps to the heuristic tier; their holdout run used an earlier build, whose
+exact reports include every one of the later builds'. Reviewers judged their harm: of `MUT101`'s 26 exact
 reports 1 is P and 25 are B (two of three reviewers judged the three changes of a Django `Q` that
 its cached `identity` hashes benign: Django changes only new `Q` objects in place); of
 `MUT111`'s 60, 0 are P by one reviewer and 2 by the other. The real-harm share is below the 10% a default rule needs
@@ -177,8 +178,8 @@ its cached `identity` hashes benign: Django changes only new `Q` objects in plac
 | `DATA101` | 0.2.0 | 6 / 0 | 0 / 0 |
 | `MUT110` | 0.2.0 | 5 / 0 | 2 / 0 |
 | `MUT114` | 0.2.0 | 5 / 0 | 5 / 0 |
-| `MUT101` | 0.2.3 (experimental) | 26 / 0 | 1 / 0 |
-| `MUT111` | 0.2.3 (experimental) | 60 / 0 | 2 / 0 |
+| `MUT101` | 0.2.4 (experimental) | 26 / 0 | 1 / 0 |
+| `MUT111` | 0.2.4 (experimental) | 60 / 0 | 2 / 0 |
 
 <!-- End of the generated certifications. -->
 

@@ -191,7 +191,9 @@ fn may_hold(decls: &ProjectDecls, class: &str, prop: &str) -> bool {
 /// defines `__slots__`), and the getter reads `read` on every path on which it returns
 /// normally: the attribute with the written key, or as a whole. A metaclass heki does not know
 /// along the MRO, which may replace the property, fails [`plain_write`] for the class, which
-/// every class the claim covers passes too.
+/// every class the claim covers passes too. The getter's name is one the declarations list as a
+/// property getter's (`ProjectDecls::names_property`), under which **Kept to the return** finds
+/// the stores and deletions of the value through any object.
 fn cached_getter_reads(
     index: &ProjectIndex,
     decls: &ProjectDecls,
@@ -201,6 +203,7 @@ fn cached_getter_reads(
 ) -> bool {
     let Some(s) = decls
         .function_taken(class, prop)
+        .filter(|_| decls.names_property(prop))
         .and_then(|getter| index.summary(&getter))
     else {
         return false;

@@ -129,8 +129,10 @@ impl KeptRemoval {
 /// What one instruction may do to the values kept in some object's `__dict__`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum KeptRemovalKind {
-    /// Remove or replace the value kept under this name.
+    /// Remove the value kept under this name, so that the getter runs again.
     Named(String),
+    /// Replace the value kept under this name with another (a store).
+    Replaces(String),
     /// Remove or replace any.
     Any,
     /// Hand control to the generator's consumer (`yield`), which may run anything before the
@@ -593,7 +595,9 @@ fn flow_blocks(
     let kept_events = |bb: BlockId, at: u32, names: &mut Names, events: &mut Vec<_>| {
         for kind in kept_at.get(&(bb, at)).into_iter().flatten() {
             let event = match kind {
-                KeptRemovalKind::Named(name) => CacheEvent::MayRemove(names.index(name)),
+                KeptRemovalKind::Named(name) | KeptRemovalKind::Replaces(name) => {
+                    CacheEvent::MayRemove(names.index(name))
+                }
                 KeptRemovalKind::Any | KeptRemovalKind::Suspends => CacheEvent::MayRemoveAny,
                 KeptRemovalKind::Runs(span) => CacheEvent::Calls(*span),
             };

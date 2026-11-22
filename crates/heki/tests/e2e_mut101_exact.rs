@@ -365,7 +365,7 @@ fn kept_to_the_return_stripped_implicit_calls_of_project_code() {
         "unused = len(raw) + 1",
         r#"unused = "%d" % len(raw)"#,
         "unused = {len(raw)}",
-        r#"unused = raw["k"]"#,
+        r#"unused = {"k": 1}["k"]"#,
         "unused = [len(raw)][0:1]",
         "unused = hook.value",
         "unused = Plain.value",
@@ -387,6 +387,259 @@ fn kept_to_the_return_stripped_implicit_calls_of_project_code() {
     for after in ["unused = hook.level", "hook.level = 10"] {
         let p = project("mut101_kept_library_attr", &typed("logging.Logger", after));
         assert_eq!(tiers(&p), vec![report("MUT101", 17, true)], "{after}");
+    }
+}
+
+/// What a writer reaches besides `self`: another holder, a class with no property of the
+/// name, a registry holding a holder, a module list of them, and project generators.
+const REFERENCES: &str = r#"
+
+
+class Plain:
+    value = 0
+
+
+class Registry:
+    def __init__(self, current: Holder) -> None:
+        self.current = current
+
+    def reset(self) -> None:
+        self.current.features = "replaced"
+
+
+HOLDERS: list[Holder] = []
+REGISTRY = Registry(Holder({}, False))
+
+
+def reset() -> None:
+    REGISTRY.reset()
+
+
+def drop(h: Holder) -> None:
+    del h.features
+
+
+def take(*args) -> None:
+    return None
+
+
+def rows(h: Holder) -> Iterator[int]:
+    del h.features
+    yield 1
+
+
+class Truthy:
+    def __bool__(self) -> bool:
+        return True
+
+
+class Text(str):
+    def __len__(self) -> int:
+        return 1
+
+
+class Hooked:
+    def __eq__(self, other):
+        return Truthy()
+
+    def __hash__(self) -> int:
+        return 0
+
+    def __format__(self, spec: str) -> str:
+        return Text("x")
+
+    def __str__(self) -> str:
+        return Text("x")
+
+    def __repr__(self) -> str:
+        return "hooked"
+
+    def __iter__(self):
+        return iter((1, 2))
+
+    def __index__(self) -> int:
+        return 1
+
+
+class Mode(enum.Enum):
+    A = 1
+
+
+class Desc:
+    def __set__(self, obj, value) -> None:
+        return None
+
+
+class WithDesc:
+    q = Desc()
+    value = 0
+
+
+class Kind(object):
+    pass
+
+
+class Names(list):
+    pass
+
+
+class Table(dict):
+    pass
+
+
+class Failure(Exception):
+    pass
+"#;
+
+/// `holder` whose writer runs `before` ahead of the write and `after` it, and takes another
+/// holder (`other`), a `Plain`, a `Hooked` (`hook`), a `Mode`, a `WithDesc`, an iterator, a
+/// value heki does not know (`exc`), values of unions, a set, a `Kind`, an exception, and
+/// `*others`. The write is on line 18.
+fn reaching(before: &str, after: &str) -> String {
+    holder(
+        READ,
+        &format!("{before}\n        {WRITE}"),
+        after,
+        REFERENCES,
+    )
+    .replacen(
+        "import functools\n",
+        "import enum\nimport functools\nfrom typing import Iterator\n",
+        1,
+    )
+    .replacen(
+        "raw: dict[str, str], hook)",
+        "raw: dict[str, str], hook: \"Hooked\", other: \"Holder\", plain: \"Plain\", \
+         mode: \"Mode\", w: \"WithDesc\", items: Iterator[str], exc, \
+         either: \"Holder | Plain\", mixed: dict[str, str] | list[str], n: int | None, \
+         tags: set[str], kind: \"Kind\", error: \"Failure\", names: \"list[str] | Names\", \
+         *others)",
+        1,
+    )
+}
+
+#[test]
+fn kept_to_the_return_stripped_stores_and_deletions_through_other_references() {
+    // A store or a deletion of the property's name through any reference that may be the
+    // holder replaces or removes the value, as do a change of an object's `__dict__` under the
+    // name, through `setattr`, a store of its `__dict__` or `__class__`, and an item of its
+    // `__dict__` under a key heki does not know.
+    for after in [
+        r#"other.features = "replacement""#,
+        r#"HOLDERS[0].features = "x""#,
+        "def inner():\n            other.features = \"x\"\n        inner()",
+        r#"others[0].features = "x""#,
+        "reset()",
+        r#"setattr(other, "features", "x")"#,
+        r#"other.__dict__["features"] = "x""#,
+        r#"vars(other)["features"] = "x""#,
+        r#"other.__dict__.update(features="x")"#,
+        "del other.features",
+        r#"del other.__dict__["features"]"#,
+        "other.__dict__ = {}",
+        "other.__class__ = Holder",
+        r#"other.__dict__[exc] = "x""#,
+        "del other.__dict__[exc]",
+        "del other.__dict__[str(len(raw))]",
+        r#"either.features = "x""#,
+        "w.q = 1",
+    ] {
+        let p = project("mut101_strip_references", &reaching("", after));
+        assert_eq!(tiers(&p), vec![report("MUT101", 18, false)], "{after}");
+    }
+    // A name no property getter has, an object whose classes have no property of the name, a
+    // dict that is no `__dict__`, and an attribute no descriptor binds.
+    for after in [
+        "other.flag = True",
+        r#"plain.features = "x""#,
+        "del plain.features",
+        r#"other.__dict__["unrelated"] = "x""#,
+        r#"del other.__dict__["unrelated"]"#,
+        r#"{"k": 1}["features"] = 1"#,
+        "w.value = 1",
+    ] {
+        let p = project("mut101_kept_references", &reaching("", after));
+        assert_eq!(tiers(&p), vec![report("MUT101", 18, true)], "{after}");
+    }
+}
+
+#[test]
+fn kept_to_the_return_stripped_values_whose_class_is_not_established() {
+    // A comparison or a conversion gives what a method of the operand's class returns, whose
+    // truth test may run code of the project after the write; a generator, a value annotated
+    // with an abstract class, an unpacking, a call's `*` argument, an in-place `+=`, a sequence
+    // repeated, and a builtin container's comparison or string run code of the operands, of
+    // their items, or of the generator's body; a library class's operator runs the library's,
+    // handed an instance of the project; a raise of a value heki cannot class may construct it.
+    for (before, after) in [
+        ("flag = hook == 0", "if flag:\n            pass"),
+        (r#"text = f"{hook}""#, "if text:\n            pass"),
+        ("text = str(hook)", "if text:\n            pass"),
+        (
+            "gen = (drop(self) for _ in range(1))",
+            "for _ in gen:\n            pass",
+        ),
+        ("it = rows(self)", "next(it)"),
+        ("", "next(items)"),
+        ("", "first, second = hook"),
+        ("", "take(*hook)"),
+        ("", "self.items += hook"),
+        ("", "unused = [0] * hook"),
+        ("", "unused = [hook] == [1]"),
+        ("", "unused = [hook] < [1]"),
+        // A dict compares a key with each key it holds under an equal hash, of classes heki
+        // does not establish, and so does a set's union with each item.
+        ("", r#"unused = raw["k"]"#),
+        ("", "unused = mixed[0]"),
+        ("", r#"unused = tags | {"x"}"#),
+        ("", "unused = str([hook])"),
+        ("", "if mode == Mode.A:\n            pass"),
+        (
+            "",
+            "try:\n            raise exc\n        except Exception:\n            pass",
+        ),
+        (
+            "",
+            "try:\n            raise ValueError(\"x\") from exc\n        except Exception:\n            pass",
+        ),
+    ] {
+        let p = project("mut101_strip_established", &reaching(before, after));
+        assert_eq!(tiers(&p), vec![report("MUT101", 18, false)], "{after}");
+    }
+    // The same on values heki builds or whose classes run `object`'s or a builtin type's own.
+    for (before, after) in [
+        ("flag = len(raw) == 0", "if flag:\n            pass"),
+        ("flag = self.flag == True", "if flag:\n            pass"),
+        ("flag = plain == other", "if flag:\n            pass"),
+        ("flag = n == 1", "if flag:\n            pass"),
+        ("flag = mixed == {}", "if flag:\n            pass"),
+        ("flag = kind == kind", "if flag:\n            pass"),
+        ("", r#"names.append("x")"#),
+        ("", r#"unused = Table.fromkeys(["a"])"#),
+        (
+            "",
+            "try:\n            raise error\n        except Exception:\n            pass",
+        ),
+        (r#"text = f"{len(raw)}""#, "if text:\n            pass"),
+        ("text = str(self.flag)", "if text:\n            pass"),
+        ("count = len(raw)", "if -count < 0:\n            pass"),
+        ("", "first, second = (1, 2)"),
+        ("", "unused = [0] * len(raw)"),
+        ("", "unused = [len(raw)] == [1]"),
+        ("", "unused = [len(raw)] < [1]"),
+        ("", "unused = [len(raw)] <= [1]"),
+        ("", "unused = str([len(raw)])"),
+        (
+            "",
+            "try:\n            raise ValueError(\"x\") from None\n        except Exception:\n            pass",
+        ),
+    ] {
+        let p = project("mut101_kept_established", &reaching(before, after));
+        assert_eq!(
+            tiers(&p),
+            vec![report("MUT101", 18, true)],
+            "{before} / {after}"
+        );
     }
 }
 
