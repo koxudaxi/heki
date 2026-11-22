@@ -2730,15 +2730,10 @@ impl ProjectDecls {
     /// its attributes, by the attribute types its classes declare (`ClassDecl::attr_types`: a
     /// class, the members of a union, the items of a generic container, the structural
     /// implementations of a protocol), each once with the first attribute that holds it. A class
-    /// with a copy hook along its MRO is left out: what a deep copy makes of it is the hook's.
-    /// A walk below several levels of attributes reads this once per class it reaches.
+    /// whose own copy is decided otherwise ([`Self::copy_decided_by_class`]) is left out: what a
+    /// deep copy makes of it is not its attributes' copies. A walk below several levels of
+    /// attributes reads this once per class it reaches.
     pub fn classes_in_attributes(&self, class: &str) -> Vec<(String, String)> {
-        let hooked = |c: &str| {
-            self.mro(c).iter().any(|m| {
-                self.class(m)
-                    .is_some_and(|d| COPY_HOOKS.iter().any(|h| d.members.contains(*h)))
-            })
-        };
         let mut seen = FxHashSet::from_iter([self.canonical(class)]);
         let mut out: Vec<(String, String)> = Vec::new();
         let declared = self.mro(class).into_iter().filter_map(|m| self.class(&m));
@@ -2756,7 +2751,10 @@ impl ProjectDecls {
                 held.push(t);
             }
             for h in held {
-                if self.is_project_class(&h) && seen.insert(h.clone()) && !hooked(&h) {
+                if self.is_project_class(&h)
+                    && seen.insert(h.clone())
+                    && !self.copy_decided_by_class(&h)
+                {
                     out.push((h, attr.clone()));
                 }
             }
@@ -2773,6 +2771,30 @@ impl ProjectDecls {
         })
     }
 
+    /// Whether something of the class `class` itself decides what `copy.deepcopy` makes of its
+    /// instances, in place of copying their attributes: a copy hook along its MRO
+    /// (`__deepcopy__`, `__reduce__`, `__reduce_ex__`, `__getstate__`, `__setstate__`), or a
+    /// `copyreg` registration of the class ([`Self::copy_registered`]). Either may keep any value.
+    pub fn copy_decided_by_class(&self, class: &str) -> bool {
+        let class = self.canonical(class);
+        self.mro(&class).iter().any(|c| {
+            self.read(|k| note(&mut k.class_facts, c));
+            self.class(c)
+                .is_some_and(|d| COPY_HOOKS.iter().any(|h| d.members.contains(*h)))
+        }) || self.copy_registered(&class)
+    }
+
+    /// Whether a project module registers the class `class` with `copyreg`
+    /// (`ModuleDecls::copy_registrations`), or a class heki cannot name: `copy.deepcopy` then
+    /// copies an instance whose exact class it is by the registered function.
+    pub fn copy_registered(&self, class: &str) -> bool {
+        self.read(|k| {
+            note(&mut k.class_facts, class);
+            note(&mut k.class_facts, "*");
+        });
+        self.copy_registered.contains(class) || self.copy_registered.contains("*")
+    }
+
     /// What `copy.deepcopy` (without a `memo`) does with a value of the project class `class`,
     /// an instance of it or, under R2, of a project subclass ([`DeepCopy`]). The copy protocol
     /// looks for `__deepcopy__` on the instance (where `__getattr__` and `__getattribute__`
@@ -2782,13 +2804,6 @@ impl ProjectDecls {
     /// copy is a new instance whose attributes are deep copies of the original's.
     pub fn deep_copy_of(&self, class: &str, kb: &EffectiveEcosystemKb) -> DeepCopy {
         let class = self.canonical(class);
-        let registered = |c: &str| {
-            self.read(|k| {
-                note(&mut k.class_facts, c);
-                note(&mut k.class_facts, "*");
-            });
-            self.copy_registered.contains(c) || self.copy_registered.contains("*")
-        };
         let hooked = |d: &ClassDecl| COPY_HOOKS.iter().any(|h| d.members.contains(*h));
         // A base outside the project: one known to define none of the hooks, or one whose
         // `__deepcopy__` the catalog describes as copying the attributes deeply (R3).
@@ -2798,16 +2813,10 @@ impl ProjectDecls {
                     .lookup(&format!("{c}.__deepcopy__"))
                     .is_some_and(|e| e.copy_sanitizer == Some(CopyDepth::Deep))
         };
-        let mro = self.mro(&class);
-        for c in &mro {
-            self.read(|k| note(&mut k.class_facts, c));
-            if self.class(c).is_some_and(hooked) {
-                return DeepCopy::Hooked;
-            }
-        }
-        if registered(&class) {
+        if self.copy_decided_by_class(&class) {
             return DeepCopy::Hooked;
         }
+        let mro = self.mro(&class);
         let mut answer = DeepCopy::Attributes;
         for c in &mro {
             if !self.is_project_class(c) && !known_base(c) {
@@ -2826,7 +2835,7 @@ impl ProjectDecls {
                 || lookup_hooks.iter().any(|h| d.members.contains(*h))
                 || d.custom_metaclass
                 || unknown_base
-                || c != class && registered(&c)
+                || c != class && self.copy_registered(&c)
             {
                 answer = DeepCopy::Open;
             }
