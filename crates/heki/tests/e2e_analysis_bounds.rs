@@ -3273,3 +3273,70 @@ fn the_paths_of_many_packages_merged_in_one_function_are_decided_once() {
         vec!["plugin"]
     );
 }
+
+/// `functions` functions of one module, each making one project call.
+fn functions_each_calling(functions: usize) -> String {
+    let mut lines = vec!["def g(x):".to_owned(), "    return x".to_owned()];
+    for i in 0..functions {
+        lines.extend([
+            String::new(),
+            String::new(),
+            format!("def call{i}(x):"),
+            "    return g(x)".to_owned(),
+        ]);
+    }
+    lines.join("\n") + "\n"
+}
+
+/// A function handing the read-only value a `readonly-returns` producer returns to `calls`
+/// calls of a function that only reads it, then once to one that changes it.
+fn read_only_value_handed_to_calls(calls: usize) -> String {
+    let mut lines = vec![
+        "def load():".to_owned(),
+        "    return [1, 2, 3]".to_owned(),
+        String::new(),
+        String::new(),
+        "def use(xs):".to_owned(),
+        "    return len(xs)".to_owned(),
+        String::new(),
+        String::new(),
+        "def grow(xs):".to_owned(),
+        "    xs.append(1)".to_owned(),
+        String::new(),
+        String::new(),
+        "def shape():".to_owned(),
+        "    values = load()".to_owned(),
+    ];
+    lines.extend((0..calls).map(|_| "    use(values)".to_owned()));
+    lines.push("    grow(values)".to_owned());
+    lines.join("\n") + "\n"
+}
+
+/// `MUT202` finds the call site of each call instruction in an index of the module's call sites
+/// by function and position, built once per module (forty thousand functions each making a
+/// call), and the facts a call runs, at the call and where the object it returns is used, once
+/// per call target of a function (twenty thousand calls handed one read-only value): neither is
+/// scanned again per function or per call. The one call handing the value to a function that
+/// changes it is still found.
+#[test]
+fn call_sites_and_the_facts_they_run_are_looked_up_not_scanned() {
+    let p = Project::new("bounds_functions_each_calling");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT202\"]\n",
+    )
+    .write("m.py", &functions_each_calling(40_000));
+    assert!(check_within(&p, Duration::from_secs(20)).is_empty());
+
+    let p = Project::new("bounds_read_only_value_handed_to_calls");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT202\"]\n\n\
+         [[tool.heki.readonly-returns]]\nname = \"r\"\nproducers = [\"m.load\"]\n",
+    )
+    .write("m.py", &read_only_value_handed_to_calls(20_000));
+    let found = check_within(&p, Duration::from_secs(20));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0]["rule_code"], "MUT202");
+    assert_eq!(found[0]["line"], 20_015);
+}

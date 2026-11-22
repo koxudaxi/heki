@@ -2,17 +2,17 @@
 //! `MUT113`, `MUT201`, `MUT202`, `MUT203`, `MUT204` (docs/ANALYSIS_AND_KB_SPEC.md section 2.3).
 
 use crate::{
-    CheckContext, DottedPattern, ModuleUnit, RuleConfigError, SitesByCaller, has_glob_syntax,
-    split_last_dot,
+    CheckContext, DottedPattern, FnSites, ModuleUnit, RuleConfigError, SitesByCaller, SitesBySpan,
+    has_glob_syntax, split_last_dot,
 };
 use heki_ast::Span;
 use heki_diagnostics::Diagnostic;
 use heki_effect::readonly::{self, Derivation};
 use heki_effect::{
-    AttrKeyPath, BoundCallee, CacheEvent, CacheFlow, CallHop, CallSite, Callee, Construction,
-    ContractClass, Delivery, EffectSummary, Facts, FlowBlock, FuncKey, INITIALIZERS, ProjectDecls,
-    ProjectIndex, ReturnStep, SelfAttrWrite, Shared, SiteRole, TypeCtx, TypedFieldWriteSite, Val,
-    WriteKind, attr_writes, container_mutator, self_attr_writes,
+    AttrKeyPath, BoundCallee, CacheEvent, CacheFlow, CallHop, CallSite, CallTarget, Callee,
+    Construction, ContractClass, Delivery, EffectSummary, Facts, FlowBlock, FuncKey, INITIALIZERS,
+    ProjectDecls, ProjectIndex, ReturnStep, SelfAttrWrite, Shared, SiteRole, TypeCtx,
+    TypedFieldWriteSite, Val, WriteKind, attr_writes, container_mutator, self_attr_writes,
 };
 use heki_env::HekiConfig;
 use heki_ir::walk::{Budget, FnShape, Visit, reach};
@@ -2414,7 +2414,7 @@ impl CallParts<'_> {
 /// unbound.
 pub(crate) fn site_call<'i>(
     def: &dyn Fn(VarId) -> Option<&'i Inst>,
-    sites: &[&'i CallSite],
+    sites: FnSites<'_, 'i>,
     inst: &'i Inst,
     worker: bool,
 ) -> Option<CallParts<'i>> {
@@ -2424,11 +2424,8 @@ pub(crate) fn site_call<'i>(
     } else {
         heki_effect::Runner::Caller
     };
-    let site = sites.iter().find(|s| {
-        s.span == inst.span
-            && s.role == SiteRole::Call
-            && s.runner == runner
-            && !s.project_callees().is_empty()
+    let site = sites.at(inst.span).iter().find(|s| {
+        s.role == SiteRole::Call && s.runner == runner && !s.project_callees().is_empty()
     })?;
     if wraps_call_at_own_span(def, inst, &call) {
         return None;
@@ -2501,11 +2498,12 @@ pub(crate) fn mut202(
         return;
     }
     let tcx = TypeCtx::new(&unit.input, cx.decls, cx.kb);
+    let sites = cx.sites_by_span(unit);
     for f in &unit.input.ir.functions {
         if f.is_class_body {
             continue;
         }
-        Mut202Fn::new(cx, unit, &tcx, returns, f).run(out);
+        Mut202Fn::new(cx, unit, &tcx, returns, &sites, f).run(out);
     }
 }
 
@@ -2521,14 +2519,21 @@ struct Mut202Fn<'a> {
     key: FuncKey,
     types: FxHashMap<VarId, Val>,
     ro: FxHashMap<VarId, Ro>,
-    /// The function's call sites in the index, every role (built on the first need).
-    sites: std::cell::OnceCell<Vec<&'a CallSite>>,
+    /// The function's call sites in the index, every role.
+    sites: FnSites<'a, 'a>,
+    /// The distinct facts of each project callee that the sites with one target run in the
+    /// function ([`Self::facts_run_by_call`], built on the first need).
+    facts_by_target: std::cell::OnceCell<FactsByTarget<'a>>,
     /// The cached function whose result each variable is on every path ([`Self::must_results`],
     /// built on the first need).
     cached: std::cell::OnceCell<FxHashMap<VarId, MustResult<'a>>>,
     /// The function's tables of definitions and block order (built on the first need).
     shape: std::cell::OnceCell<FnShape<'a>>,
 }
+
+/// Per call target and project callee, the distinct facts of the callee that the sites with that
+/// target run in the calling function ([`facts_run_at`]).
+type FactsByTarget<'a> = FxHashMap<&'a CallTarget, FxHashMap<&'a FuncKey, Vec<&'a EffectSummary>>>;
 
 /// The passes of [`Mut202Fn::must_results`] before it gives up.
 const MUST_RESULT_PASSES: usize = 64;
@@ -2570,8 +2575,10 @@ impl<'a> Mut202Fn<'a> {
         unit: &'a ModuleUnit<'a>,
         tcx: &'a TypeCtx<'a>,
         returns: &'a ReadOnlyReturns,
+        sites: &'a SitesBySpan<'a>,
         f: &'a IrFunction,
     ) -> Self {
+        let key = CheckContext::key(unit, f);
         Self {
             cx,
             unit,
@@ -2579,10 +2586,11 @@ impl<'a> Mut202Fn<'a> {
             returns,
             f,
             ix: FnIndex::new(f, &unit.input.ir.constants),
-            key: CheckContext::key(unit, f),
+            sites: sites.of(&key.qualname),
+            key,
             types: tcx.infer(f),
             ro: FxHashMap::default(),
-            sites: std::cell::OnceCell::new(),
+            facts_by_target: std::cell::OnceCell::new(),
             cached: std::cell::OnceCell::new(),
             shape: std::cell::OnceCell::new(),
         }
@@ -2658,7 +2666,7 @@ impl<'a> Mut202Fn<'a> {
     /// keeps its results ([`heki_effect::CachedResult`]).
     fn cached_callee(&self, inst: &'a Inst) -> Option<&'a FuncKey> {
         let shape = self.shape();
-        let call = site_call(&|v| shape.inst(v), self.function_sites(), inst, false)?;
+        let call = site_call(&|v| shape.inst(v), self.sites, inst, false)?;
         let callees = call.site?.project_callees();
         let bc = callees.first().filter(|_| callees.len() == 1)?;
         let summary = self.cx.index.summary(&bc.callee)?;
@@ -2706,40 +2714,43 @@ impl<'a> Mut202Fn<'a> {
         (changes && builtin).then_some((key, cached))
     }
 
-    /// The function's call sites in the index, every role.
-    fn function_sites(&self) -> &[&'a CallSite] {
-        self.sites.get_or_init(|| {
-            self.cx
-                .index
-                .files
-                .get(&self.unit.input.path)
-                .into_iter()
-                .flat_map(|f| &f.call_sites)
-                .filter(|s| s.caller == self.key)
-                .collect()
-        })
+    /// The distinct facts of the project callee `key` that the call at `span` (a site of it)
+    /// runs in this function: at the call, and where the object it returns is iterated
+    /// ([`facts_run_at`]).
+    fn facts_run_by_call(&self, span: Span, key: &FuncKey) -> &[&'a EffectSummary] {
+        let call = self.sites.at(span).iter().find(|s| {
+            s.role == SiteRole::Call && s.project_callees().iter().any(|bc| bc.callee == *key)
+        });
+        call.and_then(|call| self.facts_by_target().get(&call.target)?.get(key))
+            .map_or(&[], Vec::as_slice)
     }
 
-    /// The facts of `callee` that the call at `span` (a site of it) runs in this function: at
-    /// the call, and where the object it returns is iterated ([`facts_run_at`]).
-    fn facts_run_by_call(
-        &self,
-        span: Span,
-        key: &FuncKey,
-        callee: &'a EffectSummary,
-    ) -> Vec<&'a EffectSummary> {
-        let sites = self.function_sites();
-        let calls_key = |s: &&&CallSite| s.project_callees().iter().any(|bc| bc.callee == *key);
-        let call = sites
-            .iter()
-            .filter(calls_key)
-            .find(|s| s.role == SiteRole::Call && s.span == span);
-        // The other sites of the object the call returns copy its target.
-        call.into_iter()
-            .flat_map(|call| sites.iter().filter(move |s| s.target == call.target))
-            .filter(calls_key)
-            .filter_map(|s| facts_run_at(self.cx.index, s, callee))
-            .collect()
+    /// The facts the function's sites run, per call target: the other sites of the object a
+    /// call returns copy the call's target, so a call runs the facts of every site with its
+    /// target, gathered for all calls in one pass over the sites.
+    fn facts_by_target(&self) -> &FactsByTarget<'a> {
+        self.facts_by_target.get_or_init(|| {
+            let index = self.cx.index;
+            let mut out = FactsByTarget::default();
+            for site in self.sites.all() {
+                for bc in site.project_callees() {
+                    let run = index
+                        .summary(&bc.callee)
+                        .and_then(|callee| facts_run_at(index, site, callee));
+                    let facts = out
+                        .entry(&site.target)
+                        .or_default()
+                        .entry(&bc.callee)
+                        .or_default();
+                    if let Some(run) =
+                        run.filter(|run| !facts.iter().any(|f| std::ptr::eq(*f, *run)))
+                    {
+                        facts.push(run);
+                    }
+                }
+            }
+            out
+        })
     }
 
     /// The parts of a call instruction (`None` for any other instruction).
@@ -2748,12 +2759,7 @@ impl<'a> Mut202Fn<'a> {
         'a: 'i,
     {
         // A project call as the summaries resolved it; any other call by the inferred values.
-        if let Some(call) = site_call(
-            &|v| self.ix.shape.inst(v),
-            self.function_sites(),
-            inst,
-            false,
-        ) {
+        if let Some(call) = site_call(&|v| self.ix.shape.inst(v), self.sites, inst, false) {
             return Some(call);
         }
         let call = CallInst::of(&inst.kind)?;
@@ -3062,12 +3068,12 @@ impl<'a> Mut202Fn<'a> {
         // Passing a read-only value to a project function that mutates that parameter, also
         // through an offloading API that calls it on a worker thread.
         let def = |v| self.ix.shape.inst(v);
-        let Some(call) = site_call(&def, self.function_sites(), inst, false)
-            .or_else(|| site_call(&def, self.function_sites(), inst, true))
+        let Some(call) = site_call(&def, self.sites, inst, false)
+            .or_else(|| site_call(&def, self.sites, inst, true))
         else {
             return (None, Vec::new());
         };
-        for (key, callee, pos, var) in call.bound_arguments(self.cx) {
+        for (key, _, pos, var) in call.bound_arguments(self.cx) {
             let Some(r) = self.ro.get(&var) else {
                 continue;
             };
@@ -3076,21 +3082,18 @@ impl<'a> Mut202Fn<'a> {
             // attributes changes the copy alone. Filling a memo of the shared object, or
             // initializing one of its attributes lazily, leaves what it computes as it was.
             let p = u8::try_from(pos).ok().filter(|p| *p < 64);
-            let mutates = self
-                .facts_run_by_call(inst.span, key, callee)
-                .iter()
-                .any(|facts| {
-                    p.is_some_and(|p| {
-                        if r.shallow_copy {
-                            facts
-                                .changed_param_attrs
-                                .get(&p)
-                                .is_some_and(|attrs| facts.changes_param_state(p, Some(attrs)))
-                        } else {
-                            facts.changes_param_state(p, None)
-                        }
-                    })
-                });
+            let mutates = self.facts_run_by_call(inst.span, key).iter().any(|facts| {
+                p.is_some_and(|p| {
+                    if r.shallow_copy {
+                        facts
+                            .changed_param_attrs
+                            .get(&p)
+                            .is_some_and(|attrs| facts.changes_param_state(p, Some(attrs)))
+                    } else {
+                        facts.changes_param_state(p, None)
+                    }
+                })
+            });
             if mutates {
                 let hop = CallHop {
                     caller: self.key.clone(),

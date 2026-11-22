@@ -413,7 +413,7 @@ pub enum Construction {
 }
 
 /// What a call argument is for the construction of the objects its callee writes.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NewArg {
     #[default]
@@ -1016,7 +1016,7 @@ pub struct ArgumentValues(pub Vec<(String, ArgValue)>);
 /// What a caller knows about the value of a callee parameter at one call, when the argument
 /// binds the parameter exactly: the receiver, a keyword, a position before any `*` unpacking,
 /// or the literal default of an omitted parameter.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ArgBinding {
     pub constant: Option<ConstArg>,
     /// The caller's own input the argument is (a guard subject of the caller).
@@ -1431,7 +1431,7 @@ pub struct Delivery<'a> {
 }
 
 /// Where a call argument comes from, as seen by the caller (used to map callee facts back).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ArgOrigin {
     /// Caller parameter `i` itself (`None`) or its attribute `a` (`Some(a)`).
     pub param: Option<(u8, Option<String>)>,
@@ -1474,7 +1474,7 @@ pub struct ArgOrigin {
 
 /// [`ArgOrigin::targets`]: what the argument's class and field are to the `invalidation`
 /// contracts, which propagation cannot look up (it has no class hierarchy).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ArgTargets {
     /// The contracts whose targets include the field the argument is (`typed_field`): changing
     /// the value in place writes it.
@@ -1509,7 +1509,7 @@ impl ArgOrigin {
 }
 
 /// The classes a protocol-typed argument is an instance of ([`ArgOrigin::implementers`]).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Implementers {
     /// The project classes implementing the protocol structurally (none: no project class does).
     Listed(Vec<String>),
@@ -1518,7 +1518,7 @@ pub enum Implementers {
 }
 
 /// One resolved project callee with the caller-side origin of each callee parameter.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct BoundCallee {
     pub callee: FuncKey,
     /// Indexed by the callee's parameter position (receiver included for bound methods).
@@ -1533,7 +1533,7 @@ impl BoundCallee {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CallTarget {
     /// Project functions (1 candidate, or up to `CHA_CANDIDATE_LIMIT` CHA candidates).
     Project(Vec<BoundCallee>),

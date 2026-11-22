@@ -18,7 +18,7 @@ use std::fmt::Debug;
 /// A class as the contracts match it. A pattern with a module part (`pkg.model:Model`) compares
 /// the class's module and its qualname inside it, which the fqn alone does not tell apart
 /// (`pkg.sub.Model` is in module `pkg.sub`, or nested in a class `sub` of `pkg`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ContractClass {
     pub fqn: String,
     /// The qualname of the project class inside its module (`Outer.Inner`), looked up only when

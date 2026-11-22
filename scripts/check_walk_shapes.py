@@ -77,8 +77,6 @@ PLACED = ("function", "method", "module")
 
 # Shapes known to cost more than the limits, with the walk that costs: (family, placement).
 KNOWN_OVER: dict[tuple[str, str], str] = {
-    ("call_chain", "module"): "MUT202 looks up each call's site in a scan of the function's call "
-    "sites (`mut_rules::site_call`)",
     **{
         ("returned_merge_chain", p): "the roots of each merged value are listed again per merge, "
         "with the call sites through them (summary `iterations`)"
@@ -349,6 +347,11 @@ def cell_reads_of_several_names(n: int) -> Body:
     return Body(("xs", "out"), lines)
 
 
+def read_only_value_handed_to_calls(n: int) -> Body:
+    """The value a `readonly-returns` producer returns, handed to many project calls."""
+    return Body(("p",), ["v = load()", *("use(v)" for _ in range(n))])
+
+
 def path_aliases(n: int) -> Body:
     """Merges each joining the previous alias of a package's `__path__` and a new read of it,
     each alias read."""
@@ -391,6 +394,14 @@ def callers_of_one_helper(n: int) -> str:
     lines = ["def _write(obj: Base):", "    obj.cache = []", ""]
     for i in range(n):
         lines += [f"def call{i}(obj: Base):", "    _write(obj)", "    return obj.m()", ""]
+    return "\n".join(lines)
+
+
+def functions_each_calling(n: int) -> str:
+    """Many functions each making one project call."""
+    lines = []
+    for i in range(n):
+        lines += [f"def call{i}(x):", "    return g(x)", ""]
     return "\n".join(lines)
 
 
@@ -512,11 +523,15 @@ FAMILIES = [
         placements=("function", "method"),
         size=CELL_BINDINGS,
     ),
+    Family("read_only_value_handed_to_calls", read_only_value_handed_to_calls),
     Family("path_aliases", path_aliases),
     Family("merged_package_paths", merged_package_paths),
     Family("lazy_init_sites", lazy_init_sites, placements=("method",)),
     Family("wide_hierarchy", project=wide_hierarchy, placements=("project",), size=4000),
     Family("helper_chain", project=helper_chain, placements=("project",), size=2000),
+    Family(
+        "functions_each_calling", project=functions_each_calling, placements=("project",), size=20000
+    ),
     Family("callers_of_one_helper", project=callers_of_one_helper, placements=("project",), size=4000),
     Family(
         "argument_marks",
