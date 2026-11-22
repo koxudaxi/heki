@@ -305,6 +305,24 @@ the targets of write and read boundaries.
 | 3 | `self.attr = Cls(...)` in `__init__` and similar | Typed | `self.http = httpx.Client()`, then `self.http.get(...)` in another method |
 | 4 | Same-name methods in the class hierarchy (CHA / RTA); a project `Protocol` dispatches to its structural implementations (a call site keeps the protocol's own declaration of the method, `CallSite::declared`, which the read and call contracts judge it by) | Heuristic | Concrete subclasses of an abstract base (more than 8 candidates: unresolved) |
 
+A class's bases (`ClassDecl::bases`) are the values its class statement passes, named where the
+statement runs. A module-level statement names them through the module's names: an import, a
+module-level class or alias, an attribute of an imported module. A statement in a function or a
+class body takes each value from the IR (`ModuleIr::class_base_values`) through copies and the
+origin of a generic alias (`Base[int]`): a name the function loads from the module (in a class
+body also one the body has not bound yet, which Python looks up in the globals), what an import
+in the function binds, or an attribute of either, so a local alias of the import is the import.
+Any other value is an unknown base (`UNKNOWN_BASE`): a parameter, a local bound to anything
+else, a closure cell, a class-body name bound to anything else, a value merged from paths that
+disagree (also the copies of a `finally` body), or a call's result; so are an expression or a
+starred base, a module variable heki names no class for (`Base = declarative_base()`), and every
+base of a statement in a function too large to model. An unknown base keeps its place in the MRO
+as a base outside the project that heki knows nothing of: it may define any method or attribute
+and its metaclass is unknown (`ClassDecl::custom_metaclass`), and no class derives from it, so
+the class is in no project class's subclass family. The declarations are built before inference,
+which reads them, so they follow the IR definition only; base references (below) type the same
+values with inference, which also follows closure cells and class-body aliases.
+
 A method called on an instance is the definition the class's MRO (Python's C3 linearization of
 its project bases) finds first, plus the overrides of its project subclasses (Priority 4). A
 named class is exactly that class: constructing it runs the `__init__` its MRO finds, and
@@ -355,16 +373,16 @@ describes it as it describes a library symbol. A name under a project module tha
 does not bind (a compiled submodule, a star import) is what the catalog says of it.
 
 A method that no project class of the receiver's MRO defines comes from the first base outside
-the project, when heki takes it to define the method (a base it knows nothing of coming first
-leaves the call unresolved): a special method (`__init__`, `__copy__`, ...), a
-public method of a builtin type other than `object` (`dict.update`), or a member Layer 2 lists
-(`pydantic.BaseModel.model_copy`). Otherwise the call is unresolved (`abc.ABC._copy_model_type`
-and `typing.Generic.result_type` are no known symbols); on a union, a class whose bases are all
-project classes and builtin types without the member adds no target, any other one leaves the
-call unresolved. `object.__new__(C)`, also through an alias, and `C.__new__(C)` or
-`super().__new__(cls)` where no class of the MRO defines `__new__` and no base outside the project
-but builtin types may, allocate an instance of `C` without running its `__init__`: a
-construction of `C`.
+the project, when heki takes it to define the method (a base it knows nothing of coming first, an
+unknown base included, leaves the call unresolved): a special method (`__init__`, `__copy__`,
+...), a public method of a builtin type other than `object` (`dict.update`), or a member Layer 2
+lists (`pydantic.BaseModel.model_copy`). Otherwise the call is unresolved
+(`abc.ABC._copy_model_type` and `typing.Generic.result_type` are no known symbols); on a union, a
+class whose bases are all project classes and builtin types without the member adds no target,
+any other one leaves the call unresolved. `object.__new__(C)`, also through an alias, and
+`C.__new__(C)` or `super().__new__(cls)` where no class of the MRO defines `__new__` and no base
+outside the project but builtin types may, allocate an instance of `C` without running its
+`__init__`: a construction of `C`.
 
 Layer 2 `return_type` entries type the results of factories (`sqlite3.connect()` →
 `sqlite3.Connection`, `asyncio.get_running_loop()` → `asyncio.AbstractEventLoop`). A call that
@@ -548,7 +566,7 @@ evaluated annotations are not told apart, nor a class's bases and keywords), and
 binding a name to the value itself (an import, a module alias). With `references =
 "calls-and-bases"` (`Contracts::reference_bases`), the bases of a class statement are reference
 sites too (`CallSite::is_base`): one per value the statement passes as a base
-(`ModuleIr::class_bases`) that is a project class, typed in the statement's block as any value
+(`ModuleIr::class_base_values`) that is a project class, typed in the statement's block as any value
 is (a parameter or a local of the imported class's name is another value), constructing that
 class, at the base's load when the statement loads it, else at the class statement. The class
 bodies a module runs add their references to the module body's (their other facts are not the
