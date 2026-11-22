@@ -17,6 +17,8 @@
 //!    callee's guards across each call site (pruning the effects an argument switches off).
 //! 4. `report`: Boundary-Only Reporting.
 
+mod blind_spots;
+pub use blind_spots::{Blind, BlindCall, BlindSpotReach, UnresolvedReason};
 pub mod cache_flow;
 mod callgraph;
 pub use callgraph::{HopGap, MustExplainer, MustGap, SiteMust};
@@ -2037,9 +2039,20 @@ pub struct FileSummary {
     /// boundary names such an access, [`Contracts::external_call`]).
     #[serde(default, skip_serializing_if = "FxHashMap::is_empty")]
     pub external_accesses: FxHashMap<FuncKey, Vec<ExternalAccess>>,
+    /// The calls of each function of the file that heki is blind to, in its own body and in
+    /// the class bodies it runs, each once, in source order (local, IR-free; `None` unless
+    /// [`OptInFacts::blind_spots`], so that a run without them keeps one word per file). Read
+    /// through [`Self::blind_calls`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blind_spots: Option<Box<FxHashMap<FuncKey, Vec<BlindCall>>>>,
 }
 
 impl FileSummary {
+    /// [`Self::blind_spots`], by function.
+    pub fn blind_calls(&self) -> impl Iterator<Item = (&FuncKey, &[BlindCall])> {
+        (self.blind_spots.iter().flat_map(|b| b.iter())).map(|(f, calls)| (f, calls.as_slice()))
+    }
+
     /// The summary of a project file heki could not read or parse: a module that defines
     /// nothing heki knows ([`ModuleDecls::unread_module`]).
     pub fn unread(module: &UnreadModule) -> Self {
@@ -2207,8 +2220,9 @@ pub enum TypedWrites {
 /// `CallSite::result_held`), `EFF109`'s lock facts (`EffectSummary::locks`,
 /// `CallSite::state_tests`), and `EFF110`'s one-at-a-time uses (`EffectSummary::exclusive`,
 /// `CallSite::under_lock`), and the shared state functions change
-/// (`EffectSummary::shared_state`), which only `heki inspect` reads. `CallSite::returned`,
-/// which `MUT202` reads too, is always computed.
+/// (`EffectSummary::shared_state`), which only `heki inspect` reads, and the calls heki is
+/// blind to (`FileSummary::blind_spots`), which only `heki recommend` reads.
+/// `CallSite::returned`, which `MUT202` reads too, is always computed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OptInFacts {
     pub return_origins: bool,
@@ -2223,10 +2237,12 @@ pub struct OptInFacts {
     /// ([`CacheEvent::MayRemove`]), and the call-site facts they are computed from
     /// ([`CallSite::complete`], [`CallSite::on_every_return`]).
     pub kept_values: bool,
+    pub blind_spots: bool,
 }
 
 impl OptInFacts {
-    /// Every opt-in fact.
+    /// Every opt-in fact a rule or `heki inspect` reads. The blind spots, which neither reads,
+    /// are left out.
     pub const ALL: Self = Self {
         return_origins: true,
         iterations: true,
@@ -2235,6 +2251,7 @@ impl OptInFacts {
         shared_state: true,
         must_effects: true,
         kept_values: true,
+        blind_spots: false,
     };
 
     /// Whether the call sites carry [`CallSite::complete`] and [`CallSite::on_every_return`].

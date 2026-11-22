@@ -698,6 +698,39 @@ property of its own instance (`del self.<name>`, a constant-key removal from `se
 they do). They are local facts, never propagated, and they let `MUT101` decide staleness from the
 index alone, for a method of any indexed file.
 
+`FileSummary.blind_spots` (`heki_effect::BlindCall`, only with `OptInFacts::blind_spots`, which
+`heki_rules::recommend_facts` sets and neither `heki check` nor the language server does) holds,
+per function, the calls heki is blind to in its own body and the class bodies it runs, each once
+in source order: a call resolving to no function (`Callee::Unresolved` or `TooMany`), with the
+name called and why, from the receiver or the called value (`UnresolvedReason`: an unannotated
+parameter, an annotation giving no class, `Any` or `object`, a `Callable`, a name nothing heki
+sees binds, an unlisted protocol, a call result, an attribute, a computed `getattr` name, more
+implementations than CHA follows, a member heki does not find, any other untyped value); a call
+on `Any`, `object`, or a `Callable`, or of an unbound name, which resolves to a library name no
+library defines (`typing.Any.get`, `builtins.create`), counts as unresolved; and a call of a
+library function or class outside the project and the standard library without a catalog entry
+(`Blind::Uncatalogued`, with whether the catalog lists its package). They are local facts, never
+propagated, and no rule reads them. `ProjectIndex::blind_spot_reach` walks a function's facts of
+one kind, its body or what iterating its result runs, as each call hands them on
+(`ProjectIndex::delivery`: a helper returning a generator it does not iterate runs no generator
+body where it is called), once from every `async def` (not through a worker thread) and once from
+the calls inside a loop or once per item, giving the functions on an event loop and below a loop; `heki_rules::blind_spots` counts the calls by package and name and by function and reason,
+and the hidden `heki dump-recommend-facts` prints them.
+
+The census contract candidates are drawn from (`heki_rules::census`) is a pass over the index and
+computes no fact of its own: every local summary keeps the function's own typed read and write
+sites for every project class, whatever the contracts. Per class (the one heki types the accessed
+object with) and attribute it lists the functions writing it outside the initialization of their
+own instance (whether they rebind it, change its object in place, or only fill an object they
+construct), the initializers writing it on their own `self` (`INITIALIZERS` of the class), and
+the functions reading it (a read through a protocol declaring the attribute is the protocol's);
+per class, the modules constructing it or accessing its attributes; per module, its functions,
+those whose final summary reaches a blocking effect, and those reaching code heki does not see
+(`ProjectIndex::reaching_blind_spots`: a blind call, `unknown_calls`, or a body known only from a
+stub, in their own body or in what their calls hand on, as `blind_spot_reach` walks it, one
+`Closure` over those states). Without an ownership contract the summaries keep no write into an entry of an attribute's
+container and do not answer whether a write constructs its object, so a contract trial sees more.
+
 **Guards.** An effect inside a branch of a test of the function's own inputs (`if cache:`,
 `if x is None:`, `isinstance(x, T)`, `hasattr(x, "write")`, also through `and` / `or` / `not`,
 early returns, and conditional expressions; on a parameter, or an attribute of one the function
@@ -1028,6 +1061,16 @@ which module imports which.
    that class, a subclass (known), or a base (open). One report per deep copy, the known claim
    first; the tests are related locations, at most five. What each copied class gives and which
    tests read each class's sentinel are answered once per run.
+6. **Below the attributes** (heuristic): the classes an object may hold in its attributes, by
+   the attribute types its classes declare (`ProjectDecls::classes_in_attributes`: a class, a
+   union's members, a generic container's items one level down, a protocol's structural
+   implementations; classes whose copy a hook or a `copyreg` registration decides left out,
+   `ProjectDecls::copy_decided_by_class`), read once per class. `heki_ir::walk::Closure` joins,
+   per class and once per run, the first class by name and sentinel holding a tested sentinel
+   among those it reaches (an unmetered budget: a walk over the declarations expands each class
+   once per run, and a budget spent in another order by `heki check` and the language server
+   would make them disagree). Each attribute of the copied class gives a heuristic claim naming
+   that attribute.
 
 #### `MUT112`: a value that is new on one path and borrowed on another, changed in place (opt-in)
 1. **What a value holds** (`heki_effect::ownership`): each instruction's `Source` says what the
@@ -1428,7 +1471,7 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      premises of its claim's row (`heki_rules::premises`) it left open, each with a cause. The
      decisions above tell each step that does not hold (`MustGap`) to whoever asks: a decision
      stops at the first, an explanation goes on. Along the reported chain each call is evaluated
-     (`ProjectIndex::site_must_gaps`): its targets' completeness, whether they run there as
+     (`MustExplainer::gaps_along`): its targets' completeness, whether they run there as
      written, their facts, and, below the first call, whether the caller makes the next call on
      every normal return (`CallSite::made_on_every_return`); the walk goes down while the
      function the chain enters lacks the fact, whose own gap then gives way to the gaps found
@@ -1736,8 +1779,14 @@ its verdict that is not established, with the obligation's kind as the cause
 site is found only in a loop and, for an accumulation, on a value carried around it
 (`find_sites`), and a candidate is reported only when its construction establishes the builtin
 type (`OptCandidate::is_reportable`). A proven size-dependent report in a loop whose trip count
-the code fixes or caps (`OptCandidate::in_exact_tier`) records nothing: no premise of its row is
-open, and the exact tier leaves it out only because a fixed count is no evidence either way.
+the code fixes or caps (`OptCandidate::in_exact_tier`) leaves no premise of its row open: the
+exact tier also asks for a condition that is no premise, "Trip count open"
+(`heki_rules::premises::Condition`, decided in `FnIndex::fixed_trips`; Safety × Profitability,
+ADR-007 and ADR-011: the claim holds, the change does not pay off over a loop the code counts).
+The report records that condition with its cause (`trip-count-fixed`, the bound as its detail)
+in the same list as open premises (`heki_diagnostics::OpenRecord::Condition`, axis
+profitability), so every heuristic report names why it is not exact; the premise rows, the
+claims, and the oracle's strips do not change.
 
 `OPT113`'s exact tier is one decision, `JoinPremises::steps`, which tells each step that does
 not hold to its caller in the order it takes them (the same collection, the same keys, both
@@ -1748,8 +1797,8 @@ budget proportional to the function), so the decisions of the other joins are un
 of an item whose type is unknown, or a load that is no plain attribute of a known class or no
 item of a builtin container) apart from any other work on a mismatch ("Idle on a mismatch"), and
 `steps_run_no_code` an inner iterable of unknown type (an annotation closes it, unless a project
-subclass of a builtin container defines `__iter__`) apart from one that may run code. A fixed
-trip count records nothing, as for the rewrites.
+subclass of a builtin container defines `__iter__`) apart from one that may run code. A trip
+count the code fixes or caps records "Trip count open" at the loop, as for the rewrites.
 
 ---
 

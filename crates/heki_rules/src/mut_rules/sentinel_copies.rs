@@ -13,13 +13,18 @@ use heki_diagnostics::{Certainty, Diagnostic};
 use heki_effect::{
     DeepCopy, DeepCopySite, FuncKey, HeldSentinel, ProjectDecls, ProjectIndex, SentinelTest,
 };
+use heki_ir::walk::{Answer, Budget, Closure, Join};
 use rustc_hash::FxHashMap;
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 /// The most tests one report lists as related locations: a sentinel may be tested in thousands
 /// of functions, and each deep copy reports once.
 const MAX_RELATED_TESTS: usize = 5;
+
+/// The owner of the walk below the copied objects' attributes.
+const OWNER: &str = "heki_rules::mut_rules::sentinel_copies";
 
 /// A comparison of an attribute with a sentinel by identity, with where it is.
 struct TestAt<'a> {
@@ -68,6 +73,9 @@ struct Candidate {
     class: String,
     surely: bool,
     held: HeldSentinel,
+    /// The copied object's attribute that may hold the instance, itself or in what it holds
+    /// ([`Facts::below`]); `None` when the copied object is the instance.
+    below: Option<String>,
     /// Every premise but the deep copy's own (one argument of one class) is established.
     exact: bool,
 }
@@ -81,6 +89,34 @@ struct Facts<'c, 't> {
     tested: FxHashMap<(String, String, String), Tested<'t>>,
     ancestors: FxHashMap<String, Vec<String>>,
     plain: FxHashMap<(String, String), bool>,
+    in_attributes: FxHashMap<String, Vec<(String, String)>>,
+    held: FxHashMap<String, Vec<HeldSentinel>>,
+    subclasses: FxHashMap<String, Vec<String>>,
+    /// The classes the walk below the attributes has met, by number (`Closure` keys).
+    ids: FxHashMap<String, usize>,
+    names: Vec<String>,
+    nearest: Closure<usize, Nearest>,
+    /// The walk over the declarations expands each class once per run: a budget spent in
+    /// another order by `heki check` and by the language server would make them disagree.
+    budget: Budget,
+}
+
+/// A class holding a tested sentinel, the first by name and sentinel of those a class reaches
+/// through its attributes ([`Facts::below`]).
+#[derive(Debug, Clone, Default, PartialEq)]
+struct Nearest(Option<(String, HeldSentinel)>);
+
+impl Join for Nearest {
+    fn join(&mut self, other: &Self) -> bool {
+        match (&self.0, &other.0) {
+            (_, None) => false,
+            (Some(mine), Some(theirs)) if mine <= theirs => false,
+            _ => {
+                self.0.clone_from(&other.0);
+                true
+            }
+        }
+    }
 }
 
 impl<'c, 't> Facts<'c, 't> {
@@ -93,6 +129,22 @@ impl<'c, 't> Facts<'c, 't> {
         self.ancestors
             .entry(class.to_owned())
             .or_insert_with(|| decls.ancestors_of(class))
+    }
+
+    fn held(&mut self, class: &str) -> Vec<HeldSentinel> {
+        let (decls, kb) = (self.cx.decls, self.cx.kb);
+        self.held
+            .entry(class.to_owned())
+            .or_insert_with(|| decls.held_sentinels(class, kb))
+            .clone()
+    }
+
+    fn subclasses(&mut self, class: &str) -> Vec<String> {
+        let decls = self.cx.decls;
+        self.subclasses
+            .entry(class.to_owned())
+            .or_insert_with(|| decls.subclasses_of(class))
+            .clone()
     }
 
     fn plain(&mut self, class: &str, attr: &str) -> bool {
@@ -125,10 +177,10 @@ impl<'c, 't> Facts<'c, 't> {
             .chain(self.ancestors(copied).iter().cloned())
             .map(|c| (c, true))
             .collect::<Vec<_>>();
-        let maybe = decls.subclasses_of(copied).into_iter().map(|c| (c, false));
+        let maybe = self.subclasses(copied).into_iter().map(|c| (c, false));
         let mut out = Vec::new();
         for (class, surely) in surely.into_iter().chain(maybe) {
-            for held in decls.held_sentinels(&class, self.cx.kb) {
+            for held in self.held(&class) {
                 let Some(tested) = self.tested(&class, &held.attr, &held.sentinel) else {
                     continue;
                 };
@@ -141,13 +193,101 @@ impl<'c, 't> Facts<'c, 't> {
                     class: class.clone(),
                     surely,
                     held,
+                    below: None,
                     exact,
                 });
             }
         }
+        // An instance held below the copied object's attributes, by their types: what they hold
+        // at run time may be another object, so these claims are heuristic.
+        if let Some((attr, (class, held))) = self.below(copied) {
+            out.push(Candidate {
+                class,
+                surely: false,
+                held,
+                below: Some(attr),
+                exact: false,
+            });
+        }
         out.sort_by(|a, b| {
-            (!a.exact, !a.surely, &a.class, &a.held).cmp(&(!b.exact, !b.surely, &b.class, &b.held))
+            let rank = |c: &Candidate| (!c.exact, c.below.is_some(), !c.surely);
+            (rank(a), &a.class, &a.held).cmp(&(rank(b), &b.class, &b.held))
         });
+        out
+    }
+
+    /// The class holding a tested sentinel that an object of `copied` may hold below its
+    /// attributes, with the attribute of `copied` it is in or below: the first by name and
+    /// sentinel ([`Nearest`]) over the attributes, each joining what the classes it may hold reach
+    /// through theirs ([`ProjectDecls::classes_in_attributes`]), once per class and run.
+    fn below(&mut self, copied: &str) -> Option<(String, (String, HeldSentinel))> {
+        let children = self.in_attributes(copied);
+        let nearest = std::mem::take(&mut self.nearest);
+        let budget = std::mem::replace(&mut self.budget, Budget::unmetered(OWNER));
+        let mut found: Option<(String, (String, HeldSentinel))> = None;
+        {
+            let facts = RefCell::new(&mut *self);
+            for (child, attr) in children {
+                let start = facts.borrow_mut().id(&child);
+                let fact = nearest.ask(
+                    &budget,
+                    start,
+                    |k| facts.borrow_mut().holder(k),
+                    |k, out| facts.borrow_mut().held_ids(k, out),
+                );
+                if let Answer::Known(fact) = fact
+                    && let Some(holder) = &fact.0
+                    && found.as_ref().is_none_or(|(_, best)| holder < best)
+                {
+                    found = Some((attr, holder.clone()));
+                }
+            }
+        }
+        self.nearest = nearest;
+        self.budget = budget;
+        found
+    }
+
+    fn in_attributes(&mut self, class: &str) -> Vec<(String, String)> {
+        let decls = self.cx.decls;
+        self.in_attributes
+            .entry(class.to_owned())
+            .or_insert_with(|| decls.classes_in_attributes(class))
+            .clone()
+    }
+
+    fn id(&mut self, class: &str) -> usize {
+        if let Some(&id) = self.ids.get(class) {
+            return id;
+        }
+        self.names.push(class.to_owned());
+        self.ids.insert(class.to_owned(), self.names.len() - 1);
+        self.names.len() - 1
+    }
+
+    /// The classes an object of the class numbered `k` may hold in its attributes.
+    fn held_ids(&mut self, k: usize, out: &mut Vec<usize>) {
+        let class = self.names[k].clone();
+        for (held, _) in self.in_attributes(&class) {
+            out.push(self.id(&held));
+        }
+    }
+
+    /// The first class by name and sentinel that holds a tested sentinel among those an object
+    /// typed by the class numbered `k` is an instance of or may be (its MRO, its subclasses).
+    fn holder(&mut self, k: usize) -> Nearest {
+        let class = self.names[k].clone();
+        let mut family = vec![class.clone()];
+        family.extend(self.ancestors(&class).iter().cloned());
+        family.extend(self.subclasses(&class));
+        let mut out = Nearest::default();
+        for c in family {
+            for held in self.held(&c) {
+                if self.tested(&c, &held.attr, &held.sentinel).is_some() {
+                    out.join(&Nearest(Some((c.clone(), held))));
+                }
+            }
+        }
         out
     }
 
@@ -219,6 +359,13 @@ pub(crate) fn mut118(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
         tested: FxHashMap::default(),
         ancestors: FxHashMap::default(),
         plain: FxHashMap::default(),
+        in_attributes: FxHashMap::default(),
+        held: FxHashMap::default(),
+        subclasses: FxHashMap::default(),
+        ids: FxHashMap::default(),
+        names: Vec::new(),
+        nearest: Closure::new(),
+        budget: Budget::unmetered(OWNER),
     };
     for (unit, func, site) in sites {
         // One argument of one class: the deep copy's own premises.
@@ -269,10 +416,12 @@ fn report(
         .next()
         .unwrap_or(&claim.held.sentinel);
     let tester = &tests[0].func.qualname;
-    let receives = if claim.surely {
-        "receives"
-    } else {
-        "may receive"
+    let copied = match (&claim.below, claim.surely) {
+        (Some(below), _) => {
+            format!("may copy an instance of `{class}` held in `{below}` or in what it holds")
+        }
+        (None, true) => format!("receives an instance of `{class}`"),
+        (None, false) => format!("may receive an instance of `{class}`"),
     };
     let related = tests
         .iter()
@@ -297,7 +446,7 @@ fn report(
         &func.qualname,
         format!("{class}.{attr}"),
         format!(
-            "`copy.deepcopy` {receives} an instance of `{class}`, whose `{attr}` can hold the `object()` sentinel `{sentinel}` that `{tester}` tests by identity: the copy holds a new object there, which the test does not match"
+            "`copy.deepcopy` {copied}, whose `{attr}` can hold the `object()` sentinel `{sentinel}` that `{tester}` tests by identity: the copy holds a new object there, which the test does not match"
         ),
         Some(format!(
             "make `{sentinel}` an object that copies as itself (a class whose `__copy__`, `__deepcopy__`, and `__reduce__` return it, as `typing_extensions.Sentinel` does), or give `{class}` a `__deepcopy__` that keeps it"
