@@ -18,10 +18,11 @@ use crate::{
     CallSite, Delivery, EffectSummary, Facts, FuncKey, ProjectIndex, SharedChain, WriteKind,
 };
 use heki_ast::Span;
-use heki_ir::walk::FnShape;
+use heki_ir::walk::{Budget, FnShape};
 use heki_ir::{BlockId, ConstLiteral, InstKind, IrFunction, Terminator, VarId};
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::path::Path;
 
@@ -611,44 +612,85 @@ fn flag_covered(
     cov[0]
 }
 
-impl ProjectIndex {
+/// The contracts announced after points of the project's functions ([`Self::after`]). What the
+/// call sites from one on announce does not depend on the point the chain is entered from, so
+/// it is kept per site while the summaries it reads stay the same: for the propagation of one
+/// function, or one check of the rules.
+pub struct CoveredAfter<'i> {
+    index: &'i ProjectIndex,
+    /// By file and call site: the contracts the calls from the site to the end of its chain
+    /// announce.
+    from: RefCell<FxHashMap<(&'i Path, u32), u64>>,
+    steps: Budget,
+}
+
+impl<'i> CoveredAfter<'i> {
+    pub fn new(index: &'i ProjectIndex) -> Self {
+        Self {
+            index,
+            from: RefCell::default(),
+            steps: Budget::unmetered("invalidation::CoveredAfter"),
+        }
+    }
+
     /// The contracts of `mask` announced after a point with `flow` in a function of `path`:
     /// by the function's own invalidator calls on every normal path, or by a project call on
     /// every such path whose callees announce them on every path of their own
     /// (`must_invalidate`): every function the call may run, an abstract method aside. A
     /// different helper in each branch is not combined.
-    pub fn covered_after(&self, path: &Path, flow: &SiteFlow, mask: u64) -> u64 {
-        let mut covered = flow.invalidated & mask;
-        let file = &self.files[path];
-        let mut next = flow.next_call;
+    pub fn after(&self, path: &'i Path, flow: &SiteFlow, mask: u64) -> u64 {
+        let later = flow.next_call.map_or(0, |site| self.from(path, site));
+        (flow.invalidated | later) & mask
+    }
+
+    /// What the calls from `site` on announce. The chain is followed to the end or to a site
+    /// already answered, then answered back to `site`.
+    fn from(&self, path: &'i Path, site: u32) -> u64 {
+        let file = &self.index.files[path];
+        let mut chain = Vec::new();
+        let mut next = Some(site);
+        let mut known = 0;
         // `next_call` follows the post-dominator tree, so the chain is finite; the bound only
         // guards an index from another version of the file.
         for _ in 0..file.call_sites.len() {
-            let Some(site) = next.and_then(|i| file.call_sites.get(i as usize)) else {
+            let Some(i) = next.filter(|i| (*i as usize) < file.call_sites.len()) else {
                 break;
             };
-            if covered == mask {
+            if let Some(&from) = self.from.borrow().get(&(path, i)) {
+                known = from;
                 break;
             }
-            // Only a body that runs at its call is known to run to its end: a generator may be
-            // iterated in part.
-            let mut announced: Option<u64> = None;
-            for bc in site.project_callees() {
-                let here = match self.summary(&bc.callee) {
-                    Some(cs) if cs.is_abstract() => continue,
-                    Some(cs)
-                        if body_runs_at(self, site, cs).is_some_and(|d| d.from == Facts::Body) =>
-                    {
-                        cs.must_invalidate & mask
-                    }
-                    _ => 0,
-                };
-                announced = Some(announced.map_or(here, |a| a & here));
-            }
-            covered |= announced.unwrap_or(0);
-            next = site.flow.and_then(|f| f.next_call);
+            self.steps.take(1);
+            chain.push(i);
+            next = file.call_sites[i as usize].flow.and_then(|f| f.next_call);
         }
-        covered
+        let mut from = self.from.borrow_mut();
+        for i in chain.into_iter().rev() {
+            known |= self.announced_at(&file.call_sites[i as usize]);
+            from.insert((path, i), known);
+        }
+        known
+    }
+
+    /// The contracts every function the call at `site` may run announces on every path. Only a
+    /// body that runs at its call is known to run to its end: a generator may be iterated in
+    /// part.
+    fn announced_at(&self, site: &CallSite) -> u64 {
+        let mut announced: Option<u64> = None;
+        for bc in site.project_callees() {
+            let here = match self.index.summary(&bc.callee) {
+                Some(cs) if cs.is_abstract() => continue,
+                Some(cs)
+                    if body_runs_at(self.index, site, cs)
+                        .is_some_and(|d| d.from == Facts::Body) =>
+                {
+                    cs.must_invalidate
+                }
+                _ => 0,
+            };
+            announced = Some(announced.map_or(here, |a| a & here));
+        }
+        announced.unwrap_or(0)
     }
 }
 
@@ -711,17 +753,18 @@ pub(crate) fn propagate_facts(
     let all = contracts_mask(n);
     let path = &index.func_files[func];
     let flows = index.files[path].flows.get(func);
+    let covers = CoveredAfter::new(index);
     // Every function summarized with a contract has a flow for each of its definitions.
     s.must_invalidate = flows.map_or(0, |fl| {
         fl.entries
             .iter()
-            .fold(all, |acc, e| acc & index.covered_after(path, e, all))
+            .fold(all, |acc, e| acc & covers.after(path, e, all))
     });
     let mut unmet: BTreeSet<UnmetWrite> = BTreeSet::new();
     // The function's own writes leave out the contracts it is an exempt writer of already.
     for w in flows.into_iter().flat_map(|fl| &fl.writes) {
         let mask = w.contracts;
-        let open = mask & !index.covered_after(path, &w.flow, mask);
+        let open = mask & !covers.after(path, &w.flow, mask);
         for k in bits(open) {
             unmet.insert(UnmetWrite {
                 contract: k,
@@ -775,7 +818,7 @@ pub(crate) fn propagate_facts(
                     continue;
                 }
                 let mask = mask & !exempt_of();
-                let open = mask & !index.covered_after(site_path, &flow, mask);
+                let open = mask & !covers.after(site_path, &flow, mask);
                 for k in bits(open) {
                     unmet.insert(UnmetWrite {
                         contract: k,
@@ -813,7 +856,7 @@ pub(crate) fn propagate_facts(
                 if builds_written_object(initializer, reach, obj_params) {
                     continue;
                 }
-                if index.covered_after(site_path, &flow, bit) & bit != 0 {
+                if covers.after(site_path, &flow, bit) & bit != 0 {
                     continue;
                 }
                 let mut via_chain = crate::callgraph::lead_hops(site, site_path, &bc.callee, d.via);

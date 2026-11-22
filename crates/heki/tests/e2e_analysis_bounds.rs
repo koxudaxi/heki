@@ -576,11 +576,13 @@ fn phi_inputs_after_many_is_tests_find_their_sides_once_per_edge() {
 
 /// A function returning the last of a long chain of conditional expressions, each choosing
 /// between a call of the previous value and the previous value itself
-/// (`x200 = identity(x199) if flag else x199`): each phi is walked once and referred to by the
-/// walks that meet it, instead of every argument walking all the phis before it.
+/// (`x1000 = identity(x999) if flag else x999`): each phi is walked once and referred to by the
+/// walks that meet it, instead of every argument walking all the phis before it. The calls each
+/// argument may be the result of are those of every link before it, so the iterations' facts
+/// grow with the square of the chain: they pass their budget instead.
 #[test]
 fn returned_phis_of_calls_on_the_previous_value_are_walked_once() {
-    let found = check_linear(200, |links| {
+    let found = check_past_budgets(1_000, &["consumption::IterFlow"], |links| {
         let mut lines = vec![
             "def identity(x):".to_owned(),
             "    return x".to_owned(),
@@ -4294,6 +4296,75 @@ fn changes_down_a_long_item_chain_decide_each_element_once() {
         .map(|d| d["line"].as_u64().unwrap())
         .collect();
     assert_eq!(found, vec![1]);
+}
+
+/// A scope under a `mutates-params` boundary calling two thousand helpers in turn before handing
+/// its parameter to the last of them, each helper handing its own to the one before, the first
+/// changing it: the calls are found in the scope's order, against the order the parameter flows
+/// in. Which scope parameter each helper's parameters hold is joined from the calls into it, a
+/// helper visited again only when what it is handed grows, not in passes over every call until
+/// nothing changes.
+#[test]
+fn parameter_changes_down_a_chain_found_in_reverse_are_joined_once() {
+    let shape = |helpers: usize| {
+        let mut lines = vec!["def h0(x):".to_owned(), "    x.append(1)".to_owned()];
+        for i in 1..=helpers {
+            lines.push(format!("def h{i}(x=None):"));
+            lines.push(format!("    h{}(x)", i - 1));
+        }
+        lines.push("def entry(p):".to_owned());
+        lines.extend((0..helpers).map(|i| format!("    h{i}()")));
+        lines.push(format!("    h{helpers}(p)"));
+        let p = Project::new(&format!("bounds_reversed_param_chain_{helpers}"));
+        p.write(
+            "pyproject.toml",
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"EFF201\"]\n\n[[tool.heki.effect-boundaries]]\nname = \"pure\"\nscopes = [\"m.entry\"]\nforbid = [\"mutates-params\"]\n",
+        )
+        .write("m.py", &(lines.join("\n") + "\n"));
+        p
+    };
+    let found: Vec<String> = check_linear(2_000, shape)
+        .iter()
+        .filter(|d| d["rule_code"] == "EFF201")
+        .map(|d| d["qualname"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(found, vec!["entry"]);
+}
+
+/// A function writing an invalidation target four thousand times, each write followed by a call
+/// of a helper that announces nothing (`MUT109`): what the calls after a write announce is
+/// answered once per call site along the chain of next calls, not walked to the end again for
+/// each write.
+#[test]
+fn writes_before_many_calls_follow_the_calls_after_them_once() {
+    let shape = |writes: usize| {
+        let mut lines = vec![
+            "class Model:".to_owned(),
+            "    def __init__(self):".to_owned(),
+            "        self.value = 0".to_owned(),
+            "def helper():".to_owned(),
+            "    pass".to_owned(),
+            "def notify():".to_owned(),
+            "    pass".to_owned(),
+            "def touch(model: Model):".to_owned(),
+        ];
+        for i in 0..writes {
+            lines.push(format!("    model.value = {i}"));
+            lines.push("    helper()".to_owned());
+        }
+        let p = Project::new(&format!("bounds_writes_before_calls_{writes}"));
+        p.write(
+            "pyproject.toml",
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT109\"]\n\n[[tool.heki.invalidation]]\nname = \"m\"\ntargets = [\"Model.value\"]\ninvalidators = [\"m.notify\"]\n",
+        )
+        .write("m.py", &(lines.join("\n") + "\n"));
+        p
+    };
+    let found = check_linear(4_000, shape);
+    assert_eq!(
+        found.iter().filter(|d| d["rule_code"] == "MUT109").count(),
+        4_000
+    );
 }
 
 /// Five thousand shallow copies of one parameter, each changing one of its items, and a loop

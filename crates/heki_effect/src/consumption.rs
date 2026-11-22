@@ -15,9 +15,13 @@
 use crate::Items;
 use crate::resolver::{Callee, TypeCtx, Val};
 use heki_ast::Span;
-use heki_ir::walk::FnShape;
-use heki_ir::{BlockId, ConstLiteral, FunctionKind, Inst, InstKind, IrFunction, Terminator, VarId};
+use heki_ir::walk::{Answer, Budget, Facts, FnShape, Min, Sparse, Use, Visit, fixpoint, reach};
+use heki_ir::{
+    BlockId, ConstLiteral, DominatorTree, FunctionKind, Inst, InstKind, IrFunction, Terminator,
+    VarId,
+};
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::cell::RefCell;
 
 /// How a single-pass constructor iterates its positional arguments `first..end`
 /// (`usize::MAX`: to the last).
@@ -346,14 +350,18 @@ pub enum Roots {
 }
 
 /// Tracked values of one function and their iterations.
-#[derive(Debug, Default)]
 pub struct IterFlow {
     /// Tracked value -> its root (a root maps to itself): parameters and single-pass sources,
     /// followed through `Copy` and phis whose other inputs share one root.
     pub root_of: FxHashMap<VarId, VarId>,
+    /// The copies and phis of the function, and the one defining each value.
+    links: Vec<AliasLink>,
+    link_of: FxHashMap<VarId, usize>,
     /// Values merged from different roots (`rows() if flag else other()`, through copies): the
-    /// roots each may be. Iterating one steps them all; it exhausts none (it is one of them).
-    pub may_roots: FxHashMap<VarId, Vec<VarId>>,
+    /// roots each may be ([`Self::may_roots`]), decided for the values asked about.
+    merged: RefCell<FxHashMap<VarId, Vec<VarId>>>,
+    /// The steps of the flow's walks.
+    budget: Budget,
     /// Lazy wrappers: root -> the values it exhausts when it is consumed.
     pub wraps: FxHashMap<VarId, Vec<VarId>>,
     /// Lazy wrappers: root -> every value it steps when it is iterated (`wraps` and the values
@@ -418,9 +426,20 @@ impl IterFlow {
         callees: FxHashMap<(BlockId, usize), Callee>,
     ) -> Self {
         let f = shape.f;
+        let links = alias_links(f);
+        let link_of = links.iter().enumerate().map(|(i, l)| (l.dst, i)).collect();
         let mut flow = Self {
+            root_of: FxHashMap::default(),
+            links,
+            link_of,
+            merged: RefCell::default(),
+            budget: Budget::of_function("consumption::IterFlow", f),
+            wraps: FxHashMap::default(),
+            steps: FxHashMap::default(),
+            def_at: FxHashMap::default(),
             callees,
-            ..Self::default()
+            events: Vec::new(),
+            unpackable: FxHashSet::default(),
         };
         for p in &f.params {
             let annotated = p
@@ -470,7 +489,7 @@ impl IterFlow {
                 }
             }
         }
-        flow.alias(f);
+        flow.alias(shape);
         // Locals annotated as iterators that are not already tracked.
         let annotated: FxHashSet<&str> = f
             .local_annotations
@@ -488,7 +507,7 @@ impl IterFlow {
                 }
             }
         }
-        flow.alias(f);
+        flow.alias(shape);
         flow.collect_events(shape, types);
         flow
     }
@@ -508,72 +527,99 @@ impl IterFlow {
         self.unpackable.insert(var);
     }
 
-    /// `Copy` and agreeing-phi aliases of the roots, to a fixpoint. A phi's may-roots are
-    /// replaced, not joined, so the sizes the stop test compares need not grow: the passes are
-    /// bounded by the phis and copies there are.
-    fn alias(&mut self, f: &IrFunction) {
-        let links = f
-            .blocks
-            .iter()
-            .map(|b| b.phis.len() + b.insts.len())
-            .sum::<usize>();
-        for _ in 0..=links {
-            let before = (
-                self.root_of.len(),
-                self.may_roots.values().map(Vec::len).sum::<usize>(),
-            );
-            for bb in &f.blocks {
-                for phi in &bb.phis {
-                    let mut inputs = phi
-                        .incoming
-                        .iter()
-                        .map(|(_, v)| *v)
-                        .filter(|v| *v != phi.dst);
-                    let first = inputs.next().and_then(|v| self.root_of.get(&v).copied());
-                    if let Some(r) = first
-                        && inputs.all(|v| self.root_of.get(&v) == Some(&r))
-                    {
-                        self.root_of.entry(phi.dst).or_insert(r);
-                        continue;
-                    }
-                    let mut may: Vec<VarId> = phi
-                        .incoming
-                        .iter()
-                        .filter(|(_, v)| *v != phi.dst)
-                        .flat_map(|(_, v)| self.possible_roots(*v))
-                        .collect();
-                    may.sort();
-                    may.dedup();
-                    if !may.is_empty() {
-                        self.may_roots.insert(phi.dst, may);
-                    }
-                }
-                for inst in &bb.insts {
-                    if let InstKind::Copy { dst, src } = &inst.kind {
-                        if let Some(&r) = self.root_of.get(src) {
-                            self.root_of.entry(*dst).or_insert(r);
-                        } else if let Some(may) = self.may_roots.get(src).cloned() {
-                            self.may_roots.insert(*dst, may);
-                        }
-                    }
-                }
+    /// The `Copy` and phi aliases of the roots: a value has one root when it copies a value that
+    /// has one, or is a phi whose other inputs all have the same one. The least such facts, a
+    /// value visited again only when an input gains its root. Past the budget, a value is
+    /// tracked only where it is a root itself, so fewer iterations are seen, and no rule
+    /// reports from the ones missed.
+    fn alias(&mut self, shape: &FnShape<'_>) {
+        let f = shape.f;
+        let (links, link_of) = (&self.links, &self.link_of);
+        let readers = |i: usize, out: &mut Vec<usize>| {
+            for u in shape.readers(links[i].dst) {
+                let dst = match *u {
+                    Use::Inst(b, k) => f.block(b).insts[k as usize].kind.dst(),
+                    Use::Phi(b, k) => Some(f.block(b).phis[k as usize].dst),
+                    Use::Terminator(_) => None,
+                };
+                out.extend(dst.and_then(|d| link_of.get(&d).copied()));
             }
-            let after = (
-                self.root_of.len(),
-                self.may_roots.values().map(Vec::len).sum::<usize>(),
-            );
-            if after == before {
-                return;
+        };
+        // A link is visited once, then once per input gaining its root.
+        let max_inputs = links.iter().map(|l| l.inputs.len()).max().unwrap_or(0);
+        let spec = Sparse {
+            nodes: links.len(),
+            readers: &readers,
+            max_visits: u32::try_from(max_inputs + 1).unwrap_or(u32::MAX),
+        };
+        let roots = &self.root_of;
+        let transfer = |i: usize, known: &Facts<Min<VarId>>| -> Option<Min<VarId>> {
+            let root = |v: VarId| {
+                roots.get(&v).copied().or_else(|| {
+                    let j = link_of.get(&v)?;
+                    known.get(*j).map(|r| r.0)
+                })
+            };
+            let link = &links[i];
+            if let Some(&own) = roots.get(&link.dst) {
+                return Some(Min(own));
+            }
+            let mut inputs = link.inputs.iter().map(|v| root(*v));
+            let first = inputs.next()??;
+            inputs.all(|r| r == Some(first)).then_some(Min(first))
+        };
+        let Answer::Known(found) = fixpoint(&self.budget, spec, transfer) else {
+            return;
+        };
+        for (link, root) in self.links.iter().zip(found.into_vec()) {
+            if let Some(Min(r)) = root {
+                self.root_of.entry(link.dst).or_insert(r);
             }
         }
     }
 
-    /// The roots `v` is or may be.
-    fn possible_roots(&self, v: VarId) -> Vec<VarId> {
-        match self.root_of.get(&v) {
-            Some(r) => vec![*r],
-            None => self.may_roots.get(&v).cloned().unwrap_or_default(),
+    /// The roots `v` may be when it has no root of its own: those of the values with one that
+    /// reach it through copies and phis without one (`rows() if flag else other()`). Iterating
+    /// it steps them all; it exhausts none (it is one of them). Past the budget, none.
+    ///
+    /// The answer of each value asked is kept, and a walk joins the answer of a value asked
+    /// before instead of walking on through it: asked in their order, the links of a chain take
+    /// one step each and the weight of their answers. Only the values asked about have one: a
+    /// merge of many roots asked at its end takes one walk, not a set per merge on the way.
+    pub fn may_roots(&self, v: VarId) -> Vec<VarId> {
+        if self.root_of.contains_key(&v) {
+            return Vec::new();
         }
+        if let Some(known) = self.merged.borrow().get(&v) {
+            return known.clone();
+        }
+        let mut found = Vec::new();
+        let inputs = |u: VarId, out: &mut Vec<VarId>| {
+            if let Some(&i) = self.link_of.get(&u) {
+                out.extend(&self.links[i].inputs);
+            }
+        };
+        let walked = reach(&self.budget, [v], inputs, |u| {
+            if let Some(&r) = self.root_of.get(&u) {
+                found.push(r);
+                return Visit::<()>::Prune;
+            }
+            match self.merged.borrow().get(&u) {
+                Some(known) => {
+                    found.extend(known);
+                    Visit::Prune
+                }
+                None => Visit::Expand,
+            }
+        });
+        found.sort();
+        found.dedup();
+        // The answer is kept: its weight is taken too.
+        if walked.is_open() || !self.budget.take(found.len()) {
+            found.clear();
+        }
+        self.merged.borrow_mut().insert(v, found.clone());
+        found
     }
 
     /// Roots `values` exhaust: each value's root, then (pre-order) the values its wrappers
@@ -587,9 +633,9 @@ impl IterFlow {
     pub fn expand_steps(&self, values: &[VarId]) -> Vec<VarId> {
         let values: Vec<VarId> = values
             .iter()
-            .flat_map(|v| match self.may_roots.get(v) {
-                Some(roots) if !self.root_of.contains_key(v) => roots.clone(),
-                _ => vec![*v],
+            .flat_map(|v| match self.may_roots(*v) {
+                roots if roots.is_empty() => vec![*v],
+                roots => roots,
             })
             .collect();
         expand_through(&self.root_of, &self.steps, &values)
@@ -696,6 +742,35 @@ pub fn is_unpacking(shape: &FnShape<'_>, index: VarId, span: Span) -> bool {
     )
 }
 
+/// A value that aliases others: a `Copy` of one, or a phi of its inputs (itself left out).
+struct AliasLink {
+    dst: VarId,
+    inputs: Vec<VarId>,
+}
+
+/// The copies and phis of `f`, in block order.
+fn alias_links(f: &IrFunction) -> Vec<AliasLink> {
+    let mut links = Vec::new();
+    for bb in &f.blocks {
+        links.extend(bb.phis.iter().map(|phi| {
+            AliasLink {
+                dst: phi.dst,
+                inputs: (phi.incoming.iter().map(|(_, v)| *v))
+                    .filter(|v| *v != phi.dst)
+                    .collect(),
+            }
+        }));
+        links.extend(bb.insts.iter().filter_map(|inst| match inst.kind {
+            InstKind::Copy { dst, src } => Some(AliasLink {
+                dst,
+                inputs: vec![src],
+            }),
+            _ => None,
+        }));
+    }
+    links
+}
+
 /// Roots `values` reach through `edges` (pre-order, each root once).
 fn expand_through(
     root_of: &FxHashMap<VarId, VarId>,
@@ -785,22 +860,20 @@ fn loop_exhaustion(shape: &FnShape<'_>, iter: VarId) -> Option<(BlockId, bool)> 
     Some((exhausted, !leaves_early))
 }
 
-/// Whether every normal-flow path from the entry to a `return` passes through `block`.
-fn runs_on_every_return(f: &IrFunction, block: BlockId) -> bool {
-    let entry = BlockId(0);
-    let mut seen: FxHashSet<BlockId> = FxHashSet::default();
-    let mut stack = vec![entry];
-    while let Some(b) = stack.pop() {
-        if b == block || !seen.insert(b) {
-            continue;
-        }
-        let t = &f.block(b).terminator;
-        if matches!(t, Terminator::Return(_)) {
-            return false;
-        }
-        stack.extend(t.successors());
-    }
-    true
+/// Whether every normal-flow path from the entry to a `return` passes through a block: the
+/// blocks dominating, over the normal edges, the nearest common dominator of the returns the
+/// entry reaches, and every block when it reaches none.
+fn on_every_return(shape: &FnShape<'_>) -> impl Fn(BlockId) -> bool {
+    let f = shape.f;
+    let tree = DominatorTree::over(shape, |p, b| {
+        f.block(p).terminator.successors().contains(&b)
+    });
+    let returns = (f.blocks.iter())
+        .filter(|b| matches!(b.terminator, Terminator::Return(_)) && tree.number(b.id).is_some())
+        .map(|b| b.id);
+    // Each step starts where the previous one ended, so the fold climbs the tree once.
+    let common = returns.reduce(|c, r| tree.common(c, r));
+    move |b| common.is_none_or(|c| tree.dominates(b, c))
 }
 
 /// How `f` iterates its parameters (local facts; bit `i`: parameter `i < 64`).
@@ -818,7 +891,8 @@ pub(crate) struct ParamIteration {
 /// [`ParamIteration`] of `f` from its [`Roots::Summary`] flow. A generator function's body does
 /// not run at the call, so its calls consume nothing; iterating the generator steps what its
 /// body iterates (`iterates`).
-pub(crate) fn param_iteration(f: &IrFunction, flow: &IterFlow) -> ParamIteration {
+pub(crate) fn param_iteration(shape: &FnShape<'_>, flow: &IterFlow) -> ParamIteration {
+    let f = shape.f;
     let bits = |roots: &[VarId]| {
         let mut out = 0u64;
         for (i, p) in f.params.iter().take(64).enumerate() {
@@ -840,8 +914,7 @@ pub(crate) fn param_iteration(f: &IrFunction, flow: &IterFlow) -> ParamIteration
             ..ParamIteration::default()
         };
     }
-    let mut must: FxHashMap<BlockId, bool> = FxHashMap::default();
-    let mut runs = |b: BlockId| *must.entry(b).or_insert_with(|| runs_on_every_return(f, b));
+    let runs = on_every_return(shape);
     let mut consumes = 0;
     for e in flow.events.iter().filter(|e| e.full) {
         if runs(e.block) {

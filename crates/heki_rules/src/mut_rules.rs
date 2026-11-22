@@ -11,12 +11,12 @@ use heki_diagnostics::{Certainty, Diagnostic, OpenPremise, OpenRecord};
 use heki_effect::readonly::{self, Derivation};
 use heki_effect::{
     AttrKeyPath, BoundCallee, CacheEvent, CacheFlow, CallHop, CallSite, CallTarget, Callee,
-    Construction, ContractClass, Delivery, EffectSummary, Facts, FlowBlock, FuncKey, INITIALIZERS,
+    Construction, ContractClass, Delivery, EffectSummary, Facts, FuncKey, INITIALIZERS,
     ProjectDecls, ProjectIndex, ReturnStep, SelfAttrWrite, Shared, SiteRole, TypeCtx,
     TypedFieldWriteSite, Val, WriteKind, attr_writes, container_mutator, self_attr_writes,
 };
 use heki_env::HekiConfig;
-use heki_ir::walk::{Budget, FnShape, Visit, reach};
+use heki_ir::walk::{Answer, Budget, FnShape, Visit, reach};
 use heki_ir::{BlockId, FnIndex, Inst, InstKind, IrFunction, VarId};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::hash_map::Entry;
@@ -472,6 +472,18 @@ struct CacheEvents {
     invalidations: FxHashSet<(BlockId, u32)>,
     /// `self.prop`, and calls on `self` of methods whose summary reads it.
     reads: FxHashSet<(BlockId, u32)>,
+    /// Per block, whether every normal path from its start to a return passes an invalidation.
+    covered: Vec<bool>,
+    /// Per block, whether every path from the entry to its start passes an invalidation with no
+    /// read of the property after it.
+    absent: Vec<bool>,
+}
+
+/// The last of a block's events that invalidates the property or reads it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LastEvent {
+    Invalidates,
+    Reads,
 }
 
 impl CacheEvents {
@@ -495,6 +507,8 @@ impl CacheEvents {
         let mut out = Self {
             invalidations: FxHashSet::default(),
             reads: FxHashSet::default(),
+            covered: Vec::new(),
+            absent: Vec::new(),
         };
         for (b, block) in flow.blocks.iter().enumerate() {
             let b = BlockId(u32::try_from(b).unwrap_or(u32::MAX));
@@ -514,7 +528,91 @@ impl CacheEvents {
                 }
             }
         }
+        let budget = Budget::unmetered("mut_rules::CacheEvents");
+        // Open: every write is covered, and none is reported.
+        let n = flow.blocks.len();
+        out.covered = out.covered(flow, &budget).open_means(vec![true; n]);
+        out.absent = out.absent(flow, &budget).open_means(vec![true; n]);
         out
+    }
+
+    /// The last event of `b` (before instruction `upto`) that invalidates the property or reads
+    /// it.
+    fn last_event(&self, flow: &CacheFlow, b: BlockId, upto: Option<u32>) -> Option<LastEvent> {
+        let events = flow.blocks[b.0 as usize].events.iter().map(|(i, _)| *i);
+        (events.filter(|i| upto.is_none_or(|u| *i < u)))
+            .filter_map(|i| {
+                if self.invalidations.contains(&(b, i)) {
+                    Some(LastEvent::Invalidates)
+                } else {
+                    self.reads.contains(&(b, i)).then_some(LastEvent::Reads)
+                }
+            })
+            .next_back()
+    }
+
+    /// [`Self::covered`] of every block. A block is not covered when it invalidates nothing and
+    /// returns, or has a successor not covered: the blocks a return reaches backward through
+    /// blocks that invalidate nothing.
+    fn covered(&self, flow: &CacheFlow, budget: &Budget) -> Answer<Vec<bool>> {
+        let n = flow.blocks.len();
+        let block = |i: usize| BlockId(u32::try_from(i).unwrap_or(u32::MAX));
+        let invalidates: Vec<bool> = (0..n)
+            .map(|i| {
+                flow.blocks[i]
+                    .events
+                    .iter()
+                    .any(|(k, _)| self.invalidations.contains(&(block(i), *k)))
+            })
+            .collect();
+        let mut preds: Vec<Vec<usize>> = vec![Vec::new(); n];
+        for (i, b) in flow.blocks.iter().enumerate() {
+            for s in &b.succs {
+                preds[s.0 as usize].push(i);
+            }
+        }
+        let mut covered = vec![true; n];
+        let returns = (0..n).filter(|i| flow.blocks[*i].returns && !invalidates[*i]);
+        let back = |i: usize, out: &mut Vec<usize>| {
+            out.extend(preds[i].iter().filter(|p| !invalidates[**p]));
+        };
+        reach(budget, returns, back, |i| {
+            covered[i] = false;
+            Visit::<()>::Expand
+        })
+        .map(|_| covered)
+    }
+
+    /// [`Self::absent`] of every block. The value is present at the start of the entry, of a
+    /// handler (an exception may come from anywhere), and of a successor of a block reading it
+    /// last, and present on through blocks that neither invalidate nor read it; a block no path
+    /// enters keeps it absent.
+    fn absent(&self, flow: &CacheFlow, budget: &Budget) -> Answer<Vec<bool>> {
+        let n = flow.blocks.len();
+        let block = |i: usize| BlockId(u32::try_from(i).unwrap_or(u32::MAX));
+        let reachable = reachable_blocks(flow);
+        let last: Vec<Option<LastEvent>> = (0..n)
+            .map(|i| self.last_event(flow, block(i), None))
+            .collect();
+        let mut starts: Vec<usize> = vec![0];
+        for (i, b) in flow.blocks.iter().enumerate() {
+            starts.extend(b.exc_target.map(|h| h.0 as usize));
+            if last[i] == Some(LastEvent::Reads) {
+                starts.extend(b.succs.iter().map(|s| s.0 as usize));
+            }
+        }
+        starts.retain(|i| reachable.get(*i).copied().unwrap_or(false));
+        let mut absent = vec![true; n];
+        let on = |i: usize, out: &mut Vec<usize>| {
+            if last[i].is_none() {
+                out.extend(flow.blocks[i].succs.iter().map(|s| s.0 as usize));
+            }
+        };
+        reach(budget, starts, on, |i| {
+            absent[i] = false;
+            Visit::<()>::Expand
+        })
+        .map(|_| absent)
     }
 
     /// Whether the write at instruction `index` of `block` leaves no stale value behind on any
@@ -528,81 +626,22 @@ impl CacheEvents {
     /// Raising paths carry no obligation (as for `MUT109`), and a loop that never returns adds
     /// none.
     fn invalidated_after(&self, flow: &CacheFlow, block: BlockId, index: u32) -> bool {
-        let point_after = |b: BlockId, after: Option<u32>| {
-            self.invalidations
-                .iter()
-                .any(|(pb, pi)| *pb == b && after.is_none_or(|a| *pi > a))
-        };
-        let leaves_covered = |b: &FlowBlock, covered: &[bool]| {
-            !b.returns && b.succs.iter().all(|s| covered[s.0 as usize])
-        };
-        // Covered from each block's start: a greatest fixpoint from `true`.
-        let mut covered = vec![true; flow.blocks.len()];
-        loop {
-            let mut changed = false;
-            for (i, b) in flow.blocks.iter().enumerate().rev() {
-                let id = BlockId(u32::try_from(i).unwrap_or(u32::MAX));
-                let v = point_after(id, None) || leaves_covered(b, &covered);
-                if v != covered[i] {
-                    covered[i] = v;
-                    changed = true;
-                }
-            }
-            if !changed {
-                break;
-            }
-        }
-        point_after(block, Some(index)) || leaves_covered(&flow.blocks[block.0 as usize], &covered)
+        let b = &flow.blocks[block.0 as usize];
+        let later = b.events.iter().map(|(i, _)| *i).filter(|i| *i > index);
+        later
+            .into_iter()
+            .any(|i| self.invalidations.contains(&(block, i)))
+            || (!b.returns && b.succs.iter().all(|s| self.covered[s.0 as usize]))
     }
 
     /// Every path from the entry to the instruction passes an invalidation with no read of the
     /// property after it: the cached value is gone when the write happens. A block an exception
     /// enters may hold any value, and a block no path enters keeps its first value.
     fn absent_before(&self, flow: &CacheFlow, block: BlockId, index: u32) -> bool {
-        let events_of = |b: BlockId| flow.blocks[b.0 as usize].events.iter().map(|(i, _)| *i);
-        let through = |b: BlockId, mut absent: bool, upto: Option<u32>| {
-            for i in events_of(b).filter(|i| upto.is_none_or(|u| *i < u)) {
-                if self.invalidations.contains(&(b, i)) {
-                    absent = true;
-                } else if self.reads.contains(&(b, i)) {
-                    absent = false;
-                }
-            }
-            absent
-        };
-        let n = flow.blocks.len();
-        let mut preds: Vec<Vec<BlockId>> = vec![Vec::new(); n];
-        let mut handlers = vec![false; n];
-        for (i, b) in flow.blocks.iter().enumerate() {
-            for s in &b.succs {
-                preds[s.0 as usize].push(BlockId(u32::try_from(i).unwrap_or(u32::MAX)));
-            }
-            if let Some(h) = b.exc_target {
-                handlers[h.0 as usize] = true;
-            }
+        match self.last_event(flow, block, Some(index)) {
+            Some(last) => last == LastEvent::Invalidates,
+            None => self.absent[block.0 as usize],
         }
-        let reachable = reachable_blocks(flow);
-        // Absent at each block's start: a greatest fixpoint from `true` (the entry: present).
-        let mut absent_in = vec![true; n];
-        absent_in[0] = false;
-        loop {
-            let mut changed = false;
-            for i in (0..n).filter(|i| reachable[*i]) {
-                let v = i != 0
-                    && !handlers[i]
-                    && preds[i]
-                        .iter()
-                        .all(|p| through(*p, absent_in[p.0 as usize], None));
-                if v != absent_in[i] {
-                    absent_in[i] = v;
-                    changed = true;
-                }
-            }
-            if !changed {
-                break;
-            }
-        }
-        through(block, absent_in[block.0 as usize], Some(index))
     }
 }
 

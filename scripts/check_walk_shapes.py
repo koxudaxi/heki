@@ -86,8 +86,8 @@ PLACED = ("function", "method", "module")
 # Shapes known to cost more than the limits, with the walk that costs: (family, placement).
 KNOWN_OVER: dict[tuple[str, str], str] = {
     **{
-        ("returned_merge_chain", p): "the roots of each merged value are listed again per merge, "
-        "with the call sites through them (summary `iterations`)"
+        ("returned_merge_chain", p): "the summary keeps a site per call a merged argument may be "
+        "the result of (`iterations`), until the iteration facts pass their budget"
         for p in PLACED
     },
     **{
@@ -105,12 +105,6 @@ KNOWN_OVER: dict[tuple[str, str], str] = {
         "question recurses once per list extending the next (`FnIndex::display_at`)"
         for p in ("function", "method")
     },
-    ("lists_extending_each_other", "module"): "building the IR of a module body walks the "
-    "module-level names again per name (3 s; milliseconds in a function), and EFF107",
-    ("copy_chain_in_loop", "module"): "building the IR of a module body walks module-level copy "
-    "chains again per name (2.8 s; 0.02 s in a function)",
-    ("reverse_chain_in_loop", "module"): "dense alias passes take one pass per link of a chain "
-    "laid against block order (`grown_vars`, `aliases`)",
     ("wide_hierarchy", "project"): "each method call walks the whole subclass family of its "
     "receiver's class (`ProjectDecls::definitions`)",
     ("callers_of_one_helper", "project"): "MUT201 walks the helper's callers again per caller",
@@ -122,6 +116,12 @@ KNOWN_STEPS: dict[tuple[str, str], str] = {
     **{
         ("isinstance_continue", p): "the path facts of a loop header with many `continue`s "
         "(`Extractor::path_facts`, module bindings) grow quadratically and spend their budget"
+        for p in PLACED
+    },
+    **{
+        ("returned_merge_chain", p): "each argument may be the result of every call before it: "
+        "the roots of the merged values (`consumption::IterFlow`) grow quadratically and spend "
+        "their budget"
         for p in PLACED
     },
 }

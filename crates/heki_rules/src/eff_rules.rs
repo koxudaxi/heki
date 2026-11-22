@@ -23,7 +23,7 @@ use heki_effect::{
     SiteEffect, SiteMust, TypeCtx, WriteKind, anchors_call_site, boundary_reports_in,
 };
 pub(crate) use heki_ir::ItemOrigins;
-use heki_ir::walk::{Answer, Budget, FnShape};
+use heki_ir::walk::{self, Answer, Budget, FnShape, JoinMap, Or, Sparse, fixpoint};
 use heki_ir::{BlockId, Carries, InstKind, IrFunction, ItemOrigin, ItemSource, Must, Progress};
 use heki_kb::{EcosystemEntry, EnvironmentAccess, ExecEffectKind, ResultItems, WaitKind};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -1672,21 +1672,29 @@ impl<'a> Reach<'a> {
     /// whose changes count only below the copy's top level), and the distinct sites of those
     /// changes (each in the body making it).
     fn mutated_params(&self, cx: &CheckContext<'_>, params: usize) -> (u64, BTreeSet<SiteId>) {
-        // `(any change counts, only changes below the top level count)`.
-        let mut alias: FxHashMap<(usize, usize), (u64, u64)> = FxHashMap::default();
-        for p in 0..params.min(64) {
-            alias.insert((0, p), (1u64 << p, 0));
+        // Per node, the scope parameters each of its parameters holds: `(any change counts, only
+        // changes below the top level count)`.
+        type Held = JoinMap<usize, (Or, Or)>;
+        let mut into: Vec<Vec<(usize, &BoundCallee)>> = vec![Vec::new(); self.nodes.len()];
+        let mut out_of: Vec<Vec<usize>> = vec![Vec::new(); self.nodes.len()];
+        for &(from, to, bc) in &self.edges {
+            into[to].push((from, bc));
+            out_of[from].push(to);
         }
-        loop {
-            let mut changed = false;
-            for &(from, to, bc) in &self.edges {
+        let readers = |i: usize, out: &mut Vec<usize>| out.extend(&out_of[i]);
+        let transfer = |node: usize, known: &walk::Facts<Held>| -> Option<Held> {
+            let mut held = Held::new();
+            if node == 0 {
+                for p in 0..params.min(64) {
+                    held.insert(p, (Or(1u64 << p), Or(0)));
+                }
+            }
+            for &(from, bc) in &into[node] {
+                let of = |p: u8| {
+                    let bits = known.get(from).and_then(|h| h.get(&usize::from(p)));
+                    bits.map_or((0, 0), |(full, below)| (full.0, below.0))
+                };
                 for (k, o) in bc.params.iter().enumerate() {
-                    let of = |p: u8| {
-                        alias
-                            .get(&(from, usize::from(p)))
-                            .copied()
-                            .unwrap_or((0, 0))
-                    };
                     // The parameter itself keeps what counts; a part of it, or of a copy of it,
                     // is below the top level.
                     let mut bits = (0, 0);
@@ -1709,18 +1717,35 @@ impl<'a> Reach<'a> {
                         let (full, below) = of(*p);
                         bits.1 |= full | below;
                     }
-                    let slot = alias.entry((to, k)).or_insert((0, 0));
-                    let grown = (slot.0 | bits.0, slot.1 | bits.1);
-                    if grown != *slot {
-                        *slot = grown;
-                        changed = true;
+                    if bits != (0, 0) {
+                        held.insert(k, (Or(bits.0), Or(bits.1)));
                     }
                 }
             }
-            if !changed {
-                break;
-            }
-        }
+            Some(held)
+        };
+        // A node is visited once, then again only after a node calling it gains a bit of one of
+        // its parameters' two masks: at most the bits of every node's parameters.
+        let parameters: usize = (0..self.nodes.len())
+            .map(|j| {
+                let called = into[j].iter().map(|(_, bc)| bc.params.len()).max();
+                called.unwrap_or(0).max(if j == 0 { params } else { 0 })
+            })
+            .sum();
+        let spec = Sparse {
+            nodes: self.nodes.len(),
+            readers: &readers,
+            max_visits: u32::try_from(1 + 2 * 64 * parameters).unwrap_or(u32::MAX),
+        };
+        let budget = Budget::unmetered("eff_rules::Reach::mutated_params");
+        // Open: no change of a parameter is known, and none is reported.
+        let Answer::Known(found) = fixpoint(&budget, spec, transfer) else {
+            return (0, BTreeSet::new());
+        };
+        let alias = |i: usize, k: u8| {
+            let bits = found.get(i).and_then(|h| h.get(&usize::from(k)));
+            bits.map_or((0, 0), |(full, below)| (full.0, below.0))
+        };
         let mut out = 0;
         let mut sites = BTreeSet::new();
         for (i, (func, facts, _)) in self.nodes.iter().enumerate() {
@@ -1733,7 +1758,7 @@ impl<'a> Reach<'a> {
                 continue;
             };
             for k in (0..64u8).filter(|k| local.mutates_params & (1u64 << k) != 0) {
-                let (full, below) = alias.get(&(i, usize::from(k))).copied().unwrap_or((0, 0));
+                let (full, below) = alias(i, k);
                 let below = below
                     & if local
                         .changed_param_attrs

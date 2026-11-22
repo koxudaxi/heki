@@ -12,8 +12,8 @@
 //! nothing kept so far, under conditions on the callees, which propagation resolves.
 
 use crate::{FuncKey, NewArg, NewCond, NewKind};
-use heki_ir::walk::FnShape;
-use heki_ir::{InstKind, IrFunction, VarId};
+use heki_ir::walk::{Answer, Budget, Closure, Def, FnShape, Or};
+use heki_ir::{InstKind, VarId};
 use rustc_hash::FxHashMap;
 
 /// Position of an instruction: block, index in the block (`insts.len()` for the terminator).
@@ -143,8 +143,6 @@ impl Recorder {
             return (Vec::new(), None);
         }
         let f = shape.f;
-        let roots = self.roots(f, may_params, param_of);
-        let trackable = |v: VarId| roots.may.contains_key(&v) || param_of(v).is_some();
         let returned: Vec<(Pos, VarId)> = if returns {
             f.blocks
                 .iter()
@@ -158,6 +156,15 @@ impl Recorder {
         } else {
             Vec::new()
         };
+        let asked = (self.queries.iter().map(|(_, v)| *v))
+            .chain(returned.iter().map(|(_, v)| *v))
+            .chain(self.escapes.iter().map(|(_, v, _)| *v));
+        let budget = Budget::of_function("construction::Recorder", f);
+        // Past the budget, no object is known to be new, as past the allocations recorded.
+        let Answer::Known(roots) = self.roots(shape, &budget, asked, may_params, param_of) else {
+            return (vec![NewArg::Old; self.queries.len()], None);
+        };
+        let trackable = |v: VarId| roots.may.contains_key(&v) || param_of(v).is_some();
         let any_return_new = !returned.is_empty() && returned.iter().all(|(_, v)| trackable(*v));
         if !self.queries.iter().any(|(_, v)| trackable(*v)) && !any_return_new {
             return (vec![NewArg::Old; self.queries.len()], None);
@@ -298,93 +305,65 @@ impl Recorder {
         (answers, returns_new)
     }
 
-    /// The allocation roots of every variable, through copies and phis (a monotone fixpoint).
+    /// The allocation roots each of `asked` may hold, through copies and phis: `may`, the roots
+    /// of every value a value reaches through their inputs, and `all`, whether every value on the
+    /// way holds allocations only. Open past the budget.
     fn roots<'f>(
         &self,
-        f: &IrFunction,
+        shape: &FnShape<'_>,
+        budget: &Budget,
+        asked: impl Iterator<Item = VarId>,
         may_params: &'f FxHashMap<VarId, u64>,
         param_of: &'f dyn Fn(VarId) -> Option<u8>,
-    ) -> Roots<'f> {
-        let mut may: FxHashMap<VarId, u64> = FxHashMap::default();
-        for (r, a) in self.allocs.iter().enumerate() {
-            *may.entry(a.dst).or_default() |= 1u64 << r;
-        }
-        if may.is_empty() {
-            return Roots {
-                may,
-                all: FxHashMap::default(),
-                may_params,
-                param_of,
-            };
-        }
-        // Copies and phis (phi inputs other than the phi itself).
-        let mut copies: Vec<(VarId, VarId)> = Vec::new();
-        let mut phis: Vec<&heki_ir::PhiNode> = Vec::new();
-        for bb in &f.blocks {
-            phis.extend(&bb.phis);
-            for inst in &bb.insts {
-                if let InstKind::Copy { dst, src } = &inst.kind {
-                    copies.push((*dst, *src));
-                }
-            }
-        }
-        let inputs = |phi: &heki_ir::PhiNode| {
-            let dst = phi.dst;
-            phi.incoming
-                .iter()
-                .map(|(_, v)| *v)
-                .filter(move |v| *v != dst)
-                .collect::<Vec<_>>()
-        };
-        let phi_inputs: Vec<(VarId, Vec<VarId>)> =
-            phis.iter().map(|p| (p.dst, inputs(p))).collect();
-        let flows = || {
-            copies
-                .iter()
-                .map(|(d, s)| (*d, std::slice::from_ref(s)))
-                .chain(phi_inputs.iter().map(|(d, i)| (*d, i.as_slice())))
-        };
-        // `may`: a union over every input, to the least fixpoint.
-        loop {
-            let mut changed = false;
-            for (dst, inputs) in flows() {
-                let bits = inputs
-                    .iter()
-                    .fold(0, |acc, v| acc | may.get(v).copied().unwrap_or(0));
-                if bits != 0 {
-                    let slot = may.entry(dst).or_default();
-                    if *slot | bits != *slot {
-                        *slot |= bits;
-                        changed = true;
-                    }
-                }
-            }
-            if !changed {
-                break;
-            }
-        }
-        // `all`: every input holds allocations only, to the greatest fixpoint.
-        let mut all: FxHashMap<VarId, bool> = may.keys().map(|v| (*v, true)).collect();
-        loop {
-            let mut changed = false;
-            for (dst, inputs) in flows() {
-                if all.get(&dst) == Some(&true)
-                    && !inputs.iter().all(|v| all.get(v).copied().unwrap_or(false))
-                {
-                    all.insert(dst, false);
-                    changed = true;
-                }
-            }
-            if !changed {
-                break;
-            }
-        }
-        Roots {
-            may,
-            all,
+    ) -> Answer<Roots<'f>> {
+        let mut roots = Roots {
+            may: FxHashMap::default(),
+            all: FxHashMap::default(),
             may_params,
             param_of,
+        };
+        let mut own: FxHashMap<VarId, u64> = FxHashMap::default();
+        for (r, a) in self.allocs.iter().enumerate() {
+            *own.entry(a.dst).or_default() |= 1u64 << r;
         }
+        if own.is_empty() {
+            return Answer::Known(roots);
+        }
+        let f = shape.f;
+        // A copy's source, a phi's inputs other than itself.
+        let inputs = |v: VarId, out: &mut Vec<VarId>| match shape.def(v) {
+            Def::Inst(b, i) => {
+                if let InstKind::Copy { src, .. } = f.block(b).insts[i as usize].kind {
+                    out.push(src);
+                }
+            }
+            Def::Phi(b, i) => out.extend(
+                (f.block(b).phis[i as usize].incoming.iter().map(|(_, x)| *x)).filter(|x| *x != v),
+            ),
+            Def::Param | Def::None => {}
+        };
+        let held: Closure<VarId, Or> = Closure::new();
+        let may = |v: VarId| {
+            let own = |u: VarId| Or(own.get(&u).copied().unwrap_or(0));
+            held.ask(budget, v, own, inputs).map(|bits| bits.0)
+        };
+        let lacking: Closure<VarId, bool> = Closure::new();
+        for v in asked {
+            let Answer::Known(bits) = may(v) else {
+                return Answer::Open;
+            };
+            if bits == 0 || roots.may.contains_key(&v) {
+                continue;
+            }
+            // A value on the way that holds no allocation.
+            let none = |u: VarId| !matches!(may(u), Answer::Known(b) if b != 0);
+            let Answer::Known(lacks) = lacking.ask(budget, v, none, inputs) else {
+                return Answer::Open;
+            };
+            roots.may.insert(v, bits);
+            roots.all.insert(v, !*lacks);
+        }
+        Answer::Known(roots)
     }
 
     /// Whether `var` holds, at a point with escape state `state`, a new object or a parameter

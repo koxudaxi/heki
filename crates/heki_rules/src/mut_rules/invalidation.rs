@@ -14,8 +14,8 @@ use crate::contracts::ConfigContracts;
 use crate::{CheckContext, RuleConfigError, SitesByCaller};
 use heki_diagnostics::Diagnostic;
 use heki_effect::{
-    ContractClass, FuncKey, Reach, UnmetWrite, body_runs_at, builds_written_object, is_initializer,
-    reach_across,
+    ContractClass, CoveredAfter, FuncKey, Reach, UnmetWrite, body_runs_at, builds_written_object,
+    is_initializer, reach_across,
 };
 use rustc_hash::FxHashSet;
 use std::collections::VecDeque;
@@ -26,6 +26,7 @@ pub(crate) fn run(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) -> Result<()
     }
     let names = ConfigContracts::new(cx.config, cx.kb)?;
     let sites = cx.sites_by_caller();
+    let covers = CoveredAfter::new(cx.index);
     let mut paths: Vec<_> = cx.index.files.keys().collect();
     paths.sort();
     // Per contract: two contracts naming one target are two reports.
@@ -58,7 +59,7 @@ pub(crate) fn run(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) -> Result<()
             for u in &s.unmet_invalidation {
                 // The index was built with these contracts, so the contract exists.
                 let rule = &cx.config.invalidation[usize::from(u.contract)];
-                if announced_by_callers(cx, &sites, &names, key, u) {
+                if announced_by_callers(cx, &sites, &covers, &names, key, u) {
                     continue;
                 }
                 // The configured target that names the write, as the summary matched it.
@@ -123,9 +124,10 @@ pub(crate) fn run(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) -> Result<()
 /// it (where it comes from, and the parameters it may be), like `MUT201`'s allowed-context walk:
 /// a function without project callers ends a path unannounced, and paths that only cycle
 /// announce nothing.
-fn announced_by_callers(
-    cx: &CheckContext<'_>,
-    sites: &SitesByCaller<'_>,
+fn announced_by_callers<'i>(
+    cx: &CheckContext<'i>,
+    sites: &SitesByCaller<'i>,
+    covers: &CoveredAfter<'i>,
     names: &ConfigContracts,
     func: &FuncKey,
     u: &UnmetWrite,
@@ -173,7 +175,7 @@ fn announced_by_callers(
                         builds_written_object(is_initializer(caller), caller_reach, caller_obj);
                     let covered = site
                         .flow
-                        .is_some_and(|f| cx.index.covered_after(path, &f, bit) & bit != 0);
+                        .is_some_and(|f| covers.after(path, &f, bit) & bit != 0);
                     if builds || covered {
                         announced = true;
                     } else if visited.insert((caller.clone(), caller_reach, caller_obj)) {
