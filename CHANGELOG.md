@@ -110,6 +110,20 @@ release can change rules, configuration keys, diagnostics, and output formats.
   PyYAML's `yaml.dump` / `yaml.safe_dump` (`sort_keys`, sorting by default).
   `[[tool.heki.ecosystem]]` takes `writes-in-order` for library symbols.
 
+- `EFF112` (`set-order-output`, opt-in, heuristic, experimental): the iteration order of a set of
+  `str` or `bytes` values, which changes between runs as their hashes are randomized per process,
+  reaches an output across a call: a value built in that order (iterated, copied into a sequence
+  or text, formatted, or an element picked) returned up to the caller that writes it, or handed
+  down to a writer. Outputs are the catalog's `writes_in_order` calls with their sorting switch
+  off (`json.dumps` without `sort_keys=True`, `yaml.safe_dump(..., sort_keys=False)`, `pprint.pp`,
+  `Path.write_text`, `print`), writes to `sys.stdout`, `sys.stderr`, or a file the function opens,
+  and the message of a raised builtin exception built from the whole value; `logging` and
+  `warnings.warn` are not. A flow inside one function, a sorted value, a set bounded to one
+  element, one element written per file or raised per element, a mapping read back by key, a key
+  stored again after a read, and a set filled with the elements are not reported. The report
+  sits where the ordered value meets the output, with the order-taking line and the calls on the
+  way as related locations.
+
 ### Changed
 
 - `MUT201`, `MUT203`, `MUT204`: an access matching several targets of one contract is reported
