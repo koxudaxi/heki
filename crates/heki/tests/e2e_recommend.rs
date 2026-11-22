@@ -141,7 +141,7 @@ fn reports_now_are_what_heki_check_shows_and_withholds() {
          no: slower code, not a bug\n\
          \x20 EFF111        1      -  slowdown     not measured                      -          \
          no: slower code, not a bug\n\
-         \x20 No reports here: EFF102, EFF105, EFF106, EFF107, EFF109, EFF110, EFF113, MUT101, \
+         \x20 No reports here: EFF102, EFF105, EFF106, EFF107, EFF109, EFF110, EFF112, EFF113, EFF114, MUT101, \
          MUT106, MUT107, MUT108, MUT111, MUT112, MUT113, MUT115, MUT118, OPT112\n\
          \x20 MUT103: it compares with a saved summary snapshot: run `heki snapshot --write`, then \
          select it.\n\
@@ -655,7 +655,7 @@ fn rules_worth_enabling_follow_the_policy() {
         \x20 MUT107        1      -  bug          78% (65-87%), n=50, 2026-11-21    4%         no: real harm below 10%\n\
         \x20 Optional (experimental, never in the block)\n\
         \x20 EFF109        1      -  bug          not measured                      -          no: experimental\n\
-        \x20 No reports here: EFF102, EFF105, EFF106, EFF110, EFF113, MUT101, MUT108, MUT111, MUT112, MUT113, \
+        \x20 No reports here: EFF102, EFF105, EFF106, EFF110, EFF112, EFF113, EFF114, MUT101, MUT108, MUT111, MUT112, MUT113, \
         MUT115, MUT118, OPT112\n\
         \x20 MUT103: it compares with a saved summary snapshot: run `heki snapshot --write`, then select it."
     );
@@ -1691,6 +1691,45 @@ fn a_source_root_stays_out_when_an_import_would_name_another_file() {
     assert_eq!(waits_reported(&p), ["main.py"]);
     apply_block(&p, &report);
     assert_eq!(waits_reported(&p), ["main.py", "tools/cli.py"]);
+}
+
+#[test]
+fn a_source_root_stays_out_when_a_workspace_members_package_would_lose_its_name() {
+    let p = Project::new("recommend_source_root_workspace_member");
+    p.write(
+        "pyproject.toml",
+        "[tool.uv.workspace]\nmembers = [\"packages/*\"]\n",
+    )
+    .write("packages/api/pyproject.toml", "")
+    .write("packages/api/acme_api/__init__.py", "")
+    .write(
+        "packages/api/acme_api/io.py",
+        "import time\n\n\ndef get():\n    time.sleep(1)\n",
+    )
+    // A `src` setting replaces the detection of the members' packages too: below the block's
+    // roots this import would name nothing.
+    .write(
+        "app.py",
+        "import acme_api.io\nimport helpers\n\n\nasync def main():\n    acme_api.io.get()\n    \
+         helpers.run()\n",
+    )
+    .write("tools/lib/helpers.py", "def run():\n    pass\n");
+    let (_, report, _) = recommend_json(&p, &[]);
+    let root = &report["blind_spots"]["source_roots"][0];
+    assert_eq!(
+        (&root["directory"], &root["in_block"], &root["reason"]),
+        (
+            &json!("tools/lib"),
+            &json!(false),
+            &json!(
+                "`acme_api.io` in app.py would name no project module, not \
+                 packages/api/acme_api/io.py"
+            )
+        )
+    );
+    assert_eq!(report["config"].get("src"), None);
+    assert_follows_the_schema(&report);
+    assert_eq!(waits_reported(&p), ["app.py"]);
 }
 
 #[test]

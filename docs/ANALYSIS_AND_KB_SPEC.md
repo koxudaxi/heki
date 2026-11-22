@@ -385,11 +385,28 @@ variable of the name, which the scopes created outside the comprehension read. A
 nested scope may rebind (`nonlocal`, an assignment expression in a comprehension scope before
 3.12, any scope nested in a function too large to model) is of unknown type.
 
+A cell that the function binding it binds only as one of its parameters, and that no nested
+scope rebinds, is that parameter in every scope reading it (`FunctionDecl::captured_params`, one
+list per qualname, which scopes sharing a qualname share): every scope nested in the function
+gets one more parameter per such cell, past the parameters of every scope with its qualname, so
+a scope that does not read it can still hand it to one that does (a generator expression calling
+a nested function), and the masks of its facts (`may_params`, `obj_params`) name it. A call binds
+it (`BoundCallee::params` past the scope's own) to the caller's own parameter when the caller
+binds the cell, to the caller's position of it when the caller is nested in that function too,
+and to nothing otherwise: a closure called away from the function. So the mapping of
+masks across calls takes `self` in a comprehension, generator expression, lambda, or nested
+function back to the method running it (a class's own initialization, `own-receiver`, the walk
+up the callers), and the owner contracts' lexical attribution maps the positions of a lambda,
+comprehension, or generator expression to the function holding it directly.
+
 Module names come from the paths below a source root (`pkg/mod.py` → `pkg.mod`,
 `pkg/__init__.py` → `pkg`), the deepest one holding the file, else the project root. The `src`
 setting lists the source roots; without it they are detected as ty detects them: `src/`, the
 directory named after the project when it holds one of the same name (`acme/acme/`), and
-`python/`, each when it is not itself a package (no `__init__.py`). `src/acme/io.py` is
+`python/`, each when it is not itself a package (no `__init__.py`), plus the members of the
+project's uv, Hatch, and PDM workspaces: a member's own detected source roots, else its top-level
+packages named below it (`packages/api/acme_api/` is `acme_api`; configuration.md, "Workspaces
+and monorepos"). `src/acme/io.py` is
 `acme.io`, for regular and namespace packages and for modules directly under `src/`. A module name that several files share is defined by one of them, in full and
 incremental analysis alike: an implementation before its `.pyi` stub, a package
 (`pkg/__init__.py`) before a module file of the same name (`pkg.py`, which Python does not import
@@ -557,6 +574,17 @@ EffectSummary(f) = {
                                                            // CallSite::under_lock; only with EFF110
                                                            // selected, OptInFacts::exclusive)
 
+    // Set orders (EFF112; only with EFF112 selected, OptInFacts::set_order)
+    set_order:                Option<SetOrderFacts>,       // flows: the ends (return, an output call,
+                                                           // a project call's argument) each source
+                                                           // reaches (a take of a set's order, a
+                                                           // parameter, a project call's result),
+                                                           // local; returns / returns_params /
+                                                           // writes_params, propagated
+    // Call cycles (EFF114; propagated; only with EFF114 selected, OptInFacts::call_cycles)
+    call_cycle:               Option<CallCycle>,           // none, Reaches (a function its body runs
+                                                           // is on a call cycle), or On (itself)
+
     // Metadata
     is_async, is_generator, is_cached_property, is_lru_cache, owner_class_qualname, decorators,
 }
@@ -706,9 +734,11 @@ in source order: a call resolving to no function (`Callee::Unresolved` or `TooMa
 name called and why, from the receiver or the called value (`UnresolvedReason`: an unannotated
 parameter, an annotation giving no class, `Any` or `object`, a `Callable`, a name nothing heki
 sees binds, an unlisted protocol, a call result, an attribute, a computed `getattr` name, more
-implementations than CHA follows, a member heki does not find, any other untyped value); a call
-on `Any`, `object`, or a `Callable`, or of an unbound name, which resolves to a library name no
-library defines (`typing.Any.get`, `builtins.create`), counts as unresolved; and a call of a
+implementations than CHA follows, a member heki does not find, any other untyped value). A call
+on a value of `Any`, `object`, or `Callable` (an instance or a class object), or of an unbound
+name, resolves to no function: its library name (`typing.Any.get`, `builtins.create`) is no
+library's, so the call is unresolved for every consumer (`EffectSummary::unknown_calls`, the
+purity `heki inspect` gives, blind spots); and a call of a
 library function or class outside the project and the standard library without a catalog entry
 (`Blind::Uncatalogued`, with whether the catalog lists its package). They are local facts, never
 propagated, and no rule reads them. `ProjectIndex::blind_spot_reach` walks a function's facts of
@@ -1337,7 +1367,10 @@ message = "write model state through GenerationStore instead"
      - **container mutation through an alias**: `xs = obj.a; xs.append(...)` / `xs[i] = ...` /
        `xs.clear()` / `xs.sort()` / `xs |= ...` (through alias tracking and
        `mutated_param_paths`, **handing `obj.a` to `helper(obj.a)` that calls `.append()` is
-       caught across calls**). An alias is one in the scopes nested in its function too: a
+       caught across calls**). An augmented assignment that changes a built-in container in
+       place (`types::changes_in_place`: `+=` on a list, `|=` on a dict, `-=` on a set) gives
+       the container itself, so the name it rebinds stays the alias and keeps its type
+       (`xs |= {}; xs["k"] = v`); on any other value (`n += 1`) it binds a new object. An alias is one in the scopes nested in its function too: a
        read of its closure cell joins the aliases of every value the function binds to it, as
        a phi joins its inputs (the function is summarized before the scopes nested in it), and
        a cell a nested scope rebinds (`nonlocal`) is no alias. `getattr(obj, "a"[, default])`
@@ -1454,7 +1487,7 @@ deep = true   # changes to attributes and nested containers below are forbidden 
   callers, with the same initializer and allowed-context rules as `MUT201`. Reads through
   parameters without a project-class type are not seen.
 
-### 2.4 Family 2 (`EFF101`–`EFF103`, `EFF105`–`EFF107`, `EFF109`, `EFF110`, `EFF111`, `EFF113`, `EFF201`, `DATA101`): precision, sanitizers, and aggregation
+### 2.4 Family 2 (`EFF101`–`EFF103`, `EFF105`–`EFF107`, `EFF109`, `EFF110`, `EFF111`, `EFF112`, `EFF113`, `EFF114`, `EFF201`, `DATA101`): precision, sanitizers, and aggregation
 0. **Must-facts and the exact tier** (`EffectSummary::must_exec`, computed only when `EFF101`,
    `EFF111`, `EFF103`, or `EFF113` runs: `OptInFacts::must_effects`):
    - Per call instruction, the path facts (`heki_ir::Paths`, with the reader of
@@ -1646,7 +1679,85 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      an operation on the object, its own, an awaited call reaching one, or a fan-out whose
      tasks use it; kill at `"unbinds"`) leaves out a fan-out that every path reaches after a
      use.
-10. **`EFF201`** (contract): a breadth-first search over the IR-free call graph from each scope
+10. **`EFF112`** (opt-in): the iteration order of a set of strings reaching an output across a
+   call.
+   - `heki_effect::order_flow` decides, per function and IR-free afterwards, which sources reach
+     which ends. A source is a take of a set's order (the elements of a loop or comprehension over
+     the set, `list()` / `tuple()` / `iter()` / `str.join()` / formatting of it, `set.pop()`, a
+     generator expression over it, a comprehension of its own before Python 3.12 handed it; a set
+     the code bounds to one element on every path to the take, by a test of `len` whose bounding
+     edge is the only way in, also an operand of a short-circuit `or` / `and` on the side of the
+     whole that decides every operand, takes none), a parameter, or a project call's result. The set has
+     run-dependent hashes when it is a `set` / `frozenset` of `str` or `bytes` (or tuples of
+     them): a display of text, `set()` / `frozenset()` of text, a set operator with such an
+     operand (a mapping's `keys()` of text keys included), a module name bound once to such a
+     display (`TypeCtx::string_set_global`), a phi of one, or a value whose inferred type is one
+     (one memoized answer per value). The flow is a `Closure` over `(value, kind)` nodes: a whole
+     value in the set's order passes through copies, phis, list / tuple / dict displays,
+     formatting, `+` / `%`, `str.join`, the builtins that keep an order, `.items()` and the other
+     keeping methods, positional item reads (not from a mapping, by a text key, or from a
+     sequence the code bounds to one element there), and into the containers keeping the order
+     it is appended to or stored in (not a set, which has an order of its own; `insert`,
+     `update`, and `setdefault` only on a list or a mapping known by construction or type; a key
+     read from the mapping on every path before keeps its place when stored again); an element
+     also passes to what is computed from it (an item looked up by it, text formatted or
+     concatenated from it, a call's result), and text made from it and added onto a phi (what a
+     loop has built so far) is a whole value in the set's order. The
+     ends are a `return`, an output (a catalog `writes_in_order` argument with its sorting
+     keyword established off, a stream's `write`, a builtin exception's message; for one element
+     at a time only outputs that append: streams and `print`, not a raise, which names the first
+     element that fails), and a project call's argument (with the callee and parameter; `each`
+     for one element at a time).
+   - Propagation (`order_flow::propagate`) resolves the flows against the callees' facts: what a
+     call's result carries (the callee's `returns`, or, through a callee returning a parameter,
+     what the argument carries: a fixpoint over the flows that visits a flow again only when it
+     grows; one element at a time hands no order back), then `returns` (the first origin),
+     `returns_params`, and `writes_params` (the shortest chain to an output; through an `each`
+     argument only to an appending output).
+   - The rule (`eff_rules::set_order_output`) reads the same resolution where the ordered value
+     meets the output: a call's result written (it came back across a call), or a take handed to
+     a call whose parameter reaches an output. A take written in its own function is a linter's
+     and is not reported.
+11. **`EFF114`** (opt-in): an `except` clause that turns the `RecursionError` of a call cycle
+   into a value.
+   - A function is on a call cycle when it is a member of a component, of more than one node or
+     with a call of itself, of the propagation region's call graph restricted to the calls whose
+     callee's body runs on the caller's stack (`callgraph::on_call_cycles`: a call that runs at
+     the call, not a coroutine only created or a generator only made, or a generator iterated
+     there; never a callable run on a worker thread). The components are computed once per
+     propagation; a region always holds every member of a cycle it touches (an edit's region
+     holds every function sharing a cycle with it, a caller region every caller of a changed
+     function). `EffectSummary::call_cycle` is `On` for a member and `Reaches` for a function
+     whose delivered callee facts reach one (joined during propagation like the other facts, so
+     a generator's or a returned generator's iteration counts where it runs), and takes part in
+     Early Cutoff.
+   - The rule (`eff_rules::recursion_handlers`) reads, per `try`, the clauses its dispatch block
+     tests in turn (the `CatchException` that starts each clause body) and takes the first whose
+     classes include `RecursionError`: a bare `except`, or class values the type inference gives
+     as `builtins.RecursionError`, `RuntimeError`, `Exception`, or `BaseException` (a tuple
+     display of them included). A class is known when it is a builtin (a name Python binds in
+     `builtins`) or a project class statement, which makes a new class; an earlier clause of
+     any other class (one of a dependency or the standard library, which may be bound to
+     `RuntimeError`, as `threading.ThreadError` is, or a name only a star import may bind),
+     of a value heki does not know, or an `except*` clause (by its source text), leaves the
+     `try` undecided. The `try` body is every block whose
+     exception reaches that dispatch block, past `with` exits and past the dispatch of an inner
+     `try` none of whose clauses takes it (one walk per exception target). A call site in the
+     body whose delivered callee facts reach a call cycle (`ProjectIndex::delivery`, into the
+     body; never a worker thread) is the witness. When the witness's callee only reaches the
+     cycle, a walk down its calls (`reach`, under the function's budget; past it, no finding)
+     ends at a function on the cycle or at one an earlier walk of the module's check decided,
+     and each function on the way keeps its first call down: every function's call is decided
+     once for all the chains through it, and a report lists the first eight calls of its chain. The clause completes normally when a walk over
+     the blocks the start of its body dominates, along normal edges, finds no `raise`, no call ending
+     the process (`sys.exit`, `os._exit`, `os.abort`, `exit`, `quit`), and no call of project
+     functions that return on no path (`MustExec::never_returns`, which `EFF114` has computed);
+     leaving those blocks or
+     returning completes it. A clause reporting the error (`print(..., file=sys.stderr)`,
+     `sys.stderr.write`, `traceback.print_exc`, a `logging` call with the exception, also on a
+     logger of unknown class by its method name) and returning an integer constant on every
+     `return` is a CLI boundary and is left out.
+12. **`EFF201`** (contract): a breadth-first search over the IR-free call graph from each scope
    function (and each module body a scope names as `<module>`,
    `DottedPattern::names_module_bodies`) finds the shortest chain to each forbidden effect,
    without entering `allowed-callees`, other scope functions, or bodies that do not run at the
@@ -1793,7 +1904,7 @@ Every candidate also needs `A1HazardFree` (no frame introspection in the functio
 | **OPT103** | `size-dependent` | `Unique(acc)`, `ExclusiveAccessAtWrite(acc)`, `ExactType(acc / rhs)`, `NoIntermediateReads`, `ExceptionStateSafe` | `LoopCarried(acc)`, `NotConstSmall` (local `str +=` excluded); for `obj.attr +=`, every assignment of the attribute (the class's methods for `self`) stores a `str` / `bytes` / `tuple` literal of the right operand's kind | A.8 (slower for small loops), `self.s +=`, `__radd__` on the right, `self.values = []` then `self.values += (i,)` |
 | **OPT110** | `size-dependent` | `ValueLoopInvariant(lst, loop)`, `ExactType(lst, list \| tuple)`, hash-consistent builtin elements (`HashConsistentProbe`), `ZeroTripExceptionSafe`; the edit needs a `for` statement (not a comprehension clause) and a name no other hoist of the function binds | `NotConstSmall(lst)`, not a `ConstSmall` / retry loop | S9a, S9b, S22, S27 |
 | **OPT111** | `size-dependent` | `Unique(seen)`, `ExclusiveAccessAtWrite`, `ExactType(seen, list)`, hash-consistent builtin elements, only the appends the set mirrors (`OnlyPairedAppends`) | `NotConstSmall` | `seen.remove`, unhashable elements |
-| **OPT120** / **OPT121** | `size-dependent` | `Unique(q)` (no escape, not returned), `ExactType(q, list)`, only operations `deque` supports equally (`DequeEquivalentOps`: no `list(*a)` / `list(**kw)`, no iterator live at a change or consumed by it, iterators used only for their elements, `q = q[1:]` exactly) | `NotConstSmall`, **no index `q[i]` other than the ends (`0`, `-1`)** | S12, `sort()`, $O(n)$ middle indexes, `q.extend(reversed(q))`, `type(iter(q))` |
+| **OPT120** / **OPT121** | `size-dependent` | `Unique(q)` (no escape, not returned), `ExactType(q, list)`, only operations `deque` supports equally (`DequeEquivalentOps`: no `list(*a)` / `list(**kw)`, no iterator live at a change or consumed by it, iterators used only for their elements, `q = q[1:]` exactly, no other object bound to a variable it reaches) | `NotConstSmall`, **no index `q[i]` other than the ends (`0`, `-1`)** | S12, `sort()`, $O(n)$ middle indexes, `q.extend(reversed(q))`, `type(iter(q))` |
 | **OPT130** | `size-dependent` | Every argument `ValueLoopInvariant`, `SideEffectFree` (no method arguments), `ZeroTripExceptionSafe` (no `*` arguments), the built container used by the membership test only (`ValueLoopInvariant(call)`) | `NotConstSmall` (100 times slower when the loop runs zero times: A.8), not a `ConstSmall` / retry loop, not `tuple(t)` of a tuple | S22, S28, A.8 |
 
 Open premises (`CheckExtras::open_premises`, as for `EFF111` / `EFF113` in section 2.4): a
@@ -1803,15 +1914,23 @@ its verdict that is not established, with the obligation's kind as the cause
 (`Kind(subject): reason`) as the detail. The other premises of the row hold for every report: a
 site is found only in a loop and, for an accumulation, on a value carried around it
 (`find_sites`), and a candidate is reported only when its construction establishes the builtin
-type (`OptCandidate::is_reportable`). A proven size-dependent report in a loop whose trip count
-the code fixes or caps (`OptCandidate::in_exact_tier`) leaves no premise of its row open: the
-exact tier also asks for a condition that is no premise, "Trip count open"
-(`heki_rules::premises::Condition`, decided in `FnIndex::fixed_trips`; Safety × Profitability,
-ADR-007 and ADR-011: the claim holds, the change does not pay off over a loop the code counts).
-The report records that condition with its cause (`trip-count-fixed`, the bound as its detail)
-in the same list as open premises (`heki_diagnostics::OpenRecord::Condition`, axis
-profitability), so every heuristic report names why it is not exact; the premise rows, the
-claims, and the oracle's strips do not change.
+type (`OptCandidate::is_reportable`). The exact tier of a size-dependent rewrite also asks for a
+condition that is no premise, "Trip count open" (`heki_rules::premises::Condition`; Safety ×
+Profitability, ADR-007 and ADR-011: the claim holds either way, but the change pays off only
+over a loop the data sizes), which the Advisory lane decides for the loop around the site
+(`OptCandidate::trip_loop`, in `heki_rules::opt_rules::TripCounts::open_record`): the code does
+not fix or cap its trip count (`FnIndex::fixed_trips`, computed with the candidate), and its
+items are the data's as `EFF103`'s "Origin" establishes them (`DataOrigins::of_loop_items`: a
+parameter or a part of one, `*args` included, or the rows, lines, or entries of a call the
+catalog sizes, through `ItemOrigins::of_loop` and `data_origin`; a walk budget per function). A
+loop over a receiver's attribute, a project function's result, `range` of a number that is no
+constant or length, an item of a call's result (`type(x).__mro__`), or a `while` loop runs as
+many times as the program has parts, however large the input. A proven report over such a loop
+leaves no premise of its row open; it records the condition with its cause in the same list as
+open premises (`heki_diagnostics::OpenRecord::Condition`, axis profitability): `trip-count-fixed`
+with the bound as its detail, or the cause of "Origin" that rejected the items, under the same id
+and closer (`premises::trip_count_cause`). Every heuristic report names why it is not exact; the
+premise rows, the claims, and the oracle's strips do not change.
 
 `OPT113`'s exact tier is one decision, `JoinPremises::steps`, which tells each step that does
 not hold to its caller in the order it takes them (the same collection, the same keys, both
@@ -1823,7 +1942,10 @@ of an item whose type is unknown, or a load that is no plain attribute of a know
 item of a builtin container) apart from any other work on a mismatch ("Idle on a mismatch"), and
 `steps_run_no_code` an inner iterable of unknown type (an annotation closes it, unless a project
 subclass of a builtin container defines `__iter__`) apart from one that may run code. A trip
-count the code fixes or caps records "Trip count open" at the loop, as for the rewrites.
+count the code fixes or caps records "Trip count open" at the loop, as for the rewrites. Its
+loops' items need no condition of their own: "Steps through inputs" asks for parameters or parts
+of them, which "Origin" accepts too, so a join over a loop the data does not size is heuristic
+for that premise.
 
 ---
 
@@ -1855,7 +1977,10 @@ from a deep copy of an unhashable one, then holds what validating the default re
 field validates it: pydantic 2's `BaseModel`), `return_type` (factories such as
 `sqlite3.connect`), `sync_lock_or_tx` (`threading.Lock`, `Session.begin`: `EFF106`),
 `non_reentrant_lock` (`threading.Lock`, `asyncio.Lock`: `EFF109`), `one_at_a_time`
-(`asyncio.StreamReader.readline`, `AsyncSession.execute`: `EFF110`),
+(`asyncio.StreamReader.readline`, `AsyncSession.execute`: `EFF110`), `writes_in_order` (the
+argument a call writes or serializes in the order of its elements, with the keyword that sorts
+mapping keys first and whether it sorts by default: `json.dumps`, `yaml.safe_dump`,
+`pprint.pprint`, `pathlib.Path.write_text`, `print`: `EFF112`),
 `waits_until_done` / `done_when_awaited` (futures), `bounded_by` / `waits_while_full` (queues:
 section 2.2), `environment` (`"call"`: calling the function reads the environment the program runs
 in, `os.getenv`, `platform.system`, `shutil.which`; `"read"`: reading the module attribute does,
@@ -1885,7 +2010,7 @@ is a parameter of the calling function (`shutdown(wait=wait)`) becomes a guard: 
 switches off need the parameter to be true, which the callers decide (`close(wait=False)`). A file lists its `opaque_packages`. Projects add or
 override entries with `[[tool.heki.ecosystem]]` (`symbol`, `effects`, `async-safe`,
 `offloads-blocking-arg`, `excluded`, `copy-sanitizer`, `return-type`, `sync-lock-or-tx`,
-`non-reentrant-lock`, `one-at-a-time`): an
+`non-reentrant-lock`, `one-at-a-time`, `writes-in-order`): an
 override sets the keys it lists and keeps the built-in entry's others. A `[[tool.heki.ecosystem]]`
 entry naming a project function applies to its summary (the built-in catalog never does: a
 package's own source is followed through its bodies): its `effects` are direct effects (chain: the function itself),
@@ -1909,7 +2034,10 @@ Three more keys state when a call waits, which an exact claim needs (ADR-018):
   (`Session.get`), `if-pending` (`Session.flush`, `Session.commit`, a driver's `commit()` /
   `rollback()` without an open transaction does nothing), `unless-cached` (Django's
   `QuerySet.count()` / `exists()` / `first()` / `last()` on an evaluated query set read its
-  cache), `unless-connected` (a pool checkout, Django's `connection.cursor()`). Only `always`
+  cache; an exhausted pymongo or motor cursor returns nothing without a query), `unless-connected` (a pool checkout, Django's `connection.cursor()`),
+  `unless-configured-otherwise` (any effect, on any entry: the library can be configured so the
+  call does not do it, as Celery's `task_always_eager` or an in-memory transport; no effect of
+  the call is certain). Only `always`
   establishes that the call sends or waits on every call.
 - **`items`** on a call whose result's items the environment decides the number of: `rows`
   (`Cursor.fetchall`, a DB-API `execute` whose cursor is iterated, `Session.execute`, pymongo's

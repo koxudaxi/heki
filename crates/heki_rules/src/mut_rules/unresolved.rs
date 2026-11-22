@@ -94,15 +94,15 @@ pub(super) fn mut205(cx: &CheckContext<'_>, rules: &[OwnerRule<'_>], out: &mut V
                 let what = match &w.what {
                     Unresolved::Receiver(attr) => format!(
                         "writes `{attr}` ({}) on an object of unknown class",
-                        w.kind.as_str()
+                        w.kind.describe()
                     ),
                     Unresolved::Name(_) => format!(
                         "writes an attribute named at run time ({}) on `{target}`",
-                        w.kind.as_str()
+                        w.kind.describe()
                     ),
                     Unresolved::Anything => format!(
                         "writes an attribute named at run time ({}) on an object of unknown class",
-                        w.kind.as_str()
+                        w.kind.describe()
                     ),
                 };
                 let judged = rule.allowance.judged(cx.decls, key);
@@ -120,7 +120,7 @@ pub(super) fn mut205(cx: &CheckContext<'_>, rules: &[OwnerRule<'_>], out: &mut V
                             rule.allowance.where_text(
                                 "write owners",
                                 "forbidden writers",
-                                rule.name
+                                &rule.label
                             )
                         )
                     },
@@ -214,11 +214,11 @@ pub(super) fn mut206(
                             "`{}` reads `{}` ({}) on an object of unknown class {}: heki cannot tell whether it reads {guarded}",
                             judged.qualname,
                             a.name,
-                            kind.as_str(),
+                            kind.describe(),
                             rule.allowance.where_text(
                                 "read owners",
                                 "forbidden readers",
-                                rule.name
+                                &rule.label
                             )
                         )
                     },
@@ -290,7 +290,7 @@ pub(super) fn mut207(
                             rule.allowance.where_text(
                                 "call owners",
                                 "forbidden callers",
-                                rule.name
+                                &rule.label
                             )
                         )
                     },

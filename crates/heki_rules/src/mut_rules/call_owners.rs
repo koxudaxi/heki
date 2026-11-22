@@ -771,7 +771,8 @@ fn receiver_params(site: &CallSite) -> u64 {
 }
 
 pub(super) struct CallOwnerRule<'r> {
-    pub(super) name: &'r str,
+    /// How a report names the contract ([`heki_env::contract_label`]).
+    pub(super) label: String,
     pub(super) targets: CallTargets,
     pub(super) allowance: Allowance,
     pub(super) note: Option<&'r str>,
@@ -797,7 +798,7 @@ pub(crate) fn mut204<'c>(
     }
     let all_classes = project_classes(cx);
     let mut rules = Vec::new();
-    for rule in &cx.config.call_owners {
+    for (index, rule) in cx.config.call_owners.iter().enumerate() {
         let context = "call-owners.targets";
         let subclasses = Subclasses::of(rule.subclasses);
         let targets = parse_call_targets(cx, &all_classes, &rule.targets, context, subclasses)?;
@@ -805,7 +806,7 @@ pub(crate) fn mut204<'c>(
         // is made, so what the operation does inside is part of it.
         let guarded = Arc::clone(&targets.functions);
         rules.push(CallOwnerRule {
-            name: &rule.name,
+            label: heki_env::contract_label("call-owners", index, &rule.name),
             targets,
             allowance: Allowance::new(&AllowanceKeys {
                 allowed: (&rule.allowed_callers, "call-owners.allowed-callers"),
@@ -915,7 +916,7 @@ pub(crate) fn mut204<'c>(
                                     rule.allowance.where_text(
                                         "call owners",
                                         "forbidden callers",
-                                        rule.name
+                                        &rule.label
                                     )
                                 )
                             },

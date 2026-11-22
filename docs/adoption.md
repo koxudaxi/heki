@@ -75,20 +75,22 @@ staged files only:
 ```yaml
 # .pre-commit-config.yaml
 repos:
-  - repo: https://github.com/koxudaxi/heki
-    rev: v0.2.2
+  - repo: https://github.com/koxudaxi/heki-pre-commit
+    rev: v0.2.3
     hooks:
       - id: heki
 ```
 
-The first run builds heki from the source of that release: pre-commit installs the repository as
-a Python package, which maturin compiles with cargo (Rust 1.99 or newer; when cargo is not on
-`PATH`, the build installs Rust into a cache directory first). That takes a few minutes, and
-pre-commit keeps the installed hook for later runs. `pre-commit autoupdate` moves `rev` to the
-latest release.
+[heki-pre-commit](https://github.com/koxudaxi/heki-pre-commit) installs heki from its PyPI wheel, so
+there is no compile and no Rust toolchain. Its tags follow heki releases, so `pre-commit autoupdate`
+moves `rev` to the latest release.
 
-heki also ships as one binary on PyPI, so a local hook can run it without a compile or a Rust
-toolchain:
+To build heki from source instead, point `repo` at `https://github.com/koxudaxi/heki` with a release
+`rev`. pre-commit then installs the repository as a Python package, which maturin compiles with cargo
+(Rust 1.99 or newer; when cargo is not on `PATH`, the build installs Rust into a cache directory
+first). That takes a few minutes, and pre-commit keeps the installed hook for later runs.
+
+A local hook can run any version of the PyPI wheel, also without a compile or a Rust toolchain:
 
 === "uv"
 
@@ -186,10 +188,7 @@ For custom tooling, `--output-format json` gives every field: see
 ### From heki 0.1
 
 heki 0.1 ran every rule that is not opt-in by default. Since rules have a certainty, only the
-exact ones do: in 0.2.0, `EFF101`, `EFF103`, `DATA101`, the proven tier of the eight `OPT`
-rewrite rules (`OPT101`-`OPT103`, `OPT110`, `OPT111`, `OPT120`, `OPT121`, `OPT130`), their
-reports whose rewrite heki proves safe, and the exact tier of `OPT113` ([Rule
-precision](precision.md#certifications) lists them).
+exact ones do ([Getting Started](getting-started.md#run-it) lists them).
 
 - `lint.heuristic = true` restores the rules of 0.1, now labelled `heuristic` in every output.
 - A baseline keeps its entries: their keys (file, function, rule, target) do not change.

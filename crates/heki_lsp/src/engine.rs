@@ -42,9 +42,15 @@ pub enum EngineError {
     Baseline(Box<heki_diagnostics::BaselineError>),
 }
 
-/// The files of a project root whose change reloads the whole workspace: the configuration and
-/// the summary snapshot (`MUT103`).
-pub const CONFIG_FILES: &[&str] = &["pyproject.toml", "heki.toml", ".heki.toml", SNAPSHOT_FILE];
+/// The files of a project root whose change reloads the whole workspace: the configuration, the
+/// `hatch.toml` whose workspace members are source roots, and the summary snapshot (`MUT103`).
+pub const CONFIG_FILES: &[&str] = &[
+    "pyproject.toml",
+    "heki.toml",
+    ".heki.toml",
+    "hatch.toml",
+    SNAPSHOT_FILE,
+];
 
 /// Counters exposed through the `heki/stats` request (Early Cutoff verification).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]

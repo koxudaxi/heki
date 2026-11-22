@@ -995,8 +995,12 @@ impl SourceRootTrial<'_> {
             let mut with: Vec<String> = roots.clone();
             with.extend(accepted.iter().map(|d| (*d).to_owned()));
             with.push(dir.clone());
+            // A configured `src` replaces the detection, the workspace members' packages
+            // included ([`ModuleLayout::detect`]): the block's layout names those files below
+            // its roots, and the imports resolved now that it would change keep it out.
             let layout = ModuleLayout {
                 source_roots: with.clone(),
+                member_packages: Vec::new(),
                 root_is_package: false,
             };
             let next = Names::under(self.tree, &layout);

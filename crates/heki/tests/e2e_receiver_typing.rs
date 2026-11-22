@@ -425,6 +425,43 @@ def strings(names: list[str]) -> None:
 def untyped(models) -> None:
     for model in models:
         model.fields = []
+
+
+def extended(source: Mapping[str, Model]) -> None:
+    picked = []
+    picked += [source[key] for key in source]
+    for model in picked:
+        model.fields = []
+
+
+def extended_then_appended(source: Mapping[str, Model]) -> None:
+    picked = []
+    picked += []
+    picked.append(source["a"])
+    for model in picked:
+        model.fields = []
+
+
+def subtracted(source: Mapping[str, Model]) -> None:
+    picked = [source["a"]]
+    picked -= []
+    for model in picked:
+        model.fields = []
+
+
+class Replacement:
+    def __ror__(self, other):
+        return []
+
+
+def replaced(source: Mapping[str, Model]) -> None:
+    picked = []
+    kept = picked
+    kept += []
+    kept |= Replacement()
+    kept.append(source["a"])
+    for model in picked:
+        model.fields = []
 "#;
 
 const SHELF: &str = r#"from __future__ import annotations
@@ -746,15 +783,20 @@ fn items_of_wrapping_builtins_displays_scopes_and_other_modules() {
             "nodes",
             "mixed",
             "shifted",
+            "extended",
+            "extended_then_appended",
         ] {
             assert!(
                 found.contains(name),
                 "{name} not reported for {version}: {found:?}"
             );
         }
-        // A read; items of `str`; an untyped parameter. (A starred target before the written
-        // one leaves its position untrusted: any item of the tuple may be there.)
-        for name in ["e_read", "strings", "untyped"] {
+        // A read; items of `str`; an untyped parameter; `-=` on a list, which does not change
+        // it in place (so it gives no list heki knows), and `|=` on one after a `+=` that does
+        // (it gives what `Replacement.__ror__` returns, so the item goes to another list). (A
+        // starred target before the written one leaves its position untrusted: any item of the
+        // tuple may be there.)
+        for name in ["e_read", "strings", "untyped", "subtracted", "replaced"] {
             assert!(!found.contains(name), "{name} reported for {version}");
         }
     }

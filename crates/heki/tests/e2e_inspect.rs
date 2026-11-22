@@ -858,6 +858,103 @@ fn purity_rests_on_evidence_and_says_what_is_unknown() {
     assert_eq!(report(&users, "pure")["purity"]["verdict"], "pure");
 }
 
+/// Values whose type says nothing of the code a call on them runs.
+const OPAQUE: &str = r#"import collections.abc
+import typing
+from typing import Any, Callable, Optional
+
+
+def on_any(x: Any):
+    x.save()
+
+
+def on_object(x: object):
+    x.save()
+
+
+def on_attribute_of_any(x: typing.Any):
+    x.conn.save()
+
+
+def on_optional_any(x: Optional[Any]):
+    if x is not None:
+        x.save()
+
+
+def builds_any_class(cls: type[Any]):
+    cls()
+
+
+def calls_callable(cb: Callable[[], None]):
+    cb()
+
+
+def calls_abc_callable(cb: collections.abc.Callable[[], None]):
+    cb()
+
+
+def calls_bare_callable(cb: Callable):
+    cb()
+
+
+def calls_untyped(cb):
+    cb()
+
+
+def calls_unbound():
+    undefined_helper()
+
+
+class Holder:
+    def __init__(self, client: Any):
+        self.client = client
+
+    def fetch(self):
+        return self.client.get()
+
+
+def through_holder(h: Holder):
+    return h.fetch()
+
+
+def known(x: object):
+    print(x)
+    return len(str(x))
+"#;
+
+#[test]
+fn calls_on_values_whose_type_says_nothing_are_unresolved() {
+    let p = Project::new("inspect_opaque_calls");
+    p.write("m.py", OPAQUE);
+    for name in [
+        "on_any",
+        "on_object",
+        "on_attribute_of_any",
+        "on_optional_any",
+        "builds_any_class",
+        "calls_callable",
+        "calls_abc_callable",
+        "calls_bare_callable",
+        "calls_untyped",
+        "calls_unbound",
+        "Holder.fetch",
+    ] {
+        let purity = &report(&p, name)["purity"];
+        assert_eq!(purity["verdict"], "unknown", "{name}: {purity:#}");
+        assert_eq!(
+            purity["because"],
+            serde_json::json!(["unresolved_calls"]),
+            "{name}"
+        );
+        assert_eq!(purity["unknown_at"]["fqn"], format!("m.{name}"), "{name}");
+    }
+    let through = report(&p, "through_holder");
+    assert_eq!(through["purity"]["verdict"], "unknown");
+    assert_eq!(through["purity"]["unknown_at"]["fqn"], "m.Holder.fetch");
+    // Builtins called with such a value are known.
+    assert_eq!(report(&p, "known")["purity"]["verdict"], "pure");
+}
+
 const CALLERS: &str = r#"class Base:
     def step(self):
         return 1
@@ -1512,4 +1609,62 @@ fn the_text_form_shows_every_kind_of_fact() {
     has(&out, "unknown: unresolved_calls (first at pkg.calls.vague)");
     let (_, out, _) = users.heki(&["inspect", "--heuristic", "fetch", "--callers"]);
     has(&out, "  calls.far  calls.py:5  (return)");
+}
+
+#[test]
+fn a_nested_function_names_the_enclosing_parameters_it_keeps() {
+    let p = Project::new("inspect_captured_params");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[[tool.heki.write-owners]]\nname = \"owned\"\ntargets = [\"Model.name\"]\nallowed-writers = [\"nobody\"]\n",
+    );
+    p.write(
+        "m.py",
+        "REGISTRY = []\n\n\ndef outer(items, other):\n    def inner():\n        REGISTRY.append(other)\n\n    return inner\n\n\ndef outer_with_parameter(items, other):\n    def inner(extra):\n        REGISTRY.append(other)\n\n    inner(1)\n\n\ndef outer_with_varargs(items, other):\n    def inner(*args, **kwargs):\n        REGISTRY.append(other)\n\n    inner()\n\n\ndef outer_with_lambdas(xs, other):\n    wide = lambda a, b: a\n    narrow = lambda: REGISTRY.append(other)\n    return wide, narrow\n",
+    );
+    for symbol in [
+        "outer.<locals>.inner",
+        "outer_with_parameter.<locals>.inner",
+        "outer_with_parameter",
+        "outer_with_varargs.<locals>.inner",
+        "outer_with_varargs",
+        "outer_with_lambdas.<locals>.<lambda>",
+    ] {
+        assert_eq!(
+            report(&p, symbol)["retains"]["kept"],
+            serde_json::json!(["other"]),
+            "{symbol}"
+        );
+    }
+}
+
+#[test]
+fn class_attribute_writes_name_how_they_write() {
+    let p = Project::new("inspect_write_kinds");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[[tool.heki.write-owners]]\nname = \"owned\"\ntargets = [\"Model.name\", \"Model.items\"]\nallowed-writers = [\"nobody\"]\n",
+    );
+    p.write(
+        "m.py",
+        "class Model:\n    def __init__(self):\n        self.name = \"\"\n        self.items = [[]]\n\n\ndef delete(m: Model):\n    del m.name\n\n\ndef set_by_name(m: Model):\n    setattr(m, \"name\", \"x\")\n\n\ndef set_in_dict(m: Model):\n    m.__dict__[\"name\"] = \"x\"\n\n\ndef append(m: Model):\n    m.items.append(1)\n\n\ndef append_to_alias(m: Model):\n    xs = m.items\n    xs.append(1)\n\n\ndef append_to_item(m: Model):\n    m.items[0].append(1)\n\n\ndef helper(x):\n    x.items.append(1)\n\n\ndef through_helper(m: Model):\n    helper(m)\n",
+    );
+    for (symbol, kind) in [
+        ("delete", "attr_delete"),
+        ("set_by_name", "set_attr"),
+        ("set_in_dict", "dict_direct"),
+        ("append", "container_mut"),
+        ("append_to_alias", "alias_container_mut"),
+        ("append_to_item", "item_mut"),
+        ("through_helper", "indirect_helper"),
+    ] {
+        let r = report_with(&p, &[symbol, "--extend-select", "MUT112"]);
+        let kinds: Vec<&Value> = r["changes"]["class_attrs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|w| &w["kind"])
+            .collect();
+        assert_eq!(kinds, [kind], "{symbol}");
+    }
 }

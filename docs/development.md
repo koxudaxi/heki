@@ -15,6 +15,11 @@ $ cargo fmt --all -- --check
 
 - The tests are end to end first: they run the real `heki` binary and the real LSP server
   (`heki server --stdio`) on small projects.
+- A test waits for `heki` by what it reports, not by the clock: a wait for the language server's
+  diagnostics ends when `heki/stats` shows the server idle, and fails then if they never came. The
+  only time limit, `HANG` in `crates/heki/tests/common/mod.rs`, stops a run, a reply, or a
+  `--watch` report that never comes; a debug build on a loaded CI runner can take many times its
+  usual time without hanging.
 - The `--fix` tests run the original and the rewritten programs on CPython and require identical
   output. They use `python3.15`, or the interpreter in `HEKI_TEST_PYTHON`.
 
@@ -246,10 +251,16 @@ the call graph, or the class hierarchy goes through them:
   `ProjectIndex`.
 
 `crates/heki/tests/architecture_walks.rs` finds walks written by hand in the analysis crates:
-recursion over IR ids (W1), worklists (W2), passes over every block until nothing changes (W3),
-and the linear lookups `FnShape` answers from a table (W4). `crates/heki/tests/walks.allow` lists
-the functions it still allows, each with its reason. The test fails on a finding the list does
-not allow and on an entry that finds nothing any more, so the list only shrinks as walks move.
+recursion over IR ids (W1), worklists (W2), passes repeated until nothing changes (W3), and the
+linear lookups `FnShape` answers from a table (W4). A repeated pass is a `loop`, a `while`, or a
+`for` over a range whose end is no constant (`0..links`, `1..`), around a sweep of a function's
+blocks, phis, instructions, or reverse postorder, or stopping on the facts `before` the pass, on a
+size, or on a flag each pass clears and sets. Such a pass costs the function once per pass, and a
+chain laid against the order of the sweep takes a pass per link; no walk counts it, so its cost
+shows only in time. A data flow over a function's blocks is a `fixpoint` whose nodes are the
+blocks, and its facts are counted like any other. `crates/heki/tests/walks.allow` lists the
+functions it still allows, each with its reason. The test fails on a finding the list does not
+allow and on an entry that finds nothing any more, so the list only shrinks as walks move.
 
 ```console
 $ cargo build --release
@@ -275,11 +286,20 @@ runs only through `heki check` (not the `--watch` engine), with a short timeout,
 once it costs under a quarter of the limits. `KNOWN_STEPS` lists, the same way, the shapes whose
 steps are known to grow faster than linearly or to spend a budget.
 
-Each bound comes with a shape in `crates/heki/tests/e2e_analysis_bounds.rs` that is slow without it,
-checked against a time limit: comparisons sharing an operand thirty deep, many `match` statements of
-slicing or pass-through cases, `t1 = t0[t0]` chains in a loop, a loop with many `continue`s and
-`isinstance` tests, a long chain of assignments a loop carries, closure cells bound thousands of
-times, each binding followed by a generator expression reading them, many loops one after another,
+Each bound comes with a shape in `crates/heki/tests/e2e_analysis_bounds.rs` that is slow without it.
+The test counts the steps of the walks (`heki check --walk-steps`) on the shape and on the same
+shape eight times smaller, and compares the counts, not times, so the result does not depend on the
+machine's speed or load: each owner's steps may grow at most sixteen times, and no owner may spend
+its budget on the full shape unless the test names it (`check_past_budgets`: a shape made to pass
+a budget). A walk made quadratic spends its budget, and a walk without one takes the extra steps;
+either fails. Work no walk counts (the IR builder, the indexes, the language server's engine)
+shows only in time, which these tests do not compare: `scripts/check_walk_shapes.py` times its own
+shapes on the release build, and here a run fails only once it hangs (`HANG` in
+`crates/heki/tests/common/mod.rs`). The shapes: comparisons sharing an operand thirty deep, many
+`match` statements of slicing or pass-through cases, `t1 = t0[t0]` chains in a loop, a loop with
+many `continue`s and `isinstance` tests, a long chain of assignments a loop carries, closure cells
+bound thousands of times, each binding followed by a generator expression reading them, many loops
+one after another,
 each with a lazy initialization (the blocks each covers count toward a budget proportional to the
 source), many waits on one future before many `await`s of it, task factories at the end of a long
 chain of copies, a long chain of aliases of a class with an attribute store through the last one per
@@ -314,9 +334,14 @@ changing every method of a class of thousands of methods, methods changing a typ
 thousands of times, a method storing under a key after each of hundreds of tests that such a dict
 holds the key, and a function reading attributes down a chain ten thousand deep (`x = x.child`),
 many queue puts each after a branch that may build a new queue, a long chain of helpers handing a
-queue on, named in the opposite order of the calls, a class whose thousands of queue attributes each
-store the one before, with a put on each, and the path facts of a `try` body of thousands of calls
-whose handler returns, of loops nested twenty deep with a call at each depth, of a thousand loops
+queue on, named in the opposite order of the calls, a scope under a boundary forbidding parameter
+changes handing its parameter down a chain of thousands of helpers it called before in turn, a
+function writing an invalidation target before each of thousands of calls, a loop over thousands
+of `if` statements each writing an invalidation target, a new object handed to hundreds of
+helpers each under its own `if` before its attribute is written, a class whose
+thousands of queue attributes each store the one before, with a put on each, and the path facts of
+a `try` body of thousands of calls whose handler returns, of loops nested twenty deep with a call
+at each depth, of a thousand loops
 one after another, and of a chain of hundreds of `and` tests of module constants, and the item
 origins of a chain of thousands of wrappers, of a list filled by appends in a thousand loops, and of
 a phi of sixty branches each choosing a different parameter, and thousands of `call-owners` targets,
@@ -330,10 +355,19 @@ changed, thousands of calls handing a global to a helper that changes it, thousa
 comprehensions or generator expressions, each over a value the function creating them binds just
 before, through `heki dump-recommend-facts`, the calls heki is blind to in a chain of
 thousands of helpers below as many `async def`s and the census of the attributes of thousands of
-classes, and, through `heki recommend`, thousands of library names without a catalog entry (its
+classes, through `heki recommend`, thousands of library names without a catalog entry (its
 hypothetical-catalog run tries 64), thousands of directories that would each resolve an import
 as a source root (its source-root trial tries 8), and the contract candidates of thousands of
-classes and of thousands of modules (its contract trial tries 32 of each kind).
+classes and of thousands of modules (its contract trial tries 32 of each kind), for the set
+orders `EFF112` follows, a chain of thousands of functions returning a value in a set's order up
+to the one writing it, a value handed down thousands of helpers to the one writing it, hundreds
+of comprehensions over one set appended to one written list, a value chosen among a set and
+hundreds of sorted lists by a chain of branches, and a thousand stores of a set's element as a
+key, each after reads of other mappings by the same key, and, for the call cycles `EFF114`
+follows, thousands of `try` statements in one function calling into one recursion, a call cycle
+through thousands of functions each calling the next inside a `try`, a lattice of calls thirty
+levels deep with a `try` at each level above a recursion, and a ladder of thousands of helpers
+above a recursion with a `try` calling each.
 
 A change to the IR builder, a walk, a fixpoint, or a rule's state is also run over a large
 corpus of real projects before it is merged, every run under a memory cap and a timeout. No
