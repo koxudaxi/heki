@@ -3273,3 +3273,35 @@ fn the_paths_of_many_packages_merged_in_one_function_are_decided_once() {
         vec!["plugin"]
     );
 }
+
+/// One dict display copied along a long chain of assignments, each copy unpacked with `**` into a
+/// call of a target with an argument list: whether anything changes the display is decided once
+/// for the display, not once per call (which spends the function's budget, past which the
+/// calls pass nothing).
+#[test]
+fn calls_unpacking_copies_of_one_display_decide_it_once() {
+    let copies = 2000;
+    let mut lines = vec![
+        "def plain(kind=False):".to_owned(),
+        "    return kind".to_owned(),
+        String::new(),
+        String::new(),
+        "def unpack():".to_owned(),
+        "    f0 = {\"kind\": True}".to_owned(),
+    ];
+    for i in 1..=copies {
+        lines.push(format!("    f{i} = f{}", i - 1));
+    }
+    for i in 0..=copies {
+        lines.push(format!("    plain(**f{i})"));
+    }
+    let p = Project::new("bounds_unpacked_display_copies");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT204\"]\n\n[[tool.heki.call-owners]]\nname = \"c\"\ntargets = [\"m.plain(kind=True)\"]\nallowed-callers = [\"m.plain\"]\n",
+    )
+    .write("m.py", &(lines.join("\n") + "\n"));
+    let found = check_within(&p, Duration::from_secs(20));
+    let calls = found.iter().filter(|d| d["rule_code"] == "MUT204").count();
+    assert_eq!(calls, copies + 1);
+}

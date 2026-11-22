@@ -33,7 +33,7 @@ use crate::{
     UnresolvedWriteSite, WriteKind,
 };
 use heki_ast::Span;
-use heki_ir::walk::{Answer, Budget, Closure, Def, FnShape, KeySet, Use};
+use heki_ir::walk::{Answer, Budget, Closure, Def, FnShape, KeySet, Memo, Use, Visit, reach};
 use heki_ir::{
     BinOpKind, BlockId, BuiltinKind, CompareOpKind, ConstLiteral, DictEntry, FunctionId,
     FunctionKind, Inst, InstKind, IrFunction, ModuleIr, Must, NaturalLoop, PhiNode, Progress,
@@ -41,9 +41,11 @@ use heki_ir::{
 };
 use heki_kb::{EffectiveEcosystemKb, EnvironmentAccess, ExecEffectKind, LiteralValue};
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::borrow::Cow;
 use std::cell::{OnceCell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use std::rc::Rc;
 use std::sync::Arc;
 
 mod imports;
@@ -695,7 +697,12 @@ struct Extractor<'a> {
     /// The module globals and closure cells each value may be reached from
     /// ([`Self::global_roots`]), on the function's tables and budget.
     roots: Closure<VarId, KeySet<Root<'a>>>,
-    roots_budget: Budget,
+    /// The constant entries of each dict display `**` unpacks, by the display
+    /// ([`Self::constant_display`]).
+    displays: Memo<VarId, Option<DisplayEntries>>,
+    /// The budget of the walks over the function's values ([`Self::global_roots`],
+    /// [`Self::constant_display`]).
+    walk_budget: Budget,
     /// Allocations, escapes, and construction queries (`construction`).
     rec: Recorder,
     pending_sites: Vec<PendingSite>,
@@ -1035,7 +1042,8 @@ impl<'a> Extractor<'a> {
             exempt: None,
             reach: FxHashMap::default(),
             roots: Closure::new(),
-            roots_budget: Budget::of_function("summary::global_roots", f),
+            displays: Memo::new(),
+            walk_budget: Budget::of_function("summary::walks", f),
             rec: Recorder::default(),
             pending_sites: Vec::new(),
             pending_args: Vec::new(),
@@ -1690,7 +1698,7 @@ impl<'a> Extractor<'a> {
             }
             Def::Param | Def::None => {}
         };
-        self.roots.ask(&self.roots_budget, var, own, sources)
+        self.roots.ask(&self.walk_budget, var, own, sources)
     }
 
     /// A change, at `span`, of state that outlives the call.
@@ -4701,10 +4709,15 @@ impl<'a> Extractor<'a> {
     /// model): only a keyword names a parameter there.
     fn keyword_marks(&self, call: &Call<'_>) -> Option<Box<ArgumentValues>> {
         let marked = self.marked_params(call)?;
-        let values = call.kwargs.iter().filter_map(|(name, v)| {
-            let name = name.as_ref().filter(|n| marked.contains(n.as_str()))?;
-            Some((name.clone(), self.arg_value(*v)?))
-        });
+        let passed = self.passed_keywords(call);
+        if passed.repeated {
+            return None;
+        }
+        let values = passed
+            .named
+            .iter()
+            .filter(|(name, _)| marked.contains(name.as_ref()))
+            .filter_map(|(name, v)| Some((name.to_string(), self.arg_value(*v)?)));
         agreed_marks(vec![Some(values.collect())])
     }
 
@@ -4720,19 +4733,20 @@ impl<'a> Extractor<'a> {
         bindings: &Bindings<'_>,
         marked: &FxHashSet<String>,
     ) -> Option<Vec<(String, ArgValue)>> {
-        if bindings.raises(call, decl, offset) {
+        if bindings.raises(decl, offset) {
             return None;
         }
         let name_of = |p: usize| decl.param_names.get(p).filter(|n| marked.contains(*n));
         let mut out = Vec::new();
-        for &(name, v, p) in &bindings.keywords {
+        for (name, v, p) in &bindings.keywords {
             // In `**kwargs`, the keyword passes nothing to a parameter of its name (a
             // positional-only one, or `*args` / `**kwargs` itself).
-            if !marked.contains(name) || (p.is_none() && decl.param_names.iter().any(|n| n == name))
+            if !marked.contains(name.as_ref())
+                || (p.is_none() && decl.param_names.iter().any(|n| n == name))
             {
                 continue;
             }
-            out.extend(self.arg_value(v).map(|value| (name.to_owned(), value)));
+            out.extend(self.arg_value(*v).map(|value| (name.to_string(), value)));
         }
         for &(slot, a) in &bindings.slots {
             if let Some(name) = decl.positional_param(slot).and_then(name_of) {
@@ -4750,14 +4764,114 @@ impl<'a> Extractor<'a> {
     /// How `call` binds the parameters of `decl`, whose first positional argument binds
     /// parameter `offset` (a bound receiver binds those before it).
     fn bindings<'c>(&self, call: &Call<'c>, decl: &FunctionDecl, offset: usize) -> Bindings<'c> {
-        let keywords = call.kwargs.iter().filter_map(|(name, v)| {
-            let name = name.as_deref()?;
-            Some((name, *v, decl.keyword_param(name)))
+        let passed = self.passed_keywords(call);
+        let keywords = passed.named.into_iter().map(|(name, v)| {
+            let p = decl.keyword_param(&name);
+            (name, v, p)
         });
         Bindings {
             slots: self.positional_slots(call, offset),
             keywords: keywords.collect(),
+            unpacks: call.star_from.is_some() || passed.open,
+            repeated: passed.repeated,
         }
+    }
+
+    /// The keywords `call` passes by name: each one written, and the entries of each `**`
+    /// operand that is a constant dict display ([`Self::constant_display`]), which Python passes
+    /// as written keywords; any other `**` operand may pass any keyword.
+    fn passed_keywords<'c>(&self, call: &Call<'c>) -> Keywords<'c> {
+        let mut named: Vec<(Cow<'c, str>, VarId)> = Vec::new();
+        let (mut open, mut unpacked) = (false, false);
+        for (name, v) in call.kwargs {
+            match name {
+                Some(name) => named.push((Cow::Borrowed(name.as_str()), *v)),
+                None => match self.constant_display(*v) {
+                    Some(entries) => {
+                        unpacked = true;
+                        named.extend(entries.iter().map(|(k, v)| (Cow::Owned(k.clone()), *v)));
+                    }
+                    None => open = true,
+                },
+            }
+        }
+        // Written keywords never share a name; an unpacked display may repeat one.
+        let mut seen = FxHashSet::default();
+        let repeated = unpacked && !named.iter().all(|(n, _)| seen.insert(n.as_ref()));
+        Keywords {
+            named,
+            open,
+            repeated,
+        }
+    }
+
+    /// The entries of the dict display `var` holds through copies, by key, when every key is a
+    /// string constant ([`Self::resolved_str`]) and nothing changes the display
+    /// ([`Self::only_unpacked`]; a call unpacking it with `**` takes its entries without keeping
+    /// it). A later entry of a key replaces an earlier one.
+    fn constant_display(&self, var: VarId) -> Option<DisplayEntries> {
+        let root = self.shape.copy_root(var);
+        let Some(InstKind::DictLiteral { entries, .. }) = self.shape.inst(root).map(|i| &i.kind)
+        else {
+            return None;
+        };
+        let decide = || {
+            let mut out: Vec<(String, VarId)> = Vec::new();
+            let mut at: FxHashMap<String, usize> = FxHashMap::default();
+            for entry in entries {
+                let DictEntry::KeyValue { key, value } = entry else {
+                    return None;
+                };
+                let key = self.resolved_str(*key)?;
+                match at.get(&key) {
+                    Some(&i) => out[i].1 = *value,
+                    None => {
+                        at.insert(key.clone(), out.len());
+                        out.push((key, *value));
+                    }
+                }
+            }
+            self.only_unpacked(root).then(|| out.into())
+        };
+        self.displays
+            .ask(&self.walk_budget, root, decide)
+            .open_means(None)
+    }
+
+    /// Whether no use of `root` can change the object it makes: each value holding it (`root`,
+    /// its copies, and the phis merging them) is only copied, merged, unpacked with `**` into a
+    /// call, tested, returned, or raised.
+    fn only_unpacked(&self, root: VarId) -> bool {
+        let shape = self.shape;
+        let f = self.f;
+        let keeps_entries = |v: VarId, u: &Use| match *u {
+            Use::Inst(b, i) => match &f.block(b).insts[i as usize].kind {
+                InstKind::Copy { .. } => true,
+                kind @ (InstKind::Call { kwargs, .. } | InstKind::MethodCall { kwargs, .. }) => {
+                    let unpacking = kwargs.iter().filter(|(k, x)| k.is_none() && *x == v);
+                    kind.operands().iter().filter(|x| **x == v).count() == unpacking.count()
+                }
+                _ => false,
+            },
+            Use::Phi(..) | Use::Terminator(_) => true,
+        };
+        let holders = |v: VarId, out: &mut Vec<VarId>| {
+            out.extend(shape.readers(v).iter().filter_map(|u| match *u {
+                Use::Inst(b, i) => match &f.block(b).insts[i as usize].kind {
+                    InstKind::Copy { dst, .. } => Some(*dst),
+                    _ => None,
+                },
+                Use::Phi(b, i) => Some(f.block(b).phis[i as usize].dst),
+                Use::Terminator(_) => None,
+            }));
+        };
+        let walked = reach(&self.walk_budget, [root], holders, |v| {
+            match shape.readers(v).iter().all(|u| keeps_entries(v, u)) {
+                true => Visit::Expand,
+                false => Visit::Stop(()),
+            }
+        });
+        walked == Answer::Known(None)
     }
 
     /// The constant `var` holds ([`ArgValue`]): a literal through copies, a string constant
@@ -6299,11 +6413,6 @@ struct Call<'c> {
 }
 
 impl<'c> Call<'c> {
-    /// `*` or `**` unpacking may pass any parameter an argument binds.
-    fn unpacks(&self) -> bool {
-        self.star_from.is_some() || self.kwargs.iter().any(|(k, _)| k.is_none())
-    }
-
     fn passed(&self) -> Passed<'c> {
         Passed {
             args: self.args,
@@ -6320,26 +6429,34 @@ struct Bindings<'c> {
     /// Each positional argument with its slot ([`Extractor::positional_slots`]): the parameter
     /// it binds, if any, is [`FunctionDecl::positional_param`].
     slots: Vec<(usize, VarId)>,
-    /// Each keyword with the parameter it binds ([`FunctionDecl::keyword_param`]); one binding
-    /// none lands in `**kwargs`, or the call raises `TypeError`.
-    keywords: Vec<(&'c str, VarId, Option<usize>)>,
+    /// Each keyword the call passes by name ([`Keywords`]) with the parameter it binds
+    /// ([`FunctionDecl::keyword_param`]); one binding none lands in `**kwargs`, or the call
+    /// raises `TypeError`.
+    keywords: Vec<(Cow<'c, str>, VarId, Option<usize>)>,
+    /// `*` unpacking, or `**` unpacking of anything but a constant dict display, may pass any
+    /// parameter an argument binds.
+    unpacks: bool,
+    /// Two keywords share a name: the call raises `TypeError`.
+    repeated: bool,
 }
 
 impl Bindings<'_> {
     /// Whether the call raises `TypeError` instead of running `decl` (whose first positional
-    /// argument binds parameter `offset`, the receiver taking the slots before it): a keyword
-    /// binds a parameter a position binds too, a keyword binds no parameter and `decl` takes no
-    /// `**kwargs`, a position is past the positional parameters and `decl` takes no `*args`, or
-    /// a parameter without a default is left unbound where no `*` / `**` unpacking may bind it.
-    /// The work is that of the call's arguments: the parameters without a default are counted
-    /// in the declaration ([`FunctionDecl::required_positional`]).
-    fn raises(&self, call: &Call<'_>, decl: &FunctionDecl, offset: usize) -> bool {
+    /// argument binds parameter `offset`, the receiver taking the slots before it): two keywords
+    /// share a name, a keyword binds a parameter a position binds too, a keyword binds no
+    /// parameter and `decl` takes no `**kwargs`, a position is past the positional parameters
+    /// and `decl` takes no `*args`, or a parameter without a default is left unbound where no
+    /// unpacking may bind it ([`Self::unpacks`]). The work is that of the call's arguments: the
+    /// parameters without a default are counted in the declaration
+    /// ([`FunctionDecl::required_positional`]).
+    fn raises(&self, decl: &FunctionDecl, offset: usize) -> bool {
         let passed = offset + self.slots.len();
         let by_position = |p: usize| decl.positional_param(p).is_some() && p < passed;
-        let doubled = self
-            .keywords
-            .iter()
-            .any(|&(_, _, p)| p.map_or(!decl.has_kwargs, by_position));
+        let doubled = self.repeated
+            || self
+                .keywords
+                .iter()
+                .any(|&(_, _, p)| p.map_or(!decl.has_kwargs, by_position));
         let past_positionals = passed
             .checked_sub(1)
             .is_some_and(|last| decl.positional_param(last).is_none());
@@ -6358,20 +6475,20 @@ impl Bindings<'_> {
             bound += usize::from(p < required);
             bound_keyword_only += usize::from(keyword_only(p));
         }
-        !call.unpacks()
+        !self.unpacks
             && (bound < required
                 || bound_keyword_only < decl.required_keyword_only.count_ones() as usize)
     }
 
     /// The parameters of `decl` that take their literal defaults: no position or keyword binds
-    /// them, and no `*` / `**` unpacking may.
+    /// them, and no unpacking may ([`Self::unpacks`]).
     fn defaults<'d>(
         &self,
         call: &Call<'_>,
         decl: &'d FunctionDecl,
         offset: usize,
     ) -> impl Iterator<Item = (usize, &'d ConstArg)> {
-        let unpacks = call.unpacks();
+        let unpacks = self.unpacks;
         let passed =
             offset + call.args.len() + call.per_item.and_then(|p| p.positions).unwrap_or(0);
         let by_position = move |p: usize| decl.positional_param(p).is_some() && p < passed;
@@ -6382,6 +6499,19 @@ impl Bindings<'_> {
             .map(|(p, c)| (usize::from(*p), c))
             .filter(move |(p, _)| !by_position(*p) && !by_keyword.contains(p))
     }
+}
+
+/// The entries of a dict display with constant keys, by key ([`Extractor::constant_display`]).
+type DisplayEntries = Rc<[(String, VarId)]>;
+
+/// The keywords a call passes by name ([`Extractor::passed_keywords`]).
+struct Keywords<'c> {
+    /// Each keyword written, and each entry of a `**` operand that is a constant dict display.
+    named: Vec<(Cow<'c, str>, VarId)>,
+    /// Another `**` operand may pass any keyword.
+    open: bool,
+    /// Two of `named` share a name: the call raises `TypeError`.
+    repeated: bool,
 }
 
 /// [`CallSite::arguments`] from what each callee a call may run is passed for the marked

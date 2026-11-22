@@ -39,14 +39,18 @@ read by name, through an import (also a function's own), or as an attribute of t
 `del` in a function, another module-level store, a star import); passed by keyword, by position
 where every function the call may run binds that position to the parameter, or left out where
 every such function's default is `True`, `False`, `None`, `0`, or `""` and the value. A keyword
-binds as Python binds it: never a positional-only parameter, and one naming no parameter passes
-its value under its name into `**kwargs`; the receiver is the first position. A call that raises
-`TypeError` instead of running the function (a parameter bound by a position, or the receiver, and
-a keyword, a keyword without `**kwargs` to land in, a position past the parameters without
-`*args`, a parameter without a default left unbound where no `*` or `**` unpacking may bind it)
-passes nothing. A variable, a call result, `*` or `**` unpacking, or a position of a class without a
-project `__init__` establishes nothing, and the call is not reported. A reference passes nothing,
-so it never matches such a target.
+binds as Python binds it: never a positional-only parameter, and one naming no parameter passes its
+value under its name into `**kwargs`; the receiver is the first position. A `**` operand that is a
+dict display with string constant keys, which nothing changes (a name holding it is only unpacked
+with `**`, bound to another name, tested, or returned), passes its entries as keywords
+(`DataType(**{"is_dict": True})`, `flags = {"is_dict": True}` then `DataType(**flags)`). A call that
+raises `TypeError` instead of running the function (two keywords of one name, a parameter bound by a
+position, or the receiver, and a keyword, a keyword without `**kwargs` to land in, a position past
+the parameters without `*args`, a parameter without a default left unbound where no `*` unpacking or
+`**` unpacking of another mapping may bind it) passes nothing. A variable, a call result, `*`
+unpacking, `**` unpacking of another mapping, or a position of a class without a project `__init__`
+establishes nothing, and the call is not reported. A reference passes nothing, so it never matches
+such a target.
 
 With `references = "calls"` (or `"calls-and-bases"`), a reference handing a target on to be
 called later counts as a call of it, reported where the target is named ("`f` hands on `pkg.core.decide`"; a name an import or

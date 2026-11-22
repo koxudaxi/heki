@@ -560,16 +560,21 @@ only for a class without a project `__init__`. That binding (`BoundCallee::param
 positional parameters (`FunctionDecl::positional_param`; one past them lands in `*args`, a new
 tuple, and binds no parameter, never a keyword-only one: only a hand-over asks whether the callee
 keeps `*args`, which holds it), and a keyword never binds a positional-only parameter
-(`FunctionDecl::keyword_param`; one binding no parameter is, for the argument lists, a parameter
-of its own name in `**kwargs`); the receiver is the first position. A callee the call raises
-`TypeError` for instead of running (`Bindings::raises`: a parameter bound twice, a keyword without
+(`FunctionDecl::keyword_param`; one binding no parameter is, for the argument lists, a parameter of
+its own name in `**kwargs`); the receiver is the first position. A `**` operand that is a dict
+display with string constant keys passes its entries as keywords when nothing changes it
+(`Extractor::constant_display`: each value holding it, through copies and phis, is only copied,
+merged, unpacked with `**`, tested, returned, or raised; one walk per display); any other `**`
+operand may bind any parameter. A callee the call raises `TypeError` for instead of running
+(`Bindings::raises`: two keywords of one name, a parameter bound twice, a keyword without
 `**kwargs`, a position past the parameters without `*args`, a parameter without a default left
 unbound where no unpacking may bind it, counted from `FunctionDecl::required_positional` and
 `required_keyword_only` in the work of the call's arguments) is passed nothing. The constants are
-literals, string constants (`TypeCtx::str_constant_with`), and modules' number and boolean
-constants (`TypeCtx::module_constant`: a module-level name, an import, or a module's attribute,
-`TypeCtx::global_read`, the reads catalog cases follow too). The marked names are looked up for the parameters a call binds, so
-the work per call is that of binding it, whatever the number of argument lists.
+literals, string constants (`TypeCtx::str_constant_with`), and modules' number and boolean constants
+(`TypeCtx::module_constant`: a module-level name, an import, or a module's attribute,
+`TypeCtx::global_read`, the reads catalog cases follow too). The marked names are looked up for the
+parameters a call binds, so the work per call is that of binding it, whatever the number of argument
+lists.
 
 `CallSite.returned` (whether the call's result may be returned, and how) is computed at
 extraction for every project call. `CallSite.flow` (the invalidation contracts announced after

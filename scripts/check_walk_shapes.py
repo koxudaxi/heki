@@ -235,6 +235,12 @@ def copy_chain_in_loop(n: int) -> Body:
     return Body(("items", "xs"), [*lines, f"    y{n}.remove(it)"])
 
 
+def unpacked_display_copies(n: int) -> Body:
+    """One dict display copied along a chain, each copy unpacked with `**` into a call."""
+    lines = ['f0 = {"x": p}', *(f"f{i} = f{i - 1}" for i in range(1, n + 1))]
+    return Body(("p",), [*lines, *(f"g(**f{i})" for i in range(n + 1))])
+
+
 def reverse_chain_in_loop(n: int) -> Body:
     """A loop carries a chain of copies laid against the order of the blocks."""
     lines = ["acc = []", *(f"x{i} = None" for i in range(1, n + 1)), "x0 = acc", "for it in items:"]
@@ -493,6 +499,8 @@ FAMILIES = [
     Family("phi_diamonds", phi_diamonds),
     Family("isinstance_continue", isinstance_continue),
     Family("copy_chain_in_loop", copy_chain_in_loop),
+    # A module body's names are globals: no copy of the display reaches a call.
+    Family("unpacked_display_copies", unpacked_display_copies, placements=("function", "method")),
     Family("reverse_chain_in_loop", reverse_chain_in_loop),
     Family("alias_loops", alias_loops),
     Family("doubled_constant_slices", doubled_constant_slices, real_code=False),
