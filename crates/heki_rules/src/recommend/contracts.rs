@@ -784,11 +784,10 @@ fn attribute_reports<'d>(
         *at += 1;
     }
     let mut out = vec![Vec::new(); entries.len()];
-    let reports = (kept.iter().map(|d| (d, false))).chain(suppressed.iter().map(|d| (d, true)));
-    for (d, dropped) in reports {
-        let Some(kind) = ContractKind::of_rule(&d.rule_code) else {
-            continue;
-        };
+    let reports = (kept.iter().map(|d| (d, false)))
+        .chain(suppressed.iter().map(|d| (d, true)))
+        .filter_map(|(d, dropped)| Some((d, dropped, ContractKind::of_rule(&d.rule_code)?)));
+    for (d, dropped, kind) in reports {
         for &p in &d.contracts {
             if let Some(&i) = usize::try_from(p).ok().and_then(|p| place.get(&(kind, p))) {
                 out[i].push((d, dropped));
