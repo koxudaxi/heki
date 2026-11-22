@@ -5376,34 +5376,10 @@ fn the_census_of_many_classes_is_one_pass_over_their_sites() {
     );
 }
 
-/// `heki recommend --output-format json` of the project, which must finish within `limit`.
-fn recommend_within(p: &Project, limit: Duration) -> Value {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_heki"))
-        .args(["recommend", "--output-format", "json", "."])
-        .current_dir(&p.dir)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    let mut stdout = child.stdout.take().unwrap();
-    let reader = std::thread::spawn(move || {
-        let mut out = Vec::new();
-        stdout.read_to_end(&mut out).unwrap();
-        out
-    });
-    let started = Instant::now();
-    let status = loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            break status;
-        }
-        if started.elapsed() > limit {
-            child.kill().unwrap();
-            panic!("heki recommend ran past {limit:?}");
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    };
-    assert_eq!(status.code(), Some(0));
-    serde_json::from_slice(&reader.join().unwrap()).unwrap()
+/// `heki recommend --output-format json` of the project, which counts no walk steps: its shapes
+/// bound how many trials it runs.
+fn recommend(p: &Project) -> Value {
+    heki_json(p, &["recommend", "--output-format", "json", "."])
 }
 
 /// Thousands of `async def`s, each calling a library name of its own that the catalog lacks:
@@ -5423,7 +5399,7 @@ fn the_trial_of_library_names_without_an_entry_tries_a_bounded_number() {
     }
     let p = Project::new("bounds_recommend_uncatalogued");
     p.write("app.py", &(lines.join("\n") + "\n"));
-    let report = recommend_within(&p, Duration::from_secs(20));
+    let report = recommend(&p);
     let blind = &report["blind_spots"];
     let totals = &blind["totals"];
     assert_eq!(
@@ -5458,7 +5434,7 @@ fn the_source_root_trial_tries_a_bounded_number_of_directories() {
         main.push_str(&format!("import m{i}\n"));
     }
     p.write("main.py", &main);
-    let report = recommend_within(&p, Duration::from_secs(20));
+    let report = recommend(&p);
     let blind = &report["blind_spots"];
     assert_eq!(blind["totals"]["source_root_candidates"], json!(dirs));
     let roots = blind["source_roots"].as_array().unwrap();
