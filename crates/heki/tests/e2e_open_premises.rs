@@ -913,3 +913,33 @@ fn heki_check_writes_no_open_premise() {
     );
     assert!(!stdout.contains("open_premises") && !stdout.contains("conditional-wait"));
 }
+
+/// A file `per-file-ignores` keeps a rule away from gets none of its reports, open premises
+/// included; the other files' reports keep theirs.
+#[test]
+fn a_file_the_rule_is_ignored_in_gets_no_report() {
+    let p = Project::new("open_per_file_ignores");
+    let source = "import time\n\n\ndef helper(flag):\n    if flag:\n        return None\n    time.sleep(1)\n\n\nasync def handler(flag):\n    helper(flag)\n";
+    p.write("app.py", source)
+        .write("quiet.py", source)
+        .write(
+            "pyproject.toml",
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nper-file-ignores = { \"quiet.py\" = [\"EFF111\"] }\n",
+        );
+    let (code, stdout, stderr) = p.heki(&["dump-open-premises", "--select", EFF101, "."]);
+    assert_eq!(code, 0, "{stderr}");
+    let out: Value = serde_json::from_str(&stdout).unwrap();
+    let reports = out["reports"].as_array().unwrap();
+    let paths: Vec<&str> = reports
+        .iter()
+        .map(|r| r["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(paths, vec!["app.py"], "{stdout}");
+    assert_eq!(
+        open_of(&reports[0]),
+        vec![(
+            "Every return".to_owned(),
+            "not-made-on-every-return".to_owned()
+        )]
+    );
+}

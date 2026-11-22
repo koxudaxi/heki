@@ -1,7 +1,7 @@
 //! Boundary-Only Reporting for `EFF101` / `EFF105` (docs/ANALYSIS_AND_KB_SPEC.md section 2.4).
 //! Rule wiring (codes, severities) and Root-Cause Grouping of the output are in `heki_rules`.
 
-use crate::callgraph::{HopGap, MustGap, site_must_steps};
+use crate::callgraph::{HopGap, MustExplainer, MustGap, site_must_steps};
 use crate::summary::BLOCKING_EFFECTS;
 use crate::{CallHop, CallSite, FuncKey, ProjectIndex, SiteMust, SiteRole};
 use heki_ast::Span;
@@ -41,15 +41,15 @@ pub struct BoundaryReport {
 /// Offloads never fire: offload APIs carry no blocking effects and the offloaded callable is
 /// not called. Functions marked `sync_driven_only` are skipped.
 pub fn boundary_reports(index: &ProjectIndex) -> Vec<BoundaryReport> {
-    boundary_reports_in(index, index.files.keys().map(PathBuf::as_path), false)
+    boundary_reports_in(index, index.files.keys().map(PathBuf::as_path), None)
 }
 
-/// [`boundary_reports`] restricted to the call sites of `paths` (single-file checks). With
-/// `explain`, each report whose `must` is not established says why ([`BoundaryReport::gaps`]).
+/// [`boundary_reports`] restricted to the call sites of `paths` (single-file checks). With an
+/// `explainer`, each report whose `must` is not established says why ([`BoundaryReport::gaps`]).
 pub fn boundary_reports_in<'p>(
     index: &ProjectIndex,
     paths: impl IntoIterator<Item = &'p Path>,
-    explain: bool,
+    explainer: Option<&MustExplainer<'_>>,
 ) -> Vec<BoundaryReport> {
     // `(file, span, function, effect) -> (shortest chain, its call site, it starts at an
     // iteration, what the call has run whenever it returns)`.
@@ -98,9 +98,9 @@ pub fn boundary_reports_in<'p>(
     best.into_iter()
         .map(
             |((path, span, function, effect), (chain, site, iterates, must))| {
-                let gaps = match site {
-                    Some(site) if explain && must.is_none() => {
-                        boundary_gaps(index, &path, site, effect, &chain)
+                let gaps = match (site, explainer) {
+                    (Some(site), Some(explainer)) if must.is_none() => {
+                        boundary_gaps(index, explainer, &path, site, effect, &chain)
                     }
                     _ => Vec::new(),
                 };
@@ -163,9 +163,10 @@ fn boundary_steps(
 }
 
 /// [`boundary_steps`]' gaps at the call, then those of `chain` from it
-/// ([`ProjectIndex::site_must_gaps`]), each told once.
+/// ([`MustExplainer::gaps_along`]), each told once.
 fn boundary_gaps(
     index: &ProjectIndex,
+    explainer: &MustExplainer<'_>,
     path: &Path,
     site: &CallSite,
     e: ExecEffectKind,
@@ -176,7 +177,7 @@ fn boundary_gaps(
         out.push(HopGap { hop: 0, gap });
         ControlFlow::Continue(())
     });
-    for gap in index.site_must_gaps(path, site, e, chain) {
+    for gap in explainer.gaps_along(path, site, e, chain) {
         if !out.contains(&gap) {
             out.push(gap);
         }

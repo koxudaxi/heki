@@ -16,8 +16,10 @@ pub mod experimental;
 pub mod inspect;
 mod mut_rules;
 mod opt_rules;
+pub mod precision;
 pub mod premises;
 pub mod project;
+pub mod recommend;
 pub mod selection;
 pub mod snapshot;
 
@@ -59,7 +61,7 @@ pub enum RuleFamily {
 }
 
 /// What happens in the code a rule reports, which sets its default severity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum Consequence {
     /// A bug that can be critical: a wrong result, an exception, a lost update, a deadlock, or a
@@ -73,7 +75,7 @@ pub enum Consequence {
 }
 
 /// When a rule runs without being named by its code or name (ADR-018).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum Activation {
     /// In the default selection, and matched by a prefix or `ALL`, while the rule is exact;
@@ -851,6 +853,9 @@ pub(crate) struct CheckContext<'a> {
     text_of: Option<&'a TextOf<'a>>,
     /// [`CheckExtras::open_premises`].
     pub open_premises: bool,
+    /// Why must-facts do not hold, shared by the rules that record open premises (built only
+    /// when the run records them).
+    pub must_explainer: Option<heki_effect::MustExplainer<'a>>,
 }
 
 /// Run every enabled rule over an analyzed project.
@@ -886,6 +891,9 @@ pub fn check_project(
             .collect(),
         text_of: extras.text_of,
         open_premises: extras.open_premises,
+        must_explainer: extras
+            .open_premises
+            .then(|| heki_effect::MustExplainer::new(index)),
     };
     let mut out = Vec::new();
     mut_rules::mut101_mut111(&cx, &mut out);
@@ -960,6 +968,7 @@ pub fn contract_roles(
         unit_by_path: FxHashMap::default(),
         text_of: None,
         open_premises: false,
+        must_explainer: None,
     };
     contracts::roles_of(&cx, key)
 }

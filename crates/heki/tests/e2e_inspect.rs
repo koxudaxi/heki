@@ -254,6 +254,14 @@ fn a_file_that_does_not_parse_leaves_the_report_incomplete() {
     assert_eq!(v["error"]["errors"].as_array().unwrap().len(), 1);
 }
 
+#[test]
+fn a_configuration_error_is_an_error_of_the_command() {
+    let p = users_project("inspect_configuration_error");
+    let (code, out, err) = p.heki(&["inspect", "fetch", "--select", "NOPE1"]);
+    assert_eq!((code, out.as_str()), (2, ""));
+    assert!(err.contains("unknown rule selector `NOPE1`"), "{err}");
+}
+
 /// `heki check --output-format json` of the project.
 fn check_json(p: &Project, args: &[&str]) -> Vec<Value> {
     let mut all = vec!["--output-format", "json"];
