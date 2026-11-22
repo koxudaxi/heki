@@ -5011,6 +5011,74 @@ fn reads_on_every_path_of_many_keys_stay_within_the_function_budget() {
     assert_eq!(found, vec!["C.put"]);
 }
 
+/// A writer counting through thousands of branches after its write, each merging two
+/// arithmetic results of the one before: whether an operator's operand is a builtin value the
+/// function built is decided once per variable for the whole function, not by a walk back
+/// through the merges per operator.
+#[test]
+fn built_values_after_a_write_are_decided_once_per_variable() {
+    let found = kept_value_changes("bounds_built_values", 1_000, &[], |branches| {
+        let mut lines = vec![
+            "from functools import cached_property".to_owned(),
+            String::new(),
+            String::new(),
+            "class C:".to_owned(),
+            "    def __init__(self):".to_owned(),
+            "        self.a = 0".to_owned(),
+            "        self.flag = False".to_owned(),
+            String::new(),
+            "    @cached_property".to_owned(),
+            "    def p(self):".to_owned(),
+            "        return self.a".to_owned(),
+            String::new(),
+            "    def bump(self):".to_owned(),
+            "        self.a = 1".to_owned(),
+            "        total = 0".to_owned(),
+        ];
+        for _ in 0..branches {
+            lines.push("        if self.flag:".to_owned());
+            lines.push("            total = total + 1".to_owned());
+            lines.push("        else:".to_owned());
+            lines.push("            total = -total".to_owned());
+        }
+        lines.push("        return None".to_owned());
+        lines.join("\n") + "\n"
+    });
+    assert_eq!(found, vec!["C.bump"]);
+}
+
+/// A writer building a dict display of tens of thousands of keys after its write, each hashed:
+/// what the keys' special methods may run, and whether the other operands an implementation
+/// would be handed are inert, are decided once per key, not again per pair of keys.
+#[test]
+fn special_methods_of_a_large_display_after_a_write_are_decided_once_per_key() {
+    let diagnostics = check_past_budgets(20_000, &[], |keys| {
+        let entries: Vec<String> = (0..keys).map(|i| format!("\"k{i}\": {i}")).collect();
+        let source = format!(
+            "from functools import cached_property\n\n\nclass C:\n    def __init__(self):\n        \
+             self.a = 0\n\n    @cached_property\n    def p(self):\n        return self.a\n\n    \
+             def bump(self):\n        self.a = 1\n        table = {{{}}}\n        return table\n",
+            entries.join(", ")
+        );
+        module_project(
+            &format!("bounds_large_display_{keys}"),
+            MUT101_CONFIG,
+            &source,
+        )
+    });
+    let found: Vec<(String, String)> = diagnostics
+        .iter()
+        .filter(|d| d["rule_code"] == "MUT101")
+        .map(|d| {
+            (
+                d["qualname"].as_str().unwrap().to_owned(),
+                d["certainty"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    assert_eq!(found, vec![("C.bump".to_owned(), "exact".to_owned())]);
+}
+
 /// A writer making thousands of project calls and library calls after its write: whether a
 /// callable a library call is handed has a site of its own is looked up once per argument, not
 /// by a scan of every site of the function (which took time quadratic in its calls).

@@ -757,6 +757,27 @@ const FAN_READ_NOTHING: &str =
 const FAN_READ_LOCKED: &str = "import asyncio\n\nLOCK = asyncio.Lock()\n\n\nasync def read_line(reader: asyncio.StreamReader):\n    async with LOCK:\n        return await reader.readline()\n";
 const FAN_USE: &str = "import asyncio\n\nfrom pkg.fan_read import read_line\n\n\nasync def both(reader: asyncio.StreamReader):\n    return await asyncio.gather(read_line(reader), read_line(reader))\n";
 
+// Kept values (`MUT101` / `MUT111` exact claims): a cached property reads `raw` through a helper
+// of a base class in another file; the writer calls a method of that base class and a function of
+// a third file after its write; a subclass in a fourth file holds no value of the property, and
+// a reader in a fifth reads it.
+const KEPT_BASE: &str = "class Base:\n    def _key(self) -> str:\n        return self.raw.get(\"k\", \"\")\n\n    def after(self) -> None:\n        return None\n";
+const KEPT_BASE_ONE_BRANCH: &str = "class Base:\n    def _key(self) -> str:\n        if self.flag:\n            return self.raw.get(\"k\", \"\")\n        return \"\"\n\n    def after(self) -> None:\n        return None\n";
+const KEPT_BASE_INVALIDATING: &str = "class Base:\n    def _key(self) -> str:\n        return self.raw.get(\"k\", \"\")\n\n    def after(self) -> None:\n        self.__dict__.pop(\"features\", None)\n";
+const KEPT_DROP: &str = "def cleanup(obj) -> None:\n    return None\n";
+const KEPT_DROP_DELETING: &str = "def cleanup(obj) -> None:\n    del obj.features\n";
+const KEPT_DROP_STORING: &str = "from typing import TYPE_CHECKING\n\nif TYPE_CHECKING:\n    from pkg.kept_holder import Holder\n\n\ndef cleanup(obj: \"Holder\") -> None:\n    obj.features = None\n";
+const KEPT_DROP_STORING_SIZE: &str = "from typing import TYPE_CHECKING\n\nif TYPE_CHECKING:\n    from pkg.kept_holder import Holder\n\n\ndef cleanup(obj: \"Holder\") -> None:\n    obj.size = 0\n";
+const KEPT_HOLDER: &str = "from functools import cached_property\n\nfrom pkg.kept_base import Base\nfrom pkg.kept_drop import cleanup\n\n\nclass Holder(Base):\n    def __init__(self, raw: dict[str, str], flag: bool) -> None:\n        self.raw = raw\n        self.flag = flag\n\n    @cached_property\n    def features(self) -> str:\n        return self._key()\n\n    def replace(self, raw: dict[str, str]) -> None:\n        self.raw = raw\n        self.after()\n        cleanup(self)\n";
+const KEPT_HOLDER_SIZE: &str = "from functools import cached_property\n\nfrom pkg.kept_base import Base\nfrom pkg.kept_drop import cleanup\n\n\nclass Holder(Base):\n    def __init__(self, raw: dict[str, str], flag: bool) -> None:\n        self.raw = raw\n        self.flag = flag\n\n    @cached_property\n    def features(self) -> str:\n        return self._key()\n\n    @cached_property\n    def size(self) -> int:\n        return len(self.raw)\n\n    def replace(self, raw: dict[str, str]) -> None:\n        self.raw = raw\n        self.after()\n        cleanup(self)\n";
+const KEPT_SUB: &str = "from pkg.kept_holder import Holder\n\n\nclass Sub(Holder):\n    def extra(self) -> int:\n        return 1\n";
+const KEPT_SUB_PLAIN: &str = "from pkg.kept_holder import Holder\n\n\nclass Sub(Holder):\n    @property\n    def features(self) -> str:\n        return \"plain\"\n";
+const KEPT_LAZY: &str = "import functools\n\n\nclass Lazy:\n    def __init__(self, raw: dict[str, str]) -> None:\n        self.raw = raw\n\n    @functools.cached_property\n    def loaded(self) -> bool:\n        self.raw = {\"k\": \"v\"}\n        return True\n\n    @functools.cached_property\n    def features(self) -> str:\n        if self.loaded:\n            return self.raw.get(\"k\", \"\")\n        return self.raw.get(\"k\", \"\")\n";
+const KEPT_FORGET: &str = "def forget(obj) -> None:\n    return None\n";
+const KEPT_FORGET_DELETING: &str = "def forget(obj) -> None:\n    del obj.loaded\n";
+const KEPT_READER: &str =
+    "from pkg.kept_holder import Holder\n\n\ndef show(h: Holder) -> str:\n    return h.features\n";
+
 // A dict built in a set's order in one module and written in another (`EFF112`): the builder
 // sorts and stops, the writer sorts the keys and stops.
 const ORDER_SRC: &str =
@@ -802,6 +823,13 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/token_user.py", TOKEN_USER),
         ("pkg/remote.py", REMOTE),
         ("pkg/reader.py", READER),
+        ("pkg/kept_base.py", KEPT_BASE),
+        ("pkg/kept_drop.py", KEPT_DROP),
+        ("pkg/kept_holder.py", KEPT_HOLDER),
+        ("pkg/kept_sub.py", KEPT_SUB),
+        ("pkg/kept_reader.py", KEPT_READER),
+        ("pkg/kept_lazy.py", KEPT_LAZY),
+        ("pkg/kept_forget.py", KEPT_FORGET),
         ("pkg/guard_net.py", GUARD_NET),
         ("pkg/guard_use.py", GUARD_USE),
         ("pkg/guard_default_use.py", GUARD_DEFAULT_USE),
@@ -1117,6 +1145,90 @@ impl Step {
         self.propagates = true;
         self
     }
+}
+
+/// The tier of `MUT101` and of the `MUT111` reader behind it follows the facts other files give
+/// the writer and the getter: a helper of a base class the getter reads through
+/// (`KeptFacts::must_read_self_attrs`), a method of that class called after the write that
+/// starts invalidating, a function of another file called after the write that starts removing
+/// the kept value (`KeptFacts::removes_kept`), a subclass that defines the name as a plain
+/// property (the cached property is no longer the first definition along its MRO), a function
+/// of another file called after the write that stores the property's name on its argument, or a
+/// name that a property defined later in another file comes to have (the stores a summary keeps
+/// are those of names of property getters: `DeclKeys::property_names`), and a function anywhere
+/// in the project that removes the value of a lazy setup's cached property by name
+/// (`FileSummary::kept_removals`).
+fn steps_kept_values() -> Vec<Step> {
+    const BOTH: &[(&str, &str)] = &[
+        ("pkg/kept_holder.py", "MUT101"),
+        ("pkg/kept_reader.py", "MUT111"),
+    ];
+    vec![
+        Step::new(
+            "the base-class helper the getter calls reads the attribute on one branch only",
+            vec![save("pkg/kept_base.py", KEPT_BASE_ONE_BRANCH)],
+        )
+        .present(BOTH),
+        Step::new(
+            "the base-class method called after the write starts invalidating the property",
+            vec![save("pkg/kept_base.py", KEPT_BASE_INVALIDATING)],
+        )
+        .absent(BOTH),
+        Step::new(
+            "the base class is as before; a function of another file called after the write \
+             starts removing the kept value",
+            vec![
+                save("pkg/kept_base.py", KEPT_BASE),
+                save("pkg/kept_drop.py", KEPT_DROP_DELETING),
+            ],
+        )
+        .present(BOTH),
+        Step::new(
+            "the function stores the property's name on its argument instead",
+            vec![save("pkg/kept_drop.py", KEPT_DROP_STORING)],
+        )
+        .present(BOTH),
+        Step::new(
+            "the function stores a name no property has",
+            vec![save("pkg/kept_drop.py", KEPT_DROP_STORING_SIZE)],
+        )
+        .present(BOTH),
+        Step::new(
+            "the holder's file adds a cached property of that name, reading the written \
+             attribute: the store in the unchanged file replaces its value",
+            vec![save("pkg/kept_holder.py", KEPT_HOLDER_SIZE)],
+        )
+        .present(BOTH),
+        Step::new(
+            "the holder is as before",
+            vec![save("pkg/kept_holder.py", KEPT_HOLDER)],
+        )
+        .present(BOTH),
+        Step::new(
+            "the function stops; a subclass in another file defines the name as a plain property",
+            vec![
+                save("pkg/kept_drop.py", KEPT_DROP),
+                save("pkg/kept_sub.py", KEPT_SUB_PLAIN),
+            ],
+        )
+        .present(BOTH),
+        Step::new(
+            "the subclass is as before",
+            vec![save("pkg/kept_sub.py", KEPT_SUB)],
+        )
+        .present(BOTH),
+        Step::new(
+            "a function of another file that nothing calls starts removing the value of a lazy \
+             setup's cached property: its write is no setup step any more",
+            vec![save("pkg/kept_forget.py", KEPT_FORGET_DELETING)],
+        )
+        .present(&[("pkg/kept_lazy.py", "MUT101")]),
+        Step::new(
+            "the function stops removing it",
+            vec![save("pkg/kept_forget.py", KEPT_FORGET)],
+        )
+        .present(&[("pkg/kept_lazy.py", "MUT101")]),
+    ]
 }
 
 /// Exact effect reports follow every implementation of a call across modules (the targets of
@@ -4648,6 +4760,7 @@ sessions!(editing, Session::start, {
     initial_index: steps_initial_index,
     blocking_chain: steps_blocking_chain,
     property_getters: steps_property_getters,
+    kept_values: steps_kept_values,
     guarded_effects: steps_guarded_effects,
     mut108: steps_mut108,
     mut110: steps_mut110,
