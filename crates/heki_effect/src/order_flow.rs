@@ -315,6 +315,7 @@ pub(crate) fn local_facts(
         sets: Closure::new(),
         elements: FxHashSet::default(),
         item_reads: std::cell::OnceCell::new(),
+        lengths: std::cell::OnceCell::new(),
         budget: &budget,
     };
     let mut sources: Vec<(OrderSource, VarId, Kind)> = Vec::new();
@@ -388,6 +389,8 @@ struct LocalFlow<'f, 'c> {
     elements: FxHashSet<VarId>,
     /// Where the function reads an item, by the mapping's copy root and the key.
     item_reads: std::cell::OnceCell<ItemReads>,
+    /// The results of the function's `len()` calls, by the copy root of their argument.
+    lengths: std::cell::OnceCell<FxHashMap<VarId, Vec<VarId>>>,
     budget: &'c Budget,
 }
 
@@ -835,25 +838,76 @@ impl<'f, 'c> LocalFlow<'f, 'c> {
     fn bounded_to_one(&self, v: VarId, at: BlockId) -> bool {
         let root = self.shape.copy_root(v);
         let doms = self.shape.dominators();
-        let mut b = at;
-        while let Some(d) = doms.strict_dominator(b).filter(|_| self.budget.take(1)) {
-            if let Terminator::Branch {
-                cond,
-                then_bb,
-                else_bb,
-            } = self.f.block(d).terminator
-                && let Some(holds) = self.bounding_side(cond, root)
-            {
-                // The edge into `side` is on every path to `at` when `side` is entered only by it
-                // and dominates `at`.
-                let side = if holds { then_bb } else { else_bb };
-                if self.shape.preds(side) == [d] && doms.dominates(side, at) {
-                    return true;
-                }
+        for (d, cond) in self.length_branches(root) {
+            if !self.budget.take(1) {
+                return false;
             }
-            b = d;
+            let Terminator::Branch {
+                then_bb, else_bb, ..
+            } = self.f.block(d).terminator
+            else {
+                continue;
+            };
+            let Some(holds) = self.bounding_side(cond, root) else {
+                continue;
+            };
+            // The edge into `side` is on every path to `at` when `side` is entered only by it
+            // and dominates `at`.
+            let side = if holds { then_bb } else { else_bb };
+            if self.shape.preds(side) == [d] && doms.dominates(side, at) {
+                return true;
+            }
         }
         false
+    }
+
+    /// The branches (block, condition) on a comparison of `len(set)`, or on the value of a
+    /// short-circuit operator one of whose operands is one.
+    fn length_branches(&self, set: VarId) -> Vec<(BlockId, VarId)> {
+        let lengths = self.lengths.get_or_init(|| {
+            let mut lengths: FxHashMap<VarId, Vec<VarId>> = FxHashMap::default();
+            for bb in &self.f.blocks {
+                for (i, inst) in bb.insts.iter().enumerate() {
+                    if let InstKind::Call { dst, args, .. } = &inst.kind
+                        && self.external_callee((bb.id, i)) == Some("builtins.len")
+                        && let Some(a) = args.first()
+                    {
+                        lengths
+                            .entry(self.shape.copy_root(*a))
+                            .or_default()
+                            .push(*dst);
+                    }
+                }
+            }
+            lengths
+        });
+        let branched = |x: VarId, out: &mut Vec<(BlockId, VarId)>| {
+            for u in self.shape.readers(x) {
+                if let Use::Terminator(b) = *u
+                    && matches!(self.f.block(b).terminator, Terminator::Branch { cond, .. } if cond == x)
+                {
+                    out.push((b, x));
+                }
+            }
+        };
+        let mut out = Vec::new();
+        for &length in lengths.get(&set).into_iter().flatten() {
+            for u in self.shape.readers(length) {
+                let Use::Inst(b, i) = *u else {
+                    continue;
+                };
+                let InstKind::Compare { dst: test, .. } = self.inst_at((b, i as usize)).kind else {
+                    continue;
+                };
+                branched(test, &mut out);
+                for w in self.shape.readers(test) {
+                    if let Use::Phi(m, k) = *w {
+                        branched(self.f.block(m).phis[k as usize].dst, &mut out);
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// For a branch on `cond`, the side bounding the length of `set` to one (`Some(true)`: the
