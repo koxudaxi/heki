@@ -333,8 +333,7 @@ fn lsp_without_a_root_indexes_the_working_directory_its_documents_are_in() {
 fn lsp_without_a_root_in_a_removed_working_directory() {
     // Neither `initialize` nor the process names a root: the working directory is removed
     // after the server starts, so the server indexes `.`, which holds nothing.
-    let dir = std::env::temp_dir().join(format!("heki_e2e_lsp_gone_{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = common::fresh_dir("lsp_gone");
     let mut lsp = Lsp::start(&dir, &["server", "--stdio"]);
     std::fs::remove_dir(&dir).unwrap();
     lsp.request(
