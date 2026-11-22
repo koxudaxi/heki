@@ -2,9 +2,10 @@
 //! set per question and linear in the states it visits (docs/development.md, "Analysis cost").
 
 use crate::{
-    AttrKeyPath, BoundCallee, CallHop, CallSite, CellChange, EffectSummary, Facts, FuncKey,
-    ProjectIndex, SharedState, SiteRole, Slot,
+    AttrKeyPath, BlindSpotReach, BoundCallee, CallHop, CallSite, CellChange, EffectSummary, Facts,
+    FuncKey, ProjectIndex, Runner, SharedState, SiteRole, Slot,
 };
+use heki_ir::walk::{Budget, Visit, reach};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::path::Path;
 
@@ -132,6 +133,69 @@ impl ProjectIndex {
             index: self,
             by_file: FxHashMap::default(),
         }
+    }
+
+    /// [`BlindSpotReach`]: one walk from every `async def` over the calls that run their
+    /// callee's body on the caller's thread, and one from the callees of every call inside a
+    /// loop or once per item over every call that runs its callee's body, each function visited
+    /// once per walk.
+    pub fn blind_spot_reach(&self) -> BlindSpotReach {
+        let mut calls = self.calls_by_caller();
+        let mut async_defs = Vec::new();
+        let mut in_loops = Vec::new();
+        for file in self.files.values() {
+            async_defs.extend(
+                file.functions
+                    .iter()
+                    .filter(|(_, s)| s.is_async)
+                    .map(|(k, _)| k),
+            );
+            for site in &file.call_sites {
+                if site.loop_depth > 0 || site.runner == Runner::PerItem {
+                    in_loops.extend(self.bodies_run_at(site));
+                }
+            }
+        }
+        BlindSpotReach {
+            on_event_loop: self
+                .run_from(&mut calls, async_defs, |site| site.runner != Runner::Worker),
+            below_loop: self.run_from(&mut calls, in_loops, |_| true),
+        }
+    }
+
+    /// The project callees of `site` whose bodies run there ([`Self::delivery`]).
+    fn bodies_run_at<'s>(&'s self, site: &'s CallSite) -> impl Iterator<Item = &'s FuncKey> {
+        site.project_callees().iter().filter_map(move |bc| {
+            let callee = self.summary(&bc.callee)?;
+            self.delivery(site, callee).map(|_| &bc.callee)
+        })
+    }
+
+    /// `starts` and every function whose body a call `follows` accepts runs in one of them,
+    /// transitively.
+    fn run_from<'i>(
+        &'i self,
+        calls: &mut CallsByCaller<'i>,
+        starts: Vec<&'i FuncKey>,
+        follows: impl Fn(&CallSite) -> bool,
+    ) -> FxHashSet<FuncKey> {
+        let mut out = FxHashSet::default();
+        let _ = reach::<_, ()>(
+            &Budget::unmetered("blind_spot_reach"),
+            starts,
+            |func, next| {
+                for site in calls.of(func) {
+                    if follows(site) {
+                        next.extend(self.bodies_run_at(site));
+                    }
+                }
+            },
+            |func| {
+                out.insert(func.clone());
+                Visit::Expand
+            },
+        );
+        out
     }
 
     /// The shortest chain of calls from `start`, whose parameter `param` changes `what` in place,

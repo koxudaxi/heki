@@ -9,6 +9,7 @@
 //!   `OPT112`, `OPT113`, `OPT120`, `OPT121`, `OPT130`); `OPT112` / `OPT113` are Advisory-lane
 //!   reports without a rewrite.
 
+pub mod blind_spots;
 mod contracts;
 mod data_rules;
 mod eff_rules;
@@ -22,8 +23,8 @@ pub mod selection;
 pub mod snapshot;
 
 pub use contracts::{
-    MAX_INVALIDATIONS, declares_ownership, inspect_facts, opt_in_facts, summary_contracts,
-    typed_writes,
+    MAX_INVALIDATIONS, declares_ownership, inspect_facts, opt_in_facts, recommend_facts,
+    summary_contracts, typed_writes,
 };
 pub use eff_rules::{ROOT_CAUSE_GROUP_THRESHOLD, fold_root_causes};
 pub use heki_diagnostics::Certainty;

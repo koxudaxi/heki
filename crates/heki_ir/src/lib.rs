@@ -19,7 +19,7 @@ pub use dominators::{Dominated, DominatorTree, immediate_dominators};
 pub use facts::{
     Carries, Decided, FnIndex, GlobalStores, ItemOrigin, ItemOrigins, ItemSource, LEN_CAP_MAX,
     ModuleBindings, ModuleConstants, Must, PathReader, Paths, Progress, SMALL_MAX, SmallDisplay,
-    Trips, comprehension_id,
+    Trips, comprehension_id, is_builtin_name,
 };
 
 use heki_ast::Span;

@@ -3671,3 +3671,76 @@ fn a_wide_display_unpacked_by_many_calls_is_bound_within_the_budget() {
     let wide = check_within(&wide_display_unpacked(8000, 8000), Duration::from_secs(20));
     assert!((1..8000).contains(&wide.len()), "{}", wide.len());
 }
+
+/// `heki dump-recommend-facts` of the project, which must finish within `limit`.
+fn recommend_facts_within(p: &Project, limit: Duration) -> Value {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_heki"))
+        .args(["dump-recommend-facts", "."])
+        .current_dir(&p.dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+    let reader = std::thread::spawn(move || {
+        let mut out = Vec::new();
+        stdout.read_to_end(&mut out).unwrap();
+        out
+    });
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if started.elapsed() > limit {
+            child.kill().unwrap();
+            panic!("heki dump-recommend-facts ran past {limit:?}");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(status.code(), Some(0));
+    serde_json::from_slice(&reader.join().unwrap()).unwrap()
+}
+
+/// A chain of `links` helpers, each calling the next and, in a loop, a library name of its own
+/// that the catalog lacks and a method of its unannotated parameter, below as many `async def`s
+/// that each call the head of the chain.
+fn blind_calls_below_async_defs(links: usize) -> String {
+    let mut lines = vec!["import stripe".to_owned()];
+    for i in 0..links {
+        lines.extend([
+            String::new(),
+            String::new(),
+            format!("def h{i}(client, items):"),
+            "    for item in items:".to_owned(),
+            format!("        stripe.f{i}(item)"),
+            format!("        client.m{i}(item)"),
+        ]);
+        if i + 1 < links {
+            lines.push(format!("    h{}(client, items)", i + 1));
+        }
+        lines.extend([
+            String::new(),
+            String::new(),
+            format!("async def entry{i}(client, items):"),
+            "    h0(client, items)".to_owned(),
+        ]);
+    }
+    lines.join("\n") + "\n"
+}
+
+/// Which functions run on an event loop and which below a loop is one walk each over the calls,
+/// whatever the number of blind calls and of `async def`s above them: one walk per blind call
+/// took time quadratic in the chain.
+#[test]
+fn the_reach_of_blind_calls_is_one_walk_over_the_calls() {
+    let links = 2_000;
+    let p = Project::new("bounds_blind_calls_below_async_defs");
+    p.write("app.py", &blind_calls_below_async_defs(links));
+    let facts = recommend_facts_within(&p, Duration::from_secs(20));
+    let totals = &facts["blind_spots"]["totals"];
+    let all = json!({"calls": links, "awaited": 0, "on_event_loop": links, "in_loops": links});
+    assert_eq!(totals["uncatalogued"], all, "{totals:#}");
+    assert_eq!(totals["unresolved"], all, "{totals:#}");
+    assert_eq!(totals["uncatalogued_symbols"], links);
+}

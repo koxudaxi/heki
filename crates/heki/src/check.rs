@@ -39,7 +39,7 @@ pub(crate) fn selectors(args: &AnalysisArgs) -> Selectors {
 
 /// Rule selection of a run (the command line over the config), with `lint.severity` keys
 /// validated.
-fn selection(args: &AnalysisArgs, project: &Project) -> Result<RuleSelection> {
+pub(crate) fn selection(args: &AnalysisArgs, project: &Project) -> Result<RuleSelection> {
     let cfg = &project.env.cfg;
     let selection = RuleSelection::resolve(&cfg.lint, &selectors(args))?;
     for key in cfg.lint.severity.keys() {

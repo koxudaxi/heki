@@ -2369,6 +2369,11 @@ impl ProjectDecls {
         self.split_module(fqn).is_some_and(|(m, _)| m.unread)
     }
 
+    /// Whether `fqn` names a project module or something under one.
+    pub(crate) fn in_project_module(&self, fqn: &str) -> bool {
+        self.split_module(fqn).is_some()
+    }
+
     /// The target of a call to `fqn`, a name no project definition holds: the external function
     /// the catalog may list, or nothing heki knows when `fqn` is under a project module it could
     /// not read (that module, not the catalog's, is what the name refers to).
