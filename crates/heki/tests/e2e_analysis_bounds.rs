@@ -4663,6 +4663,86 @@ fn library_calls_after_a_write_look_up_handed_callables_once() {
     assert_eq!(found, ["C.put"]);
 }
 
+/// The parameters `p0, p1, ...` of a function of `params` parameters.
+fn parameters(params: usize) -> String {
+    (0..params)
+        .map(|i| format!("p{i}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// A function constructing an object and writing its attribute, then handing thousands of its
+/// parameters to a project helper: the construction walk takes a step per value it is asked
+/// about, each parameter too, and past its budget no object is known to be new, so the write is
+/// reported. With a few parameters the write constructs its object and is allowed.
+#[test]
+fn objects_past_the_construction_budget_are_not_new() {
+    let shape = |params: usize| {
+        let ps = parameters(params);
+        let p = Project::new(&format!("bounds_construction_{params}"));
+        p.write(
+            "pyproject.toml",
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT201\"]\n\n\
+             [[tool.heki.write-owners]]\nname = \"attrs\"\ntargets = [\"m.Model.attr\"]\n\
+             allowed-writers = [\"m.Model.*\"]\n",
+        )
+        .write(
+            "m.py",
+            &format!(
+                "class Model:\n    def __init__(self):\n        self.attr = 0\n\n\n\
+                 def keep(*items):\n    return items\n\n\n\
+                 def build({ps}):\n    m = Model()\n    m.attr = 1\n    keep({ps})\n    return m\n"
+            ),
+        );
+        p
+    };
+    let writes = |found: &[Value]| found.iter().filter(|d| d["rule_code"] == "MUT201").count();
+    assert_eq!(writes(&check(&shape(8))), 0);
+    let found = check_past_budgets(4_096, &["construction::Recorder"], shape);
+    assert_eq!(writes(&found), 1);
+}
+
+/// A function of thousands of parameters a nested function captures: the walk to the values
+/// that may be grown starts from each captured variable, and past its budget anything may be
+/// grown, so the module list the function reads is no constant, and another function's query
+/// per item of it is reported. With a few parameters the list keeps its size.
+#[test]
+fn values_past_the_budget_of_the_grown_variables_may_be_grown() {
+    let shape = |params: usize| {
+        let ps = parameters(params);
+        let p = Project::new(&format!("bounds_grown_variables_{params}"));
+        p.write(
+            "pyproject.toml",
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"EFF103\", \"EFF113\"]\n",
+        )
+        .write(
+            "m.py",
+            &format!(
+                "import sqlite3\n\nSTATUS = [\"a\", \"b\"]\n\n\n\
+                 def query(conn: sqlite3.Connection):\n    for s in STATUS:\n        \
+                 conn.execute(\"SELECT ?\", (s,))\n\n\n\
+                 def build({ps}):\n    def inner():\n        return ({ps})\n    \
+                 return inner, STATUS[0]\n"
+            ),
+        );
+        p
+    };
+    let queries = |found: &[Value]| -> Vec<(String, u64)> {
+        (found.iter())
+            .map(|d| {
+                (
+                    d["rule_code"].as_str().unwrap().to_owned(),
+                    d["line"].as_u64().unwrap(),
+                )
+            })
+            .collect()
+    };
+    assert_eq!(queries(&check(&shape(8))), []);
+    let grown_vars = "heki_ir::facts::FnIndex::grown_vars";
+    let found = check_past_budgets(6_000, &[grown_vars], shape);
+    assert_eq!(queries(&found), [("EFF113".to_owned(), 8)]);
+}
+
 /// Open premises along shared chains are decided once per call: thousands of `async def`s each
 /// reach a sleep through the same chain of hundreds of helpers, none of which makes the next
 /// call on every return. Each report walks only its own chain, and each call on it is looked up

@@ -1751,12 +1751,12 @@ impl<'a> Reach<'a> {
             max_visits: u32::try_from(1 + 2 * 64 * parameters).unwrap_or(u32::MAX),
         };
         let budget = Budget::unmetered("eff_rules::Reach::mutated_params");
-        // Open: no change of a parameter is known, and none is reported.
-        let Answer::Known(found) = fixpoint(&budget, spec, transfer) else {
-            return (0, BTreeSet::new());
-        };
+        // Never open: the budget is unmetered and the visits stay within the limit above. Open,
+        // no change of a parameter would be known, and none reported.
+        let found = fixpoint(&budget, spec, transfer).map(walk::Facts::into_vec);
+        let found = found.open_means(Vec::new());
         let alias = |i: usize, k: u8| {
-            let bits = found.get(i).and_then(|h| h.get(&usize::from(k)));
+            let bits = (found.get(i).and_then(Option::as_ref)).and_then(|h| h.get(&usize::from(k)));
             bits.map_or((0, 0), |(full, below)| (full.0, below.0))
         };
         let mut out = 0;

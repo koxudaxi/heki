@@ -15,7 +15,7 @@
 use crate::Items;
 use crate::resolver::{Callee, TypeCtx, Val};
 use heki_ast::Span;
-use heki_ir::walk::{Answer, Budget, Facts, FnShape, Min, Sparse, Use, Visit, fixpoint, reach};
+use heki_ir::walk::{Budget, Facts, FnShape, Min, Sparse, Use, Visit, fixpoint, reach};
 use heki_ir::{
     BlockId, ConstLiteral, DominatorTree, FunctionKind, Inst, InstKind, IrFunction, Terminator,
     VarId,
@@ -568,10 +568,10 @@ impl IterFlow {
             let first = inputs.next()??;
             inputs.all(|r| r == Some(first)).then_some(Min(first))
         };
-        let Answer::Known(found) = fixpoint(&self.budget, spec, transfer) else {
-            return;
-        };
-        for (link, root) in self.links.iter().zip(found.into_vec()) {
+        let found = fixpoint(&self.budget, spec, transfer).map(Facts::into_vec);
+        // Past the budget no link has a root but its own.
+        let found = found.open_means(Vec::new());
+        for (link, root) in self.links.iter().zip(found) {
             if let Some(Min(r)) = root {
                 self.root_of.entry(link.dst).or_insert(r);
             }

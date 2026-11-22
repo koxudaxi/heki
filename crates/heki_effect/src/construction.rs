@@ -349,19 +349,21 @@ impl Recorder {
         };
         let lacking: Closure<VarId, bool> = Closure::new();
         for v in asked {
-            let Answer::Known(bits) = may(v) else {
-                return Answer::Open;
-            };
-            if bits == 0 || roots.may.contains_key(&v) {
-                continue;
-            }
             // A value on the way that holds no allocation.
             let none = |u: VarId| !matches!(may(u), Answer::Known(b) if b != 0);
-            let Answer::Known(lacks) = lacking.ask(budget, v, none, inputs) else {
+            let held = may(v).and_then(|bits| {
+                if bits == 0 || roots.may.contains_key(&v) {
+                    return Answer::Known(None);
+                }
+                (lacking.ask(budget, v, none, inputs)).map(|lacks| Some((bits, !*lacks)))
+            });
+            let Answer::Known(held) = held else {
                 return Answer::Open;
             };
-            roots.may.insert(v, bits);
-            roots.all.insert(v, !*lacks);
+            if let Some((bits, all)) = held {
+                roots.may.insert(v, bits);
+                roots.all.insert(v, all);
+            }
         }
         Answer::Known(roots)
     }

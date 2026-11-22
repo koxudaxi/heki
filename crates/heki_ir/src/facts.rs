@@ -975,11 +975,14 @@ impl<'a> FnIndex<'a> {
     ) -> Option<u32> {
         // The methods of a container of unknown kind may add any number of items.
         let counted = !origins.shared && !origins.opaque;
-        // Aliases past the walk's budget may be grown any number of times.
+        // Aliases past the walk's budget may be grown any number of times. A step per alias and
+        // per instruction reading one is at most three per IR unit, which the budget counts
+        // without ever reaching.
         let budget = Budget::of_function("heki_ir::facts::FnIndex::growth", self.f);
-        let Answer::Known(alias) = self.aliases(&origins.roots, &budget) else {
-            return None;
-        };
+        let alias = self
+            .aliases(&origins.roots, &budget)
+            .map(Some)
+            .open_means(None)?;
         if self.captured(&alias) {
             return None;
         }
@@ -1004,9 +1007,7 @@ impl<'a> FnIndex<'a> {
         // A block's terminator comes after its instructions.
         reading.sort_unstable_by_key(|(b, i)| (*b, i.is_none(), *i));
         reading.dedup();
-        if !budget.take(reading.len()) {
-            return None;
-        }
+        budget.take(reading.len()).then_some(())?;
         for (b, at) in reading {
             let bb = self.f.block(b);
             let Some(i) = at else {
@@ -1939,11 +1940,11 @@ impl<'a> FnIndex<'a> {
                 })
                 .collect();
             let mut ops = Vec::new();
-            // A root whose aliases are past the walk's budget may be changed on the way.
+            // A root whose aliases are past the walk's budget may be changed on the way. A step
+            // per alias is at most one per IR unit, which the budget counts without ever reaching.
             let budget = Budget::of_function("heki_ir::facts::FnIndex::guarded_len", self.f);
-            let root_changed = match self.aliases(&[p.root], &budget) {
-                Answer::Known(root) => self
-                    .f
+            let root_changed = self.aliases(&[p.root], &budget).map(|root| {
+                self.f
                     .blocks
                     .iter()
                     .filter(|bb| on_the_way[bb.id.0 as usize])
@@ -1962,9 +1963,9 @@ impl<'a> FnIndex<'a> {
                             self.grown_operands(i, false, &mut ops);
                             ops.iter().any(|o| root.contains(o))
                         }
-                    }),
-                Answer::Open => true,
-            };
+                    })
+            });
+            let root_changed = root_changed.open_means(true);
             let mut values = vec![v];
             values.extend(linked.iter().map(|g| g.var));
             if !linked.is_empty() && !root_changed && unchanged(values) {

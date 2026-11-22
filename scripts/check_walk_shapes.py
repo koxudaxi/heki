@@ -100,11 +100,6 @@ KNOWN_OVER: dict[tuple[str, str], str] = {
         "2^16 questions per loop (`FnIndex::iter_bound_depth`)"
         for p in PLACED
     },
-    **{
-        ("lists_extending_each_other", p): "building the IR overflows the stack: the display "
-        "question recurses once per list extending the next (`FnIndex::display_at`)"
-        for p in ("function", "method")
-    },
     ("wide_hierarchy", "project"): "each method call walks the whole subclass family of its "
     "receiver's class (`ProjectDecls::definitions`)",
     ("callers_of_one_helper", "project"): "MUT201 walks the helper's callers again per caller",
