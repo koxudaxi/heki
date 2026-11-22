@@ -1037,8 +1037,12 @@ fn closing_the_cause_in_the_code_makes_the_report_exact() {
             "def join(lefts, rights):",
             "def join(lefts: list[Left], rights: list[Right]):",
         ),
-        // A loop the data sizes.
-        ("app/counts.py", "range(40)", "range(probes)"),
+        // A loop over the data, whose items the probe turns into ints.
+        (
+            "app/counts.py",
+            "range(40):\n        if p in allowed:",
+            "probes:\n        if int(p) in allowed:",
+        ),
     ];
     for (path, open, close) in closed {
         let (_, text) = HEURISTIC_CLAIMS.iter().find(|(p, _)| *p == path).unwrap();
