@@ -1639,7 +1639,11 @@ fn deque_import_reuse_and_placement() {
         ),
         // With a star import, `import collections` could be rebound too: the rewrite is left
         // to be made by hand.
-        ("from collections import deque\nfrom os.path import *\n", &[], true),
+        (
+            "from collections import deque\nfrom os.path import *\n",
+            &[],
+            true,
+        ),
         // `from .collections import deque` is another module's `deque`.
         (
             "from .collections import deque\n",

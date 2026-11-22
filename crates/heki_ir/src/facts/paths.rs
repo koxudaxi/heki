@@ -642,6 +642,8 @@ const MAX_PASSES: u32 = 4;
 struct Dominance {
     /// The position of each block of the region.
     local: FxHashMap<BlockId, u32>,
+    /// Per node, its immediate dominator ([`UNREACHED`] for a node the root does not reach).
+    idom: Vec<u32>,
     /// Per node, whether the region's root reaches it.
     reached: Vec<bool>,
     /// Per node, whether every path from the root to the sink passes it.
@@ -663,6 +665,39 @@ impl Dominance {
             Must::Every
         } else {
             Must::NotEvery
+        }
+    }
+}
+
+/// Which blocks every path from a function's entry to another block passes, over the graph of
+/// its path facts ([`Paths::block_dominators`]).
+#[derive(Debug, Clone)]
+pub struct BlockDominators {
+    local: FxHashMap<BlockId, u32>,
+    idom: Vec<u32>,
+}
+
+impl BlockDominators {
+    /// Whether every path from the entry to block `to` passes block `through`: also when no
+    /// path reaches `to` (none avoids `through` either).
+    pub fn passes(&self, through: BlockId, to: BlockId) -> bool {
+        let head = |b: BlockId| self.local.get(&b).map(|k| 2 * k);
+        let Some(mut x) = head(to).filter(|x| self.idom[*x as usize] != UNREACHED) else {
+            return true;
+        };
+        let Some(target) = head(through) else {
+            return false;
+        };
+        // Up the dominator tree, which a node's immediate dominator always climbs: it ends at
+        // the root (node 0).
+        loop {
+            if x == target {
+                return true;
+            }
+            if x == 0 {
+                return false;
+            }
+            x = self.idom[x as usize];
         }
     }
 }
@@ -781,6 +816,19 @@ impl<'p, 'a> Paths<'p, 'a> {
         answer
     }
 
+    /// Which blocks every path from the entry to another block passes ([`BlockDominators`]), over
+    /// the graph `on_every_return` reads: a branch the code decides is not taken, and a block
+    /// raises into its handler only where an instruction of it may raise.
+    pub fn block_dominators(&self) -> Answer<BlockDominators> {
+        self.on_return
+            .get_or_init(|| self.dominance(Region::Function))
+            .as_ref()
+            .map(|d| BlockDominators {
+                local: d.local.clone(),
+                idom: d.idom.clone(),
+            })
+    }
+
     /// The node that is passed exactly when the point is: the head while no raising
     /// instruction before it (or, for `Returned`, at it) has run. A method call whose lookup of
     /// the method may raise has made no call until the lookup returned: it is called only after
@@ -880,6 +928,7 @@ impl<'p, 'a> Paths<'p, 'a> {
         }
         Answer::Known(Dominance {
             local,
+            idom,
             reached,
             on_every,
             sink,

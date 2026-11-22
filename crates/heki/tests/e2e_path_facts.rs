@@ -315,6 +315,31 @@ def default_from_caller(report, db, fallback):
         raise ValueError(report)
     for run in report["runs"]:
         db.one(run)
+
+
+DEBUG = False
+
+
+def decided_bypass(rows, db):
+    if DEBUG:
+        db.one(None)
+    else:
+        if len(rows) > 8:
+            raise ValueError(rows)
+        db.one(len(rows))
+    for row in rows:
+        db.one(row)
+
+
+def live_bypass(rows, db, flag):
+    if flag:
+        db.one(None)
+    else:
+        if len(rows) > 8:
+            raise ValueError(rows)
+        db.one(len(rows))
+    for row in rows:
+        db.one(row)
 "#,
     );
     let trips = |qualname: &str| -> Vec<Value> {
@@ -365,6 +390,10 @@ def default_from_caller(report, db, fallback):
     assert_eq!(trips("without_default"), vec![fixed(40)]);
     // A default the test accepts may be what it measured, not the value the loop reads.
     assert_eq!(trips("default_passes"), vec![json!("open")]);
+    // A branch a module constant decides is not taken: the cap is on every path that runs. A
+    // branch the input decides may skip it.
+    assert_eq!(trips("decided_bypass"), vec![capped(8)]);
+    assert_eq!(trips("live_bypass"), vec![json!("open")]);
     // The IR records the count of a loop over what a generator expression's creator passes.
     let genexpr = function(&facts, "generated.<locals>.<genexpr>");
     assert_eq!(genexpr["loops"][0]["fixed_trips"], capped(3));
