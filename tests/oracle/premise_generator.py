@@ -555,7 +555,12 @@ RELEVANCE = {("MUT114", "Keyed"), ("OPT113", "Steps through inputs")}
 # (`heki dump-open-premises`), each with the code those reports carry: its heuristic side
 # (`heki_rules::premises::exact_side_of`), or its own code when its heuristic tier keeps it. With a
 # premise stripped, such a report has to name it among them.
-OPEN_PREMISE_CODES = {"EFF101": "EFF111", "EFF103": "EFF113"}
+OPEN_PREMISE_CODES = {
+    "EFF101": "EFF111",
+    "EFF103": "EFF113",
+    **{rule: rule for rule in OPT_PATTERNS},
+    "OPT113": "OPT113",
+}
 
 
 class TableError(Exception):

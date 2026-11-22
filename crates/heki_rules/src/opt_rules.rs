@@ -14,9 +14,10 @@
 //! lane never trusts.
 
 use crate::mut_rules::{CallInst, site_call};
+use crate::premises::{self, OpenCause};
 use crate::{CheckContext, ModuleUnit, SitesBySpan};
 use heki_ast::Span;
-use heki_diagnostics::{Diagnostic, TextEdit};
+use heki_diagnostics::{Certainty, Diagnostic, OpenPremise, TextEdit};
 use heki_effect::{Items, ProjectDecls, TypeCtx, Val, container_mutator};
 use heki_ir::walk::{self, Answer, Budget, Def, FnShape, Use};
 use heki_ir::{
@@ -29,6 +30,8 @@ use heki_soundness::{
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::cell::RefCell;
+use std::collections::BTreeSet;
+use std::ops::ControlFlow;
 
 /// Suffix of the help saying what `--fix` does with one candidate.
 fn fix_note(c: &OptCandidate) -> String {
@@ -80,8 +83,11 @@ pub(crate) fn opt(
             // This `OPT` rule is not selected for the file.
             continue;
         };
-        let tier = crate::premises::tier(c.rule.code(), c.in_exact_tier());
+        let tier = premises::tier(c.rule.code(), c.in_exact_tier());
         d.certainty = tier.at_most(d.certainty);
+        if cx.open_premises && tier == Certainty::Heuristic {
+            d.open_premises = rewrite_open_premises(&c);
+        }
         d.evidence = c.cost_evidence.clone().map(|cost| match c.verdict.tier {
             SafetyTier::Safe => format!("{cost}; established: {}", c.verdict.evidence()),
             _ => cost,
@@ -97,6 +103,27 @@ pub(crate) fn opt(
                 .collect()
         });
     }
+}
+
+/// The premises of an `OPT` rewrite's claim a heuristic report leaves open: "Rewrite proven
+/// safe", once for each obligation of its verdict that is not established. The other premises
+/// hold for every report: its sites are in loops and carry the value around them
+/// (`heki_soundness::opt_rules::find_sites`), and it reports only a value whose builtin type
+/// its construction establishes (`OptCandidate::is_reportable`). A proven report in a loop
+/// whose trip count the code fixes or caps leaves none open: the exact tier leaves it out
+/// although its claim holds (`OptCandidate::in_exact_tier`).
+fn rewrite_open_premises(c: &OptCandidate) -> Vec<OpenPremise> {
+    // The A1 hazard that blocks a verdict on its own is an obligation of every candidate too.
+    debug_assert!(
+        c.is_safe() || c.verdict.obligations.iter().any(|o| !o.is_established()),
+        "a rewrite that is not proven safe names an obligation"
+    );
+    c.verdict
+        .obligations
+        .iter()
+        .filter(|o| !o.is_established())
+        .map(|o| premises::obligation_cause(o.kind).open_at(None, Some(o.describe())))
+        .collect()
 }
 
 // ============================================================================= loop sizes
@@ -1145,15 +1172,17 @@ pub(crate) fn opt113(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
                     origins: &origins,
                     budget: budget.get_or_insert_with(|| Budget::of_function("OPT113", f)),
                 };
-                let same_collection = premises.same_collection_each_time(inner, j.outer)
-                    && premises.keys_unchanged(j.outer, j.inner_side);
-                let exact = same_collection
-                    && premises.steps_through_inputs(j.outer)
-                    && premises.steps_through_inputs(inner)
-                    && premises.trips_open(j.outer)
-                    && premises.trips_open(inner)
-                    && premises.idle_on_mismatch(inner, j.outer, j.cmp)
-                    && premises.steps_run_no_code(inner);
+                // The step the decision stops at, when the run records open premises.
+                let mut first: Option<JoinStep> = None;
+                let JoinVerdict {
+                    same_collection,
+                    exact,
+                } = premises.steps(inner, j.outer, j.cmp, j.inner_side, &mut |step| {
+                    if cx.open_premises {
+                        first = Some(step);
+                    }
+                    ControlFlow::Break(())
+                });
                 // The advice names a `set` or a `dict` only for keys known to be hashable, and
                 // an index built before the outer loop only for an inner collection that is the
                 // same on every outer iteration.
@@ -1229,7 +1258,35 @@ pub(crate) fn opt113(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
                         &[],
                     )
                     .expect("the rule runs on the unit: it returned at its start otherwise");
-                d.certainty = crate::premises::tier("OPT113", exact).at_most(d.certainty);
+                d.certainty = premises::tier("OPT113", exact).at_most(d.certainty);
+                if cx.open_premises && !exact {
+                    // Explaining spends a budget of its own: the decisions of the other joins
+                    // of the function spend the shared one as they did.
+                    let budget = Budget::of_function("OPT113", f);
+                    let explaining = JoinPremises {
+                        budget: &budget,
+                        ..premises
+                    };
+                    let mut open: Vec<OpenPremise> = Vec::new();
+                    let path = &unit.input.path;
+                    let mut record = |step: JoinStep| {
+                        if let JoinStep::Open(cause, at) = step
+                            && !open
+                                .iter()
+                                .any(|o| o.premise == cause.premise.name && o.cause == cause.id)
+                        {
+                            let at =
+                                at.map(|(span, what)| cx.related_at(path, span, what.to_owned()));
+                            open.push(cause.open_at(at, None));
+                        }
+                    };
+                    first.into_iter().for_each(&mut record);
+                    explaining.steps(inner, j.outer, j.cmp, j.inner_side, &mut |step| {
+                        record(step);
+                        ControlFlow::Continue(())
+                    });
+                    d.open_premises = open;
+                }
                 if exact {
                     d.evidence = Some(format!(
                         "established: both loops step through inputs, a pair that does not match runs only the comparison, and `{inner_iter}` is the same collection, with the same keys, on every outer iteration"
@@ -1292,6 +1349,53 @@ const CONTAINERS: &[&str] = &[
     "builtins.range",
 ];
 
+/// One step of an `OPT113` report's exact tier that does not hold ([`JoinPremises::steps`]).
+enum JoinStep {
+    /// A premise of the claim is open, at the span named (`None`: at the comparison).
+    Open(&'static OpenCause, Option<(Span, &'static str)>),
+    /// The code fixes or caps a loop's trip count: the claim holds, but a fixed count is no
+    /// evidence either way, so the exact tier leaves the report out.
+    TripsFixed,
+}
+
+/// The steps of one decision that do not hold, told to whoever asks: a decision stops at the
+/// first (`ControlFlow::Break`), an explanation goes on through the others.
+struct Told<'s> {
+    steps: &'s mut dyn FnMut(JoinStep) -> ControlFlow<()>,
+    /// A step did not hold.
+    open: bool,
+    /// The last step told stops the decision.
+    stopped: bool,
+}
+
+impl Told<'_> {
+    /// Tells `step`; true when the decision stops at it.
+    fn step(&mut self, step: JoinStep) -> bool {
+        self.open = true;
+        self.stopped = (self.steps)(step).is_break();
+        self.stopped
+    }
+}
+
+/// The decision on one `OPT113` report's exact tier ([`JoinPremises::steps`]).
+struct JoinVerdict {
+    /// The inner loop steps through the same collection, with the same keys, on every outer
+    /// iteration: what the help's advice needs, whatever the tier.
+    same_collection: bool,
+    exact: bool,
+}
+
+/// What an instruction on the path of a pair whose keys differ does
+/// ([`JoinPremises::idle_on_mismatch`]).
+enum PairWork {
+    /// The loads of the two keys, or the comparison, running no code of the project.
+    Idle,
+    /// A load of a key that may run code of the project ("Equality of keys"), and why.
+    KeyLoad(&'static OpenCause),
+    /// Anything else ("Idle on a mismatch").
+    Other,
+}
+
 /// The premises of an `OPT113` report's exact tier (ADR-018) besides the comparison of keys,
 /// each established or not; a walk that runs out of its budget establishes nothing.
 struct JoinPremises<'p, 'a, 'c> {
@@ -1305,6 +1409,66 @@ struct JoinPremises<'p, 'a, 'c> {
 }
 
 impl JoinPremises<'_, '_, '_> {
+    /// The decision on the exact tier of the join of `inner`'s items with `outer`'s at the
+    /// comparison `cmp` (`key`: its inner side), each step that does not hold told to `steps`,
+    /// in the order the decision takes them: the same collection, the same keys, both loops
+    /// through inputs, both trip counts open, idle on a mismatch with keys loaded without code,
+    /// and the inner loop advanced without code. A decision stops at the first, so it spends no
+    /// budget on the steps after it; an explanation goes on.
+    fn steps(
+        &self,
+        inner: &ForLoop<'_>,
+        outer: &ForLoop<'_>,
+        cmp: VarId,
+        key: VarId,
+        steps: &mut dyn FnMut(JoinStep) -> ControlFlow<()>,
+    ) -> JoinVerdict {
+        let mut told = Told {
+            steps,
+            open: false,
+            stopped: false,
+        };
+        let collection = self.same_collection_each_time(inner, outer);
+        if !collection && told.step(JoinStep::Open(&premises::COLLECTION_MAY_CHANGE, None)) {
+            return JoinVerdict {
+                same_collection: false,
+                exact: false,
+            };
+        }
+        let keys = self.keys_unchanged(outer, key);
+        if !keys && told.step(JoinStep::Open(&premises::KEYS_MAY_CHANGE, None)) {
+            return JoinVerdict {
+                same_collection: false,
+                exact: false,
+            };
+        }
+        let same_collection = collection && keys;
+        let verdict = |told: &Told<'_>| JoinVerdict {
+            same_collection,
+            exact: !told.open,
+        };
+        for (lp, which) in [(outer, "the outer loop"), (inner, "the inner loop")] {
+            if let Err(cause) = self.steps_through_inputs(lp)
+                && told.step(JoinStep::Open(cause, Some((lp.iter_span, which))))
+            {
+                return verdict(&told);
+            }
+        }
+        for lp in [outer, inner] {
+            if !self.trips_open(lp) && told.step(JoinStep::TripsFixed) {
+                return verdict(&told);
+            }
+        }
+        if !self.idle_on_mismatch(inner, outer, cmp, &mut told) && told.stopped {
+            return verdict(&told);
+        }
+        if let Err(cause) = self.steps_run_no_code(inner) {
+            let at = Some((inner.iter_span, "the inner loop's iterable"));
+            told.step(JoinStep::Open(cause, at));
+        }
+        verdict(&told)
+    }
+
     fn builtin_type(&self, v: VarId, classes: &[&str]) -> bool {
         known_instance(self.types, v, classes)
     }
@@ -1429,17 +1593,25 @@ impl JoinPremises<'_, '_, '_> {
     /// The loop steps through items of the function's inputs: every source of its items is a
     /// parameter, an attribute or an item of one (a call result needs the catalog to say what
     /// it yields, and a method's receiver, a module constant, or a display is not an input).
-    fn steps_through_inputs(&self, lp: &ForLoop<'_>) -> bool {
+    /// Otherwise why not, from the first source that is not an input.
+    fn steps_through_inputs(&self, lp: &ForLoop<'_>) -> Result<(), &'static OpenCause> {
         // Open (a budget spent) establishes nothing.
-        self.origins
+        let origins = self
+            .origins
             .of_loop(self.budget, self.defs.f.id, lp.index)
-            .map(|origins| {
-                !origins.is_empty()
-                    && origins.iter().all(|o| {
-                        matches!(o.source, ItemSource::Param(_) | ItemSource::ParamPart(_))
-                    })
-            })
-            .open_means(false)
+            .open_means(BTreeSet::new());
+        let not_an_input = origins
+            .iter()
+            .map(|o| o.source)
+            .find(|s| !matches!(s, ItemSource::Param(_) | ItemSource::ParamPart(_)));
+        match not_an_input {
+            Some(ItemSource::Fixed) => Err(&premises::INPUT_ITEMS_FIXED_BY_THE_CODE),
+            Some(_) => Err(&premises::ITEMS_NOT_FROM_THE_INPUTS),
+            // A loop whose items heki follows to no source steps through no input either.
+            None => (!origins.is_empty())
+                .then_some(())
+                .ok_or(&premises::ITEMS_NOT_FROM_THE_INPUTS),
+        }
     }
 
     /// The code fixes no trip count of the loop: a fixed count past 16 is no evidence either
@@ -1455,8 +1627,15 @@ impl JoinPremises<'_, '_, '_> {
     /// every block a pair runs until the next pair, taking the false side of the comparison's
     /// branch, holds only the loads of the two items' keys and the comparison, and no other
     /// branch (an earlier `and` operand, an `if` around the test), `return`, `raise`, or way
-    /// out of the inner loop.
-    fn idle_on_mismatch(&self, inner: &ForLoop<'_>, outer: &ForLoop<'_>, cmp: VarId) -> bool {
+    /// out of the inner loop. Each block that does not is told to `told`: a key load that may
+    /// run code leaves "Equality of keys" open, any other work "Idle on a mismatch".
+    fn idle_on_mismatch(
+        &self,
+        inner: &ForLoop<'_>,
+        outer: &ForLoop<'_>,
+        cmp: VarId,
+        told: &mut Told<'_>,
+    ) -> bool {
         let f = self.defs.f;
         let shape = &self.sizes.ix.shape;
         let alias = forward_aliases(f, &[cmp]);
@@ -1478,19 +1657,29 @@ impl JoinPremises<'_, '_, '_> {
             .steps_through_tuples(inner)
             .then(|| self.defs.next_of(inner.lp).map(|(e, _)| e))
             .flatten();
-        let key_work = |inst: &Inst| match &inst.kind {
-            InstKind::IterNext { .. } => true,
-            InstKind::Const { dst, .. } => index_of_key(dst),
-            InstKind::Copy { dst, .. } => key(dst),
-            InstKind::AttrLoad { dst, obj, attr } => key(dst) && self.plain_key_attr(*obj, attr),
-            InstKind::SubscriptLoad { dst, obj, .. } => {
-                key(dst)
-                    && (self.builtin_type(*obj, CONTAINERS)
-                        || tuple_item == Some(shape.copy_root(*obj)))
+        let work = |inst: &Inst| match &inst.kind {
+            InstKind::IterNext { .. } => PairWork::Idle,
+            InstKind::Const { dst, .. } if index_of_key(dst) => PairWork::Idle,
+            InstKind::Copy { dst, .. } if key(dst) => PairWork::Idle,
+            InstKind::AttrLoad { dst, obj, attr } if key(dst) => {
+                if self.plain_key_attr(*obj, attr) {
+                    PairWork::Idle
+                } else {
+                    PairWork::KeyLoad(self.key_load_cause(*obj))
+                }
             }
-            InstKind::Compare { dst, .. } => *dst == cmp,
-            _ => false,
+            InstKind::SubscriptLoad { dst, obj, .. } if key(dst) => {
+                if self.builtin_type(*obj, CONTAINERS) || tuple_item == Some(shape.copy_root(*obj))
+                {
+                    PairWork::Idle
+                } else {
+                    PairWork::KeyLoad(self.key_load_cause(*obj))
+                }
+            }
+            InstKind::Compare { dst, .. } if *dst == cmp => PairWork::Idle,
+            _ => PairWork::Other,
         };
+        let mut idle = true;
         let found = walk::reach(
             self.budget,
             [header],
@@ -1512,18 +1701,48 @@ impl JoinPremises<'_, '_, '_> {
                     block.terminator,
                     Terminator::Return(_) | Terminator::Raise(_) | Terminator::Unreachable
                 );
-                if !shape.in_loop(inner.index, b)
-                    || other_branch
-                    || leaves
-                    || !block.insts.iter().all(key_work)
-                {
+                let inside = shape.in_loop(inner.index, b);
+                let mut other = !inside || other_branch || leaves;
+                let mut key_load = None;
+                for inst in &block.insts {
+                    match work(inst) {
+                        PairWork::Idle => {}
+                        PairWork::KeyLoad(cause) => {
+                            key_load.get_or_insert((cause, inst.span));
+                        }
+                        PairWork::Other => other = true,
+                    }
+                }
+                idle &= key_load.is_none() && !other;
+                let mut stop = false;
+                if let Some((cause, span)) = key_load {
+                    stop = told.step(JoinStep::Open(cause, Some((span, "the key load"))));
+                }
+                if other && !stop {
+                    stop = told.step(JoinStep::Open(&premises::WORK_ON_A_MISMATCH, None));
+                }
+                // An explanation goes on through the inner loop only.
+                if stop {
                     walk::Visit::Stop(())
-                } else {
+                } else if inside {
                     walk::Visit::Expand
+                } else {
+                    walk::Visit::Prune
                 }
             },
         );
-        matches!(found, Answer::Known(None))
+        // A walk past its budget establishes nothing.
+        let _ = found.is_open() && told.step(JoinStep::Open(&premises::WORK_ON_A_MISMATCH, None));
+        idle && matches!(found, Answer::Known(None))
+    }
+
+    /// Why a key the inner loop loads from `obj` may run code of the project: the type of `obj`
+    /// is unknown, or it is known and the load is not a plain one of it.
+    fn key_load_cause(&self, obj: VarId) -> &'static OpenCause {
+        match self.types.get(&obj) {
+            Some(Val::Inst(_) | Val::Union(_)) => &premises::KEY_LOAD_MAY_RUN_CODE,
+            _ => &premises::ITEM_TYPE_UNKNOWN,
+        }
     }
 
     /// Advancing the inner loop runs no code of the project: its iterable is a builtin
@@ -1531,8 +1750,9 @@ impl JoinPremises<'_, '_, '_> {
     /// comprehension's result, a builtin that builds a container (`sorted`, `list`, `range`,
     /// ...), a view of a `dict` or the pieces of a `str`, or `enumerate` / `zip` / `reversed` /
     /// `iter` of such iterables, also through a phi. A value of unknown type (it may be a
-    /// generator), a `map` or `filter` call, or any other call may run code for every pair.
-    fn steps_run_no_code(&self, inner: &ForLoop<'_>) -> bool {
+    /// generator), a `map` or `filter` call, or any other call may run code for every pair:
+    /// why, from the first value that may.
+    fn steps_run_no_code(&self, inner: &ForLoop<'_>) -> Result<(), &'static OpenCause> {
         let f = self.defs.f;
         let shape = &self.sizes.ix.shape;
         let ix = &self.sizes.ix;
@@ -1576,42 +1796,59 @@ impl JoinPremises<'_, '_, '_> {
                 {
                     return walk::Visit::Expand;
                 }
-                let builds = inst.map_or_else(
-                    || self.iterates_as_builtin(v),
+                // Whether the value builds a container, and whether its type decides that.
+                let (builds, by_type) = inst.map_or_else(
+                    || (self.iterates_as_builtin(v), true),
                     |inst| match &inst.kind {
-                        InstKind::AllocBuiltin { .. } | InstKind::DictLiteral { .. } => true,
+                        InstKind::AllocBuiltin { .. } | InstKind::DictLiteral { .. } => {
+                            (true, false)
+                        }
                         InstKind::Call {
                             callee_var, callee, ..
-                        } => matches!(
-                            ix.builtin(*callee_var, callee),
-                            Some(
-                                "sorted"
-                                    | "list"
-                                    | "tuple"
-                                    | "set"
-                                    | "frozenset"
-                                    | "dict"
-                                    | "range"
-                            )
+                        } => (
+                            matches!(
+                                ix.builtin(*callee_var, callee),
+                                Some(
+                                    "sorted"
+                                        | "list"
+                                        | "tuple"
+                                        | "set"
+                                        | "frozenset"
+                                        | "dict"
+                                        | "range"
+                                )
+                            ),
+                            false,
                         ),
-                        InstKind::MethodCall { recv, method, .. } => {
+                        InstKind::MethodCall { recv, method, .. } => (
                             VIEWS.iter().any(|(m, classes)| {
                                 m == method
                                     && self.builtin_type(*recv, classes)
                                     && self.not_overridden(classes, m, true)
-                            })
-                        }
-                        _ => self.iterates_as_builtin(v),
+                            }),
+                            false,
+                        ),
+                        _ => (self.iterates_as_builtin(v), true),
                     },
                 );
+                // A type annotation closes an unknown type, unless a project subclass of a
+                // builtin container defines its own `__iter__`.
+                let unknown_type = by_type
+                    && !matches!(self.types.get(&v), Some(Val::Inst(_) | Val::Union(_)))
+                    && self.not_overridden(CONTAINERS, "__iter__", false);
                 if builds {
                     walk::Visit::Prune
+                } else if unknown_type {
+                    walk::Visit::Stop(&premises::ITERABLE_TYPE_UNKNOWN)
                 } else {
-                    walk::Visit::Stop(())
+                    walk::Visit::Stop(&premises::ADVANCING_RUNS_CODE)
                 }
             },
         );
-        matches!(found, Answer::Known(None))
+        // A walk past its budget establishes nothing.
+        found
+            .open_means(Some(&premises::ADVANCING_RUNS_CODE))
+            .map_or(Ok(()), Err)
     }
 
     /// The outer loop leaves the compared key of every inner item as it is: it stores into or

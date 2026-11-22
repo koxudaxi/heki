@@ -1608,6 +1608,29 @@ Every candidate also needs `A1HazardFree` (no frame introspection in the functio
 | **OPT120** / **OPT121** | `size-dependent` | `Unique(q)` (no escape, not returned), `ExactType(q, list)`, only operations `deque` supports equally (`DequeEquivalentOps`: no `list(*a)` / `list(**kw)`, no iterator live at a change or consumed by it, iterators used only for their elements, `q = q[1:]` exactly) | `NotConstSmall`, **no index `q[i]` other than the ends (`0`, `-1`)** | S12, `sort()`, $O(n)$ middle indexes, `q.extend(reversed(q))`, `type(iter(q))` |
 | **OPT130** | `size-dependent` | Every argument `ValueLoopInvariant`, `SideEffectFree` (no method arguments), `ZeroTripExceptionSafe` (no `*` arguments), the built container used by the membership test only (`ValueLoopInvariant(call)`) | `NotConstSmall` (100 times slower when the loop runs zero times: A.8), not a `ConstSmall` / retry loop, not `tuple(t)` of a tuple | S22, S28, A.8 |
 
+Open premises (`CheckExtras::open_premises`, as for `EFF111` / `EFF113` in section 2.4): a
+heuristic report of an `OPT` rewrite records "Rewrite proven safe" once for each obligation of
+its verdict that is not established, with the obligation's kind as the cause
+(`heki_rules::premises::OBLIGATION_CAUSES`, one row per `ObligationKind`) and its description
+(`Kind(subject): reason`) as the detail. The other premises of the row hold for every report: a
+site is found only in a loop and, for an accumulation, on a value carried around it
+(`find_sites`), and a candidate is reported only when its construction establishes the builtin
+type (`OptCandidate::is_reportable`). A proven size-dependent report in a loop whose trip count
+the code fixes or caps (`OptCandidate::in_exact_tier`) records nothing: no premise of its row is
+open, and the exact tier leaves it out only because a fixed count is no evidence either way.
+
+`OPT113`'s exact tier is one decision, `JoinPremises::steps`, which tells each step that does
+not hold to its caller in the order it takes them (the same collection, the same keys, both
+loops through inputs, both trip counts open, idle on a mismatch, the inner loop advanced
+without code): the decision stops at the first, so it spends the function's shared walk budget
+as before, and an explanation goes on with a budget of its own, so the decisions of the other
+joins are unchanged. `idle_on_mismatch` tells a key load that may run code ("Equality of keys":
+of an item whose type is unknown, or a load that is no plain attribute of a known class or no
+item of a builtin container) apart from any other work on a mismatch ("Idle on a mismatch"), and
+`steps_run_no_code` an inner iterable of unknown type (an annotation closes it, unless a project
+subclass of a builtin container defines `__iter__`) apart from one that may run code. A fixed
+trip count records nothing, as for the rewrites.
+
 ---
 
 ## 4. Knowledge bases, the Ratchet baseline, and profile dumps

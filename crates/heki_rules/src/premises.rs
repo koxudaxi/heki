@@ -15,9 +15,14 @@
 //!   only when it asks (`CheckExtras::open_premises`); no output format writes them yet. The
 //!   list grows with what the homes tell apart: a cause stands for the cases its facts cannot
 //!   separate yet, and says so, rather than guessing one of them. The rules recording causes so
-//!   far are `EFF101` (with its heuristic side `EFF111`) and `EFF103` (with `EFF113`).
+//!   far are `EFF101` (with its heuristic side `EFF111`), `EFF103` (with `EFF113`), the eight
+//!   `OPT` rewrites (a cause of "Rewrite proven safe" per proof obligation,
+//!   [`OBLIGATION_CAUSES`]), and `OPT113`. A heuristic report whose premises all hold records
+//!   none: a proven `OPT` rewrite or an `OPT113` join in a loop whose trip count the code fixes,
+//!   which the exact tier leaves out because a fixed count is no evidence either way.
 
 use heki_diagnostics::{Certainty, OpenPremise, RelatedLocation};
+use heki_soundness::ObligationKind;
 use serde::Serialize;
 
 /// One premise of an exact claim.
@@ -347,6 +352,154 @@ pub const REWRITE_PROVEN_SAFE: Premise = Premise {
     decided_in: &["heki_soundness::obligations::SafetyVerdict::evaluate"],
 };
 
+pub const FRAME_INTROSPECTION: OpenCause = OpenCause {
+    id: "frame-introspection",
+    premise: &REWRITE_PROVEN_SAFE,
+    states: "the function introspects or rebinds its frame (`locals()`, `exec`, `sys._getframe`, ...), which can read or rebind its locals behind the analysis (assumption A1)",
+    closer: Closer::Code,
+};
+
+pub const ANALYSIS_NOT_CONVERGED: OpenCause = OpenCause {
+    id: "analysis-not-converged",
+    premise: &REWRITE_PROVEN_SAFE,
+    states: "the abstract interpretation of the function did not reach a fixpoint",
+    closer: Closer::None,
+};
+
+pub const EXACT_TYPE: OpenCause = OpenCause {
+    id: "exact-type",
+    premise: &REWRITE_PROVEN_SAFE,
+    states: "the exact builtin type a value of the statement must have is not established by its construction at the statement: it is another type, or unknown there (annotations are never trusted)",
+    closer: Closer::Code,
+};
+
+pub const UNIQUE: OpenCause = OpenCause {
+    id: "unique",
+    premise: &REWRITE_PROVEN_SAFE,
+    states: "the value may be shared: a reference to it heki does not track may exist (a parameter, an attribute, a container, a call that keeps it), which would see the change in place",
+    closer: Closer::Code,
+};
+
+pub const EXCLUSIVE_ACCESS_AT_WRITE: OpenCause = OpenCause {
+    id: "exclusive-access-at-write",
+    premise: &REWRITE_PROVEN_SAFE,
+    states: "another reference to the object, or the old binding, may be used after the write",
+    closer: Closer::Code,
+};
+
+pub const EVAL_ORDER_PRESERVED: OpenCause = OpenCause {
+    id: "eval-order-preserved",
+    premise: &REWRITE_PROVEN_SAFE,
+    states: "the rewrite may evaluate the statement's parts in another order: the right-hand side changes the value before the original reads it, or an update evaluates every entry before inserting any",
+    closer: Closer::Code,
+};
+
+pub const EXCEPTION_STATE_SAFE: OpenCause = OpenCause {
+    id: "exception-state-safe",
+    premise: &REWRITE_PROVEN_SAFE,
+    states: "an exception handler may see another state after the rewrite: a value partly updated in place, a name still bound to the old object, or an accumulator not joined yet",
+    closer: Closer::Code,
+};
+
+pub const DICT_UNPACK_LEADING: OpenCause = OpenCause {
+    id: "dict-unpack-leading",
+    premise: &REWRITE_PROVEN_SAFE,
+    states: "the accumulator is not the leading `**` entry of the display, or is unpacked again",
+    closer: Closer::Code,
+};
+
+pub const SET_ORDER_UNOBSERVED: OpenCause = OpenCause {
+    id: "set-order-unobserved",
+    premise: &REWRITE_PROVEN_SAFE,
+    states: "something may observe the iteration order of the set the rewrite grows in place, or the value may be a set",
+    closer: Closer::Code,
+};
+
+pub const VALUE_LOOP_INVARIANT: OpenCause = OpenCause {
+    id: "value-loop-invariant",
+    premise: &REWRITE_PROVEN_SAFE,
+    states: "the value the rewrite builds once before the loop may change during the loop",
+    closer: Closer::Code,
+};
+
+pub const ZERO_TRIP_EXCEPTION_SAFE: OpenCause = OpenCause {
+    id: "zero-trip-exception-safe",
+    premise: &REWRITE_PROVEN_SAFE,
+    states: "the `set(...)` the rewrite builds before the loop may raise even when the loop runs no time: an element that may be unhashable, or a name that may be unbound there",
+    closer: Closer::Code,
+};
+
+pub const HASH_CONSISTENT_PROBE: OpenCause = OpenCause {
+    id: "hash-consistent-probe",
+    premise: &REWRITE_PROVEN_SAFE,
+    states: "the value looked up may compare otherwise through `hash` than through `==`: a custom `__eq__` / `__hash__`, or an unhashable value",
+    closer: Closer::Code,
+};
+
+pub const NO_INTERMEDIATE_READS: OpenCause = OpenCause {
+    id: "no-intermediate-reads",
+    premise: &REWRITE_PROVEN_SAFE,
+    states: "the accumulator is read inside the loop besides the accumulation",
+    closer: Closer::Code,
+};
+
+pub const ONLY_PAIRED_APPENDS: OpenCause = OpenCause {
+    id: "only-paired-appends",
+    premise: &REWRITE_PROVEN_SAFE,
+    states: "the list changes otherwise than by the appends a set kept beside it would mirror",
+    closer: Closer::Code,
+};
+
+pub const DEQUE_EQUIVALENT_OPS: OpenCause = OpenCause {
+    id: "deque-equivalent-ops",
+    premise: &REWRITE_PROVEN_SAFE,
+    states: "a use of the list has no `collections.deque` equivalent, or no construction of it can become a deque",
+    closer: Closer::Code,
+};
+
+pub const SIDE_EFFECT_FREE: OpenCause = OpenCause {
+    id: "side-effect-free",
+    premise: &REWRITE_PROVEN_SAFE,
+    states: "what the rewrite evaluates before the loop may have side effects, or `set` does not name the builtin there",
+    closer: Closer::Code,
+};
+
+/// The cause of "Rewrite proven safe" each proof obligation stands for when it is not
+/// established, one row per obligation kind in the order of its declaration.
+pub const OBLIGATION_CAUSES: &[(ObligationKind, &OpenCause)] = &[
+    (ObligationKind::A1HazardFree, &FRAME_INTROSPECTION),
+    (ObligationKind::AnalysisConverged, &ANALYSIS_NOT_CONVERGED),
+    (ObligationKind::ExactType, &EXACT_TYPE),
+    (ObligationKind::Unique, &UNIQUE),
+    (
+        ObligationKind::ExclusiveAccessAtWrite,
+        &EXCLUSIVE_ACCESS_AT_WRITE,
+    ),
+    (ObligationKind::EvalOrderPreserved, &EVAL_ORDER_PRESERVED),
+    (ObligationKind::ExceptionStateSafe, &EXCEPTION_STATE_SAFE),
+    (ObligationKind::DictUnpackLeading, &DICT_UNPACK_LEADING),
+    (ObligationKind::SetOrderUnobserved, &SET_ORDER_UNOBSERVED),
+    (ObligationKind::ValueLoopInvariant, &VALUE_LOOP_INVARIANT),
+    (
+        ObligationKind::ZeroTripExceptionSafe,
+        &ZERO_TRIP_EXCEPTION_SAFE,
+    ),
+    (ObligationKind::HashConsistentProbe, &HASH_CONSISTENT_PROBE),
+    (ObligationKind::NoIntermediateReads, &NO_INTERMEDIATE_READS),
+    (ObligationKind::OnlyPairedAppends, &ONLY_PAIRED_APPENDS),
+    (ObligationKind::DequeEquivalentOps, &DEQUE_EQUIVALENT_OPS),
+    (ObligationKind::SideEffectFree, &SIDE_EFFECT_FREE),
+];
+
+/// The cause of "Rewrite proven safe" an obligation of `kind` that is not established stands
+/// for ([`OBLIGATION_CAUSES`]).
+pub fn obligation_cause(kind: ObligationKind) -> &'static OpenCause {
+    OBLIGATION_CAUSES
+        .iter()
+        .find_map(|(k, cause)| (*k == kind).then_some(*cause))
+        .expect("every obligation kind has a row")
+}
+
 pub const EQUALITY_OF_KEYS: Premise = Premise {
     name: "Equality of keys",
     states: "the comparison is `==` between keys of the two items, and each key the inner loop loads runs no code of the project",
@@ -356,16 +509,65 @@ pub const EQUALITY_OF_KEYS: Premise = Premise {
     ],
 };
 
+pub const ITEM_TYPE_UNKNOWN: OpenCause = OpenCause {
+    id: "item-type-unknown",
+    premise: &EQUALITY_OF_KEYS,
+    states: "a key the inner loop loads is an attribute or an item of an item whose type heki does not know, so the load may run a property or a method",
+    closer: Closer::Annotation,
+};
+
+pub const KEY_LOAD_MAY_RUN_CODE: OpenCause = OpenCause {
+    id: "key-load-may-run-code",
+    premise: &EQUALITY_OF_KEYS,
+    states: "a key the inner loop loads from an item of a known type may run code of the project: no plain attribute of that name (a property, a method, another descriptor, `__getattr__` or `__getattribute__` along the class's MRO or in a project subclass, a base heki does not know, or a metaclass), or a subscript of a value that is no builtin container",
+    closer: Closer::None,
+};
+
 pub const STEPS_THROUGH_INPUTS: Premise = Premise {
     name: "Steps through inputs",
     states: "each loop steps through items of the function's inputs",
     decided_in: &["heki_rules::opt_rules::JoinPremises::steps_through_inputs"],
 };
 
+pub const INPUT_ITEMS_FIXED_BY_THE_CODE: OpenCause = OpenCause {
+    id: "fixed-by-the-code",
+    premise: &STEPS_THROUGH_INPUTS,
+    states: "a loop steps through items the code fixes: a module constant or a display",
+    closer: Closer::None,
+};
+
+pub const ITEMS_NOT_FROM_THE_INPUTS: OpenCause = OpenCause {
+    id: "items-not-from-the-inputs",
+    premise: &STEPS_THROUGH_INPUTS,
+    states: "a loop's items are not established to come from the function's inputs: they come from a call's result or a method's receiver (`self.rows`), or heki follows none",
+    closer: Closer::None,
+};
+
 pub const IDLE_ON_A_MISMATCH: Premise = Premise {
     name: "Idle on a mismatch",
     states: "an inner item whose key differs runs only the loads of the two keys and the comparison",
     decided_in: &["heki_rules::opt_rules::JoinPremises::idle_on_mismatch"],
+};
+
+pub const WORK_ON_A_MISMATCH: OpenCause = OpenCause {
+    id: "work-on-a-mismatch",
+    premise: &IDLE_ON_A_MISMATCH,
+    states: "an inner item whose key differs is not established to run only the key loads and the comparison: a statement before the test or after the `if`, an `else` or `elif`, an earlier `and` operand, or a way out of the inner loop on that path",
+    closer: Closer::Code,
+};
+
+pub const ITERABLE_TYPE_UNKNOWN: OpenCause = OpenCause {
+    id: "iterable-type-unknown",
+    premise: &IDLE_ON_A_MISMATCH,
+    states: "the inner loop's iterable is a value whose type heki does not know, which may be a generator that runs code for each item",
+    closer: Closer::Annotation,
+};
+
+pub const ADVANCING_RUNS_CODE: OpenCause = OpenCause {
+    id: "advancing-runs-code",
+    premise: &IDLE_ON_A_MISMATCH,
+    states: "advancing the inner loop may run code of the project: its iterable is a call's result (a generator, `map`, `filter`, a project function), or a container whose class or a project subclass of a builtin container defines its own `__iter__`",
+    closer: Closer::None,
 };
 
 pub const SAME_COLLECTION_SAME_KEYS: Premise = Premise {
@@ -375,6 +577,20 @@ pub const SAME_COLLECTION_SAME_KEYS: Premise = Premise {
         "heki_rules::opt_rules::JoinPremises::same_collection_each_time",
         "heki_rules::opt_rules::JoinPremises::keys_unchanged",
     ],
+};
+
+pub const COLLECTION_MAY_CHANGE: OpenCause = OpenCause {
+    id: "collection-may-change",
+    premise: &SAME_COLLECTION_SAME_KEYS,
+    states: "the inner loop is not established to step through the same collection on every outer iteration: its iterable is computed in the outer loop from other than values bound before it, or the outer loop changes one of those values (a changing method, a store, `del`, a call that receives it, a closure, `yield`, or `await`)",
+    closer: Closer::Code,
+};
+
+pub const KEYS_MAY_CHANGE: OpenCause = OpenCause {
+    id: "keys-may-change",
+    premise: &SAME_COLLECTION_SAME_KEYS,
+    states: "the outer loop may change the compared key of an inner item: a store into or deletion of what the key loads, or a call or closure that reaches the item or the key's object",
+    closer: Closer::Code,
 };
 
 /// Every premise of the table, once.
@@ -424,6 +640,31 @@ pub const CAUSES: &[&OpenCause] = &[
     &ITEMS_NOT_FROM_THE_DATA,
     &LIBRARY_CALL_WITHOUT_ITEMS,
     &NO_ITEMS_FOLLOWED,
+    &FRAME_INTROSPECTION,
+    &ANALYSIS_NOT_CONVERGED,
+    &EXACT_TYPE,
+    &UNIQUE,
+    &EXCLUSIVE_ACCESS_AT_WRITE,
+    &EVAL_ORDER_PRESERVED,
+    &EXCEPTION_STATE_SAFE,
+    &DICT_UNPACK_LEADING,
+    &SET_ORDER_UNOBSERVED,
+    &VALUE_LOOP_INVARIANT,
+    &ZERO_TRIP_EXCEPTION_SAFE,
+    &HASH_CONSISTENT_PROBE,
+    &NO_INTERMEDIATE_READS,
+    &ONLY_PAIRED_APPENDS,
+    &DEQUE_EQUIVALENT_OPS,
+    &SIDE_EFFECT_FREE,
+    &ITEM_TYPE_UNKNOWN,
+    &KEY_LOAD_MAY_RUN_CODE,
+    &INPUT_ITEMS_FIXED_BY_THE_CODE,
+    &ITEMS_NOT_FROM_THE_INPUTS,
+    &WORK_ON_A_MISMATCH,
+    &ITERABLE_TYPE_UNKNOWN,
+    &ADVANCING_RUNS_CODE,
+    &COLLECTION_MAY_CHANGE,
+    &KEYS_MAY_CHANGE,
 ];
 
 /// The cause `id` of the premise named `premise`.
@@ -577,6 +818,37 @@ mod tests {
     fn the_causes_follow_the_order_of_their_premises() {
         let position = |c: &OpenCause| ALL.iter().position(|p| *p == c.premise);
         assert!(CAUSES.windows(2).all(|w| position(w[0]) <= position(w[1])));
+    }
+
+    #[test]
+    fn every_obligation_kind_has_one_cause_of_the_rewrite_premise() {
+        use ObligationKind as K;
+        // Exhaustive: a new obligation kind does not compile here until it has its row.
+        let row = |kind: ObligationKind| match kind {
+            K::A1HazardFree => 0,
+            K::AnalysisConverged => 1,
+            K::ExactType => 2,
+            K::Unique => 3,
+            K::ExclusiveAccessAtWrite => 4,
+            K::EvalOrderPreserved => 5,
+            K::ExceptionStateSafe => 6,
+            K::DictUnpackLeading => 7,
+            K::SetOrderUnobserved => 8,
+            K::ValueLoopInvariant => 9,
+            K::ZeroTripExceptionSafe => 10,
+            K::HashConsistentProbe => 11,
+            K::NoIntermediateReads => 12,
+            K::OnlyPairedAppends => 13,
+            K::DequeEquivalentOps => 14,
+            K::SideEffectFree => 15,
+        };
+        assert_eq!(OBLIGATION_CAUSES.len(), 16);
+        for (i, (kind, cause)) in OBLIGATION_CAUSES.iter().enumerate() {
+            assert_eq!(row(*kind), i, "{kind}");
+            assert_eq!(cause.premise, &REWRITE_PROVEN_SAFE, "{kind}");
+            assert_eq!(obligation_cause(*kind), *cause);
+            assert!(CAUSES.contains(cause), "{kind}");
+        }
     }
 
     #[test]
