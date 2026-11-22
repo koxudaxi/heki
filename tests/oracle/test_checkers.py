@@ -380,6 +380,115 @@ class Mut110(unittest.TestCase):
         self.assertEqual(checkers.check(claim, [trace])["refutations"], [])
 
 
+def kept_line(line_id, start, end, before, after, muts=(), act=1, outcome="ok"):
+    """A `line` event of a kept-value claim's write, with the facts before and after it."""
+    event = line(line_id, start, end, muts=muts, act=act, outcome=outcome)
+    return [*event, {"before": before, "after": after}]
+
+
+def kept_state(kept=70, attr=(80, "a"), cached=True, plain=True, has=True, klass="Parser"):
+    return {
+        "self": 60,
+        "kept": kept,
+        "attr": list(attr) if attr is not None else None,
+        "class": klass,
+        "mro": [klass, "object"],
+        "has": has,
+        "cached": cached,
+        "plain": plain,
+    }
+
+
+class Mut101(unittest.TestCase):
+    claim = {
+        "id": "k0",
+        "rule": "MUT101",
+        "line_id": "N0",
+        "ret": "R0",
+        "writer_ret": "W0",
+        "prop": "features",
+        "attr": "raw",
+        "getter": "Parser.features",
+        "rebinds": True,
+    }
+
+    def trace(self, before=None, after=None, loads=True, kept_at_return=70, muts=()):
+        events = [
+            ["start", 1, 2, "Parser.features", "app/m.py", 0, 3],
+            ["load", 2, 2, 60, "raw"] if loads else ["load", 2, 2, 60, "other"],
+            ["ret", "R0", 2, 3, 70, "str", "str", 60],
+            kept_line("N0", 5, 6, before or kept_state(), after or kept_state(attr=(81, "b")), muts=muts),
+        ]
+        if kept_at_return is not False:
+            events.append(["kept_ret", "W0", 1, 9, 60, kept_at_return])
+        return run(*events)
+
+    def premises(self, trace):
+        return [r["premise"].split(":")[0] for r in checkers.check(self.claim, [trace])["refutations"]]
+
+    def test_a_kept_value_the_getter_computed_from_the_attribute_confirms(self):
+        result = checkers.check(self.claim, [self.trace()])
+        self.assertEqual((result["checked"], result["refutations"]), (1, []))
+
+    def test_an_instance_holding_no_value_is_no_instance(self):
+        result = checkers.check(self.claim, [self.trace(before=kept_state(kept=None))])
+        self.assertEqual(result["checked"], 0)
+
+    def test_a_class_without_the_property_is_no_instance(self):
+        result = checkers.check(self.claim, [self.trace(before=kept_state(has=False, cached=False))])
+        self.assertEqual(result["checked"], 0)
+
+    def test_another_descriptor_under_the_name_refutes_cached_property(self):
+        self.assertEqual(self.premises(self.trace(before=kept_state(cached=False))), ["Cached property"])
+
+    def test_a_value_the_getter_did_not_return_refutes_cached_property(self):
+        self.assertEqual(self.premises(self.trace(before=kept_state(kept=71))), ["Cached property"])
+
+    def test_a_run_of_the_getter_without_the_load_refutes_reads_on_every_path(self):
+        self.assertEqual(self.premises(self.trace(loads=False)), ["Reads on every path"])
+
+    def test_a_store_that_runs_code_refutes_plain_write(self):
+        self.assertEqual(self.premises(self.trace(before=kept_state(plain=False))), ["Plain write"])
+
+    def test_an_in_place_change_that_changes_nothing_refutes_plain_write(self):
+        claim = dict(self.claim, rebinds=False)
+        trace = self.trace(after=kept_state())
+        refutations = checkers.check(claim, [trace])["refutations"]
+        self.assertEqual([r["premise"].split(":")[0] for r in refutations], ["Plain write"])
+        changed = self.trace(after=kept_state(), muts=[[80, "append", "list"]])
+        self.assertEqual(checkers.check(claim, [changed])["refutations"], [])
+
+    def test_a_run_of_the_getter_on_another_instance_returning_the_same_object_is_not_its_run(self):
+        # `a.features`, then `b.features` returning the same object without loading `a.raw`.
+        trace = self.trace()
+        trace["events"][3:3] = [
+            ["start", 4, 3, "Parser.features", "app/m.py", 0, 4],
+            ["load", 3, 4, 61, "raw"],
+            ["ret", "R0", 3, 4, 70, "str", "str", 61],
+        ]
+        self.assertEqual(self.premises(trace), [])
+
+    def test_a_value_gone_at_the_normal_return_refutes_kept_to_the_return(self):
+        self.assertEqual(self.premises(self.trace(kept_at_return=None)), ["Kept to the return"])
+
+    def test_a_writer_that_raised_makes_no_claim_about_the_return(self):
+        self.assertEqual(self.premises(self.trace(kept_at_return=False)), [])
+
+
+class Mut111(unittest.TestCase):
+    claim = {"id": "k0", "rule": "MUT111", "line_id": "N0", "prop": "features", "getter": "Parser.features"}
+
+    def test_a_read_of_the_getters_property_confirms(self):
+        trace = run(kept_line("N0", 1, 2, kept_state(), kept_state()))
+        result = checkers.check(self.claim, [trace])
+        self.assertEqual((result["checked"], result["refutations"]), (1, []))
+
+    def test_an_object_without_the_cached_property_refutes(self):
+        trace = run(kept_line("N0", 1, 2, kept_state(cached=False), kept_state(cached=False)))
+        refutation = checkers.check(self.claim, [trace])["refutations"][0]
+        self.assertTrue(refutation["premise"].startswith("Runs the writer"))
+
+
 class Mut118(unittest.TestCase):
     claim = {
         "id": "k0",

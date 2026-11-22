@@ -9,7 +9,7 @@
 //! - A rule's exact or heuristic tier comes from [`tier`], which takes the rule's premises from
 //!   this table.
 //! - A heuristic report of a rule with a row can record which premises it left open and why
-//!   (`heki_diagnostics::Diagnostic::open_premises`), each with an [`OpenCause`] from the closed
+//!   (`heki_diagnostics::Diagnostic::open_records`), each with an [`OpenCause`] from the closed
 //!   list kept next to its premise below ([`CAUSES`]). The causes come from the steps of the
 //!   decision that sets the report's tier, so they cannot disagree with it. A run records them
 //!   only when it asks (`CheckExtras::open_premises`); no output format writes them yet. The
@@ -17,12 +17,15 @@
 //!   separate yet, and says so, rather than guessing one of them. The rules recording causes so
 //!   far are `EFF101` (with its heuristic side `EFF111`), `EFF103` (with `EFF113`), the eight
 //!   `OPT` rewrites (a cause of "Rewrite proven safe" per proof obligation,
-//!   [`OBLIGATION_CAUSES`]), `OPT113`, `DATA101`, `MUT110`, and `MUT114`. A heuristic report
-//!   whose premises all hold records none: a proven `OPT` rewrite or an `OPT113` join in a loop
-//!   whose trip count the code fixes, which the exact tier leaves out because a fixed count is no
-//!   evidence either way.
+//!   [`OBLIGATION_CAUSES`]), `OPT113`, `DATA101`, `MUT110`, and `MUT114`.
+//! - The exact tier of a size-dependent `OPT` rewrite and of `OPT113` also asks for a
+//!   [`Condition`] that is no premise: "Trip count open" (Safety × Profitability, ADR-007 and
+//!   ADR-011: the claim holds over a loop the code counts, the change does not pay off there). A
+//!   report heuristic only for it records the condition with its cause ([`ConditionCause`]) in
+//!   the same list, so every heuristic report names why it is not exact, while the premise rows,
+//!   the claims, and the oracle's strips stay as they are.
 
-use heki_diagnostics::{Certainty, OpenPremise, RelatedLocation};
+use heki_diagnostics::{Axis, Certainty, OpenCondition, OpenPremise, OpenRecord, RelatedLocation};
 use heki_soundness::ObligationKind;
 use serde::Serialize;
 use std::ops::ControlFlow;
@@ -831,6 +834,73 @@ pub fn exact_side_of(code: &str) -> Option<&'static str> {
     }
 }
 
+/// A condition of an exact rule's exact tier that is no premise of its claim: the claim is true
+/// whatever it says (the rule pages say so under "Not part of the claim"), and a report is exact
+/// only when it holds because the change then pays off (Safety × Profitability, ADR-007,
+/// ADR-011). The premise rows, the claims, and the oracle's strips do not list it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct Condition {
+    pub name: &'static str,
+    pub axis: Axis,
+    pub states: &'static str,
+    /// Where heki decides it, as [`Premise::decided_in`].
+    pub decided_in: &'static [&'static str],
+}
+
+pub const TRIP_COUNT_OPEN: Condition = Condition {
+    name: "Trip count open",
+    axis: Axis::Profitability,
+    states: "the code does not fix or cap the number of times the loop runs, so the cost grows with the data",
+    decided_in: &["heki_ir::facts::FnIndex::fixed_trips"],
+};
+
+/// Why a report left a [`Condition`] open, from a closed list kept next to the condition, as
+/// [`OpenCause`] is for a premise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct ConditionCause {
+    /// Unique within its condition, kebab-case.
+    pub id: &'static str,
+    pub condition: &'static Condition,
+    pub states: &'static str,
+    pub closer: Closer,
+}
+
+pub const TRIP_COUNT_FIXED: ConditionCause = ConditionCause {
+    id: "trip-count-fixed",
+    condition: &TRIP_COUNT_OPEN,
+    states: "the code fixes or caps the loop's trip count (`range` of constants, a display, a slice, a length test, a counter): the change pays off only for a loop the data sizes",
+    closer: Closer::None,
+};
+
+/// Every cause of a condition, once.
+pub const CONDITION_CAUSES: &[&ConditionCause] = &[&TRIP_COUNT_FIXED];
+
+impl ConditionCause {
+    /// The record of this cause on a report: where the condition is open, and what the
+    /// statement leaves out.
+    pub fn open_at(
+        &'static self,
+        at: Option<RelatedLocation>,
+        detail: Option<String>,
+    ) -> OpenRecord {
+        OpenRecord::Condition(OpenCondition {
+            axis: self.condition.axis,
+            condition: self.condition.name,
+            cause: self.id,
+            at,
+            detail,
+        })
+    }
+}
+
+/// The cause `id` of the condition named `condition`.
+pub fn condition_cause(condition: &str, id: &str) -> Option<&'static ConditionCause> {
+    CONDITION_CAUSES
+        .iter()
+        .copied()
+        .find(|c| c.condition.name == condition && c.id == id)
+}
+
 const OPT_ACCUMULATION: &[&Premise] = &[
     &BUILTIN_TYPE_BY_CONSTRUCTION,
     &LOOP_CARRIED,
@@ -957,6 +1027,30 @@ mod tests {
                 );
             }
             assert_eq!(cause(c.premise.name, c.id), Some(*c));
+        }
+    }
+
+    #[test]
+    fn a_condition_is_no_premise_and_its_causes_are_unique_kebab_case() {
+        let keys: std::collections::BTreeSet<(&str, &str)> = CONDITION_CAUSES
+            .iter()
+            .map(|c| (c.condition.name, c.id))
+            .collect();
+        assert_eq!(keys.len(), CONDITION_CAUSES.len(), "a cause twice");
+        for c in CONDITION_CAUSES {
+            assert!(
+                ALL.iter().all(|p| p.name != c.condition.name),
+                "{} is a premise row",
+                c.condition.name
+            );
+            assert!(
+                c.id.chars().all(|ch| ch.is_ascii_lowercase() || ch == '-')
+                    && !c.id.starts_with('-')
+                    && !c.id.ends_with('-'),
+                "{} is not kebab-case",
+                c.id
+            );
+            assert_eq!(condition_cause(c.condition.name, c.id), Some(*c));
         }
     }
 

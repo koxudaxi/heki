@@ -17,7 +17,7 @@ use crate::mut_rules::{CallInst, site_call};
 use crate::premises::{self, OpenCause, Told};
 use crate::{CheckContext, ModuleUnit, SitesBySpan};
 use heki_ast::Span;
-use heki_diagnostics::{Certainty, Diagnostic, OpenPremise, TextEdit};
+use heki_diagnostics::{Certainty, Diagnostic, OpenRecord, TextEdit};
 use heki_effect::{Items, ProjectDecls, TypeCtx, Val, container_mutator};
 use heki_ir::walk::{self, Answer, Budget, Def, FnShape, Use};
 use heki_ir::{
@@ -86,7 +86,7 @@ pub(crate) fn opt(
         let tier = premises::tier(c.rule.code(), c.in_exact_tier());
         d.certainty = tier.at_most(d.certainty);
         if cx.open_premises && tier == Certainty::Heuristic {
-            d.open_premises = rewrite_open_premises(&c);
+            d.open_records = rewrite_open_records(&c);
         }
         d.evidence = c.cost_evidence.clone().map(|cost| match c.verdict.tier {
             SafetyTier::Safe => format!("{cost}; established: {}", c.verdict.evidence()),
@@ -105,26 +105,34 @@ pub(crate) fn opt(
     }
 }
 
-/// The premises of an `OPT` rewrite's claim a heuristic report leaves open: "Rewrite proven
-/// safe", once for each obligation of its verdict that is not established. The other premises
-/// hold for every report: its sites are in loops and carry the value around them
-/// (`heki_soundness::opt_rules::find_sites`), and it reports only a value whose builtin type
-/// its construction establishes (`OptCandidate::is_reportable`; for `OPT130`, a call of the
-/// builtin constructor, the only call a site is). A proven report in a loop
-/// whose trip count the code fixes or caps leaves none open: the exact tier leaves it out
-/// although its claim holds (`OptCandidate::in_exact_tier`).
-fn rewrite_open_premises(c: &OptCandidate) -> Vec<OpenPremise> {
+/// Why an `OPT` rewrite's heuristic report is not exact (`OptCandidate::in_exact_tier`): "Rewrite
+/// proven safe" open, once for each obligation of its verdict that is not established, and a
+/// trip count the code fixes or caps, which leaves "Trip count open" open, a condition that is no
+/// premise. The other premises hold for every report: its sites are in loops and carry the value
+/// around them (`heki_soundness::opt_rules::find_sites`), and it reports only a value whose
+/// builtin type its construction establishes (`OptCandidate::is_reportable`; for `OPT130`, a
+/// call of the builtin constructor, the only call a site is).
+fn rewrite_open_records(c: &OptCandidate) -> Vec<OpenRecord> {
     // The A1 hazard that blocks a verdict on its own is an obligation of every candidate too.
     debug_assert!(
         c.is_safe() || c.verdict.obligations.iter().any(|o| !o.is_established()),
         "a rewrite that is not proven safe names an obligation"
     );
-    c.verdict
+    let obligations = c
+        .verdict
         .obligations
         .iter()
         .filter(|o| !o.is_established())
-        .map(|o| premises::obligation_cause(o.kind).open_at(None, Some(o.describe())))
-        .collect()
+        .map(|o| {
+            premises::obligation_cause(o.kind)
+                .open_at(None, Some(o.describe()))
+                .into()
+        });
+    let trips = c.fixed_trips.map(|n| {
+        let at_most = format!("the loop runs at most {n} times");
+        premises::TRIP_COUNT_FIXED.open_at(None, Some(at_most))
+    });
+    obligations.chain(trips).collect()
 }
 
 // ============================================================================= loop sizes
@@ -1269,17 +1277,26 @@ pub(crate) fn opt113(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
                             .get_or_insert_with(|| Budget::of_function("OPT113", f)),
                         ..premises
                     };
-                    let mut open: Vec<OpenPremise> = Vec::new();
+                    let mut open: Vec<OpenRecord> = Vec::new();
                     let path = &unit.input.path;
-                    let mut record = |step: JoinStep| {
-                        if let JoinStep::Open(cause, at) = step
-                            && !open
-                                .iter()
-                                .any(|o| o.premise == cause.premise.name && o.cause == cause.id)
-                        {
-                            let at =
-                                at.map(|(span, what)| cx.related_at(path, span, what.to_owned()));
-                            open.push(cause.open_at(at, None));
+                    let mut record = |step: JoinStep| match step {
+                        JoinStep::Open(cause, at) => {
+                            let told = open.iter().any(|o| {
+                                matches!(o, OpenRecord::Premise(p)
+                                    if p.premise == cause.premise.name && p.cause == cause.id)
+                            });
+                            if !told {
+                                let at = at
+                                    .map(|(span, what)| cx.related_at(path, span, what.to_owned()));
+                                open.push(cause.open_at(at, None).into());
+                            }
+                        }
+                        JoinStep::TripsFixed(span, which) => {
+                            let at = cx.related_at(path, span, which.to_owned());
+                            let condition = premises::TRIP_COUNT_FIXED.open_at(Some(at), None);
+                            if !open.contains(&condition) {
+                                open.push(condition);
+                            }
                         }
                     };
                     first.into_iter().for_each(&mut record);
@@ -1287,7 +1304,7 @@ pub(crate) fn opt113(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
                         record(step);
                         ControlFlow::Continue(())
                     });
-                    d.open_premises = open;
+                    d.open_records = open;
                 }
                 if exact {
                     d.evidence = Some(format!(
@@ -1355,9 +1372,10 @@ const CONTAINERS: &[&str] = &[
 enum JoinStep {
     /// A premise of the claim is open, at the span named (`None`: at the comparison).
     Open(&'static OpenCause, Option<(Span, &'static str)>),
-    /// The code fixes or caps a loop's trip count: the claim holds, but a fixed count is no
-    /// evidence either way, so the exact tier leaves the report out.
-    TripsFixed,
+    /// The code fixes or caps the trip count of the loop at the span named: the claim holds,
+    /// but the exact tier leaves the report out ("Trip count open", a condition that is no
+    /// premise).
+    TripsFixed(Span, &'static str),
 }
 
 /// The decision on one `OPT113` report's exact tier ([`JoinPremises::steps`]).
@@ -1433,8 +1451,8 @@ impl JoinPremises<'_, '_, '_> {
                 return verdict(&told);
             }
         }
-        for lp in [outer, inner] {
-            if !self.trips_open(lp) && told.step(JoinStep::TripsFixed) {
+        for (lp, which) in [(outer, "the outer loop"), (inner, "the inner loop")] {
+            if !self.trips_open(lp) && told.step(JoinStep::TripsFixed(lp.iter_span, which)) {
                 return verdict(&told);
             }
         }
