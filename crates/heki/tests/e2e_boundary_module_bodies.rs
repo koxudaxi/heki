@@ -214,7 +214,7 @@ REGISTRY.items = ["a"]
         ),
         (
             7,
-            forbids("`<module>` writes `Registry.items` (direct_attr)"),
+            forbids("`<module>` writes `Registry.items` (by attribute)"),
         ),
     ];
     let want: Vec<(u64, &str)> = want.iter().map(|(l, m)| (*l, m.as_str())).collect();

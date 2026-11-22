@@ -230,11 +230,11 @@ fn final_constant_keys_name_attributes_and_entries() {
         ]
     );
     assert!(
-        message_at(&diags, u, 40).contains("writes `DataModel.meta` (item_mut)"),
+        message_at(&diags, u, 40).contains("writes `DataModel.meta` (in place inside an item)"),
         "{diags:#?}"
     );
     assert!(
-        message_at(&diags, u, 12).contains("(dict_direct)"),
+        message_at(&diags, u, 12).contains("(as a `__dict__` item)"),
         "{diags:#?}"
     );
 }
@@ -1235,17 +1235,17 @@ fn strict_mode_reports_the_writes_heki_cannot_tie_to_a_class() {
     );
     assert_eq!(
         message_at(&diags, u, 8),
-        "`touch` writes `fields` (direct_attr) on an object of unknown class outside the write owners of `store`: heki cannot tell whether it writes `DataModel.fields`"
+        "`touch` writes `fields` (by attribute) on an object of unknown class outside the write owners of `store`: heki cannot tell whether it writes `DataModel.fields`"
     );
     assert!(
         message_at(&diags, u, 23).contains(
-            "writes an attribute named at run time (set_attr) on `DataModel` outside the write owners of `store`: heki cannot tell whether it writes `DataModel.fields` or `DataModel.name`"
+            "writes an attribute named at run time (with `setattr`) on `DataModel` outside the write owners of `store`: heki cannot tell whether it writes `DataModel.fields` or `DataModel.name`"
         ),
         "{diags:#?}"
     );
     assert_eq!(
         message_at(&diags, u, 25),
-        "`anything` writes an attribute named at run time (set_attr) on an object of unknown class outside the write owners of `store`: heki cannot tell whether it writes `DataModel.fields` or `DataModel.name`"
+        "`anything` writes an attribute named at run time (with `setattr`) on an object of unknown class outside the write owners of `store`: heki cannot tell whether it writes `DataModel.fields` or `DataModel.name`"
     );
 }
 
@@ -1331,7 +1331,7 @@ fn strict_mode_reports_a_run_time_name_on_an_object_of_unknown_class() {
     );
     assert_eq!(
         message_at(&diags, n, 12),
-        "`store_by_key` writes an attribute named at run time (dict_direct) on an object of unknown class outside the write owners of `store`: heki cannot tell whether it writes `DataModel.fields` or `DataModel.name`"
+        "`store_by_key` writes an attribute named at run time (as a `__dict__` item) on an object of unknown class outside the write owners of `store`: heki cannot tell whether it writes `DataModel.fields` or `DataModel.name`"
     );
     // Off by default.
     let p = strict_project("strict_run_time_names_off", false);
@@ -1849,7 +1849,7 @@ fn strict_mode_walks_callers_and_honors_the_contract_scopes() {
         "{diags:#?}"
     );
     assert!(
-        message_at(&diags, u, 18).contains("writes `meta` (item_mut)"),
+        message_at(&diags, u, 18).contains("writes `meta` (in place inside an item)"),
         "{diags:#?}"
     );
     // `forbidden-writers`: only the forbidden layer is reported.
@@ -2639,7 +2639,7 @@ fn strict_modes_report_the_reads_and_calls_heki_cannot_tie_to_a_class() {
     );
     assert_eq!(
         message_at(&diags, u, 11),
-        "`kids` reads `children` (direct_attr) on an object of unknown class outside the read owners of `children`: heki cannot tell whether it reads `Reference.children`"
+        "`kids` reads `children` (by attribute) on an object of unknown class outside the read owners of `children`: heki cannot tell whether it reads `Reference.children`"
     );
     assert_eq!(
         message_at(&diags, u, 43),
@@ -3113,7 +3113,7 @@ fn vars_is_the_namespace_and_in_place_or_writes_through_it() {
     );
     assert!(
         message_at(&diags, u, 15).contains(
-            "`in_place_namespace` writes an attribute named at run time (dict_direct) on `Field`"
+            "`in_place_namespace` writes an attribute named at run time (as a `__dict__` item) on `Field`"
         ),
         "{diags:#?}"
     );
@@ -3237,7 +3237,7 @@ fn unlisted_dict_keys_reports_the_namespace_keys_no_target_names() {
     );
     assert_eq!(
         message_at(&diags, u, 11),
-        "`unlisted` writes `pkg.model.Field._type_cache` (dict_direct), a `__dict__` key no target names, outside the write owners of `caches`"
+        "`unlisted` writes `pkg.model.Field._type_cache` (as a `__dict__` item), a `__dict__` key no target names, outside the write owners of `caches`"
     );
     // The same writes judged lexically.
     let p = unlisted_project(
@@ -3369,11 +3369,11 @@ fn unlisted_dict_keys_count_the_keys_every_write_owners_contract_names() {
     );
     assert_eq!(
         message_at(&diags, u, 13),
-        "`unlisted` writes `pkg.model.Field._type_cache` (dict_direct) outside the write owners of `other`"
+        "`unlisted` writes `pkg.model.Field._type_cache` (as a `__dict__` item) outside the write owners of `other`"
     );
     assert_eq!(
         message_at(&diags, u, 17),
-        "`unlisted_literal` writes `pkg.model.Field._name_cache` (dict_direct), a `__dict__` key no target names, outside the write owners of `caches`"
+        "`unlisted_literal` writes `pkg.model.Field._name_cache` (as a `__dict__` item), a `__dict__` key no target names, outside the write owners of `caches`"
     );
 }
 

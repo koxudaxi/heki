@@ -685,7 +685,7 @@ def bad_write(flags: RuntimeFlags) -> None:
     let (_, stdout, _) = p.check(&["--output-format", "concise"]);
     assert!(
         stdout.contains(
-            "`bad_write` writes `pkg.parser.base.Parser._has_runtime_expressions` (direct_attr) inside the forbidden writers of `host-private` (also `pkg.parser._flags.RuntimeFlags._has_runtime_expressions`)"
+            "`bad_write` writes `pkg.parser.base.Parser._has_runtime_expressions` (by attribute) inside the forbidden writers of `host-private` (also `pkg.parser._flags.RuntimeFlags._has_runtime_expressions`)"
         ),
         "{stdout}"
     );

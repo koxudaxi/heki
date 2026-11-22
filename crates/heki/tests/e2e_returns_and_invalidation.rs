@@ -1056,7 +1056,7 @@ fn mut109_requires_an_invalidator_on_every_path_after_a_write() {
     assert_eq!(narrow["target"], "graph-index:DataType.data_types");
     assert_eq!(
         narrow["message"],
-        "`narrow` writes `DataType.data_types` (direct_attr) and returns on some path without calling an invalidator of `graph-index`"
+        "`narrow` writes `DataType.data_types` (by attribute) and returns on some path without calling an invalidator of `graph-index`"
     );
     assert_eq!(narrow["help"], "tell the store which models changed");
     // A helper write is reported at the call, with the hops down to the write.
@@ -1065,7 +1065,7 @@ fn mut109_requires_an_invalidator_on_every_path_after_a_write() {
         two["message"]
             .as_str()
             .unwrap()
-            .contains("(direct_attr) via `pkg.passes._write`"),
+            .contains("(by attribute) via `pkg.passes._write`"),
         "{two}"
     );
     assert_eq!(
@@ -1177,7 +1177,7 @@ fn mut109_initializers_build_only_their_own_self() {
         diags[1]["message"]
             .as_str()
             .unwrap()
-            .contains("(direct_attr) via `pkg.models._touch`"),
+            .contains("(by attribute) via `pkg.models._touch`"),
         "{diags:#?}"
     );
 }
@@ -1267,7 +1267,7 @@ fn mut109_follows_the_fields_and_instances_bound_to_untyped_helper_arguments() {
         diags[1]["message"]
             .as_str()
             .unwrap()
-            .starts_with("`fill` writes `Model.items` (indirect_helper) via `pkg.models._fill`"),
+            .starts_with("`fill` writes `Model.items` (through a helper) via `pkg.models._fill`"),
         "{diags:#?}"
     );
 }
@@ -1323,8 +1323,8 @@ fn mut109_ties_a_helper_write_through_a_protocol_to_each_class_once() {
     assert_eq!(
         messages,
         vec![
-            "`set_positioned` writes `Model.x` (indirect_helper) via `pkg.models._set_x` and returns on some path without calling an invalidator of `model`",
-            "`set_positioned` writes `Positioned.x` (indirect_helper) via `pkg.models._set_x` and returns on some path without calling an invalidator of `positioned`",
+            "`set_positioned` writes `Model.x` (through a helper) via `pkg.models._set_x` and returns on some path without calling an invalidator of `model`",
+            "`set_positioned` writes `Positioned.x` (through a helper) via `pkg.models._set_x` and returns on some path without calling an invalidator of `positioned`",
         ],
         "{diags:#?}"
     );

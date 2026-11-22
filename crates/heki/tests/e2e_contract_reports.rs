@@ -486,7 +486,7 @@ fn a_report_at_a_call_counts_each_access_the_helper_hands_over_once() {
     assert_eq!(reports(&p, "MUT204"), vec![touch(18), touch(19)]);
     let (_, stdout, _) = p.check(&["--select", "MUT203", "--output-format", "concise"]);
     assert!(
-        stdout.contains("`Store.sync` reads `Model.value` (direct_attr) via `app._peek` outside the read owners of `auditors`"),
+        stdout.contains("`Store.sync` reads `Model.value` (by attribute) via `app._peek` outside the read owners of `auditors`"),
         "{stdout}"
     );
 }
@@ -569,16 +569,56 @@ fn an_access_matching_several_targets_of_one_contract_is_reported_once() {
     assert_eq!(reports(&p, "MUT204"), vec![at(32, "A.reset")]);
     let (_, stdout, _) = p.check(&["--output-format", "concise"]);
     for message in [
-        "`write` writes `E.items` (direct_attr) outside the write owners of `store` (also `A.items`)",
-        "`write` writes `app.A.items` (direct_attr) outside the write owners of `audit`",
-        "`read` reads `E.items` (direct_attr) outside the read owners of `reads` (also `A.items`)",
+        "`write` writes `E.items` (by attribute) outside the write owners of `store` (also `A.items`)",
+        "`write` writes `app.A.items` (by attribute) outside the write owners of `audit`",
+        "`read` reads `E.items` (by attribute) outside the read owners of `reads` (also `A.items`)",
         "`call` calls `A.reset` outside the call owners of `calls` (also `reset`)",
     ] {
         assert!(stdout.contains(message), "{message}\n{stdout}");
     }
     assert!(
-        !stdout
-            .contains("`write` writes `A.items` (direct_attr) outside the write owners of `store`"),
+        !stdout.contains(
+            "`write` writes `A.items` (by attribute) outside the write owners of `store`"
+        ),
         "{stdout}"
+    );
+}
+
+#[test]
+fn a_contract_without_a_name_is_named_by_its_position() {
+    let p = project(
+        "unnamed_contract",
+        "[[tool.heki.write-owners]]\nname = \"first\"\ntargets = [\"Other.fields\"]\n\n[[tool.heki.write-owners]]\ntargets = [\"Model.fields\"]\nallowed-writers = [\"pkg.models.Store.*\"]\n",
+    );
+    p.write("pkg/__init__.py", "")
+        .write("pkg/models.py", MODEL_FIELDS);
+    let (_, stdout, stderr) = p.check(&["--select", "MUT201", "--output-format", "json"]);
+    let diags: Vec<Value> = serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("{e}{stderr}"));
+    assert_eq!(
+        diags[0]["message"],
+        "`outside` writes `Model.fields` (by attribute) outside the write owners of the `write-owners` contract at position 2"
+    );
+}
+
+#[test]
+fn an_effect_boundary_without_a_name_is_named_by_its_position() {
+    let p = project(
+        "unnamed_boundary",
+        "[[tool.heki.effect-boundaries]]\nname = \"first\"\nscopes = [\"pkg.other\"]\nforbid = [\"calls\"]\ncall-targets = [\"Store.*\"]\n\n[[tool.heki.effect-boundaries]]\nscopes = [\"pkg.render\"]\nforbid = [\"calls\"]\ncall-targets = [\"Store.*\"]\n",
+    );
+    p.write("pkg/__init__.py", "")
+        .write(
+            "pkg/store.py",
+            "class Store:\n    def save(self) -> None:\n        pass\n",
+        )
+        .write(
+            "pkg/render.py",
+            "from pkg.store import Store\n\n\ndef page(store: Store) -> None:\n    store.save()\n",
+        );
+    let (_, stdout, stderr) = p.check(&["--select", "EFF201", "--output-format", "json"]);
+    let diags: Vec<Value> = serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("{e}{stderr}"));
+    assert_eq!(
+        diags[0]["message"],
+        "`page` calls `Store.*`, which the `effect-boundaries` contract at position 2 forbids"
     );
 }

@@ -1303,13 +1303,13 @@ impl Allowance {
         self.forbidden.is_empty() || names(&self.forbidden, key)
     }
 
-    /// `outside the <owners> of `name``, or `inside the forbidden <who> of `name`` for a contract
-    /// with `forbidden-*`.
-    pub(crate) fn where_text(&self, owners: &str, forbidden: &str, name: &str) -> String {
+    /// `outside the <owners> of <label>`, or `inside the forbidden <who> of <label>` for a
+    /// contract with `forbidden-*` (`label`: [`heki_env::contract_label`]).
+    pub(crate) fn where_text(&self, owners: &str, forbidden: &str, label: &str) -> String {
         if self.has_forbidden() {
-            format!("inside the {forbidden} of `{name}`")
+            format!("inside the {forbidden} of {label}")
         } else {
-            format!("outside the {owners} of `{name}`")
+            format!("outside the {owners} of {label}")
         }
     }
 }
@@ -2336,7 +2336,8 @@ fn mode(
 }
 
 struct OwnerRule<'r> {
-    name: &'r str,
+    /// How a report names the contract ([`heki_env::contract_label`]).
+    label: String,
     targets: Vec<ContractTarget>,
     allowance: Allowance,
     forbid_cached: FxHashSet<String>,
@@ -2441,7 +2442,7 @@ pub(crate) fn mut201(
     );
     let all_classes = project_classes(cx);
     let mut rules = Vec::new();
-    for rule in &cx.config.write_owners {
+    for (index, rule) in cx.config.write_owners.iter().enumerate() {
         let targets = parse_targets(
             cx,
             &all_classes,
@@ -2476,7 +2477,7 @@ pub(crate) fn mut201(
             forbid_cached.extend(class_set(cx, &p, &all_classes, Subclasses::Covered));
         }
         rules.push(OwnerRule {
-            name: &rule.name,
+            label: heki_env::contract_label("write-owners", index, &rule.name),
             targets,
             allowance,
             forbid_cached,
@@ -2664,11 +2665,11 @@ pub(crate) fn mut201(
                                 format!(
                                     "`{}` writes `{named}` ({}){via}{unlisted} {}",
                                     judged.qualname,
-                                    site.kind.as_str(),
+                                    site.kind.describe(),
                                     rule.allowance.where_text(
                                         "write owners",
                                         "forbidden writers",
-                                        rule.name
+                                        &rule.label
                                     )
                                 )
                             },
@@ -2704,8 +2705,8 @@ pub(crate) fn mut201(
                     &f.qualname,
                     format!("{owner}.{}", f.name),
                     format!(
-                        "`@cached_property` `{}` is defined on `{owner}`, which `{}` forbids caching on",
-                        f.name, rule.name
+                        "`@cached_property` `{}` is defined on `{owner}`, which {} forbids caching on",
+                        f.name, rule.label
                     ),
                     rule.note.map(str::to_owned),
                     &[],
@@ -4010,7 +4011,8 @@ pub(crate) fn mut106(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
 // ==================================================================================== MUT203
 
 struct ReadOwnerRule<'r> {
-    name: &'r str,
+    /// How a report names the contract ([`heki_env::contract_label`]).
+    label: String,
     targets: Vec<ContractTarget>,
     allowance: Allowance,
     note: Option<&'r str>,
@@ -4111,9 +4113,9 @@ pub(crate) fn mut203<'c>(
     }
     let all_classes = project_classes(cx);
     let mut rules = Vec::new();
-    for rule in &cx.config.read_owners {
+    for (index, rule) in cx.config.read_owners.iter().enumerate() {
         rules.push(ReadOwnerRule {
-            name: &rule.name,
+            label: heki_env::contract_label("read-owners", index, &rule.name),
             targets: parse_read_targets(
                 cx,
                 &all_classes,
@@ -4221,11 +4223,11 @@ pub(crate) fn mut203<'c>(
                                 format!(
                                     "`{}` reads `{named}` ({}){via} {}",
                                     r.func.qualname,
-                                    read.kind.as_str(),
+                                    read.kind.describe(),
                                     rule.allowance.where_text(
                                         "read owners",
                                         "forbidden readers",
-                                        rule.name
+                                        &rule.label
                                     )
                                 )
                             },

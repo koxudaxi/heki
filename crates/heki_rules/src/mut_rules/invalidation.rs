@@ -98,10 +98,10 @@ pub(crate) fn run(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) -> Result<()
                     rule.message.as_deref(),
                     || {
                         format!(
-                            "`{}` writes `{named}` ({}){via} and returns on some path without calling an invalidator of `{}`",
+                            "`{}` writes `{named}` ({}){via} and returns on some path without calling an invalidator of {}",
                             key.qualname,
-                            u.kind.as_str(),
-                            rule.name
+                            u.kind.describe(),
+                            heki_env::contract_label("invalidation", usize::from(u.contract), &rule.name)
                         )
                     },
                     || heki_effect::owned_chain(&u.via_chain),
