@@ -4702,6 +4702,47 @@ fn objects_past_the_construction_budget_are_not_new() {
     assert_eq!(writes(&found), 1);
 }
 
+/// A function constructing an object, handing it to hundreds of project helpers, each call
+/// under its own `if`, then writing its attribute: the data flow of what may keep the object
+/// holds, at each block, the objects handed to every helper before it, so it grows with the
+/// blocks times the helpers and passes the budget, and the write is reported. With a few
+/// helpers it constructs its object and is allowed.
+#[test]
+fn objects_handed_to_many_helpers_pass_the_construction_budget() {
+    let shape = |helpers: usize| {
+        let mut lines = vec![
+            "class Model:".to_owned(),
+            "    def __init__(self):".to_owned(),
+            "        self.attr = 0".to_owned(),
+        ];
+        for i in 0..helpers {
+            lines.push(format!("def keep{i}(m):"));
+            lines.push("    return 1".to_owned());
+        }
+        lines.push("def build(flags):".to_owned());
+        lines.push("    m = Model()".to_owned());
+        for i in 0..helpers {
+            lines.push(format!("    if flags[{i}]:"));
+            lines.push(format!("        keep{i}(m)"));
+        }
+        lines.push("    m.attr = 1".to_owned());
+        lines.push("    return m".to_owned());
+        let p = Project::new(&format!("bounds_construction_helpers_{helpers}"));
+        p.write(
+            "pyproject.toml",
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT201\"]\n\n\
+             [[tool.heki.write-owners]]\nname = \"attrs\"\ntargets = [\"m.Model.attr\"]\n\
+             allowed-writers = [\"m.Model.*\"]\n",
+        )
+        .write("m.py", &(lines.join("\n") + "\n"));
+        p
+    };
+    let writes = |found: &[Value]| found.iter().filter(|d| d["rule_code"] == "MUT201").count();
+    assert_eq!(writes(&check(&shape(64))), 0);
+    let found = check_past_budgets(512, &["construction::Recorder"], shape);
+    assert_eq!(writes(&found), 1);
+}
+
 /// A function of thousands of parameters a nested function captures: the walk to the values
 /// that may be grown starts from each captured variable, and past its budget anything may be
 /// grown, so the module list the function reads is no constant, and another function's query
@@ -4965,6 +5006,48 @@ fn writes_before_many_calls_follow_the_calls_after_them_once() {
     assert_eq!(
         found.iter().filter(|d| d["rule_code"] == "MUT109").count(),
         4_000
+    );
+}
+
+/// A loop over two thousand `if` statements, each writing an invalidation target and calling a
+/// helper, every other one announcing the write (`MUT109`): what every path from a point
+/// announces is a data flow over the blocks, and the next call on every path comes from the
+/// post-dominators, each block visited a bounded number of times. The writes announced on no
+/// path past them are reported.
+#[test]
+fn writes_under_many_branches_of_a_loop_decide_each_block_a_few_times() {
+    let shape = |writes: usize| {
+        let mut lines = vec![
+            "class Model:".to_owned(),
+            "    def __init__(self):".to_owned(),
+            "        self.value = 0".to_owned(),
+            "def helper():".to_owned(),
+            "    pass".to_owned(),
+            "def notify():".to_owned(),
+            "    pass".to_owned(),
+            "def touch(model: Model, items):".to_owned(),
+            "    for i in items:".to_owned(),
+        ];
+        for i in 0..writes {
+            lines.push(format!("        if i == {i}:"));
+            lines.push(format!("            model.value = {i}"));
+            lines.push("            helper()".to_owned());
+            if i % 2 == 0 {
+                lines.push("            notify()".to_owned());
+            }
+        }
+        let p = Project::new(&format!("bounds_writes_under_branches_{writes}"));
+        p.write(
+            "pyproject.toml",
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT109\"]\n\n[[tool.heki.invalidation]]\nname = \"m\"\ntargets = [\"Model.value\"]\ninvalidators = [\"m.notify\"]\n",
+        )
+        .write("m.py", &(lines.join("\n") + "\n"));
+        p
+    };
+    let found = check_linear(2_000, shape);
+    assert_eq!(
+        found.iter().filter(|d| d["rule_code"] == "MUT109").count(),
+        1_000
     );
 }
 

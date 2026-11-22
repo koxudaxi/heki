@@ -993,20 +993,8 @@ impl<'a> FnIndex<'a> {
             !origins.opaque && !kinds.is_empty() && kinds.iter().all(|k| *k == BuiltinKind::Dict);
         let mut added: u32 = 0;
         let mut ops = Vec::new();
-        // Only what reads an alias can grow it: the instructions and terminators reading one, in
-        // block order (the questions they ask keep the order of a scan of the function).
-        let mut reading: Vec<(BlockId, Option<usize>)> = (alias.iter())
-            .flat_map(|v| self.shape.readers(*v))
-            .filter_map(|u| match *u {
-                Use::Inst(b, i) => Some((b, Some(i as usize))),
-                Use::Terminator(b) => Some((b, None)),
-                Use::Phi(..) => None,
-            })
-            .filter(|(b, _)| within.is_none_or(|w| w.get(b.0 as usize).copied().unwrap_or(false)))
-            .collect();
-        // A block's terminator comes after its instructions.
-        reading.sort_unstable_by_key(|(b, i)| (*b, i.is_none(), *i));
-        reading.dedup();
+        // Only what reads an alias can grow it.
+        let reading = self.reading(&alias, within);
         budget.take(reading.len()).then_some(())?;
         for (b, at) in reading {
             let bb = self.f.block(b);
@@ -1062,6 +1050,29 @@ impl<'a> FnIndex<'a> {
         };
         self.growth(&origins, sink.map(|(b, i)| Sink::Store(b, i)), None)
             .is_none()
+    }
+
+    /// The instructions (`Some` index) and terminators (`None`) reading one of `alias`, in the
+    /// blocks of `within` (by block id, all when `None`), in block order: the questions they
+    /// ask keep the order of a scan of the function.
+    fn reading(
+        &self,
+        alias: &FxHashSet<VarId>,
+        within: Option<&[bool]>,
+    ) -> Vec<(BlockId, Option<usize>)> {
+        let mut reading: Vec<(BlockId, Option<usize>)> = (alias.iter())
+            .flat_map(|v| self.shape.readers(*v))
+            .filter_map(|u| match *u {
+                Use::Inst(b, i) => Some((b, Some(i as usize))),
+                Use::Terminator(b) => Some((b, None)),
+                Use::Phi(..) => None,
+            })
+            .filter(|(b, _)| within.is_none_or(|w| w.get(b.0 as usize).copied().unwrap_or(false)))
+            .collect();
+        // A block's terminator comes after its instructions.
+        reading.sort_unstable_by_key(|(b, i)| (*b, i.is_none(), *i));
+        reading.dedup();
+        reading
     }
 
     /// The variables that may hold the objects of `roots`: they, and the copies and phis of

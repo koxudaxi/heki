@@ -8,7 +8,6 @@ heki_effect::cache_flow::attr_write_ops  W3  passes until nothing changes: fixpo
 heki_effect::callgraph::propagate_with_budget  W2  worklist: reach, Closure, or fixpoint
 heki_effect::callgraph::scc_closure  W2  worklist: reach, Closure, or fixpoint
 heki_effect::capacity::ParamCapacities::of  W2  worklist: fixpoint; stage-2 migration debt
-heki_effect::construction::Recorder::resolve  W3  a forward data flow over the blocks in reverse postorder whose states only grow: passes bounded by the loop nesting
 heki_effect::consumption::expand_through  W2  worklist: reach, Closure, or fixpoint
 heki_effect::guards::Facts::decompose_at  W1  recursion (calls itself): Memo or Closure
 heki_effect::guards::Facts::find_tests  W2  worklist: reach, Closure, or fixpoint
@@ -29,9 +28,6 @@ heki_effect::infer::TypeCtx::child_output  W1  recursion (through Engine::run, E
 heki_effect::invalidation::Flags::depends_on_flag  W1  recursion (calls itself): Memo or Closure
 heki_effect::invalidation::Flags::of  W3  passes until nothing changes: fixpoint
 heki_effect::invalidation::Flags::value_in  W1  recursion (calls itself): Memo or Closure
-heki_effect::invalidation::analyze  W3  a backward data flow of one contract mask per block in postorder: passes bounded by the loop nesting
-heki_effect::invalidation::flag_covered  W3  a backward data flow over at most MAX_FLAG_STATES states
-heki_effect::invalidation::post_dominators  W3  Cooper, Harvey, and Kennedy's dominators in postorder: passes bounded by the loop nesting
 heki_effect::iterations::continuing_body  W2  worklist: reach, Closure, or fixpoint
 heki_effect::iterations::resumed  W2  worklist: reach, Closure, or fixpoint
 heki_effect::locks::BlockTests::common  W1  stage-2 debt (EFF109): recursion (calls itself): Memo or Closure
@@ -134,7 +130,6 @@ heki_ir::facts::FnIndex::decide_display  W1  recursion (through FnIndex::contain
 heki_ir::facts::FnIndex::display_at  W1  recursion (through FnIndex::container_bound_nested, FnIndex::decide_bound, FnIndex::decide_display and 13 more): Memo or Closure
 heki_ir::facts::FnIndex::fixed_trip  W1  recursion (through FnIndex::container_bound_nested, FnIndex::decide_bound, FnIndex::display_at and 13 more): Memo or Closure
 heki_ir::facts::FnIndex::grows  W1  recursion (through FnIndex::container_bound_nested, FnIndex::decide_bound, FnIndex::display_at and 13 more): Memo or Closure
-heki_ir::facts::FnIndex::growth  W1  recursion (through FnIndex::container_bound_nested, FnIndex::decide_bound, FnIndex::display_at and 13 more): Memo or Closure
 heki_ir::facts::FnIndex::guarded_len  W1  recursion (through FnIndex::container_bound_nested, FnIndex::decide_bound, FnIndex::display_at and 13 more): Memo or Closure
 heki_ir::facts::FnIndex::implied_caps  W1  recursion (through FnIndex::caps_on_the_way): Memo or Closure
 heki_ir::facts::FnIndex::inst_origins  W1  recursion (through FnIndex::container_bound_nested, FnIndex::decide_bound, FnIndex::display_at and 13 more): Memo or Closure
@@ -182,7 +177,6 @@ heki_rules::opt_rules::forward_aliases  W3  passes until nothing changes: fixpoi
 heki_rules::opt_rules::runs_again  W2  worklist: reach, Closure, or fixpoint
 heki_soundness::interpreter::FnCtx::exact_on_every_path_in  W1  recursion (calls itself): Memo or Closure
 heki_soundness::interpreter::FnCtx::possible_kinds_depth  W1  recursion (calls itself): Memo or Closure
-heki_soundness::liveness::Liveness::compute  W3  backward liveness in postorder: passes bounded by the loop nesting, the sets of the blocks by the proof-state budget (`state_fits`)
 heki_soundness::obligations::Checker::defined_in  W1  recursion (calls itself): Memo or Closure
 heki_soundness::obligations::Checker::definitely_bound  W2  worklist: reach, Closure, or fixpoint
 heki_soundness::obligations::Checker::name  W1  recursion (calls itself): Memo or Closure

@@ -18,7 +18,7 @@ use crate::{
     CallSite, Delivery, EffectSummary, Facts, FuncKey, ProjectIndex, SharedChain, WriteKind,
 };
 use heki_ast::Span;
-use heki_ir::walk::{Budget, FnShape};
+use heki_ir::walk::{self, And, Answer, Budget, FnShape, Sparse, Visit, fixpoint, reach};
 use heki_ir::{BlockId, ConstLiteral, InstKind, IrFunction, Terminator, VarId};
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
@@ -385,34 +385,24 @@ pub(crate) fn analyze(
             *mask = later;
         }
     }
-    // Contracts covered from the start of each block: a greatest fixpoint from `all`, so
-    // paths that never return (and loops before a return) add no obligation.
-    let mut cov_in = vec![all; n];
-    let order: Vec<usize> = shape.rpo().iter().rev().map(|b| b.0 as usize).collect();
-    let cov_out = |b: usize, cov_in: &[u64]| -> u64 {
+    let budget = Budget::of_function("invalidation::analyze", f);
+    let solved = covered_in(shape, &succ, &block_inv, all, &budget).and_then(|cov_in| {
+        // Post-dominators only find the next call; without calls there is none to find.
+        let ipdom = if events.calls.is_empty() {
+            Answer::Known(vec![None; n])
+        } else {
+            post_dominators(&succ, &budget)
+        };
+        ipdom.map(|ipdom| (cov_in, ipdom))
+    });
+    // Past the budget no write is known to go unannounced: every point announces every contract.
+    let unknown = if solved.is_open() { all } else { 0 };
+    let (cov_in, ipdom) = solved.open_means((vec![all; n], vec![None; n]));
+    let cov_out = |b: usize| -> u64 {
         match &succ[b] {
             None => 0,
             Some(s) => s.iter().fold(all, |acc, t| acc & cov_in[*t]),
         }
-    };
-    loop {
-        let mut changed = false;
-        for &b in &order {
-            let v = block_inv[b] | cov_out(b, &cov_in);
-            if v != cov_in[b] {
-                cov_in[b] = v;
-                changed = true;
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
-    // Post-dominators only find the next call; without calls there is none to find.
-    let ipdom = if events.calls.is_empty() {
-        vec![None; n]
-    } else {
-        post_dominators(&succ)
     };
 
     let mut calls_at: Vec<Vec<(usize, usize)>> = vec![Vec::new(); n];
@@ -451,11 +441,13 @@ pub(crate) fn analyze(
             next_from[b] = Some(found);
         }
     }
+    let searches = Budget::unmetered("invalidation::flag_covered");
     // The flow after instruction `after` of block `b` (`None`: from the block's start).
     let flow_at = |b: usize, after: Option<usize>| -> SiteFlow {
-        let mut invalidated = inv_after(b, after) | cov_out(b, &cov_in);
+        let mut invalidated = unknown | inv_after(b, after) | cov_out(b);
         if has_flags && invalidated != all {
-            invalidated |= flag_covered(f, &conds, &succ, &inv_after, all, b, after);
+            let point = (b, after);
+            invalidated |= flag_covered(f, &conds, &succ, &inv_after, all, point, &searches);
         }
         let first = after.map_or(0, |a| calls_at[b].partition_point(|(i, _)| *i <= a));
         let next = calls_at[b].get(first).map(|c| c.1).or_else(|| {
@@ -481,12 +473,72 @@ pub(crate) fn analyze(
     (entry, calls, writes)
 }
 
+/// The contracts covered from the start of each block (`block_inv`: those each block announces
+/// itself): a greatest fixpoint over the normal edges `succ`, each block starting from `all`,
+/// so that paths that never return (and loops before a return) add no obligation. A block the
+/// entry does not reach keeps `all`. Open past the budget.
+fn covered_in(
+    shape: &FnShape<'_>,
+    succ: &[Option<Vec<usize>>],
+    block_inv: &[u64],
+    all: u64,
+    budget: &Budget,
+) -> Answer<Vec<u64>> {
+    let n = succ.len();
+    // The blocks in postorder, so that a block is first visited after its successors.
+    let order: Vec<usize> = shape.rpo().iter().rev().map(|b| b.0 as usize).collect();
+    let mut node = vec![usize::MAX; n];
+    for (i, b) in order.iter().enumerate() {
+        node[*b] = i;
+    }
+    let mut preds: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (b, s) in succ.iter().enumerate() {
+        for t in s.iter().flatten() {
+            preds[*t].push(b);
+        }
+    }
+    let readers = |i: usize, out: &mut Vec<usize>| {
+        out.extend(
+            preds[order[i]]
+                .iter()
+                .map(|p| node[*p])
+                .filter(|j| *j != usize::MAX),
+        );
+    };
+    let transfer = |i: usize, covered: &walk::Facts<And>| {
+        let b = order[i];
+        let rest = match &succ[b] {
+            None => 0,
+            Some(s) => s.iter().fold(all, |acc, t| {
+                acc & covered.get(node[*t]).map_or(all, |c| c.0)
+            }),
+        };
+        Some(And(block_inv[b] | rest))
+    };
+    // A block is visited once, then once per fact a successor gets or bit it loses.
+    let spec = Sparse {
+        nodes: order.len(),
+        readers: &readers,
+        max_visits: 1 + 2 * (1 + 64),
+    };
+    fixpoint(budget, spec, transfer).map(|covered| {
+        (0..n)
+            .map(|b| covered.get(node[b]).map_or(all, |c| c.0))
+            .collect()
+    })
+}
+
 /// The immediate post-dominator of each block over the normal edges `succ` (`None`: a normal
 /// return), towards a virtual exit (index `succ.len()`) after every return; `None` for a block
-/// from which no return is reachable.
-fn post_dominators(succ: &[Option<Vec<usize>>]) -> Vec<Option<usize>> {
+/// from which no return is reachable. Lengauer and Tarjan's algorithm over the edges reversed,
+/// from the exit: the blocks are numbered depth first, then each is visited once in the reverse
+/// order, so no pass repeats. A step per block, edge, and link compressed; open past the budget.
+fn post_dominators(succ: &[Option<Vec<usize>>], budget: &Budget) -> Answer<Vec<Option<usize>>> {
+    const NONE: usize = usize::MAX;
     let n = succ.len();
     let exit = n;
+    // Edges reversed: from each block to those with an edge to it, from the exit to every
+    // block that returns.
     let mut preds: Vec<Vec<usize>> = vec![Vec::new(); n + 1];
     for (b, s) in succ.iter().enumerate() {
         match s {
@@ -494,56 +546,95 @@ fn post_dominators(succ: &[Option<Vec<usize>>]) -> Vec<Option<usize>> {
             Some(s) => s.iter().for_each(|t| preds[*t].push(b)),
         }
     }
-    // Post-order of the reversed graph from the exit.
-    let mut post = vec![usize::MAX; n + 1];
-    let mut order = Vec::with_capacity(n + 1);
-    let mut stack = vec![(exit, false)];
-    let mut seen = vec![false; n + 1];
-    while let Some((x, done)) = stack.pop() {
-        if done {
-            post[x] = order.len();
-            order.push(x);
-        } else if !std::mem::replace(&mut seen[x], true) {
-            stack.push((x, true));
-            stack.extend(preds[x].iter().filter(|p| !seen[**p]).map(|p| (*p, false)));
+    // Depth-first numbers from the exit, each block's parent in that tree, and the blocks by
+    // number.
+    let mut number = vec![NONE; n + 1];
+    let mut block = Vec::with_capacity(n + 1);
+    let mut parent = Vec::with_capacity(n + 1);
+    let mut stack = vec![(exit, NONE)];
+    while let Some((x, from)) = stack.pop() {
+        if number[x] != NONE {
+            continue;
+        }
+        number[x] = block.len();
+        block.push(x);
+        parent.push(from);
+        stack.extend(preds[x].iter().rev().map(|p| (*p, number[x])));
+    }
+    let count = block.len();
+    let mut steps = count + preds.iter().map(Vec::len).sum::<usize>();
+    let to_exit = [exit];
+    // The numbers of the blocks with an edge into block number `w` (not the exit) on the
+    // reversed edges: its successors, the exit for a return.
+    let into = |w: usize| {
+        let targets: &[usize] = succ[block[w]].as_deref().unwrap_or(&to_exit);
+        targets.iter().map(|t| number[*t]).filter(|v| *v != NONE)
+    };
+    // By number: the semidominator, the ancestor linked in the forest, and the number of
+    // smallest semidominator on the compressed path to that ancestor.
+    let mut semi: Vec<usize> = (0..count).collect();
+    let mut ancestor = vec![NONE; count];
+    let mut best: Vec<usize> = (0..count).collect();
+    let mut idom = vec![NONE; count];
+    let mut same = vec![NONE; count];
+    let mut bucket: Vec<Vec<usize>> = vec![Vec::new(); count];
+    let mut path = Vec::new();
+    // The number of the smallest semidominator on the forest path above `v`, the path
+    // compressed on the way.
+    let mut lowest = |v: usize, ancestor: &mut [usize], best: &mut [usize], semi: &[usize]| {
+        let mut x = v;
+        while ancestor[ancestor[x]] != NONE {
+            path.push(x);
+            x = ancestor[x];
+        }
+        steps += path.len();
+        for u in path.drain(..).rev() {
+            let a = ancestor[u];
+            if semi[best[a]] < semi[best[u]] {
+                best[u] = best[a];
+            }
+            ancestor[u] = ancestor[a];
+        }
+        best[v]
+    };
+    for w in (1..count).rev() {
+        let p = parent[w];
+        let mut s = p;
+        for v in into(w) {
+            let candidate = if v <= w {
+                v
+            } else {
+                semi[lowest(v, &mut ancestor, &mut best, &semi)]
+            };
+            s = s.min(candidate);
+        }
+        semi[w] = s;
+        bucket[s].push(w);
+        ancestor[w] = p;
+        for v in std::mem::take(&mut bucket[p]) {
+            let y = lowest(v, &mut ancestor, &mut best, &semi);
+            if semi[y] == semi[v] {
+                idom[v] = p;
+            } else {
+                same[v] = y;
+            }
+        }
+    }
+    for w in 1..count {
+        if same[w] != NONE {
+            idom[w] = idom[same[w]];
         }
     }
     let mut ipdom: Vec<Option<usize>> = vec![None; n + 1];
     ipdom[exit] = Some(exit);
-    let intersect = |mut a: usize, mut b: usize, ipdom: &[Option<usize>]| {
-        while a != b {
-            while post[a] < post[b] {
-                a = ipdom[a].expect("processed nodes have post-dominators");
-            }
-            while post[b] < post[a] {
-                b = ipdom[b].expect("processed nodes have post-dominators");
-            }
-        }
-        a
-    };
-    let to_exit = [exit];
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for &x in order.iter().rev().filter(|x| **x != exit) {
-            let targets: &[usize] = succ[x].as_deref().unwrap_or(&to_exit);
-            let new = targets
-                .iter()
-                .filter(|t| ipdom[**t].is_some())
-                .fold(None, |acc: Option<usize>, t| {
-                    Some(acc.map_or(*t, |c| intersect(*t, c, &ipdom)))
-                });
-            if ipdom[x] != new {
-                ipdom[x] = new;
-                changed = true;
-            }
-        }
+    for w in 1..count {
+        ipdom[block[w]] = Some(block[idom[w]]);
     }
-    ipdom
+    (budget.take(steps).then_some(ipdom)).map_or(Answer::Open, Answer::Known)
 }
 
 /// The contracts announced on every feasible path from the point after instruction `after` of
-/// block `b`, with the flags a path sets (see [`Flags`]); `0` (nothing more than the
+/// block `b` (`point`), with the flags a path sets (see [`Flags`]); `0` (nothing more than the
 /// flag-insensitive answer) when the search exceeds [`MAX_FLAG_STATES`].
 fn flag_covered(
     f: &IrFunction,
@@ -551,19 +642,16 @@ fn flag_covered(
     succ: &[Option<Vec<usize>>],
     inv_after: &dyn Fn(usize, Option<usize>) -> u64,
     all: u64,
-    b: usize,
-    after: Option<usize>,
+    (b, after): (usize, Option<usize>),
+    budget: &Budget,
 ) -> u64 {
-    // States: the start point, then `(block, flags)` on entering a block.
+    // States: the start point, then `(block, flags)` on entering a block; the states each one
+    // leads to (`None`: a normal return).
     let mut states: Vec<(usize, FlagEnv)> = vec![(b, Vec::new())];
     let mut index: FxHashMap<(usize, FlagEnv), usize> = FxHashMap::default();
-    let mut edges: Vec<Option<Vec<usize>>> = Vec::new();
-    let mut i = 0;
-    while i < states.len() {
-        if states.len() > MAX_FLAG_STATES {
-            return 0;
-        }
-        let (block, env) = states[i].clone();
+    let mut edges: Vec<Option<Vec<usize>>> = vec![None];
+    let next = |s: usize, out: &mut Vec<usize>| {
+        let (block, env) = states[s].clone();
         let targets: Option<Vec<usize>> = match &f.blocks[block].terminator {
             Terminator::Branch {
                 cond,
@@ -576,40 +664,63 @@ fn flag_covered(
             },
             _ => succ[block].clone(),
         };
-        let mut out = Vec::new();
+        let from = BlockId(u32::try_from(block).unwrap_or(0));
+        let mut ids = Vec::new();
         for t in targets.iter().flatten() {
-            let next = (
-                *t,
-                flags.enter(BlockId(u32::try_from(block).unwrap_or(0)), *t, &env),
-            );
-            let id = *index.entry(next.clone()).or_insert_with(|| {
-                states.push(next);
+            let state = (*t, flags.enter(from, *t, &env));
+            let id = *index.entry(state.clone()).or_insert_with(|| {
+                states.push(state);
+                edges.push(None);
                 states.len() - 1
             });
-            out.push(id);
+            ids.push(id);
         }
-        edges.push(targets.map(|_| out));
-        i += 1;
+        out.extend(&ids);
+        edges[s] = targets.map(|_| ids);
+    };
+    let mut visited = 0;
+    let searched = reach(budget, [0], next, |_| {
+        visited += 1;
+        if visited > MAX_FLAG_STATES {
+            Visit::Stop(())
+        } else {
+            Visit::Expand
+        }
+    });
+    if !matches!(searched, Answer::Known(None)) {
+        return 0;
     }
-    // A greatest fixpoint over the states, as for the blocks.
-    let mut cov = vec![all; states.len()];
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for (s, (block, _)) in states.iter().enumerate().rev() {
-            let own = inv_after(*block, if s == 0 { after } else { None });
-            let rest = match &edges[s] {
-                None => 0,
-                Some(out) => out.iter().fold(all, |acc, t| acc & cov[*t]),
-            };
-            let v = own | rest;
-            if v != cov[s] {
-                cov[s] = v;
-                changed = true;
-            }
+    // A greatest fixpoint over the states, as for the blocks; the later states first.
+    let last = states.len() - 1;
+    let mut preds: Vec<Vec<usize>> = vec![Vec::new(); states.len()];
+    for (s, out) in edges.iter().enumerate() {
+        for t in out.iter().flatten() {
+            preds[*t].push(s);
         }
     }
-    cov[0]
+    let readers = |i: usize, out: &mut Vec<usize>| {
+        out.extend(preds[last - i].iter().map(|s| last - s));
+    };
+    let transfer = |i: usize, covered: &walk::Facts<And>| {
+        let s = last - i;
+        let own = inv_after(states[s].0, if s == 0 { after } else { None });
+        let rest = match &edges[s] {
+            None => 0,
+            Some(out) => out.iter().fold(all, |acc, t| {
+                acc & covered.get(last - t).map_or(all, |c| c.0)
+            }),
+        };
+        Some(And(own | rest))
+    };
+    // A state is visited once, then once per fact a successor gets or bit it loses.
+    let spec = Sparse {
+        nodes: states.len(),
+        readers: &readers,
+        max_visits: 1 + 2 * (1 + 64),
+    };
+    let covered = fixpoint(budget, spec, transfer).map(|c| c.get(last).map_or(0, |c| c.0));
+    // Unmetered and within the visit limit, the search is never open.
+    covered.open_means(0)
 }
 
 /// The contracts announced after points of the project's functions ([`Self::after`]). What the
@@ -920,4 +1031,91 @@ fn shortest_chains(set: BTreeSet<UnmetWrite>) -> BTreeSet<UnmetWrite> {
     all.sort_by_key(|w| (key(w), w.via_chain.len()));
     all.dedup_by_key(|w| key(w));
     all.into_iter().collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::post_dominators;
+    use heki_ir::walk::{Answer, Budget};
+
+    /// The immediate post-dominators of `succ` from their definition: `d` post-dominates `b`
+    /// when every path from `b` to the exit runs through `d`, and the nearest is the one every
+    /// other strict post-dominator of `b` post-dominates.
+    fn by_definition(succ: &[Option<Vec<usize>>]) -> Vec<Option<usize>> {
+        let n = succ.len();
+        let exit = n;
+        let next = |b: usize| -> Vec<usize> { succ[b].clone().unwrap_or_else(|| vec![exit]) };
+        // Whether a path from `b` reaches the exit without running through `avoid`.
+        let escapes = |b: usize, avoid: Option<usize>| {
+            let mut seen = vec![false; n + 1];
+            let mut stack = vec![b];
+            while let Some(x) = stack.pop() {
+                if Some(x) == avoid || std::mem::replace(&mut seen[x], true) {
+                    continue;
+                }
+                if x == exit {
+                    return true;
+                }
+                stack.extend(next(x));
+            }
+            false
+        };
+        let pdoms = |b: usize| -> Vec<usize> {
+            let mut out: Vec<usize> = (0..n).filter(|d| *d != b && !escapes(b, Some(*d))).collect();
+            out.push(exit);
+            out
+        };
+        (0..=n)
+            .map(|b| {
+                if b == exit {
+                    return Some(exit);
+                }
+                if !escapes(b, None) {
+                    return None;
+                }
+                let strict = pdoms(b);
+                strict.iter().copied().find(|d| {
+                    *d == exit && strict.len() == 1
+                        || *d != exit && strict.iter().all(|o| o == d || pdoms(*d).contains(o))
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn post_dominators_are_those_every_path_to_a_return_runs_through() {
+        let mut seed: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut below = |m: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % m as u64) as usize
+        };
+        for _ in 0..3_000 {
+            let n = 1 + below(10);
+            let succ: Vec<Option<Vec<usize>>> = (0..n)
+                .map(|_| match below(8) {
+                    0 => None,
+                    1 => Some(Vec::new()),
+                    _ => Some((0..1 + below(2)).map(|_| below(n)).collect()),
+                })
+                .collect();
+            let found = post_dominators(&succ, &Budget::unmetered("test"));
+            assert_eq!(found, Answer::Known(by_definition(&succ)), "{succ:?}");
+        }
+    }
+
+    #[test]
+    fn a_deep_chain_of_blocks_is_numbered_without_recursion() {
+        let n = 200_000;
+        let succ: Vec<Option<Vec<usize>>> = (0..n)
+            .map(|i| if i + 1 < n { Some(vec![i + 1]) } else { None })
+            .collect();
+        let found = post_dominators(&succ, &Budget::unmetered("test"));
+        let Answer::Known(ipdom) = found else {
+            panic!("an unmetered budget is never spent");
+        };
+        assert_eq!(ipdom[0], Some(1));
+        assert_eq!(ipdom[n - 1], Some(n));
+    }
 }

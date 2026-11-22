@@ -12,7 +12,7 @@
 //! nothing kept so far, under conditions on the callees, which propagation resolves.
 
 use crate::{FuncKey, NewArg, NewCond, NewKind};
-use heki_ir::walk::{Answer, Budget, Closure, Def, FnShape, Or};
+use heki_ir::walk::{Answer, Budget, Closure, Def, Facts, FnShape, Join, Or, Sparse, fixpoint};
 use heki_ir::{InstKind, VarId};
 use rustc_hash::FxHashMap;
 
@@ -57,13 +57,9 @@ struct State {
     handed: Vec<(u64, u64)>,
 }
 
-impl State {
-    fn join(&mut self, other: &Self) {
-        self.absorb(other);
-    }
-
-    /// `self |= other`; whether it grew.
-    fn absorb(&mut self, other: &Self) -> bool {
+/// What may be kept on some path: the union of the states joined.
+impl Join for State {
+    fn join(&mut self, other: &Self) -> bool {
         let before = (self.allocs, self.params);
         self.allocs |= other.allocs;
         self.params |= other.params;
@@ -75,6 +71,10 @@ impl State {
             grew |= was != *a;
         }
         grew
+    }
+
+    fn weight(&self) -> usize {
+        1 + self.handed.len()
     }
 }
 
@@ -169,16 +169,24 @@ impl Recorder {
         if !self.queries.iter().any(|(_, v)| trackable(*v)) && !any_return_new {
             return (vec![NewArg::Old; self.queries.len()], None);
         }
-        // Hand-over ids.
-        let mut handed_ids: FxHashMap<(u32, u16, u8), usize> = FxHashMap::default();
-        let mut handed_keys: Vec<(u32, u16, u8)> = Vec::new();
+        // Hand-over ids, one per callee and parameter: the answers name only those, so the
+        // calls of one helper share a hand-over.
+        let mut handed_ids: FxHashMap<(FuncKey, u8), usize> = FxHashMap::default();
+        let mut handed_keys: Vec<(FuncKey, u8)> = Vec::new();
+        let mut escape_ids: Vec<Option<usize>> = Vec::with_capacity(self.escapes.len());
         for (_, _, how) in &self.escapes {
-            if let Escape::Handed(s, c, p) = how
-                && !handed_ids.contains_key(&(*s, *c, *p))
-            {
-                handed_ids.insert((*s, *c, *p), handed_keys.len());
-                handed_keys.push((*s, *c, *p));
-            }
+            escape_ids.push(match how {
+                Escape::Definite => None,
+                Escape::Handed(s, c, p) => {
+                    let key = (callee_of(*s, *c), *p);
+                    let next = handed_keys.len();
+                    let id = *handed_ids.entry(key.clone()).or_insert(next);
+                    if id == next {
+                        handed_keys.push(key);
+                    }
+                    Some(id)
+                }
+            });
         }
         // Every action in position order (queries, escapes, kills at one position), and the
         // range of each block's actions.
@@ -192,11 +200,7 @@ impl Recorder {
         for (i, (pos, _)) in returned.iter().enumerate() {
             actions.push((*pos, 0, Action::Query(self.queries.len() + i)));
         }
-        for (pos, var, how) in &self.escapes {
-            let id = match how {
-                Escape::Definite => None,
-                Escape::Handed(s, c, p) => Some(handed_ids[&(*s, *c, *p)]),
-            };
+        for ((pos, var, _), id) in self.escapes.iter().zip(escape_ids) {
             actions.push((*pos, 1, Action::Escape(*var, id)));
         }
         for (r, a) in self.allocs.iter().enumerate() {
@@ -241,47 +245,73 @@ impl Recorder {
             }
             Action::Query(_) => {}
         };
-        // The forward data flow to a fixpoint (states only grow: kills apply inside a block).
-        // The two buffers are reused, so the iterations allocate nothing.
-        let mut block_in: Vec<State> = vec![empty.clone(); n];
-        let (mut state, mut exc) = (empty.clone(), empty);
-        loop {
-            let mut changed = false;
-            for &b in shape.rpo() {
-                let bi = b.0 as usize;
-                state.clone_from(&block_in[bi]);
-                exc.clone_from(&state);
-                for (_, _, action) in of(bi) {
-                    apply(&mut state, action);
-                    exc.join(&state);
+        // The forward data flow over the blocks the entry reaches, in reverse postorder: the
+        // state on entering a block joins what each predecessor may have kept on its way out,
+        // through its normal edges, and at any of its points through its exception edge. Kills
+        // apply inside a block, so the states only grow.
+        let rpo = shape.rpo();
+        let node = |b: heki_ir::BlockId| shape.rpo_index(b).map(|i| i as usize);
+        let out_of = |p: heki_ir::BlockId, facts: &Facts<State>| {
+            let mut state = node(p)
+                .and_then(|i| facts.get(i))
+                .map_or_else(|| empty.clone(), Clone::clone);
+            let mut exc = state.clone();
+            for (_, _, action) in of(p.0 as usize) {
+                apply(&mut state, action);
+                exc.join(&state);
+            }
+            (state, exc)
+        };
+        let transfer = |i: usize, facts: &Facts<State>| {
+            let b = rpo[i];
+            let mut entry = empty.clone();
+            for &p in shape.preds(b).iter().filter(|p| node(**p).is_some()) {
+                let (out, exc) = out_of(p, facts);
+                let pb = f.block(p);
+                if pb.terminator.successors().contains(&b) {
+                    entry.join(&out);
                 }
-                let block = f.block(b);
-                for succ in block.terminator.successors() {
-                    changed |= block_in[succ.0 as usize].absorb(&state);
-                }
-                if let Some(t) = block.exc_target {
-                    changed |= block_in[t.0 as usize].absorb(&exc);
+                if pb.exc_target == Some(b) {
+                    entry.join(&exc);
                 }
             }
-            if !changed {
-                break;
-            }
-        }
-        // Answer the queries with the state before each one.
+            Some(entry)
+        };
+        let readers = |i: usize, out: &mut Vec<usize>| {
+            out.extend(shape.succs(rpo[i]).filter_map(node));
+        };
+        // A block is visited once, then once per bit a predecessor's state gains.
+        let bits = 2 * 64 * (1 + handed_keys.len());
+        let most_preds = (rpo.iter().map(|b| shape.preds(*b).len()).max()).unwrap_or(0);
+        let spec = Sparse {
+            nodes: rpo.len(),
+            readers: &readers,
+            max_visits: u32::try_from(1 + most_preds * (1 + bits)).unwrap_or(u32::MAX),
+        };
+        // Past the budget, no object is known to be new, as past the roots' walk.
+        let Answer::Known(block_in) = fixpoint(&budget, spec, transfer) else {
+            return (vec![NewArg::Old; self.queries.len()], None);
+        };
+        // Answer the queries with the state before each one (a block the entry does not reach
+        // keeps nothing).
         let mut answers = vec![NewArg::Old; self.queries.len() + returned.len()];
-        for (bi, entry) in block_in.iter().enumerate() {
+        let mut state = empty.clone();
+        for (bi, block) in f.blocks.iter().enumerate() {
             let list = of(bi);
             if list.iter().all(|(_, _, a)| !matches!(a, Action::Query(_))) {
                 continue;
             }
-            state.clone_from(entry);
+            match node(block.id).and_then(|i| block_in.get(i)) {
+                Some(entry) => state.clone_from(entry),
+                None => state.clone_from(&empty),
+            }
             for (_, _, action) in list {
                 if let Action::Query(i) = action {
                     let var = match self.queries.get(*i) {
                         Some((_, v)) => *v,
                         None => returned[*i - self.queries.len()].1,
                     };
-                    answers[*i] = self.answer(&roots, &state, &handed_keys, callee_of, var);
+                    answers[*i] = self.answer(&roots, &state, &handed_keys, var);
                 } else {
                     apply(&mut state, action);
                 }
@@ -374,8 +404,7 @@ impl Recorder {
         &self,
         roots: &Roots<'_>,
         state: &State,
-        handed_keys: &[(u32, u16, u8)],
-        callee_of: &dyn Fn(u32, u16) -> FuncKey,
+        handed_keys: &[(FuncKey, u8)],
         var: VarId,
     ) -> NewArg {
         let (a, p) = roots.masks(var);
@@ -387,8 +416,7 @@ impl Recorder {
         let mut keeps = Vec::new();
         for (i, (ha, hp)) in state.handed.iter().enumerate() {
             if ha & a != 0 || hp & p != 0 {
-                let (s, c, k) = handed_keys[i];
-                keeps.push((callee_of(s, c), k));
+                keeps.push(handed_keys[i].clone());
             }
         }
         if let Some(param) = param {
