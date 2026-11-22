@@ -1,5 +1,6 @@
-//! Contract rules (`MUT109`, `MUT201`, `MUT204`, `EFF201`): which configured names match, which
-//! violations are reported, and what each report counts (end to end, through the real binary).
+//! Contract rules (`MUT109`, `MUT201`, `MUT203`, `MUT204`, `EFF201`): which configured names
+//! match, which violations are reported, and what each report counts (end to end, through the
+//! real binary).
 
 mod common;
 
@@ -433,6 +434,61 @@ fn a_private_recursion_no_other_function_calls_reports_its_own_accesses() {
     assert_eq!(lines("MUT204"), vec![11]);
     // A recursion without reads reports none.
     assert_eq!(lines("MUT203"), Vec::<u64>::new());
+}
+
+const HELPER_READS: &str = r#"class Model:
+    def __init__(self) -> None:
+        self.value = 0
+
+    def touch(self) -> None:
+        pass
+
+
+def _peek(m: Model, n: Model) -> int:
+    n.touch()
+    m.touch()
+    return m.value + n.value + m.value
+
+
+def run(m: Model, n: Model) -> int:
+    first = m.value
+    again = m.value
+    a = _peek(m, n)
+    b = _peek(n, m)
+    return a + b + first + again
+
+
+class Store:
+    def sync(self, m: Model, n: Model) -> int:
+        return _peek(m, n)
+"#;
+
+#[test]
+fn a_report_at_a_call_counts_each_access_the_helper_hands_over_once() {
+    let config = "[[tool.heki.read-owners]]\nname = \"readers\"\ntargets = [\"Model.value\"]\nallowed-readers = [\"app.Store.*\"]\n\n[[tool.heki.read-owners]]\nname = \"auditors\"\ntargets = [\"Model.value\"]\nallowed-readers = [\"app.Audit.*\"]\n\n[[tool.heki.call-owners]]\nname = \"touch\"\ntargets = [\"Model.touch\"]\nallowed-callers = [\"app.Store.*\"]\n";
+    let p = project("helper_reads_counted_once", config);
+    p.write("app.py", HELPER_READS);
+    let value = |line: u64, sites: u64| (line, "Model.value".to_owned(), sites);
+    // `run`'s own reads are one site each; each call of `_peek` stands for its three reads, of
+    // either parameter, which both contracts on `Model.value` report once.
+    assert_eq!(
+        reports(&p, "MUT203"),
+        vec![
+            value(16, 1),
+            value(17, 1),
+            value(18, 3),
+            value(19, 3),
+            value(25, 3)
+        ]
+    );
+    // `Store.sync` may call `touch`: only `run`'s calls of `_peek` stand for its two calls.
+    let touch = |line: u64| (line, "Model.touch".to_owned(), 2);
+    assert_eq!(reports(&p, "MUT204"), vec![touch(18), touch(19)]);
+    let (_, stdout, _) = p.check(&["--select", "MUT203", "--output-format", "concise"]);
+    assert!(
+        stdout.contains("`Store.sync` reads `Model.value` (direct_attr) via `app._peek` outside the read owners of `auditors`"),
+        "{stdout}"
+    );
 }
 
 #[test]

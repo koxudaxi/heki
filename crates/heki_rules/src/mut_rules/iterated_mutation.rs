@@ -24,7 +24,7 @@
 //! private one.
 
 use super::{Checked, Method, filter1_init, for_each_class_family, is_private, local_summary};
-use crate::{CheckContext, ModuleUnit};
+use crate::{CheckContext, ModuleUnit, SitesBySpan};
 use heki_ast::Span;
 use heki_diagnostics::{Diagnostic, RelatedLocation};
 use heki_effect::iterations::changed_at;
@@ -65,9 +65,6 @@ const READ_DUNDERS: &[&str] = &[
     "__reduce__",
     "__reduce_ex__",
 ];
-
-/// Call sites of one module by `(caller qualname, span)`.
-type SitesBySpan<'a> = FxHashMap<(String, Span), Vec<&'a CallSite>>;
 
 pub(super) fn run(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
     if !cx.selection.is_enabled("MUT113") {
@@ -176,9 +173,8 @@ impl<'a> LoopCalls<'a> {
             .enumerate()
             .map(|(i, span)| {
                 let changes: Vec<_> = sites
-                    .get(&(g.key.qualname.clone(), *span))
-                    .into_iter()
-                    .flatten()
+                    .at(&g.key.qualname, *span)
+                    .iter()
                     .flat_map(|site| changed_at(cx.index, site))
                     .collect();
                 let shared = suspending.get(span).into_iter().flatten().copied();

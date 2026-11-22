@@ -84,6 +84,160 @@ const READ_ONLY_BUILTINS: &[&str] = &[
     "zip",
 ];
 
+/// The names Python 3.11 binds in `builtins` (every later version binds them too), without the
+/// module dunders, sorted.
+const BUILTIN_NAMES: &[&str] = &[
+    "ArithmeticError",
+    "AssertionError",
+    "AttributeError",
+    "BaseException",
+    "BaseExceptionGroup",
+    "BlockingIOError",
+    "BrokenPipeError",
+    "BufferError",
+    "BytesWarning",
+    "ChildProcessError",
+    "ConnectionAbortedError",
+    "ConnectionError",
+    "ConnectionRefusedError",
+    "ConnectionResetError",
+    "DeprecationWarning",
+    "EOFError",
+    "Ellipsis",
+    "EncodingWarning",
+    "EnvironmentError",
+    "Exception",
+    "ExceptionGroup",
+    "False",
+    "FileExistsError",
+    "FileNotFoundError",
+    "FloatingPointError",
+    "FutureWarning",
+    "GeneratorExit",
+    "IOError",
+    "ImportError",
+    "ImportWarning",
+    "IndentationError",
+    "IndexError",
+    "InterruptedError",
+    "IsADirectoryError",
+    "KeyError",
+    "KeyboardInterrupt",
+    "LookupError",
+    "MemoryError",
+    "ModuleNotFoundError",
+    "NameError",
+    "None",
+    "NotADirectoryError",
+    "NotImplemented",
+    "NotImplementedError",
+    "OSError",
+    "OverflowError",
+    "PendingDeprecationWarning",
+    "PermissionError",
+    "ProcessLookupError",
+    "RecursionError",
+    "ReferenceError",
+    "ResourceWarning",
+    "RuntimeError",
+    "RuntimeWarning",
+    "StopAsyncIteration",
+    "StopIteration",
+    "SyntaxError",
+    "SyntaxWarning",
+    "SystemError",
+    "SystemExit",
+    "TabError",
+    "TimeoutError",
+    "True",
+    "TypeError",
+    "UnboundLocalError",
+    "UnicodeDecodeError",
+    "UnicodeEncodeError",
+    "UnicodeError",
+    "UnicodeTranslateError",
+    "UnicodeWarning",
+    "UserWarning",
+    "ValueError",
+    "Warning",
+    "ZeroDivisionError",
+    "abs",
+    "aiter",
+    "all",
+    "anext",
+    "any",
+    "ascii",
+    "bin",
+    "bool",
+    "breakpoint",
+    "bytearray",
+    "bytes",
+    "callable",
+    "chr",
+    "classmethod",
+    "compile",
+    "complex",
+    "copyright",
+    "credits",
+    "delattr",
+    "dict",
+    "dir",
+    "divmod",
+    "enumerate",
+    "eval",
+    "exec",
+    "exit",
+    "filter",
+    "float",
+    "format",
+    "frozenset",
+    "getattr",
+    "globals",
+    "hasattr",
+    "hash",
+    "help",
+    "hex",
+    "id",
+    "input",
+    "int",
+    "isinstance",
+    "issubclass",
+    "iter",
+    "len",
+    "license",
+    "list",
+    "locals",
+    "map",
+    "max",
+    "memoryview",
+    "min",
+    "next",
+    "object",
+    "oct",
+    "open",
+    "ord",
+    "pow",
+    "print",
+    "property",
+    "quit",
+    "range",
+    "repr",
+    "reversed",
+    "round",
+    "set",
+    "setattr",
+    "slice",
+    "sorted",
+    "staticmethod",
+    "str",
+    "sum",
+    "super",
+    "tuple",
+    "type",
+    "vars",
+    "zip",
+];
+
 /// Methods of the builtin containers that never add an item to their receiver (they read it,
 /// shrink it, reorder it, or return a new object).
 const NON_GROWING_METHODS: &[&str] = &[
@@ -259,17 +413,19 @@ pub struct ModuleConstants {
     /// `t.TYPE_CHECKING` for a name `t` bound to `import typing` (the dotted key).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub bools: BTreeMap<String, bool>,
-    /// Names of the builtins the facts rely on (`range`, `len`, ...) that the module rebinds.
+    /// Names of the builtins the module may rebind: those it stores or deletes as globals, and
+    /// all of them when it has a star import.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub shadowed: BTreeSet<String>,
     /// Module globals may be bound behind the IR (`exec`, or a change through the dict
     /// `globals()` returns: [`writes_globals`]): no name is fixed and no builtin is trusted.
-    /// (A `from m import *` only rebinds the public names bound before it.)
+    /// (A `from m import *` only rebinds the public names bound before it, and the builtins.)
     #[serde(default)]
     pub dynamic: bool,
 }
 
 impl ModuleConstants {
+    /// A global load of the builtin `name` in any code of the module finds the real builtin.
     fn trusts_builtin(&self, name: &str) -> bool {
         !self.dynamic && !self.shadowed.contains(name)
     }
@@ -1206,6 +1362,23 @@ impl<'a> FnIndex<'a> {
     /// attribute this module's constants do not cover (the Advisory lane knows other modules).
     pub fn iter_bound(&self, v: VarId, leaf: &mut dyn FnMut(&Inst) -> Option<u32>) -> Option<u32> {
         self.iter_bound_depth(v, leaf, 0, SMALL_MAX, &mut false)
+    }
+
+    /// [`Self::iter_bound`] as an index that has answered nothing yet gives it: the answers kept
+    /// for earlier questions are dropped, the function's tables stay. An owner asking the
+    /// function one question for each of its child scopes (the iterable each receives from it)
+    /// builds the tables once and answers each as if it asked first, which an answer kept from
+    /// another question may not: a size first reached past [`MAX_NESTED_SIZES`], or inside a
+    /// cycle of sizes, is kept as not fixed.
+    pub fn iter_bound_alone(
+        &self,
+        v: VarId,
+        leaf: &mut dyn FnMut(&Inst) -> Option<u32>,
+    ) -> Option<u32> {
+        self.bounds.take();
+        self.trips.take();
+        self.sink_displays.take();
+        self.iter_bound(v, leaf)
     }
 
     /// [`Self::iter_bound`] up to `cap` items. Past [`SMALL_MAX`] it also counts what holds any
@@ -2508,9 +2681,13 @@ fn module_constants(
             }
         }
     }
-    let shadowed: BTreeSet<String> = READ_ONLY_BUILTINS
+    // A star import binds the names the imported module exports, which heki does not read, so
+    // it may bind the name of any builtin. Builtins are trusted per module, not per statement:
+    // a function may run after the import wherever the import stands.
+    let star_import = last_star_import.is_some();
+    let shadowed: BTreeSet<String> = BUILTIN_NAMES
         .iter()
-        .filter(|b| stores.contains_key(**b) || deleted.contains(**b))
+        .filter(|b| star_import || stores.contains_key(**b) || deleted.contains(**b))
         .map(|b| (*b).to_owned())
         .collect();
     let mut out = ModuleConstants {
@@ -2742,23 +2919,66 @@ fn comprehension_results(
     out
 }
 
+/// The bounds of the iterables functions pass to the child scopes they create (a generator
+/// expression, a comprehension function before 3.12), where each creator evaluates them: one
+/// index per creator and one answer per iterable, however many child scopes a function creates.
+struct PassedBounds<'a> {
+    functions: &'a [IrFunction],
+    constants: &'a ModuleConstants,
+    creators: FxHashMap<FunctionId, FnIndex<'a>>,
+    bounds: FxHashMap<(FunctionId, VarId), Option<u32>>,
+}
+
+impl<'a> PassedBounds<'a> {
+    fn new(functions: &'a [IrFunction], constants: &'a ModuleConstants) -> Self {
+        Self {
+            functions,
+            constants,
+            creators: FxHashMap::default(),
+            bounds: FxHashMap::default(),
+        }
+    }
+
+    /// The bound of `it`, when it is the iterable `f` receives as `.0` from the function
+    /// creating it.
+    fn of(&mut self, f: &IrFunction, it: VarId) -> Option<u32> {
+        let (creator, iterable) = f.passed_from?;
+        (f.var_name(it) == Some(".0")).then_some(())?;
+        *self.bounds.entry((creator, iterable)).or_insert_with(|| {
+            self.creators
+                .entry(creator)
+                .or_insert_with(|| {
+                    FnIndex::new(&self.functions[creator.0 as usize], self.constants)
+                })
+                .iter_bound_alone(iterable, &mut |_| None)
+        })
+    }
+}
+
 /// One pass of [`refine_loops`] over the loops still `Unbounded` (and every loop's caps).
 fn refine_round(
     functions: &mut [IrFunction],
     hints: &[(FunctionId, Vec<LoopHint>)],
     constants: &ModuleConstants,
 ) {
+    for (fi, li, bound, caps) in refined_loops(functions, hints, constants) {
+        let lp = &mut functions[fi].loops[li];
+        lp.bound = bound;
+        lp.len_caps = caps;
+    }
+}
+
+/// The loops of `hints` whose bound or caps [`refine_round`] changes: the index of the
+/// function and of the loop, and the new bound and caps.
+fn refined_loops(
+    functions: &[IrFunction],
+    hints: &[(FunctionId, Vec<LoopHint>)],
+    constants: &ModuleConstants,
+) -> Vec<(usize, usize, LoopBound, Vec<LenCap>)> {
     let mut updates: Vec<(usize, usize, LoopBound, Vec<LenCap>)> = Vec::new();
+    let mut passed = PassedBounds::new(functions, constants);
     for (fid, loop_hints) in hints {
         let f = &functions[fid.0 as usize];
-        // The iterable a generator expression or a comprehension function receives as `.0`
-        // is bounded where its creator evaluated it.
-        let passed_bound = |it: VarId| {
-            let (creator, iterable) = f.passed_from?;
-            (f.var_name(it) == Some(".0")).then_some(())?;
-            FnIndex::new(&functions[creator.0 as usize], constants)
-                .iter_bound(iterable, &mut |_| None)
-        };
         let needs = f
             .loops
             .iter()
@@ -2773,7 +2993,7 @@ fn refine_round(
             if bound == LoopBound::Unbounded
                 && let Some(n) = ix
                     .fixed_trip(lp, &mut |_| None, SMALL_MAX)
-                    .or_else(|| ix.loop_iterable(lp).and_then(passed_bound))
+                    .or_else(|| ix.loop_iterable(lp).and_then(|it| passed.of(f, it)))
             {
                 bound = if hint.retry_body {
                     LoopBound::RetryPattern
@@ -2815,11 +3035,7 @@ fn refine_round(
             }
         }
     }
-    for (fi, li, bound, caps) in updates {
-        let lp = &mut functions[fi].loops[li];
-        lp.bound = bound;
-        lp.len_caps = caps;
-    }
+    updates
 }
 
 #[cfg(test)]
