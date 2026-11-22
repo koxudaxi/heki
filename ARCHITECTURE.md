@@ -710,6 +710,8 @@ heki server                                   # incremental LSP server (alias: h
 heki rule <RULE_ID>                           # the rule's documentation (alias: heki explain; like `ruff rule`)
 heki snapshot summary --write [PATHS...]      # save the inferred summaries (MUT103)
 heki assumptions [PATHS...]                   # list the A1 violations of a project
+heki inspect <SYMBOL> [PATHS...]              # experimental: what heki knows about one function
+heki recommend [PATHS...]                     # experimental: advice on the configuration (writes nothing)
 ```
 
 ### 9.2 Configuration (`[tool.heki]` in `pyproject.toml`, or `heki.toml`; kebab-case)
