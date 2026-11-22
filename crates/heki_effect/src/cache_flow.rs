@@ -45,12 +45,21 @@ pub struct SelfAttrWrite {
     /// (`if self.<attr> is None:`, `if not self.<attr>:`): a lazy initialization.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub lazy_init: bool,
+    /// What `MUT101`'s exact claim reads of the write ([`KeptWrite`]), boxed as `cache_flow`
+    /// computes it only while an enabled rule reads it (`OptInFacts::kept_values`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kept: Option<Box<KeptWrite>>,
+}
+
+/// What `MUT101`'s exact claim reads of a write ([`SelfAttrWrite::kept`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeptWrite {
     /// The literal key of an item store or delete (`self.<attr>["k"] = v`), as
     /// `EffectSummary::mutates_self_attrs` keys it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
-    /// An in-place change of a builtin container the attribute holds by its type (computed by
-    /// `cache_flow` only; `MUT101`'s "Plain write").
+    /// An in-place change of a builtin container the attribute holds by its type (`MUT101`'s
+    /// "Plain write").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub change: Option<InPlaceChange>,
 }
@@ -68,7 +77,7 @@ pub struct InPlaceChange {
 }
 
 /// The values kept in an instance `__dict__` (a `@cached_property`'s) a function may remove or
-/// replace, on any object (`EffectSummary::removes_kept`).
+/// replace, on any object (`KeptFacts::removes_kept`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum KeptRemoval {
     #[default]
@@ -133,6 +142,16 @@ pub(crate) struct KeptPoint {
 }
 
 impl SelfAttrWrite {
+    /// [`KeptWrite::key`].
+    pub fn key(&self) -> Option<&str> {
+        self.kept.as_ref().and_then(|k| k.key.as_deref())
+    }
+
+    /// [`KeptWrite::change`].
+    pub fn change(&self) -> Option<&InPlaceChange> {
+        self.kept.as_ref().and_then(|k| k.change.as_ref())
+    }
+
     /// A write that fills a memo rather than changing what was computed from the object: a
     /// memo-shaped write (`setdefault`, a store under `if k not in <obj>.<attr>:`), or an
     /// in-place change of an attribute named as a memo or cache ([`is_memo_name`]). Rebinding
@@ -242,14 +261,17 @@ pub(crate) fn cache_flow(
         return None;
     }
     let mut names = Names::default();
-    let writes = writes
+    let mut writes: Vec<SelfAttrWrite> = writes
         .into_iter()
-        .map(|(attr, w, op)| SelfAttrWrite {
+        .map(|(attr, w, op, key)| SelfAttrWrite {
             attr: names.index(attr),
-            change: op.and_then(|op| in_place_change(op, types)),
+            kept: kept.and_then(|_| KeptWrite::of(key, op, types)),
             ..w
         })
         .collect();
+    // The collection reuses the buffer of the larger tuples it maps from; the index keeps the
+    // flow for the whole run.
+    writes.shrink_to_fit();
     let blocks = flow_blocks(shape, key, sites, tcx, types, kept, &mut names);
     Some(CacheFlow {
         names: names.list,
@@ -258,7 +280,20 @@ pub(crate) fn cache_flow(
     })
 }
 
-/// [`SelfAttrWrite::change`]: the in-place write `op` changes, through one of its changing
+impl KeptWrite {
+    /// The facts of a write with the literal key `key` and the in-place op `op` (`None` when it
+    /// has neither).
+    fn of(
+        key: Option<String>,
+        op: Option<InPlaceOp<'_>>,
+        types: &FxHashMap<VarId, Val>,
+    ) -> Option<Box<Self>> {
+        let change = op.and_then(|op| in_place_change(op, types));
+        (key.is_some() || change.is_some()).then(|| Box::new(Self { key, change }))
+    }
+}
+
+/// [`KeptWrite::change`]: the in-place write `op` changes, through one of its changing
 /// methods or an item store or delete, the builtin `list`, `dict`, or `set` its receiver holds
 /// by the function's types.
 fn in_place_change(op: InPlaceOp<'_>, types: &FxHashMap<VarId, Val>) -> Option<InPlaceChange> {
@@ -333,7 +368,7 @@ pub fn attr_writes<'f>(
 ) -> Vec<(&'f str, SelfAttrWrite)> {
     attr_write_ops(shape, objects)
         .into_iter()
-        .map(|(attr, w, _)| (attr, w))
+        .map(|(attr, w, _, _)| (attr, w))
         .collect()
 }
 
@@ -342,11 +377,18 @@ pub fn attr_writes<'f>(
 /// delete), and whether the method is called by its name.
 type InPlaceOp<'f> = (VarId, &'f str, bool);
 
-/// [`attr_writes`], with the [`InPlaceOp`] of each write that does not rebind the attribute.
+/// [`attr_writes`], with the [`InPlaceOp`] of each write that does not rebind the attribute and
+/// the literal key of an item store or delete ([`KeptWrite::key`]).
+#[allow(clippy::type_complexity)]
 fn attr_write_ops<'f>(
     shape: &FnShape<'f>,
     objects: &FxHashMap<VarId, u32>,
-) -> Vec<(&'f str, SelfAttrWrite, Option<InPlaceOp<'f>>)> {
+) -> Vec<(
+    &'f str,
+    SelfAttrWrite,
+    Option<InPlaceOp<'f>>,
+    Option<String>,
+)> {
     let f = shape.f;
     // `var -> (object, attr)`: the variables holding `<obj>.<attr>`, through copies.
     let mut alias: FxHashMap<VarId, (u32, &str)> = FxHashMap::default();
@@ -455,7 +497,7 @@ fn attr_write_ops<'f>(
         written.entry(attr).or_default().insert(*o);
     }
     let lazy = lazy_init_blocks(shape, objects, &written);
-    let mut out: Vec<(&str, SelfAttrWrite, Option<InPlaceOp<'f>>)> = found
+    let mut out: Vec<(&str, SelfAttrWrite, Option<InPlaceOp<'f>>, Option<String>)> = found
         .into_iter()
         .map(|(block, index, span, held, memo_shaped, in_place, key)| {
             let write = SelfAttrWrite {
@@ -468,13 +510,12 @@ fn attr_write_ops<'f>(
                 lazy_init: lazy
                     .iter()
                     .any(|(h, blocks)| *h == held && blocks[block.0 as usize]),
-                key,
-                change: None,
+                kept: None,
             };
-            (held.1, write, in_place)
+            (held.1, write, in_place, key)
         })
         .collect();
-    out.sort_by_key(|(_, w, _)| w.span);
+    out.sort_by_key(|(_, w, _, _)| w.span);
     out
 }
 
@@ -606,6 +647,8 @@ fn flow_blocks(
                 events.push((u32::try_from(index).unwrap_or(u32::MAX), event));
             }
         }
+        // The index keeps the flow for the whole run: no room for more events.
+        events.shrink_to_fit();
         blocks[bb.id.0 as usize] = FlowBlock {
             succs: bb.terminator.successors(),
             returns: matches!(bb.terminator, Terminator::Return(_)),

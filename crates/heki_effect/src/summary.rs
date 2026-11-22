@@ -30,10 +30,10 @@ use crate::{
     Access, ArgBinding, ArgOrigin, ArgTargets, ArgValue, ArgumentValues, AttrKeyPath, BoundCallee,
     CallHop, CallSite, CallTarget, CellChange, ConstArg, Construction, ContractClass, Contracts,
     Dispatch, EffectSummary, FileSummary, FuncKey, GuardSubject, HandedState, Implementers, Items,
-    ListedCache, ModuleInput, MustExec, NewArg, NewCond, NewKind, OnEveryReturn, OptInFacts,
-    PerItem, ProjectDecls, ReadKind, ReturnsNew, Runner, SharedLine, SharedState, SharedStateFacts,
-    SiteRole, Slot, TypedFieldReadSite, TypedFieldWriteSite, Unresolved, UnresolvedAccessSite,
-    UnresolvedWriteSite, WriteKind,
+    KeptFacts, ListedCache, ModuleInput, MustExec, NewArg, NewCond, NewKind, OnEveryReturn,
+    OptInFacts, PerItem, ProjectDecls, ReadKind, ReturnsNew, Runner, SharedLine, SharedState,
+    SharedStateFacts, SiteRole, Slot, TypedFieldReadSite, TypedFieldWriteSite, Unresolved,
+    UnresolvedAccessSite, UnresolvedWriteSite, WriteKind,
 };
 use heki_ast::Span;
 use heki_ir::walk::{Answer, Budget, Closure, Def, FnShape, KeySet, Memo, Use, Visit, reach};
@@ -494,16 +494,7 @@ fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary) {
         into.iteration_facts_mut().merge(*facts);
     }
     into.invalidates_cached.extend(other.invalidates_cached);
-    // A must-fact: read by both definitions.
-    into.must_read_self_attrs = match (into.must_read_self_attrs.take(), other.must_read_self_attrs)
-    {
-        (Some(a), Some(b)) => {
-            let both = crate::callgraph::must_reads_of_both(&a, &b);
-            (!both.is_empty()).then(|| Box::new(both))
-        }
-        _ => None,
-    };
-    into.removes_kept.join(&other.removes_kept);
+    into.merge_kept(other.kept.as_deref());
     into.typed_field_write_sites
         .extend(other.typed_field_write_sites);
     into.typed_field_read_sites
@@ -1127,13 +1118,24 @@ impl<'a> Extractor<'a> {
             is_async: matches!(f.kind, FunctionKind::Async | FunctionKind::AsyncGenerator),
             is_generator: is_generator_function(f),
             is_cached_property: decorated_as(cx.module, f, &["cached_property"]),
-            listed_cache: f.decorators.iter().find_map(|d| {
-                let symbol = cx.module.decorator_symbol(d)?;
-                let listed = cx.kb.cached_property(&symbol)?;
-                Some(ListedCache {
-                    in_slot: listed.slot.is_some(),
+            kept: opt_in
+                .kept_values
+                .then(|| {
+                    f.decorators.iter().find_map(|d| {
+                        let symbol = cx.module.decorator_symbol(d)?;
+                        let listed = cx.kb.cached_property(&symbol)?;
+                        Some(ListedCache {
+                            in_slot: listed.slot.is_some(),
+                        })
+                    })
                 })
-            }),
+                .flatten()
+                .map(|listed| {
+                    Box::new(KeptFacts {
+                        listed_cache: Some(listed),
+                        ..KeptFacts::default()
+                    })
+                }),
             is_lru_cache: decorated_as(cx.module, f, &["lru_cache", "cache"]),
             owner_class_qualname: f.owner_class_qualname.clone(),
             decorators: f.decorators.clone(),
@@ -2582,7 +2584,7 @@ impl<'a> Extractor<'a> {
     }
 
     /// The instructions that may remove or replace a value kept in some object's `__dict__`
-    /// ([`cache_flow::KeptPoint`]), and their union into [`EffectSummary::removes_kept`]. A
+    /// ([`cache_flow::KeptPoint`]), and their union into [`KeptFacts::removes_kept`]. A
     /// project call's own removals are its callees' (propagation adds them), unless its targets
     /// are not every implementation it can run.
     fn kept_value_points(&mut self) {
@@ -2590,7 +2592,7 @@ impl<'a> Extractor<'a> {
         if !f.a1_hazards.is_empty() {
             // Code heki cannot follow (`eval`, `exec`, frame introspection) may run in its
             // callers; its own calls are points of their own below.
-            self.summary.removes_kept.set_any();
+            self.summary.kept_mut().removes_kept.set_any();
         }
         let mut points = Vec::new();
         let results = self.callees_by_result();
@@ -2603,8 +2605,8 @@ impl<'a> Extractor<'a> {
         }
         for (block, index, kind) in points {
             match &kind {
-                KeptRemovalKind::Named(name) => self.summary.removes_kept.add(name),
-                KeptRemovalKind::Any => self.summary.removes_kept.set_any(),
+                KeptRemovalKind::Named(name) => self.summary.kept_mut().removes_kept.add(name),
+                KeptRemovalKind::Any => self.summary.kept_mut().removes_kept.set_any(),
                 // The consumer is the caller; a generator's removals are its summary's, which
                 // propagation joins.
                 KeptRemovalKind::Suspends | KeptRemovalKind::Runs(_) => {}
@@ -6652,7 +6654,7 @@ impl<'a> Extractor<'a> {
         })
     }
 
-    /// The points that read each `self` attribute, for [`EffectSummary::must_read_self_attrs`]:
+    /// The points that read each `self` attribute, for [`KeptFacts::must_read_self_attrs`]:
     /// per attribute, the loads whose value is read as a whole, and per constant key the item
     /// loads of a value every use of which is such an item load (the keys `reads_self_attrs`
     /// records).
@@ -6853,7 +6855,7 @@ impl<'a> Extractor<'a> {
                 (must_run, never_returns, must_reads)
             });
         if !must_reads.is_empty() {
-            self.summary.must_read_self_attrs = Some(Box::new(must_reads));
+            self.summary.kept_mut().must_read_self_attrs = must_reads;
         }
         self.must_run = must_run;
         if never_returns && self.opt_in.must_effects {

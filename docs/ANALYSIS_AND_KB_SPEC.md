@@ -456,12 +456,14 @@ EffectSummary(f) = {
     iterates_params:          Bitset,                      // stepped by an iteration on some path: a generator
                                                            // passed there runs there
     reads_self_attrs:         Set<AttrKeyPath>,            // self.<attr> and self.<dict>[const_key] reads
-    must_read_self_attrs:     Set<AttrKeyPath>,            // those read on every path that returns normally,
-                                                           // as a whole or with the key (MUT101; only with
-                                                           // MUT101 or MUT111 selected, OptInFacts::kept_values)
-    removes_kept:             KeptRemoval,                 // the values kept in an instance __dict__ it may remove
-                                                           // or replace on any object: by name, or any (MUT101;
-                                                           // OptInFacts::kept_values)
+    kept:                     Option<Box<KeptFacts>>,      // only with MUT101 or MUT111 selected
+                                                           // (OptInFacts::kept_values):
+                                                           // must_read_self_attrs, those read on every path
+                                                           // that returns normally, as a whole or with the key;
+                                                           // removes_kept, the values kept in an instance
+                                                           // __dict__ it may remove or replace on any object
+                                                           // (by name, or any); and listed_cache, its decorator
+                                                           // is one of the catalog's [[cached_properties]]
     returns_self_attrs:       Set<AttrName>,               // @cached_property: self.<attr> objects the result
                                                            // holds by reference, read for nothing else (MUT101)
     lazily_read_self_attrs:   Set<AttrName>,               // self.<attr> read only where it or a self call
@@ -557,7 +559,6 @@ EffectSummary(f) = {
 
     // Metadata
     is_async, is_generator, is_cached_property, is_lru_cache, owner_class_qualname, decorators,
-    listed_cache: Option<ListedCache>,                    // the decorator is in [[cached_properties]]
 }
 ```
 
@@ -973,7 +974,7 @@ which module imports which.
 6. The writes and the paths after and before them come from `FileSummary.cache_flows`, so the
    stale writes of a method are known without its IR: `MUT101` reports those of the checked
    methods, and `MUT111` reads those of every method.
-7. **Reads on every path** (`EffectSummary::must_read_self_attrs`, computed only when `MUT101`
+7. **Reads on every path** (`KeptFacts::must_read_self_attrs`, computed only when `MUT101`
    or `MUT111` runs: `OptInFacts::kept_values`): the attributes a function reads on every path
    on which it returns normally, exception edges into handlers included. Its own loads of
    `self.<attr>` are points of the path facts (`Progress::Returned`: a load that raised read
@@ -1000,11 +1001,11 @@ which module imports which.
    `Calls(span)` at the project calls no `SelfCall` stands for (other receivers, the property
    getters a read of `self.<name>` runs) and at each step of iterating what a project generator
    called at `span` returns, whose callees' summaries say what they remove.
-   `EffectSummary::removes_kept` joins the same points of a function (a `yield` excepted: its
-   consumer is its caller) with what every callee removes. Each write of the flow also records
-   its literal key (`SelfAttrWrite::key`) and, for an in-place change, the builtin list, dict, or
-   set the attribute holds by its type and the method that changes it
-   (`SelfAttrWrite::change`).
+   `KeptFacts::removes_kept` (`EffectSummary::kept`) joins the same points of a function (a
+   `yield` excepted: its consumer is its caller) with what every callee removes. Each write of
+   the flow also records, under the same opt-in (`SelfAttrWrite::kept`), its literal key
+   (`KeptWrite::key`) and, for an in-place change, the builtin list, dict, or set the attribute
+   holds by its type and the method that changes it (`KeptWrite::change`).
 
 #### `MUT111`: readers of a stale `@cached_property` (opt-in)
 1. Reads: the `TypedFieldReadSite`s of each checked function's own body (`self.p`, `obj.p`,
@@ -1917,7 +1918,7 @@ cached-property decorators known to keep the getter's value in the instance `__d
 property's name: `functools.cached_property`, Django's, Werkzeug's, propcache's, and kombu's. Each
 entry names the versions whose source was read, why the value is kept there, how `del obj.<name>`
 and `obj.__dict__.pop(<name>)` act on it, and, for Werkzeug, the slot an instance without a
-`__dict__` keeps it in. `EffectSummary::listed_cache` records that a getter's decorator, resolved
+`__dict__` keeps it in. `KeptFacts::listed_cache` records that a getter's decorator, resolved
 through the module's imports (`ModuleDecls::decorator_symbol`), is listed; only such a getter makes
 a cached property an exact claim's (R3), and any other `cached_property` is one by its name.
 
