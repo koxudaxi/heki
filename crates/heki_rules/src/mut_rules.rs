@@ -871,16 +871,20 @@ pub(crate) fn project_classes(cx: &CheckContext<'_>) -> Vec<ContractClass> {
     all
 }
 
-/// The project classes (fqn) of `all` that `pattern` names, plus all their subclasses.
+/// The project classes (fqn) of `all` that `pattern` names, plus all their subclasses when
+/// `subclasses` covers them.
 fn class_set(
     cx: &CheckContext<'_>,
     pattern: &DottedPattern,
     all: &[ContractClass],
+    subclasses: Subclasses,
 ) -> FxHashSet<String> {
     let mut out = FxHashSet::default();
     for c in all.iter().filter(|c| pattern.matches_class(c)) {
         out.insert(c.fqn.clone());
-        out.extend(cx.decls.subclasses_of(&c.fqn));
+        if subclasses == Subclasses::Covered {
+            out.extend(cx.decls.subclasses_of(&c.fqn));
+        }
     }
     out
 }
@@ -911,7 +915,7 @@ pub(crate) fn parse_targets(
             text: t.clone(),
             attr: DottedPattern::new(attr, context)?,
             key,
-            classes: class_set(cx, &class, all),
+            classes: class_set(cx, &class, all, Subclasses::Covered),
         });
     }
     Ok(out)
@@ -972,8 +976,8 @@ pub(crate) struct Allowance {
     /// `own-receiver = "allow"`: an access through the receiver of the method judging it is
     /// allowed ([`Self::owns`]).
     own_receiver: bool,
-    /// The project protocols `allowed-protocols` names, with their subclasses
-    /// ([`Self::allows_protocol`]).
+    /// The project protocols `allowed-protocols` names, with their subclasses unless
+    /// `protocol-subclasses = false` ([`Self::allows_protocol`]).
     protocols: FxHashSet<String>,
 }
 
@@ -1005,7 +1009,8 @@ impl FunctionMatcher {
     ) -> Result<Self, RuleConfigError> {
         let mut out = Self::named(text, context)?;
         if let Some((holder, last)) = split_last_dot(text) {
-            let owners = class_set(cx, &DottedPattern::new(holder, context)?, all_classes);
+            let holder = DottedPattern::new(holder, context)?;
+            let owners = class_set(cx, &holder, all_classes, Subclasses::Covered);
             if !owners.is_empty() {
                 out.method = Some((owners, DottedPattern::new(last, context)?));
             }
@@ -2197,16 +2202,23 @@ fn protocols_written_through<'s>(
 }
 
 /// The project classes the `allowed-protocols` patterns of a contract name, with their subclasses
-/// (a class that is no protocol allows nothing, [`Allowance::allows_protocol`]).
+/// unless `protocol-subclasses = false` (a class that is no protocol allows nothing,
+/// [`Allowance::allows_protocol`]).
 pub(crate) fn named_protocols(
     cx: &CheckContext<'_>,
     all: &[ContractClass],
-    patterns: &[String],
+    (patterns, subclasses): (&[String], Option<bool>),
     context: &'static str,
 ) -> Result<FxHashSet<String>, RuleConfigError> {
+    let subclasses = Subclasses::of(subclasses);
     let mut out = FxHashSet::default();
     for p in patterns {
-        out.extend(class_set(cx, &DottedPattern::new(p, context)?, all));
+        out.extend(class_set(
+            cx,
+            &DottedPattern::new(p, context)?,
+            all,
+            subclasses,
+        ));
     }
     Ok(out)
 }
@@ -2311,28 +2323,30 @@ struct OwnerRule<'r> {
 impl OwnerRule<'_> {
     /// What `site` writes of the contract: the targets it hits, or, with `unlisted-dict-keys =
     /// "report"`, a key written through the namespace of an object of a class some targets cover
-    /// (a `dict_direct` write) that none of them names, once for each family of those targets.
-    /// Each comes with the index of a target whose family it is.
-    fn written<'s>(&'s self, site: &TypedFieldWriteSite) -> Vec<(usize, Written<'s>)> {
+    /// (a `dict_direct` write) that no `write-owners` target names (`named`), once for each
+    /// family of the contract's targets covering the class. Each comes with the index of a target
+    /// whose family it is.
+    fn written<'s>(
+        &'s self,
+        site: &TypedFieldWriteSite,
+        named: &NamedDictKeys<'_>,
+    ) -> Vec<(usize, Written<'s>)> {
         let hits = write_hits(&self.targets, site);
-        if !hits.is_empty() || !self.report_unlisted_keys || site.kind != WriteKind::DictDirect {
+        if !hits.is_empty()
+            || !self.report_unlisted_keys
+            || site.kind != WriteKind::DictDirect
+            || named.names(&site.class_qualname, &site.attr)
+        {
             return hits
                 .into_iter()
                 .map(|(k, t)| (k, Written::Target(t)))
                 .collect();
         }
-        let covering: Vec<(usize, &ContractTarget)> = self
-            .targets
-            .iter()
-            .enumerate()
-            .filter(|(_, t)| t.classes.contains(&site.class_qualname))
-            .collect();
-        if covering.iter().any(|(_, t)| t.matches_attr(&site.attr)) {
-            return Vec::new();
-        }
         let mut families: Vec<(usize, &FxHashSet<String>)> = Vec::new();
-        for (k, t) in covering {
-            if !families.iter().any(|(_, f)| *f == &t.classes) {
+        for (k, t) in self.targets.iter().enumerate() {
+            if t.classes.contains(&site.class_qualname)
+                && !families.iter().any(|(_, f)| *f == &t.classes)
+            {
                 families.push((k, &t.classes));
             }
         }
@@ -2340,6 +2354,36 @@ impl OwnerRule<'_> {
             .into_iter()
             .map(|(k, f)| (k, Written::UnlistedKey(f)))
             .collect()
+    }
+}
+
+/// The `__dict__` keys the `write-owners` contracts name, by class (`unlisted-dict-keys`): a
+/// target names the keys its attribute pattern matches (an entry target its container) on every
+/// class of its family, whichever contract declares it. A key one contract guards is a listed
+/// key of the class for every other contract, whose own allowance does not cover it.
+struct NamedDictKeys<'r> {
+    /// The targets covering each class (fqn); empty when no contract reports unlisted keys.
+    by_class: FxHashMap<&'r str, Vec<&'r ContractTarget>>,
+}
+
+impl<'r> NamedDictKeys<'r> {
+    fn new(rules: &'r [OwnerRule<'_>]) -> Self {
+        let mut by_class: FxHashMap<&str, Vec<&ContractTarget>> = FxHashMap::default();
+        if rules.iter().any(|r| r.report_unlisted_keys) {
+            for target in rules.iter().flat_map(|r| &r.targets) {
+                for class in &target.classes {
+                    by_class.entry(class).or_default().push(target);
+                }
+            }
+        }
+        Self { by_class }
+    }
+
+    /// Whether a target covering `class` names the `__dict__` key `key`.
+    fn names(&self, class: &str, key: &str) -> bool {
+        self.by_class
+            .get(class)
+            .is_some_and(|targets| targets.iter().any(|t| t.matches_attr(key)))
     }
 }
 
@@ -2393,13 +2437,13 @@ pub(crate) fn mut201(
         .with_protocols(named_protocols(
             cx,
             &all_classes,
-            &rule.allowed_protocols,
+            (&rule.allowed_protocols, rule.protocol_subclasses),
             "write-owners.allowed-protocols",
         )?);
         let mut forbid_cached = FxHashSet::default();
         for p in &rule.forbid_cached_property_on {
             let p = DottedPattern::new(p, "write-owners.forbid-cached-property-on")?;
-            forbid_cached.extend(class_set(cx, &p, &all_classes));
+            forbid_cached.extend(class_set(cx, &p, &all_classes, Subclasses::Covered));
         }
         rules.push(OwnerRule {
             name: &rule.name,
@@ -2445,6 +2489,7 @@ pub(crate) fn mut201(
         .map(|r| r.targets.iter().map(|_| InsideAllowed::default()).collect())
         .collect();
     let names_protocols = rules.iter().any(|r| r.allowance.names_protocols());
+    let named_keys = NamedDictKeys::new(&rules);
     for path in paths {
         let file = &cx.index.files[path];
         let Some(unit) = cx.unit(path) else {
@@ -2479,7 +2524,7 @@ pub(crate) fn mut201(
                     }
                     let (judged, obj_params) =
                         rule.allowance.judged_access(cx.decls, key, site.obj_params);
-                    for (ti, written) in rule.written(site) {
+                    for (ti, written) in rule.written(site, &named_keys) {
                         let family = match written {
                             Written::Target(t) => &t.classes,
                             Written::UnlistedKey(family) => family,
@@ -4064,7 +4109,7 @@ pub(crate) fn mut203<'c>(
             .with_protocols(named_protocols(
                 cx,
                 &all_classes,
-                &rule.allowed_protocols,
+                (&rule.allowed_protocols, rule.protocol_subclasses),
                 "read-owners.allowed-protocols",
             )?),
             note: rule.message.as_deref(),

@@ -1317,8 +1317,10 @@ message = "write model state through GenerationStore instead"
      private helper with project callers hands its report to them. Otherwise the outermost
      function is reported, with `message` as the report's help. With
      `unlisted-dict-keys = "report"`, a `dict_direct` site that hits no target, on a class some
-     targets cover, whose key none of them names, is judged the same way once per family of
-     those targets (`OwnerRule::written`), and reported as that key (`Class.key`).
+     targets cover, whose key no target of any `write-owners` contract covering the class names
+     (`NamedDictKeys`, built once per run from every contract's targets), is judged the same way
+     once per family of the contract's targets covering the class (`OwnerRule::written`), and
+     reported as that key (`Class.key`).
   3. Existing code bases migrate with **`heki check --baseline`**: counts are frozen per
      `(path, qualname, "MUT201", "Class.attr")` and can only shrink.
 
