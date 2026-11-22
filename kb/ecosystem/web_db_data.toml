@@ -25,7 +25,8 @@ opaque_packages = [
     "requests", "httpx", "aiohttp", "urllib3", "sqlalchemy", "sqlmodel", "django", "psycopg",
     "psycopg_pool", "psycopg2", "pymysql", "redis", "pymongo", "boto3", "botocore", "grpc",
     "pandas", "numpy", "pydantic", "anyio", "trio", "starlette", "fastapi", "asgiref", "asyncer",
-    "channels", "asyncpg", "websockets", "motor", "duckdb",
+    "channels", "asyncpg", "websockets", "motor", "duckdb", "celery", "openai", "anthropic",
+    "google", "polars", "torch",
 ]
 
 # --- Offloads blocking work (argument index of the offloaded callable) ---
@@ -5172,6 +5173,74 @@ effects = ["db_query"]
 async_safe = true
 opaque_to_layer3 = true
 
+# --- Task queues: Celery ---
+# `send_task()` publishes the task message to the broker and waits for the write (also under
+# `task_always_eager`, which it ignores). `Task.delay()` / `apply_async()` publish it too,
+# except under `task_always_eager` (a test setting), where they run the task in the caller.
+# `AsyncResult.get()` is not listed: it returns at once for a result already fetched
+# (`ready()` stores a finished one) or a task that ignores its result.
+
+[[entries]]
+symbol = "celery.Celery.send_task"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "celery.Task.delay"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "celery.Task.apply_async"
+effects = ["blocking_net"]
+opaque_to_layer3 = true
+
+# --- LLM APIs: openai, anthropic, google-genai ---
+# A client constructor reads its settings and builds an HTTP connection pool (an
+# `httpx.Client` / `httpx.AsyncClient`, unless `http_client=` hands it one) without I/O.
+# google-genai's `Client` builds both a sync and an async pool (its `aio` attribute); in
+# Vertex AI mode without a project or API key it also looks up the default credentials.
+# The requests (`client.chat.completions.create(...)`) are made through attributes of the
+# client, which the catalog does not type, so they are not listed.
+
+[[entries]]
+symbol = "openai.OpenAI"
+effects = ["unpooled_client_alloc"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "openai.AzureOpenAI"
+effects = ["unpooled_client_alloc"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "openai.AsyncOpenAI"
+effects = ["unpooled_client_alloc"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "openai.AsyncAzureOpenAI"
+effects = ["unpooled_client_alloc"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "anthropic.Anthropic"
+effects = ["unpooled_client_alloc"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "anthropic.AsyncAnthropic"
+effects = ["unpooled_client_alloc"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "google.genai.Client"
+effects = ["unpooled_client_alloc"]
+opaque_to_layer3 = true
+
 # --- DB transaction starters (EFF106, opt-in) ---
 # A `with` block over the result of the call holds a transaction (and its pooled connection).
 # `Connection.begin_nested()` sends `SAVEPOINT` at the call and `Session.begin_nested()` flushes
@@ -5380,6 +5449,121 @@ symbol = "pandas.DataFrame.to_sql"
 effects = ["blocking_db"]
 opaque_to_layer3 = true
 
+# --- Data: polars I/O ---
+# Readers of files are `blocking_fs` (EFF105, opt-in): an `http(s)://` URL is downloaded, an
+# in-memory buffer is parsed without I/O. The `scan_*` functions return a lazy frame that
+# reads when it is collected. `read_database` runs its query on the connection it is handed,
+# `read_database_uri` on a connection it opens; `DataFrame.write_database` inserts the rows.
+# `concat` is not listed: by default (`rechunk=False`) it appends the frames' chunks without
+# copying their data.
+
+[[entries]]
+symbol = "polars.read_csv"
+effects = ["blocking_fs"]
+cases = [
+    { arg = 0, param = "source", prefix = ["http://", "https://"], effects = ["blocking_net"] },
+    { arg = 0, param = "source", instance_of = ["io.StringIO", "io.BytesIO"], effects = [] },
+]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "polars.read_parquet"
+effects = ["blocking_fs"]
+cases = [
+    { arg = 0, param = "source", prefix = ["http://", "https://"], effects = ["blocking_net"] },
+    { arg = 0, param = "source", instance_of = ["io.StringIO", "io.BytesIO"], effects = [] },
+]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "polars.read_json"
+effects = ["blocking_fs"]
+cases = [
+    { arg = 0, param = "source", prefix = ["http://", "https://"], effects = ["blocking_net"] },
+    { arg = 0, param = "source", instance_of = ["io.StringIO", "io.BytesIO"], effects = [] },
+]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "polars.read_ndjson"
+effects = ["blocking_fs"]
+cases = [
+    { arg = 0, param = "source", prefix = ["http://", "https://"], effects = ["blocking_net"] },
+    { arg = 0, param = "source", instance_of = ["io.StringIO", "io.BytesIO"], effects = [] },
+]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "polars.read_ipc"
+effects = ["blocking_fs"]
+cases = [
+    { arg = 0, param = "source", prefix = ["http://", "https://"], effects = ["blocking_net"] },
+    { arg = 0, param = "source", instance_of = ["io.StringIO", "io.BytesIO"], effects = [] },
+]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "polars.read_avro"
+effects = ["blocking_fs"]
+cases = [
+    { arg = 0, param = "source", prefix = ["http://", "https://"], effects = ["blocking_net"] },
+    { arg = 0, param = "source", instance_of = ["io.StringIO", "io.BytesIO"], effects = [] },
+]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "polars.read_excel"
+effects = ["blocking_fs"]
+cases = [
+    { arg = 0, param = "source", prefix = ["http://", "https://"], effects = ["blocking_net"] },
+    { arg = 0, param = "source", instance_of = ["io.StringIO", "io.BytesIO"], effects = [] },
+]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "polars.read_ods"
+effects = ["blocking_fs"]
+cases = [
+    { arg = 0, param = "source", prefix = ["http://", "https://"], effects = ["blocking_net"] },
+    { arg = 0, param = "source", instance_of = ["io.StringIO", "io.BytesIO"], effects = [] },
+]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "polars.read_database"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "polars.read_database_uri"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "polars.DataFrame.write_database"
+effects = ["blocking_db"]
+opaque_to_layer3 = true
+
+# --- Data: torch serialization ---
+# `torch.load(f)` / `torch.save(obj, f)` read and write the file `f` names (EFF105, opt-in); an
+# in-memory buffer is read or written without I/O.
+
+[[entries]]
+symbol = "torch.load"
+effects = ["blocking_fs"]
+cases = [
+    { arg = 0, param = "f", instance_of = ["io.BytesIO"], effects = [] },
+]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "torch.save"
+effects = ["blocking_fs"]
+cases = [
+    { arg = 1, param = "f", instance_of = ["io.BytesIO"], effects = [] },
+]
+opaque_to_layer3 = true
+
 # --- Data: quadratic re-concatenation (DATA101) ---
 
 [[entries]]
@@ -5419,6 +5603,48 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "numpy.insert"
+effects = ["quadratic_realloc"]
+opaque_to_layer3 = true
+
+# torch's concatenations allocate a new tensor on every call (`concat` and
+# `concatenate` are aliases of `cat`, `row_stack` of `vstack`).
+[[entries]]
+symbol = "torch.cat"
+effects = ["quadratic_realloc"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "torch.concat"
+effects = ["quadratic_realloc"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "torch.concatenate"
+effects = ["quadratic_realloc"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "torch.vstack"
+effects = ["quadratic_realloc"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "torch.hstack"
+effects = ["quadratic_realloc"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "torch.dstack"
+effects = ["quadratic_realloc"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "torch.column_stack"
+effects = ["quadratic_realloc"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "torch.row_stack"
 effects = ["quadratic_realloc"]
 opaque_to_layer3 = true
 

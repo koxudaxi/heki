@@ -3191,3 +3191,117 @@ fn async_drivers_count_their_queries_and_duckdb_waits_on_nothing_known() {
         ]
     );
 }
+
+const API_CLIENTS_AND_DATA: &str = r#"import io
+
+import anthropic
+import celery
+import openai
+import polars as pl
+import torch
+from celery import Celery
+from google import genai
+
+app = Celery("proj")
+
+
+async def tp_celery(task: celery.Task):
+    app.send_task("proj.add", args=(1, 2))
+    task.delay(1, 2)
+
+
+def tp_clients_in_loops(prompts):
+    for p in prompts:
+        openai.OpenAI()
+        anthropic.Anthropic()
+        genai.Client()
+
+
+async def tp_async_clients_in_loops(prompts):
+    for p in prompts:
+        openai.AsyncOpenAI()
+        anthropic.AsyncAnthropic()
+
+
+async def tn_clients_built_once(prompts):
+    client = openai.AsyncOpenAI()
+    sync = openai.OpenAI()
+    for p in prompts:
+        pass
+
+
+async def tp_polars(conn, path):
+    pl.read_database("SELECT 1", conn)
+    pl.read_csv("https://example.com/a.csv")
+    pl.read_parquet(path)
+
+
+async def tn_polars_in_memory(data: bytes):
+    pl.read_csv(io.BytesIO(data))
+    pl.scan_parquet("a.parquet")
+
+
+def tp_torch_accumulation(batches):
+    acc = torch.zeros(0)
+    for b in batches:
+        acc = torch.cat([acc, b])
+    return acc
+
+
+def tn_torch_concatenated_once(batches):
+    out = []
+    for b in batches:
+        out.append(b)
+    return torch.cat(out)
+
+
+async def tp_torch_io(path, model):
+    torch.save(model.state_dict(), path)
+    torch.load(path)
+
+
+async def tn_torch_buffers(model):
+    buf = io.BytesIO()
+    torch.save(model.state_dict(), buf)
+    torch.load(io.BytesIO(buf.getvalue()))
+"#;
+
+/// Celery publishes to its broker; LLM API clients build a connection pool each; polars and
+/// torch read and write files, polars downloads URLs and runs queries, and `torch.cat`
+/// reallocates its accumulator.
+#[test]
+fn api_clients_task_queues_and_data_libraries() {
+    assert_eq!(
+        check(
+            "catalog_api_clients",
+            "app/apis.py",
+            API_CLIENTS_AND_DATA,
+            "EFF101,EFF111,EFF102,EFF103,EFF113,EFF105,DATA101"
+        ),
+        vec![
+            d(15, "EFF101", "tp_celery", "celery.Celery.send_task"),
+            d(16, "EFF101", "tp_celery", "celery.Task.delay"),
+            d(21, "EFF102", "tp_clients_in_loops", "openai.OpenAI"),
+            d(22, "EFF102", "tp_clients_in_loops", "anthropic.Anthropic"),
+            d(23, "EFF102", "tp_clients_in_loops", "google.genai.Client"),
+            d(
+                28,
+                "EFF102",
+                "tp_async_clients_in_loops",
+                "openai.AsyncOpenAI"
+            ),
+            d(
+                29,
+                "EFF102",
+                "tp_async_clients_in_loops",
+                "anthropic.AsyncAnthropic"
+            ),
+            d(40, "EFF101", "tp_polars", "polars.read_database"),
+            d(41, "EFF101", "tp_polars", "polars.read_csv"),
+            d(42, "EFF105", "tp_polars", "polars.read_parquet"),
+            d(53, "DATA101", "tp_torch_accumulation", "acc"),
+            d(65, "EFF105", "tp_torch_io", "torch.save"),
+            d(66, "EFF105", "tp_torch_io", "torch.load"),
+        ]
+    );
+}

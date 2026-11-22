@@ -1932,6 +1932,11 @@ mod tests {
                     with_prefix("urllib3.ProxyManager", &["request", "urlopen"]),
                     with_prefix("urllib3.HTTPConnectionPool", &["request", "urlopen"]),
                     with_prefix("urllib3.HTTPSConnectionPool", &["request", "urlopen"]),
+                    s(&[
+                        "celery.Celery.send_task",
+                        "celery.Task.delay",
+                        "celery.Task.apply_async",
+                    ]),
                 ]
                 .concat(),
                 entry(&[BlockingNet]),
@@ -1954,6 +1959,10 @@ mod tests {
                     "redis.ConnectionPool.from_url",
                     "redis.BlockingConnectionPool.from_url",
                     "psycopg_pool.ConnectionPool",
+                    "openai.OpenAI",
+                    "openai.AzureOpenAI",
+                    "anthropic.Anthropic",
+                    "google.genai.Client",
                 ]),
                 entry(&[UnpooledClientAlloc]),
             ),
@@ -2001,6 +2010,9 @@ mod tests {
                     "pymongo.AsyncMongoClient",
                     "psycopg_pool.AsyncConnectionPool",
                     "motor.motor_asyncio.AsyncIOMotorClient",
+                    "openai.AsyncOpenAI",
+                    "openai.AsyncAzureOpenAI",
+                    "anthropic.AsyncAnthropic",
                 ]),
                 async_safe(entry(&[UnpooledClientAlloc])),
             ),
@@ -2493,7 +2505,54 @@ mod tests {
     }
 
     fn data_libraries() -> Vec<(Vec<String>, EcosystemEntry)> {
+        // polars downloads an `http(s)://` source itself; other URL schemes are not listed.
+        let polars_url = ArgCase {
+            prefix: s(&["http://", "https://"]),
+            ..source_case("source", true)
+        };
+        let buffer = |arg: u8| ArgCase {
+            arg: Some(arg),
+            param: Some("f".into()),
+            instance_of: s(&["io.BytesIO"]),
+            effects: Some(Vec::new()),
+            ..ArgCase::default()
+        };
         vec![
+            (
+                with_prefix(
+                    "polars",
+                    &[
+                        "read_csv",
+                        "read_parquet",
+                        "read_json",
+                        "read_ndjson",
+                        "read_ipc",
+                        "read_avro",
+                        "read_excel",
+                        "read_ods",
+                    ],
+                ),
+                with_cases(
+                    vec![polars_url, source_case("source", false)],
+                    entry(&[BlockingFs]),
+                ),
+            ),
+            (
+                with_prefix("polars", &["read_database", "read_database_uri"]),
+                entry(&[BlockingDb, DbQuery]),
+            ),
+            (
+                s(&["polars.DataFrame.write_database"]),
+                entry(&[BlockingDb]),
+            ),
+            (
+                s(&["torch.load"]),
+                with_cases(vec![buffer(0)], entry(&[BlockingFs])),
+            ),
+            (
+                s(&["torch.save"]),
+                with_cases(vec![buffer(1)], entry(&[BlockingFs])),
+            ),
             (
                 // Local paths only.
                 with_prefix("pandas", &["read_hdf", "read_spss"]),
@@ -2519,6 +2578,19 @@ mod tests {
                             "concatenate",
                             "append",
                             "insert",
+                        ],
+                    ),
+                    with_prefix(
+                        "torch",
+                        &[
+                            "cat",
+                            "concat",
+                            "concatenate",
+                            "vstack",
+                            "hstack",
+                            "dstack",
+                            "column_stack",
+                            "row_stack",
                         ],
                     ),
                 ]
@@ -3154,6 +3226,8 @@ mod tests {
             "asyncpg.",
             "websockets.",
             "motor.motor_asyncio.",
+            "openai.Async",
+            "anthropic.Async",
         ];
         let kb = EffectiveEcosystemKb::load_builtin(&[]).unwrap();
         let mut seen = BTreeSet::new();
