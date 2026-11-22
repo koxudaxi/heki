@@ -131,7 +131,8 @@ pub struct Diagnostic {
     pub fold_key: Option<String>,
     /// Why a heuristic report of an exact rule is not exact: the premises of its claim it did
     /// not establish and the conditions of the exact tier that are no premise, each with its
-    /// cause; filled only when the run asks for them, and written by no output format.
+    /// cause; filled only when the run asks for them (`heki recommend` counts them), and written
+    /// by no output format.
     #[serde(skip)]
     pub open_records: Vec<OpenRecord>,
 }

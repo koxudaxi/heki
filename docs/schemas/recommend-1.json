@@ -83,6 +83,147 @@
       ],
       "type": "object"
     },
+    "CauseRow": {
+      "additionalProperties": false,
+      "description": "The reports that leave one premise or condition open for one cause.",
+      "properties": {
+        "cause": {
+          "description": "The cause, unique within its premise or condition.",
+          "type": "string"
+        },
+        "closer": {
+          "$ref": "#/$defs/Closer",
+          "description": "What closes the cause: `annotation` (an annotation the user writes, which must be\ntrue), `code` (a change of the code's shape), `heki-catalog` (a fact only heki's\nshipped catalog can hold), or `none` (nothing the user can apply to every case)."
+        },
+        "examples": {
+          "description": "The first 50 reports, in report order.",
+          "items": {
+            "$ref": "#/$defs/ReportAt"
+          },
+          "type": "array"
+        },
+        "kind": {
+          "$ref": "#/$defs/OpenKind"
+        },
+        "name": {
+          "description": "The premise's name in the premise table (docs/precision.md), or the condition's.",
+          "type": "string"
+        },
+        "only_open": {
+          "description": "The reports it is the only open premise or condition of.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reports": {
+          "description": "The reports that leave it open.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "rules": {
+          "description": "The reports by the exact rule whose claim they report and the code they are reported\nunder.",
+          "items": {
+            "$ref": "#/$defs/CauseRule"
+          },
+          "type": "array"
+        },
+        "states": {
+          "description": "What the cause states.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "name",
+        "cause",
+        "states",
+        "closer",
+        "reports",
+        "only_open",
+        "rules",
+        "examples"
+      ],
+      "type": "object"
+    },
+    "CauseRule": {
+      "additionalProperties": false,
+      "description": "The reports of one rule's claim under one code that leave a cause open.",
+      "properties": {
+        "only_open": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reported_as": {
+          "description": "The code they are reported under: the rule's own, or its heuristic side's.",
+          "type": "string"
+        },
+        "reports": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "rule": {
+          "description": "The exact rule whose claim the reports state.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "rule",
+        "reported_as",
+        "reports",
+        "only_open"
+      ],
+      "type": "object"
+    },
+    "Closer": {
+      "description": "What closes an open cause, for every case the cause stands for.",
+      "oneOf": [
+        {
+          "const": "annotation",
+          "description": "An annotation the user writes; heki trusts it under R2, so it must be true.",
+          "type": "string"
+        },
+        {
+          "const": "code",
+          "description": "A change of the code's shape.",
+          "type": "string"
+        },
+        {
+          "const": "heki-catalog",
+          "description": "A fact only heki's shipped catalog can hold (no `[[tool.heki.ecosystem]]` key sets it).",
+          "type": "string"
+        },
+        {
+          "const": "none",
+          "description": "Nothing the user can apply to every case: heki cannot establish the premise today, the\ncode states the opposite, or the cause stands for cases with different closers that the\nfacts do not tell apart yet.",
+          "type": "string"
+        }
+      ]
+    },
+    "Combination": {
+      "additionalProperties": false,
+      "description": "Causes that reports leave open together.",
+      "properties": {
+        "open": {
+          "items": {
+            "$ref": "#/$defs/OpenRef"
+          },
+          "type": "array"
+        },
+        "reports": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "open",
+        "reports"
+      ],
+      "type": "object"
+    },
     "Consequence": {
       "description": "What happens in the code a rule reports, which sets its default severity.",
       "oneOf": [
@@ -129,6 +270,111 @@
         "python_files",
         "files",
         "truncated"
+      ],
+      "type": "object"
+    },
+    "Location": {
+      "additionalProperties": false,
+      "properties": {
+        "column": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "line": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "line",
+        "column"
+      ],
+      "type": "object"
+    },
+    "OpenKind": {
+      "description": "What a report leaves open: a premise of its claim, which may then be false, or a condition\nof the exact tier that is no premise, under which the claim holds.",
+      "enum": [
+        "premise",
+        "condition"
+      ],
+      "type": "string"
+    },
+    "OpenPremises": {
+      "additionalProperties": false,
+      "description": "The heuristic reports of exact claims, by what keeps them heuristic.",
+      "properties": {
+        "by_cause": {
+          "description": "One row per premise or condition left open and cause, the row that is the only open one\nof the most reports first, then the row of the most reports.",
+          "items": {
+            "$ref": "#/$defs/CauseRow"
+          },
+          "type": "array"
+        },
+        "by_rule": {
+          "description": "Those reports by the code they are reported under, the most first.",
+          "items": {
+            "$ref": "#/$defs/RuleReports"
+          },
+          "type": "array"
+        },
+        "combinations": {
+          "description": "The sets of more than one cause that reports leave open together, the commonest first:\nat most 50.",
+          "items": {
+            "$ref": "#/$defs/Combination"
+          },
+          "type": "array"
+        },
+        "not_recorded": {
+          "description": "The reports that record no cause, by code: they are counted under no row of `by_cause`.",
+          "items": {
+            "$ref": "#/$defs/RuleReports"
+          },
+          "type": "array"
+        },
+        "reports": {
+          "description": "The heuristic reports of exact claims, as `heki check` prints them with every rule\nselected: the heuristic reports of exact rules, and the reports of the heuristic rules\nthat report an exact rule's claim with a premise open (`EFF111`, `EFF113`).",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "truncated": {
+          "description": "Whether `combinations` holds fewer sets than there are.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "reports",
+        "by_rule",
+        "not_recorded",
+        "by_cause",
+        "combinations",
+        "truncated"
+      ],
+      "type": "object"
+    },
+    "OpenRef": {
+      "additionalProperties": false,
+      "properties": {
+        "cause": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/OpenKind"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "name",
+        "cause"
       ],
       "type": "object"
     },
@@ -215,6 +461,53 @@
         "right_percent",
         "interval_percent",
         "real_harm_percent"
+      ],
+      "type": "object"
+    },
+    "ReportAt": {
+      "additionalProperties": false,
+      "description": "One report, with where it leaves the cause open.",
+      "properties": {
+        "at": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Location"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Where the premise or condition is open: the call of a chain's hop, or a loop."
+        },
+        "column": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "detail": {
+          "description": "What the cause's statement leaves out: the function, value, or class it is about.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "line": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "type": "string"
+        },
+        "rule": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "line",
+        "column",
+        "rule"
       ],
       "type": "object"
     },
@@ -379,6 +672,25 @@
       ],
       "type": "object"
     },
+    "RuleReports": {
+      "additionalProperties": false,
+      "description": "The reports under one code.",
+      "properties": {
+        "reports": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "rule": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "rule",
+        "reports"
+      ],
+      "type": "object"
+    },
     "Run": {
       "additionalProperties": false,
       "properties": {
@@ -447,6 +759,10 @@
       },
       "type": "array"
     },
+    "open_premises": {
+      "$ref": "#/$defs/OpenPremises",
+      "description": "What keeps the heuristic reports of exact claims heuristic."
+    },
     "reports_now": {
       "$ref": "#/$defs/ReportsNow"
     },
@@ -490,6 +806,7 @@
     "analyzed",
     "runs",
     "reports_now",
+    "open_premises",
     "rules",
     "notes",
     "config",

@@ -2130,6 +2130,16 @@ It takes the options of `heki check` that decide what is analyzed: `--select`,
   reports (reports sharing a root cause count once, as `heki check` folds them), the heuristic
   reports of exact rules that `lint.heuristic = false` withholds, and the heuristic rules it
   leaves off. With a baseline, the reports it allows and the regressions.
+- **What keeps reports heuristic**: the heuristic reports of exact claims (the heuristic reports
+  of exact rules, and those of `EFF111` and `EFF113`, which report the claims of `EFF101` and
+  `EFF103` with a premise open), counted by the premise of the claim each leaves open and why
+  ([Rule Precision](https://heki.koxudaxi.dev/precision/)), or by the condition of the exact tier that is no premise
+  ("Trip count open": the claim holds, and the change pays off only over a loop the data
+  sizes). Each row says what the cause states, how many reports leave it open, how many leave
+  nothing else open, and what closes it: an annotation, which must be true; a change of the
+  code; heki's catalog, which no configuration sets (the row says where to report the case);
+  or nothing you can apply. None of it enters the block. A report whose rule records no cause
+  is counted as "not recorded", never given a guessed one.
 - **Rules worth enabling here**: every rule the configuration leaves off, and every exact rule
   whose heuristic reports it withholds, with the reports naming it in `extend-select` would add
   (exact and heuristic, and with a baseline the regressions among them), its consequence, and
@@ -2166,6 +2176,8 @@ listed with the reason they stay out:
   applied, `heki check` prints the reports it promises.
 - How often a rule's reports are right is quoted only from published measurements, with their
   sample, interval, and date; a rule without one is "not measured". No score is computed.
+- What keeps a report heuristic comes from the report itself, as the analysis decided its
+  tier; a cause the analysis does not record is shown as not recorded, never guessed.
 - The same input, configuration, and heki version give the same report, on any machine and
   with any number of threads.
 - It writes nothing and keeps every value the configuration sets.
@@ -2225,6 +2237,17 @@ heki recommend (experimental) on .: 3 file(s), 9 function(s)
 
 Reports now  1 shown (1 exact, 0 heuristic), 1 heuristic withheld, 5 heuristic rule(s) off
 
+What keeps reports heuristic
+  1 heuristic report(s) of exact claims: OPT110 1
+  premise: cause                                 reports  only open  closed by
+  Rewrite proven safe: zero-trip-exception-safe        1          0  code
+    the `set(...)` the rewrite builds before the loop may raise even when the loop runs no time: an element that may be unhashable, or a name that may be unbound there
+    e.g. app/users.py:14 OPT110
+  Rewrite proven safe: hash-consistent-probe           1          0  code
+    the value looked up may compare otherwise through `hash` than through `==`: a custom `__eq__` / `__hash__`, or an unhashable value
+    e.g. app/users.py:14 OPT110
+  Nothing here enters the block: an annotation or a change of the code is an edit of the program.
+
 Rules worth enabling here
   rule    reports  exact  consequence  right about the code (published)  real harm  block
   MUT106        1      -  bug          not measured                      -          yes
@@ -2255,6 +2278,7 @@ changes meaning.
 | `analyzed` | the files and functions analyzed, the files that could not be read or parsed, the paths given, and the Python files below the root they leave out |
 | `runs` | the analyses the report was computed from |
 | `reports_now` | the counts of "Reports now" |
+| `open_premises` | the counts of "What keeps reports heuristic": by code; by premise or condition and cause, with what the cause states, what closes it, the reports, the reports it is the only open cause of, and the first 50 reports; the sets of causes that reports leave open together |
 | `rules` | each rule of "Rules worth enabling here": its metadata, the reports it would add, its published measurement, whether the block enables it, and why |
 | `notes` | the notes |
 | `config`, `config_toml` | the keys to add or change, as keys and values and as TOML |
@@ -2662,9 +2686,9 @@ A heuristic report of an exact claim can also say which premises of its row it l
 with a cause from a closed list kept next to the premise in the same table (what the cause states,
 and what closes it: an annotation, a change of the code, heki's catalog, or nothing today). The
 causes come from the steps of the decision that made the report heuristic, each premise evaluated
-on its own along the reported chain and loop, so they cannot disagree with its tier. The records
-are internal for now: no output format of `heki check` and nothing in the language server shows
-them. `EFF111` and `EFF113` record them for the claims of `EFF101` and `EFF103`, and the heuristic
+on its own along the reported chain and loop, so they cannot disagree with its tier.
+[`heki recommend`](https://heki.koxudaxi.dev/recommend/) counts the heuristic reports by these causes; no output format of
+`heki check` and nothing in the language server shows them. `EFF111` and `EFF113` record them for the claims of `EFF101` and `EFF103`, and the heuristic
 reports of the eight `OPT` rewrite rules, `OPT113`, `DATA101`, `MUT110`, and `MUT114` for their own
 claims. A proven `OPT` rewrite, or an `OPT113` join whose premises all hold, over a loop the code
 fixes at more than 16 trips is heuristic for a condition of the exact tier that is no premise,
@@ -3419,16 +3443,19 @@ $ cargo build --release -p heki --features count-alloc
 $ python3 scripts/check_memory.py --heki target/release/heki
 ```
 
-- CI fails when the peak heap of `heki check` (with and without an ownership contract) or of
-  the `--watch` engine on a generated project exceeds its budget in the script.
+- CI fails when the peak heap of `heki check` (with and without an ownership contract), of
+  the `--watch` engine, or of `heki recommend` (with and without the contract) on a generated
+  project exceeds its budget in the script.
 - The peak heap is the most bytes heki holds at once, counted by the allocator of a
   `count-alloc` build (release builds leave the feature off). The counting build also runs its
   parallel work on the main thread alone, what `RAYON_NUM_THREADS=1` asks without the second
   thread whose timing would move the peak. No allocator cache, memory pressure, or thread timing
   changes the count: every run reads the same bytes, and one run per mode suffices. The total of
   the bytes allocated is printed next to it.
-- Each budget is the peak on CI's Linux runner when it was set, plus 5 %. Another machine reads
-  a few hundred bytes more or less, from the length of the generated project's path.
+- Each budget is the peak on CI's Linux runner when it was set, plus 5 %, except those of
+  `heki recommend`, an experimental command that runs several analyses and that no editor waits
+  on: the owner set them to 100 MiB. Another machine reads a few hundred bytes more or less,
+  from the length of the generated project's path.
 - A budget changes, down or up, only with the owner's decision. A change that would exceed one
   first finds what grew (below) and removes it where it lives; when the growth is the cost of
   facts a default rule needs, the measurements go to the owner.
@@ -3439,7 +3466,7 @@ $ python3 scripts/check_memory.py --heki target/release/heki
   declarations).
 
 At release time (`release.yml` runs CI on the release commit) and on a manual CI run, a release
-build also runs the three modes, and its peak memory as the system sees it, the lowest of three
+build also runs the three modes of `heki check` and `--watch`, and its peak memory as the system sees it, the lowest of three
 runs, stays under a coarse budget: about 10 % above it when the budget was set. This peak also
 holds what the heap count leaves out: the allocator's fragmentation, its mappings, and the code.
 It is the resident set size on Linux and the physical footprint on macOS, each platform with its

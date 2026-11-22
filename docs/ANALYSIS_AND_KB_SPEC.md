@@ -1424,7 +1424,7 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      code does not fix (`heki_ir::ItemOrigins`, `FnIndex::fixed_trips`), and has sent a statement
      whenever it returns. Everything else the heuristic tier finds is `EFF111` / `EFF113`.
    - Open premises (`CheckExtras::open_premises`, off in `heki check` and the language server,
-     on in the hidden `heki dump-open-premises`): an `EFF111` / `EFF113` report records which
+     on in `heki recommend` and the hidden `heki dump-open-premises`): an `EFF111` / `EFF113` report records which
      premises of its claim's row (`heki_rules::premises`) it left open, each with a cause. The
      decisions above tell each step that does not hold (`MustGap`) to whoever asks: a decision
      stops at the first, an explanation goes on. Along the reported chain each call is evaluated

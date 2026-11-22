@@ -9,6 +9,7 @@
 //! sorted, and every cap is a count.
 
 pub mod block;
+pub mod premises;
 pub mod rules;
 
 use crate::project::{
@@ -43,6 +44,9 @@ pub const MAX_EXAMPLES: usize = 3;
 /// The most entries below the project root the count of the Python files the paths leave out
 /// looks at: past them, it says how many it found so far.
 pub const MAX_CENSUS_ENTRIES: usize = 10_000;
+
+/// Where to report what only heki can change: a fact only its shipped catalog can hold.
+pub const ISSUES_URL: &str = concat!(env!("CARGO_PKG_REPOSITORY"), "/issues");
 
 /// The file the configuration goes into when the project has none.
 const NEW_CONFIG_FILE: &str = "pyproject.toml";
@@ -102,6 +106,8 @@ pub struct RecommendReport {
     /// The analyses the report was computed from, in the order they ran.
     pub runs: Vec<Run>,
     pub reports_now: ReportsNow,
+    /// What keeps the heuristic reports of exact claims heuristic.
+    pub open_premises: premises::OpenPremises,
     /// Every rule the configuration does not run in full: the rules it leaves off, and the exact
     /// rules whose heuristic reports it withholds. The block's rules come first.
     pub rules: Vec<rules::RuleAdvice>,
@@ -218,8 +224,10 @@ pub fn recommend(request: Request<'_>) -> Result<RecommendReport, RecommendError
     let files = project.files.len();
     let selection = discovery_selection(&env.cfg.lint, &current)?;
     let discovery = Indexed::build(project, selection, snapshot, Facts::Check)?;
-    let (diags, _) = discovery.diagnose()?;
+    // The heuristic reports of exact claims record what they leave open, and why.
+    let (diags, _) = discovery.diagnose_units(&discovery.project.units(), true)?;
     let files_analyzed = &discovery.project.files;
+    let open_premises = premises::open_premises(&diags, shown);
     let rules = rules::advise(&rules::Inputs {
         current: &current,
         baseline: baseline.as_ref(),
@@ -261,6 +269,7 @@ pub fn recommend(request: Request<'_>) -> Result<RecommendReport, RecommendError
             label: RunLabel::Discovery,
         }],
         reports_now,
+        open_premises,
         rules,
         notes,
         config: block.config,
@@ -423,6 +432,7 @@ pub fn render_text(report: &RecommendReport) -> String {
             split.allowed, split.regressions
         );
     }
+    premises::render(&mut out, &report.open_premises);
     rules::render(&mut out, &report.rules, now.baseline.is_some());
     if !report.notes.is_empty() {
         out.push_str("\nNotes\n");
