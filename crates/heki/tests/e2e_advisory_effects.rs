@@ -1649,3 +1649,93 @@ fn a_helper_summary_keeps_every_witness() {
         "{related:?}"
     );
 }
+
+/// Calls of a property's value (`self.caller()`, `super().waiter()`): the getter runs as a read
+/// of the property does, and the value call is complete when calling a value of the type the
+/// getter declares is. A callable protocol has implementations heki cannot list, also through
+/// `super()`; a project class no subclass overrides `__call__` of names its one implementation.
+const PROPERTY_VALUES: &str = r#"import time
+from typing import Protocol
+
+
+class Waiter(Protocol):
+    def __call__(self) -> None: ...
+
+
+class Sleeper:
+    def __call__(self) -> None:
+        time.sleep(1)
+
+
+class Caller:
+    def __call__(self) -> None:
+        time.sleep(1)
+
+
+class Base:
+    @property
+    def waiter(self) -> Waiter:
+        return Sleeper()
+
+    @property
+    def caller(self) -> Caller:
+        return Caller()
+
+
+class Child(Base):
+    async def through_protocol(self) -> None:
+        super().waiter()
+
+    async def through_protocol_self(self) -> None:
+        self.waiter()
+
+    async def through_class(self) -> None:
+        super().caller()
+
+    async def through_class_self(self) -> None:
+        self.caller()
+
+
+class Lazy:
+    @property
+    def slow(self) -> Caller:
+        time.sleep(1)
+        return Caller()
+
+
+async def getter_waits(lazy: Lazy) -> None:
+    lazy.slow
+    lazy.slow()
+"#;
+
+#[test]
+fn a_call_of_a_property_value_is_as_complete_as_calling_the_value() {
+    let p = Project::new("exact_property_values");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/m.py", PROPERTY_VALUES);
+    let diags = diagnostics(&p, &["--select", "EFF101,EFF111"]);
+    let got: Vec<(u64, &str)> = diags
+        .iter()
+        .map(|d| {
+            (
+                d["line"].as_u64().unwrap(),
+                d["rule_code"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            // A protocol value, through `super()` and through `self`: heuristic.
+            (31, "EFF111"),
+            (34, "EFF111"),
+            // A project class value: exact.
+            (37, "EFF101"),
+            (40, "EFF101"),
+            // The getter's own wait is a property read's, heuristic; the value call beside it is
+            // exact.
+            (51, "EFF111"),
+            (52, "EFF101"),
+        ]
+    );
+}

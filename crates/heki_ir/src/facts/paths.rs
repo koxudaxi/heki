@@ -21,7 +21,7 @@
 //!   A point "called" is passed on the path where its own call raises: whenever the function
 //!   returns normally, the call has been made.
 
-use super::{FnIndex, GlobalStores, ModuleConstants};
+use super::{BUILTIN_NAMES, FnIndex, GlobalStores, ModuleConstants};
 use crate::walk::{Answer, Budget, Visit, reach};
 use crate::{
     BlockId, CompareOpKind, ConstLiteral, Inst, InstKind, IrFunction, ModuleIr, NaturalLoop,
@@ -278,187 +278,23 @@ impl<'a> FnIndex<'a> {
 
 // --------------------------------------------------------------------------- module bindings
 
-/// The names Python 3.11 binds in `builtins` (every later version binds them too), without the
-/// module dunders, sorted.
-const BUILTIN_NAMES: &[&str] = &[
-    "ArithmeticError",
-    "AssertionError",
-    "AttributeError",
-    "BaseException",
-    "BaseExceptionGroup",
-    "BlockingIOError",
-    "BrokenPipeError",
-    "BufferError",
-    "BytesWarning",
-    "ChildProcessError",
-    "ConnectionAbortedError",
-    "ConnectionError",
-    "ConnectionRefusedError",
-    "ConnectionResetError",
-    "DeprecationWarning",
-    "EOFError",
-    "Ellipsis",
-    "EncodingWarning",
-    "EnvironmentError",
-    "Exception",
-    "ExceptionGroup",
-    "False",
-    "FileExistsError",
-    "FileNotFoundError",
-    "FloatingPointError",
-    "FutureWarning",
-    "GeneratorExit",
-    "IOError",
-    "ImportError",
-    "ImportWarning",
-    "IndentationError",
-    "IndexError",
-    "InterruptedError",
-    "IsADirectoryError",
-    "KeyError",
-    "KeyboardInterrupt",
-    "LookupError",
-    "MemoryError",
-    "ModuleNotFoundError",
-    "NameError",
-    "None",
-    "NotADirectoryError",
-    "NotImplemented",
-    "NotImplementedError",
-    "OSError",
-    "OverflowError",
-    "PendingDeprecationWarning",
-    "PermissionError",
-    "ProcessLookupError",
-    "RecursionError",
-    "ReferenceError",
-    "ResourceWarning",
-    "RuntimeError",
-    "RuntimeWarning",
-    "StopAsyncIteration",
-    "StopIteration",
-    "SyntaxError",
-    "SyntaxWarning",
-    "SystemError",
-    "SystemExit",
-    "TabError",
-    "TimeoutError",
-    "True",
-    "TypeError",
-    "UnboundLocalError",
-    "UnicodeDecodeError",
-    "UnicodeEncodeError",
-    "UnicodeError",
-    "UnicodeTranslateError",
-    "UnicodeWarning",
-    "UserWarning",
-    "ValueError",
-    "Warning",
-    "ZeroDivisionError",
-    "abs",
-    "aiter",
-    "all",
-    "anext",
-    "any",
-    "ascii",
-    "bin",
-    "bool",
-    "breakpoint",
-    "bytearray",
-    "bytes",
-    "callable",
-    "chr",
-    "classmethod",
-    "compile",
-    "complex",
-    "copyright",
-    "credits",
-    "delattr",
-    "dict",
-    "dir",
-    "divmod",
-    "enumerate",
-    "eval",
-    "exec",
-    "exit",
-    "filter",
-    "float",
-    "format",
-    "frozenset",
-    "getattr",
-    "globals",
-    "hasattr",
-    "hash",
-    "help",
-    "hex",
-    "id",
-    "input",
-    "int",
-    "isinstance",
-    "issubclass",
-    "iter",
-    "len",
-    "license",
-    "list",
-    "locals",
-    "map",
-    "max",
-    "memoryview",
-    "min",
-    "next",
-    "object",
-    "oct",
-    "open",
-    "ord",
-    "pow",
-    "print",
-    "property",
-    "quit",
-    "range",
-    "repr",
-    "reversed",
-    "round",
-    "set",
-    "setattr",
-    "slice",
-    "sorted",
-    "staticmethod",
-    "str",
-    "sum",
-    "super",
-    "tuple",
-    "type",
-    "vars",
-    "zip",
-];
-
 /// What a module's globals hold whenever one of its functions runs, under the assumptions
 /// every exact claim states (bindings are static, imports resolve as configured): the names
-/// its body binds once, on every path through it, that nothing else binds or deletes; which of
-/// them a plain `import` binds, and to what module; and whether its builtins are the real ones.
+/// its body binds once, on every path through it, that nothing else binds or deletes, and which
+/// of them a plain `import` binds, and to what module. Which builtins are the real ones is the
+/// answer of its constants ([`ModuleConstants::trusts_builtin`]).
 #[derive(Debug, Clone, Default)]
 pub struct ModuleBindings {
     once: FxHashSet<String>,
     /// The module each `import m` (`import m as n`, `import m.sub`) of `once` binds.
     modules: FxHashMap<String, String>,
-    /// Names some code of the module binds or deletes as globals.
-    bound: FxHashSet<String>,
-    /// The module's globals are bound behind the IR (`exec`, `globals()`), or a star import may
-    /// rebind any name: no builtin is trusted.
-    untrusted: bool,
-    star_import: bool,
 }
 
 impl ModuleBindings {
     /// The bindings of `ir`'s module.
     pub fn of(ir: &ModuleIr) -> Self {
         let stores = GlobalStores::of(&ir.functions);
-        let mut out = Self {
-            untrusted: ir.constants.dynamic || ir.has_star_import,
-            star_import: ir.has_star_import,
-            bound: stores.names().map(str::to_owned).collect(),
-            ..Self::default()
-        };
+        let mut out = Self::default();
         if ir.constants.dynamic {
             return out;
         }
@@ -474,7 +310,7 @@ impl ModuleBindings {
                 // A star import may rebind any name: its module's `__all__` may list one that
                 // starts with an underscore.
                 if !stores.once(name)
-                    || out.star_import
+                    || ir.has_star_import
                     || paths.on_every_return((bb.id, i), Progress::Called)
                         != Answer::Known(Must::Every)
                 {
@@ -507,12 +343,11 @@ impl ModuleBindings {
         self.once.contains(name)
     }
 
-    /// A load of the global `name` finds a binding: one bound once, or a real builtin.
-    fn binds(&self, name: &str) -> bool {
+    /// A load of the global `name` in the module of `constants` finds a binding: one bound
+    /// once, or a real builtin.
+    fn binds(&self, constants: &ModuleConstants, name: &str) -> bool {
         self.once.contains(name)
-            || (!self.untrusted
-                && !self.bound.contains(name)
-                && BUILTIN_NAMES.binary_search(&name).is_ok())
+            || (BUILTIN_NAMES.binary_search(&name).is_ok() && constants.trusts_builtin(name))
     }
 }
 
@@ -583,7 +418,7 @@ impl PathReader<'_> {
                 name,
                 is_lazy_import: false,
                 ..
-            } => !bindings.binds(name),
+            } => !bindings.binds(ix.module, name),
             InstKind::AttrLoad { obj, attr, .. } => self.lookup_raises(ix, *obj, attr),
             InstKind::AllocBuiltin {
                 dst,

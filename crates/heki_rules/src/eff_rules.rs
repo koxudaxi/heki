@@ -7,7 +7,7 @@ use crate::mut_rules::{
     initializes_itself, parse_call_targets, parse_read_targets, parse_targets, patterns,
     project_classes, reports_import_probes, site_callee, write_hits,
 };
-use crate::opt_rules::Sizes;
+use crate::opt_rules::{Creators, Sizes};
 use crate::{
     CheckContext, DottedPattern, ModuleUnit, RuleConfigError, SitesByCaller, has_glob_syntax,
     split_last_dot,
@@ -332,14 +332,14 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
     // The functions where a builtin calls a project callable once per item: their calls outside
     // loops may repeat too.
     let per_item_callers: FxHashSet<&str> = sites
-        .values()
-        .flatten()
+        .all()
         .filter(|s| s.per_item.is_some())
         .map(|s| s.caller.qualname.as_str())
         .collect();
     let tcx = TypeCtx::new(&unit.input, cx.decls, cx.kb);
     let no_types = FxHashMap::default();
     let constants = cx.fixed_constants(unit);
+    let creators = Creators::new(cx, &tcx, &no_types, unit, &constants);
     let item_origins: std::cell::OnceCell<ItemOrigins<'_>> = std::cell::OnceCell::new();
     for f in &unit.input.ir.functions {
         if f.is_class_body {
@@ -385,10 +385,8 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
                 if !iteration && !anchors_call_site(&inst.kind) {
                     continue;
                 }
-                let Some(list) = sites.get(&(key.qualname.clone(), inst.span)) else {
-                    continue;
-                };
-                if depth == 0 && list.iter().all(|s| s.per_item.is_none()) {
+                let list = sites.at(&key.qualname, inst.span);
+                if list.is_empty() || depth == 0 && list.iter().all(|s| s.per_item.is_none()) {
                     continue;
                 }
                 if !seen.insert(inst.span) {
@@ -414,7 +412,8 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
                         .enumerate()
                         .filter(|(i, lp)| {
                             shape.in_loop(*i, bb.id)
-                                && *data_sized[*i].get_or_insert_with(|| sizes.data_sized(lp))
+                                && *data_sized[*i]
+                                    .get_or_insert_with(|| sizes.data_sized(lp, &creators))
                         })
                         .fold(0, |mask, (_, lp)| mask | loop_bit(lp))
                 });

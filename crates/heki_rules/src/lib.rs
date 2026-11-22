@@ -802,6 +802,50 @@ pub type TextOf<'a> = dyn Fn(&Path) -> Option<String> + Sync + 'a;
 /// `caller -> [(defining file, call site)]` (see [`CheckContext::sites_by_caller`]).
 pub(crate) type SitesByCaller<'a> = FxHashMap<&'a FuncKey, Vec<(&'a Path, &'a CallSite)>>;
 
+/// The call sites of one module by caller qualname and span ([`CheckContext::sites_by_span`]):
+/// a function's sites and the sites at one of its instructions are looked up, never scanned.
+#[derive(Default)]
+pub(crate) struct SitesBySpan<'a>(FxHashMap<&'a str, FxHashMap<Span, Vec<&'a CallSite>>>);
+
+impl<'a> SitesBySpan<'a> {
+    /// The call sites of the function `qualname`.
+    pub(crate) fn of(&self, qualname: &str) -> FnSites<'_, 'a> {
+        FnSites(self.0.get(qualname))
+    }
+
+    /// The call sites of `qualname` at `span`, in source order.
+    pub(crate) fn at(&self, qualname: &str, span: Span) -> &[&'a CallSite] {
+        self.of(qualname).at(span)
+    }
+
+    /// Every call site of the module.
+    pub(crate) fn all(&self) -> impl Iterator<Item = &'a CallSite> + '_ {
+        self.0
+            .values()
+            .flat_map(|by_span| by_span.values().flatten().copied())
+    }
+}
+
+/// The call sites of one function by span ([`SitesBySpan::of`]).
+#[derive(Clone, Copy)]
+pub(crate) struct FnSites<'s, 'a>(Option<&'s FxHashMap<Span, Vec<&'a CallSite>>>);
+
+impl<'s, 'a> FnSites<'s, 'a> {
+    /// The sites at `span`, in source order.
+    pub(crate) fn at(self, span: Span) -> &'s [&'a CallSite] {
+        self.0
+            .and_then(|by_span| by_span.get(&span))
+            .map_or(&[], Vec::as_slice)
+    }
+
+    /// Every site of the function.
+    pub(crate) fn all(self) -> impl Iterator<Item = &'a CallSite> + 's {
+        self.0
+            .into_iter()
+            .flat_map(|by_span| by_span.values().flatten().copied())
+    }
+}
+
 /// Shared state of one `heki check` run.
 pub(crate) struct CheckContext<'a> {
     pub config: &'a HekiConfig,
@@ -967,15 +1011,15 @@ impl<'a> CheckContext<'a> {
         }
     }
 
-    /// Call sites of `unit` keyed by `(caller qualname, span)`.
-    pub fn sites_by_span(
-        &self,
-        unit: &ModuleUnit<'_>,
-    ) -> FxHashMap<(String, Span), Vec<&'a CallSite>> {
-        let mut out: FxHashMap<(String, Span), Vec<&CallSite>> = FxHashMap::default();
+    /// Call sites of `unit` by caller qualname and span.
+    pub(crate) fn sites_by_span(&self, unit: &ModuleUnit<'_>) -> SitesBySpan<'a> {
+        let mut out = SitesBySpan::default();
         let file = self.index.files.get(&unit.input.path);
         for site in file.into_iter().flat_map(|f| &f.call_sites) {
-            out.entry((site.caller.qualname.clone(), site.span))
+            out.0
+                .entry(site.caller.qualname.as_str())
+                .or_default()
+                .entry(site.span)
                 .or_default()
                 .push(site);
         }

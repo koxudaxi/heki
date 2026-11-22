@@ -805,10 +805,10 @@ impl<'a> Mut202Fn<'a> {
         // Handing a part of a copy to a helper that changes that parameter, or the copy
         // itself to one that changes what its parameter holds.
         let shape = &self.ix.shape;
-        let call = site_call(&|v| shape.inst(v), self.function_sites(), inst, false)?;
-        for (key, callee, pos, var) in call.bound_arguments(self.cx) {
+        let call = site_call(&|v| shape.inst(v), self.sites, inst, false)?;
+        for (key, _, pos, var) in call.bound_arguments(self.cx) {
             let p = u8::try_from(pos).ok().filter(|p| *p < 64)?;
-            let facts_run = self.facts_run_by_call(inst.span, key, callee);
+            let facts_run = self.facts_run_by_call(inst.span, key);
             let below = self.copies_below(facts, var, Step::Below);
             let site = if facts_run.iter().any(|f| f.changes_param_state(p, None)) {
                 below.iter().next().copied()
