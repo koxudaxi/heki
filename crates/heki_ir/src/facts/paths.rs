@@ -497,10 +497,12 @@ impl ModuleBindings {
                 {
                     continue;
                 }
+                // `from . import json` binds the package's own module, not `json`.
                 if let Some(InstKind::Import {
                     module: None,
                     name: imported,
                     is_lazy: false,
+                    relative: false,
                     ..
                 }) = ix.source(*value).map(|i| &i.kind)
                 {
@@ -513,6 +515,13 @@ impl ModuleBindings {
             }
         }
         out
+    }
+
+    /// Whether the module binds `name` once, on every path through its body, and nothing else
+    /// binds or deletes it: whenever one of its functions runs, the name holds what that binding
+    /// bound (an import a rewrite can reuse, say).
+    pub fn bound_once(&self, name: &str) -> bool {
+        self.once.contains(name)
     }
 
     /// A load of the global `name` finds a binding: one bound once, or a real builtin.

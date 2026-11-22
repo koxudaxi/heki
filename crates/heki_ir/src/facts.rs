@@ -2631,10 +2631,13 @@ fn bool_constant(ix: &FnIndex<'_>, name: &str, value: VarId) -> Option<(String, 
             literal: ConstLiteral::Bool(b),
             ..
         } => Some((name.to_owned(), *b)),
+        // A package's own `typing` module (`from .typing import TYPE_CHECKING`) is not the
+        // standard library's.
         InstKind::Import {
             module: Some(module),
             name: imported,
             is_lazy: false,
+            relative: false,
             ..
         } if TYPING.contains(&module.as_str()) && imported == "TYPE_CHECKING" => {
             Some((name.to_owned(), false))
@@ -2643,6 +2646,7 @@ fn bool_constant(ix: &FnIndex<'_>, name: &str, value: VarId) -> Option<(String, 
             module: None,
             name: imported,
             is_lazy: false,
+            relative: false,
             ..
         } if TYPING.contains(&imported.as_str()) => Some((format!("{name}.TYPE_CHECKING"), false)),
         _ => None,
