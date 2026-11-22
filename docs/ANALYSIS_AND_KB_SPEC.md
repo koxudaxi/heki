@@ -284,6 +284,16 @@ Compound expressions are flattened into **basic instructions in explicit left-to
     item of a call's result, a global that is no constant, and anything else are `Open`. The walk
     is a `Closure` over questions `(function, value, steps)`, the steps being what the way from
     the loop applies to the value's sources (an item, a count, pieces of text).
+  - The reader has two set-ups. Where types are inferred, `heki_effect::with_paths` builds it
+    (the module's bindings, members from the catalog or the project, methods of the inferred
+    class, managers the catalog says suppress nothing): the summaries' must-facts, `EFF103`'s
+    and `DATA101`'s every-iteration premise, and `heki dump-facts` read it. Inside `heki_ir`,
+    where no types exist, `PathReader::ir()` knows nothing beyond the IR (every raising
+    instruction raises, every `with` may suppress): the module's bindings
+    (`ModuleBindings::of`), the length caps on every path to a loop
+    (`Paths::block_dominators`), the paced loops (`Paths::on_every_iteration_passes_one_of`),
+    and the appends `ItemOrigins` accepts as filling a list read it. It answers `Every` in fewer
+    cases, so each of these facts holds in fewer programs than it would with types.
   - `heki dump-facts` (hidden) prints these facts and `fixed_trips` as JSON for the tests.
 
 ---
