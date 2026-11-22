@@ -442,6 +442,11 @@ const KID_USER: &str = "from pkg.kid_gen import _grow_kids\nfrom pkg.nodes impor
 const RACK: &str = "class Rack:\n    def __init__(self):\n        self.items = []\n";
 const RACK_OPS: &str = "def empty(xs):\n    xs.clear()\n\n\ndef refill(xs):\n    empty(xs)\n";
 const RACK_VIEW: &str = "from pkg.rack import Rack\nfrom pkg.rack_ops import refill\n\n\ndef show(s: Rack):\n    refill(s.items)\n";
+// A private method of a `Registry` subclass filling the entries of its own `self` in a
+// generator expression, which reads `self` from a closure cell, and a subclass in another module
+// whose initializer calls it (`steps_captured_parameters`).
+const REG_LOAD: &str = "from pkg.model import Registry\n\n\nclass Loading(Registry):\n    def _load(self, peer: Registry, xs):\n        any(self.entries.append(x) for x in xs)\n";
+const REG_SUB: &str = "from pkg.model import Registry\nfrom pkg.reg_load import Loading\n\n\nclass Loaded(Loading):\n    def __init__(self, other: Registry, xs):\n        super().__init__()\n        self._load(other, xs)\n";
 // Inherited writers (`MUT101`): a subclass in another module gains a cached property that an
 // inherited method's write leaves stale, then overrides that method.
 const NAMED: &str = "class Named:\n    def __init__(self, name):\n        self.name = name\n\n    def rename(self, name):\n        self.name = name\n";
@@ -2704,6 +2709,47 @@ fn steps_module_patterns() -> Vec<Step> {
     ]
 }
 
+/// The parameters of its enclosing function that a nested scope reads from closure cells are
+/// parameters of the scope (`CapturedParams`): a private method's generator expression filling
+/// the entries of its `self` writes the method's own receiver, which an initializer in another
+/// module calls while it initializes (`MUT201`). The generator expression turns to the method's
+/// other parameter, which the initializer binds to an argument, and back; then the method rebinds
+/// `self` before it, so the cell is no parameter any more.
+fn steps_captured_parameters() -> Vec<Step> {
+    let peer = REG_LOAD.replace("any(self.entries", "any(peer.entries");
+    let rebound = REG_LOAD.replace("        any(", "        self = peer\n        any(");
+    vec![
+        Step::new(
+            "an initializer in another module calls a private method filling its own entries in a generator expression",
+            vec![
+                Action::Create("pkg/reg_load.py", REG_LOAD.to_owned()),
+                Action::Create("pkg/reg_sub.py", REG_SUB.to_owned()),
+            ],
+        )
+        .absent(&[("pkg/reg_sub.py", "MUT201"), ("pkg/reg_load.py", "MUT201")]),
+        Step::new(
+            "the generator expression fills the entries of the method's other parameter",
+            vec![Action::Save("pkg/reg_load.py", peer)],
+        )
+        .present(&[("pkg/reg_sub.py", "MUT201")]),
+        Step::new(
+            "the generator expression fills the method's own entries again",
+            vec![save("pkg/reg_load.py", REG_LOAD)],
+        )
+        .absent(&[("pkg/reg_sub.py", "MUT201")]),
+        Step::new(
+            "the method rebinds `self` to its other parameter before the generator expression",
+            vec![Action::Save("pkg/reg_load.py", rebound)],
+        )
+        .present(&[("pkg/reg_sub.py", "MUT201")]),
+        Step::new(
+            "the method stops rebinding `self`",
+            vec![save("pkg/reg_load.py", REG_LOAD)],
+        )
+        .absent(&[("pkg/reg_sub.py", "MUT201")]),
+    ]
+}
+
 /// A helper handed a typed field starts changing it itself, besides through the allowed
 /// callee, while its final summary stays the same: the writes the boundary and the owner
 /// contract count are decided from the helpers' own changes (`EFF201`, `MUT201`).
@@ -4396,6 +4442,7 @@ sessions!(editing, Session::start, {
     item_changes: steps_item_changes,
     module_patterns: steps_module_patterns,
     indirect_helpers: steps_indirect_helpers,
+    captured_parameters: steps_captured_parameters,
     inherited_writers: steps_inherited_writers,
     hash_writers: steps_hash_writers,
     mut111: steps_mut111,

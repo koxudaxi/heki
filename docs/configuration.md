@@ -711,8 +711,9 @@ holds for `invalidation` too:
   it does: a call of the scope by that function, or by another scope nested in it, hands the
   object over. So a comprehension in `__init__` writing `self.imports` is part of the class's own
   initialization. The variable is another object when the function or a nested scope rebinds it
-  (`self = other`, `nonlocal self`), and for a closure called away from the function (stored,
-  then called later elsewhere).
+  (`self = other`, `nonlocal self`). A closure called away from the function (stored, then
+  called later elsewhere) still reads the same object, but heki does not tie it to the
+  parameter: no call of the function hands it over.
 - **A function that only runs inside allowed functions is allowed.** Every path of project
   callers above it starts in an allowed function, an exempt method, or such an initialization.
 - **A private helper reports at its callers.** An access in a private helper (`_name`) with
