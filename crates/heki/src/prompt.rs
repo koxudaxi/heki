@@ -13,7 +13,7 @@ use crate::{CheckArgs, JsonSchemaTarget, OutputFormat};
 use anyhow::Result;
 use heki_diagnostics::{Diagnostic, RatchetBaseline, Stylesheet, render};
 use heki_env::{HekiConfig, Severity};
-use heki_rules::project::ProjectEnv;
+use heki_rules::project::{Facts, ProjectEnv};
 use heki_rules::{
     Activation, CORE_RULES, Certainty, EffectiveSelectors, RuleMeta, fold_root_causes,
     heuristic_hint,
@@ -146,7 +146,13 @@ struct ShownDiagnostic {
 }
 
 pub(crate) fn run(args: &CheckArgs, question: &str) -> Result<ExitCode> {
-    let indexed = load_and_index(&args.paths, &args.analysis, args.output_format, None, false)?;
+    let indexed = load_and_index(
+        &args.paths,
+        &args.analysis,
+        args.output_format,
+        None,
+        Facts::Check,
+    )?;
     let (mut diags, withheld) = indexed.diagnose()?;
     let project = &indexed.project;
     let baseline = baseline_path(&args.analysis, &project.env);
