@@ -362,6 +362,25 @@ pub struct EcosystemEntry {
     /// (`queue.Queue.put`): it blocks only where the receiver is known to be bounded
     /// ([`Self::bounded_by`]).
     pub waits_while_full: bool,
+    /// `EFF112`: the call writes an argument, or serializes it into text, in the order of its
+    /// elements (`json.dumps`, `pathlib.Path.write_text`, `print`).
+    pub writes_in_order: Option<OrderedOutput>,
+}
+
+/// What a call writes in the order of its elements (`EcosystemEntry::writes_in_order`): a
+/// mapping's keys and a sequence's items in their iteration order, text as it is.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct OrderedOutput {
+    /// The argument written: at position `arg` (the receiver not counted), or passed by the
+    /// keyword `param`; with neither, every positional argument (`print`).
+    pub arg: Option<u8>,
+    pub param: Option<String>,
+    /// The keyword argument that sorts the keys of the mappings it writes first (`sort_keys`,
+    /// `sort_dicts`).
+    pub sorted_by: Option<String>,
+    /// The call sorts them when it is not passed `sorted_by`.
+    pub sorted_by_default: bool,
 }
 
 /// How a symbol tagged `environment` reads the environment (`EcosystemEntry::environment`).
@@ -551,6 +570,7 @@ pub struct EcosystemPatch {
     pub sync_lock_or_tx: Option<bool>,
     pub non_reentrant_lock: Option<bool>,
     pub one_at_a_time: Option<OneAtATime>,
+    pub writes_in_order: Option<OrderedOutput>,
 }
 
 impl EcosystemPatch {
@@ -581,6 +601,9 @@ impl EcosystemPatch {
         }
         if let Some(v) = self.one_at_a_time {
             entry.one_at_a_time = Some(v);
+        }
+        if let Some(v) = &self.writes_in_order {
+            entry.writes_in_order = Some(v.clone());
         }
     }
 }
@@ -625,6 +648,12 @@ impl TryFrom<&EcosystemOverride> for EcosystemPatch {
                 .as_deref()
                 .map(OneAtATime::from_name)
                 .transpose()?,
+            writes_in_order: value.writes_in_order.as_ref().map(|w| OrderedOutput {
+                arg: w.arg,
+                param: w.param.clone(),
+                sorted_by: w.sorted_by.clone(),
+                sorted_by_default: w.sorted_by_default,
+            }),
         })
     }
 }
@@ -1459,6 +1488,7 @@ mod tests {
             synchronous_waits(),
             lazy_iterators(),
             environment_reads(),
+            ordered_outputs(),
             pydantic_models(),
         ]
         .into_iter()
@@ -1485,6 +1515,24 @@ mod tests {
                 },
             ),
         ]
+    }
+
+    /// `EFF112`: the calls writing an argument in the order of its elements, with no other fact
+    /// (the file writes of `pathlib` are in [`ORDERED_OUTPUTS`] too).
+    fn ordered_outputs() -> Vec<(Vec<String>, EcosystemEntry)> {
+        vec![(
+            s(&[
+                "builtins.print",
+                "json.dumps",
+                "json.dump",
+                "pprint.pprint",
+                "pprint.pformat",
+                "pprint.pp",
+                "yaml.dump",
+                "yaml.safe_dump",
+            ]),
+            entry(&[]),
+        )]
     }
 
     /// The calls and module attributes `reads-environment` effect boundaries forbid; they carry
@@ -2997,6 +3045,55 @@ mod tests {
         ),
     ];
 
+    /// One row of [`ORDERED_OUTPUTS`]: `(arg, param, sorted_by, sorted_by_default, symbols)`.
+    type OrderedOutputRow = (
+        Option<u8>,
+        Option<&'static str>,
+        Option<&'static str>,
+        bool,
+        &'static [&'static str],
+    );
+
+    /// `EFF112`: what each call writes in the order of its elements.
+    const ORDERED_OUTPUTS: &[OrderedOutputRow] = &[
+        (None, None, None, false, &["builtins.print"]),
+        (
+            Some(0),
+            Some("data"),
+            None,
+            false,
+            &["pathlib.Path.write_text", "pathlib.Path.write_bytes"],
+        ),
+        (
+            Some(0),
+            Some("obj"),
+            Some("sort_keys"),
+            false,
+            &["json.dumps", "json.dump"],
+        ),
+        (
+            Some(0),
+            Some("object"),
+            Some("sort_dicts"),
+            true,
+            &["pprint.pprint", "pprint.pformat"],
+        ),
+        (
+            Some(0),
+            Some("object"),
+            Some("sort_dicts"),
+            false,
+            &["pprint.pp"],
+        ),
+        (
+            Some(0),
+            Some("data"),
+            Some("sort_keys"),
+            true,
+            &["yaml.dump", "yaml.safe_dump"],
+        ),
+    ];
+
     /// The calls whose results' items the environment decides the number of.
     const RESULT_ITEMS: &[(ResultItems, &[&str])] = &[
         (
@@ -3113,12 +3210,24 @@ mod tests {
                         None => format!("sqlite3.Connection.{method}"),
                     })
                 });
+                let writes_in_order = ORDERED_OUTPUTS
+                    .iter()
+                    .find(|(.., symbols)| symbols.contains(&symbol.as_str()))
+                    .map(
+                        |(arg, param, sorted_by, sorted_by_default, _)| OrderedOutput {
+                            arg: *arg,
+                            param: param.map(Into::into),
+                            sorted_by: sorted_by.map(Into::into),
+                            sorted_by_default: *sorted_by_default,
+                        },
+                    );
                 let expected = EcosystemEntry {
                     symbol: symbol.clone(),
                     emits,
                     exit_suppresses,
                     items,
                     api,
+                    writes_in_order,
                     ..expected.clone()
                 };
                 assert_eq!(kb.lookup(&symbol), Some(&expected), "{symbol}");
@@ -3585,6 +3694,13 @@ mod tests {
                 non_reentrant_lock: Some(true),
                 ..patch("mypkg.sync.Mutex")
             },
+            EcosystemPatch {
+                writes_in_order: Some(OrderedOutput {
+                    sorted_by: Some("sort_keys".into()),
+                    ..OrderedOutput::default()
+                }),
+                ..patch("json.dumps")
+            },
             // An async-safe API keeps only its loop-sensitive effects.
             EcosystemPatch {
                 async_safe: Some(true),
@@ -3642,6 +3758,14 @@ mod tests {
                 non_reentrant_lock: true,
                 ..EcosystemEntry::default()
             }
+        );
+        // A project may describe another sorting switch of a library call.
+        assert_eq!(
+            got("json.dumps").writes_in_order,
+            Some(OrderedOutput {
+                sorted_by: Some("sort_keys".into()),
+                ..OrderedOutput::default()
+            })
         );
         assert_eq!(
             got("vendor.fetch"),
@@ -3739,6 +3863,12 @@ mod tests {
             sync_lock_or_tx: Some(false),
             non_reentrant_lock: Some(true),
             one_at_a_time: Some("when_unbound".into()),
+            writes_in_order: Some(heki_env::OrderedOutputSetting {
+                arg: None,
+                param: Some("payload".into()),
+                sorted_by: Some("sort_keys".into()),
+                sorted_by_default: true,
+            }),
         };
         assert_eq!(
             EcosystemPatch::try_from(&ok).unwrap(),
@@ -3753,6 +3883,12 @@ mod tests {
                 sync_lock_or_tx: Some(false),
                 non_reentrant_lock: Some(true),
                 one_at_a_time: Some(OneAtATime::WhenUnbound),
+                writes_in_order: Some(OrderedOutput {
+                    arg: None,
+                    param: Some("payload".into()),
+                    sorted_by: Some("sort_keys".into()),
+                    sorted_by_default: true,
+                }),
             }
         );
         for (name, kind) in [

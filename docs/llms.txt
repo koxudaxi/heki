@@ -20,7 +20,7 @@
 
 ## Docs
 
-- [Rules](https://heki.koxudaxi.dev/rules/): heki has 42 rules in four families
+- [Rules](https://heki.koxudaxi.dev/rules/): heki has 44 rules in four families
 - [Rule Precision](https://heki.koxudaxi.dev/precision/): A rule is exact once it is certified (below), and heuristic until then
 - [Experimental Features](https://heki.koxudaxi.dev/experimental/): Experimental features can still change in behavior or precision, or be removed, in any release, and each change is listed in the release notes
 
@@ -67,8 +67,10 @@
 - [readonly-param-mutation (MUT110)](https://heki.koxudaxi.dev/rules/readonly-param-mutation/): Family: Mutation & State (MUT) · Exact · Enabled by default · Severity warning (a bug that is rarely harmful) · No automatic fix
 - [readonly-return-mutation (MUT202)](https://heki.koxudaxi.dev/rules/readonly-return-mutation/): Family: Mutation & State (MUT) · Heuristic · Runs when its contract is declared · Severity error (a bug) · No automatic fix
 - [readonly-type-mutation (MUT108)](https://heki.koxudaxi.dev/rules/readonly-type-mutation/): Family: Mutation & State (MUT) · Heuristic · Opt-in · Severity error (a bug) · No automatic fix
+- [recursion-error-as-value (EFF114)](https://heki.koxudaxi.dev/rules/recursion-error-as-value/): Family: Execution Effects (EFF) · Heuristic · Opt-in · Experimental · Severity error (a bug) · No automatic fix
 - [sentinel-lost-in-deepcopy (MUT118)](https://heki.koxudaxi.dev/rules/sentinel-lost-in-deepcopy/): Family: Mutation & State (MUT) · Heuristic · Off by default · Severity error (a bug) · No automatic fix
 - [set-dict-quadratic-merge (OPT102)](https://heki.koxudaxi.dev/rules/set-dict-quadratic-merge/): Family: Complexity Rewrites (OPT) · Exact · Enabled by default · Severity warning (slower code) · Safe fix (--fix)
+- [set-order-output (EFF112)](https://heki.koxudaxi.dev/rules/set-order-output/): Family: Execution Effects (EFF) · Heuristic · Opt-in · Experimental · Severity error (a bug) · No automatic fix
 - [shallow-copy-nested-mutation (MUT115)](https://heki.koxudaxi.dev/rules/shallow-copy-nested-mutation/): Family: Mutation & State (MUT) · Heuristic · Opt-in · Severity error (a bug) · No automatic fix
 - [summary-effect-regression (MUT103)](https://heki.koxudaxi.dev/rules/summary-effect-regression/): Family: Mutation & State (MUT) · Heuristic · Opt-in · Severity error (a bug) · No automatic fix
 - [unresolved-guarded-call (MUT207)](https://heki.koxudaxi.dev/rules/unresolved-guarded-call/): Family: Mutation & State (MUT) · Heuristic · Runs when its contract is declared · Severity error (a bug) · No automatic fix

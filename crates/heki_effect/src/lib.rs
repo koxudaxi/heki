@@ -38,6 +38,7 @@ mod invokes;
 pub mod iterations;
 pub mod locks;
 pub mod one_at_a_time;
+pub mod order_flow;
 pub mod ownership;
 mod query;
 pub mod readonly;
@@ -244,6 +245,19 @@ impl MustExec {
         }
         self.effects.get(&e).map(Vec::as_slice)
     }
+}
+
+/// What running a function's body runs of a call cycle: a function that can call itself again
+/// through calls whose bodies run on the caller's stack (called there, or a generator iterated
+/// there; never a coroutine only created, nor a callable a worker thread runs), so that a deep
+/// enough input raises `RecursionError` ([`EffectSummary::call_cycle`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CallCycle {
+    /// A function it calls, through any number of such calls, is on a call cycle.
+    Reaches,
+    /// The function itself is on a call cycle.
+    On,
 }
 
 /// Whether a caller has made a call whenever it returns normally (`heki_ir::Paths`).
@@ -894,6 +908,10 @@ pub struct EffectSummary {
     pub is_generator: bool,
     pub is_cached_property: bool,
     pub is_lru_cache: bool,
+    /// What running the function's body runs of a call cycle (`EFF114`; propagated, computed
+    /// only while the rule runs: [`OptInFacts::call_cycles`]; `None`: none).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_cycle: Option<CallCycle>,
     /// A `functools` cache keeps the function's results, each a builtin container of one kind
     /// (`MUT114`; a local fact, never propagated).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -916,6 +934,12 @@ pub struct EffectSummary {
     /// adds their effects where the project shows the queue bounded (local).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capacity_waits: Vec<CapacityWait>,
+
+    /// What the function does with set iteration order (`EFF112`; `None` when it does nothing
+    /// with one, as most functions, and while the rule does not run:
+    /// [`OptInFacts::set_order`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub set_order: Option<Box<order_flow::SetOrderFacts>>,
 }
 
 /// The shared state a function changes ([`EffectSummary::shared_state`]). The lists are sorted
@@ -2279,7 +2303,8 @@ pub enum TypedWrites {
 /// `ArgOrigin::origins`), `MUT113`'s iteration facts (`EffectSummary::iterations`,
 /// `CallSite::result_held`), `EFF109`'s lock facts (`EffectSummary::locks`,
 /// `CallSite::state_tests`), and `EFF110`'s one-at-a-time uses (`EffectSummary::exclusive`,
-/// `CallSite::under_lock`), and the shared state functions change
+/// `CallSite::under_lock`), `EFF112`'s set-order flows (`EffectSummary::set_order`), `EFF114`'s
+/// call cycles (`EffectSummary::call_cycle`), and the shared state functions change
 /// (`EffectSummary::shared_state`), which only `heki inspect` reads, and the calls heki is
 /// blind to (`FileSummary::blind_spots`), which only `heki recommend` reads.
 /// `CallSite::returned`, which `MUT202` reads too, is always computed.
@@ -2298,6 +2323,8 @@ pub struct OptInFacts {
     /// ([`CallSite::complete`], [`CallSite::on_every_return`]).
     pub kept_values: bool,
     pub blind_spots: bool,
+    pub set_order: bool,
+    pub call_cycles: bool,
 }
 
 impl OptInFacts {
@@ -2312,6 +2339,8 @@ impl OptInFacts {
         must_effects: true,
         kept_values: true,
         blind_spots: false,
+        set_order: true,
+        call_cycles: true,
     };
 
     /// Whether the call sites carry [`CallSite::complete`] and [`CallSite::on_every_return`].
