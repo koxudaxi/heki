@@ -3,7 +3,7 @@
 //! symbol names no single function or a file could not be analyzed (the report is still
 //! printed).
 
-use crate::check::{Indexed, baseline_key, baseline_path, load_and_index, shown_errors};
+use crate::check::{baseline_key, baseline_path, load_and_index, shown_errors};
 use crate::{InspectArgs, OutputFormat, ReportFormat};
 use anyhow::Result;
 use heki_diagnostics::{Diagnostic, RatchetBaseline, path_text};
@@ -12,7 +12,7 @@ use heki_rules::inspect::{
     InspectInputs, InspectQuery, MAX_CANDIDATES, Resolution, Symbol, inspect, render_text,
     resolve_line, resolve_name,
 };
-use heki_rules::project::{ParsedFile, canonical};
+use heki_rules::project::{Facts, Indexed, ParsedFile, canonical};
 use rustc_hash::FxHashMap;
 use serde_json::json;
 use std::path::Path;
@@ -39,7 +39,13 @@ pub(crate) fn run(args: &InspectArgs) -> Result<ExitCode> {
             return fail(args, json, &failure, None, &[]);
         }
     };
-    let indexed = load_and_index(&args.paths, &args.analysis, OutputFormat::Full, None, true)?;
+    let indexed = load_and_index(
+        &args.paths,
+        &args.analysis,
+        OutputFormat::Full,
+        None,
+        Facts::Inspect,
+    )?;
     let errors = shown_errors(&indexed.project.errors);
     let decls = indexed.index.project_decls();
     let resolution = match resolve(&indexed, &decls, &symbol) {

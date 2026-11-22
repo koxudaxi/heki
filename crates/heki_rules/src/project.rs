@@ -1,12 +1,18 @@
 //! Project discovery and parsing shared by `heki check`, `heki snapshot`, `--watch`, and the
 //! LSP server: configuration lookup, file discovery (`.gitignore` / `.hekiignore` / `exclude`),
-//! parallel parse → semantic model → IR, and inline-suppression filtering.
+//! parallel parse → semantic model → IR, inline-suppression filtering, and the index the
+//! commands that report from `heki check`'s analysis build.
 
-use crate::ModuleUnit;
+use crate::{
+    CheckExtras, ModuleUnit, RuleConfigError, RuleSelection, SummarySnapshot, check_project,
+};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use heki_ast::{LineIndex, Span};
 use heki_diagnostics::{Diagnostic, InlineIgnores};
-use heki_effect::{ModuleInput, ModuleLayout, UnreadModule};
+use heki_effect::{
+    Contracts, ModuleInput, ModuleLayout, OptInFacts, ProjectIndex, TypedWrites, UnreadModule,
+    analyze_project_for,
+};
 use heki_env::{ConfigError, HekiConfig, PythonVersion, RuntimeProfile};
 use heki_ir::ModuleIr;
 use heki_kb::{EcosystemPatch, EffectiveEcosystemKb, EffectiveSoundnessKb, KbError};
@@ -14,6 +20,7 @@ use heki_semantic::SemanticModel;
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 use thiserror::Error;
 
 /// Directories skipped during discovery unless `exclude` replaces this list (Ruff-style).
@@ -573,6 +580,138 @@ impl Project {
 
     pub fn units(&self) -> Vec<ModuleUnit<'_>> {
         self.files.iter().map(ParsedFile::unit).collect()
+    }
+
+    /// The index of the project's files with `facts`.
+    pub fn index(&self, facts: IndexFacts) -> ProjectIndex {
+        let inputs = self.inputs();
+        analyze_project_for(
+            &inputs,
+            &self.unread,
+            &self.env.kb,
+            facts.contracts,
+            facts.typed_writes,
+            facts.opt_in,
+        )
+    }
+}
+
+/// Which facts an index holds besides those the selected rules read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Facts {
+    /// None: `heki check` and its `--watch` engine.
+    Check,
+    /// Also what `heki inspect` shows ([`crate::inspect_facts`]): `heki inspect` and the language
+    /// server.
+    Inspect,
+}
+
+/// What an index is built with: the contracts its summaries depend on, whether typed writes
+/// propagate, and the opt-in facts it extracts.
+pub struct IndexFacts {
+    pub contracts: Option<Arc<dyn Contracts>>,
+    pub typed_writes: TypedWrites,
+    pub opt_in: OptInFacts,
+}
+
+impl IndexFacts {
+    /// The facts the rules `selection` runs on `config` read, with `facts`.
+    pub fn of(
+        facts: Facts,
+        config: &HekiConfig,
+        kb: &EffectiveEcosystemKb,
+        selection: &RuleSelection,
+    ) -> Result<Self, RuleConfigError> {
+        let opt_in = match facts {
+            Facts::Check => crate::opt_in_facts(selection),
+            Facts::Inspect => crate::inspect_facts(selection),
+        };
+        Ok(Self {
+            contracts: crate::summary_contracts(config, kb)?,
+            typed_writes: crate::typed_writes(config, selection),
+            opt_in,
+        })
+    }
+
+    /// Every fact, with no contract: what a summary snapshot records (`MUT103`).
+    pub fn snapshot() -> Self {
+        Self {
+            contracts: None,
+            typed_writes: TypedWrites::Propagated,
+            opt_in: OptInFacts::ALL,
+        }
+    }
+}
+
+/// A loaded project with the analysis `heki check` runs on it: the rule selection, the saved
+/// summary snapshot `MUT103` compares with, and the index built with the configuration's
+/// contracts and the selection's typed-write mode.
+pub struct Indexed {
+    pub project: Project,
+    pub selection: RuleSelection,
+    pub snapshot: Option<SummarySnapshot>,
+    pub index: ProjectIndex,
+}
+
+impl Indexed {
+    /// Index `project` for the rules `selection` runs, with `facts`.
+    pub fn build(
+        project: Project,
+        selection: RuleSelection,
+        snapshot: Option<SummarySnapshot>,
+        facts: Facts,
+    ) -> Result<Self, RuleConfigError> {
+        let env = &project.env;
+        let index = project.index(IndexFacts::of(facts, &env.cfg, &env.kb, &selection)?);
+        Ok(Self {
+            project,
+            selection,
+            snapshot,
+            index,
+        })
+    }
+
+    /// The diagnostics of every enabled rule in the project's files, after inline suppressions
+    /// and without the heuristic reports the selection withholds, and how many those are.
+    pub fn diagnose(&self) -> Result<(Vec<Diagnostic>, usize), RuleConfigError> {
+        self.diagnose_units(&self.project.units())
+    }
+
+    /// [`Self::diagnose`] in `units` (some or all of the project's files): the rules read the
+    /// other files through the index only.
+    pub fn diagnose_units(
+        &self,
+        units: &[ModuleUnit<'_>],
+    ) -> Result<(Vec<Diagnostic>, usize), RuleConfigError> {
+        let env = &self.project.env;
+        let decls = self.index.project_decls();
+        let sources: FxHashMap<&Path, &str> = self
+            .project
+            .files
+            .iter()
+            .map(|f| (f.path.as_path(), f.source.as_str()))
+            .collect();
+        let text_of = |p: &Path| sources.get(p).map(|t| (*t).to_owned());
+        let extras = CheckExtras {
+            soundness_kb: &env.soundness_kb,
+            snapshot: self.snapshot.as_ref(),
+            decls: Some(&decls),
+            project_patches_builtins: Some(
+                self.project.files.iter().any(ParsedFile::patches_builtins),
+            ),
+            text_of: Some(&text_of),
+        };
+        let mut diags = check_project(
+            units,
+            &env.cfg,
+            &env.kb,
+            &self.index,
+            &self.selection,
+            &extras,
+        )?;
+        retain_unsuppressed(&mut diags, &self.project.files);
+        let withheld = self.selection.withhold_heuristic(&mut diags);
+        Ok((diags, withheld))
     }
 }
 
