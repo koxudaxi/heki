@@ -159,7 +159,9 @@ Compound expressions are flattened into **basic instructions in explicit left-to
     block that reaches the loop grows `x` or lets it escape (returning it after the loop is
     fine). `FnIndex::guarded_len` reads the outcome of the test on the edge into a block whose
     one predecessor branches on it, through `not`, `and` / `or`, and comparison chains, and the
-    tests on the single-predecessor way to each operand. A generator expression's or a
+    tests on the single-predecessor way to each operand. "Every path" is that of the path facts
+    (`Paths::block_dominators`): a branch the module's constants decide is not taken, and a
+    block raises into its handler only where an instruction of it may raise. A generator expression's or a
     comprehension function's loop over `.0` takes the bound of the iterable its creator passes
     (`IrFunction::passed_from`); and a `while` loop over a counter that runs at most 16 times
     (`FnIndex::counted_trips`): its test compares a header phi with a constant (`==`, `!=`,
@@ -177,8 +179,10 @@ Compound expressions are flattened into **basic instructions in explicit left-to
     (`facts::waits_every_iteration`): a sleep (a call or method named `sleep`) of a duration
     other than a literal zero, or a `wait` with a `timeout=` keyword that is not a literal zero
     or a positive constant (`stop.wait(1)`; `asyncio.wait(tasks)` may return at once), awaited
-    in a coroutine (`asyncio.create_task(asyncio.sleep(1))` waits elsewhere). The walk leaves a
-    waiting block by its exception edge too, since an exception may skip the wait.
+    in a coroutine (`asyncio.create_task(asyncio.sleep(1))` waits elsewhere). The paths are
+    those of the path facts (`Paths::on_every_iteration_passes_one_of`, the wait to its
+    return): a branch the module's constants decide is not taken, and an exception raised
+    before the wait returns skips it.
   - `DaemonPolling`: `while self._running:` / `while not self._stopped:`-style flag loops (the
     flag's name has the word `running`, `active`, or `alive`, or after `not` a word like `stop`
     or `shutdown`; an event's `is_set()` / `wait(...)` tests the event as the flag; and the body
@@ -219,9 +223,13 @@ Compound expressions are flattened into **basic instructions in explicit left-to
   - `IrFunction.starred` marks starred display elements, `ModuleIr.class_bases` the bases a
     class statement passes, `BasicBlock.term_span` the source of a block's terminator (blocker
     lines point at it), and `ModuleIr.constants` (`ModuleConstants`) the module's constant
-    integers, displays, strings, and tuples of strings. A string constant, or a tuple of them,
-    is one entry: its text (`strs` / `str_tuples`, one `Arc<str>` per string the module writes,
-    which aliases and items share), whose length gives its display.
+    integers, booleans, floats, displays, strings, and tuples of strings. A string constant, or
+    a tuple of them, is one entry: its text (`strs` / `str_tuples`, one `Arc<str>` per string
+    the module writes, which aliases and items share), whose length gives its display. It is
+    the one view of a module name bound once (a star import rebinds every name bound before
+    it, also one with an underscore, which the imported module's `__all__` may list): the
+    effect lane's declarations read their number, boolean, and string constants from it, and `GlobalStores` is the one count of the stores
+    and deletions of each module global that it, `ModuleBindings`, and the declarations read.
   - The Soundness lane reads these facts within one module only (`FnIndex`). The Advisory rules
     read other modules' small displays through the declarations (`ModuleDecls.small_globals`,
     `ClassDecl.attr_displays`), so the language server re-checks their users when they change.
@@ -246,7 +254,8 @@ Compound expressions are flattened into **basic instructions in explicit left-to
   - `FnIndex::decided` (`Decided`): a branch whose test the code fixes never takes its other
     side, and code only that side reaches is dead for every fact. The tests are literals, module
     constants (`ModuleConstants::ints`, `strs`, `bools`, and `typing.TYPE_CHECKING`, which is
-    false whenever the code runs), `not`, `==` / `!=` / `is` of two such values, and the phis of
+    false whenever the code runs; a relative import, `from .typing import TYPE_CHECKING`, names
+    the package's own module and fixes nothing), `not`, `==` / `!=` / `is` of two such values, and the phis of
     `and` / `or` along the edges that can run (one pass in reverse postorder: a phi's input along
     a back edge leaves it undecided).
   - Exception edges: an instruction raises into its block's handler unless the assumptions every
@@ -254,7 +263,8 @@ Compound expressions are flattened into **basic instructions in explicit left-to
     as configured, the catalog describes the library, and no asynchronous or resource-exhaustion
     exception arises (`KeyboardInterrupt`, `MemoryError`). A load of a module name the module
     body binds once on every path (`ModuleBindings`) or of a real builtin does not raise, nor does
-    an attribute load of a member of a module a plain `import` binds once, nor a list or tuple
+    an attribute load of a member of a module a plain `import` binds once (`from . import json`
+    binds the package's own module, `InstKind::Import::relative`), nor a list or tuple
     display without unpacking. Attribute loads of other objects (unless the reader finds the
     attribute on the object's class, `PathReader::attribute_found`: a catalog method, or a
     project method no decorator replaces, where no class the object may be under R2, a project
@@ -288,6 +298,16 @@ Compound expressions are flattened into **basic instructions in explicit left-to
     item of a call's result, a global that is no constant, and anything else are `Open`. The walk
     is a `Closure` over questions `(function, value, steps)`, the steps being what the way from
     the loop applies to the value's sources (an item, a count, pieces of text).
+  - The reader has two set-ups. Where types are inferred, `heki_effect::with_paths` builds it
+    (the module's bindings, members from the catalog or the project, methods of the inferred
+    class, managers the catalog says suppress nothing): the summaries' must-facts, `EFF103`'s
+    and `DATA101`'s every-iteration premise, and `heki dump-facts` read it. Inside `heki_ir`,
+    where no types exist, `PathReader::ir()` knows nothing beyond the IR (every raising
+    instruction raises, every `with` may suppress): the module's bindings
+    (`ModuleBindings::of`), the length caps on every path to a loop
+    (`Paths::block_dominators`), the paced loops (`Paths::on_every_iteration_passes_one_of`),
+    and the appends `ItemOrigins` accepts as filling a list read it. It answers `Every` in fewer
+    cases, so each of these facts holds in fewer programs than it would with types.
   - `heki dump-facts` (hidden) prints these facts and `fixed_trips` as JSON for the tests.
 
 ---
@@ -1548,7 +1568,10 @@ forbids; such an entry has no other fact), and
 `opaque_to_layer3` (reserved for Layer 3), and `cases`: what the call does instead when one
 argument (by position, the receiver not counted, or by keyword) is a given literal (an
 argument is the literal it is, or the one a module constant bound once holds:
-`TypeCtx::global_literal`, `ModuleDecls::str_constants` and `literal_constants`, also imported
+`TypeCtx::global_literal`, `ModuleDecls::str_constants` and `literal_constants`, the latter
+read from `heki_ir::ModuleConstants` (the integers it computes from other constants, its
+booleans, and its floats), the one view of a module name bound once that the IR's facts read
+too, with `heki_ir::GlobalStores` the one count of its stores and deletions, also imported
 unless the importing module binds the name again, `ModuleDecls::fixed_import`), a string
 literal with a given prefix, equal to one of given strings (`one_of`), containing one
 (`contains`), an IPv4 or IPv6 address (`numeric_address`), or not empty, a value established to

@@ -1,7 +1,8 @@
-//! The path and loop facts of `heki_ir::facts`, end to end through `heki dump-facts`: whether a
-//! call runs whenever its function returns, over the edges into its handlers; whether it runs on
-//! every iteration of a loop that completes; branches the module's constants decide; the trip
-//! counts the code fixes, past 16 too; and where the items a loop steps through come from.
+//! The path and loop facts of `heki_ir::facts`, end to end through `heki dump-facts` (with the
+//! reader the rules have): whether a call runs whenever its function returns, over the edges
+//! into its handlers; whether it runs on every iteration of a loop that completes; branches the
+//! module's constants decide; the trip counts the code fixes, past 16 too; and where the items a
+//! loop steps through come from.
 
 mod common;
 
@@ -46,6 +47,8 @@ fn a_call_runs_whenever_its_function_returns_over_the_edges_into_handlers() {
         "paths_on_return",
         r#"import subprocess
 
+from . import subprocess as local_proc
+
 
 def own_handler(cmd):
     try:
@@ -79,8 +82,23 @@ def receiver_first(conn):
     return rows
 
 
+def relative_module(cmd):
+    try:
+        r = local_proc.run(["git", cmd], timeout=10)
+    except FileNotFoundError:
+        return None
+    return r
+
+
 def in_with(open_, p, sub):
     with open_(p) as fh:
+        data = fh.read()
+        sub.run(data)
+    return 1
+
+
+def in_open(p, sub):
+    with open(p) as fh:
         data = fh.read()
         sub.run(data)
     return 1
@@ -124,9 +142,19 @@ def in_with(open_, p, sub):
         "not_every",
         "not_every",
     );
+    // A package's own module is not the standard library's: looking up its member may raise.
+    expect(
+        "relative_module",
+        "local_proc.run([\"git\", cmd], timeout=10)",
+        "not_every",
+        "not_every",
+    );
     // A `with` whose manager heki does not resolve may suppress what its body raises.
     expect("in_with", "fh.read()", "not_every", "not_every");
     expect("in_with", "sub.run(data)", "not_every", "not_every");
+    // The facts are those the rules read: the catalog says the file `open` returns suppresses
+    // nothing.
+    expect("in_open", "sub.run(data)", "every", "every");
 }
 
 #[test]
@@ -315,6 +343,50 @@ def default_from_caller(report, db, fallback):
         raise ValueError(report)
     for run in report["runs"]:
         db.one(run)
+
+
+DEBUG = False
+
+
+def decided_bypass(rows, db):
+    if DEBUG:
+        db.one(None)
+    else:
+        if len(rows) > 8:
+            raise ValueError(rows)
+        db.one(len(rows))
+    for row in rows:
+        db.one(row)
+
+
+def dead_loop(rows, db):
+    if DEBUG:
+        if len(rows) > 8:
+            raise ValueError(rows)
+        if db.ready():
+            db.one(None)
+        for row in rows:
+            db.one(row)
+
+
+def bypassed_through_dead_code(rows, db):
+    if DEBUG:
+        if len(rows) > 8:
+            raise ValueError(rows)
+        db.one(None)
+    for row in rows:
+        db.one(row)
+
+
+def live_bypass(rows, db, flag):
+    if flag:
+        db.one(None)
+    else:
+        if len(rows) > 8:
+            raise ValueError(rows)
+        db.one(len(rows))
+    for row in rows:
+        db.one(row)
 "#,
     );
     let trips = |qualname: &str| -> Vec<Value> {
@@ -365,6 +437,14 @@ def default_from_caller(report, db, fallback):
     assert_eq!(trips("without_default"), vec![fixed(40)]);
     // A default the test accepts may be what it measured, not the value the loop reads.
     assert_eq!(trips("default_passes"), vec![json!("open")]);
+    // A branch a module constant decides is not taken: the cap is on every path that runs. A
+    // branch the input decides may skip it.
+    assert_eq!(trips("decided_bypass"), vec![capped(8)]);
+    assert_eq!(trips("live_bypass"), vec![json!("open")]);
+    // A loop no path reaches is capped by any test (none avoids it); a test only dead code
+    // passes caps no loop that runs.
+    assert_eq!(trips("dead_loop"), vec![capped(8)]);
+    assert_eq!(trips("bypassed_through_dead_code"), vec![json!("open")]);
     // The IR records the count of a loop over what a generator expression's creator passes.
     let genexpr = function(&facts, "generated.<locals>.<genexpr>");
     assert_eq!(genexpr["loops"][0]["fixed_trips"], capped(3));

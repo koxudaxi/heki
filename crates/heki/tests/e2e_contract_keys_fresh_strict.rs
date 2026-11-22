@@ -793,8 +793,9 @@ def write(field: DataModelFieldBase) -> None:
     field.__dict__[AFTER] = True
 "#;
 
-/// A star import may rebind the public names the module bound before it, so they hold no
-/// constant there; it imports no `_private` name, and a name bound after it keeps its value.
+/// A star import may rebind the names the module bound before it, so they hold no constant
+/// there: the public ones, and a `_private` one too, which the imported module's `__all__` may
+/// list. A name bound after it keeps its value.
 #[test]
 fn a_star_import_after_a_module_constant_may_rebind_it() {
     let p = class_keys_project("keys_star_import", STARRED_KEYS);
@@ -805,7 +806,7 @@ fn a_star_import_after_a_module_constant_may_rebind_it() {
         found(&diagnostics(&p, &[])),
         vec![
             d(u, 12, "MUT205", "write", "DataModelFieldBase"),
-            d(u, 13, "MUT201", "write", forced),
+            d(u, 13, "MUT205", "write", "DataModelFieldBase"),
             d(u, 14, "MUT201", "write", forced),
         ]
     );
