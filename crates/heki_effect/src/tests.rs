@@ -2035,10 +2035,8 @@ fn reads_on_every_path_are_the_loads_and_self_calls_every_normal_return_passes()
     let index = project(&[("kept.py", KEPT_READS_PY)]);
     let must = |q: &str| -> BTreeSet<(String, Option<String>)> {
         summary(&index, "kept", q)
-            .must_read_self_attrs
-            .as_deref()
-            .into_iter()
-            .flatten()
+            .must_read_self_attrs()
+            .iter()
             .map(|r| (r.attr.clone(), r.const_key.clone()))
             .collect()
     };
@@ -2259,7 +2257,7 @@ def factory(h: Holder):
 #[test]
 fn removals_of_kept_values_by_name_and_by_unknown_code() {
     let index = project(&[("rm.py", KEPT_REMOVALS_PY)]);
-    let removes = |q: &str| summary(&index, "rm", q).removes_kept.clone();
+    let removes = |q: &str| summary(&index, "rm", q).removes_kept().clone();
     let named = |n: &str| KeptRemoval::Named(Box::new(set(&[n.to_owned()])));
     assert_eq!(removes("drop"), named("size"));
     assert_eq!(removes("pop"), named("size"));
@@ -2357,7 +2355,7 @@ fn cached_property_decorators_the_catalog_lists_keep_their_value_in_the_instance
     let index = project(&[("lc.py", LISTED_CACHES_PY)]);
     let of = |q: &str| {
         let s = summary(&index, "lc", q);
-        (s.is_cached_property, s.listed_cache)
+        (s.is_cached_property, s.listed_cache())
     };
     let listed = |in_slot| Some(ListedCache { in_slot });
     assert_eq!(of("A.by_module"), (true, listed(false)));

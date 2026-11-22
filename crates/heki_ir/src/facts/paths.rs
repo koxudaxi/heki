@@ -21,7 +21,7 @@
 //!   A point "called" is passed on the path where its own call raises: whenever the function
 //!   returns normally, the call has been made.
 
-use super::{BUILTIN_NAMES, FnIndex, GlobalStores, ModuleConstants};
+use super::{FnIndex, GlobalStores, ModuleConstants, is_builtin_name};
 use crate::walk::{Answer, Budget, Visit, reach};
 use crate::{
     BlockId, CompareOpKind, ConstLiteral, Inst, InstKind, IrFunction, ModuleIr, NaturalLoop,
@@ -346,8 +346,7 @@ impl ModuleBindings {
     /// A load of the global `name` in the module of `constants` finds a binding: one bound
     /// once, or a real builtin.
     fn binds(&self, constants: &ModuleConstants, name: &str) -> bool {
-        self.once.contains(name)
-            || (BUILTIN_NAMES.binary_search(&name).is_ok() && constants.trusts_builtin(name))
+        self.once.contains(name) || (is_builtin_name(name) && constants.trusts_builtin(name))
     }
 }
 
