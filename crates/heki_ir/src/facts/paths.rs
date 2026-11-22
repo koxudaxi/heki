@@ -21,8 +21,8 @@
 //!   A point "called" is passed on the path where its own call raises: whenever the function
 //!   returns normally, the call has been made.
 
-use super::{FnIndex, ModuleConstants};
-use crate::walk::{Answer, Budget};
+use super::{BUILTIN_NAMES, FnIndex, GlobalStores, ModuleConstants};
+use crate::walk::{Answer, Budget, Visit, reach};
 use crate::{
     BlockId, CompareOpKind, ConstLiteral, Inst, InstKind, IrFunction, ModuleIr, NaturalLoop,
     Terminator, UnaryOpKind, VarId,
@@ -278,204 +278,23 @@ impl<'a> FnIndex<'a> {
 
 // --------------------------------------------------------------------------- module bindings
 
-/// The names Python 3.11 binds in `builtins` (every later version binds them too), without the
-/// module dunders, sorted.
-const BUILTIN_NAMES: &[&str] = &[
-    "ArithmeticError",
-    "AssertionError",
-    "AttributeError",
-    "BaseException",
-    "BaseExceptionGroup",
-    "BlockingIOError",
-    "BrokenPipeError",
-    "BufferError",
-    "BytesWarning",
-    "ChildProcessError",
-    "ConnectionAbortedError",
-    "ConnectionError",
-    "ConnectionRefusedError",
-    "ConnectionResetError",
-    "DeprecationWarning",
-    "EOFError",
-    "Ellipsis",
-    "EncodingWarning",
-    "EnvironmentError",
-    "Exception",
-    "ExceptionGroup",
-    "False",
-    "FileExistsError",
-    "FileNotFoundError",
-    "FloatingPointError",
-    "FutureWarning",
-    "GeneratorExit",
-    "IOError",
-    "ImportError",
-    "ImportWarning",
-    "IndentationError",
-    "IndexError",
-    "InterruptedError",
-    "IsADirectoryError",
-    "KeyError",
-    "KeyboardInterrupt",
-    "LookupError",
-    "MemoryError",
-    "ModuleNotFoundError",
-    "NameError",
-    "None",
-    "NotADirectoryError",
-    "NotImplemented",
-    "NotImplementedError",
-    "OSError",
-    "OverflowError",
-    "PendingDeprecationWarning",
-    "PermissionError",
-    "ProcessLookupError",
-    "RecursionError",
-    "ReferenceError",
-    "ResourceWarning",
-    "RuntimeError",
-    "RuntimeWarning",
-    "StopAsyncIteration",
-    "StopIteration",
-    "SyntaxError",
-    "SyntaxWarning",
-    "SystemError",
-    "SystemExit",
-    "TabError",
-    "TimeoutError",
-    "True",
-    "TypeError",
-    "UnboundLocalError",
-    "UnicodeDecodeError",
-    "UnicodeEncodeError",
-    "UnicodeError",
-    "UnicodeTranslateError",
-    "UnicodeWarning",
-    "UserWarning",
-    "ValueError",
-    "Warning",
-    "ZeroDivisionError",
-    "abs",
-    "aiter",
-    "all",
-    "anext",
-    "any",
-    "ascii",
-    "bin",
-    "bool",
-    "breakpoint",
-    "bytearray",
-    "bytes",
-    "callable",
-    "chr",
-    "classmethod",
-    "compile",
-    "complex",
-    "copyright",
-    "credits",
-    "delattr",
-    "dict",
-    "dir",
-    "divmod",
-    "enumerate",
-    "eval",
-    "exec",
-    "exit",
-    "filter",
-    "float",
-    "format",
-    "frozenset",
-    "getattr",
-    "globals",
-    "hasattr",
-    "hash",
-    "help",
-    "hex",
-    "id",
-    "input",
-    "int",
-    "isinstance",
-    "issubclass",
-    "iter",
-    "len",
-    "license",
-    "list",
-    "locals",
-    "map",
-    "max",
-    "memoryview",
-    "min",
-    "next",
-    "object",
-    "oct",
-    "open",
-    "ord",
-    "pow",
-    "print",
-    "property",
-    "quit",
-    "range",
-    "repr",
-    "reversed",
-    "round",
-    "set",
-    "setattr",
-    "slice",
-    "sorted",
-    "staticmethod",
-    "str",
-    "sum",
-    "super",
-    "tuple",
-    "type",
-    "vars",
-    "zip",
-];
-
 /// What a module's globals hold whenever one of its functions runs, under the assumptions
 /// every exact claim states (bindings are static, imports resolve as configured): the names
-/// its body binds once, on every path through it, that nothing else binds or deletes; which of
-/// them a plain `import` binds, and to what module; and whether its builtins are the real ones.
+/// its body binds once, on every path through it, that nothing else binds or deletes, and which
+/// of them a plain `import` binds, and to what module. Which builtins are the real ones is the
+/// answer of its constants ([`ModuleConstants::trusts_builtin`]).
 #[derive(Debug, Clone, Default)]
 pub struct ModuleBindings {
     once: FxHashSet<String>,
     /// The module each `import m` (`import m as n`, `import m.sub`) of `once` binds.
     modules: FxHashMap<String, String>,
-    /// Names some code of the module binds or deletes as globals.
-    bound: FxHashSet<String>,
-    /// The module's globals are bound behind the IR (`exec`, `globals()`), or a star import may
-    /// rebind any public name: no builtin is trusted.
-    untrusted: bool,
-    star_import: bool,
 }
 
 impl ModuleBindings {
     /// The bindings of `ir`'s module.
     pub fn of(ir: &ModuleIr) -> Self {
-        let mut stores: FxHashMap<&str, u32> = FxHashMap::default();
-        let mut out = Self {
-            untrusted: ir.constants.dynamic || ir.has_star_import,
-            star_import: ir.has_star_import,
-            ..Self::default()
-        };
-        for f in &ir.functions {
-            for inst in f.blocks.iter().flat_map(|b| &b.insts) {
-                match &inst.kind {
-                    InstKind::StoreGlobal { name, .. } => {
-                        *stores.entry(name).or_default() += 1;
-                        out.bound.insert(name.clone());
-                    }
-                    InstKind::Delete {
-                        name, global: true, ..
-                    } => {
-                        // Deleted: never bound once.
-                        *stores.entry(name).or_default() += 2;
-                        out.bound.insert(name.clone());
-                    }
-                    _ => {}
-                }
-            }
-        }
+        let stores = GlobalStores::of(&ir.functions);
+        let mut out = Self::default();
         if ir.constants.dynamic {
             return out;
         }
@@ -488,19 +307,21 @@ impl ModuleBindings {
                 let InstKind::StoreGlobal { name, value } = &inst.kind else {
                     continue;
                 };
-                // A star import may rebind any public name.
-                let public = !name.starts_with('_');
-                if stores.get(name.as_str()) != Some(&1)
-                    || (out.star_import && public)
+                // A star import may rebind any name: its module's `__all__` may list one that
+                // starts with an underscore.
+                if !stores.once(name)
+                    || ir.has_star_import
                     || paths.on_every_return((bb.id, i), Progress::Called)
                         != Answer::Known(Must::Every)
                 {
                     continue;
                 }
+                // `from . import json` binds the package's own module, not `json`.
                 if let Some(InstKind::Import {
                     module: None,
                     name: imported,
                     is_lazy: false,
+                    relative: false,
                     ..
                 }) = ix.source(*value).map(|i| &i.kind)
                 {
@@ -515,12 +336,18 @@ impl ModuleBindings {
         out
     }
 
-    /// A load of the global `name` finds a binding: one bound once, or a real builtin.
-    fn binds(&self, name: &str) -> bool {
+    /// Whether the module binds `name` once, on every path through its body, and nothing else
+    /// binds or deletes it: whenever one of its functions runs, the name holds what that binding
+    /// bound (an import a rewrite can reuse, say).
+    pub fn bound_once(&self, name: &str) -> bool {
         self.once.contains(name)
-            || (!self.untrusted
-                && !self.bound.contains(name)
-                && BUILTIN_NAMES.binary_search(&name).is_ok())
+    }
+
+    /// A load of the global `name` in the module of `constants` finds a binding: one bound
+    /// once, or a real builtin.
+    fn binds(&self, constants: &ModuleConstants, name: &str) -> bool {
+        self.once.contains(name)
+            || (BUILTIN_NAMES.binary_search(&name).is_ok() && constants.trusts_builtin(name))
     }
 }
 
@@ -591,7 +418,7 @@ impl PathReader<'_> {
                 name,
                 is_lazy_import: false,
                 ..
-            } => !bindings.binds(name),
+            } => !bindings.binds(ix.module, name),
             InstKind::AttrLoad { obj, attr, .. } => self.lookup_raises(ix, *obj, attr),
             InstKind::AllocBuiltin {
                 dst,
@@ -635,6 +462,8 @@ const MAX_PASSES: u32 = 4;
 struct Dominance {
     /// The position of each block of the region.
     local: FxHashMap<BlockId, u32>,
+    /// Per node, its immediate dominator ([`UNREACHED`] for a node the root does not reach).
+    idom: Vec<u32>,
     /// Per node, whether the region's root reaches it.
     reached: Vec<bool>,
     /// Per node, whether every path from the root to the sink passes it.
@@ -658,6 +487,69 @@ impl Dominance {
             Must::NotEvery
         }
     }
+}
+
+/// Which blocks every path from a function's entry to another block passes, over the graph of
+/// its path facts ([`Paths::block_dominators`]). Each node's subtree of the dominator tree is
+/// an interval of preorder numbers, so a query takes constant time.
+#[derive(Debug, Clone)]
+pub struct BlockDominators {
+    local: FxHashMap<BlockId, u32>,
+    /// Per node, its number in a preorder of the dominator tree ([`UNREACHED`] for a node the
+    /// entry does not reach).
+    preorder: Vec<u32>,
+    /// Per node, how many nodes its subtree holds.
+    subtree: Vec<u32>,
+}
+
+impl BlockDominators {
+    /// The intervals of the dominator tree `idom`. A node comes after its immediate dominator in
+    /// reverse postorder, as [`Paths::immediate_dominators`] already relies on: sizes are summed
+    /// from the last node back, and each child takes the next free numbers of its parent's
+    /// interval from the first node on.
+    fn of(local: FxHashMap<BlockId, u32>, idom: &[u32]) -> Self {
+        let reached = |x: usize| idom[x] != UNREACHED;
+        debug_assert!((1..idom.len()).all(|x| !reached(x) || (idom[x] as usize) < x));
+        let mut subtree = vec![1u32; idom.len()];
+        for x in (1..idom.len()).rev().filter(|&x| reached(x)) {
+            subtree[idom[x] as usize] += subtree[x];
+        }
+        let mut preorder = vec![UNREACHED; idom.len()];
+        let mut next_free = vec![0u32; idom.len()];
+        preorder[0] = 0;
+        next_free[0] = 1;
+        for x in (1..idom.len()).filter(|&x| reached(x)) {
+            let parent = idom[x] as usize;
+            preorder[x] = next_free[parent];
+            next_free[parent] += subtree[x];
+            next_free[x] = preorder[x] + 1;
+        }
+        Self {
+            local,
+            preorder,
+            subtree,
+        }
+    }
+
+    /// Whether every path from the entry to block `to` passes block `through`: also when no
+    /// path reaches `to` (none avoids `through` either).
+    pub fn passes(&self, through: BlockId, to: BlockId) -> bool {
+        let head = |b: BlockId| self.local.get(&b).map(|k| 2 * *k as usize);
+        let Some(x) = head(to).filter(|x| self.preorder[*x] != UNREACHED) else {
+            return true;
+        };
+        let Some(d) = head(through).filter(|d| self.preorder[*d] != UNREACHED) else {
+            return false;
+        };
+        (self.preorder[d]..self.preorder[d] + self.subtree[d]).contains(&self.preorder[x])
+    }
+}
+
+/// A region's graph ([`Paths::region_graph`]).
+struct RegionGraph {
+    local: FxHashMap<BlockId, u32>,
+    preds: Vec<SmallVec<[u32; 2]>>,
+    sink: u32,
 }
 
 /// The region a graph covers.
@@ -774,6 +666,57 @@ impl<'p, 'a> Paths<'p, 'a> {
         answer
     }
 
+    /// Whether every iteration of `f.loops[li]` (an index the function has) that completes passes
+    /// one of `points`, to `progress`: every path from the header back to it does (also when
+    /// none does, as no iteration completes). One point need not be on every path: a sleep in
+    /// each branch of an `if` paces the loop too.
+    pub fn on_every_iteration_passes_one_of(
+        &self,
+        li: usize,
+        points: &[(BlockId, usize)],
+        progress: Progress,
+    ) -> Answer<bool> {
+        let lp = &self.ix.f.loops[li];
+        // Past the budget the region has no graph, and the answer is open.
+        self.region_graph(Region::Loop(li, lp))
+            .map_or(Answer::Open, |graph| {
+                let passed: FxHashSet<u32> = points
+                    .iter()
+                    .filter_map(|&at| {
+                        let (block, tail) = self.node_at(at, progress);
+                        graph.local.get(&block).map(|k| 2 * k + u32::from(tail))
+                    })
+                    .collect();
+                // Back from the end of an iteration, never through a passed node: reaching the
+                // header is a path around the loop that passes none.
+                reach(
+                    self.budget,
+                    [graph.sink],
+                    |node, next| next.extend(graph.preds[node as usize].iter().copied()),
+                    |node| {
+                        if passed.contains(&node) {
+                            Visit::Prune
+                        } else if node == 0 {
+                            Visit::Stop(())
+                        } else {
+                            Visit::Expand
+                        }
+                    },
+                )
+                .map(|found| found.is_none())
+            })
+    }
+
+    /// Which blocks every path from the entry to another block passes ([`BlockDominators`]), over
+    /// the graph `on_every_return` reads: a branch the code decides is not taken, and a block
+    /// raises into its handler only where an instruction of it may raise.
+    pub fn block_dominators(&self) -> Answer<BlockDominators> {
+        self.on_return
+            .get_or_init(|| self.dominance(Region::Function))
+            .as_ref()
+            .map(|d| BlockDominators::of(d.local.clone(), &d.idom))
+    }
+
     /// The node that is passed exactly when the point is: the head while no raising
     /// instruction before it (or, for `Returned`, at it) has run. A method call whose lookup of
     /// the method may raise has made no call until the lookup returned: it is called only after
@@ -790,26 +733,30 @@ impl<'p, 'a> Paths<'p, 'a> {
         (block, tail)
     }
 
-    fn dominance(&self, region: Region<'_>) -> Answer<Dominance> {
+    /// The graph of `region`: two nodes per block in reverse postorder (the head of the `k`-th
+    /// block is `2k`, its tail `2k + 1`) and a sink last, as predecessor lists. `None` when the
+    /// region's root is not its first block or past the budget.
+    fn region_graph(&self, region: Region<'_>) -> Option<RegionGraph> {
         let f = self.ix.f;
         let decided = self.ix.decided();
         let shape = &self.ix.shape;
         let (blocks, root): (Vec<BlockId>, BlockId) = match region {
             Region::Function => (shape.rpo().to_vec(), BlockId(0)),
             Region::Loop(li, lp) => {
-                let blocks = shape
-                    .rpo()
+                let mut blocks: Vec<BlockId> = lp
+                    .body
                     .iter()
                     .copied()
-                    .filter(|b| shape.in_loop(li, *b))
+                    .filter(|b| shape.in_loop(li, *b) && shape.reachable(*b))
                     .collect();
+                blocks.sort_unstable_by_key(|b| shape.rpo_index(*b));
                 (blocks, lp.header)
             }
         };
         // The root comes first: it dominates the region, and a dominator comes before the
         // blocks it dominates in reverse postorder.
         if blocks.first() != Some(&root) || !self.budget.take(blocks.len()) {
-            return Answer::Open;
+            return None;
         }
         let local: FxHashMap<BlockId, u32> = blocks
             .iter()
@@ -856,6 +803,13 @@ impl<'p, 'a> Paths<'p, 'a> {
                 }
             }
         }
+        Some(RegionGraph { local, preds, sink })
+    }
+
+    fn dominance(&self, region: Region<'_>) -> Answer<Dominance> {
+        let Some(RegionGraph { local, preds, sink }) = self.region_graph(region) else {
+            return Answer::Open;
+        };
         let Some(idom) = self.immediate_dominators(&preds) else {
             return Answer::Open;
         };
@@ -873,6 +827,7 @@ impl<'p, 'a> Paths<'p, 'a> {
         }
         Answer::Known(Dominance {
             local,
+            idom,
             reached,
             on_every,
             sink,

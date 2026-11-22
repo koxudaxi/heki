@@ -123,6 +123,17 @@ pub const EXPERIMENTAL_FEATURES: &[ExperimentalFeature] = &[
             still change.",
         tracking: None,
     },
+    ExperimentalFeature {
+        id: "cli-option.generate-prompt",
+        kind: ExperimentalKind::CliOption,
+        target: "heki check --generate-prompt",
+        since: "0.2.2",
+        reason: "What the prompt holds and how it says it can still change as it is tried with \
+            models, and so can its JSON object, whose schema `heki check \
+            --output-format-json-schema generate-prompt` prints; the object's `version` changes \
+            when a field is removed or changes meaning.",
+        tracking: None,
+    },
 ];
 
 /// The entry of an experimental rule, by its code.

@@ -48,6 +48,11 @@ impl PythonVersion {
             _ => None,
         }
     }
+
+    /// The `target-version` spelling of the version (`py312`), which [`Self::parse_tag`] reads.
+    pub fn tag(self) -> String {
+        format!("py{}{}", self.major, self.minor)
+    }
 }
 
 /// Materialized runtime feature profile (no version branching inside analysis passes).
@@ -79,6 +84,16 @@ impl From<PythonVersion> for RuntimeProfile {
 pub enum Severity {
     Error,
     Warning,
+}
+
+impl Severity {
+    /// The name the configuration and the reports write.
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Error => "error",
+            Self::Warning => "warning",
+        }
+    }
 }
 
 /// `[tool.heki.lint]` section (Ruff + `t-linter` conventions, kebab-case).
@@ -130,6 +145,16 @@ pub struct WriteOwnerRule {
     /// a private helper hands its writes to its callers, and a function that only runs inside
     /// allowed writers is allowed.
     pub attribution: Option<String>,
+    /// `"allow"`: a write through the receiver of the method it is judged in (`self`, `cls`,
+    /// `super()`) is allowed; `"report"` (default) judges it like any other.
+    pub own_receiver: Option<String>,
+    /// Project protocols (class patterns, their subclasses included): a write through a value
+    /// typed with one that declares the attribute is allowed.
+    pub allowed_protocols: Vec<String>,
+    /// `"report"`: also report (`MUT201`) a constant key written through the namespace of an
+    /// object of a target's class (`obj.__dict__[KEY] = v`, `vars(obj)`) that no target covering
+    /// the class names; `"ignore"` (default) does not.
+    pub unlisted_dict_keys: Option<String>,
 }
 
 /// `[[tool.heki.read-owners]]` contract for `MUT203` (the read side of `write-owners`).
@@ -150,6 +175,11 @@ pub struct ReadOwnerRule {
     pub unresolved: Option<String>,
     /// `"lexical"` or `"call-graph"` (default), as for `WriteOwnerRule`.
     pub attribution: Option<String>,
+    /// `"allow"` or `"report"` (default), as for `WriteOwnerRule`.
+    pub own_receiver: Option<String>,
+    /// Project protocols, as for `WriteOwnerRule`: a read through a value typed with one that
+    /// declares the attribute is allowed.
+    pub allowed_protocols: Vec<String>,
 }
 
 /// `[[tool.heki.call-owners]]` contract for `MUT204`: who may call a function or method, or
@@ -178,10 +208,17 @@ pub struct CallOwnerRule {
     /// `"calls"`: a reference to a target that hands it on to be called later (`[decide]`,
     /// `return decide`, `partial(decide)`, `field(default_factory=Rule)`) counts as a call of
     /// it; `"calls-and-bases"` also a class statement naming a class target among its bases;
-    /// `"ignore"` (default) neither.
+    /// `"reads"` also every other use of a target's value (`Keys.of(...)`, `isinstance(x,
+    /// Keys)`); `"ignore"` (default) none of them.
     pub references: Option<String>,
     /// `"lexical"` or `"call-graph"` (default), as for `WriteOwnerRule`.
     pub attribution: Option<String>,
+    /// `"allow"` or `"report"` (default), as for `WriteOwnerRule`: a call of a method bound to
+    /// the receiver of the method it is judged in.
+    pub own_receiver: Option<String>,
+    /// Project protocols, as for `WriteOwnerRule`: a call through a value typed with one that
+    /// declares the method is allowed.
+    pub allowed_protocols: Vec<String>,
 }
 
 /// `[[tool.heki.effect-boundaries]]` contract for `EFF201`: effects that must not be reached,
@@ -215,8 +252,9 @@ pub struct EffectBoundaryRule {
     /// `"allow"` (default) or `"report"`, as for `write-owners`: whether writes that construct
     /// the object they write count as writes of the boundary.
     pub fresh_objects: Option<String>,
-    /// `"calls"`, `"calls-and-bases"`, or `"ignore"` (default), as for `call-owners`: whether a
-    /// reference handing a `call-targets` entry on counts as a call of it for `calls`.
+    /// `"calls"`, `"calls-and-bases"`, `"reads"`, or `"ignore"` (default), as for `call-owners`:
+    /// whether a reference handing a `call-targets` entry on (or using it otherwise) counts as a
+    /// call of it for `calls`.
     pub references: Option<String>,
     /// `"allow"` (default) or `"report"`: whether `reads-environment` also forbids the imports
     /// that probe whether a module is installed (`try: import yaml` / `except ImportError:`).
@@ -645,6 +683,16 @@ impl HekiConfig {
         "ecosystem",
     ];
 
+    /// The keys of the contracts, each an array of tables (docs/configuration.md, "Contracts").
+    pub const CONTRACT_KEYS: &'static [&'static str] = &[
+        "write-owners",
+        "read-owners",
+        "call-owners",
+        "effect-boundaries",
+        "readonly-returns",
+        "invalidation",
+    ];
+
     /// Load an explicit configuration file ([`ConfigLayout`]): the `[tool.heki]` table of a
     /// `pyproject.toml` (empty config when absent), the top-level keys of any other file.
     pub fn load_from_file(path: &Path) -> Result<Self, ConfigError> {
@@ -657,13 +705,16 @@ impl HekiConfig {
 
     /// Load configuration from either `heki.toml` / `.heki.toml` or `pyproject.toml` `[tool.heki]`.
     pub fn load_from_dir(root: &Path) -> Result<Self, ConfigError> {
-        for candidate in ["heki.toml", ".heki.toml", "pyproject.toml"] {
-            let p = root.join(candidate);
-            if p.is_file() {
-                return Self::load_from_file(&p);
-            }
-        }
-        Ok(Self::default())
+        Self::file_in(root).map_or_else(|| Ok(Self::default()), |p| Self::load_from_file(&p))
+    }
+
+    /// The file [`Self::load_from_dir`] reads in `root`, the first of `heki.toml`,
+    /// `.heki.toml`, and `pyproject.toml` that exists.
+    pub fn file_in(root: &Path) -> Option<PathBuf> {
+        ["heki.toml", ".heki.toml", "pyproject.toml"]
+            .into_iter()
+            .map(|candidate| root.join(candidate))
+            .find(|p| p.is_file())
     }
 
     /// The configuration of `path` with its `src` entries in their project-relative form
@@ -727,6 +778,7 @@ message = "use Store.set_fields() instead"
 fresh-objects = "report"
 unresolved = "report"
 attribution = "lexical"
+unlisted-dict-keys = "report"
 
 [[tool.heki.read-owners]]
 name = "reference-children"
@@ -737,6 +789,8 @@ exempt-methods = ["__deepcopy__"]
 message = "read children through GenerationIndex instead"
 unresolved = "report"
 attribution = "call-graph"
+own-receiver = "allow"
+allowed-protocols = ["*Host"]
 
 [[tool.heki.call-owners]]
 name = "reference-mutators"
@@ -749,6 +803,7 @@ unresolved = "ignore"
 subclasses = false
 references = "calls-and-bases"
 attribution = "lexical"
+own-receiver = "report"
 
 [[tool.heki.readonly-returns]]
 name = "shared-schema"
@@ -788,6 +843,10 @@ import-probes = "report"
         assert_eq!(cfg.write_owners[0].unresolved.as_deref(), Some("report"));
         assert_eq!(cfg.write_owners[0].attribution.as_deref(), Some("lexical"));
         assert_eq!(
+            cfg.write_owners[0].unlisted_dict_keys.as_deref(),
+            Some("report")
+        );
+        assert_eq!(
             cfg.write_owners[0].message.as_deref(),
             Some("use Store.set_fields() instead")
         );
@@ -802,6 +861,8 @@ import-probes = "report"
                 message: Some("read children through GenerationIndex instead".into()),
                 unresolved: Some("report".into()),
                 attribution: Some("call-graph".into()),
+                own_receiver: Some("allow".into()),
+                allowed_protocols: vec!["*Host".into()],
             }
         );
         assert_eq!(
@@ -817,6 +878,8 @@ import-probes = "report"
                 subclasses: Some(false),
                 references: Some("calls-and-bases".into()),
                 attribution: Some("lexical".into()),
+                own_receiver: Some("report".into()),
+                allowed_protocols: Vec::new(),
             }
         );
         assert_eq!(

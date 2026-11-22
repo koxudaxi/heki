@@ -11,6 +11,7 @@ use crate::decorators::keeps_returned_value;
 use crate::environment::{self, AccessKind, ExternalAccess};
 use crate::guards::{self, GuardInputs, LocalGuards, per_item_bit};
 use crate::held;
+use crate::infer::CellKey;
 use crate::invalidation::{self, Events, FlowWrite, FuncFlow, Reach, SiteFlow};
 use crate::iterations::{
     self, BetweenSteps, ContainerChange, IteratedContainer, IteratedResult, ResultIteration,
@@ -33,7 +34,7 @@ use crate::{
     UnresolvedWriteSite, WriteKind,
 };
 use heki_ast::Span;
-use heki_ir::walk::{Answer, Budget, Closure, Def, FnShape, KeySet, Use};
+use heki_ir::walk::{Answer, Budget, Closure, Def, FnShape, KeySet, Memo, Use, Visit, reach};
 use heki_ir::{
     BinOpKind, BlockId, BuiltinKind, CompareOpKind, ConstLiteral, DictEntry, FunctionId,
     FunctionKind, Inst, InstKind, IrFunction, ModuleIr, Must, NaturalLoop, PhiNode, Progress,
@@ -41,12 +42,15 @@ use heki_ir::{
 };
 use heki_kb::{EffectiveEcosystemKb, EnvironmentAccess, ExecEffectKind, LiteralValue};
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::borrow::Cow;
 use std::cell::{OnceCell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use std::rc::Rc;
 use std::sync::Arc;
 
 mod imports;
+mod references;
 mod statements;
 
 /// The (value, place) pairs the store walk of `return_origins` may take per byte of a function's
@@ -158,6 +162,7 @@ fn extract_module(
         .filter(|f| !f.is_class_body && !is_overload(f))
         .map(func_qualname)
         .collect();
+    let mut cell_aliases = CellAliases::default();
     for f in &input.ir.functions {
         if f.is_class_body || (is_overload(f) && implemented.contains(func_qualname(f))) {
             continue;
@@ -173,13 +178,34 @@ fn extract_module(
             flow,
             mut references,
             mut external,
-        } = Extractor::new(&shape, &key, &cx, &input.path, contracts, opt_in).run();
+            cells,
+            types,
+        } = Extractor::new(
+            &shape,
+            &key,
+            &cx,
+            &input.path,
+            contracts,
+            opt_in,
+            &cell_aliases,
+        )
+        .run();
+        cell_aliases.extend(cells);
         // A `class` statement in a function runs its body there: the body's effects and calls
         // are the function's (its methods run only when they are called).
         if !f.is_module_body {
             for body in class_bodies_run_by(input.ir, f) {
                 let body = FnShape::new(body);
-                let facts = Extractor::new(&body, &key, &cx, &input.path, contracts, opt_in).run();
+                let facts = Extractor::new(
+                    &body,
+                    &key,
+                    &cx,
+                    &input.path,
+                    contracts,
+                    opt_in,
+                    &cell_aliases,
+                )
+                .run();
                 absorb_class_body(&mut summary, facts.summary);
                 external.extend(facts.external);
                 sites.extend(
@@ -197,7 +223,16 @@ fn extract_module(
             // the module's.
             for body in class_bodies_run_by(input.ir, f) {
                 let body = FnShape::new(body);
-                let facts = Extractor::new(&body, &key, &cx, &input.path, contracts, opt_in).run();
+                let facts = Extractor::new(
+                    &body,
+                    &key,
+                    &cx,
+                    &input.path,
+                    contracts,
+                    opt_in,
+                    &cell_aliases,
+                )
+                .run();
                 references.extend(facts.references);
                 external.extend(facts.external);
             }
@@ -221,7 +256,7 @@ fn extract_module(
             slot.entries.extend(flow.entries);
             slot.writes.extend(flow.writes);
         }
-        if let Some(flow) = cache_flow::cache_flow(&shape, &key, &sites, &cx) {
+        if let Some(flow) = cache_flow::cache_flow(&shape, &key, &sites, &cx, &types) {
             summary.lazily_read_self_attrs = flow.lazily_initialized().map(str::to_owned).collect();
             file.cache_flows.entry(key.clone()).or_default().push(flow);
         }
@@ -540,6 +575,23 @@ struct ItemOf {
     holder: Option<VarId>,
 }
 
+/// What every value a function binds to one of its closure cells is, as its alias maps join
+/// them (a read of the cell in a nested scope is a phi of the bindings): the container an
+/// attribute of an object holds, of a project class or of unknown class, or an entry of one. The
+/// object is none of the nested scope's own: no parameter of it, constructed nowhere in it.
+struct CellAlias {
+    attr: Option<ObjAttr>,
+    item: Option<ItemOf>,
+    /// The attribute of an object of unknown class whose container (or an entry of it, `true`)
+    /// every binding holds ([`Extractor::untyped_container`]).
+    untyped: Option<(String, bool)>,
+}
+
+/// The [`CellAlias`] of the cells the functions of one module summarized so far bind. The
+/// builder numbers a function before the scopes nested in it, so the functions enclosing a
+/// scope are summarized before it.
+type CellAliases = FxHashMap<CellKey, CellAlias>;
+
 /// The object a typed write changes, as its write site records it.
 #[derive(Debug, Clone, Copy)]
 struct Written {
@@ -595,6 +647,10 @@ struct Extracted {
     references: Vec<CallSite>,
     /// [`FileSummary::external_accesses`].
     external: Vec<ExternalAccess>,
+    /// The [`CellAlias`] of the closure cells the function binds.
+    cells: Vec<(CellKey, CellAlias)>,
+    /// The values of the function's variables ([`TypeCtx::infer`]).
+    types: FxHashMap<VarId, Val>,
 }
 
 /// A typed write site waiting for the answer of its construction query.
@@ -640,6 +696,8 @@ struct Extractor<'a> {
     self_attr_alias: FxHashMap<VarId, String>,
     /// `obj.<attr>` with project-class `obj`.
     obj_attr_alias: FxHashMap<VarId, ObjAttr>,
+    /// What the closure cells of the functions enclosing this one hold.
+    cell_aliases: &'a CellAliases,
     /// `x.__dict__` -> owner of `x`.
     dict_of: FxHashMap<VarId, Owner>,
     /// Entries of the containers that project-class attributes hold (`WriteKind::ItemMut`).
@@ -695,7 +753,13 @@ struct Extractor<'a> {
     /// The module globals and closure cells each value may be reached from
     /// ([`Self::global_roots`]), on the function's tables and budget.
     roots: Closure<VarId, KeySet<Root<'a>>>,
-    roots_budget: Budget,
+    /// The constant entries of each dict display `**` unpacks, by the display
+    /// ([`Self::constant_display`]).
+    displays: Memo<VarId, Option<DisplayEntries>>,
+    /// The budget of the walks over the function's values ([`Self::global_roots`],
+    /// [`Self::constant_display`]) and of the display entries calls bind
+    /// ([`Self::passed_keywords`]).
+    walk_budget: Budget,
     /// Allocations, escapes, and construction queries (`construction`).
     rec: Recorder,
     pending_sites: Vec<PendingSite>,
@@ -950,6 +1014,7 @@ impl<'a> Extractor<'a> {
         path: &'a Path,
         contracts: Option<&'a dyn Contracts>,
         opt_in: OptInFacts,
+        cell_aliases: &'a CellAliases,
     ) -> Self {
         let f = shape.f;
         let (types, narrowed, isinstance_classes) = cx.infer_flow(f);
@@ -1007,6 +1072,7 @@ impl<'a> Extractor<'a> {
             memo_fills: FxHashSet::default(),
             self_attr_alias: FxHashMap::default(),
             obj_attr_alias: FxHashMap::default(),
+            cell_aliases,
             dict_of: FxHashMap::default(),
             item_alias: FxHashMap::default(),
             may_params: FxHashMap::default(),
@@ -1035,7 +1101,8 @@ impl<'a> Extractor<'a> {
             exempt: None,
             reach: FxHashMap::default(),
             roots: Closure::new(),
-            roots_budget: Budget::of_function("summary::global_roots", f),
+            displays: Memo::new(),
+            walk_budget: Budget::of_function("summary::walks", f),
             rec: Recorder::default(),
             pending_sites: Vec::new(),
             pending_args: Vec::new(),
@@ -1255,8 +1322,9 @@ impl<'a> Extractor<'a> {
         }
     }
 
-    /// Alias maps through `AttrLoad`, `Copy`, agreeing phis, and the calls and property reads
-    /// that return an attribute of what they are handed (iterated to a fixpoint).
+    /// Alias maps through `AttrLoad`, `Copy`, agreeing phis, the calls and property reads that
+    /// return an attribute of what they are handed, and the closure cells of enclosing functions
+    /// (iterated to a fixpoint).
     fn build_aliases(&mut self) {
         for (i, p) in self.f.params.iter().enumerate() {
             if let Ok(i) = u8::try_from(i)
@@ -1265,13 +1333,16 @@ impl<'a> Extractor<'a> {
                 self.param_alias.insert(p.var, (i, None));
             }
         }
-        let rebound = Rebound::of(self.f);
+        let rebound = Rebound::of(self.f, |kind| self.namespace_load(kind));
         let mut returned_attrs: FxHashMap<VarId, (VarId, String)> = FxHashMap::default();
         for bb in &self.f.blocks {
             self.pos = (bb.id, 0);
             for inst in &bb.insts {
                 if let Some((dst, holder, attr)) = self.returned_attr(&inst.kind) {
                     returned_attrs.insert(dst, (holder, attr));
+                }
+                if let InstKind::LoadDeref { dst, name } = &inst.kind {
+                    self.alias_cell_read(*dst, name);
                 }
             }
         }
@@ -1427,9 +1498,29 @@ impl<'a> Extractor<'a> {
         }
     }
 
-    /// `(dst, obj, attr)` of an instruction loading attribute `attr` of `obj`: `obj.attr`, or
+    /// The alias maps of `dst`, a read of the closure cell `name` of an enclosing function: the
+    /// [`CellAlias`] of the values that function binds to it, of an object reached from the cell.
+    fn alias_cell_read(&mut self, dst: VarId, name: &str) {
+        let Some(alias) = self
+            .cx
+            .bound_cell(self.f, name)
+            .and_then(|cell| self.cell_aliases.get(cell))
+        else {
+            return;
+        };
+        let reach = self.reach_of(dst);
+        if let Some(a) = &alias.attr {
+            self.obj_attr_alias
+                .insert(dst, ObjAttr { reach, ..a.clone() });
+        }
+        if let Some(i) = &alias.item {
+            self.item_alias.insert(dst, ItemOf { reach, ..i.clone() });
+        }
+    }
+
+    /// `(dst, obj, attr)` of an instruction loading attribute `attr` of `obj`: `obj.attr`,
     /// `getattr(obj, "attr"[, default])` with a constant name (a default only stands in for a
-    /// missing attribute).
+    /// missing attribute), or `vars(obj)`, which loads `obj.__dict__`.
     fn attr_load(&self, kind: &InstKind) -> Option<(VarId, VarId, String)> {
         match kind {
             InstKind::AttrLoad { dst, obj, attr } => Some((*dst, *obj, attr.clone())),
@@ -1444,8 +1535,15 @@ impl<'a> Extractor<'a> {
             {
                 Some((*dst, args[0], self.resolved_str(args[1])?))
             }
-            _ => None,
+            _ => self
+                .namespace_load(kind)
+                .map(|(dst, obj)| (dst, obj, "__dict__".to_owned())),
         }
+    }
+
+    /// [`resolver::namespace_load`] in the function.
+    fn namespace_load(&self, kind: &InstKind) -> Option<(VarId, VarId)> {
+        resolver::namespace_load(kind, |v| self.val(v))
     }
 
     /// `(dst, holder, attr)` of a call or property read that returns attribute `attr` of an
@@ -1690,7 +1788,7 @@ impl<'a> Extractor<'a> {
             }
             Def::Param | Def::None => {}
         };
-        self.roots.ask(&self.roots_budget, var, own, sources)
+        self.roots.ask(&self.walk_budget, var, own, sources)
     }
 
     /// A change, at `span`, of state that outlives the call.
@@ -1846,8 +1944,9 @@ impl<'a> Extractor<'a> {
     }
 
     /// The project class a call constructs: a call of a class object (`Model(...)`,
-    /// `cls(...)`), or of a class reached through a module or class (`models.Model(...)`), or
-    /// an allocation by `object.__new__` ([`Self::bare_allocation`]).
+    /// `cls(...)`, a property's value `self.model_type(...)`), or of a class reached through a
+    /// module or class (`models.Model(...)`), or an allocation by `object.__new__`
+    /// ([`Self::bare_allocation`]).
     fn construction(&self, kind: &InstKind) -> Option<String> {
         let project = self.cx.project;
         match kind {
@@ -1885,7 +1984,11 @@ impl<'a> Extractor<'a> {
                 {
                     self.bare_allocation(args)
                 }
-                _ => None,
+                recv => self
+                    .cx
+                    .property_value(recv.recv()?, method)??
+                    .class_object(project)
+                    .map(str::to_owned),
             },
             _ => None,
         }
@@ -1899,12 +2002,9 @@ impl<'a> Extractor<'a> {
 
     /// The project class calling `callee` constructs (`Model`, `cls` in a class method).
     fn class_called(&self, callee: VarId) -> Option<String> {
-        match self.val(callee)? {
-            Val::Ref(fqn) | Val::Class(fqn) if self.cx.project.is_project_class(fqn) => {
-                Some(fqn.clone())
-            }
-            _ => None,
-        }
+        self.val(callee)?
+            .class_object(self.cx.project)
+            .map(str::to_owned)
     }
 
     /// [`Self::fresh`]: the results of constructing a project class
@@ -2198,51 +2298,53 @@ impl<'a> Extractor<'a> {
                 writes,
             }
         });
+        let cells = self.own_cell_aliases();
         Extracted {
             summary: self.summary,
             sites: self.sites,
             flow,
             references,
             external: self.external,
+            cells,
+            types: self.types,
         }
     }
 
-    /// The function's references handing a project function, method, or class on
-    /// ([`FileSummary::reference_sites`]): a load of one whose value reaches, through copies,
-    /// phis, and the displays holding it, an argument of a call, a stored attribute, item, or
-    /// global, a `return`, a `yield`, or a `raise`. The value as a callee is a call (its own
-    /// site), and so is a callable a library API runs (`Self::handed_callable`). Not handed on
-    /// either: an argument of a call that only inspects or names it ([`names_only`]), a
-    /// receiver, an operand, a subscript, a dict key, a closure's captures (its defaults and
-    /// its annotations are not told apart, nor a class's bases and keywords), and the name a
-    /// module binds to the object (an import, a module alias), which is the object. A site is
-    /// at the load; a name an import or the module body binds is read without a load of its own
-    /// (the bound value), so its sites are at the uses handing it on.
-    fn reference_sites(&mut self) -> Vec<CallSite> {
-        let flow = HandedValues::of(
-            self.f,
-            |at| self.callees.get(&at).is_some_and(names_only),
-            &self.handed,
-        );
-        let reaching = flow.reaching();
+    /// The [`CellAlias`] of each closure cell the function binds, when its bindings have one.
+    fn own_cell_aliases(&mut self) -> Vec<(CellKey, CellAlias)> {
         let mut out = Vec::new();
-        for &(at, var, span, imported) in &flow.loads {
-            if !reaching.contains(&var) {
-                continue;
+        for (name, vars) in crate::infer::cell_bindings(self.f) {
+            let mut untyped = vars.iter().map(|&v| {
+                if let Def::Inst(b, i) = self.shape.def(v) {
+                    self.pos = (b, i as usize);
+                }
+                self.untyped_container(v)
+                    .map(|(attr, _, nested)| (attr, nested))
+            });
+            let first = untyped.next().flatten();
+            let untyped = first.filter(|f| untyped.all(|u| u.as_ref() == Some(f)));
+            let attr = joined_obj_attr(vars.iter().map(|v| self.obj_attr_alias.get(v)));
+            let attr = attr.map(|a| ObjAttr {
+                obj_params: 0,
+                fresh: false,
+                holder: None,
+                ..a
+            });
+            let item = joined_item(vars.iter().map(|v| self.item_alias.get(v)));
+            let item = item.map(|i| ItemOf {
+                obj_params: 0,
+                fresh: false,
+                holder: None,
+                ..i
+            });
+            if attr.is_some() || item.is_some() || untyped.is_some() {
+                let alias = CellAlias {
+                    attr,
+                    item,
+                    untyped,
+                };
+                out.push(((self.f.id, name.to_owned()), alias));
             }
-            self.pos = at;
-            let Some(site) = self.reference_site(var, at.0, span) else {
-                continue;
-            };
-            let spans = if imported || flow.bound_by_module(var) {
-                flow.handed_at(var)
-            } else {
-                vec![span]
-            };
-            out.extend(spans.into_iter().map(|span| CallSite {
-                span,
-                ..site.clone()
-            }));
         }
         out
     }
@@ -2286,22 +2388,17 @@ impl<'a> Extractor<'a> {
 
     /// The bases of the class statements in the function ([`Contracts::reference_bases`]), each
     /// as a reference site of the project class it is (`Base`, `core.Base`, `Base[int]`). A base
-    /// is the value the statement passes ([`heki_ir::ModuleIr::class_bases`]), typed in the statement's
-    /// block as any value is, so a name it reads is what the statement's scope binds (a
-    /// parameter, a local, a closure cell, a class-body name), whatever the module imports under
-    /// that name. A site is at the base when the statement loads it, else at the statement (a
-    /// name an import or the module body binds is read without a load of its own).
+    /// is the value the statement passes ([`heki_ir::ModuleIr::class_base_values`]), typed in
+    /// the statement's block as any value is, so a name it reads is what the statement's scope
+    /// binds (a parameter, a local, a closure cell, a class-body name), whatever the module
+    /// imports under that name. A site is at the base when the statement loads it, else at the
+    /// statement (a name an import or the module body binds is read without a load of its own).
     fn base_sites(&mut self) -> Vec<CallSite> {
-        let (f, shape) = (self.f, self.shape);
-        let bases = self
-            .cx
+        let (cx, shape) = (self.cx, self.shape);
+        let bases = cx
             .ir()
-            .class_bases_of(f.id)
-            .filter_map(|(class, index)| {
-                let (bb, statement) = shape.defining(class)?;
-                let base = *statement.kind.operands().get(index as usize)?;
-                Some((bb, statement.span, base))
-            });
+            .class_base_values(shape)
+            .map(|b| (b.block, b.statement.span, b.value));
         let mut out = Vec::new();
         for (bb, statement, base) in bases {
             self.pos = (bb, 0);
@@ -2361,6 +2458,7 @@ impl<'a> Extractor<'a> {
             result_discarded: false,
             result_held: false,
             is_base: false,
+            is_read: false,
             arguments: None,
             queues: None,
             state_tests: None,
@@ -2368,6 +2466,7 @@ impl<'a> Extractor<'a> {
             // Handing a function on does not run it: no must-fact goes through the reference.
             complete: false,
             on_every_return: OnEveryReturn::default(),
+            made_by: None,
         }
     }
 
@@ -3327,7 +3426,7 @@ impl<'a> Extractor<'a> {
                         self.seed_protected(fqn, deep, step, span);
                     }
                 }
-                self.property_read(bb, index, *dst, *obj, attr, span);
+                self.property_read(bb, index, Some(*dst), *obj, attr, span);
             }
             InstKind::SubscriptLoad {
                 obj,
@@ -3351,6 +3450,16 @@ impl<'a> Extractor<'a> {
                 {
                     self.container_change(*obj, ContainerChange::Resizes, span);
                 }
+            }
+            // `obj.__dict__ |= other` updates the namespace in place, whatever the result is
+            // stored to.
+            InstKind::BinOp {
+                op: BinOpKind::BitOr,
+                lhs,
+                in_place: true,
+                ..
+            } if self.dict_of.contains_key(lhs) => {
+                self.container_method(*lhs, BinOpKind::BitOr.in_place_method(), &[], span);
             }
             InstKind::BinOp {
                 dst,
@@ -3427,10 +3536,17 @@ impl<'a> Extractor<'a> {
                 }
                 let callee = self.cx.resolve_method(self.val(*recv), method);
                 self.unresolved_access(method, Access::Call, *recv, span);
+                // `obj.prop(...)` reads the property and calls the value read, which binds no
+                // receiver and changes no container `obj` is.
+                let calls_property = self.cx.calls_property(self.val(*recv), method);
+                if calls_property {
+                    self.property_read(bb, index, None, *recv, method, span);
+                }
                 // A container method changes its receiver in place, unless the receiver's
                 // class defines the method itself: then what that method does is in its
                 // summary (`Stats.clear()` may change nothing).
-                if container_mutator(method) && !matches!(callee, Callee::Project(..)) {
+                let changes_recv = !calls_property && !matches!(callee, Callee::Project(..));
+                if container_mutator(method) && changes_recv {
                     self.container_method(*recv, method, args, span);
                     for a in args {
                         if matches!(method.as_str(), "append" | "insert" | "add" | "setdefault") {
@@ -3438,9 +3554,7 @@ impl<'a> Extractor<'a> {
                         }
                     }
                 }
-                if !matches!(callee, Callee::Project(..))
-                    && let Some(change) = iterations::method_change(method)
-                {
+                if changes_recv && let Some(change) = iterations::method_change(method) {
                     self.container_change(*recv, change, span);
                 }
                 // `obj.__dict__.get("attr"[, default])`.
@@ -3450,13 +3564,19 @@ impl<'a> Extractor<'a> {
                 {
                     self.typed_read(owner, &k, ReadKind::DictDirect, span);
                 }
-                let (recv_origin, recv_is_self) = self.receiver(*recv, bb);
+                let (recv_origin, recv_is_self) = match calls_property {
+                    true => (None, false),
+                    false => {
+                        let (origin, is_self) = self.receiver(*recv, bb);
+                        (Some(origin), is_self)
+                    }
+                };
                 let constructs = self.construction(kind);
                 let call = Call {
-                    dst: *dst,
+                    dst: Some(*dst),
                     value: None,
-                    recv: Some(recv_origin),
-                    recv_var: Some(*recv),
+                    recv_var: recv_origin.as_ref().map(|_| *recv),
+                    recv: recv_origin,
                     args,
                     kwargs,
                     star_from: *star_from,
@@ -3497,7 +3617,7 @@ impl<'a> Extractor<'a> {
                     self.unresolved_access(&method, Access::Call, recv, span);
                     let (recv_origin, recv_is_self) = self.receiver(recv, bb);
                     let call = Call {
-                        dst: *dst,
+                        dst: Some(*dst),
                         value: *callee_var,
                         recv: Some(recv_origin),
                         recv_var: Some(recv),
@@ -3525,7 +3645,7 @@ impl<'a> Extractor<'a> {
                 };
                 let constructs = self.construction(kind);
                 let call = Call {
-                    dst: *dst,
+                    dst: Some(*dst),
                     value: *callee_var,
                     recv: None,
                     recv_var: None,
@@ -3553,7 +3673,7 @@ impl<'a> Extractor<'a> {
                 self.child_iteration(bb, *id, *outer_iter, span);
                 let target = self.child_callee(*id);
                 let call = Call {
-                    dst: *dst,
+                    dst: Some(*dst),
                     value: None,
                     recv: None,
                     recv_var: None,
@@ -3762,12 +3882,13 @@ impl<'a> Extractor<'a> {
     /// sites) stay as they are.
     /// A read of `obj.attr` at `(bb, index)` that runs property getters: a call of them, whose
     /// result (`dst`) is a project call's result like any other (a generator a getter returns
-    /// runs where the caller iterates it).
+    /// runs where the caller iterates it). Without `dst`, the read is the one a call of the
+    /// property's value makes (`obj.prop(...)`), and the instruction's result is that call's.
     fn property_read(
         &mut self,
         bb: BlockId,
         index: usize,
-        dst: VarId,
+        dst: Option<VarId>,
         obj: VarId,
         attr: &str,
         span: Span,
@@ -3776,9 +3897,11 @@ impl<'a> Extractor<'a> {
             return;
         };
         let (recv, recv_is_self) = self.receiver(obj, bb);
-        let is_awaited = self.uses.get(&dst).is_some_and(|uses| {
-            uses.iter()
-                .any(|u| matches!(u, InstKind::Await { value, .. } if *value == dst))
+        let is_awaited = dst.is_some_and(|dst| {
+            self.uses.get(&dst).is_some_and(|uses| {
+                uses.iter()
+                    .any(|u| matches!(u, InstKind::Await { value, .. } if *value == dst))
+            })
         });
         let call = Call {
             dst,
@@ -3795,7 +3918,12 @@ impl<'a> Extractor<'a> {
             per_item: None,
             span,
         };
-        self.call_inst(bb, index, callee, &call);
+        match dst {
+            Some(_) => self.call_inst(bb, index, callee, &call),
+            None => {
+                self.call(bb, &callee, &call);
+            }
+        }
     }
 
     /// The receiver and method name of the bound method behind `var` (through copies): an
@@ -3875,7 +4003,7 @@ impl<'a> Extractor<'a> {
             .kb
             .lookup(symbol)
             .is_some_and(|e| e.effects.contains(&ExecEffectKind::QuadraticRealloc));
-        if !reallocates || !self.returned.contains_key(&call.dst) {
+        if !reallocates || !call.dst.is_some_and(|d| self.returned.contains_key(&d)) {
             return;
         }
         for &arg in call.args {
@@ -3956,6 +4084,10 @@ impl<'a> Extractor<'a> {
                 ));
             }
         }
+        let through_protocol = self.contracts.is_some_and(|c| c.write_protocols())
+            && obj.holder.and_then(|v| self.val(v)).is_some_and(
+                |v| matches!(v, Val::Inst(p) if self.cx.project.protocol_declares(p, attr)),
+            );
         let site = TypedFieldWriteSite {
             class_qualname: class,
             attr: attr.to_owned(),
@@ -3967,6 +4099,7 @@ impl<'a> Extractor<'a> {
             key,
             construction: Construction::No,
             contexts: 0,
+            through_protocol,
         };
         // A site waiting for its answer joins the summary once the function is visited.
         if let Some(holder) = obj.holder.filter(|h| self.track && self.trackable(*h)) {
@@ -3981,18 +4114,24 @@ impl<'a> Extractor<'a> {
         self.summary.typed_field_write_sites.insert(site);
     }
 
-    /// Read of attribute `attr` on the object `owner`, when it has a project class.
+    /// Read of attribute `attr` on the object `owner`, when it has a project class or is the
+    /// class object of one (`Model.KIND`, `cls.KIND`, `kind.KIND` of a `kind: type[Model]`).
     fn typed_read(&mut self, owner: Owner, attr: &str, kind: ReadKind, span: Span) {
         if let Some(var) = owner.var {
             self.unresolved_access(attr, Access::Read(kind), var, span);
         }
+        let val = owner.var.and_then(|v| self.val(v));
         // A read through a protocol declaring the attribute is one of every class implementing
         // it; the read contracts judge it by the protocol, the type the code reads it through.
-        let protocol = match owner.var.and_then(|v| self.val(v)) {
+        let protocol = match val {
             Some(Val::Inst(p)) if self.cx.project.protocol_declares(p, attr) => Some(p.clone()),
             _ => None,
         };
-        for class in owner.typed_classes {
+        let class_object = val
+            .and_then(|v| v.class_object(self.cx.project))
+            .map(str::to_owned);
+        let classes = owner.typed_classes.into_iter().map(|c| (c, false));
+        for (class, class_object) in classes.chain(class_object.map(|c| (c, true))) {
             let through_protocol = protocol.as_ref().is_some_and(|p| *p != class);
             self.summary
                 .typed_field_read_sites
@@ -4003,6 +4142,7 @@ impl<'a> Extractor<'a> {
                     obj_params: owner.may_params,
                     span,
                     through_protocol,
+                    class_object,
                 });
         }
     }
@@ -4028,7 +4168,7 @@ impl<'a> Extractor<'a> {
             self.typed_site(class, attr, None, kind, span, written);
         }
         if let Some(var) = owner.var.filter(|v| self.unknown_class(*v)) {
-            self.unresolved(Unresolved::Receiver(attr.to_owned()), var, kind, span);
+            self.unresolved(Unresolved::Receiver(attr.to_owned()), Some(var), kind, span);
         }
     }
 
@@ -4076,13 +4216,14 @@ impl<'a> Extractor<'a> {
             });
     }
 
-    /// Record a write heki cannot tie to a class (`MUT205`) of the object `obj` holds: the
-    /// object counts as a parameter only when it is one on every path.
-    fn unresolved(&mut self, what: Unresolved, obj: VarId, kind: WriteKind, span: Span) {
+    /// Record a write heki cannot tie to a class (`MUT205`) of the object `obj` holds (`None`:
+    /// an object of an enclosing function, reached from a closure cell): the object counts as a
+    /// parameter only when it is one on every path.
+    fn unresolved(&mut self, what: Unresolved, obj: Option<VarId>, kind: WriteKind, span: Span) {
         if !self.ownership {
             return;
         }
-        let obj_params = match self.param_alias.get(&obj) {
+        let obj_params = match obj.and_then(|o| self.param_alias.get(&o)) {
             Some((i, None)) => 1u64 << i,
             _ => 0,
         };
@@ -4093,7 +4234,7 @@ impl<'a> Extractor<'a> {
             obj_params,
             construction: Construction::No,
         };
-        if self.track && self.trackable(obj) {
+        if let Some(obj) = obj.filter(|o| self.track && self.trackable(*o)) {
             let query = self.rec.query(self.at(), obj);
             self.pending_unresolved.push((site, query));
             return;
@@ -4102,23 +4243,33 @@ impl<'a> Extractor<'a> {
     }
 
     /// A computed attribute name written on `owner`'s object (`setattr(obj, name, v)`,
-    /// `obj.__dict__[name] = v`): unresolved when the object has a project class.
+    /// `obj.__dict__[name] = v`): unresolved when the object has a project class, or when heki
+    /// knows nothing of its class.
     fn computed_name(&mut self, owner: &Owner, kind: WriteKind, span: Span) {
         let Some(var) = owner.var else { return };
         self.change_object(var, span);
         for class in &owner.typed_classes {
-            self.unresolved(Unresolved::Name(class.clone()), var, kind, span);
+            self.unresolved(Unresolved::Name(class.clone()), Some(var), kind, span);
+        }
+        if owner.typed_classes.is_empty() && self.unknown_class(var) {
+            self.unresolved(Unresolved::Anything, Some(var), kind, span);
         }
     }
 
     /// The attribute of an object of unknown class whose container (or an entry of it, `true`)
-    /// `var` holds: `obj.attr`, `obj.attr["k"]`, through copies.
-    fn untyped_container(&self, var: VarId) -> Option<(String, VarId, bool)> {
+    /// `var` holds, and the object (`None`: one of an enclosing function, reached from a closure
+    /// cell): `obj.attr`, `obj.attr["k"]`, through copies and closure cells.
+    fn untyped_container(&self, var: VarId) -> Option<(String, Option<VarId>, bool)> {
         let mut cur = var;
         let mut nested = false;
         for _ in 0..16 {
             match &self.defs.get(&cur)?.kind {
                 InstKind::Copy { src, .. } => cur = *src,
+                InstKind::LoadDeref { name, .. } => {
+                    let cell = self.cx.bound_cell(self.f, name)?;
+                    let (attr, entry) = self.cell_aliases.get(cell)?.untyped.clone()?;
+                    return Some((attr, None, nested || entry));
+                }
                 InstKind::SubscriptLoad {
                     obj,
                     is_slice: false,
@@ -4130,7 +4281,7 @@ impl<'a> Extractor<'a> {
                 InstKind::AttrLoad { obj, attr, .. }
                     if attr != "__dict__" && self.unknown_class(*obj) =>
                 {
-                    return Some((attr.clone(), *obj, nested));
+                    return Some((attr.clone(), Some(*obj), nested));
                 }
                 _ => return None,
             }
@@ -4598,7 +4749,7 @@ impl<'a> Extractor<'a> {
                         self.computed_name(&owner, WriteKind::DictDirect, span);
                     }
                 }
-                // `update`, `popitem`, `clear`: attributes heki cannot name.
+                // `update`, `popitem`, `clear`, `|=` (`__ior__`): attributes heki cannot name.
                 _ => {
                     if method == "clear" && owner.is_self {
                         self.summary.invalidates_cached.insert("*".to_owned());
@@ -4673,10 +4824,15 @@ impl<'a> Extractor<'a> {
     /// model): only a keyword names a parameter there.
     fn keyword_marks(&self, call: &Call<'_>) -> Option<Box<ArgumentValues>> {
         let marked = self.marked_params(call)?;
-        let values = call.kwargs.iter().filter_map(|(name, v)| {
-            let name = name.as_ref().filter(|n| marked.contains(n.as_str()))?;
-            Some((name.clone(), self.arg_value(*v)?))
-        });
+        let passed = self.passed_keywords(call);
+        if passed.repeated {
+            return None;
+        }
+        let values = passed
+            .named
+            .iter()
+            .filter(|(name, _)| marked.contains(name.as_ref()))
+            .filter_map(|(name, v)| Some((name.to_string(), self.arg_value(*v)?)));
         agreed_marks(vec![Some(values.collect())])
     }
 
@@ -4692,19 +4848,20 @@ impl<'a> Extractor<'a> {
         bindings: &Bindings<'_>,
         marked: &FxHashSet<String>,
     ) -> Option<Vec<(String, ArgValue)>> {
-        if bindings.raises(call, decl, offset) {
+        if bindings.raises(decl, offset) {
             return None;
         }
         let name_of = |p: usize| decl.param_names.get(p).filter(|n| marked.contains(*n));
         let mut out = Vec::new();
-        for &(name, v, p) in &bindings.keywords {
+        for (name, v, p) in &bindings.keywords {
             // In `**kwargs`, the keyword passes nothing to a parameter of its name (a
             // positional-only one, or `*args` / `**kwargs` itself).
-            if !marked.contains(name) || (p.is_none() && decl.param_names.iter().any(|n| n == name))
+            if !marked.contains(name.as_ref())
+                || (p.is_none() && decl.param_names.iter().any(|n| n == name))
             {
                 continue;
             }
-            out.extend(self.arg_value(v).map(|value| (name.to_owned(), value)));
+            out.extend(self.arg_value(*v).map(|value| (name.to_string(), value)));
         }
         for &(slot, a) in &bindings.slots {
             if let Some(name) = decl.positional_param(slot).and_then(name_of) {
@@ -4722,14 +4879,121 @@ impl<'a> Extractor<'a> {
     /// How `call` binds the parameters of `decl`, whose first positional argument binds
     /// parameter `offset` (a bound receiver binds those before it).
     fn bindings<'c>(&self, call: &Call<'c>, decl: &FunctionDecl, offset: usize) -> Bindings<'c> {
-        let keywords = call.kwargs.iter().filter_map(|(name, v)| {
-            let name = name.as_deref()?;
-            Some((name, *v, decl.keyword_param(name)))
+        let passed = self.passed_keywords(call);
+        let keywords = passed.named.into_iter().map(|(name, v)| {
+            let p = decl.keyword_param(&name);
+            (name, v, p)
         });
         Bindings {
             slots: self.positional_slots(call, offset),
             keywords: keywords.collect(),
+            unpacks: call.star_from.is_some() || passed.open,
+            repeated: passed.repeated,
         }
+    }
+
+    /// The keywords `call` passes by name: each one written, and the entries of each `**`
+    /// operand that is a constant dict display ([`Self::constant_display`]), which Python passes
+    /// as written keywords; any other `**` operand may pass any keyword. Every call binds each
+    /// entry of the displays it unpacks, which the source does not repeat: the entries are taken
+    /// from the function's budget, so that a wide display unpacked by many calls costs work
+    /// linear in the function, and past the budget a display may pass any keyword.
+    fn passed_keywords<'c>(&self, call: &Call<'c>) -> Keywords<'c> {
+        let mut named: Vec<(Cow<'c, str>, VarId)> = Vec::new();
+        let (mut open, mut unpacked) = (false, false);
+        for (name, v) in call.kwargs {
+            let display = || {
+                self.constant_display(*v)
+                    .filter(|entries| self.walk_budget.take(entries.len()))
+            };
+            match name {
+                Some(name) => named.push((Cow::Borrowed(name.as_str()), *v)),
+                None => match display() {
+                    Some(entries) => {
+                        unpacked = true;
+                        named.extend(entries.iter().map(|(k, v)| (Cow::Owned(k.clone()), *v)));
+                    }
+                    None => open = true,
+                },
+            }
+        }
+        // Written keywords never share a name; an unpacked display may repeat one.
+        let mut seen = FxHashSet::default();
+        let repeated = unpacked && !named.iter().all(|(n, _)| seen.insert(n.as_ref()));
+        Keywords {
+            named,
+            open,
+            repeated,
+        }
+    }
+
+    /// The entries of the dict display `var` holds through copies, by key, when every key is a
+    /// string constant ([`Self::resolved_str`]) and nothing changes the display
+    /// ([`Self::only_unpacked`]; a call unpacking it with `**` takes its entries without keeping
+    /// it). A later entry of a key replaces an earlier one.
+    fn constant_display(&self, var: VarId) -> Option<DisplayEntries> {
+        let root = self.shape.copy_root(var);
+        let Some(InstKind::DictLiteral { entries, .. }) = self.shape.inst(root).map(|i| &i.kind)
+        else {
+            return None;
+        };
+        let decide = || {
+            let mut out: Vec<(String, VarId)> = Vec::new();
+            let mut at: FxHashMap<String, usize> = FxHashMap::default();
+            for entry in entries {
+                let DictEntry::KeyValue { key, value } = entry else {
+                    return None;
+                };
+                let key = self.resolved_str(*key)?;
+                match at.get(&key) {
+                    Some(&i) => out[i].1 = *value,
+                    None => {
+                        at.insert(key.clone(), out.len());
+                        out.push((key, *value));
+                    }
+                }
+            }
+            self.only_unpacked(root).then(|| out.into())
+        };
+        self.displays
+            .ask(&self.walk_budget, root, decide)
+            .open_means(None)
+    }
+
+    /// Whether no use of `root` can change the object it makes: each value holding it (`root`,
+    /// its copies, and the phis merging them) is only copied, merged, unpacked with `**` into a
+    /// call, tested, returned, or raised.
+    fn only_unpacked(&self, root: VarId) -> bool {
+        let shape = self.shape;
+        let f = self.f;
+        let keeps_entries = |v: VarId, u: &Use| match *u {
+            Use::Inst(b, i) => match &f.block(b).insts[i as usize].kind {
+                InstKind::Copy { .. } => true,
+                kind @ (InstKind::Call { kwargs, .. } | InstKind::MethodCall { kwargs, .. }) => {
+                    let unpacking = kwargs.iter().filter(|(k, x)| k.is_none() && *x == v);
+                    kind.operands().iter().filter(|x| **x == v).count() == unpacking.count()
+                }
+                _ => false,
+            },
+            Use::Phi(..) | Use::Terminator(_) => true,
+        };
+        let holders = |v: VarId, out: &mut Vec<VarId>| {
+            out.extend(shape.readers(v).iter().filter_map(|u| match *u {
+                Use::Inst(b, i) => match &f.block(b).insts[i as usize].kind {
+                    InstKind::Copy { dst, .. } => Some(*dst),
+                    _ => None,
+                },
+                Use::Phi(b, i) => Some(f.block(b).phis[i as usize].dst),
+                Use::Terminator(_) => None,
+            }));
+        };
+        let walked = reach(&self.walk_budget, [root], holders, |v| {
+            match shape.readers(v).iter().all(|u| keeps_entries(v, u)) {
+                true => Visit::Expand,
+                false => Visit::Stop(()),
+            }
+        });
+        walked == Answer::Known(None)
     }
 
     /// The constant `var` holds ([`ArgValue`]): a literal through copies, a string constant
@@ -4768,7 +5032,7 @@ impl<'a> Extractor<'a> {
         for (j, a) in call.args.iter().enumerate() {
             if !call
                 .args_at
-                .is_some_and(|at| self.f.is_starred(call.dst, at + j))
+                .is_some_and(|at| call.dst.is_some_and(|dst| self.f.is_starred(dst, at + j)))
             {
                 out.push((slot, *a));
                 slot += 1;
@@ -4797,12 +5061,14 @@ impl<'a> Extractor<'a> {
     /// kept for the iteration flow, and a project call is remembered for the sites of the
     /// object it returns.
     fn call_inst(&mut self, bb: BlockId, index: usize, callee: Callee, call: &Call<'_>) {
-        if let Some((site, params)) = self.call(bb, &callee, call) {
+        if let Some((site, params)) = self.call(bb, &callee, call)
+            && let Some(dst) = call.dst
+        {
             let binds_recv = self.sites[site].binds_recv && call.constructs.is_none();
             self.project_calls.push(ProjectCall {
                 site,
                 at: (bb, index),
-                dst: call.dst,
+                dst,
                 params,
                 recv: call.recv_var.or(call.value).filter(|_| binds_recv),
             });
@@ -4839,7 +5105,7 @@ impl<'a> Extractor<'a> {
                                 && self.imports_project_module(&call.passed()),
                         });
                     }
-                    if let Some(step) = self.returned.get(&call.dst).copied()
+                    if let Some(step) = call.dst.and_then(|d| self.returned.get(&d).copied())
                         && let Some(deep) = c.readonly_producer(symbol, symbol)
                     {
                         self.seed_protected(symbol.clone(), deep, step, call.span);
@@ -4891,11 +5157,13 @@ impl<'a> Extractor<'a> {
                         queues: None,
                         result_held: false,
                         is_base: false,
+                        is_read: false,
                         arguments,
                         state_tests: None,
                         under_lock: false,
                         complete: false,
                         on_every_return: crate::OnEveryReturn::default(),
+                        made_by: None,
                     });
                 }
                 self.handed_callable(bb, symbol, call);
@@ -5109,7 +5377,9 @@ impl<'a> Extractor<'a> {
                     self.worker_site(bb, on_worker, call);
                     return None;
                 }
-                let drives = any_async && !call.is_awaited && self.drives_manually(call.dst);
+                let drives = any_async
+                    && !call.is_awaited
+                    && call.dst.is_some_and(|d| self.drives_manually(d));
                 if let Some(events) = self.events.as_mut() {
                     events
                         .calls
@@ -5125,16 +5395,28 @@ impl<'a> Extractor<'a> {
                 }
                 let arguments = agreed_marks(marks);
                 let site = self.site(bb, CallTarget::Project(callees), call.is_awaited, call.span);
+                let mut dispatch = self.dispatch(call, site.project_callees());
+                if let Some(recv) = call.recv.as_ref().filter(|r| r.may_params != 0)
+                    && self.contracts.is_some_and(|c| c.own_receiver_calls())
+                    && site.project_callees().iter().any(|bc| {
+                        self.cx
+                            .project
+                            .function_decl(&bc.callee)
+                            .is_some_and(|d| d.is_classmethod || d.is_staticmethod)
+                    })
+                {
+                    dispatch.get_or_insert_with(Box::default).recv_params = recv.may_params;
+                }
                 self.sites.push(CallSite {
                     arguments,
                     recv_is_self: call.recv_is_self,
                     // A builtin calling the callees per item uses what they return.
                     result_discarded: call.recv_is_self
                         && call.per_item.is_none()
-                        && self.discards(call.dst),
+                        && call.dst.is_some_and(|d| self.discards(d)),
                     drives_coroutine_manually: drives,
                     binds_recv: *binds_recv,
-                    dispatch: self.dispatch(call, site.project_callees()),
+                    dispatch,
                     queues: (!handed.is_empty()).then(|| {
                         Box::new(SiteQueues {
                             while_full: None,
@@ -5145,8 +5427,12 @@ impl<'a> Extractor<'a> {
                     returned: if constructor || call.per_item.is_some() {
                         None
                     } else {
-                        self.returned.get(&call.dst).copied()
+                        call.dst.and_then(|d| self.returned.get(&d).copied())
                     },
+                    // The instruction's completeness is its own call's (`Self::targets_complete`):
+                    // the getters a call of a property's value runs, as a read of the property,
+                    // never are complete.
+                    complete: site.complete && call.dst.is_some(),
                     ..site
                 });
                 let at = self.sites.len() - 1;
@@ -5245,6 +5531,7 @@ impl<'a> Extractor<'a> {
                 receiver,
                 providers,
                 declared,
+                recv_params: 0,
             })
         })
     }
@@ -5334,7 +5621,7 @@ impl<'a> Extractor<'a> {
         if self.references {
             // The API calls the callable, and a partial object the one it holds: their sites
             // are calls, not references (`Self::reference_sites`).
-            self.handed.insert((call.dst, callable));
+            self.handed.extend(call.dst.map(|dst| (dst, callable)));
             self.handed
                 .extend(partial.iter().flat_map(|p| p.calls.iter().copied()));
         }
@@ -5611,6 +5898,7 @@ impl<'a> Extractor<'a> {
             queues: None,
             result_held: false,
             is_base: false,
+            is_read: false,
             arguments: None,
             state_tests: if self.opt_in.locks {
                 self.state_tests().of_site(bb)
@@ -5620,6 +5908,7 @@ impl<'a> Extractor<'a> {
             under_lock: self.opt_in.exclusive && self.lock_held_at(self.pos),
             complete,
             on_every_return,
+            made_by: None,
         }
     }
 
@@ -5762,17 +6051,17 @@ impl<'a> Extractor<'a> {
                 );
             }
             Callee::Project(keys, _) => {
-                if !self.track || call.per_item.is_some() {
-                } else if let Some(class) = &call.constructs {
+                let Some(dst) = call.dst.filter(|_| self.track && call.per_item.is_none()) else {
+                    return;
+                };
+                if let Some(class) = &call.constructs {
                     if !self.cx.project.may_reuse_instances(class) {
-                        self.rec
-                            .alloc(self.at(), call.dst, NewKind::Own, Vec::new());
+                        self.rec.alloc(self.at(), dst, NewKind::Own, Vec::new());
                     }
-                } else if self.may_be_new(call.dst) {
+                } else if self.may_be_new(dst) {
                     // A project function returning an instance of a project class: a new object
                     // when every candidate returns one.
-                    self.rec
-                        .alloc(self.at(), call.dst, NewKind::Own, keys.clone());
+                    self.rec.alloc(self.at(), dst, NewKind::Own, keys.clone());
                 }
             }
             Callee::TooMany | Callee::Unresolved => {
@@ -5833,7 +6122,7 @@ impl<'a> Extractor<'a> {
     fn external_escapes(
         &mut self,
         symbol: &str,
-        dst: VarId,
+        dst: Option<VarId>,
         recv: Option<VarId>,
         args: &[VarId],
         kwargs: &[(Option<String>, VarId)],
@@ -5875,7 +6164,7 @@ impl<'a> Extractor<'a> {
             }
             _ => (None, false, 0),
         };
-        if let Some(kind) = alloc.filter(|_| self.track) {
+        if let (Some(kind), Some(dst)) = (alloc.filter(|_| self.track), dst) {
             self.rec.alloc(self.at(), dst, kind, Vec::new());
         }
         if let Some(v) = recv.filter(|_| !recv_read) {
@@ -6239,8 +6528,9 @@ impl Passed<'_> {
 
 /// One call instruction as [`Extractor::call`] sees it.
 struct Call<'c> {
-    /// The variable the call defines.
-    dst: VarId,
+    /// The variable the call defines: none for the getter a call of a property runs
+    /// (`obj.prop(...)`), whose value only that call uses.
+    dst: Option<VarId>,
     /// The called value (`f` of `f(...)`), when it is a variable.
     value: Option<VarId>,
     /// The origin of a bound receiver (`obj` of `obj.m(...)`).
@@ -6266,11 +6556,6 @@ struct Call<'c> {
 }
 
 impl<'c> Call<'c> {
-    /// `*` or `**` unpacking may pass any parameter an argument binds.
-    fn unpacks(&self) -> bool {
-        self.star_from.is_some() || self.kwargs.iter().any(|(k, _)| k.is_none())
-    }
-
     fn passed(&self) -> Passed<'c> {
         Passed {
             args: self.args,
@@ -6287,26 +6572,34 @@ struct Bindings<'c> {
     /// Each positional argument with its slot ([`Extractor::positional_slots`]): the parameter
     /// it binds, if any, is [`FunctionDecl::positional_param`].
     slots: Vec<(usize, VarId)>,
-    /// Each keyword with the parameter it binds ([`FunctionDecl::keyword_param`]); one binding
-    /// none lands in `**kwargs`, or the call raises `TypeError`.
-    keywords: Vec<(&'c str, VarId, Option<usize>)>,
+    /// Each keyword the call passes by name ([`Keywords`]) with the parameter it binds
+    /// ([`FunctionDecl::keyword_param`]); one binding none lands in `**kwargs`, or the call
+    /// raises `TypeError`.
+    keywords: Vec<(Cow<'c, str>, VarId, Option<usize>)>,
+    /// `*` unpacking, or `**` unpacking of anything but a constant dict display, may pass any
+    /// parameter an argument binds.
+    unpacks: bool,
+    /// Two keywords share a name: the call raises `TypeError`.
+    repeated: bool,
 }
 
 impl Bindings<'_> {
     /// Whether the call raises `TypeError` instead of running `decl` (whose first positional
-    /// argument binds parameter `offset`, the receiver taking the slots before it): a keyword
-    /// binds a parameter a position binds too, a keyword binds no parameter and `decl` takes no
-    /// `**kwargs`, a position is past the positional parameters and `decl` takes no `*args`, or
-    /// a parameter without a default is left unbound where no `*` / `**` unpacking may bind it.
-    /// The work is that of the call's arguments: the parameters without a default are counted
-    /// in the declaration ([`FunctionDecl::required_positional`]).
-    fn raises(&self, call: &Call<'_>, decl: &FunctionDecl, offset: usize) -> bool {
+    /// argument binds parameter `offset`, the receiver taking the slots before it): two keywords
+    /// share a name, a keyword binds a parameter a position binds too, a keyword binds no
+    /// parameter and `decl` takes no `**kwargs`, a position is past the positional parameters
+    /// and `decl` takes no `*args`, or a parameter without a default is left unbound where no
+    /// unpacking may bind it ([`Self::unpacks`]). The work is that of the call's arguments: the
+    /// parameters without a default are counted in the declaration
+    /// ([`FunctionDecl::required_positional`]).
+    fn raises(&self, decl: &FunctionDecl, offset: usize) -> bool {
         let passed = offset + self.slots.len();
         let by_position = |p: usize| decl.positional_param(p).is_some() && p < passed;
-        let doubled = self
-            .keywords
-            .iter()
-            .any(|&(_, _, p)| p.map_or(!decl.has_kwargs, by_position));
+        let doubled = self.repeated
+            || self
+                .keywords
+                .iter()
+                .any(|&(_, _, p)| p.map_or(!decl.has_kwargs, by_position));
         let past_positionals = passed
             .checked_sub(1)
             .is_some_and(|last| decl.positional_param(last).is_none());
@@ -6325,20 +6618,20 @@ impl Bindings<'_> {
             bound += usize::from(p < required);
             bound_keyword_only += usize::from(keyword_only(p));
         }
-        !call.unpacks()
+        !self.unpacks
             && (bound < required
                 || bound_keyword_only < decl.required_keyword_only.count_ones() as usize)
     }
 
     /// The parameters of `decl` that take their literal defaults: no position or keyword binds
-    /// them, and no `*` / `**` unpacking may.
+    /// them, and no unpacking may ([`Self::unpacks`]).
     fn defaults<'d>(
         &self,
         call: &Call<'_>,
         decl: &'d FunctionDecl,
         offset: usize,
     ) -> impl Iterator<Item = (usize, &'d ConstArg)> {
-        let unpacks = call.unpacks();
+        let unpacks = self.unpacks;
         let passed =
             offset + call.args.len() + call.per_item.and_then(|p| p.positions).unwrap_or(0);
         let by_position = move |p: usize| decl.positional_param(p).is_some() && p < passed;
@@ -6349,6 +6642,19 @@ impl Bindings<'_> {
             .map(|(p, c)| (usize::from(*p), c))
             .filter(move |(p, _)| !by_position(*p) && !by_keyword.contains(p))
     }
+}
+
+/// The entries of a dict display with constant keys, by key ([`Extractor::constant_display`]).
+type DisplayEntries = Rc<[(String, VarId)]>;
+
+/// The keywords a call passes by name ([`Extractor::passed_keywords`]).
+struct Keywords<'c> {
+    /// Each keyword written, and each entry of a `**` operand that is a constant dict display.
+    named: Vec<(Cow<'c, str>, VarId)>,
+    /// Another `**` operand may pass any keyword.
+    open: bool,
+    /// Two of `named` share a name: the call raises `TypeError`.
+    repeated: bool,
 }
 
 /// [`CallSite::arguments`] from what each callee a call may run is passed for the marked
@@ -6382,173 +6688,6 @@ struct Partial {
     kwargs: Vec<(Option<String>, VarId)>,
     /// It unpacks positional arguments with `*`: the positions after `args` are not known.
     open: bool,
-}
-
-/// How the values of a function reach the uses handing them on ([`Extractor::reference_sites`]).
-struct HandedValues {
-    /// Where each value comes from: the values it copies, or the phi inputs it merges.
-    from: FxHashMap<VarId, Vec<VarId>>,
-    /// The values each display holds (a dict display's values, not its keys).
-    held: FxHashMap<VarId, Vec<VarId>>,
-    /// The uses handing each value on, and whether only a display is handed on there: a module
-    /// binding a name to a function or class binds the name to the object, and binding it to
-    /// a display stores what the display holds.
-    uses: FxHashMap<VarId, Vec<(Span, bool)>>,
-    /// The loads: where, the value, its span, and whether it is an import.
-    loads: Vec<(Position, VarId, Span, bool)>,
-    /// What each value flows to (a copy, a phi, or a display holding it: `true`), built on
-    /// first use.
-    onward: OnceCell<FxHashMap<VarId, Vec<(VarId, bool)>>>,
-}
-
-impl HandedValues {
-    /// The flow of `f`'s values; `names_only_at` tells the calls that hand nothing on, and
-    /// `handed` the callables library APIs run (`(call, argument)`).
-    fn of(
-        f: &IrFunction,
-        names_only_at: impl Fn(Position) -> bool,
-        handed: &FxHashSet<(VarId, VarId)>,
-    ) -> Self {
-        let mut flow = Self {
-            from: FxHashMap::default(),
-            held: FxHashMap::default(),
-            uses: FxHashMap::default(),
-            loads: Vec::new(),
-            onward: OnceCell::new(),
-        };
-        for bb in &f.blocks {
-            for phi in &bb.phis {
-                let inputs = phi.incoming.iter().map(|(_, v)| *v);
-                flow.from.entry(phi.dst).or_default().extend(inputs);
-            }
-            for (index, inst) in bb.insts.iter().enumerate() {
-                let (at, span) = ((bb.id, index), inst.span);
-                match &inst.kind {
-                    InstKind::LoadGlobal { dst, .. }
-                    | InstKind::LoadName { dst, .. }
-                    | InstKind::AttrLoad { dst, .. } => flow.loads.push((at, *dst, span, false)),
-                    InstKind::Import { dst, .. } => flow.loads.push((at, *dst, span, true)),
-                    InstKind::Copy { dst, src } => flow.from.entry(*dst).or_default().push(*src),
-                    InstKind::AllocBuiltin { dst, elems, .. } => {
-                        flow.held.entry(*dst).or_default().extend(elems);
-                    }
-                    InstKind::DictLiteral { dst, entries } => {
-                        let values = entries.iter().filter_map(|e| match e {
-                            DictEntry::KeyValue { value, .. } => Some(*value),
-                            DictEntry::Unpack { .. } => None,
-                        });
-                        flow.held.entry(*dst).or_default().extend(values);
-                    }
-                    // A comprehension frame's arguments are its captures.
-                    InstKind::Call {
-                        dst,
-                        callee_var: Some(_),
-                        args,
-                        kwargs,
-                        ..
-                    }
-                    | InstKind::MethodCall {
-                        dst, args, kwargs, ..
-                    } if !names_only_at(at) => {
-                        let passed = args.iter().chain(kwargs.iter().map(|(_, v)| v));
-                        for v in passed.filter(|v| !handed.contains(&(*dst, **v))) {
-                            flow.hand_on(*v, span, false);
-                        }
-                    }
-                    InstKind::AttrStore { value, .. }
-                    | InstKind::SubscriptStore { value, .. }
-                    | InstKind::Yield {
-                        value: Some(value), ..
-                    } => flow.hand_on(*value, span, false),
-                    InstKind::StoreGlobal { value, .. } => {
-                        flow.hand_on(*value, span, f.is_module_body);
-                    }
-                    _ => {}
-                }
-            }
-            // The builder gives every `return` and `raise` of a value its statement's span.
-            if let (Terminator::Return(Some(v)) | Terminator::Raise(Some(v)), Some(span)) =
-                (&bb.terminator, bb.term_span)
-            {
-                flow.hand_on(*v, span, false);
-            }
-        }
-        flow
-    }
-
-    fn hand_on(&mut self, var: VarId, span: Span, display_only: bool) {
-        self.uses.entry(var).or_default().push((span, display_only));
-    }
-
-    /// Whether the module body binds a name to `var` itself.
-    fn bound_by_module(&self, var: VarId) -> bool {
-        self.uses
-            .get(&var)
-            .is_some_and(|uses| uses.iter().any(|(_, display_only)| *display_only))
-    }
-
-    /// The values whose objects reach a use handing them on: through copies and phis, and as
-    /// what a display reaching one holds.
-    fn reaching(&self) -> FxHashSet<VarId> {
-        let walk = |start: Vec<VarId>, displays: bool| {
-            let mut seen: FxHashSet<VarId> = start.iter().copied().collect();
-            let mut stack = start;
-            while let Some(v) = stack.pop() {
-                let inside = displays.then(|| self.held.get(&v)).flatten();
-                for &w in self.from.get(&v).into_iter().chain(inside).flatten() {
-                    if seen.insert(w) {
-                        stack.push(w);
-                    }
-                }
-            }
-            seen
-        };
-        let in_display = walk(self.uses.keys().copied().collect(), true);
-        let mut start: Vec<VarId> = self
-            .uses
-            .iter()
-            .filter(|(_, uses)| uses.iter().any(|(_, display_only)| !display_only))
-            .map(|(v, _)| *v)
-            .collect();
-        start.extend(in_display.iter().filter_map(|d| self.held.get(d)).flatten());
-        walk(start, false)
-    }
-
-    /// Where `var`'s object is handed on: the spans of the uses it reaches, in order.
-    fn handed_at(&self, var: VarId) -> Vec<Span> {
-        let onward = self.onward.get_or_init(|| {
-            let mut onward: FxHashMap<VarId, Vec<(VarId, bool)>> = FxHashMap::default();
-            for (to, sources) in &self.from {
-                for s in sources {
-                    onward.entry(*s).or_default().push((*to, false));
-                }
-            }
-            for (display, values) in &self.held {
-                for v in values {
-                    onward.entry(*v).or_default().push((*display, true));
-                }
-            }
-            onward
-        });
-        let mut seen: FxHashSet<(VarId, bool)> = FxHashSet::from_iter([(var, false)]);
-        let mut stack = vec![(var, false)];
-        let mut out = Vec::new();
-        while let Some((v, in_display)) = stack.pop() {
-            let uses = self.uses.get(&v).into_iter().flatten();
-            out.extend(
-                uses.filter(|(_, only)| in_display || !only)
-                    .map(|(s, _)| *s),
-            );
-            for &(w, into) in onward.get(&v).into_iter().flatten() {
-                if seen.insert((w, in_display || into)) {
-                    stack.push((w, in_display || into));
-                }
-            }
-        }
-        out.sort_unstable();
-        out.dedup();
-        out
-    }
 }
 
 /// What a builtin calling a callable once per item passes it ([`Extractor::passed_items`]).
@@ -6650,11 +6789,13 @@ fn role_site(
         queues: site.queues.clone(),
         result_held: false,
         is_base: false,
+        is_read: false,
         arguments: None,
         state_tests: site.state_tests.clone(),
         under_lock: site.under_lock,
         complete: false,
         on_every_return: crate::OnEveryReturn::default(),
+        made_by: Some(site.span),
     }
 }
 
@@ -6668,6 +6809,7 @@ const INSPECTING_BUILTINS: &[&str] = &[
     "hasattr",
     "getattr",
     "object.__getattribute__",
+    "vars",
     "callable",
     "repr",
     "str",
@@ -6733,22 +6875,21 @@ struct Rebound<'f> {
 }
 
 impl<'f> Rebound<'f> {
-    fn of(f: &'f IrFunction) -> Self {
+    /// The names `f` may rebind, `namespace` telling the namespaces its instructions load
+    /// ([`resolver::namespace_load`]).
+    fn of(f: &'f IrFunction, namespace: impl Fn(&InstKind) -> Option<(VarId, VarId)>) -> Self {
         let insts = || f.blocks.iter().flat_map(|b| &b.insts);
         let mut strings: FxHashMap<VarId, &'f str> = FxHashMap::default();
         let mut dicts: FxHashSet<VarId> = FxHashSet::default();
         for inst in insts() {
-            match &inst.kind {
-                InstKind::Const {
-                    dst,
-                    literal: ConstLiteral::Str(text),
-                } => {
-                    strings.insert(*dst, text.as_str());
-                }
-                InstKind::AttrLoad { dst, attr, .. } if attr == "__dict__" => {
-                    dicts.insert(*dst);
-                }
-                _ => {}
+            if let InstKind::Const {
+                dst,
+                literal: ConstLiteral::Str(text),
+            } = &inst.kind
+            {
+                strings.insert(*dst, text.as_str());
+            } else if let Some((dst, _)) = namespace(&inst.kind) {
+                dicts.insert(dst);
             }
         }
         let mut attrs = Some(FxHashSet::default());
@@ -6791,6 +6932,12 @@ impl<'f> Rebound<'f> {
                     }
                     keys = None;
                 }
+                InstKind::BinOp {
+                    lhs,
+                    op: BinOpKind::BitOr,
+                    in_place: true,
+                    ..
+                } if dicts.contains(lhs) => attrs = None,
                 _ => {}
             }
         }
@@ -6839,11 +6986,17 @@ fn merge_obj_attr_phi(map: &mut FxHashMap<VarId, ObjAttr>, dst: VarId, inputs: &
     if map.contains_key(&dst) {
         return;
     }
+    if let Some(a) = joined_obj_attr(inputs.iter().map(|v| map.get(v))) {
+        map.insert(dst, a);
+    }
+}
+
+/// The `obj.<attr>` alias of a value that is one of `inputs` ([`merge_obj_attr_phi`]): `None`
+/// when one has none, or when they name different class attributes.
+fn joined_obj_attr<'m>(inputs: impl IntoIterator<Item = Option<&'m ObjAttr>>) -> Option<ObjAttr> {
     let mut found: Option<ObjAttr> = None;
-    for v in inputs {
-        let Some(a) = map.get(v) else {
-            return;
-        };
+    for a in inputs {
+        let a = a?;
         match &mut found {
             None => {
                 found = Some(ObjAttr {
@@ -6853,7 +7006,7 @@ fn merge_obj_attr_phi(map: &mut FxHashMap<VarId, ObjAttr>, dst: VarId, inputs: &
             }
             Some(f) => {
                 if f.classes != a.classes || f.attr != a.attr {
-                    return;
+                    return None;
                 }
                 f.obj_params |= a.obj_params;
                 f.fresh &= a.fresh;
@@ -6864,9 +7017,7 @@ fn merge_obj_attr_phi(map: &mut FxHashMap<VarId, ObjAttr>, dst: VarId, inputs: &
             }
         }
     }
-    if let Some(a) = found {
-        map.insert(dst, a);
-    }
+    found
 }
 
 /// [`merge_phi`] for container entries: the inputs must name entries of one class attribute
@@ -6876,16 +7027,21 @@ fn merge_item_phi(map: &mut FxHashMap<VarId, ItemOf>, dst: VarId, inputs: &[VarI
     if map.contains_key(&dst) {
         return;
     }
+    if let Some(a) = joined_item(inputs.iter().map(|v| map.get(v))) {
+        map.insert(dst, a);
+    }
+}
+
+/// The entry alias of a value that is one of `inputs` ([`merge_item_phi`]).
+fn joined_item<'m>(inputs: impl IntoIterator<Item = Option<&'m ItemOf>>) -> Option<ItemOf> {
     let mut found: Option<ItemOf> = None;
-    for v in inputs {
-        let Some(a) = map.get(v) else {
-            return;
-        };
+    for a in inputs {
+        let a = a?;
         match &mut found {
             None => found = Some(a.clone()),
             Some(f) => {
                 if f.classes != a.classes || f.attr != a.attr {
-                    return;
+                    return None;
                 }
                 if f.key != a.key {
                     f.key = None;
@@ -6899,9 +7055,7 @@ fn merge_item_phi(map: &mut FxHashMap<VarId, ItemOf>, dst: VarId, inputs: &[VarI
             }
         }
     }
-    if let Some(a) = found {
-        map.insert(dst, a);
-    }
+    found
 }
 
 /// Where an object that outlives the call is held ([`Extractor::global_roots`]).

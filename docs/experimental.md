@@ -8,6 +8,7 @@ An experimental rule is never enabled by default: it runs only when `select` or 
 
 | ID | Kind | Target | Since | Tracking |
 | -- | ---- | ------ | ----- | -------- |
+| `cli-option.generate-prompt` | cli-option | `heki check --generate-prompt` | 0.2.2 | - |
 | `cli-option.profile` | cli-option | `heki check --profile` | 0.1.1 | - |
 | `command.inspect` | command | `heki inspect` | 0.2.1 | - |
 | `rule.EFF109` | rule | [`EFF109`](rules/lock-reacquired-while-held.md) | 0.2.1 | - |
@@ -17,6 +18,14 @@ An experimental rule is never enabled by default: it runs only when `select` or 
 | `rule.MUT111` | rule | [`MUT111`](rules/cached-property-stale-read.md) | 0.1.1 | - |
 | `rule.MUT112` | rule | [`MUT112`](rules/conditional-ownership-mutation.md) | 0.2.0 | - |
 | `rule.MUT113` | rule | [`MUT113`](rules/iterated-container-mutation.md) | 0.2.0 | - |
+
+## `cli-option.generate-prompt`
+
+- **Kind:** cli-option
+- **Target:** `heki check --generate-prompt`
+- **Since:** 0.2.2
+
+What the prompt holds and how it says it can still change as it is tried with models, and so can its JSON object, whose schema `heki check --output-format-json-schema generate-prompt` prints; the object's `version` changes when a field is removed or changes meaning.
 
 ## `cli-option.profile`
 

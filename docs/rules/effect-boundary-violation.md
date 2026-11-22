@@ -42,10 +42,10 @@ count for a read.
     object it allocated), as for `MUT201`;
   - `reads-targets`: reads of the `Class.attr` entries of `read-targets` (and their
     subclasses), in every form `MUT203` follows (`obj.attr`, `getattr(obj, "attr")`,
-    `obj.__dict__["attr"]`, a property getter that reads it); an initializer reading its own
-    instance is no read. An entry also names an attribute of a module outside the project by its
-    full dotted name (`sys.platform`), read as `sys.platform` or through
-    `from sys import platform`;
+    `obj.__dict__["attr"]` or `vars(obj)["attr"]`, a property getter that reads it); an
+    initializer reading its own instance is no read. An entry also names an attribute of a module
+    outside the project by its full dotted name (`sys.platform`), read as `sys.platform` or
+    through `from sys import platform`;
   - `calls`: calls of the `call-targets` entries, matched as the targets of `MUT204`: a function,
     a method (with its overrides in subclasses, through bound-method aliases and `getattr` with a
     constant name), or a class (constructing it); a call is one only when every function it may
@@ -54,8 +54,9 @@ count for a read.
     its full dotted name (`os.getenv`, `platform.*`); a dotted suffix, a leading glob, a module
     part, or an argument list does not. With `references = "calls"`, a reached function handing a target on to be called
     later (passed, stored, returned, yielded, raised, or held by such a display) counts too, as
-    for `MUT204` ("`render` hands on `pkg.core.decide`"), and with `"calls-and-bases"` a class
-    statement naming a class target among its bases ("`render` subclasses `pkg.core.Rule`");
+    for `MUT204` ("`render` hands on `pkg.core.decide`"), with `"calls-and-bases"` a class
+    statement naming a class target among its bases ("`render` subclasses `pkg.core.Rule`"), and
+    with `"reads"` every other use of a target's value ("`render` reads `pkg.core.Keys`");
   - `reads-environment`: reading the environment the program runs in: a call or a module
     attribute read the ecosystem catalog tags `environment` (`os.getenv`, `platform.system`,
     `importlib.util.find_spec`, `os.environ`, `sys.platform`, `sys.version_info`, ...), and,
@@ -139,7 +140,8 @@ Its premises:
   reaches a use handing it on. Established; whether the code it is handed to calls it is not
   part of the claim. With `"calls-and-bases"`, so is a class statement passing a class target
   as a base, typed where the statement runs; whether the subclass is constructed is not part of
-  the claim.
+  the claim. With `"reads"`, so is any other use of the target's value, as for `MUT204`; what the
+  use does with it is not part of the claim.
 
 ## Why is this bad?
 Some parts of a code base promise to be pure: rendering a model must not mutate it, domain code
@@ -205,9 +207,10 @@ No automatic fix.
   - `allow-writes`: `Class.attr` writes the boundary allows (needs `write-universe`).
   - `fresh-objects`: `"allow"` (default) or `"report"`: whether writes that construct the object
     they write count, as for `[[tool.heki.write-owners]]`.
-  - `references`: `"ignore"` (default), `"calls"`, or `"calls-and-bases"`: whether a reference
-    handing a `call-targets` entry on, and with `"calls-and-bases"` a class statement naming one
-    among its bases, counts for `calls`, as for `[[tool.heki.call-owners]]`.
+  - `references`: `"ignore"` (default), `"calls"`, `"calls-and-bases"`, or `"reads"`: whether a
+    reference handing a `call-targets` entry on, with `"calls-and-bases"` a class statement
+    naming one among its bases, and with `"reads"` any other use of its value, counts for
+    `calls`, as for `[[tool.heki.call-owners]]`.
   - `import-probes`: `"allow"` (default) or `"report"`: whether `reads-environment` also forbids
     import probes (needs `reads-environment`).
   - `allowed-callees`: functions, classes, modules, or ecosystem symbols whose effects are

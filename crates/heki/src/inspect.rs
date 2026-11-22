@@ -3,7 +3,7 @@
 //! symbol names no single function or a file could not be analyzed (the report is still
 //! printed).
 
-use crate::check::{Indexed, load_and_index, shown_errors};
+use crate::check::{Indexed, baseline_key, baseline_path, load_and_index, shown_errors};
 use crate::{InspectArgs, OutputFormat, ReportFormat};
 use anyhow::Result;
 use heki_diagnostics::{Diagnostic, RatchetBaseline, path_text};
@@ -276,22 +276,11 @@ fn with_baseline(
     diags: Vec<Diagnostic>,
 ) -> Result<Vec<(Diagnostic, Option<&'static str>)>> {
     let project = &indexed.project;
-    let root = &project.env.root;
-    let path = args
-        .analysis
-        .baseline
-        .clone()
-        .or_else(|| project.env.cfg.baseline.clone().map(|b| root.join(b)));
-    let Some(path) = path else {
+    let Some(path) = baseline_path(&args.analysis, &project.env) else {
         return Ok(diags.into_iter().map(|d| (d, None)).collect());
     };
     let baseline = RatchetBaseline::load(&path)?;
-    let rel: FxHashMap<&Path, &str> = project
-        .files
-        .iter()
-        .map(|f| (f.path.as_path(), f.rel.as_str()))
-        .collect();
-    let key_path = |p: &Path| rel.get(p).map_or_else(|| path_text(p), |r| (*r).to_owned());
+    let key_path = baseline_key(project);
     let mut regressions = diags.clone();
     baseline.keep_regressions(&mut regressions, &key_path);
     let regressed = |d: &Diagnostic| {

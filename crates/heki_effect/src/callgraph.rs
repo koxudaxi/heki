@@ -299,7 +299,7 @@ fn recompute(
     let local = &file.local_functions[func];
     let mut s = EffectSummary::clone(local);
     if on_cycle {
-        s.call_cycle = CallCycle::On;
+        s.call_cycle = Some(CallCycle::On);
     }
     index.param_capacities.realize(local, &mut s);
     s.sync_driven_only = file
@@ -1040,8 +1040,8 @@ fn transfer(
     let origin = |k: usize| bc.params.get(k);
 
     // A recursion raises on the stack it runs on: a worker thread's is not the caller's.
-    if facts.call_cycle != CallCycle::None && site.runner != Runner::Worker {
-        t.call_cycle = t.call_cycle.max(CallCycle::Reaches);
+    if facts.call_cycle.is_some() && site.runner != Runner::Worker {
+        t.call_cycle = t.call_cycle.max(Some(CallCycle::Reaches));
     }
 
     // a. Offload wrappers: a callee offloading its parameter k offloads the caller's
@@ -1288,6 +1288,7 @@ fn transfer_typed_writes(
                 key: None,
                 construction,
                 contexts,
+                through_protocol: false,
             },
         );
     }
@@ -1322,6 +1323,7 @@ fn transfer_typed_writes(
                 _ => Construction::No,
             },
             contexts: w.contexts | contexts,
+            through_protocol: w.through_protocol,
         };
         insert_site(t, caller, site);
     }
@@ -1687,6 +1689,7 @@ fn insert_site(s: &mut EffectSummary, owner: &FuncKey, site: TypedFieldWriteSite
         key: None,
         construction: Construction::No,
         contexts: 0,
+        through_protocol: false,
     };
     let existing = s
         .typed_field_write_sites

@@ -75,8 +75,6 @@ heki_effect::summary::Extractor::returned_self_attrs  W2  worklist: reach, Closu
 heki_effect::summary::Extractor::site  W1  stage-2 debt (EFF110): recursion (through TypeCtx::infer_types): Memo or Closure
 heki_effect::summary::Extractor::visit  W1  stage-2 debt (EFF109): recursion (through TypeCtx::infer_types): Memo or Closure
 heki_effect::summary::Extractor::worker_site  W1  stage-2 debt (EFF110): recursion (through TypeCtx::infer_types): Memo or Closure
-heki_effect::summary::HandedValues::handed_at  W2  worklist: reach, Closure, or fixpoint; stage-2 migration debt
-heki_effect::summary::HandedValues::reaching  W2  worklist: reach, Closure, or fixpoint; stage-2 migration debt
 heki_effect::summary::class_bodies_run_by  W2  worklist: reach, Closure, or fixpoint
 heki_effect::summary::statements::Extractor::head_texts  W1  recursion (through Extractor::statement_texts, Extractor::merged_texts, Extractor::source_texts and 3 more): Memo or Closure
 heki_effect::summary::statements::Extractor::item_texts  W1  recursion (through Extractor::statement_texts, Extractor::merged_texts, Extractor::source_texts and 3 more): Memo or Closure
@@ -146,7 +144,6 @@ heki_ir::facts::FnIndex::not_grown  W1  recursion (through FnIndex::container_bo
 heki_ir::facts::FnIndex::origins  W1  recursion (through FnIndex::container_bound_nested, FnIndex::decide_bound, FnIndex::display_at and 13 more): Memo or Closure
 heki_ir::facts::FnIndex::reaching  W2  worklist: reach, Closure, or fixpoint
 heki_ir::facts::FnIndex::runs  W1  recursion (through FnIndex::container_bound_nested, FnIndex::decide_bound, FnIndex::display_at and 13 more): Memo or Closure
-heki_ir::facts::waits_every_iteration  W2  worklist: reach, Closure, or fixpoint
 heki_rules::data_rules::Derivations::of  W2  worklist: reach, Closure, or fixpoint
 heki_rules::data_rules::carries  W2  worklist: reach, Closure, or fixpoint
 heki_rules::data_rules::combines  W2  worklist: reach, Closure, or fixpoint
@@ -190,4 +187,3 @@ heki_soundness::obligations::Checker::name  W1  recursion (calls itself): Memo o
 heki_soundness::obligations::Checker::names_read_from  W2  worklist: reach, Closure, or fixpoint
 heki_soundness::obligations::Checker::reachable_from  W2  worklist: reach, Closure, or fixpoint
 heki_soundness::opt_rules::Rules::alias_closure  W3  passes until nothing changes: fixpoint
-heki_soundness::opt_rules::on_every_path  W2  worklist: reach, Closure, or fixpoint

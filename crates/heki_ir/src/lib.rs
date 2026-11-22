@@ -17,9 +17,9 @@ pub mod walk;
 pub use builder::build_module_ir;
 pub use dominators::{Dominated, DominatorTree, immediate_dominators};
 pub use facts::{
-    Carries, Decided, FnIndex, ItemOrigin, ItemOrigins, ItemSource, LEN_CAP_MAX, ModuleBindings,
-    ModuleConstants, Must, PathReader, Paths, Progress, SMALL_MAX, SmallDisplay, Trips,
-    comprehension_id,
+    Carries, Decided, FnIndex, GlobalStores, ItemOrigin, ItemOrigins, ItemSource, LEN_CAP_MAX,
+    ModuleBindings, ModuleConstants, Must, PathReader, Paths, Progress, SMALL_MAX, SmallDisplay,
+    Trips, comprehension_id,
 };
 
 use heki_ast::Span;
@@ -493,6 +493,10 @@ pub enum InstKind {
         module: Option<String>,
         name: String,
         is_lazy: bool,
+        /// A relative import (`from .typing import X`, `from . import json`): `module` and
+        /// `name` are named from the importing package, not from the import path.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        relative: bool,
     },
 }
 
@@ -970,6 +974,18 @@ impl IrFunction {
     }
 }
 
+/// A value a class statement passes as a base ([`ModuleIr::class_base_values`]).
+#[derive(Debug, Clone, Copy)]
+pub struct ClassBase<'a> {
+    /// The block of the statement.
+    pub block: BlockId,
+    /// The statement's `MakeClosure`.
+    pub statement: &'a Inst,
+    /// The class object the statement makes (the `dst` of its `MakeClosure`).
+    pub class: VarId,
+    pub value: VarId,
+}
+
 /// Complete IR for one Python source module.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModuleIr {
@@ -991,6 +1007,21 @@ pub struct ModuleIr {
     /// hold a class statement.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub class_bases: Vec<(FunctionId, VarId, u32)>,
+    /// The values a statement uses that no instruction reads, by function (sorted), with the
+    /// span of the expression giving each: a decorator, which the statement applies to what it
+    /// decorates; a default of a function or lambda and a keyword of a class statement, which
+    /// the object made keeps (`MakeClosure` holds them among its captures and annotations
+    /// without telling them apart); the class of a class pattern and the types of an `except`
+    /// clause, which the statement tests a value against; and the cause of `raise ... from`.
+    /// Kept by module, as the class bases are: few functions hold such a statement.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub statement_uses: Vec<(FunctionId, VarId, Span)>,
+    /// The annotations a function evaluates when it runs, by function and position (sorted):
+    /// the span of each annotation expression of a definition it makes, and of each annotated
+    /// name of a module or class body, evaluated eagerly (before 3.14, without `from __future__
+    /// import annotations`). The instructions inside one evaluate an annotation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub annotations: Vec<(FunctionId, Span)>,
 }
 
 impl ModuleIr {
@@ -998,14 +1029,44 @@ impl ModuleIr {
         &self.functions[id.0 as usize]
     }
 
-    /// The class bases of function `id` ([`Self::class_bases`]): the class's `dst` and the
-    /// operand index of each base.
-    pub fn class_bases_of(&self, id: FunctionId) -> impl Iterator<Item = (VarId, u32)> + '_ {
+    /// The values the class statements of `shape`'s function pass as bases
+    /// ([`Self::class_bases`]), statement by statement and in the order of each one's bases.
+    pub fn class_base_values<'s, 'a: 's>(
+        &'s self,
+        shape: &'s walk::FnShape<'a>,
+    ) -> impl Iterator<Item = ClassBase<'a>> + 's {
+        let id = shape.f.id;
         let start = self.class_bases.partition_point(|b| b.0 < id);
         self.class_bases[start..]
             .iter()
             .take_while(move |b| b.0 == id)
-            .map(|&(_, class, index)| (class, index))
+            .filter_map(|&(_, class, index)| {
+                let (block, statement) = shape.defining(class)?;
+                Some(ClassBase {
+                    block,
+                    statement,
+                    class,
+                    value: *statement.kind.operands().get(index as usize)?,
+                })
+            })
+    }
+
+    /// The statement uses of function `id` ([`Self::statement_uses`]).
+    pub fn statement_uses_of(&self, id: FunctionId) -> impl Iterator<Item = (VarId, Span)> + '_ {
+        let start = self.statement_uses.partition_point(|u| u.0 < id);
+        self.statement_uses[start..]
+            .iter()
+            .take_while(move |u| u.0 == id)
+            .map(|&(_, value, span)| (value, span))
+    }
+
+    /// The spans of the annotations function `id` evaluates ([`Self::annotations`]), in order.
+    pub fn annotations_of(&self, id: FunctionId) -> impl Iterator<Item = Span> + '_ {
+        let start = self.annotations.partition_point(|a| a.0 < id);
+        self.annotations[start..]
+            .iter()
+            .take_while(move |a| a.0 == id)
+            .map(|&(_, span)| span)
     }
 
     pub fn all_a1_hazards(&self) -> Vec<(&IrFunction, &A1Hazard)> {

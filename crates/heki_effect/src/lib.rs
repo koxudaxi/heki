@@ -246,23 +246,13 @@ impl MustExec {
 /// through calls whose bodies run on the caller's stack (called there, or a generator iterated
 /// there; never a coroutine only created, nor a callable a worker thread runs), so that a deep
 /// enough input raises `RecursionError` ([`EffectSummary::call_cycle`]).
-#[derive(
-    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CallCycle {
-    #[default]
-    None,
     /// A function it calls, through any number of such calls, is on a call cycle.
     Reaches,
     /// The function itself is on a call cycle.
     On,
-}
-
-impl CallCycle {
-    pub fn is_none(&self) -> bool {
-        *self == Self::None
-    }
 }
 
 /// Whether a caller has made a call whenever it returns normally (`heki_ir::Paths`).
@@ -284,7 +274,7 @@ pub const fn effect_bit(e: ExecEffectKind) -> u16 {
 
 /// What a method call's receiver tells about the implementations its callees run
 /// ([`EffectSummary::receiver_effects`]).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Dispatch {
     /// The receiver's class (a receiver of one project class, the class a constructor makes,
     /// or the caller's own `self`), when a callee is inherited from a proper base of it: the
@@ -298,6 +288,14 @@ pub struct Dispatch {
     /// the type the code calls it through, while the callees are the implementations it runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub declared: Option<FuncKey>,
+    /// Parameters of the caller the receiver may be, as itself (`cls.m()`, `self.m()`,
+    /// `super().m()`: bit 0), for a call of a class method, which binds the class and no value of
+    /// the caller, or of a static method, which binds no receiver at all: the first bound
+    /// parameter of the callees does not tell it ([`CallSite::recv_params`]). Kept only when a
+    /// `call-owners` contract allows calls through a method's own receiver
+    /// ([`Contracts::own_receiver_calls`]).
+    #[serde(default)]
+    pub recv_params: u64,
 }
 
 /// The hops of a kept chain, owned (what a report shows).
@@ -344,6 +342,14 @@ pub struct TypedFieldWriteSite {
     /// differ in it are kept apart, so a path through an allowed writer does not stand for one
     /// around it.
     pub contexts: u64,
+    /// The written object is typed with a project protocol that declares the attribute (itself
+    /// or through its protocol bases): the write is one of the protocol's member, the site whose
+    /// class is the protocol, and of each implementation's attribute, the other sites of the
+    /// write, and every one of them carries this. A flag, not the protocol's name: it fits the
+    /// room the site's layout leaves. Computed only when a `write-owners` contract allows writes
+    /// through protocols ([`Contracts::write_protocols`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub through_protocol: bool,
 }
 
 /// How a function's new object was made: a shallow copy shares the containers of the original
@@ -436,7 +442,7 @@ pub enum Construction {
 }
 
 /// What a call argument is for the construction of the objects its callee writes.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NewArg {
     #[default]
@@ -471,8 +477,8 @@ impl ReturnsNew {
 }
 
 /// A write heki cannot tie to a class (`MUT205`): an attribute written on an object of unknown
-/// class, or a computed attribute name written on a project class. A local fact, never
-/// propagated.
+/// class, or a computed attribute name written on a project class or on an object of unknown
+/// class. A local fact, never propagated.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct UnresolvedWriteSite {
     pub what: Unresolved,
@@ -494,6 +500,9 @@ pub enum Unresolved {
     /// A computed attribute name (`setattr(obj, name, v)`, `obj.__dict__[name] = v`) written on
     /// an instance of this project class (fqn).
     Name(String),
+    /// A computed attribute name written on an object of unknown class: any attribute of any
+    /// class.
+    Anything,
 }
 
 /// A read or a call heki cannot tie to a class (`MUT206`, `MUT207`): an attribute read, or a
@@ -523,7 +532,8 @@ pub enum Access {
 /// summary keeps exactly its own reads.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct TypedFieldReadSite {
-    /// Fully qualified class name of the read object (`pkg.model.Reference`).
+    /// Fully qualified class name of the read object (`pkg.model.Reference`), or of the class a
+    /// class object read through is (`Reference.KIND`, `cls.KIND`).
     pub class_qualname: String,
     pub attr: String,
     pub kind: ReadKind,
@@ -535,6 +545,10 @@ pub struct TypedFieldReadSite {
     /// ([`Self::counts_for_contracts`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub through_protocol: bool,
+    /// The read is through a class object: it reads the class attribute, never a value an
+    /// instance holds (a `cached_property` gives its descriptor there).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub class_object: bool,
 }
 
 impl TypedFieldReadSite {
@@ -807,9 +821,9 @@ pub struct EffectSummary {
     pub is_cached_property: bool,
     pub is_lru_cache: bool,
     /// What running the function's body runs of a call cycle (`EFF114`; propagated, computed
-    /// only while the rule runs: [`OptInFacts::call_cycles`]).
-    #[serde(default, skip_serializing_if = "CallCycle::is_none")]
-    pub call_cycle: CallCycle,
+    /// only while the rule runs: [`OptInFacts::call_cycles`]; `None`: none).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_cycle: Option<CallCycle>,
     /// A `functools` cache keeps the function's results, each a builtin container of one kind
     /// (`MUT114`; a local fact, never propagated).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1043,7 +1057,7 @@ pub struct ArgumentValues(pub Vec<(String, ArgValue)>);
 /// What a caller knows about the value of a callee parameter at one call, when the argument
 /// binds the parameter exactly: the receiver, a keyword, a position before any `*` unpacking,
 /// or the literal default of an omitted parameter.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ArgBinding {
     pub constant: Option<ConstArg>,
     /// The caller's own input the argument is (a guard subject of the caller).
@@ -1458,7 +1472,7 @@ pub struct Delivery<'a> {
 }
 
 /// Where a call argument comes from, as seen by the caller (used to map callee facts back).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ArgOrigin {
     /// Caller parameter `i` itself (`None`) or its attribute `a` (`Some(a)`).
     pub param: Option<(u8, Option<String>)>,
@@ -1501,7 +1515,7 @@ pub struct ArgOrigin {
 
 /// [`ArgOrigin::targets`]: what the argument's class and field are to the `invalidation`
 /// contracts, which propagation cannot look up (it has no class hierarchy).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ArgTargets {
     /// The contracts whose targets include the field the argument is (`typed_field`): changing
     /// the value in place writes it.
@@ -1536,7 +1550,7 @@ impl ArgOrigin {
 }
 
 /// The classes a protocol-typed argument is an instance of ([`ArgOrigin::implementers`]).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Implementers {
     /// The project classes implementing the protocol structurally (none: no project class does).
     Listed(Vec<String>),
@@ -1545,7 +1559,7 @@ pub enum Implementers {
 }
 
 /// One resolved project callee with the caller-side origin of each callee parameter.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct BoundCallee {
     pub callee: FuncKey,
     /// Indexed by the callee's parameter position (receiver included for bound methods).
@@ -1560,7 +1574,7 @@ impl BoundCallee {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CallTarget {
     /// Project functions (1 candidate, or up to `CHA_CANDIDATE_LIMIT` CHA candidates).
     Project(Vec<BoundCallee>),
@@ -1682,6 +1696,10 @@ pub struct CallSite {
     /// unless it overrides it ([`Contracts::reference_bases`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_base: bool,
+    /// A reference site that uses its target without handing it on or calling it
+    /// (`Keys.of(...)`, `isinstance(x, Keys)`, `case Keys():`, [`Contracts::reference_reads`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_read: bool,
     /// The constants the call passes for the parameters a call target's argument list names
     /// (computed only for those, [`Contracts::marked_params`]; boxed: few calls have any).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1702,6 +1720,10 @@ pub struct CallSite {
     /// Whether the caller has made the call whenever it returns normally (computed when an
     /// enabled rule reads [`EffectSummary::must_exec`]).
     pub on_every_return: OnEveryReturn,
+    /// For a site of the object a call returns (where it is iterated, returned, handed to a
+    /// project call, or awaited): the span of that call. `None` for a call's own site.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub made_by: Option<Span>,
 }
 
 /// How an API runs a callable it is handed ([`CallSite::runner`]).
@@ -1748,6 +1770,23 @@ pub enum Items {
 }
 
 impl CallSite {
+    /// The call a site stands for, shared by the call's own site and every site of the object
+    /// it returns: the call's span and target. Other calls of the same callees with the same
+    /// arguments have the target too, but not the span.
+    pub fn of_call(&self) -> (Span, &CallTarget) {
+        (self.made_by.unwrap_or(self.span), &self.target)
+    }
+
+    /// The site without its source positions (Early Cutoff compares what callers see of their
+    /// calls without them).
+    pub fn unplaced(&self) -> Self {
+        Self {
+            span: Span { start: 0, end: 0 },
+            made_by: None,
+            ..self.clone()
+        }
+    }
+
     /// Whether the effect `e` of the callees does not block the caller's thread here.
     pub fn hides(&self, e: ExecEffectKind) -> bool {
         match self.runner {
@@ -1768,6 +1807,12 @@ impl CallSite {
     pub fn argument(&self, name: &str) -> Option<&ArgValue> {
         let values = &self.arguments.as_ref()?.0;
         values.iter().find(|(n, _)| n == name).map(|(_, v)| v)
+    }
+
+    /// Parameters of the caller the receiver of a class method's or a static method's call may be
+    /// ([`Dispatch::recv_params`]).
+    pub fn recv_params(&self) -> u64 {
+        self.dispatch.as_ref().map_or(0, |d| d.recv_params)
     }
 
     /// The class of the receiver ([`Dispatch::receiver`]).

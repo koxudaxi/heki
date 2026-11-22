@@ -447,8 +447,8 @@ fn cycle_at<'a>(cx: &CheckContext<'a>, site: &'a CallSite) -> Option<Witness<'a>
             if delivery.into != Facts::Body {
                 return None;
             }
-            let cycle = callee.facts(delivery.from)?.call_cycle;
-            (cycle != CallCycle::None).then_some(Witness {
+            let cycle = callee.facts(delivery.from)?.call_cycle?;
+            Some(Witness {
                 site,
                 callee: &bc.callee,
                 cycle,
@@ -506,7 +506,7 @@ impl<'a> CycleChains<'a> {
                 let on = cx
                     .index
                     .summary(k)
-                    .is_some_and(|s| s.call_cycle == CallCycle::On);
+                    .is_some_and(|s| s.call_cycle == Some(CallCycle::On));
                 if on { Visit::Stop(k) } else { Visit::Expand }
             },
         );
@@ -731,7 +731,7 @@ fn report(
     let own_cycle = cx
         .index
         .summary(key)
-        .is_some_and(|s| s.call_cycle == CallCycle::On);
+        .is_some_and(|s| s.call_cycle == Some(CallCycle::On));
     let nested_in_own = |callee: &FuncKey| {
         callee.module == key.module
             && (callee.qualname == key.qualname

@@ -191,19 +191,24 @@ Contracts declare what no type can say. Each kind is an array of tables with its
   names no project module is no error: the name matches nothing.
 - A report of a glob target names the member it matched (`reads
   `pkg.types.DataType._flag``); one report standing for several members lists the others.
+- An access matching several targets of one contract (a target on a class and one on its
+  subclass, a protocol's member and its implementation's attribute) is one report of the
+  contract: it names the target configured first among them, and lists the others (`(also
+  `A.items`)`).
 - A `Class.attr` target covers the subclasses of the class too.
 - A contract heki cannot use is a configuration error: a target that is not `Class.attr`, an
   invalid glob, a name with more than one colon or an empty module or qualified name, call
   targets whose globs are too many to match together (tens of thousands of complex ones), an
-  argument list heki cannot read, or an unknown value of `forbid`, `fresh-objects`, `unresolved`,
-  `references`, or `attribution`.
+  argument list heki cannot read, an invalid glob in `allowed-protocols`, or an unknown value of
+  `forbid`, `fresh-objects`, `unresolved`, `references`, `attribution`, `own-receiver`, or
+  `unlisted-dict-keys`.
 - With `unresolved = "report"`, a contract also reports the accesses it cannot tie to a class,
   each under its own rule (`MUT205` writes, `MUT206` reads, `MUT207` calls): an attribute or
   method named like a target, accessed on an object of unknown class (an unannotated parameter,
   a loop variable, an untyped call result, `Any`, a protocol whose implementations heki cannot
   list). A baseline counts them apart from the violations the typed rules prove.
-- An attribute named through a string (`setattr`, `getattr`, `__dict__`) is followed when the
-  string is a constant: see [Dynamic names](scope.md#dynamic-names).
+- An attribute named through a string (`setattr`, `getattr`, `__dict__`, `vars`) is followed
+  when the string is a constant: see [Dynamic names](scope.md#dynamic-names).
 
 ### `write-owners`
 
@@ -231,6 +236,9 @@ unresolved = "report"
 | `fresh-objects` | `"allow"` | `"allow"` or `"report"`: whether a write that constructs the object it writes is reported. |
 | `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the writes the contract cannot tie to a class are reported under [`MUT205`](rules/unresolved-guarded-write.md). |
 | `attribution` | `"call-graph"` | `"call-graph"` or `"lexical"`: which function a write is judged in. See [How contracts report](#how-contracts-report). |
+| `own-receiver` | `"report"` | `"report"` or `"allow"`: whether a write through the receiver of the method it is judged in (`self`, `cls`, `super()`) is allowed. See [How contracts report](#how-contracts-report). |
+| `allowed-protocols` | `[]` | Project protocols (class patterns, their subclasses included): a write through a value typed with one that declares the attribute, itself or through its protocol bases, is allowed. See [How contracts report](#how-contracts-report). |
+| `unlisted-dict-keys` | `"ignore"` | `"ignore"` or `"report"`: whether a `__dict__` key of a target's class that no target names is reported when it is written. |
 
 A container entry (`Class.attr["key"]`):
 
@@ -250,11 +258,21 @@ With `fresh-objects = "allow"`, a write is no violation when it constructs the o
 
 A shallow copy's containers are the original's: only rebinding its attributes constructs it.
 
+With `unlisted-dict-keys = "report"`, `MUT201` also reports a constant key written through the
+namespace of an object of a class a target covers (`field.__dict__[KEY] = v`,
+`field.__dict__.setdefault("_cache", v)`, `del vars(field)["k"]`) when no target covering that
+class names the key, so a new cache key needs a target first. A target names the keys its
+attribute pattern matches (`Field._*` names `_cache`), and an entry target names its container.
+The contract's allowance applies as to a target write. A key computed at run time has no name to
+check (`MUT205`, with `unresolved = "report"`), and neither has a write in a helper that does not
+type the object.
+
 With `unresolved = "report"`, `MUT205` reports:
 
 - an attribute named like a target, written on an object of unknown class;
-- a computed attribute name (`setattr(obj, name, v)`, `obj.__dict__[name] = v`) written on a
-  target class.
+- a computed attribute name (`setattr(obj, name, v)`, `obj.__dict__[name] = v`,
+  `obj.__dict__.update(...)`, `vars(obj) |= other`) written on a target class, or on an object
+  of unknown class, where it may be any target.
 
 ### `read-owners`
 
@@ -269,14 +287,17 @@ unresolved = "report"
 ```
 
 The read side of `write-owners`. A read is `ref.children`, a read through a local alias,
-`getattr(ref, "children")`, or `ref.__dict__["children"]`.
+`getattr(ref, "children")`, or `ref.__dict__["children"]`, also through a class object, which
+reads the class attribute (`Reference.children`, `cls.children`, a value typed
+`type[Reference]`).
 
 A read, or a call (`call-owners`, and an effect boundary's `call-targets` and
 `allowed-callees`), through a value typed with a project protocol that declares the member is
 judged by the protocol, the type the code uses it through: `def f(h: Host): h._m` reads
 `Host._m`, not `_m` of the classes implementing `Host`, and a private method of an
 implementation called through the protocol keeps what it reads and calls. A write through such
-a value still writes the implementations' attribute.
+a value still writes the implementations' attribute. `allowed-protocols` allows the reads, calls,
+and writes through the protocols it names (see [How contracts report](#how-contracts-report)).
 
 | Key | Default | Meaning |
 | --- | ------- | ------- |
@@ -288,6 +309,8 @@ a value still writes the implementations' attribute.
 | `message` | none | The help of every report of the contract. |
 | `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the reads of a target's attribute name on an object of unknown class are reported under [`MUT206`](rules/unresolved-guarded-read.md). |
 | `attribution` | `"call-graph"` | `"call-graph"` or `"lexical"`, as in `write-owners`. |
+| `own-receiver` | `"report"` | `"report"` or `"allow"`, as in `write-owners`. |
+| `allowed-protocols` | `[]` | As in `write-owners`, for a read or a call through the protocol. |
 
 `MUT203` does not see a read through a parameter without a project-class annotation; with
 `unresolved = "report"`, `MUT206` reports it unless every caller binds the parameter to an
@@ -317,8 +340,10 @@ The call side of `write-owners`.
 | `exempt-methods` | `[]` | Methods allowed to call the targets, matched as in `write-owners`. |
 | `message` | none | The help of every report of the contract. |
 | `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the calls of a method named like a target (its last name) on an object of unknown class are reported under [`MUT207`](rules/unresolved-guarded-call.md). |
-| `references` | `"ignore"` | `"ignore"`, `"calls"`, or `"calls-and-bases"`: whether a reference handing a target on to be called later counts as a call of it (`[decide]`, `return decide`, `partial(decide)`, `field(default_factory=Rule)`, `obj.callback = self.decide`), and with `"calls-and-bases"` a class statement naming a class target among its bases too (`class Derived(Base)`). |
+| `references` | `"ignore"` | `"ignore"`, `"calls"`, `"calls-and-bases"`, or `"reads"`: whether a reference handing a target on to be called later counts as a call of it (`[decide]`, `return decide`, `partial(decide)`, `field(default_factory=Rule)`, `obj.callback = self.decide`), with `"calls-and-bases"` a class statement naming a class target among its bases too (`class Derived(Base)`), and with `"reads"` every other use of a target's value as well (`Keys.of(...)`, `Code.OK`, `isinstance(x, Keys)`, `case Keys():`, `tuple[Keys, int]`). |
 | `attribution` | `"call-graph"` | `"call-graph"` or `"lexical"`, as in `write-owners`. |
+| `own-receiver` | `"report"` | `"report"` or `"allow"`, as in `write-owners`. |
+| `allowed-protocols` | `[]` | As in `write-owners`, for a read or a call through the protocol. |
 
 - A call is reported only when every function it may call (each candidate in the class
   hierarchy) is a target: `text.replace(...)` on a `str` is never a call of
@@ -328,8 +353,9 @@ The call side of `write-owners`.
 - The targets of a contract may call each other: a call of the guarded operation is checked where
   it is made, so what the operation does inside is part of it.
 - With `references = "calls"`, a target handed on is reported where it is named ("`f` hands on
-  `pkg.core.decide`"; a name an import or the module body binds, at the statement handing it
-  on): passed to a call, stored in an attribute, an item, or a global, returned,
+  `pkg.core.decide`"; a name an import or the module body binds, read in the scope binding it, at
+  the statement handing it on; a name a class body, a function, a lambda, or a comprehension
+  nested in a function reads from it, a local import included, at the name): passed to a call, stored in an attribute, an item, or a global, returned,
   yielded, raised, or held by a display that is. A use that only names it is no reference: an
   argument of `isinstance`, `issubclass`, another builtin that only inspects its arguments
   (`print`, `getattr`, `type`), `super`, `typing.cast`, `typing.TypeVar`, `typing.NewType`, or
@@ -351,17 +377,21 @@ The call side of `write-owners`.
   parameter, or left out where every such function's default is the value and only `True`,
   `False`, `None`, `0`, or `""` (heki keeps defaults by class and truthiness). A keyword binds as
   Python binds it: never a positional-only parameter (with `def f(kind=False, /, **kwargs)`,
-  `f(kind=True)` leaves `kind` false), and a keyword naming no parameter passes its value under
-  its name into `**kwargs`; the receiver of a method call is its first position. A call that
-  raises `TypeError` instead of running the function passes nothing: a keyword binding a
-  parameter a position or the receiver binds too, a keyword naming no parameter of a function
-  without `**kwargs`, a position (the receiver included) past the parameters of a function
-  without `*args`, or a parameter without a default left unbound where no `*` or `**` unpacking
-  may bind it. Any other argument (a variable, a call, `*` or `**` unpacking) is not
-  established, and the call is not reported. A reference passes no arguments, so it never
-  matches. A target with an argument list names no symbol outside the project; `unresolved =
-  "report"` matches its last name before the list, whatever the arguments of a call on an object
-  of unknown class.
+  `f(kind=True)` leaves `kind` false), and a keyword naming no parameter passes its value under its
+  name into `**kwargs`; the receiver of a method call is its first position. A `**` operand that is
+  a dict display with string constant keys (literals, or string constants as above), which nothing
+  changes (a name holding it is only unpacked with `**`, bound to another name, tested, or
+  returned), passes its entries as keywords: `DataType(**{"is_dict": True})`,
+  `flags = {"is_dict": True}; DataType(**flags)`. A call that raises `TypeError` instead of running
+  the function passes nothing: two keywords of one name (written and in such a display, or in two
+  displays), a keyword binding a parameter a position or the receiver binds too, a keyword naming no
+  parameter of a function without `**kwargs`, a position (the receiver included) past the parameters
+  of a function without `*args`, or a parameter without a default left unbound where no `*`
+  unpacking or `**` unpacking of another mapping may bind it. Any other argument (a variable, a
+  call, `*` unpacking, `**` unpacking of another mapping) is not established, and the call is not
+  reported. A reference passes no arguments, so it never matches. A target with an argument list
+  names no symbol outside the project; `unresolved = "report"` matches its last name before the
+  list, whatever the arguments of a call on an object of unknown class.
 - With `references = "calls-and-bases"`, a class statement passing a class target as a base is
   reported too ("`<module>` subclasses `pkg.core.Base`"), at the base, or at the class statement
   for a name an import or the module body binds: the class it makes holds the base, and
@@ -369,6 +399,24 @@ The call side of `write-owners`.
   statement passes, typed where the statement runs as any value is (a parameter, a local, or a
   class-body name of the imported class's name is another value), and matched as a construction
   is (with `subclasses = false`, the class itself only); a keyword (`metaclass=Base`) is no base.
+- With `references = "reads"`, everything `"calls-and-bases"` counts is reported as before, and
+  every other use of a target's value is reported too ("`f` reads `pkg.core.Keys`"), where it is
+  named as a hand-on is: the object of an attribute read, store, or deletion and a method's
+  receiver (`Keys.of(names)`, `Keys.__annotations__`, `Code.OK`), an argument of a call that only
+  names it (`isinstance(value, Keys)`, `cast(Keys, x)`, `TypeVar("T", bound=Keys)`), a subscript
+  or its index (`tuple[Keys, int]`, `Optional[Keys]`), an operand (`f is decide`, `Keys | None`),
+  a tested condition (`if decide:`), an iterated, awaited, formatted, or `with` value, a dict
+  display's key, the class of a class pattern (`case Keys():`), the types of an `except` clause
+  an exception may reach, a decorator, a default of a function or lambda, a keyword of a class
+  statement, and the cause of `raise ... from`, also through copies and the displays holding it
+  (`isinstance(value, (Keys, Code))`, a test of a module-level display holding it). No read: a
+  call (a call of its own), an annotation, evaluated or not (`list[Keys]`, `Keys | None`), the
+  values Python evaluates only when asked (a `type` statement's value, the bounds and defaults of
+  type parameters), an import, a name bound to the target by itself (`Alias = Keys`, a local, a
+  `nonlocal` cell), whose own uses count, and a value nothing uses (`Keys` as an expression
+  statement). A load handing a target on is reported as a hand-on only. A read is matched as a
+  construction is, so a subclass counts unless `subclasses = false`; an instance of the class is
+  no read of it.
 
 ### Allowed and forbidden functions
 
@@ -441,7 +489,7 @@ import-probes = "report"
 | `allow-writes` | `[]` | `Class.attr` writes the boundary allows, exempt from `write-targets` too. Needs `write-universe`. |
 | `allowed-callees` | `[]` | Functions, classes, modules, or ecosystem symbols whose effects are allowed: paths through them are not followed, and calls of them are no `calls` violation. |
 | `fresh-objects` | `"allow"` | `"allow"` or `"report"`: whether a write that constructs the object it writes (as in `write-owners`) counts as a write of the boundary. |
-| `references` | `"ignore"` | `"ignore"`, `"calls"`, or `"calls-and-bases"`, as for `call-owners`: whether a reference handing a `call-targets` entry on (and a class statement naming one among its bases) counts for `calls`. |
+| `references` | `"ignore"` | `"ignore"`, `"calls"`, `"calls-and-bases"`, or `"reads"`, as for `call-owners`: whether a reference handing a `call-targets` entry on (and a class statement naming one among its bases, and any other use of its value) counts for `calls`. |
 | `import-probes` | `"allow"` | `"allow"` or `"report"`: whether `reads-environment` also forbids an import probe, an `import` inside a `try` with an `except` clause naming `ImportError` or `ModuleNotFoundError`. `"report"` without `reads-environment` is a configuration error. |
 | `message` | none | The help of every report of the boundary. |
 
@@ -584,9 +632,10 @@ What needs no announcement:
 - writes to objects the function gets from a call;
 - a function whose every caller announces the change after calling it.
 
-A write is followed through local aliases, container methods, `setattr` / `__dict__`, and
-helpers. A helper changing an argument it does not type writes the field or instance its caller
-binds to it. At most 64 `invalidation` contracts can be declared.
+A write is followed through local aliases (also in the scopes nested in the function),
+container methods, `setattr` / `__dict__`, and helpers. A helper changing an argument it does
+not type writes the field or instance its caller binds to it. At most 64 `invalidation`
+contracts can be declared.
 
 ### How contracts report
 
@@ -608,9 +657,33 @@ holds for `invalidation` too:
   function of its own. For `write-owners`, a call handing a typed object to a helper that
   changes it without knowing its class is the caller's write. With `unresolved = "report"`, the
   callers binding a parameter only tell its object's class, allowed callers included. A class's
-  own initialization, `exempt-methods`, `fresh-objects`, and the targets of a call contract
-  calling each other stay allowed. Effect boundaries have no such key: they judge what their
-  scope functions reach through any number of calls.
+  own initialization stays allowed, a helper it passes `self` to included when every path of
+  project callers above the helper starts in such an initialization; so do `exempt-methods`,
+  `fresh-objects`, and the targets of a call contract calling each other. Effect boundaries have
+  no such key: they judge what their scope functions reach through any number of calls.
+- **`own-receiver = "allow"` allows the accesses through a method's own receiver.** An access is
+  allowed when the function it is judged in (the function reported, or with `attribution =
+  "lexical"` the function holding the access) is a method that is no static method, and the
+  object the member is looked up on may be its first parameter: `self._cache[k] = v`,
+  `self._seen`, `cls._kind()`, `super()._label()`, `self._norm(x)` of a static method,
+  `Resolver._label(self)`. A member the class inherits counts like its own. Another parameter, an
+  attribute of the receiver, a static method called through its class, the parameter of a static
+  method or of a function, and a nested `def`, lambda, or comprehension using the enclosing
+  method's `self` (heki does not tie a variable a nested scope captures to the enclosing
+  function's parameter) stay reported. By the call graph, a private helper the method hands its
+  `self` (`_count(self)`) is judged at the method, and is allowed with it.
+- **`allowed-protocols` allows the accesses through the protocols it names.** A read, call, or
+  write through a value typed with a project protocol a pattern names (or a subprotocol of one)
+  that declares the member, itself or through its protocol bases, is allowed wherever it is
+  judged, and so is a reference that `references` counts (`return h._helper`): `allowed-protocols = ["*Host"]` allows `parser._flag` with `parser: RenderHost` and
+  `class RenderHost(RuntimeFlags, Protocol)` when `RuntimeFlags` declares `_flag`, while the same
+  read through `flags: RuntimeFlags` stays reported. A write through the protocol is allowed for
+  the protocol's member and for each implementation's attribute alike. Accesses through a
+  protocol that does not declare the member, through an implementation's class, through a value
+  of unknown class (`unresolved = "report"`, also a protocol whose implementations heki cannot
+  list), and a protocol-typed value handed to a helper that changes it without typing its
+  parameter stay reported. By the call graph, a private method of an implementation that a call
+  through the protocol runs still hands its writes of its own `self` to the caller.
 - **One report stands for every site behind it.** A report at a call stands for every access
   behind the call, and an effect boundary's report for every site its scope function reaches.
   JSON output gives their number as `sites`, and a
