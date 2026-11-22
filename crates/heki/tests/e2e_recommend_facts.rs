@@ -307,7 +307,7 @@ def build():
     return Local
 
 
-def vague(either: Any | None, maybe: Callable[[], None] | None):
+def vague(either: str | Any, maybe: Callable[[], None] | int):
     either.go()
     maybe()
 "#,
