@@ -281,7 +281,7 @@ mod tests {
             }]),
             sites: 1,
             fold_key: None,
-            open_premises: Vec::new(),
+            open_records: Vec::new(),
         };
         let uri = Url::parse("file:///a.py").unwrap();
         let target = EditTarget {
