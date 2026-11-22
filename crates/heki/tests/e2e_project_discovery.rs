@@ -249,6 +249,143 @@ fn src_entries_name_directories_inside_the_project() {
     }
 }
 
+/// A workspace below `p` whose root `pyproject.toml` holds `table`: `packages/core` in the src
+/// layout with a blocking helper, `packages/api` in the flat layout calling it. Each also holds
+/// a `main.py` and a `scripts` package of its own.
+fn workspace<'p>(p: &'p Project, table: &str) -> &'p Project {
+    p.write(
+        "pyproject.toml",
+        &format!("[project]\nname = \"root\"\n\n{table}"),
+    )
+    .write(
+        "packages/core/pyproject.toml",
+        "[project]\nname = \"acme-core\"\n",
+    )
+    .write("packages/core/src/acme_core/__init__.py", "")
+    .write("packages/core/src/acme_core/io.py", BLOCKING_WAIT)
+    .write(
+        "packages/api/pyproject.toml",
+        "[project]\nname = \"acme-api\"\n",
+    )
+    .write("packages/api/acme_api/__init__.py", "")
+    .write(
+        "packages/api/acme_api/server.py",
+        "from acme_core.io import wait\n\n\nasync def go():\n    wait()\n",
+    )
+}
+
+/// The report of the call from `packages/api` into `packages/core`.
+const CROSS_MEMBER: &str = "packages/api/acme_api/server.py:5:5: EFF101 ";
+
+#[test]
+fn uv_workspace_members_are_source_roots() {
+    let p = Project::new("disc_uv_workspace");
+    workspace(&p, "[tool.uv.workspace]\nmembers = [\"packages/*\"]\n");
+    // Several members hold a `main.py` and a `scripts` package: each keeps its name below the
+    // project root, so `wait` and `scripts.helpers.wait` of one member are not the other's.
+    for (member, helper) in [("api", BLOCKING_WAIT), ("cli", "def wait():\n    pass\n")] {
+        p.write(
+            &format!("packages/{member}/pyproject.toml"),
+            "[project]\nname = \"x\"\n",
+        )
+        .write(
+            &format!("packages/{member}/main.py"),
+            &format!("{helper}\n\nasync def go():\n    wait()\n"),
+        )
+        .write(&format!("packages/{member}/scripts/__init__.py"), "")
+        .write(&format!("packages/{member}/scripts/helpers.py"), helper)
+        .write(
+            &format!("packages/{member}/scripts/run.py"),
+            "from .helpers import wait\nfrom scripts.helpers import wait as either\n\n\n\
+                 async def go():\n    wait()\n    either()\n",
+        );
+    }
+    let (_, stdout) = concise(&p);
+    assert_eq!(
+        stdout
+            .lines()
+            .filter(|l| l.contains(" EFF101 "))
+            .collect::<Vec<_>>(),
+        [
+            "packages/api/acme_api/server.py:5:5: EFF101 `acme_core.io.wait` always runs the \
+             waiting call `time.sleep` on the event loop (1 call down, on every path)",
+            "packages/api/main.py:9:5: EFF101 `packages.api.main.wait` always runs the waiting \
+             call `time.sleep` on the event loop (1 call down, on every path)",
+            "packages/api/scripts/run.py:6:5: EFF101 `packages.api.scripts.helpers.wait` always \
+             runs the waiting call `time.sleep` on the event loop (1 call down, on every path)",
+        ],
+        "{stdout}"
+    );
+    assert!(
+        full(&p).contains(
+            "= related: packages/core/src/acme_core/io.py:5:5: `wait` calls `time.sleep`"
+        ),
+    );
+    // A directory without a `pyproject.toml` is no member.
+    std::fs::remove_file(p.dir.join("packages/core/pyproject.toml")).unwrap();
+    assert!(!concise(&p).1.contains(CROSS_MEMBER));
+}
+
+#[test]
+fn workspace_exclude_globs_drop_members() {
+    let p = Project::new("disc_workspace_exclude");
+    let table = |exclude: &str| {
+        format!("[tool.uv.workspace]\nmembers = [\"packages/*\"]\nexclude = [{exclude}]\n")
+    };
+    workspace(&p, &table("\"./packages/co*/\""));
+    assert!(!concise(&p).1.contains(CROSS_MEMBER));
+    // An exclude glob's `*` spans path segments, as uv matches it.
+    workspace(&p, &table("\"*/core\""));
+    assert!(!concise(&p).1.contains(CROSS_MEMBER));
+    workspace(&p, &table("\"packages/legacy\", \"[\""));
+    assert!(concise(&p).1.contains(CROSS_MEMBER));
+}
+
+#[test]
+fn hatch_and_pdm_workspace_members_are_source_roots() {
+    let p = Project::new("disc_hatch_pdm_workspace");
+    for table in [
+        // Any Hatch environment's members, as paths or `{path = ...}` tables.
+        "[tool.hatch.envs.test]\nworkspace.members = [\n  {path = \"packages/core\", features = [\"dev\"]},\n  \"packages/api\",\n]\n",
+        "[tool.hatch.envs.default]\nworkspace.members = [\"packages/**\"]\nworkspace.exclude = [\"packages/legacy\"]\n",
+        "[tool.pdm.workspace]\nmembers = [\"./packages/core/\", \"packages/a*\"]\n",
+    ] {
+        workspace(&p, table);
+        assert!(concise(&p).1.contains(CROSS_MEMBER), "{table}");
+    }
+    // Members that name no directory below the project root, and a malformed glob.
+    workspace(
+        &p,
+        "[tool.uv.workspace]\nmembers = [\"../core\", \"/packages/core\", \"packages/[\", \"packages/gone\", \"packages/api\"]\n",
+    );
+    assert!(!concise(&p).1.contains(CROSS_MEMBER));
+    // `hatch.toml` holds Hatch's tables at its top level; a `heki.toml` reads the workspaces of
+    // the `pyproject.toml` next to it.
+    p.write(
+        "hatch.toml",
+        "[envs.default]\nworkspace.members = [\"packages/*\"]\n",
+    );
+    assert!(concise(&p).1.contains(CROSS_MEMBER));
+    std::fs::remove_file(p.dir.join("hatch.toml")).unwrap();
+    workspace(&p, "[tool.uv.workspace]\nmembers = [\"packages/*\"]\n").write("heki.toml", "");
+    assert!(concise(&p).1.contains(CROSS_MEMBER));
+}
+
+#[test]
+fn the_src_setting_replaces_detected_workspace_members() {
+    let p = Project::new("disc_workspace_src_setting");
+    workspace(
+        &p,
+        "[tool.uv.workspace]\nmembers = [\"packages/*\"]\n\n[tool.heki]\nsrc = [\"packages/api\"]\n",
+    );
+    assert!(!concise(&p).1.contains(CROSS_MEMBER));
+    p.write(
+        "pyproject.toml",
+        "[tool.uv.workspace]\nmembers = [\"packages/*\"]\n\n[tool.heki]\nsrc = [\"packages/api\", \"packages/core/src\"]\n",
+    );
+    assert!(concise(&p).1.contains(CROSS_MEMBER));
+}
+
 #[test]
 fn a_package_owns_its_name_over_a_module_of_the_same_name() {
     let p = Project::new("disc_package_over_module");

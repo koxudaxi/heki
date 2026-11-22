@@ -4,6 +4,7 @@
 //! unpacked have a class too. Types are hints for finding call targets and the classes of
 //! accessed attributes; they never reach the Soundness lane (ADR-004).
 
+use heki_ir::BinOpKind;
 use serde::{Deserialize, Serialize};
 
 /// Deepest nesting of tracked type arguments (`dict[str, list[Model]]` nests 2 deep); deeper
@@ -138,6 +139,43 @@ const GENERICS: &[(&str, Generic)] = &[
 /// The generic container `class` is, if any.
 pub(crate) fn generic(class: &str) -> Option<Generic> {
     GENERICS.iter().find(|(c, _)| *c == class).map(|(_, g)| *g)
+}
+
+/// Augmented assignments changing a container in place, by the container's class: `xs += ys`
+/// extends a list, `s |= t` updates a set (`__iadd__`, `__ior__`, ...).
+const IN_PLACE_OPERATORS: &[(&str, &[BinOpKind])] = &[
+    ("builtins.list", &[BinOpKind::Add, BinOpKind::Mult]),
+    ("builtins.bytearray", &[BinOpKind::Add, BinOpKind::Mult]),
+    (
+        "builtins.set",
+        &[
+            BinOpKind::BitOr,
+            BinOpKind::BitAnd,
+            BinOpKind::Sub,
+            BinOpKind::BitXor,
+        ],
+    ),
+    ("builtins.dict", &[BinOpKind::BitOr]),
+    ("collections.deque", &[BinOpKind::Add, BinOpKind::Mult]),
+    ("collections.OrderedDict", &[BinOpKind::BitOr]),
+    ("collections.defaultdict", &[BinOpKind::BitOr]),
+    (
+        "collections.Counter",
+        &[
+            BinOpKind::Add,
+            BinOpKind::Sub,
+            BinOpKind::BitOr,
+            BinOpKind::BitAnd,
+        ],
+    ),
+];
+
+/// Whether `x op= y` changes the container `x`, an instance of `class`, in place, and so gives
+/// the container itself.
+pub(crate) fn changes_in_place(class: &str, op: BinOpKind) -> bool {
+    IN_PLACE_OPERATORS
+        .iter()
+        .any(|(c, ops)| *c == class && ops.contains(&op))
 }
 
 /// The `typing` generic an unresolved annotation name means (`Iterable` in a string

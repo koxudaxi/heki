@@ -393,6 +393,36 @@ fn the_json_object_holds_the_same_content_and_follows_its_schema() {
 }
 
 #[test]
+fn detected_workspace_member_packages_are_listed() {
+    let p = Project::new("prompt_workspace");
+    p.write(
+        "pyproject.toml",
+        "[tool.uv.workspace]\nmembers = [\"packages/*\"]\n",
+    )
+    .write("packages/core/pyproject.toml", "")
+    .write("packages/core/src/acme_core/io.py", "x = 1\n")
+    .write("packages/api/pyproject.toml", "")
+    .write("packages/api/acme_api/__init__.py", "");
+    let text = prompt(&p, &["--generate-prompt"]);
+    assert!(
+        section(&text, "Configuration").contains(
+            "- Source roots: `packages/core/src` (detected)\n- Workspace member packages, each \
+             named below its member: `packages/api/acme_api`\n"
+        ),
+        "{text}"
+    );
+    let object = prompt_json(&p, &["--generate-prompt"]);
+    assert_eq!(
+        object["configuration"]["member_packages"],
+        json!(["packages/api/acme_api"])
+    );
+    // Without workspace members the key is absent.
+    p.write("pyproject.toml", "");
+    let object = prompt_json(&p, &["--generate-prompt"]);
+    assert_eq!(object["configuration"].get("member_packages"), None);
+}
+
+#[test]
 fn a_run_without_a_question_contracts_configuration_or_diagnostics_says_so() {
     let p = Project::new("prompt_bare");
     std::fs::remove_file(p.dir.join("pyproject.toml")).unwrap();

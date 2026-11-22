@@ -39,9 +39,14 @@ Its premises:
 Not part of the claim: how many times the statement runs (one under a branch inside the loop
 counts), and how large the loop or the list is. The message claims no size and no cost estimate. A
 loop or a list that the code fixes at 16 or fewer items is not reported, since the rewrite would not
-pay off. A proven report in a loop whose trip count the code fixes at more, or caps with a length
-test every path to the loop passes, is heuristic: it is true, but a fixed count is no evidence
-either way, so the exact tier leaves it out.
+pay off. The exact tier also asks that the data decide how many times the loop runs: the loop steps
+through a parameter (`*args` included) or a part of one, the rows of a query, the lines of a file,
+or the entries of a directory, as `EFF103`'s Origin establishes them, and the code does not fix or
+cap their number. A proven report over any other loop is heuristic, for example over a loop whose
+trip count the code fixes at more than 16 or caps with a length test every path to the loop passes,
+over the program's structure (an attribute of `self`, a project function's result, `range` of a
+configured number, a class's MRO, a module-level list), or in a `while` loop. Such a report is true,
+but its loop usually runs a few times, however large the input.
 
 ## Why is this bad?
 Removing the first element shifts every remaining element, so a queue drained this way is
@@ -89,7 +94,9 @@ stored, or passed to other code except read-only builtins such as `len`), and ev
 against lists, and no text of it (a replacement field of an f-string, `str()`), which differs
 for a `deque`. An annotation the rewrite cannot turn into a `deque` one (`Sequence[str]`, a
 union) or another annotated declaration of the variable blocks the fix, so that a type checker
-accepts the fixed file.
+accepts the fixed file. So does any other binding of a variable the list reaches, since a type
+checker gives the variable one type: `s = [...]` before `s = q`, a later `q = [...]` the loop
+never sees, a `for s in ...`, or a parameter `s`.
 
 A `deque` iterator raises `RuntimeError` when the deque changes under it and is another type
 than a list iterator: no iterator of the list may be live at a change, consumed by the changing

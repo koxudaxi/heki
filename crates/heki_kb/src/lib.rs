@@ -233,8 +233,9 @@ pub enum WaitKind {
     Thread,
 }
 
-/// When a database call sends a statement or otherwise waits on the database
-/// ([`EcosystemEntry::emits`]).
+/// When a call does its effects ([`EcosystemEntry::emits`]): for a database call, when it sends a
+/// statement or otherwise waits on the database; for any call, whether the library's
+/// configuration can make it skip them.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Emits {
@@ -247,7 +248,8 @@ pub enum Emits {
     /// (`Session.flush`, a driver's `commit()`).
     IfPending,
     /// Only when the receiver has not loaded its results (Django's `QuerySet.count()` on an
-    /// evaluated query set counts its cache).
+    /// evaluated query set counts its cache; a database cursor that is exhausted returns nothing
+    /// without a query).
     UnlessCached,
     /// Only when no open connection is at hand (a pool checkout, Django's
     /// `connection.cursor()`).
@@ -257,6 +259,11 @@ pub enum Emits {
     /// `path=":memory:"` passed in) or only named by an annotation may be in memory. It sends
     /// its statements either way.
     IfOnDisk,
+    /// Every effect of the call, unless the library is configured otherwise: it can be set up so
+    /// the call does not do them (Celery's `task_always_eager` runs the task in the caller, and
+    /// kombu's in-memory transport publishes without the network). The configuration is not
+    /// visible at the call, so no effect is certain and the call only supports heuristic reports.
+    UnlessConfiguredOtherwise,
 }
 
 /// What the items of a call's result are when the environment decides how many there are
@@ -362,6 +369,25 @@ pub struct EcosystemEntry {
     /// (`queue.Queue.put`): it blocks only where the receiver is known to be bounded
     /// ([`Self::bounded_by`]).
     pub waits_while_full: bool,
+    /// `EFF112`: the call writes an argument, or serializes it into text, in the order of its
+    /// elements (`json.dumps`, `pathlib.Path.write_text`, `print`).
+    pub writes_in_order: Option<OrderedOutput>,
+}
+
+/// What a call writes in the order of its elements (`EcosystemEntry::writes_in_order`): a
+/// mapping's keys and a sequence's items in their iteration order, text as it is.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct OrderedOutput {
+    /// The argument written: at position `arg` (the receiver not counted), or passed by the
+    /// keyword `param`; with neither, every positional argument (`print`).
+    pub arg: Option<u8>,
+    pub param: Option<String>,
+    /// The keyword argument that sorts the keys of the mappings it writes first (`sort_keys`,
+    /// `sort_dicts`).
+    pub sorted_by: Option<String>,
+    /// The call sorts them when it is not passed `sorted_by`.
+    pub sorted_by_default: bool,
 }
 
 /// How a symbol tagged `environment` reads the environment (`EcosystemEntry::environment`).
@@ -551,6 +577,7 @@ pub struct EcosystemPatch {
     pub sync_lock_or_tx: Option<bool>,
     pub non_reentrant_lock: Option<bool>,
     pub one_at_a_time: Option<OneAtATime>,
+    pub writes_in_order: Option<OrderedOutput>,
 }
 
 impl EcosystemPatch {
@@ -581,6 +608,9 @@ impl EcosystemPatch {
         }
         if let Some(v) = self.one_at_a_time {
             entry.one_at_a_time = Some(v);
+        }
+        if let Some(v) = &self.writes_in_order {
+            entry.writes_in_order = Some(v.clone());
         }
     }
 }
@@ -625,6 +655,12 @@ impl TryFrom<&EcosystemOverride> for EcosystemPatch {
                 .as_deref()
                 .map(OneAtATime::from_name)
                 .transpose()?,
+            writes_in_order: value.writes_in_order.as_ref().map(|w| OrderedOutput {
+                arg: w.arg,
+                param: w.param.clone(),
+                sorted_by: w.sorted_by.clone(),
+                sorted_by_default: w.sorted_by_default,
+            }),
         })
     }
 }
@@ -1060,22 +1096,8 @@ mod tests {
                         "asyncio.StreamReader",
                         &["read", "readline", "readexactly", "readuntil", "__anext__"],
                     ),
-                    with_prefix(
-                        "asyncpg.Connection",
-                        &[
-                            "execute",
-                            "executemany",
-                            "fetch",
-                            "fetchrow",
-                            "fetchval",
-                            "fetchmany",
-                            "prepare",
-                            "copy_from_table",
-                            "copy_from_query",
-                            "copy_to_table",
-                            "copy_records_to_table",
-                        ],
-                    ),
+                    with_prefix_all(ASYNCPG_CONNECTIONS, ASYNCPG_BULK),
+                    with_prefix_all(ASYNCPG_CONNECTIONS, &["prepare"]),
                     with_prefix_all(
                         &asyncio_websockets,
                         &["recv", "recv_streaming", "__anext__"],
@@ -1099,8 +1121,15 @@ mod tests {
                 always(),
             ),
             (
+                with_prefix_all(ASYNCPG_CONNECTIONS, ASYNCPG_QUERIES),
+                one_at_a_time(OneAtATime::Always, async_safe(entry(&[DbQuery]))),
+            ),
+            (
                 s(&["asyncpg.connect"]),
-                async_safe(returning("asyncpg.Connection", entry(&[]))),
+                async_safe(returning(
+                    "asyncpg.Connection",
+                    entry(&[UnpooledClientAlloc]),
+                )),
             ),
             (
                 s(&["anyio.create_task_group"]),
@@ -1238,10 +1267,100 @@ mod tests {
     const QUERYSET_BULK: &[&str] = &["bulk_create", "in_bulk"];
     const MONGO_BULK: &[&str] = &["insert_many", "bulk_write"];
     const REDIS_COMMANDS: &[&str] = &[
-        "get", "set", "setex", "mget", "mset", "delete", "exists", "expire", "ttl", "incr", "decr",
-        "hget", "hset", "hmget", "hgetall", "hdel", "lpush", "rpush", "lpop", "rpop", "lrange",
-        "sadd", "srem", "smembers", "zadd", "zrange", "publish", "keys", "eval",
+        "get",
+        "set",
+        "setex",
+        "mget",
+        "mset",
+        "delete",
+        "exists",
+        "expire",
+        "ttl",
+        "incr",
+        "decr",
+        "hget",
+        "hset",
+        "hmget",
+        "hgetall",
+        "hdel",
+        "lpush",
+        "rpush",
+        "lpop",
+        "rpop",
+        "lrange",
+        "sadd",
+        "srem",
+        "smembers",
+        "zadd",
+        "zrange",
+        "publish",
+        "keys",
+        "eval",
+        "incrby",
+        "incrbyfloat",
+        "decrby",
+        "getset",
+        "getdel",
+        "setnx",
+        "expireat",
+        "pexpire",
+        "persist",
+        "pttl",
+        "unlink",
+        "rename",
+        "hincrby",
+        "hexists",
+        "hkeys",
+        "hvals",
+        "hlen",
+        "hsetnx",
+        "llen",
+        "lindex",
+        "lrem",
+        "lset",
+        "ltrim",
+        "blpop",
+        "brpop",
+        "sismember",
+        "smismember",
+        "scard",
+        "spop",
+        "srandmember",
+        "zrem",
+        "zscore",
+        "zincrby",
+        "zcard",
+        "zcount",
+        "zrank",
+        "zrangebyscore",
+        "zrevrange",
+        "zrevrangebyscore",
+        "zremrangebyscore",
+        "xadd",
+        "xread",
+        "xreadgroup",
+        "xrange",
+        "xrevrange",
+        "xlen",
+        "xack",
+        "xdel",
+        "xtrim",
+        "evalsha",
     ];
+    /// asyncpg methods that send one statement, and those that send many rows at once.
+    const ASYNCPG_QUERIES: &[&str] = &["execute", "fetch", "fetchrow", "fetchval"];
+    const ASYNCPG_BULK: &[&str] = &[
+        "executemany",
+        "fetchmany",
+        "copy_from_table",
+        "copy_from_query",
+        "copy_to_table",
+        "copy_records_to_table",
+    ];
+    /// The spellings of asyncpg's connection and pool classes (re-exported at the top level).
+    const ASYNCPG_CONNECTIONS: &[&str] = &["asyncpg.Connection", "asyncpg.connection.Connection"];
+    const ASYNCPG_POOLS: &[&str] = &["asyncpg.Pool", "asyncpg.pool.Pool"];
+    const MOTOR: &str = "motor.motor_asyncio";
     const MONGO_COLLECTION_OPS: &[&str] = &[
         "find_one",
         "insert_one",
@@ -1356,6 +1475,16 @@ mod tests {
         }
     }
 
+    /// An LLM SDK client built over an `httpx` client made elsewhere shares that client's pool.
+    fn shared_http_client() -> ArgCase {
+        ArgCase {
+            param: Some("http_client".into()),
+            instance_of: s(&["httpx.Client", "httpx.AsyncClient"]),
+            effects: Some(vec![]),
+            ..ArgCase::default()
+        }
+    }
+
     fn with_cases(cases: Vec<ArgCase>, e: EcosystemEntry) -> EcosystemEntry {
         EcosystemEntry { cases, ..e }
     }
@@ -1376,6 +1505,7 @@ mod tests {
             synchronous_waits(),
             lazy_iterators(),
             environment_reads(),
+            ordered_outputs(),
             pydantic_models(),
         ]
         .into_iter()
@@ -1402,6 +1532,24 @@ mod tests {
                 },
             ),
         ]
+    }
+
+    /// `EFF112`: the calls writing an argument in the order of its elements, with no other fact
+    /// (the file writes of `pathlib` are in [`ORDERED_OUTPUTS`] too).
+    fn ordered_outputs() -> Vec<(Vec<String>, EcosystemEntry)> {
+        vec![(
+            s(&[
+                "builtins.print",
+                "json.dumps",
+                "json.dump",
+                "pprint.pprint",
+                "pprint.pformat",
+                "pprint.pp",
+                "yaml.dump",
+                "yaml.safe_dump",
+            ]),
+            entry(&[]),
+        )]
     }
 
     /// The calls and module attributes `reads-environment` effect boundaries forbid; they carry
@@ -1849,6 +1997,11 @@ mod tests {
                     with_prefix("urllib3.ProxyManager", &["request", "urlopen"]),
                     with_prefix("urllib3.HTTPConnectionPool", &["request", "urlopen"]),
                     with_prefix("urllib3.HTTPSConnectionPool", &["request", "urlopen"]),
+                    s(&[
+                        "celery.Celery.send_task",
+                        "celery.Task.delay",
+                        "celery.Task.apply_async",
+                    ]),
                 ]
                 .concat(),
                 entry(&[BlockingNet]),
@@ -1866,9 +2019,18 @@ mod tests {
                     "boto3.resource",
                     "redis.Redis",
                     "redis.StrictRedis",
+                    "redis.ConnectionPool",
+                    "redis.BlockingConnectionPool",
+                    "redis.ConnectionPool.from_url",
+                    "redis.BlockingConnectionPool.from_url",
                     "psycopg_pool.ConnectionPool",
+                    "google.genai.Client",
                 ]),
                 entry(&[UnpooledClientAlloc]),
+            ),
+            (
+                s(&["openai.OpenAI", "openai.AzureOpenAI", "anthropic.Anthropic"]),
+                with_cases(vec![shared_http_client()], entry(&[UnpooledClientAlloc])),
             ),
             (
                 // `connect=True` (the default) resolves a `mongodb+srv://` URI at once.
@@ -1907,10 +2069,26 @@ mod tests {
                     "aiohttp.ClientSession",
                     "aiohttp.request",
                     "redis.asyncio.Redis",
+                    "redis.asyncio.ConnectionPool",
+                    "redis.asyncio.BlockingConnectionPool",
+                    "redis.asyncio.ConnectionPool.from_url",
+                    "redis.asyncio.BlockingConnectionPool.from_url",
                     "pymongo.AsyncMongoClient",
                     "psycopg_pool.AsyncConnectionPool",
+                    "motor.motor_asyncio.AsyncIOMotorClient",
                 ]),
                 async_safe(entry(&[UnpooledClientAlloc])),
+            ),
+            (
+                s(&[
+                    "openai.AsyncOpenAI",
+                    "openai.AsyncAzureOpenAI",
+                    "anthropic.AsyncAnthropic",
+                ]),
+                async_safe(with_cases(
+                    vec![shared_http_client()],
+                    entry(&[UnpooledClientAlloc]),
+                )),
             ),
             (
                 [
@@ -2149,6 +2327,19 @@ mod tests {
                 s(&["pymongo.database.Database.get_collection"]),
                 returning("pymongo.collection.Collection", entry(&[])),
             ),
+            // An in-process database that may be in memory: its statements wait on nothing known.
+            (
+                s(&["duckdb.connect"]),
+                returning("duckdb.DuckDBPyConnection", entry(&[UnpooledClientAlloc])),
+            ),
+            (
+                s(&["duckdb.DuckDBPyConnection.execute", "duckdb.execute"]),
+                returning("duckdb.DuckDBPyConnection", entry(&[DbQuery])),
+            ),
+            (
+                s(&["duckdb.DuckDBPyConnection.cursor"]),
+                returning("duckdb.DuckDBPyConnection", entry(&[])),
+            ),
         ]
     }
 
@@ -2328,11 +2519,114 @@ mod tests {
                     entry(&[]),
                 )),
             ),
+            (
+                s(&["asyncpg.create_pool"]),
+                async_safe(returning("asyncpg.Pool", entry(&[UnpooledClientAlloc]))),
+            ),
+            (
+                // Each query checks a connection out for itself: tasks may share the pool.
+                with_prefix_all(ASYNCPG_POOLS, ASYNCPG_QUERIES),
+                async_safe(entry(&[DbQuery])),
+            ),
+            (
+                with_prefix_all(ASYNCPG_POOLS, ASYNCPG_BULK),
+                async_safe(entry(&[])),
+            ),
+            (
+                with_prefix_all(ASYNCPG_POOLS, &["acquire"]),
+                async_safe(returning("asyncpg.Connection", entry(&[]))),
+            ),
+            (
+                with_prefix(
+                    &format!("{MOTOR}.AsyncIOMotorClient"),
+                    &["get_database", "get_default_database", "__getitem__"],
+                ),
+                async_safe(returning(
+                    &format!("{MOTOR}.AsyncIOMotorDatabase"),
+                    entry(&[]),
+                )),
+            ),
+            (
+                with_prefix(
+                    &format!("{MOTOR}.AsyncIOMotorDatabase"),
+                    &["get_collection", "__getitem__"],
+                ),
+                async_safe(returning(
+                    &format!("{MOTOR}.AsyncIOMotorCollection"),
+                    entry(&[]),
+                )),
+            ),
+            (
+                [
+                    s(&[&format!("{MOTOR}.AsyncIOMotorDatabase.command")]),
+                    with_prefix(
+                        &format!("{MOTOR}.AsyncIOMotorCollection"),
+                        &MONGO_COLLECTION_OPS
+                            .iter()
+                            .copied()
+                            .filter(|m| *m != "aggregate")
+                            .collect::<Vec<_>>(),
+                    ),
+                ]
+                .concat(),
+                async_safe(entry(&[DbQuery])),
+            ),
+            (
+                with_prefix(&format!("{MOTOR}.AsyncIOMotorCollection"), MONGO_BULK),
+                async_safe(entry(&[])),
+            ),
         ]
     }
 
     fn data_libraries() -> Vec<(Vec<String>, EcosystemEntry)> {
+        // polars downloads an `http(s)://` source itself; other URL schemes are not listed.
+        let polars_url = ArgCase {
+            prefix: s(&["http://", "https://"]),
+            ..source_case("source", true)
+        };
+        let buffer = |arg: u8| ArgCase {
+            arg: Some(arg),
+            param: Some("f".into()),
+            instance_of: s(&["io.BytesIO"]),
+            effects: Some(Vec::new()),
+            ..ArgCase::default()
+        };
         vec![
+            (
+                with_prefix(
+                    "polars",
+                    &[
+                        "read_csv",
+                        "read_parquet",
+                        "read_json",
+                        "read_ndjson",
+                        "read_ipc",
+                        "read_avro",
+                        "read_excel",
+                        "read_ods",
+                    ],
+                ),
+                with_cases(
+                    vec![polars_url, source_case("source", false)],
+                    entry(&[BlockingFs]),
+                ),
+            ),
+            (
+                with_prefix("polars", &["read_database", "read_database_uri"]),
+                entry(&[BlockingDb, DbQuery]),
+            ),
+            (
+                s(&["polars.DataFrame.write_database"]),
+                entry(&[BlockingDb]),
+            ),
+            (
+                s(&["torch.load"]),
+                with_cases(vec![buffer(0)], entry(&[BlockingFs])),
+            ),
+            (
+                s(&["torch.save"]),
+                with_cases(vec![buffer(1)], entry(&[BlockingFs])),
+            ),
             (
                 // Local paths only.
                 with_prefix("pandas", &["read_hdf", "read_spss"]),
@@ -2358,6 +2652,19 @@ mod tests {
                             "concatenate",
                             "append",
                             "insert",
+                        ],
+                    ),
+                    with_prefix(
+                        "torch",
+                        &[
+                            "cat",
+                            "concat",
+                            "concatenate",
+                            "vstack",
+                            "hstack",
+                            "dstack",
+                            "column_stack",
+                            "row_stack",
                         ],
                     ),
                 ]
@@ -2450,6 +2757,8 @@ mod tests {
         const CURSOR_RUNS: &[&str] = &["to_list", "distinct", "explain"];
         let cursor = "pymongo.cursor.Cursor";
         let async_cursor = "pymongo.asynchronous.cursor.AsyncCursor";
+        let motor_cursor = format!("{MOTOR}.AsyncIOMotorCursor");
+        let motor_command_cursor = format!("{MOTOR}.AsyncIOMotorLatentCommandCursor");
         vec![
             (s(&["os.walk"]), returning("os.walk()", entry(&[]))),
             (
@@ -2480,6 +2789,28 @@ mod tests {
                 [
                     s(&[&format!("{async_cursor}.__aiter__")]),
                     with_prefix(async_cursor, CURSOR_RUNS),
+                ]
+                .concat(),
+                async_safe(entry(&[DbQuery])),
+            ),
+            // Motor's `aggregate()` returns a lazy command cursor, unlike pymongo's async one.
+            (
+                [
+                    s(&[&format!("{MOTOR}.AsyncIOMotorCollection.find")]),
+                    with_prefix(&motor_cursor, CURSOR_BUILDERS),
+                ]
+                .concat(),
+                async_safe(returning(&motor_cursor, entry(&[]))),
+            ),
+            (
+                s(&[&format!("{MOTOR}.AsyncIOMotorCollection.aggregate")]),
+                async_safe(returning(&motor_command_cursor, entry(&[]))),
+            ),
+            (
+                [
+                    s(&[&format!("{motor_cursor}.__aiter__")]),
+                    with_prefix(&motor_cursor, CURSOR_RUNS),
+                    with_prefix(&motor_command_cursor, &["__aiter__", "to_list"]),
                 ]
                 .concat(),
                 async_safe(entry(&[DbQuery])),
@@ -2799,6 +3130,22 @@ mod tests {
                 "django.db.models.query.QuerySet.alast",
                 "django.db.models.query.QuerySet.aexists",
                 "django.db.models.query.QuerySet.acount",
+                "pymongo.cursor.Cursor.__iter__",
+                "pymongo.cursor.Cursor.to_list",
+                "pymongo.asynchronous.cursor.AsyncCursor.__aiter__",
+                "pymongo.asynchronous.cursor.AsyncCursor.to_list",
+                "motor.motor_asyncio.AsyncIOMotorCursor.__aiter__",
+                "motor.motor_asyncio.AsyncIOMotorCursor.to_list",
+                "motor.motor_asyncio.AsyncIOMotorLatentCommandCursor.__aiter__",
+                "motor.motor_asyncio.AsyncIOMotorLatentCommandCursor.to_list",
+            ],
+        ),
+        (
+            Emits::UnlessConfiguredOtherwise,
+            &[
+                "celery.Celery.send_task",
+                "celery.Task.delay",
+                "celery.Task.apply_async",
             ],
         ),
         (
@@ -2809,6 +3156,55 @@ mod tests {
                 "psycopg_pool.ConnectionPool.connection",
                 "django.db.connection.cursor",
             ],
+        ),
+    ];
+
+    /// One row of [`ORDERED_OUTPUTS`]: `(arg, param, sorted_by, sorted_by_default, symbols)`.
+    type OrderedOutputRow = (
+        Option<u8>,
+        Option<&'static str>,
+        Option<&'static str>,
+        bool,
+        &'static [&'static str],
+    );
+
+    /// `EFF112`: what each call writes in the order of its elements.
+    const ORDERED_OUTPUTS: &[OrderedOutputRow] = &[
+        (None, None, None, false, &["builtins.print"]),
+        (
+            Some(0),
+            Some("data"),
+            None,
+            false,
+            &["pathlib.Path.write_text", "pathlib.Path.write_bytes"],
+        ),
+        (
+            Some(0),
+            Some("obj"),
+            Some("sort_keys"),
+            false,
+            &["json.dumps", "json.dump"],
+        ),
+        (
+            Some(0),
+            Some("object"),
+            Some("sort_dicts"),
+            true,
+            &["pprint.pprint", "pprint.pformat"],
+        ),
+        (
+            Some(0),
+            Some("object"),
+            Some("sort_dicts"),
+            false,
+            &["pprint.pp"],
+        ),
+        (
+            Some(0),
+            Some("data"),
+            Some("sort_keys"),
+            true,
+            &["yaml.dump", "yaml.safe_dump"],
         ),
     ];
 
@@ -2833,6 +3229,10 @@ mod tests {
                 "sqlmodel.Session.scalars",
                 "psycopg.Connection.execute",
                 "psycopg.Cursor.execute",
+                "asyncpg.Connection.fetch",
+                "asyncpg.connection.Connection.fetch",
+                "asyncpg.Pool.fetch",
+                "asyncpg.pool.Pool.fetch",
                 "pymongo.collection.Collection.find",
                 "pymongo.collection.Collection.aggregate",
                 "sqlite3.connect(\":memory:\").execute",
@@ -2924,12 +3324,24 @@ mod tests {
                         None => format!("sqlite3.Connection.{method}"),
                     })
                 });
+                let writes_in_order = ORDERED_OUTPUTS
+                    .iter()
+                    .find(|(.., symbols)| symbols.contains(&symbol.as_str()))
+                    .map(
+                        |(arg, param, sorted_by, sorted_by_default, _)| OrderedOutput {
+                            arg: *arg,
+                            param: param.map(Into::into),
+                            sorted_by: sorted_by.map(Into::into),
+                            sorted_by_default: *sorted_by_default,
+                        },
+                    );
                 let expected = EcosystemEntry {
                     symbol: symbol.clone(),
                     emits,
                     exit_suppresses,
                     items,
                     api,
+                    writes_in_order,
                     ..expected.clone()
                 };
                 assert_eq!(kb.lookup(&symbol), Some(&expected), "{symbol}");
@@ -2964,6 +3376,9 @@ mod tests {
             "pymongo.asynchronous.",
             "asyncpg.",
             "websockets.",
+            "motor.motor_asyncio.",
+            "openai.Async",
+            "anthropic.Async",
         ];
         let kb = EffectiveEcosystemKb::load_builtin(&[]).unwrap();
         let mut seen = BTreeSet::new();
@@ -3087,9 +3502,11 @@ mod tests {
             emits("sqlalchemy.engine.Engine.connect"),
             Emits::UnlessConnected
         );
-        // Only database calls carry a condition on their database effects.
+        assert_eq!(emits("celery.Task.delay"), Emits::UnlessConfiguredOtherwise);
+        // Only database calls carry a condition on their database effects, and a call whose
+        // configuration can switch its effects off carries any.
         for (symbol, e) in &kb.entries {
-            if e.emits != Emits::Always {
+            if !matches!(e.emits, Emits::Always | Emits::UnlessConfiguredOtherwise) {
                 assert!(
                     e.effects.iter().any(|k| matches!(k, BlockingDb | DbQuery)),
                     "{symbol}"
@@ -3395,6 +3812,13 @@ mod tests {
                 non_reentrant_lock: Some(true),
                 ..patch("mypkg.sync.Mutex")
             },
+            EcosystemPatch {
+                writes_in_order: Some(OrderedOutput {
+                    sorted_by: Some("sort_keys".into()),
+                    ..OrderedOutput::default()
+                }),
+                ..patch("json.dumps")
+            },
             // An async-safe API keeps only its loop-sensitive effects.
             EcosystemPatch {
                 async_safe: Some(true),
@@ -3452,6 +3876,14 @@ mod tests {
                 non_reentrant_lock: true,
                 ..EcosystemEntry::default()
             }
+        );
+        // A project may describe another sorting switch of a library call.
+        assert_eq!(
+            got("json.dumps").writes_in_order,
+            Some(OrderedOutput {
+                sorted_by: Some("sort_keys".into()),
+                ..OrderedOutput::default()
+            })
         );
         assert_eq!(
             got("vendor.fetch"),
@@ -3549,6 +3981,12 @@ mod tests {
             sync_lock_or_tx: Some(false),
             non_reentrant_lock: Some(true),
             one_at_a_time: Some("when_unbound".into()),
+            writes_in_order: Some(heki_env::OrderedOutputSetting {
+                arg: None,
+                param: Some("payload".into()),
+                sorted_by: Some("sort_keys".into()),
+                sorted_by_default: true,
+            }),
         };
         assert_eq!(
             EcosystemPatch::try_from(&ok).unwrap(),
@@ -3563,6 +4001,12 @@ mod tests {
                 sync_lock_or_tx: Some(false),
                 non_reentrant_lock: Some(true),
                 one_at_a_time: Some(OneAtATime::WhenUnbound),
+                writes_in_order: Some(OrderedOutput {
+                    arg: None,
+                    param: Some("payload".into()),
+                    sorted_by: Some("sort_keys".into()),
+                    sorted_by_default: true,
+                }),
             }
         );
         for (name, kind) in [

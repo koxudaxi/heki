@@ -15,11 +15,7 @@ struct Project {
 
 impl Project {
     fn new(name: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!("heki_cli_{name}_{}", std::process::id()));
-        if dir.exists() {
-            std::fs::remove_dir_all(&dir).unwrap();
-        }
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = common::fresh_dir(&format!("cli_{name}"));
         // Marks the project root.
         std::fs::write(dir.join("pyproject.toml"), "[project]\nname = \"t\"\n").unwrap();
         Self { dir }

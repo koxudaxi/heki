@@ -288,21 +288,21 @@ fn a_lexical_read_contract_judges_the_function_holding_the_read() {
                 5,
                 12,
                 "MUT203",
-                "`_peek` reads `Vault.secret` (direct_attr) outside the read owners of `vault`"
+                "`_peek` reads `Vault.secret` (by attribute) outside the read owners of `vault`"
             ),
             report(
                 "pkg/peek.py",
                 9,
                 12,
                 "MUT203",
-                "`show` reads `Vault.secret` (direct_attr) outside the read owners of `vault`"
+                "`show` reads `Vault.secret` (by attribute) outside the read owners of `vault`"
             ),
             report(
                 "pkg/peek.py",
                 13,
                 12,
                 "MUT206",
-                "`guess` reads `secret` (direct_attr) on an object of unknown class outside the read owners of `vault`: heki cannot tell whether it reads `Vault.secret`"
+                "`guess` reads `secret` (by attribute) on an object of unknown class outside the read owners of `vault`: heki cannot tell whether it reads `Vault.secret`"
             ),
         ]
     );
@@ -376,7 +376,7 @@ fn a_lexical_write_contract_judges_the_function_holding_the_write() {
         17,
         5,
         "MUT201",
-        "`touch` writes `Model.fields` (indirect_helper) via `pkg.writers.fill` outside the write owners of `model`",
+        "`touch` writes `Model.fields` (through a helper) via `pkg.writers.fill` outside the write owners of `model`",
     );
     // `touch` hands the field to a helper that changes it, and nothing calls it.
     assert_eq!(run(""), vec![touch.clone()]);
@@ -391,14 +391,14 @@ fn a_lexical_write_contract_judges_the_function_holding_the_write() {
                 5,
                 5,
                 "MUT201",
-                "`_reset` writes `Model.fields` (direct_attr) outside the write owners of `model`"
+                "`_reset` writes `Model.fields` (by attribute) outside the write owners of `model`"
             ),
             report(
                 "pkg/writers.py",
                 9,
                 5,
                 "MUT201",
-                "`public_set` writes `Model.fields` (direct_attr) outside the write owners of `model`"
+                "`public_set` writes `Model.fields` (by attribute) outside the write owners of `model`"
             ),
             touch,
             report(
@@ -406,7 +406,7 @@ fn a_lexical_write_contract_judges_the_function_holding_the_write() {
                 21,
                 5,
                 "MUT201",
-                "`_touch_privately` writes `Model.fields` (indirect_helper) via `pkg.writers.fill` outside the write owners of `model`"
+                "`_touch_privately` writes `Model.fields` (through a helper) via `pkg.writers.fill` outside the write owners of `model`"
             ),
             report(
                 "pkg/writers.py",
@@ -517,14 +517,14 @@ fn the_helpers_only_initialization_runs_on_its_own_self_stay_allowed() {
                 line,
                 write_column,
                 "MUT201",
-                "writes `Model.imports` (container_mut)",
+                "writes `Model.imports` (in place)",
                 "write owners of `imports`",
             ),
             at(
                 line,
                 read_column,
                 "MUT203",
-                "reads `Model.name` (direct_attr)",
+                "reads `Model.name` (by attribute)",
                 "read owners of `name`",
             ),
             at(
@@ -541,7 +541,7 @@ fn the_helpers_only_initialization_runs_on_its_own_self_stay_allowed() {
         61,
         9,
         "MUT205",
-        "`Model.rename` writes an attribute named at run time (set_attr) on `Model` outside the write owners of `imports`: heki cannot tell whether it writes `Model.imports`",
+        "`Model.rename` writes an attribute named at run time (with `setattr`) on `Model` outside the write owners of `imports`: heki cannot tell whether it writes `Model.imports`",
     );
     // Through the method on `self`, the static method and the module function handed `self`,
     // the public method, the chain of two helpers, and the computed name, the initializer
@@ -759,9 +759,216 @@ def other(resolver: Resolver) -> int:
             24,
             16,
             "MUT203",
-            "`other` reads `pkg.model.Resolver._seen` (direct_attr) inside the forbidden readers of `host-private-read`"
+            "`other` reads `pkg.model.Resolver._seen` (by attribute) inside the forbidden readers of `host-private-read`"
         )]
     );
+}
+
+const CAPTURING: &str = r#"class Model:
+    def __init__(self) -> None:
+        self.imports: list[str] = []
+        self._seen: set[str] = set()
+
+    def _fmt(self, x: str) -> str:
+        return x
+
+
+class Comprehension(Model):
+    def __init__(self, xs: list[str]) -> None:
+        super().__init__()
+        [self.imports.append(x) for x in xs]
+
+
+class Generator(Model):
+    def __init__(self, xs: list[str]) -> None:
+        super().__init__()
+        any(self.imports.append(x) for x in xs)
+
+
+class Anonymous(Model):
+    def __init__(self, xs: list[str]) -> None:
+        super().__init__()
+        list(map(lambda x: self.imports.append(x), xs))
+
+
+class Nested(Model):
+    def __init__(self, xs: list[str]) -> None:
+        super().__init__()
+
+        def add(x: str) -> None:
+            self.imports.append(x)
+
+        for x in xs:
+            add(x)
+
+
+class Named(Model):
+    def __init__(self, xs: list[str]) -> None:
+        super().__init__()
+        [setattr(self, x, None) for x in xs]
+
+
+class Peer(Model):
+    def __init__(self, xs: list[str], peer: Model) -> None:
+        super().__init__()
+        [peer.imports.append(x) for x in xs]
+
+
+class Later(Model):
+    def __init__(self) -> None:
+        super().__init__()
+        self.later = lambda x: self.imports.append(x)
+
+    def run(self) -> None:
+        self.later("x")
+
+
+class Rebound(Model):
+    def __init__(self, xs: list[str], peer: Model) -> None:
+        self = peer
+        [self.imports.append(x) for x in xs]
+
+
+class Nonlocal(Model):
+    def __init__(self, xs: list[str], peer: Model) -> None:
+        super().__init__()
+
+        def swap() -> None:
+            nonlocal self
+            self = peer
+
+        swap()
+        any(self.imports.append(x) for x in xs)
+"#;
+
+const CAPTURING_SUB: &str = r#"from pkg.model import Model
+
+
+class Sub(Model):
+    def comprehension(self, xs: list[str]) -> list[str]:
+        return [self._fmt(x) for x in xs if x in self._seen]
+
+    def generator(self, xs: list[str]) -> list[str]:
+        return list(self._fmt(x) for x in xs if x in self._seen)
+
+    def anonymous(self, xs: list[str]) -> list[str]:
+        return list(map(lambda x: self._fmt(x), xs))
+
+    def private_def(self, xs: list[str]) -> list[str]:
+        def _one(x: str) -> str:
+            return self._fmt(x)
+
+        return [_one(x) for x in xs]
+
+    def public_def(self, xs: list[str]) -> list[str]:
+        def one(x: str) -> str:
+            return self._fmt(x)
+
+        return [one(x) for x in xs]
+
+    def peer(self, peer: Model, xs: list[str]) -> list[str]:
+        return [peer._fmt(x) for x in xs]
+"#;
+
+#[test]
+fn a_nested_scope_uses_the_parameters_of_the_function_enclosing_it() {
+    let run = |attribution: &str, version: &str| {
+        let p = Project::new(&format!("captured_{attribution}_{version}"));
+        let contract = |section: &str, keys: &str| {
+            format!(
+                "[[tool.heki.{section}]]\nname = \"{section}\"\n{keys}attribution = \"{attribution}\"\n\n"
+            )
+        };
+        p.write(
+            "pyproject.toml",
+            &format!(
+                "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT201\", \"MUT203\", \"MUT204\", \"MUT205\"]\n\n{}{}{}",
+                contract(
+                    "write-owners",
+                    "targets = [\"pkg.model.Model.imports\"]\nallowed-writers = [\"pkg.model.Model.allowed\"]\nunresolved = \"report\"\n"
+                ),
+                contract(
+                    "read-owners",
+                    "targets = [\"pkg.model.Model._seen\"]\nforbidden-readers = [\"pkg.sub.*\"]\nown-receiver = \"allow\"\n"
+                ),
+                contract(
+                    "call-owners",
+                    "targets = [\"pkg.model.Model._fmt\"]\nforbidden-callers = [\"pkg.sub.*\"]\nown-receiver = \"allow\"\n"
+                ),
+            ),
+        )
+        .write("pkg/__init__.py", "")
+        .write("pkg/model.py", CAPTURING)
+        .write("pkg/sub.py", CAPTURING_SUB);
+        let (code, stdout, stderr) =
+            p.check(&["--output-format", "json", "--target-version", version]);
+        assert!(code == 0 || code == 1, "{stdout}{stderr}");
+        let diags: Vec<Value> = serde_json::from_str(&stdout).unwrap();
+        let mut out: Vec<(String, u64, String, String)> = diags
+            .iter()
+            .map(|d| {
+                let message = d["message"].as_str().unwrap();
+                (
+                    d["path"].as_str().unwrap().replace('\\', "/"),
+                    d["line"].as_u64().unwrap(),
+                    d["rule_code"].as_str().unwrap().to_owned(),
+                    message.split('`').nth(1).unwrap_or_default().to_owned(),
+                )
+            })
+            .collect();
+        out.sort();
+        out
+    };
+    let at = |path: &str, line: u64, code: &str, func: &str| {
+        (
+            format!("pkg/{path}.py"),
+            line,
+            code.to_owned(),
+            func.to_owned(),
+        )
+    };
+    // A comprehension, a generator expression, a lambda, and a nested `def` an initializer runs
+    // write its own `self` (a name written on it at run time too), and the methods' own
+    // receivers allow the reads and calls of their scopes, a generator expression or a
+    // comprehension calling a private nested `def` included, whether the comprehension has a
+    // scope of its own (3.11) or not. Another parameter, a `self` the method or a nested scope
+    // rebinds, a lambda an initializer stores that runs later elsewhere, and a public nested
+    // `def` (a function of its own, as a public helper) stay reported.
+    for version in ["py311", "py313"] {
+        assert_eq!(
+            run("call-graph", version),
+            vec![
+                at("model", 48, "MUT201", "Peer.__init__"),
+                at("model", 54, "MUT201", "Later.__init__.<locals>.<lambda>"),
+                at("model", 63, "MUT201", "Rebound.__init__"),
+                at(
+                    "model",
+                    75,
+                    "MUT205",
+                    "Nonlocal.__init__.<locals>.<genexpr>"
+                ),
+                at("sub", 22, "MUT204", "Sub.public_def.<locals>.one"),
+                at("sub", 27, "MUT204", "Sub.peer"),
+            ],
+            "{version}"
+        );
+    }
+    // Judged lexically, a lambda, comprehension, or generator expression is part of the method
+    // holding it wherever it runs (the stored lambda too), and a nested `def` is judged by itself.
+    for version in ["py311", "py313"] {
+        assert_eq!(
+            run("lexical", version),
+            vec![
+                at("model", 48, "MUT201", "Peer.__init__"),
+                at("model", 63, "MUT201", "Rebound.__init__"),
+                at("model", 75, "MUT205", "Nonlocal.__init__"),
+                at("sub", 16, "MUT204", "Sub.private_def.<locals>._one"),
+                at("sub", 22, "MUT204", "Sub.public_def.<locals>.one"),
+                at("sub", 27, "MUT204", "Sub.peer"),
+            ],
+            "{version}"
+        );
+    }
 }
 
 #[test]

@@ -25,7 +25,8 @@ opaque_packages = [
     "requests", "httpx", "aiohttp", "urllib3", "sqlalchemy", "sqlmodel", "django", "psycopg",
     "psycopg_pool", "psycopg2", "pymysql", "redis", "pymongo", "boto3", "botocore", "grpc",
     "pandas", "numpy", "pydantic", "anyio", "trio", "starlette", "fastapi", "asgiref", "asyncer",
-    "channels", "asyncpg", "websockets",
+    "channels", "asyncpg", "websockets", "yaml", "motor", "duckdb", "celery", "openai",
+    "anthropic", "google", "polars", "torch",
 ]
 
 # --- Offloads blocking work (argument index of the offloaded callable) ---
@@ -1466,39 +1467,54 @@ opaque_to_layer3 = true
 # --- DB: asyncpg ---
 # A connection runs one query at a time: a second task's query while another runs raises
 # `InterfaceError: cannot perform operation: another operation is in progress` (`EFF110`).
+# `connect()` opens a new connection on every call. `create_pool()` is a plain function
+# returning the pool, which opens its connections when it is awaited or entered (`async with`);
+# its query methods check a connection out for one statement each, so tasks may share it.
+# `Pool.acquire()` returns a context manager that is also awaitable; both give a proxy
+# forwarding to a pooled connection, typed here as the connection. `execute` / `fetch` /
+# `fetchrow` / `fetchval` send one statement; `executemany` / `fetchmany` (from 0.30) and the
+# `copy_*` methods send many rows at once (no `db_query`), and `prepare` only prepares one.
+# `asyncpg.Connection` / `asyncpg.Pool` are re-exports of `asyncpg.connection.Connection` /
+# `asyncpg.pool.Pool`; both spellings are listed.
 
 [[entries]]
 symbol = "asyncpg.connect"
+effects = ["unpooled_client_alloc"]
 async_safe = true
 return_type = "asyncpg.Connection"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "asyncpg.Connection.execute"
-async_safe = true
-one_at_a_time = "always"
-opaque_to_layer3 = true
-
-[[entries]]
-symbol = "asyncpg.Connection.executemany"
+effects = ["db_query"]
 async_safe = true
 one_at_a_time = "always"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "asyncpg.Connection.fetch"
+effects = ["db_query"]
 async_safe = true
 one_at_a_time = "always"
+items = "rows"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "asyncpg.Connection.fetchrow"
+effects = ["db_query"]
 async_safe = true
 one_at_a_time = "always"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "asyncpg.Connection.fetchval"
+effects = ["db_query"]
+async_safe = true
+one_at_a_time = "always"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncpg.Connection.executemany"
 async_safe = true
 one_at_a_time = "always"
 opaque_to_layer3 = true
@@ -1537,6 +1553,206 @@ opaque_to_layer3 = true
 symbol = "asyncpg.Connection.copy_records_to_table"
 async_safe = true
 one_at_a_time = "always"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncpg.connection.Connection.execute"
+effects = ["db_query"]
+async_safe = true
+one_at_a_time = "always"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncpg.connection.Connection.fetch"
+effects = ["db_query"]
+async_safe = true
+one_at_a_time = "always"
+items = "rows"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncpg.connection.Connection.fetchrow"
+effects = ["db_query"]
+async_safe = true
+one_at_a_time = "always"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncpg.connection.Connection.fetchval"
+effects = ["db_query"]
+async_safe = true
+one_at_a_time = "always"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncpg.connection.Connection.executemany"
+async_safe = true
+one_at_a_time = "always"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncpg.connection.Connection.fetchmany"
+async_safe = true
+one_at_a_time = "always"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncpg.connection.Connection.prepare"
+async_safe = true
+one_at_a_time = "always"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncpg.connection.Connection.copy_from_table"
+async_safe = true
+one_at_a_time = "always"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncpg.connection.Connection.copy_from_query"
+async_safe = true
+one_at_a_time = "always"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncpg.connection.Connection.copy_to_table"
+async_safe = true
+one_at_a_time = "always"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncpg.connection.Connection.copy_records_to_table"
+async_safe = true
+one_at_a_time = "always"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncpg.create_pool"
+effects = ["unpooled_client_alloc"]
+async_safe = true
+return_type = "asyncpg.Pool"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncpg.Pool.execute"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncpg.Pool.fetch"
+effects = ["db_query"]
+async_safe = true
+items = "rows"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncpg.Pool.fetchrow"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncpg.Pool.fetchval"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncpg.Pool.executemany"
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncpg.Pool.fetchmany"
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncpg.Pool.copy_from_table"
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncpg.Pool.copy_from_query"
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncpg.Pool.copy_to_table"
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncpg.Pool.copy_records_to_table"
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncpg.Pool.acquire"
+async_safe = true
+return_type = "asyncpg.Connection"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncpg.pool.Pool.execute"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncpg.pool.Pool.fetch"
+effects = ["db_query"]
+async_safe = true
+items = "rows"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncpg.pool.Pool.fetchrow"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncpg.pool.Pool.fetchval"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncpg.pool.Pool.executemany"
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncpg.pool.Pool.fetchmany"
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncpg.pool.Pool.copy_from_table"
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncpg.pool.Pool.copy_from_query"
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncpg.pool.Pool.copy_to_table"
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncpg.pool.Pool.copy_records_to_table"
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "asyncpg.pool.Pool.acquire"
+async_safe = true
+return_type = "asyncpg.Connection"
 opaque_to_layer3 = true
 
 # --- WebSockets: websockets ---
@@ -2066,6 +2282,38 @@ symbol = "pymysql.cursors.Cursor.callproc"
 effects = ["blocking_db", "db_query"]
 opaque_to_layer3 = true
 
+# --- DB: DuckDB ---
+# An in-process database: `connect()` opens an in-memory database by default (`":memory:"`) and
+# a file otherwise. `execute()` runs its statement at once and returns the connection;
+# `executemany()` runs one statement for many parameter sets (no `db_query`), and the fetch
+# methods read the result. Opening the database and running a statement wait on the file only
+# when the database is on disk, which no call here establishes (`connect()` without an argument
+# opens one in memory), so they carry no blocking effect. `sql()` / `query()` are not listed: a
+# `SELECT` returns a lazy relation run when it is read, any other statement runs at once.
+
+[[entries]]
+symbol = "duckdb.connect"
+effects = ["unpooled_client_alloc"]
+return_type = "duckdb.DuckDBPyConnection"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "duckdb.DuckDBPyConnection.execute"
+effects = ["db_query"]
+return_type = "duckdb.DuckDBPyConnection"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "duckdb.DuckDBPyConnection.cursor"
+return_type = "duckdb.DuckDBPyConnection"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "duckdb.execute"
+effects = ["db_query"]
+return_type = "duckdb.DuckDBPyConnection"
+opaque_to_layer3 = true
+
 # --- DB: Django ---
 # `connection.cursor()` opens the connection when needed. QuerySet methods that only build
 # another QuerySet are lazy (no effect); the ones that run the query block, and their `a*`
@@ -2297,6 +2545,26 @@ return_type = "redis.Redis"
 opaque_to_layer3 = true
 
 [[entries]]
+symbol = "redis.ConnectionPool"
+effects = ["unpooled_client_alloc"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.BlockingConnectionPool"
+effects = ["unpooled_client_alloc"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.ConnectionPool.from_url"
+effects = ["unpooled_client_alloc"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.BlockingConnectionPool.from_url"
+effects = ["unpooled_client_alloc"]
+opaque_to_layer3 = true
+
+[[entries]]
 symbol = "redis.Redis.pipeline"
 return_type = "redis.client.Pipeline"
 opaque_to_layer3 = true
@@ -2457,6 +2725,256 @@ return_type = "redis.client.Pipeline"
 opaque_to_layer3 = true
 
 [[entries]]
+symbol = "redis.client.Pipeline.incrby"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.incrbyfloat"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.decrby"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.getset"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.getdel"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.setnx"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.expireat"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.pexpire"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.persist"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.pttl"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.unlink"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.rename"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.hincrby"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.hexists"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.hkeys"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.hvals"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.hlen"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.hsetnx"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.llen"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.lindex"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.lrem"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.lset"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.ltrim"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.blpop"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.brpop"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.sismember"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.smismember"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.scard"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.spop"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.srandmember"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.zrem"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.zscore"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.zincrby"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.zcard"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.zcount"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.zrank"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.zrangebyscore"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.zrevrange"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.zrevrangebyscore"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.zremrangebyscore"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.xadd"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.xread"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.xreadgroup"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.xrange"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.xrevrange"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.xlen"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.xack"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.xdel"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.xtrim"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.client.Pipeline.evalsha"
+return_type = "redis.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
 symbol = "redis.Redis.get"
 effects = ["blocking_db", "db_query"]
 opaque_to_layer3 = true
@@ -2602,6 +3120,256 @@ effects = ["blocking_db", "db_query"]
 opaque_to_layer3 = true
 
 [[entries]]
+symbol = "redis.Redis.incrby"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.incrbyfloat"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.decrby"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.getset"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.getdel"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.setnx"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.expireat"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.pexpire"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.persist"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.pttl"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.unlink"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.rename"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.hincrby"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.hexists"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.hkeys"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.hvals"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.hlen"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.hsetnx"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.llen"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.lindex"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.lrem"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.lset"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.ltrim"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.blpop"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.brpop"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.sismember"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.smismember"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.scard"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.spop"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.srandmember"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.zrem"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.zscore"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.zincrby"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.zcard"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.zcount"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.zrank"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.zrangebyscore"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.zrevrange"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.zrevrangebyscore"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.zremrangebyscore"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.xadd"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.xread"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.xreadgroup"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.xrange"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.xrevrange"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.xlen"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.xack"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.xdel"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.xtrim"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.Redis.evalsha"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
 symbol = "redis.Redis.scan"
 effects = ["blocking_db"]
 opaque_to_layer3 = true
@@ -2629,6 +3397,30 @@ symbol = "redis.asyncio.Redis.from_url"
 effects = ["unpooled_client_alloc"]
 async_safe = true
 return_type = "redis.asyncio.Redis"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.ConnectionPool"
+effects = ["unpooled_client_alloc"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.BlockingConnectionPool"
+effects = ["unpooled_client_alloc"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.ConnectionPool.from_url"
+effects = ["unpooled_client_alloc"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.BlockingConnectionPool.from_url"
+effects = ["unpooled_client_alloc"]
+async_safe = true
 opaque_to_layer3 = true
 
 [[entries]]
@@ -2824,6 +3616,306 @@ return_type = "redis.asyncio.client.Pipeline"
 opaque_to_layer3 = true
 
 [[entries]]
+symbol = "redis.asyncio.client.Pipeline.incrby"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.incrbyfloat"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.decrby"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.getset"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.getdel"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.setnx"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.expireat"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.pexpire"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.persist"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.pttl"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.unlink"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.rename"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.hincrby"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.hexists"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.hkeys"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.hvals"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.hlen"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.hsetnx"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.llen"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.lindex"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.lrem"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.lset"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.ltrim"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.blpop"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.brpop"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.sismember"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.smismember"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.scard"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.spop"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.srandmember"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.zrem"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.zscore"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.zincrby"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.zcard"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.zcount"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.zrank"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.zrangebyscore"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.zrevrange"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.zrevrangebyscore"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.zremrangebyscore"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.xadd"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.xread"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.xreadgroup"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.xrange"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.xrevrange"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.xlen"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.xack"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.xdel"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.xtrim"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.client.Pipeline.evalsha"
+async_safe = true
+return_type = "redis.asyncio.client.Pipeline"
+opaque_to_layer3 = true
+
+[[entries]]
 symbol = "redis.asyncio.Redis.get"
 effects = ["db_query"]
 async_safe = true
@@ -2998,6 +4090,306 @@ async_safe = true
 opaque_to_layer3 = true
 
 [[entries]]
+symbol = "redis.asyncio.Redis.incrby"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.incrbyfloat"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.decrby"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.getset"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.getdel"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.setnx"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.expireat"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.pexpire"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.persist"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.pttl"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.unlink"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.rename"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.hincrby"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.hexists"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.hkeys"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.hvals"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.hlen"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.hsetnx"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.llen"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.lindex"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.lrem"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.lset"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.ltrim"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.blpop"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.brpop"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.sismember"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.smismember"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.scard"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.spop"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.srandmember"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.zrem"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.zscore"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.zincrby"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.zcard"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.zcount"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.zrank"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.zrangebyscore"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.zrevrange"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.zrevrangebyscore"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.zremrangebyscore"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.xadd"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.xread"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.xreadgroup"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.xrange"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.xrevrange"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.xlen"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.xack"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.xdel"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.xtrim"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "redis.asyncio.Redis.evalsha"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
 symbol = "redis.asyncio.Redis.scan"
 async_safe = true
 opaque_to_layer3 = true
@@ -3131,11 +4523,13 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "pymongo.cursor.Cursor.__iter__"
 effects = ["blocking_db", "db_query"]
+emits = "unless-cached"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "pymongo.cursor.Cursor.to_list"
 effects = ["blocking_db", "db_query"]
+emits = "unless-cached"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -3369,12 +4763,14 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "pymongo.asynchronous.cursor.AsyncCursor.__aiter__"
 effects = ["db_query"]
+emits = "unless-cached"
 async_safe = true
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "pymongo.asynchronous.cursor.AsyncCursor.to_list"
 effects = ["db_query"]
+emits = "unless-cached"
 async_safe = true
 opaque_to_layer3 = true
 
@@ -3492,6 +4888,394 @@ async_safe = true
 return_type = "pymongo.asynchronous.cursor.AsyncCursor"
 opaque_to_layer3 = true
 
+# --- Document DB: motor (asyncio) ---
+# Motor 3 wraps pymongo: every operation runs pymongo's in a thread pool and returns a future.
+# The client connects in the background, `client[name]` / `get_database()` and
+# `db[name]` / `get_collection()` only build objects, `find()` returns a lazy cursor whose
+# builder methods return it again, and, unlike pymongo's `AsyncCollection.aggregate`,
+# `aggregate()` returns a lazy command cursor: the query runs when the cursor is iterated
+# (`async for`) or read (`to_list()`). The bulk writes (`insert_many`, `bulk_write`) send
+# many documents at once: no `db_query`. Attribute access (`client.app.users`) is not typed.
+
+[[entries]]
+symbol = "motor.motor_asyncio.AsyncIOMotorClient"
+effects = ["unpooled_client_alloc"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "motor.motor_asyncio.AsyncIOMotorClient.get_database"
+async_safe = true
+return_type = "motor.motor_asyncio.AsyncIOMotorDatabase"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "motor.motor_asyncio.AsyncIOMotorClient.get_default_database"
+async_safe = true
+return_type = "motor.motor_asyncio.AsyncIOMotorDatabase"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "motor.motor_asyncio.AsyncIOMotorClient.__getitem__"
+async_safe = true
+return_type = "motor.motor_asyncio.AsyncIOMotorDatabase"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "motor.motor_asyncio.AsyncIOMotorDatabase.get_collection"
+async_safe = true
+return_type = "motor.motor_asyncio.AsyncIOMotorCollection"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "motor.motor_asyncio.AsyncIOMotorDatabase.__getitem__"
+async_safe = true
+return_type = "motor.motor_asyncio.AsyncIOMotorCollection"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "motor.motor_asyncio.AsyncIOMotorDatabase.command"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "motor.motor_asyncio.AsyncIOMotorCollection.find_one"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "motor.motor_asyncio.AsyncIOMotorCollection.insert_one"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "motor.motor_asyncio.AsyncIOMotorCollection.update_one"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "motor.motor_asyncio.AsyncIOMotorCollection.update_many"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "motor.motor_asyncio.AsyncIOMotorCollection.replace_one"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "motor.motor_asyncio.AsyncIOMotorCollection.delete_one"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "motor.motor_asyncio.AsyncIOMotorCollection.delete_many"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "motor.motor_asyncio.AsyncIOMotorCollection.count_documents"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "motor.motor_asyncio.AsyncIOMotorCollection.estimated_document_count"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "motor.motor_asyncio.AsyncIOMotorCollection.distinct"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "motor.motor_asyncio.AsyncIOMotorCollection.find_one_and_update"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "motor.motor_asyncio.AsyncIOMotorCollection.find_one_and_replace"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "motor.motor_asyncio.AsyncIOMotorCollection.find_one_and_delete"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "motor.motor_asyncio.AsyncIOMotorCollection.insert_many"
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "motor.motor_asyncio.AsyncIOMotorCollection.bulk_write"
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "motor.motor_asyncio.AsyncIOMotorCollection.find"
+async_safe = true
+return_type = "motor.motor_asyncio.AsyncIOMotorCursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "motor.motor_asyncio.AsyncIOMotorCollection.aggregate"
+async_safe = true
+return_type = "motor.motor_asyncio.AsyncIOMotorLatentCommandCursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "motor.motor_asyncio.AsyncIOMotorCursor.sort"
+async_safe = true
+return_type = "motor.motor_asyncio.AsyncIOMotorCursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "motor.motor_asyncio.AsyncIOMotorCursor.limit"
+async_safe = true
+return_type = "motor.motor_asyncio.AsyncIOMotorCursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "motor.motor_asyncio.AsyncIOMotorCursor.skip"
+async_safe = true
+return_type = "motor.motor_asyncio.AsyncIOMotorCursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "motor.motor_asyncio.AsyncIOMotorCursor.batch_size"
+async_safe = true
+return_type = "motor.motor_asyncio.AsyncIOMotorCursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "motor.motor_asyncio.AsyncIOMotorCursor.hint"
+async_safe = true
+return_type = "motor.motor_asyncio.AsyncIOMotorCursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "motor.motor_asyncio.AsyncIOMotorCursor.max_time_ms"
+async_safe = true
+return_type = "motor.motor_asyncio.AsyncIOMotorCursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "motor.motor_asyncio.AsyncIOMotorCursor.max_await_time_ms"
+async_safe = true
+return_type = "motor.motor_asyncio.AsyncIOMotorCursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "motor.motor_asyncio.AsyncIOMotorCursor.where"
+async_safe = true
+return_type = "motor.motor_asyncio.AsyncIOMotorCursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "motor.motor_asyncio.AsyncIOMotorCursor.collation"
+async_safe = true
+return_type = "motor.motor_asyncio.AsyncIOMotorCursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "motor.motor_asyncio.AsyncIOMotorCursor.comment"
+async_safe = true
+return_type = "motor.motor_asyncio.AsyncIOMotorCursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "motor.motor_asyncio.AsyncIOMotorCursor.allow_disk_use"
+async_safe = true
+return_type = "motor.motor_asyncio.AsyncIOMotorCursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "motor.motor_asyncio.AsyncIOMotorCursor.min"
+async_safe = true
+return_type = "motor.motor_asyncio.AsyncIOMotorCursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "motor.motor_asyncio.AsyncIOMotorCursor.max"
+async_safe = true
+return_type = "motor.motor_asyncio.AsyncIOMotorCursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "motor.motor_asyncio.AsyncIOMotorCursor.add_option"
+async_safe = true
+return_type = "motor.motor_asyncio.AsyncIOMotorCursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "motor.motor_asyncio.AsyncIOMotorCursor.remove_option"
+async_safe = true
+return_type = "motor.motor_asyncio.AsyncIOMotorCursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "motor.motor_asyncio.AsyncIOMotorCursor.rewind"
+async_safe = true
+return_type = "motor.motor_asyncio.AsyncIOMotorCursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "motor.motor_asyncio.AsyncIOMotorCursor.clone"
+async_safe = true
+return_type = "motor.motor_asyncio.AsyncIOMotorCursor"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "motor.motor_asyncio.AsyncIOMotorCursor.__aiter__"
+effects = ["db_query"]
+emits = "unless-cached"
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "motor.motor_asyncio.AsyncIOMotorCursor.to_list"
+effects = ["db_query"]
+emits = "unless-cached"
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "motor.motor_asyncio.AsyncIOMotorCursor.distinct"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "motor.motor_asyncio.AsyncIOMotorCursor.explain"
+effects = ["db_query"]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "motor.motor_asyncio.AsyncIOMotorLatentCommandCursor.__aiter__"
+effects = ["db_query"]
+emits = "unless-cached"
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "motor.motor_asyncio.AsyncIOMotorLatentCommandCursor.to_list"
+effects = ["db_query"]
+emits = "unless-cached"
+async_safe = true
+opaque_to_layer3 = true
+
+# --- Task queues: Celery ---
+# `send_task()`, `Task.delay()` and `Task.apply_async()` publish the task message to the
+# broker and wait for the write, unless the app is configured otherwise: under
+# `task_always_eager` (a test setting) `delay()` / `apply_async()` run the task in the caller
+# without a broker, and with kombu's in-memory transport even `send_task()` publishes without
+# the network. The configuration is not visible at the call, so the effect is never certain
+# (`emits = "unless-configured-otherwise"`) and only heuristic reports (`EFF111`)
+# follow.
+# `AsyncResult.get()` is not listed: it returns at once for a result already fetched
+# (`ready()` stores a finished one) or a task that ignores its result.
+
+[[entries]]
+symbol = "celery.Celery.send_task"
+effects = ["blocking_net"]
+emits = "unless-configured-otherwise"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "celery.Task.delay"
+effects = ["blocking_net"]
+emits = "unless-configured-otherwise"
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "celery.Task.apply_async"
+effects = ["blocking_net"]
+emits = "unless-configured-otherwise"
+opaque_to_layer3 = true
+
+# --- LLM APIs: openai, anthropic, google-genai ---
+# A client constructor reads its settings and builds an HTTP connection pool (an
+# `httpx.Client` / `httpx.AsyncClient`, unless `http_client=` hands it one) without I/O.
+# google-genai's `Client` builds both a sync and an async pool (its `aio` attribute); in
+# Vertex AI mode without a project or API key it also looks up the default credentials.
+# The requests (`client.chat.completions.create(...)`) are made through attributes of the
+# client, which the catalog does not type, so they are not listed.
+# An `http_client=` that is a known `httpx` client shares that client's pool and allocates
+# nothing. google-genai takes its client inside `http_options`, which a case cannot reach.
+
+[[entries]]
+symbol = "openai.OpenAI"
+effects = ["unpooled_client_alloc"]
+cases = [
+    { param = "http_client", instance_of = ["httpx.Client", "httpx.AsyncClient"], effects = [] },
+]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "openai.AzureOpenAI"
+effects = ["unpooled_client_alloc"]
+cases = [
+    { param = "http_client", instance_of = ["httpx.Client", "httpx.AsyncClient"], effects = [] },
+]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "openai.AsyncOpenAI"
+effects = ["unpooled_client_alloc"]
+cases = [
+    { param = "http_client", instance_of = ["httpx.Client", "httpx.AsyncClient"], effects = [] },
+]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "openai.AsyncAzureOpenAI"
+effects = ["unpooled_client_alloc"]
+cases = [
+    { param = "http_client", instance_of = ["httpx.Client", "httpx.AsyncClient"], effects = [] },
+]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "anthropic.Anthropic"
+effects = ["unpooled_client_alloc"]
+cases = [
+    { param = "http_client", instance_of = ["httpx.Client", "httpx.AsyncClient"], effects = [] },
+]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "anthropic.AsyncAnthropic"
+effects = ["unpooled_client_alloc"]
+cases = [
+    { param = "http_client", instance_of = ["httpx.Client", "httpx.AsyncClient"], effects = [] },
+]
+async_safe = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "google.genai.Client"
+effects = ["unpooled_client_alloc"]
+opaque_to_layer3 = true
+
 # --- DB transaction starters (EFF106, opt-in) ---
 # A `with` block over the result of the call holds a transaction (and its pooled connection).
 # `Connection.begin_nested()` sends `SAVEPOINT` at the call and `Session.begin_nested()` flushes
@@ -3554,6 +5338,19 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "psycopg.Connection.transaction"
 sync_lock_or_tx = true
+opaque_to_layer3 = true
+
+# --- Serializers written in order (EFF112, opt-in) ---
+# PyYAML sorts mapping keys unless `sort_keys=False` is passed.
+
+[[entries]]
+symbol = "yaml.dump"
+writes_in_order = { arg = 0, param = "data", sorted_by = "sort_keys", sorted_by_default = true }
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "yaml.safe_dump"
+writes_in_order = { arg = 0, param = "data", sorted_by = "sort_keys", sorted_by_default = true }
 opaque_to_layer3 = true
 
 # --- Data: pandas I/O ---
@@ -3700,6 +5497,121 @@ symbol = "pandas.DataFrame.to_sql"
 effects = ["blocking_db"]
 opaque_to_layer3 = true
 
+# --- Data: polars I/O ---
+# Readers of files are `blocking_fs` (EFF105, opt-in): an `http(s)://` URL is downloaded, an
+# in-memory buffer is parsed without I/O. The `scan_*` functions return a lazy frame that
+# reads when it is collected. `read_database` runs its query on the connection it is handed,
+# `read_database_uri` on a connection it opens; `DataFrame.write_database` inserts the rows.
+# `concat` is not listed: by default (`rechunk=False`) it appends the frames' chunks without
+# copying their data.
+
+[[entries]]
+symbol = "polars.read_csv"
+effects = ["blocking_fs"]
+cases = [
+    { arg = 0, param = "source", prefix = ["http://", "https://"], effects = ["blocking_net"] },
+    { arg = 0, param = "source", instance_of = ["io.StringIO", "io.BytesIO"], effects = [] },
+]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "polars.read_parquet"
+effects = ["blocking_fs"]
+cases = [
+    { arg = 0, param = "source", prefix = ["http://", "https://"], effects = ["blocking_net"] },
+    { arg = 0, param = "source", instance_of = ["io.StringIO", "io.BytesIO"], effects = [] },
+]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "polars.read_json"
+effects = ["blocking_fs"]
+cases = [
+    { arg = 0, param = "source", prefix = ["http://", "https://"], effects = ["blocking_net"] },
+    { arg = 0, param = "source", instance_of = ["io.StringIO", "io.BytesIO"], effects = [] },
+]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "polars.read_ndjson"
+effects = ["blocking_fs"]
+cases = [
+    { arg = 0, param = "source", prefix = ["http://", "https://"], effects = ["blocking_net"] },
+    { arg = 0, param = "source", instance_of = ["io.StringIO", "io.BytesIO"], effects = [] },
+]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "polars.read_ipc"
+effects = ["blocking_fs"]
+cases = [
+    { arg = 0, param = "source", prefix = ["http://", "https://"], effects = ["blocking_net"] },
+    { arg = 0, param = "source", instance_of = ["io.StringIO", "io.BytesIO"], effects = [] },
+]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "polars.read_avro"
+effects = ["blocking_fs"]
+cases = [
+    { arg = 0, param = "source", prefix = ["http://", "https://"], effects = ["blocking_net"] },
+    { arg = 0, param = "source", instance_of = ["io.StringIO", "io.BytesIO"], effects = [] },
+]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "polars.read_excel"
+effects = ["blocking_fs"]
+cases = [
+    { arg = 0, param = "source", prefix = ["http://", "https://"], effects = ["blocking_net"] },
+    { arg = 0, param = "source", instance_of = ["io.StringIO", "io.BytesIO"], effects = [] },
+]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "polars.read_ods"
+effects = ["blocking_fs"]
+cases = [
+    { arg = 0, param = "source", prefix = ["http://", "https://"], effects = ["blocking_net"] },
+    { arg = 0, param = "source", instance_of = ["io.StringIO", "io.BytesIO"], effects = [] },
+]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "polars.read_database"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "polars.read_database_uri"
+effects = ["blocking_db", "db_query"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "polars.DataFrame.write_database"
+effects = ["blocking_db"]
+opaque_to_layer3 = true
+
+# --- Data: torch serialization ---
+# `torch.load(f)` / `torch.save(obj, f)` read and write the file `f` names (EFF105, opt-in); an
+# in-memory buffer is read or written without I/O.
+
+[[entries]]
+symbol = "torch.load"
+effects = ["blocking_fs"]
+cases = [
+    { arg = 0, param = "f", instance_of = ["io.BytesIO"], effects = [] },
+]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "torch.save"
+effects = ["blocking_fs"]
+cases = [
+    { arg = 1, param = "f", instance_of = ["io.BytesIO"], effects = [] },
+]
+opaque_to_layer3 = true
+
 # --- Data: quadratic re-concatenation (DATA101) ---
 
 [[entries]]
@@ -3739,6 +5651,48 @@ opaque_to_layer3 = true
 
 [[entries]]
 symbol = "numpy.insert"
+effects = ["quadratic_realloc"]
+opaque_to_layer3 = true
+
+# torch's concatenations allocate a new tensor on every call (`concat` and
+# `concatenate` are aliases of `cat`, `row_stack` of `vstack`).
+[[entries]]
+symbol = "torch.cat"
+effects = ["quadratic_realloc"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "torch.concat"
+effects = ["quadratic_realloc"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "torch.concatenate"
+effects = ["quadratic_realloc"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "torch.vstack"
+effects = ["quadratic_realloc"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "torch.hstack"
+effects = ["quadratic_realloc"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "torch.dstack"
+effects = ["quadratic_realloc"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "torch.column_stack"
+effects = ["quadratic_realloc"]
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "torch.row_stack"
 effects = ["quadratic_realloc"]
 opaque_to_layer3 = true
 

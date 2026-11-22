@@ -11,7 +11,8 @@
 //! closure cell the function binds later.
 //!
 //! Types come from parameter, local, attribute, and return annotations (with the arguments of
-//! generic containers), constructors, imports, and `type(obj)`; they flow through copies,
+//! generic containers), constructors, imports, and `type(obj)`; they flow through copies, the
+//! augmented assignments that change a built-in container in place (`xs += ys` gives `xs`),
 //! attributes, calls, and the items of containers: iteration, subscripts, unpacking, `dict`
 //! views and `get` / `pop`, the builtins that wrap an iterable (`enumerate`, `zip`,
 //! `reversed`, `sorted`, `iter`, `next`, `list`, `tuple`, `set`, `frozenset`, `dict`, `filter`,
@@ -25,8 +26,8 @@ use crate::types::{Args, Elem, Obj, Ty};
 use heki_ast::Span;
 use heki_ir::walk::FnShape;
 use heki_ir::{
-    BlockId, BuiltinKind, ConstLiteral, DictEntry, FunctionId, FunctionKind, Inst, InstKind,
-    IrFunction, ModuleIr, PhiNode, Terminator, UnaryOpKind, VarId,
+    BinOpKind, BlockId, BuiltinKind, ConstLiteral, DictEntry, FunctionId, FunctionKind, Inst,
+    InstKind, IrFunction, ModuleIr, PhiNode, Terminator, UnaryOpKind, VarId,
 };
 use heki_kb::ArgFact;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -222,6 +223,9 @@ struct Nesting {
     /// comprehension scope before 3.12): they hold more than what the function binding them
     /// binds.
     rebound: FxHashSet<CellKey>,
+    /// The cells their function binds only as one of its parameters (`i < 64`), and that
+    /// parameter ([`cell_bindings`]).
+    param_cells: FxHashMap<CellKey, u8>,
 }
 
 /// How a function creates a nested scope.
@@ -238,6 +242,7 @@ impl Nesting {
             visible: FxHashMap::default(),
             reads: FxHashMap::default(),
             rebound: FxHashSet::default(),
+            param_cells: FxHashMap::default(),
         };
         // No function keeps a cell: no scope reads or rebinds one.
         if ir.functions.iter().all(|f| f.captured_vars.is_empty()) {
@@ -327,6 +332,14 @@ impl Nesting {
             if !cells.is_empty() {
                 out.visible.insert(f.id, cells);
             }
+            for (name, vars) in cell_bindings(f) {
+                if let [var] = vars[..]
+                    && let Some(i) = f.params.iter().take(64).position(|p| p.var == var)
+                {
+                    let i = u8::try_from(i).expect("at most 64 parameters");
+                    out.param_cells.insert((f.id, name.to_owned()), i);
+                }
+            }
         }
         // The child scopes a function runs come after it.
         for f in ir.functions.iter().rev() {
@@ -363,6 +376,83 @@ impl Nesting {
     fn bound_only<'c>(&self, cell: &'c CellKey) -> Option<&'c CellKey> {
         (!self.rebound.contains(cell)).then_some(cell)
     }
+
+    /// The function enclosing `f` that binds the variable `name` `f` reads from it, and its
+    /// parameter the variable is on every path: the function binds the name only as that
+    /// parameter, and no nested scope rebinds it.
+    fn captured_param<'m>(
+        &self,
+        ir: &'m ModuleIr,
+        f: &IrFunction,
+        name: &str,
+    ) -> Option<(&'m IrFunction, u8)> {
+        let cell = self.bound_only(self.visible.get(&f.id)?.get(name)?)?;
+        Some((ir.function(cell.0), *self.param_cells.get(cell)?))
+    }
+}
+
+/// The parameters of enclosing functions that the nested scopes of the module read through
+/// closure cells ([`resolver::CapturedParams`]), by the scope's qualname. A parameter of a function
+/// that one scope nested in it reads is a parameter of every scope nested in it, so a scope can
+/// hand it to the scope it calls (a generator expression calling a nested function reading
+/// `self`). The scopes sharing a qualname (sibling lambdas, conditional definitions) share one
+/// summary, so they share the positions too.
+pub(crate) fn captured_params(ir: &ModuleIr) -> FxHashMap<&str, resolver::CapturedParams> {
+    let nesting = Nesting::of(ir);
+    if nesting.visible.is_empty() {
+        return FxHashMap::default();
+    }
+    // The parameters of each function that the scopes nested in it read, by its qualname.
+    let mut read: FxHashMap<&str, BTreeSet<u8>> = FxHashMap::default();
+    for f in ir
+        .functions
+        .iter()
+        .filter(|f| nesting.visible.contains_key(&f.id))
+    {
+        for inst in f.blocks.iter().flat_map(|b| &b.insts) {
+            if let InstKind::LoadDeref { name, .. } = &inst.kind
+                && let Some((owner, i)) = nesting.captured_param(ir, f, name)
+            {
+                read.entry(resolver::func_qualname(owner))
+                    .or_default()
+                    .insert(i);
+            }
+        }
+    }
+    if read.is_empty() {
+        return FxHashMap::default();
+    }
+    // The parameters of enclosing functions each scope has, and the most parameters of its own
+    // that a scope of its qualname takes.
+    let mut captured: FxHashMap<&str, BTreeSet<(&str, u8)>> = FxHashMap::default();
+    let mut own: FxHashMap<&str, usize> = FxHashMap::default();
+    for f in &ir.functions {
+        let qualname = f.qualname.as_str();
+        let enclosing = qualname
+            .match_indices(".<locals>.")
+            .filter_map(|(at, _)| read.get_key_value(&qualname[..at]));
+        let mut params = enclosing
+            .flat_map(|(owner, read)| read.iter().map(|i| (*owner, *i)))
+            .peekable();
+        if params.peek().is_none() {
+            continue;
+        }
+        captured.entry(qualname).or_default().extend(params);
+        let most = own.entry(qualname).or_default();
+        *most = (*most).max(f.params.len());
+    }
+    captured
+        .into_iter()
+        .filter_map(|(qualname, params)| {
+            let first = u8::try_from(own[qualname]).ok().filter(|f| *f < 64)?;
+            let params = params
+                .into_iter()
+                .take(64 - usize::from(first))
+                .map(|(owner, i)| (owner.to_owned(), i))
+                .collect();
+            Some((qualname, resolver::CapturedParams { first, params }))
+        })
+        .collect()
 }
 
 /// The cells the scopes `parent` creates outside its inlined comprehensions can read: those
@@ -434,6 +524,11 @@ pub(crate) fn cell_bindings(f: &IrFunction) -> FxHashMap<&str, Vec<VarId>> {
         }
     }
     cell_vars
+}
+
+/// Whether `x op= y` on a display of `kind` changes it in place.
+fn display_changes_in_place(kind: BuiltinKind, op: BinOpKind) -> bool {
+    crate::types::changes_in_place(&format!("builtins.{}", kind.name()), op)
 }
 
 /// The function id of a non-inlined comprehension call (Python 3.11).
@@ -508,6 +603,12 @@ impl TypeCtx<'_> {
     pub(crate) fn bound_cell(&self, f: &IrFunction, name: &str) -> Option<&CellKey> {
         let nesting = self.nesting();
         nesting.bound_only(nesting.visible.get(&f.id)?.get(name)?)
+    }
+
+    /// The function enclosing scope `f` whose parameter the variable `name` `f` reads from it is
+    /// on every path, and that parameter.
+    pub(crate) fn captured_param(&self, f: &IrFunction, name: &str) -> Option<(&IrFunction, u8)> {
+        self.nesting().captured_param(self.ir(), f, name)
     }
 
     /// What the variable `name` that scope `f` reads from an enclosing function is: the
@@ -657,6 +758,9 @@ struct Engine<'e, 'a> {
     unpacked: FxHashMap<VarId, usize>,
     /// Container displays built in the function (`[]`, `{}`, `set()` is a call), by kind.
     displays: FxHashMap<VarId, BuiltinKind>,
+    /// The augmented assignments that give a display back (`xs += ys`), each operator of the
+    /// chain from the display changing it in place, with the display and its kind.
+    kept_displays: FxHashMap<VarId, (VarId, BuiltinKind)>,
     /// The items (or keys) and values added to each display after it is built.
     added: FxHashMap<VarId, (Elem, Elem)>,
     /// The facts of the closure cells of enclosing functions the function can read, by name.
@@ -764,6 +868,7 @@ impl<'e, 'a> Engine<'e, 'a> {
             strs: FxHashMap::default(),
             unpacked: FxHashMap::default(),
             displays: FxHashMap::default(),
+            kept_displays: FxHashMap::default(),
             added: FxHashMap::default(),
             cells: seed.cells,
             own_cells: FxHashMap::default(),
@@ -830,7 +935,7 @@ impl<'e, 'a> Engine<'e, 'a> {
     }
 
     /// The facts the transfers look up: declared locals, constants, unpacking targets,
-    /// copies, and displays.
+    /// copies, and displays (also as the in-place operators that keep them give them back).
     fn collect(&mut self) {
         let (cx, f) = (self.cx, self.f);
         let insts = || f.blocks.iter().flat_map(|b| &b.insts);
@@ -916,6 +1021,24 @@ impl<'e, 'a> Engine<'e, 'a> {
                     callee_var: None, ..
                 } => self.nested_read = true,
                 _ => {}
+            }
+        }
+        // In reverse postorder an operand comes before its users (only a phi, which ends a
+        // chain, reaches back), so each result is decided from its operand's, once.
+        for &bb in self.shape.rpo() {
+            for inst in &f.block(bb).insts {
+                if let InstKind::BinOp {
+                    dst,
+                    op,
+                    lhs,
+                    in_place: true,
+                    ..
+                } = &inst.kind
+                    && let Some((root, kind)) = self.display_of(*lhs)
+                    && display_changes_in_place(kind, *op)
+                {
+                    self.kept_displays.insert(*dst, (root, kind));
+                }
             }
         }
         // An unpacking target loads its position with a constant spanning the target itself.
@@ -1351,6 +1474,26 @@ impl<'e, 'a> Engine<'e, 'a> {
             }
             InstKind::Import { .. } => cx.import_type(inst.span),
             InstKind::Copy { src, .. } => self.need(*src)?.cloned(),
+            // An augmented assignment changing a built-in container in place gives the
+            // container: the display it is, with what the function adds to it, or the type the
+            // container has.
+            InstKind::BinOp {
+                op,
+                lhs,
+                in_place: true,
+                ..
+            } => match self.display_of(*lhs) {
+                Some((root, kind)) if display_changes_in_place(kind, *op) => {
+                    self.need(root)?.cloned()
+                }
+                Some(_) => None,
+                None => match self.need(*lhs)? {
+                    Some(t @ Ty::Inst(o)) if crate::types::changes_in_place(&o.class, *op) => {
+                        Some(t.clone())
+                    }
+                    _ => None,
+                },
+            },
             InstKind::Await { value, .. } => self.need(*value)?.and_then(awaited),
             // `with m as c` binds `m.__enter__()` (`async with`: `await m.__aenter__()`): what
             // its definition declares it returns; without a declaration, the manager itself, as
@@ -1516,9 +1659,10 @@ impl<'e, 'a> Engine<'e, 'a> {
         }
     }
 
-    /// Items added to a display after it is built: `append` / `insert` / `extend` of a list,
-    /// `add` / `update` of a set, `xs[i] = v`, and `d[k] = v` / `setdefault` / `update` of a
-    /// dict (also through copies of the variable holding it).
+    /// Items added to a display after it is built: `append` / `insert` / `extend` / `+=` of a
+    /// list, `add` / `update` / `|=` / `^=` of a set, `xs[i] = v`, and `d[k] = v` /
+    /// `setdefault` / `update` / `|=` of a dict (also through copies of the variable holding it,
+    /// and through what an in-place operator gives).
     fn add_contents(&mut self, inst: &Inst) {
         let (target, item, value) = match &inst.kind {
             InstKind::MethodCall {
@@ -1544,6 +1688,23 @@ impl<'e, 'a> Engine<'e, 'a> {
                     _ => return,
                 }
             }
+            InstKind::BinOp {
+                op,
+                lhs,
+                rhs,
+                in_place: true,
+                ..
+            } => match (self.display_of(*lhs), op) {
+                (Some((root, BuiltinKind::List)), BinOpKind::Add)
+                | (Some((root, BuiltinKind::Set)), BinOpKind::BitOr | BinOpKind::BitXor) => {
+                    (root, self.items_of(*rhs), Elem::Empty)
+                }
+                (Some((root, BuiltinKind::Dict)), BinOpKind::BitOr) => {
+                    let (k, v) = self.mapping(*rhs);
+                    (root, k, v)
+                }
+                _ => return,
+            },
             InstKind::SubscriptStore {
                 obj, index, value, ..
             } => match self.display_of(*obj) {
@@ -1567,10 +1728,14 @@ impl<'e, 'a> Engine<'e, 'a> {
         }
     }
 
-    /// The display a variable holds (through copies), with its kind.
+    /// The display a variable holds (through copies, and the in-place operators that give it
+    /// back), with its kind.
     fn display_of(&self, var: VarId) -> Option<(VarId, BuiltinKind)> {
         let root = self.shape.copy_root(var);
-        self.displays.get(&root).map(|kind| (root, *kind))
+        match self.displays.get(&root) {
+            Some(kind) => Some((root, *kind)),
+            None => self.kept_displays.get(&root).copied(),
+        }
     }
 
     fn subscript(&self, span: Span, obj: VarId, index: VarId, is_slice: bool) -> Step {
