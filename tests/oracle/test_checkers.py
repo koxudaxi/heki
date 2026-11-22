@@ -310,6 +310,28 @@ class Mut118(unittest.TestCase):
         result = checkers.check(self.claim, [self.deep_copy("int", kept=True)])
         self.assertEqual((result["checked"], result["refutations"]), (0, []))
 
+    def test_a_line_that_ends_before_the_copy_is_bound_checks_nothing(self):
+        before = {"item.value": [10, self.classes, 77, "object"]}
+        trace = run(line("N0", 2, 9, attrs_before=before, attrs_after={"copied.value": None}))
+        result = checkers.check(self.claim, [trace])
+        self.assertEqual((result["checked"], result["refutations"]), (0, []))
+
+    def test_a_deep_copy_over_several_lines_is_not_mapped(self):
+        import ast
+
+        import plan
+
+        for text, mapped in [
+            ("import copy\n\ndef f(item):\n    copied = copy.deepcopy(item)\n    return copied\n", True),
+            ("import copy\n\ndef f(item):\n    copied = copy.deepcopy(\n        item\n    )\n    return copied\n", False),
+        ]:
+            source = _source(text)
+            call = next(n for n in ast.walk(source.tree) if isinstance(n, ast.Call))
+            pos = (call.lineno, call.col_offset, call.end_lineno, call.end_col_offset)
+            claim = {"id": "k0", "path": "app/m.py"}
+            got = plan.Planner("/")._mut118(claim, source, pos, {"target": "Spec.value"})
+            self.assertEqual(bool(got), mapped, text)
+
     def test_an_object_of_another_class_violates_r2(self):
         classes = ["app.s0.Other", "builtins.object"]
         result = checkers.check(self.claim, [self.deep_copy("object", kept=True, classes=classes)])

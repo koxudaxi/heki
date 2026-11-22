@@ -421,8 +421,11 @@ def check_mut118(claim, runs, sources=None):
                     assumption="R2",
                 )
                 continue
+            # A line that ended before the copy was bound records no copy: nothing to check.
+            if copied is None:
+                continue
             result.checked += 1
-            if copied is None or copied[2] is None or copied[2] == held:
+            if copied[2] is None or copied[2] == held:
                 result.refute(
                     "sentinel-kept",
                     "Deep-copied: the copy does not hold a new object in the attribute",
