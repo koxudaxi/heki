@@ -301,7 +301,8 @@ each with a lazy initialization (the blocks each covers count toward a budget pr
 source), many waits on one future before many `await`s of it, task factories at the end of a long
 chain of copies, a long chain of aliases of a class with an attribute store through the last one per
 alias, a class with thousands of subclasses whose class constant as many functions read on an
-instance, a strict `read-owners` target on such a class that as many functions read on an object of
+instance, a library class with thousands of project subclasses whose catalogued attribute as many
+functions read on an instance, a strict `read-owners` target on such a class that as many functions read on an object of
 unknown class, as many calls of a method of such a class that a call target naming no class names, a
 module binding thousands of names each to an attribute of the one before, a module binding thousands
 of names each to the one before, a method returning one of thousands of copies of an attribute
