@@ -3432,9 +3432,12 @@ Each step of the chain is established, not assumed:
 - every implementation the call can run is followed, and each one makes the next call: all the
   overrides in project subclasses of the receiver's class, every class that inherits a mixin
   method calling `self`, every member of a union; a receiver typed by a protocol has
-  implementations heki cannot list, and is not followed; a decorator other than
-  `staticmethod`, `classmethod`, `property`, `abstractmethod`, or `override` may not run the
-  body, and is not followed; a function defined twice is not followed;
+  implementations heki cannot list, and is not followed; a call of a property's value
+  (`self.handler()`) runs what calling a value of the type the getter declares runs (a protocol
+  is not followed), and the getter runs as a read of the property, which is not followed; a
+  decorator other than `staticmethod`, `classmethod`, `property`, `abstractmethod`, or
+  `override` may not run the body, and is not followed; a function defined twice is not
+  followed;
 - the waiting call is in the ecosystem catalog, waits on every call (a database call that may be
   answered by a session's identity map, a cache, an open connection, or that sends only pending
   changes does not), and no argument that may come from the caller can make it return at once

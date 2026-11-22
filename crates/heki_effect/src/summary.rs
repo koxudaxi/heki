@@ -5441,6 +5441,10 @@ impl<'a> Extractor<'a> {
                     } else {
                         call.dst.and_then(|d| self.returned.get(&d).copied())
                     },
+                    // The instruction's completeness is its own call's (`Self::targets_complete`):
+                    // the getters a call of a property's value runs, as a read of the property,
+                    // never are complete.
+                    complete: site.complete && call.dst.is_some(),
                     ..site
                 });
                 let at = self.sites.len() - 1;

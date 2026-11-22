@@ -5859,7 +5859,8 @@ impl<'a> TypeCtx<'a> {
     /// Whether `callee`, what [`Self::resolve_method`] resolves `recv.method(...)` to, is every
     /// implementation the call can run (`CallSite::complete`): each member of a union resolves
     /// and is complete, a protocol receiver never is, and a module member, a class object's
-    /// own attribute, or `super()` names one implementation.
+    /// own attribute, or `super()` names one implementation. A call of a property's value is
+    /// judged by the value ([`Self::targets_complete_on`]).
     pub fn method_targets_complete(
         &self,
         recv: Option<&Val>,
@@ -5870,20 +5871,33 @@ impl<'a> TypeCtx<'a> {
             Some(Val::Union(classes)) => classes.iter().all(|c| {
                 let own = self.method_call_targets(Some(Recv::Inst(c)), method);
                 matches!(own, Callee::Project(..) | Callee::External(_))
-                    && self
-                        .project
-                        .instance_targets_complete(c, method, &own, self.kb)
+                    && self.targets_complete_on(Recv::Inst(c), method, &own)
             }),
-            Some(Val::Inst(class)) => self
+            _ => recv
+                .and_then(Val::recv)
+                .is_some_and(|recv| self.targets_complete_on(recv, method, callee)),
+        }
+    }
+
+    /// [`Self::method_targets_complete`] on a receiver of one class. A call of a property's value
+    /// runs what calling the value runs, whatever class the getter is found in (the getter's run
+    /// is a read of its own): it is complete when calling a value of the type the getter
+    /// declares is ([`Self::call_targets_complete`]).
+    fn targets_complete_on(&self, recv: Recv<'_>, method: &str, callee: &Callee) -> bool {
+        if let Some(value) = self.property_value(recv, method) {
+            return self.call_targets_complete(value.as_ref(), callee);
+        }
+        match recv {
+            Recv::Inst(class) => self
                 .project
                 .instance_targets_complete(class, method, callee, self.kb),
-            Some(Val::Class(class)) => {
+            Recv::Class(class) => {
                 self.project.is_project_class(class)
                     && self
                         .project
                         .instance_targets_complete(class, method, callee, self.kb)
             }
-            other => matches!(other, Some(Val::Ref(_) | Val::Super(_))),
+            Recv::Ref(_) | Recv::Super(_) => true,
         }
     }
 

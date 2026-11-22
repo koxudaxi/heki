@@ -1234,7 +1234,10 @@ deep = true   # changes to attributes and nested containers below are forbidden 
    - A call's targets are complete (`CallSite::complete`) when they are every implementation
      the call can run under R2 and R5: for each of the receiver's class and its project
      subclasses (at most `DISPATCH_CLASS_LIMIT`, 64), the definition its MRO finds is a target;
-     every member of a union resolves; a protocol receiver never is complete.
+     every member of a union resolves; a protocol receiver never is complete. A call of a
+     property's value is complete when calling a value of the type the getter declares is
+     (`TypeCtx::targets_complete_on`), whatever the receiver; the getters it runs, as a read of
+     the property, never are.
    - A Layer 2 call has an effect unconditionally (`CallTarget::Layer2::unconditional`) when its
      entry `emits` it on every call and no case of the entry tests an argument that may be a
      parameter of the caller (R6 covers the arguments heki cannot evaluate).
