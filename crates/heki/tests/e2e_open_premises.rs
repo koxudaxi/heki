@@ -869,6 +869,418 @@ fn each_premise_of_a_join_left_open_is_recorded() {
     );
 }
 
+// ----------------------------------------------------------------------------- DATA101's claim
+
+/// A module importing numpy, with `body` after it.
+fn arrays(body: &str) -> String {
+    format!("import numpy as np\n\n\n{body}")
+}
+
+const GROWN_EACH_ITEM: &str = "def build(items: list[str]):\n    acc = np.array([])\n    for c in items:\n        acc = np.append(acc, c)\n    return acc\n";
+
+#[test]
+fn a_helper_that_may_return_another_value_is_not_the_catalog_call() {
+    let open = arrays(
+        "def grow(arr, c, flag):\n    if flag:\n        return arr\n    return np.append(arr, c)\n\n\ndef build(items: list[str], flag):\n    acc = np.array([])\n    for c in items:\n        acc = grow(acc, c, flag)\n    return acc\n",
+    );
+    let report = own_heuristic(
+        "op_data_helper",
+        "DATA101",
+        &open,
+        "DATA101",
+        &[("Reallocates", "not-the-catalog-call")],
+    );
+    assert_eq!(
+        closer_line_detail(&report, 0),
+        ("none".to_owned(), None, None)
+    );
+    exact(
+        "op_data_helper_closed",
+        "DATA101",
+        &arrays(GROWN_EACH_ITEM),
+        "DATA101",
+    );
+}
+
+#[test]
+fn a_reset_on_one_path_leaves_the_value_not_carried() {
+    let open = arrays(&GROWN_EACH_ITEM.replace(
+        "        acc = np.append(acc, c)\n",
+        "        acc = np.append(acc, c)\n        if c == \"0\":\n            acc = np.array([])\n",
+    ));
+    own_heuristic(
+        "op_data_reset",
+        "DATA101",
+        &open,
+        "DATA101",
+        &[("Loop-carried on every path", "reset-on-a-path")],
+    );
+    exact(
+        "op_data_reset_closed",
+        "DATA101",
+        &arrays(GROWN_EACH_ITEM),
+        "DATA101",
+    );
+}
+
+#[test]
+fn a_previous_value_on_some_paths_only_is_not_held() {
+    let open = arrays(
+        "def build(items: list[str], other, flag):\n    acc = np.array([])\n    for c in items:\n        acc = np.append(acc if flag else other, c)\n    return acc\n",
+    );
+    own_heuristic(
+        "op_data_held",
+        "DATA101",
+        &open,
+        "DATA101",
+        &[("Loop-carried on every path", "previous-value-not-held")],
+    );
+    exact(
+        "op_data_held_closed",
+        "DATA101",
+        &arrays(GROWN_EACH_ITEM),
+        "DATA101",
+    );
+}
+
+#[test]
+fn a_continue_before_the_update_leaves_every_iteration_open() {
+    let open = arrays(&GROWN_EACH_ITEM.replace(
+        "    for c in items:\n",
+        "    for c in items:\n        if c == \"skip\":\n            continue\n",
+    ));
+    own_heuristic(
+        "op_data_every",
+        "DATA101",
+        &open,
+        "DATA101",
+        &[("Every iteration", "not-every-iteration")],
+    );
+    exact(
+        "op_data_every_closed",
+        "DATA101",
+        &arrays(GROWN_EACH_ITEM),
+        "DATA101",
+    );
+}
+
+#[test]
+fn a_loop_not_over_the_data_leaves_the_origin_open() {
+    for (name, shape, cause) in [
+        (
+            "op_data_fixed",
+            GROWN_EACH_ITEM.replace("for c in items:", "for c in range(40):"),
+            "fixed-by-the-code",
+        ),
+        (
+            "op_data_receiver",
+            "class Holder:\n    def build(self):\n        acc = np.array([])\n        for c in self.rows:\n            acc = np.append(acc, c)\n        return acc\n".to_owned(),
+            "items-not-from-the-data",
+        ),
+        (
+            "op_data_while",
+            "def build(n: int):\n    acc = np.array([])\n    while n:\n        acc = np.append(acc, n)\n        n -= 1\n    return acc\n".to_owned(),
+            "no-items-followed",
+        ),
+    ] {
+        own_heuristic(name, "DATA101", &arrays(&shape), "DATA101", &[("Origin", cause)]);
+    }
+    exact(
+        "op_data_origin_closed",
+        "DATA101",
+        &arrays(GROWN_EACH_ITEM),
+        "DATA101",
+    );
+}
+
+#[test]
+fn each_premise_of_an_update_left_open_is_recorded() {
+    let open = arrays(
+        "def grow(arr, c, flag):\n    if flag:\n        return arr\n    return np.append(arr, c)\n\n\ndef build(items: list[str], flag):\n    acc = np.array([])\n    for c in items:\n        if c == \"skip\":\n            continue\n        acc = grow(acc, c, flag)\n        if c == \"0\":\n            acc = np.array([])\n    return acc\n",
+    );
+    own_heuristic(
+        "op_data_several",
+        "DATA101",
+        &open,
+        "DATA101",
+        &[
+            ("Reallocates", "not-the-catalog-call"),
+            ("Every iteration", "not-every-iteration"),
+            ("Loop-carried on every path", "reset-on-a-path"),
+        ],
+    );
+    exact(
+        "op_data_several_closed",
+        "DATA101",
+        &arrays(GROWN_EACH_ITEM),
+        "DATA101",
+    );
+}
+
+// ------------------------------------------------------------------------------ MUT110's claim
+
+const APPEND_TO_LISTS: &str = "from collections.abc import Sequence\n\n\ndef append_to_lists(values):\n    if isinstance(values, list):\n        values.append(1)\n\n\ndef entry(values: Sequence[float]) -> None:\n    append_to_lists(values)\n";
+
+#[test]
+fn a_change_a_project_subclass_may_replace_names_no_line() {
+    let open = APPEND_TO_LISTS.replace(
+        "\n\ndef append_to_lists",
+        "\n\nclass Frozen(list):\n    def append(self, item):\n        return None\n\n\ndef append_to_lists",
+    );
+    let report = own_heuristic(
+        "op_mut110_subclass",
+        "MUT110",
+        &open,
+        "MUT110",
+        &[("Changed at the line", "not-a-builtin-container-change")],
+    );
+    assert_eq!(
+        closer_line_detail(&report, 0),
+        (
+            "none".to_owned(),
+            None,
+            Some("`app.append_to_lists`".to_owned())
+        )
+    );
+    exact(
+        "op_mut110_subclass_closed",
+        "MUT110",
+        APPEND_TO_LISTS,
+        "MUT110",
+    );
+}
+
+#[test]
+fn a_change_where_a_returned_generator_is_iterated_has_no_changing_body() {
+    let open = "from collections.abc import Sequence\n\n\ndef wipe(values):\n    values.clear()\n    yield 1\n\n\ndef adapter(values):\n    return wipe(values)\n\n\ndef consume(values):\n    list(adapter(values))\n\n\ndef entry(values: Sequence[float]) -> None:\n    consume(values)\n";
+    own_heuristic(
+        "op_mut110_generator",
+        "MUT110",
+        open,
+        "MUT110",
+        &[("Changed at the line", "no-changing-body")],
+    );
+    let closed = open.replace(
+        "    list(adapter(values))\n",
+        "    if isinstance(values, list):\n        values.clear()\n",
+    );
+    exact("op_mut110_generator_closed", "MUT110", &closed, "MUT110");
+}
+
+// ------------------------------------------------------------------------------ MUT114's claim
+
+/// A module with `table`, a cached function returning a list, `Frozen`, a list whose `append`
+/// changes nothing, and `body` after them.
+fn cached(decorator: &str, table: &str, body: &str) -> String {
+    format!(
+        "import functools\n\n\nclass Frozen(list):\n    def append(self, item):\n        return None\n\n\n{decorator}\n{table}\n\n\n{body}"
+    )
+}
+
+const KEEPS: &str = "@functools.lru_cache(maxsize=None)";
+const TABLE: &str = "def table(name) -> list[str]:\n    return [name, \"id\"]";
+const APPEND: &str =
+    "def use(name):\n    result = table(name)\n    result.append(\"x\")\n    return result\n";
+
+#[test]
+fn a_cache_that_keeps_nothing_leaves_the_cached_result_open() {
+    let open = cached("@functools.lru_cache(maxsize=0)", TABLE, APPEND);
+    let report = own_heuristic(
+        "op_mut114_cached",
+        "MUT114",
+        &open,
+        "MUT114",
+        &[
+            ("Cached", "cached-result-not-established"),
+            ("Keyed", "cached-result-not-established"),
+            ("Container kind", "cached-result-not-established"),
+        ],
+    );
+    assert_eq!(
+        closer_line_detail(&report, 0),
+        ("none".to_owned(), None, Some("`app.table`".to_owned()))
+    );
+    exact(
+        "op_mut114_cached_closed",
+        "MUT114",
+        &cached(KEEPS, TABLE, APPEND),
+        "MUT114",
+    );
+    // A cached function without a key, or whose return names no container, is the same fact.
+    for (name, table) in [
+        (
+            "op_mut114_keyed",
+            "def table() -> list[str]:\n    return [\"fixed\", \"id\"]",
+        ),
+        (
+            "op_mut114_kind",
+            "def table(name):\n    return Frozen([name, \"id\"])",
+        ),
+    ] {
+        let body = APPEND.replace(
+            "table(name)",
+            if name == "op_mut114_keyed" {
+                "table()"
+            } else {
+                "table(name)"
+            },
+        );
+        own_heuristic(
+            name,
+            "MUT114",
+            &cached(KEEPS, table, &body),
+            "MUT114",
+            &[
+                ("Cached", "cached-result-not-established"),
+                ("Keyed", "cached-result-not-established"),
+                ("Container kind", "cached-result-not-established"),
+            ],
+        );
+    }
+}
+
+#[test]
+fn a_subclass_the_annotation_admits_may_replace_the_change() {
+    let frozen = "def table(name) -> list[str]:\n    return Frozen([name, \"id\"])";
+    let report = own_heuristic(
+        "op_mut114_subclass",
+        "MUT114",
+        &cached(KEEPS, frozen, APPEND),
+        "MUT114",
+        &[("Changed in place", "replaced-by-a-subclass")],
+    );
+    assert_eq!(closer_line_detail(&report, 0).0, "code");
+    exact(
+        "op_mut114_subclass_closed",
+        "MUT114",
+        &cached(KEEPS, TABLE, APPEND),
+        "MUT114",
+    );
+}
+
+#[test]
+fn a_value_that_is_the_result_on_some_paths_only_is_not_the_same_object() {
+    let open = APPEND
+        .replace("def use(name):", "def use(name, flag):")
+        .replace(
+            "result = table(name)",
+            "result = table(name) if not flag else []",
+        );
+    own_heuristic(
+        "op_mut114_branch",
+        "MUT114",
+        &cached(KEEPS, TABLE, &open),
+        "MUT114",
+        &[("Same object", "not-the-result-on-every-path")],
+    );
+    exact(
+        "op_mut114_branch_closed",
+        "MUT114",
+        &cached(KEEPS, TABLE, APPEND),
+        "MUT114",
+    );
+}
+
+#[test]
+fn a_result_returned_through_a_wrapper_is_not_established_the_same_object() {
+    let open = format!(
+        "def wrapper(name):\n    return table(name)\n\n\n{}",
+        APPEND.replace("result = table(name)", "result = wrapper(name)")
+    );
+    let report = own_heuristic(
+        "op_mut114_wrapper",
+        "MUT114",
+        &cached(KEEPS, TABLE, &open),
+        "MUT114",
+        &[("Same object", "returned-through-a-function")],
+    );
+    assert_eq!(
+        closer_line_detail(&report, 0).2,
+        Some("`app.wrapper`".to_owned())
+    );
+    exact(
+        "op_mut114_wrapper_closed",
+        "MUT114",
+        &cached(KEEPS, TABLE, APPEND),
+        "MUT114",
+    );
+}
+
+#[test]
+fn a_change_that_is_not_one_of_the_kind_at_the_line() {
+    let helper = format!(
+        "def mutate(xs):\n    xs.append(\"x\")\n\n\n{}",
+        APPEND.replace("    result.append(\"x\")\n", "    mutate(result)\n")
+    );
+    own_heuristic(
+        "op_mut114_helper",
+        "MUT114",
+        &cached(KEEPS, TABLE, &helper),
+        "MUT114",
+        &[("Changed in place", "changed-in-a-called-function")],
+    );
+    own_heuristic(
+        "op_mut114_add",
+        "MUT114",
+        &cached(KEEPS, TABLE, &APPEND.replace("result.append", "result.add")),
+        "MUT114",
+        &[("Changed in place", "not-a-change-of-the-kind")],
+    );
+    // An attribute store, on the result or on an item of it.
+    let attribute = APPEND.replace("    result.append(\"x\")\n", "    result.tag = \"x\"\n");
+    own_heuristic(
+        "op_mut114_attribute",
+        "MUT114",
+        &cached(KEEPS, TABLE, &attribute),
+        "MUT114",
+        &[("Changed in place", "not-a-change-of-the-kind")],
+    );
+    own_heuristic(
+        "op_mut114_item",
+        "MUT114",
+        &cached(
+            KEEPS,
+            TABLE,
+            &attribute.replace("result.tag", "result[0].tag"),
+        ),
+        "MUT114",
+        &[
+            ("Same object", "not-the-result-on-every-path"),
+            ("Changed in place", "not-a-change-of-the-kind"),
+        ],
+    );
+    exact(
+        "op_mut114_change_closed",
+        "MUT114",
+        &cached(KEEPS, TABLE, APPEND),
+        "MUT114",
+    );
+}
+
+#[test]
+fn each_premise_of_a_cached_change_left_open_is_recorded() {
+    let open = "def mutate(xs):\n    xs.append(\"x\")\n\n\ndef use(name, flag):\n    result = table(name) if not flag else []\n    mutate(result)\n    return result\n";
+    own_heuristic(
+        "op_mut114_several",
+        "MUT114",
+        &cached("@functools.lru_cache(maxsize=0)", TABLE, open),
+        "MUT114",
+        &[
+            ("Same object", "not-the-result-on-every-path"),
+            ("Cached", "cached-result-not-established"),
+            ("Keyed", "cached-result-not-established"),
+            ("Container kind", "cached-result-not-established"),
+            ("Changed in place", "changed-in-a-called-function"),
+        ],
+    );
+    exact(
+        "op_mut114_several_closed",
+        "MUT114",
+        &cached(KEEPS, TABLE, APPEND),
+        "MUT114",
+    );
+}
+
 // --------------------------------------------------------------------------- outputs
 
 #[test]

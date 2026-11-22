@@ -72,7 +72,8 @@ causes come from the steps of the decision that made the report heuristic, each 
 on its own along the reported chain and loop, so they cannot disagree with its tier. The records
 are internal for now: no output format of `heki check` and nothing in the language server shows
 them. `EFF111` and `EFF113` record them for the claims of `EFF101` and `EFF103`, and the heuristic
-reports of the eight `OPT` rewrite rules and of `OPT113` for their own claims. A proven `OPT`
+reports of the eight `OPT` rewrite rules, `OPT113`, `DATA101`, `MUT110`, and `MUT114` for their own
+claims. A proven `OPT`
 rewrite or an `OPT113` join whose loop the code fixes at more than 16 trips records none: its
 premises all hold, and the exact tier leaves it out only because a fixed count is no evidence
 either way.

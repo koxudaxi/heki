@@ -550,7 +550,7 @@ impl<'i> MustExplainer<'i> {
     }
 
     /// The call site a chain's hop stands for: the call of its callee its caller makes there.
-    fn site_of(&self, hop: &CallHop) -> Option<&'i CallSite> {
+    pub fn site_of(&self, hop: &CallHop) -> Option<&'i CallSite> {
         let calls = |site: &&CallSite| match &site.target {
             CallTarget::Layer2 { symbol, .. } => *symbol == hop.callee,
             CallTarget::Project(callees) => callees.iter().any(|bc| bc.callee.fqn() == hop.callee),

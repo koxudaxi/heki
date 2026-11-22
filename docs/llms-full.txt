@@ -2664,7 +2664,8 @@ causes come from the steps of the decision that made the report heuristic, each 
 on its own along the reported chain and loop, so they cannot disagree with its tier. The records
 are internal for now: no output format of `heki check` and nothing in the language server shows
 them. `EFF111` and `EFF113` record them for the claims of `EFF101` and `EFF103`, and the heuristic
-reports of the eight `OPT` rewrite rules and of `OPT113` for their own claims. A proven `OPT`
+reports of the eight `OPT` rewrite rules, `OPT113`, `DATA101`, `MUT110`, and `MUT114` for their own
+claims. A proven `OPT`
 rewrite or an `OPT113` join whose loop the code fixes at more than 16 trips records none: its
 premises all hold, and the exact tier leaves it out only because a fixed count is no evidence
 either way.
@@ -3390,10 +3391,10 @@ table from another build, to check a release older than the table with it.
 
 For the rules whose heuristic reports record the premises they leave open (`OPEN_PREMISE_CODES`
 in `premise_generator.py`: `EFF101` through `EFF111`, `EFF103` through `EFF113`, and the `OPT`
-rewrites and `OPT113` through their own codes), a program with a premise stripped is also run
-through `heki dump-open-premises`: each heuristic report of the claim has to name the stripped
-premise among its open ones, since the causes come from the decision that made the report
-heuristic. A report that does not is an oracle finding of its own kind, written to
+rewrites, `OPT113`, `DATA101`, `MUT110`, and `MUT114` through their own codes), a program with a
+premise stripped is also run through `heki dump-open-premises`: each heuristic report of the claim
+has to name the stripped premise among its open ones, since the causes come from the decision that
+made the report heuristic. A report that does not is an oracle finding of its own kind, written to
 `unrecorded/` beside the refutations and counted with them for `--fail-on-refutation`. A heki
 without the command (an older release) skips the check.
 
