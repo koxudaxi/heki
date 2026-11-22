@@ -190,4 +190,3 @@ heki_soundness::obligations::Checker::name  W1  recursion (calls itself): Memo o
 heki_soundness::obligations::Checker::names_read_from  W2  worklist: reach, Closure, or fixpoint
 heki_soundness::obligations::Checker::reachable_from  W2  worklist: reach, Closure, or fixpoint
 heki_soundness::opt_rules::Rules::alias_closure  W3  passes until nothing changes: fixpoint
-heki_soundness::opt_rules::on_every_path  W2  worklist: reach, Closure, or fixpoint

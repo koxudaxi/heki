@@ -18,7 +18,7 @@ use heki_ast::{LineIndex, Span};
 use heki_ir::walk::{Answer, Def, FnShape};
 use heki_ir::{
     BinOpKind, BlockId, BuiltinKind, CompareOpKind, DictEntry, FnIndex, Inst, InstKind, IrFunction,
-    LoopBound, ModuleIr, NaturalLoop, Terminator, VarId,
+    LoopBound, ModuleBindings, ModuleIr, NaturalLoop, Terminator, VarId,
 };
 use heki_kb::{EffectiveSoundnessKb, SoundnessParamEffect};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -192,7 +192,6 @@ impl<'a> ModuleCtx<'a> {
     fn new(ir: &'a ModuleIr, source: &'a str, opts: &AnalysisOptions) -> Self {
         let builtins = BuiltinScope::for_module(ir, opts.project_patches_builtins);
         let mut used_names = FxHashSet::default();
-        let mut stores: rustc_hash::FxHashMap<&str, u32> = rustc_hash::FxHashMap::default();
         for f in &ir.functions {
             used_names.extend(f.var_names.iter().flatten().cloned());
             for inst in f.blocks.iter().flat_map(|b| &b.insts) {
@@ -205,7 +204,6 @@ impl<'a> ModuleCtx<'a> {
                     }
                     InstKind::StoreGlobal { name, .. } => {
                         used_names.insert(name.clone());
-                        *stores.entry(name.as_str()).or_default() += 1;
                     }
                     InstKind::Call { callee, .. } => {
                         used_names.insert(callee.split('.').next().unwrap_or(callee).to_owned());
@@ -216,11 +214,11 @@ impl<'a> ModuleCtx<'a> {
         }
         let module_fn = ir.function(ir.module_fn);
         let mut deque = None;
-        let imports = module_fn
-            .blocks
-            .iter()
-            .filter(|b| on_every_path(module_fn, b.id))
-            .flat_map(|b| &b.insts);
+        // An import the rewrite reuses is one the module binds once, on every path through its
+        // body, that nothing deletes or a star import may rebind (the module bindings the path
+        // facts trust).
+        let bindings = ModuleBindings::of(ir);
+        let imports = module_fn.blocks.iter().flat_map(|b| &b.insts);
         for inst in imports {
             let InstKind::Import {
                 dst, module, name, ..
@@ -230,8 +228,8 @@ impl<'a> ModuleCtx<'a> {
             };
             let bound = module_fn.var_name(*dst).unwrap_or_default();
             // `from .collections import deque` names another module.
-            let single = stores.get(bound).copied() == Some(1)
-                && !crate::imports::is_relative_from(source, inst.span);
+            let single =
+                bindings.bound_once(bound) && !crate::imports::is_relative_from(source, inst.span);
             if module.as_deref() == Some("collections") && name == "deque" && single {
                 deque = Some(DequeRef {
                     spelling: bound.to_owned(),
@@ -3132,26 +3130,6 @@ fn attribute_stores(
 fn same_kind(mut kinds: impl Iterator<Item = Option<BuiltinKind>>) -> Option<BuiltinKind> {
     let first = kinds.next()??;
     kinds.all(|k| k == Some(first)).then_some(first)
-}
-
-/// Block `b` runs whenever the function body completes (it is no branch of an `if`, such as
-/// `if TYPE_CHECKING:`): no path from the entry avoids it.
-fn on_every_path(f: &IrFunction, b: BlockId) -> bool {
-    let mut seen = FxHashSet::default();
-    let mut stack = vec![BlockId(0)];
-    while let Some(x) = stack.pop() {
-        if x == b || !seen.insert(x) {
-            continue;
-        }
-        let bb = f.block(x);
-        let next = bb.terminator.successors();
-        if next.is_empty() {
-            return false;
-        }
-        stack.extend(next);
-        stack.extend(bb.exc_target);
-    }
-    true
 }
 
 /// `list[T]` / `list` / `List[T]` / `typing.List[T]` (also quoted) spelled with `spelling`

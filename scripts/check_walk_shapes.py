@@ -107,8 +107,6 @@ KNOWN_OVER: dict[tuple[str, str], str] = {
     "module-level names again per name (3 s; milliseconds in a function), and EFF107",
     ("copy_chain_in_loop", "module"): "building the IR of a module body walks module-level copy "
     "chains again per name (2.8 s; 0.02 s in a function)",
-    ("alias_loops", "module"): "the OPT rules' module context walks the module's blocks once per "
-    "block",
     ("reverse_chain_in_loop", "module"): "dense alias passes take one pass per link of a chain "
     "laid against block order (`grown_vars`, `aliases`)",
     ("wide_hierarchy", "project"): "each method call walks the whole subclass family of its "

@@ -1630,6 +1630,16 @@ fn deque_import_reuse_and_placement() {
             INSERTED,
             true,
         ),
+        // A name a function deletes, or that a star import may rebind, may not hold the import
+        // when the function runs: the module bindings the path facts trust decide it.
+        (
+            "from collections import deque\n\n\ndef forget():\n    global deque\n    del deque\n",
+            INSERTED,
+            true,
+        ),
+        // With a star import, `import collections` could be rebound too: the rewrite is left
+        // to be made by hand.
+        ("from collections import deque\nfrom os.path import *\n", &[], true),
         // `from .collections import deque` is another module's `deque`.
         (
             "from .collections import deque\n",

@@ -1768,8 +1768,9 @@ Would fix 1 issue(s) in 1 file(s).
 - It never goes above a shebang, an encoding declaration, or a `from __future__` import, and only
   imports run before it, so the rewritten function cannot run before `collections` is bound.
 - An existing `from collections import deque` or `import collections` is reused only when it runs
-  unconditionally (not under `if TYPE_CHECKING:`) and names the standard library's module (not
-  `from .collections import deque`).
+  unconditionally (not under `if TYPE_CHECKING:`), nothing else binds or deletes the name (no
+  other store, no `del` in a function declaring it `global`, no star import that may rebind it),
+  and it names the standard library's module (not `from .collections import deque`).
 
 ## Profiles
 
