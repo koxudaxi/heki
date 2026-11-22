@@ -1988,7 +1988,7 @@ Three more keys state when a call waits, which an exact claim needs (ADR-018):
   (`Session.get`), `if-pending` (`Session.flush`, `Session.commit`, a driver's `commit()` /
   `rollback()` without an open transaction does nothing), `unless-cached` (Django's
   `QuerySet.count()` / `exists()` / `first()` / `last()` on an evaluated query set read its
-  cache), `unless-connected` (a pool checkout, Django's `connection.cursor()`),
+  cache; an exhausted pymongo or motor cursor returns nothing without a query), `unless-connected` (a pool checkout, Django's `connection.cursor()`),
   `unless-configured-otherwise` (any effect, on any entry: the library can be configured so the
   call does not do it, as Celery's `task_always_eager` or an in-memory transport; no effect of
   the call is certain). Only `always`

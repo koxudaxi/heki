@@ -4523,11 +4523,13 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "pymongo.cursor.Cursor.__iter__"
 effects = ["blocking_db", "db_query"]
+emits = "unless-cached"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "pymongo.cursor.Cursor.to_list"
 effects = ["blocking_db", "db_query"]
+emits = "unless-cached"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -4761,12 +4763,14 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "pymongo.asynchronous.cursor.AsyncCursor.__aiter__"
 effects = ["db_query"]
+emits = "unless-cached"
 async_safe = true
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "pymongo.asynchronous.cursor.AsyncCursor.to_list"
 effects = ["db_query"]
+emits = "unless-cached"
 async_safe = true
 opaque_to_layer3 = true
 
@@ -5140,12 +5144,14 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "motor.motor_asyncio.AsyncIOMotorCursor.__aiter__"
 effects = ["db_query"]
+emits = "unless-cached"
 async_safe = true
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "motor.motor_asyncio.AsyncIOMotorCursor.to_list"
 effects = ["db_query"]
+emits = "unless-cached"
 async_safe = true
 opaque_to_layer3 = true
 
@@ -5164,12 +5170,14 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "motor.motor_asyncio.AsyncIOMotorLatentCommandCursor.__aiter__"
 effects = ["db_query"]
+emits = "unless-cached"
 async_safe = true
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "motor.motor_asyncio.AsyncIOMotorLatentCommandCursor.to_list"
 effects = ["db_query"]
+emits = "unless-cached"
 async_safe = true
 opaque_to_layer3 = true
 
