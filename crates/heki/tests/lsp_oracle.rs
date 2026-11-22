@@ -28,7 +28,7 @@ const CONFIG: &str = r#"[project]
 name = "t"
 
 [tool.heki.lint]
-extend-select = ["MUT101", "MUT107", "MUT108", "MUT111", "EFF107", "MUT112", "MUT113", "EFF109", "EFF110", "MUT115", "MUT118"]
+extend-select = ["MUT101", "MUT107", "MUT108", "MUT111", "EFF107", "MUT112", "MUT113", "EFF109", "EFF110", "EFF112", "MUT115", "MUT118"]
 
 [[tool.heki.write-owners]]
 name = "registry"
@@ -706,6 +706,14 @@ const FAN_READ_NOTHING: &str =
 const FAN_READ_LOCKED: &str = "import asyncio\n\nLOCK = asyncio.Lock()\n\n\nasync def read_line(reader: asyncio.StreamReader):\n    async with LOCK:\n        return await reader.readline()\n";
 const FAN_USE: &str = "import asyncio\n\nfrom pkg.fan_read import read_line\n\n\nasync def both(reader: asyncio.StreamReader):\n    return await asyncio.gather(read_line(reader), read_line(reader))\n";
 
+// A dict built in a set's order in one module and written in another (`EFF112`): the builder
+// sorts and stops, the writer sorts the keys and stops.
+const ORDER_SRC: &str =
+    "def table(d: dict[str, int]) -> dict[str, int]:\n    return {k: d[k] for k in set(d)}\n";
+const ORDER_SRC_SORTED: &str = "def table(d: dict[str, int]) -> dict[str, int]:\n    return {k: d[k] for k in sorted(set(d))}\n";
+const ORDER_USE: &str = "import json\nfrom pathlib import Path\n\nfrom pkg.order_src import table\n\n\ndef save(d: dict[str, int], path: Path) -> None:\n    path.write_text(json.dumps(table(d)))\n";
+const ORDER_USE_SORTED: &str = "import json\nfrom pathlib import Path\n\nfrom pkg.order_src import table\n\n\ndef save(d: dict[str, int], path: Path) -> None:\n    path.write_text(json.dumps(table(d), sort_keys=True))\n";
+
 // `MUT115`: the declarations of a copied class and of the builtin containers' subclasses in
 // other modules, and a helper in another module, decide whether a change below a copy states
 // the exact claim.
@@ -797,6 +805,8 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/lock_use.py", LOCK_USE),
         ("pkg/fan_read.py", FAN_READ),
         ("pkg/fan_use.py", FAN_USE),
+        ("pkg/order_src.py", ORDER_SRC),
+        ("pkg/order_use.py", ORDER_USE),
         ("pkg/plot.py", RO_PLOT),
         ("pkg/loops.py", LOOPS),
         ("pkg/compat.py", COMPAT),
@@ -3268,6 +3278,34 @@ fn steps_eff110() -> Vec<Step> {
     ]
 }
 
+/// `EFF112`: whether a call's result is in a set's order comes from the callee's summary
+/// (`EffectSummary::set_order`), and whether the writer keeps it from the writer's own call: the
+/// builder in another module sorts and stops sorting, the writer sorts the keys and stops.
+fn steps_eff112() -> Vec<Step> {
+    vec![
+        Step::new(
+            "the builder in another module sorts the set first",
+            vec![save("pkg/order_src.py", ORDER_SRC_SORTED)],
+        )
+        .absent(&[("pkg/order_use.py", "EFF112")]),
+        Step::new(
+            "the builder iterates the set again",
+            vec![save("pkg/order_src.py", ORDER_SRC)],
+        )
+        .present(&[("pkg/order_use.py", "EFF112")]),
+        Step::new(
+            "the writer sorts the keys",
+            vec![save("pkg/order_use.py", ORDER_USE_SORTED)],
+        )
+        .absent(&[("pkg/order_use.py", "EFF112")]),
+        Step::new(
+            "the writer stops sorting them",
+            vec![save("pkg/order_use.py", ORDER_USE)],
+        )
+        .present(&[("pkg/order_use.py", "EFF112")]),
+    ]
+}
+
 /// The initial index.
 fn steps_initial_index() -> Vec<Step> {
     vec![Step::new("initial index", Vec::new()).present(&[
@@ -3289,6 +3327,7 @@ fn steps_initial_index() -> Vec<Step> {
         ("pkg/natives_use.py", "EFF101"),
         ("pkg/lock_use.py", "EFF109"),
         ("pkg/fan_use.py", "EFF110"),
+        ("pkg/order_use.py", "EFF112"),
     ])]
 }
 
@@ -3652,8 +3691,8 @@ fn steps_configuration() -> Vec<Step> {
         Step::new(
             "the configuration becomes invalid",
             vec![Action::Configure(CONFIG.replace(
-                "extend-select = [\"MUT101\", \"MUT107\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\", \"MUT113\", \"EFF109\", \"EFF110\", \"MUT115\", \"MUT118\"]",
-                "extend-select = [\"MUT101\", \"MUT107\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\", \"MUT113\", \"EFF109\", \"EFF110\", \"MUT115\", \"MUT118\"]\nselect = [\"NOPE1\"]",
+                "extend-select = [\"MUT101\", \"MUT107\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\", \"MUT113\", \"EFF109\", \"EFF110\", \"EFF112\", \"MUT115\", \"MUT118\"]",
+                "extend-select = [\"MUT101\", \"MUT107\", \"MUT108\", \"MUT111\", \"EFF107\", \"MUT112\", \"MUT113\", \"EFF109\", \"EFF110\", \"EFF112\", \"MUT115\", \"MUT118\"]\nselect = [\"NOPE1\"]",
             ))],
         )
         .absent(&[("pkg/svc_user.py", "EFF101")]),
@@ -4249,6 +4288,7 @@ sessions!(editing, Session::start, {
     eff109: steps_eff109,
     mut113: steps_mut113,
     eff110: steps_eff110,
+    eff112: steps_eff112,
     receiver_typing: steps_receiver_typing,
     effect_index: steps_effect_index,
     exact_effects: steps_exact_effects,

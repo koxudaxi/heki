@@ -632,6 +632,72 @@ def step_items(n: int) -> str:
     return '\n[[write-owners]]\nname = "shape-steps"\ntargets = ["Model.items"]\nallowed-writers = ["Base.*"]\n'
 
 
+# A function returning a set of strings, for the set-order families.
+SET_ORDER_HELPERS = """import json
+from pathlib import Path
+
+
+def names(table: dict[str, int]) -> set[str]:
+    return set(table)
+
+
+"""
+
+
+def order_returned_up(n: int) -> str:
+    """Functions each returning what the one below returns, the last a list in a set's order,
+    written at the top."""
+    lines = ["def f0(table: dict[str, int]) -> list[str]:", "    return [k for k in names(table)]", ""]
+    for i in range(1, n):
+        lines += [f"def f{i}(table: dict[str, int]) -> list[str]:", f"    return f{i - 1}(table)", ""]
+    lines += ["def top(table: dict[str, int], path: Path) -> None:"]
+    lines += [f"    path.write_text(json.dumps(f{n - 1}(table)))", ""]
+    return SET_ORDER_HELPERS + "\n".join(lines)
+
+
+def order_handed_down(n: int) -> str:
+    """A value in a set's order handed down helpers to the one that writes it."""
+    lines = ["def h0(path: Path, data: object) -> None:", "    path.write_text(json.dumps(data))", ""]
+    for i in range(1, n):
+        lines += [f"def h{i}(path: Path, data: object) -> None:", f"    h{i - 1}(path, data)", ""]
+    lines += ["def top(table: dict[str, int], path: Path) -> None:"]
+    lines += [f"    h{n - 1}(path, [k for k in names(table)])", ""]
+    return SET_ORDER_HELPERS + "\n".join(lines)
+
+
+def comprehensions_over_one_set(n: int) -> str:
+    """Comprehensions over one set, each appended to one list handed to a writer."""
+    lines = ["def write(path: Path, parts: list[object]) -> None:", "    path.write_text(json.dumps(parts))", ""]
+    lines += ["def top(table: dict[str, int], path: Path) -> None:", "    found = names(table)", "    parts = []"]
+    lines += ["    parts.append([k for k in found])"] * n
+    lines += ["    write(path, parts)", ""]
+    return SET_ORDER_HELPERS + "\n".join(lines)
+
+
+def set_or_sorted_branches(n: int) -> str:
+    """A value chosen among a set and many sorted lists by a chain of branches, then iterated and
+    handed to a writer."""
+    lines = ["def write(path: Path, data: object) -> None:", "    path.write_text(json.dumps(data))", ""]
+    lines += ["def top(table: dict[str, int], path: Path, k: int) -> None:", "    found = names(table)"]
+    for i in range(n):
+        lines += [f"    if k == {i}:", "        found = sorted(table)"]
+    lines += ["    write(path, [x for x in found])", ""]
+    return SET_ORDER_HELPERS + "\n".join(lines)
+
+
+def stores_after_reads(n: int) -> str:
+    """A loop over a set storing each element as a key of one mapping, each store after a read of
+    another mapping by the same key and of the stored mapping by another key."""
+    lines = ["def filled(table: dict[str, int], other: dict[str, int], k: str) -> dict:"]
+    lines += ["    fields = {}", "    for name in names(table):"]
+    for i in range(n):
+        lines += [f"        a{i} = {{}}", f"        x{i} = a{i}[name] if other else fields[k]"]
+        lines += ["        fields[name] = other"]
+    lines += ["    return fields", "", "def top(table: dict[str, int], other: dict[str, int], path: Path) -> None:"]
+    lines += ['    path.write_text(json.dumps(filled(table, other, "k")))', ""]
+    return SET_ORDER_HELPERS + "\n".join(lines)
+
+
 # The functions `argument_marks` defines, each named by an argument list of `marked_targets`.
 MARKED_FUNCTIONS = 1000
 
@@ -819,6 +885,18 @@ FAMILIES = [
         "functions_each_calling", project=functions_each_calling, placements=("project",), size=20000
     ),
     Family("self_helper_chain", project=self_helper_chain, placements=("project",), size=2000),
+    Family("order_returned_up", project=order_returned_up, placements=("project",), size=2000),
+    Family("order_handed_down", project=order_handed_down, placements=("project",), size=2000),
+    Family(
+        "comprehensions_over_one_set",
+        project=comprehensions_over_one_set,
+        placements=("project",),
+        size=500,
+    ),
+    Family(
+        "set_or_sorted_branches", project=set_or_sorted_branches, placements=("project",), size=400
+    ),
+    Family("stores_after_reads", project=stores_after_reads, placements=("project",), size=1000),
     Family("callers_of_one_helper", project=callers_of_one_helper, placements=("project",), size=4000),
     Family(
         "reports_sharing_a_chain",

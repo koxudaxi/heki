@@ -266,7 +266,7 @@ report names the missing obligation instead of offering a fix. See [Fixes and sa
 - 🎯 See what heki [covers and does not cover](https://heki.koxudaxi.dev/scope/).
 - 📦 [Install heki](https://heki.koxudaxi.dev/installation/) and 🚀 [run it on a project](https://heki.koxudaxi.dev/getting-started/).
 - ⚙️ [Configure](https://heki.koxudaxi.dev/configuration/) rule selection, contracts, and the Python version.
-- 📏 Browse the [42 rules](https://heki.koxudaxi.dev/rules/), and see [how precise each one is](https://heki.koxudaxi.dev/precision/).
+- 📏 Browse the [43 rules](https://heki.koxudaxi.dev/rules/), and see [how precise each one is](https://heki.koxudaxi.dev/precision/).
 - 🔧 Read how [fixes are proven safe](https://heki.koxudaxi.dev/fixes/).
 - 🪜 [Adopt it gradually](https://heki.koxudaxi.dev/adoption/) with a Ratchet baseline in CI.
 - 🖥️ Use it from [your editor](https://heki.koxudaxi.dev/lsp/) or 🤖 [a coding agent](https://heki.koxudaxi.dev/coding-agents/).
@@ -698,8 +698,8 @@ The proofs heki can make, on five axes:
 | Axis | What heki establishes | Used by |
 | ---- | --------------------- | ------- |
 | Control flow | which statements can run after which: CFG paths, loops and their bounds, exception edges | `MUT106`, `MUT109`, `MUT113`, `EFF102`, `EFF103`, `EFF106`, `EFF109`, `EFF110`, `DATA101`, `OPT` |
-| Calls | which functions a call reaches across modules, and what they do (summaries propagated over the call graph) | `EFF101`, `EFF109`, `EFF110`, `EFF201`, `MUT103`, `MUT108`, `MUT109`, `MUT110`, `MUT112`, `MUT113`, `MUT201`–`MUT204` |
-| Aliases | which names, iterators, and views refer to one object; whether it is unique to its frame and of an exact builtin type | `MUT202`, `MUT201`, `MUT204`, `MUT108`, `MUT110`, `MUT112`, `EFF107`, `EFF109`, `EFF110`, `OPT101`–`OPT130` |
+| Calls | which functions a call reaches across modules, and what they do (summaries propagated over the call graph) | `EFF101`, `EFF109`, `EFF110`, `EFF112`, `EFF201`, `MUT103`, `MUT108`, `MUT109`, `MUT110`, `MUT112`, `MUT113`, `MUT201`–`MUT204` |
+| Aliases | which names, iterators, and views refer to one object; whether it is unique to its frame and of an exact builtin type | `MUT202`, `MUT201`, `MUT204`, `MUT108`, `MUT110`, `MUT112`, `EFF107`, `EFF109`, `EFF110`, `EFF112`, `OPT101`–`OPT130` |
 | Effects | which blocking, network, file, or database work runs, from the catalog of library behavior | `EFF101`–`EFF106`, `EFF201`, `DATA101` |
 | State | which attributes and containers a function reads, writes, or mutates, and who may do so | `MUT101`, `MUT107`, `MUT108`, `MUT109`, `MUT110`, `MUT111`, `MUT112`, `MUT113`, `MUT201`–`MUT204` |
 
@@ -1088,9 +1088,9 @@ supported version that every clause admits:
 - A run of `full` or `concise` output that leaves heuristic rules off, or heuristic reports out,
   says how many.
 - A prefix or `ALL` never enables the opt-in rules (`EFF105`, `EFF106`, `EFF107`, `EFF109`,
-  `EFF110`, `MUT101`, `MUT103`, `MUT106`, `MUT107`, `MUT108`, `MUT111`, `MUT112`, `MUT113`,
-  `MUT115`): they
-  need their exact code or name. In `ignore`, a prefix covers every rule it matches.
+  `EFF110`, `EFF112`, `MUT101`, `MUT103`, `MUT106`, `MUT107`, `MUT108`, `MUT111`, `MUT112`,
+  `MUT113`, `MUT115`): they need their exact code or name. In `ignore`, a prefix covers every
+  rule it matches.
 - The command line wins: `--select` replaces `select`, `--extend-select` and `--ignore` add to the
   configured lists, and `--heuristic` / `--no-heuristic` replace `heuristic`.
 
@@ -2248,7 +2248,7 @@ Rules worth enabling here
   rule    reports  exact  consequence  right about the code (published)  real harm  block
   MUT106        1      -  bug          not measured                      -          yes
   OPT110        1      0  slowdown     78% (65-87%), n=50, 2026-11-21    6%         no: slower code, not a bug
-  No reports here: EFF102, EFF105, EFF106, EFF107, EFF109, EFF110, EFF111, EFF113, MUT101, MUT107, MUT108, MUT111, MUT112, MUT113, MUT115, MUT118, OPT112
+  No reports here: EFF102, EFF105, EFF106, EFF107, EFF109, EFF110, EFF111, EFF112, EFF113, MUT101, MUT107, MUT108, MUT111, MUT112, MUT113, MUT115, MUT118, OPT112
   MUT103: it compares with a saved summary snapshot: run `heki snapshot --write`, then select it.
 
 Notes
@@ -2519,7 +2519,7 @@ Source: https://heki.koxudaxi.dev/rules/
 
 # Rules
 
-heki has 42 rules in four families. A rule is exact when it reports only what it established and was certified on the corpus, and heuristic (≈) when a report can be wrong about the code: [Rule Precision](https://heki.koxudaxi.dev/precision/) says how a rule is certified and what each one measured. Each rule's page says what a report states.
+heki has 43 rules in four families. A rule is exact when it reports only what it established and was certified on the corpus, and heuristic (≈) when a report can be wrong about the code: [Rule Precision](https://heki.koxudaxi.dev/precision/) says how a rule is certified and what each one measured. Each rule's page says what a report states.
 
 - The exact rules run by default, and for a prefix such as `EFF` or `ALL`. A report of an exact rule that did not establish every premise (an `OPT` report whose rewrite is not proven) is shown where a heuristic rule would run.
 - A heuristic rule runs when `select` / `extend-select` names its code or name. With `lint.heuristic = true` (`--heuristic`), the heuristic rules that are not opt-in also run by default and for a prefix or `ALL`.
@@ -2578,6 +2578,7 @@ Work that runs where it should not: blocking calls on the event loop, clients an
 | EFF107 | [unretained-async-task](https://heki.koxudaxi.dev/rules/unretained-async-task/) | Opt-in: an `asyncio.create_task` result bound to a local variable but never awaited, returned, or stored. | ≈ 🔌 |
 | EFF109 | [lock-reacquired-while-held](https://heki.koxudaxi.dev/rules/lock-reacquired-while-held/) | Opt-in: a non-reentrant lock (`threading.Lock`, `asyncio.Lock`) taken again, directly or through a call, while it is held (the thread or task waits for itself). | ≈ 🔌 🧪 |
 | EFF110 | [exclusive-object-fanout](https://heki.koxudaxi.dev/rules/exclusive-object-fanout/) | Opt-in: an object allowing one operation at a time (`asyncio.StreamReader`, an asyncpg connection, a WebSocket) used by tasks started together (`asyncio.gather`, a task group). | ≈ 🔌 🧪 |
+| EFF112 | [set-order-output](https://heki.koxudaxi.dev/rules/set-order-output/) | Opt-in: the iteration order of a set of strings, which changes between runs, reaches a file, a stream, a serializer, or a raised exception's message across a call. | ≈ 🔌 🧪 |
 | EFF201 | [effect-boundary-violation](https://heki.koxudaxi.dev/rules/effect-boundary-violation/) | Reaching a forbidden effect (directly or through calls) from a declared `effect-boundaries` scope. | ≈ 📜 |
 
 ## Data Pipelines (DATA)
@@ -2831,6 +2832,7 @@ An experimental rule is never enabled by default: it runs only when `select` or 
 | `command.recommend` | command | `heki recommend` | 0.2.2 | - |
 | `rule.EFF109` | rule | [`EFF109`](https://heki.koxudaxi.dev/rules/lock-reacquired-while-held/) | 0.2.1 | - |
 | `rule.EFF110` | rule | [`EFF110`](https://heki.koxudaxi.dev/rules/exclusive-object-fanout/) | 0.2.1 | - |
+| `rule.EFF112` | rule | [`EFF112`](https://heki.koxudaxi.dev/rules/set-order-output/) | 0.2.4 | - |
 | `rule.MUT101` | rule | [`MUT101`](https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/) | 0.1.0 | - |
 | `rule.MUT111` | rule | [`MUT111`](https://heki.koxudaxi.dev/rules/cached-property-stale-read/) | 0.1.1 | - |
 | `rule.MUT112` | rule | [`MUT112`](https://heki.koxudaxi.dev/rules/conditional-ownership-mutation/) | 0.2.0 | - |
@@ -2883,6 +2885,14 @@ Its precision is measured on a small sample of reports only.
 - **Since:** 0.2.1
 
 Its precision is measured on a small sample of reports only.
+
+## `rule.EFF112`
+
+- **Kind:** rule
+- **Target:** [`EFF112`](https://heki.koxudaxi.dev/rules/set-order-output/)
+- **Since:** 0.2.4
+
+Its precision is measured on a sample of reports of one corpus only, and its premises are not yet certified.
 
 ## `rule.MUT101`
 
@@ -3042,7 +3052,7 @@ On a save, the edit reaches other files only through what it changes:
 
 | The edit changes | Also re-analyzed |
 | ---------------- | ---------------- |
-| a function's effects, the locks it takes (`EFF109`), the objects it uses one operation at a time (`EFF110`), or what the object it returns may be (a new one, its argument, or state it keeps) | its callers, and the functions of a call cycle through it (their effects change with it) |
+| a function's effects, the locks it takes (`EFF109`), the objects it uses one operation at a time (`EFF110`), what it returns in a set's order or writes of its parameters (`EFF112`), or what the object it returns may be (a new one, its argument, or state it keeps) | its callers, and the functions of a call cycle through it (their effects change with it) |
 | a declaration that names resolve through: a re-exported class, a new method or base class, a property getter, a subclass, an offloading decorator | every file that resolved names through it |
 | a method of a class family | the classes of that family; with `MUT112` selected, every changed method counts: a value stored in `self.<attr>` is reported when a method of the family changes that attribute in place |
 | what a function changes of its own containers, or what it does with the generators it calls (`MUT113`, when selected) | the classes of its family with generators suspending inside an iteration of their containers, and those of the generators it calls |
@@ -3620,7 +3630,11 @@ changed, thousands of calls handing a global to a helper that changes it, thousa
 comprehensions or generator expressions, each over a value the function creating them binds just
 before, and, through `heki dump-recommend-facts`, the calls heki is blind to in a chain of
 thousands of helpers below as many `async def`s and the census of the attributes of thousands of
-classes.
+classes, and, for the set orders `EFF112` follows, a chain of thousands of functions returning a
+value in a set's order up to the one writing it, a value handed down thousands of helpers to the
+one writing it, hundreds of comprehensions over one set appended to one written list, a value
+chosen among a set and hundreds of sorted lists by a chain of branches, and a thousand stores of
+a set's element as a key, each after reads of other mappings by the same key.
 
 A change to the IR builder, a walk, a fixpoint, or a rule's state is also run over a large
 corpus of real projects before it is merged, every run under a memory cap and a timeout. No
@@ -7921,6 +7935,145 @@ Applied by `heki check --fix` only when proven safe, with the same obligations a
   `len(s)`, truthiness, `==` / `!=` with a builtin value); a set that is iterated, converted
   (`sorted(s)`, `list(s)`), formatted, returned, stored, yielded, or passed to other code keeps
   `s = s | t`. A dict keeps its insertion order either way.
+
+
+---
+
+Source: https://heki.koxudaxi.dev/rules/set-order-output/
+
+# set-order-output (EFF112)
+
+Family: Execution Effects (EFF) · Heuristic · Opt-in · Experimental · Severity `error` (a bug) · No automatic fix
+
+Opt-in: the iteration order of a set of strings, which changes between runs, reaches a file, a stream, a serializer, or a raised exception's message across a call.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs only when `select` or `extend-select` names its code or name. It has not been measured yet. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
+
+!!! warning "Experimental"
+
+    Its precision is measured on a sample of reports of one corpus only, and its premises are not yet certified. Experimental features can still change in behavior or precision, or be removed, in any release, and each change is listed in the release notes. An opt-in rule that is not experimental is stable and only off by default. See [Experimental Features](https://heki.koxudaxi.dev/experimental/).
+
+## What it does
+Checks for the iteration order of a set of strings reaching an output across a call: a
+function builds a value in the order it iterates a set (or picks an element of one) and returns
+it, and its caller writes it; or a function hands such a value to a call that writes it. The
+rule is opt-in: enable it with `--extend-select EFF112` or `extend-select = ["EFF112"]`.
+
+The set is a `set` or `frozenset` of `str` or `bytes` values (or tuples of them), by
+construction (a display, a comprehension, `set()`, `frozenset()`, a set operator such as
+`a & b.keys()`, a module constant bound once to one) or by annotation (`set[str]`, a callee's
+declared return type). Python randomizes the hashes of strings per process, so such a set
+iterates in a different order from run to run.
+
+The order is taken where the code iterates the set (a loop, a comprehension, a generator
+expression), copies it into a sequence or text (`list()`, `tuple()`, `str.join()`, formatting),
+or picks an element of it (`set.pop()`, `next(iter(...))`, the first element a loop returns). It
+follows the value through assignments, displays, formatting, string concatenation (text built
+element by element in a loop included), the containers it is appended to or stored in, returns,
+and the calls of the project.
+
+The outputs are:
+
+- files and streams: `pathlib.Path.write_text` / `write_bytes`, `print`, `sys.stdout.write`,
+  and `write` on a file the function opens;
+- serializers: `json.dumps` / `json.dump` unless `sort_keys=True`, `yaml.dump` /
+  `yaml.safe_dump` with `sort_keys=False`, `pprint.pprint` / `pprint.pformat` with
+  `sort_dicts=False`, and `pprint.pp`;
+- the message of a raised builtin exception built from the whole value
+  (`ValueError("unknown: " + ", ".join(names))`).
+
+Add your own writers with `writes-in-order` in `[[tool.heki.ecosystem]]`. The report is placed
+where the ordered value meets the output: the call whose result is written, or the place the
+order is taken when it is handed to a call that writes it. The place the order is taken and the
+calls on the way are related locations.
+
+It does not report:
+
+- a flow inside one function (`", ".join(names)` written in the same function): one expression
+  and its type decide it, which is a linter's check;
+- a set of other values (`set[int]` iterates in the same order in every run), or of values whose
+  type heki does not know;
+- a value sorted on the way (`sorted(...)`), turned back into a set, measured (`len`), compared,
+  or only tested for membership;
+- a set holding at most one element on every path to where its order is taken
+  (`if len(s) > 1: return None`, then `s.pop()`, also as one operand of `or` / `and`:
+  `if len(s) != 1 or not ok: return None`), or a sequence copied from it holding at most one
+  where an item is read from it (`if len(rest) > 1: ...`, then `rest[0]`);
+- one element at a time written to its own file (`(root / name).write_text(...)` in a loop
+  over the set): only an output that appends, such as a stream, writes the set's order;
+- an exception raised for one element at a time (`for name in names: check(f"pkg.{name}")`,
+  raising with its argument): it names the first element that fails, which depends on the order
+  only when two fail;
+- a mapping read back by key (`summary[path]` for each `path` of `sorted(summary)`), and a key
+  read from the mapping before and stored again (`fields[k] = fields[k].strip()`), which keeps
+  its place;
+- a set filled with the elements (`seen.update(...)`): a set has an order of its own, and
+  iterating it is a take of its own; `insert`, `update`, and `setdefault` on a value heki does
+  not know as a list or a mapping;
+- a writer whose sorting switch heki cannot evaluate (`json.dumps(data, sort_keys=flag)`), and
+  `logging` and `warnings.warn`;
+- a value passed through code heki does not follow: a template engine, a call it cannot
+  resolve.
+
+## What a report states
+
+A report states that a value whose order (or whose element, for a pick) comes from iterating a
+set of strings reaches the output call shown in that order, across a call, so the written text
+changes from run to run.
+
+Its premises:
+
+- **Set order**: the iterated value is a `set` or `frozenset`, by construction or annotation
+  (assumption R2). Open through an annotation.
+- **Run-dependent hashes**: its elements are `str` or `bytes`, or tuples of them, by
+  construction or annotation. Open through an annotation.
+- **Order taken**: the code iterates, copies, formats, or picks from the set, with no `sorted()`
+  after it on the way, and the set may hold two elements there. Established.
+- **Reaches output**: the value, or a value built from it in order, is the argument of the
+  output call, through assignments, returns, and calls. Open: one path is enough.
+- **Writes in order**: the output call writes its argument in the value's order, as the catalog
+  describes it (assumption R3), with its sorting switch established off. Established.
+
+## Why is this bad?
+A program whose output depends on the iteration order of a set of strings writes different
+files on different runs: generated code and configuration change without a change to their
+input, `--check` modes fail at random, caches and snapshots miss, and two runs of a test
+disagree. The order is fixed only within one process, so the difference shows on another
+machine or in CI, rarely where the code was written.
+
+## Example
+```python
+import json
+from pathlib import Path
+
+
+def referenced(schema: dict[str, dict]) -> set[str]:
+    return {value["$ref"] for value in schema.values() if "$ref" in value}
+
+
+def components(schema: dict[str, dict], schemas: dict[str, dict]) -> dict[str, dict]:
+    return {name: schemas[name] for name in referenced(schema)}
+
+
+def write_components(schema: dict[str, dict], schemas: dict[str, dict], path: Path) -> None:
+    path.write_text(json.dumps(components(schema, schemas)))  # EFF112
+```
+
+Use instead:
+```python
+def components(schema: dict[str, dict], schemas: dict[str, dict]) -> dict[str, dict]:
+    return {name: schemas[name] for name in sorted(referenced(schema))}
+```
+
+## Fix safety
+No automatic fix.
+
+## Options
+- `lint.extend-select = ["EFF112"]` (or `--extend-select EFF112`) enables the rule. It is
+  opt-in: selecting the `EFF` prefix does not enable it.
+- `[[tool.heki.ecosystem]]` entries with `writes-in-order` add writers.
 
 
 ---
