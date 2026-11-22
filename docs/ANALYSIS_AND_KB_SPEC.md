@@ -846,7 +846,12 @@ re-propagated into their summaries, so that the incremental index always equals 
 the language server re-checks the files whose diagnostics show a moved call site. The call chains
 of `MUT108` / `MUT110` reports are no summary facts: the rule walks the own summaries and project
 calls of the functions below the call (`FileSummary::local_functions` and `call_sites`) down to
-the first function whose body makes the change. The language server compares these facts of the
+the first function whose body makes the change. A heuristic `MUT110` report, whose chain names no
+line, records "Changed at the line" open when the run asks (`CheckExtras::open_premises`): no
+function on the chain makes the change in its own body (a generator another function returns is
+iterated), or the one that does is not where its own summary establishes a builtin container whose
+changing method no project subclass replaces (`EffectSummary::param_inplace_sites`, which keeps no
+reason). The language server compares these facts of the
 edited file's functions that change a parameter in place (`heki_rules::chain_facts`) and
 re-checks the files with such reports above a function whose facts changed. Likewise, while
 `MUT111` is selected, it keeps the stale writes `MUT101` finds in each file's methods, with the
@@ -1238,7 +1243,14 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      live return, by its return annotation or by construction), the changed value is that one
      function's result on every path (`MustResult`, an optimistic fixpoint over copies and phis:
      a value starts unset and moves only down, to one cached function, then to anything else),
-     and the instruction changes a container of that kind in place. Filling a memo of the shared object or initializing one of its attributes
+     and the instruction changes a container of that kind in place. One decision,
+     `Mut202Fn::cached_change_steps`, tells each premise that does not hold, which a heuristic
+     report records as open when the run asks (`CheckExtras::open_premises`): "Same object" from
+     `MustResult` (over the result of any one project function, so that the cached function's
+     own premises stay apart) or a wrapper on the way, "Cached", "Keyed", and "Container kind"
+     together from a missing `CachedResult` (it keeps no reason, so all three are recorded), and
+     "Changed in place" from a change through a called function, a line that is no change of the
+     kind, or a subclass the annotation admits that replaces the method. Filling a memo of the shared object or initializing one of its attributes
      lazily (`SelfAttrWrite::fills_memo`, `lazy_init`, on any object a parameter or a tagged value
      holds; through a call, a change of the object a memo-named attribute holds) is no change:
      what the object computes stays the same. A change below a shallow copy
@@ -1360,7 +1372,14 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      concatenation and padding in a loop are excluded, and so is a value rebuilt only from
      arithmetic on the previous one (`x = np.concatenate((x - d, [a]))`): an operator holds an
      operand only as list or tuple concatenation and repetition or dict union, and an operand
-     sliced or computed from the previous array or frame makes it work entry by entry.
+     sliced or computed from the previous array or frame makes it work entry by entry. The exact
+     tier is one decision (`UpdateDecision::steps`), told the premises that do not hold in the
+     order it takes them: the update is a catalog call that reallocates on every call
+     ("Reallocates"), the previous value is held and every path around the back edge carries
+     the update ("Loop-carried on every path"), every iteration, and the loop's trip count and
+     items ("Origin", as for `EFF103`). A decision stops at the first and asks for the loop's
+     items whatever the steps before it found, as it always did; an explanation (when the run
+     records open premises) goes on with a budget the function's explanations share.
 4. **Duplicate aggregation (boundary-only reporting and root-cause grouping)**:
    - In `async A → await async B → sync C → blocking D`, only the first crossing into the
      synchronous world (`async B`) is reported; when more than a threshold (10) of the reports

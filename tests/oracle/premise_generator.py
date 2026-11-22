@@ -324,16 +324,27 @@ def mut114(sc, strip):
     deco = "@functools.lru_cache(maxsize=0)" if strip == "Cached" else "@functools.lru_cache(maxsize=None)"
     params = "" if strip == "Keyed" else "name"
     build = '[name, "id"]'
+    annotation = " -> list[str]"
+    change = 'result.append("x")'
     if strip == "Container kind":
+        # Neither the construction nor an annotation names a builtin container.
         sc.frozen = True
         build = f"Frozen_{sc.ns}({build})"
+        annotation = ""
+    if strip == "Changed in place":
+        # No change in place, or one a project subclass replaces where only the return
+        # annotation names the kind (R2 admits the subclass).
+        if sc.pick(["rebind", "subclass"]) == "rebind":
+            change = 'result = result + ["x"]'
+        else:
+            sc.frozen = True
+            build = f"Frozen_{sc.ns}({build})"
     body = ['name = "fixed"', f"return {build}"] if strip == "Keyed" else [f"return {build}"]
-    sc.define([deco] + block(f"def {cached}({params}) -> list[str]:", body))
+    sc.define([deco] + block(f"def {cached}({params}){annotation}:", body))
     call = f"{cached}({'' if strip == 'Keyed' else 'name'})"
     lines = [f"result = {call}"]
     if strip == "Same object":
         lines = [sc.pick([f"result = list({call})", f"result = {call} if not flag else []"])]
-    change = 'result = result + ["x"]' if strip == "Changed in place" else 'result.append("x")'
     entry = sc.name("use")
     sc.define(block(f"def {entry}(name, {sc.params}):", lines + [change, "return result"]))
     _add_inputs(sc, entry, lambda k: [["a", "b"][k % 2]])
@@ -564,6 +575,9 @@ RELEVANCE = {("MUT114", "Keyed"), ("OPT113", "Steps through inputs")}
 OPEN_PREMISE_CODES = {
     "EFF101": "EFF111",
     "EFF103": "EFF113",
+    "DATA101": "DATA101",
+    "MUT110": "MUT110",
+    "MUT114": "MUT114",
     **{rule: rule for rule in OPT_PATTERNS},
     "OPT113": "OPT113",
 }

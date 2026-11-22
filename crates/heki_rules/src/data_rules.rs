@@ -3,16 +3,18 @@
 use crate::eff_rules::{DataOrigins, ItemOrigins, shortest};
 use crate::mut_rules::{CallInst, site_call};
 use crate::opt_rules::{Creators, Sizes};
+use crate::premises::{self, OpenCause, Told};
 use crate::{CheckContext, FnSites, ModuleUnit};
-use heki_diagnostics::Diagnostic;
+use heki_diagnostics::{Certainty, Diagnostic, OpenPremise};
 use heki_effect::{CallHop, CallSite, CallTarget, SiteEffect, TypeCtx, with_paths};
 use heki_ir::walk::{Answer, Budget, Def, FnShape, Visit, reach};
 use heki_ir::{
-    BinOpKind, BlockId, BuiltinKind, ConstLiteral, Inst, InstKind, IrFunction, LoopCarriedInfo,
-    Must, NaturalLoop, Progress, UnaryOpKind, VarId,
+    BinOpKind, BlockId, BuiltinKind, ConstLiteral, FnIndex, Inst, InstKind, IrFunction,
+    LoopCarriedInfo, Must, NaturalLoop, Paths, Progress, UnaryOpKind, VarId,
 };
 use heki_kb::ExecEffectKind;
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::ops::ControlFlow;
 
 /// `DATA101`: a loop-carried variable rebuilt *from itself* through a `QuadraticRealloc` API
 /// (`df = pd.concat([df, part])`): one of its accumulating updates (`LoopCarriedInfo::updates`,
@@ -99,8 +101,9 @@ pub(crate) fn data101(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Ve
             continue;
         }
         let origins = item_origins.get_or_init(|| ItemOrigins::new(unit.input.ir));
-        let established = established_updates(cx, unit, &tcx, f, origins, &hits);
-        for (hit, established) in hits.iter().zip(established) {
+        let verdicts = established_updates(cx, unit, &tcx, f, origins, &hits);
+        for (hit, verdict) in hits.iter().zip(verdicts) {
+            let established = verdict.exact;
             let Hit {
                 lc, span, chain, ..
             } = hit;
@@ -124,8 +127,8 @@ pub(crate) fn data101(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Ve
                     ),
                 ),
             };
-            let premises = crate::premises::tier("DATA101", established.is_some());
-            cx.emit(
+            let tier = premises::tier("DATA101", established.is_some());
+            if let Some(d) = cx.emit(
                 out,
                 "DATA101",
                 unit,
@@ -135,9 +138,14 @@ pub(crate) fn data101(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Ve
                 format!("`{var}` is rebuilt from itself with `{root}` {every}"),
                 help,
                 chain,
-            )
-            .into_iter()
-            .for_each(|d| d.certainty = premises.at_most(d.certainty));
+            ) {
+                d.certainty = tier.at_most(d.certainty);
+                debug_assert!(
+                    !cx.open_premises || tier == Certainty::Exact || !verdict.open.is_empty(),
+                    "a heuristic DATA101 report records why it is not exact"
+                );
+                d.open_premises = verdict.open;
+            }
         }
     }
 }
@@ -156,15 +164,19 @@ struct Hit<'s> {
     at: &'s [&'s CallSite],
 }
 
-/// The origins that establish each `DATA101` report of `hits` in `f`, named as `EFF103` names
-/// them, with one inference, one analysis of the paths, and one budget for the function: the
-/// update is the reallocating catalog call itself (a project helper may return another value)
-/// and copies the whole previous value whenever it returns (`ProjectIndex::site_must` of its
-/// call sites), the data it combines holds the previous value itself, not a value only some
-/// paths make it ([`holds_previous`]), it returns on every iteration of the loop that completes,
-/// and every path around the back edge carries it (no path resets the variable); the loop steps
-/// through items the data decides, and its trip count is not one the code fixes. `None` where a
-/// premise is not established.
+/// The decision on one `DATA101` report ([`established_updates`]): established, with the items'
+/// origins, or, when the run records them ([`CheckContext::open_premises`]), the premises it
+/// leaves open.
+struct UpdateVerdict {
+    exact: Option<DataOrigins>,
+    open: Vec<OpenPremise>,
+}
+
+/// The decision on each `DATA101` report of `hits` in `f`, with one inference, one analysis of
+/// the paths, and one budget for the function ([`UpdateDecision::steps`]); the origins named as
+/// `EFF103` names them where every premise is established. When the run records open premises,
+/// an update that is not established says which, from the same steps: the explanations spend a
+/// budget of their own, so the decisions of the other updates spend the shared one as they did.
 fn established_updates(
     cx: &CheckContext<'_>,
     unit: &ModuleUnit<'_>,
@@ -172,36 +184,128 @@ fn established_updates(
     f: &IrFunction,
     origins: &ItemOrigins<'_>,
     hits: &[Hit<'_>],
-) -> Vec<Option<DataOrigins>> {
+) -> Vec<UpdateVerdict> {
     let types = tcx.infer(f);
     let owner = "heki_rules::data_rules::established_updates";
     let budget = Budget::of_function(owner, f);
+    let explaining = cx.open_premises.then(|| Budget::of_function(owner, f));
     with_paths(tcx, f, &types, owner, |paths, ix| {
-        let shape = &ix.shape;
+        let decision = UpdateDecision {
+            cx,
+            unit,
+            tcx,
+            f,
+            paths,
+            ix,
+            origins,
+        };
         hits.iter()
             .map(|hit| {
-                hit.at
-                    .iter()
-                    .filter(|s| matches!(s.target, CallTarget::Layer2 { .. }))
-                    .find_map(|s| {
-                        cx.index
-                            .site_must(&unit.input.path, s, ExecEffectKind::QuadraticRealloc)
-                    })?;
-                let li = f.loops.iter().position(|l| l.header == hit.lp.header)?;
-                let established = holds_previous(shape, hit.call, hit.lc.phi_var)
-                    && paths.on_every_iteration(li, hit.position, Progress::Returned)
-                        == Answer::Known(Must::Every)
-                    && ix.fixed_trips(hit.lp, &mut |_| None).is_open()
-                    && carries_only(shape, f, &budget, &hit.lc.back_vars, hit.update);
-                match origins.of_loop(&budget, f.id, li) {
-                    Answer::Known(found) if established => {
-                        DataOrigins::of(cx, tcx, unit.input.ir, &found).ok()
-                    }
-                    _ => None,
+                let mut first: Option<&'static OpenCause> = None;
+                let exact = decision.steps(hit, &budget, &mut |cause| {
+                    first = Some(cause);
+                    ControlFlow::Break(())
+                });
+                let mut open: Vec<OpenPremise> = Vec::new();
+                if let (None, Some(explaining)) = (&exact, &explaining) {
+                    let mut record = |cause: &'static OpenCause| {
+                        let premise = cause.open_at(None, None);
+                        if !open.contains(&premise) {
+                            open.push(premise);
+                        }
+                    };
+                    first.into_iter().for_each(&mut record);
+                    decision.steps(hit, explaining, &mut |cause| {
+                        record(cause);
+                        ControlFlow::Continue(())
+                    });
                 }
+                UpdateVerdict { exact, open }
             })
             .collect()
     })
+}
+
+/// What [`UpdateDecision::steps`] reads of one function.
+struct UpdateDecision<'d, 'o> {
+    cx: &'d CheckContext<'d>,
+    unit: &'d ModuleUnit<'d>,
+    tcx: &'d TypeCtx<'d>,
+    f: &'d IrFunction,
+    paths: &'d Paths<'d, 'd>,
+    ix: &'d FnIndex<'d>,
+    origins: &'d ItemOrigins<'o>,
+}
+
+impl UpdateDecision<'_, '_> {
+    /// The decision on the `DATA101` report of `hit`, each premise that does not hold told to
+    /// `steps` with its cause, in the order the decision takes them: the update is the
+    /// reallocating catalog call itself (a project helper may return another value) and copies
+    /// the whole previous value whenever it returns (`ProjectIndex::site_must` of its call
+    /// sites), the data it combines holds the previous value itself, not a value only some paths
+    /// make it ([`holds_previous`]), it returns on every iteration of the loop that completes,
+    /// the code does not fix the loop's trip count, every path around the back edge carries it
+    /// (no path resets the variable), and the loop steps through items the data decides. A
+    /// decision stops at the first, but asks for the loop's items past a reallocation it
+    /// establishes whatever the steps between found, as it always did; an explanation goes on.
+    /// The items' origins when every premise holds.
+    fn steps(
+        &self,
+        hit: &Hit<'_>,
+        budget: &Budget,
+        steps: &mut dyn FnMut(&'static OpenCause) -> ControlFlow<()>,
+    ) -> Option<DataOrigins> {
+        let (cx, f, ix) = (self.cx, self.f, self.ix);
+        let shape = &ix.shape;
+        let mut told = Told::new(steps);
+        let reallocates = hit
+            .at
+            .iter()
+            .filter(|s| matches!(s.target, CallTarget::Layer2 { .. }))
+            .find_map(|s| {
+                cx.index
+                    .site_must(&self.unit.input.path, s, ExecEffectKind::QuadraticRealloc)
+            });
+        if reallocates.is_none() && told.step(&premises::NOT_THE_CATALOG_CALL) {
+            return None;
+        }
+        let li = f.loops.iter().position(|l| l.header == hit.lp.header)?;
+        if !holds_previous(shape, hit.call, hit.lc.phi_var) {
+            told.step(&premises::PREVIOUS_VALUE_NOT_HELD);
+        }
+        let every_iteration = || {
+            self.paths
+                .on_every_iteration(li, hit.position, Progress::Returned)
+                == Answer::Known(Must::Every)
+        };
+        if !told.stopped && !every_iteration() {
+            told.step(&premises::NOT_EVERY_ITERATION);
+        }
+        if !told.stopped && !ix.fixed_trips(hit.lp, &mut |_| None).is_open() {
+            told.step(&premises::FIXED_BY_THE_CODE);
+        }
+        if !told.stopped && !carries_only(shape, f, budget, &hit.lc.back_vars, hit.update) {
+            told.step(&premises::RESET_ON_A_PATH);
+        }
+        match self.origins.of_loop(budget, f.id, li) {
+            Answer::Known(found) if !told.stopped => {
+                match DataOrigins::of(cx, self.tcx, self.unit.input.ir, &found) {
+                    Ok(found) => (!told.open).then_some(found),
+                    Err(cause) => {
+                        told.step(cause);
+                        None
+                    }
+                }
+            }
+            Answer::Known(_) => None,
+            Answer::Open => {
+                if !told.stopped {
+                    told.step(&premises::NO_ITEMS_FOLLOWED);
+                }
+                None
+            }
+        }
+    }
 }
 
 /// Whether the data the reallocating call `kind` combines holds `previous` itself, on every

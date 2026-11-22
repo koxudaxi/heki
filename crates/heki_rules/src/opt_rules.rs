@@ -14,7 +14,7 @@
 //! lane never trusts.
 
 use crate::mut_rules::{CallInst, site_call};
-use crate::premises::{self, OpenCause};
+use crate::premises::{self, OpenCause, Told};
 use crate::{CheckContext, ModuleUnit, SitesBySpan};
 use heki_ast::Span;
 use heki_diagnostics::{Certainty, Diagnostic, OpenPremise, TextEdit};
@@ -1359,25 +1359,6 @@ enum JoinStep {
     TripsFixed,
 }
 
-/// The steps of one decision that do not hold, told to whoever asks: a decision stops at the
-/// first (`ControlFlow::Break`), an explanation goes on through the others.
-struct Told<'s> {
-    steps: &'s mut dyn FnMut(JoinStep) -> ControlFlow<()>,
-    /// A step did not hold.
-    open: bool,
-    /// The last step told stops the decision.
-    stopped: bool,
-}
-
-impl Told<'_> {
-    /// Tells `step`; true when the decision stops at it.
-    fn step(&mut self, step: JoinStep) -> bool {
-        self.open = true;
-        self.stopped = (self.steps)(step).is_break();
-        self.stopped
-    }
-}
-
 /// The decision on one `OPT113` report's exact tier ([`JoinPremises::steps`]).
 struct JoinVerdict {
     /// The inner loop steps through the same collection, with the same keys, on every outer
@@ -1424,11 +1405,7 @@ impl JoinPremises<'_, '_, '_> {
         key: VarId,
         steps: &mut dyn FnMut(JoinStep) -> ControlFlow<()>,
     ) -> JoinVerdict {
-        let mut told = Told {
-            steps,
-            open: false,
-            stopped: false,
-        };
+        let mut told = Told::new(steps);
         let collection = self.same_collection_each_time(inner, outer);
         if !collection && told.step(JoinStep::Open(&premises::COLLECTION_MAY_CHANGE, None)) {
             return JoinVerdict {
@@ -1444,7 +1421,7 @@ impl JoinPremises<'_, '_, '_> {
             };
         }
         let same_collection = collection && keys;
-        let verdict = |told: &Told<'_>| JoinVerdict {
+        let verdict = |told: &Told<'_, JoinStep>| JoinVerdict {
             same_collection,
             exact: !told.open,
         };
@@ -1635,7 +1612,7 @@ impl JoinPremises<'_, '_, '_> {
         inner: &ForLoop<'_>,
         outer: &ForLoop<'_>,
         cmp: VarId,
-        told: &mut Told<'_>,
+        told: &mut Told<'_, JoinStep>,
     ) -> bool {
         let f = self.defs.f;
         let shape = &self.sizes.ix.shape;

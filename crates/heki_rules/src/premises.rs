@@ -17,13 +17,15 @@
 //!   separate yet, and says so, rather than guessing one of them. The rules recording causes so
 //!   far are `EFF101` (with its heuristic side `EFF111`), `EFF103` (with `EFF113`), the eight
 //!   `OPT` rewrites (a cause of "Rewrite proven safe" per proof obligation,
-//!   [`OBLIGATION_CAUSES`]), and `OPT113`. A heuristic report whose premises all hold records
-//!   none: a proven `OPT` rewrite or an `OPT113` join in a loop whose trip count the code fixes,
-//!   which the exact tier leaves out because a fixed count is no evidence either way.
+//!   [`OBLIGATION_CAUSES`]), `OPT113`, `DATA101`, `MUT110`, and `MUT114`. A heuristic report
+//!   whose premises all hold records none: a proven `OPT` rewrite or an `OPT113` join in a loop
+//!   whose trip count the code fixes, which the exact tier leaves out because a fixed count is no
+//!   evidence either way.
 
 use heki_diagnostics::{Certainty, OpenPremise, RelatedLocation};
 use heki_soundness::ObligationKind;
 use serde::Serialize;
+use std::ops::ControlFlow;
 
 /// One premise of an exact claim.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -79,6 +81,34 @@ impl OpenCause {
             at,
             detail,
         }
+    }
+}
+
+/// The steps of one decision that do not hold, told to whoever asks: a decision stops at the
+/// first (`ControlFlow::Break`), so it spends nothing on the steps after it, and an explanation
+/// goes on through the others.
+pub(crate) struct Told<'s, S> {
+    steps: &'s mut dyn FnMut(S) -> ControlFlow<()>,
+    /// A step did not hold.
+    pub open: bool,
+    /// The last step told stops the decision.
+    pub stopped: bool,
+}
+
+impl<'s, S> Told<'s, S> {
+    pub fn new(steps: &'s mut dyn FnMut(S) -> ControlFlow<()>) -> Self {
+        Self {
+            steps,
+            open: false,
+            stopped: false,
+        }
+    }
+
+    /// Tells `step`; true when the decision stops at it.
+    pub fn step(&mut self, step: S) -> bool {
+        self.open = true;
+        self.stopped = (self.steps)(step).is_break();
+        self.stopped
     }
 }
 
@@ -265,10 +295,31 @@ pub const LOOP_CARRIED_ON_EVERY_PATH: Premise = Premise {
     ],
 };
 
+pub const PREVIOUS_VALUE_NOT_HELD: OpenCause = OpenCause {
+    id: "previous-value-not-held",
+    premise: &LOOP_CARRIED_ON_EVERY_PATH,
+    states: "the data the reallocating call combines is not established to hold the previous value itself on every path: a value only some paths make it, or a value computed from it",
+    closer: Closer::Code,
+};
+
+pub const RESET_ON_A_PATH: OpenCause = OpenCause {
+    id: "reset-on-a-path",
+    premise: &LOOP_CARRIED_ON_EVERY_PATH,
+    states: "a path around the back edge is not established to carry the update: it resets the variable or binds it to another value",
+    closer: Closer::Code,
+};
+
 pub const REALLOCATES: Premise = Premise {
     name: "Reallocates",
     states: "the call copies all of its inputs into a new value on every call, as the ecosystem catalog describes it",
     decided_in: &["heki_effect::ProjectIndex::site_must"],
+};
+
+pub const NOT_THE_CATALOG_CALL: OpenCause = OpenCause {
+    id: "not-the-catalog-call",
+    premise: &REALLOCATES,
+    states: "the update is not established to be a catalog call that copies all of its inputs on every call: it is a project function's result, which may return another value on some path (heki establishes the reallocation only of the catalog call itself at the update), or a catalog call whose targets or effect heki does not establish there",
+    closer: Closer::None,
 };
 
 pub const READ_ONLY_PARAMETER: Premise = Premise {
@@ -292,6 +343,20 @@ pub const CHANGED_AT_THE_LINE: Premise = Premise {
     ],
 };
 
+pub const NO_CHANGING_BODY: OpenCause = OpenCause {
+    id: "no-changing-body",
+    premise: &CHANGED_AT_THE_LINE,
+    states: "no function the calls shown reach changes the object in its own body: the change is made where a generator that another function returns is iterated",
+    closer: Closer::None,
+};
+
+pub const NOT_A_BUILTIN_CONTAINER_CHANGE: OpenCause = OpenCause {
+    id: "not-a-builtin-container-change",
+    premise: &CHANGED_AT_THE_LINE,
+    states: "the function the calls end at changes the object, but not where heki establishes it a builtin container whose changing method no project subclass replaces: it may be a value of another class (a `Sequence` whose `append` returns a new one), or a project subclass overrides the method",
+    closer: Closer::None,
+};
+
 pub const CACHED: Premise = Premise {
     name: "Cached",
     states: "the decorator is `functools.cache`, or `functools.lru_cache` that keeps results",
@@ -313,10 +378,57 @@ pub const CONTAINER_KIND: Premise = Premise {
     ],
 };
 
+/// The cause of "Cached", "Keyed", and "Container kind" for a cached function whose summary
+/// does not establish them ([`heki_effect::CachedResult`] keeps no reason).
+const CACHED_RESULT_STATES: &str = "the cached function's summary does not establish that it is a synchronous function a `functools` cache keeps the results of, that takes a parameter besides `self` / `cls`, and that hands out a builtin container of one kind on every return, or heki does not find the function; the summary keeps no reason, so heki cannot tell which of the three fails, and each is open";
+
+pub const NOT_ESTABLISHED_CACHED: OpenCause = OpenCause {
+    id: "cached-result-not-established",
+    premise: &CACHED,
+    states: CACHED_RESULT_STATES,
+    closer: Closer::None,
+};
+
+pub const NOT_ESTABLISHED_KEYED: OpenCause = OpenCause {
+    id: "cached-result-not-established",
+    premise: &KEYED,
+    states: CACHED_RESULT_STATES,
+    closer: Closer::None,
+};
+
+pub const NOT_ESTABLISHED_CONTAINER_KIND: OpenCause = OpenCause {
+    id: "cached-result-not-established",
+    premise: &CONTAINER_KIND,
+    states: CACHED_RESULT_STATES,
+    closer: Closer::None,
+};
+
+/// The causes a cached function's summary without a [`heki_effect::CachedResult`] leaves open,
+/// one for each premise that fact stands for.
+pub const CACHED_RESULT_NOT_ESTABLISHED: [&OpenCause; 3] = [
+    &NOT_ESTABLISHED_CACHED,
+    &NOT_ESTABLISHED_KEYED,
+    &NOT_ESTABLISHED_CONTAINER_KIND,
+];
+
 pub const SAME_OBJECT: Premise = Premise {
     name: "Same object",
     states: "the changed object is the cached call's result on every path, with no copy",
     decided_in: &["heki_rules::mut_rules::Mut202Fn::must_results"],
+};
+
+pub const NOT_THE_RESULT_ON_EVERY_PATH: OpenCause = OpenCause {
+    id: "not-the-result-on-every-path",
+    premise: &SAME_OBJECT,
+    states: "the changed object is not established to be the result of a direct call of the cached function on every path: another value on some path, or a value derived from it (an item, an attribute, the contents of a copy)",
+    closer: Closer::Code,
+};
+
+pub const RETURNED_THROUGH_A_FUNCTION: OpenCause = OpenCause {
+    id: "returned-through-a-function",
+    premise: &SAME_OBJECT,
+    states: "the value comes from a project function that returns the cached function's result, which heki does not establish to be that result itself, with no copy, on every path",
+    closer: Closer::None,
 };
 
 pub const CHANGED_IN_PLACE: Premise = Premise {
@@ -326,6 +438,27 @@ pub const CHANGED_IN_PLACE: Premise = Premise {
         "heki_effect::readonly::ContainerKind::mutators",
         "heki_effect::resolver::ProjectDecls::method_not_overridden",
     ],
+};
+
+pub const CHANGED_IN_A_CALLED_FUNCTION: OpenCause = OpenCause {
+    id: "changed-in-a-called-function",
+    premise: &CHANGED_IN_PLACE,
+    states: "the line hands the value to a project function that changes it, where the claim names an in-place change at the line itself",
+    closer: Closer::None,
+};
+
+pub const NOT_A_CHANGE_OF_THE_KIND: OpenCause = OpenCause {
+    id: "not-a-change-of-the-kind",
+    premise: &CHANGED_IN_PLACE,
+    states: "the line is no in-place change heki knows for a container of the cached result's kind: an attribute store or deletion, or a method or operator that does not change that kind",
+    closer: Closer::None,
+};
+
+pub const REPLACED_BY_A_SUBCLASS: OpenCause = OpenCause {
+    id: "replaced-by-a-subclass",
+    premise: &CHANGED_IN_PLACE,
+    states: "the cached function's result is of the container kind only by its return annotation, which under R2 admits a project subclass, and one overrides the changing method or operator, may install it through a metaclass, or defines `__getattribute__`",
+    closer: Closer::Code,
 };
 
 pub const BUILTIN_TYPE_BY_CONSTRUCTION: Premise = Premise {
@@ -640,6 +773,19 @@ pub const CAUSES: &[&OpenCause] = &[
     &ITEMS_NOT_FROM_THE_DATA,
     &LIBRARY_CALL_WITHOUT_ITEMS,
     &NO_ITEMS_FOLLOWED,
+    &PREVIOUS_VALUE_NOT_HELD,
+    &RESET_ON_A_PATH,
+    &NOT_THE_CATALOG_CALL,
+    &NO_CHANGING_BODY,
+    &NOT_A_BUILTIN_CONTAINER_CHANGE,
+    &NOT_ESTABLISHED_CACHED,
+    &NOT_ESTABLISHED_KEYED,
+    &NOT_ESTABLISHED_CONTAINER_KIND,
+    &NOT_THE_RESULT_ON_EVERY_PATH,
+    &RETURNED_THROUGH_A_FUNCTION,
+    &CHANGED_IN_A_CALLED_FUNCTION,
+    &NOT_A_CHANGE_OF_THE_KIND,
+    &REPLACED_BY_A_SUBCLASS,
     &FRAME_INTROSPECTION,
     &ANALYSIS_NOT_CONVERGED,
     &EXACT_TYPE,
