@@ -1647,8 +1647,7 @@ impl<'a> FnIndex<'a> {
     /// Whether every path from the entry to block `at` passes block `through`, over the graph of
     /// the path facts (`paths::Paths`): a branch the module's constants decide is not taken, and
     /// a block raises into its handler only where an instruction of it may raise. Past the
-    /// budget of that walk, or where it cannot order the dominators, the dominator tree of every
-    /// edge answers.
+    /// budget of that walk, the dominator tree of every edge answers.
     fn every_path_passes(&self, through: BlockId, at: BlockId) -> bool {
         let dominators = self.block_dominators.get_or_init(|| {
             let budget = Budget::of_function("heki_ir::facts::FnIndex::every_path_passes", self.f);
