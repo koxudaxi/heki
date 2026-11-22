@@ -394,6 +394,9 @@ struct LocalFlow<'f, 'c> {
     budget: &'c Budget,
 }
 
+/// A branch on a test of a length: its block, its condition, and its two sides.
+type LengthBranch = (BlockId, VarId, BlockId, BlockId);
+
 /// The places (block, instruction) of the item reads `obj[index]` of a function, by the copy
 /// root of `obj` and `index`.
 type ItemReads = FxHashMap<(VarId, VarId), Vec<(BlockId, usize)>>;
@@ -833,37 +836,28 @@ impl<'f, 'c> LocalFlow<'f, 'c> {
     }
 
     /// Whether `v` holds at most one element on every path to block `at`: a test of its length
-    /// (`if len(v) > 1: return`, `v.pop() if len(v) == 1 else None`) on the way, on the side
-    /// that bounds it.
+    /// (`if len(v) > 1: return`, `v.pop() if len(v) == 1 else None`, also inside `or` / `and`)
+    /// on the way, on the side that bounds it.
     fn bounded_to_one(&self, v: VarId, at: BlockId) -> bool {
         let root = self.shape.copy_root(v);
         let doms = self.shape.dominators();
-        for (d, cond) in self.length_branches(root) {
-            if !self.budget.take(1) {
-                return false;
-            }
-            let Terminator::Branch {
-                then_bb, else_bb, ..
-            } = self.f.block(d).terminator
-            else {
-                continue;
-            };
-            let Some(holds) = self.bounding_side(cond, root) else {
-                continue;
-            };
-            // The edge into `side` is on every path to `at` when `side` is entered only by it
-            // and dominates `at`.
-            let side = if holds { then_bb } else { else_bb };
-            if self.shape.preds(side) == [d] && doms.dominates(side, at) {
-                return true;
-            }
-        }
-        false
+        // The edge into `side` is on every path to `at` when `side` is entered only by it and
+        // dominates `at`.
+        let bounds = |(d, cond, then_bb, else_bb): LengthBranch| {
+            self.bounding_side(cond, root).is_some_and(|holds| {
+                let side = if holds { then_bb } else { else_bb };
+                self.shape.preds(side) == [d] && doms.dominates(side, at)
+            })
+        };
+        self.length_branches(root)
+            .into_iter()
+            .take_while(|_| self.budget.take(1))
+            .any(bounds)
     }
 
-    /// The branches (block, condition) on a comparison of `len(set)`, or on the value of a
-    /// short-circuit operator one of whose operands is one.
-    fn length_branches(&self, set: VarId) -> Vec<(BlockId, VarId)> {
+    /// The branches on a comparison of `len(set)`, or on the value of a short-circuit operator
+    /// one of whose operands is one, found from the function's `len()` calls.
+    fn length_branches(&self, set: VarId) -> Vec<LengthBranch> {
         let lengths = self.lengths.get_or_init(|| {
             let mut lengths: FxHashMap<VarId, Vec<VarId>> = FxHashMap::default();
             for bb in &self.f.blocks {
@@ -881,28 +875,31 @@ impl<'f, 'c> LocalFlow<'f, 'c> {
             }
             lengths
         });
-        let branched = |x: VarId, out: &mut Vec<(BlockId, VarId)>| {
+        let branched = |x: VarId, out: &mut Vec<LengthBranch>| {
             for u in self.shape.readers(x) {
                 if let Use::Terminator(b) = *u
-                    && matches!(self.f.block(b).terminator, Terminator::Branch { cond, .. } if cond == x)
+                    && let Terminator::Branch {
+                        cond,
+                        then_bb,
+                        else_bb,
+                    } = self.f.block(b).terminator
+                    && cond == x
                 {
-                    out.push((b, x));
+                    out.push((b, x, then_bb, else_bb));
                 }
             }
         };
         let mut out = Vec::new();
         for &length in lengths.get(&set).into_iter().flatten() {
             for u in self.shape.readers(length) {
-                let Use::Inst(b, i) = *u else {
-                    continue;
-                };
-                let InstKind::Compare { dst: test, .. } = self.inst_at((b, i as usize)).kind else {
-                    continue;
-                };
-                branched(test, &mut out);
-                for w in self.shape.readers(test) {
-                    if let Use::Phi(m, k) = *w {
-                        branched(self.f.block(m).phis[k as usize].dst, &mut out);
+                if let Use::Inst(b, i) = *u
+                    && let InstKind::Compare { dst: test, .. } = self.inst_at((b, i as usize)).kind
+                {
+                    branched(test, &mut out);
+                    for w in self.shape.readers(test) {
+                        if let Use::Phi(m, k) = *w {
+                            branched(self.f.block(m).phis[k as usize].dst, &mut out);
+                        }
                     }
                 }
             }
@@ -923,31 +920,26 @@ impl<'f, 'c> LocalFlow<'f, 'c> {
         };
         let incoming = &self.f.block(merge).phis[i as usize].incoming;
         // Each operand but the last branches to the merge on the side that decides the whole
-        // (holding for `or`, failing for `and`); the last jumps there. The other side of the
+        // (holding for `or`, failing for `and`), and the last jumps there: the other side of the
         // whole is then known of every operand.
-        let mut known = None;
-        for (pred, x) in incoming {
-            let side = match self.f.block(*pred).terminator {
-                Terminator::Branch {
-                    cond: c,
-                    then_bb,
-                    else_bb,
-                } if c == *x && (then_bb == merge) != (else_bb == merge) => Some(else_bb == merge),
-                Terminator::Jump(to) if to == merge => None,
-                _ => return None,
-            };
-            match (known, side) {
-                (_, None) => {}
-                (None, Some(s)) => known = Some(s),
-                (Some(k), Some(s)) if k != s => return None,
-                _ => {}
+        let side = |&(pred, x): &(BlockId, VarId)| match &self.f.block(pred).terminator {
+            Terminator::Branch {
+                cond,
+                then_bb,
+                else_bb,
+            } if *cond == x && (*then_bb == merge) != (*else_bb == merge) => {
+                Some(Some(*else_bb == merge))
             }
-        }
-        let known = known?;
-        incoming
+            other => matches!(other, Terminator::Jump(to) if *to == merge).then_some(None),
+        };
+        let sides = incoming.iter().map(side).collect::<Option<Vec<_>>>()?;
+        let known = sides.iter().flatten().next().copied()?;
+        let one_last = sides.iter().filter(|s| s.is_none()).count() == 1;
+        let shaped = one_last && sides.iter().flatten().all(|&s| s == known);
+        let bounded = incoming
             .iter()
-            .any(|(_, x)| self.length_at_most_one(*x, set) == Some(known))
-            .then_some(known)
+            .any(|(_, x)| self.length_at_most_one(*x, set) == Some(known));
+        (shaped && bounded).then_some(known)
     }
 
     /// For a branch on `cond`, a comparison of `len(set)` with a constant: `Some(true)` when the
