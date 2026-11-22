@@ -1777,3 +1777,17 @@ values = [{ arg = 0, methods = ["*"] }]
 [[invokes]]
 symbol = "warnings.warn"
 values = [{ arg = 0, methods = ["__str__", "__repr__"] }, { param = "message", methods = ["__str__", "__repr__"] }]
+
+# --- Cached-property decorators that keep the value in the instance `__dict__` ---
+# `[[cached_properties]]`: a decorator listed here keeps the getter's value in the instance
+# `__dict__` under the property's name, a later read returns it until something removes it, and
+# `del obj.<name>` or `obj.__dict__.pop(<name>)` makes the next read run the getter again. Each
+# entry names the versions whose source was read, why the value is kept there, and how removing it
+# acts; `slot` names where an instance without a `__dict__` keeps it instead. Only a decorator listed
+# here makes a cached property an exact claim's (R3); any other `cached_property` is one by its name.
+
+[[cached_properties]]
+symbol = "functools.cached_property"
+versions = "CPython 3.11, 3.15"
+keeps = "a non-data descriptor whose __get__ stores the getter's value in instance.__dict__[attrname], which later reads find before the descriptor"
+invalidation = "del obj.<name> and obj.__dict__.pop(<name>) remove the entry (the descriptor defines no __delete__); an instance without a __dict__ raises TypeError and keeps nothing"

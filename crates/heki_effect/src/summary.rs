@@ -29,8 +29,8 @@ use crate::{
     Access, ArgBinding, ArgOrigin, ArgTargets, ArgValue, ArgumentValues, AttrKeyPath, BoundCallee,
     CallHop, CallSite, CallTarget, CellChange, ConstArg, Construction, ContractClass, Contracts,
     Dispatch, EffectSummary, FileSummary, FuncKey, GuardSubject, HandedState, Implementers, Items,
-    ModuleInput, MustExec, NewArg, NewCond, NewKind, OnEveryReturn, OptInFacts, PerItem,
-    ProjectDecls, ReadKind, ReturnsNew, Runner, SharedLine, SharedState, SharedStateFacts,
+    ListedCache, ModuleInput, MustExec, NewArg, NewCond, NewKind, OnEveryReturn, OptInFacts,
+    PerItem, ProjectDecls, ReadKind, ReturnsNew, Runner, SharedLine, SharedState, SharedStateFacts,
     SiteRole, Slot, TypedFieldReadSite, TypedFieldWriteSite, Unresolved, UnresolvedAccessSite,
     UnresolvedWriteSite, WriteKind,
 };
@@ -1075,6 +1075,13 @@ impl<'a> Extractor<'a> {
             is_async: matches!(f.kind, FunctionKind::Async | FunctionKind::AsyncGenerator),
             is_generator: is_generator_function(f),
             is_cached_property: decorated_as(cx.module, f, &["cached_property"]),
+            listed_cache: f.decorators.iter().find_map(|d| {
+                let symbol = cx.module.decorator_symbol(d)?;
+                let listed = cx.kb.cached_property(&symbol)?;
+                Some(ListedCache {
+                    in_slot: listed.slot.is_some(),
+                })
+            }),
             is_lru_cache: decorated_as(cx.module, f, &["lru_cache", "cache"]),
             owner_class_qualname: f.owner_class_qualname.clone(),
             decorators: f.decorators.clone(),
@@ -2423,8 +2430,11 @@ impl<'a> Extractor<'a> {
                     None => Some(KeptRemovalKind::Any),
                 }
             }
-            // Another coroutine or the generator's consumer runs while the function waits.
-            InstKind::Await { .. } | InstKind::YieldFrom { .. } => Some(KeptRemovalKind::Any),
+            // Another coroutine or the generator's consumer runs while the function waits: at
+            // an `await`, the implicit awaits of `async for` and `async with` (`__anext__`,
+            // `__aenter__`, `__aexit__`), and `yield from`.
+            kind if kind.suspends() => Some(KeptRemovalKind::Any),
+            InstKind::YieldFrom { .. } => Some(KeptRemovalKind::Any),
             InstKind::Yield { .. } => Some(KeptRemovalKind::Suspends),
             // A context manager's `__enter__` and `__exit__`, and an iterable's `__iter__` and its
             // iterator's `__next__`, are not followed in a project class: they may run anything.

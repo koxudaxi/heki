@@ -618,6 +618,14 @@ impl WriteKind {
     }
 }
 
+/// What the catalog says of a cached property's decorator ([`EffectSummary::listed_cache`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListedCache {
+    /// An instance without a `__dict__` keeps the value in a slot instead
+    /// (`heki_kb::CachedPropertyDecorator::slot`).
+    pub in_slot: bool,
+}
+
 /// Unified interprocedural summary propagated bottom-up over Tarjan SCCs.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EffectSummary {
@@ -824,6 +832,11 @@ pub struct EffectSummary {
     /// generator; its body runs where the generator is iterated.
     pub is_generator: bool,
     pub is_cached_property: bool,
+    /// The cached property's decorator is one the catalog lists as keeping the value in the
+    /// instance `__dict__` (`heki_kb::CachedPropertyDecorator`); any other `cached_property` is
+    /// one by its name only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listed_cache: Option<ListedCache>,
     pub is_lru_cache: bool,
     /// A `functools` cache keeps the function's results, each a builtin container of one kind
     /// (`MUT114`; a local fact, never propagated).

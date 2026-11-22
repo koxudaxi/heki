@@ -2045,6 +2045,7 @@ fn reads_on_every_path_are_the_loads_and_self_calls_every_normal_return_passes()
 }
 
 const KEPT_REMOVALS_PY: &str = r#"
+import asyncio
 import functools
 import json
 
@@ -2179,6 +2180,11 @@ def merged(first: str, extra: dict[str, int]) -> list[str]:
     return sorted({first: 1, **extra})
 
 
+async def locked(h: Holder, lock: asyncio.Lock) -> None:
+    async with lock:
+        h.items.append("x")
+
+
 class Feed:
     def __init__(self) -> None:
         self.items: list[str] = []
@@ -2259,6 +2265,8 @@ fn removals_of_kept_values_by_name_and_by_unknown_code() {
     // A dict display used once hands on its keys; a `**` unpacking adds keys of another value.
     assert_eq!(removes("keyed"), KeptRemoval::Nothing);
     assert_eq!(removes("merged"), KeptRemoval::Any);
+    // Leaving an `async with` awaits `__aexit__`: other tasks run then, whatever the manager.
+    assert_eq!(removes("locked"), KeptRemoval::Any);
     // A generator runs its body while what it returns is iterated: each step of the loop is a
     // point of the generator's removals (its summary's), after the write before the loop.
     assert_eq!(removes("Feed.refill"), named("count"));
@@ -2280,4 +2288,47 @@ fn removals_of_kept_values_by_name_and_by_unknown_code() {
     // A builtin list a project method declares it returns iterates as a builtin; what another
     // project call returns runs its class's iteration, which may be anything.
     assert_eq!(removes("Feed.from_factory"), KeptRemoval::Any);
+}
+
+const LISTED_CACHES_PY: &str = r#"
+import functools
+from functools import cached_property as cp
+
+from mylib import cached_property
+from werkzeug.utils import cached_property as wcp
+
+
+class A:
+    @functools.cached_property
+    def by_module(self) -> int:
+        return 1
+
+    @cp
+    def by_alias(self) -> int:
+        return 1
+
+    @cached_property
+    def lookalike(self) -> int:
+        return 1
+
+    @wcp
+    def in_slot(self) -> int:
+        return 1
+"#;
+
+#[test]
+fn cached_property_decorators_the_catalog_lists_keep_their_value_in_the_instance_dict() {
+    let index = project(&[("lc.py", LISTED_CACHES_PY)]);
+    let of = |q: &str| {
+        let s = summary(&index, "lc", q);
+        (s.is_cached_property, s.listed_cache)
+    };
+    let listed = |in_slot| Some(ListedCache { in_slot });
+    assert_eq!(of("A.by_module"), (true, listed(false)));
+    // An alias import names the decorator it imports.
+    assert_eq!(of("A.by_alias"), (true, listed(false)));
+    // A `cached_property` of a library the catalog does not list is one by its name only.
+    assert_eq!(of("A.lookalike"), (true, None));
+    // Werkzeug keeps the value of an instance without a `__dict__` in a slot.
+    assert_eq!(of("A.in_slot"), (true, listed(true)));
 }

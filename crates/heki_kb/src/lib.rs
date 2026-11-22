@@ -663,6 +663,28 @@ impl InvokedValue {
     }
 }
 
+/// A cached-property decorator the catalog lists as keeping the getter's value in the instance
+/// `__dict__` under the property's name (`[[cached_properties]]`): a later read returns it until
+/// something removes it, and `del obj.<name>` or a removal from `obj.__dict__` makes the next read
+/// run the getter again. Only a decorator listed here makes a cached property an exact claim's;
+/// any other `cached_property` is one by its name only (R3).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CachedPropertyDecorator {
+    /// The implementation's qualified name, as an import resolves it.
+    pub symbol: String,
+    /// The versions whose source the entry was checked against.
+    pub versions: String,
+    /// Why the value is kept in the instance `__dict__`.
+    pub keeps: String,
+    /// How `del obj.<name>` and `obj.__dict__.pop(<name>)` act on the kept value.
+    pub invalidation: String,
+    /// Where an instance without a `__dict__` keeps the value instead (a slot), if anywhere;
+    /// without this the decorator keeps nothing on such an instance.
+    #[serde(default)]
+    pub slot: Option<String>,
+}
+
 /// On-disk shape of one `kb/ecosystem/*.toml` file.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -673,6 +695,8 @@ struct EcosystemKbFile {
     entries: Vec<EcosystemEntry>,
     #[serde(default)]
     invokes: Vec<Invokes>,
+    #[serde(default)]
+    cached_properties: Vec<CachedPropertyDecorator>,
 }
 
 fn parse_ecosystem_file(file: &'static str, text: &str) -> Result<EcosystemKbFile, KbError> {
@@ -693,6 +717,9 @@ pub struct EffectiveEcosystemKb {
     pub user_symbols: BTreeSet<String>,
     /// What each listed library call runs of the values it is handed ([`Invokes`]).
     pub invokes: BTreeMap<String, Invokes>,
+    /// The cached-property decorators known to keep the value in the instance `__dict__`
+    /// ([`CachedPropertyDecorator`]).
+    pub cached_properties: BTreeMap<String, CachedPropertyDecorator>,
     pub digest: String,
 }
 
@@ -717,6 +744,7 @@ impl EffectiveEcosystemKb {
             opaque_packages,
             user_symbols: BTreeSet::new(),
             invokes: BTreeMap::new(),
+            cached_properties: BTreeMap::new(),
             digest,
         }
     }
@@ -728,11 +756,18 @@ impl EffectiveEcosystemKb {
         let mut raw: BTreeMap<String, EcosystemEntry> = BTreeMap::new();
         let mut opaque_packages = Vec::new();
         let mut invokes = BTreeMap::new();
+        let mut cached_properties = BTreeMap::new();
         for &(file, text) in ECOSYSTEM_KB_FILES {
             let parsed = parse_ecosystem_file(file, text)?;
             raw.extend(parsed.entries.into_iter().map(|e| (e.symbol.clone(), e)));
             opaque_packages.extend(parsed.opaque_packages);
             invokes.extend(parsed.invokes.into_iter().map(|i| (i.symbol.clone(), i)));
+            cached_properties.extend(
+                parsed
+                    .cached_properties
+                    .into_iter()
+                    .map(|c| (c.symbol.clone(), c)),
+            );
         }
         opaque_packages.sort();
         opaque_packages.dedup();
@@ -749,10 +784,12 @@ impl EffectiveEcosystemKb {
         }
         let mut kb = Self::materialize(raw.into_values().collect(), opaque_packages);
         let listed = serde_json::to_string(&invokes).unwrap_or_default();
-        kb.digest = blake3::hash(format!("{}|{listed}", kb.digest).as_bytes())
+        let caches = serde_json::to_string(&cached_properties).unwrap_or_default();
+        kb.digest = blake3::hash(format!("{}|{listed}|{caches}", kb.digest).as_bytes())
             .to_hex()
             .to_string();
         kb.invokes = invokes;
+        kb.cached_properties = cached_properties;
         kb.user_symbols = overrides.iter().map(|p| p.symbol.clone()).collect();
         if !kb.user_symbols.is_empty() {
             let users: Vec<&str> = kb.user_symbols.iter().map(String::as_str).collect();
@@ -784,6 +821,12 @@ impl EffectiveEcosystemKb {
     /// ([`Invokes`]).
     pub fn invoked(&self, symbol: &str) -> Option<&Invokes> {
         self.invokes.get(symbol)
+    }
+
+    /// The catalog's entry for the cached-property decorator `symbol`, when it lists it as
+    /// keeping the value in the instance `__dict__` ([`CachedPropertyDecorator`]).
+    pub fn cached_property(&self, symbol: &str) -> Option<&CachedPropertyDecorator> {
+        self.cached_properties.get(symbol)
     }
 }
 
@@ -3406,7 +3449,7 @@ mod tests {
     }
 
     #[test]
-    fn invokes_entries_name_their_arguments_and_are_part_of_the_digest() {
+    fn invokes_and_cached_property_entries_are_described_and_part_of_the_digest() {
         let kb = EffectiveEcosystemKb::load_builtin(&[]).unwrap();
         let isinstance = kb.invoked("builtins.isinstance").expect("listed");
         assert!(!isinstance.lazy);
@@ -3430,6 +3473,17 @@ mod tests {
         let format = kb.invoked("builtins.str.format").expect("listed");
         assert!(format.values[1].names(None, Some("anything")));
         assert_eq!(kb.invoked("time.sleep"), None);
+        // Cached-property decorators: each entry says which source it was read against, why the
+        // value is in the instance `__dict__`, and how removing it acts.
+        assert!(kb.cached_property("functools.cached_property").is_some());
+        let werkzeug = kb
+            .cached_property("werkzeug.utils.cached_property")
+            .expect("listed");
+        assert!(werkzeug.slot.is_some());
+        assert_eq!(kb.cached_property("cached_property"), None);
+        assert!(kb.cached_properties.values().all(|c| {
+            !c.versions.is_empty() && !c.keeps.is_empty() && !c.invalidation.is_empty()
+        }));
         // The table is no entry of the catalog: other facts never see it.
         assert_eq!(kb.lookup("builtins.isinstance"), None);
         let empty = EffectiveEcosystemKb::materialize(
