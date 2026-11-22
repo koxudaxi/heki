@@ -3298,3 +3298,44 @@ fn changes_down_a_long_item_chain_decide_each_element_once() {
         .collect();
     assert_eq!(found, vec![1]);
 }
+
+/// Five thousand shallow copies of one parameter, each changing one of its items, and a loop
+/// rebinding an item of a copy on one branch per test before changing it: which copy each
+/// changed object is below, and whether a store before it rebinds its level, are decided once
+/// per value, not by a walk over every store at every load.
+#[test]
+fn changes_below_many_copies_decide_each_copy_once() {
+    let copies = 5_000;
+    let mut lines = vec!["def copies(p: dict[str, list[int]]):".to_owned()];
+    for i in 0..copies {
+        lines.push(format!("    c{i} = dict(p)"));
+        lines.push(format!("    c{i}[\"k\"].append({i})"));
+    }
+    lines.extend(
+        [
+            "",
+            "",
+            "def rebound(p: dict[str, list[int]], xs):",
+            "    c = dict(p)",
+            "    for x in xs:",
+        ]
+        .map(str::to_owned),
+    );
+    for i in 0..2_000 {
+        lines.push(format!("        if x == {i}:"));
+        lines.push("            c[\"k\"] = []".to_owned());
+    }
+    lines.push("        c[\"k\"].append(x)".to_owned());
+    let p = Project::new("bounds_copies");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nextend-select = [\"MUT115\"]\n",
+    )
+    .write("m.py", &(lines.join("\n") + "\n"));
+    let found: Vec<u64> = check_within(&p, Duration::from_secs(20))
+        .iter()
+        .filter(|d| d["rule_code"] == "MUT115")
+        .map(|d| d["line"].as_u64().unwrap())
+        .collect();
+    assert_eq!(found.len(), copies + 1);
+}

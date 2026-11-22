@@ -2497,7 +2497,10 @@ pub(crate) fn mut202(
     returns: &ReadOnlyReturns,
     out: &mut Vec<Diagnostic>,
 ) {
-    if !cx.enabled("MUT202", unit) && !cx.enabled("MUT114", unit) {
+    if !["MUT202", "MUT114", "MUT115"]
+        .iter()
+        .any(|code| cx.enabled(code, unit))
+    {
         return;
     }
     let tcx = TypeCtx::new(&unit.input, cx.decls, cx.kb);
@@ -2933,6 +2936,10 @@ impl<'a> Mut202Fn<'a> {
     }
 
     fn run(mut self, out: &mut Vec<Diagnostic>) {
+        self.below_copies(out);
+        if !self.cx.enabled("MUT202", self.unit) && !self.cx.enabled("MUT114", self.unit) {
+            return;
+        }
         self.propagate();
         if self.ro.is_empty() {
             return;
@@ -3107,6 +3114,10 @@ impl<'a> Mut202Fn<'a> {
         (None, Vec::new())
     }
 }
+
+// ==================================================================================== MUT115
+
+mod below_copies;
 
 // ==================================================================================== MUT107
 
