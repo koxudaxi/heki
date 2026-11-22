@@ -594,7 +594,8 @@ def copied_reassigned(r: Reassigned):
 /// the attributes hold at run time may be other objects, so the reports are heuristic. A class
 /// with a copy hook or a `copyreg` registration on the way leads nowhere (it copies its instances
 /// itself), through a tuple or a union too, and so do attributes holding a class object, a
-/// callable, `Self`, or a dict of values of no known class.
+/// callable, `Self`, or a dict of values of no known class (`Any`, or a name heki cannot
+/// resolve).
 #[test]
 fn an_instance_below_the_copied_objects_attributes() {
     let p = Project::new("mut118_below");
@@ -690,6 +691,7 @@ class Bundle:
     check: Callable[[DataModel], bool]
     parent: Self
     options: dict[str, Any]
+    unknown: dict[str, "NoSuchClass"]
 
     def __init__(
         self, pair: tuple[Shared, int], either: Shared | int, kind: type[DataModel]
