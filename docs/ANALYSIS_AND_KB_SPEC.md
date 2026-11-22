@@ -435,9 +435,13 @@ EffectSummary(f) = {
 
     // Family 1: mutation and state effects (MUT1xx / MUT2xx)
     mutates_params:           Bitset,                      // parameter i or its elements / attributes changed
-    mutated_param_paths:      Map<ParamIdx, Set<AttrPath>>,// attributes / containers changed through parameter i
-    changed_param_attrs:      Map<ParamIdx, Set<AttrName>>,// attributes whose objects change (in place or deeper),
-                                                           // not just rebound: what a shallow copy shares (MUT202)
+    mutated_param_paths:      Map<ParamIdx, Set<AttrPath>>,// attributes / containers changed through parameter i;
+                                                           // "[]": an object it holds as an item or an element
+                                                           // (p["k"].append(x), for x in p: x.clear()), also
+                                                           // through a shallow copy of it (ELEMENTS_PATH)
+    changed_param_attrs:      Map<ParamIdx, Set<AttrName>>,// attributes (and "[]") whose objects change (in place
+                                                           // or deeper), not just rebound: what a shallow copy
+                                                           // shares (MUT202)
     param_change_sites:       Map<ParamIdx, Set<Span>>,    // own changes of parameter i only, never propagated
                                                            // (EFF201 mutates-params counts them)
     escapes_params:           Bitset,                      // stored in an attribute / container / global / closure variable
@@ -1224,13 +1228,17 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      level only), a display that only unpacks tagged values (`{**x}` with no other entry,
      `[*xs, *ys]`, `readonly::display_copies`) is a shallow copy of them, and a slice is a shallow copy unless
      the value's class is inferred and is not a builtin sequence
-     (`readonly::subscript_step`, shared with the return flow). A copy method of a project class
+     (`readonly::subscript_step`, shared with the return flow). `readonly::copy_of` is the one
+     table of the copies an instruction makes of the values it is given alone, which
+     `MUT112`'s origins (`ownership::source`: a shallow copy is a new object holding the copied
+     values' elements) and the summaries' copies of parameters read too. A copy method of a project class
      (`Image.copy`) is a call of that method, not a copy by its name (`readonly::call_derivation`).
      A copy keeps its original's class for receiver typing. A phi joins the tags of all its
      incoming values, to a fixpoint.
   3. A direct attribute write or container mutation of a tagged value, or passing it in a
      parameter position the callee changes (`mutated_param_paths` minus `memo_param_paths`; for a
-     shallow copy, below the attributes `changed_param_attrs` names), is reported as **`MUT202`**
+     shallow copy, below the attributes `changed_param_attrs` names; for a producer that is not
+     deep, not below its items), is reported as **`MUT202`**
      with the call hop, or as **`MUT114`** when the value comes from an `@lru_cache` / `@cache`
      function rather than a declared producer. A `MUT114` report is exact when the cached
      function carries a `CachedResult` (a `functools` cache resolved by import, with a `maxsize`
@@ -1650,8 +1658,15 @@ The single place for every execution-effect origin. An entry has `symbol`, `effe
 `offloads_blocking_arg` (`asyncio.to_thread`; with `0`, also an offloading decorator such as
 `asgiref.sync.sync_to_async`), `sync_facade_arg` (`AsyncSession.run_sync`: the callable runs on
 the caller's thread with a synchronous facade over an async connection), `excluded` (`logging.Logger.*`), `copy_sanitizer` (`"deep"`:
-`copy.deepcopy`; `"shallow"`: `copy.copy`, `BaseModel.model_copy`, whose `deep=True` copies
-deeply unless `update=` hands it values by reference: `MUT202`), `return_type` (factories such as
+`copy.deepcopy`, `BaseModel.__deepcopy__`; `"shallow"`: `copy.copy`, `BaseModel.model_copy`, whose
+`deep=True` copies deeply unless `update=` hands it values by reference: `MUT202`),
+`stores_on_instance` (a class's `__setattr__` / `__delattr__` that stores the value, possibly a
+validated conversion of it, or deletes the attribute on the instance itself, or raises, handing
+the value to no other object, in a class that installs no descriptor for it and defines no
+`__getattribute__`, so a read finds the stored value: `pydantic.BaseModel.__setattr__`), `keeps_hashable_defaults` (an
+instance built without a field starts from the field's default itself when it is hashable, and
+from a deep copy of an unhashable one, then holds what validating the default returns where the
+field validates it: pydantic 2's `BaseModel`), `return_type` (factories such as
 `sqlite3.connect`), `sync_lock_or_tx` (`threading.Lock`, `Session.begin`: `EFF106`),
 `non_reentrant_lock` (`threading.Lock`, `asyncio.Lock`: `EFF109`), `one_at_a_time`
 (`asyncio.StreamReader.readline`, `AsyncSession.execute`: `EFF110`),

@@ -73,6 +73,8 @@ def line(
     names_after=None,
     outcome="ok",
     act=1,
+    evals=None,
+    evals_after=None,
 ):
     return [
         "line",
@@ -88,7 +90,105 @@ def line(
         types or {},
         names or {},
         names_after or {},
+        evals or {},
+        evals_after or {},
     ]
+
+
+class Mut115(unittest.TestCase):
+    claim = {
+        "id": "k0",
+        "rule": "MUT115",
+        "line_id": "N0",
+        "copy_line_id": "Nc0",
+        "changes": [
+            {"held": '(options)["bases"]', "copy": 'result["bases"]', "changed": 'result["bases"]', "kind": "call"}
+        ],
+    }
+
+    def copy(self, start, held=7, in_copy=7, act=1):
+        return line(
+            "Nc0",
+            start,
+            start + 1,
+            act=act,
+            evals={'(options)["bases"]': [held, "list", {"list": []}]},
+            evals_after={'result["bases"]': [in_copy, "list", {"list": []}]},
+        )
+
+    def change(self, start, changed=7, before=(), after=("x",), muts=(), act=1, outcome="ok"):
+        snap = lambda items: {"list": list(items)}  # noqa: E731
+        return line(
+            "N0",
+            start,
+            start + 1,
+            act=act,
+            outcome=outcome,
+            muts=muts,
+            evals={'result["bases"]': [changed, "list", snap(before)]},
+            evals_after={'result["bases"]': [changed, "list", snap(after)]},
+        )
+
+    def test_a_change_of_the_object_the_original_held_confirms(self):
+        result = checkers.check(self.claim, [run(self.copy(1), self.change(3))])
+        self.assertEqual((result["checked"], result["refutations"]), (1, []))
+
+    def test_a_method_changing_it_to_equal_contents_confirms(self):
+        trace = run(self.copy(1), self.change(3, before=("x",), after=("x",), muts=[[7, "sort", "list"]]))
+        self.assertEqual(checkers.check(self.claim, [trace])["refutations"], [])
+
+    def test_another_object_refutes_still_shared(self):
+        refutation = checkers.check(self.claim, [run(self.copy(1), self.change(3, changed=9))])["refutations"][0]
+        self.assertEqual(refutation["kind"], "not-the-copied-object")
+        self.assertTrue(refutation["premise"].startswith("Still shared"))
+
+    def test_a_copy_holding_another_object_refutes_shallow_copy(self):
+        refutation = checkers.check(self.claim, [run(self.copy(1, in_copy=8), self.change(3))])["refutations"][0]
+        self.assertTrue(refutation["premise"].startswith("Shallow copy"))
+
+    def test_a_line_changing_nothing_refutes_changed_below_the_copy(self):
+        trace = run(self.copy(1), self.change(3, before=("x",), after=("x",)))
+        refutation = checkers.check(self.claim, [trace])["refutations"][0]
+        self.assertTrue(refutation["premise"].startswith("Changed below the copy"))
+
+    def test_only_completed_lines_after_a_copy_in_the_same_activation_count(self):
+        trace = run(
+            self.change(1),
+            self.copy(3, act=2),
+            self.change(5),
+            self.change(7, changed=9, outcome="exc"),
+        )
+        self.assertEqual(checkers.check(self.claim, [trace])["checked"], 0)
+
+    def test_a_store_leaving_equal_contents_confirms(self):
+        claim = dict(self.claim, changes=[dict(self.claim["changes"][0], kind="store")])
+        trace = run(self.copy(1), self.change(3, before=("x",), after=("x",)))
+        self.assertEqual(checkers.check(claim, [trace])["refutations"], [])
+
+    def test_an_augmented_assignment_changes_a_container_target_or_stores_into_its_holder(self):
+        claim = dict(
+            self.claim,
+            changes=[
+                {"held": '(o)["k"]["n"]', "copy": 'c["k"]["n"]', "changed": 'c["k"]["n"]', "kind": "inplace"},
+                {"held": '(o)["k"]', "copy": 'c["k"]', "changed": 'c["k"]', "kind": "store"},
+            ],
+        )
+        copy = line(
+            "Nc0",
+            1,
+            2,
+            evals={'(o)["k"]["n"]': [5, "int", 1], '(o)["k"]': [7, "dict", {}]},
+            evals_after={'c["k"]["n"]': [5, "int", 1], 'c["k"]': [7, "dict", {}]},
+        )
+        stored = line("N0", 3, 4, evals={'c["k"]["n"]': [5, "int", 1], 'c["k"]': [7, "dict", {}]})
+        self.assertEqual(checkers.check(claim, [run(copy, stored)])["refutations"], [])
+        elsewhere = line("N0", 3, 4, evals={'c["k"]["n"]': [5, "int", 1], 'c["k"]': [9, "dict", {}]})
+        refutation = checkers.check(claim, [run(copy, elsewhere)])["refutations"][0]
+        self.assertEqual(refutation["kind"], "not-the-copied-object")
+
+    def test_paths_heki_cannot_load_without_running_code_are_not_checked(self):
+        copy = line("Nc0", 1, 2, evals={'(options)["bases"]': None})
+        self.assertEqual(checkers.check(self.claim, [run(copy, self.change(3))])["checked"], 0)
 
 
 class Eff101(unittest.TestCase):
@@ -699,6 +799,73 @@ class Recorder(unittest.TestCase):
         self.assertEqual(items, [2, 5] * 3)
         keys = [(e[8]["key:a"][0], e[8]["key:b"][0]) for e in events if e[0] == "iter" and e[1] == "Lcomp"]
         self.assertEqual(keys[:2], [(1, 2), (1, 5)])
+
+
+class RecordedCopies(unittest.TestCase):
+    """The plan of a `MUT115` claim and the recorder on a real copy: the change of what the
+    copied value holds confirms the claim, a rebinding in the copy refutes it."""
+
+    SOURCE = (
+        "def with_base(options, base, rebind):\n"
+        "    result = options.copy()\n"
+        "    if rebind:\n"
+        "        result[\"bases\"] = []\n"
+        "    result[\"bases\"].append(base)\n"
+        "    result[\"bases\"] += [base]\n"
+        "    return result\n"
+    )
+
+    def test_a_change_below_the_copy_is_checked_against_the_original(self):
+        import importlib
+        import tempfile
+
+        import plan
+
+        root = os.path.realpath(tempfile.mkdtemp(prefix="oracle-copies-"))
+        with open(os.path.join(root, "copies_mod.py"), "w", encoding="utf-8") as f:
+            f.write(self.SOURCE)
+        def report(text, line):
+            start = self.SOURCE.index(text)
+            return {
+                "rule_code": "MUT115",
+                "certainty": "exact",
+                "path": "copies_mod.py",
+                "line": line,
+                "column": 5,
+                "span": {"start": start, "end": self.SOURCE.index("\n", start)},
+                "message": "shares",
+                "target": "result",
+                "related": [{"path": "copies_mod.py", "line": 2, "column": 14, "message": "copy"}],
+            }
+
+        planner = plan.build(
+            root, [report("result[\"bases\"].append", 5), report("result[\"bases\"] +=", 6)]
+        )
+        self.assertEqual(len(planner.claims), 2, planner.unmapped)
+        claim, augmented = planner.claims
+        self.assertEqual(claim["changes"][0]["changed"], 'result["bases"]')
+        self.assertEqual(claim["changes"][0]["held"], '(options)["bases"]')
+        self.assertEqual(augmented["changes"][0]["kind"], "inplace")
+        recorder = monitor.Recorder(root, planner.plan)
+        sys.path.insert(0, root)
+        try:
+            module = importlib.import_module("copies_mod")
+            recorder.install()
+            runs = []
+            for rebind in (False, True):
+                recorder.begin_run()
+                module.with_base({"bases": ["a"]}, "b", rebind)
+                runs.append(run(*recorder.end_run()))
+        finally:
+            recorder.uninstall()
+            sys.path.remove(root)
+        self.assertEqual(recorder.errors, [])
+        kept = checkers.check(claim, runs[:1])
+        self.assertEqual((kept["checked"], kept["refutations"]), (1, []))
+        rebound = checkers.check(claim, runs[1:])
+        self.assertEqual(rebound["refutations"][0]["kind"], "not-the-copied-object")
+        added = checkers.check(augmented, runs[:1])
+        self.assertEqual((added["checked"], added["refutations"]), (1, []))
 
 
 def _source(text):

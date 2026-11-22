@@ -2912,16 +2912,20 @@ pub(crate) fn mut202(
     returns: &ReadOnlyReturns,
     out: &mut Vec<Diagnostic>,
 ) {
-    if !cx.enabled("MUT202", unit) && !cx.enabled("MUT114", unit) {
+    if !["MUT202", "MUT114", "MUT115"]
+        .iter()
+        .any(|code| cx.enabled(code, unit))
+    {
         return;
     }
     let tcx = TypeCtx::new(&unit.input, cx.decls, cx.kb);
     let sites = cx.sites_by_span(unit);
+    let classes = below_copies::ClassAnswers::default();
     for f in &unit.input.ir.functions {
         if f.is_class_body {
             continue;
         }
-        Mut202Fn::new(cx, unit, &tcx, returns, &sites, f).run(out);
+        Mut202Fn::new(cx, unit, &tcx, returns, &sites, &classes, f).run(out);
     }
 }
 
@@ -2930,6 +2934,8 @@ struct Mut202Fn<'a> {
     unit: &'a ModuleUnit<'a>,
     tcx: &'a TypeCtx<'a>,
     returns: &'a ReadOnlyReturns,
+    /// `MUT115`'s class decisions asked so far in the module's check.
+    classes: &'a below_copies::ClassAnswers,
     f: &'a IrFunction,
     /// The facts and tables of `f`: the defining instruction of each variable, looked up per
     /// call operand.
@@ -2996,6 +3002,7 @@ impl<'a> Mut202Fn<'a> {
         tcx: &'a TypeCtx<'a>,
         returns: &'a ReadOnlyReturns,
         sites: &'a SitesBySpan<'a>,
+        classes: &'a below_copies::ClassAnswers,
         f: &'a IrFunction,
     ) -> Self {
         let key = CheckContext::key(unit, f);
@@ -3004,6 +3011,7 @@ impl<'a> Mut202Fn<'a> {
             unit,
             tcx,
             returns,
+            classes,
             f,
             ix: FnIndex::new(f, &unit.input.ir.constants),
             sites: sites.of(&key.qualname),
@@ -3358,6 +3366,10 @@ impl<'a> Mut202Fn<'a> {
     }
 
     fn run(mut self, out: &mut Vec<Diagnostic>) {
+        self.below_copies(out);
+        if !self.cx.enabled("MUT202", self.unit) && !self.cx.enabled("MUT114", self.unit) {
+            return;
+        }
         self.propagate();
         if self.ro.is_empty() {
             return;
@@ -3498,8 +3510,9 @@ impl<'a> Mut202Fn<'a> {
             };
             // Summaries track parameters 0..64 (`mutated_param_paths` keys are `u8`).
             // A shallow copy shares only the objects below its top level: rebinding its
-            // attributes changes the copy alone. Filling a memo of the shared object, or
-            // initializing one of its attributes lazily, leaves what it computes as it was.
+            // attributes changes the copy alone; a producer that is not deep shares only the
+            // object itself, not what it holds as items. Filling a memo of the shared object,
+            // or initializing one of its attributes lazily, leaves what it computes as it was.
             let p = u8::try_from(pos).ok().filter(|p| *p < 64);
             let mutates = self.facts_run_by_call(inst.span, key).iter().any(|facts| {
                 p.is_some_and(|p| {
@@ -3508,8 +3521,10 @@ impl<'a> Mut202Fn<'a> {
                             .changed_param_attrs
                             .get(&p)
                             .is_some_and(|attrs| facts.changes_param_state(p, Some(attrs)))
-                    } else {
+                    } else if r.deep {
                         facts.changes_param_state(p, None)
+                    } else {
+                        facts.changes_param_object(p)
                     }
                 })
             });
@@ -3526,6 +3541,10 @@ impl<'a> Mut202Fn<'a> {
         (None, Vec::new())
     }
 }
+
+// ==================================================================================== MUT115
+
+mod below_copies;
 
 // ==================================================================================== MUT107
 
