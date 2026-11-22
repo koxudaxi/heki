@@ -312,14 +312,16 @@ class body takes each value from the IR (`ModuleIr::class_base_values`) through 
 origin of a generic alias (`Base[int]`): a name the function loads from the module (in a class
 body also one the body has not bound yet, which Python looks up in the globals), what an import
 in the function binds, or an attribute of either, so a local alias of the import is the import.
-Any other value is an unknown base (`UNKNOWN_BASE`): a parameter, a local bound to anything
+Any other value is an unknown base (`is_unknown_base`): a parameter, a local bound to anything
 else, a closure cell, a class-body name bound to anything else, a value merged from paths that
 disagree (also the copies of a `finally` body), or a call's result; so are an expression or a
 starred base, a module variable heki names no class for (`Base = declarative_base()`), and every
 base of a statement in a function too large to model. An unknown base keeps its place in the MRO
 as a base outside the project that heki knows nothing of: it may define any method or attribute
 and its metaclass is unknown (`ClassDecl::custom_metaclass`), and no class derives from it, so
-the class is in no project class's subclass family. The declarations are built before inference,
+the class is in no project class's subclass family. Each unknown base is a class of its own,
+named after its class statement and its place (`<unknown pkg.mod.Left 0>`): two of them never
+order each other in a C3 linearization, as two distinct classes do not. The declarations are built before inference,
 which reads them, so they follow the IR definition only; base references (below) type the same
 values with inference, which also follows closure cells and class-body aliases.
 
