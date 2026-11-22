@@ -78,23 +78,23 @@ jobs:
             fi
           done
 
-  test-build:
-    # The test binaries, built once per platform in the `ci` profile (optimized dependencies, see
-    # Cargo.toml) and archived for the `test` shards. Linux builds them from the unpacked source
-    # distribution, so its shards run every test from it: platforms without a wheel build from
-    # the source distribution, and packagers run its tests, so it must carry every file the build
-    # and the tests embed or read (`pyproject.toml`). The other platforms build the checkout.
+  # The test binaries, built once per platform in the `ci` profile (optimized dependencies, see
+  # Cargo.toml) and archived for that platform's `test` shards, which wait for their own build
+  # only. Linux builds them from the unpacked source distribution, so its shards run every test
+  # from it: platforms without a wheel build from the source distribution, and packagers run its
+  # tests, so it must carry every file the build and the tests embed or read (`pyproject.toml`).
+  # The other platforms build the checkout.
+  test-build-linux:
     name: build tests (${{ matrix.os }})
     if: *full-run
     strategy:
-      fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-15, windows-2025]
+        os: [ubuntu-24.04]
     runs-on: ${{ matrix.os }}
-    steps:
-      # The ruff crates come from a git tag (ADR-009 / ADR-016), and the ruff repository holds
-      # test snapshots whose paths pass Windows' 260-character limit once cargo checks them out.
+    steps: &test-build-steps
       - name: Allow long paths in git checkouts
+        # The ruff crates come from a git tag (ADR-009 / ADR-016), and the ruff repository holds
+        # test snapshots whose paths pass Windows' 260-character limit once cargo checks them out.
         if: runner.os == 'Windows'
         run: git config --system core.longpaths true
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -113,6 +113,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@92e73e19cbfb3981e63ef478a16f95f415e634d3 # 1.99.0
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
+          # The cache key of the three jobs; rust-cache adds the platform to it.
+          shared-key: test-build
           workspaces: ${{ runner.os == 'Linux' && 'sdist-tree -> target' || '. -> target' }}
       - &install-nextest
         uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
@@ -137,34 +139,40 @@ jobs:
           compression-level: 0
           retention-days: 1
 
-  test:
-    # Each shard runs a fixed part of the archived tests (`--partition count:k/n`: every n-th
-    # test). The tests read the files of the tree they were built in (`CARGO_MANIFEST_DIR`) and
-    # run `heki` from where it was built (`CARGO_BIN_EXE_heki`), so a shard checks out (or
-    # unpacks) the same tree at the same path and extracts the binaries back into it.
+  test-build-macos:
+    name: build tests (${{ matrix.os }})
+    if: *full-run
+    strategy:
+      matrix:
+        os: [macos-15]
+    runs-on: ${{ matrix.os }}
+    steps: *test-build-steps
+
+  test-build-windows:
+    name: build tests (${{ matrix.os }})
+    if: *full-run
+    strategy:
+      matrix:
+        os: [windows-2025]
+    runs-on: ${{ matrix.os }}
+    steps: *test-build-steps
+
+  # Each shard runs a fixed part of its platform's archived tests (`--partition count:k/n`: every
+  # n-th test). The tests read the files of the tree they were built in (`CARGO_MANIFEST_DIR`)
+  # and run `heki` from where it was built (`CARGO_BIN_EXE_heki`), so a shard checks out (or
+  # unpacks) the same tree at the same path and extracts the binaries back into it.
+  test-linux:
     name: test (${{ matrix.os }}, ${{ matrix.shard }}/${{ matrix.shards }})
-    needs: test-build
+    needs: test-build-linux
     if: *full-run
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { os: ubuntu-24.04, shard: 1, shards: 4 }
-          - { os: ubuntu-24.04, shard: 2, shards: 4 }
-          - { os: ubuntu-24.04, shard: 3, shards: 4 }
-          - { os: ubuntu-24.04, shard: 4, shards: 4 }
-          # The account runs at most 5 macOS jobs at once: the build, then these 4.
-          - { os: macos-15, shard: 1, shards: 4 }
-          - { os: macos-15, shard: 2, shards: 4 }
-          - { os: macos-15, shard: 3, shards: 4 }
-          - { os: macos-15, shard: 4, shards: 4 }
-          - { os: windows-2025, shard: 1, shards: 5 }
-          - { os: windows-2025, shard: 2, shards: 5 }
-          - { os: windows-2025, shard: 3, shards: 5 }
-          - { os: windows-2025, shard: 4, shards: 5 }
-          - { os: windows-2025, shard: 5, shards: 5 }
+        os: [ubuntu-24.04]
+        shard: [1, 2, 3, 4]
+        shards: [4]
     runs-on: ${{ matrix.os }}
-    steps:
+    steps: &test-steps
       - if: runner.os != 'Linux'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -192,6 +200,33 @@ jobs:
         run: >-
           cargo nextest run --archive-file tests.tar.zst --extract-to "$TREE" --extract-overwrite
           --workspace-remap "$TREE" --partition "$PARTITION" --no-fail-fast
+
+  test-macos:
+    # The account runs at most 5 macOS jobs at once: the build, then these 4.
+    name: test (${{ matrix.os }}, ${{ matrix.shard }}/${{ matrix.shards }})
+    needs: test-build-macos
+    if: *full-run
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15]
+        shard: [1, 2, 3, 4]
+        shards: [4]
+    runs-on: ${{ matrix.os }}
+    steps: *test-steps
+
+  test-windows:
+    name: test (${{ matrix.os }}, ${{ matrix.shard }}/${{ matrix.shards }})
+    needs: test-build-windows
+    if: *full-run
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2025]
+        shard: [1, 2, 3, 4, 5]
+        shards: [5]
+    runs-on: ${{ matrix.os }}
+    steps: *test-steps
 
   coverage-build:
     # The instrumented test binaries, in the `ci` profile like the tests. cargo-llvm-cov builds
@@ -464,8 +499,12 @@ jobs:
       - fmt
       - clippy
       - architecture
-      - test-build
-      - test
+      - test-build-linux
+      - test-build-macos
+      - test-build-windows
+      - test-linux
+      - test-macos
+      - test-windows
       - coverage-build
       - coverage-test
       - coverage
