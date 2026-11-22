@@ -2774,19 +2774,10 @@ const GLOBALS_USES: &[(&str, &str, &str)] = &[
     ),
 ];
 
-/// Reading the dict of module globals (`globals().get(name)`, `globals()[name]`, `name in
-/// globals()`, iterating it, `len(globals())` with the real builtin) binds no name, so the
-/// module's constants still name keys; storing into it, deleting from it, a method changing it,
-/// or handing it on may bind any name, even one declared `Final`. Handing it on includes the
-/// builtin `globals` itself, a call of a reading builtin's name that the module, an import, a
-/// parameter, or a local rebinds (`def len(ns)`; a class attribute does not rebind it for the
-/// methods), and a place where another object's method receives the dict: an index
-/// (`obj[globals()]`), a container tested (`globals() in obj`), a comparison (`obj ==
-/// globals()`), the sentinel of `iter`. A call of a function the module names `globals` may
-/// return the dict too.
-#[test]
-fn only_a_change_through_the_dict_of_module_globals_unfixes_its_constants() {
-    let p = Project::new("keys_globals_uses");
+/// A project whose write owners own `pkg.model.Node._hidden`, with `pkg/writer.py` defining a
+/// `len` that stores into the dict it receives.
+fn globals_project(name: &str) -> Project {
+    let p = Project::new(name);
     p.write(
         "pyproject.toml",
         "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT201\", \"MUT205\"]\n\n\
@@ -2802,6 +2793,22 @@ fn only_a_change_through_the_dict_of_module_globals_unfixes_its_constants() {
         "pkg/writer.py",
         "def len(ns: dict) -> int:\n    ns[\"KEY\"] = \"other\"\n    return 0\n",
     );
+    p
+}
+
+/// Reading the dict of module globals (`globals().get(name)`, `globals()[name]`, `name in
+/// globals()`, iterating it, `len(globals())` with the real builtin) binds no name, so the
+/// module's constants still name keys; storing into it, deleting from it, a method changing it,
+/// or handing it on may bind any name, even one declared `Final`. Handing it on includes the
+/// builtin `globals` itself, a call of a reading builtin's name that the module, an import, a
+/// parameter, or a local rebinds (`def len(ns)`; a class attribute does not rebind it for the
+/// methods), and a place where another object's method receives the dict: an index
+/// (`obj[globals()]`), a container tested (`globals() in obj`), a comparison (`obj ==
+/// globals()`), the sentinel of `iter`. A call of a function the module names `globals` may
+/// return the dict too.
+#[test]
+fn only_a_change_through_the_dict_of_module_globals_unfixes_its_constants() {
+    let p = globals_project("keys_globals_uses");
     for (module, body, tail) in GLOBALS_USES {
         p.write(
             &format!("pkg/{module}.py"),
@@ -2832,4 +2839,49 @@ fn only_a_change_through_the_dict_of_module_globals_unfixes_its_constants() {
     let mut sorted = expected.clone();
     sorted.sort();
     assert_eq!(codes, sorted);
+}
+
+/// A star import binds the names its module exports, which heki does not read, so it may bind
+/// the name of any builtin: `len(globals())` may hand the dict to another `len` (the one
+/// `pkg.writer` defines), which may bind a name declared `Final`. That holds for a star import
+/// of a module that binds no `len` too (`pkg.helpers`), and wherever the import stands: a
+/// function runs after it (`_KEY`, a private name the import does not rebind, bound before an
+/// import at the end of the module). Without a star import the key stays a constant.
+#[test]
+fn a_star_import_may_bind_the_name_of_a_reading_builtin() {
+    let p = globals_project("keys_globals_star_import");
+    p.write("pkg/helpers.py", "def helper() -> None:\n    pass\n");
+    let modules = [
+        ("no_star", "", "KEY", ""),
+        ("star_writer", "from pkg.writer import *", "KEY", ""),
+        ("star_helpers", "from pkg.helpers import *", "KEY", ""),
+        ("star_last", "", "_KEY", "\n\nfrom pkg.writer import *\n"),
+    ];
+    for (module, head, key, tail) in modules {
+        p.write(
+            &format!("pkg/{module}.py"),
+            &format!(
+                "from typing import Final\n\nfrom pkg.model import Node\n{head}\n\n{key}: Final = \"_hidden\"\n\n\n\
+                 def write(node: Node) -> None:\n    node.__dict__[{key}] = 1\n\n\n\
+                 def use(name: str) -> object:\n    return len(globals())\n{tail}"
+            ),
+        );
+    }
+    let codes: Vec<(String, u64, String)> = found(&diagnostics(&p, &[]))
+        .into_iter()
+        .map(|x| (x.0, x.1, x.2))
+        .collect();
+    let mut expected: Vec<(String, u64, String)> = modules
+        .iter()
+        .map(|(module, ..)| {
+            let code = if *module == "no_star" {
+                "MUT201"
+            } else {
+                "MUT205"
+            };
+            (format!("pkg/{module}.py"), 10, code.to_owned())
+        })
+        .collect();
+    expected.sort();
+    assert_eq!(codes, expected);
 }

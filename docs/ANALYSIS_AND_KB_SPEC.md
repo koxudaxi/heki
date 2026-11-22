@@ -208,6 +208,16 @@ Compound expressions are flattened into **basic instructions in explicit left-to
     constant's object gains none (every call shares it). Tuples and strings are fixed whatever
     their uses, also in other modules, unless another module rebinds or deletes the name
     (`ModuleDecls.rebound_globals`, `ProjectDecls::changed_elsewhere`).
+  - The builtins these facts read (`range`, `len`, `sorted`, `min`, `enumerate`, ...) count only
+    where a load of the name finds the real one (`ModuleConstants::trusts_builtin`, which
+    `ModuleBindings` reads too): not in a module that stores or deletes the name, or that binds
+    names behind the IR (`exec`, a change through the dict `globals()` returns), and none in a
+    module with a star import, which may bind the name of any builtin, since heki does not read
+    which names the imported module exports, also when it is a project module. The trust is per
+    module, as `ModuleBindings` and the Soundness lane's builtin scope take it: a function may
+    run after the import wherever the import stands. A size resting on such a builtin is then
+    not known, so no claim rests on it (`range(len(rows))` gives `EFF103` no origin), and the
+    rules that read an unknown size as data-sized report the loop (`range(3)`).
   - `NaturalLoop.len_caps` (`LenCap`) records `while len(x) < N` caps up to 4096
     (`LEN_CAP_MAX`); `LoopCarriedInfo.updates` lists the real updates of a loop-carried value.
   - `IrFunction.starred` marks starred display elements, `ModuleIr.class_bases` the bases a

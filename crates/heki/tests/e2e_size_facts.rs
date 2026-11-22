@@ -768,3 +768,54 @@ fn slices_constructors_and_additions_by_fixed_counts() {
     let expected: Vec<(&str, &str)> = expected.iter().map(|(a, r)| (a.as_str(), *r)).collect();
     assert_both_versions(&p, "EFF103", &expected);
 }
+
+/// Two loops after an import line (`{import}`): one over the indices of a parameter, one over a
+/// constant range.
+const INDEXED: &str = r#"import sqlite3
+{import}
+
+
+def by_index(conn: sqlite3.Connection, rows):
+    for i in range(len(rows)):
+        conn.execute("SELECT ?", (rows[i],))
+
+
+def three(conn: sqlite3.Connection):
+    for i in range(3):
+        conn.execute("SELECT ?", (i,))
+"#;
+
+#[test]
+fn a_star_import_may_bind_the_builtins_a_size_rests_on() {
+    // A star import binds the names its module exports, which heki does not read, so after one
+    // any builtin may be another function: `range(len(rows))` yields one item per row and
+    // `range(3)` three items only with the real builtins. Without a star import the first loop
+    // is an exact `EFF103` and the second is not reported. After the star import of a module
+    // that binds `range` (`shadow`), or of one that binds no builtin (`helpers`), neither size
+    // is known: no exact report, and both loops count as data-sized (`EFF113`).
+    let p = Project::new("sizes_star_import");
+    p.write("pkg/__init__.py", "")
+        .write("pkg/shadow.py", "def range(n):\n    return [0] * 1000\n")
+        .write("pkg/helpers.py", "def helper() -> None:\n    pass\n");
+    for (module, import) in [
+        ("plain", ""),
+        ("starred", "from pkg.shadow import *"),
+        ("helpers_star", "from pkg.helpers import *"),
+    ] {
+        p.write(
+            &format!("pkg/{module}.py"),
+            &INDEXED.replace("{import}", import),
+        );
+    }
+    assert_both_versions(
+        &p,
+        "EFF103",
+        &[
+            ("pkg/plain.py:7", "EFF103"),
+            ("pkg/starred.py:7", "EFF113"),
+            ("pkg/starred.py:12", "EFF113"),
+            ("pkg/helpers_star.py:7", "EFF113"),
+            ("pkg/helpers_star.py:12", "EFF113"),
+        ],
+    );
+}
