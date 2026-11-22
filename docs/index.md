@@ -4,8 +4,8 @@
   <img src="assets/heki-banner.png" alt="heki: a snake in front of a brick wall" width="600">
 </p>
 
-🧱 heki (壁, "wall") is a static checker for Python, written in Rust. It tracks side effects and
-mutations across function calls.
+🧱 heki (壁, Japanese for "wall") is a static checker for Python, written in Rust. It tracks side
+effects and mutations across function calls.
 
 It catches blocking I/O in `async` code, database queries and HTTP clients in loops, and
 quadratic loops. You can also add rules in `pyproject.toml` to restrict which functions may
@@ -174,7 +174,8 @@ once you declare a contract: see [Rules](rules/index.md) and [Rule precision](pr
 - The [language server](lsp.md) checks while you edit and re-checks only what an edit can affect.
 - [`heki snapshot`](adoption.md#effect-snapshots-mut103) records what each public function does, and `MUT103` reports a function that gained an
   effect, which a diff does not show.
-- [Coding agents](coding-agents.md) get the same checks as JSON.
+- [Coding agents](coding-agents.md) get the same checks as JSON, and an
+  [Agent Skill](coding-agents.md#agent-skill-experimental) teaches them the workflow.
 
 ### Fast, quiet, and easy to adopt
 

@@ -4,11 +4,12 @@
 
 use super::{
     ModuleDecls, NamedAttr, dataclass_decorator, decorator_parts, is_summarized_function,
-    module_store_counts, qualifiers, split_top_level,
+    qualifiers, split_top_level,
 };
 use crate::ModuleInput;
+
 use heki_ir::walk::FnShape;
-use heki_ir::{FunctionId, InstKind, IrFunction, VarId};
+use heki_ir::{FunctionId, GlobalStores, InstKind, IrFunction, VarId};
 use heki_semantic::{NameResolution, ScopeKind};
 use rustc_hash::FxHashMap;
 use std::collections::BTreeSet;
@@ -20,7 +21,7 @@ pub(super) fn object_sentinels(input: &ModuleInput<'_>, decls: &ModuleDecls) -> 
     if input.ir.constants.dynamic || input.ir.has_star_import || !builtin_object(input, decls) {
         return out;
     }
-    let module_stores = module_store_counts(input);
+    let module_stores = GlobalStores::of(&input.ir.functions);
     for f in input.ir.functions.iter().filter(|f| f.is_module_body) {
         let shape = FnShape::new(f);
         for b in f.blocks.iter().filter(|b| shape.loop_depth(b.id) == 0) {
@@ -28,8 +29,7 @@ pub(super) fn object_sentinels(input: &ModuleInput<'_>, decls: &ModuleDecls) -> 
                 let InstKind::StoreGlobal { name, value } = &inst.kind else {
                     continue;
                 };
-                let once = module_stores.get(name.as_str()) == Some(&1)
-                    && !decls.imports.contains_key(name);
+                let once = module_stores.once(name) && !decls.imports.contains_key(name);
                 if once && calls_object(&shape, *value) {
                     out.insert(name.clone());
                 }

@@ -2914,6 +2914,49 @@ fn path_facts_decide_each_region_once() {
     assert_eq!(each["called"], json!({"known": "every"}));
 }
 
+/// Past the budget of the path facts (a loop dispatching on hundreds of `isinstance` tests, each
+/// ending in `continue`), whether a length test is on every path to a later loop (past a branch
+/// between them) is decided by the dominator tree of every edge: the cap still holds.
+#[test]
+fn length_caps_past_the_path_facts_budget_read_the_dominator_tree() {
+    let mut lines = vec![
+        "def spent(pending, rows, db):".to_owned(),
+        "    while pending:".to_owned(),
+        "        cur = pending.pop()".to_owned(),
+    ];
+    for i in 0..600 {
+        lines.push(format!("        if isinstance(cur, C{i}):"));
+        lines.push("            continue".to_owned());
+    }
+    lines.extend(
+        [
+            "        db.one(cur)",
+            "    if len(rows) > 8:",
+            "        raise ValueError(rows)",
+            "    if db.ready():",
+            "        db.one(None)",
+            "    for row in rows:",
+            "        db.one(row)",
+        ]
+        .map(str::to_owned),
+    );
+    let p = Project::new("bounds_caps_past_budget");
+    p.write("m.py", &(lines.join("\n") + "\n"));
+    let facts = dump_facts_within(&p, Duration::from_secs(20));
+    let spent = &facts["functions"][0];
+    let call = spent["calls"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["text"] == "db.one(row)")
+        .unwrap();
+    assert_eq!(call["on_every_return"]["called"], json!("open"));
+    assert_eq!(
+        spent["loops"][1]["fixed_trips"],
+        json!({"known": {"capped": 8}})
+    );
+}
+
 /// The origin walk decides each question once: a chain of thousands of wrappers each of the one
 /// before, a list filled by appends in each of a thousand loops, and a phi of sixty branches each
 /// choosing a different parameter (as many as the IR budget models with their phis).
