@@ -142,7 +142,8 @@ heki looks for the callee in this order:
 
 1. local constructors and imports;
 2. annotations;
-3. attributes assigned in `__init__`;
+3. attributes `__init__` assigns and module globals, when every store of each agrees on the
+   type;
 4. the class hierarchy, up to eight overriding methods.
 
 It also follows container item types (`list[Model]`), return annotations along the MRO,
@@ -266,6 +267,12 @@ Missed findings close as heki learns more:
   class. A read is not.
 - Not typed: values declared `Any`, generics substituted through `TypeVar`s, and calls of
   `type[C]` attributes.
+- The type of a module global or an instance attribute joins every store of it through a
+  receiver whose type heki knows: `self`, an instance of the class (a parameter `obj: Helper`,
+  `cls()` in a class method), the module (also imported in a function, or through `setattr` or
+  `vars`). A store through a receiver without a known type (`def configure(obj): obj.client =
+  ...`, a parameter whose default is the module) is not joined, nor is one through a `Protocol`
+  value, so the type the other stores agree on may be wrong for values it stores.
 
 ### Names the catalog does not list
 

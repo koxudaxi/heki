@@ -39,7 +39,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 
 mod package_paths;
 mod sentinels;
-mod stores;
+pub(crate) mod stores;
 mod workspace;
 
 /// The derived indexes of a [`ProjectDecls`] version (`ProjectDecls::index_changes`).
@@ -55,6 +55,7 @@ struct Indexes {
     rebound_elsewhere: FxHashSet<String>,
     changed_paths: BTreeMap<String, PathChange>,
     copy_registered: FxHashSet<String>,
+    setstate_called: bool,
 }
 
 /// Names every class has, which a protocol's body defines without requiring them.
@@ -377,16 +378,78 @@ impl AttrRead {
     }
 }
 
-/// What the stores of a class's methods bind one attribute of its instances to.
+/// What the stores of a module's code bind one attribute of the instances of a class to.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AttrStore {
-    /// `__init__` or `__post_init__` binds it to a value of known type, and every store binds a
-    /// value of this type (Priority 3).
+    /// `__init__` or `__post_init__` binds it through `self` to a value of known type, and
+    /// every store binds a value of this type (Priority 3).
     Established(Ty),
     /// Every store binds a value of this type, and none of `__init__`'s does.
     Of(Ty),
     /// A store binds a value of unknown type, or values no tracked type covers.
     Open,
+}
+
+/// What a module's code stores into the globals of other project modules and into the
+/// instances of their classes, through a receiver whose type the inference knows
+/// (`cfg.client = v`, `setattr(cfg, "client", v)`, `vars(cfg)["client"] = v`,
+/// `obj.client = v` with `obj: Helper`): the join of the values' types, `None` when one is
+/// unknown or no tracked type covers them.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoresElsewhere {
+    /// By the global's fqn.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub globals: BTreeMap<String, StoredElsewhere>,
+    /// By the class's fqn, then the attribute.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub attrs: BTreeMap<String, BTreeMap<String, StoredElsewhere>>,
+    /// The modules and classes, by fqn, it stores into under a name heki cannot read
+    /// (`setattr(cfg, name, v)`, `vars(obj).update(other)`).
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub unnamed: BTreeSet<String>,
+}
+
+/// What a module's stores bind one name of another module to.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredElsewhere {
+    /// The join of the values' types, `Some(None)` when one is unknown or no tracked type covers
+    /// them; `None` when every store rebinds the name in place.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ty: Option<Option<Ty>>,
+    /// A store rebinds the name to what an in-place operator gives on its own value
+    /// (`obj.items += [x]`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub in_place: bool,
+}
+
+/// A module's global and attribute types decided without what reading them gives, where they
+/// differ from [`ModuleDecls::global_types`] and [`ClassDecl::attr_stores`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoreFallbacks {
+    /// By global: its type, `None` for none.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub globals: BTreeMap<String, StoreFallback<Option<Ty>>>,
+    /// By class qualname, then attribute.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub attrs: BTreeMap<String, BTreeMap<String, StoreFallback<AttrStore>>>,
+    /// The classes that store attributes heki cannot name, once another module stores into
+    /// the module.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub any_attr: BTreeSet<String>,
+}
+
+/// The type of a global or an attribute decided without what reading names gives, and the
+/// names of the module whose reads its stores' values depend on: it holds once another
+/// module stores into one of them.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoreFallback<T> {
+    pub value: T,
+    /// The module's globals.
+    #[serde(default, skip_serializing_if = "<[_]>::is_empty")]
+    pub globals: Box<[String]>,
+    /// The attributes of the module's classes.
+    #[serde(default, skip_serializing_if = "<[_]>::is_empty")]
+    pub attrs: Box<[String]>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -403,15 +466,27 @@ pub struct ClassDecl {
     /// The declared instance attribute types, `attr -> type`: annotations in the class body or
     /// on `self` in a method, which type every store of the attribute.
     pub attr_types: BTreeMap<String, Ty>,
-    /// What the class's methods store through `self` in the attributes it does not annotate,
-    /// sorted by attribute (`stores::record`). A slice rather than a map: most
-    /// classes store a few, and a map's first node would hold room for eleven.
+    /// What the module's code stores in the attributes of the class's instances it does not
+    /// annotate, through `self` or another receiver of the class, sorted by attribute
+    /// (`stores::record`). A slice rather than a map: most classes store a few, and a map's
+    /// first node would hold room for eleven.
     #[serde(default, skip_serializing_if = "<[_]>::is_empty")]
     pub attr_stores: Box<[(Box<str>, AttrStore)]>,
-    /// A method stores an attribute of `self` heki cannot name (`setattr(self, name, v)`,
-    /// `self.__dict__.update(state)`): any attribute may hold any value.
+    /// The module's code stores an attribute of an instance heki cannot name
+    /// (`setattr(self, name, v)`, `self.__dict__.update(other)`): any attribute may hold any
+    /// value.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub stores_any_attr: bool,
+    /// The attributes the module's code rebinds to what an in-place operator gives on their own
+    /// value (`self.items += [x]`), sorted: such a store binds the object it read when the
+    /// attribute holds a value the operator changes in place ([`ProjectDecls::join_family`]).
+    #[serde(default, skip_serializing_if = "<[_]>::is_empty")]
+    pub in_place_attrs: Box<[Box<str>]>,
+    /// The only stores heki cannot name are those `__setstate__` makes from its state, which
+    /// restore what an instance held when pickle or copy took the state
+    /// ([`ProjectDecls::restores_hold`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub restores_state: bool,
     /// `@dataclass(frozen=True)` / `@dataclasses.dataclass(frozen=True)`, or a `NamedTuple`:
     /// the class promises immutable instances (`MUT108`). Classes a PEP 681
     /// `dataclass_transform(frozen_default=True)` builds are frozen too, and the subclasses of a
@@ -629,6 +704,10 @@ pub struct FunctionDecl {
     /// function, or reading the property, gives that object of the argument.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub returns_param_attr: Option<(u8, String)>,
+    /// A `__getstate__` returning a state built only from the instance's own attributes
+    /// (`stores::state_of_self`), which `__setstate__` restores.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub state_of_self: bool,
 }
 
 impl FunctionDecl {
@@ -736,11 +815,24 @@ pub struct ModuleDecls {
     /// longer the string constant their own module binds ([`ProjectDecls::rebound_elsewhere`]).
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub rebound_globals: BTreeSet<String>,
-    /// What the module's stores into the globals of other project modules bind
-    /// (`cfg.client = httpx.Client()`), by the global they store into: the join of the values'
-    /// types, `None` when one is unknown or no tracked type covers them (`stores::record`).
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub rebound_global_types: BTreeMap<String, Option<Ty>>,
+    /// What the module's code stores into the globals of other project modules and into the
+    /// instances of their classes (`stores::record`). Boxed: most modules store into none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stores_elsewhere: Option<Box<StoresElsewhere>>,
+    /// The types of the module's globals and attributes without what deciding them assumed
+    /// reading them, where those differ: they hold once another module stores into the module's
+    /// globals or into the instances of its classes (`stores::record`). Boxed: most modules
+    /// have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store_fallbacks: Option<Box<StoreFallbacks>>,
+    /// The module calls `__setstate__` on an object outside a `__setstate__` handing its own
+    /// state on: the state may be anything ([`ProjectDecls::restores_hold`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub calls_setstate: bool,
+    /// The names a star import of the module binds when the module fixes them: its `__all__`,
+    /// bound once to a tuple or an unchanged list of string literals (`stores::exported_names`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exports: Option<Box<[String]>>,
     /// The packages whose `__path__` the module changes, by the fqn its imports give them
     /// (`plugins.__path__.append(d)`), or by its own name when it is a package changing its own
     /// (`__path__ = extend_path(__path__, __name__)`), and how
@@ -868,13 +960,17 @@ impl ModuleDecls {
             class.attr_types.clear();
             class.attr_stores = Box::default();
             class.stores_any_attr = false;
+            class.restores_state = false;
+            class.in_place_attrs = Box::default();
             class.attr_capacities.clear();
         }
         for function in out.functions.values_mut() {
             function.offloaded_by = None;
+            function.state_of_self = false;
         }
         out.global_types.clear();
-        out.rebound_global_types.clear();
+        out.stores_elsewhere = None;
+        out.store_fallbacks = None;
         out.global_capacities.clear();
         out
     }
@@ -1611,9 +1707,12 @@ pub struct ProjectDecls {
     grown_elsewhere: FxHashSet<String>,
     /// Those another project module rebinds or deletes (`ModuleDecls::rebound_globals`).
     rebound_elsewhere: FxHashSet<String>,
-    /// The type of each module global another project module stores into: the join of its own
-    /// module's type and of those stores (`ModuleDecls::rebound_global_types`), `None` for none.
-    rebound_types: FxHashMap<String, Option<Ty>>,
+    /// What project modules store into the globals of other modules and into the instances of
+    /// their classes, joined (`ModuleDecls::stores_elsewhere`), and the modules whose own types
+    /// then hold no longer.
+    elsewhere: stores::Elsewhere,
+    /// Some project module calls `__setstate__` itself (`ModuleDecls::calls_setstate`).
+    setstate_called: bool,
     /// The packages whose `__path__` a project module changes (`ModuleDecls::path_changes`, the
     /// changes joined), and the packages heki could not read, as `PathChange::Replaced`; sorted,
     /// so the packages under a name are one range.
@@ -1681,7 +1780,7 @@ pub(crate) enum Symbol<'a> {
     Module,
     Class(&'a ClassDecl),
     Function(FuncKey, &'a FunctionDecl),
-    Global(&'a Ty),
+    Global(Ty),
     /// A name a project module binds itself that heki has no declaration for, or a name under
     /// one: a module global it holds no type of ([`ModuleDecls::unknown_globals`]). Calling it
     /// is unresolved.
@@ -1771,6 +1870,9 @@ impl ProjectDecls {
             .extend(differ(&before.rebound_elsewhere, &self.rebound_elsewhere));
         out.class_facts
             .extend(differ(&before.copy_registered, &self.copy_registered));
+        if before.setstate_called != self.setstate_called {
+            out.class_facts.insert(stores::SETSTATE_KEY.to_owned());
+        }
         for package in before.changed_paths.keys().chain(self.changed_paths.keys()) {
             if before.changed_paths.get(package) != self.changed_paths.get(package) {
                 out.package_paths
@@ -1793,6 +1895,7 @@ impl ProjectDecls {
             rebound_elsewhere: self.rebound_elsewhere.clone(),
             changed_paths: self.changed_paths.clone(),
             copy_registered: self.copy_registered.clone(),
+            setstate_called: self.setstate_called,
         }
     }
 
@@ -1863,7 +1966,8 @@ impl ProjectDecls {
         self.protocols = self.protocol_implementations();
         self.grown_elsewhere = self.globals_changed_elsewhere(|m| &m.grown_globals);
         self.rebound_elsewhere = self.globals_changed_elsewhere(|m| &m.rebound_globals);
-        self.rebound_types = self.rebound_global_types();
+        self.setstate_called = self.modules.values().any(|m| m.calls_setstate);
+        self.elsewhere = self.stores_elsewhere();
         self.changed_paths = self.package_path_changes();
         self.copy_registered = self
             .modules
@@ -1909,39 +2013,6 @@ impl ProjectDecls {
             }
         }
         out
-    }
-
-    /// [`Self::rebound_types`]: for each module global another project module stores into, its
-    /// own module's type joined with the types of those stores.
-    fn rebound_global_types(&self) -> FxHashMap<String, Option<Ty>> {
-        let mut stored: FxHashMap<String, Option<Ty>> = FxHashMap::default();
-        for m in self.modules.values() {
-            for (fqn, t) in &m.rebound_global_types {
-                let fqn = self.canonical(fqn);
-                let elsewhere = self.split_module(&fqn).is_some_and(|(owner, rest)| {
-                    owner.module_name != m.module_name && !rest.is_empty()
-                });
-                if !elsewhere {
-                    continue;
-                }
-                let joined = match (stored.remove(&fqn), t) {
-                    (None, t) => t.clone(),
-                    (Some(Some(a)), Some(b)) => a.join(b),
-                    (Some(_), _) => None,
-                };
-                stored.insert(fqn, joined);
-            }
-        }
-        for (fqn, t) in &mut stored {
-            let own = self
-                .split_module(fqn)
-                .and_then(|(m, rest)| m.global_types.get(rest));
-            *t = match (own, t.take()) {
-                (Some(own), Some(other)) => own.join(&other).filter(kept_in_declarations),
-                _ => None,
-            };
-        }
-        stored
     }
 
     /// Whether another project module may grow or rebinds the module global `fqn` (a display
@@ -3416,10 +3487,10 @@ impl ProjectDecls {
     /// the MRO (past `class` itself with `skip_self`, for `super()`) that declares it: the
     /// return annotation of a property getter (with or without a setter; another function of a
     /// name some project property has gives none), or the Priority 3 attribute type. Overriding
-    /// subclasses do not count for an annotation, as for a type checker; an inferred type is
-    /// what every class whose methods may store into the instance stores
-    /// ([`Self::stored_attr_type`]). The getter's module is a declaration read like any other
-    /// (`DeclKeys::modules`).
+    /// subclasses do not count for an annotation, as for a type checker; an inferred type joins
+    /// what the project's code stores into the instances of every class whose code may store
+    /// into the instance ([`Self::stored_attr_type`]). The getter's module is a declaration read
+    /// like any other (`DeclKeys::modules`).
     pub(crate) fn member_type(&self, class: &str, attr: &str, skip_self: bool) -> Option<Ty> {
         self.read(|k| note(&mut k.property_names, attr));
         let property = self.property_names.contains(attr);
@@ -3433,38 +3504,36 @@ impl ProjectDecls {
             if let Some(t) = decl.attr_types.get(attr) {
                 return Some(t.clone());
             }
-            if let Some(AttrStore::Established(_)) = decl.stored(attr) {
+            if let Some(AttrStore::Established(_)) = self.attr_store(c, decl, attr) {
                 return self.stored_attr_type(class, attr);
             }
         }
         None
     }
 
-    /// The join of what every class whose methods may store into an instance of `class` stores
-    /// in `attr`: `class`, its project subclasses, and the project classes along their MROs
-    /// (`stores::join_family`). The answer is kept for the life of the indexes, as
+    /// The join of what the project's code stores in `attr` of the instances of the classes
+    /// whose code may store into an instance of `class` ([`Self::instance_family`],
+    /// [`Self::join_family`]). The answer is kept for the life of the indexes, as
     /// [`Self::class_str_constant`]'s.
     fn stored_attr_type(&self, class: &str, attr: &str) -> Option<Ty> {
         let class = self.canonical(class);
         let key = (class.clone(), attr.to_owned());
         self.kept(&self.attr_joins, key, || {
-            let mut instances = self.subclasses_of(&class);
-            instances.push(class.clone());
-            let family: BTreeSet<String> = instances.iter().flat_map(|c| self.mro(c)).collect();
-            stores::join_family(family.iter().filter_map(|c| self.class(c)), attr)
+            let family = self.instance_family(&class);
+            self.join_family(&family, attr)
         })
     }
 
-    /// The type of the module global `name` of `m` ([`ModuleDecls::global_types`]), joined with
-    /// what other project modules store into it ([`Self::rebound_types`]).
-    fn global_type<'s>(&'s self, m: &'s ModuleDecls, name: &str) -> Option<&'s Ty> {
-        let t = m.global_types.get(name)?;
-        let fqn = self.canonical(&format!("{}.{name}", m.module_name));
-        self.read(|k| note(&mut k.grown_globals, &fqn));
-        match self.rebound_types.get(&fqn) {
-            Some(joined) => joined.as_ref(),
-            None => Some(t),
-        }
+    /// The classes whose code may store into an instance of the project class `class`:
+    /// `class`, its project subclasses, and the project classes along their MROs, sorted.
+    pub(crate) fn instance_family(&self, class: &str) -> Vec<String> {
+        let mut instances = self.subclasses_of(class);
+        instances.push(class.to_owned());
+        let family: BTreeSet<String> = instances.iter().flat_map(|c| self.mro(c)).collect();
+        family
+            .into_iter()
+            .filter(|c| self.is_project_class(c))
+            .collect()
     }
 
     /// The declared value of the property `attr` when the definition of `attr` that an instance
@@ -3950,39 +4019,35 @@ impl DeclPasses {
             return DeclKeys::default();
         }
         let before = self.structural.indexes();
-        let before_types = self.completed.rebound_types.clone();
+        let before_stores = self.completed.elsewhere.clone();
         self.structural.replace(completed.structural());
         self.completed.replace(completed);
-        self.changed(&name, Some(&before), &before_types)
+        self.changed(&name, Some(&before), &before_stores)
     }
 
     /// Forget a deleted module; returns what changed.
     pub fn remove(&mut self, module: &str) -> DeclKeys {
         let before = self.structural.indexes();
-        let before_types = self.completed.rebound_types.clone();
+        let before_stores = self.completed.elsewhere.clone();
         self.structural.remove(module);
         self.completed.remove(module);
-        self.changed(module, Some(&before), &before_types)
+        self.changed(module, Some(&before), &before_stores)
     }
 
     /// What changed when `module`'s declarations did: the module, the hierarchy indexes that
-    /// differ from `before` (unchanged without it: the module's structure stayed), and the
-    /// globals whose type with other modules' stores differs from `before_types`
-    /// (`ProjectDecls::rebound_types`, which the completed declarations decide).
+    /// differ from `before` (unchanged without it: the module's structure stayed), and what
+    /// other modules' stores change that differs from `before_stores`
+    /// (`ProjectDecls::elsewhere`, which the completed declarations decide).
     fn changed(
         &self,
         module: &str,
         before: Option<&Indexes>,
-        before_types: &FxHashMap<String, Option<Ty>>,
+        before_stores: &stores::Elsewhere,
     ) -> DeclKeys {
         let mut out = before.map_or_else(DeclKeys::default, |b| self.structural.index_changes(b));
         out.modules.insert(module.to_owned());
-        let after_types = &self.completed.rebound_types;
-        for fqn in before_types.keys().chain(after_types.keys()) {
-            if before_types.get(fqn) != after_types.get(fqn) {
-                out.grown_globals.insert(fqn.clone());
-            }
-        }
+        out.grown_globals
+            .extend(before_stores.changes(&self.completed.elsewhere));
         out
     }
 }
@@ -4007,9 +4072,9 @@ pub(crate) fn update_module_decls(
         return (DeclKeys::default(), Arc::new(completed), reads);
     }
     let completed = Arc::new(completed);
-    let before_types = passes.completed.rebound_types.clone();
+    let before_stores = passes.completed.elsewhere.clone();
     passes.completed.replace(Arc::clone(&completed));
-    let changed = passes.changed(name, before.as_ref(), &before_types);
+    let changed = passes.changed(name, before.as_ref(), &before_stores);
     (changed, completed, reads)
 }
 
@@ -4515,11 +4580,14 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
             is_abstract: crate::is_abstract_method(&f.decorators),
             property_type: getter_types.get(f.qualname.as_str()).cloned(),
             returns_param_attr: returned_attrs[f.qualname.as_str()].clone(),
+            state_of_self: false,
         };
         decls.functions.insert(f.qualname.clone(), Box::new(decl));
     }
     readonly_metadata(input, &mut decls);
     decls.small_globals = input.ir.constants.displays.clone();
+    decls.calls_setstate = stores::calls_setstate(input);
+    decls.exports = stores::exported_names(input);
     (decls.grown_globals, decls.rebound_globals) = foreign_grown_globals(input, &decls.imports);
     let path_changes = package_paths::path_changes(input, &decls);
     decls.path_changes = (!path_changes.is_empty()).then(|| Box::new(path_changes));
@@ -6273,27 +6341,9 @@ pub struct TypeCtx<'a> {
     /// [`ProjectDecls::function_taken`] by class and name, asked once per module (the module's
     /// summaries are one recording, which the first answer's reads join).
     taken: RefCell<FxHashMap<(String, String), Option<FuncKey>>>,
-    /// The types reading the module's globals and its classes' attributes gives while
-    /// [`stores::record`] decides them.
-    assumed: Assumed,
-}
-
-/// The types of the module's own globals and of its classes' instance attributes (by class
-/// qualname) that [`stores::record`] takes their reads to give while it joins their stores:
-/// the declarations, whose own types are not decided yet, have none.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct Assumed {
-    pub(crate) globals: BTreeMap<String, Ty>,
-    pub(crate) attrs: BTreeMap<(String, String), Ty>,
-}
-
-impl Assumed {
-    /// `derived` with these types in place of its own.
-    fn over(&self, mut derived: Assumed) -> Assumed {
-        derived.globals.extend(self.globals.clone());
-        derived.attrs.extend(self.attrs.clone());
-        derived
-    }
+    /// What reading the module's globals and its classes' attributes gives while
+    /// [`stores::record`] decides their types.
+    store_reads: Option<&'a dyn stores::StoreReads>,
 }
 
 /// Declarations used when a module is missing from `ProjectDecls`.
@@ -6319,7 +6369,10 @@ static EMPTY_DECLS: ModuleDecls = ModuleDecls {
     small_globals: BTreeMap::new(),
     grown_globals: BTreeSet::new(),
     rebound_globals: BTreeSet::new(),
-    rebound_global_types: BTreeMap::new(),
+    stores_elsewhere: None,
+    store_fallbacks: None,
+    calls_setstate: false,
+    exports: None,
     path_changes: None,
     str_constants: BTreeMap::new(),
     literal_constants: BTreeMap::new(),
@@ -6378,7 +6431,7 @@ impl<'a> TypeCtx<'a> {
             bindings: std::cell::OnceCell::new(),
             string_sets: std::cell::OnceCell::new(),
             taken: RefCell::default(),
-            assumed: Assumed::default(),
+            store_reads: None,
         }
     }
 
@@ -6430,31 +6483,47 @@ impl<'a> TypeCtx<'a> {
         }
     }
 
-    /// This context with the reads of the module's globals and attributes giving `assumed`.
-    pub(crate) fn assuming(mut self, assumed: Assumed) -> Self {
-        self.assumed = assumed;
+    /// This context with the reads of the module's globals and attributes going to `reads`.
+    pub(crate) fn reading_stores(mut self, reads: &'a dyn stores::StoreReads) -> Self {
+        self.store_reads = Some(reads);
         self
     }
 
-    /// The type [`Assumed`] gives reading `attr` on an instance of `class`: the first class along
-    /// the MRO (past `class` itself with `skip_self`) of this module it assumes a type for.
-    pub(crate) fn assumed_member(&self, class: &str, attr: &str, skip_self: bool) -> Option<Ty> {
-        if self.assumed.attrs.is_empty() {
+    /// Forget the types inferred so far, which depend on what the reads of the stores gave.
+    pub(crate) fn forget_inferred(&self) {
+        self.scopes.forget();
+    }
+
+    /// What reading the module global `name` gives while [`stores::record`] decides it, past
+    /// the names whose value the module's declarations fix (imports, classes, functions, module
+    /// aliases): `None` for what the declarations give.
+    pub(crate) fn store_read_global(&self, name: &str) -> Option<stores::Read> {
+        let reads = self.store_reads?;
+        let m = self.module;
+        let fixed = m.imports.contains_key(name)
+            || m.classes.contains_key(name)
+            || m.functions.contains_key(name)
+            || (m.aliases.contains_key(name)
+                && !self.project.alias_rebound(self.module_name(), name));
+        if fixed {
             return None;
         }
-        let prefix = format!("{}.", self.module_name);
-        let mro = self.project.mro(class);
-        let qualnames = mro
-            .iter()
-            .skip(usize::from(skip_self))
-            .filter_map(|c| c.strip_prefix(&prefix));
-        for qualname in qualnames {
-            let key = (qualname.to_owned(), attr.to_owned());
-            if let Some(t) = self.assumed.attrs.get(&key) {
-                return Some(t.clone());
-            }
+        match reads.global(name)? {
+            stores::Read::Pending => Some(stores::Read::Pending),
+            stores::Read::Of(t) => self.project.declared_ty(&t).map(stores::Read::Of),
         }
-        None
+    }
+
+    /// What reading `attr` on an instance of `class` (past `class` itself with `skip_self`)
+    /// gives while [`stores::record`] decides the module's attributes: `None` for what the
+    /// declarations give.
+    pub(crate) fn store_read_member(
+        &self,
+        class: &str,
+        attr: &str,
+        skip_self: bool,
+    ) -> Option<stores::Read> {
+        self.store_reads?.member(class, attr, skip_self)
     }
 
     /// Value of a module-level name read inside this module.
@@ -6466,11 +6535,9 @@ impl<'a> TypeCtx<'a> {
             return Ty::Ref(format!("{}.{name}", self.module_name()));
         }
         if let Some(t) = self
-            .assumed
-            .globals
-            .get(name)
-            .or_else(|| self.project.global_type(self.module, name))
-            .and_then(|t| self.project.declared_ty(t))
+            .project
+            .global_type(self.module, name)
+            .and_then(|t| self.project.declared_ty(&t))
         {
             return t;
         }
@@ -6524,7 +6591,7 @@ impl<'a> TypeCtx<'a> {
     pub(crate) fn named(&self, fqn: &str) -> Ty {
         let fqn = self.project.object_named(fqn);
         match self.project.symbol(&fqn) {
-            Symbol::Global(t) => self.project.declared_ty(t).unwrap_or(Ty::Ref(fqn)),
+            Symbol::Global(t) => self.project.declared_ty(&t).unwrap_or(Ty::Ref(fqn)),
             _ => Ty::Ref(fqn),
         }
     }

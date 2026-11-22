@@ -1,11 +1,11 @@
 //! The cost of the analyses past the IR, end to end through the real binary: `isinstance`
 //! narrowing through phis, the passes of the type inference and of the classes of merged values,
 //! the closure cells child scopes read, the iterables child scopes receive from the functions
-//! creating them, the rounds joining the stores of attributes, the size of the Soundness lane's
-//! proof state, the values `EFF107` follows from a task factory, the walk to the callable a
-//! builtin calls once per item, contracts with many call targets and argument lists, the walk to
-//! the uses handing a reference to a call target on, the locks `EFF109` follows, and the values
-//! class statements pass as bases.
+//! creating them, the fixpoint joining the stores of attributes and the stores through namespaces
+//! and `setattr`, the size of the Soundness lane's proof state, the values `EFF107` follows from a
+//! task factory, the walk to the callable a builtin calls once per item, contracts with many call
+//! targets and argument lists, the walk to the uses handing a reference to a call target on, the
+//! locks `EFF109` follows, and the values class statements pass as bases.
 //!
 //! A shape's cost is counted, not timed: `heki check --walk-steps` writes the steps of each
 //! owner's walks (as `scripts/check_walk_shapes.py` reads them), and a shape is compared with the
@@ -329,9 +329,10 @@ fn attribute_chain_before_blocking_call(links: usize) -> String {
     out.join("\n") + "\n"
 }
 
-/// The stores of a module's attributes are joined in a bounded number of rounds, each reading the
-/// attributes with the types the one before established: an attribute reached past them has no
-/// type, so the receiver of the call is unknown and nothing is reported.
+/// The types of a module's attributes are a fixpoint over the functions storing them, each
+/// inferred again a bounded number of times when an attribute it reads grew: past the bound the
+/// stores reading attributes bind values of unknown type, so the receiver of the call is unknown
+/// and nothing is reported.
 #[test]
 fn attributes_past_the_store_join_rounds_are_unknown() {
     let shape = |links: usize| {
@@ -342,6 +343,54 @@ fn attributes_past_the_store_join_rounds_are_unknown() {
     let blocking = |found: Vec<Value>| found.iter().filter(|d| d["rule_code"] == "EFF101").count();
     assert_eq!(blocking(check(&shape(2))), 1);
     assert_eq!(blocking(check_linear(30, shape)), 0);
+}
+
+/// A class whose `__init__` binds an attribute to a client and makes `stores` stores of other
+/// attributes, each one `store(k)` writes, and an `async def` calling the client's blocking
+/// method.
+fn many_attribute_stores(stores: usize, store: impl Fn(usize) -> String) -> String {
+    let mut out = vec![
+        "import httpx".to_owned(),
+        String::new(),
+        String::new(),
+        "class Holder:".to_owned(),
+        "    def __init__(self):".to_owned(),
+        "        self.client = httpx.Client()".to_owned(),
+    ];
+    out.extend((0..stores).map(|k| format!("        {}", store(k))));
+    out.push(String::new());
+    out.push("    async def handle(self):".to_owned());
+    out.push("        self.client.get(\"https://example.com\")".to_owned());
+    out.join("\n") + "\n"
+}
+
+/// The stores through an instance's namespace are found in one pass over the function: the
+/// aliases of every namespace it loads, and the names their keys hold from the function's table
+/// of definitions. Stores of other attributes keep the client's type.
+#[test]
+fn stores_through_namespaces_are_found_in_one_pass() {
+    let shape = |stores: usize| {
+        let p = Project::new(&format!("bounds_namespace_stores_{stores}"));
+        let text = many_attribute_stores(stores, |k| format!("self.__dict__[\"a{k}\"] = {k}"));
+        p.write("m.py", &text);
+        p
+    };
+    let blocking = |found: Vec<Value>| found.iter().filter(|d| d["rule_code"] == "EFF101").count();
+    assert_eq!(blocking(check_linear(2000, shape)), 1);
+}
+
+/// The names `setattr` stores are read from the function's table of definitions, each in a
+/// constant number of steps.
+#[test]
+fn names_setattr_stores_are_read_from_a_table() {
+    let shape = |stores: usize| {
+        let p = Project::new(&format!("bounds_setattr_stores_{stores}"));
+        let text = many_attribute_stores(stores, |k| format!("setattr(self, \"a{k}\", {k})"));
+        p.write("m.py", &text);
+        p
+    };
+    let blocking = |found: Vec<Value>| found.iter().filter(|d| d["rule_code"] == "EFF101").count();
+    assert_eq!(blocking(check_linear(2000, shape)), 1);
 }
 
 /// A function binding `names` variables in turn `bindings` times in all, each binding followed

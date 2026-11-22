@@ -1075,22 +1075,16 @@ fn module_constants_class_attributes_and_elif_comparisons() {
         .write("pkg/views.py", CLASS_ATTRIBUTES)
         .write("pkg/pairs.py", TWO_KEYS);
     let diags = diagnostics(&p, &["--select", "OPT112,OPT113"]);
-    // A star import may rebind every name bound before it (its module's `__all__` may list a
-    // `_private` one); a class attribute read through `cls` is small when the class family only
+    // A star import of a module whose exports heki does not read (`os`) may rebind every name
+    // bound before it, `_private` ones too (its `__all__` may list one), so they hold values of
+    // unknown type; a class attribute read through `cls` is small when the class family only
     // assigns small displays; an `elif` comparison only sees the pairs the `if` before it
     // rejected (a join filtered by `continue` is still one).
     assert_eq!(
         reported(&diags),
-        pairs(&[
-            ("guarded", "OPT113"),
-            ("ops", "OPT112"),
-            ("ops", "OPT112"),
-            ("Grown.fields", "OPT112"),
-        ]),
+        pairs(&[("guarded", "OPT113"), ("Grown.fields", "OPT112")]),
         "{diags:#?}"
     );
-    assert_eq!(diags[1]["target"], "_OPS");
-    assert_eq!(diags[2]["target"], "PUBLIC");
 }
 
 // ============================================================== the IR facts themselves

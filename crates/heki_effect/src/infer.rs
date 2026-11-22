@@ -20,6 +20,7 @@
 //! the value its enclosing function hands it, and a nested scope reads the closure cells of the
 //! functions enclosing it, so those functions are inferred first.
 
+use crate::resolver::stores::Read;
 use crate::resolver::{self, Callee, ProjectDecls, TypeCtx, Val};
 use crate::types::{Args, Elem, Obj, Ty};
 use heki_ast::Span;
@@ -205,6 +206,14 @@ pub(crate) struct Scopes {
     enclosing: RefCell<FxHashMap<FunctionId, Rc<Inferred>>>,
     /// What a child scope produces in each run.
     outputs: RefCell<FxHashMap<ChildRun, Elem>>,
+}
+
+impl Scopes {
+    /// Forget the types and outputs kept so far (the nesting of the scopes stays).
+    pub(crate) fn forget(&self) {
+        self.enclosing.borrow_mut().clear();
+        self.outputs.borrow_mut().clear();
+    }
 }
 
 /// A run of a child scope: the scope, the type of the value it iterates, and the facts of the
@@ -1352,9 +1361,9 @@ impl<'e, 'a> Engine<'e, 'a> {
             InstKind::Convert { dst, .. }
             | InstKind::Format { dst, .. }
             | InstKind::BuildString { dst, .. } => Some(self.display(*dst, BuiltinKind::Str, &[])),
-            InstKind::LoadGlobal { name, .. } => Some(cx.global(name)),
+            InstKind::LoadGlobal { name, .. } => return self.global(name),
             // An unassigned local of a function holds no value on this path.
-            InstKind::LoadName { name, .. } if self.reads_globals => Some(cx.global(name)),
+            InstKind::LoadName { name, .. } if self.reads_globals => return self.global(name),
             InstKind::LoadName { .. } => return Err(Pending),
             InstKind::LoadDeref { name, .. } => {
                 return self.cells.get(name).map_or(Ok(None), Fact::as_step);
@@ -1376,7 +1385,7 @@ impl<'e, 'a> Engine<'e, 'a> {
             }
             InstKind::AttrLoad { obj, attr, .. } => match self.need(*obj)? {
                 Some(Ty::Ref(fqn) | Ty::Class(fqn)) => Some(cx.named(&format!("{fqn}.{attr}"))),
-                Some(recv) => self.member(recv, attr),
+                Some(recv) => return self.member(recv, attr),
                 None => None,
             },
             InstKind::SubscriptLoad {
@@ -1766,18 +1775,38 @@ impl<'e, 'a> Engine<'e, 'a> {
         }
     }
 
+    /// The value of the module global `name` read inside this module (no value yet while the
+    /// stores deciding its type have bound none, `resolver::stores`).
+    fn global(&self, name: &str) -> Step {
+        match self.cx.store_read_global(name) {
+            Some(Read::Pending) => Err(Pending),
+            Some(Read::Of(t)) => Ok(Some(t)),
+            None => Ok(Some(self.cx.global(name))),
+        }
+    }
+
     /// The declared type of reading `attr` on a value of type `recv`: a property getter's
-    /// return annotation or the attribute's annotation along its MRO (`Self` bound to it).
-    fn member(&self, recv: &Ty, attr: &str) -> Option<Ty> {
+    /// return annotation or the attribute's annotation along its MRO (`Self` bound to it). The
+    /// members of a union no store has bound a value of yet (`resolver::stores`) add nothing.
+    fn member(&self, recv: &Ty, attr: &str) -> Step {
         if let Ty::Union(os) = recv {
-            return join_all(os.iter().map(|o| self.member(&Ty::Inst(o.clone()), attr)));
+            let bound: Vec<Option<Ty>> = os
+                .iter()
+                .filter_map(|o| self.member(&Ty::Inst(o.clone()), attr).ok())
+                .collect();
+            return (!bound.is_empty()).then(|| join_all(bound)).ok_or(Pending);
         }
         let cx = self.cx;
-        let (class, skip_self, self_ty) = self.static_receiver(recv)?;
-        cx.assumed_member(class, attr, skip_self)
-            .or_else(|| cx.project.member_type(class, attr, skip_self))
-            .and_then(|t| cx.project.declared_ty(&t))
-            .and_then(|t| t.bind_self(Some(&self_ty)))
+        let Some((class, skip_self, self_ty)) = self.static_receiver(recv) else {
+            return Ok(None);
+        };
+        let t = match cx.store_read_member(class, attr, skip_self) {
+            Some(Read::Pending) => return Err(Pending),
+            Some(Read::Of(t)) => Some(t),
+            None => cx.project.member_type(class, attr, skip_self),
+        };
+        Ok(t.and_then(|t| cx.project.declared_ty(&t))
+            .and_then(|t| t.bind_self(Some(&self_ty))))
     }
 
     /// What calling method `method` on a value of type `recv` returns: the return annotation of
@@ -1800,7 +1829,9 @@ impl<'e, 'a> Engine<'e, 'a> {
             // object holds the property object itself, which raises when called.
             if decl.reads_as_property() {
                 let on_instance = matches!(recv, Ty::Inst(_) | Ty::Super(_));
-                let value = on_instance.then(|| self.member(recv, method)).flatten();
+                let value = on_instance
+                    .then(|| self.member(recv, method).ok().flatten())
+                    .flatten();
                 return value.and_then(|v| self.called(&v, call));
             }
             return decl

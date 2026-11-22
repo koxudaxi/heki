@@ -334,31 +334,58 @@ the targets of write and read boundaries.
 | 4 | Same-name methods in the class hierarchy (CHA / RTA); a project `Protocol` dispatches to its structural implementations (a call site keeps the protocol's own declaration of the method, `CallSite::declared`, which the read and call contracts judge it by) | Heuristic | Concrete subclasses of an abstract base (more than 8 candidates: unresolved) |
 
 A module global the module body binds to a value of known type, and an instance attribute
-`__init__` or `__post_init__` binds to one, have the join of what every store of the name binds
-(Priority 3; `ModuleDecls::global_types`, `ClassDecl::attr_stores`). A global's stores are the
-module body's and those of every function declaring it `global`. An attribute's are those of
-every method of each class whose methods may store into an instance (the class, its project
-subclasses, and the project classes along their MROs; `ProjectDecls::member_type`): through
-`self`, a copy of it, or the closure cell of a function nested in the method,
-`setattr(self, "attr", v)`, `object.__setattr__(self, "attr", v)`, and a write of the
-instance's namespace under a string literal (`self.__dict__["attr"] = v`,
-`vars(self).setdefault("attr", v)`). A store of `None` adds nothing (a call on it raises). A
-store of a value of unknown type, or values no tracked type covers, leave the name untyped. A
-global's stores also include those of other project modules (`cfg.client = ...`;
-`ModuleDecls::rebound_global_types`), and a module whose globals `globals()` or `exec` may
-change, or a module-body store before a star import (`ModuleIr::last_star_import`), leaves it
-untyped; so does, for an attribute, a
-store whose attribute heki cannot name (`setattr(self, name, v)`, `self.__dict__.update(state)`,
-the namespace handed on; `ClassDecl::stores_any_attr`). A store reading the name itself
-(`self.items = self.items[1:]`) binds a value whose type depends on the one being decided: the
-functions storing such values are inferred again with the names they read taking the type the
-other stores establish, until the joins give what the reads were taken to give (at most four
-rounds; without that, the first round's types hold, with those names untyped). An annotation
-types every store of the name it declares (Priority 2): an annotated global holds its
-declaration or a narrower value, an annotated attribute its declaration. Stores of two or three
-classes give a union, on which a call dispatches as on any union (one of `httpx.Client` and
-`httpx.AsyncClient` leaves `get` unresolved). A store into an instance through another receiver
-(`holder.client = ...` in a function) is not one of them.
+`__init__` or `__post_init__` binds to one through `self`, have the join of what every store of
+the name binds (Priority 3; `ModuleDecls::global_types`, `ClassDecl::attr_stores`,
+`resolver::stores`).
+
+- **What a store stores into.** A store stores into what its receiver holds: `self` in a method
+  (a copy of it, the closure cell of a function nested in the method, `super()`), or a value whose
+  type the inference knows: an instance of a project class (`inst = cls()` in a class method, a
+  parameter `obj: Helper`, a union of such classes) or a project module (an import in a function
+  too). A global's stores are also the module body's and those of every function declaring it
+  `global`. An attribute's type joins the stores into the instances of every class whose code may
+  store into an instance (the class, its project subclasses, and the project classes along their
+  MROs; `ProjectDecls::member_type`).
+- **The stores.** `obj.attr = v`, `setattr(obj, "attr", v)`, `object.__setattr__(obj, "attr", v)`,
+  `super().__setattr__("attr", v)`, the same calls through an alias (`_set = object.__setattr__`),
+  and writes of the namespace (`obj.__dict__["attr"] = v`, `vars(obj).setdefault("attr", v)`).
+  The name may be a literal or a string constant of a module or a class (`KEY: Final`).
+- **What a store binds.** A store of `None` adds nothing (a call on it raises). A store of a value
+  of unknown type, or values no tracked type covers, leaves the name untyped. `obj.attr += v`
+  binds what the operator gives on the attribute's own value: nothing new when the name holds a
+  list, set, dict, deque, `bytearray`, `str`, or `bytes`, and an unknown value otherwise.
+- **Stores heki cannot name.** `setattr(obj, name, v)`, `obj.__dict__.update(other)`,
+  `obj.__dict__ = state`, `obj.__class__ = C`, and a namespace handed on store any attribute
+  (`ClassDecl::stores_any_attr`), except in `__setstate__` from its state parameter
+  (`ClassDecl::restores_state`): those restore what an instance held, while no project code calls
+  `__setstate__` itself (outside a `__setstate__` handing its state on) and the family has no
+  `__reduce__` / `__reduce_ex__` and no `__getstate__` building the state from anything but the
+  instance's own attributes (`FunctionDecl::state_of_self`).
+- **Globals the module may rebind.** In a module whose globals `globals()` or `exec` may change,
+  every store of a global binds a value of unknown type. A module-body store before a star import
+  does too, unless the star-imported module is a project module whose `__all__` fixes the names it
+  exports and does not list the name (`ModuleDecls::exports`).
+- **Other modules.** What other project modules store into a module's globals and into the
+  instances of its classes (`ModuleDecls::stores_elsewhere`) is joined where the type is read.
+- **Stores reading names being decided.** A store reading another such name
+  (`self.active = self.client`, `self.items = self.items[1:]`) binds a value whose type depends on
+  the one being decided. The types are a least fixpoint (`heki_ir::walk::fixpoint`): each read
+  starts with no value, then gives what the stores bound so far give, as the final declarations
+  will (the family join); a function is inferred again only when a name it reads grew, at most
+  four times. A read the final declarations answer from another module (an attribute of a class
+  with a family member in another module, a class of another module along the MRO) gives what the
+  declarations of pass 1 give. Past the visit limit, the first round's types hold, with those reads
+  untyped. Where the types differ from the first round's joined with them, the latter are kept
+  with the names their stores read (`ModuleDecls::store_fallbacks`): they hold once another module
+  stores into one of those names.
+- **Annotations.** An annotation types every store of the name it declares (Priority 2): an
+  annotated global holds its declaration or a narrower value, an annotated attribute its
+  declaration.
+
+Stores of two or three classes give a union, on which a call dispatches as on any union (one of
+`httpx.Client` and `httpx.AsyncClient` leaves `get` unresolved). A store through a receiver
+whose type the inference does not know (`def configure(obj): obj.client = ...`) is not one of
+them (docs/scope.md, "Known limitations").
 
 A class's bases (`ClassDecl::bases`) are the values its class statement passes, named where the
 statement runs. A module-level statement names them through the module's names: an import, a
