@@ -28,7 +28,7 @@ use crate::convert;
 use crate::engine::{CONFIG_FILES, Selectors, Source, Workspace};
 use heki_diagnostics::Diagnostic;
 use heki_effect::ModuleLayout;
-use heki_rules::project::{IGNORE_FILES, ProjectOptions, canonical, find_root};
+use heki_rules::project::{Facts, IGNORE_FILES, ProjectOptions, canonical, find_root};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -266,7 +266,7 @@ impl State {
             },
             &self.selectors,
             None,
-            true,
+            Facts::Inspect,
         );
         self.pending.clear();
         let mut files: BTreeSet<PathBuf> =

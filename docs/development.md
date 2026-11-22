@@ -98,7 +98,10 @@ a rule becomes exact](precision.md#how-a-rule-becomes-exact):
 4. `checkers.py` refutes a claim from the runs: an `EFF101` call that returned without a waiting
    call during it, an `EFF103` iteration that completed without a statement, a `DATA101`
    iteration whose new value was not built from the previous one, a `MUT110` or `MUT114` line
-   that ran without changing the object the report names, an `OPT` accumulator of another type,
+   that ran without changing the object the report names, a `MUT115` line that changed another
+   object than the copied value held at the access path when the copy line ran (or left it as it
+   was, or whose copy held another object there; `monitor.py` loads each path at those lines
+   without running code of the program), an `OPT` accumulator of another type,
    or an `OPT113` inner item with a different key that ran more than the comparison. For the
    `OPT` rewrites, the driver applies `heki check --fix --include-size-dependent` to a copy and
    compares results, exceptions, arguments, output, and library calls on the same inputs.
@@ -251,9 +254,9 @@ rule and one contract of each kind (a family may add its own), through `heki che
 `--watch` engine (a family of the facts only `heki recommend` reads also through
 `heki dump-recommend-facts`), and fails when it costs more than 1 s (on the machine the limits
 were measured on, scaled to the machine running the gate by linear shapes of calls and of loops)
-or 1 GiB beyond an empty module. `heki check --walk-steps <path>` (hidden) writes the steps each owner's walks took
-per function as JSON: the gate also fails when an owner's steps grow more than 2.5 times from half
-the size to the full size, or when a budget is spent on a shape like real code.
+or 1 GiB beyond an empty module. `heki check --walk-steps <path>` (hidden) writes the steps each
+owner's walks took per function as JSON: the gate also fails when an owner's steps grow more than
+2.5 times from half the size to the full size, or when a budget is spent on a shape like real code.
 `KNOWN_OVER` in the script lists the shapes known to cost more, and only shrinks: a listed shape
 runs only through `heki check` (not the `--watch` engine), with a short timeout, and fails the gate
 once it costs under a quarter of the limits. `KNOWN_STEPS` lists, the same way, the shapes whose
@@ -339,15 +342,17 @@ $ uvx --from "zensical==0.1.2" zensical serve
   away in any release, and the release notes list each change; once it is stable, its entry is
   removed.
 - Each rule's certainty (`exact` or `heuristic`) and activation (`Default`, `OptIn`, or
-  `Contract`) are fields of its entry in `crates/heki_rules/src/lib.rs`. The generator marks the
-  heuristic rules on the generated pages, copies each rule's measurement from
-  [Rule Precision](precision.md) into its page, and fails when a hand-written table row says
-  "heuristic" other than exactly when a rule it names is heuristic, when an exact rule lacks a
-  certification there with no false claim in its census and holdout run, when a rule's
-  documentation has no "What a report states" section, or when an exact rule's page lists other
-  premises under "Its premises:" than the premise table (`crates/heki_rules/src/premises.rs`,
-  which `heki rule --output-format json` prints with each rule), in another order or under other
-  names.
+  `Contract`) are fields of its entry in `crates/heki_rules/src/lib.rs`, and the certifications
+  and measurements of [Rule Precision](precision.md) are data in
+  `crates/heki_rules/src/precision.rs`, which `heki rule --output-format json` prints with each
+  rule. The generator marks the heuristic rules on the generated pages, writes the two tables of
+  Rule Precision between the markers of their generated parts, copies each rule's measurement into
+  its page, and fails when a hand-written table row says "heuristic" other than exactly when a
+  rule it names is heuristic, when an exact rule lacks a certification with no false claim in its
+  census and holdout run, when a rule's documentation has no "What a report states" section, or
+  when an exact rule's page lists other premises under "Its premises:" than the premise table
+  (`crates/heki_rules/src/premises.rs`, which `heki rule --output-format json` prints with each
+  rule), in another order or under other names.
 - The Docs workflow deploys the site to Cloudflare Pages (heki.koxudaxi.dev) once a published
   release is on PyPI (the newest release only), or when it is run by hand on `main`, so the site
   documents the released version. That job runs in the `docs-production` environment, which
@@ -503,7 +508,7 @@ The workspace is split by responsibility (`crates/`):
 | `heki_env` | configuration loading and the runtime profile of the target Python version |
 | `heki_effect` | call graph, per-function effect summaries, incremental project index |
 | `heki_soundness` | the alias analysis and proof obligations behind `OPT` rewrites (never depends on `heki_effect`, never reads annotations) |
-| `heki_rules` | the rules, rule selection, project discovery |
+| `heki_rules` | the rules, rule selection, project discovery and indexing |
 | `heki_diagnostics` | output formats, inline suppressions, Ratchet baselines, fix application |
 | `heki_profile` | offline profile dumps |
 | `heki_lsp` | the incremental LSP server and the `--watch` engine |
