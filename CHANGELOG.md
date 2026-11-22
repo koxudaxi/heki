@@ -102,6 +102,16 @@ release can change rules, configuration keys, diagnostics, and output formats.
   on stays a hand-on, and a read is matched as a construction is. The other values report as
   before.
 
+- `EFF114` (`recursion-error-as-value`, opt-in, heuristic, experimental): an `except` clause that
+  takes the `RecursionError` a recursion reached from its `try` body can raise (`Exception`,
+  `BaseException`, `RuntimeError`, `RecursionError`, a bare `except`, or a tuple with one), when
+  no path through the clause raises, so the function goes on with a value that depends on the
+  depth of the stack. The recursion is a call cycle through calls whose bodies run on the
+  caller's stack, across modules; the report names the function on the cycle and the calls down
+  to it. A clause that re-raises `RecursionError` first, raises on a path, exits, calls a project
+  function that raises on every path, or reports the error and returns an exit status (a CLI
+  boundary) is not reported.
+
 ### Changed
 
 - `MUT201`, `MUT203`, `MUT204`: an access matching several targets of one contract is reported
