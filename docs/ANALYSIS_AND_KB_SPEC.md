@@ -1769,9 +1769,10 @@ deep = true   # changes to attributes and nested containers below are forbidden 
 12. **`EFF115`** (opt-in): an `async def` handed to a library call that never awaits what it
    returns.
    - The summary (`summary::Extractor::unawaited_handoff`, only with
-     `OptInFacts::unawaited_handoffs`) records, at each call of a catalog API whose entry names a
-     callable argument it calls without awaiting (`EcosystemEntry::unawaited_callable`: its
-     `calls_unawaited`, or its `offloads_blocking_arg`), the project functions the argument calls
+     `OptInFacts::unawaited_handoffs`) records, at each call of a catalog API with a callable
+     argument it calls without awaiting (`EffectiveEcosystemKb::unawaited_callable`: the API's
+     `[[calls_unawaited]]` entry, or its entry's `offloads_blocking_arg`), the project functions
+     the argument calls
      (a `functools.partial` object followed to the function it holds, a bound method resolved to
      the implementations it may run; a class constructs instead and is left out), in
      `OptInTables::unawaited_handoffs` (`FileSummary::opt_in_tables`) by calling function, the
@@ -2006,10 +2007,7 @@ field validates it: pydantic 2's `BaseModel`), `return_type` (factories such as
 (`asyncio.StreamReader.readline`, `AsyncSession.execute`: `EFF110`), `writes_in_order` (the
 argument a call writes or serializes in the order of its elements, with the keyword that sorts
 mapping keys first and whether it sorts by default: `json.dumps`, `yaml.safe_dump`,
-`pprint.pprint`, `pathlib.Path.write_text`, `print`: `EFF112`), `calls_unawaited` (the callable
-argument a call calls as a plain function without awaiting what it returns, and whether it tests
-the result for truth: `threading.Thread`'s `target`, `atexit.register`, `signal.signal`, `filter`:
-`EFF115`; every `offloads_blocking_arg` API counts as one too),
+`pprint.pprint`, `pathlib.Path.write_text`, `print`: `EFF112`),
 `waits_until_done` / `done_when_awaited` (futures), `bounded_by` / `waits_while_full` (queues:
 section 2.2), `environment` (`"call"`: calling the function reads the environment the program runs
 in, `os.getenv`, `platform.system`, `shutil.which`; `"read"`: reading the module attribute does,
@@ -2102,6 +2100,14 @@ and `obj.__dict__.pop(<name>)` act on it, and, for Werkzeug, the slot an instanc
 `__dict__` keeps it in. `KeptFacts::listed_cache` records that a getter's decorator, resolved
 through the module's imports (`ModuleDecls::decorator_symbol`), is listed; only such a getter makes
 a cached property an exact claim's (R3), and any other `cached_property` is one by its name.
+
+A fourth table, `[[calls_unawaited]]` (`heki_kb::UnawaitedCall`, `EFF115`), names the callable
+argument a call calls as a plain function without awaiting what it returns (by position, the
+receiver not counted, or by keyword), and whether it tests the result for truth:
+`threading.Thread`'s `target`, `atexit.register`, `signal.signal`, `filter`. Every
+`offloads_blocking_arg` API counts as one too. Each listed call also has an entry; the table
+stands beside the entries so that the entries without such an argument, nearly all, keep no word
+for it.
 
 The entries follow the public API of each package, with three conventions:
 - An async API is `async_safe` and carries no blocking effect: it is often called without a

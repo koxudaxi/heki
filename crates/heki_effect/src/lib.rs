@@ -2170,8 +2170,9 @@ pub struct OptInTables {
 }
 
 /// A project function handed to a library call that calls it as a plain function and never
-/// awaits what it returns (`heki_kb::EcosystemEntry::unawaited_callable`): `threading.Thread`'s
-/// target, `atexit.register(f)`, `filter(f, xs)`, a `functools.partial` of one, a bound method.
+/// awaits what it returns (`heki_kb::EffectiveEcosystemKb::unawaited_callable`):
+/// `threading.Thread`'s target, `atexit.register(f)`, `filter(f, xs)`, a `functools.partial` of
+/// one, a bound method.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnawaitedHandoff {
     /// The library call.

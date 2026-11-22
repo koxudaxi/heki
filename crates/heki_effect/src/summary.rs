@@ -6545,14 +6545,11 @@ impl<'a> Extractor<'a> {
 
     /// A project function handed to the library call `call` of `symbol` that calls it without
     /// awaiting what it returns (`OptInTables::unawaited_handoffs`): the callable the catalog
-    /// names (`heki_kb::EcosystemEntry::unawaited_callable`), through a `functools.partial`
-    /// object and a bound method. A class constructs an object instead.
+    /// names (`heki_kb::EffectiveEcosystemKb::unawaited_callable`), through a
+    /// `functools.partial` object and a bound method. A class constructs an object instead.
     fn unawaited_handoff(&mut self, symbol: &str, call: &Call<'_>) {
-        let Some(slot) = self
-            .cx
-            .catalog(symbol)
-            .and_then(heki_kb::EcosystemEntry::unawaited_callable)
-        else {
+        let catalog = self.cx.catalog(symbol);
+        let Some(slot) = catalog.and_then(|entry| self.cx.kb.unawaited_callable(entry)) else {
             return;
         };
         let Some(callable) = resolver::passed_var(

@@ -5,9 +5,10 @@
 //!   Any entry whose `verified_max_python < target_python` is automatically downgraded
 //!   to `Unknown` during materialization.
 //! - `EffectiveEcosystemKB` (Layer 2) holds all Execution Effect sources, `async_safe`,
-//!   `offloads_blocking_arg`, `calls_unawaited` (EFF115), `excluded` (logging), `copy_sanitizer`
-//!   (MUT202), and `opaque_to_layer3 = true` (preventing Layer 3 from descending into
-//!   stdlib/Layer 2).
+//!   `offloads_blocking_arg`, `excluded` (logging), `copy_sanitizer` (MUT202), and
+//!   `opaque_to_layer3 = true` (preventing Layer 3 from descending into stdlib/Layer 2), and the
+//!   tables beside the entries: `[[invokes]]`, `[[cached_properties]]`, and `[[calls_unawaited]]`
+//!   (EFF115).
 //!
 //! The built-in TOML files under `kb/` are embedded with `include_str!`; every struct they
 //! deserialize into uses `#[serde(deny_unknown_fields)]`, so an advisory field written into
@@ -373,20 +374,18 @@ pub struct EcosystemEntry {
     /// `EFF112`: the call writes an argument, or serializes it into text, in the order of its
     /// elements (`json.dumps`, `pathlib.Path.write_text`, `print`).
     pub writes_in_order: Option<OrderedOutput>,
-    /// `EFF115`: the call calls the callable passed here as a plain function, now or later, on
-    /// this thread or another, and never awaits what it returns (`threading.Thread(target=f)`,
-    /// `atexit.register(f)`, `filter(f, xs)`). An offloading API's callable
-    /// ([`Self::offloads_blocking_arg`]) is one too ([`Self::unawaited_callable`]). Boxed: few
-    /// entries have one, and every entry of the catalog stays in memory.
-    pub calls_unawaited: Option<Box<UnawaitedCall>>,
 }
 
-/// A callable argument a call calls without awaiting what it returns
-/// (`EcosystemEntry::calls_unawaited`): the one at position `arg` (the receiver not counted), or
-/// passed by the keyword `param`.
+/// `EFF115` (`[[calls_unawaited]]`): the callable argument the call of `symbol` calls as a plain
+/// function, now or later, on this thread or another, and never awaits what it returns
+/// (`threading.Thread(target=f)`, `atexit.register(f)`, `filter(f, xs)`): the one at position
+/// `arg` (the receiver not counted), or passed by the keyword `param`. A table beside the
+/// entries, so that the entries without one, nearly all, keep no word for it; the call has an
+/// entry too ([`EffectiveEcosystemKb::unawaited_callable`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct UnawaitedCall {
+    pub symbol: String,
     pub arg: Option<u8>,
     pub param: Option<String>,
     /// The call tests what the callable returns for truth (`filter`, `itertools.takewhile`).
@@ -534,18 +533,6 @@ impl ArgCase {
 }
 
 impl EcosystemEntry {
-    /// The callable argument the call calls without awaiting what it returns (`EFF115`): the
-    /// one `calls_unawaited` names, or an offloading API's, which a worker thread calls and
-    /// whose result the call hands back as it is.
-    pub fn unawaited_callable(&self) -> Option<UnawaitedCall> {
-        self.calls_unawaited.as_deref().cloned().or_else(|| {
-            self.offloads_blocking_arg.map(|k| UnawaitedCall {
-                arg: Some(k),
-                ..UnawaitedCall::default()
-            })
-        })
-    }
-
     /// The entry as the analyses read it: an `async_safe` API never blocks the event loop, so
     /// it keeps only its loop-sensitive effects (`db_query`, `unpooled_client_alloc`).
     fn normalized(mut self) -> Self {
@@ -777,6 +764,8 @@ struct EcosystemKbFile {
     invokes: Vec<Invokes>,
     #[serde(default)]
     cached_properties: Vec<CachedPropertyDecorator>,
+    #[serde(default)]
+    calls_unawaited: Vec<UnawaitedCall>,
 }
 
 fn parse_ecosystem_file(file: &'static str, text: &str) -> Result<EcosystemKbFile, KbError> {
@@ -800,6 +789,8 @@ pub struct EffectiveEcosystemKb {
     /// The cached-property decorators known to keep the value in the instance `__dict__`
     /// ([`CachedPropertyDecorator`]).
     pub cached_properties: BTreeMap<String, CachedPropertyDecorator>,
+    /// The callable each listed library call calls without awaiting it ([`UnawaitedCall`]).
+    pub calls_unawaited: BTreeMap<String, UnawaitedCall>,
     pub digest: String,
 }
 
@@ -825,6 +816,7 @@ impl EffectiveEcosystemKb {
             user_symbols: BTreeSet::new(),
             invokes: BTreeMap::new(),
             cached_properties: BTreeMap::new(),
+            calls_unawaited: BTreeMap::new(),
             digest,
         }
     }
@@ -837,6 +829,7 @@ impl EffectiveEcosystemKb {
         let mut opaque_packages = Vec::new();
         let mut invokes = BTreeMap::new();
         let mut cached_properties = BTreeMap::new();
+        let mut calls_unawaited = BTreeMap::new();
         for &(file, text) in ECOSYSTEM_KB_FILES {
             let parsed = parse_ecosystem_file(file, text)?;
             raw.extend(parsed.entries.into_iter().map(|e| (e.symbol.clone(), e)));
@@ -845,6 +838,12 @@ impl EffectiveEcosystemKb {
             cached_properties.extend(
                 parsed
                     .cached_properties
+                    .into_iter()
+                    .map(|c| (c.symbol.clone(), c)),
+            );
+            calls_unawaited.extend(
+                parsed
+                    .calls_unawaited
                     .into_iter()
                     .map(|c| (c.symbol.clone(), c)),
             );
@@ -865,11 +864,13 @@ impl EffectiveEcosystemKb {
         let mut kb = Self::materialize(raw.into_values().collect(), opaque_packages);
         let listed = serde_json::to_string(&invokes).unwrap_or_default();
         let caches = serde_json::to_string(&cached_properties).unwrap_or_default();
-        kb.digest = blake3::hash(format!("{}|{listed}|{caches}", kb.digest).as_bytes())
+        let unawaited = serde_json::to_string(&calls_unawaited).unwrap_or_default();
+        kb.digest = blake3::hash(format!("{}|{listed}|{caches}|{unawaited}", kb.digest).as_bytes())
             .to_hex()
             .to_string();
         kb.invokes = invokes;
         kb.cached_properties = cached_properties;
+        kb.calls_unawaited = calls_unawaited;
         kb.user_symbols = overrides.iter().map(|p| p.symbol.clone()).collect();
         if !kb.user_symbols.is_empty() {
             let users: Vec<&str> = kb.user_symbols.iter().map(String::as_str).collect();
@@ -907,6 +908,22 @@ impl EffectiveEcosystemKb {
     /// keeping the value in the instance `__dict__` ([`CachedPropertyDecorator`]).
     pub fn cached_property(&self, symbol: &str) -> Option<&CachedPropertyDecorator> {
         self.cached_properties.get(symbol)
+    }
+
+    /// The callable argument the call of `entry` calls without awaiting what it returns
+    /// (`EFF115`): the one `[[calls_unawaited]]` lists for it, or an offloading API's, which a
+    /// worker thread calls and whose result the call hands back as it is.
+    pub fn unawaited_callable(&self, entry: &EcosystemEntry) -> Option<UnawaitedCall> {
+        self.calls_unawaited
+            .get(&entry.symbol)
+            .cloned()
+            .or_else(|| {
+                entry.offloads_blocking_arg.map(|k| UnawaitedCall {
+                    symbol: entry.symbol.clone(),
+                    arg: Some(k),
+                    ..UnawaitedCall::default()
+                })
+            })
     }
 }
 
@@ -3460,16 +3477,6 @@ mod tests {
                             sorted_by_default: *sorted_by_default,
                         },
                     );
-                let calls_unawaited = UNAWAITED_CALLS
-                    .iter()
-                    .find(|(.., symbols)| symbols.contains(&symbol.as_str()))
-                    .map(|(arg, param, tests_result, _)| {
-                        Box::new(UnawaitedCall {
-                            arg: *arg,
-                            param: param.map(Into::into),
-                            tests_result: *tests_result,
-                        })
-                    });
                 let expected = EcosystemEntry {
                     symbol: symbol.clone(),
                     emits,
@@ -3477,7 +3484,6 @@ mod tests {
                     items,
                     api,
                     writes_in_order,
-                    calls_unawaited,
                     ..expected.clone()
                 };
                 assert_eq!(kb.lookup(&symbol), Some(&expected), "{symbol}");
@@ -3724,11 +3730,32 @@ mod tests {
     }
 
     #[test]
+    fn layer2_calls_unawaited_are_exactly_the_required_ones_each_with_an_entry() {
+        let kb = EffectiveEcosystemKb::load_builtin(&[]).unwrap();
+        let required: BTreeMap<String, UnawaitedCall> = UNAWAITED_CALLS
+            .iter()
+            .flat_map(|(arg, param, tests_result, symbols)| {
+                symbols.iter().map(move |symbol| UnawaitedCall {
+                    symbol: (*symbol).to_owned(),
+                    arg: *arg,
+                    param: param.map(Into::into),
+                    tests_result: *tests_result,
+                })
+            })
+            .map(|call| (call.symbol.clone(), call))
+            .collect();
+        assert_eq!(kb.calls_unawaited, required);
+        for symbol in kb.calls_unawaited.keys() {
+            assert!(kb.lookup(symbol).is_some(), "{symbol}");
+        }
+    }
+
+    #[test]
     fn an_offloading_api_calls_its_callable_without_awaiting_it() {
         let kb = EffectiveEcosystemKb::load_builtin(&[]).unwrap();
         let unawaited = |symbol: &str| {
             kb.lookup(symbol)
-                .and_then(EcosystemEntry::unawaited_callable)
+                .and_then(|entry| kb.unawaited_callable(entry))
         };
         for (symbol, arg) in [
             ("asyncio.to_thread", 0),
@@ -3738,6 +3765,7 @@ mod tests {
             assert_eq!(
                 unawaited(symbol),
                 Some(UnawaitedCall {
+                    symbol: symbol.to_owned(),
                     arg: Some(arg),
                     ..UnawaitedCall::default()
                 }),
@@ -3747,6 +3775,7 @@ mod tests {
         assert_eq!(
             unawaited("threading.Thread"),
             Some(UnawaitedCall {
+                symbol: "threading.Thread".into(),
                 arg: Some(1),
                 param: Some("target".into()),
                 tests_result: false,
