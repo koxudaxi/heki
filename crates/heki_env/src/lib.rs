@@ -152,8 +152,8 @@ pub struct WriteOwnerRule {
     /// typed with one that declares the attribute is allowed.
     pub allowed_protocols: Vec<String>,
     /// `"report"`: also report (`MUT201`) a constant key written through the namespace of an
-    /// object of a target's class (`obj.__dict__[KEY] = v`, `vars(obj)`) that no target covering
-    /// the class names; `"ignore"` (default) does not.
+    /// object of a target's class (`obj.__dict__[KEY] = v`, `vars(obj)`) that no target of any
+    /// `write-owners` contract covering the class names; `"ignore"` (default) does not.
     pub unlisted_dict_keys: Option<String>,
 }
 

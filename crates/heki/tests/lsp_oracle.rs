@@ -4917,6 +4917,67 @@ fn lsp_diagnostics_equal_a_full_check_through_protocols_a_contract_names() {
     s.lsp.stop(true);
 }
 
+// ------------------------------------- `__dict__` keys another `write-owners` contract names
+
+const LISTED_KEYS_CONFIG: &str = r#"[project]
+name = "t"
+
+[tool.heki.lint]
+select = ["MUT201"]
+
+[[tool.heki.write-owners]]
+name = "caches"
+targets = ["pkg.model.Field._cache_key"]
+allowed-writers = ["pkg.store:*"]
+unlisted-dict-keys = "report"
+
+[[tool.heki.write-owners]]
+name = "types"
+targets = ["pkg.base.Base._type_cache"]
+allowed-writers = ["pkg.parser:*"]
+"#;
+
+const LISTED_KEYS_BASE: &str = "class Base:\n    pass\n";
+const LISTED_KEYS_MODEL: &str = "from pkg.base import Base\n\n\nclass Field(Base):\n    pass\n";
+const LISTED_KEYS_PARSER: &str = "from pkg.model import Field\n\n\ndef cache(field: Field) -> None:\n    field.__dict__[\"_type_cache\"] = 1\n";
+
+/// `unlisted-dict-keys` with the key named by another contract's target on a base class in
+/// another module: whether the written object's class derives from it decides whether the key is
+/// listed, as the class drops the base and takes it again.
+#[test]
+fn lsp_diagnostics_equal_a_full_check_for_keys_another_contract_names() {
+    let files = vec![
+        ("pkg/__init__.py", String::new()),
+        ("pkg/base.py", LISTED_KEYS_BASE.to_owned()),
+        ("pkg/model.py", LISTED_KEYS_MODEL.to_owned()),
+        ("pkg/parser.py", LISTED_KEYS_PARSER.to_owned()),
+    ];
+    let mut s = Session::start_with("lsp_oracle_listed_keys", LISTED_KEYS_CONFIG, files, false);
+    let reported: &[(&str, &str)] = &[("pkg/parser.py", "MUT201")];
+    let steps = [
+        Step::new("initial index", Vec::new()).absent(reported),
+        Step::new(
+            "the class stops deriving from the base the other contract names",
+            vec![save(
+                "pkg/model.py",
+                &LISTED_KEYS_MODEL.replace("class Field(Base):", "class Field:"),
+            )],
+        )
+        .present(reported),
+        Step::new(
+            "the class derives from the base again",
+            vec![save("pkg/model.py", LISTED_KEYS_MODEL)],
+        )
+        .absent(reported),
+    ];
+    let mut failures = Vec::new();
+    for step in &steps {
+        failures.extend(s.run(step));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+    s.lsp.stop(true);
+}
+
 // ---------------------------------------------- class bases named in their scope (session 4)
 
 const SCOPED_BASES_CONFIG: &str = r#"[project]

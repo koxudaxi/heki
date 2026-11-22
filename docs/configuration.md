@@ -238,7 +238,7 @@ unresolved = "report"
 | `attribution` | `"call-graph"` | `"call-graph"` or `"lexical"`: which function a write is judged in. See [How contracts report](#how-contracts-report). |
 | `own-receiver` | `"report"` | `"report"` or `"allow"`: whether a write through the receiver of the method it is judged in (`self`, `cls`, `super()`) is allowed. See [How contracts report](#how-contracts-report). |
 | `allowed-protocols` | `[]` | Project protocols (class patterns, their subclasses included): a write through a value typed with one that declares the attribute, itself or through its protocol bases, is allowed. See [How contracts report](#how-contracts-report). |
-| `unlisted-dict-keys` | `"ignore"` | `"ignore"` or `"report"`: whether a `__dict__` key of a target's class that no target names is reported when it is written. |
+| `unlisted-dict-keys` | `"ignore"` | `"ignore"` or `"report"`: whether a `__dict__` key of a target's class that no `write-owners` target names is reported when it is written. |
 
 A container entry (`Class.attr["key"]`):
 
@@ -261,11 +261,21 @@ A shallow copy's containers are the original's: only rebinding its attributes co
 With `unlisted-dict-keys = "report"`, `MUT201` also reports a constant key written through the
 namespace of an object of a class a target covers (`field.__dict__[KEY] = v`,
 `field.__dict__.setdefault("_cache", v)`, `del vars(field)["k"]`) when no target covering that
-class names the key, so a new cache key needs a target first. A target names the keys its
-attribute pattern matches (`Field._*` names `_cache`), and an entry target names its container.
-The contract's allowance applies as to a target write. A key computed at run time has no name to
-check (`MUT205`, with `unresolved = "report"`), and neither has a write in a helper that does not
-type the object.
+class names the key, in this contract or in any other `write-owners` contract, so a new cache key
+needs a target first. A target names the keys its attribute pattern matches (`Field._*` names
+`_cache`), and an entry target names its container. A key another contract names is that
+contract's to guard: its writes are judged by that contract's allowance alone. The contract's
+allowance applies to an unlisted key as to a target write. A key computed at run time has no name
+to check (`MUT205`, with `unresolved = "report"`), and neither has a write in a helper that does
+not type the object. A key every function may write is listed by a contract that allows every
+writer:
+
+```toml
+[[tool.heki.write-owners]]
+name = "bookkeeping"
+targets = ["pkg.model.Field._derived_from", "pkg.model.Field._seen_*"]
+allowed-writers = ["*"]
+```
 
 With `unresolved = "report"`, `MUT205` reports:
 
