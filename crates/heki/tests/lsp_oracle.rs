@@ -4905,3 +4905,88 @@ fn lsp_diagnostics_equal_a_full_check_through_a_re_export_its_package_binds_agai
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
     s.lsp.stop(true);
 }
+
+// ------------------------------------------------------ class objects across modules (session)
+
+const CLASS_OBJECTS_CONFIG: &str = r#"[project]
+name = "t"
+
+[tool.heki.lint]
+select = ["MUT203", "MUT204"]
+
+[[tool.heki.call-owners]]
+name = "dict-builder"
+targets = ["pkg.types.DataType(is_dict=True)"]
+forbidden-callers = ["pkg.use:*"]
+
+[[tool.heki.read-owners]]
+name = "members"
+targets = ["pkg.types.DataType.HOLDS_MEMBERS"]
+forbidden-readers = ["pkg.use:*"]
+"#;
+
+const CLASS_OBJECTS_TYPES: &str = "class DataType:\n    HOLDS_MEMBERS = True\n\n    def __init__(self, *, is_dict: bool = False) -> None:\n        self.is_dict = is_dict\n";
+// The property and the function returning a class object live in another module than their
+// callers.
+const CLASS_OBJECTS_BASE: &str = "from pkg.types import DataType\n\n\nclass Base:\n    @property\n    def data_type(self) -> type[DataType]:\n        return DataType\n\n\ndef kind() -> type[DataType]:\n    return DataType\n";
+const CLASS_OBJECTS_USE: &str = "from pkg.base import Base, kind\nfrom pkg.types import DataType\n\n\nclass Use(Base):\n    def build(self) -> DataType:\n        return self.data_type(is_dict=True)\n\n\ndef returned() -> DataType:\n    return kind()(is_dict=True)\n\n\ndef read(model_type: type[DataType]) -> bool:\n    return model_type.HOLDS_MEMBERS\n";
+
+/// A `type[C]` annotation names the class object of `C` from the declarations of other modules:
+/// the property and the function returning one are declared in another module than the calls of
+/// their values, and the class the annotation names becomes a protocol (whose class objects are
+/// of no known class) and a class again.
+#[test]
+fn lsp_diagnostics_equal_a_full_check_for_class_objects_across_modules() {
+    let files = vec![
+        ("pkg/__init__.py", String::new()),
+        ("pkg/types.py", CLASS_OBJECTS_TYPES.to_owned()),
+        ("pkg/base.py", CLASS_OBJECTS_BASE.to_owned()),
+        ("pkg/use.py", CLASS_OBJECTS_USE.to_owned()),
+    ];
+    let mut s = Session::start_with(
+        "lsp_oracle_class_objects",
+        CLASS_OBJECTS_CONFIG,
+        files,
+        false,
+    );
+    let both: &[(&str, &str)] = &[("pkg/use.py", "MUT203"), ("pkg/use.py", "MUT204")];
+    let steps = [
+        Step::new("initial index", Vec::new()).present(both),
+        Step::new(
+            "the property and the function return an instance",
+            vec![save(
+                "pkg/base.py",
+                &CLASS_OBJECTS_BASE.replace("-> type[DataType]", "-> DataType"),
+            )],
+        )
+        .present(&[("pkg/use.py", "MUT203")])
+        .absent(&[("pkg/use.py", "MUT204")]),
+        Step::new(
+            "they return the class object again",
+            vec![save("pkg/base.py", CLASS_OBJECTS_BASE)],
+        )
+        .present(both),
+        Step::new(
+            "the class becomes a protocol",
+            vec![save(
+                "pkg/types.py",
+                &format!(
+                    "from typing import Protocol\n\n\n{}",
+                    CLASS_OBJECTS_TYPES.replace("class DataType:", "class DataType(Protocol):")
+                ),
+            )],
+        )
+        .absent(both),
+        Step::new(
+            "it is a class again",
+            vec![save("pkg/types.py", CLASS_OBJECTS_TYPES)],
+        )
+        .present(both),
+    ];
+    let mut failures = Vec::new();
+    for step in &steps {
+        failures.extend(s.run(step));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+    s.lsp.stop(true);
+}

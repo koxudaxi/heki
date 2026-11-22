@@ -3369,6 +3369,38 @@ fn the_paths_of_many_packages_merged_in_one_function_are_decided_once() {
     );
 }
 
+/// One dict display copied along a long chain of assignments, each copy unpacked with `**` into a
+/// call of a target with an argument list: whether anything changes the display is decided once
+/// for the display, not once per call (which spends the function's budget, past which the
+/// calls pass nothing).
+#[test]
+fn calls_unpacking_copies_of_one_display_decide_it_once() {
+    let copies = 2000;
+    let mut lines = vec![
+        "def plain(kind=False):".to_owned(),
+        "    return kind".to_owned(),
+        String::new(),
+        String::new(),
+        "def unpack():".to_owned(),
+        "    f0 = {\"kind\": True}".to_owned(),
+    ];
+    for i in 1..=copies {
+        lines.push(format!("    f{i} = f{}", i - 1));
+    }
+    for i in 0..=copies {
+        lines.push(format!("    plain(**f{i})"));
+    }
+    let p = Project::new("bounds_unpacked_display_copies");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT204\"]\n\n[[tool.heki.call-owners]]\nname = \"c\"\ntargets = [\"m.plain(kind=True)\"]\nallowed-callers = [\"m.plain\"]\n",
+    )
+    .write("m.py", &(lines.join("\n") + "\n"));
+    let found = check_within(&p, Duration::from_secs(20));
+    let calls = found.iter().filter(|d| d["rule_code"] == "MUT204").count();
+    assert_eq!(calls, copies + 1);
+}
+
 /// `functions` functions of one module, each making one project call.
 fn functions_each_calling(functions: usize) -> String {
     let mut lines = vec!["def g(x):".to_owned(), "    return x".to_owned()];
@@ -3523,4 +3555,41 @@ fn class_statements_deriving_from_long_chains_name_each_base_in_bounded_steps() 
         found,
         vec!["`build` constructs `m.K` outside the call owners of `home`"]
     );
+}
+
+/// A dict display of `width` entries unpacked with `**` by `calls` calls of a target with an
+/// argument list.
+fn wide_display_unpacked(width: usize, calls: usize) -> Project {
+    let entries: Vec<String> = (0..width)
+        .map(|i| format!("\"k{i}\": {i}"))
+        .chain(["\"kind\": True".to_owned()])
+        .collect();
+    let mut lines = vec![
+        "def plain(kind=False, **options):".to_owned(),
+        "    return kind".to_owned(),
+        String::new(),
+        String::new(),
+        "def unpack():".to_owned(),
+        format!("    flags = {{{}}}", entries.join(", ")),
+    ];
+    lines.extend((0..calls).map(|_| "    plain(**flags)".to_owned()));
+    let p = Project::new(&format!("bounds_wide_display_{width}_{calls}"));
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT204\"]\n\n[[tool.heki.call-owners]]\nname = \"c\"\ntargets = [\"m.plain(kind=True)\"]\nallowed-callers = [\"m.plain\"]\n",
+    )
+    .write("m.py", &(lines.join("\n") + "\n"));
+    p
+}
+
+/// Each call binds every entry of the display it unpacks, which the source writes once: the
+/// entries are taken from the function's budget, so a display as wide as the calls are many
+/// costs work linear in the function (not width times calls), and past the budget a call passes
+/// nothing the display holds. A narrow display leaves every call its argument.
+#[test]
+fn a_wide_display_unpacked_by_many_calls_is_bound_within_the_budget() {
+    let narrow = check_within(&wide_display_unpacked(40, 40), Duration::from_secs(20));
+    assert_eq!(narrow.len(), 40, "{narrow:#?}");
+    let wide = check_within(&wide_display_unpacked(8000, 8000), Duration::from_secs(20));
+    assert!((1..8000).contains(&wide.len()), "{}", wide.len());
 }

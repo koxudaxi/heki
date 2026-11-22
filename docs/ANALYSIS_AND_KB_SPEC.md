@@ -349,9 +349,14 @@ A method called on an instance is the definition the class's MRO (Python's C3 li
 its project bases) finds first, plus the overrides of its project subclasses (Priority 4). A
 named class is exactly that class: constructing it runs the `__init__` its MRO finds, and
 `Base.method(obj)` the `method` it finds; `cls` in a class method may be any subclass, so
-`cls()` and `cls.method()` dispatch like a call on an instance, and so is `type(obj)` of an
+`cls()` and `cls.method()` dispatch like a call on an instance, and so do `type(obj)` of an
 instance of a project class that is not a protocol (`obj.__class__` is not: a class or a
-subclass may rebind it). A method's calls on its own
+subclass may rebind it) and a value annotated `type[C]` or `typing.Type[C]` (`Ty::Class`; the
+class object of a protocol, of `Any`, or of one of several classes is of no known class). A call
+of a property's value (`obj.prop(...)`, the getter found first along the MRO, with or without a
+setter) runs the getter as reading `obj.prop` does and calls the value it gives, typed by the
+getter's return annotation (`self.data_type(is_dict=True)` of a property returning
+`type[DataType]` constructs `DataType`). A method's calls on its own
 `self` run the overrides of every subclass, so a mixin's summary holds the effects of every
 class sharing it; an execution effect reached only through the override of a subclass records
 that class (`EffectSummary::receiver_effects`), and a call on a receiver of known class runs it
@@ -453,7 +458,8 @@ EffectSummary(f) = {
     typed_params:             Bitset,                      // parameters the function types itself (its sites
                                                            // cover their changes)
     typed_field_read_sites:   Set<TypedFieldReadSite>,     // own reads of (class, attr): attribute, getattr,
-                                                           // __dict__; never propagated (MUT203)
+                                                           // __dict__, through an instance or a class
+                                                           // object; never propagated (MUT203)
     returns_protected:        Option<ProtectedReturn>,     // may return a protected value: producer, depth,
                                                            // call chain (MUT202)
     must_invalidate:          Bitset,                      // invalidation contracts announced on every
@@ -605,16 +611,22 @@ only for a class without a project `__init__`. That binding (`BoundCallee::param
 positional parameters (`FunctionDecl::positional_param`; one past them lands in `*args`, a new
 tuple, and binds no parameter, never a keyword-only one: only a hand-over asks whether the callee
 keeps `*args`, which holds it), and a keyword never binds a positional-only parameter
-(`FunctionDecl::keyword_param`; one binding no parameter is, for the argument lists, a parameter
-of its own name in `**kwargs`); the receiver is the first position. A callee the call raises
-`TypeError` for instead of running (`Bindings::raises`: a parameter bound twice, a keyword without
+(`FunctionDecl::keyword_param`; one binding no parameter is, for the argument lists, a parameter of
+its own name in `**kwargs`); the receiver is the first position. A `**` operand that is a dict
+display with string constant keys passes its entries as keywords when nothing changes it
+(`Extractor::constant_display`: each value holding it, through copies and phis, is only copied,
+merged, unpacked with `**`, tested, returned, or raised; one walk per display; the entries a call
+binds are taken from the function's budget, past which the display may pass any keyword); any other
+`**` operand may bind any parameter. A callee the call raises `TypeError` for instead of running
+(`Bindings::raises`: two keywords of one name, a parameter bound twice, a keyword without
 `**kwargs`, a position past the parameters without `*args`, a parameter without a default left
 unbound where no unpacking may bind it, counted from `FunctionDecl::required_positional` and
 `required_keyword_only` in the work of the call's arguments) is passed nothing. The constants are
-literals, string constants (`TypeCtx::str_constant_with`), and modules' number and boolean
-constants (`TypeCtx::module_constant`: a module-level name, an import, or a module's attribute,
-`TypeCtx::global_read`, the reads catalog cases follow too). The marked names are looked up for the parameters a call binds, so
-the work per call is that of binding it, whatever the number of argument lists.
+literals, string constants (`TypeCtx::str_constant_with`), and modules' number and boolean constants
+(`TypeCtx::module_constant`: a module-level name, an import, or a module's attribute,
+`TypeCtx::global_read`, the reads catalog cases follow too). The marked names are looked up for the
+parameters a call binds, so the work per call is that of binding it, whatever the number of argument
+lists.
 
 `CallSite.returned` (whether the call's result may be returned, and how) is computed at
 extraction for every project call. `CallSite.flow` (the invalidation contracts announced after
@@ -868,7 +880,8 @@ which module imports which.
 
 #### `MUT111`: readers of a stale `@cached_property` (opt-in)
 1. Reads: the `TypedFieldReadSite`s of each checked function's own body (`self.p`, `obj.p`,
-   `getattr(obj, "p")`, `obj.__dict__["p"]` / `.get("p")`), whose class `K` heki knows.
+   `getattr(obj, "p")`, `obj.__dict__["p"]` / `.get("p")`), whose class `K` heki knows; a read
+   through a class object gives the property's descriptor, not a cached value, and is none.
 2. For `K` and each project subclass `X` of it, the getter an instance of `X` runs for `p` (the
    first definition along its MRO); a `@cached_property` getter is a candidate.
 3. Its stale writes are `MUT101`'s (whatever is selected, suppressions included). A write by `m`
@@ -1244,7 +1257,10 @@ deep = true   # changes to attributes and nested containers below are forbidden 
    - A call's targets are complete (`CallSite::complete`) when they are every implementation
      the call can run under R2 and R5: for each of the receiver's class and its project
      subclasses (at most `DISPATCH_CLASS_LIMIT`, 64), the definition its MRO finds is a target;
-     every member of a union resolves; a protocol receiver never is complete.
+     every member of a union resolves; a protocol receiver never is complete. A call of a
+     property's value is complete when calling a value of the type the getter declares is
+     (`TypeCtx::targets_complete_on`), whatever the receiver; the getters it runs, as a read of
+     the property, never are.
    - A Layer 2 call has an effect unconditionally (`CallTarget::Layer2::unconditional`) when its
      entry `emits` it on every call and no case of the entry tests an argument that may be a
      parameter of the caller (R6 covers the arguments heki cannot evaluate).

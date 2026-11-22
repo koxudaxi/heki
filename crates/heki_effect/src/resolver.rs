@@ -495,6 +495,12 @@ pub struct FunctionDecl {
 }
 
 impl FunctionDecl {
+    /// A property's getter, with or without a setter: reading its name on an instance gives
+    /// what the getter returns, and a call of the name calls that value.
+    pub(crate) fn reads_as_property(&self) -> bool {
+        self.is_property || self.property_type.is_some()
+    }
+
     /// What calling it gives when its declaration says it returns `returned`: for an
     /// `async def` that no decorator replaces, the coroutine that awaiting gives `returned`.
     pub(crate) fn call_type(&self, returned: Ty) -> Ty {
@@ -815,9 +821,10 @@ impl ModuleDecls {
 
     /// The type an annotation names (receiver typing): a class with the arguments of a known
     /// generic container (`list[Model]`, `Mapping[str, Model]`, `tuple[Model, int]`,
-    /// `Iterator[Model]`), after `Optional` / `| None` / `Annotated` / `Final` / `ClassVar` /
-    /// `Required` / `NotRequired` / `ReadOnly` and quotes. An unresolved name of a `typing`
-    /// generic counts as that generic (`"Iterable[Model]"` without the import).
+    /// `Iterator[Model]`), or the class object `type[Model]` / `typing.Type[Model]` names, after
+    /// `Optional` / `| None` / `Annotated` / `Final` / `ClassVar` / `Required` / `NotRequired` /
+    /// `ReadOnly` and quotes. An unresolved name of a `typing` generic counts as that generic
+    /// (`"Iterable[Model]"` without the import).
     pub fn resolve_annotation_ty(&self, text: &str) -> Option<Ty> {
         let t = unquote(text);
         let mut parts = split_top_level(t, '|');
@@ -849,6 +856,16 @@ impl ModuleDecls {
                 return self.union_annotation(&members);
             }
             _ => {}
+        }
+        if self.is_type_form(head) {
+            // Whether `C` is a project class, and which, is decided across the project
+            // (`ProjectDecls::declared_ty`).
+            let class = self
+                .resolve_annotation_ty(first_arg(inner))?
+                .obj()?
+                .class
+                .clone();
+            return Some(Ty::Class(class));
         }
         let class = self
             .resolve_type_head(head)
@@ -890,6 +907,18 @@ impl ModuleDecls {
             objs.extend(t.members().iter().cloned());
         }
         Ty::of_members(objs)
+    }
+
+    /// Whether the subscripted head `head` is `type` or `typing.Type` (an unresolved `Type`
+    /// counts, as an unresolved `typing` generic does).
+    fn is_type_form(&self, head: &str) -> bool {
+        match self.resolve_dotted(head, true) {
+            Some(fqn) => matches!(
+                fqn.as_str(),
+                "builtins.type" | "typing.Type" | "typing_extensions.Type"
+            ),
+            None => matches!(head, "type" | "Type"),
+        }
     }
 
     fn resolve_type_head(&self, head: &str) -> Option<String> {
@@ -1632,7 +1661,7 @@ impl ProjectDecls {
             }
             for (qualname, f) in &m.functions {
                 let name = qualname.rsplit('.').next().unwrap_or(qualname);
-                if f.is_property || f.property_type.is_some() {
+                if f.reads_as_property() {
                     property_names.insert(name.to_owned());
                 }
                 if f.returns_param_attr.is_some() {
@@ -2859,6 +2888,25 @@ impl ProjectDecls {
         None
     }
 
+    /// The declared value of the property `attr` when the definition of `attr` that an instance
+    /// of `class` finds first along the MRO (past `class` itself with `skip_self`) is a
+    /// property's getter, with or without a setter: its return annotation, `Some(None)` without
+    /// one. Overriding subclasses do not count, as for a type checker.
+    pub(crate) fn declared_property(
+        &self,
+        class: &str,
+        attr: &str,
+        skip_self: bool,
+    ) -> Option<Option<&Ty>> {
+        self.read(|k| note(&mut k.property_names, attr));
+        if !self.property_names.contains(attr) {
+            return None;
+        }
+        let decl = self.function_decl(&self.mro_definition(class, attr, skip_self)?)?;
+        decl.reads_as_property()
+            .then_some(decl.property_type.as_ref())
+    }
+
     /// Whether `class.__new__` (found past `class` itself with `skip_self`, as for `super()`)
     /// is `object.__new__`: no class of the MRO defines `__new__`, and no base outside the
     /// project but `object` may ([`Self::inherited_external`]).
@@ -2896,8 +2944,11 @@ impl ProjectDecls {
     /// every class named canonically (re-exports chased): `None` when it names a module, or a name
     /// of a project module that is no class (a type alias, a `TypeVar`, a constant); an item of
     /// such a type is unknown. A name below a module heki does not see (a compiled submodule of a
-    /// project package) stays as it is.
+    /// project package) stays as it is. A class object (`type[C]`) is [`Self::class_object`].
     pub(crate) fn declared_ty(&self, ty: &Ty) -> Option<Ty> {
+        if let Ty::Class(class) = ty {
+            return self.class_object(&self.object_named(class));
+        }
         ty.map_members(|o| {
             let class = self.object_named(&o.class);
             if let Some((m, rest)) = self.split_module(&class)
@@ -2911,10 +2962,27 @@ impl ProjectDecls {
         })
     }
 
+    /// The type of a class object that is the canonical class `class` or one of its subclasses
+    /// ([`Ty::Class`]), as `cls` in a class method is: unknown for a protocol, whose
+    /// implementations need not be its subclasses, and for a class outside the project.
+    pub(crate) fn class_object(&self, class: &str) -> Option<Ty> {
+        (self.is_project_class(class) && self.protocol(class).is_none())
+            .then(|| Ty::Class(class.to_owned()))
+    }
+
     /// Whether the inferred type `t` is narrower than the declared `declared`, so that a value
-    /// keeps it: anything for a declaration of `Any` / `object`, and an instance of a project
-    /// subclass of the declared class (`x: Base = Sub()`).
+    /// keeps it: anything for a declaration of `Any` / `object`, an instance of a project
+    /// subclass of the declared class (`x: Base = Sub()`), and for a declared class object, a
+    /// class named exactly or the class object of a subclass (`kind: type[Base] = Base`, `=
+    /// Sub`, `= type(sub)`).
     pub(crate) fn narrower(&self, t: &Ty, declared: &Ty) -> bool {
+        if let Ty::Class(d) = declared {
+            return match t {
+                Ty::Ref(c) => c == d || self.is_subclass(c, d),
+                Ty::Class(c) => c != d && self.is_subclass(c, d),
+                _ => false,
+            };
+        }
         declared.obj().is_some_and(|d| {
             matches!(d.class.as_str(), "typing.Any" | "builtins.object")
                 || t.obj()
@@ -4915,11 +4983,12 @@ fn complete_decls(
 }
 
 /// Whether the declarations keep an inferred type of a global or a `self` attribute: an
-/// instance, a union of instances, or a coroutine of one (`self.ready = self.setup()`, awaited
-/// in another method).
+/// instance, a union of instances, a class object (`FACTORY: type[Model] = Model`,
+/// `self.kind = kind` of a `kind: type[Model]`), or a coroutine of one (`self.ready =
+/// self.setup()`, awaited in another method).
 fn kept_in_declarations(t: &Ty) -> bool {
     match t {
-        Ty::Inst(_) | Ty::Union(_) => true,
+        Ty::Inst(_) | Ty::Union(_) | Ty::Class(_) => true,
         Ty::Coroutine(result) => kept_in_declarations(result),
         _ => false,
     }
@@ -5350,6 +5419,15 @@ pub(crate) enum Recv<'v> {
 }
 
 impl Val {
+    /// The project class the value is the class object of: a class named exactly, or one that
+    /// may be a subclass (`cls`). Calling it constructs that class.
+    pub(crate) fn class_object<'v>(&'v self, project: &ProjectDecls) -> Option<&'v str> {
+        match self {
+            Val::Ref(class) | Val::Class(class) if project.is_project_class(class) => Some(class),
+            _ => None,
+        }
+    }
+
     /// The view call resolution takes (`None` for a union, resolved class by class).
     pub(crate) fn recv(&self) -> Option<Recv<'_>> {
         match self {
@@ -5769,7 +5847,8 @@ impl<'a> TypeCtx<'a> {
     /// Whether `callee`, what [`Self::resolve_method`] resolves `recv.method(...)` to, is every
     /// implementation the call can run (`CallSite::complete`): each member of a union resolves
     /// and is complete, a protocol receiver never is, and a module member, a class object's
-    /// own attribute, or `super()` names one implementation.
+    /// own attribute, or `super()` names one implementation. A call of a property's value is
+    /// judged by the value ([`Self::targets_complete_on`]).
     pub fn method_targets_complete(
         &self,
         recv: Option<&Val>,
@@ -5780,20 +5859,33 @@ impl<'a> TypeCtx<'a> {
             Some(Val::Union(classes)) => classes.iter().all(|c| {
                 let own = self.method_call_targets(Some(Recv::Inst(c)), method);
                 matches!(own, Callee::Project(..) | Callee::External(_))
-                    && self
-                        .project
-                        .instance_targets_complete(c, method, &own, self.kb)
+                    && self.targets_complete_on(Recv::Inst(c), method, &own)
             }),
-            Some(Val::Inst(class)) => self
+            _ => recv
+                .and_then(Val::recv)
+                .is_some_and(|recv| self.targets_complete_on(recv, method, callee)),
+        }
+    }
+
+    /// [`Self::method_targets_complete`] on a receiver of one class. A call of a property's value
+    /// runs what calling the value runs, whatever class the getter is found in (the getter's run
+    /// is a read of its own): it is complete when calling a value of the type the getter
+    /// declares is ([`Self::call_targets_complete`]).
+    fn targets_complete_on(&self, recv: Recv<'_>, method: &str, callee: &Callee) -> bool {
+        if let Some(value) = self.property_value(recv, method) {
+            return self.call_targets_complete(value.as_ref(), callee);
+        }
+        match recv {
+            Recv::Inst(class) => self
                 .project
                 .instance_targets_complete(class, method, callee, self.kb),
-            Some(Val::Class(class)) => {
+            Recv::Class(class) => {
                 self.project.is_project_class(class)
                     && self
                         .project
                         .instance_targets_complete(class, method, callee, self.kb)
             }
-            other => matches!(other, Some(Val::Ref(_) | Val::Super(_))),
+            Recv::Ref(_) | Recv::Super(_) => true,
         }
     }
 
@@ -5836,10 +5928,50 @@ impl<'a> TypeCtx<'a> {
             Some(Recv::Class(class)) => {
                 self.through_class(self.project.method_targets(class, method, false, self.kb))
             }
-            Some(Recv::Inst(class)) => self.project.method_targets(class, method, false, self.kb),
-            Some(Recv::Super(class)) => self.project.method_targets(class, method, true, self.kb),
+            Some(recv @ (Recv::Inst(class) | Recv::Super(class))) => {
+                let skip_self = matches!(recv, Recv::Super(_));
+                // `obj.prop(...)` runs the getter as a read of `obj.prop` does (where the summary
+                // records it), then calls the value it gives.
+                match self.property_value(recv, method) {
+                    Some(value) => self.resolve_call(value.as_ref()),
+                    None => self
+                        .project
+                        .method_targets(class, method, skip_self, self.kb),
+                }
+            }
             None => Callee::Unresolved,
         }
+    }
+
+    /// Whether `recv.attr(...)` calls the value of a property ([`Self::property_value`]) on some
+    /// class `recv` dispatches on.
+    pub(crate) fn calls_property(&self, recv: Option<&Val>, attr: &str) -> bool {
+        match self.dispatch_classes(recv) {
+            Some(classes) => classes
+                .iter()
+                .any(|c| self.property_value(Recv::Inst(c), attr).is_some()),
+            None => recv
+                .and_then(Val::recv)
+                .is_some_and(|r| self.property_value(r, attr).is_some()),
+        }
+    }
+
+    /// The value reading `attr` on the instance `recv` (or on `super()`) gives when it reads a
+    /// property ([`ProjectDecls::declared_property`]): its declared type, `typing.Self` bound to the
+    /// instance; `Some(None)` when it is not declared.
+    pub(crate) fn property_value(&self, recv: Recv<'_>, attr: &str) -> Option<Option<Val>> {
+        let (class, skip_self) = match recv {
+            Recv::Inst(class) => (class, false),
+            Recv::Super(class) => (class, true),
+            Recv::Ref(_) | Recv::Class(_) => return None,
+        };
+        let declared = self.project.declared_property(class, attr, skip_self)?;
+        Some(
+            declared
+                .and_then(|t| self.project.declared_ty(t))
+                .and_then(|t| t.bind_self(Some(&Ty::inst(class))))
+                .and_then(|t| t.val()),
+        )
     }
 
     /// The targets of calling `method` through a class object, from its definitions `callee`:
