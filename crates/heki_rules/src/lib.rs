@@ -30,7 +30,7 @@ pub use heki_diagnostics::Certainty;
 pub use mut_rules::{
     CHAIN_RULES, ChainFacts, StaleWriteKey, chain_facts, family_readers, stale_writes_by_file,
 };
-pub use selection::{RuleSelection, SelectionError, Selectors, heuristic_hint};
+pub use selection::{EffectiveSelectors, RuleSelection, SelectionError, Selectors, heuristic_hint};
 pub use snapshot::{SNAPSHOT_FILE, SnapshotError, SummarySnapshot};
 
 use globset::{Glob, GlobMatcher};
@@ -84,6 +84,17 @@ pub enum Activation {
     /// Selected as an exact `Default` rule is, whatever its certainty: it reports only what a
     /// declared contract asks for, so declaring the contract is what selects it.
     Contract,
+}
+
+impl Activation {
+    /// The name `heki rule --output-format json` writes.
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::OptIn => "opt-in",
+            Self::Contract => "contract",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
