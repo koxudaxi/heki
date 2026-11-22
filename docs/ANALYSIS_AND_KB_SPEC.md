@@ -385,6 +385,20 @@ variable of the name, which the scopes created outside the comprehension read. A
 nested scope may rebind (`nonlocal`, an assignment expression in a comprehension scope before
 3.12, any scope nested in a function too large to model) is of unknown type.
 
+A cell that the function binding it binds only as one of its parameters, and that no nested
+scope rebinds, is that parameter in every scope reading it (`FunctionDecl::captured_params`, one
+list per qualname, which scopes sharing a qualname share): every scope nested in the function
+gets one more parameter per such cell, past the parameters of every scope with its qualname, so
+a scope that does not read it can still hand it to one that does (a generator expression calling
+a nested function), and the masks of its facts (`may_params`, `obj_params`) name it. A call binds
+it (`BoundCallee::params` past the scope's own) to the caller's own parameter when the caller
+binds the cell, to the caller's position of it when the caller is nested in that function too,
+and to nothing otherwise: a closure called away from the function. So the mapping of
+masks across calls takes `self` in a comprehension, generator expression, lambda, or nested
+function back to the method running it (a class's own initialization, `own-receiver`, the walk
+up the callers), and the owner contracts' lexical attribution maps the positions of a lambda,
+comprehension, or generator expression to the function holding it directly.
+
 Module names come from the paths below a source root (`pkg/mod.py` → `pkg.mod`,
 `pkg/__init__.py` → `pkg`), the deepest one holding the file, else the project root. The `src`
 setting lists the source roots; without it they are detected as ty detects them: `src/`, the

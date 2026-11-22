@@ -1141,6 +1141,16 @@ class Keeper:
 
 def _touch(k: Keeper) -> None:
     k.model.x = 2
+
+
+class Filled(Model):
+    def __init__(self, xs: list[int]) -> None:
+        super().__init__()
+        self.items: list[int] = []
+        any(self.items.append(x) for x in xs)
+
+    def refill(self, xs: list[int]) -> None:
+        any(self.items.append(x) for x in xs)
 "#;
 
 #[test]
@@ -1151,14 +1161,15 @@ fn mut109_initializers_build_only_their_own_self() {
         .write("pkg/models.py", INITIALIZERS);
     let diags = diagnostics(&p, &["--select", "MUT109"]);
     let m = "pkg/models.py";
-    // An initializer builds its own `self`, also through a helper it hands `self` to; an
-    // object reached through `self`'s attributes existed before (`Holder`, and `Keeper` through
-    // a helper).
+    // An initializer builds its own `self`, also through a helper it hands `self` to and a
+    // generator expression using it; an object reached through `self`'s attributes existed
+    // before (`Holder`, and `Keeper` through a helper), and so does the `self` of another method.
     assert_eq!(
         found(&diags),
         vec![
             d(m, 20, "MUT109", "Holder.__init__"),
             d(m, 28, "MUT109", "Keeper.__init__"),
+            d(m, 42, "MUT109", "Filled.refill"),
         ],
         "{diags:#?}"
     );

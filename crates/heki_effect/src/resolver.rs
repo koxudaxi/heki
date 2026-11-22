@@ -551,6 +551,46 @@ pub struct FunctionDecl {
     /// function, or reading the property, gives that object of the argument.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub returns_param_attr: Option<(u8, String)>,
+    /// The parameters of enclosing functions a nested scope reads through its closure cells.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub captured_params: Option<Box<CapturedParams>>,
+}
+
+/// The parameters of the functions enclosing a nested scope (a comprehension or generator
+/// expression with a scope of its own, a lambda, a nested `def`) that the scopes nested in them
+/// read through closure cells, each a cell its function binds only as that parameter and no
+/// nested scope rebinds. Each is one more parameter of the scope, past its own, that a call binds
+/// to what the caller holds there: the caller's own parameter when the caller binds the cell, the
+/// caller's position of it when the caller is nested in that function too, and nothing for a
+/// closure called away from that function. The masks of the scope's facts (`obj_params`, an
+/// argument's `may_params`) name them by position, so its accesses to the enclosing method's
+/// `self` map to that `self` at the method, as those to an argument do.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapturedParams {
+    /// The position of the first: past the parameters of every scope with the qualname.
+    pub first: u8,
+    /// The enclosing function (its qualname) and its parameter each position holds, in order.
+    pub params: Vec<(String, u8)>,
+}
+
+impl CapturedParams {
+    /// The mask bit of parameter `param` of the enclosing function `owner`, when the scope
+    /// reads it.
+    pub fn bit(&self, owner: &str, param: u8) -> u64 {
+        self.params
+            .iter()
+            .position(|(o, p)| o == owner && *p == param)
+            .map_or(0, |j| 1u64 << (usize::from(self.first) + j))
+    }
+
+    /// The parameters of the enclosing function `owner` that the positions in `mask` hold.
+    pub fn owner_params(&self, owner: &str, mask: u64) -> u64 {
+        self.params
+            .iter()
+            .enumerate()
+            .filter(|(j, (o, _))| o == owner && mask & (1u64 << (usize::from(self.first) + j)) != 0)
+            .fold(0, |acc, (_, (_, p))| acc | 1u64 << p)
+    }
 }
 
 impl FunctionDecl {
@@ -4266,6 +4306,7 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
             getter_types.entry(&f.qualname).or_insert(t);
         }
     }
+    let captured_params = crate::infer::captured_params(input.ir);
     for f in &input.ir.functions {
         if !is_summarized_function(f) {
             continue;
@@ -4323,6 +4364,9 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
             is_abstract: crate::is_abstract_method(&f.decorators),
             property_type: getter_types.get(f.qualname.as_str()).cloned(),
             returns_param_attr: returned_attrs[f.qualname.as_str()].clone(),
+            captured_params: captured_params
+                .get(f.qualname.as_str())
+                .map(|c| Box::new(c.clone())),
         };
         decls.functions.insert(f.qualname.clone(), Box::new(decl));
     }

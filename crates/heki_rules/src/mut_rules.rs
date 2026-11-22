@@ -1272,15 +1272,23 @@ impl Allowance {
 
     /// [`Self::judged`] for an access in `func` to an object that may be its parameters `obj`
     /// (one mask, or several), with the parameters of the judged function the object may be: the
-    /// parameters of a scope a function holds are none of the function's.
-    pub(crate) fn judged_access<'k, M: Default>(
+    /// parameters of a scope a function holds are none of the function's, while the function's
+    /// own parameters the scope reads through closure cells are
+    /// ([`heki_effect::CapturedParams`]).
+    pub(crate) fn judged_access<'k, M: ParamMasks>(
         &self,
         decls: &ProjectDecls,
         func: &'k FuncKey,
         obj: M,
     ) -> (std::borrow::Cow<'k, FuncKey>, M) {
         let judged = self.judged(decls, func);
-        let obj = if *judged == *func { obj } else { M::default() };
+        if *judged == *func {
+            return (judged, obj);
+        }
+        let captured = decls
+            .function_decl(func)
+            .and_then(|d| d.captured_params.as_deref());
+        let obj = obj.map(|mask| captured.map_or(0, |c| c.owner_params(&judged.qualname, mask)));
         (judged, obj)
     }
 
@@ -1447,6 +1455,24 @@ fn callers_of<'a>(
         }
     }
     out
+}
+
+/// One mask of the parameters an object may be, or several ([`Allowance::judged_access`]).
+pub(crate) trait ParamMasks {
+    /// Each mask through `f`.
+    fn map(self, f: impl Fn(u64) -> u64) -> Self;
+}
+
+impl ParamMasks for u64 {
+    fn map(self, f: impl Fn(u64) -> u64) -> Self {
+        f(self)
+    }
+}
+
+impl ParamMasks for (u64, u64) {
+    fn map(self, f: impl Fn(u64) -> u64) -> Self {
+        (f(self.0), f(self.1))
+    }
 }
 
 /// Whether a function binds a receiver to its first parameter: a method (an instance method's

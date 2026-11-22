@@ -222,6 +222,9 @@ struct Nesting {
     /// comprehension scope before 3.12): they hold more than what the function binding them
     /// binds.
     rebound: FxHashSet<CellKey>,
+    /// The cells their function binds only as one of its parameters (`i < 64`), and that
+    /// parameter ([`cell_bindings`]).
+    param_cells: FxHashMap<CellKey, u8>,
 }
 
 /// How a function creates a nested scope.
@@ -238,6 +241,7 @@ impl Nesting {
             visible: FxHashMap::default(),
             reads: FxHashMap::default(),
             rebound: FxHashSet::default(),
+            param_cells: FxHashMap::default(),
         };
         // No function keeps a cell: no scope reads or rebinds one.
         if ir.functions.iter().all(|f| f.captured_vars.is_empty()) {
@@ -327,6 +331,14 @@ impl Nesting {
             if !cells.is_empty() {
                 out.visible.insert(f.id, cells);
             }
+            for (name, vars) in cell_bindings(f) {
+                if let [var] = vars[..]
+                    && let Some(i) = f.params.iter().take(64).position(|p| p.var == var)
+                {
+                    let i = u8::try_from(i).expect("at most 64 parameters");
+                    out.param_cells.insert((f.id, name.to_owned()), i);
+                }
+            }
         }
         // The child scopes a function runs come after it.
         for f in ir.functions.iter().rev() {
@@ -363,6 +375,83 @@ impl Nesting {
     fn bound_only<'c>(&self, cell: &'c CellKey) -> Option<&'c CellKey> {
         (!self.rebound.contains(cell)).then_some(cell)
     }
+
+    /// The function enclosing `f` that binds the variable `name` `f` reads from it, and its
+    /// parameter the variable is on every path: the function binds the name only as that
+    /// parameter, and no nested scope rebinds it.
+    fn captured_param<'m>(
+        &self,
+        ir: &'m ModuleIr,
+        f: &IrFunction,
+        name: &str,
+    ) -> Option<(&'m IrFunction, u8)> {
+        let cell = self.bound_only(self.visible.get(&f.id)?.get(name)?)?;
+        Some((ir.function(cell.0), *self.param_cells.get(cell)?))
+    }
+}
+
+/// The parameters of enclosing functions that the nested scopes of the module read through
+/// closure cells ([`resolver::CapturedParams`]), by the scope's qualname. A parameter of a function
+/// that one scope nested in it reads is a parameter of every scope nested in it, so a scope can
+/// hand it to the scope it calls (a generator expression calling a nested function reading
+/// `self`). The scopes sharing a qualname (sibling lambdas, conditional definitions) share one
+/// summary, so they share the positions too.
+pub(crate) fn captured_params(ir: &ModuleIr) -> FxHashMap<&str, resolver::CapturedParams> {
+    let nesting = Nesting::of(ir);
+    if nesting.visible.is_empty() {
+        return FxHashMap::default();
+    }
+    // The parameters of each function that the scopes nested in it read, by its qualname.
+    let mut read: FxHashMap<&str, BTreeSet<u8>> = FxHashMap::default();
+    for f in ir
+        .functions
+        .iter()
+        .filter(|f| nesting.visible.contains_key(&f.id))
+    {
+        for inst in f.blocks.iter().flat_map(|b| &b.insts) {
+            if let InstKind::LoadDeref { name, .. } = &inst.kind
+                && let Some((owner, i)) = nesting.captured_param(ir, f, name)
+            {
+                read.entry(resolver::func_qualname(owner))
+                    .or_default()
+                    .insert(i);
+            }
+        }
+    }
+    if read.is_empty() {
+        return FxHashMap::default();
+    }
+    // The parameters of enclosing functions each scope has, and the most parameters of its own
+    // that a scope of its qualname takes.
+    let mut captured: FxHashMap<&str, BTreeSet<(&str, u8)>> = FxHashMap::default();
+    let mut own: FxHashMap<&str, usize> = FxHashMap::default();
+    for f in &ir.functions {
+        let qualname = f.qualname.as_str();
+        let enclosing = qualname
+            .match_indices(".<locals>.")
+            .filter_map(|(at, _)| read.get_key_value(&qualname[..at]));
+        let mut params = enclosing
+            .flat_map(|(owner, read)| read.iter().map(|i| (*owner, *i)))
+            .peekable();
+        if params.peek().is_none() {
+            continue;
+        }
+        captured.entry(qualname).or_default().extend(params);
+        let most = own.entry(qualname).or_default();
+        *most = (*most).max(f.params.len());
+    }
+    captured
+        .into_iter()
+        .filter_map(|(qualname, params)| {
+            let first = u8::try_from(own[qualname]).ok().filter(|f| *f < 64)?;
+            let params = params
+                .into_iter()
+                .take(64 - usize::from(first))
+                .map(|(owner, i)| (owner.to_owned(), i))
+                .collect();
+            Some((qualname, resolver::CapturedParams { first, params }))
+        })
+        .collect()
 }
 
 /// The cells the scopes `parent` creates outside its inlined comprehensions can read: those
@@ -508,6 +597,12 @@ impl TypeCtx<'_> {
     pub(crate) fn bound_cell(&self, f: &IrFunction, name: &str) -> Option<&CellKey> {
         let nesting = self.nesting();
         nesting.bound_only(nesting.visible.get(&f.id)?.get(name)?)
+    }
+
+    /// The function enclosing scope `f` whose parameter the variable `name` `f` reads from it is
+    /// on every path, and that parameter.
+    pub(crate) fn captured_param(&self, f: &IrFunction, name: &str) -> Option<(&IrFunction, u8)> {
+        self.nesting().captured_param(self.ir(), f, name)
     }
 
     /// What the variable `name` that scope `f` reads from an enclosing function is: the
