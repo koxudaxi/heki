@@ -78,7 +78,8 @@ Each diagnostic has:
 
 `heki rule <CODE>` prints a rule's documentation: what it does, why it matters, and what to do
 instead, which makes a good prompt for the fix. `heki rule --all --output-format json` gives
-every rule's metadata and documentation.
+every rule's metadata and documentation, the premises of its exact claim, and its published
+precision: its certification and its latest measurement ([Rule Precision](precision.md)).
 
 ## Ask a model: `heki check --generate-prompt` (experimental)
 

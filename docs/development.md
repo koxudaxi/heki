@@ -340,15 +340,17 @@ $ uvx --from "zensical==0.1.2" zensical serve
   away in any release, and the release notes list each change; once it is stable, its entry is
   removed.
 - Each rule's certainty (`exact` or `heuristic`) and activation (`Default`, `OptIn`, or
-  `Contract`) are fields of its entry in `crates/heki_rules/src/lib.rs`. The generator marks the
-  heuristic rules on the generated pages, copies each rule's measurement from
-  [Rule Precision](precision.md) into its page, and fails when a hand-written table row says
-  "heuristic" other than exactly when a rule it names is heuristic, when an exact rule lacks a
-  certification there with no false claim in its census and holdout run, when a rule's
-  documentation has no "What a report states" section, or when an exact rule's page lists other
-  premises under "Its premises:" than the premise table (`crates/heki_rules/src/premises.rs`,
-  which `heki rule --output-format json` prints with each rule), in another order or under other
-  names.
+  `Contract`) are fields of its entry in `crates/heki_rules/src/lib.rs`, and the certifications
+  and measurements of [Rule Precision](precision.md) are data in
+  `crates/heki_rules/src/precision.rs`, which `heki rule --output-format json` prints with each
+  rule. The generator marks the heuristic rules on the generated pages, writes the two tables of
+  Rule Precision between the markers of their generated parts, copies each rule's measurement into
+  its page, and fails when a hand-written table row says "heuristic" other than exactly when a
+  rule it names is heuristic, when an exact rule lacks a certification with no false claim in its
+  census and holdout run, when a rule's documentation has no "What a report states" section, or
+  when an exact rule's page lists other premises under "Its premises:" than the premise table
+  (`crates/heki_rules/src/premises.rs`, which `heki rule --output-format json` prints with each
+  rule), in another order or under other names.
 - The Docs workflow deploys the site to Cloudflare Pages (heki.koxudaxi.dev) once a published
   release is on PyPI (the newest release only), or when it is run by hand on `main`, so the site
   documents the released version. That job runs in the `docs-production` environment, which
@@ -504,7 +506,7 @@ The workspace is split by responsibility (`crates/`):
 | `heki_env` | configuration loading and the runtime profile of the target Python version |
 | `heki_effect` | call graph, per-function effect summaries, incremental project index |
 | `heki_soundness` | the alias analysis and proof obligations behind `OPT` rewrites (never depends on `heki_effect`, never reads annotations) |
-| `heki_rules` | the rules, rule selection, project discovery |
+| `heki_rules` | the rules, rule selection, project discovery and indexing |
 | `heki_diagnostics` | output formats, inline suppressions, Ratchet baselines, fix application |
 | `heki_profile` | offline profile dumps |
 | `heki_lsp` | the incremental LSP server and the `--watch` engine |

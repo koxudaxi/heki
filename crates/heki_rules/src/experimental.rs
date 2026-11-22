@@ -82,6 +82,16 @@ pub const EXPERIMENTAL_FEATURES: &[ExperimentalFeature] = &[
         tracking: None,
     },
     ExperimentalFeature {
+        id: "command.recommend",
+        kind: ExperimentalKind::Command,
+        target: "heki recommend",
+        since: "0.2.2",
+        reason: "The sections, their policies, the candidates it infers, and its JSON object can \
+            still change as the policies are calibrated; the object's `version` changes when a \
+            field is removed or changes meaning.",
+        tracking: None,
+    },
+    ExperimentalFeature {
         id: "rule.MUT113",
         kind: ExperimentalKind::Rule,
         target: "MUT113",

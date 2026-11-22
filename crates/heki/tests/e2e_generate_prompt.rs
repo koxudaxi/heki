@@ -5,7 +5,7 @@
 
 mod common;
 
-use common::Project;
+use common::{Project, schema};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 
@@ -93,7 +93,7 @@ fn prompt_json(p: &Project, args: &[&str]) -> Value {
     let all = [args, &["--output-format", "json"]].concat();
     let out = prompt(p, &all);
     let object: Value = serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {out}"));
-    let errors = schema_errors(&schema(p), &object);
+    let errors = schema::errors(&schema(p), &object);
     assert!(errors.is_empty(), "{errors:#?}\n{object:#}");
     object
 }
@@ -382,7 +382,7 @@ fn the_json_object_holds_the_same_content_and_follows_its_schema() {
     broken["configuration"]["extra"] = json!(true);
     broken.as_object_mut().unwrap().remove("guidance");
     assert_eq!(
-        schema_errors(&schema, &broken),
+        schema::errors(&schema, &broken),
         [
             "/: no `guidance`",
             "/configuration: `extra` is not allowed",
@@ -596,105 +596,4 @@ fn the_prompt_writes_no_file_and_does_not_combine_with_the_options_that_do() {
     let (code, out, err) = p.heki(&["check", "--select", "NOPE1", "--generate-prompt"]);
     assert_eq!((code, out.as_str()), (2, ""), "{err}");
     assert!(err.contains("unknown rule selector `NOPE1`"), "{err}");
-}
-
-/// The errors of `value` against `schema`, a JSON Schema using only the keywords this function
-/// knows (any other fails the test, so that the schema cannot say more than is checked).
-fn schema_errors(schema: &Value, value: &Value) -> Vec<String> {
-    let mut errors = Vec::new();
-    check(schema, schema, value, "", &mut errors);
-    errors.sort();
-    errors
-}
-
-fn check(root: &Value, schema: &Value, value: &Value, at: &str, errors: &mut Vec<String>) {
-    let here = if at.is_empty() { "/" } else { at };
-    let rules = schema.as_object().unwrap();
-    for (keyword, rule) in rules {
-        match keyword.as_str() {
-            "$schema" | "$defs" | "title" | "description" => {}
-            "$ref" => {
-                let name = rule.as_str().unwrap().strip_prefix("#/$defs/").unwrap();
-                check(root, &root["$defs"][name], value, at, errors);
-            }
-            "type" => {
-                let types: Vec<&str> = match rule {
-                    Value::String(t) => vec![t.as_str()],
-                    _ => rule
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .map(|t| t.as_str().unwrap())
-                        .collect(),
-                };
-                let matches = |t: &str| match t {
-                    "object" => value.is_object(),
-                    "array" => value.is_array(),
-                    "string" => value.is_string(),
-                    "integer" => value.is_u64() || value.is_i64(),
-                    "boolean" => value.is_boolean(),
-                    "null" => value.is_null(),
-                    other => panic!("unknown type `{other}`"),
-                };
-                if !types.iter().any(|t| matches(t)) {
-                    errors.push(format!(
-                        "{here}: {value} is not of type {}",
-                        types.join(" or ")
-                    ));
-                }
-            }
-            "const" => {
-                if value != rule {
-                    errors.push(format!("{here}: {value} is not {rule}"));
-                }
-            }
-            "enum" => {
-                if !rule.as_array().unwrap().contains(value) {
-                    errors.push(format!("{here}: {value} is not one of {rule}"));
-                }
-            }
-            "minimum" => {
-                if value.as_f64().is_some_and(|v| v < rule.as_f64().unwrap()) {
-                    errors.push(format!("{here}: {value} is below {rule}"));
-                }
-            }
-            "required" => {
-                for key in rule.as_array().unwrap() {
-                    let key = key.as_str().unwrap();
-                    if value.as_object().is_some_and(|o| !o.contains_key(key)) {
-                        errors.push(format!("{here}: no `{key}`"));
-                    }
-                }
-            }
-            "properties" => {
-                for (key, inner) in value.as_object().into_iter().flatten() {
-                    if let Some(property) = rule.get(key) {
-                        check(root, property, inner, &format!("{at}/{key}"), errors);
-                    }
-                }
-            }
-            "additionalProperties" => {
-                let declared = rules.get("properties");
-                let extra = value
-                    .as_object()
-                    .into_iter()
-                    .flatten()
-                    .filter(|(key, _)| declared.is_none_or(|d| d.get(key.as_str()).is_none()));
-                for (key, inner) in extra {
-                    match rule {
-                        Value::Bool(false) => {
-                            errors.push(format!("{here}: `{key}` is not allowed"))
-                        }
-                        _ => check(root, rule, inner, &format!("{at}/{key}"), errors),
-                    }
-                }
-            }
-            "items" => {
-                for (i, item) in value.as_array().into_iter().flatten().enumerate() {
-                    check(root, rule, item, &format!("{at}/{i}"), errors);
-                }
-            }
-            other => panic!("the schema uses `{other}`, which the test does not check"),
-        }
-    }
 }
