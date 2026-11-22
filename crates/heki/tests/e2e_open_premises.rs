@@ -1370,3 +1370,121 @@ fn an_unknown_rule_is_a_configuration_error() {
     );
     assert!(stdout.is_empty(), "{stdout}");
 }
+
+// ------------------------------------------------------ conditions of the tier that are no premise
+
+/// `(condition, cause, detail)` of each open condition of `report`.
+fn conditions_of(report: &Value) -> Vec<(String, String, Option<String>)> {
+    report["open_conditions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| {
+            assert_eq!(o["axis"], "profitability");
+            assert_eq!(o["closer"], "none");
+            (
+                o["condition"].as_str().unwrap().to_owned(),
+                o["cause"].as_str().unwrap().to_owned(),
+                o["detail"].as_str().map(str::to_owned),
+            )
+        })
+        .collect()
+}
+
+/// A size-dependent rewrite heki proves in a loop whose trip count the code fixes is heuristic
+/// with every premise of its claim established: the record names the condition of the exact tier
+/// that is no premise ("Trip count open"). The same rewrite over a loop the data sizes is exact.
+#[test]
+fn a_rewrite_in_a_loop_the_code_counts_leaves_the_trip_count_open() {
+    let cases = [
+        (
+            "OPT103",
+            "def build(items):\n    x = ()\n    for i in ITER:\n        x = x + (i,)\n    return x\n",
+            "items",
+        ),
+        (
+            "OPT110",
+            "def count(probes):\n    allowed = list(range(0, 50, 3))\n    hits = []\n    for p in ITER:\n        if p in allowed:\n            hits.append(p)\n    return hits\n",
+            "range(probes)",
+        ),
+        (
+            "OPT111",
+            "def dedup(n):\n    seen = []\n    for v in ITER:\n        w = v % 7\n        if w not in seen:\n            seen.append(w)\n    return seen\n",
+            "range(n)",
+        ),
+        (
+            "OPT120",
+            "def drain(items):\n    q = [0, 1, 2, *items]\n    out = []\n    for _ in ITER:\n        out.append(q.pop(0))\n    return out\n",
+            "items",
+        ),
+        (
+            "OPT121",
+            "def front(items):\n    q = []\n    for i in ITER:\n        q.insert(0, i)\n    return list(q)\n",
+            "items",
+        ),
+        (
+            "OPT130",
+            "def rebuild(probes):\n    keys = [1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610, 987, 1597, 2584]\n    hits = 0\n    for p in ITER:\n        if p in set(keys):\n            hits += 1\n    return hits\n",
+            "range(probes)",
+        ),
+    ];
+    for (rule, shape, data) in cases {
+        let name = rule.to_lowercase();
+        let fixed = reports(
+            &format!("cond_{name}"),
+            OPT,
+            &shape.replace("ITER", "range(40)"),
+        );
+        assert_eq!(fixed.len(), 1, "{rule}: {fixed:#?}");
+        assert_eq!(fixed[0]["rule"], rule);
+        assert_eq!(fixed[0]["certainty"], "heuristic", "{rule}");
+        assert!(open_of(&fixed[0]).is_empty(), "{rule}: {:#?}", fixed[0]);
+        assert_eq!(
+            conditions_of(&fixed[0]),
+            vec![(
+                "Trip count open".to_owned(),
+                "trip-count-fixed".to_owned(),
+                Some("the loop runs at most 40 times".to_owned())
+            )],
+            "{rule}"
+        );
+        exact(
+            &format!("cond_{name}_closed"),
+            OPT,
+            &shape.replace("ITER", data),
+            rule,
+        );
+    }
+}
+
+/// A join over loops whose trip count a length test caps (above the 16 under which heki reports
+/// none) is heuristic with every premise established, at the loop the test caps.
+#[test]
+fn a_join_over_a_capped_loop_leaves_the_trip_count_open() {
+    let closed = join(TYPED, "rights", MATCH);
+    let open = closed.replace(
+        "    out = []\n",
+        "    if len(lefts) > 1000:\n        raise ValueError(lefts)\n    out = []\n",
+    );
+    let reports = reports("cond_opt113", "OPT113", &open);
+    assert_eq!(reports.len(), 1, "{reports:#?}");
+    assert_eq!(reports[0]["certainty"], "heuristic");
+    assert!(open_of(&reports[0]).is_empty(), "{:#?}", reports[0]);
+    assert_eq!(
+        conditions_of(&reports[0]),
+        vec![(
+            "Trip count open".to_owned(),
+            "trip-count-fixed".to_owned(),
+            None
+        )]
+    );
+    let at = &reports[0]["open_conditions"][0]["at"];
+    assert_eq!(
+        at["line"],
+        open.lines()
+            .position(|l| l.contains("for a in lefts"))
+            .unwrap()
+            + 1
+    );
+    exact("cond_opt113_closed", "OPT113", &closed, "OPT113");
+}

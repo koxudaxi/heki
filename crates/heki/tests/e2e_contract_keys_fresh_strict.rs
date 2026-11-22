@@ -3256,6 +3256,127 @@ fn unlisted_dict_keys_reports_the_namespace_keys_no_target_names() {
     );
 }
 
+const LISTED_ELSEWHERE_MODEL: &str = r#"from __future__ import annotations
+
+CACHE_KEY = "_cache_key"
+
+
+class Field:
+    def __init__(self) -> None:
+        self.required = False
+
+
+class Sub(Field):
+    pass
+"#;
+
+const LISTED_ELSEWHERE_PARSER: &str = r#"from __future__ import annotations
+
+from pkg.model import CACHE_KEY, Field, Sub
+
+OTHER_KEY = "_type_cache"
+
+
+def listed(field: Field) -> None:
+    field.__dict__[CACHE_KEY] = 1
+
+
+def unlisted(field: Field) -> None:
+    field.__dict__[OTHER_KEY] = 1
+
+
+def unlisted_literal(field: Field) -> None:
+    field.__dict__.setdefault("_name_cache", "x")
+
+
+def named_for_the_subclass(sub: Sub) -> None:
+    sub.__dict__["_sub_cache"] = 1
+
+
+def subclass_key_on_the_base(field: Field) -> None:
+    field.__dict__["_sub_cache"] = 1
+
+
+def bookkeeping(field: Field) -> None:
+    field.__dict__.setdefault("_derived_from", None)
+
+
+def read_target(field: Field) -> None:
+    field.__dict__["_read_cache"] = 1
+"#;
+
+/// A `write-owners` contract `name` guarding `target`, allowing the writers `allowed` and judging
+/// writes lexically, with `keys` added.
+fn write_owner(name: &str, target: &str, allowed: &str, keys: &str) -> String {
+    format!(
+        "[[tool.heki.write-owners]]\nname = \"{name}\"\ntargets = [\"{target}\"]\n\
+         allowed-writers = [\"{allowed}\"]\nattribution = \"lexical\"\n{keys}\n"
+    )
+}
+
+/// `unlisted-dict-keys = "report"` counts a key as listed when a target of any `write-owners`
+/// contract covering the written object's class names it: a key another contract guards is that
+/// contract's write only, in both directions. A target on a subclass names the key for the
+/// subclass, not for its base; a `read-owners` target lists nothing; and a contract allowing
+/// every writer lists keys any function may write.
+#[test]
+fn unlisted_dict_keys_count_the_keys_every_write_owners_contract_names() {
+    let (store, unlisted) = ("pkg.store:*", "unlisted-dict-keys = \"report\"\n");
+    let p = Project::new("unlisted_keys_listed_elsewhere");
+    p.write(
+        "pyproject.toml",
+        &format!(
+            "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT201\", \"MUT205\"]\n\n{}{}{}{}\
+             [[tool.heki.read-owners]]\nname = \"reads\"\ntargets = [\"pkg.model.Field._read_cache\"]\n\
+             allowed-readers = [\"pkg.store:*\"]\n",
+            write_owner("caches", "pkg.model.Field._cache_key", store, unlisted),
+            write_owner("other", "pkg.model.Field._type_cache", store, unlisted),
+            write_owner("subclass", "pkg.model.Sub._sub_cache", store, ""),
+            write_owner("bookkeeping", "pkg.model.Field._derived_*", "*", ""),
+        ),
+    )
+    .write("pkg/__init__.py", "")
+    .write("pkg/model.py", LISTED_ELSEWHERE_MODEL)
+    .write("pkg/parser.py", LISTED_ELSEWHERE_PARSER)
+    .write(
+        "pkg/store.py",
+        "from pkg.model import Field\n\n\ndef save(field: Field) -> None:\n    field.__dict__[\"_type_cache\"] = 1\n    field.__dict__[\"_stored\"] = 1\n",
+    );
+    let u = "pkg/parser.py";
+    let diags = diagnostics(&p, &[]);
+    assert_eq!(
+        found(&diags),
+        vec![
+            d(u, 9, "MUT201", "listed", "pkg.model.Field._cache_key"),
+            d(u, 13, "MUT201", "unlisted", "pkg.model.Field._type_cache"),
+            d(u, 17, "MUT201", "unlisted_literal", "Field._name_cache"),
+            d(
+                u,
+                21,
+                "MUT201",
+                "named_for_the_subclass",
+                "pkg.model.Sub._sub_cache",
+            ),
+            d(
+                u,
+                25,
+                "MUT201",
+                "subclass_key_on_the_base",
+                "Field._sub_cache",
+            ),
+            d(u, 33, "MUT201", "read_target", "Field._read_cache"),
+        ]
+    );
+    assert_eq!(
+        message_at(&diags, u, 13),
+        "`unlisted` writes `pkg.model.Field._type_cache` (dict_direct) outside the write owners of `other`"
+    );
+    assert_eq!(
+        message_at(&diags, u, 17),
+        "`unlisted_literal` writes `pkg.model.Field._name_cache` (dict_direct), a `__dict__` key no target names, outside the write owners of `caches`"
+    );
+}
+
 /// A star import binds the names its module exports, which heki does not read, so it may bind
 /// the name of any builtin: `len(globals())` may hand the dict to another `len` (the one
 /// `pkg.writer` defines), which may bind a name declared `Final`. That holds for a star import

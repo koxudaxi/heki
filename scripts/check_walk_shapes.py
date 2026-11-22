@@ -15,7 +15,8 @@ function whose cost already shows at a smaller size, where the walks it does not
 
 Each shape is checked with every rule selected and one contract of each kind naming the classes
 and functions the shapes define (a family may add contracts of its own, such as thousands of
-argument lists), through `heki check` and through the `--watch` engine. The cost
+argument lists), through `heki check` and through the `--watch` engine; a family of the facts only
+`heki recommend` reads also runs through `heki dump-recommend-facts`. The cost
 is the wall time and the peak (the heap of the memory gate's counting build, or what the system
 reports, see `check_memory.py`) minus those of an empty module; the time limit is scaled to the
 machine by fixed linear shapes of calls and of loops.
@@ -632,6 +633,39 @@ def marked_targets(n: int) -> str:
     )
 
 
+def blind_calls(n: int) -> Body:
+    """Calls heki is blind to, in a loop: library names the catalog lacks, and methods of an
+    unannotated parameter."""
+    lines = ["for item in items:"]
+    for i in range(n):
+        lines += [f"    requests.fancy{i}(item)", f"    client.m{i}(item)"]
+    return Body(("client", "items"), lines)
+
+
+def blind_calls_below_async(n: int) -> str:
+    """A chain of helpers each calling the next and making blind calls in a loop, below as many
+    `async def`s calling its head."""
+    lines = []
+    for i in range(n):
+        lines += [f"def h{i}(client, items):", "    for item in items:"]
+        lines += [f"        requests.fancy{i}(item)", f"        client.m{i}(item)"]
+        if i + 1 < n:
+            lines.append(f"    h{i + 1}(client, items)")
+        lines += ["", f"async def entry{i}(client, items):", "    h0(client, items)", ""]
+    return "\n".join(lines)
+
+
+def attributes_of_many_classes(n: int) -> str:
+    """Classes each initializing attributes, and as many functions changing and reading them: the
+    census contract candidates are drawn from."""
+    lines = []
+    for i in range(n):
+        lines += [f"class C{i}:", "    def __init__(self):", "        self.items = []"]
+        lines += ["        self.state = 0", "", f"def put{i}(c: C{i}, x):", "    c.items.append(x)"]
+        lines += ["    c.state = x", "", f"def show{i}(c: C{i}):", "    return c.items, c.state", ""]
+    return "\n".join(lines)
+
+
 def container_subclass_chain(n: int) -> str:
     """A chain of subclasses of `list`, each deriving from the one before: the classes a list or
     the chain's first class may be under R2, read by a read-only parameter handed to a helper
@@ -683,6 +717,8 @@ class Family:
     real_code: bool = True
     # Contracts of its own, added to `CONTRACTS` for its runs.
     contracts: Callable[[int], str] | None = None
+    # Also run through `heki dump-recommend-facts`: the facts only `heki recommend` reads.
+    facts: bool = False
     # Run through `heki dump-open-premises`, which explains the reports' open premises.
     open_premises: bool = False
 
@@ -744,6 +780,7 @@ FAMILIES = [
     Family("path_aliases", path_aliases),
     Family("merged_package_paths", merged_package_paths),
     Family("lazy_init_sites", lazy_init_sites, placements=("method",)),
+    Family("blind_calls", blind_calls, facts=True),
     Family("wide_hierarchy", project=wide_hierarchy, placements=("project",), size=4000),
     Family("helper_chain", project=helper_chain, placements=("project",), size=2000),
     Family(
@@ -786,6 +823,20 @@ FAMILIES = [
         "sentinel_attribute_chain", project=sentinel_attribute_chain, placements=("project",), size=2000
     ),
     Family("sentinel_attribute_ring", project=sentinel_attribute_ring, placements=("project",), size=2000),
+    Family(
+        "blind_calls_below_async",
+        project=blind_calls_below_async,
+        placements=("project",),
+        size=2000,
+        facts=True,
+    ),
+    Family(
+        "attributes_of_many_classes",
+        project=attributes_of_many_classes,
+        placements=("project",),
+        size=2000,
+        facts=True,
+    ),
 ]
 
 
@@ -896,25 +947,31 @@ class Runner:
         return low, None
 
     def check(
-        self,
-        text: str,
-        watch: bool,
-        steps: Path | None = None,
-        timeout: float = TIMEOUT_SECONDS,
-        open_premises: bool = False,
+        self, text: str, watch: bool, steps: Path | None = None, timeout: float = TIMEOUT_SECONDS
     ) -> tuple[float, float, int]:
-        self.write(text)
-        if open_premises:
-            args = ["dump-open-premises", "--select", self.select, "--config", "shapes.toml", "m.py"]
-        else:
-            args = ["check", "--select", self.select, "--config", "shapes.toml"]
-            args += ["--output-format", "json", "m.py"]
+        args = ["check", "--select", self.select, "--config", "shapes.toml"]
+        args += ["--output-format", "json", "m.py"]
         env = {}
         if watch:
             args.insert(1, "--watch")
             env["HEKI_WATCH_MAX_RUNS"] = "0"
         if steps is not None:
             args[1:1] = ["--walk-steps", str(steps)]
+        return self.measure(text, args, env, timeout)
+
+    def run(self, text: str, mode: str, timeout: float = TIMEOUT_SECONDS) -> tuple[float, float, int]:
+        """A run of `mode`: `check`, `watch` (the `--watch` engine), `facts` (`heki
+        dump-recommend-facts`), or `open-premises` (`heki dump-open-premises`)."""
+        dumps = {"facts": "dump-recommend-facts", "open-premises": "dump-open-premises"}
+        if mode not in dumps:
+            return self.check(text, mode == "watch", timeout=timeout)
+        args = [dumps[mode], "--select", self.select, "--config", "shapes.toml", "m.py"]
+        return self.measure(text, args, {}, timeout)
+
+    def measure(
+        self, text: str, args: list[str], env: dict[str, str], timeout: float
+    ) -> tuple[float, float, int]:
+        self.write(text)
         darwin = sys.platform == "darwin"
         seconds, code, stderr, usage = execute(self.heki, args, self.root, env, darwin, timeout)
         return seconds, peak_mib(stderr, usage), code
@@ -1005,20 +1062,20 @@ def main() -> int:
             if failed is not None:
                 print(f"{family.name}/{placement} n={n}: building the IR {failed}", flush=True)
                 over.append("build")
-            single = listed or family.open_premises
-            for watch in () if failed is not None else (False,) if single else (False, True):
+            if family.open_premises:
+                modes: tuple[str, ...] = ("open-premises",)
+            else:
+                modes = ("check",) if listed else ("check", "watch")
+                modes += ("facts",) * family.facts
+            for mode in () if failed is not None else modes:
                 # A listed shape only has to show when it drops under the limits.
                 timeout = base_seconds + 2 * limit_seconds if listed else TIMEOUT_SECONDS
-                explain = family.open_premises
-                seconds, peak, code = runner.check(
-                    text, watch, timeout=timeout, open_premises=explain
-                )
+                seconds, peak, code = runner.run(text, mode, timeout=timeout)
                 cost = (seconds - base_seconds, peak - base_peak)
                 if not listed and (cost[0] > limit_seconds or cost[1] > LIMIT_MIB or code == -9):
                     # Once more, against noise.
-                    seconds, peak, code = runner.check(text, watch, open_premises=explain)
+                    seconds, peak, code = runner.run(text, mode)
                     cost = (seconds - base_seconds, peak - base_peak)
-                mode = "open-premises" if explain else "watch" if watch else "check"
                 if code == -9:
                     spent = f"stopped after {cost[0]:.0f} s"
                 elif code not in (0, 1):

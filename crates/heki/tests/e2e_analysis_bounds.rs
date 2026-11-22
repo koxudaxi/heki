@@ -4384,3 +4384,135 @@ fn copies_of_a_class_with_a_deep_subclass_chain_walk_each_class_once() {
         .count();
     assert_eq!(found, 1_000);
 }
+
+/// `heki dump-recommend-facts` of the project, which must finish within `limit`.
+fn recommend_facts_within(p: &Project, limit: Duration) -> Value {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_heki"))
+        .args(["dump-recommend-facts", "."])
+        .current_dir(&p.dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+    let reader = std::thread::spawn(move || {
+        let mut out = Vec::new();
+        stdout.read_to_end(&mut out).unwrap();
+        out
+    });
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if started.elapsed() > limit {
+            child.kill().unwrap();
+            panic!("heki dump-recommend-facts ran past {limit:?}");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(status.code(), Some(0));
+    serde_json::from_slice(&reader.join().unwrap()).unwrap()
+}
+
+/// A chain of `links` helpers, each calling the next and, in a loop, a library name of its own
+/// that the catalog lacks and a method of its unannotated parameter, below as many `async def`s
+/// that each call the head of the chain.
+fn blind_calls_below_async_defs(links: usize) -> String {
+    let mut lines = vec!["import stripe".to_owned()];
+    for i in 0..links {
+        lines.extend([
+            String::new(),
+            String::new(),
+            format!("def h{i}(client, items):"),
+            "    for item in items:".to_owned(),
+            format!("        stripe.f{i}(item)"),
+            format!("        client.m{i}(item)"),
+        ]);
+        if i + 1 < links {
+            lines.push(format!("    h{}(client, items)", i + 1));
+        }
+        lines.extend([
+            String::new(),
+            String::new(),
+            format!("async def entry{i}(client, items):"),
+            "    h0(client, items)".to_owned(),
+        ]);
+    }
+    lines.join("\n") + "\n"
+}
+
+/// Which functions run on an event loop and which below a loop is one walk each over the calls,
+/// whatever the number of blind calls and of `async def`s above them: one walk per blind call
+/// took time quadratic in the chain.
+#[test]
+fn the_reach_of_blind_calls_is_one_walk_over_the_calls() {
+    let links = 2_000;
+    let p = Project::new("bounds_blind_calls_below_async_defs");
+    p.write("app.py", &blind_calls_below_async_defs(links));
+    let facts = recommend_facts_within(&p, Duration::from_secs(20));
+    let totals = &facts["blind_spots"]["totals"];
+    let all = json!({"calls": links, "awaited": 0, "on_event_loop": links, "in_loops": links});
+    assert_eq!(totals["uncatalogued"], all, "{totals:#}");
+    assert_eq!(totals["unresolved"], all, "{totals:#}");
+    assert_eq!(totals["uncatalogued_symbols"], links);
+    // Every function reaches a blind call: one closure over the calls.
+    let module = &facts["census"]["modules"][0];
+    assert_eq!(module["unseen"].as_array().unwrap().len(), 2 * links);
+}
+
+/// `classes` classes, each initializing three attributes, a module of as many functions each
+/// changing the attributes of one class, and one of as many functions each reading them.
+fn classes_written_in_one_module(classes: usize) -> [(String, String); 3] {
+    let mut models = Vec::new();
+    let mut store = vec!["import app.models as m".to_owned()];
+    let mut views = vec!["import app.models as m".to_owned()];
+    for i in 0..classes {
+        models.extend([
+            format!("class C{i}:"),
+            "    def __init__(self):".to_owned(),
+            "        self.items = []".to_owned(),
+            "        self.state = 0".to_owned(),
+            "        self.name = ''".to_owned(),
+            String::new(),
+        ]);
+        store.extend([
+            String::new(),
+            format!("def put{i}(c: m.C{i}, x):"),
+            "    c.items.append(x)".to_owned(),
+            "    c.state = x".to_owned(),
+        ]);
+        views.extend([
+            String::new(),
+            format!("def show{i}(c: m.C{i}):"),
+            "    return c.items, c.state, c.name".to_owned(),
+        ]);
+    }
+    [
+        ("app/models.py".to_owned(), models.join("\n") + "\n"),
+        ("app/store.py".to_owned(), store.join("\n") + "\n"),
+        ("app/views.py".to_owned(), views.join("\n") + "\n"),
+    ]
+}
+
+/// The census of the attributes of thousands of classes is one pass over the functions' own
+/// sites, grouped by class and attribute.
+#[test]
+fn the_census_of_many_classes_is_one_pass_over_their_sites() {
+    let classes = 3_000;
+    let p = Project::new("bounds_census_classes");
+    for (path, text) in classes_written_in_one_module(classes) {
+        p.write(&path, &text);
+    }
+    let facts = recommend_facts_within(&p, Duration::from_secs(20));
+    let totals = &facts["census"]["totals"];
+    assert_eq!(
+        totals,
+        &json!({
+            "classes": classes, "attributes": 3 * classes, "write_sites": 2 * classes,
+            "initializer_sites": 3 * classes, "read_sites": 4 * classes, "modules": 3,
+            "functions": 3 * classes,
+        }),
+        "{totals:#}"
+    );
+}
