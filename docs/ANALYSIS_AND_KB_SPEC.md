@@ -689,10 +689,11 @@ on `Any`, `object`, or a `Callable`, or of an unbound name, which resolves to a 
 library defines (`typing.Any.get`, `builtins.create`), counts as unresolved; and a call of a
 library function or class outside the project and the standard library without a catalog entry
 (`Blind::Uncatalogued`, with whether the catalog lists its package). They are local facts, never
-propagated, and no rule reads them. `ProjectIndex::blind_spot_reach` walks the calls whose
-callee's body runs at the call once from every `async def` (not through a worker thread) and once
-from the calls inside a loop or once per item, giving the functions on an event loop and below a
-loop; `heki_rules::blind_spots` counts the calls by package and name and by function and reason,
+propagated, and no rule reads them. `ProjectIndex::blind_spot_reach` walks a function's facts of
+one kind, its body or what iterating its result runs, as each call hands them on
+(`ProjectIndex::delivery`: a helper returning a generator it does not iterate runs no generator
+body where it is called), once from every `async def` (not through a worker thread) and once from
+the calls inside a loop or once per item, giving the functions on an event loop and below a loop; `heki_rules::blind_spots` counts the calls by package and name and by function and reason,
 and the hidden `heki dump-recommend-facts` prints them.
 
 The census contract candidates are drawn from (`heki_rules::census`) is a pass over the index and
@@ -705,8 +706,8 @@ the functions reading it (a read through a protocol declaring the attribute is t
 per class, the modules constructing it or accessing its attributes; per module, its functions,
 those whose final summary reaches a blocking effect, and those reaching code heki does not see
 (`ProjectIndex::reaching_blind_spots`: a blind call, `unknown_calls`, or a body known only from a
-stub, themselves or through the calls whose callee's body runs there, one `Closure` over the
-calls). Without an ownership contract the summaries keep no write into an entry of an attribute's
+stub, in their own body or in what their calls hand on, as `blind_spot_reach` walks it, one
+`Closure` over those states). Without an ownership contract the summaries keep no write into an entry of an attribute's
 container and do not answer whether a write constructs its object, so a contract trial sees more.
 
 **Guards.** An effect inside a branch of a test of the function's own inputs (`if cache:`,
