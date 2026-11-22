@@ -686,6 +686,11 @@ table (`consumption`):
   at the call, or whose result is iterated there or returned by a plain caller (`return
   relay(rows())`): its `Result` runs inside that call, or goes into the caller's `iterated`.
 
+Each of these sites records the span of the call that made the object (`CallSite::made_by`), and
+so does the site of the `await` of a coroutine made earlier: what one call runs is read from its own
+site and those (`CallSite::of_call`, the call's span and target), never from another call of the
+same callees with the same arguments, whose target is the same.
+
 Any other use runs nothing in the caller: a generator stored, yielded, returned from an
 `async def`, handed to an external or unresolved call (`StreamingResponse(rows())`), or only
 stepped with `next()` (which runs it only to its first `yield`, which the summary does not separate

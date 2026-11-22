@@ -2578,9 +2578,9 @@ struct Mut202Fn<'a> {
     ro: FxHashMap<VarId, Ro>,
     /// The function's call sites in the index, every role.
     sites: FnSites<'a, 'a>,
-    /// The distinct facts of each project callee that the sites with one target run in the
-    /// function ([`Self::facts_run_by_call`], built on the first need).
-    facts_by_target: std::cell::OnceCell<FactsByTarget<'a>>,
+    /// The distinct facts of each project callee that the sites of one call run in the function
+    /// ([`Self::facts_run_by_call`], built on the first need).
+    facts_by_call: std::cell::OnceCell<FactsByCall<'a>>,
     /// The cached function whose result each variable is on every path ([`Self::must_results`],
     /// built on the first need).
     cached: std::cell::OnceCell<FxHashMap<VarId, MustResult<'a>>>,
@@ -2588,9 +2588,11 @@ struct Mut202Fn<'a> {
     shape: std::cell::OnceCell<FnShape<'a>>,
 }
 
-/// Per call target and project callee, the distinct facts of the callee that the sites with that
-/// target run in the calling function ([`facts_run_at`]).
-type FactsByTarget<'a> = FxHashMap<&'a CallTarget, FxHashMap<&'a FuncKey, Vec<&'a EffectSummary>>>;
+/// Per call ([`CallSite::of_call`]) and project callee, the distinct facts of the callee that the
+/// call's site and the sites of the object it returns run in the calling function
+/// ([`facts_run_at`]).
+type FactsByCall<'a> =
+    FxHashMap<(Span, &'a CallTarget), FxHashMap<&'a FuncKey, Vec<&'a EffectSummary>>>;
 
 /// The passes of [`Mut202Fn::must_results`] before it gives up.
 const MUST_RESULT_PASSES: usize = 64;
@@ -2647,7 +2649,7 @@ impl<'a> Mut202Fn<'a> {
             key,
             types: tcx.infer(f),
             ro: FxHashMap::default(),
-            facts_by_target: std::cell::OnceCell::new(),
+            facts_by_call: std::cell::OnceCell::new(),
             cached: std::cell::OnceCell::new(),
             shape: std::cell::OnceCell::new(),
         }
@@ -2778,24 +2780,23 @@ impl<'a> Mut202Fn<'a> {
         let call = self.sites.at(span).iter().find(|s| {
             s.role == SiteRole::Call && s.project_callees().iter().any(|bc| bc.callee == *key)
         });
-        call.and_then(|call| self.facts_by_target().get(&call.target)?.get(key))
+        call.and_then(|call| self.facts_by_call().get(&call.of_call())?.get(key))
             .map_or(&[], Vec::as_slice)
     }
 
-    /// The facts the function's sites run, per call target: the other sites of the object a
-    /// call returns copy the call's target, so a call runs the facts of every site with its
-    /// target, gathered for all calls in one pass over the sites.
-    fn facts_by_target(&self) -> &FactsByTarget<'a> {
-        self.facts_by_target.get_or_init(|| {
+    /// The facts the function's sites run, per call they stand for, gathered for all calls in
+    /// one pass over the sites.
+    fn facts_by_call(&self) -> &FactsByCall<'a> {
+        self.facts_by_call.get_or_init(|| {
             let index = self.cx.index;
-            let mut out = FactsByTarget::default();
+            let mut out = FactsByCall::default();
             for site in self.sites.all() {
                 for bc in site.project_callees() {
                     let run = index
                         .summary(&bc.callee)
                         .and_then(|callee| facts_run_at(index, site, callee));
                     let facts = out
-                        .entry(&site.target)
+                        .entry(site.of_call())
                         .or_default()
                         .entry(&bc.callee)
                         .or_default();

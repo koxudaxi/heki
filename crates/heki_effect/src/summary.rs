@@ -2368,6 +2368,7 @@ impl<'a> Extractor<'a> {
             // Handing a function on does not run it: no must-fact goes through the reference.
             complete: false,
             on_every_return: OnEveryReturn::default(),
+            made_by: None,
         }
     }
 
@@ -4896,6 +4897,7 @@ impl<'a> Extractor<'a> {
                         under_lock: false,
                         complete: false,
                         on_every_return: crate::OnEveryReturn::default(),
+                        made_by: None,
                     });
                 }
                 self.handed_callable(bb, symbol, call);
@@ -5620,6 +5622,7 @@ impl<'a> Extractor<'a> {
             under_lock: self.opt_in.exclusive && self.lock_held_at(self.pos),
             complete,
             on_every_return,
+            made_by: None,
         }
     }
 
@@ -6655,6 +6658,7 @@ fn role_site(
         under_lock: site.under_lock,
         complete: false,
         on_every_return: crate::OnEveryReturn::default(),
+        made_by: Some(site.span),
     }
 }
 
