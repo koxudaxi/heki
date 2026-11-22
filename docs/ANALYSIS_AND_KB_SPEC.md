@@ -216,8 +216,9 @@ Compound expressions are flattened into **basic instructions in explicit left-to
     integers, booleans, floats, displays, strings, and tuples of strings. A string constant, or
     a tuple of them, is one entry: its text (`strs` / `str_tuples`, one `Arc<str>` per string
     the module writes, which aliases and items share), whose length gives its display. It is
-    the one view of a module name bound once: the effect lane's declarations read their number,
-    boolean, and string constants from it, and `GlobalStores` is the one count of the stores
+    the one view of a module name bound once (a star import rebinds every name bound before
+    it, also one with an underscore, which the imported module's `__all__` may list): the
+    effect lane's declarations read their number, boolean, and string constants from it, and `GlobalStores` is the one count of the stores
     and deletions of each module global that it, `ModuleBindings`, and the declarations read.
   - The Soundness lane reads these facts within one module only (`FnIndex`). The Advisory rules
     read other modules' small displays through the declarations (`ModuleDecls.small_globals`,

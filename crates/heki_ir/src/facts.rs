@@ -230,8 +230,8 @@ fn is_immutable_kind(kind: BuiltinKind) -> bool {
 }
 
 /// Module-level names the code fixes: bound once, by the module body, outside loops, and
-/// never rebound (no other store, `del`, `global` assignment, later star import of a public
-/// name, or dynamic globals).
+/// never rebound (no other store, `del`, `global` assignment, later star import, or dynamic
+/// globals).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModuleConstants {
     /// Integer constants (`ATTEMPTS = 5`, `LIMIT = BASE * 2`).
@@ -2605,8 +2605,9 @@ fn module_constants(
             let InstKind::StoreGlobal { name, value } = &inst.kind else {
                 continue;
             };
-            let star_rebinds =
-                last_star_import.is_some_and(|s| inst.span.start < s) && !name.starts_with('_');
+            // A star import binds the public names of its module, or those its `__all__` lists,
+            // which may start with an underscore.
+            let star_rebinds = last_star_import.is_some_and(|s| inst.span.start < s);
             if !stores.once(name) || star_rebinds {
                 continue;
             }

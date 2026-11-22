@@ -444,7 +444,7 @@ pub struct ModuleBindings {
     /// Names some code of the module binds or deletes as globals.
     bound: FxHashSet<String>,
     /// The module's globals are bound behind the IR (`exec`, `globals()`), or a star import may
-    /// rebind any public name: no builtin is trusted.
+    /// rebind any name: no builtin is trusted.
     untrusted: bool,
     star_import: bool,
 }
@@ -471,10 +471,10 @@ impl ModuleBindings {
                 let InstKind::StoreGlobal { name, value } = &inst.kind else {
                     continue;
                 };
-                // A star import may rebind any public name.
-                let public = !name.starts_with('_');
+                // A star import may rebind any name: its module's `__all__` may list one that
+                // starts with an underscore.
                 if !stores.once(name)
-                    || (out.star_import && public)
+                    || out.star_import
                     || paths.on_every_return((bb.id, i), Progress::Called)
                         != Answer::Known(Must::Every)
                 {

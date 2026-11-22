@@ -2913,15 +2913,22 @@ fn catalog_argument_cases_read_module_constants_bound_once() {
 
 /// The constants a catalog case reads are those of the module's IR (`heki_ir::ModuleConstants`),
 /// the facts' own view of a name bound once: an integer the code computes from other constants, a
-/// negative literal, and a name the module binds after its last star import hold their value.
+/// negative literal, and a name the module binds after its last star import hold their value. A
+/// name bound before the star import may be rebound by it, also one with an underscore, which
+/// the imported module's `__all__` may list.
 #[test]
 fn catalog_argument_cases_read_the_constants_of_the_module_ir() {
     let p = Project::new("cat_ir_constants");
     p.write("app/__init__.py", "")
-        .write("app/extra.py", "LATE = 1\n")
+        .write(
+            "app/extra.py",
+            "__all__ = [\"LATE\", \"_HIDDEN\"]\nLATE = 1\n_HIDDEN = 1\n",
+        )
         .write(
             "app/use.py",
             r#"import time
+
+_HIDDEN = 0
 
 from app.extra import *
 
@@ -2941,6 +2948,10 @@ async def tn_after_star():
 
 async def tp_negative():
     time.sleep(NEGATIVE)
+
+
+async def tp_rebound_by_the_star_import():
+    time.sleep(_HIDDEN)
 "#,
         );
     let (code, stdout, stderr) = p.check(&["--output-format", "json", "--select", "EFF101"]);
@@ -2952,7 +2963,11 @@ async def tp_negative():
         .collect();
     // `time.sleep(-1)` raises `ValueError` without waiting, which no catalog case says: it counts
     // as a wait.
-    assert_eq!(got, vec!["tp_negative"], "{stdout}");
+    assert_eq!(
+        got,
+        vec!["tp_negative", "tp_rebound_by_the_star_import"],
+        "{stdout}"
+    );
 }
 
 /// A module constant imported by a module that binds the name again: in a function declaring it
