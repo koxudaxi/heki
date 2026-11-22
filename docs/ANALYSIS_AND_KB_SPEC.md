@@ -545,6 +545,13 @@ EffectSummary(f) = {
                                                            // CallSite::under_lock; only with EFF110
                                                            // selected, OptInFacts::exclusive)
 
+    // Set orders (EFF112; only with EFF112 selected, OptInFacts::set_order)
+    set_order:                Option<SetOrderFacts>,       // flows: the ends (return, an output call,
+                                                           // a project call's argument) each source
+                                                           // reaches (a take of a set's order, a
+                                                           // parameter, a project call's result),
+                                                           // local; returns / returns_params /
+                                                           // writes_params, propagated
     // Call cycles (EFF114; propagated; only with EFF114 selected, OptInFacts::call_cycles)
     call_cycle:               Option<CallCycle>,           // none, Reaches (a function its body runs
                                                            // is on a call cycle), or On (itself)
@@ -1354,7 +1361,7 @@ deep = true   # changes to attributes and nested containers below are forbidden 
   callers, with the same initializer and allowed-context rules as `MUT201`. Reads through
   parameters without a project-class type are not seen.
 
-### 2.4 Family 2 (`EFF101`–`EFF103`, `EFF105`–`EFF107`, `EFF109`, `EFF110`, `EFF111`, `EFF113`, `EFF114`, `EFF201`, `DATA101`): precision, sanitizers, and aggregation
+### 2.4 Family 2 (`EFF101`–`EFF103`, `EFF105`–`EFF107`, `EFF109`, `EFF110`, `EFF111`, `EFF112`, `EFF113`, `EFF114`, `EFF201`, `DATA101`): precision, sanitizers, and aggregation
 0. **Must-facts and the exact tier** (`EffectSummary::must_exec`, computed only when `EFF101`,
    `EFF111`, `EFF103`, or `EFF113` runs: `OptInFacts::must_effects`):
    - Per call instruction, the path facts (`heki_ir::Paths`, with the reader of
@@ -1539,7 +1546,46 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      an operation on the object, its own, an awaited call reaching one, or a fan-out whose
      tasks use it; kill at `"unbinds"`) leaves out a fan-out that every path reaches after a
      use.
-10. **`EFF114`** (opt-in): an `except` clause that turns the `RecursionError` of a call cycle
+10. **`EFF112`** (opt-in): the iteration order of a set of strings reaching an output across a
+   call.
+   - `heki_effect::order_flow` decides, per function and IR-free afterwards, which sources reach
+     which ends. A source is a take of a set's order (the elements of a loop or comprehension over
+     the set, `list()` / `tuple()` / `iter()` / `str.join()` / formatting of it, `set.pop()`, a
+     generator expression over it, a comprehension of its own before Python 3.12 handed it; a set
+     the code bounds to one element on every path to the take, by a test of `len` whose bounding
+     edge is the only way in, also an operand of a short-circuit `or` / `and` on the side of the
+     whole that decides every operand, takes none), a parameter, or a project call's result. The set has
+     run-dependent hashes when it is a `set` / `frozenset` of `str` or `bytes` (or tuples of
+     them): a display of text, `set()` / `frozenset()` of text, a set operator with such an
+     operand (a mapping's `keys()` of text keys included), a module name bound once to such a
+     display (`TypeCtx::string_set_global`), a phi of one, or a value whose inferred type is one
+     (one memoized answer per value). The flow is a `Closure` over `(value, kind)` nodes: a whole
+     value in the set's order passes through copies, phis, list / tuple / dict displays,
+     formatting, `+` / `%`, `str.join`, the builtins that keep an order, `.items()` and the other
+     keeping methods, positional item reads (not from a mapping, by a text key, or from a
+     sequence the code bounds to one element there), and into the containers keeping the order
+     it is appended to or stored in (not a set, which has an order of its own; `insert`,
+     `update`, and `setdefault` only on a list or a mapping known by construction or type; a key
+     read from the mapping on every path before keeps its place when stored again); an element
+     also passes to what is computed from it (an item looked up by it, text formatted or
+     concatenated from it, a call's result), and text made from it and added onto a phi (what a
+     loop has built so far) is a whole value in the set's order. The
+     ends are a `return`, an output (a catalog `writes_in_order` argument with its sorting
+     keyword established off, a stream's `write`, a builtin exception's message; for one element
+     at a time only outputs that append: streams and `print`, not a raise, which names the first
+     element that fails), and a project call's argument (with the callee and parameter; `each`
+     for one element at a time).
+   - Propagation (`order_flow::propagate`) resolves the flows against the callees' facts: what a
+     call's result carries (the callee's `returns`, or, through a callee returning a parameter,
+     what the argument carries: a fixpoint over the flows that visits a flow again only when it
+     grows; one element at a time hands no order back), then `returns` (the first origin),
+     `returns_params`, and `writes_params` (the shortest chain to an output; through an `each`
+     argument only to an appending output).
+   - The rule (`eff_rules::set_order_output`) reads the same resolution where the ordered value
+     meets the output: a call's result written (it came back across a call), or a take handed to
+     a call whose parameter reaches an output. A take written in its own function is a linter's
+     and is not reported.
+11. **`EFF114`** (opt-in): an `except` clause that turns the `RecursionError` of a call cycle
    into a value.
    - A function is on a call cycle when it is a member of a component, of more than one node or
      with a call of itself, of the propagation region's call graph restricted to the calls whose
@@ -1570,7 +1616,7 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      `sys.stderr.write`, `traceback.print_exc`, a `logging` call with the exception, also on a
      logger of unknown class by its method name) and returning an integer constant on every
      `return` is a CLI boundary and is left out.
-11. **`EFF201`** (contract): a breadth-first search over the IR-free call graph from each scope
+12. **`EFF201`** (contract): a breadth-first search over the IR-free call graph from each scope
    function (and each module body a scope names as `<module>`,
    `DottedPattern::names_module_bodies`) finds the shortest chain to each forbidden effect,
    without entering `allowed-callees`, other scope functions, or bodies that do not run at the
@@ -1773,7 +1819,10 @@ from a deep copy of an unhashable one, then holds what validating the default re
 field validates it: pydantic 2's `BaseModel`), `return_type` (factories such as
 `sqlite3.connect`), `sync_lock_or_tx` (`threading.Lock`, `Session.begin`: `EFF106`),
 `non_reentrant_lock` (`threading.Lock`, `asyncio.Lock`: `EFF109`), `one_at_a_time`
-(`asyncio.StreamReader.readline`, `AsyncSession.execute`: `EFF110`),
+(`asyncio.StreamReader.readline`, `AsyncSession.execute`: `EFF110`), `writes_in_order` (the
+argument a call writes or serializes in the order of its elements, with the keyword that sorts
+mapping keys first and whether it sorts by default: `json.dumps`, `yaml.safe_dump`,
+`pprint.pprint`, `pathlib.Path.write_text`, `print`: `EFF112`),
 `waits_until_done` / `done_when_awaited` (futures), `bounded_by` / `waits_while_full` (queues:
 section 2.2), `environment` (`"call"`: calling the function reads the environment the program runs
 in, `os.getenv`, `platform.system`, `shutil.which`; `"read"`: reading the module attribute does,
@@ -1803,7 +1852,7 @@ is a parameter of the calling function (`shutdown(wait=wait)`) becomes a guard: 
 switches off need the parameter to be true, which the callers decide (`close(wait=False)`). A file lists its `opaque_packages`. Projects add or
 override entries with `[[tool.heki.ecosystem]]` (`symbol`, `effects`, `async-safe`,
 `offloads-blocking-arg`, `excluded`, `copy-sanitizer`, `return-type`, `sync-lock-or-tx`,
-`non-reentrant-lock`, `one-at-a-time`): an
+`non-reentrant-lock`, `one-at-a-time`, `writes-in-order`): an
 override sets the keys it lists and keeps the built-in entry's others. A `[[tool.heki.ecosystem]]`
 entry naming a project function applies to its summary (the built-in catalog never does: a
 package's own source is followed through its bodies): its `effects` are direct effects (chain: the function itself),

@@ -3766,6 +3766,102 @@ fn a_wide_display_unpacked_by_many_calls_is_bound_within_the_budget() {
     assert!((1..8000).contains(&wide.len()), "{}", wide.len());
 }
 
+/// The `EFF112` reports of `heki check --extend-select EFF112` on the module `m.py` of `source`,
+/// which must finish within 20 seconds.
+fn set_order_outputs(name: &str, source: &str) -> usize {
+    let p = Project::new(name);
+    p.write("m.py", source);
+    check_selecting_within(&p, &["EFF112"], Duration::from_secs(20))
+        .iter()
+        .filter(|d| d["rule_code"] == "EFF112")
+        .count()
+}
+
+const SET_ORDER_HEAD: &str = "import json\nfrom pathlib import Path\n\n\ndef names(table: dict[str, int]) -> set[str]:\n    return set(table)\n\n\n";
+
+/// A chain of four thousand functions each returning what the one below returns, the last a
+/// list in a set's order, written at the top: each function's origin comes from its callee's
+/// summary once.
+#[test]
+fn an_order_returned_up_thousands_of_functions_is_decided_once_each() {
+    let n = 4_000;
+    let mut lines = vec![SET_ORDER_HEAD.to_owned()];
+    lines.push("def f0(table: dict[str, int]) -> list[str]:".to_owned());
+    lines.push("    return [k for k in names(table)]".to_owned());
+    for i in 1..n {
+        lines.extend([
+            String::new(),
+            String::new(),
+            format!("def f{i}(table: dict[str, int]) -> list[str]:"),
+            format!("    return f{}(table)", i - 1),
+        ]);
+    }
+    lines.extend([
+        String::new(),
+        String::new(),
+        "def top(table: dict[str, int], path: Path) -> None:".to_owned(),
+        format!("    path.write_text(json.dumps(f{}(table)))", n - 1),
+    ]);
+    assert_eq!(
+        set_order_outputs("bounds_order_returned_up", &(lines.join("\n") + "\n")),
+        1
+    );
+}
+
+/// A value in a set's order handed down four thousand helpers to the one that writes it: each
+/// helper's written parameter comes from its callee's summary once.
+#[test]
+fn an_order_handed_down_thousands_of_helpers_is_decided_once_each() {
+    let n = 4_000;
+    let mut lines = vec![SET_ORDER_HEAD.to_owned()];
+    lines.push("def h0(path: Path, data: object) -> None:".to_owned());
+    lines.push("    path.write_text(json.dumps(data))".to_owned());
+    for i in 1..n {
+        lines.extend([
+            String::new(),
+            String::new(),
+            format!("def h{i}(path: Path, data: object) -> None:"),
+            format!("    h{}(path, data)", i - 1),
+        ]);
+    }
+    lines.extend([
+        String::new(),
+        String::new(),
+        "def top(table: dict[str, int], path: Path) -> None:".to_owned(),
+        format!("    h{}(path, [k for k in names(table)])", n - 1),
+    ]);
+    assert_eq!(
+        set_order_outputs("bounds_order_handed_down", &(lines.join("\n") + "\n")),
+        1
+    );
+}
+
+/// Five hundred comprehensions over one set (each a loop the summaries model too, which keeps a
+/// debug build well within the limit), each handed to one writer through one list: the flows of
+/// one function share their nodes.
+#[test]
+fn many_comprehensions_over_one_set_share_their_flows() {
+    let n = 500;
+    let mut lines = vec![SET_ORDER_HEAD.to_owned()];
+    lines.extend([
+        "def write(path: Path, parts: list[object]) -> None:".to_owned(),
+        "    path.write_text(json.dumps(parts))".to_owned(),
+        String::new(),
+        String::new(),
+        "def top(table: dict[str, int], path: Path) -> None:".to_owned(),
+        "    found = names(table)".to_owned(),
+        "    parts = []".to_owned(),
+    ]);
+    for _ in 0..n {
+        lines.push("    parts.append([k for k in found])".to_owned());
+    }
+    lines.push("    write(path, parts)".to_owned());
+    assert_eq!(
+        set_order_outputs("bounds_many_comprehensions", &(lines.join("\n") + "\n")),
+        n
+    );
+}
+
 /// The `EFF114` reports of `heki check --extend-select EFF114` on the module `m.py` of `source`,
 /// which must finish within 20 seconds.
 fn recursion_handlers(name: &str, source: &str) -> usize {
@@ -3826,6 +3922,62 @@ fn a_cycle_through_thousands_of_functions_is_found_once() {
     assert_eq!(
         recursion_handlers("bounds_cycle_of_functions", &(lines.join("\n") + "\n")),
         n
+    );
+}
+
+/// A value chosen among a set and hundreds of sorted lists by a chain of branches, then
+/// iterated and handed to a writer: whether it is such a set is decided once per value.
+#[test]
+fn a_phi_of_hundreds_of_branches_is_decided_once() {
+    let n = 400;
+    let mut lines = vec![SET_ORDER_HEAD.to_owned()];
+    lines.extend([
+        "def write(path: Path, data: object) -> None:".to_owned(),
+        "    path.write_text(json.dumps(data))".to_owned(),
+        String::new(),
+        String::new(),
+        "def top(table: dict[str, int], path: Path, k: int) -> None:".to_owned(),
+        "    found = names(table)".to_owned(),
+    ]);
+    for i in 0..n {
+        lines.push(format!("    if k == {i}:"));
+        lines.push("        found = sorted(table)".to_owned());
+    }
+    lines.push("    write(path, [x for x in found])".to_owned());
+    assert_eq!(
+        set_order_outputs("bounds_order_phi", &(lines.join("\n") + "\n")),
+        1
+    );
+}
+
+/// A loop over a set storing each element as a key of a mapping a thousand times, each store
+/// after reads of a thousand other mappings by the same key and of the stored mapping itself by
+/// another: whether the key was read from the stored mapping before is looked up by mapping and
+/// key, once per store.
+#[test]
+fn stores_after_reads_by_the_same_key_are_decided_once_each() {
+    let n = 1_000;
+    let mut lines = vec![SET_ORDER_HEAD.to_owned()];
+    lines.extend([
+        "def filled(table: dict[str, int], other: dict[str, int], k: str) -> dict:".to_owned(),
+        "    fields = {}".to_owned(),
+        "    for name in names(table):".to_owned(),
+    ]);
+    for i in 0..n {
+        lines.push(format!("        a{i} = {{}}"));
+        lines.push(format!("        x{i} = a{i}[name] if other else fields[k]"));
+        lines.push("        fields[name] = other".to_owned());
+    }
+    lines.extend([
+        "    return fields".to_owned(),
+        String::new(),
+        String::new(),
+        "def top(table: dict[str, int], other: dict[str, int], path: Path) -> None:".to_owned(),
+        "    path.write_text(json.dumps(filled(table, other, \"k\")))".to_owned(),
+    ]);
+    assert_eq!(
+        set_order_outputs("bounds_order_stores", &(lines.join("\n") + "\n")),
+        1
     );
 }
 

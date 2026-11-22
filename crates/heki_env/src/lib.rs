@@ -314,6 +314,22 @@ pub struct EcosystemOverride {
     /// `EFF110`: tasks may not be inside this method on one object at once (`"always"`,
     /// `"when_unbound"`, `"unbinds"`, validated by `heki_kb`).
     pub one_at_a_time: Option<String>,
+    /// `EFF112`: the call writes an argument, or serializes it into text, in the order of its
+    /// elements.
+    pub writes_in_order: Option<OrderedOutputSetting>,
+}
+
+/// `writes-in-order`: the argument written (`arg`, a position not counting the receiver, or
+/// `param`, a keyword; with neither, every positional argument) and the keyword argument that
+/// sorts the keys of the mappings written first (`sorted-by`), sorting by default when
+/// `sorted-by-default` is true.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
+pub struct OrderedOutputSetting {
+    pub arg: Option<u8>,
+    pub param: Option<String>,
+    pub sorted_by: Option<String>,
+    pub sorted_by_default: bool,
 }
 
 /// `copy-sanitizer`: the depth of the copy the call returns (`"shallow"` / `"deep"`, validated
@@ -1033,6 +1049,10 @@ non-reentrant-lock = true
 [[tool.heki.ecosystem]]
 symbol = "mypkg.wire.Channel.recv"
 one-at-a-time = "always"
+
+[[tool.heki.ecosystem]]
+symbol = "mypkg.out.dump"
+writes-in-order = { arg = 0, param = "data", sorted-by = "sort_keys" }
 "#;
         let wrapper: PyProjectWrapper = toml::from_str(raw).unwrap();
         let cfg = wrapper.tool.heki.unwrap();
@@ -1084,6 +1104,16 @@ one-at-a-time = "always"
                 EcosystemOverride {
                     symbol: "mypkg.wire.Channel.recv".into(),
                     one_at_a_time: Some("always".into()),
+                    ..EcosystemOverride::default()
+                },
+                EcosystemOverride {
+                    symbol: "mypkg.out.dump".into(),
+                    writes_in_order: Some(OrderedOutputSetting {
+                        arg: Some(0),
+                        param: Some("data".into()),
+                        sorted_by: Some("sort_keys".into()),
+                        sorted_by_default: false,
+                    }),
                     ..EcosystemOverride::default()
                 },
             ]

@@ -14,6 +14,7 @@ An experimental rule is never enabled by default: it runs only when `select` or 
 | `command.recommend` | command | `heki recommend` | 0.2.2 | - |
 | `rule.EFF109` | rule | [`EFF109`](rules/lock-reacquired-while-held.md) | 0.2.1 | - |
 | `rule.EFF110` | rule | [`EFF110`](rules/exclusive-object-fanout.md) | 0.2.1 | - |
+| `rule.EFF112` | rule | [`EFF112`](rules/set-order-output.md) | 0.2.2 | - |
 | `rule.EFF114` | rule | [`EFF114`](rules/recursion-error-as-value.md) | 0.2.2 | - |
 | `rule.MUT101` | rule | [`MUT101`](rules/cached-property-stale-mutation.md) | 0.1.0 | - |
 | `rule.MUT111` | rule | [`MUT111`](rules/cached-property-stale-read.md) | 0.1.1 | - |
@@ -67,6 +68,14 @@ Its precision is measured on a small sample of reports only.
 - **Since:** 0.2.1
 
 Its precision is measured on a small sample of reports only.
+
+## `rule.EFF112`
+
+- **Kind:** rule
+- **Target:** [`EFF112`](rules/set-order-output.md)
+- **Since:** 0.2.2
+
+Its precision is measured on a sample of reports of one corpus only, and its premises are not yet certified.
 
 ## `rule.EFF114`
 
