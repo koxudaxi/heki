@@ -2949,6 +2949,9 @@ struct Mut202Fn<'a> {
     cached: std::cell::OnceCell<FxHashMap<VarId, MustResult<'a>>>,
     /// The function's tables of definitions and block order (built on the first need).
     shape: std::cell::OnceCell<FnShape<'a>>,
+    /// The project functions the function calls, by their dotted names (built on the first
+    /// explanation of a `MUT114` report, [`Self::cached_function`]).
+    callees_by_fqn: std::cell::OnceCell<FxHashMap<String, &'a FuncKey>>,
 }
 
 /// Per call ([`CallSite::of_call`]) and project callee, the distinct facts of the callee that the
@@ -3015,6 +3018,7 @@ impl<'a> Mut202Fn<'a> {
             facts_by_call: std::cell::OnceCell::new(),
             cached: std::cell::OnceCell::new(),
             shape: std::cell::OnceCell::new(),
+            callees_by_fqn: std::cell::OnceCell::new(),
         }
     }
 
@@ -3181,19 +3185,21 @@ impl<'a> Mut202Fn<'a> {
     /// The cached function `r` names, when the value's identity is not established: the callee
     /// of the last call through a wrapper, or of a call of this function.
     fn cached_function(&self, r: &Ro) -> Option<&'a FuncKey> {
-        let named = |bc: &&'a BoundCallee| bc.callee.fqn() == r.producer;
-        let found = match r.via.last() {
-            Some(hop) => {
-                let site = self.cx.must_explainer.as_ref()?.site_of(hop)?;
-                site.project_callees().iter().find(named)
-            }
-            None => self
-                .sites
-                .all()
-                .flat_map(CallSite::project_callees)
-                .find(named),
+        let Some(hop) = r.via.last() else {
+            let callees = self.callees_by_fqn.get_or_init(|| {
+                self.sites
+                    .all()
+                    .flat_map(CallSite::project_callees)
+                    .map(|bc| (bc.callee.fqn(), &bc.callee))
+                    .collect()
+            });
+            return callees.get(&r.producer).copied();
         };
-        found.map(|bc| &bc.callee)
+        let site = self.cx.must_explainer.as_ref()?.site_of(hop)?;
+        site.project_callees()
+            .iter()
+            .map(|bc| &bc.callee)
+            .find(|key| key.fqn() == r.producer)
     }
 
     /// The distinct facts of the project callee `key` that the call at `span` (a site of it)
