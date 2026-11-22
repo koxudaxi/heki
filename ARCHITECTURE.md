@@ -675,8 +675,8 @@ heki/
   `crates/heki/tests/lsp_oracle.rs` compares the server with `heki check` after every step of an
   editing session. Each group of steps is a test of its own, a session that starts from the
   project's initial files, so the groups run in parallel: 334 steps in 40 groups, 44 steps in
-  13 groups over file, layout, source root, buffer, and baseline changes, and 3 steps in a
-  project below a Git working tree without a configuration file.
+  13 groups over file, layout, source root, buffer, and baseline changes, and 25 steps in five
+  small projects of their own (one below a Git working tree without a configuration file).
   Measured on datamodel-code-generator: p90 of about 45 ms per file edit.
 - **LSP features**: the call chains of `EFF101` / `MUT201` and others, and each diagnostic's
   help, are `DiagnosticRelatedInformation`; `OPT101` / `OPT102` are quick fixes and the proven
