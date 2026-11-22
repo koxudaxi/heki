@@ -15,7 +15,9 @@ EXACT_RULES = (
     "EFF101",
     "EFF103",
     "DATA101",
+    "MUT101",
     "MUT110",
+    "MUT111",
     "MUT114",
     "OPT101",
     "OPT102",
@@ -238,6 +240,57 @@ def _function_of(source, line):
     return best
 
 
+def find_function(root, qualname, sources):
+    """The project file that defines the function `qualname` (`Class.method`), when one does."""
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
+        for name in sorted(filenames):
+            if not name.endswith(".py"):
+                continue
+            path = os.path.relpath(os.path.join(dirpath, name), root).replace(os.sep, "/")
+            if path not in sources:
+                try:
+                    sources[path] = Source(root, path)
+                except (SyntaxError, UnicodeDecodeError):
+                    continue
+            if qualname in _qualnames(sources[path].tree):
+                return path
+    return None
+
+
+def _qualnames(tree):
+    """The qualified names of the functions a module defines in classes and at its top."""
+    out = set()
+
+    def visit(node, prefix):
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.ClassDef):
+                visit(child, f"{prefix}{child.name}.")
+            elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                out.add(prefix + child.name)
+
+    visit(tree, "")
+    return out
+
+
+def _rebinds(source, line, attr):
+    """Whether the statement on `line` rebinds or deletes `<name>.attr` (an assignment, an
+    augmented assignment, or `del`) rather than changing its object in place."""
+    for node in ast.walk(source.tree):
+        if getattr(node, "lineno", None) != line:
+            continue
+        targets = []
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+            targets = [node.target]
+        elif isinstance(node, ast.Delete):
+            targets = node.targets
+        if any(isinstance(t, ast.Attribute) and t.attr == attr for t in targets):
+            return True
+    return False
+
+
 def resolve_function(root, dotted, sources):
     """`app.m.Class.method` as (path, qualname), when a project file defines it."""
     parts = dotted.split(".")
@@ -365,6 +418,53 @@ class Planner:
         claim.update(names)
         function = _function_of(source, pos[0])
         claim["function"] = function.name if function is not None else None
+        return True
+
+    def _mut101(self, claim, source, pos, report):
+        target = report.get("target") or ""
+        written, _, prop = target.partition("->")
+        owner, _, attr = written.rpartition(".")
+        writer = report.get("qualname")
+        if not (prop and owner and attr and writer):
+            return False
+        getter = f"{owner}.{prop}"
+        getter_path = find_function(self.root, getter, self.sources)
+        if getter_path is None:
+            return False
+        ret_id = f"R{claim['id'][1:]}"
+        self.plan["returns"].append({"id": ret_id, "path": getter_path, "qualname": getter})
+        writer_ret = f"W{claim['id'][1:]}"
+        self.plan["returns"].append(
+            {"id": writer_ret, "path": claim["path"], "qualname": writer, "kept": {"prop": prop}}
+        )
+        self._line(claim, pos[0], kept={"prop": prop, "attr": attr, "getter": getter})
+        claim.update(
+            {
+                "ret": ret_id,
+                "writer_ret": writer_ret,
+                "prop": prop,
+                "attr": attr,
+                "getter": getter,
+                "rebinds": _rebinds(source, pos[0], attr),
+            }
+        )
+        return True
+
+    def _mut111(self, claim, source, pos, report):
+        target = report.get("target") or ""
+        owner, _, prop = target.rpartition(".")
+        node = source.node_at(pos, (ast.Attribute,))
+        receiver = node.value.id if node is not None and isinstance(node.value, ast.Name) else None
+        writers = [r for r in report.get("related", [])]
+        if not (owner and prop and receiver):
+            return False
+        getter = f"{owner}.{prop}"
+        self._line(
+            claim,
+            pos[0],
+            kept={"prop": prop, "attr": prop, "getter": getter, "receiver": receiver},
+        )
+        claim.update({"prop": prop, "getter": getter, "writers": len(writers)})
         return True
 
     def _opt_type(self, claim, source, pos, report):

@@ -289,6 +289,136 @@ def data101(sc, strip):
 
 
 # ---------------------------------------------------------------------------------------------
+# MUT101 and MUT111: a write that leaves a cached property stale
+# ---------------------------------------------------------------------------------------------
+def _kept_value_classes(sc, strip):
+    """The classes of a kept-value program: `(holder, builds)`. The holder's `@cached_property`
+    `features` reads an attribute (`raw`, a dict it rebinds, or `items`, a list it changes in
+    place); its method `replace` writes it, then runs code that keeps the value; `builds` are the
+    classes the entry may construct. Each stripped premise is made false by construction on a
+    class the entry constructs."""
+    sc.imports("import functools")
+    holder, quiet = sc.name("Holder"), sc.name("Quiet")
+    in_place = sc.chance(0.5 if strip == "Plain write" else 0.3)
+    store_runs_code = strip == "Plain write" and not in_place
+    if in_place:
+        expr = '",".join(self.items)'
+        write = ["self.items.append(text)"]
+        if strip == "Plain write":
+            # A project subclass of `list` whose `append` changes nothing (R2: a value annotated
+            # `list` may be one).
+            sc.define(block(f"class {quiet}(list):", block("def append(self, item):", ["return None"])))
+            init = [f"self.items: list[str] = {quiet}() if flag else []"]
+        else:
+            init = ["self.items: list[str] = []"]
+    else:
+        expr = 'self.raw.get("k", "")'
+        write = ["self.raw = raw"]
+        init = []
+    helpers = []
+    if strip == "Reads on every path":
+        if sc.chance(0.5):
+            read = f'return {expr} if self.flag else ""'
+        else:
+            read = 'return self._look() if self.flag else ""'
+            helpers = [""] + block("def _look(self) -> str:", [f"return {expr}"])
+    elif strip == "Every implementation":
+        read = "return self.hook()"
+        helpers = [""] + block("def hook(self) -> str:", [f"return {expr}"])
+    elif sc.chance(0.5):
+        read = "return self._look()"
+        helpers = [""] + block("def _look(self) -> str:", [f"return {expr}"])
+    else:
+        read = f"return {expr}"
+    stored = ["self._raw = raw"] if store_runs_code else ["self.raw = raw"]
+    body = block(
+        "def __init__(self, raw: dict[str, str], flag: bool) -> None:",
+        [*stored, "self.flag = flag", *init],
+    )
+    if store_runs_code:
+        # Storing `raw` runs the property's setter, which stores a copy elsewhere.
+        body += [""] + ["@property"] + block("def raw(self) -> dict[str, str]:", ["return self._raw"])
+        body += [""] + ["@raw.setter"] + block("def raw(self, value: dict[str, str]) -> None:", ["self._raw = dict(value)"])
+    body += [""] + ["@functools.cached_property"] + block("def features(self) -> str:", [read])
+    body += helpers
+    kept_strip = strip == "Kept to the return"
+    params = "self, raw: dict[str, str], text: str" + (", hook" if kept_strip else "")
+    after = ["hook(self)"] if kept_strip else []
+    body += [""] + block(f"def replace({params}) -> None:", [*write, *after, "return None"])
+    sc.define(block(f"class {holder}:", body))
+    builds = [holder]
+    if strip == "Cached property":
+        plain = sc.name("Plain")
+        sc.define(block(f"class {plain}({holder}):", ["@property"] + block("def features(self) -> str:", ['return "plain"'])))
+        builds.append(plain)
+    elif strip == "Every implementation":
+        other = sc.name("Other")
+        sc.define(block(f"class {other}({holder}):", block("def hook(self) -> str:", ['return "other"'])))
+        builds.append(other)
+    return holder, builds
+
+
+def _kept_value_entry(sc, strip, holder, builds, reader=None):
+    """The entry of a kept-value program: it constructs one of `builds`, computes the cached
+    value, runs the writer, then the reader (`MUT111`) and the property again. With a reader it
+    reads the property by a name it builds, so that its own reads are not claims of their own."""
+    entry = sc.name("use")
+    pick = "cls = builds[n % len(builds)]" if len(builds) > 1 else f"cls = {holder}"
+    kept_strip = strip == "Kept to the return"
+    args = "other, text, hook" if kept_strip else "other, text"
+    prop = '"".join(("feat", "ures"))'
+    get = f"getattr(obj, {prop})" if reader is not None else "obj.features"
+    lines = [
+        f"builds = [{', '.join(builds)}]",
+        pick,
+        "obj = cls(raw, flag)",
+        f"first = {get}",
+        f"obj.replace({args})",
+    ]
+    if reader is not None:
+        lines.append(f"seen = {reader}(obj)")
+    lines.append(f"return first, {get}")
+    extra = "hook, " if kept_strip else ""
+    sc.define(block(f"def {entry}(raw, other, {extra}{sc.params}):", lines))
+    popper = None
+    if kept_strip:
+        popper = sc.name("forget")
+        sc.define(block(f"def {popper}(obj):", ['obj.__dict__.pop("features", None)']))
+
+    def values(k):
+        raw = {"$dict": [["k", ["a", "b", "c"][k % 3]]]}
+        other = {"$dict": [["k", ["x", "y"][k % 2]]]}
+        out = [raw, other]
+        if popper is not None:
+            out.append({"$ref": f"{sc.main_module}:{popper}"})
+        return out
+
+    _add_inputs(sc, entry, values)
+
+
+def mut101(sc, strip):
+    holder, builds = _kept_value_classes(sc, strip)
+    _kept_value_entry(sc, strip, holder, builds)
+
+
+def mut111(sc, strip):
+    shared = None if strip in ("Reads the property", "Runs the writer") else strip
+    holder, builds = _kept_value_classes(sc, shared)
+    reader = sc.name("check")
+    if strip == "Reads the property":
+        # The property is read by a name the code does not show.
+        sc.define(block(f"def {reader}(obj: {holder}) -> bool:", ['return bool(getattr(obj, "".join(("feat", "ures"))))']))
+    elif strip == "Runs the writer":
+        sibling = sc.name("Sibling")
+        sc.define(block(f"class {sibling}({holder}):", block("def replace(self, raw, text) -> None:", ["return None"])))
+        builds = [*builds, sibling]
+        sc.define(block(f"def {reader}(obj: {holder}) -> bool:", ['return obj.features.startswith("x")']))
+    else:
+        sc.define(block(f"def {reader}(obj: {holder}) -> bool:", ['return obj.features.startswith("x")']))
+    _kept_value_entry(sc, shared, holder, builds, reader)
+
+
+# ---------------------------------------------------------------------------------------------
 # MUT110 and MUT114
 # ---------------------------------------------------------------------------------------------
 def mut110(sc, strip):
@@ -512,7 +642,9 @@ BUILDERS = {
     "EFF101": eff101,
     "EFF103": eff103,
     "DATA101": data101,
+    "MUT101": mut101,
     "MUT110": mut110,
+    "MUT111": mut111,
     "MUT114": mut114,
     **{rule: _opt_builder(rule) for rule in OPT_PATTERNS},
     "OPT113": opt113,
@@ -530,7 +662,23 @@ STRIPS = {
     "EFF101": ["Every return", "Every implementation", "Waits"],
     "EFF103": ["Origin", "Every iteration", "Every return", "Every implementation", "Sends"],
     "DATA101": ["Loop-carried on every path", "Every iteration", "Origin", "Reallocates"],
+    "MUT101": [
+        "Cached property",
+        "Reads on every path",
+        "Every implementation",
+        "Plain write",
+        "Kept to the return",
+    ],
     "MUT110": ["Read-only parameter", "Passed as itself", "Changed at the line"],
+    "MUT111": [
+        "Cached property",
+        "Reads on every path",
+        "Every implementation",
+        "Plain write",
+        "Kept to the return",
+        "Reads the property",
+        "Runs the writer",
+    ],
     "MUT114": ["Cached", "Keyed", "Container kind", "Same object", "Changed in place"],
     **{
         rule: ["Builtin type by construction", "Loop-carried", "In a loop", "Rewrite proven safe"]

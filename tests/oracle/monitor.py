@@ -32,6 +32,12 @@ Events (lists, so that the trace is compact JSON):
   hold when the line starts and ends;
 - `["ret", ret, act, seq, value_id, type_name, base]`: `base` is `list`, `dict`, or `set` for an
   instance of one (a subclass too), else the type's name;
+- `["load", act, seq, object_id, attr]`: an attribute load `<first argument>.<attr>` of a frame ran,
+  for the attributes a kept-value claim names (`MUT101`);
+- `["kept_ret", ret, act, seq, self_id, kept_id]`: the writer of a kept-value claim returned
+  normally; `kept_id` is the identity of what its first argument's `__dict__` holds under the
+  property's name then (`None`: nothing). A line of such a writer carries the same facts at its
+  start and end as a last element of its `line` event (`kept_facts`);
 - `["fake", seq, api, kind, waits, detail, stack, input_ids, output_id]`.
 """
 
@@ -39,6 +45,7 @@ from __future__ import annotations
 
 import collections
 import dis
+import functools
 import os
 import re
 import sys
@@ -130,6 +137,8 @@ class CodeInfo:
         "returns",
         "watched",
         "body_offs",
+        "load_offs",
+        "kept_rets",
         "_instructions",
     )
 
@@ -145,6 +154,8 @@ class CodeInfo:
         self.lines = {}
         self.returns = []
         self.body_offs = {}
+        self.load_offs = {}
+        self.kept_rets = []
         instructions = list(dis.get_instructions(code))
         for i, ins in enumerate(instructions):
             pos = ins.positions
@@ -156,9 +167,11 @@ class CodeInfo:
         self.watched = False
         self._instructions = instructions
 
-    def attach(self, plan_sites, plan_loops, plan_lines, plan_returns):
+    def attach(self, plan_sites, plan_loops, plan_lines, plan_returns, kept_attrs=frozenset()):
         """Index the plan entries in this code object; returns whether any is here."""
         instructions = self._instructions
+        if kept_attrs and self.code.co_argcount:
+            self.load_offs = first_argument_loads(instructions, self.code.co_varnames[0], kept_attrs)
         by_pos = collections.defaultdict(list)
         for ins in instructions:
             pos = self.pos_of.get(ins.offset)
@@ -184,9 +197,74 @@ class CodeInfo:
                 self.lines.setdefault(line["line"], []).append(line)
         for ret in plan_returns.get(self.path, ()):
             if ret["qualname"] == self.code.co_qualname:
-                self.returns.append(ret)
-        self.watched = bool(self.sites or self.for_iters or self.lines)
+                if "kept" in ret:
+                    self.kept_rets.append(ret)
+                else:
+                    self.returns.append(ret)
+        self.watched = bool(self.sites or self.for_iters or self.lines or self.load_offs)
         return self.watched
+
+
+# The instructions that load a local onto the stack, the last name pushed last.
+_LOAD_LOCAL = frozenset("LOAD_FAST LOAD_FAST_BORROW LOAD_FAST_CHECK".split())
+_LOAD_TWO_LOCALS = frozenset("LOAD_FAST_LOAD_FAST LOAD_FAST_BORROW_LOAD_FAST_BORROW".split())
+
+
+def first_argument_loads(instructions, first, attrs):
+    """The `LOAD_ATTR` instructions of a code object whose receiver is its first argument `first`
+    (the local it pushed just before), for the attributes `attrs`: `{offset: attr}`."""
+    out = {}
+    for prev, ins in zip(instructions, instructions[1:]):
+        if ins.opname != "LOAD_ATTR" or ins.argval not in attrs:
+            continue
+        pushed = None
+        if prev.opname in _LOAD_LOCAL:
+            pushed = prev.argval
+        elif prev.opname in _LOAD_TWO_LOCALS and isinstance(prev.argval, tuple):
+            pushed = prev.argval[-1]
+        if pushed == first:
+            out[ins.offset] = ins.argval
+    return out
+
+
+def instance_dict(obj):
+    """`obj.__dict__` read without running code of the program (`None` without one)."""
+    try:
+        attrs = object.__getattribute__(obj, "__dict__")
+    except (AttributeError, TypeError):
+        return None
+    return attrs if isinstance(attrs, dict) else None
+
+
+def kept_class_facts(obj, prop, attr, getter):
+    """What the class of `obj` makes of a kept-value claim: `has`, a class along its MRO defines
+    `prop`; `cached`, that first definition is a `functools.cached_property` of the getter
+    `getter` (a qualname);
+    `plain`, storing or deleting `attr` on it changes its own `__dict__` (no `__setattr__`,
+    `__delattr__`, or data descriptor of the name)."""
+    klass = type(obj)
+    cached = False
+    has = False
+    for k in klass.__mro__:
+        if prop in k.__dict__:
+            has = True
+            desc = k.__dict__[prop]
+            func = getattr(desc, "func", None)
+            cached = isinstance(desc, functools.cached_property) and getattr(func, "__qualname__", None) == getter
+            break
+    plain = klass.__setattr__ is object.__setattr__ and klass.__delattr__ is object.__delattr__
+    for k in klass.__mro__:
+        if attr in k.__dict__:
+            kind = type(k.__dict__[attr])
+            plain = plain and not (hasattr(kind, "__set__") or hasattr(kind, "__delete__"))
+            break
+    return {
+        "class": klass.__qualname__,
+        "mro": [k.__qualname__ for k in klass.__mro__],
+        "has": has,
+        "cached": cached,
+        "plain": plain,
+    }
 
 
 _TARGET_STORES = frozenset(
@@ -293,7 +371,19 @@ class Iteration:
 
 
 class LineExec:
-    __slots__ = ("plan", "start", "chain", "watched", "before", "muts", "types", "raised", "names")
+    __slots__ = (
+        "plan",
+        "start",
+        "chain",
+        "watched",
+        "before",
+        "muts",
+        "types",
+        "raised",
+        "names",
+        "kept",
+        "kept_self",
+    )
 
     def __init__(self, plan, start):
         self.plan = plan
@@ -305,6 +395,8 @@ class LineExec:
         self.muts = []
         self.types = {}
         self.raised = False
+        self.kept = None
+        self.kept_self = MISSING
 
 
 class Recorder:
@@ -324,6 +416,9 @@ class Recorder:
         self.plan_loops = _by_path(plan.get("loops", ()))
         self.plan_lines = _by_path(plan.get("lines", ()))
         self.plan_returns = _by_path(plan.get("returns", ()))
+        self.kept_attrs = frozenset(
+            entry["kept"]["attr"] for entry in plan.get("lines", ()) if "kept" in entry
+        )
         self.active = False
         self.errors = []
 
@@ -405,7 +500,7 @@ class Recorder:
             return self.codes[code]
         rel = os.path.relpath(code.co_filename, self.root).replace(os.sep, "/")
         info = CodeInfo(code, rel)
-        if info.attach(self.plan_sites, self.plan_loops, self.plan_lines, self.plan_returns):
+        if info.attach(self.plan_sites, self.plan_loops, self.plan_lines, self.plan_returns, self.kept_attrs):
             MON.set_local_events(TOOL_ID, code, EV.INSTRUCTION | EV.CALL)
         self.codes[code] = info
         return info
@@ -537,6 +632,16 @@ class Recorder:
         fs = self.frames.pop(id(frame), None)
         seq = self._tick()
         if fs is not None and fs.frame is frame:
+            for ret in fs.info.kept_rets:
+                obj = frame.f_locals.get(code.co_varnames[0], MISSING) if code.co_argcount else MISSING
+                if obj is MISSING:
+                    continue
+                attrs = instance_dict(obj)
+                kept = attrs.get(ret["kept"]["prop"], MISSING) if attrs is not None else MISSING
+                self.keep.append(obj)
+                self.events.append(
+                    ["kept_ret", ret["id"], fs.act, seq, id(obj), None if kept is MISSING else id(kept)]
+                )
             if fs.info.returns:
                 self.keep.append(value)
                 base = next(
@@ -597,6 +702,12 @@ class Recorder:
         fs = self._state(frame, code)
         info = fs.info
         seq = self._tick()
+        attr = info.load_offs.get(offset)
+        if attr is not None:
+            obj = frame.f_locals.get(code.co_varnames[0], MISSING)
+            if obj is not MISSING:
+                self.keep.append(obj)
+                self.events.append(["load", fs.act, seq, id(obj), attr])
         if fs.open_call:
             calls, fs.open_call = fs.open_call, []
             for call in calls:
@@ -726,7 +837,33 @@ class Recorder:
             )
         if merged["chain"]:
             ex.chain = self._chain(frame)
+        kept = next((plan["kept"] for plan in plans if "kept" in plan), None)
+        code = frame.f_code
+        if kept is not None and (kept.get("receiver") or code.co_argcount):
+            obj = local.get(kept.get("receiver") or code.co_varnames[0], MISSING)
+            if obj is not MISSING:
+                self.keep.append(obj)
+                ex.kept_self = obj
+                ex.kept = self._kept_state(obj, kept)
+                ex.kept.update(kept_class_facts(obj, kept["prop"], kept["attr"], kept["getter"]))
         fs.open_line = ex
+
+    def _kept_state(self, obj, kept):
+        """What a kept-value claim reads of `obj`: the identity of the value its `__dict__` keeps
+        under the property's name, and the identity and contents of its written attribute."""
+        attrs = instance_dict(obj)
+        if attrs is None:
+            return {"self": id(obj), "kept": None, "attr": None}
+        value = attrs.get(kept["prop"], MISSING)
+        held = attrs.get(kept["attr"], MISSING)
+        for v in (value, held):
+            if v is not MISSING:
+                self.keep.append(v)
+        return {
+            "self": id(obj),
+            "kept": None if value is MISSING else id(value),
+            "attr": None if held is MISSING else [id(held), snapshot(held)],
+        }
 
     def _chain(self, frame):
         chain = []
@@ -761,6 +898,10 @@ class Recorder:
             if value is not MISSING:
                 self.keep.append(value)
                 after_names[name] = id(value)
+        kept_facts = None
+        if ex.kept is not None:
+            kept = next(plan["kept"] for plan in ex.plan if "kept" in plan)
+            kept_facts = {"before": ex.kept, "after": self._kept_state(ex.kept_self, kept)}
         self.events.append(
             [
                 "line",
@@ -776,6 +917,7 @@ class Recorder:
                 ex.types,
                 ex.names,
                 after_names,
+                kept_facts,
             ]
         )
         for extra in ex.plan[1:]:
