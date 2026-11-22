@@ -195,7 +195,12 @@ fn project(name: &str, references: &str) -> Project {
 
 /// `(line, column, message)` of every `MUT204` report, sorted.
 fn reports(p: &Project) -> Vec<(u64, u64, String)> {
-    let (code, stdout, stderr) = p.check(&["--output-format", "json"]);
+    reports_with(p, &[])
+}
+
+/// [`reports`] of a check given the further arguments `args`.
+fn reports_with(p: &Project, args: &[&str]) -> Vec<(u64, u64, String)> {
+    let (code, stdout, stderr) = p.check(&[&["--output-format", "json"], args].concat());
     assert_eq!(code, 1, "{stdout}{stderr}");
     let diags: Vec<Value> = serde_json::from_str(&stdout).unwrap();
     let mut out: Vec<(u64, u64, String)> = diags
@@ -647,6 +652,176 @@ fn a_class_base_is_named_in_the_scope_of_its_class_statement() {
     ];
     expected.sort();
     assert_eq!(found, expected);
+}
+
+// Scopes nested in a function read the names it binds through their cells: a local import is
+// handed on wherever such a scope hands it on, as a module import is.
+const NESTED: &str = r#"from pkg.core import Rule as ModuleRule
+from pkg.core import register
+
+
+def class_body() -> type:
+    from pkg.core import Rule
+
+    class Config:
+        rule = staticmethod(Rule)
+
+    return Config
+
+
+def class_body_module_import() -> type:
+    class Config:
+        rule = staticmethod(ModuleRule)
+
+    return Config
+
+
+def function_body() -> object:
+    from pkg.core import Rule
+
+    return staticmethod(Rule)
+
+
+def nested_def() -> object:
+    from pkg.core import decide
+
+    def inner() -> None:
+        register(decide)
+
+    return inner
+
+
+def in_lambda() -> object:
+    from pkg.core import decide
+
+    return lambda: register(decide)
+
+
+def in_comprehension(values: list[int]) -> list[object]:
+    from pkg.core import decide
+
+    return [register(decide) for _ in values]
+
+
+def in_generator(values: list[int]) -> list[object]:
+    from pkg.core import decide
+
+    return list(register(decide) for _ in values)
+
+
+def nested_class() -> type:
+    from pkg.core import Rule
+
+    class Outer:
+        class Inner:
+            rule = staticmethod(Rule)
+
+    return Outer
+
+
+def class_body_scopes() -> type:
+    from pkg.core import decide
+
+    class Config:
+        hooks = [register(decide) for _ in range(3)]
+        hook = lambda: register(decide)  # noqa: E731
+
+    return Config
+
+
+def unread() -> type:
+    from pkg.core import Rule  # noqa: F401
+
+    class Config:
+        rule = staticmethod(int)
+
+    return Config
+
+
+def shadowed_in_class() -> type:
+    from pkg.core import Rule
+
+    class Config:
+        Rule = int
+        rule = staticmethod(Rule)
+
+    return Config
+
+
+def rebound_after() -> object:
+    from pkg.core import decide
+
+    def inner() -> None:
+        register(decide)
+
+    decide = len
+    return inner
+
+
+def rebound_inside() -> object:
+    from pkg.core import decide
+
+    def inner() -> None:
+        nonlocal decide
+        decide = len
+        register(decide)
+
+    return inner
+
+
+def names_only() -> object:
+    from pkg.core import Rule
+
+    return lambda value: isinstance(value, Rule)
+"#;
+
+#[test]
+fn a_scope_nested_in_a_function_hands_on_the_names_it_imports() {
+    let p = Project::new("references_nested_scopes");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\nrequires-python = \">=3.11\"\n\n[tool.heki.lint]\nselect = [\"MUT204\"]\n\n[[tool.heki.call-owners]]\nname = \"home\"\ntargets = [\"pkg.core.decide\", \"pkg.core.Rule\"]\nallowed-callers = [\"pkg.core.*\"]\nreferences = \"calls\"\nattribution = \"lexical\"\n",
+    )
+    .write("pkg/__init__.py", "")
+    .write("pkg/core.py", CORE)
+    .write("pkg/nested.py", NESTED);
+    let hands = |line: u64, column: u64, func: &str, target: &str| {
+        (
+            line,
+            column,
+            format!("`{func}` hands on `{target}` outside the call owners of `home`"),
+        )
+    };
+    // A class body counts for the function running its class statement, and so do the lambdas
+    // and comprehensions it holds. The name a nested scope reads is a load of its own; the
+    // function's own reads of its import are the import's value, reported at the use. Silent:
+    // an import no scope reads, a class-body name shadowing it, a cell the function or a nested
+    // scope binds again to another value, and a use that only names it.
+    let expected = [
+        hands(9, 29, "class_body", "pkg.core.Rule"),
+        hands(16, 29, "class_body_module_import", "pkg.core.Rule"),
+        hands(24, 12, "function_body", "pkg.core.Rule"),
+        hands(31, 18, "nested_def.<locals>.inner", "pkg.core.decide"),
+        hands(39, 29, "in_lambda", "pkg.core.decide"),
+        hands(51, 26, "in_generator", "pkg.core.decide"),
+        hands(59, 33, "nested_class", "pkg.core.Rule"),
+        hands(68, 27, "class_body_scopes", "pkg.core.decide"),
+        hands(69, 33, "class_body_scopes", "pkg.core.decide"),
+    ];
+    // Before 3.12 a comprehension is a scope of its own reading the cell; from 3.12 on it runs
+    // in the function (PEP 709) and reads the import's value.
+    for (version, comprehension) in [("py311", (45, 22)), ("py312", (45, 13))] {
+        let mut want = expected.to_vec();
+        want.push(hands(
+            comprehension.0,
+            comprehension.1,
+            "in_comprehension",
+            "pkg.core.decide",
+        ));
+        want.sort();
+        let found = reports_with(&p, &["--target-version", version]);
+        assert_eq!(found, want, "{version}");
+    }
 }
 
 #[test]

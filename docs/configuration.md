@@ -327,8 +327,9 @@ The call side of `write-owners`.
 - The targets of a contract may call each other: a call of the guarded operation is checked where
   it is made, so what the operation does inside is part of it.
 - With `references = "calls"`, a target handed on is reported where it is named ("`f` hands on
-  `pkg.core.decide`"; a name an import or the module body binds, at the statement handing it
-  on): passed to a call, stored in an attribute, an item, or a global, returned,
+  `pkg.core.decide`"; a name an import or the module body binds, read in the scope binding it, at
+  the statement handing it on; a name a class body, a function, a lambda, or a comprehension
+  nested in a function reads from it, a local import included, at the name): passed to a call, stored in an attribute, an item, or a global, returned,
   yielded, raised, or held by a display that is. A use that only names it is no reference: an
   argument of `isinstance`, `issubclass`, another builtin that only inspects its arguments
   (`print`, `getattr`, `type`), `super`, `typing.cast`, `typing.TypeVar`, `typing.NewType`, or

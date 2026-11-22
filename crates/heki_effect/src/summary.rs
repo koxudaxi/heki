@@ -2208,16 +2208,18 @@ impl<'a> Extractor<'a> {
     }
 
     /// The function's references handing a project function, method, or class on
-    /// ([`FileSummary::reference_sites`]): a load of one whose value reaches, through copies,
-    /// phis, and the displays holding it, an argument of a call, a stored attribute, item, or
-    /// global, a `return`, a `yield`, or a `raise`. The value as a callee is a call (its own
-    /// site), and so is a callable a library API runs (`Self::handed_callable`). Not handed on
-    /// either: an argument of a call that only inspects or names it ([`names_only`]), a
-    /// receiver, an operand, a subscript, a dict key, a closure's captures (its defaults and
-    /// its annotations are not told apart, nor a class's bases and keywords), and the name a
-    /// module binds to the object (an import, a module alias), which is the object. A site is
-    /// at the load; a name an import or the module body binds is read without a load of its own
-    /// (the bound value), so its sites are at the uses handing it on.
+    /// ([`FileSummary::reference_sites`]): a load of one (a global, a name, an attribute, or a
+    /// closure cell, which holds what the enclosing function binds to the name, a local import
+    /// included) whose value reaches, through copies, phis, and the displays holding it, an
+    /// argument of a call, a stored attribute, item, or global, a `return`, a `yield`, or a
+    /// `raise`. The value as a callee is a call (its own site), and so is a callable a library
+    /// API runs (`Self::handed_callable`). Not handed on either: an argument of a call that only
+    /// inspects or names it ([`names_only`]), a receiver, an operand, a subscript, a dict key, a
+    /// closure's captures (its defaults and its annotations are not told apart, nor a class's
+    /// bases and keywords), and the name a module binds to the object (an import, a module
+    /// alias), which is the object. A site is at the load; a name an import or the module body
+    /// binds is read without a load of its own (the bound value), so its sites are at the uses
+    /// handing it on.
     fn reference_sites(&mut self) -> Vec<CallSite> {
         let flow = HandedValues::of(
             self.f,
@@ -6426,6 +6428,7 @@ impl HandedValues {
                 match &inst.kind {
                     InstKind::LoadGlobal { dst, .. }
                     | InstKind::LoadName { dst, .. }
+                    | InstKind::LoadDeref { dst, .. }
                     | InstKind::AttrLoad { dst, .. } => flow.loads.push((at, *dst, span, false)),
                     InstKind::Import { dst, .. } => flow.loads.push((at, *dst, span, true)),
                     InstKind::Copy { dst, src } => flow.from.entry(*dst).or_default().push(*src),

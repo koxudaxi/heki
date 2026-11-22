@@ -1264,8 +1264,9 @@ The call side of `write-owners`.
 - The targets of a contract may call each other: a call of the guarded operation is checked where
   it is made, so what the operation does inside is part of it.
 - With `references = "calls"`, a target handed on is reported where it is named ("`f` hands on
-  `pkg.core.decide`"; a name an import or the module body binds, at the statement handing it
-  on): passed to a call, stored in an attribute, an item, or a global, returned,
+  `pkg.core.decide`"; a name an import or the module body binds, read in the scope binding it, at
+  the statement handing it on; a name a class body, a function, a lambda, or a comprehension
+  nested in a function reads from it, a local import included, at the name): passed to a call, stored in an attribute, an item, or a global, returned,
   yielded, raised, or held by a display that is. A use that only names it is no reference: an
   argument of `isinstance`, `issubclass`, another builtin that only inspects its arguments
   (`print`, `getattr`, `type`), `super`, `typing.cast`, `typing.TypeVar`, `typing.NewType`, or
@@ -4094,8 +4095,8 @@ so it never matches such a target.
 
 With `references = "calls"` (or `"calls-and-bases"`), a reference handing a target on to be
 called later counts as a call of it, reported where the target is named ("`f` hands on `pkg.core.decide`"; a name an import or
-the module body binds is read without a position of its own, so it is reported at the statement
-handing it on): passed to a call
+the module body binds is read in the scope binding it without a position of its own, so it is
+reported there at the statement handing it on): passed to a call
 (`partial(decide)`, `register(self.decide)`, `field(default_factory=Rule)`), stored in an
 attribute, an item, or a global, returned, yielded, raised, or held by a display that is
 (`[decide]`, `{"a": decide}`), also through an import alias (`from pkg.core import decide as
@@ -4107,7 +4108,9 @@ function's defaults and annotations; a subscript (`Optional[Rule]`), a compariso
 receiver (`Rule.of(...)`), and a module binding another name to it. A callable a builtin calls once
 per item (`sorted(xs, key=decide)`, `map(decide, xs)`) is a call already, and so is the
 `functools.partial` object handed to one. A reference in a class body counts for the function
-running the class statement (`<module>` for a class at module level).
+running the class statement (`<module>` for a class at module level). A class body, a function, a
+lambda, or a comprehension nested in a function names what the function binds to a name it reads
+(a local import), at the name.
 
 With `references = "calls-and-bases"`, a class statement naming a class target among its bases
 counts too ("`<module>` subclasses `pkg.core.Base`"): the class it makes holds the base, and

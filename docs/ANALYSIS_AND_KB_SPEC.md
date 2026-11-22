@@ -522,9 +522,10 @@ compares the module and the qualname, which the fqn alone does not tell apart.
 
 `FileSummary.reference_sites` holds, only when a call contract sets `references = "calls"`
 (`Contracts::references`), the references handing a project function, method, or class on to
-be called later: a load of one (a name, a module or class attribute, a bound method; for a name
-an import or the module body binds, which is read without a load of its own, each use handing
-it on) whose value
+be called later: a load of one (a name, a module or class attribute, a bound method, a closure
+cell, which holds what the enclosing function binds to the name, such as a local import; for a
+name an import or the module body binds, which the scope binding it reads without a load of its
+own, each use handing it on) whose value
 reaches, through copies, phis, and the displays holding it, an argument of a call, a stored
 attribute, item, or global, a `return`, a `yield`, or a `raise`. Each is a `CallSite` of what
 calling the value calls (the class it constructs, or its project callees, without bindings),
