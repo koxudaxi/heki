@@ -395,9 +395,15 @@ fn names_setattr_stores_are_read_from_a_table() {
 }
 
 /// A class whose `__setstate__` hands its state through `copies` copies to `stores` stores under
-/// a name the code does not give, then pads and writes through its namespace; its `handle` calls
-/// a blocking method on the client `__init__` binds.
-fn restoring_class(name: &str, copies: usize, stores: usize, padding: usize) -> String {
+/// a name the code does not give, then pads and (with `namespace`) writes through its namespace;
+/// its `handle` calls a blocking method on the client `__init__` binds.
+fn restoring_class(
+    name: &str,
+    copies: usize,
+    stores: usize,
+    padding: usize,
+    namespace: bool,
+) -> String {
     let mut lines = vec![
         format!("class {name}:"),
         "    def __init__(self):".to_owned(),
@@ -409,10 +415,12 @@ fn restoring_class(name: &str, copies: usize, stores: usize, padding: usize) -> 
     lines.extend((1..=copies).map(|i| format!("        s{i} = s{}", i - 1)));
     lines.extend((0..stores).map(|_| format!("        setattr(self, key, s{copies})")));
     lines.extend((0..padding).map(|i| format!("        pad{i} = {i}")));
+    if namespace {
+        lines.push("        ns = self.__dict__".to_owned());
+        lines.push("        ns[\"a\"] = 1".to_owned());
+    }
     lines.extend(
         [
-            "        ns = self.__dict__",
-            "        ns[\"a\"] = 1",
             "",
             "    async def handle(self):",
             "        self.client.get(\"https://example.com\")",
@@ -424,23 +432,88 @@ fn restoring_class(name: &str, copies: usize, stores: usize, padding: usize) -> 
     lines.join("\n")
 }
 
+/// The store budget's steps of `Probe.__setstate__` in a project of one `Probe` class.
+fn store_steps(p: &Project, copies: usize, padding: usize, namespace: bool) -> Steps {
+    let text = restoring_class("Probe", copies, STORES, padding, namespace);
+    p.write("m.py", &format!("import httpx\n\n\n{text}"));
+    let (_, steps) = check_counted(p);
+    steps[&(
+        "store targets".to_owned(),
+        Some("Probe.__setstate__".to_owned()),
+    )]
+}
+
+const STORES: usize = 101;
+
+/// The steps the walk finding the aliases of a namespace takes before it reads their uses.
+const WALK_STEPS: i64 = 2;
+
+/// The state copies and pads of a `__setstate__` whose stores leave exactly the steps of that
+/// walk, so that the first read of a use of the namespace finds none.
+///
+/// The steps the stores take grow linearly with the copies, and what a spent budget leaves is
+/// read from the steps taken: a walk that finds none counts its own step, so a spent function
+/// took `left_after_the_stores + 1` steps more than the stores need. That is measured on
+/// functions of three sizes that spend the budget, and the sizes solve for the steps of the walk.
+fn copies_and_pads_leaving_the_walk() -> (usize, usize) {
+    let p = Project::new("bounds_store_budget_probe");
+    let at = |copies, pads| store_steps(&p, copies, pads, true);
+    let plain = |copies| store_steps(&p, copies, 60, false).taken as i64;
+    let (base, next) = (plain(300), plain(301));
+    let stores_taken = |copies: usize| base + (next - base) * (copies as i64 - 300);
+    let (copies, pads) = (520_usize, 0_usize);
+    let (spent, more_copies, more_pads) =
+        (at(copies, pads), at(copies + 1, pads), at(copies, pads + 1));
+    assert!(spent.spent && more_copies.spent && more_pads.spent);
+    let left = |taken: u64, copies: usize| taken as i64 - stores_taken(copies) - 1;
+    let left_here = left(spent.taken, copies);
+    let per_copy = left(more_copies.taken, copies + 1) - left_here;
+    let per_pad = more_pads.taken as i64 - spent.taken as i64;
+    assert!(per_copy < 0 && per_pad > 0, "{per_copy} {per_pad}");
+    for fewer in 0..per_pad {
+        let left_after = left_here - per_copy * fewer;
+        let more_pads = WALK_STEPS - left_after;
+        if more_pads < 0 || more_pads % per_pad != 0 {
+            continue;
+        }
+        let found = (
+            copies - fewer as usize,
+            pads + (more_pads / per_pad) as usize,
+        );
+        let walk_left = at(found.0, found.1);
+        assert!(walk_left.spent, "{walk_left:?}");
+        assert_eq!(left(walk_left.taken, found.0), WALK_STEPS);
+        return found;
+    }
+    panic!("no size leaves the steps of the walk: {per_copy} {per_pad}");
+}
+
 /// The stores of a function share one budget with the walks that read what they store. Once a
 /// `__setstate__` spends it on following its state, later stores and the namespace it writes are
-/// stores of unknown names, so no attribute of the class keeps its type. The budget is spent
-/// before the namespace (`spent`), and with one step left after the stores (`one_step_left`),
-/// which the namespace's first walk takes, so its next step finds none.
+/// stores of unknown names, so no attribute of the class keeps its type: where the stores spend
+/// it (`Spent`), and where the first read of the namespace's uses does (`WalkLeft`). A function within it keeps
+/// its attributes' types.
 #[test]
 fn a_function_past_its_store_budget_stores_attributes_of_unknown_names() {
+    let (copies, pads) = copies_and_pads_leaving_the_walk();
     let p = Project::new("bounds_store_budget");
     let text = [
         "import httpx\n\n\n".to_owned(),
-        restoring_class("Spent", 374, 101, 0),
-        restoring_class("OneStepLeft", 374, 101, 6),
-        restoring_class("Within", 10, 3, 0),
+        restoring_class("Spent", copies, STORES + 20, 0, true),
+        restoring_class("WalkLeft", copies, STORES, pads, true),
+        restoring_class("Within", 10, 3, 0, true),
     ]
     .concat();
     p.write("m.py", text.trim_end_matches('\n'));
-    let found = check(&p);
+    let (found, steps) = check_counted(&p);
+    let spent = |class: &str| {
+        steps[&(
+            "store targets".to_owned(),
+            Some(format!("{class}.__setstate__")),
+        )]
+            .spent
+    };
+    assert!(spent("Spent") && spent("WalkLeft") && !spent("Within"));
     let blocking: Vec<&str> = found
         .iter()
         .filter(|d| d["rule_code"] == "EFF101")

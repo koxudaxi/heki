@@ -322,14 +322,12 @@ impl Decided {
         decls.global_types.extend(self.globals);
         for (qualname, attrs) in self.attrs {
             // The semantic model declares every class the IR has (one AST).
-            let class = decls
-                .classes
-                .get_mut(&qualname)
-                .expect("a class a store names is declared by its module");
-            class.attr_stores = attrs
-                .into_iter()
-                .map(|(attr, store)| (Box::from(attr), store))
-                .collect();
+            for class in decls.classes.get_mut(&qualname).into_iter() {
+                class.attr_stores = attrs
+                    .iter()
+                    .map(|(attr, store)| (Box::from(attr.as_str()), store.clone()))
+                    .collect();
+            }
         }
         for qualname in self.any {
             if let Some(class) = decls.classes.get_mut(&qualname) {
@@ -2026,11 +2024,6 @@ impl ProjectDecls {
             let (owner, rest) = self.split_module(fqn)?;
             (owner.module_name != m.module_name).then(|| (owner.module_name.clone(), rest.len()))
         };
-        // The module of a class or a module a holder names: a project one other than `m`, whose
-        // classes and module the holders of `m` give by their canonical names.
-        let holder_owner = |fqn: &str, m: &ModuleDecls| {
-            owner(fqn, m).expect("a holder is a class or a module of another project module")
-        };
         for m in self.modules.values() {
             let Some(stores) = m.stores_elsewhere.as_deref() else {
                 continue;
@@ -2046,24 +2039,26 @@ impl ProjectDecls {
             }
             for (class, attrs) in &stores.attrs {
                 let class = self.canonical(class);
-                let (module, _) = holder_owner(&class, m);
-                let into = touched.entry(module).or_default();
-                into.attrs.extend(attrs.keys().cloned());
-                let joins = out.attrs.entry(class).or_default();
-                for (attr, t) in attrs {
-                    joins.entry(attr.clone()).or_default().join(t);
+                for (module, _) in owner(&class, m).into_iter() {
+                    let into = touched.entry(module).or_default();
+                    into.attrs.extend(attrs.keys().cloned());
+                    let joins = out.attrs.entry(class.clone()).or_default();
+                    for (attr, t) in attrs {
+                        joins.entry(attr.clone()).or_default().join(t);
+                    }
                 }
             }
             for fqn in &stores.unnamed {
                 let fqn = self.canonical(fqn);
-                let (module, rest) = holder_owner(&fqn, m);
-                let into = touched.entry(module).or_default();
-                if rest == 0 {
-                    into.any_global = true;
-                } else {
-                    into.any_attr = true;
+                for (module, rest) in owner(&fqn, m).into_iter() {
+                    let into = touched.entry(module).or_default();
+                    if rest == 0 {
+                        into.any_global = true;
+                    } else {
+                        into.any_attr = true;
+                    }
+                    out.unnamed.insert(fqn.clone());
                 }
-                out.unnamed.insert(fqn);
             }
         }
         out.held = touched
@@ -2148,8 +2143,10 @@ impl ProjectDecls {
         let mut out = Stored::Nothing;
         let mut restoring = false;
         let mut in_place = false;
-        for class in family {
-            let decl = self.class(class).expect("a family lists project classes");
+        for (class, decl) in family
+            .iter()
+            .filter_map(|class| Some((class, self.class(class)?)))
+        {
             if self.stores_any_attr(class, decl) {
                 return None;
             }
