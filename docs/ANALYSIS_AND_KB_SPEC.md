@@ -1318,6 +1318,21 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      of a loop over a parameter, a part of one, or a catalog call's `items`, whose trip count the
      code does not fix (`heki_ir::ItemOrigins`, `FnIndex::fixed_trips`), and has sent a statement
      whenever it returns. Everything else the heuristic tier finds is `EFF111` / `EFF113`.
+   - Open premises (`CheckExtras::open_premises`, off in `heki check` and the language server,
+     on in the hidden `heki dump-open-premises`): an `EFF111` / `EFF113` report records which
+     premises of its claim's row (`heki_rules::premises`) it left open, each with a cause. The
+     decisions above tell each step that does not hold (`MustGap`) to whoever asks: a decision
+     stops at the first, an explanation goes on. Along the reported chain each call is evaluated
+     (`ProjectIndex::site_must_gaps`): its targets' completeness, whether they run there as
+     written, their facts, and, below the first call, whether the caller makes the next call on
+     every normal return (`CallSite::made_on_every_return`); the walk goes down while the
+     function the chain enters lacks the fact, whose own gap then gives way to the gaps found
+     below it. For `EFF103` the loop premises are evaluated on every loop around the call, and
+     the loop that leaves the fewest open (the first such) gives them. A cause stands for the
+     cases its facts cannot tell apart yet: `CallSite::complete` keeps no reason, so a protocol
+     receiver, an unknown base, more than 64 classes, and an unresolved union member are one
+     cause, and `CallTarget::Layer2::unconditional` keeps none either (it is computed only for a
+     complete call, so at an incomplete last call "Waits" / "Sends" is not evaluated).
 1. **Offload wrapper propagation** (from datamodel-code-generator `bodies.py:112`):
    - When a function `w(fn, *args)` calls `asyncio.to_thread(fn, ...)` (`offloads_blocking_arg =
      0`) or similar, the parameter index of `fn` is recorded in `w`'s `offloads_blocking_params`

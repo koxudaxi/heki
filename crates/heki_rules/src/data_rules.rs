@@ -195,7 +195,7 @@ fn established_updates(
                     && carries_only(shape, f, &budget, &hit.lc.back_vars, hit.update);
                 match origins.of_loop(&budget, f.id, li) {
                     Answer::Known(found) if established => {
-                        DataOrigins::of(cx, tcx, unit.input.ir, &found)
+                        DataOrigins::of(cx, tcx, unit.input.ir, &found).ok()
                     }
                     _ => None,
                 }

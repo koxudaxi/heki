@@ -3672,6 +3672,48 @@ fn a_wide_display_unpacked_by_many_calls_is_bound_within_the_budget() {
     assert!((1..8000).contains(&wide.len()), "{}", wide.len());
 }
 
+/// Open premises along shared chains are decided once per call: thousands of `async def`s each
+/// reach a sleep through the same chain of hundreds of helpers, none of which makes the next
+/// call on every return. Each report walks only its own chain, and each call on it is looked up
+/// and explained once for all of them.
+#[test]
+fn open_premises_along_shared_chains_are_explained_once_per_call() {
+    let (depth, handlers) = (200, 4000);
+    let mut lines = vec![
+        "import time".to_owned(),
+        String::new(),
+        "def helper0(flag):".to_owned(),
+        "    if flag:".to_owned(),
+        "        return None".to_owned(),
+        "    time.sleep(1)".to_owned(),
+    ];
+    for i in 1..depth {
+        lines.push(format!("def helper{i}(flag):"));
+        lines.push(format!("    helper{}(flag)", i - 1));
+    }
+    for j in 0..handlers {
+        lines.push(format!("async def handler{j}(flag):"));
+        lines.push(format!("    helper{}(flag)", depth - 1));
+    }
+    let p = Project::new("bounds_open_premises_chains");
+    p.write("m.py", &(lines.join("\n") + "\n"));
+    let started = Instant::now();
+    let (code, stdout, stderr) = p.heki(&["dump-open-premises", "--select", "EFF111", "."]);
+    assert!(
+        started.elapsed() < Duration::from_secs(20),
+        "heki dump-open-premises ran {:?}",
+        started.elapsed()
+    );
+    assert_eq!(code, 0, "{stderr}");
+    let out: Value = serde_json::from_str(&stdout).unwrap();
+    let reports = out["reports"].as_array().unwrap();
+    assert_eq!(reports.len(), handlers);
+    assert_eq!(
+        reports[0]["open_premises"][0]["cause"],
+        json!("not-made-on-every-return")
+    );
+}
+
 /// A function binding names each to an item of the one before (`e = e["k"]`) five thousand deep,
 /// each changed in place, under a `mutates-params` boundary: which parameter's items each changed
 /// object may be is decided once per value, not by a walk back up the chain at every change.
