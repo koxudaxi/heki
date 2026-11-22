@@ -19,7 +19,8 @@ argument lists), through `heki check` and through the `--watch` engine; a family
 `heki recommend` reads also runs through `heki dump-recommend-facts`. The cost
 is the wall time and the peak (the heap of the memory gate's counting build, or what the system
 reports, see `check_memory.py`) minus those of an empty module; the time limit is scaled to the
-machine by fixed linear shapes of calls and of loops.
+machine by fixed linear shapes of calls and of loops, timed on a fixed release of heki (from
+PyPI, through pip), not on the binary under test.
 
 `heki check --walk-steps` gives the steps each owner's walks took per function. They must grow
 at most 2.5 times from n / 2 to n (quadratic growth inside the budget shows without timing
@@ -56,6 +57,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -65,14 +67,16 @@ from check_memory import HEAP_LINE, MIB, execute  # noqa: E402
 
 LIMIT_SECONDS = 1.0
 LIMIT_MIB = 1024.0
-# The seconds are those of the machine the limits were measured on. Fixed linear shapes, one of
-# calls and one of loops, take these seconds there (beyond an empty module), and the time limit
-# scales by the largest factor by which the machine running the gate is slower on one of them
-# (never below 1): machines differ unevenly on calls and on loops, and the gated shapes do both.
-REFERENCES = (
-    ("with_statements", "function", 3104, 0.26),
-    ("alias_loops", "function", 2000, 0.11),
-)
+# The seconds are those of the machine the limits were measured on (an Apple M4 Max). Fixed
+# linear shapes, one of calls and one of loops (`reference_source`), take these seconds there on
+# the release `REFERENCE_HEKI` (beyond an empty module), and the time limit scales by the largest
+# factor by which the machine running the gate is slower on one of them (never below 1): machines
+# differ unevenly on calls and on loops, and the gated shapes do both. The references never run
+# on the binary under test, whose changes would move every limit: a reference made cheaper
+# tightens them all, one made dearer loosens them all. Another `REFERENCE_HEKI` or
+# `reference_source` needs these seconds measured again on that machine (the gate prints them).
+REFERENCE_HEKI = "0.2.4"
+REFERENCES = (("calls", 3104, 0.225), ("loops", 2000, 0.105))
 # A run past this is over the limits whatever it would have taken.
 TIMEOUT_SECONDS = 10.0
 # The steps of an owner may grow this much from n / 2 to n.
@@ -1003,6 +1007,37 @@ def source(family: Family, placement: str, n: int) -> str:
     return HELPERS + head + "".join(indent + line + "\n" for line in body.lines)
 
 
+def reference_source(kind: str, n: int) -> str:
+    """A reference of `REFERENCES`: n `with` statements calling a function, or n loops over
+    aliases of one display. It shares nothing with the gated shapes (helpers, contracts, family
+    generators), which change, while the reference seconds hold only for this source."""
+    if kind == "calls":
+        lines = ["def use(x):", "    return x", "", "", "def shape(p):"]
+        for i in range(n):
+            lines += [f"    with open(p) as f{i}:", f"        use(f{i})"]
+    else:
+        lines = ["def shape(xs):", "    a0 = [1, 2, 3]"]
+        for i in range(1, n + 1):
+            lines += [f"    a{i} = a{i - 1}", f"    for _ in a{i}:", "        xs.append(1)"]
+    return "\n".join(lines) + "\n"
+
+
+def released_heki(root: Path) -> str:
+    """The `heki` executable of the release `REFERENCE_HEKI`, from its wheel on PyPI for this
+    platform, unpacked under `root`."""
+    wheels = root / "wheels"
+    pip = [sys.executable, "-m", "pip", "download", "--quiet", "--disable-pip-version-check"]
+    pip += ["--no-deps", "--only-binary=:all:", "--dest", str(wheels), f"heki=={REFERENCE_HEKI}"]
+    subprocess.run(pip, check=True)
+    (wheel,) = wheels.glob("*.whl")
+    executable = root / "released-heki"
+    with zipfile.ZipFile(wheel) as archive:
+        member = next(name for name in archive.namelist() if name.endswith(".data/scripts/heki"))
+        executable.write_bytes(archive.read(member))
+    executable.chmod(0o755)
+    return str(executable)
+
+
 def peak_mib(stderr: str, usage: os.struct_rusage) -> float:
     """The peak of a run: the heap a counting build reports (the memory gate's build), else the
     physical footprint `/usr/bin/time -l` reports on macOS, else the resident set size (0 for a
@@ -1146,6 +1181,31 @@ def shard(text: str) -> tuple[int, int]:
     return int(k), int(n)
 
 
+def time_limit(root: Path) -> float | None:
+    """`LIMIT_SECONDS` scaled to this machine by `REFERENCES`, run on the release
+    `REFERENCE_HEKI` in `root`; `None` when no run of a reference or of its empty module ended
+    cleanly (a crash or a stopped run says nothing, or would inflate the limit)."""
+    root.mkdir()
+    released = Runner(released_heki(root), root)
+    args = ["check", "--select", released.select, "--output-format", "json", "m.py"]
+    least: dict[str, float] = {}
+    for kind, text in [("empty", ""), *((k, reference_source(k, n)) for k, n, _ in REFERENCES)]:
+        runs = [released.measure(text, args, {}, TIMEOUT_SECONDS) for _ in range(3)]
+        clean = [seconds for seconds, _, code in runs if code in (0, 1)]
+        if not clean:
+            print(f"calibration failed: no run of the {kind} reference ended cleanly",
+                  file=sys.stderr)
+            return None
+        least[kind] = min(clean)
+    factor = 1.0
+    for kind, n, seconds in REFERENCES:
+        took = least[kind] - least["empty"]
+        print(f"reference {kind} n={n} on heki {REFERENCE_HEKI}: {took:.3f} s ({seconds:.3f} s "
+              "on the machine of the limits)", flush=True)
+        factor = max(factor, took / seconds)
+    return LIMIT_SECONDS * factor
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--heki", required=True, help="path to the heki binary (release build)")
@@ -1171,22 +1231,9 @@ def main() -> int:
         base_seconds = min(run[0] for run in empty)
         base_peak = min(run[1] for run in empty)
         print(f"empty module: {base_seconds:.2f} s, {base_peak:.0f} MiB", flush=True)
-        factor = 1.0
-        for name, placement, n, seconds in REFERENCES:
-            reference = source(next(f for f in FAMILIES if f.name == name), placement, n)
-            runs = [runner.check(reference, watch=False) for _ in range(3)]
-            runs = [run for run in runs if run[2] in (0, 1)]
-            if not runs:
-                print(
-                    f"calibration failed: no run of {name}/{placement} ended cleanly",
-                    file=sys.stderr,
-                )
-                return 1
-            took = min(run[0] for run in runs) - base_seconds
-            print(f"reference {name}/{placement} n={n}: {took:.2f} s ({seconds:.2f} s on the "
-                  "machine of the limits)", flush=True)
-            factor = max(factor, took / seconds)
-        limit_seconds = LIMIT_SECONDS * factor
+        limit_seconds = time_limit(Path(tmp) / "reference")
+        if limit_seconds is None:
+            return 1
         print(f"time limit on this machine: {limit_seconds:.2f} s", flush=True)
         for family, placement in shapes:
             shape = (family.name, placement)
@@ -1218,8 +1265,11 @@ def main() -> int:
                 seconds, peak, code = runner.run(text, mode, timeout=timeout)
                 cost = (seconds - base_seconds, peak - base_peak)
                 if not listed and (cost[0] > limit_seconds or cost[1] > LIMIT_MIB or code == -9):
-                    # Once more, against noise.
-                    seconds, peak, code = runner.run(text, mode)
+                    # Noise only adds time: the least of three runs, as the empty module and the
+                    # references are timed, so that both sides of the comparison are measured
+                    # alike.
+                    runs = [(seconds, peak, code), runner.run(text, mode), runner.run(text, mode)]
+                    seconds, peak, code = min(runs)
                     cost = (seconds - base_seconds, peak - base_peak)
                 if code == -9:
                     spent = f"stopped after {cost[0]:.0f} s"
