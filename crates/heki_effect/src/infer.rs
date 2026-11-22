@@ -526,12 +526,12 @@ pub(crate) fn cell_bindings(f: &IrFunction) -> FxHashMap<&str, Vec<VarId>> {
     cell_vars
 }
 
-/// The function id of a non-inlined comprehension call (Python 3.11).
 /// Whether `x op= y` on a display of `kind` changes it in place.
 fn display_changes_in_place(kind: BuiltinKind, op: BinOpKind) -> bool {
     crate::types::changes_in_place(&format!("builtins.{}", kind.name()), op)
 }
 
+/// The function id of a non-inlined comprehension call (Python 3.11).
 fn comprehension_id(callee: &str) -> FunctionId {
     FunctionId(
         callee
@@ -1727,7 +1727,7 @@ impl<'e, 'a> Engine<'e, 'a> {
                         _ => root = lhs,
                     }
                 }
-                _ => return None,
+                _ => break,
             }
         }
         None
