@@ -1813,17 +1813,41 @@ pub(crate) fn facts_run_at<'s>(
 /// One violation site: the function holding the write, read, or call (fqn) and its span there.
 pub(crate) type SiteId = (String, Span);
 
-/// The reports of a contract rule, merged by `(reporting function, span, target)`: the first
+/// The reports of a contract rule, merged by `(reporting function, span, K, target)`: the first
 /// report of a key gives the message, the help, and the related chain, and every distinct
 /// violation site behind the key counts (`Diagnostic::sites`), so a second write inside a
 /// private helper that is reported at its caller is visible to the Ratchet baseline. The
 /// message names the member the first report matched ([`matched_name`]) and lists the other
 /// members of a glob target the key stands for.
-#[derive(Default)]
-pub(crate) struct MergedReports<'u> {
-    reports: BTreeMap<(FuncKey, Span, String), MergedReport<'u>>,
+///
+/// `K` groups the targets whose reports of the same accesses are one report: the contract for
+/// `MUT201`, `MUT203`, and `MUT204`, where an access matching several targets of one contract
+/// is reported once, under the target configured first, naming the others; the target itself
+/// for the rules that name one target per report.
+pub(crate) struct MergedReports<'u, K = String> {
+    reports: BTreeMap<(FuncKey, Span, K, String), MergedReport<'u>>,
     /// The sites of each group of accesses reported at the same places ([`AccessGroups`]).
     groups: Vec<BTreeSet<SiteId>>,
+}
+
+impl<K> Default for MergedReports<'_, K> {
+    fn default() -> Self {
+        Self {
+            reports: BTreeMap::new(),
+            groups: Vec::new(),
+        }
+    }
+}
+
+/// What one report of [`MergedReports`] names: the configured `target` text, the member it
+/// matched as the message quotes it (`named`, [`matched_name`] in backticks), and the target's
+/// place in its contract's configuration (`rank`), which decides the target that names the
+/// report of an access matching several.
+#[derive(Clone, Copy)]
+pub(crate) struct Named<'a> {
+    pub target: &'a str,
+    pub named: &'a str,
+    pub rank: usize,
 }
 
 /// A group of sites of [`MergedReports`].
@@ -1861,7 +1885,9 @@ pub(crate) fn names_members(text: &str) -> bool {
 struct MergedReport<'u> {
     unit: &'u ModuleUnit<'u>,
     message: String,
-    /// The member the message names, and the other members behind the key.
+    /// The target's place in its contract's configuration ([`Named::rank`]).
+    rank: usize,
+    /// The member the message names (quoted), and the other members behind the key.
     named: String,
     also: BTreeSet<String>,
     help: Option<String>,
@@ -1870,7 +1896,7 @@ struct MergedReport<'u> {
     groups: BTreeSet<SiteGroup>,
 }
 
-impl<'u> MergedReports<'u> {
+impl<'u, K: Ord> MergedReports<'u, K> {
     /// A new, empty group of sites.
     pub(crate) fn group(&mut self) -> SiteGroup {
         self.groups.push(BTreeSet::new());
@@ -1882,17 +1908,16 @@ impl<'u> MergedReports<'u> {
         self.groups[group.0].insert(site);
     }
 
-    /// Add a report of `func` at `span` for `target` (the configured text) and the member it
-    /// matched (`named`, [`matched_name`]), standing for `sites`, with the contract's `message`
-    /// as its help (`note`); `message` and `chain` are only built for the first report of the
-    /// key.
+    /// Add a report of `func` at `span` under `key` for `name` (the target and the member it
+    /// matched), standing for `sites`, with the contract's `message` as its help (`note`);
+    /// `message` and `chain` are only built for the first report of the key and target.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn add(
         &mut self,
         unit: &'u ModuleUnit<'u>,
         func: &FuncKey,
         span: Span,
-        (target, named): (&str, &str),
+        (key, name): (K, Named<'_>),
         sites: impl Into<Sites>,
         note: Option<&str>,
         message: impl FnOnce() -> String,
@@ -1900,19 +1925,20 @@ impl<'u> MergedReports<'u> {
     ) {
         let report = self
             .reports
-            .entry((func.clone(), span, target.to_owned()))
+            .entry((func.clone(), span, key, name.target.to_owned()))
             .or_insert_with(|| MergedReport {
                 unit,
                 message: message(),
-                named: named.to_owned(),
+                rank: name.rank,
+                named: name.named.to_owned(),
                 also: BTreeSet::new(),
                 help: note.map(str::to_owned),
                 chain: chain(),
                 sites: BTreeSet::new(),
                 groups: BTreeSet::new(),
             });
-        if report.named != named {
-            report.also.insert(named.to_owned());
+        if report.named != name.named {
+            report.also.insert(name.named.to_owned());
         }
         match sites.into() {
             Sites::One(site) => {
@@ -1925,40 +1951,86 @@ impl<'u> MergedReports<'u> {
     }
 
     pub(crate) fn emit(self, cx: &CheckContext<'_>, code: &'static str, out: &mut Vec<Diagnostic>) {
+        // Groups of equal sites are one group: the groups of two targets of one access hold the
+        // same sites.
+        let mut first_of: FxHashMap<&BTreeSet<SiteId>, usize> = FxHashMap::default();
+        let canonical: Vec<usize> = (0..self.groups.len())
+            .map(|g| *first_of.entry(&self.groups[g]).or_insert(g))
+            .collect();
         // Reports standing for the same sites and groups (the call sites of a function, each
         // running the accesses of the same groups) count their union once.
-        type Union<'r> = (&'r BTreeSet<SiteId>, &'r BTreeSet<SiteGroup>);
+        type Union<'r> = (&'r BTreeSet<SiteId>, BTreeSet<usize>);
         let mut unions: FxHashMap<Union<'_>, usize> = FxHashMap::default();
-        let mut counted = Vec::with_capacity(self.reports.len());
-        for r in self.reports.values() {
-            let mut groups = r.groups.iter();
-            let distinct = match (groups.next(), groups.next()) {
-                (None, _) => r.sites.len(),
-                (Some(g), None) if r.sites.is_empty() => self.groups[g.0].len(),
-                _ => *unions.entry((&r.sites, &r.groups)).or_insert_with(|| {
-                    let grouped = r.groups.iter().flat_map(|g| &self.groups[g.0]);
-                    let union: BTreeSet<&SiteId> = r.sites.iter().chain(grouped).collect();
-                    union.len()
-                }),
-            };
-            counted.push(distinct);
+        // The reports of one place and `K` standing for the same accesses, by the first of them
+        // in key order: they are emitted as the report of the target configured first.
+        let mut merged: Vec<(usize, Vec<usize>)> = Vec::new();
+        // The keys of one place and `K` come one after another.
+        let mut place = None;
+        let mut accesses: FxHashMap<Union<'_>, usize> = FxHashMap::default();
+        let reports: Vec<_> = self.reports.iter().collect();
+        for (i, ((func, span, key, _), r)) in reports.iter().enumerate() {
+            if place != Some((func, *span, key)) {
+                place = Some((func, *span, key));
+                accesses.clear();
+            }
+            let groups: BTreeSet<usize> = r.groups.iter().map(|g| canonical[g.0]).collect();
+            let union = (&r.sites, groups);
+            let distinct = *unions.entry(union.clone()).or_insert_with(|| {
+                let mut groups = union.1.iter();
+                match (groups.next(), groups.next()) {
+                    (None, _) => r.sites.len(),
+                    (Some(&g), None) if r.sites.is_empty() => self.groups[g].len(),
+                    _ => {
+                        let grouped = union.1.iter().flat_map(|&g| &self.groups[g]);
+                        let all: BTreeSet<&SiteId> = r.sites.iter().chain(grouped).collect();
+                        all.len()
+                    }
+                }
+            });
+            match accesses.entry(union) {
+                std::collections::hash_map::Entry::Occupied(e) => merged[*e.get()].1.push(i),
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    e.insert(merged.len());
+                    merged.push((distinct, vec![i]));
+                }
+            }
         }
-        for (((func, span, target), r), distinct) in self.reports.into_iter().zip(counted) {
+        for (distinct, members) in merged {
             let sites = u32::try_from(distinct).unwrap_or(u32::MAX);
-            let mut message = r.message;
-            if !r.also.is_empty() {
-                let also: Vec<String> = r.also.iter().map(|m| format!("`{m}`")).collect();
+            // The target configured first names the report; the others' names, with their
+            // members, follow its own members.
+            let lead = *members
+                .iter()
+                .min_by_key(|&&i| reports[i].1.rank)
+                .unwrap_or(&members[0]);
+            let ((func, span, _, target), r) = reports[lead];
+            let mut also: Vec<(usize, &str)> =
+                r.also.iter().map(|m| (r.rank, m.as_str())).collect();
+            for &i in members.iter().filter(|&&i| i != lead) {
+                let other = reports[i].1;
+                also.push((other.rank, other.named.as_str()));
+                also.extend(other.also.iter().map(|m| (other.rank, m.as_str())));
+            }
+            also.sort_unstable();
+            let mut seen: FxHashSet<&str> = FxHashSet::from_iter([r.named.as_str()]);
+            let also: Vec<&str> = also
+                .into_iter()
+                .map(|(_, m)| m)
+                .filter(|m| seen.insert(m))
+                .collect();
+            let mut message = r.message.clone();
+            if !also.is_empty() {
                 message.push_str(&format!(" (also {})", also.join(", ")));
             }
             if let Some(d) = cx.emit(
                 out,
                 code,
                 r.unit,
-                span,
+                *span,
                 &func.qualname,
-                target,
+                target.clone(),
                 message,
-                r.help,
+                r.help.clone(),
                 &r.chain,
             ) {
                 d.sites = sites;
@@ -2485,11 +2557,17 @@ pub(crate) fn mut201(
                                 (text, member, ", a `__dict__` key no target names,")
                             }
                         };
+                        let quoted = format!("`{named}`");
+                        let name = Named {
+                            target: &text,
+                            named: &quoted,
+                            rank: ti,
+                        };
                         reports.add(
                             unit,
                             &judged,
                             span,
-                            (&text, &named),
+                            (r, name),
                             (writer, site.span),
                             rule.note,
                             || {
@@ -3796,13 +3874,13 @@ impl<K: Eq + std::hash::Hash> AccessGroups<K> {
 
     /// Report the access at `site` of the group `key`, whose reports `walk` finds for its first
     /// access: `add` adds a report found there, standing for `sites`.
-    pub(crate) fn report<'u>(
+    pub(crate) fn report<'u, R: Ord>(
         &mut self,
-        reports: &mut MergedReports<'u>,
+        reports: &mut MergedReports<'u, R>,
         key: K,
         site: SiteId,
         walk: impl FnOnce() -> Vec<DelegatedReport>,
-        mut add: impl FnMut(&mut MergedReports<'u>, &DelegatedReport, Sites),
+        mut add: impl FnMut(&mut MergedReports<'u, R>, &DelegatedReport, Sites),
     ) {
         match self.groups.entry(key) {
             Entry::Occupied(group) => {
@@ -3905,7 +3983,7 @@ pub(crate) fn mut203<'c>(
             .iter()
             .filter(|r| r.counts_for_contracts())
         {
-            for (r, (rule, inside)) in rules.iter().zip(&mut inside).enumerate() {
+            for (contract, (rule, inside)) in rules.iter().zip(&mut inside).enumerate() {
                 if rule
                     .allowance
                     .allows_protocol(cx.decls, &read.class_qualname, &read.attr)
@@ -3930,15 +4008,23 @@ pub(crate) fn mut203<'c>(
                             inside,
                         )
                     };
-                    let add = |reports: &mut MergedReports<'c>, r: &DelegatedReport, sites| {
+                    let add = |reports: &mut MergedReports<'c, usize>,
+                               r: &DelegatedReport,
+                               sites| {
                         let Some(unit) = cx.index.file_of(&r.func).and_then(|p| cx.unit(p)) else {
                             return;
+                        };
+                        let quoted = format!("`{named}`");
+                        let name = Named {
+                            target: &t.text,
+                            named: &quoted,
+                            rank: k,
                         };
                         reports.add(
                             unit,
                             &r.func,
                             r.span(read.span),
-                            (&t.text, &named),
+                            (contract, name),
                             sites,
                             rule.note,
                             || {
@@ -3961,7 +4047,7 @@ pub(crate) fn mut203<'c>(
                             || r.chain.clone(),
                         );
                     };
-                    let group = (read.obj_params, r, k, named.clone());
+                    let group = (read.obj_params, contract, k, named.clone());
                     groups.report(&mut reports, group, (reader.clone(), read.span), walk, add);
                 }
             }

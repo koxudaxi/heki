@@ -462,15 +462,10 @@ fn allowed_protocols_allow_the_accesses_through_a_named_protocol_declaring_the_m
     // `_has_runtime_expressions`, `_items`, and `_reset` from `RuntimeFlags`: reading, writing
     // (also inside a container, and through a private helper), and calling them through it is
     // allowed. `_other` is no member of the protocol, `concrete` reads through the class, and
-    // `RuntimeFlags` is not named.
+    // `RuntimeFlags` is not named. An access matching both targets of a contract is reported
+    // once, under the target configured first.
     let kept = || {
         vec![
-            at(
-                42,
-                "MUT203",
-                "undeclared",
-                "pkg.parser._render.RenderHost._other",
-            ),
             at(42, "MUT203", "undeclared", "pkg.parser.base.Parser._other"),
             at(
                 46,
@@ -482,12 +477,6 @@ fn allowed_protocols_allow_the_accesses_through_a_named_protocol_declaring_the_m
                 50,
                 "MUT203",
                 "bad_read",
-                "pkg.parser._flags.RuntimeFlags._has_runtime_expressions",
-            ),
-            at(
-                54,
-                "MUT201",
-                "bad_write",
                 "pkg.parser._flags.RuntimeFlags._has_runtime_expressions",
             ),
             at(
@@ -515,12 +504,12 @@ fn allowed_protocols_allow_the_accesses_through_a_named_protocol_declaring_the_m
         at(29, "MUT201", "build", "pkg.parser.base.Parser._items"),
     );
     assert_eq!(named(&call_graph), expected);
-    // Without the key, every access through the protocol is reported.
+    // Without the key, every access through the protocol is reported, once per access.
     let without = named(&host_project(
         "allowed_protocols_unset",
         "attribution = \"lexical\"\n",
     ));
-    assert_eq!(without.len(), 17, "{without:#?}");
+    assert_eq!(without.len(), 12, "{without:#?}");
     assert!(
         without.iter().any(
             |(line, code, func, _)| (*line, code.as_str(), func.as_str()) == (34, "MUT201", "_set")
@@ -543,7 +532,7 @@ fn allowed_protocols_name_classes_by_pattern_and_a_bad_glob_is_a_configuration_e
             .iter()
             .map(|(_, _, func, _)| func.as_str())
             .collect::<Vec<_>>(),
-        vec!["undeclared", "undeclared", "concrete"],
+        vec!["undeclared", "concrete"],
         "{found:#?}"
     );
     let bad = host_project(
@@ -618,7 +607,8 @@ def bad_write(flags: RuntimeFlags) -> None:
         (line, code.to_owned(), func.to_owned(), target.to_owned())
     };
     // The write through `RuntimeFlags` is one of the protocol's member and of the attribute of
-    // `Parser`, which implements it: two targets of the contract, one report each.
+    // `Parser`, which implements it: two targets of the contract, one report under the target
+    // configured first, naming the other.
     assert_eq!(
         named(&p),
         vec![
@@ -632,15 +622,16 @@ def bad_write(flags: RuntimeFlags) -> None:
                 29,
                 "MUT201",
                 "bad_write",
-                "pkg.parser._flags.RuntimeFlags._has_runtime_expressions"
-            ),
-            at(
-                29,
-                "MUT201",
-                "bad_write",
                 "pkg.parser.base.Parser._has_runtime_expressions"
             ),
         ]
+    );
+    let (_, stdout, _) = p.check(&["--output-format", "concise"]);
+    assert!(
+        stdout.contains(
+            "`bad_write` writes `pkg.parser.base.Parser._has_runtime_expressions` (direct_attr) inside the forbidden writers of `host-private` (also `pkg.parser._flags.RuntimeFlags._has_runtime_expressions`)"
+        ),
+        "{stdout}"
     );
 }
 

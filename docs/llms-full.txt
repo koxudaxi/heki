@@ -1134,6 +1134,10 @@ Contracts declare what no type can say. Each kind is an array of tables with its
   names no project module is no error: the name matches nothing.
 - A report of a glob target names the member it matched (`reads
   `pkg.types.DataType._flag``); one report standing for several members lists the others.
+- An access matching several targets of one contract (a target on a class and one on its
+  subclass, a protocol's member and its implementation's attribute) is one report of the
+  contract: it names the target configured first among them, and lists the others (`(also
+  `A.items`)`).
 - A `Class.attr` target covers the subclasses of the class too.
 - A contract heki cannot use is a configuration error: a target that is not `Class.attr`, an
   invalid glob, a name with more than one colon or an empty module or qualified name, call
@@ -4269,7 +4273,9 @@ hierarchy also offers a method that is no target (a receiver typed with a base c
 `replace_reference` is not guarded), the call is not reported. The functions it may call can be
 targets of different entries of one contract: with `A.reset` and `B.reset` both listed, `obj.reset()`
 on `obj: Base`, whose subclasses `A` and `B` implement `reset`, is one report for
-`A.reset|B.reset`. A call on a receiver whose class heki does not know (an unannotated
+`A.reset|B.reset`. A call every function of which several targets of one contract name
+(`A.reset` and `reset` for `a.reset()` on `a: A`) is one report too, under the target configured
+first, naming the others (`(also `reset`)`). A call on a receiver whose class heki does not know (an unannotated
 parameter, `Any`) is not seen; with `unresolved = "report"`,
 `MUT207` reports it.
 
@@ -6845,7 +6851,8 @@ so a private getter (`ref._kids` returning `self.children`) hands its read to th
 reading it. Reads in a class's own initializer on its own `self` are allowed, and so are reads
 in a function that only runs inside allowed contexts (every path of callers above it starts in
 an allowed reader or an exempt method), as for `MUT201`. One report stands for every read behind
-its call (`sites` in JSON), as for `MUT201`. A read runs where the body holding it runs, as for
+its call (`sites` in JSON), as for `MUT201`, and a read matching several targets of one contract
+is one report, under the target configured first, naming the others. A read runs where the body holding it runs, as for
 `MUT201`: a generator's reads where it is iterated, a coroutine's where it is awaited.
 
 With `attribution = "lexical"`, a read is judged in the function whose code holds it instead: a
@@ -7979,7 +7986,9 @@ sites of the first non-private callers, with the chain of calls as related infor
 private function that only its own recursion calls (`_walk` calling itself, handed out as a
 callback) has no such caller and reports its writes itself. One
 report stands for every write behind that call (`sites` in JSON), so a Ratchet baseline counts a
-second write inside a recorded helper. A write reached through an allowed writer on one path and
+second write inside a recorded helper. A write matching several targets of one contract (`A.items`
+and `E.items` for a write on an `E`, a subclass of `A`) is one report, under the target
+configured first, naming the others (`(also `E.items`)`). A write reached through an allowed writer on one path and
 around it on another (or through a forbidden writer on one path only) is reported for the path
 the contract does not allow.
 Reading a `@property` or `functools.cached_property` attribute calls its getter, so a private

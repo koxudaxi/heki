@@ -190,6 +190,10 @@ Contracts declare what no type can say. Each kind is an array of tables with its
   names no project module is no error: the name matches nothing.
 - A report of a glob target names the member it matched (`reads
   `pkg.types.DataType._flag``); one report standing for several members lists the others.
+- An access matching several targets of one contract (a target on a class and one on its
+  subclass, a protocol's member and its implementation's attribute) is one report of the
+  contract: it names the target configured first among them, and lists the others (`(also
+  `A.items`)`).
 - A `Class.attr` target covers the subclasses of the class too.
 - A contract heki cannot use is a configuration error: a target that is not `Class.attr`, an
   invalid glob, a name with more than one colon or an empty module or qualified name, call

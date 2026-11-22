@@ -12,7 +12,7 @@
 
 use super::call_owners::CallOwnerRule;
 use super::{
-    Allowance, ContractTarget, MergedReports, OwnerRule, ReadOwnerRule, runs_inside_allowed,
+    Allowance, ContractTarget, MergedReports, Named, OwnerRule, ReadOwnerRule, runs_inside_allowed,
 };
 use crate::{CheckContext, SitesByCaller};
 use heki_ast::Span;
@@ -314,11 +314,17 @@ fn add<'u>(
     let Some(unit) = cx.index.file_of(key).and_then(|p| cx.unit(p)) else {
         return;
     };
+    let quoted = format!("`{target}`");
+    let name = Named {
+        target,
+        named: &quoted,
+        rank: 0,
+    };
     reports.add(
         unit,
         key,
         span,
-        (target, target),
+        (target.to_owned(), name),
         (key.fqn(), span),
         note,
         message,

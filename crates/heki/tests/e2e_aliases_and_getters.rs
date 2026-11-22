@@ -600,9 +600,9 @@ fn a_getter_hands_out_its_attribute_only_where_every_read_runs_it() {
         found(&diagnostics(&p, &[])),
         vec![
             d(m, 44, "MUT201", "A.items"),
-            // A target on a base covers the instances of its subclasses.
+            // A target on a base covers the instances of its subclasses: the write matches
+            // `A.items` and `E.items`, one report of the target configured first.
             d(m, 45, "MUT201", "A.items"),
-            d(m, 45, "MUT201", "E.items"),
             d(m, 49, "MUT201", "A.items"),
             // `drain` storing the attribute again is a write itself.
             d(m, 84, "MUT201", "Pool.items"),

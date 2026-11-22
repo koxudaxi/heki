@@ -8,8 +8,8 @@
 
 use super::{
     AccessGroups, Allowance, AllowanceKeys, DelegatedReport, FunctionMatcher, InsideAllowed,
-    MergedReports, References, allows_own_receiver, attribution, binds_receiver, counts_references,
-    delegated_reports, named_protocols, project_classes, reports_unresolved,
+    MergedReports, Named, References, allows_own_receiver, attribution, binds_receiver,
+    counts_references, delegated_reports, named_protocols, project_classes, reports_unresolved,
 };
 use crate::{
     CheckContext, DottedPattern, NamePart, RuleConfigError, SitesByCaller, last_name, module_of,
@@ -874,15 +874,22 @@ pub(crate) fn mut204<'c>(
                             inside,
                         )
                     };
-                    let add = |reports: &mut MergedReports<'c>, r: &DelegatedReport, sites| {
+                    let add = |reports: &mut MergedReports<'c, usize>,
+                               r: &DelegatedReport,
+                               sites| {
                         let Some(unit) = cx.index.file_of(&r.func).and_then(|p| cx.unit(p)) else {
                             return;
+                        };
+                        let name = Named {
+                            target: &target,
+                            named: &called,
+                            rank: group[0],
                         };
                         reports.add(
                             unit,
                             &r.func,
                             r.span(site.span),
-                            (&target, &called),
+                            (c, name),
                             sites,
                             rule.note,
                             || {
