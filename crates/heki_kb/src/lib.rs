@@ -362,6 +362,25 @@ pub struct EcosystemEntry {
     /// (`queue.Queue.put`): it blocks only where the receiver is known to be bounded
     /// ([`Self::bounded_by`]).
     pub waits_while_full: bool,
+    /// `EFF112`: the call writes an argument, or serializes it into text, in the order of its
+    /// elements (`json.dumps`, `pathlib.Path.write_text`, `print`).
+    pub writes_in_order: Option<OrderedOutput>,
+}
+
+/// What a call writes in the order of its elements (`EcosystemEntry::writes_in_order`): a
+/// mapping's keys and a sequence's items in their iteration order, text as it is.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct OrderedOutput {
+    /// The argument written: at position `arg` (the receiver not counted), or passed by the
+    /// keyword `param`; with neither, every positional argument (`print`).
+    pub arg: Option<u8>,
+    pub param: Option<String>,
+    /// The keyword argument that sorts the keys of the mappings it writes first (`sort_keys`,
+    /// `sort_dicts`).
+    pub sorted_by: Option<String>,
+    /// The call sorts them when it is not passed `sorted_by`.
+    pub sorted_by_default: bool,
 }
 
 /// How a symbol tagged `environment` reads the environment (`EcosystemEntry::environment`).
@@ -551,6 +570,7 @@ pub struct EcosystemPatch {
     pub sync_lock_or_tx: Option<bool>,
     pub non_reentrant_lock: Option<bool>,
     pub one_at_a_time: Option<OneAtATime>,
+    pub writes_in_order: Option<OrderedOutput>,
 }
 
 impl EcosystemPatch {
@@ -581,6 +601,9 @@ impl EcosystemPatch {
         }
         if let Some(v) = self.one_at_a_time {
             entry.one_at_a_time = Some(v);
+        }
+        if let Some(v) = &self.writes_in_order {
+            entry.writes_in_order = Some(v.clone());
         }
     }
 }
@@ -625,8 +648,83 @@ impl TryFrom<&EcosystemOverride> for EcosystemPatch {
                 .as_deref()
                 .map(OneAtATime::from_name)
                 .transpose()?,
+            writes_in_order: value.writes_in_order.as_ref().map(|w| OrderedOutput {
+                arg: w.arg,
+                param: w.param.clone(),
+                sorted_by: w.sorted_by.clone(),
+                sorted_by_default: w.sorted_by_default,
+            }),
         })
     }
+}
+
+/// What a library call runs of the values it is handed (`[[invokes]]`): an entry lists each
+/// argument the call runs code of; an argument it does not list runs nothing there. The code a
+/// value runs is its class's: the special methods named (looked up on the metaclass for a class
+/// object), its items' special methods, or the value itself when the call calls it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Invokes {
+    pub symbol: String,
+    /// The call returns an iterator that runs what `values` names again while it is iterated
+    /// (`enumerate`, `map`).
+    pub lazy: bool,
+    pub values: Vec<InvokedValue>,
+}
+
+/// One argument of an [`Invokes`] entry and what the call runs of it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct InvokedValue {
+    /// The argument at this position (the receiver not counted), or at any position from it on
+    /// with `rest`.
+    pub arg: Option<u8>,
+    pub rest: bool,
+    /// The argument passed by this keyword (`"*"`: by any keyword).
+    pub param: Option<String>,
+    /// The receiver of a method.
+    pub receiver: bool,
+    /// The special methods the call runs on the value's class; `"*"`: any attribute of it (a
+    /// read by a name the call is handed).
+    pub methods: Vec<String>,
+    /// The special methods the call runs on the class of each item the value holds.
+    pub item_methods: Vec<String>,
+    /// The call calls the value itself.
+    pub calls: bool,
+}
+
+impl InvokedValue {
+    /// Whether this entry names the argument at `position` (`None`: passed by keyword
+    /// `keyword`).
+    pub fn names(&self, position: Option<u8>, keyword: Option<&str>) -> bool {
+        match (position, keyword) {
+            (Some(i), _) => self.arg.is_some_and(|a| a == i || (self.rest && i > a)),
+            (None, Some(k)) => matches!(self.param.as_deref(), Some(p) if p == k || p == "*"),
+            (None, None) => false,
+        }
+    }
+}
+
+/// A cached-property decorator the catalog lists as keeping the getter's value in the instance
+/// `__dict__` under the property's name (`[[cached_properties]]`): a later read returns it until
+/// something removes it, and `del obj.<name>` or a removal from `obj.__dict__` makes the next read
+/// run the getter again. Only a decorator listed here makes a cached property an exact claim's;
+/// any other `cached_property` is one by its name only (R3).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CachedPropertyDecorator {
+    /// The implementation's qualified name, as an import resolves it.
+    pub symbol: String,
+    /// The versions whose source the entry was checked against.
+    pub versions: String,
+    /// Why the value is kept in the instance `__dict__`.
+    pub keeps: String,
+    /// How `del obj.<name>` and `obj.__dict__.pop(<name>)` act on the kept value.
+    pub invalidation: String,
+    /// Where an instance without a `__dict__` keeps the value instead (a slot), if anywhere;
+    /// without this the decorator keeps nothing on such an instance.
+    #[serde(default)]
+    pub slot: Option<String>,
 }
 
 /// On-disk shape of one `kb/ecosystem/*.toml` file.
@@ -637,6 +735,10 @@ struct EcosystemKbFile {
     opaque_packages: Vec<String>,
     #[serde(default)]
     entries: Vec<EcosystemEntry>,
+    #[serde(default)]
+    invokes: Vec<Invokes>,
+    #[serde(default)]
+    cached_properties: Vec<CachedPropertyDecorator>,
 }
 
 fn parse_ecosystem_file(file: &'static str, text: &str) -> Result<EcosystemKbFile, KbError> {
@@ -655,6 +757,11 @@ pub struct EffectiveEcosystemKb {
     pub opaque_packages: Vec<String>,
     /// The symbols `[[tool.heki.ecosystem]]` names ([`Self::declared`]).
     pub user_symbols: BTreeSet<String>,
+    /// What each listed library call runs of the values it is handed ([`Invokes`]).
+    pub invokes: BTreeMap<String, Invokes>,
+    /// The cached-property decorators known to keep the value in the instance `__dict__`
+    /// ([`CachedPropertyDecorator`]).
+    pub cached_properties: BTreeMap<String, CachedPropertyDecorator>,
     pub digest: String,
 }
 
@@ -678,6 +785,8 @@ impl EffectiveEcosystemKb {
             entries,
             opaque_packages,
             user_symbols: BTreeSet::new(),
+            invokes: BTreeMap::new(),
+            cached_properties: BTreeMap::new(),
             digest,
         }
     }
@@ -688,10 +797,19 @@ impl EffectiveEcosystemKb {
     pub fn load_builtin(overrides: &[EcosystemPatch]) -> Result<Self, KbError> {
         let mut raw: BTreeMap<String, EcosystemEntry> = BTreeMap::new();
         let mut opaque_packages = Vec::new();
+        let mut invokes = BTreeMap::new();
+        let mut cached_properties = BTreeMap::new();
         for &(file, text) in ECOSYSTEM_KB_FILES {
             let parsed = parse_ecosystem_file(file, text)?;
             raw.extend(parsed.entries.into_iter().map(|e| (e.symbol.clone(), e)));
             opaque_packages.extend(parsed.opaque_packages);
+            invokes.extend(parsed.invokes.into_iter().map(|i| (i.symbol.clone(), i)));
+            cached_properties.extend(
+                parsed
+                    .cached_properties
+                    .into_iter()
+                    .map(|c| (c.symbol.clone(), c)),
+            );
         }
         opaque_packages.sort();
         opaque_packages.dedup();
@@ -707,6 +825,13 @@ impl EffectiveEcosystemKb {
             patch.apply(entry);
         }
         let mut kb = Self::materialize(raw.into_values().collect(), opaque_packages);
+        let listed = serde_json::to_string(&invokes).unwrap_or_default();
+        let caches = serde_json::to_string(&cached_properties).unwrap_or_default();
+        kb.digest = blake3::hash(format!("{}|{listed}|{caches}", kb.digest).as_bytes())
+            .to_hex()
+            .to_string();
+        kb.invokes = invokes;
+        kb.cached_properties = cached_properties;
         kb.user_symbols = overrides.iter().map(|p| p.symbol.clone()).collect();
         if !kb.user_symbols.is_empty() {
             let users: Vec<&str> = kb.user_symbols.iter().map(String::as_str).collect();
@@ -732,6 +857,18 @@ impl EffectiveEcosystemKb {
 
     pub fn is_opaque_to_layer3(&self, top_level_package: &str) -> bool {
         self.opaque_packages.iter().any(|p| p == top_level_package)
+    }
+
+    /// What the call of `symbol` runs of the values it is handed, when the catalog lists it
+    /// ([`Invokes`]).
+    pub fn invoked(&self, symbol: &str) -> Option<&Invokes> {
+        self.invokes.get(symbol)
+    }
+
+    /// The catalog's entry for the cached-property decorator `symbol`, when it lists it as
+    /// keeping the value in the instance `__dict__` ([`CachedPropertyDecorator`]).
+    pub fn cached_property(&self, symbol: &str) -> Option<&CachedPropertyDecorator> {
+        self.cached_properties.get(symbol)
     }
 }
 
@@ -1268,6 +1405,7 @@ mod tests {
             synchronous_waits(),
             lazy_iterators(),
             environment_reads(),
+            ordered_outputs(),
             pydantic_models(),
         ]
         .into_iter()
@@ -1294,6 +1432,24 @@ mod tests {
                 },
             ),
         ]
+    }
+
+    /// `EFF112`: the calls writing an argument in the order of its elements, with no other fact
+    /// (the file writes of `pathlib` are in [`ORDERED_OUTPUTS`] too).
+    fn ordered_outputs() -> Vec<(Vec<String>, EcosystemEntry)> {
+        vec![(
+            s(&[
+                "builtins.print",
+                "json.dumps",
+                "json.dump",
+                "pprint.pprint",
+                "pprint.pformat",
+                "pprint.pp",
+                "yaml.dump",
+                "yaml.safe_dump",
+            ]),
+            entry(&[]),
+        )]
     }
 
     /// The calls and module attributes `reads-environment` effect boundaries forbid; they carry
@@ -2704,6 +2860,55 @@ mod tests {
         ),
     ];
 
+    /// One row of [`ORDERED_OUTPUTS`]: `(arg, param, sorted_by, sorted_by_default, symbols)`.
+    type OrderedOutputRow = (
+        Option<u8>,
+        Option<&'static str>,
+        Option<&'static str>,
+        bool,
+        &'static [&'static str],
+    );
+
+    /// `EFF112`: what each call writes in the order of its elements.
+    const ORDERED_OUTPUTS: &[OrderedOutputRow] = &[
+        (None, None, None, false, &["builtins.print"]),
+        (
+            Some(0),
+            Some("data"),
+            None,
+            false,
+            &["pathlib.Path.write_text", "pathlib.Path.write_bytes"],
+        ),
+        (
+            Some(0),
+            Some("obj"),
+            Some("sort_keys"),
+            false,
+            &["json.dumps", "json.dump"],
+        ),
+        (
+            Some(0),
+            Some("object"),
+            Some("sort_dicts"),
+            true,
+            &["pprint.pprint", "pprint.pformat"],
+        ),
+        (
+            Some(0),
+            Some("object"),
+            Some("sort_dicts"),
+            false,
+            &["pprint.pp"],
+        ),
+        (
+            Some(0),
+            Some("data"),
+            Some("sort_keys"),
+            true,
+            &["yaml.dump", "yaml.safe_dump"],
+        ),
+    ];
+
     /// The calls whose results' items the environment decides the number of.
     const RESULT_ITEMS: &[(ResultItems, &[&str])] = &[
         (
@@ -2816,12 +3021,24 @@ mod tests {
                         None => format!("sqlite3.Connection.{method}"),
                     })
                 });
+                let writes_in_order = ORDERED_OUTPUTS
+                    .iter()
+                    .find(|(.., symbols)| symbols.contains(&symbol.as_str()))
+                    .map(
+                        |(arg, param, sorted_by, sorted_by_default, _)| OrderedOutput {
+                            arg: *arg,
+                            param: param.map(Into::into),
+                            sorted_by: sorted_by.map(Into::into),
+                            sorted_by_default: *sorted_by_default,
+                        },
+                    );
                 let expected = EcosystemEntry {
                     symbol: symbol.clone(),
                     emits,
                     exit_suppresses,
                     items,
                     api,
+                    writes_in_order,
                     ..expected.clone()
                 };
                 assert_eq!(kb.lookup(&symbol), Some(&expected), "{symbol}");
@@ -3287,6 +3504,13 @@ mod tests {
                 non_reentrant_lock: Some(true),
                 ..patch("mypkg.sync.Mutex")
             },
+            EcosystemPatch {
+                writes_in_order: Some(OrderedOutput {
+                    sorted_by: Some("sort_keys".into()),
+                    ..OrderedOutput::default()
+                }),
+                ..patch("json.dumps")
+            },
             // An async-safe API keeps only its loop-sensitive effects.
             EcosystemPatch {
                 async_safe: Some(true),
@@ -3345,6 +3569,14 @@ mod tests {
                 ..EcosystemEntry::default()
             }
         );
+        // A project may describe another sorting switch of a library call.
+        assert_eq!(
+            got("json.dumps").writes_in_order,
+            Some(OrderedOutput {
+                sorted_by: Some("sort_keys".into()),
+                ..OrderedOutput::default()
+            })
+        );
         assert_eq!(
             got("vendor.fetch"),
             EcosystemEntry {
@@ -3382,6 +3614,53 @@ mod tests {
     }
 
     #[test]
+    fn invokes_and_cached_property_entries_are_described_and_part_of_the_digest() {
+        let kb = EffectiveEcosystemKb::load_builtin(&[]).unwrap();
+        let isinstance = kb.invoked("builtins.isinstance").expect("listed");
+        assert!(!isinstance.lazy);
+        assert_eq!(
+            isinstance.values[0].methods,
+            ["__class__", "__getattribute__"]
+        );
+        assert!(isinstance.values[1].names(Some(1), None));
+        assert!(!isinstance.values[1].names(Some(2), None));
+        assert!(
+            kb.invoked("builtins.id")
+                .is_some_and(|e| e.values.is_empty())
+        );
+        let map = kb.invoked("builtins.map").expect("listed");
+        assert!(map.lazy && map.values[0].calls);
+        // `rest`: every position from the argument on.
+        assert!(map.values[1].names(Some(1), None) && map.values[1].names(Some(4), None));
+        let sorted = kb.invoked("builtins.sorted").expect("listed");
+        assert!(sorted.values[1].names(None, Some("key")));
+        assert!(!sorted.values[1].names(None, Some("reverse")));
+        let format = kb.invoked("builtins.str.format").expect("listed");
+        assert!(format.values[1].names(None, Some("anything")));
+        assert_eq!(kb.invoked("time.sleep"), None);
+        // Cached-property decorators: each entry says which source it was read against, why the
+        // value is in the instance `__dict__`, and how removing it acts.
+        assert!(kb.cached_property("functools.cached_property").is_some());
+        let werkzeug = kb
+            .cached_property("werkzeug.utils.cached_property")
+            .expect("listed");
+        assert!(werkzeug.slot.is_some());
+        assert_eq!(kb.cached_property("cached_property"), None);
+        assert!(kb.cached_properties.values().all(|c| {
+            !c.versions.is_empty() && !c.keeps.is_empty() && !c.invalidation.is_empty()
+        }));
+        // The table is no entry of the catalog: other facts never see it.
+        assert_eq!(kb.lookup("builtins.isinstance"), None);
+        let empty = EffectiveEcosystemKb::materialize(
+            kb.entries.values().cloned().collect(),
+            kb.opaque_packages.clone(),
+        );
+        assert_ne!(kb.digest, empty.digest);
+        // A value no entry names, by neither position nor keyword.
+        assert!(!InvokedValue::default().names(None, None));
+    }
+
+    #[test]
     fn user_override_config_converts_to_patch() {
         let ok = EcosystemOverride {
             symbol: "mypkg.workers.in_thread".into(),
@@ -3394,6 +3673,12 @@ mod tests {
             sync_lock_or_tx: Some(false),
             non_reentrant_lock: Some(true),
             one_at_a_time: Some("when_unbound".into()),
+            writes_in_order: Some(heki_env::OrderedOutputSetting {
+                arg: None,
+                param: Some("payload".into()),
+                sorted_by: Some("sort_keys".into()),
+                sorted_by_default: true,
+            }),
         };
         assert_eq!(
             EcosystemPatch::try_from(&ok).unwrap(),
@@ -3408,6 +3693,12 @@ mod tests {
                 sync_lock_or_tx: Some(false),
                 non_reentrant_lock: Some(true),
                 one_at_a_time: Some(OneAtATime::WhenUnbound),
+                writes_in_order: Some(OrderedOutput {
+                    arg: None,
+                    param: Some("payload".into()),
+                    sorted_by: Some("sort_keys".into()),
+                    sorted_by_default: true,
+                }),
             }
         );
         for (name, kind) in [

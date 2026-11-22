@@ -800,16 +800,24 @@ impl ModuleDecls {
     /// defines is its own decorator and none of `names` (an identity `def cache(fn)` caches
     /// nothing); a head bound by neither (a builtin, a star import) counts by its spelling.
     pub fn decorator_is(&self, text: &str, names: &[&str]) -> bool {
+        self.decorator_symbol(text)
+            .is_some_and(|s| names.contains(&s.rsplit('.').next().unwrap_or(&s)))
+    }
+
+    /// The symbol the head of the decorator `text` names, through this module's imports and
+    /// aliases (`functools.cached_property` of `@cached_property` after `from functools import
+    /// cached_property`); `None` for a class or function the module defines; a name the module
+    /// neither imports nor defines as written.
+    pub fn decorator_symbol(&self, text: &str) -> Option<String> {
         let (head, _) = decorator_parts(text);
         let first = head.split('.').next().unwrap_or(head);
-        let symbol = if self.imports.contains_key(first) || self.aliases.contains_key(first) {
+        if self.imports.contains_key(first) || self.aliases.contains_key(first) {
             self.resolve_dotted(head, false)
         } else if self.classes.contains_key(first) || self.functions.contains_key(first) {
             None
         } else {
             Some(head.to_owned())
-        };
-        symbol.is_some_and(|s| names.contains(&s.rsplit('.').next().unwrap_or(&s)))
+        }
     }
 
     /// Resolve a dotted name written in this module (runtime imports, then aliases and local
@@ -2149,7 +2157,7 @@ impl ProjectDecls {
     /// The object the name `fqn` stands for: through re-exports, as [`Self::canonical`], and
     /// through the module aliases it names (`pkg.model._set` for `_set = object.__setattr__` in
     /// `pkg.model`). The name itself stays the alias's: only values are the object.
-    pub(crate) fn object_named(&self, fqn: &str) -> String {
+    pub fn object_named(&self, fqn: &str) -> String {
         self.chase(fqn, true)
     }
 
@@ -3494,16 +3502,23 @@ impl ProjectDecls {
     /// `None` when a plain class or instance attribute comes first (reading it runs nothing), a
     /// class on the way stores the name outside its body, a base outside the project comes
     /// first (heki does not know what it binds), or none binds it.
-    pub(crate) fn function_taken(&self, class: &str, name: &str) -> Option<FuncKey> {
-        for c in self.mro(class) {
-            let decl = self.class(&c)?;
+    pub fn function_taken(&self, class: &str, name: &str) -> Option<FuncKey> {
+        self.function_taken_along(&self.mro(class), name)
+    }
+
+    /// [`Self::function_taken`] along `mro`: an MRO, or the part of one after a class (what
+    /// `super()` in that class looks up).
+    fn function_taken_along(&self, mro: &[String], name: &str) -> Option<FuncKey> {
+        for c in mro {
+            self.read(|k| note(&mut k.class_facts, c));
+            let decl = self.class(c)?;
             // Stored on the class object outside its body (`Child.view = []`), the name holds
             // what was stored there from then on.
             if decl.rebound_attrs.contains(name) {
                 return None;
             }
             if decl.members.contains(name) {
-                return self.own_method(&c, name);
+                return self.own_method(c, name);
             }
         }
         None
@@ -3560,6 +3575,65 @@ impl ProjectDecls {
             |c| {
                 visited += 1;
                 if visited > DISPATCH_CLASS_LIMIT || !self.runs_a_target(c, method, callee, kb) {
+                    Visit::Stop(())
+                } else {
+                    Visit::Expand
+                }
+            },
+        );
+        missing == Answer::Known(None)
+    }
+
+    /// Whether reading `attr` on every instance of the project class `class` or of a project
+    /// subclass (R2) runs one of the getters `keys`: what each such class takes the name from is
+    /// one of them ([`Self::function_taken`]: not a plain attribute, a method, or a value stored on
+    /// the class outside its body, and no base outside the project before it), and no class is a
+    /// protocol, defines `__getattribute__`, or has a metaclass heki does not know.
+    pub(crate) fn getters_complete(&self, class: &str, attr: &str, keys: &[FuncKey]) -> bool {
+        let class = self.canonical(class);
+        let read = self.attr_read(&class, attr);
+        if read.getattribute || read.custom_metaclass {
+            return false;
+        }
+        self.every_class_finds(&class, keys, |c| {
+            self.protocol(c)
+                .is_none()
+                .then(|| self.function_taken(c, attr))
+                .flatten()
+        })
+    }
+
+    /// Whether reading `attr` through `super()` in the project class `owner` runs one of the
+    /// getters `keys` on every instance (R2): for the owner and each project subclass, what its
+    /// MRO takes the name from after the owner ([`Self::function_taken`] from there) is one of
+    /// them, also when a subclass's MRO puts another class there.
+    pub(crate) fn super_getters_complete(&self, owner: &str, attr: &str, keys: &[FuncKey]) -> bool {
+        let owner = self.canonical(owner);
+        self.every_class_finds(&owner, keys, |c| {
+            let mro = self.mro(c);
+            let after = mro.iter().position(|m| *m == owner).map_or(0, |i| i + 1);
+            self.function_taken_along(&mro[after..], attr)
+        })
+    }
+
+    /// Whether `find` gives one of `keys` for the project class `class` and for each of its
+    /// project subclasses, at most `DISPATCH_CLASS_LIMIT` of them.
+    fn every_class_finds(
+        &self,
+        class: &str,
+        keys: &[FuncKey],
+        find: impl Fn(&str) -> Option<FuncKey>,
+    ) -> bool {
+        let budget = Budget::unmetered("heki_effect::resolver::ProjectDecls::every_class_finds");
+        let mut visited = 0;
+        let missing = reach(
+            &budget,
+            [class],
+            |c, out| out.extend(self.direct_subclasses(c).iter().map(String::as_str)),
+            |c| {
+                visited += 1;
+                let runs = find(c).is_some_and(|k| keys.contains(&k));
+                if visited > DISPATCH_CLASS_LIMIT || !runs {
                     Visit::Stop(())
                 } else {
                     Visit::Expand
@@ -4384,6 +4458,9 @@ fn attr_displays(input: &ModuleInput<'_>, decls: &mut ModuleDecls) {
 const PLAIN_BASES: &[&str] = &[
     "object",
     "builtins.object",
+    // `abc.ABC` defines no attribute but empty `__slots__`, and its metaclass `abc.ABCMeta`
+    // installs no descriptor.
+    "abc.ABC",
     "typing.NamedTuple",
     "typing_extensions.NamedTuple",
     "typing.Generic",
@@ -5994,6 +6071,9 @@ pub struct TypeCtx<'a> {
     captured: std::sync::OnceLock<FxHashMap<String, Vec<usize>>>,
     /// The module's bindings for the path facts, built on first use.
     bindings: std::cell::OnceCell<heki_ir::ModuleBindings>,
+    /// The module-level names bound once to a set of text constants
+    /// ([`Self::string_set_global`]).
+    string_sets: std::cell::OnceCell<FxHashSet<String>>,
     /// [`ProjectDecls::function_taken`] by class and name, asked once per module (the module's
     /// summaries are one recording, which the first answer's reads join).
     taken: RefCell<FxHashMap<(String, String), Option<FuncKey>>>,
@@ -6078,8 +6158,17 @@ impl<'a> TypeCtx<'a> {
             scopes: crate::infer::Scopes::default(),
             captured: std::sync::OnceLock::new(),
             bindings: std::cell::OnceCell::new(),
+            string_sets: std::cell::OnceCell::new(),
             taken: RefCell::default(),
         }
+    }
+
+    /// Whether the module-level name `name` is bound once, in the module body, to a set of
+    /// text constants (a display, or `set()` / `frozenset()` of one): `EFF112`.
+    pub(crate) fn string_set_global(&self, name: &str) -> bool {
+        self.string_sets
+            .get_or_init(|| crate::order_flow::string_set_globals(self.ir))
+            .contains(name)
     }
 
     /// The module's bindings ([`heki_ir::ModuleBindings`]).
@@ -6109,6 +6198,16 @@ impl<'a> TypeCtx<'a> {
         match self.module.imports.get(name) {
             Some(t) => self.project.canonical(t),
             None => format!("{}.{name}", self.module_name()),
+        }
+    }
+
+    /// The fqn of the object a module-level name read inside this module names (a class, a
+    /// function, a module, or a builtin), as [`Self::global`] gives it; `None` for a name
+    /// holding an instance.
+    pub fn named_object(&self, name: &str) -> Option<String> {
+        match self.global(name) {
+            Ty::Ref(fqn) => Some(fqn),
+            _ => None,
         }
     }
 
@@ -6305,6 +6404,31 @@ impl<'a> TypeCtx<'a> {
             _ => recv
                 .and_then(Val::recv)
                 .is_some_and(|recv| self.targets_complete_on(recv, method, callee)),
+        }
+    }
+
+    /// Whether `keys`, the property getters [`Self::resolve_attr_load`] resolves reading
+    /// `recv.attr` to, are every getter the read can run (`CallSite::complete`): on an instance,
+    /// each class the value may be (R2) takes the name from one of them
+    /// ([`ProjectDecls::getters_complete`]), on each member of a union too; through `super()`,
+    /// each class finds one of them after the class `super()` is in
+    /// ([`ProjectDecls::super_getters_complete`]).
+    pub fn getter_targets_complete(
+        &self,
+        recv: Option<&Val>,
+        attr: &str,
+        keys: &[FuncKey],
+    ) -> bool {
+        match recv {
+            Some(Val::Union(classes)) => classes
+                .iter()
+                .all(|c| self.project.getters_complete(c, attr, keys)),
+            Some(Val::Super(owner)) => self.project.super_getters_complete(owner, attr, keys),
+            // A read on a class or module object runs no getter (`resolve_attr_load` resolves
+            // none).
+            _ => {
+                matches!(recv, Some(Val::Inst(class)) if self.project.getters_complete(class, attr, keys))
+            }
         }
     }
 
@@ -6526,7 +6650,8 @@ impl<'a> TypeCtx<'a> {
     }
 
     /// [`Self::infer`], with the values `isinstance` checks give variables in the blocks they
-    /// guard and the classes each check names (by its second argument).
+    /// guard, the classes each check names (by its second argument), and the types with their
+    /// arguments.
     #[allow(clippy::type_complexity)]
     pub(crate) fn infer_flow(
         &self,
@@ -6535,12 +6660,14 @@ impl<'a> TypeCtx<'a> {
         FxHashMap<VarId, Val>,
         FxHashMap<(BlockId, VarId), Val>,
         FxHashMap<VarId, Vec<String>>,
+        std::rc::Rc<crate::infer::Inferred>,
     ) {
         let inferred = self.infer_types(f);
         (
             inferred.vals(),
             inferred.narrowed_vals(),
             inferred.isinstance_args(f, self.project),
+            inferred,
         )
     }
 
