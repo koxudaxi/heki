@@ -1623,8 +1623,8 @@ open, and the exact tier leaves it out only because a fixed count is no evidence
 not hold to its caller in the order it takes them (the same collection, the same keys, both
 loops through inputs, both trip counts open, idle on a mismatch, the inner loop advanced
 without code): the decision stops at the first, so it spends the function's shared walk budget
-as before, and an explanation goes on with a budget of its own, so the decisions of the other
-joins are unchanged. `idle_on_mismatch` tells a key load that may run code ("Equality of keys":
+as before, and an explanation goes on with a budget the function's explanations share (one more
+budget proportional to the function), so the decisions of the other joins are unchanged. `idle_on_mismatch` tells a key load that may run code ("Equality of keys":
 of an item whose type is unknown, or a load that is no plain attribute of a known class or no
 item of a builtin container) apart from any other work on a mismatch ("Idle on a mismatch"), and
 `steps_run_no_code` an inner iterable of unknown type (an annotation closes it, unless a project

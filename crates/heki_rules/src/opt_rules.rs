@@ -1104,6 +1104,9 @@ pub(crate) fn opt113(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
         // Inferred only for a function with a report, and the premises' walks spend one budget.
         let mut types: Option<FxHashMap<VarId, Val>> = None;
         let mut budget: Option<Budget> = None;
+        // The explanations of the function's heuristic joins spend a budget of their own, so the
+        // decisions of the other joins spend the shared one as they did.
+        let mut explaining_budget: Option<Budget> = None;
         // Both loops are data-sized `for` loops (inlined comprehensions included).
         let fors: Vec<ForLoop<'_>> = f
             .loops
@@ -1260,11 +1263,9 @@ pub(crate) fn opt113(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
                     .expect("the rule runs on the unit: it returned at its start otherwise");
                 d.certainty = premises::tier("OPT113", exact).at_most(d.certainty);
                 if cx.open_premises && !exact {
-                    // Explaining spends a budget of its own: the decisions of the other joins
-                    // of the function spend the shared one as they did.
-                    let budget = Budget::of_function("OPT113", f);
                     let explaining = JoinPremises {
-                        budget: &budget,
+                        budget: explaining_budget
+                            .get_or_insert_with(|| Budget::of_function("OPT113", f)),
                         ..premises
                     };
                     let mut open: Vec<OpenPremise> = Vec::new();
