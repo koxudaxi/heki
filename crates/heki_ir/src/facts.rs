@@ -84,6 +84,160 @@ const READ_ONLY_BUILTINS: &[&str] = &[
     "zip",
 ];
 
+/// The names Python 3.11 binds in `builtins` (every later version binds them too), without the
+/// module dunders, sorted.
+const BUILTIN_NAMES: &[&str] = &[
+    "ArithmeticError",
+    "AssertionError",
+    "AttributeError",
+    "BaseException",
+    "BaseExceptionGroup",
+    "BlockingIOError",
+    "BrokenPipeError",
+    "BufferError",
+    "BytesWarning",
+    "ChildProcessError",
+    "ConnectionAbortedError",
+    "ConnectionError",
+    "ConnectionRefusedError",
+    "ConnectionResetError",
+    "DeprecationWarning",
+    "EOFError",
+    "Ellipsis",
+    "EncodingWarning",
+    "EnvironmentError",
+    "Exception",
+    "ExceptionGroup",
+    "False",
+    "FileExistsError",
+    "FileNotFoundError",
+    "FloatingPointError",
+    "FutureWarning",
+    "GeneratorExit",
+    "IOError",
+    "ImportError",
+    "ImportWarning",
+    "IndentationError",
+    "IndexError",
+    "InterruptedError",
+    "IsADirectoryError",
+    "KeyError",
+    "KeyboardInterrupt",
+    "LookupError",
+    "MemoryError",
+    "ModuleNotFoundError",
+    "NameError",
+    "None",
+    "NotADirectoryError",
+    "NotImplemented",
+    "NotImplementedError",
+    "OSError",
+    "OverflowError",
+    "PendingDeprecationWarning",
+    "PermissionError",
+    "ProcessLookupError",
+    "RecursionError",
+    "ReferenceError",
+    "ResourceWarning",
+    "RuntimeError",
+    "RuntimeWarning",
+    "StopAsyncIteration",
+    "StopIteration",
+    "SyntaxError",
+    "SyntaxWarning",
+    "SystemError",
+    "SystemExit",
+    "TabError",
+    "TimeoutError",
+    "True",
+    "TypeError",
+    "UnboundLocalError",
+    "UnicodeDecodeError",
+    "UnicodeEncodeError",
+    "UnicodeError",
+    "UnicodeTranslateError",
+    "UnicodeWarning",
+    "UserWarning",
+    "ValueError",
+    "Warning",
+    "ZeroDivisionError",
+    "abs",
+    "aiter",
+    "all",
+    "anext",
+    "any",
+    "ascii",
+    "bin",
+    "bool",
+    "breakpoint",
+    "bytearray",
+    "bytes",
+    "callable",
+    "chr",
+    "classmethod",
+    "compile",
+    "complex",
+    "copyright",
+    "credits",
+    "delattr",
+    "dict",
+    "dir",
+    "divmod",
+    "enumerate",
+    "eval",
+    "exec",
+    "exit",
+    "filter",
+    "float",
+    "format",
+    "frozenset",
+    "getattr",
+    "globals",
+    "hasattr",
+    "hash",
+    "help",
+    "hex",
+    "id",
+    "input",
+    "int",
+    "isinstance",
+    "issubclass",
+    "iter",
+    "len",
+    "license",
+    "list",
+    "locals",
+    "map",
+    "max",
+    "memoryview",
+    "min",
+    "next",
+    "object",
+    "oct",
+    "open",
+    "ord",
+    "pow",
+    "print",
+    "property",
+    "quit",
+    "range",
+    "repr",
+    "reversed",
+    "round",
+    "set",
+    "setattr",
+    "slice",
+    "sorted",
+    "staticmethod",
+    "str",
+    "sum",
+    "super",
+    "tuple",
+    "type",
+    "vars",
+    "zip",
+];
+
 /// Methods of the builtin containers that never add an item to their receiver (they read it,
 /// shrink it, reorder it, or return a new object).
 const NON_GROWING_METHODS: &[&str] = &[
@@ -259,17 +413,19 @@ pub struct ModuleConstants {
     /// `t.TYPE_CHECKING` for a name `t` bound to `import typing` (the dotted key).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub bools: BTreeMap<String, bool>,
-    /// Names of the builtins the facts rely on (`range`, `len`, ...) that the module rebinds.
+    /// Names of the builtins the module may rebind: those it stores or deletes as globals, and
+    /// all of them when it has a star import.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub shadowed: BTreeSet<String>,
     /// Module globals may be bound behind the IR (`exec`, or a change through the dict
     /// `globals()` returns: [`writes_globals`]): no name is fixed and no builtin is trusted.
-    /// (A `from m import *` only rebinds the public names bound before it.)
+    /// (A `from m import *` only rebinds the public names bound before it, and the builtins.)
     #[serde(default)]
     pub dynamic: bool,
 }
 
 impl ModuleConstants {
+    /// A global load of the builtin `name` in any code of the module finds the real builtin.
     fn trusts_builtin(&self, name: &str) -> bool {
         !self.dynamic && !self.shadowed.contains(name)
     }
@@ -2525,9 +2681,13 @@ fn module_constants(
             }
         }
     }
-    let shadowed: BTreeSet<String> = READ_ONLY_BUILTINS
+    // A star import binds the names the imported module exports, which heki does not read, so
+    // it may bind the name of any builtin. Builtins are trusted per module, not per statement:
+    // a function may run after the import wherever the import stands.
+    let star_import = last_star_import.is_some();
+    let shadowed: BTreeSet<String> = BUILTIN_NAMES
         .iter()
-        .filter(|b| stores.contains_key(**b) || deleted.contains(**b))
+        .filter(|b| star_import || stores.contains_key(**b) || deleted.contains(**b))
         .map(|b| (*b).to_owned())
         .collect();
     let mut out = ModuleConstants {

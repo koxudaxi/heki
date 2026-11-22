@@ -168,6 +168,10 @@ resolve is not followed:
 - a value of type `Any`, or an unannotated parameter;
 - a method name computed at run time;
 - a call with more than eight possible overrides;
+- a method no project class along a class's MRO defines, when a base of the class is a value
+  heki cannot name where its class statement runs (`class Derived(base)` with `base` a
+  parameter, a local, or a call's result), which may define it; such a class is no subclass of
+  any project class either;
 - a function outside the checked files that the catalog does not list.
 
 Two more cases stay quiet by design:
