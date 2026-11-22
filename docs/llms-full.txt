@@ -2230,7 +2230,7 @@ Rules worth enabling here
   rule    reports  exact  consequence  right about the code (published)  real harm  block
   MUT106        1      -  bug          not measured                      -          yes
   OPT110        1      0  slowdown     78% (65-87%), n=50, 2026-11-21    6%         no: slower code, not a bug
-  No reports here: EFF102, EFF105, EFF106, EFF107, EFF109, EFF110, EFF111, EFF113, MUT101, MUT107, MUT108, MUT111, MUT112, MUT113, OPT112
+  No reports here: EFF102, EFF105, EFF106, EFF107, EFF109, EFF110, EFF111, EFF112, EFF113, MUT101, MUT107, MUT108, MUT111, MUT112, MUT113, OPT112
   MUT103: it compares with a saved summary snapshot: run `heki snapshot --write`, then select it.
 
 Notes
@@ -7790,8 +7790,9 @@ It does not report:
 - a value sorted on the way (`sorted(...)`), turned back into a set, measured (`len`), compared,
   or only tested for membership;
 - a set holding at most one element on every path to where its order is taken
-  (`if len(s) > 1: return None`, then `s.pop()`), or a sequence copied from it holding at most
-  one where an item is read from it (`if len(rest) > 1: ...`, then `rest[0]`);
+  (`if len(s) > 1: return None`, then `s.pop()`, also as one operand of `or` / `and`:
+  `if len(s) != 1 or not ok: return None`), or a sequence copied from it holding at most one
+  where an item is read from it (`if len(rest) > 1: ...`, then `rest[0]`);
 - one element at a time written to its own file (`(root / name).write_text(...)` in a loop
   over the set): only an output that appends, such as a stream, writes the set's order;
 - an exception raised for one element at a time (`for name in names: check(f"pkg.{name}")`,
