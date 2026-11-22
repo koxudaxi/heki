@@ -34,9 +34,14 @@ Its premises:
 Not part of the claim: how many times the statement runs (one under a branch inside the loop
 counts), and how large the loop or the container is. The message claims no size and no cost
 estimate. A loop or a container that the code fixes at 16 or fewer items is not reported, since the
-rewrite would not pay off. A proven report in a loop whose trip count the code fixes at more, or
-caps with a length test every path to the loop passes, is heuristic: it is true, but a fixed count
-is no evidence either way, so the exact tier leaves it out.
+rewrite would not pay off. The exact tier also asks that the data decide how many times the loop
+runs: the loop steps through a parameter (`*args` included) or a part of one, the rows of a query,
+the lines of a file, or the entries of a directory, as `EFF103`'s Origin establishes them, and the
+code does not fix or cap their number. A proven report over any other loop is heuristic, for example
+over a loop whose trip count the code fixes at more than 16 or caps with a length test every path to
+the loop passes, over the program's structure (an attribute of `self`, a project function's result,
+`range` of a configured number, a class's MRO, a module-level list), or in a `while` loop. Such a
+report is true, but its loop usually runs a few times, however large the input.
 
 The rewrite also needs what the container is built from to stay the same during the loop
 (`ValueLoopInvariant`), which only a proven report establishes.

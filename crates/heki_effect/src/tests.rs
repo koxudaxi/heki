@@ -1079,6 +1079,7 @@ fn module_names_and_relative_imports() {
     let name = |p: &str, roots: &[&str]| {
         let layout = ModuleLayout {
             source_roots: roots.iter().map(|r| (*r).to_owned()).collect(),
+            member_packages: vec!["packages/b/beta".to_owned()],
             root_is_package: false,
         };
         layout.module_name(Path::new(p))
@@ -1101,6 +1102,19 @@ fn module_names_and_relative_imports() {
     assert_eq!(
         name("srcs/pkg/mod.py", &["src"]),
         Some(("srcs.pkg.mod".into(), false))
+    );
+    // A member's package is named below the member, the member's other files below the root.
+    assert_eq!(
+        name("packages/b/beta/io.py", &[]),
+        Some(("beta.io".into(), false))
+    );
+    assert_eq!(
+        name("packages/b/main.py", &[]),
+        Some(("packages.b.main".into(), false))
+    );
+    assert_eq!(
+        name("packages/b/beta_x/io.py", &[]),
+        Some(("packages.b.beta_x.io".into(), false))
     );
     assert_eq!(name("pkg/data.txt", &[]), None);
     // `heki_rules::project::rel_posix` keeps normal components only; others are refused.

@@ -602,6 +602,35 @@ fn param_name(i: u8, names: &[String]) -> String {
         .unwrap_or_else(|| format!("#{i}"))
 }
 
+/// The names of the positions of `key`'s facts: its parameters, then the enclosing functions'
+/// parameters it reads through closure cells ([`heki_effect::CapturedParams`]).
+fn with_captured_params(
+    decls: &ProjectDecls,
+    key: &FuncKey,
+    mut names: Vec<String>,
+) -> Vec<String> {
+    let Some(captured) = decls
+        .function_decl(key)
+        .and_then(|d| d.captured_params.as_deref())
+    else {
+        return names;
+    };
+    while names.len() < usize::from(captured.first) {
+        names.push(format!("#{}", names.len()));
+    }
+    names.extend(captured.params.iter().map(|(owner, i)| {
+        let owner = FuncKey {
+            module: key.module.clone(),
+            qualname: owner.clone(),
+        };
+        decls
+            .function_decl(&owner)
+            .and_then(|d| d.param_names.get(usize::from(*i)).cloned())
+            .unwrap_or_else(|| format!("#{i}"))
+    }));
+    names
+}
+
 /// The names of the parameters in `mask`.
 fn param_names(mask: u64, names: &[String]) -> Vec<String> {
     (0..64u8)
@@ -647,8 +676,9 @@ pub fn inspect(
         candidates: RefCell::default(),
     };
     let decl = inputs.decls.function_decl(key);
-    let params: Vec<String> = decl.map(|d| d.param_names.clone()).unwrap_or_default();
-    let function = function_info(&b, key, path, summary, &params);
+    let own_params: Vec<String> = decl.map(|d| d.param_names.clone()).unwrap_or_default();
+    let function = function_info(&b, key, path, summary, &own_params);
+    let params = with_captured_params(inputs.decls, key, own_params);
     let effects = effects(&b, summary, &params);
     let changes = changes(&b, key, summary, local, &params);
     let retains = Retains {

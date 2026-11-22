@@ -659,13 +659,13 @@ fn contracts_follow_getters_but_not_setters() {
         eff201,
         vec![
             "`Model.render` reaches blocking_net (`requests.get` via `pkg.model.Model.payload`), which effect boundary `pure` forbids",
-            "`Model.render` writes `Model.fields` (direct_attr via `pkg.model.Model.resolved`), which effect boundary `pure` forbids",
+            "`Model.render` writes `Model.fields` (by attribute via `pkg.model.Model.resolved`), which effect boundary `pure` forbids",
         ]
     );
     let summary = diags.iter().find(|x| x["qualname"] == "summary").unwrap();
     assert_eq!(
         summary["message"],
-        "`summary` reads `Model.children` (direct_attr) via `pkg.model.Model._kids` outside the read owners of `kids`"
+        "`summary` reads `Model.children` (by attribute) via `pkg.model.Model._kids` outside the read owners of `kids`"
     );
     assert_eq!(
         related_of(&diags, "summary"),

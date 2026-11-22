@@ -9,7 +9,6 @@ heki_effect::callgraph::propagate_with_budget  W2  worklist: reach, Closure, or 
 heki_effect::callgraph::scc_closure  W2  worklist: reach, Closure, or fixpoint
 heki_effect::capacity::ParamCapacities::of  W2  worklist: fixpoint; stage-2 migration debt
 heki_effect::consumption::expand_through  W2  worklist: reach, Closure, or fixpoint
-heki_effect::consumption::runs_on_every_return  W2  worklist: reach, Closure, or fixpoint
 heki_effect::guards::Facts::decompose_at  W1  recursion (calls itself): Memo or Closure
 heki_effect::guards::Facts::find_tests  W2  worklist: reach, Closure, or fixpoint
 heki_effect::guards::LocalGuards::repeating  W2  worklist: reach, Closure, or fixpoint
@@ -122,7 +121,6 @@ heki_ir::builder::accumulating_updates  W2  worklist: reach, Closure, or fixpoin
 heki_ir::builder::collect_expr_bindings  W1  AST lowering, bounded by the IR unit budget
 heki_ir::builder::reaches_var  W2  worklist: reach, Closure, or fixpoint
 heki_ir::dominators::DominatorTree::over  W2  numbers the tree FnShape keeps, each block once
-heki_ir::facts::FnIndex::aliases  W3  passes until nothing changes: fixpoint
 heki_ir::facts::FnIndex::caps_on_the_way  W1  recursion (through FnIndex::implied_caps): Memo or Closure
 heki_ir::facts::FnIndex::const_int_depth  W1  recursion (calls itself): Memo or Closure
 heki_ir::facts::FnIndex::constructed  W1  recursion (through FnIndex::container_bound_nested, FnIndex::decide_bound, FnIndex::display_at and 13 more): Memo or Closure
@@ -131,7 +129,6 @@ heki_ir::facts::FnIndex::decide_bound  W1  recursion (through FnIndex::container
 heki_ir::facts::FnIndex::decide_display  W1  recursion (through FnIndex::container_bound_nested, FnIndex::decide_bound, FnIndex::display_at and 13 more): Memo or Closure
 heki_ir::facts::FnIndex::display_at  W1  recursion (through FnIndex::container_bound_nested, FnIndex::decide_bound, FnIndex::decide_display and 13 more): Memo or Closure
 heki_ir::facts::FnIndex::fixed_trip  W1  recursion (through FnIndex::container_bound_nested, FnIndex::decide_bound, FnIndex::display_at and 13 more): Memo or Closure
-heki_ir::facts::FnIndex::grown_vars  W3  passes until nothing changes: fixpoint
 heki_ir::facts::FnIndex::grows  W1  recursion (through FnIndex::container_bound_nested, FnIndex::decide_bound, FnIndex::display_at and 13 more): Memo or Closure
 heki_ir::facts::FnIndex::guarded_len  W1  recursion (through FnIndex::container_bound_nested, FnIndex::decide_bound, FnIndex::display_at and 13 more): Memo or Closure
 heki_ir::facts::FnIndex::implied_caps  W1  recursion (through FnIndex::caps_on_the_way): Memo or Closure
@@ -155,7 +152,6 @@ heki_rules::eff_rules::fanout_exclusive::Check::holder  W1  stage-2 debt (EFF110
 heki_rules::eff_rules::fanout_exclusive::Check::top_holder  W1  stage-2 debt (EFF110): recursion (calls itself): Memo or Closure
 heki_rules::eff_rules::unretained_task::TaskFlow::aliases  W2  worklist: reach, Closure, or fixpoint
 heki_rules::eff_rules::unretained_task::TaskFlow::of  W2  worklist: reach, Closure, or fixpoint
-heki_rules::mut_rules::CacheEvents::invalidated_after  W3  passes until nothing changes: fixpoint
 heki_rules::mut_rules::FunctionMatcher::matches  W1  not recursive: `self.whole.matches` is a pattern's method of the same name
 heki_rules::mut_rules::Mut202Fn::propagate  W3  passes until nothing changes: fixpoint
 heki_rules::mut_rules::changes_param  W2  worklist: reach, Closure, or fixpoint

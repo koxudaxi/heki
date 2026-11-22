@@ -31,7 +31,7 @@
 mod join;
 mod shape;
 
-pub use join::{BitSet, Fallible, Join, JoinMap, KeySet, Min, Or};
+pub use join::{And, BitSet, Fallible, Join, JoinMap, KeySet, Min, Or};
 pub use shape::{Def, FnShape, Use};
 
 use crate::IrFunction;
