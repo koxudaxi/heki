@@ -3495,6 +3495,10 @@ impl ProjectDecls {
         attr: &str,
         kb: &'k EffectiveEcosystemKb,
     ) -> Option<&'k str> {
+        // No row of the name: the read depends on no declaration.
+        if !kb.types_attribute_named(attr) {
+            return None;
+        }
         let class = self.canonical(class);
         let found = self.attribute_row_along(&self.mro(&class), attr, kb)?;
         let read = self.attr_read(&class, attr);

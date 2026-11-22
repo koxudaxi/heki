@@ -964,6 +964,15 @@ impl EffectiveEcosystemKb {
         self.cached_properties.get(symbol)
     }
 
+    /// Whether a row of the catalog types an attribute named `attr`, on any class.
+    pub fn types_attribute_named(&self, attr: &str) -> bool {
+        self.attributes.keys().any(|symbol| {
+            symbol
+                .rsplit_once('.')
+                .is_some_and(|(_, name)| name == attr)
+        })
+    }
+
     /// The class of what reading `attr` on an instance of exactly the library class `class`
     /// gives, when the catalog lists it ([`AttributeType`]).
     pub fn attribute_type(&self, class: &str, attr: &str) -> Option<&str> {
@@ -4028,6 +4037,7 @@ mod tests {
             Some("vendor.Chat")
         );
         assert_eq!(kb.attributes.len(), builtin.attributes.len() + 1);
+        assert!(kb.types_attribute_named("chat") && !kb.types_attribute_named("Client"));
         assert_eq!(kb.declared("vendor.Client.chat"), None);
         // Only what the configuration names is a declaration of project code.
         assert!(kb.declared("mypkg.db.open").is_some());
