@@ -929,10 +929,12 @@ which module imports which.
    nothing); the loads of one attribute whose value is read as a whole, and the item loads of
    one constant key of values read only through such loads, are asked together
    (`Paths::on_every_return_passes_one_of`), so a read on each side of a branch counts. A `self` method
-   called on every such path adds what every one of its targets reads, when the function's name
-   is bound once (each site's paths are its own definition's), the call's targets are every
-   implementation it can run (`CallSite::complete`), and each runs its body at every call (no
-   cache decorator); a callee of the function's own call-graph component adds nothing,
+   called on every such path, or a property read there (its getters' call), adds what every one
+   of its targets reads, when the function's name is bound once (each site's paths are its own
+   definition's), the call's targets are every implementation it can run (`CallSite::complete`;
+   for a read, the getter every class the object may be finds first:
+   `TypeCtx::getter_targets_complete`), and each runs its body at every call (no cache
+   decorator); a callee of the function's own call-graph component adds nothing,
    so propagation needs no fixpoint for it. An attribute read as a whole covers each of its
    keys, also where two definitions or two targets are joined.
 8. **What may remove a kept value** (computed only with `OptInFacts::kept_values`). A method's
@@ -1336,8 +1338,13 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      subclasses (at most `DISPATCH_CLASS_LIMIT`, 64), the definition its MRO finds is a target;
      every member of a union resolves; a protocol receiver never is complete. A call of a
      property's value is complete when calling a value of the type the getter declares is
-     (`TypeCtx::targets_complete_on`), whatever the receiver; the getters it runs, as a read of
-     the property, never are.
+     (`TypeCtx::targets_complete_on`), whatever the receiver. A read of a property, the call of
+     its getters, is complete when each class the object may be (at most
+     `DISPATCH_CLASS_LIMIT`) finds one of them first (`ProjectDecls::first_definition`: the first
+     class along its MRO that names the name defines it as that getter, and no base heki does
+     not know comes before it), and none defines `__getattribute__` or has a metaclass heki does
+     not know (`TypeCtx::getter_targets_complete`). A class that finds a class attribute, a
+     method, or nothing first runs no getter.
    - A Layer 2 call has an effect unconditionally (`CallTarget::Layer2::unconditional`) when its
      entry `emits` it on every call and no case of the entry tests an argument that may be a
      parameter of the caller (R6 covers the arguments heki cannot evaluate).

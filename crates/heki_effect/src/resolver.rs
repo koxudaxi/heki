@@ -3181,6 +3181,59 @@ impl ProjectDecls {
         missing == Answer::Known(None)
     }
 
+    /// Whether reading `attr` on every instance of the project class `class` or of a project
+    /// subclass (R2) runs one of the getters `keys`: what each such class finds first for the
+    /// name is one of them ([`Self::first_definition`]), and no class is a protocol, defines
+    /// `__getattribute__`, or has a metaclass heki does not know. A class that finds a plain
+    /// attribute or a method first, or no definition, runs no getter.
+    pub(crate) fn getters_complete(&self, class: &str, attr: &str, keys: &[FuncKey]) -> bool {
+        let class = self.canonical(class);
+        let read = self.attr_read(&class, attr);
+        if read.getattribute || read.custom_metaclass {
+            return false;
+        }
+        let budget = Budget::unmetered("heki_effect::resolver::ProjectDecls::getters_complete");
+        let mut visited = 0;
+        let missing = reach(
+            &budget,
+            [class.as_str()],
+            |c, out| out.extend(self.direct_subclasses(c).iter().map(String::as_str)),
+            |c| {
+                visited += 1;
+                let runs = self.protocol(c).is_none()
+                    && self
+                        .first_definition(c, attr)
+                        .is_some_and(|k| keys.contains(&k));
+                if visited > DISPATCH_CLASS_LIMIT || !runs {
+                    Visit::Stop(())
+                } else {
+                    Visit::Expand
+                }
+            },
+        );
+        missing == Answer::Known(None)
+    }
+
+    /// The project function reading `name` on an instance of exactly the project class `class`
+    /// finds: the first class along its MRO that names `name` (`ClassDecl::members`) defines it
+    /// as a function, and only project classes and plain bases (`object`, `NamedTuple`,
+    /// `Generic`, `abc.ABC`) come before it. `None` when that class binds the name otherwise (a
+    /// class attribute shadows a base's property), a base heki does not know comes first (it
+    /// may define the name), or no class names it. Unlike [`Self::mro_method`], which skips
+    /// what is not a function.
+    pub fn first_definition(&self, class: &str, name: &str) -> Option<FuncKey> {
+        for c in self.mro(&self.canonical(class)) {
+            self.read(|k| note(&mut k.class_facts, &c));
+            match self.class(&c) {
+                Some(d) if d.members.contains(name) => return self.own_method(&c, name),
+                Some(_) => {}
+                None if PLAIN_BASES.contains(&c.as_str()) => {}
+                None => return None,
+            }
+        }
+        None
+    }
+
     /// Whether an instance of exactly `class` calling `method` runs one of `callee`: the
     /// definition its MRO finds is a target (a library one, [`Self::inherited_external`], only
     /// as the call's single target), or it has none and the call raises. A protocol has
@@ -3993,6 +4046,9 @@ fn attr_displays(input: &ModuleInput<'_>, decls: &mut ModuleDecls) {
 const PLAIN_BASES: &[&str] = &[
     "object",
     "builtins.object",
+    // `abc.ABC` defines no attribute but empty `__slots__`, and its metaclass `abc.ABCMeta`
+    // installs no descriptor.
+    "abc.ABC",
     "typing.NamedTuple",
     "typing_extensions.NamedTuple",
     "typing.Generic",
@@ -5872,6 +5928,27 @@ impl<'a> TypeCtx<'a> {
             _ => recv
                 .and_then(Val::recv)
                 .is_some_and(|recv| self.targets_complete_on(recv, method, callee)),
+        }
+    }
+
+    /// Whether `keys`, the property getters [`Self::resolve_attr_load`] resolves reading
+    /// `recv.attr` to, are every getter the read can run (`CallSite::complete`): on an instance,
+    /// each class the value may be (R2) finds one of them first along its MRO
+    /// ([`ProjectDecls::getters_complete`]), on each member of a union too. Through `super()` the
+    /// read runs the one getter it resolves to, as a method call through `super()` does
+    /// ([`Self::targets_complete_on`]); a read on a class or module object runs no getter.
+    pub fn getter_targets_complete(
+        &self,
+        recv: Option<&Val>,
+        attr: &str,
+        keys: &[FuncKey],
+    ) -> bool {
+        match recv {
+            Some(Val::Inst(class)) => self.project.getters_complete(class, attr, keys),
+            Some(Val::Union(classes)) => classes
+                .iter()
+                .all(|c| self.project.getters_complete(c, attr, keys)),
+            _ => matches!(recv, Some(Val::Super(_))),
         }
     }
 

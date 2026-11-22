@@ -3227,12 +3227,12 @@ fn steps_property_getters() -> Vec<Step> {
             "a getter read from an async def in another file starts blocking",
             vec![save("pkg/remote.py", REMOTE_BLOCKING)],
         )
-        .present(&[("pkg/reader.py", "EFF111")]),
+        .present(&[("pkg/reader.py", "EFF101")]),
         Step::new(
             "the getter stops blocking",
             vec![save("pkg/remote.py", REMOTE)],
         )
-        .absent(&[("pkg/reader.py", "EFF111")]),
+        .absent(&[("pkg/reader.py", "EFF101")]),
     ]
 }
 
@@ -3588,7 +3588,7 @@ fn steps_re_exports() -> Vec<Step> {
                 &UI_IMPL.replace("    def data", "    @property\n    def data"),
             )],
         )
-        .present(&[("pkg/consumer.py", "EFF111")]),
+        .present(&[("pkg/consumer.py", "EFF101")]),
         Step::new(
             "the getter `__hash__` reads becomes a property reading a mutated attribute",
             vec![save(
@@ -3612,7 +3612,7 @@ fn steps_re_exports() -> Vec<Step> {
             "the re-exported classes are plain again",
             vec![save("pkg/ui/impl.py", UI_IMPL)],
         )
-        .absent(&[("pkg/consumer.py", "EFF111"), ("pkg/consumer.py", "MUT107")]),
+        .absent(&[("pkg/consumer.py", "EFF101"), ("pkg/consumer.py", "MUT107")]),
     ]
 }
 
