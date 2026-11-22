@@ -76,6 +76,40 @@ Each diagnostic has:
 instead, which makes a good prompt for the fix. `heki rule --all --output-format json` gives
 every rule's metadata and documentation.
 
+## Ask a model: `heki check --generate-prompt` (experimental)
+
+When a diagnostic is unclear, or the fix or the contract to write is, print a prompt for a model
+and give it to one:
+
+```console
+$ heki check --generate-prompt
+$ heki check app/ --generate-prompt "Why is load_user reported, and where does the fix go?"
+$ heki check --generate-prompt "Write a write-owners contract for Store.items" | claude -p
+$ heki check --generate-prompt --output-format json
+$ heki check --output-format-json-schema generate-prompt
+```
+
+| Section | Content |
+| ------- | ------- |
+| Question | the question, when one is given |
+| Configuration | the project root, the configuration file, the target version, the source roots, the rule selection in effect (`select`, `extend-select`, `ignore`, `per-file-ignores`, `lint.heuristic`, `fail-on`), the baseline, and the declared contracts as TOML |
+| Rules that apply | each rule the run applies: its code, name, certainty, activation, and the first paragraph of its "What a report states" |
+| Diagnostics | the diagnostics of the run in the `concise` form (with a baseline, the reports it does not allow), up to 16 KiB of lines, with a note counting the rest, and the files heki could not analyze |
+| How to answer | fix at the root cause, do not suppress, check `heuristic` reports, rely on proven fixes only, how a contract is written, and what the answer holds |
+
+- A word after the option is the question: put the paths before it.
+- The prompt comes from the analysis `heki check` runs with the same options and configuration.
+  The command writes no file and exits with 0 once the prompt is printed, also when a file could
+  not be analyzed; a configuration error exits with 2, as for `heki check`.
+- It cannot be combined with `--fix`, `--diff`, `--watch`, `--update-baseline`, `--profile`, or
+  `--include-size-dependent`.
+- `--output-format json` prints the same content as one object, and
+  `--output-format-json-schema generate-prompt` prints its JSON Schema. Its `version` changes
+  when a field is removed or changes meaning. Every other output format prints the Markdown
+  prompt.
+- Pipe the prompt to a model's command line (`| claude -p`, `| codex exec`) or copy it
+  (`| pbcopy`, `| xclip -selection clipboard`, `| clip.exe`).
+
 ## Use the LSP server
 
 Agents that talk LSP (for example through an editor or an MCP bridge) can start `heki server`

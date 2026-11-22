@@ -2092,6 +2092,10 @@ Options:
           Experimental: offline profile dump (collapsed stacks of CPython 3.15's profiler or py-spy, or `--gecko` JSON): apply the `size-dependent` fixes in its hot functions (in every function with `--include-size-dependent`)
       --watch
           Watch for file changes and re-run incrementally
+      --generate-prompt [<QUESTION>]
+          Experimental: print a prompt for consulting a language model about this run instead of the report: the configuration, the rules that apply, the diagnostics, how to answer, and QUESTION when given (put PATHS before the option). `--output-format json` prints it as JSON. Writes no file and exits with 0
+      --output-format-json-schema <TARGET>
+          Print the JSON Schema of a JSON output and exit: `generate-prompt`, the object of `--generate-prompt --output-format json` [possible values: generate-prompt]
   -h, --help
           Print help
 ```
@@ -2501,6 +2505,7 @@ An experimental rule is never enabled by default: it runs only when `select` or 
 
 | ID | Kind | Target | Since | Tracking |
 | -- | ---- | ------ | ----- | -------- |
+| `cli-option.generate-prompt` | cli-option | `heki check --generate-prompt` | 0.2.2 | - |
 | `cli-option.profile` | cli-option | `heki check --profile` | 0.1.1 | - |
 | `command.inspect` | command | `heki inspect` | 0.2.1 | - |
 | `rule.EFF109` | rule | [`EFF109`](https://heki.koxudaxi.dev/rules/lock-reacquired-while-held/) | 0.2.1 | - |
@@ -2509,6 +2514,14 @@ An experimental rule is never enabled by default: it runs only when `select` or 
 | `rule.MUT111` | rule | [`MUT111`](https://heki.koxudaxi.dev/rules/cached-property-stale-read/) | 0.1.1 | - |
 | `rule.MUT112` | rule | [`MUT112`](https://heki.koxudaxi.dev/rules/conditional-ownership-mutation/) | 0.2.0 | - |
 | `rule.MUT113` | rule | [`MUT113`](https://heki.koxudaxi.dev/rules/iterated-container-mutation/) | 0.2.0 | - |
+
+## `cli-option.generate-prompt`
+
+- **Kind:** cli-option
+- **Target:** `heki check --generate-prompt`
+- **Since:** 0.2.2
+
+What the prompt holds and how it says it can still change as it is tried with models, and so can its JSON object, whose schema `heki check --output-format-json-schema generate-prompt` prints; the object's `version` changes when a field is removed or changes meaning.
 
 ## `cli-option.profile`
 
@@ -2846,6 +2859,40 @@ Each diagnostic has:
 `heki rule <CODE>` prints a rule's documentation: what it does, why it matters, and what to do
 instead, which makes a good prompt for the fix. `heki rule --all --output-format json` gives
 every rule's metadata and documentation.
+
+## Ask a model: `heki check --generate-prompt` (experimental)
+
+When a diagnostic is unclear, or the fix or the contract to write is, print a prompt for a model
+and give it to one:
+
+```console
+$ heki check --generate-prompt
+$ heki check app/ --generate-prompt "Why is load_user reported, and where does the fix go?"
+$ heki check --generate-prompt "Write a write-owners contract for Store.items" | claude -p
+$ heki check --generate-prompt --output-format json
+$ heki check --output-format-json-schema generate-prompt
+```
+
+| Section | Content |
+| ------- | ------- |
+| Question | the question, when one is given |
+| Configuration | the project root, the configuration file, the target version, the source roots, the rule selection in effect (`select`, `extend-select`, `ignore`, `per-file-ignores`, `lint.heuristic`, `fail-on`), the baseline, and the declared contracts as TOML |
+| Rules that apply | each rule the run applies: its code, name, certainty, activation, and the first paragraph of its "What a report states" |
+| Diagnostics | the diagnostics of the run in the `concise` form (with a baseline, the reports it does not allow), up to 16 KiB of lines, with a note counting the rest, and the files heki could not analyze |
+| How to answer | fix at the root cause, do not suppress, check `heuristic` reports, rely on proven fixes only, how a contract is written, and what the answer holds |
+
+- A word after the option is the question: put the paths before it.
+- The prompt comes from the analysis `heki check` runs with the same options and configuration.
+  The command writes no file and exits with 0 once the prompt is printed, also when a file could
+  not be analyzed; a configuration error exits with 2, as for `heki check`.
+- It cannot be combined with `--fix`, `--diff`, `--watch`, `--update-baseline`, `--profile`, or
+  `--include-size-dependent`.
+- `--output-format json` prints the same content as one object, and
+  `--output-format-json-schema generate-prompt` prints its JSON Schema. Its `version` changes
+  when a field is removed or changes meaning. Every other output format prints the Markdown
+  prompt.
+- Pipe the prompt to a model's command line (`| claude -p`, `| codex exec`) or copy it
+  (`| pbcopy`, `| xclip -selection clipboard`, `| clip.exe`).
 
 ## Use the LSP server
 
