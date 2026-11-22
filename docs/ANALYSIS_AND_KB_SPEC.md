@@ -1354,7 +1354,10 @@ message = "write model state through GenerationStore instead"
      - **container mutation through an alias**: `xs = obj.a; xs.append(...)` / `xs[i] = ...` /
        `xs.clear()` / `xs.sort()` / `xs |= ...` (through alias tracking and
        `mutated_param_paths`, **handing `obj.a` to `helper(obj.a)` that calls `.append()` is
-       caught across calls**). An alias is one in the scopes nested in its function too: a
+       caught across calls**). An augmented assignment that changes a built-in container in
+       place (`types::changes_in_place`: `+=` on a list, `|=` on a dict, `-=` on a set) gives
+       the container itself, so the name it rebinds stays the alias and keeps its type
+       (`xs |= {}; xs["k"] = v`); on any other value (`n += 1`) it binds a new object. An alias is one in the scopes nested in its function too: a
        read of its closure cell joins the aliases of every value the function binds to it, as
        a phi joins its inputs (the function is summarized before the scopes nested in it), and
        a cell a nested scope rebinds (`nonlocal`) is no alias. `getattr(obj, "a"[, default])`

@@ -1288,7 +1288,10 @@ A container entry (`Class.attr["key"]`):
 - is reported once, under the entry, when its container is a target too.
 
 A write into the entries of a target's container (`model.meta["kw"][name] = v`) is a write of
-the target.
+the target. So is a write through a local alias of the container (`kw = model.meta["kw"]`), also
+after an augmented assignment that changes the container in place and so keeps it
+(`kw |= other`, `items += more`, `-=`, `&=`, `^=` on a set); one on any other value
+(`count += 1`) binds a new object.
 
 With `fresh-objects = "allow"`, a write is no violation when it constructs the object it writes:
 

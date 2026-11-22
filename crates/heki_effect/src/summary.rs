@@ -67,35 +67,6 @@ const MIN_KEPT_PAIRS: usize = 4096;
 const ORIGIN_STEPS_PER_SOURCE_BYTE: usize = 1;
 const MIN_ORIGIN_STEPS: usize = 4096;
 
-/// Augmented assignments changing a container in place, by the container's class: `xs += ys`
-/// extends a list, `s |= t` updates a set (`__iadd__`, `__ior__`, ...).
-const IN_PLACE_OPERATORS: &[(&str, &[BinOpKind])] = &[
-    ("builtins.list", &[BinOpKind::Add, BinOpKind::Mult]),
-    ("builtins.bytearray", &[BinOpKind::Add, BinOpKind::Mult]),
-    (
-        "builtins.set",
-        &[
-            BinOpKind::BitOr,
-            BinOpKind::BitAnd,
-            BinOpKind::Sub,
-            BinOpKind::BitXor,
-        ],
-    ),
-    ("builtins.dict", &[BinOpKind::BitOr]),
-    ("collections.deque", &[BinOpKind::Add, BinOpKind::Mult]),
-    ("collections.OrderedDict", &[BinOpKind::BitOr]),
-    ("collections.defaultdict", &[BinOpKind::BitOr]),
-    (
-        "collections.Counter",
-        &[
-            BinOpKind::Add,
-            BinOpKind::Sub,
-            BinOpKind::BitOr,
-            BinOpKind::BitAnd,
-        ],
-    ),
-];
-
 /// Execution effects `EFF101` treats as blocking the event loop.
 pub const BLOCKING_EFFECTS: &[ExecEffectKind] = ExecEffectKind::BLOCKING;
 
@@ -1351,8 +1322,9 @@ impl<'a> Extractor<'a> {
         }
     }
 
-    /// [`Self::may_params`]: a monotone fixpoint over copies and phis, from the parameters and
-    /// the reads of the enclosing functions' parameters ([`Self::captured_bit`]).
+    /// [`Self::may_params`]: a monotone fixpoint over copies, in-place container operators
+    /// ([`Self::same_object`]), and phis, from the parameters and the reads of the enclosing
+    /// functions' parameters ([`Self::captured_bit`]).
     fn build_may_params(&mut self) {
         for (i, p) in self.f.params.iter().enumerate().take(64) {
             *self.may_params.entry(p.var).or_default() |= 1u64 << i;
@@ -1374,16 +1346,35 @@ impl<'a> Extractor<'a> {
                     });
                     changed |= or_bits(&mut self.may_params, phi.dst, bits);
                 }
+                self.pos = (bb.id, 0);
                 for inst in &bb.insts {
-                    if let InstKind::Copy { dst, src } = &inst.kind {
-                        let bits = self.may_params.get(src).copied().unwrap_or(0);
-                        changed |= or_bits(&mut self.may_params, *dst, bits);
+                    if let Some((dst, src)) = self.same_object(&inst.kind) {
+                        let bits = self.may_params.get(&src).copied().unwrap_or(0);
+                        changed |= or_bits(&mut self.may_params, dst, bits);
                     }
                 }
             }
             if !changed {
                 return;
             }
+        }
+    }
+
+    /// `(dst, src)` of an instruction whose result is the object it is handed: a copy, or an
+    /// augmented assignment changing a built-in container in place (`items += more`,
+    /// `extras |= other`), which gives the container itself. On any other value
+    /// (`count += 1`) it binds a new object.
+    fn same_object(&self, kind: &InstKind) -> Option<(VarId, VarId)> {
+        match kind {
+            InstKind::Copy { dst, src } => Some((*dst, *src)),
+            InstKind::BinOp {
+                dst,
+                op,
+                lhs,
+                in_place: true,
+                ..
+            } if self.has_in_place_operator(*lhs, *op) => Some((*dst, *lhs)),
+            _ => None,
         }
     }
 
@@ -1495,9 +1486,10 @@ impl<'a> Extractor<'a> {
         }
     }
 
-    /// Alias maps through `AttrLoad`, `Copy`, agreeing phis, the calls and property reads that
-    /// return an attribute of what they are handed, and the closure cells of enclosing functions
-    /// (iterated to a fixpoint).
+    /// Alias maps through `AttrLoad`, copies and in-place container operators
+    /// ([`Self::same_object`]), agreeing phis, the calls and property reads that return an
+    /// attribute of what they are handed, and the closure cells of enclosing functions (iterated
+    /// to a fixpoint).
     fn build_aliases(&mut self) {
         for (i, p) in self.f.params.iter().enumerate() {
             if let Ok(i) = u8::try_from(i)
@@ -1548,33 +1540,10 @@ impl<'a> Extractor<'a> {
                     }
                 }
                 for inst in &bb.insts {
+                    if let Some((dst, src)) = self.same_object(&inst.kind) {
+                        self.alias_same_object(dst, src);
+                    }
                     match &inst.kind {
-                        InstKind::Copy { dst, src } => {
-                            if let Some(a) = self.param_alias.get(src).cloned() {
-                                self.param_alias.insert(*dst, a);
-                            }
-                            if let Some(a) = self.param_slot_alias.get(src).cloned() {
-                                self.param_slot_alias.insert(*dst, a);
-                            }
-                            if let Some(a) = self.param_copy_alias.get(src).cloned() {
-                                self.param_copy_alias.insert(*dst, a);
-                            }
-                            if let Some(a) = self.self_attr_alias.get(src).cloned() {
-                                self.self_attr_alias.insert(*dst, a);
-                            }
-                            if let Some(a) = self.obj_attr_alias.get(src).cloned() {
-                                let copy = ObjAttr { direct: false, ..a };
-                                self.obj_attr_alias.insert(*dst, copy);
-                            }
-                            if let Some(o) = self.dict_of.get(src).cloned() {
-                                self.dict_of.insert(*dst, o);
-                            }
-                            if !self.item_alias.is_empty()
-                                && let Some(i) = self.item_alias.get(src).cloned()
-                            {
-                                self.item_alias.insert(*dst, i);
-                            }
-                        }
                         kind @ (InstKind::AttrLoad { .. }
                         | InstKind::Call { .. }
                         | InstKind::MethodCall { .. }
@@ -1835,6 +1804,34 @@ impl<'a> Extractor<'a> {
             _ => None,
         };
         views.then_some((*recv, ItemStep::Items(index)))
+    }
+
+    /// The aliases of `src` for `dst`, the same object ([`Self::same_object`]).
+    fn alias_same_object(&mut self, dst: VarId, src: VarId) {
+        if let Some(a) = self.param_alias.get(&src).cloned() {
+            self.param_alias.insert(dst, a);
+        }
+        if let Some(a) = self.param_slot_alias.get(&src).cloned() {
+            self.param_slot_alias.insert(dst, a);
+        }
+        if let Some(a) = self.param_copy_alias.get(&src).cloned() {
+            self.param_copy_alias.insert(dst, a);
+        }
+        if let Some(a) = self.self_attr_alias.get(&src).cloned() {
+            self.self_attr_alias.insert(dst, a);
+        }
+        if let Some(a) = self.obj_attr_alias.get(&src).cloned() {
+            let copy = ObjAttr { direct: false, ..a };
+            self.obj_attr_alias.insert(dst, copy);
+        }
+        if let Some(o) = self.dict_of.get(&src).cloned() {
+            self.dict_of.insert(dst, o);
+        }
+        if !self.item_alias.is_empty()
+            && let Some(i) = self.item_alias.get(&src).cloned()
+        {
+            self.item_alias.insert(dst, i);
+        }
     }
 
     /// The alias maps of `dst`, a read of the closure cell `name` of an enclosing function: the
@@ -5048,9 +5045,7 @@ impl<'a> Extractor<'a> {
     /// Whether `lhs op= ...` changes the built-in container `lhs` holds in place, whatever the
     /// result is stored to.
     fn has_in_place_operator(&self, lhs: VarId, op: BinOpKind) -> bool {
-        matches!(self.val(lhs), Some(Val::Inst(class)) if IN_PLACE_OPERATORS
-            .iter()
-            .any(|(c, ops)| c == class && ops.contains(&op)))
+        matches!(self.val(lhs), Some(Val::Inst(class)) if crate::types::changes_in_place(class, op))
     }
 
     /// Whether the checked container of `self` that `obj` holds has the key `key` at instruction
