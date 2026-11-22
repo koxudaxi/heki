@@ -1220,3 +1220,256 @@ def use() -> None:
         ]
     );
 }
+
+#[test]
+fn a_change_below_an_item_or_element_of_a_parameter_changes_the_parameter() {
+    let p = project(
+        "param_elements",
+        r#"[[tool.heki.readonly-returns]]
+name = "schemas"
+producers = ["registry.schema", "registry.flat"]
+deep = true
+
+[[tool.heki.readonly-returns]]
+name = "flat"
+producers = ["registry.flat_only"]
+"#,
+    );
+    p.write(
+        "registry.py",
+        r#"def schema(name):
+    return {}
+
+
+def flat_only(name):
+    return {}
+"#,
+    )
+    .write(
+        "helpers.py",
+        r#"import copy
+from collections import OrderedDict
+
+
+def by_key(orig):
+    orig["tags"].append(1)
+
+
+def by_index(orig):
+    orig[0].append(1)
+
+
+def by_iteration(orig):
+    for row in orig:
+        row.clear()
+
+
+def by_items_view(orig):
+    for _, rows in orig.items():
+        rows.append(1)
+
+
+def by_get(orig):
+    orig.get("tags").append(1)
+
+
+def below_an_attribute(orig):
+    orig.groups[0].append(1)
+
+
+def through_dict(orig):
+    draft = dict(orig)
+    draft["tags"].append(1)
+
+
+def through_method(orig):
+    draft = orig.copy()
+    draft["tags"].append(1)
+
+
+def through_unpacking(orig):
+    draft = {**orig}
+    draft["tags"].append(1)
+
+
+def through_list(orig):
+    draft = list(orig)
+    draft[0].append(1)
+
+
+def through_slice(orig):
+    draft = orig[:]
+    draft[0].append(1)
+
+
+def through_ordered_dict(orig):
+    draft = OrderedDict(orig)
+    draft["tags"].append(1)
+
+
+def through_copy_iteration(orig):
+    for row in list(orig):
+        row.clear()
+
+
+def through_copy_attribute_item(orig):
+    draft = copy.copy(orig)
+    draft.groups["x"] = 1
+
+
+def changes_its_item(x):
+    x["tags"].append(1)
+
+
+def changes_itself(x):
+    x.append(1)
+
+
+def handed_a_copy(orig):
+    changes_its_item(dict(orig))
+
+
+def handed_an_item(orig):
+    changes_itself(orig["tags"])
+
+
+def rebinds_the_item(orig):
+    draft = dict(orig)
+    draft["tags"] = []
+    draft["tags"].append(1)
+
+
+def inserts_first(orig):
+    draft = list(orig)
+    draft.insert(0, [])
+    draft[0].append(1)
+
+
+def rebinds_and_changes(x):
+    x["tags"] = []
+    x["tags"].append(1)
+
+
+def handed_a_copy_it_rebinds(orig):
+    rebinds_and_changes(dict(orig))
+"#,
+    )
+    .write(
+        "use.py",
+        r#"from helpers import (
+    below_an_attribute,
+    by_get,
+    by_index,
+    by_items_view,
+    by_iteration,
+    by_key,
+    handed_a_copy,
+    handed_a_copy_it_rebinds,
+    handed_an_item,
+    inserts_first,
+    rebinds_the_item,
+    through_copy_attribute_item,
+    through_copy_iteration,
+    through_dict,
+    through_list,
+    through_method,
+    through_ordered_dict,
+    through_slice,
+    through_unpacking,
+)
+from registry import flat_only, schema
+
+
+def use(name):
+    by_key(schema(name))
+    by_index(schema(name))
+    by_iteration(schema(name))
+    by_items_view(schema(name))
+    by_get(schema(name))
+    below_an_attribute(schema(name))
+    through_dict(schema(name))
+    through_method(schema(name))
+    through_unpacking(schema(name))
+    through_list(schema(name))
+    through_slice(schema(name))
+    through_ordered_dict(schema(name))
+    through_copy_iteration(schema(name))
+    through_copy_attribute_item(schema(name))
+    handed_a_copy(schema(name))
+    handed_an_item(schema(name))
+    rebinds_the_item(schema(name))
+    inserts_first(schema(name))
+    handed_a_copy_it_rebinds(schema(name))
+    by_key(flat_only(name))
+"#,
+    );
+    // Each helper changes an object the shared value holds, directly or through its own shallow
+    // copy; one that first gives the copy a new item changes only that. A producer that is not
+    // deep shares only its object, not what it holds.
+    let expected: Vec<_> = (26..=41).map(|line| at("use.py", line, "use")).collect();
+    assert_eq!(reports(&p, "MUT202"), expected);
+
+    // The helpers' own summaries say so, also for `EFF201`'s `mutates-params`.
+    let p = project(
+        "param_elements_boundary",
+        r#"[[tool.heki.effect-boundaries]]
+name = "pure"
+scopes = ["helpers.*"]
+forbid = ["mutates-params"]
+"#,
+    );
+    p.write(
+        "helpers.py",
+        r#"from inner import changes_its_item, rebinds_and_changes
+
+
+def by_key(orig):
+    orig["tags"].append(1)
+
+
+def through_list(orig):
+    draft = list(orig)
+    draft[0].append(1)
+
+
+def handed_a_copy(orig):
+    changes_its_item(dict(orig))
+
+
+def handed_a_part_of_a_copy(orig):
+    changes_its_item(dict(orig)["rows"])
+
+
+def rebinds_the_item(orig):
+    draft = dict(orig)
+    draft["tags"] = []
+    draft["tags"].append(1)
+
+
+def handed_a_copy_it_rebinds(orig):
+    rebinds_and_changes(dict(orig))
+"#,
+    )
+    .write(
+        "inner.py",
+        r#"def changes_its_item(x):
+    x["tags"].append(1)
+
+
+def rebinds_and_changes(x):
+    x["tags"] = []
+    x["tags"].append(1)
+"#,
+    );
+    assert_eq!(
+        reports(&p, "EFF201"),
+        vec![
+            at("helpers.py", 4, "by_key"),
+            at("helpers.py", 8, "through_list"),
+            at("helpers.py", 13, "handed_a_copy"),
+            at("helpers.py", 17, "handed_a_part_of_a_copy"),
+        ]
+    );
+    let (_, stdout, _) = p.heki(&["inspect", "helpers.through_list", "."]);
+    assert!(stdout.contains("orig[...]"), "{stdout}");
+}

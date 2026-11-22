@@ -4364,7 +4364,8 @@ It does not report:
 - a conditional expression changed in place without a name (`(a if c else b).append(x)`): the
   code picks the container on purpose;
 - attribute assignments, and changes of a value below the borrowed one (`x[0].append(1)`): a
-  copy of `x` shares those too;
+  copy of `x` shares those too (an item or attribute of a shallow copy of `x`, `dict(x)["k"]`,
+  is the item of `x` it holds, borrowed);
 - `self` in its own methods, and paths a branch on a constant never takes (`while True:`).
 
 ## What a report states
@@ -4495,8 +4496,11 @@ count for a read.
     `__init__` heki cannot read, may lead it to an installed module. A relative name is
     anchored at `package` (a text, or the module's own `__package__` or `__name__`). Inside a
     `try` that takes an `ImportError`, such a call still counts;
-  - `mutates-params`: mutating a parameter, its attributes, or its contents. For a method,
-    parameter 0 is `self`, so a method writing `self.x` mutates a parameter.
+  - `mutates-params`: mutating a parameter, its attributes, or its contents, also an object it
+    holds as an item or an element (`p["k"].append(x)`, `for row in p: row.clear()`), directly
+    or through a shallow copy of it (`dict(p)["k"].append(x)`), unless the function gave that
+    item a new object first. For a method, parameter 0 is `self`, so a method writing `self.x`
+    mutates a parameter.
 - `write-universe` with `allow-writes` states the writes a scope may make positively: a reached
   write of a `write-universe` entry that no `allow-writes` entry names is reported, in every form
   `writes-targets` follows. `allow-writes` also exempts writes from `write-targets` in the same
@@ -6927,8 +6931,11 @@ reference), and the deep copy sanitizers of the ecosystem knowledge base clear i
 sanitizer declared `copy-sanitizer = "shallow"`, and slices of builtin lists, other builtin
 sequences, and values whose class heki cannot infer, `rows()[:]`) free the top level only: the
 values below stay shared, so a helper rebinding an attribute of the copy (`b.name = "new"`)
-changes nothing shared, and one changing the object an attribute holds (`b.tags.append(x)`, also
-on its own shallow copy of the argument) does. A slice of an object of another known class may
+changes nothing shared, and one changing the object an attribute or an item holds
+(`b.tags.append(x)`, `b["tags"].append(x)`, `for row in b: row.clear()`, also on its own
+shallow copy of the argument) does, unless it gave that item a new object first. A producer
+that is not `deep` shares only the object itself: a helper changing what it holds as items does
+not change it. A slice of an object of another known class may
 be a view of it (`numpy`) and stays shared. A `copy()` method of a project class copies as
 deeply as its body does: its result is shared only when the method returns a shared value. A
 wrapper that returns a copy on one path and the shared value on another still returns a shared

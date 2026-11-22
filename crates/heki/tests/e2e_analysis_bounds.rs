@@ -3273,3 +3273,28 @@ fn the_paths_of_many_packages_merged_in_one_function_are_decided_once() {
         vec!["plugin"]
     );
 }
+
+/// A function binding names each to an item of the one before (`e = e["k"]`) five thousand deep,
+/// each changed in place, under a `mutates-params` boundary: which parameter's items each changed
+/// object may be is decided once per value, not by a walk back up the chain at every change.
+#[test]
+fn changes_down_a_long_item_chain_decide_each_element_once() {
+    let links = 5_000;
+    let mut lines = vec!["def walk(p):".to_owned(), "    e = p".to_owned()];
+    for i in 0..links {
+        lines.push("    e = e[\"k\"]".to_owned());
+        lines.push(format!("    e.append({i})"));
+    }
+    let p = Project::new("bounds_element_chain");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[[tool.heki.effect-boundaries]]\nname = \"pure\"\nscopes = [\"m.*\"]\nforbid = [\"mutates-params\"]\n",
+    )
+    .write("m.py", &(lines.join("\n") + "\n"));
+    let found: Vec<u64> = check_within(&p, Duration::from_secs(20))
+        .iter()
+        .filter(|d| d["rule_code"] == "EFF201")
+        .map(|d| d["line"].as_u64().unwrap())
+        .collect();
+    assert_eq!(found, vec![1]);
+}

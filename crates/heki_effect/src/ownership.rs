@@ -10,10 +10,10 @@
 //!
 //! [`EffectSummary::return_origins`]: crate::EffectSummary::return_origins
 
-use crate::readonly::{COPY_METHODS, SLICE_COPYING_TYPES};
+use crate::readonly::{self, COPY_METHODS, SLICE_COPYING_TYPES};
 use crate::resolver::Callee;
 use heki_ast::Span;
-use heki_ir::{Inst, InstKind, PhiNode, VarId};
+use heki_ir::{Inst, InstKind, IrFunction, PhiNode, VarId};
 use heki_kb::EffectiveEcosystemKb;
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
@@ -181,6 +181,9 @@ pub enum Holder<'i> {
 pub enum Source<'i> {
     /// A new object.
     New,
+    /// A new object holding the elements of the operands: a shallow copy of them
+    /// ([`readonly::copy_of`]).
+    Copy(&'i [VarId]),
     /// State that outlives the call.
     Held(Holder<'i>),
     /// The operand's object: a copy of the reference, `typing.cast`, an in-place operator.
@@ -224,24 +227,36 @@ const NEW_OBJECT_CALLS: &[&str] = &[
 /// `typing.cast(T, value)` returns `value`.
 const CASTS: &[&str] = &["typing.cast", "typing_extensions.cast"];
 
-/// What the instruction `kind` makes of the object its result holds. A call's resolution is
-/// `callee` (`None` for any other instruction); `constructs` says the call constructs a project
-/// class. `made_here` tells the values holding an object the function makes itself
-/// ([`made_here`]): an attribute of such an object is one of its elements, of unknown origin,
-/// not state that outlives the call.
+/// What the instruction `kind` of `f` makes of the object its result holds. A call's resolution
+/// is `callee` (`None` for any other instruction); `constructs` says the call constructs a
+/// project class. `made_here` tells the values holding an object the function makes itself
+/// ([`made_here`]): an attribute of such an object is one of its elements, not state that
+/// outlives the call.
 pub fn source<'i>(
+    f: &IrFunction,
     kind: &'i InstKind,
     callee: Option<&Callee>,
     constructs: bool,
     kb: &EffectiveEcosystemKb,
     made_here: &dyn Fn(VarId) -> bool,
 ) -> Source<'i> {
+    let copy = || {
+        let callee = callee.unwrap_or(&Callee::Unresolved);
+        readonly::copy_of(f, kind, callee, kb).map(|c| {
+            if c.deep {
+                Source::New
+            } else {
+                Source::Copy(c.operands)
+            }
+        })
+    };
     match kind {
-        InstKind::AllocBuiltin { .. }
-        | InstKind::DictLiteral { .. }
-        | InstKind::Convert { .. }
-        | InstKind::Format { .. }
-        | InstKind::BuildString { .. } => Source::New,
+        InstKind::AllocBuiltin { .. } | InstKind::DictLiteral { .. } => {
+            copy().unwrap_or(Source::New)
+        }
+        InstKind::Convert { .. } | InstKind::Format { .. } | InstKind::BuildString { .. } => {
+            Source::New
+        }
         InstKind::BinOp {
             lhs,
             in_place: true,
@@ -268,6 +283,9 @@ pub fn source<'i>(
             }
             if let Some(Callee::Project(..)) = callee {
                 return Source::Project;
+            }
+            if let Some(copied) = copy() {
+                return copied;
             }
             let symbol = match callee {
                 Some(Callee::External(s)) => s.as_str(),
@@ -307,46 +325,18 @@ pub fn source<'i>(
     }
 }
 
-/// Calls of these with one argument return a copy of it.
-const COPYING_CALLS: &[&str] = &[
-    "builtins.list",
-    "builtins.dict",
-    "builtins.set",
-    "builtins.bytearray",
-    "collections.OrderedDict",
-    "collections.deque",
-    "copy.copy",
-    "copy.deepcopy",
-];
-
-/// The operand whose copy the instruction `kind` makes (with the call's resolution `callee`): the
-/// receiver of a copy method (`x.copy()`), or the argument of a copying call with that argument
-/// alone (`list(x)`, `dict(x)`, `copy.copy(x)`, a copy sanitizer of the catalog).
+/// The one value the instruction `kind` of `f` copies, shallowly or deeply, with the call's
+/// resolution `callee` ([`readonly::copy_of`]): the receiver of a copy method (`x.copy()`), or
+/// the argument of a copying call given it alone (`list(x)`, `copy.deepcopy(x)`).
 pub fn copied_operand(
+    f: &IrFunction,
     kind: &InstKind,
     callee: Option<&Callee>,
     kb: &EffectiveEcosystemKb,
 ) -> Option<VarId> {
-    match kind {
-        InstKind::MethodCall {
-            recv,
-            method,
-            args,
-            kwargs,
-            ..
-        } if args.is_empty() && kwargs.is_empty() && COPY_METHODS.contains(&method.as_str()) => {
-            Some(*recv)
-        }
-        InstKind::Call { args, kwargs, .. } if args.len() == 1 && kwargs.is_empty() => {
-            let Some(Callee::External(symbol)) = callee else {
-                return None;
-            };
-            let copies = COPYING_CALLS.contains(&symbol.as_str())
-                || kb
-                    .lookup(symbol)
-                    .is_some_and(|e| e.copy_sanitizer.is_some());
-            copies.then_some(args[0])
-        }
+    let callee = callee.unwrap_or(&Callee::Unresolved);
+    match readonly::copy_of(f, kind, callee, kb)?.operands {
+        [copied] => Some(*copied),
         _ => None,
     }
 }
@@ -366,7 +356,7 @@ pub fn made_here<'i>(
     source_of: &SourceGiven<'i, '_>,
 ) -> bool {
     defs.get(&root)
-        .is_some_and(|inst| matches!(source_of(inst, &|_| false), Source::New))
+        .is_some_and(|inst| matches!(source_of(inst, &|_| false), Source::New | Source::Copy(_)))
 }
 
 /// [`source`] of a method call outside the project, by the method's name.
@@ -582,6 +572,10 @@ pub(crate) fn origins_of<'i>(
         let source = defs.get(&var).map_or(Source::Unknown, |i| source_of(i));
         match source {
             Source::New => out.known.new |= part == Part::Object,
+            Source::Copy(copied) => match part {
+                Part::Object => out.known.new = true,
+                Part::Element => work.extend(copied.iter().map(|v| (*v, Part::Element))),
+            },
             Source::Held(_) => out.known.held = true,
             Source::Same(v) => work.push((v, part)),
             Source::Element(v) => work.push((v, Part::Element)),

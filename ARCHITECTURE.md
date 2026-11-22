@@ -335,6 +335,7 @@ EffectSummary(f) = {
     consumes_params:          Bitset,               // parameter i is iterated to exhaustion (MUT106)
     unconditional_forwards:   Bitset,               // parameters passed on at calls that always run
     mutated_param_paths:      Map<ParamIdx, Set<AttrPath>>, // attributes / elements changed through parameter i
+                                                    // ("[]": below its items, also through a shallow copy)
     reads_self_attrs:         Set<AttrKeyPath>,     // reads of self.<attr> (constant dict keys included)
     mutates_self_attrs:       Set<AttrKeyPath>,     // reassignment or in-place change of self.<attr>
     invalidates_cached:       Set<AttrName>,        // del self.<prop>, self.__dict__.pop("<prop>", ...)
