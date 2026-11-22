@@ -148,7 +148,7 @@ A function in `app/api.py` that appends to `order.items` through a helper breaks
 
 ```console
 $ heki check
-app/api.py:9:5: MUT201 (write-owner-violation) [error, heuristic] `add_gift_wrap` writes `app.models.Order.items` (indirect_helper) via `app.api._append` outside the write owners of `order-store`
+app/api.py:9:5: MUT201 (write-owner-violation) [error, heuristic] `add_gift_wrap` writes `app.models.Order.items` (through a helper) via `app.api._append` outside the write owners of `order-store`
   |
 9 |     _append(order.items, "gift-wrap")
   |     ^
@@ -395,7 +395,7 @@ heki follows the call into `load_user` and the alias into `add_default`:
 ```console
 $ heki check --output-format concise
 app/api.py:5:12: EFF101 `app.users.load_user` always runs the waiting call `requests.get` on the event loop (3 calls down, on every path)
-app/models.py:17:5: MUT201 [heuristic] `parse` writes `Model.fields` (indirect_helper) via `app.models.add_default` outside the write owners of `model-store`
+app/models.py:17:5: MUT201 [heuristic] `parse` writes `Model.fields` (through a helper) via `app.models.add_default` outside the write owners of `model-store`
 Found 2 diagnostic(s) in 4 file(s).
 note: 5 heuristic rule(s) are off; enable them with `--heuristic` or `lint.heuristic = true`
 ```
@@ -8897,7 +8897,7 @@ A target names a class and an attribute; it covers the class's subclasses too (t
 family). With `unlisted-dict-keys = "report"`, a constant key written through the namespace of an
 object of a class a target covers (`field.__dict__["_cache"] = v`, `vars(field).setdefault(KEY, v)`,
 `del field.__dict__[KEY]`) is reported too when no target covering that class names it, in this
-contract or in any other `write-owners` contract (`writes `pkg.model.Field._cache` (dict_direct), a
+contract or in any other `write-owners` contract (`writes `pkg.model.Field._cache` (as a `__dict__` item), a
 `__dict__` key no target names`), so a new key needs a target first. A target names the keys its
 attribute pattern matches, and an entry target names its container; a key another contract names is
 judged by that contract alone, and a contract allowing every writer (`allowed-writers = ["*"]`)

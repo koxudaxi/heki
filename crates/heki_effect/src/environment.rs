@@ -35,6 +35,17 @@ impl AccessKind {
     }
 }
 
+impl AccessKind {
+    /// The kind in words, for report messages (`as_str` is the stable machine name).
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::Call => "calls",
+            Self::Read => "as a module attribute",
+            Self::ImportProbe => "as an import probe",
+        }
+    }
+}
+
 /// One access of a function outside the project, in its own body (a local fact).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ExternalAccess {

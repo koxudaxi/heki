@@ -995,6 +995,8 @@ static FORBID_EXPECTED: LazyLock<String> = LazyLock::new(|| {
 /// One parsed `[[tool.heki.effect-boundaries]]` contract.
 struct Boundary<'r> {
     name: &'r str,
+    /// How a report names the contract ([`heki_env::contract_label`]).
+    label: String,
     scopes: Vec<DottedPattern>,
     effects: BTreeSet<ExecEffectKind>,
     mutates_params: bool,
@@ -1136,10 +1138,20 @@ impl Boundary<'_> {
     }
 }
 
+/// `effect boundary `name``, or the position of a boundary without a name.
+fn boundary_label(index: usize, name: &str) -> String {
+    let label = heki_env::contract_label("effect-boundaries", index, name);
+    if name.is_empty() {
+        label
+    } else {
+        format!("effect boundary {label}")
+    }
+}
+
 fn boundaries<'a>(cx: &CheckContext<'a>) -> Result<Vec<Boundary<'a>>, RuleConfigError> {
     let all_classes = project_classes(cx);
     let mut out = Vec::new();
-    for b in &cx.config.effect_boundaries {
+    for (index, b) in cx.config.effect_boundaries.iter().enumerate() {
         let mut effects = BTreeSet::new();
         for token in &b.forbid {
             let Some((_, kinds)) = FORBID_TOKENS.iter().find(|(t, _)| t == token) else {
@@ -1187,6 +1199,7 @@ fn boundaries<'a>(cx: &CheckContext<'a>) -> Result<Vec<Boundary<'a>>, RuleConfig
         };
         out.push(Boundary {
             name: &b.name,
+            label: boundary_label(index, &b.name),
             scopes: patterns(&b.scopes, "effect-boundaries.scopes")?,
             effects,
             mutates_params: forbids("mutates-params"),
@@ -1325,7 +1338,7 @@ fn note_environment(
         let found = Found {
             chain,
             span,
-            kind: kind.as_str(),
+            kind: kind.describe(),
             sites: BTreeSet::new(),
         };
         (found, kind, name)
@@ -1588,7 +1601,7 @@ impl<'a> Reach<'a> {
                 note(&mut self.writes, bucket, (func.fqn(), w.span), || {
                     let mut chain = chain_to(nodes, i);
                     chain.extend(extra.clone());
-                    (chain, w.span, w.kind.as_str())
+                    (chain, w.span, w.kind.describe())
                 });
             }
         }
@@ -1610,7 +1623,7 @@ impl<'a> Reach<'a> {
             }) {
                 let nodes = &self.nodes;
                 note(&mut self.reads, ti, (func.fqn(), r.span), || {
-                    (chain_to(nodes, i), r.span, r.kind.as_str())
+                    (chain_to(nodes, i), r.span, r.kind.describe())
                 });
             }
         }
@@ -1663,12 +1676,12 @@ impl<'a> Reach<'a> {
             };
             for t in calls {
                 note(&mut self.calls, vec![t], site.clone(), || {
-                    (chain(), a.span, a.kind.as_str())
+                    (chain(), a.span, a.kind.describe())
                 });
             }
             for t in reads {
                 note(&mut self.reads, t, site.clone(), || {
-                    (chain(), a.span, a.kind.as_str())
+                    (chain(), a.span, a.kind.describe())
                 });
             }
             if b.forbids_environment(cx, a) {
@@ -1777,7 +1790,7 @@ impl<'a> Reach<'a> {
         key: &FuncKey,
         out: &mut Vec<Diagnostic>,
     ) {
-        let forbids = |what: String| format!("{what}, which effect boundary `{}` forbids", b.name);
+        let forbids = |what: String| format!("{what}, which {} forbids", b.label);
         let help = || b.note.map(str::to_owned);
         let mut emit = |found: &Found, target: String, message: String| {
             let span = found.chain.first().map_or(found.span, |h| h.span);
@@ -1825,8 +1838,8 @@ impl<'a> Reach<'a> {
                 }
                 WriteBucket::Undeclared(attr) => {
                     let message = format!(
-                        "`{}` writes `{attr}` ({}{via}), which effect boundary `{}` does not allow",
-                        key.qualname, found.kind, b.name
+                        "`{}` writes `{attr}` ({}{via}), which {} does not allow",
+                        key.qualname, found.kind, b.label
                     );
                     emit(found, attr.clone(), message);
                 }

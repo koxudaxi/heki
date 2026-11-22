@@ -620,6 +620,17 @@ impl ReadKind {
     }
 }
 
+impl ReadKind {
+    /// The kind in words, for report messages (`as_str` is the stable machine name).
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::DirectAttr => "by attribute",
+            Self::GetAttr => "with `getattr`",
+            Self::DictDirect => "as a `__dict__` item",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WriteKind {
@@ -665,6 +676,22 @@ impl WriteKind {
             Self::DictDirect => "dict_direct",
             Self::IndirectHelper => "indirect_helper",
             Self::ItemMut => "item_mut",
+        }
+    }
+}
+
+impl WriteKind {
+    /// The kind in words, for report messages (`as_str` is the stable machine name).
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::DirectAttr => "by attribute",
+            Self::AttrDelete => "by deleting the attribute",
+            Self::ContainerMut => "in place",
+            Self::AliasContainerMut => "in place through an alias",
+            Self::SetAttr => "with `setattr`",
+            Self::DictDirect => "as a `__dict__` item",
+            Self::IndirectHelper => "through a helper",
+            Self::ItemMut => "in place inside an item",
         }
     }
 }

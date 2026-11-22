@@ -139,7 +139,7 @@ A function in `app/api.py` that appends to `order.items` through a helper breaks
 
 ```console
 $ heki check
-app/api.py:9:5: MUT201 (write-owner-violation) [error, heuristic] `add_gift_wrap` writes `app.models.Order.items` (indirect_helper) via `app.api._append` outside the write owners of `order-store`
+app/api.py:9:5: MUT201 (write-owner-violation) [error, heuristic] `add_gift_wrap` writes `app.models.Order.items` (through a helper) via `app.api._append` outside the write owners of `order-store`
   |
 9 |     _append(order.items, "gift-wrap")
   |     ^

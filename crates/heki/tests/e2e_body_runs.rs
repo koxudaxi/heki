@@ -535,7 +535,7 @@ fn contract_reports_follow_where_the_body_runs() {
     );
     assert_eq!(
         message(&diags, m, 35),
-        "`consume_outside` writes `app.models.Model.fields` (container_mut) via `app.models._fill` outside the write owners of `model-store`"
+        "`consume_outside` writes `app.models.Model.fields` (in place) via `app.models._fill` outside the write owners of `model-store`"
     );
     // Called from the iterating loop: the store's `make` is not on the chain.
     assert_eq!(chain(&diags, m, 35), vec!["app/models.py:35"]);
