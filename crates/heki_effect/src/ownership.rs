@@ -251,12 +251,11 @@ pub fn source<'i>(
         })
     };
     match kind {
-        InstKind::AllocBuiltin { .. } | InstKind::DictLiteral { .. } => {
-            copy().unwrap_or(Source::New)
-        }
-        InstKind::Convert { .. } | InstKind::Format { .. } | InstKind::BuildString { .. } => {
-            Source::New
-        }
+        InstKind::AllocBuiltin { .. }
+        | InstKind::DictLiteral { .. }
+        | InstKind::Convert { .. }
+        | InstKind::Format { .. }
+        | InstKind::BuildString { .. } => copy().unwrap_or(Source::New),
         InstKind::BinOp {
             lhs,
             in_place: true,
@@ -335,10 +334,11 @@ pub fn copied_operand(
     kb: &EffectiveEcosystemKb,
 ) -> Option<VarId> {
     let callee = callee.unwrap_or(&Callee::Unresolved);
-    match readonly::copy_of(f, kind, callee, kb)?.operands {
-        [copied] => Some(*copied),
-        _ => None,
-    }
+    let copy = readonly::copy_of(f, kind, callee, kb)?;
+    copy.operands
+        .first()
+        .copied()
+        .filter(|_| copy.operands.len() == 1)
 }
 
 /// The [`source`] of an instruction, given the values that hold an object the function makes

@@ -1607,9 +1607,10 @@ impl<'a> Extractor<'a> {
     /// item at every position: it stores, deletes, or adds no item of a value with that alias
     /// (`c[i] = v`, `c.append(v)`, `c.insert(0, v)`, `c.appendleft(v)`, `c.update(...)`).
     fn keeps_items(&self, container: &(u8, Option<String>), key: Option<&str>) -> bool {
-        let Some(rebound) = self.rebound.get() else {
-            return false;
-        };
+        let rebound = self
+            .rebound
+            .get()
+            .expect("build_aliases sets what the function rebinds");
         if let Some(key) = key {
             return rebound.keeps_key(key);
         }
