@@ -3,7 +3,7 @@
 //! the closure cells child scopes read, the size of the Soundness lane's proof state, the values
 //! `EFF107` follows from a task factory, the walk to the callable a builtin calls once per item,
 //! contracts with many call targets and argument lists, the walk to the uses handing a reference to
-//! a call target on, and the locks `EFF109` follows.
+//! a call target on, the locks `EFF109` follows, and the values class statements pass as bases.
 
 mod common;
 
@@ -3271,5 +3271,47 @@ fn the_paths_of_many_packages_merged_in_one_function_are_decided_once() {
             .map(|d| d["qualname"].as_str().unwrap())
             .collect::<Vec<_>>(),
         vec!["plugin"]
+    );
+}
+
+/// A function binding a long chain of aliases of a class and a long chain of attribute loads
+/// from a parameter, then deriving classes from the last of each (`class C0(a8000)`, `class
+/// D0(b8000)`): each base is followed along its copies through one table per function and through
+/// a bounded number of attribute loads, so the classes of the alias derive from the class and
+/// those of the attribute from an unknown base.
+#[test]
+fn class_statements_deriving_from_long_chains_name_each_base_in_bounded_steps() {
+    let (links, classes) = (8_000, 200);
+    let mut lines = vec![
+        "class K:".to_owned(),
+        "    pass".to_owned(),
+        String::new(),
+        String::new(),
+        "def build(node):".to_owned(),
+        "    a0 = K".to_owned(),
+        "    b0 = node".to_owned(),
+    ];
+    lines.extend((1..=links).map(|i| format!("    a{i} = a{}", i - 1)));
+    lines.extend((1..=links).map(|i| format!("    b{i} = b{}.child", i - 1)));
+    for i in 0..classes {
+        lines.push(format!("    class C{i}(a{links}):"));
+        lines.push("        pass".to_owned());
+        lines.push(format!("    class D{i}(b{links}):"));
+        lines.push("        pass".to_owned());
+    }
+    lines.push("    return C0(), D0()".to_owned());
+    let p = Project::new("bounds_class_base_chains");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT204\"]\n\n[[tool.heki.call-owners]]\nname = \"home\"\ntargets = [\"m.K\"]\nallowed-callers = [\"m.K.*\"]\n",
+    )
+    .write("m.py", &(lines.join("\n") + "\n"));
+    let found: Vec<String> = check_within(&p, Duration::from_secs(20))
+        .iter()
+        .map(|d| d["message"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(
+        found,
+        vec!["`build` constructs `m.K` outside the call owners of `home`"]
     );
 }

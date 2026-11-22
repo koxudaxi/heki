@@ -74,6 +74,12 @@ pub const DISPATCH_CLASS_LIMIT: usize = 64;
 /// Upper bound on re-export alias chasing (`pkg.__init__` re-exporting `pkg.sub.Foo`).
 const MAX_ALIAS_CHASE: usize = 8;
 
+/// A base heki names no class for, in [`ClassDecl::bases`]: an expression, a module variable,
+/// or a value its class statement's scope binds (`def factory(Base): class Derived(Base)`). The
+/// MRO keeps it as a base outside the project that heki knows nothing of, which may define
+/// anything; no class derives from it.
+pub const UNKNOWN_BASE: &str = "<unknown>";
+
 /// Upper bound on the attribute loads behind a module-level constant's value
 /// (`KEY = pkg.sub.keys.OTHER`: three): a dotted name a few modules deep takes a few.
 const MAX_CONSTANT_ATTRS: usize = 16;
@@ -305,7 +311,13 @@ impl AttrRead {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClassDecl {
-    /// Base classes, resolved within the defining module (canonicalized on lookup).
+    /// Base classes, resolved within the defining module (canonicalized on lookup), each the
+    /// value its class statement passes, named where the statement runs: a module-level name
+    /// (an import, a class, a module alias, an attribute of a module) through the module's
+    /// names, and in a function or a class body also a local alias of one or an import there.
+    /// A base heki names no class for (a parameter, a local, a closure cell, a class-body name
+    /// bound to anything else, an expression, a module variable) is [`UNKNOWN_BASE`]; a name
+    /// the module does not bind (a builtin heki does not list) is left out.
     pub bases: Vec<String>,
     /// Priority 3 `attr -> type` (instance attribute types).
     pub attr_types: BTreeMap<String, Ty>,
@@ -333,9 +345,8 @@ pub struct ClassDecl {
     /// The resolved `metaclass=` of the class statement.
     pub metaclass: Option<String>,
     /// The class statement names a metaclass other than `type` and `abc.ABCMeta`, also one heki
-    /// cannot resolve, or has a base heki names no class for, whose metaclass is unknown
-    /// (`with_metaclass(Meta)`, a module variable such as `Base = declarative_base()`)
-    /// ([`ProjectDecls::has_custom_metaclass`]).
+    /// cannot resolve, or has a base heki names no class for ([`UNKNOWN_BASE`]), whose
+    /// metaclass is unknown ([`ProjectDecls::has_custom_metaclass`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub custom_metaclass: bool,
     /// The `frozen=` keyword of the class statement (`class C(Base, frozen=False)`).
@@ -1603,7 +1614,7 @@ impl ProjectDecls {
         for m in out.modules.values() {
             for (qualname, class) in &m.classes {
                 let fqn = format!("{}.{qualname}", m.module_name);
-                for base in &class.bases {
+                for base in class.bases.iter().filter(|b| *b != UNKNOWN_BASE) {
                     subclasses
                         .entry(out.canonical(base))
                         .or_default()
@@ -2974,7 +2985,8 @@ impl ProjectDecls {
             if self.is_project_class(c) {
                 continue;
             }
-            if external_defines(kb, c, name) {
+            // An unknown base names no symbol, special methods included.
+            if c != UNKNOWN_BASE && external_defines(kb, c, name) {
                 return Inherited::External(format!("{c}.{name}"));
             }
             // A base heki knows nothing of may define it, before any later base that does.
@@ -3338,6 +3350,123 @@ pub(crate) fn project_decls_for(
     (decls, own)
 }
 
+/// The bases of the class statements outside the module body (in a function or a class body),
+/// by the statement's span and in their order (`None`: a base left out). Each is what the value the statement
+/// passes is ([`module_read`]): through `module_base` a module-level name, the object of an
+/// import in the function, or else an unknown base ([`UNKNOWN_BASE`]): a parameter, a local, a
+/// closure cell, or a class-body name of the imported class's name is another value. A
+/// statement made more than once (in a `finally` body, once per way out of the `try`) keeps the
+/// bases its copies agree on; one they disagree on is unknown.
+fn scoped_bases(
+    input: &ModuleInput<'_>,
+    module_base: &dyn Fn(&str) -> Option<String>,
+) -> FxHashMap<Span, Vec<Option<String>>> {
+    let ir = input.ir;
+    let imports: FxHashMap<Span, String> = input
+        .semantic
+        .imports
+        .iter()
+        .filter(|imp| !imp.in_type_checking)
+        .filter_map(|imp| Some((imp.span, import_target(imp, input)?)))
+        .collect();
+    let mut holders: Vec<heki_ir::FunctionId> = ir.class_bases.iter().map(|b| b.0).collect();
+    holders.dedup();
+    let mut out: FxHashMap<Span, Vec<Option<String>>> = FxHashMap::default();
+    for f in holders.into_iter().map(|id| ir.function(id)) {
+        if f.is_module_body {
+            continue;
+        }
+        let shape = FnShape::new(f);
+        let mut statements: Vec<(VarId, Span, Vec<Option<String>>)> = Vec::new();
+        for base in ir.class_base_values(&shape) {
+            let value = match module_read(&shape, &imports, base.value) {
+                Some(ModuleRead::Name(text)) => module_base(&text),
+                Some(ModuleRead::Imported(fqn)) => Some(fqn),
+                None => Some(UNKNOWN_BASE.to_owned()),
+            };
+            match statements.last_mut() {
+                Some((class, _, values)) if *class == base.class => values.push(value),
+                _ => statements.push((base.class, base.statement.span, vec![value])),
+            }
+        }
+        for (_, span, values) in statements {
+            match out.entry(span) {
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert(values);
+                }
+                std::collections::hash_map::Entry::Occupied(mut slot) => {
+                    for (kept, value) in slot.get_mut().iter_mut().zip(values) {
+                        if *kept != value {
+                            *kept = Some(UNKNOWN_BASE.to_owned());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// What a value of a function holds when a module-level name or an import gives it
+/// ([`module_read`]).
+enum ModuleRead {
+    /// A name of the module, or an attribute of one (`Rule`, `core.Rule`).
+    Name(String),
+    /// The object an import in the function binds, or an attribute of it.
+    Imported(String),
+}
+
+/// What `value` of the function `shape` holds when a module-level name or an import gives it,
+/// through copies and the origin of a generic alias (`Base[int]`): a name the function loads
+/// from the module's globals (in a class body also one the body has not bound there, which
+/// Python looks up in the globals), what an import in the function binds (`imports`, by the
+/// span of its `Import` instruction), or an attribute of either (`core.Rule`). `None` for any
+/// other value: a parameter, a local bound to anything else, a closure cell, a value merged
+/// from several paths, a call's result, or a name more than `MAX_ALIAS_SEGMENTS` attributes
+/// deep.
+fn module_read(
+    shape: &FnShape<'_>,
+    imports: &FxHashMap<Span, String>,
+    value: VarId,
+) -> Option<ModuleRead> {
+    let loaded_from = |v: VarId| match &shape.inst(v)?.kind {
+        InstKind::AttrLoad { obj, .. } | InstKind::SubscriptLoad { obj, .. } => {
+            Some(shape.copy_root(*obj))
+        }
+        _ => None,
+    };
+    // At most `MAX_ALIAS_SEGMENTS` attribute loads (or a generic alias and one fewer) and the
+    // name they start from: a longer chain ends at a load, which names nothing.
+    let chain = std::iter::successors(Some(shape.copy_root(value)), |&v| loaded_from(v))
+        .take(MAX_ALIAS_SEGMENTS + 1)
+        .map(|v| shape.inst(v))
+        .collect::<Option<Vec<&Inst>>>()?;
+    let (root, loads) = chain.split_last()?;
+    // Only the class a generic alias subscripts is its base (`Base[int]`), not an item.
+    let attrs = loads
+        .iter()
+        .skip_while(|i| matches!(i.kind, InstKind::SubscriptLoad { .. }))
+        .map(|i| match &i.kind {
+            InstKind::AttrLoad { attr, .. } => Some(attr.as_str()),
+            _ => None,
+        })
+        .collect::<Option<Vec<&str>>>()?;
+    let dotted = |head: &str| {
+        attrs
+            .iter()
+            .rev()
+            .fold(head.to_owned(), |name, attr| format!("{name}.{attr}"))
+    };
+    match &root.kind {
+        InstKind::LoadGlobal { name, .. } => Some(ModuleRead::Name(dotted(name))),
+        InstKind::LoadName { name, .. } if shape.f.is_class_body => {
+            Some(ModuleRead::Name(dotted(name)))
+        }
+        InstKind::Import { .. } => Some(ModuleRead::Imported(dotted(imports.get(&root.span)?))),
+        _ => None,
+    }
+}
+
 /// Pass 1: imports, classes (bases), functions (signatures) — no inference.
 fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
     let semantic = input.semantic;
@@ -3402,6 +3531,15 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
                 .is_ok()
         })
     };
+    // A base a module-level name gives (`Rule`, `core.Rule`): the class the name resolves to; for
+    // a name the module binds that heki names no class for (`Base = declarative_base()`), an
+    // unknown base. A name the module does not bind (a builtin heki does not list) is left out.
+    let module_base = |decls: &ModuleDecls, text: &str| {
+        decls.resolve_dotted(text, false).or_else(|| {
+            module_binds(text.split('.').next().unwrap_or(text)).then(|| UNKNOWN_BASE.to_owned())
+        })
+    };
+    let scoped = scoped_bases(input, &|text| module_base(&decls, text));
     // Resolve bases, class keywords, and annotations now that local names are known.
     for class in &semantic.classes {
         // A module-level class statement evaluates its bases before it binds its own name: a
@@ -3412,29 +3550,36 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
             shadowed
                 .iter()
                 .find(|(n, _, end, rebound)| *n == name && *end < at && at <= *rebound)
-                .filter(|_| !class.qualname.contains('.'))
                 .map(|(_, target, _, _)| target)
         };
-        // A base heki names no class for: an expression (`with_metaclass(Meta)`), or a module
-        // variable (`Base = declarative_base()`, `Alias = Real`). Its metaclass is unknown.
-        let mut unknown_base = class.unnamed_bases;
-        let bases: Vec<String> = class
-            .bases
-            .iter()
-            .filter_map(|b| {
+        let mut bases: Vec<String> = Vec::new();
+        if !class.qualname.contains('.') {
+            // The module body names its bases through the module's names; an expression
+            // (`with_metaclass(Meta)`, `*bases`) is an unknown base.
+            bases.extend(class.bases.iter().filter_map(|b| {
+                let Some(b) = b else {
+                    return Some(UNKNOWN_BASE.to_owned());
+                };
                 let head = b.split('[').next().unwrap_or(b).trim();
                 let (first, rest) = head.split_once('.').unwrap_or((head, ""));
                 match imported_here(first) {
                     Some(target) if rest.is_empty() => Some(target.clone()),
                     Some(target) => Some(format!("{target}.{rest}")),
-                    None => {
-                        let resolved = decls.resolve_dotted(head, false);
-                        unknown_base |= resolved.is_none() && module_binds(first);
-                        resolved
-                    }
+                    None => module_base(&decls, head),
                 }
-            })
-            .collect();
+            }));
+        } else {
+            let values = scoped.get(&class.span).map_or(&[][..], Vec::as_slice);
+            // A starred base (`*bases`) gives classes at a place among the bases heki does not
+            // track, and a statement heki did not lower (in a function too large to model) bases
+            // it does not know: an unknown base first.
+            if values.len() < class.bases.len() {
+                bases.push(UNKNOWN_BASE.to_owned());
+            }
+            bases.extend(values.iter().flatten().cloned());
+        }
+        // A base heki names no class for has an unknown metaclass.
+        let unknown_base = bases.iter().any(|b| b == UNKNOWN_BASE);
         let keyword = |name: &str| {
             class
                 .keywords
