@@ -992,7 +992,9 @@ The file's name decides, as Ruff reads `pyproject.toml` and `ruff.toml`:
 
 - A file named `pyproject.toml` holds the settings in `[tool.heki]` (`[tool.heki.lint]`,
   `[[tool.heki.ecosystem]]`, ...). Its other tables belong to the packaging standards and other
-  tools, and heki does not read them.
+  tools. heki reads only what it infers from them: the default target version
+  (`project.requires-python`) and the detected source roots (`project.name` and the workspace
+  tables, see [Workspaces and monorepos](https://heki.koxudaxi.dev/configuration/#workspaces-and-monorepos)).
 - Any other file (`heki.toml`, `.heki.toml`, or the file `--config` names, whatever its name)
   holds the same keys at its top level, without the `tool.heki` prefix (`[lint]`,
   `[[ecosystem]]`).
@@ -1021,9 +1023,54 @@ are relative to the project root.
   directory of the same name (`acme/acme/`), and `python` (the maturin layout), each when it is
   a directory and not a package (no `__init__.py`). A source root that is a package is imported
   by its own name (`src.helpers`).
+- Without `src`, heki also detects the members of the project's uv, Hatch, and PDM workspaces
+  (see [Workspaces and monorepos](https://heki.koxudaxi.dev/configuration/#workspaces-and-monorepos)).
 - Other layouts need `src`: a subdirectory application whose directories are imported as
   top-level packages (`backend/config/env.py` imported as `config.env`) takes
   `src = ["backend"]`, and a `lib/` layout (`lib/matplotlib`) takes `src = ["lib"]`.
+
+#### Workspaces and monorepos
+
+In a workspace, each member is a package of its own, installed from its own directory. Without
+`src`, heki reads the workspace tables of the root's `pyproject.toml` and names each member's
+modules the way installing the member names them, so a call from one member into another
+resolves without configuration:
+
+- the members: uv's `[tool.uv.workspace]` (`members` and `exclude`), the `workspace.members`
+  and `workspace.exclude` of every Hatch environment (`[tool.hatch.envs.<env>]`, or
+  `[envs.<env>]` in a `hatch.toml` next to it; a member may be a `{path = ...}` table), and
+  PDM's `[tool.pdm.workspace]` (`members`). Members are directories relative to the project root
+  or globs (`packages/*`; `**` spans directories), and a member must hold a `pyproject.toml`. An
+  `exclude` glob drops the members of its own table it matches, and its `*` spans directories
+  as uv matches it.
+- a member's source roots are the ones detected for the project root, below the member:
+  `packages/core/src`, the directory named after the member (`packages/core/core` when it holds
+  `core/`), and `python`.
+- a member without one (a flat layout) has its packages named below it: `packages/api/acme_api/`
+  is the package `acme_api`. Its other files keep their names below the project root
+  (`packages/api/main.py` is `packages.api.main`): several members often hold a `main.py` or a
+  `scripts/` package, and these would otherwise share a name. A package that several members
+  hold is named below the project root for the same reason.
+
+For example, this uv workspace:
+
+```text
+pyproject.toml                  # [tool.uv.workspace] members = ["packages/*"]
+packages/core/pyproject.toml
+packages/core/src/acme_core/io.py
+packages/api/pyproject.toml
+packages/api/acme_api/server.py # from acme_core.io import wait
+packages/api/main.py
+```
+
+has the source root `packages/core/src` and the member package `packages/api/acme_api`:
+`acme_core.io` is `packages/core/src/acme_core/io.py`, so `heki check` run at the root follows
+`server.py`'s call to `wait` into the other member. `heki check --generate-prompt` lists both.
+
+The `src` setting replaces the detection, members included: `src = ["packages/core/src",
+"packages/api"]` lists the same roots by hand, with `packages/api` naming all of the member's
+files below it. Run heki at the workspace root: run inside a member, the member's own
+`pyproject.toml` makes the member the project root, and the other members are outside it.
 
 Without a configuration file the project root is where heki runs (see above): in a repository
 without one, `heki check` run in `services/api/` names `services/api/app.py` `app`, and its
@@ -3114,10 +3161,11 @@ $ heki check --watch
   baseline as `heki check` compares them.
 - It only reports: `--fix`, `--diff`, and `--update-baseline` are ignored, with a warning.
 - It reloads everything when the configuration (`pyproject.toml`, `heki.toml`, `.heki.toml`, or
-  the `--config` file), the summary snapshot, or the baseline changes. So does a change of the
-  detected source roots (`src/`, `python/`, or the directory named after the project appearing,
-  or becoming a package with an `__init__.py`) or a root `__init__.py` appearing or
-  disappearing: module names below a source root, or relative imports that climb to the root,
+  the `--config` file), a `hatch.toml` (its workspace members), the summary snapshot, or the
+  baseline changes. So does a change of the detected source roots (`src/`, `python/`, or the
+  directory named after the project appearing, or becoming a package with an `__init__.py`; a
+  workspace member's `pyproject.toml`, source roots, or packages appearing or disappearing) or a
+  root `__init__.py` appearing or disappearing: module names below a source root, or relative imports that climb to the root,
   change with the module layout. The server does the same.
 - What fails once the watch runs (a configuration that no longer parses, a watched path that
   disappears) is reported, and the watch goes on until it is fixed.
@@ -3230,7 +3278,7 @@ $ heki check --output-format-json-schema generate-prompt
 | Section | Content |
 | ------- | ------- |
 | Question | the question, when one is given |
-| Configuration | the project root, the configuration file, the target version, the source roots, the rule selection in effect (`select`, `extend-select`, `ignore`, `per-file-ignores`, `lint.heuristic`, `fail-on`), the baseline, and the declared contracts as TOML |
+| Configuration | the project root, the configuration file, the target version, the source roots (with the packages of flat workspace members), the rule selection in effect (`select`, `extend-select`, `ignore`, `per-file-ignores`, `lint.heuristic`, `fail-on`), the baseline, and the declared contracts as TOML |
 | Rules that apply | each rule the run applies: its code, name, certainty, activation, and the first paragraph of its "What a report states" |
 | Diagnostics | the diagnostics of the run in the `concise` form (with a baseline, the reports it does not allow), up to 16 KiB of lines, with a note counting the rest, and the files heki could not analyze |
 | How to answer | fix at the root cause, do not suppress, check `heuristic` reports, rely on proven fixes only, how a contract is written, and what the answer holds |

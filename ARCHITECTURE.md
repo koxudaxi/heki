@@ -737,7 +737,7 @@ heki recommend [PATHS...]                     # experimental: advice on the conf
 [tool.heki]
 target-version = "py312"             # default: inferred from project.requires-python
 extend-exclude = ["generated"]       # .gitignore and .hekiignore are honored
-src = ["src", "lib"]                 # source roots (default: src/, python/, <project-name>/ as ty detects them)
+src = ["src", "lib"]                 # source roots (default: src/, python/, <project-name>/ as ty detects them, and workspace members)
 baseline = "heki-baseline.toml"      # optional Ratchet baseline
 
 [tool.heki.lint]

@@ -389,7 +389,10 @@ Module names come from the paths below a source root (`pkg/mod.py` → `pkg.mod`
 `pkg/__init__.py` → `pkg`), the deepest one holding the file, else the project root. The `src`
 setting lists the source roots; without it they are detected as ty detects them: `src/`, the
 directory named after the project when it holds one of the same name (`acme/acme/`), and
-`python/`, each when it is not itself a package (no `__init__.py`). `src/acme/io.py` is
+`python/`, each when it is not itself a package (no `__init__.py`), plus the members of the
+project's uv, Hatch, and PDM workspaces: a member's own detected source roots, else its top-level
+packages named below it (`packages/api/acme_api/` is `acme_api`; configuration.md, "Workspaces
+and monorepos"). `src/acme/io.py` is
 `acme.io`, for regular and namespace packages and for modules directly under `src/`. A module name that several files share is defined by one of them, in full and
 incremental analysis alike: an implementation before its `.pyi` stub, a package
 (`pkg/__init__.py`) before a module file of the same name (`pkg.py`, which Python does not import

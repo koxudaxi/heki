@@ -37,6 +37,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 
 mod package_paths;
 mod sentinels;
+mod workspace;
 
 /// The derived indexes of a [`ProjectDecls`] version (`ProjectDecls::index_changes`).
 struct Indexes {
@@ -125,6 +126,11 @@ pub struct ModuleLayout {
     /// The source roots below the project root: project-relative POSIX directories whose files
     /// are named relative to them (`src/acme/io.py` is `acme.io` under `src`).
     pub source_roots: Vec<String>,
+    /// The packages of the workspace members without a source root of their own (a flat
+    /// layout: `packages/b/beta/__init__.py`), each named below its member (`beta.io`) as
+    /// installing the member names it. The member's other files (`main.py`, `tests/`) keep their
+    /// names below the project root, where the same files of other members do not clash.
+    pub member_packages: Vec<String>,
     /// The project root is a package itself (`__init__.py`, and no other source root): heki names
     /// its modules top-level, and relative imports may climb to it.
     pub root_is_package: bool,
@@ -132,7 +138,8 @@ pub struct ModuleLayout {
 
 impl ModuleLayout {
     /// The layout of the project at `root`: the `src` setting's directories, else the ones ty
-    /// detects ([`detect_source_roots`]).
+    /// detects ([`detect_source_roots`]) and those of the members of the project's uv, Hatch,
+    /// and PDM workspaces (`HekiConfig::workspaces`).
     pub fn detect(root: &Path, cfg: &HekiConfig) -> Self {
         Self::detect_without(root, cfg, &|_| false)
     }
@@ -142,24 +149,42 @@ impl ModuleLayout {
     /// its last handle closes).
     pub fn detect_without(root: &Path, cfg: &HekiConfig, gone: &dyn Fn(&Path) -> bool) -> Self {
         let is_file = |p: &Path| p.is_file() && !gone(p);
-        let source_roots: Vec<String> = match &cfg.src {
-            Some(dirs) => dirs.iter().filter(|d| !d.is_empty()).cloned().collect(),
-            None => source_roots(root, cfg.project_name.as_deref(), &is_file),
+        let (source_roots, member_packages) = match &cfg.src {
+            Some(dirs) => (
+                dirs.iter().filter(|d| !d.is_empty()).cloned().collect(),
+                Vec::new(),
+            ),
+            None => {
+                let mut roots = source_roots(root, cfg.project_name.as_deref(), &is_file);
+                let members = workspace::member_layout(root, &cfg.workspaces, &is_file);
+                roots.extend(members.source_roots);
+                (roots, members.packages)
+            }
         };
         Self {
-            root_is_package: source_roots.is_empty() && is_file(&root.join("__init__.py")),
+            root_is_package: source_roots.is_empty()
+                && member_packages.is_empty()
+                && is_file(&root.join("__init__.py")),
             source_roots,
+            member_packages,
         }
     }
 
     /// Module name of `rel` (the normalized project-relative path `rel_posix` produces) below
-    /// the deepest source root holding it, else below the project root
+    /// the deepest source root or member holding it, else below the project root
     /// ([`module_name_for_path`]).
     pub fn module_name(&self, rel: &Path) -> Option<(String, bool)> {
+        let below_member = self
+            .member_packages
+            .iter()
+            .map(Path::new)
+            .filter(|package| rel.starts_with(package))
+            .filter_map(|package| rel.strip_prefix(package.parent()?).ok());
         let below_root = self
             .source_roots
             .iter()
             .filter_map(|r| rel.strip_prefix(r).ok())
+            .chain(below_member)
             .min_by_key(|rest| rest.components().count());
         module_name_for_path(below_root.unwrap_or(rel))
     }

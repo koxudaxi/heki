@@ -3728,6 +3728,71 @@ fn steps_configuration() -> Vec<Step> {
     ]
 }
 
+const MEMBER_PYPROJECT: &str = "[project]\nname = \"member\"\n";
+const MEMBER_HELPER: &str = "import time\n\n\ndef wait():\n    time.sleep(1)\n";
+const MEMBER_CALLER: &str = "from acme_core.io import wait\n\n\nasync def go():\n    wait()\n";
+const MEMBER_CALL: &[(&str, &str)] = &[("packages/api/acme_api/server.py", "EFF101")];
+
+/// The members of a workspace are source roots: the workspace tables, a member's
+/// `pyproject.toml`, and a `hatch.toml` change while the server runs.
+fn steps_workspace_members() -> Vec<Step> {
+    let uv = format!("{CONFIG}\n[tool.uv.workspace]\nmembers = [\"packages/*\"]\n");
+    vec![
+        Step::new(
+            "two directories that are not yet members",
+            vec![
+                Action::Write("packages/core/pyproject.toml", MEMBER_PYPROJECT.to_owned()),
+                Action::Create(
+                    "packages/core/src/acme_core/io.py",
+                    MEMBER_HELPER.to_owned(),
+                ),
+                Action::Write("packages/api/pyproject.toml", MEMBER_PYPROJECT.to_owned()),
+                Action::Create("packages/api/acme_api/__init__.py", String::new()),
+                Action::Create("packages/api/acme_api/server.py", MEMBER_CALLER.to_owned()),
+            ],
+        )
+        .absent(MEMBER_CALL),
+        Step::new(
+            "the configuration makes them workspace members",
+            vec![Action::Configure(uv.clone())],
+        )
+        .present(MEMBER_CALL),
+        Step::new(
+            "a member loses its pyproject.toml",
+            vec![Action::Delete("packages/core/pyproject.toml")],
+        )
+        .absent(MEMBER_CALL),
+        Step::new(
+            "the member's pyproject.toml is back",
+            vec![Action::Write(
+                "packages/core/pyproject.toml",
+                MEMBER_PYPROJECT.to_owned(),
+            )],
+        )
+        .present(MEMBER_CALL),
+        Step::new(
+            "an exclude glob drops the member",
+            vec![Action::Configure(format!(
+                "{uv}exclude = [\"packages/core\"]\n"
+            ))],
+        )
+        .absent(MEMBER_CALL),
+        Step::new(
+            "a hatch.toml lists the members",
+            vec![Action::Write(
+                "hatch.toml",
+                "[envs.default]\nworkspace.members = [\"packages/core\"]\n".to_owned(),
+            )],
+        )
+        .present(MEMBER_CALL),
+        Step::new(
+            "the hatch.toml is deleted",
+            vec![Action::Delete("hatch.toml")],
+        )
+        .absent(MEMBER_CALL),
+    ]
+}
+
 /// Project-wide assumptions: a module patching builtins, and a typing stub importing them.
 fn steps_project_assumptions() -> Vec<Step> {
     vec![
@@ -4329,6 +4394,7 @@ sessions!(editing, Session::start, {
     keys_fresh_strict: steps_keys_fresh_strict,
     files: steps_files,
     configuration: steps_configuration,
+    workspace_members: steps_workspace_members,
     project_assumptions: steps_project_assumptions,
     declarations: steps_declarations,
     re_exports: steps_re_exports,
