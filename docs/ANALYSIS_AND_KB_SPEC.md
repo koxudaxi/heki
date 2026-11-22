@@ -455,6 +455,9 @@ EffectSummary(f) = {
     must_read_self_attrs:     Set<AttrKeyPath>,            // those read on every path that returns normally,
                                                            // as a whole or with the key (MUT101; only with
                                                            // MUT101 or MUT111 selected, OptInFacts::kept_values)
+    removes_kept:             KeptRemoval,                 // the values kept in an instance __dict__ it may remove
+                                                           // or replace on any object: by name, or any (MUT101;
+                                                           // OptInFacts::kept_values)
     returns_self_attrs:       Set<AttrName>,               // @cached_property: self.<attr> objects the result
                                                            // holds by reference, read for nothing else (MUT101)
     lazily_read_self_attrs:   Set<AttrName>,               // self.<attr> read only where it or a self call
@@ -930,6 +933,21 @@ which module imports which.
    call (no cache decorator); a callee of the function's own call-graph component adds nothing,
    so propagation needs no fixpoint for it. An attribute read as a whole covers each of its
    keys, also where two definitions or two targets are joined.
+8. **What may remove a kept value** (computed only with `OptInFacts::kept_values`). A method's
+   `CacheFlow` also holds the points that may remove or replace a value kept in some object's
+   `__dict__`: `MayRemove(name)` (`del obj.<name>`, an item of a `__dict__` stored or removed
+   under that key), `MayRemoveAny` (a `__dict__` cleared, replaced, or handed to a call; an
+   `await` or a `yield`, while other code runs; a call heki cannot resolve, of a library outside
+   the catalog, or of one that may run project code by its `[[invokes]]` entry, section 4.2; a
+   project call whose targets are not every implementation it can run; the iteration of a value
+   that is no builtin container, no project call's result, and no `lazy` call's), and
+   `Calls(span)` at the project calls no `SelfCall` stands for (other receivers, the property
+   getters a read of `self.<name>` runs), whose callees' summaries say what they remove.
+   `EffectSummary::removes_kept` joins the same points of a function (a `yield` excepted: its
+   consumer is its caller) with what every callee removes. Each write of the flow also records
+   its literal key (`SelfAttrWrite::key`) and, for an in-place change, the builtin list, dict, or
+   set the attribute holds by its type and the method that changes it
+   (`SelfAttrWrite::change`).
 
 #### `MUT111`: readers of a stale `@cached_property` (opt-in)
 1. Reads: the `TypedFieldReadSite`s of each checked function's own body (`self.p`, `obj.p`,
@@ -1700,6 +1718,22 @@ Three more keys state when a call waits, which an exact claim needs (ADR-018):
   `false` when `__exit__` / `__aexit__` returns a false value on every path (files, locks, HTTP
   sessions and pools, database connections), `true` when it can suppress the body's exception
   (`contextlib.suppress`). A manager the catalog does not describe may suppress.
+
+A separate table, `[[invokes]]`, says what a call runs of the values it is handed (R3; read by
+`heki_effect::invokes`, so that no other fact sees an entry there): per argument (by position,
+`rest` for every position from it on, by keyword, `"*"` for any keyword, or the receiver), the
+special methods it runs on the value's class (`methods`, looked up on the metaclass for a class
+object; `"*"` for any attribute, read by a name the call is handed), on the classes of the
+value's items (`item_methods`), and whether it calls the value (`calls`). An argument an entry
+does not list runs nothing there. A `lazy` entry returns an iterator that runs the same code
+again while it is iterated (`enumerate`, `map`, `iter`). A value runs code of the project there
+only when its class may define the method in the project: a project class, a builtin class a
+project subclass replaces it in (R2), or a class heki does not know. Two rules keep the entries
+short: a key a dict or set looks up is compared with the keys it holds only on a hash collision,
+which an entry leaves out, and a builtin dict or set hands on its keys with the hashes it stored
+for them. A call of a catalogued library without such an entry runs code of the project only
+when it is handed a value not established as an instance of a library class that is not
+callable; `eval`, `exec`, `__import__`, `importlib.import_module`, and `pickle.loads` always may.
 
 The entries follow the public API of each package, with three conventions:
 - An async API is `async_safe` and carries no blocking effect: it is often called without a

@@ -323,6 +323,15 @@ def self_item_reads(n: int) -> Body:
     return Body(("flag",), [*lines, "return total"])
 
 
+def writes_then_library_calls(n: int) -> Body:
+    """Writes of `self` attributes, each followed by library calls on values of known and unknown
+    classes: each call's catalog entry is read once."""
+    lines = []
+    for i in range(n):
+        lines += [f"self.a{i % 50} = len(xs) + {i}", f"out.append(str(xs[{i % 7}]))", f"seen = isinstance(out, list)"]
+    return Body(("xs", "out"), [*lines, "return seen"])
+
+
 def is_tests(n: int) -> Body:
     """Many `is` tests, each followed by a conditional expression on the tested parameter."""
     lines = []
@@ -648,6 +657,7 @@ FAMILIES = [
     Family("lazy_init_sites", lazy_init_sites, placements=("method",)),
     # Adversarial: a getter with as many branches as keys asks one walk per key, past the budget.
     Family("self_item_reads", self_item_reads, placements=("method",), real_code=False),
+    Family("writes_then_library_calls", writes_then_library_calls, placements=("method",)),
     Family("wide_hierarchy", project=wide_hierarchy, placements=("project",), size=4000),
     Family("helper_chain", project=helper_chain, placements=("project",), size=2000),
     Family(

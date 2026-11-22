@@ -2030,3 +2030,78 @@ fn reads_on_every_path_are_the_loads_and_self_calls_every_normal_return_passes()
     // Both definitions of a name defined twice read `a`; only one reads `b`.
     assert_eq!(must("Twice.get"), set(&[whole("a")]));
 }
+
+const KEPT_REMOVALS_PY: &str = r#"
+import functools
+
+
+class Holder:
+    def __init__(self) -> None:
+        self.items: list[str] = []
+
+    @functools.cached_property
+    def size(self) -> int:
+        return len(self.items)
+
+
+def drop(h: Holder) -> None:
+    del h.size
+
+
+def pop(h: Holder) -> None:
+    h.__dict__.pop("size", None)
+
+
+def clear(h: Holder) -> None:
+    h.__dict__.clear()
+
+
+def calls_drop(h: Holder) -> None:
+    drop(h)
+
+
+def unknown(callback) -> None:
+    callback()
+
+
+def library_only(names: list[str]) -> int:
+    parts = []
+    parts.append("x")
+    parts.append(",".join(names))
+    parts.append(f"{names}".strip())
+    return len(parts) + len("abc")
+
+
+def handed_unknown(value) -> int:
+    return len(value)
+
+
+def class_check(value: Holder) -> bool:
+    return isinstance(value, Holder)
+
+
+async def waits(h: Holder) -> None:
+    await h.items_ready()
+"#;
+
+#[test]
+fn removals_of_kept_values_by_name_and_by_unknown_code() {
+    let index = project(&[("rm.py", KEPT_REMOVALS_PY)]);
+    let removes = |q: &str| summary(&index, "rm", q).removes_kept.clone();
+    let named = |n: &str| KeptRemoval::Named(Box::new(set(&[n.to_owned()])));
+    assert_eq!(removes("drop"), named("size"));
+    assert_eq!(removes("pop"), named("size"));
+    assert_eq!(removes("clear"), KeptRemoval::Any);
+    assert_eq!(removes("calls_drop"), named("size"));
+    assert_eq!(removes("unknown"), KeptRemoval::Any);
+    // `list.append` and `len` of a builtin list or string run no code of the project.
+    assert_eq!(removes("library_only"), KeptRemoval::Nothing);
+    // `len` of a value of a class heki does not know runs its `__len__`.
+    assert_eq!(removes("handed_unknown"), KeptRemoval::Any);
+    // `isinstance` looks up `__class__` on its first argument, and runs the metaclass's
+    // `__instancecheck__` of its second, which a class without a metaclass of its own does not
+    // define in the project.
+    assert_eq!(removes("class_check"), KeptRemoval::Nothing);
+    // Other tasks run while a coroutine waits.
+    assert_eq!(removes("waits"), KeptRemoval::Any);
+}

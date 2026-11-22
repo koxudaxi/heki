@@ -32,6 +32,7 @@ pub mod guards;
 pub mod held;
 mod infer;
 mod invalidation;
+mod invokes;
 pub mod iterations;
 pub mod locks;
 pub mod one_at_a_time;
@@ -45,7 +46,8 @@ mod summary;
 pub mod types;
 
 pub use cache_flow::{
-    CacheEvent, CacheFlow, FlowBlock, SelfAttrWrite, attr_writes, self_attr_writes,
+    CacheEvent, CacheFlow, FlowBlock, InPlaceChange, KeptRemoval, SelfAttrWrite, attr_writes,
+    self_attr_writes,
 };
 pub use capacity::{Bound, Capacity, CapacityOf, CapacityWait, ParamOf, SiteQueues, WhileFull};
 pub use contracts::{ContractClass, Contracts};
@@ -734,6 +736,12 @@ pub struct EffectSummary {
     /// reads). Computed while an enabled rule reads it ([`OptInFacts::kept_values`]; `MUT101`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub must_read_self_attrs: Option<Box<BTreeSet<AttrKeyPath>>>,
+    /// The values kept in an instance `__dict__` (a `@cached_property`'s) the function may
+    /// remove or replace, on any object, itself or through the calls it makes
+    /// ([`KeptRemoval`]). Computed while an enabled rule reads it
+    /// ([`OptInFacts::kept_values`]; `MUT101`).
+    #[serde(default, skip_serializing_if = "KeptRemoval::is_nothing")]
+    pub removes_kept: KeptRemoval,
     /// The facts of every typed write the function reaches, through any callee.
     pub typed_field_writes: BTreeSet<TypedFieldWrite>,
     /// The function's own writes of project-class attributes, the `IndirectHelper` writes of
@@ -2080,9 +2088,10 @@ pub struct OptInFacts {
     pub shared_state: bool,
     /// [`EffectSummary::must_exec`] and what computes it at call sites.
     pub must_effects: bool,
-    /// What `MUT101`'s exact claim reads of a kept value: [`EffectSummary::must_read_self_attrs`]
-    /// and the call-site facts it is computed from ([`CallSite::complete`],
-    /// [`CallSite::on_every_return`]).
+    /// What `MUT101`'s exact claim reads of a kept value: [`EffectSummary::must_read_self_attrs`],
+    /// [`EffectSummary::removes_kept`], the points of a method that may remove one
+    /// ([`CacheEvent::MayRemove`]), and the call-site facts they are computed from
+    /// ([`CallSite::complete`], [`CallSite::on_every_return`]).
     pub kept_values: bool,
 }
 

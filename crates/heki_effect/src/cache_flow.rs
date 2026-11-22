@@ -7,6 +7,7 @@
 //! decided from these facts and the summaries alone, also for a method of a file that is not
 //! checked (the language server checks one file).
 
+use crate::readonly::ContainerKind;
 use crate::resolver::namespace_load;
 use crate::{CallSite, FuncKey, TypeCtx, Val, aliases_of, container_mutator, guards, self_aliases};
 use heki_ast::Span;
@@ -14,6 +15,7 @@ use heki_ir::walk::FnShape;
 use heki_ir::{BlockId, CompareOpKind, InstKind, IrFunction, Terminator, VarId};
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 
 /// The `MUT101` facts of one definition of a method that writes a `self` attribute itself.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -43,6 +45,101 @@ pub struct SelfAttrWrite {
     /// (`if self.<attr> is None:`, `if not self.<attr>:`): a lazy initialization.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub lazy_init: bool,
+    /// The literal key of an item store or delete (`self.<attr>["k"] = v`), as
+    /// `EffectSummary::mutates_self_attrs` keys it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    /// An in-place change of a builtin container the attribute holds by its type (computed by
+    /// `cache_flow` only; `MUT101`'s "Plain write").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change: Option<InPlaceChange>,
+}
+
+/// An in-place change of the builtin `list`, `dict`, or `set` an attribute holds by its type
+/// (a construction or an annotation, R2): the method that makes it, called by name or run by
+/// an item store or delete (`__setitem__`, `__delitem__`). Whether a project subclass of the
+/// container replaces that method is decided where the claim is made
+/// (`ProjectDecls::method_not_overridden`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InPlaceChange {
+    pub kind: ContainerKind,
+    pub method: String,
+    pub by_name: bool,
+}
+
+/// The values kept in an instance `__dict__` (a `@cached_property`'s) a function may remove or
+/// replace, on any object (`EffectSummary::removes_kept`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum KeptRemoval {
+    #[default]
+    Nothing,
+    /// The values kept under these names: `del obj.<name>`, an item of an object's `__dict__`
+    /// stored or removed under the key `<name>`.
+    Named(Box<BTreeSet<String>>),
+    /// Any: clearing or replacing an object's `__dict__`, waiting while other code runs
+    /// (`await`), or running code heki does not follow (a call it cannot resolve, a library
+    /// call outside the catalog, a catalog call handed a callable, an instance of a project
+    /// class, or a value of unknown type, a call whose targets are not every implementation it
+    /// can run).
+    Any,
+}
+
+impl KeptRemoval {
+    pub fn is_nothing(&self) -> bool {
+        matches!(self, Self::Nothing)
+    }
+
+    /// Whether the value kept under `name` may be removed or replaced.
+    pub fn removes(&self, name: &str) -> bool {
+        match self {
+            Self::Nothing => false,
+            Self::Named(names) => names.contains(name),
+            Self::Any => true,
+        }
+    }
+
+    pub fn add(&mut self, name: &str) {
+        match self {
+            Self::Nothing => *self = Self::Named(Box::new(BTreeSet::from([name.to_owned()]))),
+            Self::Named(names) => {
+                names.insert(name.to_owned());
+            }
+            Self::Any => {}
+        }
+    }
+
+    pub fn set_any(&mut self) {
+        *self = Self::Any;
+    }
+
+    pub fn join(&mut self, other: &Self) {
+        match other {
+            Self::Nothing => {}
+            Self::Named(names) => names.iter().for_each(|n| self.add(n)),
+            Self::Any => self.set_any(),
+        }
+    }
+}
+
+/// What one instruction may do to the values kept in some object's `__dict__`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum KeptRemovalKind {
+    /// Remove or replace the value kept under this name.
+    Named(String),
+    /// Remove or replace any.
+    Any,
+    /// Hand control to the generator's consumer (`yield`), which may run anything before the
+    /// method resumes; a caller of the method is that consumer, so it is no fact of the
+    /// method's summary.
+    Suspends,
+}
+
+/// An instruction of a method that may remove a kept value ([`KeptRemovalKind`]).
+#[derive(Debug, Clone)]
+pub(crate) struct KeptPoint {
+    pub block: BlockId,
+    pub index: u32,
+    pub kind: KeptRemovalKind,
 }
 
 impl SelfAttrWrite {
@@ -100,6 +197,16 @@ pub enum CacheEvent {
     ClearDict,
     /// A call whose call site has a `self` receiver: what it does is in its callees' summaries.
     SelfCall(Span),
+    /// A point that may remove or replace the value kept under a name (a name index) in some
+    /// object's `__dict__` ([`KeptRemovalKind::Named`]).
+    MayRemove(u32),
+    /// A point that may remove or replace any kept value ([`KeptRemovalKind::Any`],
+    /// [`KeptRemovalKind::Suspends`]).
+    MayRemoveAny,
+    /// A project call at the point that no `SelfCall` event stands for (another receiver, a
+    /// property getter a read of `self.<name>` runs): what it removes is in its callees'
+    /// summaries.
+    Calls(Span),
 }
 
 impl CacheFlow {
@@ -125,13 +232,16 @@ impl CacheFlow {
 }
 
 /// The `MUT101` facts of `f` (`None` for a function that is no method or writes no `self`
-/// attribute itself). `sites` are the function's call sites.
+/// attribute itself). `sites` are the function's call sites, `types` its inferred values, and
+/// `kept` the points of it that may remove a kept value (`None` unless
+/// [`crate::OptInFacts::kept_values`]).
 pub(crate) fn cache_flow(
     shape: &FnShape<'_>,
     key: &FuncKey,
     sites: &[CallSite],
     tcx: &TypeCtx<'_>,
     types: &FxHashMap<VarId, Val>,
+    kept: Option<&[KeptPoint]>,
 ) -> Option<CacheFlow> {
     let f = shape.f;
     if f.is_class_body || f.is_module_body || f.owner_class_qualname.is_none() {
@@ -146,14 +256,51 @@ pub(crate) fn cache_flow(
         .into_iter()
         .map(|(attr, w)| SelfAttrWrite {
             attr: names.index(attr),
+            change: in_place_change(f, &w, types),
             ..w
         })
         .collect();
-    let blocks = flow_blocks(shape, key, sites, tcx, types, &mut names);
+    let blocks = flow_blocks(shape, key, sites, tcx, types, kept, &mut names);
     Some(CacheFlow {
         names: names.list,
         writes,
         blocks,
+    })
+}
+
+/// [`SelfAttrWrite::change`]: the write changes in place, through one of its changing methods or
+/// an item store or delete, the builtin `list`, `dict`, or `set` its receiver holds by the
+/// function's types.
+fn in_place_change(
+    f: &IrFunction,
+    w: &SelfAttrWrite,
+    types: &FxHashMap<VarId, Val>,
+) -> Option<InPlaceChange> {
+    if w.rebinds {
+        return None;
+    }
+    let inst = f.block(w.block).insts.get(w.index as usize)?;
+    let (recv, method, by_name) = match &inst.kind {
+        InstKind::MethodCall { recv, method, .. } => (*recv, method.as_str(), true),
+        InstKind::SubscriptStore { obj, .. } => (*obj, "__setitem__", false),
+        InstKind::SubscriptDelete { obj, .. } => (*obj, "__delitem__", false),
+        _ => return None,
+    };
+    let kind = match types.get(&recv)? {
+        Val::Inst(class) => ContainerKind::ALL
+            .into_iter()
+            .find(|k| k.class() == class.as_str())?,
+        _ => return None,
+    };
+    let changes = if by_name {
+        kind.mutator(method)
+    } else {
+        kind.takes_item_stores()
+    };
+    changes.then(|| InPlaceChange {
+        kind,
+        method: method.to_owned(),
+        by_name,
     })
 }
 
@@ -259,7 +406,7 @@ pub fn attr_writes<'f>(
             .get(&bb)
             .is_some_and(|tests| tests.iter().any(|(h, k)| *h == held && same_key(k, index)))
     };
-    // `(block, index, (object, attr), memo_shaped, rebinds)` of each write.
+    // `(block, index, span, (object, attr), memo_shaped, rebinds, key)` of each write.
     let mut found = Vec::new();
     for bb in &f.blocks {
         for (index, inst) in bb.insts.iter().enumerate() {
@@ -267,21 +414,28 @@ pub fn attr_writes<'f>(
                 InstKind::AttrStore { obj, attr, .. } | InstKind::AttrDelete { obj, attr }
                     if attr != "__dict__" =>
                 {
-                    objects.get(obj).map(|&o| ((o, attr.as_str()), false, true))
+                    objects
+                        .get(obj)
+                        .map(|&o| ((o, attr.as_str()), false, true, None))
                 }
-                InstKind::SubscriptStore { obj, index, .. } => alias
+                InstKind::SubscriptStore {
+                    obj,
+                    index,
+                    key_const,
+                    ..
+                } => alias
                     .get(obj)
-                    .map(|&held| (held, guarded(bb.id, held, index), false)),
-                InstKind::SubscriptDelete { obj, .. } => {
-                    alias.get(obj).map(|&held| (held, false, false))
-                }
+                    .map(|&held| (held, guarded(bb.id, held, index), false, key_const.clone())),
+                InstKind::SubscriptDelete { obj, key_const, .. } => alias
+                    .get(obj)
+                    .map(|&held| (held, false, false, key_const.clone())),
                 InstKind::MethodCall { recv, method, .. } if container_mutator(method) => alias
                     .get(recv)
-                    .map(|&held| (held, method == "setdefault", false)),
+                    .map(|&held| (held, method == "setdefault", false, None)),
                 _ => None,
             };
-            if let Some((held, memo_shaped, rebinds)) = w {
-                found.push((bb.id, index, inst.span, held, memo_shaped, rebinds));
+            if let Some((held, memo_shaped, rebinds, key)) = w {
+                found.push((bb.id, index, inst.span, held, memo_shaped, rebinds, key));
             }
         }
     }
@@ -289,13 +443,13 @@ pub fn attr_writes<'f>(
         return Vec::new();
     }
     let mut written: FxHashMap<&str, FxHashSet<u32>> = FxHashMap::default();
-    for (_, _, _, (o, attr), _, _) in &found {
+    for (_, _, _, (o, attr), _, _, _) in &found {
         written.entry(attr).or_default().insert(*o);
     }
     let lazy = lazy_init_blocks(shape, objects, &written);
     let mut out: Vec<(&str, SelfAttrWrite)> = found
         .into_iter()
-        .map(|(block, index, span, held, memo_shaped, rebinds)| {
+        .map(|(block, index, span, held, memo_shaped, rebinds, key)| {
             let write = SelfAttrWrite {
                 attr: 0,
                 span,
@@ -306,6 +460,8 @@ pub fn attr_writes<'f>(
                 lazy_init: lazy
                     .iter()
                     .any(|(h, blocks)| *h == held && blocks[block.0 as usize]),
+                key,
+                change: None,
             };
             (held.1, write)
         })
@@ -350,6 +506,7 @@ fn flow_blocks(
     sites: &[CallSite],
     tcx: &TypeCtx<'_>,
     types: &FxHashMap<VarId, Val>,
+    kept: Option<&[KeptPoint]>,
     names: &mut Names,
 ) -> Vec<FlowBlock> {
     let f = shape.f;
@@ -375,10 +532,38 @@ fn flow_blocks(
         .filter(|s| s.recv_is_self && &s.caller == key)
         .map(|s| s.span)
         .collect();
+    let project_calls: FxHashSet<Span> = sites
+        .iter()
+        .filter(|s| &s.caller == key && !s.project_callees().is_empty())
+        .map(|s| s.span)
+        .collect();
+    let mut kept_at: FxHashMap<(BlockId, u32), Vec<&KeptRemovalKind>> = FxHashMap::default();
+    for p in kept.into_iter().flatten() {
+        kept_at.entry((p.block, p.index)).or_default().push(&p.kind);
+    }
     let mut blocks = vec![FlowBlock::default(); f.blocks.len()];
     for bb in &f.blocks {
         let mut events = Vec::new();
         for (index, inst) in bb.insts.iter().enumerate() {
+            let at = u32::try_from(index).unwrap_or(u32::MAX);
+            for kind in kept_at.get(&(bb.id, at)).into_iter().flatten() {
+                events.push((
+                    at,
+                    match kind {
+                        KeptRemovalKind::Named(name) => CacheEvent::MayRemove(names.index(name)),
+                        KeptRemovalKind::Any | KeptRemovalKind::Suspends => {
+                            CacheEvent::MayRemoveAny
+                        }
+                    },
+                ));
+            }
+            let self_call = matches!(
+                inst.kind,
+                InstKind::MethodCall { .. } | InstKind::Call { .. }
+            ) && self_calls.contains(&inst.span);
+            if kept.is_some() && !self_call && project_calls.contains(&inst.span) {
+                events.push((at, CacheEvent::Calls(inst.span)));
+            }
             let event = match &inst.kind {
                 InstKind::AttrDelete { obj, attr } if self_vars.contains(obj) => {
                     Some(CacheEvent::DeleteAttr(names.index(attr)))

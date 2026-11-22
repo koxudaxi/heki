@@ -508,6 +508,10 @@ impl CacheEvents {
                     CacheEvent::LoadAttr(name) => (false, flow.name(name) == prop),
                     CacheEvent::ClearDict => (true, false),
                     CacheEvent::SelfCall(span) => self_call(span),
+                    // Points that may remove the value are no invalidation the code states.
+                    CacheEvent::MayRemove(_) | CacheEvent::MayRemoveAny | CacheEvent::Calls(_) => {
+                        (false, false)
+                    }
                 };
                 if invalidates {
                     out.invalidations.insert((b, index));

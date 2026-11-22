@@ -972,6 +972,7 @@ fn apply_edge(
         facts,
     };
     transfer(index, target, local, &edge, &lead, rewrite);
+    target.removes_kept.join(&facts.removes_kept);
     if !index.skips_typed_writes
         && (!facts.typed_field_write_sites.is_empty() || !facts.mutated_param_paths.is_empty())
     {
