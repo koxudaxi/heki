@@ -19,6 +19,7 @@ use heki_ast::LineIndex;
 use heki_rules::experimental::{
     EXPERIMENTAL_FEATURES, EXPERIMENTAL_POLICY, ExperimentalFeature, experimental_rule,
 };
+use heki_rules::precision::{self, Certification, Measurement};
 use heki_rules::project::{Project, ProjectOptions};
 use heki_rules::{Activation, CORE_RULES, RuleMeta, find_rule};
 use std::path::PathBuf;
@@ -104,6 +105,9 @@ enum Commands {
     /// Internal: dump the experimental features as JSON for `scripts/build_docs.py`.
     #[command(hide = true)]
     DumpExperimental,
+    /// Internal: dump the certifications and measurements as JSON for `scripts/build_docs.py`.
+    #[command(hide = true)]
+    DumpPrecision,
 }
 
 #[derive(Debug, Args)]
@@ -278,6 +282,9 @@ struct RuleRecord {
     /// The premises of the rule's exact claim (`heki_rules::premises`), empty for a rule
     /// without one.
     premises: &'static [&'static heki_rules::premises::Premise],
+    certification: Option<Certification>,
+    /// The latest measurement of how often its reports are right about the code.
+    measurement: Option<Measurement>,
 }
 
 impl RuleRecord {
@@ -289,6 +296,8 @@ impl RuleRecord {
             experimental: experimental_rule(rule.code),
             default_severity: rule.default_severity(),
             premises: heki_rules::premises::of_rule(rule.code),
+            certification: precision::certification(rule.code),
+            measurement: precision::measurement(rule.code),
         }
     }
 }
@@ -462,6 +471,14 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 "features": EXPERIMENTAL_FEATURES,
             });
             println!("{}", serde_json::to_string_pretty(&registry)?);
+            Ok(ExitCode::SUCCESS)
+        }
+        Commands::DumpPrecision => {
+            let published = serde_json::json!({
+                "certifications": precision::certifications().collect::<Vec<_>>(),
+                "measurements": precision::measurements().collect::<Vec<_>>(),
+            });
+            println!("{}", serde_json::to_string_pretty(&published)?);
             Ok(ExitCode::SUCCESS)
         }
     }
