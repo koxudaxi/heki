@@ -294,6 +294,16 @@ pub struct EcosystemEntry {
     pub excluded: bool,
     /// The call returns a copy of its operand (`MUT202`), this deep.
     pub copy_sanitizer: Option<CopyDepth>,
+    /// The method is a class's `__setattr__` or `__delattr__` that stores the value (or deletes
+    /// the attribute) on the instance itself, as its own attribute, or raises: it hands the
+    /// value to no other object and installs no descriptor. The value it stores may be a
+    /// validated conversion, and validators of the project may run (`pydantic.BaseModel` with
+    /// `validate_assignment`).
+    pub stores_on_instance: bool,
+    /// An instance of this class built without a value for a field holds the field's default
+    /// itself when the default is hashable; an unhashable default is deep-copied for each
+    /// instance (pydantic 2's `BaseModel`, through `pydantic-core`).
+    pub keeps_hashable_defaults: bool,
     pub opaque_to_layer3: bool,
     /// Optional instance class returned by a factory function or method
     /// (e.g. `sqlite3.connect` -> `sqlite3.Connection`, `sqlite3.Connection.cursor` -> `sqlite3.Cursor`).
@@ -1255,10 +1265,32 @@ mod tests {
             synchronous_waits(),
             lazy_iterators(),
             environment_reads(),
+            pydantic_models(),
         ]
         .into_iter()
         .flatten()
         .collect()
+    }
+
+    /// How a pydantic model stores and deletes its attributes, and what a field left out at
+    /// construction holds.
+    fn pydantic_models() -> Vec<(Vec<String>, EcosystemEntry)> {
+        vec![
+            (
+                with_prefix("pydantic.BaseModel", &["__setattr__", "__delattr__"]),
+                EcosystemEntry {
+                    stores_on_instance: true,
+                    ..entry(&[])
+                },
+            ),
+            (
+                s(&["pydantic.BaseModel"]),
+                EcosystemEntry {
+                    keeps_hashable_defaults: true,
+                    ..entry(&[])
+                },
+            ),
+        ]
     }
 
     /// The calls and module attributes `reads-environment` effect boundaries forbid; they carry
@@ -1525,7 +1557,10 @@ mod tests {
                 .concat(),
                 excluded,
             ),
-            (s(&["copy.deepcopy"]), copy_sanitizer(CopyDepth::Deep)),
+            (
+                s(&["copy.deepcopy", "pydantic.BaseModel.__deepcopy__"]),
+                copy_sanitizer(CopyDepth::Deep),
+            ),
             // `MUT114`: `html.escape(text).split("\n")` is a list by construction.
             (s(&["html.escape"]), returning("builtins.str", entry(&[]))),
             (

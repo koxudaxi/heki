@@ -116,6 +116,38 @@ symbol = "pydantic.BaseModel.model_copy"
 copy_sanitizer = "shallow"
 opaque_to_layer3 = true
 
+# `copy.deepcopy` of a model runs `BaseModel.__deepcopy__`, which deep-copies the instance's
+# `__dict__` (its fields), its extra values, and its private attributes.
+[[entries]]
+symbol = "pydantic.BaseModel.__deepcopy__"
+copy_sanitizer = "deep"
+opaque_to_layer3 = true
+
+# --- Models: pydantic ---
+# Pydantic 2. Storing a field stores it in the instance's `__dict__` (validated first under
+# `validate_assignment`); a private attribute goes to its `__pydantic_private__`, an extra one to
+# its `__pydantic_extra__`; a frozen model, a class variable, and an unknown name without
+# `extra="allow"` raise. Deleting works the same way. A property or `cached_property` of the
+# class is the project's own declaration.
+
+[[entries]]
+symbol = "pydantic.BaseModel.__setattr__"
+stores_on_instance = true
+opaque_to_layer3 = true
+
+[[entries]]
+symbol = "pydantic.BaseModel.__delattr__"
+stores_on_instance = true
+opaque_to_layer3 = true
+
+# `pydantic-core` validates a field left out with the field's default: a hashable default
+# (`None`, a string, an `object()` sentinel) is the default object itself, an unhashable one is
+# deep-copied for each instance.
+[[entries]]
+symbol = "pydantic.BaseModel"
+keeps_hashable_defaults = true
+opaque_to_layer3 = true
+
 # --- HTTP: requests ---
 # The module functions open a new connection pool per call; `Session` methods reuse one.
 

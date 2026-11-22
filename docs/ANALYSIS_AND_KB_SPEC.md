@@ -1497,8 +1497,13 @@ The single place for every execution-effect origin. An entry has `symbol`, `effe
 `offloads_blocking_arg` (`asyncio.to_thread`; with `0`, also an offloading decorator such as
 `asgiref.sync.sync_to_async`), `sync_facade_arg` (`AsyncSession.run_sync`: the callable runs on
 the caller's thread with a synchronous facade over an async connection), `excluded` (`logging.Logger.*`), `copy_sanitizer` (`"deep"`:
-`copy.deepcopy`; `"shallow"`: `copy.copy`, `BaseModel.model_copy`, whose `deep=True` copies
-deeply unless `update=` hands it values by reference: `MUT202`), `return_type` (factories such as
+`copy.deepcopy`, `BaseModel.__deepcopy__`; `"shallow"`: `copy.copy`, `BaseModel.model_copy`, whose
+`deep=True` copies deeply unless `update=` hands it values by reference: `MUT202`),
+`stores_on_instance` (a class's `__setattr__` / `__delattr__` that stores the value, possibly a
+validated conversion of it, or deletes the attribute on the instance itself, or raises, handing
+the value to no other object: `pydantic.BaseModel.__setattr__`), `keeps_hashable_defaults` (an
+instance built without a field holds the field's default itself when it is hashable, and a
+deep copy of an unhashable one: pydantic 2's `BaseModel`), `return_type` (factories such as
 `sqlite3.connect`), `sync_lock_or_tx` (`threading.Lock`, `Session.begin`: `EFF106`),
 `non_reentrant_lock` (`threading.Lock`, `asyncio.Lock`: `EFF109`), `one_at_a_time`
 (`asyncio.StreamReader.readline`, `AsyncSession.execute`: `EFF110`),
