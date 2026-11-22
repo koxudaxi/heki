@@ -1,6 +1,8 @@
 //! `heki dump-recommend-facts` (hidden): the facts `heki recommend` reads besides the rules, as
 //! JSON, for the tests that check them through the binary and for measuring what they cost:
-//! the calls heki is blind to, with their counts per project ([`heki_rules::blind_spots`]).
+//! the calls heki is blind to, with their counts per project ([`heki_rules::blind_spots`]), and
+//! the census of class attributes and modules contract candidates are drawn from
+//! ([`heki_rules::census`]).
 //!
 //! The index is the one `heki check` builds for the same configuration and selection, with the
 //! facts of [`heki_rules::recommend_facts`].
@@ -14,6 +16,7 @@ use heki_effect::analyze_project_for;
 use heki_rules::blind_spots::{
     BlindSite, BlindSpots, CallCounts, UncataloguedPackage, UnresolvedCalls,
 };
+use heki_rules::census::{Accesses, Census, CensusTotals, Writes};
 use heki_rules::project::{Project, ProjectOptions};
 use rustc_hash::FxHashMap;
 use serde::Serialize;
@@ -25,6 +28,7 @@ use std::process::ExitCode;
 #[derive(Serialize)]
 struct Facts<'a> {
     blind_spots: BlindSpotFacts<'a>,
+    census: CensusFacts<'a>,
 }
 
 /// The lists are left out with `--totals`.
@@ -85,6 +89,52 @@ struct Site {
     function: String,
 }
 
+#[derive(Serialize)]
+struct CensusFacts<'a> {
+    totals: CensusTotals,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attributes: Option<Vec<Attribute<'a>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    classes: Option<&'a [heki_rules::census::ClassUse<'a>]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    modules: Option<Vec<Module<'a>>>,
+}
+
+#[derive(Serialize)]
+struct Attribute<'a> {
+    class: &'a str,
+    attr: &'a str,
+    writers: Vec<Writer>,
+    initializers: Vec<Access>,
+    readers: Vec<Access>,
+}
+
+#[derive(Serialize)]
+struct Access {
+    function: String,
+    path: String,
+    line: u32,
+    sites: usize,
+}
+
+#[derive(Serialize)]
+struct Writer {
+    #[serde(flatten)]
+    access: Access,
+    rebinds: bool,
+    in_place: bool,
+    fresh: bool,
+}
+
+#[derive(Serialize)]
+struct Module<'a> {
+    module: &'a str,
+    path: String,
+    functions: usize,
+    blocking: Vec<String>,
+    unseen: Vec<String>,
+}
+
 pub(crate) fn run(args: &DumpRecommendFactsArgs) -> Result<ExitCode> {
     let project = Project::load(&ProjectOptions {
         paths: &args.paths,
@@ -118,6 +168,19 @@ pub(crate) fn run(args: &DumpRecommendFactsArgs) -> Result<ExitCode> {
             function: s.function.fqn(),
         }
     };
+    let access = |a: &Accesses<'_>| Access {
+        function: a.function.fqn(),
+        path: shown_text(a.path),
+        line: lines[a.path].line(a.first.start),
+        sites: a.sites,
+    };
+    let writer = |w: &Writes<'_>| Writer {
+        access: access(&w.accesses),
+        rebinds: w.rebinds,
+        in_place: w.in_place,
+        fresh: w.fresh,
+    };
+    let census = Census::of(&index);
     let spots = BlindSpots::of(&index);
     let totals = spots.totals();
     let facts = Facts {
@@ -157,6 +220,32 @@ pub(crate) fn run(args: &DumpRecommendFactsArgs) -> Result<ExitCode> {
                         names: &u.names,
                         counts: u.counts,
                         sites: u.sites.iter().map(site).collect(),
+                    })
+                    .collect()
+            }),
+        },
+        census: CensusFacts {
+            totals: census.totals(),
+            attributes: (!args.totals).then(|| {
+                (census.attributes.iter())
+                    .map(|a| Attribute {
+                        class: a.class,
+                        attr: a.attr,
+                        writers: a.writers.iter().map(writer).collect(),
+                        initializers: a.initializers.iter().map(access).collect(),
+                        readers: a.readers.iter().map(access).collect(),
+                    })
+                    .collect()
+            }),
+            classes: (!args.totals).then_some(census.classes.as_slice()),
+            modules: (!args.totals).then(|| {
+                (census.modules.iter())
+                    .map(|m| Module {
+                        module: m.module,
+                        path: shown_text(m.path),
+                        functions: m.functions,
+                        blocking: m.blocking.iter().map(|f| f.fqn()).collect(),
+                        unseen: m.unseen.iter().map(|f| f.fqn()).collect(),
                     })
                     .collect()
             }),

@@ -696,6 +696,20 @@ body where it is called), once from every `async def` (not through a worker thre
 the calls inside a loop or once per item, giving the functions on an event loop and below a loop; `heki_rules::blind_spots` counts the calls by package and name and by function and reason,
 and the hidden `heki dump-recommend-facts` prints them.
 
+The census contract candidates are drawn from (`heki_rules::census`) is a pass over the index and
+computes no fact of its own: every local summary keeps the function's own typed read and write
+sites for every project class, whatever the contracts. Per class (the one heki types the accessed
+object with) and attribute it lists the functions writing it outside the initialization of their
+own instance (whether they rebind it, change its object in place, or only fill an object they
+construct), the initializers writing it on their own `self` (`INITIALIZERS` of the class), and
+the functions reading it (a read through a protocol declaring the attribute is the protocol's);
+per class, the modules constructing it or accessing its attributes; per module, its functions,
+those whose final summary reaches a blocking effect, and those reaching code heki does not see
+(`ProjectIndex::reaching_blind_spots`: a blind call, `unknown_calls`, or a body known only from a
+stub, in their own body or in what their calls hand on, as `blind_spot_reach` walks it, one
+`Closure` over those states). Without an ownership contract the summaries keep no write into an entry of an attribute's
+container and do not answer whether a write constructs its object, so a contract trial sees more.
+
 **Guards.** An effect inside a branch of a test of the function's own inputs (`if cache:`,
 `if x is None:`, `isinstance(x, T)`, `hasattr(x, "write")`, also through `and` / `or` / `not`,
 early returns, and conditional expressions; on a parameter, or an attribute of one the function
