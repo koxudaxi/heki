@@ -81,7 +81,7 @@ pub struct ModuleUse<'i> {
     pub unseen: Vec<&'i FuncKey>,
 }
 
-/// The census of a project, each list sorted by its keys.
+/// The census of a project, each list sorted by its keys (the modules by name).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Census<'i> {
     pub attributes: Vec<AttributeUse<'i>>,
@@ -115,7 +115,7 @@ impl<'i> Census<'i> {
     pub fn of(index: &'i ProjectIndex) -> Self {
         let mut attributes: BTreeMap<(&str, &str), Gathered<'_>> = BTreeMap::new();
         let mut classes: BTreeMap<&str, FxHashSet<&str>> = BTreeMap::new();
-        let mut modules = Vec::new();
+        let mut modules: BTreeMap<&str, ModuleUse<'_>> = BTreeMap::new();
         let blocking: FxHashSet<_> = BLOCKING_EFFECTS.iter().collect();
         let unseen = index.reaching_blind_spots();
         let mut files: Vec<_> = index.files.values().collect();
@@ -129,13 +129,22 @@ impl<'i> Census<'i> {
                 .filter(|(f, _)| index.file_of(f) == Some(path))
                 .collect();
             functions.sort_by(|a, b| a.0.cmp(b.0));
-            let mut census = ModuleUse {
+            // A file heki could not read defines no function, not even its body.
+            if functions.is_empty() {
+                continue;
+            }
+            // A module defined by an implementation and its stub is one entry, shown at the
+            // implementation; each function counts in the file defining it.
+            let census = modules.entry(module).or_insert(ModuleUse {
                 module,
                 path,
                 functions: 0,
                 blocking: Vec::new(),
                 unseen: Vec::new(),
-            };
+            });
+            if heki_effect::is_stub(census.path) && !heki_effect::is_stub(path) {
+                census.path = path;
+            }
             for &(function, local) in &functions {
                 gather(&mut attributes, &mut classes, module, path, function, local);
                 if function.qualname == "<module>" {
@@ -159,9 +168,6 @@ impl<'i> Census<'i> {
                     classes.entry(class).or_default().insert(module);
                 }
             }
-            if !functions.is_empty() {
-                modules.push(census);
-            }
         }
         Self {
             attributes: attributes
@@ -182,7 +188,13 @@ impl<'i> Census<'i> {
                     ClassUse { class, modules }
                 })
                 .collect(),
-            modules,
+            modules: (modules.into_values())
+                .map(|mut m| {
+                    m.blocking.sort_unstable();
+                    m.unseen.sort_unstable();
+                    m
+                })
+                .collect(),
         }
     }
 

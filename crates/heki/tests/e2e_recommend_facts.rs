@@ -644,7 +644,10 @@ def reader():
     p.write("app/jobs.py", "def run(client):\n    client.go()\n");
     p.write("lib.pyi", "def helper() -> None: ...\n");
     p.write("app/twice.py", "def one():\n    return 1\n");
-    p.write("app/twice.pyi", "def one() -> int: ...\n");
+    p.write(
+        "app/twice.pyi",
+        "def one() -> int: ...\n\n\ndef two() -> int: ...\n",
+    );
     let census = census(&p);
     let modules: Vec<(String, u64, Vec<String>, Vec<String>)> = census["modules"]
         .as_array()
@@ -688,8 +691,9 @@ def reader():
                 ]),
             ),
             (s("app.jobs"), 1, vec![], names(&["app.jobs.run"])),
-            // Defined in the implementation and its stub: counted once.
-            (s("app.twice"), 1, vec![], vec![]),
+            // Defined in the implementation and its stub: one entry, each function counted once,
+            // the one only the stub declares unseen.
+            (s("app.twice"), 2, vec![], names(&["app.twice.two"])),
             (s("lib"), 1, vec![], names(&["lib.helper"])),
         ],
         "{census:#}"
