@@ -7,7 +7,7 @@ use crate::mut_rules::{
     initializes_itself, parse_call_targets, parse_read_targets, parse_targets, patterns,
     project_classes, reports_import_probes, site_callee, write_hits,
 };
-use crate::opt_rules::Sizes;
+use crate::opt_rules::{Creators, Sizes};
 use crate::{
     CheckContext, DottedPattern, ModuleUnit, RuleConfigError, SitesByCaller, has_glob_syntax,
     split_last_dot,
@@ -340,6 +340,7 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
     let tcx = TypeCtx::new(&unit.input, cx.decls, cx.kb);
     let no_types = FxHashMap::default();
     let constants = cx.fixed_constants(unit);
+    let creators = Creators::new(cx, &tcx, &no_types, unit, &constants);
     let item_origins: std::cell::OnceCell<ItemOrigins<'_>> = std::cell::OnceCell::new();
     for f in &unit.input.ir.functions {
         if f.is_class_body {
@@ -414,7 +415,8 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
                         .enumerate()
                         .filter(|(i, lp)| {
                             shape.in_loop(*i, bb.id)
-                                && *data_sized[*i].get_or_insert_with(|| sizes.data_sized(lp))
+                                && *data_sized[*i]
+                                    .get_or_insert_with(|| sizes.data_sized(lp, &creators))
                         })
                         .fold(0, |mask, (_, lp)| mask | loop_bit(lp))
                 });

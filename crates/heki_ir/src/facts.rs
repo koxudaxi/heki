@@ -1208,6 +1208,23 @@ impl<'a> FnIndex<'a> {
         self.iter_bound_depth(v, leaf, 0, SMALL_MAX, &mut false)
     }
 
+    /// [`Self::iter_bound`] as an index that has answered nothing yet gives it: the answers kept
+    /// for earlier questions are dropped, the function's tables stay. An owner asking the
+    /// function one question for each of its child scopes (the iterable each receives from it)
+    /// builds the tables once and answers each as if it asked first, which an answer kept from
+    /// another question may not: a size first reached past [`MAX_NESTED_SIZES`], or inside a
+    /// cycle of sizes, is kept as not fixed.
+    pub fn iter_bound_alone(
+        &self,
+        v: VarId,
+        leaf: &mut dyn FnMut(&Inst) -> Option<u32>,
+    ) -> Option<u32> {
+        self.bounds.take();
+        self.trips.take();
+        self.sink_displays.take();
+        self.iter_bound(v, leaf)
+    }
+
     /// [`Self::iter_bound`] up to `cap` items. Past [`SMALL_MAX`] it also counts what holds any
     /// number of items the code fixes: a slice by constant bounds, a tuple display, a list or set
     /// display nothing grows, and a module's string and string-tuple constants. `capped` is set
@@ -2742,23 +2759,66 @@ fn comprehension_results(
     out
 }
 
+/// The bounds of the iterables functions pass to the child scopes they create (a generator
+/// expression, a comprehension function before 3.12), where each creator evaluates them: one
+/// index per creator and one answer per iterable, however many child scopes a function creates.
+struct PassedBounds<'a> {
+    functions: &'a [IrFunction],
+    constants: &'a ModuleConstants,
+    creators: FxHashMap<FunctionId, FnIndex<'a>>,
+    bounds: FxHashMap<(FunctionId, VarId), Option<u32>>,
+}
+
+impl<'a> PassedBounds<'a> {
+    fn new(functions: &'a [IrFunction], constants: &'a ModuleConstants) -> Self {
+        Self {
+            functions,
+            constants,
+            creators: FxHashMap::default(),
+            bounds: FxHashMap::default(),
+        }
+    }
+
+    /// The bound of `it`, when it is the iterable `f` receives as `.0` from the function
+    /// creating it.
+    fn of(&mut self, f: &IrFunction, it: VarId) -> Option<u32> {
+        let (creator, iterable) = f.passed_from?;
+        (f.var_name(it) == Some(".0")).then_some(())?;
+        *self.bounds.entry((creator, iterable)).or_insert_with(|| {
+            self.creators
+                .entry(creator)
+                .or_insert_with(|| {
+                    FnIndex::new(&self.functions[creator.0 as usize], self.constants)
+                })
+                .iter_bound_alone(iterable, &mut |_| None)
+        })
+    }
+}
+
 /// One pass of [`refine_loops`] over the loops still `Unbounded` (and every loop's caps).
 fn refine_round(
     functions: &mut [IrFunction],
     hints: &[(FunctionId, Vec<LoopHint>)],
     constants: &ModuleConstants,
 ) {
+    for (fi, li, bound, caps) in refined_loops(functions, hints, constants) {
+        let lp = &mut functions[fi].loops[li];
+        lp.bound = bound;
+        lp.len_caps = caps;
+    }
+}
+
+/// The loops of `hints` whose bound or caps [`refine_round`] changes: the index of the
+/// function and of the loop, and the new bound and caps.
+fn refined_loops(
+    functions: &[IrFunction],
+    hints: &[(FunctionId, Vec<LoopHint>)],
+    constants: &ModuleConstants,
+) -> Vec<(usize, usize, LoopBound, Vec<LenCap>)> {
     let mut updates: Vec<(usize, usize, LoopBound, Vec<LenCap>)> = Vec::new();
+    let mut passed = PassedBounds::new(functions, constants);
     for (fid, loop_hints) in hints {
         let f = &functions[fid.0 as usize];
-        // The iterable a generator expression or a comprehension function receives as `.0`
-        // is bounded where its creator evaluated it.
-        let passed_bound = |it: VarId| {
-            let (creator, iterable) = f.passed_from?;
-            (f.var_name(it) == Some(".0")).then_some(())?;
-            FnIndex::new(&functions[creator.0 as usize], constants)
-                .iter_bound(iterable, &mut |_| None)
-        };
         let needs = f
             .loops
             .iter()
@@ -2773,7 +2833,7 @@ fn refine_round(
             if bound == LoopBound::Unbounded
                 && let Some(n) = ix
                     .fixed_trip(lp, &mut |_| None, SMALL_MAX)
-                    .or_else(|| ix.loop_iterable(lp).and_then(passed_bound))
+                    .or_else(|| ix.loop_iterable(lp).and_then(|it| passed.of(f, it)))
             {
                 bound = if hint.retry_body {
                     LoopBound::RetryPattern
@@ -2815,11 +2875,7 @@ fn refine_round(
             }
         }
     }
-    for (fi, li, bound, caps) in updates {
-        let lp = &mut functions[fi].loops[li];
-        lp.bound = bound;
-        lp.len_caps = caps;
-    }
+    updates
 }
 
 #[cfg(test)]

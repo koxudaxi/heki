@@ -1,6 +1,7 @@
 //! The cost of the analyses past the IR, end to end through the real binary: `isinstance`
 //! narrowing through phis, the passes of the type inference and of the classes of merged values,
-//! the closure cells child scopes read, the size of the Soundness lane's proof state, the values
+//! the closure cells child scopes read, the iterables child scopes receive from the functions
+//! creating them, the size of the Soundness lane's proof state, the values
 //! `EFF107` follows from a task factory, the walk to the callable a builtin calls once per item,
 //! contracts with many call targets and argument lists, the walk to the uses handing a reference to
 //! a call target on, and the locks `EFF109` follows.
@@ -214,6 +215,57 @@ fn scopes_reading_a_cell_bound_many_times_read_its_joined_fact() {
         assert_eq!(
             found.iter().filter(|d| d["rule_code"] == "MUT203").count(),
             names
+        );
+    }
+}
+
+/// A function creating `children` child scopes, each over a value it binds just before and
+/// opening a session per item, then one over a display of two items: comprehensions, which are
+/// functions of their own before 3.12, or generator expressions.
+fn child_scopes_over_bound_values(children: usize, comprehension: bool) -> String {
+    let child = |iterable: &str| {
+        if comprehension {
+            format!("[requests.Session() for _ in {iterable}]")
+        } else {
+            format!("list(requests.Session() for _ in {iterable})")
+        }
+    };
+    let mut lines = vec![
+        "import requests".to_owned(),
+        String::new(),
+        String::new(),
+        "def load(i):".to_owned(),
+        "    return [i]".to_owned(),
+        String::new(),
+        String::new(),
+        "def shape(out):".to_owned(),
+    ];
+    for i in 0..children {
+        lines.push(format!("    rows = load({i})"));
+        lines.push(format!("    out.append({})", child("rows")));
+    }
+    lines.push(format!("    out.append({})", child("[1, 2]")));
+    lines.join("\n") + "\n"
+}
+
+/// The iterable a child scope receives is sized where the function creating it evaluates it, on
+/// one index of that function for all its child scopes, both when the IR's loop bounds are
+/// refined and when a rule asks whether a loop is data-sized: a session per item of every child
+/// scope but the one over the display.
+#[test]
+fn child_scopes_size_their_iterables_on_one_index_of_their_creator() {
+    let config = "[project]\nname = \"t\"\n\n[tool.heki]\ntarget-version = \"py311\"\n\n\
+                  [tool.heki.lint]\nselect = [\"EFF102\"]\n";
+    for (comprehension, children) in [(true, 8_000), (false, 5_000)] {
+        let p = Project::new(&format!("bounds_child_scopes_{comprehension}"));
+        p.write("pyproject.toml", config).write(
+            "m.py",
+            &child_scopes_over_bound_values(children, comprehension),
+        );
+        let found = check_within(&p, Duration::from_secs(20));
+        assert_eq!(
+            found.iter().filter(|d| d["rule_code"] == "EFF102").count(),
+            children
         );
     }
 }
