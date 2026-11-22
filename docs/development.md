@@ -204,6 +204,13 @@ follows these rules:
   function's names, its module and qualname, its class), never tried one by one: the cost grows
   with the sites, not with sites times targets, and the targets of every contract of a rule are
   indexed together. The parameters argument lists name are looked up from those a call binds.
+- A function's call sites, and those at one of its instructions, are looked up in an index of the
+  module's call sites by function and position, built once per module: never found by a scan of
+  the module's sites per function or of the function's sites per call.
+- The accesses of one function that a contract rule reports at the same places (an object of the
+  same parameters, one contract and target) walk the callers once, and a report at a call site
+  counts their sites as one group. The generator expressions of a function share one qualname,
+  so each of their call sites stands for the accesses of all of them.
 
 The engines of `heki_ir::walk` apply these rules by construction, and every walk over IR ids,
 the call graph, or the class hierarchy goes through them:
@@ -268,7 +275,8 @@ of names each to the one before, a method returning one of thousands of copies o
 behind as many tests, a function making twenty thousand calls of eight operands each, a helper that
 types nothing making thousands of strict accesses of one name that one caller calls as many times, a
 helper that types nothing reading, calling, or writing one strict target name thousands of times,
-which a caller calls as many times, many `is` tests each followed by a conditional expression on the
+which a caller calls as many times, a class whose initializer calls a thousand methods, each running
+a helper that accesses its own `self` a thousand times, many `is` tests each followed by a conditional expression on the
 tested parameter, many branches on a long chain of copies of one `is` test,
 thousands of tests of an object's state before thousands of acquisitions of its lock, thousands of
 locks held at once over thousands of blocks, thousands of fan-outs of one session in one function,
@@ -302,7 +310,9 @@ a long chain of phis carries to one `return`, an argument handed down through th
 of one module to the one that changes it, thousands of reports whose call chains enter one module,
 the callers of the bottom of a lattice of calls thirty levels deep, the chains `heki inspect` walks
 down thousands of calls of one module, a value chosen among a thousand module globals before it is
-changed, and thousands of calls handing a global to a helper that changes it.
+changed, thousands of calls handing a global to a helper that changes it, and thousands of
+comprehensions or generator expressions, each over a value the function creating them binds just
+before.
 
 A change to the IR builder, a walk, a fixpoint, or a rule's state is also run over a large
 corpus of real projects before it is merged, every run under a memory cap and a timeout. No
