@@ -195,14 +195,14 @@ Contracts declare what no type can say. Each kind is an array of tables with its
   invalid glob, a name with more than one colon or an empty module or qualified name, call
   targets whose globs are too many to match together (tens of thousands of complex ones), an
   argument list heki cannot read, or an unknown value of `forbid`, `fresh-objects`, `unresolved`,
-  `references`, or `attribution`.
+  `references`, `attribution`, or `unlisted-dict-keys`.
 - With `unresolved = "report"`, a contract also reports the accesses it cannot tie to a class,
   each under its own rule (`MUT205` writes, `MUT206` reads, `MUT207` calls): an attribute or
   method named like a target, accessed on an object of unknown class (an unannotated parameter,
   a loop variable, an untyped call result, `Any`, a protocol whose implementations heki cannot
   list). A baseline counts them apart from the violations the typed rules prove.
-- An attribute named through a string (`setattr`, `getattr`, `__dict__`) is followed when the
-  string is a constant: see [Dynamic names](scope.md#dynamic-names).
+- An attribute named through a string (`setattr`, `getattr`, `__dict__`, `vars`) is followed
+  when the string is a constant: see [Dynamic names](scope.md#dynamic-names).
 
 ### `write-owners`
 
@@ -230,6 +230,7 @@ unresolved = "report"
 | `fresh-objects` | `"allow"` | `"allow"` or `"report"`: whether a write that constructs the object it writes is reported. |
 | `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the writes the contract cannot tie to a class are reported under [`MUT205`](rules/unresolved-guarded-write.md). |
 | `attribution` | `"call-graph"` | `"call-graph"` or `"lexical"`: which function a write is judged in. See [How contracts report](#how-contracts-report). |
+| `unlisted-dict-keys` | `"ignore"` | `"ignore"` or `"report"`: whether a `__dict__` key of a target's class that no target names is reported when it is written. |
 
 A container entry (`Class.attr["key"]`):
 
@@ -249,11 +250,21 @@ With `fresh-objects = "allow"`, a write is no violation when it constructs the o
 
 A shallow copy's containers are the original's: only rebinding its attributes constructs it.
 
+With `unlisted-dict-keys = "report"`, `MUT201` also reports a constant key written through the
+namespace of an object of a class a target covers (`field.__dict__[KEY] = v`,
+`field.__dict__.setdefault("_cache", v)`, `del vars(field)["k"]`) when no target covering that
+class names the key, so a new cache key needs a target first. A target names the keys its
+attribute pattern matches (`Field._*` names `_cache`), and an entry target names its container.
+The contract's allowance applies as to a target write. A key computed at run time has no name to
+check (`MUT205`, with `unresolved = "report"`), and neither has a write in a helper that does not
+type the object.
+
 With `unresolved = "report"`, `MUT205` reports:
 
 - an attribute named like a target, written on an object of unknown class;
-- a computed attribute name (`setattr(obj, name, v)`, `obj.__dict__[name] = v`) written on a
-  target class.
+- a computed attribute name (`setattr(obj, name, v)`, `obj.__dict__[name] = v`,
+  `obj.__dict__.update(...)`, `vars(obj) |= other`) written on a target class, or on an object
+  of unknown class, where it may be any target.
 
 ### `read-owners`
 
@@ -268,7 +279,9 @@ unresolved = "report"
 ```
 
 The read side of `write-owners`. A read is `ref.children`, a read through a local alias,
-`getattr(ref, "children")`, or `ref.__dict__["children"]`.
+`getattr(ref, "children")`, or `ref.__dict__["children"]`, also through a class object, which
+reads the class attribute (`Reference.children`, `cls.children`, a value typed
+`type[Reference]`).
 
 A read, or a call (`call-owners`, and an effect boundary's `call-targets` and
 `allowed-callees`), through a value typed with a project protocol that declares the member is
@@ -351,17 +364,21 @@ The call side of `write-owners`.
   parameter, or left out where every such function's default is the value and only `True`,
   `False`, `None`, `0`, or `""` (heki keeps defaults by class and truthiness). A keyword binds as
   Python binds it: never a positional-only parameter (with `def f(kind=False, /, **kwargs)`,
-  `f(kind=True)` leaves `kind` false), and a keyword naming no parameter passes its value under
-  its name into `**kwargs`; the receiver of a method call is its first position. A call that
-  raises `TypeError` instead of running the function passes nothing: a keyword binding a
-  parameter a position or the receiver binds too, a keyword naming no parameter of a function
-  without `**kwargs`, a position (the receiver included) past the parameters of a function
-  without `*args`, or a parameter without a default left unbound where no `*` or `**` unpacking
-  may bind it. Any other argument (a variable, a call, `*` or `**` unpacking) is not
-  established, and the call is not reported. A reference passes no arguments, so it never
-  matches. A target with an argument list names no symbol outside the project; `unresolved =
-  "report"` matches its last name before the list, whatever the arguments of a call on an object
-  of unknown class.
+  `f(kind=True)` leaves `kind` false), and a keyword naming no parameter passes its value under its
+  name into `**kwargs`; the receiver of a method call is its first position. A `**` operand that is
+  a dict display with string constant keys (literals, or string constants as above), which nothing
+  changes (a name holding it is only unpacked with `**`, bound to another name, tested, or
+  returned), passes its entries as keywords: `DataType(**{"is_dict": True})`,
+  `flags = {"is_dict": True}; DataType(**flags)`. A call that raises `TypeError` instead of running
+  the function passes nothing: two keywords of one name (written and in such a display, or in two
+  displays), a keyword binding a parameter a position or the receiver binds too, a keyword naming no
+  parameter of a function without `**kwargs`, a position (the receiver included) past the parameters
+  of a function without `*args`, or a parameter without a default left unbound where no `*`
+  unpacking or `**` unpacking of another mapping may bind it. Any other argument (a variable, a
+  call, `*` unpacking, `**` unpacking of another mapping) is not established, and the call is not
+  reported. A reference passes no arguments, so it never matches. A target with an argument list
+  names no symbol outside the project; `unresolved = "report"` matches its last name before the
+  list, whatever the arguments of a call on an object of unknown class.
 - With `references = "calls-and-bases"`, a class statement passing a class target as a base is
   reported too ("`<module>` subclasses `pkg.core.Base`"), at the base, or at the class statement
   for a name an import or the module body binds: the class it makes holds the base, and
@@ -602,9 +619,10 @@ What needs no announcement:
 - writes to objects the function gets from a call;
 - a function whose every caller announces the change after calling it.
 
-A write is followed through local aliases, container methods, `setattr` / `__dict__`, and
-helpers. A helper changing an argument it does not type writes the field or instance its caller
-binds to it. At most 64 `invalidation` contracts can be declared.
+A write is followed through local aliases (also in the scopes nested in the function),
+container methods, `setattr` / `__dict__`, and helpers. A helper changing an argument it does
+not type writes the field or instance its caller binds to it. At most 64 `invalidation`
+contracts can be declared.
 
 ### How contracts report
 

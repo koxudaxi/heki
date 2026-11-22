@@ -666,9 +666,10 @@ impl Workspace {
             .filter(|s| !s.project_callees().is_empty() || s.constructs.is_some())
             .chain(&file.reference_sites)
         {
-            let mut site = site.clone();
-            site.span = heki_ast::Span { start: 0, end: 0 };
-            out.entry(site.caller.clone()).or_default().0.push(site);
+            out.entry(site.caller.clone())
+                .or_default()
+                .0
+                .push(site.unplaced());
         }
         for (key, (_, invalidated)) in &mut out {
             *invalidated = self
@@ -690,9 +691,10 @@ impl Workspace {
             .flat_map(|f| &f.call_sites)
             .filter(|s| matches!(s.target, heki_effect::CallTarget::Layer2 { .. }))
         {
-            let mut site = site.clone();
-            site.span = heki_ast::Span { start: 0, end: 0 };
-            out.entry(site.caller.clone()).or_default().0.push(site);
+            out.entry(site.caller.clone())
+                .or_default()
+                .0
+                .push(site.unplaced());
         }
         for (func, accesses) in file.into_iter().flat_map(|f| &f.external_accesses) {
             let unplaced = accesses.iter().map(|a| heki_effect::ExternalAccess {

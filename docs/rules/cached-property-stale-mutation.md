@@ -64,8 +64,9 @@ It does not report:
 - constant dictionary keys the property never reads (`self.params["proxy"]` while the property
   reads `self.params["outtmpl"]`);
 - writes after which every path invalidates the property (`del self.prop`,
-  `self.__dict__.pop("prop", None)`, also with the key in a string constant as `MUT201` follows
-  it, a `self` method that does), or before which every path already did and nothing read it
+  `self.__dict__.pop("prop", None)` or `vars(self).pop("prop", None)`, also with the key in a
+  string constant as `MUT201` follows it, a `self` method that does), or before which every path
+  already did and nothing read it
   since; an invalidation under a condition, such as
   `if clear:`, leaves the other path stale and is reported;
 - private helpers whose every caller invalidates the property;

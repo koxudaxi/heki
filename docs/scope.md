@@ -168,6 +168,10 @@ resolve is not followed:
 - a value of type `Any`, or an unannotated parameter;
 - a method name computed at run time;
 - a call with more than eight possible overrides;
+- a method no project class along a class's MRO defines, when a base of the class is a value
+  heki cannot name where its class statement runs (`class Derived(base)` with `base` a
+  parameter, a local, or a call's result), which may define it; such a class is no subclass of
+  any project class either;
 - a function outside the checked files that the catalog does not list.
 
 Two more cases stay quiet by design:
@@ -241,6 +245,9 @@ Missed findings close as heki learns more:
 - `setattr` and `object.__setattr__` are followed through a module-level name bound once to them
   (`_set = object.__setattr__`), and `getattr(obj, "fields")` is `obj.fields` itself: changing
   what it returns changes the attribute's object.
+- `vars(obj)` (the builtin, not a name shadowing it) is `obj.__dict__`: an entry stored, deleted,
+  set by a container method, or updated in place (`vars(obj) |= other`, also on
+  `obj.__dict__`) through either is a write of the attribute it names.
 - A write-owners contract sees a container change through what a method or a property returns
   when it returns the attribute itself on every `return` (`node.members().append(x)` with
   `return self.items`) and every class the object may be runs it. A `cached_property` hands out

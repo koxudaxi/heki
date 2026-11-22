@@ -653,3 +653,178 @@ fn an_unknown_base_before_a_catalogued_one_leaves_the_method_unknown() {
         vec![d("pkg/bases.py", 18, "EFF101", "requests.Session.get")]
     );
 }
+
+const CLOSURE_MODEL: &str = r#"class Field:
+    def __init__(self) -> None:
+        self.extras: dict[str, object] = {}
+        self.meta: dict[str, list[int]] = {}
+        self.other: dict[str, object] = {}
+
+
+class Other:
+    def __init__(self) -> None:
+        self.extras: dict[str, object] = {}
+"#;
+
+const CLOSURES: &str = r#"from collections.abc import Callable
+
+from pkg.model import Field, Other
+
+
+def closure_writes_the_alias(field: Field) -> Callable[[], None]:
+    extras = field.extras
+
+    def inner() -> None:
+        extras["a"] = 1
+
+    return inner
+
+
+def lambda_writes_the_alias(field: Field) -> Callable[[], object]:
+    extras = field.extras
+    return lambda: extras.setdefault("b", 2)
+
+
+def control_local_alias(field: Field) -> None:
+    extras = field.extras
+    extras["c"] = 3
+
+
+def comprehension(field: Field, keys: list[str]) -> None:
+    extras = field.extras
+    [extras.setdefault(k, 1) for k in keys]
+
+
+def generator(field: Field, keys: list[str]) -> None:
+    extras = field.extras
+    any(extras.setdefault(k, 1) for k in keys)
+
+
+def two_levels(field: Field):
+    extras = field.extras
+
+    def mid():
+        def inner() -> None:
+            extras["a"] = 1
+
+        return inner
+
+    return mid
+
+
+def entry_in_closure(field: Field):
+    entry = field.meta["k"]
+    return lambda: entry.append(1)
+
+
+def untyped_alias(target):
+    extras = target.extras
+
+    def inner() -> None:
+        extras["a"] = 1
+
+    return inner
+
+
+def rebound_by_nonlocal(field: Field, fresh: dict[str, object]):
+    extras = field.extras
+
+    def swap() -> None:
+        nonlocal extras
+        extras = fresh
+
+    def inner() -> None:
+        extras["a"] = 1
+
+    return swap, inner
+
+
+def another_class(other: Other):
+    extras = other.extras
+    return lambda: extras.setdefault("b", 2)
+
+
+def two_attributes(field: Field, flag: bool):
+    extras = field.extras
+    if flag:
+        extras = field.other
+    return lambda: extras.setdefault("b", 2)
+
+
+def read_only(field: Field):
+    extras = field.extras
+    return lambda: extras.get("b")
+"#;
+
+/// A scope nested in a function reads the function's variable through its closure cell, which
+/// holds every value the function binds to it: an alias of a guarded attribute (or of an entry
+/// of its container) bound in the function is that attribute in a nested function, a lambda, a
+/// comprehension, or a generator expression, at any depth. A cell a nested scope rebinds
+/// (`nonlocal`) may hold anything, and a cell bound to two attributes holds neither.
+#[test]
+fn a_nested_scope_writes_the_attribute_an_enclosing_alias_holds() {
+    let c = "pkg/closures.py";
+    for attribution in ["call-graph", "lexical"] {
+        let p = Project::new(&format!(
+            "closure_aliases_{}",
+            attribution.replace('-', "_")
+        ));
+        p.write(
+            "pyproject.toml",
+            &format!(
+                "[project]\nname = \"t\"\nrequires-python = \">=3.11\"\n\n[tool.heki.lint]\nselect = [\"MUT201\", \"MUT205\"]\n\n[[tool.heki.write-owners]]\nname = \"store\"\ntargets = [\"Field.extras\", \"Field.meta\"]\nallowed-writers = [\"pkg.store.*\"]\nunresolved = \"report\"\nattribution = \"{attribution}\"\n"
+            ),
+        )
+        .write("pkg/__init__.py", "")
+        .write("pkg/model.py", CLOSURE_MODEL)
+        .write("pkg/closures.py", CLOSURES);
+        let diags = diagnostics(&p, &[]);
+        assert!(diags.iter().all(|x| x["path"] == c), "{diags:#?}");
+        let mut at: Vec<(u64, String, String)> = diags
+            .iter()
+            .map(|x| {
+                (
+                    x["line"].as_u64().unwrap(),
+                    x["rule_code"].as_str().unwrap().to_owned(),
+                    x["qualname"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect();
+        at.sort();
+        let lexical = attribution == "lexical";
+        let lambda = |f: &str| {
+            if lexical {
+                f.to_owned()
+            } else {
+                format!("{f}.<locals>.<lambda>")
+            }
+        };
+        let e =
+            |line: u64, code: &str, qualname: &str| (line, code.to_owned(), qualname.to_owned());
+        assert_eq!(
+            at,
+            vec![
+                e(10, "MUT201", "closure_writes_the_alias.<locals>.inner"),
+                e(17, "MUT201", &lambda("lambda_writes_the_alias")),
+                e(22, "MUT201", "control_local_alias"),
+                // A comprehension or generator expression with a scope of its own (3.11) hands
+                // its writes to the function running it.
+                e(27, "MUT201", "comprehension"),
+                e(32, "MUT201", "generator"),
+                e(40, "MUT201", "two_levels.<locals>.mid.<locals>.inner"),
+                e(49, "MUT201", &lambda("entry_in_closure")),
+                // An attribute of an object of unknown class.
+                e(56, "MUT205", "untyped_alias.<locals>.inner"),
+            ],
+            "{attribution}: {diags:#?}"
+        );
+        assert_eq!(
+            found(&diags)
+                .into_iter()
+                .filter(|x| x.1 == 49)
+                .map(|x| x.3)
+                .collect::<Vec<_>>(),
+            ["Field.meta"]
+        );
+    }
+}

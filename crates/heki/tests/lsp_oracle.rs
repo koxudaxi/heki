@@ -3,7 +3,8 @@
 //! every file must equal a fresh `heki check --output-format json` of the same files and
 //! configuration.
 //!
-//! The session opens every file, then runs the steps of [`steps`]. A step edits and saves,
+//! The steps come in groups (`steps_*`), and each group is a test of its own (`sessions!`): a
+//! session that opens every file, then runs the group's steps. A step edits and saves,
 //! creates, or deletes files, or changes the configuration, the way an editor and its file
 //! watcher report it (`workspace/didChangeWatchedFiles`). After it, the harness waits until the
 //! server is idle ([`Lsp::settle`]: `heki/stats` reports no work in flight, and every
@@ -11,7 +12,8 @@
 //! severity, certainty, message (labelled for a heuristic rule), related locations, and help (the
 //! last related entry, at the diagnostic's own range) of every diagnostic. A step also names diagnostics
 //! the CLI must (or must not) report, so it exercises what it describes, and a step marked
-//! `cutoff` must stop at the edited files (Early Cutoff). A new step is a few lines.
+//! `cutoff` must stop at the edited files (Early Cutoff). A new step is a few lines; a new group
+//! is a function and a line in `sessions!`.
 
 mod common;
 
@@ -3045,30 +3047,35 @@ fn steps_eff110() -> Vec<Step> {
     ]
 }
 
-fn steps() -> Vec<Step> {
-    let mut steps = vec![
-        // 1. The initial index.
-        Step::new("initial index", Vec::new()).present(&[
-            ("pkg/ops.py", "MUT201"),
-            ("pkg/ops.py", "MUT203"),
-            ("pkg/svc_user.py", "EFF101"),
-            ("pkg/guard_use.py", "EFF102"),
-            ("pkg/guard_default_use.py", "EFF102"),
-            ("pkg/guard_conn_use.py", "EFF102"),
-            ("pkg/buf_use.py", "EFF111"),
-            ("pkg/buf_default_use.py", "EFF111"),
-            ("pkg/guard_global_use.py", "EFF102"),
-            ("pkg/fill.py", "MUT201"),
-            ("pkg/fill_main.py", "MUT201"),
-            ("pkg/views.py", "MUT201"),
-            ("pkg/alias_use.py", "MUT201"),
-            ("pkg/getter_use.py", "MUT201"),
-            ("pkg/listing_use.py", "MUT201"),
-            ("pkg/natives_use.py", "EFF101"),
-            ("pkg/lock_use.py", "EFF109"),
-            ("pkg/fan_use.py", "EFF110"),
-        ]),
-        // 2. A sync helper two modules below an `async def` starts and stops blocking.
+/// The initial index.
+fn steps_initial_index() -> Vec<Step> {
+    vec![Step::new("initial index", Vec::new()).present(&[
+        ("pkg/ops.py", "MUT201"),
+        ("pkg/ops.py", "MUT203"),
+        ("pkg/svc_user.py", "EFF101"),
+        ("pkg/guard_use.py", "EFF102"),
+        ("pkg/guard_default_use.py", "EFF102"),
+        ("pkg/guard_conn_use.py", "EFF102"),
+        ("pkg/buf_use.py", "EFF111"),
+        ("pkg/buf_default_use.py", "EFF111"),
+        ("pkg/guard_global_use.py", "EFF102"),
+        ("pkg/fill.py", "MUT201"),
+        ("pkg/fill_main.py", "MUT201"),
+        ("pkg/views.py", "MUT201"),
+        ("pkg/alias_use.py", "MUT201"),
+        ("pkg/getter_use.py", "MUT201"),
+        ("pkg/listing_use.py", "MUT201"),
+        ("pkg/natives_use.py", "EFF101"),
+        ("pkg/lock_use.py", "EFF109"),
+        ("pkg/fan_use.py", "EFF110"),
+    ])]
+}
+
+/// A sync helper two modules below an `async def` starts blocking; comments around the call
+/// are Early Cutoffs, a module global the helper changes is not, and a syntax error in the
+/// middle callee hides the chain until it parses again; then the helper stops blocking.
+fn steps_blocking_chain() -> Vec<Step> {
+    vec![
         Step::new(
             "the helper two modules below the async def starts blocking",
             vec![save("pkg/low.py", LOW_BLOCKING)],
@@ -3140,7 +3147,14 @@ fn steps() -> Vec<Step> {
             vec![save("pkg/low.py", LOW)],
         )
         .absent(&[("pkg/top.py", "EFF101")]),
-        // 3. Property getters.
+    ]
+}
+
+/// Property getters: a cached property, a property `__hash__` reads, the setter or
+/// `__setattr__` a base class in another module gives a store, and a getter read from an
+/// `async def` in another file.
+fn steps_property_getters() -> Vec<Step> {
+    vec![
         Step::new(
             "a cached property starts reading a mutated attribute",
             vec![save("pkg/shapes.py", SHAPES_READING)],
@@ -3207,7 +3221,12 @@ fn steps() -> Vec<Step> {
             vec![save("pkg/remote.py", REMOTE)],
         )
         .absent(&[("pkg/reader.py", "EFF111")]),
-        // Guarded effects across modules.
+    ]
+}
+
+/// Guarded effects across modules.
+fn steps_guarded_effects() -> Vec<Step> {
+    vec![
         Step::new(
             "a helper in another file gains the guard its caller's constant switches off",
             vec![save("pkg/guard_net.py", GUARD_NET_GUARDED)],
@@ -3305,34 +3324,12 @@ fn steps() -> Vec<Step> {
             vec![save("pkg/guard_global.py", GUARD_GLOBAL)],
         )
         .present(&[("pkg/guard_global_use.py", "EFF102")]),
-    ];
-    // 4. `MUT108`, `MUT110`, then where bodies run.
-    steps.extend(steps_mut108());
-    steps.extend(steps_mut110());
-    steps.extend(steps_aliases_and_getters());
-    steps.extend(steps_protocol_reads());
-    steps.extend(steps_body_runs());
-    steps.extend(steps_task_arguments());
-    steps.extend(steps_small_displays());
-    steps.extend(steps_queue_capacity());
-    steps.extend(steps_mut114_mut202_mut109());
-    steps.extend(steps_module_patterns());
-    steps.extend(steps_indirect_helpers());
-    steps.extend(steps_inherited_writers());
-    steps.extend(steps_hash_writers());
-    steps.extend(steps_mut111());
-    steps.extend(steps_mut112());
-    steps.extend(steps_eff109());
-    steps.extend(steps_mut113());
-    steps.extend(steps_eff110());
-    steps.extend(steps_receiver_typing());
-    steps.extend(steps_effect_index());
-    steps.extend(steps_exact_effects());
-    steps.extend(steps_helper_witnesses());
-    steps.extend(steps_imported_constants());
-    steps.extend(steps_method_lookups());
-    steps.extend([
-        // 5. Contracts: the reports of private helpers move between them and their callers.
+    ]
+}
+
+/// Contracts: the reports of private helpers move between them and their callers.
+fn steps_contracts() -> Vec<Step> {
+    vec![
         Step::new(
             "only allowed functions call the private helpers",
             vec![save("pkg/store.py", STORE_CALLING)],
@@ -3353,15 +3350,13 @@ fn steps() -> Vec<Step> {
             vec![save("pkg/store.py", STORE)],
         )
         .present(&[("pkg/ops.py", "MUT201"), ("pkg/ops.py", "MUT203")]),
-    ]);
-    steps.extend(steps_contract_extensions());
-    steps.extend(steps_references());
-    steps.extend(steps_bases_and_attribution());
-    steps.extend(steps_argument_lists());
-    steps.extend(steps_environment());
-    steps.extend(steps_keys_fresh_strict());
-    steps.extend([
-        // 7. Files.
+    ]
+}
+
+/// Files: a module created and deleted, a stub next to a module, and a package over the
+/// module of the same name.
+fn steps_files() -> Vec<Step> {
+    vec![
         Step::new(
             "a module its caller imports is created",
             vec![Action::Create("pkg/extra.py", EXTRA.to_owned())],
@@ -3399,7 +3394,10 @@ fn steps() -> Vec<Step> {
         // Python imports a package over the module of the same name.
         Step::new(
             "a package next to the module of the same name",
-            vec![Action::Create("pkg/svc/__init__.py", SVC_PACKAGE.to_owned())],
+            vec![Action::Create(
+                "pkg/svc/__init__.py",
+                SVC_PACKAGE.to_owned(),
+            )],
         )
         .absent(&[("pkg/svc_user.py", "EFF101")]),
         Step::new(
@@ -3412,7 +3410,12 @@ fn steps() -> Vec<Step> {
             vec![Action::Delete("pkg/svc/__init__.py")],
         )
         .present(&[("pkg/svc_user.py", "EFF101")]),
-        // The configuration changes while the server runs.
+    ]
+}
+
+/// The configuration changes while the server runs.
+fn steps_configuration() -> Vec<Step> {
+    vec![
         Step::new(
             "the configuration gains a write owner with a message",
             vec![Action::Configure(format!(
@@ -3438,7 +3441,12 @@ fn steps() -> Vec<Step> {
             vec![Action::Configure(CONFIG.to_owned())],
         )
         .present(&[("pkg/svc_user.py", "EFF101")]),
-        // Project-wide assumptions.
+    ]
+}
+
+/// Project-wide assumptions: a module patching builtins, and a typing stub importing them.
+fn steps_project_assumptions() -> Vec<Step> {
+    vec![
         Step::new(
             "the module patching builtins is deleted",
             vec![Action::Delete("pkg/compat.py")],
@@ -3454,7 +3462,12 @@ fn steps() -> Vec<Step> {
             vec![Action::Create("pkg/compat.py", COMPAT.to_owned())],
         )
         .absent(&[("pkg/loops.py", "OPT110")]),
-        // Declarations other modules resolve names through.
+    ]
+}
+
+/// Declarations other modules resolve names through.
+fn steps_declarations() -> Vec<Step> {
+    vec![
         Step::new(
             "a module that stores an imported global on self",
             vec![save("pkg/api.py", &format!("# client\n{API}"))],
@@ -3550,7 +3563,12 @@ fn steps() -> Vec<Step> {
             vec![save("pkg/square.py", SQUARE)],
         )
         .absent(&[("pkg/draw.py", "EFF111")]),
-        // Declarations reached through a re-export.
+    ]
+}
+
+/// Declarations reached through a re-export.
+fn steps_re_exports() -> Vec<Step> {
+    vec![
         Step::new(
             "a re-exported class's method becomes a property getter that blocks",
             vec![save(
@@ -3583,8 +3601,7 @@ fn steps() -> Vec<Step> {
             vec![save("pkg/ui/impl.py", UI_IMPL)],
         )
         .absent(&[("pkg/consumer.py", "EFF111"), ("pkg/consumer.py", "MUT107")]),
-    ]);
-    steps
+    ]
 }
 
 // ---------------------------------------------------------------------------------- the oracle
@@ -3750,6 +3767,11 @@ struct Session {
 impl Session {
     fn start(name: &str) -> Self {
         Self::start_with(name, CONFIG, initial_files(), false)
+    }
+
+    /// The second session's project, with its effect snapshot (`MUT103`).
+    fn start_layout(name: &str) -> Self {
+        Self::start_with(name, EDGE_CONFIG, edge_files(), true)
     }
 
     /// A session over `files` with the configuration `config`; `snapshot`: the effect summaries
@@ -3952,16 +3974,76 @@ impl Session {
     }
 }
 
-#[test]
-fn lsp_diagnostics_equal_a_full_check_after_every_step() {
-    let mut s = Session::start("lsp_oracle");
+/// Runs `steps` in `s`, then fails with the disagreements of every step.
+fn run_steps(mut s: Session, steps: &[Step]) {
     let mut failures = Vec::new();
-    for step in steps() {
-        failures.extend(s.run(&step));
+    for step in steps {
+        failures.extend(s.run(step));
     }
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
     s.lsp.stop(true);
 }
+
+/// A module of tests, one per group of steps: each test runs its group in a session of its
+/// own, which `start` opens over the initial files. The groups are independent, so the tests
+/// run in parallel and a failure names its group.
+macro_rules! sessions {
+    ($module:ident, $start:path, { $($test:ident: $steps:ident,)* }) => {
+        mod $module {
+            use super::*;
+            $(
+                #[test]
+                fn $test() {
+                    let name = concat!("lsp_oracle_", stringify!($module), "_", stringify!($test));
+                    run_steps($start(name), &$steps());
+                }
+            )*
+        }
+    };
+}
+
+sessions!(editing, Session::start, {
+    initial_index: steps_initial_index,
+    blocking_chain: steps_blocking_chain,
+    property_getters: steps_property_getters,
+    guarded_effects: steps_guarded_effects,
+    mut108: steps_mut108,
+    mut110: steps_mut110,
+    aliases_and_getters: steps_aliases_and_getters,
+    protocol_reads: steps_protocol_reads,
+    body_runs: steps_body_runs,
+    task_arguments: steps_task_arguments,
+    small_displays: steps_small_displays,
+    queue_capacity: steps_queue_capacity,
+    mut114_mut202_mut109: steps_mut114_mut202_mut109,
+    module_patterns: steps_module_patterns,
+    indirect_helpers: steps_indirect_helpers,
+    inherited_writers: steps_inherited_writers,
+    hash_writers: steps_hash_writers,
+    mut111: steps_mut111,
+    mut112: steps_mut112,
+    eff109: steps_eff109,
+    mut113: steps_mut113,
+    eff110: steps_eff110,
+    receiver_typing: steps_receiver_typing,
+    effect_index: steps_effect_index,
+    exact_effects: steps_exact_effects,
+    helper_witnesses: steps_helper_witnesses,
+    imported_constants: steps_imported_constants,
+    method_lookups: steps_method_lookups,
+    contracts: steps_contracts,
+    contract_extensions: steps_contract_extensions,
+    references: steps_references,
+    bases_and_attribution: steps_bases_and_attribution,
+    argument_lists: steps_argument_lists,
+    environment: steps_environment,
+    keys_fresh_strict: steps_keys_fresh_strict,
+    files: steps_files,
+    configuration: steps_configuration,
+    project_assumptions: steps_project_assumptions,
+    declarations: steps_declarations,
+    re_exports: steps_re_exports,
+});
 
 // ------------------------------------------------------- files, layout, and buffers (session 2)
 
@@ -4059,8 +4141,9 @@ fn edge_files() -> Vec<(&'static str, String)> {
     .collect()
 }
 
-fn edge_steps() -> Vec<Step> {
-    let mut steps = vec![
+/// The initial index of the second session.
+fn steps_layout_initial_index() -> Vec<Step> {
+    vec![
         Step::new("initial index", Vec::new())
             .present(&[
                 ("app/handler.py", "EFF101"),
@@ -4071,20 +4154,7 @@ fn edge_steps() -> Vec<Step> {
                 ("named_caller.py", "EFF101"),
             ])
             .absent(&[("app/render.py", "EFF201"), ("lib_caller.py", "EFF101")]),
-    ];
-    steps.extend(steps_shared_module_name());
-    steps.extend(steps_unread_module());
-    steps.extend(steps_boundary_calls());
-    steps.extend(steps_recursive_snapshot());
-    steps.extend(steps_moved_lines());
-    steps.extend(steps_discarded_buffer());
-    steps.extend(steps_src_layout());
-    steps.extend(steps_source_roots());
-    steps.extend(steps_ignore_files());
-    steps.extend(steps_forwarded_generator());
-    steps.extend(steps_swapped_calls());
-    steps.extend(steps_baseline());
-    steps
+    ]
 }
 
 /// `MUT113`: a module steps by hand, then consumes, a private generator of another module that a
@@ -4448,16 +4518,21 @@ fn steps_baseline() -> Vec<Step> {
     ]
 }
 
-#[test]
-fn lsp_diagnostics_equal_a_full_check_through_file_layout_and_buffer_changes() {
-    let mut s = Session::start_with("lsp_oracle_edges", EDGE_CONFIG, edge_files(), true);
-    let mut failures = Vec::new();
-    for step in edge_steps() {
-        failures.extend(s.run(&step));
-    }
-    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
-    s.lsp.stop(true);
-}
+sessions!(layout, Session::start_layout, {
+    initial_index: steps_layout_initial_index,
+    shared_module_name: steps_shared_module_name,
+    unread_module: steps_unread_module,
+    boundary_calls: steps_boundary_calls,
+    recursive_snapshot: steps_recursive_snapshot,
+    moved_lines: steps_moved_lines,
+    discarded_buffer: steps_discarded_buffer,
+    src_layout: steps_src_layout,
+    source_roots: steps_source_roots,
+    ignore_files: steps_ignore_files,
+    forwarded_generator: steps_forwarded_generator,
+    swapped_calls: steps_swapped_calls,
+    baseline: steps_baseline,
+});
 
 // ------------------------------------------- a project below a Git working tree (session 3)
 
@@ -4472,7 +4547,7 @@ fn lsp_diagnostics_equal_a_full_check_below_a_git_working_tree() {
         ("src/defs.py", DEFS.to_owned()),
         ("b_func.py", JOIN.to_owned()),
     ];
-    let mut s = Session::start_below_working_tree("lsp_oracle_working_tree", files);
+    let s = Session::start_below_working_tree("lsp_oracle_working_tree", files);
     let steps = [
         Step::new("initial index", Vec::new()).absent(&[("b_func.py", "OPT113")]),
         Step::new(
@@ -4486,12 +4561,7 @@ fn lsp_diagnostics_equal_a_full_check_below_a_git_working_tree() {
         )
         .absent(&[("b_func.py", "OPT113")]),
     ];
-    let mut failures = Vec::new();
-    for step in &steps {
-        failures.extend(s.run(step));
-    }
-    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
-    s.lsp.stop(true);
+    run_steps(s, &steps);
 }
 
 // ------------------------------------------------- argument lists across modules (session 4)
@@ -4705,6 +4775,78 @@ fn lsp_diagnostics_equal_a_full_check_for_reads_of_a_guarded_class() {
     s.lsp.stop(true);
 }
 
+// --------------------------------------- the class hierarchy class bodies name in their scope
+
+const HIERARCHY_CONFIG: &str = r#"[project]
+name = "t"
+
+[tool.heki.lint]
+select = ["MUT204"]
+
+[[tool.heki.call-owners]]
+name = "home"
+targets = ["Rule.check"]
+allowed-callers = ["pkg.core.*", "pkg.site.*"]
+"#;
+
+const HIERARCHY_CORE: &str = "class Rule:\n    def check(self):\n        return True\n";
+// Classes nested in a class body: one inherits `Rule.check`, one overrides it.
+const HIERARCHY_SITE: &str = "from pkg.core import Rule\n\n\nclass Holder:\n    class Inherits(Rule):\n        pass\n\n    class Overrides(Rule):\n        def check(self):\n            return False\n";
+// `Holder.Inherits` finds `Rule.check` along its MRO, `Holder.Overrides` overrides it as a
+// subclass of `Rule`.
+const HIERARCHY_MRO: &str =
+    "from pkg.site import Holder\n\n\ndef through_mro(d: Holder.Inherits):\n    return d.check()\n";
+const HIERARCHY_FAMILY: &str = "from pkg.site import Holder\n\n\ndef through_family(d: Holder.Overrides):\n    return d.check()\n";
+
+/// The bases of class statements in a class body, named where they run (`ClassDecl::bases`),
+/// read by other files through the MRO and the subclass family: the class body binding the base's
+/// name before its classes turns both reports off, binding it after them turns them on (Python
+/// reads the module's name then), and binding it before them again turns them off.
+#[test]
+fn lsp_diagnostics_equal_a_full_check_while_a_class_body_shadows_a_base() {
+    let files = vec![
+        ("pkg/__init__.py", String::new()),
+        ("pkg/core.py", HIERARCHY_CORE.to_owned()),
+        ("pkg/site.py", HIERARCHY_SITE.to_owned()),
+        ("pkg/use_mro.py", HIERARCHY_MRO.to_owned()),
+        ("pkg/use_family.py", HIERARCHY_FAMILY.to_owned()),
+    ];
+    let shadowing =
+        HIERARCHY_SITE.replace("class Holder:\n", "class Holder:\n    Rule = object\n\n");
+    let mut s = Session::start_with("lsp_oracle_hierarchy_scope", HIERARCHY_CONFIG, files, false);
+    let both = &[
+        ("pkg/use_mro.py", "MUT204"),
+        ("pkg/use_family.py", "MUT204"),
+    ];
+    let steps = [
+        Step::new("initial index", Vec::new()).present(both),
+        Step::new(
+            "the class body binds the base's name before its classes",
+            vec![save("pkg/site.py", &shadowing)],
+        )
+        .absent(both),
+        Step::new(
+            "the class body binds it after its classes",
+            vec![save(
+                "pkg/site.py",
+                &format!("{HIERARCHY_SITE}\n    Rule = object\n"),
+            )],
+        )
+        .present(both),
+        Step::new(
+            "the class body binds it before its classes again",
+            vec![save("pkg/site.py", &shadowing)],
+        )
+        .absent(both),
+    ];
+    let mut failures = Vec::new();
+    for step in &steps {
+        failures.extend(s.run(step));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+    s.lsp.stop(true);
+}
+
 // ----------------------------------------------------------- package paths an import goes through
 
 const PATHS_CONFIG: &str = r#"[project]
@@ -4827,6 +4969,91 @@ fn lsp_diagnostics_equal_a_full_check_through_a_re_export_its_package_binds_agai
             )],
         )
         .present(reported),
+    ];
+    let mut failures = Vec::new();
+    for step in &steps {
+        failures.extend(s.run(step));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+    s.lsp.stop(true);
+}
+
+// ------------------------------------------------------ class objects across modules (session)
+
+const CLASS_OBJECTS_CONFIG: &str = r#"[project]
+name = "t"
+
+[tool.heki.lint]
+select = ["MUT203", "MUT204"]
+
+[[tool.heki.call-owners]]
+name = "dict-builder"
+targets = ["pkg.types.DataType(is_dict=True)"]
+forbidden-callers = ["pkg.use:*"]
+
+[[tool.heki.read-owners]]
+name = "members"
+targets = ["pkg.types.DataType.HOLDS_MEMBERS"]
+forbidden-readers = ["pkg.use:*"]
+"#;
+
+const CLASS_OBJECTS_TYPES: &str = "class DataType:\n    HOLDS_MEMBERS = True\n\n    def __init__(self, *, is_dict: bool = False) -> None:\n        self.is_dict = is_dict\n";
+// The property and the function returning a class object live in another module than their
+// callers.
+const CLASS_OBJECTS_BASE: &str = "from pkg.types import DataType\n\n\nclass Base:\n    @property\n    def data_type(self) -> type[DataType]:\n        return DataType\n\n\ndef kind() -> type[DataType]:\n    return DataType\n";
+const CLASS_OBJECTS_USE: &str = "from pkg.base import Base, kind\nfrom pkg.types import DataType\n\n\nclass Use(Base):\n    def build(self) -> DataType:\n        return self.data_type(is_dict=True)\n\n\ndef returned() -> DataType:\n    return kind()(is_dict=True)\n\n\ndef read(model_type: type[DataType]) -> bool:\n    return model_type.HOLDS_MEMBERS\n";
+
+/// A `type[C]` annotation names the class object of `C` from the declarations of other modules:
+/// the property and the function returning one are declared in another module than the calls of
+/// their values, and the class the annotation names becomes a protocol (whose class objects are
+/// of no known class) and a class again.
+#[test]
+fn lsp_diagnostics_equal_a_full_check_for_class_objects_across_modules() {
+    let files = vec![
+        ("pkg/__init__.py", String::new()),
+        ("pkg/types.py", CLASS_OBJECTS_TYPES.to_owned()),
+        ("pkg/base.py", CLASS_OBJECTS_BASE.to_owned()),
+        ("pkg/use.py", CLASS_OBJECTS_USE.to_owned()),
+    ];
+    let mut s = Session::start_with(
+        "lsp_oracle_class_objects",
+        CLASS_OBJECTS_CONFIG,
+        files,
+        false,
+    );
+    let both: &[(&str, &str)] = &[("pkg/use.py", "MUT203"), ("pkg/use.py", "MUT204")];
+    let steps = [
+        Step::new("initial index", Vec::new()).present(both),
+        Step::new(
+            "the property and the function return an instance",
+            vec![save(
+                "pkg/base.py",
+                &CLASS_OBJECTS_BASE.replace("-> type[DataType]", "-> DataType"),
+            )],
+        )
+        .present(&[("pkg/use.py", "MUT203")])
+        .absent(&[("pkg/use.py", "MUT204")]),
+        Step::new(
+            "they return the class object again",
+            vec![save("pkg/base.py", CLASS_OBJECTS_BASE)],
+        )
+        .present(both),
+        Step::new(
+            "the class becomes a protocol",
+            vec![save(
+                "pkg/types.py",
+                &format!(
+                    "from typing import Protocol\n\n\n{}",
+                    CLASS_OBJECTS_TYPES.replace("class DataType:", "class DataType(Protocol):")
+                ),
+            )],
+        )
+        .absent(both),
+        Step::new(
+            "it is a class again",
+            vec![save("pkg/types.py", CLASS_OBJECTS_TYPES)],
+        )
+        .present(both),
     ];
     let mut failures = Vec::new();
     for step in &steps {
