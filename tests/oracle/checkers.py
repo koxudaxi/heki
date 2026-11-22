@@ -394,12 +394,20 @@ def check_mut114(claim, runs, sources=None):
 # ---------------------------------------------------------------------------------------------
 # MUT115: an object below a shallow copy, which the copied value held there
 # ---------------------------------------------------------------------------------------------
+# The classes whose augmented assignment changes the object in place.
+IN_PLACE_TYPES = ("list", "dict", "set", "bytearray", "deque")
+
+
 def check_mut115(claim, runs, sources=None):
-    """At each run of the change line that completes, the object it changes is the one the
-    copied value held at the access path when the activation last ran the copy line (else
-    Still shared), the copy held that object there when the copy line ended (else Shallow
-    copy), and the line changed it (else Changed below the copy). A path heki cannot load
-    without running code is not checked."""
+    """At each run of the change line that completes, after the copy line ran in the same
+    activation, for the first of the claim's candidates that applies (an augmented assignment
+    changes its target in place when the target is a builtin container, else the object it stores
+    into): the object the line changes is the one the copied value held at the access path when
+    the copy line started (else Still shared), the copy held that object there when the copy line
+    ended (else Shallow copy), and the line changed it (else Changed below the copy): a store, a
+    delete, and an in-place operator change it by running; a method call must show a builtin
+    changing method or a change of its contents. A path that cannot be loaded without running
+    code is not checked."""
     result = Result(claim)
     for run in valid_runs(runs):
         copies = {}
@@ -412,13 +420,18 @@ def check_mut115(claim, runs, sources=None):
             evals_after = event[14] if len(event) > 14 else {}
             if event[1] == claim["copy_line_id"]:
                 if event[5] == "ok":
-                    copies[event[2]] = (evals_before.get(claim["held_expr"]), evals_after.get(claim["copy_expr"]))
+                    copies[event[2]] = (evals_before, evals_after)
                 continue
             if event[5] != "ok" or event[2] not in copies:
                 continue
-            held, in_copy = copies[event[2]]
-            changed_before = evals_before.get(claim["changed_expr"])
-            changed_after = evals_after.get(claim["changed_expr"])
+            change = _applying_change(claim["changes"], evals_before)
+            if change is None:
+                continue
+            copy_before, copy_after = copies[event[2]]
+            held = copy_before.get(change["held"])
+            in_copy = copy_after.get(change["copy"])
+            changed_before = evals_before.get(change["changed"])
+            changed_after = evals_after.get(change["changed"])
             if held is None or changed_before is None:
                 continue
             result.checked += 1
@@ -438,6 +451,8 @@ def check_mut115(claim, runs, sources=None):
                     {"held": held[1:], "changed": changed_before[1:]},
                 )
                 continue
+            if change["kind"] != "call":
+                continue
             same_after = changed_after is not None and changed_after[0] == changed_before[0]
             mutated = any(m[0] == changed_before[0] for m in event[9])
             if same_after and changed_after[2] == changed_before[2] and not mutated:
@@ -448,6 +463,18 @@ def check_mut115(claim, runs, sources=None):
                     {"object": changed_before[1:]},
                 )
     return result
+
+
+def _applying_change(changes, evals_before):
+    """The first candidate change that applies at a run of the line: an in-place one only where
+    its target holds a builtin container when the line starts."""
+    for change in changes:
+        if change["kind"] == "inplace":
+            target = evals_before.get(change["changed"])
+            if target is None or target[1] not in IN_PLACE_TYPES:
+                continue
+        return change
+    return None
 
 
 # ---------------------------------------------------------------------------------------------

@@ -101,9 +101,9 @@ class Mut115(unittest.TestCase):
         "rule": "MUT115",
         "line_id": "N0",
         "copy_line_id": "Nc0",
-        "held_expr": '(options)["bases"]',
-        "copy_expr": 'result["bases"]',
-        "changed_expr": 'result["bases"]',
+        "changes": [
+            {"held": '(options)["bases"]', "copy": 'result["bases"]', "changed": 'result["bases"]', "kind": "call"}
+        ],
     }
 
     def copy(self, start, held=7, in_copy=7, act=1):
@@ -159,6 +159,32 @@ class Mut115(unittest.TestCase):
             self.change(7, changed=9, outcome="exc"),
         )
         self.assertEqual(checkers.check(self.claim, [trace])["checked"], 0)
+
+    def test_a_store_leaving_equal_contents_confirms(self):
+        claim = dict(self.claim, changes=[dict(self.claim["changes"][0], kind="store")])
+        trace = run(self.copy(1), self.change(3, before=("x",), after=("x",)))
+        self.assertEqual(checkers.check(claim, [trace])["refutations"], [])
+
+    def test_an_augmented_assignment_changes_a_container_target_or_stores_into_its_holder(self):
+        claim = dict(
+            self.claim,
+            changes=[
+                {"held": '(o)["k"]["n"]', "copy": 'c["k"]["n"]', "changed": 'c["k"]["n"]', "kind": "inplace"},
+                {"held": '(o)["k"]', "copy": 'c["k"]', "changed": 'c["k"]', "kind": "store"},
+            ],
+        )
+        copy = line(
+            "Nc0",
+            1,
+            2,
+            evals={'(o)["k"]["n"]': [5, "int", 1], '(o)["k"]': [7, "dict", {}]},
+            evals_after={'c["k"]["n"]': [5, "int", 1], 'c["k"]': [7, "dict", {}]},
+        )
+        stored = line("N0", 3, 4, evals={'c["k"]["n"]': [5, "int", 1], 'c["k"]': [7, "dict", {}]})
+        self.assertEqual(checkers.check(claim, [run(copy, stored)])["refutations"], [])
+        elsewhere = line("N0", 3, 4, evals={'c["k"]["n"]': [5, "int", 1], 'c["k"]': [9, "dict", {}]})
+        refutation = checkers.check(claim, [run(copy, elsewhere)])["refutations"][0]
+        self.assertEqual(refutation["kind"], "not-the-copied-object")
 
     def test_paths_heki_cannot_load_without_running_code_are_not_checked(self):
         copy = line("Nc0", 1, 2, evals={'(options)["bases"]': None})
@@ -720,6 +746,7 @@ class RecordedCopies(unittest.TestCase):
         "    if rebind:\n"
         "        result[\"bases\"] = []\n"
         "    result[\"bases\"].append(base)\n"
+        "    result[\"bases\"] += [base]\n"
         "    return result\n"
     )
 
@@ -732,24 +759,28 @@ class RecordedCopies(unittest.TestCase):
         root = os.path.realpath(tempfile.mkdtemp(prefix="oracle-copies-"))
         with open(os.path.join(root, "copies_mod.py"), "w", encoding="utf-8") as f:
             f.write(self.SOURCE)
-        start = self.SOURCE.index("result[\"bases\"].append")
-        end = self.SOURCE.index("\n", start)
-        report = {
-            "rule_code": "MUT115",
-            "certainty": "exact",
-            "path": "copies_mod.py",
-            "line": 5,
-            "column": 5,
-            "span": {"start": start, "end": end},
-            "message": "shares",
-            "target": "result",
-            "related": [{"path": "copies_mod.py", "line": 2, "column": 14, "message": "copy"}],
-        }
-        planner = plan.build(root, [report])
-        self.assertEqual(len(planner.claims), 1, planner.unmapped)
-        claim = planner.claims[0]
-        self.assertEqual(claim["changed_expr"], 'result["bases"]')
-        self.assertEqual(claim["held_expr"], '(options)["bases"]')
+        def report(text, line):
+            start = self.SOURCE.index(text)
+            return {
+                "rule_code": "MUT115",
+                "certainty": "exact",
+                "path": "copies_mod.py",
+                "line": line,
+                "column": 5,
+                "span": {"start": start, "end": self.SOURCE.index("\n", start)},
+                "message": "shares",
+                "target": "result",
+                "related": [{"path": "copies_mod.py", "line": 2, "column": 14, "message": "copy"}],
+            }
+
+        planner = plan.build(
+            root, [report("result[\"bases\"].append", 5), report("result[\"bases\"] +=", 6)]
+        )
+        self.assertEqual(len(planner.claims), 2, planner.unmapped)
+        claim, augmented = planner.claims
+        self.assertEqual(claim["changes"][0]["changed"], 'result["bases"]')
+        self.assertEqual(claim["changes"][0]["held"], '(options)["bases"]')
+        self.assertEqual(augmented["changes"][0]["kind"], "inplace")
         recorder = monitor.Recorder(root, planner.plan)
         sys.path.insert(0, root)
         try:
@@ -768,6 +799,8 @@ class RecordedCopies(unittest.TestCase):
         self.assertEqual((kept["checked"], kept["refutations"]), (1, []))
         rebound = checkers.check(claim, runs[1:])
         self.assertEqual(rebound["refutations"][0]["kind"], "not-the-copied-object")
+        added = checkers.check(augmented, runs[:1])
+        self.assertEqual((added["checked"], added["refutations"]), (1, []))
 
 
 def _source(text):

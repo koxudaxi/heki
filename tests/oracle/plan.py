@@ -229,30 +229,31 @@ def _all(names):
     return sorted({*names["receivers"], *names["stores"], *names["augs"]})
 
 
-def _changed_expression(source, line):
-    """The source of the object a statement on `line` changes in place: the receiver of a method
-    call, the object of a subscript or attribute store or `del`, or of an augmented
-    assignment's target (`a["k"]["n"] += 1` changes `a["k"]`)."""
+def _changed_expressions(source, line):
+    """What a statement on `line` changes in place, as `(source, kind)` candidates in the order
+    a checker tries them: the receiver of a method call (`call`), the object of a subscript or
+    attribute store or `del` (`store`); for an augmented assignment to a subscript or an
+    attribute, its target when an in-place operator changes that object (`inplace`: `a["k"] +=
+    [x]` changes the list), else the object it stores into (`store`: `a["k"]["n"] += 1` changes
+    `a["k"]`)."""
     for node in ast.walk(source.tree):
         if getattr(node, "lineno", None) != line:
             continue
-        target = None
+        segment = lambda n: ast.get_source_segment(source.text, n)  # noqa: E731
         if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
             func = node.value.func
             if isinstance(func, ast.Attribute):
-                target = func.value
+                return [(segment(func.value), "call")]
         elif isinstance(node, (ast.Assign, ast.Delete)):
             targets = node.targets
             if len(targets) == 1 and isinstance(targets[0], (ast.Subscript, ast.Attribute)):
-                target = targets[0].value
+                return [(segment(targets[0].value), "store")]
         elif isinstance(node, ast.AugAssign):
             if isinstance(node.target, (ast.Subscript, ast.Attribute)):
-                target = node.target.value
-            elif isinstance(node.target, ast.Name):
-                return node.target.id
-        if target is not None:
-            return ast.get_source_segment(source.text, target)
-    return None
+                return [(segment(node.target), "inplace"), (segment(node.target.value), "store")]
+            if isinstance(node.target, ast.Name):
+                return [(node.target.id, "inplace")]
+    return []
 
 
 def _copied_expression(source, line):
@@ -417,35 +418,38 @@ class Planner:
         return True
 
     def _mut115(self, claim, source, pos, report):
-        """The copy call (the first related location) and the change: what the copied value
-        holds at the access path when the copy line starts, what the copy holds there when it
-        ends, and the object the change line changes."""
+        """The copy call (the first related location) and the change: for each candidate of
+        what the line changes, what the copied value holds at its access path when the copy line
+        starts, what the copy holds there when it ends, and the object at the change line."""
         related = report.get("related", [])
         copy_var = report.get("target") or ""
-        changed = _changed_expression(source, pos[0])
-        if not related or not copy_var.isidentifier() or not changed:
+        if not related or not copy_var.isidentifier():
             return False
-        if not (changed == copy_var or changed.startswith((copy_var + ".", copy_var + "["))):
+        original = _copied_expression(source, related[0]["line"])
+        if not original:
             return False
-        path = changed[len(copy_var):]
-        copy_line = related[0]["line"]
-        original = _copied_expression(source, copy_line)
-        if not path or not original:
+        changes = []
+        for changed, kind in _changed_expressions(source, pos[0]):
+            if not changed or not changed.startswith((copy_var + ".", copy_var + "[")):
+                continue
+            path = changed[len(copy_var):]
+            changes.append(
+                {"held": f"({original}){path}", "copy": f"{copy_var}{path}", "changed": changed, "kind": kind}
+            )
+        if not changes:
             return False
         copy_id = f"Nc{claim['id'][1:]}"
         self.plan["lines"].append(
             {
                 "id": copy_id,
                 "path": claim["path"],
-                "line": copy_line,
-                "evals": [f"({original}){path}", f"{copy_var}{path}"],
+                "line": related[0]["line"],
+                "evals": sorted({e for c in changes for e in (c["held"], c["copy"])}),
             }
         )
-        self._line(claim, pos[0], evals=[changed])
+        self._line(claim, pos[0], evals=sorted({c["changed"] for c in changes}))
         claim["copy_line_id"] = copy_id
-        claim["held_expr"] = f"({original}){path}"
-        claim["copy_expr"] = f"{copy_var}{path}"
-        claim["changed_expr"] = changed
+        claim["changes"] = changes
         return True
 
     def _opt_type(self, claim, source, pos, report):
