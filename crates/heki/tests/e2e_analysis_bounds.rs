@@ -4385,34 +4385,10 @@ fn copies_of_a_class_with_a_deep_subclass_chain_walk_each_class_once() {
     assert_eq!(found, 1_000);
 }
 
-/// `heki dump-recommend-facts` of the project, which must finish within `limit`.
-fn recommend_facts_within(p: &Project, limit: Duration) -> Value {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_heki"))
-        .args(["dump-recommend-facts", "."])
-        .current_dir(&p.dir)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    let mut stdout = child.stdout.take().unwrap();
-    let reader = std::thread::spawn(move || {
-        let mut out = Vec::new();
-        stdout.read_to_end(&mut out).unwrap();
-        out
-    });
-    let started = Instant::now();
-    let status = loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            break status;
-        }
-        if started.elapsed() > limit {
-            child.kill().unwrap();
-            panic!("heki dump-recommend-facts ran past {limit:?}");
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    };
-    assert_eq!(status.code(), Some(0));
-    serde_json::from_slice(&reader.join().unwrap()).unwrap()
+/// `heki dump-recommend-facts` of the project. The facts only `heki recommend` reads are walked
+/// by no owner `heki check --walk-steps` counts.
+fn recommend_facts(p: &Project) -> Value {
+    heki_json(p, &["dump-recommend-facts", "."])
 }
 
 /// A chain of `links` helpers, each calling the next and, in a loop, a library name of its own
@@ -4450,7 +4426,7 @@ fn the_reach_of_blind_calls_is_one_walk_over_the_calls() {
     let links = 2_000;
     let p = Project::new("bounds_blind_calls_below_async_defs");
     p.write("app.py", &blind_calls_below_async_defs(links));
-    let facts = recommend_facts_within(&p, Duration::from_secs(20));
+    let facts = recommend_facts(&p);
     let totals = &facts["blind_spots"]["totals"];
     let all = json!({"calls": links, "awaited": 0, "on_event_loop": links, "in_loops": links});
     assert_eq!(totals["uncatalogued"], all, "{totals:#}");
@@ -4504,7 +4480,7 @@ fn the_census_of_many_classes_is_one_pass_over_their_sites() {
     for (path, text) in classes_written_in_one_module(classes) {
         p.write(&path, &text);
     }
-    let facts = recommend_facts_within(&p, Duration::from_secs(20));
+    let facts = recommend_facts(&p);
     let totals = &facts["census"]["totals"];
     assert_eq!(
         totals,

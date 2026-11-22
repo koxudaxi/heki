@@ -3578,10 +3578,11 @@ a budget). A walk made quadratic spends its budget, and a walk without one takes
 either fails. Work no walk counts (the IR builder, the indexes, the language server's engine)
 shows only in time, which these tests do not compare: `scripts/check_walk_shapes.py` times its own
 shapes on the release build, and here a run fails only once it hangs (`HANG` in
-`crates/heki/tests/common/mod.rs`). The shapes: comparisons sharing an operand thirty deep, many `match` statements of
-slicing or pass-through cases, `t1 = t0[t0]` chains in a loop, a loop with many `continue`s and
-`isinstance` tests, a long chain of assignments a loop carries, closure cells bound thousands of
-times, each binding followed by a generator expression reading them, many loops one after another,
+`crates/heki/tests/common/mod.rs`). The shapes: comparisons sharing an operand thirty deep, many
+`match` statements of slicing or pass-through cases, `t1 = t0[t0]` chains in a loop, a loop with
+many `continue`s and `isinstance` tests, a long chain of assignments a loop carries, closure cells
+bound thousands of times, each binding followed by a generator expression reading them, many loops
+one after another,
 each with a lazy initialization (the blocks each covers count toward a budget proportional to the
 source), many waits on one future before many `await`s of it, task factories at the end of a long
 chain of copies, a long chain of aliases of a class with an attribute store through the last one per
