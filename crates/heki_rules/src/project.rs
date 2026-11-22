@@ -316,32 +316,33 @@ pub fn collect_files(
 /// The Python files below `root` that [`collect_files`] over it finds and `analyzed` does not
 /// hold (by project-relative path), in the order of a walk sorted by name: at most `limit` of
 /// them, among the first `max_entries` entries of the walk. Returns them with whether the walk
-/// reached its end.
+/// saw every entry: an entry it cannot read leaves them a lower bound.
 pub fn files_left_out(
     root: &Path,
     exclude: &GlobSet,
     analyzed: &dyn Fn(&str) -> bool,
     limit: usize,
     max_entries: usize,
-) -> Result<(Vec<PathBuf>, bool), ProjectError> {
+) -> (Vec<PathBuf>, bool) {
     let mut builder = walk_project(root, root, exclude);
     builder.sort_by_file_name(|a, b| a.cmp(b));
     let mut found = Vec::new();
+    let mut complete = true;
     for (seen, entry) in builder.build().enumerate() {
         if seen == max_entries || found.len() == limit {
-            return Ok((found, false));
+            return (found, false);
         }
-        let entry = entry.map_err(|cause| ProjectError::Walk {
-            path: root.to_path_buf(),
-            cause,
-        })?;
+        let Ok(entry) = entry else {
+            complete = false;
+            continue;
+        };
         let path = entry.path();
         if path.is_file() && walked_python(path, root, exclude) && !analyzed(&rel_posix(path, root))
         {
             found.push(path.to_path_buf());
         }
     }
-    Ok((found, true))
+    (found, complete)
 }
 
 /// Whether [`collect_files`] over the directory `dir` finds `file` (both absolute): the same
