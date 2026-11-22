@@ -169,6 +169,19 @@ fn fix_removes_unused_codes_only_when_asked() {
 }
 
 #[test]
+fn removing_a_standalone_suppression_takes_only_its_line_whatever_the_line_ending() {
+    for (name, eol) in [("lf", "\n"), ("crlf", "\r\n"), ("cr", "\r")] {
+        let source = format!(
+            "# heki: ignore[async-blocking-call]{eol}x = 1{eol}# heki: ignore[async-blocking-call]{eol}"
+        );
+        let p = project(&format!("unused_fix_eol_{name}"), UNUSED, &source);
+        let (code, _, stderr) = p.heki(&["check", "--fix"]);
+        assert_eq!(code, 0, "{name}: {stderr}");
+        assert_eq!(p.read("a.py"), format!("x = 1{eol}"), "{name}");
+    }
+}
+
+#[test]
 fn several_unused_codes_of_one_comment_are_one_report() {
     let p = project(
         "unused_several",

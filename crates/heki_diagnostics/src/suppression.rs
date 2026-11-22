@@ -188,13 +188,16 @@ impl Suppression {
             // Another directive or note follows in the comment, and keeps its place.
             start..end + next
         } else {
-            let line_start = source[..start].rfind('\n').map_or(0, |i| i + 1);
+            let line_start = (0..start)
+                .rev()
+                .find(|&i| heki_ast::ends_line(bytes, i))
+                .map_or(0, |i| i + 1);
             let from = blanks_before(start, line_start);
             let comment_end = comment.end as usize;
             if from == line_start {
-                let line_end = source[comment_end..]
-                    .find('\n')
-                    .map_or(source.len(), |i| comment_end + i + 1);
+                let line_end = (comment_end..source.len())
+                    .find(|&i| heki_ast::ends_line(bytes, i))
+                    .map_or(source.len(), |i| i + 1);
                 line_start..line_end
             } else {
                 from..comment_end
