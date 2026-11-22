@@ -15,7 +15,7 @@ use crate::liveness::Liveness;
 use crate::obligations::{Checker, ObligationKind, ProofObligation, SafetyVerdict};
 use crate::{FrameState, KindMask, ObligationStatus, ProfitabilityTier, SafetyTier};
 use heki_ast::{LineIndex, Span};
-use heki_ir::walk::{Answer, Def, FnShape};
+use heki_ir::walk::{self, Answer, Budget, Def, FnShape, Visit};
 use heki_ir::{
     BinOpKind, BlockId, BuiltinKind, CompareOpKind, DictEntry, FnIndex, Inst, InstKind, IrFunction,
     LoopBound, ModuleBindings, ModuleIr, NaturalLoop, Terminator, VarId,
@@ -428,6 +428,11 @@ enum Membership<'a> {
     /// `if v not in seen: seen.append(v)`: the append at `(block, index)` (`OPT111`).
     Dedup(BlockId, usize),
 }
+
+/// Why a deque rewrite is blocked when the walk over the bindings of the variables the list
+/// reaches runs past its budget.
+const BINDINGS_PAST_BUDGET: &str =
+    "the bindings of the variables it reaches are past the walk budget; rewrite it by hand";
 
 #[derive(Debug, Clone, Copy)]
 enum FrontForm {
@@ -2715,11 +2720,16 @@ impl<'a, 'c> Rules<'a, 'c> {
                 .iterated_while_changed(&allocs)
                 .or_else(|| self.iterator_used_otherwise(&st, &allocs));
         }
-        // A type checker must accept the rewritten variable: its `list` annotations become
-        // `deque` ones, and one that cannot be rewritten blocks the fix.
+        // A type checker must accept every variable the deque reaches: its `list` annotations
+        // become `deque` ones, and one that cannot be rewritten, or a binding of the variable
+        // to another object, blocks the fix.
         let mut type_edits = Vec::new();
         if bad_use.is_none() {
-            match self.declared_type_edits(&init_sites, &aliases) {
+            let rebind = match form {
+                Some(FrontForm::SliceRebind { copy }) => Some(copy),
+                _ => None,
+            };
+            match self.declared_type_edits(&init_sites, rebind, &aliases) {
                 Ok(edits) => type_edits = edits,
                 Err(why) => bad_use = Some(why),
             }
@@ -2871,11 +2881,13 @@ impl<'a, 'c> Rules<'a, 'c> {
 
     /// The edits turning the annotations of the deque's variables into `deque` ones: the
     /// annotation of an initializing assignment (`q: list[int] = []`) is rewritten; one that is
-    /// not `list` / `list[...]` / `List[...]`, or another annotated declaration of a variable
-    /// that may hold the deque (a parameter, a bare `q: list[int]`), blocks the fix.
+    /// not `list` / `list[...]` / `List[...]`, another annotated declaration of a variable
+    /// that may hold the deque (a parameter, a bare `q: list[int]`), or a binding of such a
+    /// variable to another object ([`Self::binding_to_other_object`]) blocks the fix.
     fn declared_type_edits(
         &self,
         init_sites: &[(BlockId, usize)],
+        rebind: Option<(BlockId, usize)>,
         aliases: &FxHashSet<VarId>,
     ) -> Result<Vec<TextEdit>, String> {
         let f = self.f();
@@ -2943,7 +2955,7 @@ impl<'a, 'c> Rules<'a, 'c> {
         names.sort_unstable();
         names.dedup();
         let text = self.m.text(f.span).unwrap_or_default();
-        for name in names {
+        for &name in &names {
             if let Some(off) = annotated_declarations(text, name)
                 .map(|o| f.span.start + o)
                 .find(|o| !handled.contains(o))
@@ -2954,7 +2966,101 @@ impl<'a, 'c> Rules<'a, 'c> {
                 ));
             }
         }
-        Ok(edits)
+        match self.binding_to_other_object(&names, init_sites, rebind) {
+            Some(why) => Err(why),
+            None => Ok(edits),
+        }
+    }
+
+    /// Why a variable named in `names` is also bound to an object the rewrite leaves alone: a
+    /// parameter, or an assignment of another value (`s = [...]` next to `s = q`). A type
+    /// checker gives an unannotated variable one type from its bindings (mypy from the first
+    /// one), which the deque and the other object need not share.
+    ///
+    /// A binding passes when its value is made at one of `init_sites`, is the `q = q[1:]` that
+    /// `rebind` turns into `q.popleft()`, or comes unchanged (a copy, `q += ...`, a phi) from
+    /// such a value or from a variable named in `names` (sorted), whose own bindings this checks
+    /// too.
+    fn binding_to_other_object(
+        &self,
+        names: &[&str],
+        init_sites: &[(BlockId, usize)],
+        rebind: Option<(BlockId, usize)>,
+    ) -> Option<String> {
+        let f = self.f();
+        let shape = &self.cx().shape;
+        let named = |v: VarId| {
+            f.var_name(v)
+                .is_some_and(|n| names.binary_search(&n).is_ok())
+        };
+        // The value a binding passes on unchanged: a copy's source, the target of `q += ...`.
+        let passed_on = |inst: &Inst| match inst.kind {
+            InstKind::Copy { src, .. } => Some(src),
+            InstKind::BinOp {
+                lhs,
+                in_place: true,
+                ..
+            } => Some(lhs),
+            _ => None,
+        };
+        let sources = |v: VarId, out: &mut Vec<VarId>| match shape.def(v) {
+            Def::Phi(b, i) => {
+                let phi = &f.block(b).phis[i as usize];
+                out.extend(phi.incoming.iter().map(|(_, src)| *src));
+            }
+            _ => out.extend(shape.inst(v).and_then(passed_on)),
+        };
+        let budget = Budget::of_function("OPT120/OPT121 deque bindings", f);
+        let other_object = |binding: VarId| {
+            let name = f.var_name(binding).unwrap_or_default();
+            // The statement binding `name`, or the object's own place when a phi binds it.
+            let other = |made: Span| {
+                let line = self.line(shape.inst(binding).map_or(made, |i| i.span).start);
+                Visit::Stop(format!(
+                    "`{name}` is also bound to another object at line {line}: a type checker gives `{name}` one type, which the `collections.deque` may not match; rewrite it by hand"
+                ))
+            };
+            walk::reach(&budget, [binding], sources, |v| {
+                // Another variable of `names` is checked as a binding of its own.
+                if v != binding && named(v) {
+                    return Visit::Prune;
+                }
+                match shape.def(v) {
+                    Def::Inst(b, i) => {
+                        let at = (b, i as usize);
+                        let inst = inst_at(f, at);
+                        // `LoadName` is the name before its first binding, or after `del`: it
+                        // holds no object.
+                        if init_sites.contains(&at)
+                            || rebind == Some(at)
+                            || matches!(inst.kind, InstKind::LoadName { .. })
+                        {
+                            Visit::Prune
+                        } else if passed_on(inst).is_some() {
+                            Visit::Expand
+                        } else {
+                            other(inst.span)
+                        }
+                    }
+                    Def::Phi(..) => Visit::Expand,
+                    Def::Param if v == binding => Visit::Stop(format!(
+                        "`{name}` is a parameter (line {}): a type checker gives `{name}` its parameter type, which the `collections.deque` may not match; rewrite it by hand",
+                        self.line(f.span.start)
+                    )),
+                    // Another parameter's argument.
+                    Def::Param => other(f.span),
+                    // A phi the builder found trivial and replaced: nothing reads it.
+                    Def::None => Visit::Prune,
+                }
+            })
+        };
+        (0..f.var_names.len() as u32)
+            .map(VarId)
+            .filter(|v| named(*v))
+            .map(other_object)
+            .find(|found| !matches!(found, Answer::Known(None)))
+            // A walk past its budget establishes nothing.
+            .and_then(|found| found.open_means(Some(BINDINGS_PAST_BUDGET.to_owned())))
     }
 
     fn front_edits(

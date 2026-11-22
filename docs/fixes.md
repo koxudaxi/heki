@@ -135,6 +135,9 @@ Would fix 1 issue(s) in 1 file(s).
 
 - An annotation the fix cannot rewrite (`Sequence[int]`, a union), or another annotated
   declaration of the variable, blocks the fix.
+- So does a variable the list reaches that is also bound to another object (`s = [...]` before
+  `s = queue`, or a parameter `s`): a type checker gives the variable one type, which would
+  not accept the deque.
 - `import collections` goes into the module's block of standard-library imports, in the order
   that block follows: straight imports first, or sorted by module as with
   `force-sort-within-sections`.
