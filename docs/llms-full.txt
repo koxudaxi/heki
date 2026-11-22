@@ -2764,8 +2764,8 @@ P by one reviewer and 2 by the other. The real-harm share is below the 10% a def
 | `DATA101` | 0.2.0 | 6 / 0 | 0 / 0 |
 | `MUT110` | 0.2.0 | 5 / 0 | 2 / 0 |
 | `MUT114` | 0.2.0 | 5 / 0 | 5 / 0 |
-| `MUT101` | 0.2.3 | 27 / 0 | 1 / 0 |
-| `MUT111` | 0.2.3 | 61 / 0 | 2 / 0 |
+| `MUT101` | 0.2.3 (experimental) | 27 / 0 | 1 / 0 |
+| `MUT111` | 0.2.3 (experimental) | 61 / 0 | 2 / 0 |
 
 ## Measurements
 
