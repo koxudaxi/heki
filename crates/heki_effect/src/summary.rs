@@ -20,6 +20,7 @@ use crate::iterations::{
 };
 use crate::locks::{self, LockStep, ObjRef};
 use crate::one_at_a_time;
+use crate::order_flow;
 use crate::ownership::{self, LocalOrigins, Origins, ParamRole, ReturnOrigins, Source};
 use crate::readonly::{self, Derivation, ProtectedReturn, ReturnStep, Shared, container_mutator};
 use crate::resolver::{
@@ -713,6 +714,8 @@ struct Extractor<'a> {
     cx: &'a TypeCtx<'a>,
     path: &'a Path,
     types: FxHashMap<VarId, Val>,
+    /// The types of the function's values with their arguments (`list[Model]`, `set[str]`).
+    inferred: std::rc::Rc<crate::infer::Inferred>,
     /// The values `isinstance` checks give variables in the blocks they guard.
     narrowed: FxHashMap<(BlockId, VarId), Val>,
     /// The classes each `isinstance` check names, by its second argument.
@@ -1092,7 +1095,7 @@ impl<'a> Extractor<'a> {
         cell_aliases: &'a CellAliases,
     ) -> Self {
         let f = shape.f;
-        let (types, narrowed, isinstance_classes) = cx.infer_flow(f);
+        let (types, narrowed, isinstance_classes, inferred) = cx.infer_flow(f);
         let mut defs = FxHashMap::default();
         let mut uses: FxHashMap<VarId, Vec<&InstKind>> = FxHashMap::default();
         let mut stored_attrs = Vec::new();
@@ -1154,6 +1157,7 @@ impl<'a> Extractor<'a> {
             types,
             narrowed,
             isinstance_classes,
+            inferred,
             defs,
             live,
             uses,
@@ -2528,6 +2532,30 @@ impl<'a> Extractor<'a> {
         self.resolve_construction();
         if self.opt_in.return_origins {
             self.returned_origins();
+        }
+        if self.opt_in.set_order {
+            let calls: Vec<order_flow::OrderCall<'_>> = self
+                .project_calls
+                .iter()
+                .map(|c| order_flow::OrderCall {
+                    at: c.at,
+                    dst: c.dst,
+                    span: self.sites[c.site].span,
+                    candidates: &c.params,
+                    recv: c.recv,
+                })
+                .collect();
+            self.summary.set_order = order_flow::local_facts(
+                order_flow::LocalInput {
+                    f,
+                    shape: self.shape,
+                    cx: self.cx,
+                    types: &self.types,
+                    inferred: &self.inferred,
+                    callees: &self.callees,
+                },
+                &calls,
+            );
         }
         self.iterations();
         if self.opt_in.iterations {
@@ -4832,10 +4860,7 @@ impl<'a> Extractor<'a> {
         match self.val(var) {
             None => true,
             Some(Val::Inst(c)) => {
-                matches!(
-                    c.as_str(),
-                    "typing.Any" | "typing_extensions.Any" | "builtins.object"
-                ) || self.cx.project.protocol(c) == Some(None)
+                resolver::of_any_class(c) || self.cx.project.protocol(c) == Some(None)
             }
             Some(_) => false,
         }
@@ -5749,26 +5774,12 @@ impl<'a> Extractor<'a> {
         let blind = match callee {
             Callee::Project(..) => return,
             Callee::External(symbol) => {
-                // A value whose type says nothing of its methods resolves to a library name
-                // (`typing.Any.get`) that no library defines.
-                match call
-                    .recv_var
-                    .or(call.value)
-                    .and_then(|v| self.opaque_target(v))
-                {
-                    Some(reason) => Blind::Unresolved {
-                        name: name(),
-                        reason,
-                    },
-                    None => {
-                        let Some(registered) = blind_spots::uncatalogued(self.cx, symbol) else {
-                            return;
-                        };
-                        Blind::Uncatalogued {
-                            symbol: symbol.clone(),
-                            registered,
-                        }
-                    }
+                let Some(registered) = blind_spots::uncatalogued(self.cx, symbol) else {
+                    return;
+                };
+                Blind::Uncatalogued {
+                    symbol: symbol.clone(),
+                    registered,
                 }
             }
             Callee::TooMany | Callee::Unresolved => Blind::Unresolved {
@@ -5795,8 +5806,9 @@ impl<'a> Extractor<'a> {
         if *callee == Callee::TooMany {
             return UnresolvedReason::TooManyImplementations;
         }
-        // A value of `Any`, `object`, or `Callable`, or an unbound name, resolves to a library
-        // name ([`Self::opaque_target`]), never to no function.
+        if let Some(reason) = self.opaque_target(subject) {
+            return reason;
+        }
         match self.val(subject) {
             Some(Val::Inst(c)) if self.cx.project.protocol(c) == Some(None) => {
                 UnresolvedReason::UnlistedProtocol
@@ -5807,28 +5819,24 @@ impl<'a> Extractor<'a> {
     }
 
     /// Why a call on `var` reaches no function heki knows although `var` has a type: the type
-    /// says nothing of its methods (`Any`, `object`) or of the function it holds (`Callable`),
-    /// or `var` is a name nothing heki sees binds, which heki looks up in `builtins`.
+    /// (of the instance or class object, or of a member of the union) says nothing of its
+    /// methods (`Any`, `object`) or of the function it holds (`Callable`), or `var` is a name
+    /// nothing heki sees binds, which heki looks up in `builtins`.
     fn opaque_target(&self, var: VarId) -> Option<UnresolvedReason> {
-        match self.val(var)? {
-            Val::Ref(name) => name
-                .strip_prefix("builtins.")
-                .is_some_and(|n| !heki_ir::is_builtin_name(n.split('.').next().unwrap_or(n)))
-                .then_some(UnresolvedReason::UnboundName),
-            Val::Inst(c)
-                if matches!(
-                    c.as_str(),
-                    "typing.Any" | "typing_extensions.Any" | "builtins.object"
-                ) =>
-            {
+        let of_class = |class: &String| {
+            if resolver::of_any_class(class) {
                 Some(UnresolvedReason::AnyValue)
+            } else {
+                resolver::is_any_callable(class).then_some(UnresolvedReason::CallableValue)
             }
-            Val::Inst(c)
-                if matches!(c.as_str(), "typing.Callable" | "collections.abc.Callable") =>
-            {
-                Some(UnresolvedReason::CallableValue)
+        };
+        match self.val(var)? {
+            Val::Ref(name) => {
+                resolver::is_unbound_name(name).then_some(UnresolvedReason::UnboundName)
             }
-            _ => None,
+            // `super()` is that of a project class, which says what it has.
+            Val::Inst(class) | Val::Class(class) | Val::Super(class) => of_class(class),
+            Val::Union(classes) => classes.iter().find_map(of_class),
         }
     }
 

@@ -329,16 +329,16 @@ fn mut108_frozen_fields_directly_through_aliases_and_helpers() {
     let own = at(&diags, u, 21);
     assert_eq!(
         message(own),
-        "`direct` changes the field `Config.tags` of a frozen instance in place (container_mut)"
+        "`direct` changes the field `Config.tags` of a frozen instance in place"
     );
     assert_eq!(
         own["help"],
         "copy it first or store an immutable type such as `tuple` / `frozenset`"
     );
-    assert!(message(at(&diags, u, 27)).contains("in place (alias_container_mut)"));
+    assert!(message(at(&diags, u, 27)).contains("in place (through an alias)"));
     assert_eq!(
         message(at(&diags, u, 34)),
-        "`via_helpers` changes the field `Config.tags` of a frozen instance in place via `pkg.helpers.reset` (indirect_helper)"
+        "`via_helpers` changes the field `Config.tags` of a frozen instance in place via `pkg.helpers.reset`"
     );
     // The calls down to the change are related locations.
     assert_eq!(chain(at(&diags, u, 31)), vec![(u.into(), 31)]);
@@ -479,11 +479,11 @@ fn mut108_final_readonly_attributes_and_typed_dict_keys() {
     );
     assert_eq!(
         message(at(&diags, run, 13)),
-        "`movies` changes the `ReadOnly` key `names` of `Movie` in place (container_mut)"
+        "`movies` changes the `ReadOnly` key `names` of `Movie` in place"
     );
     assert_eq!(
         message(at(&diags, decl, 33)),
-        "`Box.push` changes `Box.items`, declared read-only (`Final` / `ReadOnly`), in place (container_mut)"
+        "`Box.push` changes `Box.items`, declared read-only (`Final` / `ReadOnly`), in place"
     );
     assert_eq!(chain(at(&diags, run, 18)), vec![(run.into(), 18)]);
 }
@@ -750,7 +750,7 @@ fn mut108_lsp_follows_helper_and_frozen_edits_in_other_files() {
         diags[0]["message"]
             .as_str()
             .unwrap()
-            .contains("via `pkg.helpers.add` (indirect_helper)"),
+            .contains("via `pkg.helpers.add`"),
         "{diags:#?}"
     );
     let related = diags[0]["relatedInformation"].as_array().unwrap();
