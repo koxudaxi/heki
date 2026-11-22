@@ -7298,6 +7298,9 @@ impl<'a> Extractor<'a> {
         if from_caller {
             return 0;
         }
+        if entry.emits_in(case) == heki_kb::Emits::UnlessConfiguredOtherwise {
+            return 0;
+        }
         effects
             .iter()
             .filter(|e| match entry.emits_in(case) {

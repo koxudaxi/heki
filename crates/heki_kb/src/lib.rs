@@ -233,8 +233,9 @@ pub enum WaitKind {
     Thread,
 }
 
-/// When a database call sends a statement or otherwise waits on the database
-/// ([`EcosystemEntry::emits`]).
+/// When a call does its effects ([`EcosystemEntry::emits`]): for a database call, when it sends a
+/// statement or otherwise waits on the database; for any call, whether the library's
+/// configuration can make it skip them.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Emits {
@@ -258,6 +259,11 @@ pub enum Emits {
     /// `path=":memory:"` passed in) or only named by an annotation may be in memory. It sends
     /// its statements either way.
     IfOnDisk,
+    /// Every effect of the call, unless the library is configured otherwise: it can be set up so
+    /// the call does not do them (Celery's `task_always_eager` runs the task in the caller, and
+    /// kombu's in-memory transport publishes without the network). The configuration is not
+    /// visible at the call, so no effect is certain and the call only supports heuristic reports.
+    UnlessConfiguredOtherwise,
 }
 
 /// What the items of a call's result are when the environment decides how many there are
@@ -1469,6 +1475,16 @@ mod tests {
         }
     }
 
+    /// An LLM SDK client built over an `httpx` client made elsewhere shares that client's pool.
+    fn shared_http_client() -> ArgCase {
+        ArgCase {
+            param: Some("http_client".into()),
+            instance_of: s(&["httpx.Client", "httpx.AsyncClient"]),
+            effects: Some(vec![]),
+            ..ArgCase::default()
+        }
+    }
+
     fn with_cases(cases: Vec<ArgCase>, e: EcosystemEntry) -> EcosystemEntry {
         EcosystemEntry { cases, ..e }
     }
@@ -1981,6 +1997,11 @@ mod tests {
                     with_prefix("urllib3.ProxyManager", &["request", "urlopen"]),
                     with_prefix("urllib3.HTTPConnectionPool", &["request", "urlopen"]),
                     with_prefix("urllib3.HTTPSConnectionPool", &["request", "urlopen"]),
+                    s(&[
+                        "celery.Celery.send_task",
+                        "celery.Task.delay",
+                        "celery.Task.apply_async",
+                    ]),
                 ]
                 .concat(),
                 entry(&[BlockingNet]),
@@ -2003,8 +2024,13 @@ mod tests {
                     "redis.ConnectionPool.from_url",
                     "redis.BlockingConnectionPool.from_url",
                     "psycopg_pool.ConnectionPool",
+                    "google.genai.Client",
                 ]),
                 entry(&[UnpooledClientAlloc]),
+            ),
+            (
+                s(&["openai.OpenAI", "openai.AzureOpenAI", "anthropic.Anthropic"]),
+                with_cases(vec![shared_http_client()], entry(&[UnpooledClientAlloc])),
             ),
             (
                 // `connect=True` (the default) resolves a `mongodb+srv://` URI at once.
@@ -2052,6 +2078,17 @@ mod tests {
                     "motor.motor_asyncio.AsyncIOMotorClient",
                 ]),
                 async_safe(entry(&[UnpooledClientAlloc])),
+            ),
+            (
+                s(&[
+                    "openai.AsyncOpenAI",
+                    "openai.AsyncAzureOpenAI",
+                    "anthropic.AsyncAnthropic",
+                ]),
+                async_safe(with_cases(
+                    vec![shared_http_client()],
+                    entry(&[UnpooledClientAlloc]),
+                )),
             ),
             (
                 [
@@ -2542,7 +2579,54 @@ mod tests {
     }
 
     fn data_libraries() -> Vec<(Vec<String>, EcosystemEntry)> {
+        // polars downloads an `http(s)://` source itself; other URL schemes are not listed.
+        let polars_url = ArgCase {
+            prefix: s(&["http://", "https://"]),
+            ..source_case("source", true)
+        };
+        let buffer = |arg: u8| ArgCase {
+            arg: Some(arg),
+            param: Some("f".into()),
+            instance_of: s(&["io.BytesIO"]),
+            effects: Some(Vec::new()),
+            ..ArgCase::default()
+        };
         vec![
+            (
+                with_prefix(
+                    "polars",
+                    &[
+                        "read_csv",
+                        "read_parquet",
+                        "read_json",
+                        "read_ndjson",
+                        "read_ipc",
+                        "read_avro",
+                        "read_excel",
+                        "read_ods",
+                    ],
+                ),
+                with_cases(
+                    vec![polars_url, source_case("source", false)],
+                    entry(&[BlockingFs]),
+                ),
+            ),
+            (
+                with_prefix("polars", &["read_database", "read_database_uri"]),
+                entry(&[BlockingDb, DbQuery]),
+            ),
+            (
+                s(&["polars.DataFrame.write_database"]),
+                entry(&[BlockingDb]),
+            ),
+            (
+                s(&["torch.load"]),
+                with_cases(vec![buffer(0)], entry(&[BlockingFs])),
+            ),
+            (
+                s(&["torch.save"]),
+                with_cases(vec![buffer(1)], entry(&[BlockingFs])),
+            ),
             (
                 // Local paths only.
                 with_prefix("pandas", &["read_hdf", "read_spss"]),
@@ -2568,6 +2652,19 @@ mod tests {
                             "concatenate",
                             "append",
                             "insert",
+                        ],
+                    ),
+                    with_prefix(
+                        "torch",
+                        &[
+                            "cat",
+                            "concat",
+                            "concatenate",
+                            "vstack",
+                            "hstack",
+                            "dstack",
+                            "column_stack",
+                            "row_stack",
                         ],
                     ),
                 ]
@@ -3044,6 +3141,14 @@ mod tests {
             ],
         ),
         (
+            Emits::UnlessConfiguredOtherwise,
+            &[
+                "celery.Celery.send_task",
+                "celery.Task.delay",
+                "celery.Task.apply_async",
+            ],
+        ),
+        (
             Emits::UnlessConnected,
             &[
                 "sqlalchemy.engine.Engine.connect",
@@ -3272,6 +3377,8 @@ mod tests {
             "asyncpg.",
             "websockets.",
             "motor.motor_asyncio.",
+            "openai.Async",
+            "anthropic.Async",
         ];
         let kb = EffectiveEcosystemKb::load_builtin(&[]).unwrap();
         let mut seen = BTreeSet::new();
@@ -3395,9 +3502,11 @@ mod tests {
             emits("sqlalchemy.engine.Engine.connect"),
             Emits::UnlessConnected
         );
-        // Only database calls carry a condition on their database effects.
+        assert_eq!(emits("celery.Task.delay"), Emits::UnlessConfiguredOtherwise);
+        // Only database calls carry a condition on their database effects, and a call whose
+        // configuration can switch its effects off carries any.
         for (symbol, e) in &kb.entries {
-            if e.emits != Emits::Always {
+            if !matches!(e.emits, Emits::Always | Emits::UnlessConfiguredOtherwise) {
                 assert!(
                     e.effects.iter().any(|k| matches!(k, BlockingDb | DbQuery)),
                     "{symbol}"
