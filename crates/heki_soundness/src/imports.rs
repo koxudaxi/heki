@@ -304,17 +304,6 @@ fn is_encoding_declaration(line: &str) -> bool {
         })
 }
 
-/// `from .m import x`: the statement holding the alias at `alias` imports relatively.
-pub(crate) fn is_relative_from(source: &str, alias: Span) -> bool {
-    let first = statement_line(source, alias.end);
-    slice(source, first, alias.start)
-        .and_then(|head| head.strip_prefix("from"))
-        .is_some_and(|rest| {
-            rest.trim_start_matches([' ', '\t', '\\', '\n', '\r'])
-                .starts_with('.')
-        })
-}
-
 /// The offset after the comment lines a module starts with (a shebang, an encoding cookie, a
 /// license header).
 fn after_leading_comments(source: &str) -> u32 {

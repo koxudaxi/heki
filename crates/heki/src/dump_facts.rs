@@ -1,15 +1,14 @@
 //! `heki dump-facts` (hidden): the path and loop facts of `heki_ir::facts` for every function of
 //! one module, as JSON, for the tests that check them through the binary.
 //!
-//! The reader is the one every rule has without resolving calls: the module's bindings, module
-//! members named in the catalog, no attribute of any other object, and every `with` statement's
-//! `__exit__` as one that may suppress.
+//! The path facts are those the rules read (`heki_effect::with_paths`), with the module as the
+//! whole project.
 
 use heki_ast::{LineIndex, Span};
+use heki_effect::{ModuleInput, TypeCtx, analyze_project, with_paths};
 use heki_ir::walk::{Answer, Budget};
 use heki_ir::{
-    Carries, FnIndex, FunctionId, InstKind, ItemOrigins, ItemSource, ModuleBindings, ModuleIr,
-    Must, PathReader, Paths, Progress, Trips,
+    Carries, FunctionId, InstKind, ItemOrigins, ItemSource, ModuleIr, Must, Progress, Trips,
 };
 use heki_kb::EffectiveEcosystemKb;
 use serde::Serialize;
@@ -66,92 +65,90 @@ struct OriginFacts {
     text: bool,
 }
 
-pub fn module(ir: &ModuleIr, src: &str, kb: &EffectiveEcosystemKb) -> ModuleFacts {
+pub fn module(input: &ModuleInput<'_>, src: &str, kb: &EffectiveEcosystemKb) -> ModuleFacts {
+    let ir = input.ir;
     let lines = LineIndex::from_source(src);
-    let bindings = ModuleBindings::of(ir);
-    let member = |module: &str, attr: &str| kb.lookup(&format!("{module}.{attr}")).is_some();
-    let reader = PathReader {
-        module_member: &member,
-        ..PathReader::with_bindings(&bindings)
-    };
+    let decls = analyze_project(std::slice::from_ref(input), kb).project_decls();
+    let tcx = TypeCtx::new(input, &decls, kb);
     let origins = ItemOrigins::new(ir);
     let functions = ir
         .functions
         .iter()
         .filter(|f| !f.is_module_body && !f.is_class_body)
         .map(|f| {
-            let ix = FnIndex::new(f, &ir.constants);
-            let budget = Budget::of_function("dump-facts", f);
-            let paths = Paths::new(&ix, &reader, &budget);
-            let loop_line = |li: usize| {
-                let lp = &f.loops[li];
-                let header = f.block(lp.header);
-                let span = header
-                    .insts
-                    .first()
-                    .map(|i| i.span)
-                    .or(header.term_span)
-                    .unwrap_or(f.span);
-                lines.line(span.start)
-            };
-            let mut calls = Vec::new();
-            for bb in &f.blocks {
-                for (i, inst) in bb.insts.iter().enumerate() {
-                    if !matches!(
-                        inst.kind,
-                        InstKind::Call { .. } | InstKind::MethodCall { .. }
-                    ) {
-                        continue;
+            let types = tcx.infer(f);
+            with_paths(&tcx, f, &types, "dump-facts", |paths, ix| {
+                let budget = Budget::of_function("dump-facts", f);
+                let loop_line = |li: usize| {
+                    let lp = &f.loops[li];
+                    let header = f.block(lp.header);
+                    let span = header
+                        .insts
+                        .first()
+                        .map(|i| i.span)
+                        .or(header.term_span)
+                        .unwrap_or(f.span);
+                    lines.line(span.start)
+                };
+                let mut calls = Vec::new();
+                for bb in &f.blocks {
+                    for (i, inst) in bb.insts.iter().enumerate() {
+                        if !matches!(
+                            inst.kind,
+                            InstKind::Call { .. } | InstKind::MethodCall { .. }
+                        ) {
+                            continue;
+                        }
+                        let at = (bb.id, i);
+                        let (line, column) = lines.line_col(inst.span.start);
+                        let mut around: Vec<usize> = (0..f.loops.len())
+                            .filter(|li| f.loops[*li].body.contains(&bb.id))
+                            .collect();
+                        around.sort_by_key(|li| f.loops[*li].depth);
+                        calls.push(CallFacts {
+                            line,
+                            column,
+                            text: text(src, inst.span),
+                            on_every_return: Steps {
+                                called: paths.on_every_return(at, Progress::Called),
+                                returned: paths.on_every_return(at, Progress::Returned),
+                            },
+                            on_every_iteration: around
+                                .into_iter()
+                                .map(|li| IterationFacts {
+                                    loop_line: loop_line(li),
+                                    called: paths.on_every_iteration(li, at, Progress::Called),
+                                    returned: paths.on_every_iteration(li, at, Progress::Returned),
+                                })
+                                .collect(),
+                        });
                     }
-                    let at = (bb.id, i);
-                    let (line, column) = lines.line_col(inst.span.start);
-                    let mut around: Vec<usize> = (0..f.loops.len())
-                        .filter(|li| f.loops[*li].body.contains(&bb.id))
-                        .collect();
-                    around.sort_by_key(|li| f.loops[*li].depth);
-                    calls.push(CallFacts {
-                        line,
-                        column,
-                        text: text(src, inst.span),
-                        on_every_return: Steps {
-                            called: paths.on_every_return(at, Progress::Called),
-                            returned: paths.on_every_return(at, Progress::Returned),
-                        },
-                        on_every_iteration: around
-                            .into_iter()
-                            .map(|li| IterationFacts {
-                                loop_line: loop_line(li),
-                                called: paths.on_every_iteration(li, at, Progress::Called),
-                                returned: paths.on_every_iteration(li, at, Progress::Returned),
-                            })
-                            .collect(),
-                    });
                 }
-            }
-            let loops = f
-                .loops
-                .iter()
-                .enumerate()
-                .map(|(li, lp)| LoopFacts {
-                    line: loop_line(li),
-                    fixed_trips: ix.fixed_trips(lp, &mut |_| None),
-                    origin: origins.of_loop(&budget, f.id, li).map(|set| {
-                        set.into_iter()
-                            .map(|o| OriginFacts {
-                                source: source_text(ir, src, f.id, o.function, o.source),
-                                carries: o.carries,
-                                text: o.text,
-                            })
-                            .collect()
-                    }),
-                })
-                .collect();
-            FunctionFacts {
-                qualname: f.qualname.clone(),
-                line: lines.line(f.span.start),
-                calls,
-                loops,
-            }
+                let loops = f
+                    .loops
+                    .iter()
+                    .enumerate()
+                    .map(|(li, lp)| LoopFacts {
+                        line: loop_line(li),
+                        fixed_trips: ix.fixed_trips(lp, &mut |_| None),
+                        origin: origins.of_loop(&budget, f.id, li).map(|set| {
+                            set.into_iter()
+                                .map(|o| OriginFacts {
+                                    source: source_text(ir, src, f.id, o.function, o.source),
+                                    carries: o.carries,
+                                    text: o.text,
+                                })
+                                .collect()
+                        }),
+                    })
+                    .collect();
+                FunctionFacts {
+                    qualname: f.qualname.clone(),
+                    line: lines.line(f.span.start),
+                    calls,
+                    loops,
+                }
+            })
         })
         .collect();
     ModuleFacts { functions }
