@@ -1061,7 +1061,9 @@ mod tests {
             false
         };
         let pdoms = |b: usize| -> Vec<usize> {
-            let mut out: Vec<usize> = (0..n).filter(|d| *d != b && !escapes(b, Some(*d))).collect();
+            let mut out: Vec<usize> = (0..n)
+                .filter(|d| *d != b && !escapes(b, Some(*d)))
+                .collect();
             out.push(exit);
             out
         };
