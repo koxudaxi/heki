@@ -417,7 +417,19 @@ fn run(cli: Cli) -> Result<ExitCode> {
             let model = heki_semantic::analyze_module(&parsed, &src, profile);
             let ir = heki_ir::build_module_ir(&parsed, &src, &model, profile);
             let kb = heki_kb::EffectiveEcosystemKb::load_builtin(&[])?;
-            let facts = dump_facts::module(&ir, &src, &kb);
+            let input = heki_effect::ModuleInput {
+                module_name: args
+                    .file
+                    .file_stem()
+                    .map_or_else(|| "m".to_owned(), |s| s.to_string_lossy().into_owned()),
+                path: args.file.clone(),
+                is_package: false,
+                root_is_package: false,
+                content_hash: String::new(),
+                semantic: &model,
+                ir: &ir,
+            };
+            let facts = dump_facts::module(&input, &src, &kb);
             println!("{}", serde_json::to_string_pretty(&facts)?);
             Ok(ExitCode::SUCCESS)
         }

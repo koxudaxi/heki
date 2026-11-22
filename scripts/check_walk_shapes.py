@@ -107,8 +107,6 @@ KNOWN_OVER: dict[tuple[str, str], str] = {
     "module-level names again per name (3 s; milliseconds in a function), and EFF107",
     ("copy_chain_in_loop", "module"): "building the IR of a module body walks module-level copy "
     "chains again per name (2.8 s; 0.02 s in a function)",
-    ("alias_loops", "module"): "the OPT rules' module context walks the module's blocks once per "
-    "block",
     ("reverse_chain_in_loop", "module"): "dense alias passes take one pass per link of a chain "
     "laid against block order (`grown_vars`, `aliases`)",
     ("wide_hierarchy", "project"): "each method call walks the whole subclass family of its "
@@ -253,6 +251,14 @@ def alias_loops(n: int) -> Body:
     for i in range(1, n + 1):
         lines += [f"a{i} = a{i - 1}", f"for _ in a{i}:", "    xs.append(1)"]
     return Body(("xs",), lines)
+
+
+def paced_loops(n: int) -> Body:
+    """Loops after one another, each paced by a sleep on its way back."""
+    lines = []
+    for j in range(n):
+        lines += ["while True:", f"    if out.poll({j}):", "        break", "    clock.sleep(1)"]
+    return Body(("clock", "out"), lines)
 
 
 def doubled_constant_slices(n: int) -> Body:
@@ -509,6 +515,7 @@ FAMILIES = [
     Family("copy_chain_in_loop", copy_chain_in_loop),
     Family("reverse_chain_in_loop", reverse_chain_in_loop),
     Family("alias_loops", alias_loops),
+    Family("paced_loops", paced_loops),
     Family("doubled_constant_slices", doubled_constant_slices, real_code=False),
     Family("doubled_zips", doubled_zips, real_code=False),
     Family("lists_extending_each_other", lists_extending_each_other),

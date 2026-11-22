@@ -1772,8 +1772,9 @@ Would fix 1 issue(s) in 1 file(s).
 - It never goes above a shebang, an encoding declaration, or a `from __future__` import, and only
   imports run before it, so the rewritten function cannot run before `collections` is bound.
 - An existing `from collections import deque` or `import collections` is reused only when it runs
-  unconditionally (not under `if TYPE_CHECKING:`) and names the standard library's module (not
-  `from .collections import deque`).
+  unconditionally (not under `if TYPE_CHECKING:`), nothing else binds or deletes the name (no
+  other store, no `del` in a function declaring it `global`, no star import that may rebind it),
+  and it names the standard library's module (not `from .collections import deque`).
 
 ## Profiles
 
@@ -3411,7 +3412,9 @@ Each step of the chain is established, not assumed:
   answered by a session's identity map, a cache, an open connection, or that sends only pending
   changes does not), and no argument that may come from the caller can make it return at once
   (`time.sleep(delay)` with `delay` a parameter is not established). A literal argument, and
-  a module constant bound once to one (`PAUSE = 0`, also imported from another module by the
+  a module constant bound once to one or computed from such constants (`PAUSE = 0`,
+  `PAUSE = BASE - 2`; the module's constants as heki's other facts read them, also after a
+  star import that comes before the binding; also imported from another module by the
   module or by a function, or read as an attribute of its module, `settings.PAUSE`, unless a
   module rebinds it or the importing module binds the name again: a `global` store or `del` in
   a function, another module-level store, a star import), is evaluated: `time.sleep(PAUSE)`
