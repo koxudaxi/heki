@@ -46,12 +46,34 @@ fn heuristic(
     exact: &str,
     open: &[(&str, &str)],
 ) -> Value {
+    heuristic_of(name, select, source, rule, Value::from(exact), open)
+}
+
+/// [`heuristic`] for a rule whose heuristic reports keep its code: of its own claim.
+fn own_heuristic(
+    name: &str,
+    select: &str,
+    source: &str,
+    rule: &str,
+    open: &[(&str, &str)],
+) -> Value {
+    heuristic_of(name, select, source, rule, Value::Null, open)
+}
+
+fn heuristic_of(
+    name: &str,
+    select: &str,
+    source: &str,
+    rule: &str,
+    exact_side: Value,
+    open: &[(&str, &str)],
+) -> Value {
     let found = reports(name, select, source);
     assert_eq!(found.len(), 1, "{found:#?}");
     let report = found[0].clone();
     assert_eq!(report["rule"], rule, "{report:#?}");
     assert_eq!(report["certainty"], "heuristic");
-    assert_eq!(report["exact_side"], exact);
+    assert_eq!(report["exact_side"], exact_side);
     let expected: Vec<(String, String)> = open
         .iter()
         .map(|(p, c)| ((*p).to_owned(), (*c).to_owned()))
@@ -539,6 +561,312 @@ fn each_loop_premise_open_is_recorded() {
         .replace("in json.loads(text):", "in items:")
         .replace("        if x:\n            continue\n", "");
     exact("op_loop_several_closed", EFF103, &closed, "EFF103");
+}
+
+// -------------------------------------------------------------------- the OPT rewrites' claims
+
+const OPT: &str = "OPT101,OPT102,OPT103,OPT110,OPT111,OPT120,OPT121,OPT130";
+
+#[test]
+fn an_accumulator_passed_to_unseen_code_leaves_the_rewrite_unproven() {
+    let open = "def build(items, sink):\n    x = []\n    sink.keep(x)\n    for i in items:\n        x = x + [i]\n    return len(x)\n";
+    let report = own_heuristic(
+        "op_opt_unique",
+        OPT,
+        open,
+        "OPT101",
+        &[("Rewrite proven safe", "unique")],
+    );
+    // The obligation and its blocker, as the help names it.
+    let (closer, line, detail) = closer_line_detail(&report, 0);
+    assert_eq!((closer.as_str(), line), ("code", None));
+    let detail = detail.unwrap();
+    assert!(
+        detail.starts_with("Unique(x): it may be shared"),
+        "{detail}"
+    );
+    let closed = open.replace("    sink.keep(x)\n", "");
+    exact("op_opt_unique_closed", OPT, &closed, "OPT101");
+}
+
+#[test]
+fn a_read_of_the_accumulator_inside_the_loop_leaves_the_rewrite_unproven() {
+    let open = "def build(items):\n    x = ()\n    for i in items:\n        x = x + (i,)\n        print(len(x))\n    return x\n";
+    own_heuristic(
+        "op_opt_reads",
+        OPT,
+        open,
+        "OPT103",
+        &[("Rewrite proven safe", "no-intermediate-reads")],
+    );
+    let closed = open.replace("        print(len(x))\n", "");
+    exact("op_opt_reads_closed", OPT, &closed, "OPT103");
+}
+
+#[test]
+fn a_probe_of_unknown_type_leaves_the_rewrite_unproven() {
+    let open = "def count(items, n):\n    x = list(range(n * 7))\n    hits = 0\n    for i in items:\n        if i in x:\n            hits += 1\n    return hits\n";
+    own_heuristic(
+        "op_opt_probe",
+        OPT,
+        open,
+        "OPT110",
+        &[("Rewrite proven safe", "hash-consistent-probe")],
+    );
+    let closed = open.replace("if i in x:", "if len(str(i)) in x:");
+    exact("op_opt_probe_closed", OPT, &closed, "OPT110");
+}
+
+#[test]
+fn each_unproven_obligation_of_a_rewrite_is_recorded() {
+    let open = "def build(items):\n    x = ()\n    for i in items:\n        x = x + (i,)\n        print(len(x))\n        locals()\n    return x\n";
+    let report = own_heuristic(
+        "op_opt_several",
+        OPT,
+        open,
+        "OPT103",
+        &[
+            ("Rewrite proven safe", "frame-introspection"),
+            ("Rewrite proven safe", "no-intermediate-reads"),
+        ],
+    );
+    let detail = closer_line_detail(&report, 0).2.unwrap();
+    assert!(
+        detail.starts_with("A1HazardFree: A1 hazard: `locals`"),
+        "{detail}"
+    );
+    let closed = open
+        .replace("        print(len(x))\n", "")
+        .replace("        locals()\n", "");
+    exact("op_opt_several_closed", OPT, &closed, "OPT103");
+}
+
+// ------------------------------------------------------------------------------ OPT113's claim
+
+const DATACLASSES: &str = "from collections.abc import Iterable\nfrom dataclasses import dataclass\n\n\n@dataclass\nclass Left:\n    key: int\n    other: int = 0\n\n\n@dataclass\nclass Right:\n    key: int\n    payload: int = 0\n\n\n@dataclass\nclass Prop:\n    raw: int\n    payload: int = 0\n\n    @property\n    def key(self):\n        return self.raw\n\n\ndef load(rows):\n    return list(rows)\n\n\n";
+
+/// `join`, a nested-loop join of `lefts` with what the inner loop steps through, after the
+/// classes `Left`, `Right`, and `Prop` (whose `key` is a property).
+fn join(signature: &str, inner: &str, body: &str) -> String {
+    format!(
+        "{DATACLASSES}def join({signature}):\n    out = []\n    for a in lefts:\n        for b in {inner}:\n{body}    return out\n"
+    )
+}
+
+const MATCH: &str =
+    "            if a.key == b.key:\n                out.append((a.other, b.payload))\n";
+const TYPED: &str = "lefts: list[Left], rights: list[Right]";
+
+#[test]
+fn a_key_that_is_a_property_may_run_code() {
+    let open = join("lefts: list[Left], rights: list[Prop]", "rights", MATCH);
+    let report = own_heuristic(
+        "op_join_property",
+        "OPT113",
+        &open,
+        "OPT113",
+        &[("Equality of keys", "key-load-may-run-code")],
+    );
+    // At the load of the inner item's key.
+    assert_eq!(
+        closer_line_detail(&report, 0),
+        ("none".to_owned(), Some(35), None)
+    );
+    exact(
+        "op_join_property_closed",
+        "OPT113",
+        &join(TYPED, "rights", MATCH),
+        "OPT113",
+    );
+}
+
+#[test]
+fn items_of_unknown_type_leave_the_key_loads_and_the_steps_open() {
+    let open = join("lefts, rights", "rights", MATCH);
+    let report = own_heuristic(
+        "op_join_untyped",
+        "OPT113",
+        &open,
+        "OPT113",
+        &[
+            ("Equality of keys", "item-type-unknown"),
+            ("Idle on a mismatch", "iterable-type-unknown"),
+        ],
+    );
+    assert_eq!(closer_line_detail(&report, 0).0, "annotation");
+    assert_eq!(closer_line_detail(&report, 1).0, "annotation");
+    exact(
+        "op_join_untyped_closed",
+        "OPT113",
+        &join(TYPED, "rights", MATCH),
+        "OPT113",
+    );
+}
+
+#[test]
+fn a_subscript_of_an_item_of_unknown_type_may_run_code() {
+    let body = "            if a[\"id\"] == b[\"id\"]:\n                out.append(a)\n";
+    let open = join("lefts: list[dict[str, int]], rights", "rights", body);
+    own_heuristic(
+        "op_join_subscript",
+        "OPT113",
+        &open,
+        "OPT113",
+        &[
+            ("Equality of keys", "item-type-unknown"),
+            ("Idle on a mismatch", "iterable-type-unknown"),
+        ],
+    );
+    let closed = join(
+        "lefts: list[dict[str, int]], rights: list[dict[str, int]]",
+        "rights",
+        body,
+    );
+    exact("op_join_subscript_closed", "OPT113", &closed, "OPT113");
+}
+
+#[test]
+fn a_loop_over_the_receiver_does_not_step_through_inputs() {
+    let open = format!(
+        "{DATACLASSES}class Holder:\n    rows: list[Right] = []\n\n    def join(self, lefts: list[Left]):\n        out = []\n        for a in lefts:\n            for b in self.rows:\n                if a.key == b.key:\n                    out.append(a)\n        return out\n"
+    );
+    let report = own_heuristic(
+        "op_join_receiver",
+        "OPT113",
+        &open,
+        "OPT113",
+        &[("Steps through inputs", "items-not-from-the-inputs")],
+    );
+    // At the inner loop's iterable.
+    assert_eq!(closer_line_detail(&report, 0).1, Some(37));
+    let closed = open
+        .replace(
+            "lefts: list[Left]):",
+            "lefts: list[Left], rows: list[Right]):",
+        )
+        .replace("in self.rows:", "in rows:");
+    exact("op_join_receiver_closed", "OPT113", &closed, "OPT113");
+}
+
+#[test]
+fn a_loop_over_a_display_steps_through_items_the_code_fixes() {
+    let body = "            if a == b:\n                out.append(a)\n";
+    let display = format!(
+        "[{}]",
+        (1..=20)
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let open = join("lefts: list[int]", &display, body);
+    own_heuristic(
+        "op_join_display",
+        "OPT113",
+        &open,
+        "OPT113",
+        &[("Steps through inputs", "fixed-by-the-code")],
+    );
+    let closed = join("lefts: list[int], rights: list[int]", "rights", body);
+    exact("op_join_display_closed", "OPT113", &closed, "OPT113");
+}
+
+#[test]
+fn work_on_a_mismatch_leaves_the_inner_loop_busy() {
+    let before = format!("            out.append(None)\n{MATCH}");
+    own_heuristic(
+        "op_join_work",
+        "OPT113",
+        &join(TYPED, "rights", &before),
+        "OPT113",
+        &[("Idle on a mismatch", "work-on-a-mismatch")],
+    );
+    // A way out of the inner loop on a mismatch is work too.
+    let stop = format!("{MATCH}            if b.payload < 0:\n                break\n");
+    own_heuristic(
+        "op_join_break",
+        "OPT113",
+        &join(TYPED, "rights", &stop),
+        "OPT113",
+        &[("Idle on a mismatch", "work-on-a-mismatch")],
+    );
+    exact(
+        "op_join_work_closed",
+        "OPT113",
+        &join(TYPED, "rights", MATCH),
+        "OPT113",
+    );
+}
+
+#[test]
+fn an_iterable_that_may_be_a_generator_runs_code_to_advance() {
+    let open = join(
+        "lefts: list[Left], rights: Iterable[Right]",
+        "rights",
+        MATCH,
+    );
+    own_heuristic(
+        "op_join_iterable",
+        "OPT113",
+        &open,
+        "OPT113",
+        &[("Idle on a mismatch", "advancing-runs-code")],
+    );
+    exact(
+        "op_join_iterable_closed",
+        "OPT113",
+        &join(TYPED, "rights", MATCH),
+        "OPT113",
+    );
+}
+
+#[test]
+fn an_outer_loop_that_grows_the_inner_collection_or_rekeys_it() {
+    let grow = format!(
+        "{DATACLASSES}def join(lefts: list[Left], rights: list[Right], flag):\n    out = []\n    for a in lefts:\n        if flag and rights:\n            rights.append(rights[0])\n        for b in rights:\n{MATCH}    return out\n"
+    );
+    own_heuristic(
+        "op_join_grow",
+        "OPT113",
+        &grow,
+        "OPT113",
+        &[("Same collection, same keys", "collection-may-change")],
+    );
+    let closed = grow.replace(
+        "        if flag and rights:\n            rights.append(rights[0])\n",
+        "",
+    );
+    exact("op_join_grow_closed", "OPT113", &closed, "OPT113");
+    let rekey = format!("{MATCH}                b.key = -1\n");
+    own_heuristic(
+        "op_join_rekey",
+        "OPT113",
+        &join(TYPED, "rights", &rekey),
+        "OPT113",
+        &[("Same collection, same keys", "keys-may-change")],
+    );
+}
+
+#[test]
+fn each_premise_of_a_join_left_open_is_recorded() {
+    let open = join(TYPED, "load(rights)", MATCH);
+    own_heuristic(
+        "op_join_several",
+        "OPT113",
+        &open,
+        "OPT113",
+        &[
+            ("Same collection, same keys", "collection-may-change"),
+            ("Steps through inputs", "items-not-from-the-inputs"),
+            ("Equality of keys", "item-type-unknown"),
+            ("Idle on a mismatch", "advancing-runs-code"),
+        ],
+    );
+    exact(
+        "op_join_several_closed",
+        "OPT113",
+        &join(TYPED, "rights", MATCH),
+        "OPT113",
+    );
 }
 
 // --------------------------------------------------------------------------- outputs

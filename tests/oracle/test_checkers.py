@@ -663,6 +663,29 @@ class PremiseTable(unittest.TestCase):
         self.assertEqual((finding["rule"], finding["kind"]), ("EFF101", "stripped-premise-not-recorded"))
         self.assertEqual(finding["detail"]["stripped"], "Every return")
 
+    def test_a_rule_whose_heuristic_tier_keeps_its_code_checks_its_own_reports(self):
+        import driver
+        import premise_generator
+
+        code = premise_generator.OPEN_PREMISE_CODES["OPT101"]
+        self.assertEqual(code, "OPT101")
+        out = {"unrecorded": [], "recorded_checked": 0}
+        reports = [
+            self.dumped("OPT101", "heuristic", "Rewrite proven safe"),
+            self.dumped("OPT101", "exact"),
+            self.dumped("OPT101", "heuristic"),
+        ]
+        stripped = {"rule": "OPT101", "stripped": "Rewrite proven safe"}
+        driver._check_open_premises(stripped, code, reports, {"handle_s0_1"}, out)
+        self.assertEqual(out["recorded_checked"], 2)
+        self.assertEqual([f["detail"]["recorded"] for f in out["unrecorded"]], [[]])
+
+    def test_every_rule_recording_open_premises_has_programs_with_a_premise_stripped(self):
+        import premise_generator
+
+        for rule in premise_generator.OPEN_PREMISE_CODES:
+            self.assertIn(rule, premise_generator.STRIPS, rule)
+
 
 class Minimizing(unittest.TestCase):
     """A refutation that stands on how the program was built keeps its program text."""

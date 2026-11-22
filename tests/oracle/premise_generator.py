@@ -420,6 +420,12 @@ def opt(sc, strip, rule):
     construction, statement, loop, result, unsafe_change = OPT_PATTERNS[rule]
     stmt = statement.split("\n")
     init = "x = seed" if strip == "Builtin type by construction" else construction
+    if strip == "Builtin type by construction" and rule == "OPT130":
+        # The constructor's call is the value: a project function named like the builtin builds
+        # nothing (what a builtin constructor builds the container from is an obligation of the
+        # rewrite, not this premise).
+        init = construction
+        sc.define(block("def set(values):", ["return values"]))
     before = []
     body = list(stmt)
     if strip == "Loop-carried":
@@ -590,7 +596,12 @@ RELEVANCE = {("MUT114", "Keyed"), ("OPT113", "Steps through inputs")}
 # (`heki dump-open-premises`), each with the code those reports carry: its heuristic side
 # (`heki_rules::premises::exact_side_of`), or its own code when its heuristic tier keeps it. With a
 # premise stripped, such a report has to name it among them.
-OPEN_PREMISE_CODES = {"EFF101": "EFF111", "EFF103": "EFF113"}
+OPEN_PREMISE_CODES = {
+    "EFF101": "EFF111",
+    "EFF103": "EFF113",
+    **{rule: rule for rule in OPT_PATTERNS},
+    "OPT113": "OPT113",
+}
 
 
 class TableError(Exception):
