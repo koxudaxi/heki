@@ -339,7 +339,10 @@ impl crate::ProjectIndex {
                     .mutated_param_paths
                     .iter()
                     .flat_map(|(param, paths)| {
-                        (paths.iter().filter(|a| !a.is_empty())).map(|a| ObjRef::Param {
+                        (paths
+                            .iter()
+                            .filter(|a| !a.is_empty() && *a != crate::ELEMENTS_PATH))
+                        .map(|a| ObjRef::Param {
                             param: *param,
                             attr: Some(a.clone()),
                         })

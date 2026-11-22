@@ -435,9 +435,13 @@ EffectSummary(f) = {
 
     // Family 1: mutation and state effects (MUT1xx / MUT2xx)
     mutates_params:           Bitset,                      // parameter i or its elements / attributes changed
-    mutated_param_paths:      Map<ParamIdx, Set<AttrPath>>,// attributes / containers changed through parameter i
-    changed_param_attrs:      Map<ParamIdx, Set<AttrName>>,// attributes whose objects change (in place or deeper),
-                                                           // not just rebound: what a shallow copy shares (MUT202)
+    mutated_param_paths:      Map<ParamIdx, Set<AttrPath>>,// attributes / containers changed through parameter i;
+                                                           // "[]": an object it holds as an item or an element
+                                                           // (p["k"].append(x), for x in p: x.clear()), also
+                                                           // through a shallow copy of it (ELEMENTS_PATH)
+    changed_param_attrs:      Map<ParamIdx, Set<AttrName>>,// attributes (and "[]") whose objects change (in place
+                                                           // or deeper), not just rebound: what a shallow copy
+                                                           // shares (MUT202)
     param_change_sites:       Map<ParamIdx, Set<Span>>,    // own changes of parameter i only, never propagated
                                                            // (EFF201 mutates-params counts them)
     escapes_params:           Bitset,                      // stored in an attribute / container / global / closure variable
@@ -1274,13 +1278,17 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      level only), a display that only unpacks tagged values (`{**x}` with no other entry,
      `[*xs, *ys]`, `readonly::display_copies`) is a shallow copy of them, and a slice is a shallow copy unless
      the value's class is inferred and is not a builtin sequence
-     (`readonly::subscript_step`, shared with the return flow). A copy method of a project class
+     (`readonly::subscript_step`, shared with the return flow). `readonly::copy_of` is the one
+     table of the copies an instruction makes of the values it is given alone, which
+     `MUT112`'s origins (`ownership::source`: a shallow copy is a new object holding the copied
+     values' elements) and the summaries' copies of parameters read too. A copy method of a project class
      (`Image.copy`) is a call of that method, not a copy by its name (`readonly::call_derivation`).
      A copy keeps its original's class for receiver typing. A phi joins the tags of all its
      incoming values, to a fixpoint.
   3. A direct attribute write or container mutation of a tagged value, or passing it in a
      parameter position the callee changes (`mutated_param_paths` minus `memo_param_paths`; for a
-     shallow copy, below the attributes `changed_param_attrs` names), is reported as **`MUT202`**
+     shallow copy, below the attributes `changed_param_attrs` names; for a producer that is not
+     deep, not below its items), is reported as **`MUT202`**
      with the call hop, or as **`MUT114`** when the value comes from an `@lru_cache` / `@cache`
      function rather than a declared producer. A `MUT114` report is exact when the cached
      function carries a `CachedResult` (a `functools` cache resolved by import, with a `maxsize`

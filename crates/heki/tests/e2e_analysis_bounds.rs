@@ -3755,3 +3755,109 @@ fn a_wide_display_unpacked_by_many_calls_is_bound_within_the_budget() {
     let wide = check_within(&wide_display_unpacked(8000, 8000), Duration::from_secs(20));
     assert!((1..8000).contains(&wide.len()), "{}", wide.len());
 }
+
+/// A function binding names each to an item of the one before (`e = e["k"]`) five thousand deep,
+/// each changed in place, under a `mutates-params` boundary: which parameter's items each changed
+/// object may be is decided once per value, not by a walk back up the chain at every change.
+#[test]
+fn changes_down_a_long_item_chain_decide_each_element_once() {
+    let links = 5_000;
+    let mut lines = vec!["def walk(p):".to_owned(), "    e = p".to_owned()];
+    for i in 0..links {
+        lines.push("    e = e[\"k\"]".to_owned());
+        lines.push(format!("    e.append({i})"));
+    }
+    let p = Project::new("bounds_element_chain");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[[tool.heki.effect-boundaries]]\nname = \"pure\"\nscopes = [\"m.*\"]\nforbid = [\"mutates-params\"]\n",
+    )
+    .write("m.py", &(lines.join("\n") + "\n"));
+    let found: Vec<u64> = check_within(&p, Duration::from_secs(20))
+        .iter()
+        .filter(|d| d["rule_code"] == "EFF201")
+        .map(|d| d["line"].as_u64().unwrap())
+        .collect();
+    assert_eq!(found, vec![1]);
+}
+
+/// Five thousand shallow copies of one parameter, each changing one of its items, and a loop
+/// rebinding an item of a copy on one branch per test before changing it: which copy each
+/// changed object is below, and whether a store before it rebinds its level, are decided once
+/// per value, not by a walk over every store at every load.
+#[test]
+fn changes_below_many_copies_decide_each_copy_once() {
+    let copies = 5_000;
+    let mut lines = vec!["def copies(p: dict[str, list[int]]):".to_owned()];
+    for i in 0..copies {
+        lines.push(format!("    c{i} = dict(p)"));
+        lines.push(format!("    c{i}[\"k\"].append({i})"));
+    }
+    lines.extend(
+        [
+            "",
+            "",
+            "def rebound(p: dict[str, list[int]], xs):",
+            "    c = dict(p)",
+            "    for x in xs:",
+        ]
+        .map(str::to_owned),
+    );
+    for i in 0..2_000 {
+        lines.push(format!("        if x == {i}:"));
+        lines.push("            c[\"k\"] = []".to_owned());
+    }
+    lines.push("        c[\"k\"].append(x)".to_owned());
+    let p = Project::new("bounds_copies");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nextend-select = [\"MUT115\"]\n",
+    )
+    .write("m.py", &(lines.join("\n") + "\n"));
+    let found: Vec<u64> = check_within(&p, Duration::from_secs(20))
+        .iter()
+        .filter(|d| d["rule_code"] == "MUT115")
+        .map(|d| d["line"].as_u64().unwrap())
+        .collect();
+    assert_eq!(found.len(), copies + 1);
+}
+
+/// A copied class with a chain of two thousand subclasses, copied and changed below the copy in
+/// a thousand functions: the classes a value of it may be are walked once per question, not
+/// once per subclass along each subclass's bases.
+#[test]
+fn copies_of_a_class_with_a_deep_subclass_chain_walk_each_class_once() {
+    let depth = 2_000;
+    let mut lines = vec![
+        "import copy".to_owned(),
+        String::new(),
+        String::new(),
+        "class C0:".to_owned(),
+        "    def __init__(self) -> None:".to_owned(),
+        "        self.children: list[int] = []".to_owned(),
+    ];
+    for i in 1..depth {
+        lines.push(String::new());
+        lines.push(String::new());
+        lines.push(format!("class C{i}(C{}):", i - 1));
+        lines.push("    pass".to_owned());
+    }
+    for i in 0..1_000 {
+        lines.push(String::new());
+        lines.push(String::new());
+        lines.push(format!("def adopt{i}(node: C0) -> None:"));
+        lines.push("    clone = copy.copy(node)".to_owned());
+        lines.push("    clone.children.append(1)".to_owned());
+    }
+    let p = Project::new("bounds_copied_hierarchy");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nextend-select = [\"MUT115\"]\n",
+    )
+    .write("m.py", &(lines.join("\n") + "\n"));
+    let found = check_within(&p, Duration::from_secs(30))
+        .iter()
+        .filter(|d| d["rule_code"] == "MUT115")
+        .count();
+    assert_eq!(found, 1_000);
+}

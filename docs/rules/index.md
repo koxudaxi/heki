@@ -2,7 +2,7 @@
 
 # Rules
 
-heki has 41 rules in four families. A rule is exact when it reports only what it established and was certified on the corpus, and heuristic (≈) when a report can be wrong about the code: [Rule Precision](../precision.md) says how a rule is certified and what each one measured. Each rule's page says what a report states.
+heki has 42 rules in four families. A rule is exact when it reports only what it established and was certified on the corpus, and heuristic (≈) when a report can be wrong about the code: [Rule Precision](../precision.md) says how a rule is certified and what each one measured. Each rule's page says what a report states.
 
 - The exact rules run by default, and for a prefix such as `EFF` or `ALL`. A report of an exact rule that did not establish every premise (an `OPT` report whose rewrite is not proven) is shown where a heuristic rule would run.
 - A heuristic rule runs when `select` / `extend-select` names its code or name. With `lint.heuristic = true` (`--heuristic`), the heuristic rules that are not opt-in also run by default and for a prefix or `ALL`.
@@ -35,6 +35,7 @@ Shared state written behind its owner's back: stale caches, write-ownership cont
 | MUT112 | [conditional-ownership-mutation](conditional-ownership-mutation.md) | Opt-in: changing in place a value that is a new object on one path and borrowed state (a parameter, an attribute, a global, or what a function returns of such state) on another. | ≈ 🔌 🧪 |
 | MUT113 | [iterated-container-mutation](iterated-container-mutation.md) | Opt-in: a dict, set, or deque of the instance changed while a method iterates it, by another method while a generator is suspended in the loop or by a function the loop's body calls (the next step raises `RuntimeError`). | ≈ 🔌 🧪 |
 | MUT114 | [cached-result-mutation](cached-result-mutation.md) | Changing in place the list, dict, or set that a `functools.lru_cache` / `functools.cache` function returned (the cache hands the same object to later calls with the same arguments), directly or through the functions that return it. |  |
+| MUT115 | [shallow-copy-nested-mutation](shallow-copy-nested-mutation.md) | Opt-in: changing in place an object below a shallow copy the function made of state that outlives the call (`dict(x)`, `x.copy()`, `copy.copy(x)`, `model_copy()`): the copied value holds the same object, so the change is seen through it too. | ≈ 🔌 |
 | MUT118 | [sentinel-lost-in-deepcopy](sentinel-lost-in-deepcopy.md) | `copy.deepcopy` of an instance holding an `object()` sentinel in an attribute that a function tests against the sentinel by identity (the copy holds a new object, which the test does not match). | ≈ |
 | MUT201 | [write-owner-violation](write-owner-violation.md) | Writing a guarded attribute/container (directly, via alias, or via helper) outside declared `write-owners`. | ≈ 📜 |
 | MUT202 | [readonly-return-mutation](readonly-return-mutation.md) | Mutating a shared object returned by a declared `readonly-returns` producer, directly or through the functions that return it. | ≈ 📜 |
