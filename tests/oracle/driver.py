@@ -5,7 +5,9 @@ claims (`plan.py`), runs every entry point on its inputs under the monitor (`chi
 checks each claim (`checkers.py`). For the `OPT` reports with a rewrite it also applies
 `heki check --fix --include-size-dependent` to a copy and compares what the original and the
 rewritten program do on the same inputs; a difference is attributed to the report whose rewrite
-alone reproduces it.
+alone reproduces it. For a program from the premise table with a premise stripped, a heuristic
+report of the claim has to record that premise among those it leaves open
+(`heki dump-open-premises`).
 """
 
 from __future__ import annotations
@@ -26,11 +28,13 @@ OPT_FIX_RULES = ("OPT101", "OPT102", "OPT110", "OPT111", "OPT120", "OPT121", "OP
 
 
 class Tools:
-    def __init__(self, heki, python, run_timeout=2.0, heki_timeout=60.0):
+    def __init__(self, heki, python, run_timeout=2.0, heki_timeout=60.0, open_premises=False):
         self.heki = heki
         self.python = python
         self.run_timeout = run_timeout
         self.heki_timeout = heki_timeout
+        # Whether to check the open premises heki records (`supports_open_premises`).
+        self.open_premises = open_premises
 
 
 def run_heki(tools, root, *extra):
@@ -45,6 +49,25 @@ def run_heki(tools, root, *extra):
 
 class HekiError(Exception):
     pass
+
+
+def supports_open_premises(heki):
+    """Whether `heki` records open premises (`heki dump-open-premises`, absent from older builds)."""
+    proc = subprocess.run([heki, "dump-open-premises", "--help"], capture_output=True, text=True, env=_env())
+    return proc.returncode == 0
+
+
+def run_open_premises(tools, root, code):
+    """The reports `heki dump-open-premises` prints for the project, with `code` (the code of a
+    claim's heuristic reports) selected besides the configuration's rules."""
+    command = [tools.heki, "dump-open-premises", "--config", "heki.toml", "--extend-select", code, "app"]
+    proc = subprocess.run(
+        command, cwd=root, capture_output=True, text=True, timeout=tools.heki_timeout, env=_env()
+    )
+    if proc.returncode != 0:
+        stderr = proc.stderr.strip()[:2000]
+        raise HekiError(f"heki dump-open-premises exited with {proc.returncode}: {stderr}")
+    return json.loads(proc.stdout)["reports"]
 
 
 def _env():
@@ -99,6 +122,8 @@ def check_project(root, tools, entries=None):
         "violations": [],
         "departures": [],
         "premise": None,
+        "unrecorded": [],
+        "recorded_checked": 0,
         "unmapped": [],
         "errors": [],
         "runs": {"total": 0, "timeout": 0, "bad-input": 0, "monitor-error": 0},
@@ -114,6 +139,7 @@ def check_project(root, tools, entries=None):
     premise = load_meta(root).get("premise")
     if premise is not None:
         _check_stripped_premise(premise, exact, out)
+        _check_recorded_premise(tools, root, premise, entries, out)
     if not exact:
         return out
     built = planner.build(root, exact)
@@ -172,6 +198,54 @@ def _check_stripped_premise(premise, exact, out):
         out["departures"].append(finding)
     else:
         out["refutations"].append(finding)
+
+
+def _check_recorded_premise(tools, root, premise, entries, out):
+    """Runs `heki dump-open-premises` for a program from the premise table whose rule records
+    open premises (`premise_generator.OPEN_PREMISE_CODES`) and checks the reports in its entry
+    points (`_check_open_premises`)."""
+    import premise_generator
+
+    code = premise_generator.OPEN_PREMISE_CODES.get(premise["rule"])
+    if not tools.open_premises or code is None or premise["stripped"] is None:
+        return
+    try:
+        reports = run_open_premises(tools, root, code)
+    except (HekiError, subprocess.TimeoutExpired, json.JSONDecodeError) as exc:
+        out["errors"].append(["heki-open-premises", str(exc)[:2000]])
+        return
+    _check_open_premises(premise, code, reports, {e["func"] for e in entries}, out)
+
+
+def _check_open_premises(premise, code, reports, entry_points, out):
+    """With a premise stripped, each heuristic report of the claim (rule `code`) in one of the
+    program's `entry_points`, the functions the claim is built in, names that premise among the
+    premises it leaves open: one that does not is a finding of its own kind (`unrecorded`), as
+    the causes it records come from the decision that made it heuristic. A report in a helper is
+    about another claim (a loop that a way of stripping "Every return" adds is one)."""
+    rule, stripped = premise["rule"], premise["stripped"]
+    for report in reports:
+        if report["rule"] != code or report["certainty"] != "heuristic":
+            continue
+        if report["qualname"] not in entry_points:
+            continue
+        out["recorded_checked"] += 1
+        recorded = sorted({o["premise"] for o in report["open_premises"]})
+        if stripped in recorded:
+            continue
+        named = recorded or "no premise"
+        out["unrecorded"].append(
+            {
+                "rule": rule,
+                "claim": "stripped",
+                "kind": "stripped-premise-not-recorded",
+                "premise": f"{stripped}: stripped, and the {code} report records {named} as open",
+                "entry": None,
+                "input": None,
+                "detail": {"stripped": stripped, "recorded": report["open_premises"]},
+                "report": {"path": report["path"], "line": report["line"], "column": report["column"]},
+            }
+        )
 
 
 def _count_runs(out, runs):
@@ -270,7 +344,8 @@ def main():
     parser.add_argument("--heki", required=True)
     parser.add_argument("--python", default=sys.executable)
     args = parser.parse_args()
-    result = check_project(os.path.realpath(args.root), Tools(args.heki, args.python))
+    tools = Tools(args.heki, args.python, open_premises=supports_open_premises(args.heki))
+    result = check_project(os.path.realpath(args.root), tools)
     json.dump(result, sys.stdout, indent=1)
 
 

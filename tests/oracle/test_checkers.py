@@ -621,6 +621,71 @@ class PremiseTable(unittest.TestCase):
         driver._check_stripped_premise({"rule": "EFF101", "stripped": None}, [self.report("EFF101")], out)
         self.assertEqual(out["refutations"], [])
 
+    def dumped(self, rule, certainty, *premises, qualname="handle_s0_1"):
+        """A report as `heki dump-open-premises` prints it."""
+        open_premises = [
+            {"premise": p, "cause": "c", "closer": "none", "at": None, "detail": None} for p in premises
+        ]
+        return {
+            "rule": rule,
+            "certainty": certainty,
+            "path": "app/s0.py",
+            "line": 3,
+            "column": 5,
+            "qualname": qualname,
+            "open_premises": open_premises,
+        }
+
+    def test_a_heuristic_report_records_the_stripped_premise_among_its_open_ones(self):
+        import driver
+
+        out = {"unrecorded": [], "recorded_checked": 0}
+        reports = [
+            self.dumped("EFF111", "heuristic", "Every implementation", "Waits"),
+            # Exact reports, and reports of other rules, record nothing to check.
+            self.dumped("EFF101", "exact"),
+            self.dumped("EFF113", "heuristic", "Origin"),
+            # A report in a helper is about another claim.
+            self.dumped("EFF111", "heuristic", "Origin", qualname="step_s0_2"),
+        ]
+        stripped = {"rule": "EFF101", "stripped": "Waits"}
+        driver._check_open_premises(stripped, "EFF111", reports, {"handle_s0_1"}, out)
+        self.assertEqual((out["unrecorded"], out["recorded_checked"]), ([], 1))
+
+    def test_a_heuristic_report_without_the_stripped_premise_is_unrecorded(self):
+        import driver
+
+        out = {"unrecorded": [], "recorded_checked": 0}
+        reports = [self.dumped("EFF111", "heuristic", "Every implementation")]
+        stripped = {"rule": "EFF101", "stripped": "Every return"}
+        driver._check_open_premises(stripped, "EFF111", reports, {"handle_s0_1"}, out)
+        finding = out["unrecorded"][0]
+        self.assertEqual((finding["rule"], finding["kind"]), ("EFF101", "stripped-premise-not-recorded"))
+        self.assertEqual(finding["detail"]["stripped"], "Every return")
+
+    def test_a_rule_whose_heuristic_tier_keeps_its_code_checks_its_own_reports(self):
+        import driver
+        import premise_generator
+
+        code = premise_generator.OPEN_PREMISE_CODES["OPT101"]
+        self.assertEqual(code, "OPT101")
+        out = {"unrecorded": [], "recorded_checked": 0}
+        reports = [
+            self.dumped("OPT101", "heuristic", "Rewrite proven safe"),
+            self.dumped("OPT101", "exact"),
+            self.dumped("OPT101", "heuristic"),
+        ]
+        stripped = {"rule": "OPT101", "stripped": "Rewrite proven safe"}
+        driver._check_open_premises(stripped, code, reports, {"handle_s0_1"}, out)
+        self.assertEqual(out["recorded_checked"], 2)
+        self.assertEqual([f["detail"]["recorded"] for f in out["unrecorded"]], [[]])
+
+    def test_every_rule_recording_open_premises_has_programs_with_a_premise_stripped(self):
+        import premise_generator
+
+        for rule in premise_generator.OPEN_PREMISE_CODES:
+            self.assertIn(rule, premise_generator.STRIPS, rule)
+
 
 class Minimizing(unittest.TestCase):
     """A refutation that stands on how the program was built keeps its program text."""

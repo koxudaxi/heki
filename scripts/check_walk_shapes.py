@@ -33,6 +33,9 @@ listed there that costs less than a quarter of the limits fails the gate until i
 band between keeps a shape near the limit from failing on one machine and passing on another
 (shapes scale differently across machines than the calibration shape does).
 
+A family marked `open_premises` runs `heki dump-open-premises` instead of `heki check`: the
+premises its heuristic reports leave open are explained only there.
+
 `--shard k/n` runs every n-th shape, starting at the k-th (each placement of a family is a shape),
 after the same calibration: CI runs the shapes in parallel jobs.
 
@@ -488,6 +491,19 @@ def callers_of_one_helper(n: int) -> str:
     return "\n".join(lines)
 
 
+def reports_sharing_a_chain(n: int) -> str:
+    """Many `async def`s each reaching a sleep through one chain of helpers, none of which makes
+    the next call on every return: each report's open premises are explained along the chain."""
+    depth = 100
+    lines = ["import time", "", "def helper0(flag):", "    if flag:", "        return None"]
+    lines += ["    time.sleep(1)", ""]
+    for i in range(1, depth):
+        lines += [f"def helper{i}(flag):", f"    helper{i - 1}(flag)", ""]
+    for j in range(n):
+        lines += [f"async def handler{j}(flag):", f"    helper{depth - 1}(flag)", ""]
+    return "\n".join(lines)
+
+
 def functions_each_calling(n: int) -> str:
     """Many functions each making one project call."""
     lines = []
@@ -640,6 +656,8 @@ class Family:
     contracts: Callable[[int], str] | None = None
     # Also run through `heki dump-recommend-facts`: the facts only `heki recommend` reads.
     facts: bool = False
+    # Run through `heki dump-open-premises`, which explains the reports' open premises.
+    open_premises: bool = False
 
 
 FAMILIES = [
@@ -705,6 +723,13 @@ FAMILIES = [
         "functions_each_calling", project=functions_each_calling, placements=("project",), size=20000
     ),
     Family("callers_of_one_helper", project=callers_of_one_helper, placements=("project",), size=4000),
+    Family(
+        "reports_sharing_a_chain",
+        project=reports_sharing_a_chain,
+        placements=("project",),
+        size=4000,
+        open_premises=True,
+    ),
     Family(
         "initialization_steps",
         project=initialization_steps,
@@ -865,11 +890,12 @@ class Runner:
         return self.measure(text, args, env, timeout)
 
     def run(self, text: str, mode: str, timeout: float = TIMEOUT_SECONDS) -> tuple[float, float, int]:
-        """A run of `mode`: `check`, `watch` (the `--watch` engine), or `facts` (`heki
-        dump-recommend-facts`)."""
-        if mode != "facts":
+        """A run of `mode`: `check`, `watch` (the `--watch` engine), `facts` (`heki
+        dump-recommend-facts`), or `open-premises` (`heki dump-open-premises`)."""
+        dumps = {"facts": "dump-recommend-facts", "open-premises": "dump-open-premises"}
+        if mode not in dumps:
             return self.check(text, mode == "watch", timeout=timeout)
-        args = ["dump-recommend-facts", "--select", self.select, "--config", "shapes.toml", "m.py"]
+        args = [dumps[mode], "--select", self.select, "--config", "shapes.toml", "m.py"]
         return self.measure(text, args, {}, timeout)
 
     def measure(
@@ -966,8 +992,12 @@ def main() -> int:
             if failed is not None:
                 print(f"{family.name}/{placement} n={n}: building the IR {failed}", flush=True)
                 over.append("build")
-            modes = ("check",) if listed else ("check", "watch")
-            for mode in () if failed is not None else modes + ("facts",) * family.facts:
+            if family.open_premises:
+                modes: tuple[str, ...] = ("open-premises",)
+            else:
+                modes = ("check",) if listed else ("check", "watch")
+                modes += ("facts",) * family.facts
+            for mode in () if failed is not None else modes:
                 # A listed shape only has to show when it drops under the limits.
                 timeout = base_seconds + 2 * limit_seconds if listed else TIMEOUT_SECONDS
                 seconds, peak, code = runner.run(text, mode, timeout=timeout)
