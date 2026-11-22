@@ -188,6 +188,43 @@ fn cached_property_stripped_a_subclass_defines_a_plain_property() {
 }
 
 #[test]
+fn plain_write_stripped_an_in_place_change_of_an_attribute_a_class_may_bind_to_code() {
+    let in_place = |extra: &str| {
+        holder(
+            r#"return ",".join(self.items)"#,
+            r#"self.items.append("x")"#,
+            "return None",
+            extra,
+        )
+    };
+    // A subclass binds the attribute to a property, so the plain read the change assumes may run
+    // code.
+    let extra = "\n\nclass Sub(Holder):\n    @property\n    def items(self):\n        return []\n";
+    let p = project("mut101_strip_in_place_property", &in_place(extra));
+    assert_eq!(tiers(&p), vec![report("MUT101", 15, false)]);
+    // A base heki does not know may bind it too.
+    let source = in_place("")
+        .replacen(
+            "import functools",
+            "import functools; from vendor import Base",
+            1,
+        )
+        .replacen("class Holder:", "class Holder(Base):", 1);
+    let p = project("mut101_strip_in_place_unknown_base", &source);
+    assert_eq!(tiers(&p), vec![report("MUT101", 15, false)]);
+}
+
+#[test]
+fn a_helper_defined_on_both_branches_reads_on_every_path_what_both_read() {
+    let source = holder("return self.look()", WRITE, "return None", "").replace(
+        "    def look(self) -> str:\n        return self.raw.get(\"k\", \"\")\n",
+        "    if __debug__:\n        def look(self) -> str:\n            return self.raw.get(\"k\", \"\")\n    else:\n        def look(self) -> str:\n            return self.raw.get(\"k\", \"\")\n",
+    );
+    let p = project("mut101_helper_both_branches", &source);
+    assert_eq!(tiers(&p), vec![report("MUT101", 15, true)]);
+}
+
+#[test]
 fn reads_on_every_path_stripped_the_read_is_on_one_branch() {
     for read in [
         r#"return self.raw.get("k", "") if self.flag else """#,
