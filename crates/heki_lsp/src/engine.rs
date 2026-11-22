@@ -88,8 +88,8 @@ enum ShownAt {
     /// names).
     ParamChange(u8),
     /// A function's own comparison of an attribute with an `object()` sentinel (the tests
-    /// `MUT118` names), by attribute and sentinel.
-    SentinelTest(String, String),
+    /// `MUT118` names), by function, attribute, and sentinel.
+    SentinelTest(String, String, String),
 }
 
 /// The places in its text `source` of the spans of `file` that other files' diagnostics can
@@ -126,10 +126,14 @@ fn shown_places(file: &heki_effect::FileSummary, source: &str) -> Vec<SitePlace>
         .collect();
     changes.extend(
         file.local_functions
-            .values()
-            .flat_map(|s| s.sentinel_test_sites())
-            .map(|t| {
-                let at = ShownAt::SentinelTest(t.attr.clone(), t.sentinel.clone());
+            .iter()
+            .flat_map(|(func, s)| s.sentinel_test_sites().map(move |t| (func, t)))
+            .map(|(func, t)| {
+                let at = ShownAt::SentinelTest(
+                    func.qualname.clone(),
+                    t.attr.clone(),
+                    t.sentinel.clone(),
+                );
                 (t.span, at)
             }),
     );

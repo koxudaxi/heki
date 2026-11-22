@@ -1565,7 +1565,7 @@ fn deep_copies_of_a_sentinel_class_with_many_subclasses_decide_each_class_once()
 /// below its attributes is joined once per class (`heki_ir::walk::Closure`), not walked again from
 /// each copy, so every copy reports it in linear time.
 #[test]
-fn deep_copies_along_a_long_chain_of_held_classes_walk_a_bounded_way() {
+fn deep_copies_along_a_long_chain_of_held_classes_join_one_fact_per_class() {
     let classes = 3_000;
     let mut lines = vec![
         "import copy".to_owned(),
@@ -1606,6 +1606,37 @@ fn deep_copies_along_a_long_chain_of_held_classes_walk_a_bounded_way() {
     let found = check_within(&p, Duration::from_secs(20));
     let reported = found.iter().filter(|d| d["rule_code"] == "MUT118").count();
     assert_eq!(reported, classes);
+}
+
+/// Functions binding thousands of names each to the one before, from an attribute load, and
+/// comparing each with an `object()` sentinel by identity (`MUT118`'s tests): what each operand
+/// copies is read from the function's copy-root table, not walked back along the chain per
+/// comparison.
+#[test]
+fn identity_tests_of_a_long_alias_chain_read_each_copy_root_once() {
+    let names = 8_000;
+    let mut lines = vec![
+        "MISSING = object()".to_owned(),
+        String::new(),
+        String::new(),
+        "class Node:".to_owned(),
+        "    def __init__(self):".to_owned(),
+        "        self.mark = MISSING".to_owned(),
+    ];
+    for f in 0..4 {
+        lines.extend([
+            String::new(),
+            String::new(),
+            format!("def scan{f}(node: Node):"),
+            "    v0 = node.mark".to_owned(),
+        ]);
+        lines.extend((1..names).map(|i| format!("    v{i} = v{} ", i - 1)));
+        lines.extend((0..names).map(|i| format!("    x{i} = v{i} is MISSING")));
+        lines.push("    return node".to_owned());
+    }
+    let p = Project::new("bounds_alias_identity_tests");
+    p.write("m.py", &(lines.join("\n") + "\n"));
+    check_within(&p, Duration::from_secs(5));
 }
 
 /// A class with thousands of subclasses whose `reset` a call target naming no class names, and

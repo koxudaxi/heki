@@ -305,6 +305,14 @@ def is_tests(n: int) -> Body:
     return Body(("p",), [*lines, "return p"])
 
 
+def alias_identity_tests(n: int) -> Body:
+    """A chain of names each bound to the one before, from an attribute load, each compared by
+    identity: every comparison asks what its operands copy."""
+    lines = ["v0 = p.attr"] + [f"v{i} = v{i - 1}" for i in range(1, n)]
+    lines += [f"x{i} = v{i} is p" for i in range(n)]
+    return Body(("p",), [*lines, "return p"])
+
+
 def match_pass_through(n: int) -> Body:
     """Many `match` statements whose cases slice or pass the value on."""
     lines = ["v = xs"]
@@ -560,6 +568,7 @@ FAMILIES = [
     Family("item_reads", item_reads),
     Family("merged_flag_loop", merged_flag_loop),
     Family("is_tests", is_tests),
+    Family("alias_identity_tests", alias_identity_tests),
     Family("match_pass_through", match_pass_through),
     Family("with_statements", with_statements),
     Family("attribute_chain", attribute_chain),

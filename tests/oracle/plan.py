@@ -370,7 +370,9 @@ class Planner:
 
     def _mut118(self, claim, source, pos, report):
         """The deep copy is the value of an assignment to a name (`copied = copy.deepcopy(item)`)
-        of a name: the line records what the original and the copy hold in the attribute."""
+        of a name, on one line: the line records what the original and the copy hold in the
+        attribute. A line event ends when execution moves to another line, so a statement over
+        several lines would end before the copy is bound."""
         call = source.node_at(pos, (ast.Call,))
         target = report.get("target") or ""
         if call is None or len(call.args) != 1 or "." not in target:
@@ -380,6 +382,7 @@ class Planner:
         if not (
             isinstance(arg, ast.Name)
             and isinstance(statement, ast.Assign)
+            and statement.lineno == statement.end_lineno
             and len(statement.targets) == 1
             and isinstance(statement.targets[0], ast.Name)
         ):
