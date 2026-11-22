@@ -583,9 +583,10 @@ What needs no announcement:
 - writes to objects the function gets from a call;
 - a function whose every caller announces the change after calling it.
 
-A write is followed through local aliases, container methods, `setattr` / `__dict__`, and
-helpers. A helper changing an argument it does not type writes the field or instance its caller
-binds to it. At most 64 `invalidation` contracts can be declared.
+A write is followed through local aliases (also in the scopes nested in the function),
+container methods, `setattr` / `__dict__`, and helpers. A helper changing an argument it does
+not type writes the field or instance its caller binds to it. At most 64 `invalidation`
+contracts can be declared.
 
 ### How contracts report
 

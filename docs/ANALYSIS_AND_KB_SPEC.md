@@ -1071,7 +1071,11 @@ message = "write model state through GenerationStore instead"
      - **container mutation through an alias**: `xs = obj.a; xs.append(...)` / `xs[i] = ...` /
        `xs.clear()` / `xs.sort()` / `xs |= ...` (through alias tracking and
        `mutated_param_paths`, **handing `obj.a` to `helper(obj.a)` that calls `.append()` is
-       caught across calls**). `getattr(obj, "a"[, default])` with a constant name loads
+       caught across calls**). An alias is one in the scopes nested in its function too: a
+       read of its closure cell joins the aliases of every value the function binds to it, as
+       a phi joins its inputs (the function is summarized before the scopes nested in it), and
+       a cell a nested scope rebinds (`nonlocal`) is no alias. `getattr(obj, "a"[, default])`
+       with a constant name loads
        `obj.a`, and so does a call or property read whose every project callee returns
        attribute `a` of the parameter the object binds on every `return`
        (`FunctionDecl::returns_param_attr`: `node.members().append(1)` and

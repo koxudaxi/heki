@@ -11,6 +11,7 @@ use crate::decorators::keeps_returned_value;
 use crate::environment::{self, AccessKind, ExternalAccess};
 use crate::guards::{self, GuardInputs, LocalGuards, per_item_bit};
 use crate::held;
+use crate::infer::CellKey;
 use crate::invalidation::{self, Events, FlowWrite, FuncFlow, Reach, SiteFlow};
 use crate::iterations::{
     self, BetweenSteps, ContainerChange, IteratedContainer, IteratedResult, ResultIteration,
@@ -158,6 +159,7 @@ fn extract_module(
         .filter(|f| !f.is_class_body && !is_overload(f))
         .map(func_qualname)
         .collect();
+    let mut cell_aliases = CellAliases::default();
     for f in &input.ir.functions {
         if f.is_class_body || (is_overload(f) && implemented.contains(func_qualname(f))) {
             continue;
@@ -173,13 +175,33 @@ fn extract_module(
             flow,
             mut references,
             mut external,
-        } = Extractor::new(&shape, &key, &cx, &input.path, contracts, opt_in).run();
+            cells,
+        } = Extractor::new(
+            &shape,
+            &key,
+            &cx,
+            &input.path,
+            contracts,
+            opt_in,
+            &cell_aliases,
+        )
+        .run();
+        cell_aliases.extend(cells);
         // A `class` statement in a function runs its body there: the body's effects and calls
         // are the function's (its methods run only when they are called).
         if !f.is_module_body {
             for body in class_bodies_run_by(input.ir, f) {
                 let body = FnShape::new(body);
-                let facts = Extractor::new(&body, &key, &cx, &input.path, contracts, opt_in).run();
+                let facts = Extractor::new(
+                    &body,
+                    &key,
+                    &cx,
+                    &input.path,
+                    contracts,
+                    opt_in,
+                    &cell_aliases,
+                )
+                .run();
                 absorb_class_body(&mut summary, facts.summary);
                 external.extend(facts.external);
                 sites.extend(
@@ -197,7 +219,16 @@ fn extract_module(
             // the module's.
             for body in class_bodies_run_by(input.ir, f) {
                 let body = FnShape::new(body);
-                let facts = Extractor::new(&body, &key, &cx, &input.path, contracts, opt_in).run();
+                let facts = Extractor::new(
+                    &body,
+                    &key,
+                    &cx,
+                    &input.path,
+                    contracts,
+                    opt_in,
+                    &cell_aliases,
+                )
+                .run();
                 references.extend(facts.references);
                 external.extend(facts.external);
             }
@@ -540,6 +571,23 @@ struct ItemOf {
     holder: Option<VarId>,
 }
 
+/// What every value a function binds to one of its closure cells is, as its alias maps join
+/// them (a read of the cell in a nested scope is a phi of the bindings): the container an
+/// attribute of an object holds, of a project class or of unknown class, or an entry of one. The
+/// object is none of the nested scope's own: no parameter of it, constructed nowhere in it.
+struct CellAlias {
+    attr: Option<ObjAttr>,
+    item: Option<ItemOf>,
+    /// The attribute of an object of unknown class whose container (or an entry of it, `true`)
+    /// every binding holds ([`Extractor::untyped_container`]).
+    untyped: Option<(String, bool)>,
+}
+
+/// The [`CellAlias`] of the cells the functions of one module summarized so far bind. The
+/// builder numbers a function before the scopes nested in it, so the functions enclosing a
+/// scope are summarized before it.
+type CellAliases = FxHashMap<CellKey, CellAlias>;
+
 /// The object a typed write changes, as its write site records it.
 #[derive(Debug, Clone, Copy)]
 struct Written {
@@ -595,6 +643,8 @@ struct Extracted {
     references: Vec<CallSite>,
     /// [`FileSummary::external_accesses`].
     external: Vec<ExternalAccess>,
+    /// The [`CellAlias`] of the closure cells the function binds.
+    cells: Vec<(CellKey, CellAlias)>,
 }
 
 /// A typed write site waiting for the answer of its construction query.
@@ -640,6 +690,8 @@ struct Extractor<'a> {
     self_attr_alias: FxHashMap<VarId, String>,
     /// `obj.<attr>` with project-class `obj`.
     obj_attr_alias: FxHashMap<VarId, ObjAttr>,
+    /// What the closure cells of the functions enclosing this one hold.
+    cell_aliases: &'a CellAliases,
     /// `x.__dict__` -> owner of `x`.
     dict_of: FxHashMap<VarId, Owner>,
     /// Entries of the containers that project-class attributes hold (`WriteKind::ItemMut`).
@@ -950,6 +1002,7 @@ impl<'a> Extractor<'a> {
         path: &'a Path,
         contracts: Option<&'a dyn Contracts>,
         opt_in: OptInFacts,
+        cell_aliases: &'a CellAliases,
     ) -> Self {
         let f = shape.f;
         let (types, narrowed, isinstance_classes) = cx.infer_flow(f);
@@ -1007,6 +1060,7 @@ impl<'a> Extractor<'a> {
             memo_fills: FxHashSet::default(),
             self_attr_alias: FxHashMap::default(),
             obj_attr_alias: FxHashMap::default(),
+            cell_aliases,
             dict_of: FxHashMap::default(),
             item_alias: FxHashMap::default(),
             may_params: FxHashMap::default(),
@@ -1255,8 +1309,9 @@ impl<'a> Extractor<'a> {
         }
     }
 
-    /// Alias maps through `AttrLoad`, `Copy`, agreeing phis, and the calls and property reads
-    /// that return an attribute of what they are handed (iterated to a fixpoint).
+    /// Alias maps through `AttrLoad`, `Copy`, agreeing phis, the calls and property reads that
+    /// return an attribute of what they are handed, and the closure cells of enclosing functions
+    /// (iterated to a fixpoint).
     fn build_aliases(&mut self) {
         for (i, p) in self.f.params.iter().enumerate() {
             if let Ok(i) = u8::try_from(i)
@@ -1272,6 +1327,9 @@ impl<'a> Extractor<'a> {
             for inst in &bb.insts {
                 if let Some((dst, holder, attr)) = self.returned_attr(&inst.kind) {
                     returned_attrs.insert(dst, (holder, attr));
+                }
+                if let InstKind::LoadDeref { dst, name } = &inst.kind {
+                    self.alias_cell_read(*dst, name);
                 }
             }
         }
@@ -1424,6 +1482,26 @@ impl<'a> Extractor<'a> {
             if after == before {
                 break;
             }
+        }
+    }
+
+    /// The alias maps of `dst`, a read of the closure cell `name` of an enclosing function: the
+    /// [`CellAlias`] of the values that function binds to it, of an object reached from the cell.
+    fn alias_cell_read(&mut self, dst: VarId, name: &str) {
+        let Some(alias) = self
+            .cx
+            .bound_cell(self.f, name)
+            .and_then(|cell| self.cell_aliases.get(cell))
+        else {
+            return;
+        };
+        let reach = self.reach_of(dst);
+        if let Some(a) = &alias.attr {
+            self.obj_attr_alias
+                .insert(dst, ObjAttr { reach, ..a.clone() });
+        }
+        if let Some(i) = &alias.item {
+            self.item_alias.insert(dst, ItemOf { reach, ..i.clone() });
         }
     }
 
@@ -2198,13 +2276,54 @@ impl<'a> Extractor<'a> {
                 writes,
             }
         });
+        let cells = self.own_cell_aliases();
         Extracted {
             summary: self.summary,
             sites: self.sites,
             flow,
             references,
             external: self.external,
+            cells,
         }
+    }
+
+    /// The [`CellAlias`] of each closure cell the function binds, when its bindings have one.
+    fn own_cell_aliases(&mut self) -> Vec<(CellKey, CellAlias)> {
+        let mut out = Vec::new();
+        for (name, vars) in crate::infer::cell_bindings(self.f) {
+            let mut untyped = vars.iter().map(|&v| {
+                if let Def::Inst(b, i) = self.shape.def(v) {
+                    self.pos = (b, i as usize);
+                }
+                self.untyped_container(v)
+                    .map(|(attr, _, nested)| (attr, nested))
+            });
+            let first = untyped.next().flatten();
+            let untyped = first.filter(|f| untyped.all(|u| u.as_ref() == Some(f)));
+            let attr = joined_obj_attr(vars.iter().map(|v| self.obj_attr_alias.get(v)));
+            let attr = attr.map(|a| ObjAttr {
+                obj_params: 0,
+                fresh: false,
+                holder: None,
+                ..a
+            });
+            let item = joined_item(vars.iter().map(|v| self.item_alias.get(v)));
+            let item = item.map(|i| ItemOf {
+                obj_params: 0,
+                fresh: false,
+                holder: None,
+                ..i
+            });
+            if attr.is_some() || item.is_some() || untyped.is_some() {
+                let alias = CellAlias {
+                    attr,
+                    item,
+                    untyped,
+                };
+                out.push(((self.f.id, name.to_owned()), alias));
+            }
+        }
+        out
     }
 
     /// The function's references handing a project function, method, or class on
@@ -4028,7 +4147,7 @@ impl<'a> Extractor<'a> {
             self.typed_site(class, attr, None, kind, span, written);
         }
         if let Some(var) = owner.var.filter(|v| self.unknown_class(*v)) {
-            self.unresolved(Unresolved::Receiver(attr.to_owned()), var, kind, span);
+            self.unresolved(Unresolved::Receiver(attr.to_owned()), Some(var), kind, span);
         }
     }
 
@@ -4076,13 +4195,14 @@ impl<'a> Extractor<'a> {
             });
     }
 
-    /// Record a write heki cannot tie to a class (`MUT205`) of the object `obj` holds: the
-    /// object counts as a parameter only when it is one on every path.
-    fn unresolved(&mut self, what: Unresolved, obj: VarId, kind: WriteKind, span: Span) {
+    /// Record a write heki cannot tie to a class (`MUT205`) of the object `obj` holds (`None`:
+    /// an object of an enclosing function, reached from a closure cell): the object counts as a
+    /// parameter only when it is one on every path.
+    fn unresolved(&mut self, what: Unresolved, obj: Option<VarId>, kind: WriteKind, span: Span) {
         if !self.ownership {
             return;
         }
-        let obj_params = match self.param_alias.get(&obj) {
+        let obj_params = match obj.and_then(|o| self.param_alias.get(&o)) {
             Some((i, None)) => 1u64 << i,
             _ => 0,
         };
@@ -4093,7 +4213,7 @@ impl<'a> Extractor<'a> {
             obj_params,
             construction: Construction::No,
         };
-        if self.track && self.trackable(obj) {
+        if let Some(obj) = obj.filter(|o| self.track && self.trackable(*o)) {
             let query = self.rec.query(self.at(), obj);
             self.pending_unresolved.push((site, query));
             return;
@@ -4107,18 +4227,24 @@ impl<'a> Extractor<'a> {
         let Some(var) = owner.var else { return };
         self.change_object(var, span);
         for class in &owner.typed_classes {
-            self.unresolved(Unresolved::Name(class.clone()), var, kind, span);
+            self.unresolved(Unresolved::Name(class.clone()), Some(var), kind, span);
         }
     }
 
     /// The attribute of an object of unknown class whose container (or an entry of it, `true`)
-    /// `var` holds: `obj.attr`, `obj.attr["k"]`, through copies.
-    fn untyped_container(&self, var: VarId) -> Option<(String, VarId, bool)> {
+    /// `var` holds, and the object (`None`: one of an enclosing function, reached from a closure
+    /// cell): `obj.attr`, `obj.attr["k"]`, through copies and closure cells.
+    fn untyped_container(&self, var: VarId) -> Option<(String, Option<VarId>, bool)> {
         let mut cur = var;
         let mut nested = false;
         for _ in 0..16 {
             match &self.defs.get(&cur)?.kind {
                 InstKind::Copy { src, .. } => cur = *src,
+                InstKind::LoadDeref { name, .. } => {
+                    let cell = self.cx.bound_cell(self.f, name)?;
+                    let (attr, entry) = self.cell_aliases.get(cell)?.untyped.clone()?;
+                    return Some((attr, None, nested || entry));
+                }
                 InstKind::SubscriptLoad {
                     obj,
                     is_slice: false,
@@ -4130,7 +4256,7 @@ impl<'a> Extractor<'a> {
                 InstKind::AttrLoad { obj, attr, .. }
                     if attr != "__dict__" && self.unknown_class(*obj) =>
                 {
-                    return Some((attr.clone(), *obj, nested));
+                    return Some((attr.clone(), Some(*obj), nested));
                 }
                 _ => return None,
             }
@@ -6839,11 +6965,17 @@ fn merge_obj_attr_phi(map: &mut FxHashMap<VarId, ObjAttr>, dst: VarId, inputs: &
     if map.contains_key(&dst) {
         return;
     }
+    if let Some(a) = joined_obj_attr(inputs.iter().map(|v| map.get(v))) {
+        map.insert(dst, a);
+    }
+}
+
+/// The `obj.<attr>` alias of a value that is one of `inputs` ([`merge_obj_attr_phi`]): `None`
+/// when one has none, or when they name different class attributes.
+fn joined_obj_attr<'m>(inputs: impl IntoIterator<Item = Option<&'m ObjAttr>>) -> Option<ObjAttr> {
     let mut found: Option<ObjAttr> = None;
-    for v in inputs {
-        let Some(a) = map.get(v) else {
-            return;
-        };
+    for a in inputs {
+        let a = a?;
         match &mut found {
             None => {
                 found = Some(ObjAttr {
@@ -6853,7 +6985,7 @@ fn merge_obj_attr_phi(map: &mut FxHashMap<VarId, ObjAttr>, dst: VarId, inputs: &
             }
             Some(f) => {
                 if f.classes != a.classes || f.attr != a.attr {
-                    return;
+                    return None;
                 }
                 f.obj_params |= a.obj_params;
                 f.fresh &= a.fresh;
@@ -6864,9 +6996,7 @@ fn merge_obj_attr_phi(map: &mut FxHashMap<VarId, ObjAttr>, dst: VarId, inputs: &
             }
         }
     }
-    if let Some(a) = found {
-        map.insert(dst, a);
-    }
+    found
 }
 
 /// [`merge_phi`] for container entries: the inputs must name entries of one class attribute
@@ -6876,16 +7006,21 @@ fn merge_item_phi(map: &mut FxHashMap<VarId, ItemOf>, dst: VarId, inputs: &[VarI
     if map.contains_key(&dst) {
         return;
     }
+    if let Some(a) = joined_item(inputs.iter().map(|v| map.get(v))) {
+        map.insert(dst, a);
+    }
+}
+
+/// The entry alias of a value that is one of `inputs` ([`merge_item_phi`]).
+fn joined_item<'m>(inputs: impl IntoIterator<Item = Option<&'m ItemOf>>) -> Option<ItemOf> {
     let mut found: Option<ItemOf> = None;
-    for v in inputs {
-        let Some(a) = map.get(v) else {
-            return;
-        };
+    for a in inputs {
+        let a = a?;
         match &mut found {
             None => found = Some(a.clone()),
             Some(f) => {
                 if f.classes != a.classes || f.attr != a.attr {
-                    return;
+                    return None;
                 }
                 if f.key != a.key {
                     f.key = None;
@@ -6899,9 +7034,7 @@ fn merge_item_phi(map: &mut FxHashMap<VarId, ItemOf>, dst: VarId, inputs: &[VarI
             }
         }
     }
-    if let Some(a) = found {
-        map.insert(dst, a);
-    }
+    found
 }
 
 /// Where an object that outlives the call is held ([`Extractor::global_roots`]).

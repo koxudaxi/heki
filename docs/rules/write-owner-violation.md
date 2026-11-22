@@ -16,8 +16,11 @@ reserves for a set of allowed writer functions. A write is reported when it happ
 allowed writers:
 
 - directly (`model.fields = [...]`, `model.fields.append(...)`, `del model.fields`);
-- through a local alias (`fields = model.fields; fields.append(...)`), also one `getattr` with a
-  constant name loads (`getattr(model, "fields").append(...)`), or what a method, property, or
+- through a local alias (`fields = model.fields; fields.append(...)`), also one a scope nested
+  in the function reads from it (a nested function, a lambda, a comprehension, or a generator
+  expression: `lambda: fields.append(x)`) unless a nested scope rebinds it (`nonlocal`), one
+  `getattr` with a constant name loads (`getattr(model, "fields").append(...)`), or what a
+  method, property, or
   function returns when it returns the attribute itself on every `return`
   (`model.field_list().append(...)` with `return self.fields`), stores no attribute of that name
   itself, and every class the object may be runs it (no `cached_property`, no class attribute of

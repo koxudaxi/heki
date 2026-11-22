@@ -24,7 +24,8 @@ write:
   heki cannot list (one without members, or implemented by more than eight classes), or a
   variable of an enclosing function that a nested scope rebinds (`nonlocal`). Rebinding
   (`obj.fields = []`), deleting, `setattr` with a constant name, and changing the container the
-  attribute holds (`obj.fields.append(x)`, `obj.meta["k"][name] = v`) count;
+  attribute holds (`obj.fields.append(x)`, `obj.meta["k"][name] = v`, also through an alias, in
+  the function or in a scope nested in it) count;
 - an attribute name computed at run time written on an instance of a target class:
   `setattr(model, name, v)`, `model.__dict__[name] = v`, `model.__dict__.update(...)`, and a
   `__dict__` key in a name that is no constant: a module-level name bound twice, in a loop, or
