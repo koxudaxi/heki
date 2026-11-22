@@ -1104,7 +1104,8 @@ which module imports which.
    describes as a copy (`copy_sanitizer`: a builtin container's `copy()`, `copy.copy`,
    `os.environ.copy()`) whose result is of a builtin container type, or a slice of a list or
    `bytearray`; the type comes from the copied value under R2. Or a call of project functions or
-   a property read (its getters).
+   a property read (its getters). A call of a project class is none: it returns the new
+   instance, not what `__init__` returns.
 2. **The summary fact** (`EffectSummary::fresh_return`, only while `MUT119` runs:
    `OptInFacts::fresh_returns`): for a plain function (not `async`, not a generator, no decorator
    but those that call the body each time, no A1 hazard) with no bare return on a path a run can
