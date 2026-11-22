@@ -75,6 +75,8 @@ def line(
     act=1,
     evals=None,
     evals_after=None,
+    attrs_before=None,
+    attrs_after=None,
 ):
     return [
         "line",
@@ -92,6 +94,8 @@ def line(
         names_after or {},
         evals or {},
         evals_after or {},
+        attrs_before or {},
+        attrs_after or {},
     ]
 
 
@@ -374,6 +378,65 @@ class Mut110(unittest.TestCase):
             call("c0", 2, 6, captures={"values": [7, "list", {}]}, act=1),
         )
         self.assertEqual(checkers.check(claim, [trace])["refutations"], [])
+
+
+class Mut118(unittest.TestCase):
+    claim = {
+        "id": "k0",
+        "rule": "MUT118",
+        "line_id": "N0",
+        "original": "item",
+        "copy": "copied",
+        "attr": "value",
+        "class_qualname": "Spec",
+    }
+    classes = ["app.s0.Spec", "builtins.object"]
+
+    def deep_copy(self, held_type, kept, classes=None):
+        before = {"item.value": [10, classes or self.classes, 77, held_type]}
+        after = {"copied.value": [11, classes or self.classes, 77 if kept else 88, held_type]}
+        return run(line("N0", 2, 9, attrs_before=before, attrs_after=after))
+
+    def test_a_copy_holding_a_new_object_confirms(self):
+        result = checkers.check(self.claim, [self.deep_copy("object", kept=False)])
+        self.assertEqual((result["checked"], result["refutations"]), (1, []))
+
+    def test_a_copy_keeping_the_sentinel_refutes_deep_copied(self):
+        result = checkers.check(self.claim, [self.deep_copy("object", kept=True)])
+        self.assertEqual(result["refutations"][0]["kind"], "sentinel-kept")
+        self.assertTrue(result["refutations"][0]["premise"].startswith("Deep-copied"))
+
+    def test_an_instance_holding_another_value_is_no_instance_of_the_claim(self):
+        result = checkers.check(self.claim, [self.deep_copy("int", kept=True)])
+        self.assertEqual((result["checked"], result["refutations"]), (0, []))
+
+    def test_a_line_that_ends_before_the_copy_is_bound_checks_nothing(self):
+        before = {"item.value": [10, self.classes, 77, "object"]}
+        trace = run(line("N0", 2, 9, attrs_before=before, attrs_after={"copied.value": None}))
+        result = checkers.check(self.claim, [trace])
+        self.assertEqual((result["checked"], result["refutations"]), (0, []))
+
+    def test_a_deep_copy_over_several_lines_is_not_mapped(self):
+        import ast
+
+        import plan
+
+        for text, mapped in [
+            ("import copy\n\ndef f(item):\n    copied = copy.deepcopy(item)\n    return copied\n", True),
+            ("import copy\n\ndef f(item):\n    copied = copy.deepcopy(\n        item\n    )\n    return copied\n", False),
+        ]:
+            source = _source(text)
+            call = next(n for n in ast.walk(source.tree) if isinstance(n, ast.Call))
+            pos = (call.lineno, call.col_offset, call.end_lineno, call.end_col_offset)
+            claim = {"id": "k0", "path": "app/m.py"}
+            got = plan.Planner("/")._mut118(claim, source, pos, {"target": "Spec.value"})
+            self.assertEqual(bool(got), mapped, text)
+
+    def test_an_object_of_another_class_violates_r2(self):
+        classes = ["app.s0.Other", "builtins.object"]
+        result = checkers.check(self.claim, [self.deep_copy("object", kept=True, classes=classes)])
+        self.assertEqual(result["refutations"], [])
+        self.assertEqual(result["violations"][0]["assumption"], "R2")
 
 
 class Mut114(unittest.TestCase):
@@ -866,6 +929,47 @@ class RecordedCopies(unittest.TestCase):
         self.assertEqual(rebound["refutations"][0]["kind"], "not-the-copied-object")
         added = checkers.check(augmented, runs[:1])
         self.assertEqual((added["checked"], added["refutations"]), (1, []))
+
+
+class DeepCopyRecorder(unittest.TestCase):
+    """The attributes a line plan names, before and after a real deep copy."""
+
+    SOURCE = (
+        "import copy\n"
+        "MISSING = object()\n"
+        "class Spec:\n"
+        "    def __init__(self):\n"
+        "        self.value = MISSING\n"
+        "def isolated(item):\n"
+        "    copied = copy.deepcopy(item)\n"
+        "    return copied\n"
+    )
+
+    def test_the_original_and_the_copy_hold_different_objects(self):
+        import importlib
+        import tempfile
+
+        root = os.path.realpath(tempfile.mkdtemp(prefix="oracle-deep-copies-"))
+        with open(os.path.join(root, "deep_copies_mod.py"), "w", encoding="utf-8") as f:
+            f.write(self.SOURCE)
+        attrs = [["item", "value"], ["copied", "value"]]
+        recorder = monitor.Recorder(root, {"lines": [{"id": "N0", "path": "deep_copies_mod.py", "line": 7, "attrs": attrs}]})
+        sys.path.insert(0, root)
+        try:
+            module = importlib.import_module("deep_copies_mod")
+            recorder.install()
+            recorder.begin_run()
+            module.isolated(module.Spec())
+            events = recorder.end_run()
+        finally:
+            recorder.uninstall()
+            sys.path.remove(root)
+        self.assertEqual(recorder.errors, [])
+        [event] = [e for e in events if e[0] == "line" and e[1] == "N0"]
+        before, after = event[15]["item.value"], event[16]["copied.value"]
+        self.assertEqual((before[1][0], before[3], after[3]), ("deep_copies_mod.Spec", "object", "object"))
+        self.assertNotEqual(before[2], after[2])
+        self.assertIsNone(event[15]["copied.value"])
 
 
 def _source(text):
