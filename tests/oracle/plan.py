@@ -17,6 +17,7 @@ EXACT_RULES = (
     "DATA101",
     "MUT110",
     "MUT114",
+    "MUT118",
     "OPT101",
     "OPT102",
     "OPT103",
@@ -365,6 +366,28 @@ class Planner:
         claim.update(names)
         function = _function_of(source, pos[0])
         claim["function"] = function.name if function is not None else None
+        return True
+
+    def _mut118(self, claim, source, pos, report):
+        """The deep copy is the value of an assignment to a name (`copied = copy.deepcopy(item)`)
+        of a name: the line records what the original and the copy hold in the attribute."""
+        call = source.node_at(pos, (ast.Call,))
+        target = report.get("target") or ""
+        if call is None or len(call.args) != 1 or "." not in target:
+            return False
+        statement = getattr(call, "parent", None)
+        arg = call.args[0]
+        if not (
+            isinstance(arg, ast.Name)
+            and isinstance(statement, ast.Assign)
+            and len(statement.targets) == 1
+            and isinstance(statement.targets[0], ast.Name)
+        ):
+            return False
+        class_qualname, attr = target.rsplit(".", 1)
+        result = statement.targets[0].id
+        self._line(claim, pos[0], attrs=[[arg.id, attr], [result, attr]])
+        claim.update(original=arg.id, copy=result, attr=attr, class_qualname=class_qualname)
         return True
 
     def _opt_type(self, claim, source, pos, report):

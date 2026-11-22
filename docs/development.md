@@ -94,11 +94,12 @@ a rule becomes exact](precision.md#how-a-rule-becomes-exact):
    (`fakes.py`: `time.sleep`, `requests`, `sqlite3`, `socket`, `subprocess`, `urllib`, queues,
    `numpy`, `pandas`), so the program runs offline. `monitor.py` records with `sys.monitoring`
    which call was running, which iteration of a loop, and which line, when each fake was called,
-   and what each line changed.
+   what each line changed, and what the objects a line plan names hold in an attribute.
 4. `checkers.py` refutes a claim from the runs: an `EFF101` call that returned without a waiting
    call during it, an `EFF103` iteration that completed without a statement, a `DATA101`
    iteration whose new value was not built from the previous one, a `MUT110` or `MUT114` line
-   that ran without changing the object the report names, an `OPT` accumulator of another type,
+   that ran without changing the object the report names, a `MUT118` deep copy whose copy kept
+   the `object()` the original held in the attribute, an `OPT` accumulator of another type,
    or an `OPT113` inner item with a different key that ran more than the comparison. For the
    `OPT` rewrites, the driver applies `heki check --fix --include-size-dependent` to a copy and
    compares results, exceptions, arguments, output, and library calls on the same inputs.

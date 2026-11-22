@@ -332,6 +332,84 @@ def mut114(sc, strip):
 
 
 # ---------------------------------------------------------------------------------------------
+# MUT118: an `object()` sentinel an instance holds, tested by identity, deep-copied
+# ---------------------------------------------------------------------------------------------
+def _sentinel_holder(sc, klass, sentinel, strip):
+    """A class whose instances hold `sentinel` in `value` (a dataclass field default, a
+    parameter default stored on `self`, or a store in `__init__`); with "Held by the class"
+    stripped, one that only has it as its class attribute. Returns the class's source lines and
+    whether its constructor takes `value`."""
+    if strip == "Held by the class":
+        way = sc.pick(["class-attribute", "not-in-init"])
+        if way == "class-attribute":
+            body = [f"value = {sentinel}"] + block("def __init__(self, name):", ["self.name = name"])
+            return block(f"class {klass}:", body), False
+        sc.imports("from dataclasses import dataclass, field")
+        body = ["name: str", f"value: object = field(default={sentinel}, init=False)"]
+        return ["@dataclass"] + block(f"class {klass}:", body), False
+    way = sc.pick(["dataclass", "parameter", "store"])
+    if way == "dataclass":
+        sc.imports("from dataclasses import dataclass")
+        return ["@dataclass"] + block(f"class {klass}:", ["name: str", f"value: object = {sentinel}"]), True
+    if way == "parameter":
+        init = block(f"def __init__(self, name, value={sentinel}):", ["self.name = name", "self.value = value"])
+        return block(f"class {klass}:", init), True
+    init = block("def __init__(self, name):", ["self.name = name", f"self.value = {sentinel}"])
+    return block(f"class {klass}:", init), False
+
+
+def mut118(sc, strip):
+    ns = sc.ns
+    sc.imports("import copy")
+    sentinel = f"MISSING_{ns}"
+    if strip == "Object sentinel":
+        if sc.chance(0.5):
+            marker = sc.name("Marker")
+            keep = block("def __deepcopy__(self, memo):", ["return self"]) + block("def __copy__(self):", ["return self"])
+            sc.define(block(f"class {marker}:", keep))
+            sc.define([f"{sentinel} = {marker}()"])
+        else:
+            # Bound twice: no one object the name holds.
+            sc.define([f"{sentinel} = object()", f"{sentinel} = object()"])
+    else:
+        sc.define([f"{sentinel} = object()"])
+    klass = sc.name("Spec")
+    lines, takes_value = _sentinel_holder(sc, klass, sentinel, strip)
+    if strip == "Deep-copied" and sc.chance(0.5):
+        # A copy hook of the class keeps the instance, sentinel and all.
+        lines = lines + ["    " + line for line in block("def __deepcopy__(self, memo):", ["return self"])]
+    sc.define(lines)
+    tester = sc.name("given")
+    test = f"item.value is not {sentinel}"
+    if strip == "Tested by identity":
+        if sc.chance(0.5):
+            test = f"item.value != {sentinel}"
+        else:
+            other = sc.name("Other")
+            sc.define(block(f"class {other}:", block("def __init__(self):", [f"self.value = {sentinel}"])))
+            test = f"other.value is not {sentinel}"
+            sc.define(block(f"def {tester}(item: {klass}, other: {other} = {other}()) -> bool:", [f"return {test}"]))
+    if not (strip == "Tested by identity" and "other" in test):
+        sc.define(block(f"def {tester}(item: {klass}) -> bool:", [f"return {test}"]))
+    copied = "copy.deepcopy(item)"
+    if strip == "Deep-copied" and not any("__deepcopy__" in line for line in lines):
+        copied = "copy.deepcopy(item, {})"
+    entry = sc.name("isolated")
+    sc.define(
+        block(
+            f"def {entry}(item: {klass}, {sc.params}):",
+            [f"copied = {copied}", f"return {tester}(item), {tester}(copied)"],
+        )
+    )
+
+    def value(k):
+        kwargs = {"value": k} if takes_value and k % 2 else {}
+        return [{"$obj": [f"{sc.main_module}:{klass}", [f"n{k}"], kwargs]}]
+
+    _add_inputs(sc, entry, value)
+
+
+# ---------------------------------------------------------------------------------------------
 # The proven OPT tier: one pattern per rule, and the contexts that keep or break each premise
 # ---------------------------------------------------------------------------------------------
 # rule: (construction, statement in the loop, the loop, what the function returns, a change in
@@ -506,6 +584,7 @@ BUILDERS = {
     "DATA101": data101,
     "MUT110": mut110,
     "MUT114": mut114,
+    "MUT118": mut118,
     **{rule: _opt_builder(rule) for rule in OPT_PATTERNS},
     "OPT113": opt113,
 }
@@ -524,6 +603,7 @@ STRIPS = {
     "DATA101": ["Loop-carried on every path", "Every iteration", "Origin", "Reallocates"],
     "MUT110": ["Read-only parameter", "Passed as itself", "Changed at the line"],
     "MUT114": ["Cached", "Keyed", "Container kind", "Same object", "Changed in place"],
+    "MUT118": ["Object sentinel", "Held by the class", "Tested by identity", "Deep-copied"],
     **{
         rule: ["Builtin type by construction", "Loop-carried", "In a loop", "Rewrite proven safe"]
         for rule in ("OPT101", "OPT102", "OPT103")

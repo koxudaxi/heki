@@ -28,8 +28,10 @@ Events (lists, so that the trace is compact JSON):
 - `["resume", seq, act, qualname, path]`: a project generator or coroutine resumed;
 - `["exhaust", loop, act, entry, seq]`: the loop's iterator was exhausted;
 - `["line", line, act, seq_start, seq_end, outcome, chain, before, after, muts, types,
-  names_before, names_after]`: `names_*` map the captured names to the identity of what they
-  hold when the line starts and ends;
+  names_before, names_after, attrs_before, attrs_after]`: `names_*` map the captured names to
+  the identity of what they hold when the line starts and ends; `attrs_*` map `name.attr` to
+  `[object id, classes along its MRO as module.qualname, id of what its __dict__ holds under
+  attr or None, that value's type name or None]` for the pairs the plan names;
 - `["ret", ret, act, seq, value_id, type_name, base]`: `base` is `list`, `dict`, or `set` for an
   instance of one (a subclass too), else the type's name;
 - `["fake", seq, api, kind, waits, detail, stack, input_ids, output_id]`.
@@ -293,12 +295,26 @@ class Iteration:
 
 
 class LineExec:
-    __slots__ = ("plan", "start", "chain", "watched", "before", "muts", "types", "raised", "names")
+    __slots__ = (
+        "plan",
+        "start",
+        "chain",
+        "watched",
+        "before",
+        "muts",
+        "types",
+        "raised",
+        "names",
+        "attrs",
+        "attrs_before",
+    )
 
     def __init__(self, plan, start):
         self.plan = plan
         self.start = start
         self.names = {}
+        self.attrs = []
+        self.attrs_before = {}
         self.chain = None
         self.watched = []
         self.before = []
@@ -435,6 +451,28 @@ class Recorder:
                 continue
             self.keep.append(value)
             out[name] = [id(value), type(value).__name__, snapshot(value)]
+        return out
+
+    def _attr_facts(self, local, pairs):
+        """What each `[name, attr]` of `pairs` names in `local`: the object, its classes, and
+        what its `__dict__` holds under the attribute (`snapshot` cannot tell two `object()`s
+        apart)."""
+        out = {}
+        for name, attr in pairs:
+            value = local.get(name, MISSING)
+            if value is MISSING:
+                out[f"{name}.{attr}"] = None
+                continue
+            held = getattr(value, "__dict__", {}).get(attr, MISSING)
+            self.keep.append(value)
+            self.keep.append(held)
+            classes = [f"{c.__module__}.{c.__qualname__}" for c in type(value).__mro__]
+            out[f"{name}.{attr}"] = [
+                id(value),
+                classes,
+                None if held is MISSING else id(held),
+                None if held is MISSING else type(held).__name__,
+            ]
         return out
 
     def _eval_keys(self, frame, keys):
@@ -695,12 +733,14 @@ class Recorder:
 
     def _start_line(self, fs, plans, seq, frame):
         merged = {"id": plans[0]["id"], "capture": [], "types": [], "chain": False}
+        ex = LineExec(plans, seq)
         for plan in plans:
+            ex.attrs.extend(plan.get("attrs", ()))
             merged["capture"].extend(plan.get("capture", ()))
             merged["types"].extend(plan.get("types", ()))
             merged["chain"] = merged["chain"] or plan.get("chain", False)
-        ex = LineExec(plans, seq)
         local = frame.f_locals
+        ex.attrs_before = self._attr_facts(local, ex.attrs)
         watched = []
         for name in merged["capture"]:
             value = local.get(name, MISSING)
@@ -754,7 +794,8 @@ class Recorder:
         ex = fs.open_line
         fs.open_line = None
         after = [[id(v), type(v).__name__, snapshot(v)] for v in ex.watched]
-        local = fs.frame.f_locals if ex.names else {}
+        local = fs.frame.f_locals if ex.names or ex.attrs else {}
+        attrs_after = self._attr_facts(local, ex.attrs)
         after_names = {}
         for name in ex.names:
             value = local.get(name, MISSING)
@@ -776,6 +817,8 @@ class Recorder:
                 ex.types,
                 ex.names,
                 after_names,
+                ex.attrs_before,
+                attrs_after,
             ]
         )
         for extra in ex.plan[1:]:
@@ -794,6 +837,8 @@ class Recorder:
                     ex.types,
                     ex.names,
                     after_names,
+                    ex.attrs_before,
+                    attrs_after,
                 ]
             )
 
