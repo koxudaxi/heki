@@ -1032,7 +1032,12 @@ mod tests {
 
     #[test]
     fn a_condition_is_no_premise_and_its_causes_are_unique_kebab_case() {
-        for (i, c) in CONDITION_CAUSES.iter().enumerate() {
+        let keys: std::collections::BTreeSet<(&str, &str)> = CONDITION_CAUSES
+            .iter()
+            .map(|c| (c.condition.name, c.id))
+            .collect();
+        assert_eq!(keys.len(), CONDITION_CAUSES.len(), "a cause twice");
+        for c in CONDITION_CAUSES {
             assert!(
                 ALL.iter().all(|p| p.name != c.condition.name),
                 "{} is a premise row",
@@ -1045,9 +1050,6 @@ mod tests {
                 "{} is not kebab-case",
                 c.id
             );
-            for d in &CONDITION_CAUSES[i + 1..] {
-                assert!(c.condition.name != d.condition.name || c.id != d.id);
-            }
             assert_eq!(condition_cause(c.condition.name, c.id), Some(*c));
         }
     }

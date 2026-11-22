@@ -73,10 +73,11 @@ on its own along the reported chain and loop, so they cannot disagree with its t
 are internal for now: no output format of `heki check` and nothing in the language server shows
 them. `EFF111` and `EFF113` record them for the claims of `EFF101` and `EFF103`, and the heuristic
 reports of the eight `OPT` rewrite rules, `OPT113`, `DATA101`, `MUT110`, and `MUT114` for their own
-claims. A proven `OPT` rewrite or an `OPT113` join whose loop the code fixes at more than 16
-trips holds every premise of its row: the exact tier leaves it out for a condition that is no
-premise, "Trip count open" (the claim holds, but the change pays off only over a loop the data
-sizes), and the report records that condition, with its cause, in the same list.
+claims. A proven `OPT` rewrite, or an `OPT113` join whose premises all hold, over a loop the code
+fixes at more than 16 trips is heuristic for a condition of the exact tier that is no premise,
+"Trip count open" (the claim holds, but the change pays off only over a loop the data sizes): the
+report records that condition, with its cause, in the same list as the premises it left open,
+if any.
 
 An exact report's message states its claim and the witnesses of its premises, nothing else: no
 cost estimate such as "(N+1)", and no advice (that goes into the help).
