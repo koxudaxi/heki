@@ -497,18 +497,27 @@ pub fn typed_writes(config: &HekiConfig, selection: &RuleSelection) -> TypedWrit
 }
 
 /// The opt-in facts the rules `selection` runs read: `MUT112`'s return origins, `MUT113`'s
-/// iteration facts, `EFF109`'s lock facts, `EFF110`'s one-at-a-time uses, and the must-facts of
-/// the effect rules whose reports are split by them, each only with its rules. The readers assert
-/// it ([`heki_effect::ProjectIndex::opt_in_facts`]).
+/// iteration facts, `EFF109`'s lock facts, `EFF110`'s one-at-a-time uses, the must-facts of
+/// the effect rules whose reports are split by them, and the kept-value facts of `MUT101` and
+/// `MUT111`, each only with its rules. The readers assert it
+/// ([`heki_effect::ProjectIndex::opt_in_facts`]).
 pub fn opt_in_facts(selection: &RuleSelection) -> OptInFacts {
     OptInFacts {
         return_origins: selection.is_enabled("MUT112"),
         iterations: selection.is_enabled("MUT113"),
         locks: selection.is_enabled("EFF109"),
+        set_order: selection.is_enabled("EFF112"),
         exclusive: selection.is_enabled("EFF110"),
+        // `EFF114` reads which project functions never return normally
+        // (`MustExec::never_returns`).
         must_effects: crate::eff_rules::MUST_EFFECT_RULES
             .iter()
+            .chain(&["EFF114"])
             .any(|code| selection.is_enabled(code)),
+        kept_values: crate::mut_rules::KEPT_VALUE_RULES
+            .iter()
+            .any(|code| selection.is_enabled(code)),
+        call_cycles: selection.is_enabled("EFF114"),
         shared_state: false,
         blind_spots: false,
     }

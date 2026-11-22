@@ -318,6 +318,24 @@ def lazy_init_sites(n: int) -> Body:
     return Body(("items",), [*lines, "    it.x = 1"])
 
 
+def self_item_reads(n: int) -> Body:
+    """Items of constant keys of one attribute of `self`, each read on both sides of a branch: the
+    reads of each key on every path are asked together."""
+    lines = ["total = 0"]
+    for i in range(n):
+        lines += ["if flag:", f'    total += self.d["k{i}"]', "else:", f'    total -= self.d["k{i}"]']
+    return Body(("flag",), [*lines, "return total"])
+
+
+def writes_then_library_calls(n: int) -> Body:
+    """Writes of `self` attributes, each followed by library calls on values of known and unknown
+    classes: each call's catalog entry is read once."""
+    lines = []
+    for i in range(n):
+        lines += [f"self.a{i % 50} = len(xs) + {i}", f"out.append(str(xs[{i % 7}]))", f"seen = isinstance(out, list)"]
+    return Body(("xs", "out"), [*lines, "return seen"])
+
+
 def is_tests(n: int) -> Body:
     """Many `is` tests, each followed by a conditional expression on the tested parameter."""
     lines = []
@@ -491,6 +509,17 @@ def wide_hierarchy(n: int) -> str:
     return "\n".join(lines)
 
 
+def self_helper_chain(n: int) -> str:
+    """A `@cached_property` reading an attribute through a chain of `self` helpers, each reading
+    it on every path and calling the next, and a method writing the attribute."""
+    lines = ["import functools", "", "class Chain:", "    def __init__(self):", "        self.a = 0", ""]
+    lines += ["    @functools.cached_property", "    def p(self):", "        return self._h0()", ""]
+    for i in range(n):
+        lines += [f"    def _h{i}(self):", f"        return self.a + self._h{i + 1}()", ""]
+    lines += [f"    def _h{n}(self):", "        return self.a", "", "    def bump(self):", "        self.a += 1", ""]
+    return "\n".join(lines)
+
+
 def callers_of_one_helper(n: int) -> str:
     """One private helper writing an attribute, called by many functions."""
     lines = ["def _write(obj: Base):", "    obj.cache = []", ""]
@@ -601,6 +630,103 @@ def step_items(n: int) -> str:
     """A `write-owners` contract on the attribute `initialization_steps` fills, which no
     `invalidation` contract names."""
     return '\n[[write-owners]]\nname = "shape-steps"\ntargets = ["Model.items"]\nallowed-writers = ["Base.*"]\n'
+
+
+# A function returning a set of strings, for the set-order families.
+SET_ORDER_HELPERS = """import json
+from pathlib import Path
+
+
+def names(table: dict[str, int]) -> set[str]:
+    return set(table)
+
+
+"""
+
+
+def order_returned_up(n: int) -> str:
+    """Functions each returning what the one below returns, the last a list in a set's order,
+    written at the top."""
+    lines = ["def f0(table: dict[str, int]) -> list[str]:", "    return [k for k in names(table)]", ""]
+    for i in range(1, n):
+        lines += [f"def f{i}(table: dict[str, int]) -> list[str]:", f"    return f{i - 1}(table)", ""]
+    lines += ["def top(table: dict[str, int], path: Path) -> None:"]
+    lines += [f"    path.write_text(json.dumps(f{n - 1}(table)))", ""]
+    return SET_ORDER_HELPERS + "\n".join(lines)
+
+
+def order_handed_down(n: int) -> str:
+    """A value in a set's order handed down helpers to the one that writes it."""
+    lines = ["def h0(path: Path, data: object) -> None:", "    path.write_text(json.dumps(data))", ""]
+    for i in range(1, n):
+        lines += [f"def h{i}(path: Path, data: object) -> None:", f"    h{i - 1}(path, data)", ""]
+    lines += ["def top(table: dict[str, int], path: Path) -> None:"]
+    lines += [f"    h{n - 1}(path, [k for k in names(table)])", ""]
+    return SET_ORDER_HELPERS + "\n".join(lines)
+
+
+def comprehensions_over_one_set(n: int) -> str:
+    """Comprehensions over one set, each appended to one list handed to a writer."""
+    lines = ["def write(path: Path, parts: list[object]) -> None:", "    path.write_text(json.dumps(parts))", ""]
+    lines += ["def top(table: dict[str, int], path: Path) -> None:", "    found = names(table)", "    parts = []"]
+    lines += ["    parts.append([k for k in found])"] * n
+    lines += ["    write(path, parts)", ""]
+    return SET_ORDER_HELPERS + "\n".join(lines)
+
+
+def set_or_sorted_branches(n: int) -> str:
+    """A value chosen among a set and many sorted lists by a chain of branches, then iterated and
+    handed to a writer."""
+    lines = ["def write(path: Path, data: object) -> None:", "    path.write_text(json.dumps(data))", ""]
+    lines += ["def top(table: dict[str, int], path: Path, k: int) -> None:", "    found = names(table)"]
+    for i in range(n):
+        lines += [f"    if k == {i}:", "        found = sorted(table)"]
+    lines += ["    write(path, [x for x in found])", ""]
+    return SET_ORDER_HELPERS + "\n".join(lines)
+
+
+def stores_after_reads(n: int) -> str:
+    """A loop over a set storing each element as a key of one mapping, each store after a read of
+    another mapping by the same key and of the stored mapping by another key."""
+    lines = ["def filled(table: dict[str, int], other: dict[str, int], k: str) -> dict:"]
+    lines += ["    fields = {}", "    for name in names(table):"]
+    for i in range(n):
+        lines += [f"        a{i} = {{}}", f"        x{i} = a{i}[name] if other else fields[k]"]
+        lines += ["        fields[name] = other"]
+    lines += ["    return fields", "", "def top(table: dict[str, int], other: dict[str, int], path: Path) -> None:"]
+    lines += ['    path.write_text(json.dumps(filled(table, other, "k")))', ""]
+    return SET_ORDER_HELPERS + "\n".join(lines)
+
+
+def try_statements_into_a_cycle(n: int) -> str:
+    """One function of many `try` statements, each calling into one recursion and taking its
+    `RecursionError` in a clause that completes."""
+    lines = ["def rec(x):", "    return rec(x)", "", "def shape(x):"]
+    for _ in range(n):
+        lines += ["    try:", "        rec(x)", "    except Exception:", "        pass"]
+    return "\n".join(lines) + "\n"
+
+
+def cycle_of_functions(n: int) -> str:
+    """A call cycle through many functions, each calling the next inside a `try`."""
+    lines = []
+    for i in range(n):
+        lines += [f"def f{i}(x):", "    try:", f"        return f{(i + 1) % n}(x)"]
+        lines += ["    except Exception:", "        return None", ""]
+    return "\n".join(lines)
+
+
+def lattice_above_a_cycle(n: int) -> str:
+    """A lattice of calls n levels deep, two functions a level, each calling both of the level
+    below inside a `try`, above a function calling itself."""
+    lines = ["def bottom(x):", "    return bottom(x)", ""]
+    for level in range(n):
+        below = ["bottom"] if level == 0 else [f"a{level - 1}", f"b{level - 1}"]
+        for side in ("a", "b"):
+            lines += [f"def {side}{level}(x):", "    try:"]
+            lines += [f"        {callee}(x)" for callee in below]
+            lines += ["    except Exception:", "        return None", ""]
+    return "\n".join(lines)
 
 
 # The functions `argument_marks` defines, each named by an argument list of `marked_targets`.
@@ -780,12 +906,28 @@ FAMILIES = [
     Family("path_aliases", path_aliases),
     Family("merged_package_paths", merged_package_paths),
     Family("lazy_init_sites", lazy_init_sites, placements=("method",)),
+    # Adversarial: a getter with as many branches as keys asks one walk per key, past the budget.
+    Family("self_item_reads", self_item_reads, placements=("method",), real_code=False),
+    Family("writes_then_library_calls", writes_then_library_calls, placements=("method",)),
     Family("blind_calls", blind_calls, facts=True),
     Family("wide_hierarchy", project=wide_hierarchy, placements=("project",), size=4000),
     Family("helper_chain", project=helper_chain, placements=("project",), size=2000),
     Family(
         "functions_each_calling", project=functions_each_calling, placements=("project",), size=20000
     ),
+    Family("self_helper_chain", project=self_helper_chain, placements=("project",), size=2000),
+    Family("order_returned_up", project=order_returned_up, placements=("project",), size=2000),
+    Family("order_handed_down", project=order_handed_down, placements=("project",), size=2000),
+    Family(
+        "comprehensions_over_one_set",
+        project=comprehensions_over_one_set,
+        placements=("project",),
+        size=500,
+    ),
+    Family(
+        "set_or_sorted_branches", project=set_or_sorted_branches, placements=("project",), size=400
+    ),
+    Family("stores_after_reads", project=stores_after_reads, placements=("project",), size=1000),
     Family("callers_of_one_helper", project=callers_of_one_helper, placements=("project",), size=4000),
     Family(
         "reports_sharing_a_chain",
@@ -811,6 +953,14 @@ FAMILIES = [
     Family(
         "container_subclass_chain", project=container_subclass_chain, placements=("project",), size=1400
     ),
+    Family(
+        "try_statements_into_a_cycle",
+        project=try_statements_into_a_cycle,
+        placements=("project",),
+        size=2000,
+    ),
+    Family("cycle_of_functions", project=cycle_of_functions, placements=("project",), size=4000),
+    Family("lattice_above_a_cycle", project=lattice_above_a_cycle, placements=("project",), size=30),
     Family(
         "package_paths_merged_in_functions",
         project=package_paths_merged_in_functions,

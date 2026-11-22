@@ -141,6 +141,31 @@ class C:
     assert_eq!(reports(&p, "MUT107"), expected);
 }
 
+#[test]
+fn an_in_place_change_of_an_attribute_of_several_container_types_is_a_change() {
+    let p = project("union_container", "");
+    p.write(
+        "app.py",
+        r#"from functools import cached_property
+
+
+class C:
+    def __init__(self, tags: list[str] | set[str]) -> None:
+        self.tags: list[str] | set[str] = tags
+
+    @cached_property
+    def count(self) -> int:
+        return len(self.tags)
+
+    def reset(self) -> None:
+        self.tags.clear()
+"#,
+    );
+    // The attribute holds a list or a set: the change is one of either, so the cached count
+    // goes stale whichever it is.
+    assert_eq!(reports(&p, "MUT101"), vec![at("app.py", 13, "C.reset")]);
+}
+
 const BASE: &str = r#"class Base:
     def __init__(self, name: str) -> None:
         self.name = name
