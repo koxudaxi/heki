@@ -1422,7 +1422,7 @@ impl<'a> Extractor<'a> {
             match self.defs.get(&cur).map(|inst| &inst.kind) {
                 Some(InstKind::Copy { src, .. }) => cur = *src,
                 Some(InstKind::LoadDeref { name, .. }) => return self.captured_bit(name),
-                _ => return 0,
+                _ => break,
             }
         }
         0
@@ -1440,11 +1440,9 @@ impl<'a> Extractor<'a> {
         else {
             return;
         };
-        for (j, (owner, param)) in captured.params.iter().enumerate() {
-            let bit = self.enclosing_param_bit(owner, *param);
-            if bit == 0 {
-                continue;
-            }
+        let bits = (captured.params.iter().enumerate())
+            .map(|(j, (owner, param))| (j, self.enclosing_param_bit(owner, *param)));
+        for (j, bit) in bits.filter(|(_, bit)| *bit != 0) {
             let at = usize::from(captured.first) + j;
             if params.len() <= at {
                 params.resize(at + 1, ArgOrigin::default());
