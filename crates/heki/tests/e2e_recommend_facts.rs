@@ -305,6 +305,11 @@ def build():
     class Local:
         hook = make_hook()
     return Local
+
+
+def vague(either: Any | None, maybe: Callable[[], None] | None):
+    either.go()
+    maybe()
 "#,
     );
     let spots = blind_spots(&p);
@@ -364,15 +369,30 @@ def build():
             ),
             group("unknown-member", None, &["missing"], &[34, 35]),
             group("untyped-value", None, &["go"], &[36]),
+            // A union with such a member.
+            (
+                s("app.jobs.vague"),
+                s("any-value"),
+                None,
+                names(&["go"]),
+                vec![58],
+            ),
+            (
+                s("app.jobs.vague"),
+                s("callable-value"),
+                None,
+                names(&["maybe"]),
+                vec![59],
+            ),
         ],
         "{spots:#}"
     );
     let totals = &spots["totals"];
     // The call in the class body's loop.
-    assert_eq!(counts(&totals["unresolved"]), (23, 0, 0, 1));
+    assert_eq!(counts(&totals["unresolved"]), (25, 0, 0, 1));
     assert_eq!(totals["unresolved_by_reason"]["unannotated-parameter"], 7);
     assert_eq!(totals["unresolved_by_reason"]["unbound-name"], 3);
-    assert_eq!(totals["functions"], 3);
+    assert_eq!(totals["functions"], 4);
 }
 
 #[test]

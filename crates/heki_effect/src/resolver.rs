@@ -3388,7 +3388,7 @@ impl ProjectDecls {
             };
         }
         declared.obj().is_some_and(|d| {
-            matches!(d.class.as_str(), "typing.Any" | "builtins.object")
+            of_any_class(&d.class)
                 || t.obj()
                     .is_some_and(|i| i.class != d.class && self.is_subclass(&i.class, &d.class))
         })
@@ -5934,6 +5934,42 @@ pub(crate) enum Recv<'v> {
     Super(&'v str),
 }
 
+impl Recv<'_> {
+    /// Whether the receiver says nothing of the code a call on it runs: a value of `Any` or
+    /// `object` ([`of_any_class`]) or of `Callable` ([`is_any_callable`]), or a name nothing heki
+    /// sees binds ([`is_unbound_name`]: one a star import of a library binds, or none, and the
+    /// call raises `NameError`). Its library name (`typing.Any.save`, `builtins.undefined`) is
+    /// no library's function, so the call is unresolved, with effects heki does not know.
+    fn says_nothing(self) -> bool {
+        match self {
+            Recv::Inst(class) | Recv::Class(class) => of_any_class(class) || is_any_callable(class),
+            Recv::Ref(fqn) => is_unbound_name(fqn),
+            Recv::Super(_) => false,
+        }
+    }
+}
+
+/// Whether a value of `class` may be an object of any class: `Any` and `object` say nothing of
+/// the methods it has.
+pub(crate) fn of_any_class(class: &str) -> bool {
+    matches!(
+        class,
+        "typing.Any" | "typing_extensions.Any" | "builtins.object"
+    )
+}
+
+/// Whether a value of `class` may be any function: `Callable` says nothing of the function.
+pub(crate) fn is_any_callable(class: &str) -> bool {
+    matches!(class, "typing.Callable" | "collections.abc.Callable")
+}
+
+/// Whether `fqn` is a name heki looks up in `builtins` because nothing it sees binds it, and
+/// that Python's `builtins` does not define.
+pub(crate) fn is_unbound_name(fqn: &str) -> bool {
+    fqn.strip_prefix("builtins.")
+        .is_some_and(|n| !heki_ir::is_builtin_name(n.split('.').next().unwrap_or(n)))
+}
+
 impl Val {
     /// The project class the value is the class object of: a class named exactly, or one that
     /// may be a subclass (`cls`). Calling it constructs that class.
@@ -6336,7 +6372,7 @@ impl<'a> TypeCtx<'a> {
     /// Calling a named class constructs exactly that class: its `__init__` is the one its MRO
     /// finds. A class object that may be a subclass (`cls(...)`) runs any of theirs.
     pub(crate) fn call_targets(&self, callee: Option<Recv<'_>>) -> Callee {
-        match callee {
+        match callee.filter(|c| !c.says_nothing()) {
             Some(Recv::Ref(fqn)) => match self.called_symbol(fqn) {
                 Symbol::Function(key, _) => Callee::Project(vec![key], false),
                 Symbol::Class(_) => constructor(
@@ -6458,7 +6494,7 @@ impl<'a> TypeCtx<'a> {
     }
 
     pub(crate) fn method_call_targets(&self, recv: Option<Recv<'_>>, method: &str) -> Callee {
-        match recv {
+        match recv.filter(|r| !r.says_nothing()) {
             Some(Recv::Ref(fqn)) => {
                 if self.project.is_project_class(fqn) {
                     return self.through_class(self.project.class_targets(fqn, method, self.kb));
