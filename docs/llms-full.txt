@@ -266,7 +266,7 @@ report names the missing obligation instead of offering a fix. See [Fixes and sa
 - 🎯 See what heki [covers and does not cover](https://heki.koxudaxi.dev/scope/).
 - 📦 [Install heki](https://heki.koxudaxi.dev/installation/) and 🚀 [run it on a project](https://heki.koxudaxi.dev/getting-started/).
 - ⚙️ [Configure](https://heki.koxudaxi.dev/configuration/) rule selection, contracts, and the Python version.
-- 📏 Browse the [41 rules](https://heki.koxudaxi.dev/rules/), and see [how precise each one is](https://heki.koxudaxi.dev/precision/).
+- 📏 Browse the [42 rules](https://heki.koxudaxi.dev/rules/), and see [how precise each one is](https://heki.koxudaxi.dev/precision/).
 - 🔧 Read how [fixes are proven safe](https://heki.koxudaxi.dev/fixes/).
 - 🪜 [Adopt it gradually](https://heki.koxudaxi.dev/adoption/) with a Ratchet baseline in CI.
 - 🖥️ Use it from [your editor](https://heki.koxudaxi.dev/lsp/) or 🤖 [a coding agent](https://heki.koxudaxi.dev/coding-agents/).
