@@ -346,7 +346,7 @@ def copies(
 
 /// A sentinel the class never stores on an instance (a class attribute, a field `__init__` does
 /// not take, a `ClassVar`), a name bound twice or rebound by another module, a test with `==`,
-/// and a test of an attribute of an unrelated class.
+/// a test of an attribute of an unrelated class, and one on an object of no known class.
 #[test]
 fn values_that_are_no_sentinel_stored_on_the_instance() {
     let p = Project::new("mut118_negatives");
@@ -430,6 +430,10 @@ def tests(
     )
 
 
+def untyped(x) -> bool:
+    return x.mark is MISSING
+
+
 def copies(p: Plain, n: NotTaken, i: NoInit, t: Twice, c: Compared, k: Control):
     return (
         copy.deepcopy(p),
@@ -444,7 +448,7 @@ def copies(p: Plain, n: NotTaken, i: NoInit, t: Twice, c: Compared, k: Control):
     let diags = diagnostics(&p, &[]);
     assert_eq!(
         reported(&diags),
-        vec![("models.py".to_owned(), 77)],
+        vec![("models.py".to_owned(), 81)],
         "{diags:#?}"
     );
 }
