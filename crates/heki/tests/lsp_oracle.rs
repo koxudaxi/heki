@@ -2812,6 +2812,16 @@ fn steps_mut118() -> Vec<Step> {
         )
         .present(&[("pkg/mark_copies.py", "MUT118")]),
         Step::new(
+            "the testing function is renamed to a name of the same length",
+            vec![save(
+                "pkg/mark_tests.py",
+                &MARK_TESTS.replace("def given", "def check"),
+            )],
+        )
+        .present(&[("pkg/mark_copies.py", "MUT118")]),
+        Step::new("and back", vec![save("pkg/mark_tests.py", MARK_TESTS)])
+            .present(&[("pkg/mark_copies.py", "MUT118")]),
+        Step::new(
             "a new module deep-copies an instance of a subclass",
             vec![Action::Create("pkg/mark_sub.py", MARK_SUB.to_owned())],
         )

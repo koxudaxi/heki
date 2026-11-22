@@ -314,9 +314,9 @@ fn report(
     d.certainty = tier.at_most(d.certainty);
 }
 
-/// What a sentinel test gives `MUT118` apart from where it is: the class, the attribute, the
-/// sentinel, and whether the object is of that one class.
-pub type SentinelTestKey = (String, String, String, bool);
+/// What a sentinel test gives `MUT118` apart from where it is: the testing function (its reports
+/// name it), the class, the attribute, the sentinel, and whether the object is of that one class.
+pub type SentinelTestKey = (String, String, String, String, bool);
 
 /// The sentinel tests of the functions defined in `path`, without their places. The language
 /// server re-checks the files with deep copies ([`deep_copy_files`]) when they change.
@@ -327,9 +327,10 @@ pub fn sentinel_tests_in(index: &ProjectIndex, path: &Path) -> BTreeSet<Sentinel
         .into_iter()
         .flat_map(|file| &file.local_functions)
         .filter(|(func, _)| index.file_of(func) == Some(path))
-        .flat_map(|(_, s)| s.sentinel_test_sites())
-        .map(|t| {
+        .flat_map(|(func, s)| s.sentinel_test_sites().map(move |t| (func, t)))
+        .map(|(func, t)| {
             (
+                func.qualname.clone(),
                 t.class_qualname.clone(),
                 t.attr.clone(),
                 t.sentinel.clone(),
