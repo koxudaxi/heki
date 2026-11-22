@@ -199,13 +199,7 @@ impl Watcher<'_> {
         let root = &env.root;
         let mut config: Vec<PathBuf> = CONFIG_FILES.iter().map(|n| root.join(n)).collect();
         config.extend(self.args.analysis.config.clone());
-        config.extend(
-            self.args
-                .analysis
-                .baseline
-                .clone()
-                .or_else(|| env.cfg.baseline.as_ref().map(|b| root.join(b))),
-        );
+        config.extend(crate::check::baseline_path(&self.args.analysis, env));
         config
     }
 
@@ -241,12 +235,7 @@ impl Watcher<'_> {
         });
         crate::check::annotate_hot(&mut all, hot.as_ref());
         // The paths `heki check` prints.
-        for d in &mut all {
-            d.path = crate::check::shown_path(&d.path);
-            for r in &mut d.related {
-                r.path = crate::check::shown_path(&r.path);
-            }
-        }
+        crate::check::show_paths(&mut all);
         sort_diagnostics(&mut all);
         // As `heki check` prints them: across every file.
         heki_rules::fold_root_causes(&mut all);

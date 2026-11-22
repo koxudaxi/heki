@@ -170,7 +170,8 @@ see [Rules](https://heki.koxudaxi.dev/rules/) and
 - The language server checks while you edit and re-checks only what an edit can affect.
 - `heki snapshot` records what each public function does, and `MUT103` reports a function that gained an
   effect, which a diff does not show.
-- Coding agents get the same checks as JSON.
+- Coding agents get the same checks as JSON, and an
+  [Agent Skill](https://heki.koxudaxi.dev/coding-agents/#agent-skill-experimental) teaches them the workflow.
 
 ### Fast, quiet, and easy to adopt
 
