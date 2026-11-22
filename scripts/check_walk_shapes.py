@@ -165,6 +165,7 @@ name = "shape-calls"
 targets = ["Base.m", "g"]
 allowed-callers = ["Base.*"]
 unresolved = "report"
+references = "reads"
 
 [[effect-boundaries]]
 name = "shape-boundary"

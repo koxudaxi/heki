@@ -50,6 +50,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 mod imports;
+mod references;
 mod statements;
 
 /// The (value, place) pairs the store walk of `return_origins` may take per byte of a function's
@@ -2348,46 +2349,6 @@ impl<'a> Extractor<'a> {
         out
     }
 
-    /// The function's references handing a project function, method, or class on
-    /// ([`FileSummary::reference_sites`]): a load of one whose value reaches, through copies,
-    /// phis, and the displays holding it, an argument of a call, a stored attribute, item, or
-    /// global, a `return`, a `yield`, or a `raise`. The value as a callee is a call (its own
-    /// site), and so is a callable a library API runs (`Self::handed_callable`). Not handed on
-    /// either: an argument of a call that only inspects or names it ([`names_only`]), a
-    /// receiver, an operand, a subscript, a dict key, a closure's captures (its defaults and
-    /// its annotations are not told apart, nor a class's bases and keywords), and the name a
-    /// module binds to the object (an import, a module alias), which is the object. A site is
-    /// at the load; a name an import or the module body binds is read without a load of its own
-    /// (the bound value), so its sites are at the uses handing it on.
-    fn reference_sites(&mut self) -> Vec<CallSite> {
-        let flow = HandedValues::of(
-            self.f,
-            |at| self.callees.get(&at).is_some_and(names_only),
-            &self.handed,
-        );
-        let reaching = flow.reaching();
-        let mut out = Vec::new();
-        for &(at, var, span, imported) in &flow.loads {
-            if !reaching.contains(&var) {
-                continue;
-            }
-            self.pos = at;
-            let Some(site) = self.reference_site(var, at.0, span) else {
-                continue;
-            };
-            let spans = if imported || flow.bound_by_module(var) {
-                flow.handed_at(var)
-            } else {
-                vec![span]
-            };
-            out.extend(spans.into_iter().map(|span| CallSite {
-                span,
-                ..site.clone()
-            }));
-        }
-        out
-    }
-
     /// The site at `span` of what calling `var`, loaded in block `bb`, calls: a project class it
     /// constructs, or the project functions it calls (a bound method's included, with its
     /// receiver's origin bound to `self`). An instance of a class defining `__call__` is no
@@ -2497,6 +2458,7 @@ impl<'a> Extractor<'a> {
             result_discarded: false,
             result_held: false,
             is_base: false,
+            is_read: false,
             arguments: None,
             queues: None,
             state_tests: None,
@@ -5190,6 +5152,7 @@ impl<'a> Extractor<'a> {
                         queues: None,
                         result_held: false,
                         is_base: false,
+                        is_read: false,
                         arguments,
                         state_tests: None,
                         under_lock: false,
@@ -5917,6 +5880,7 @@ impl<'a> Extractor<'a> {
             queues: None,
             result_held: false,
             is_base: false,
+            is_read: false,
             arguments: None,
             state_tests: if self.opt_in.locks {
                 self.state_tests().of_site(bb)
@@ -6708,173 +6672,6 @@ struct Partial {
     open: bool,
 }
 
-/// How the values of a function reach the uses handing them on ([`Extractor::reference_sites`]).
-struct HandedValues {
-    /// Where each value comes from: the values it copies, or the phi inputs it merges.
-    from: FxHashMap<VarId, Vec<VarId>>,
-    /// The values each display holds (a dict display's values, not its keys).
-    held: FxHashMap<VarId, Vec<VarId>>,
-    /// The uses handing each value on, and whether only a display is handed on there: a module
-    /// binding a name to a function or class binds the name to the object, and binding it to
-    /// a display stores what the display holds.
-    uses: FxHashMap<VarId, Vec<(Span, bool)>>,
-    /// The loads: where, the value, its span, and whether it is an import.
-    loads: Vec<(Position, VarId, Span, bool)>,
-    /// What each value flows to (a copy, a phi, or a display holding it: `true`), built on
-    /// first use.
-    onward: OnceCell<FxHashMap<VarId, Vec<(VarId, bool)>>>,
-}
-
-impl HandedValues {
-    /// The flow of `f`'s values; `names_only_at` tells the calls that hand nothing on, and
-    /// `handed` the callables library APIs run (`(call, argument)`).
-    fn of(
-        f: &IrFunction,
-        names_only_at: impl Fn(Position) -> bool,
-        handed: &FxHashSet<(VarId, VarId)>,
-    ) -> Self {
-        let mut flow = Self {
-            from: FxHashMap::default(),
-            held: FxHashMap::default(),
-            uses: FxHashMap::default(),
-            loads: Vec::new(),
-            onward: OnceCell::new(),
-        };
-        for bb in &f.blocks {
-            for phi in &bb.phis {
-                let inputs = phi.incoming.iter().map(|(_, v)| *v);
-                flow.from.entry(phi.dst).or_default().extend(inputs);
-            }
-            for (index, inst) in bb.insts.iter().enumerate() {
-                let (at, span) = ((bb.id, index), inst.span);
-                match &inst.kind {
-                    InstKind::LoadGlobal { dst, .. }
-                    | InstKind::LoadName { dst, .. }
-                    | InstKind::AttrLoad { dst, .. } => flow.loads.push((at, *dst, span, false)),
-                    InstKind::Import { dst, .. } => flow.loads.push((at, *dst, span, true)),
-                    InstKind::Copy { dst, src } => flow.from.entry(*dst).or_default().push(*src),
-                    InstKind::AllocBuiltin { dst, elems, .. } => {
-                        flow.held.entry(*dst).or_default().extend(elems);
-                    }
-                    InstKind::DictLiteral { dst, entries } => {
-                        let values = entries.iter().filter_map(|e| match e {
-                            DictEntry::KeyValue { value, .. } => Some(*value),
-                            DictEntry::Unpack { .. } => None,
-                        });
-                        flow.held.entry(*dst).or_default().extend(values);
-                    }
-                    // A comprehension frame's arguments are its captures.
-                    InstKind::Call {
-                        dst,
-                        callee_var: Some(_),
-                        args,
-                        kwargs,
-                        ..
-                    }
-                    | InstKind::MethodCall {
-                        dst, args, kwargs, ..
-                    } if !names_only_at(at) => {
-                        let passed = args.iter().chain(kwargs.iter().map(|(_, v)| v));
-                        for v in passed.filter(|v| !handed.contains(&(*dst, **v))) {
-                            flow.hand_on(*v, span, false);
-                        }
-                    }
-                    InstKind::AttrStore { value, .. }
-                    | InstKind::SubscriptStore { value, .. }
-                    | InstKind::Yield {
-                        value: Some(value), ..
-                    } => flow.hand_on(*value, span, false),
-                    InstKind::StoreGlobal { value, .. } => {
-                        flow.hand_on(*value, span, f.is_module_body);
-                    }
-                    _ => {}
-                }
-            }
-            // The builder gives every `return` and `raise` of a value its statement's span.
-            if let (Terminator::Return(Some(v)) | Terminator::Raise(Some(v)), Some(span)) =
-                (&bb.terminator, bb.term_span)
-            {
-                flow.hand_on(*v, span, false);
-            }
-        }
-        flow
-    }
-
-    fn hand_on(&mut self, var: VarId, span: Span, display_only: bool) {
-        self.uses.entry(var).or_default().push((span, display_only));
-    }
-
-    /// Whether the module body binds a name to `var` itself.
-    fn bound_by_module(&self, var: VarId) -> bool {
-        self.uses
-            .get(&var)
-            .is_some_and(|uses| uses.iter().any(|(_, display_only)| *display_only))
-    }
-
-    /// The values whose objects reach a use handing them on: through copies and phis, and as
-    /// what a display reaching one holds.
-    fn reaching(&self) -> FxHashSet<VarId> {
-        let walk = |start: Vec<VarId>, displays: bool| {
-            let mut seen: FxHashSet<VarId> = start.iter().copied().collect();
-            let mut stack = start;
-            while let Some(v) = stack.pop() {
-                let inside = displays.then(|| self.held.get(&v)).flatten();
-                for &w in self.from.get(&v).into_iter().chain(inside).flatten() {
-                    if seen.insert(w) {
-                        stack.push(w);
-                    }
-                }
-            }
-            seen
-        };
-        let in_display = walk(self.uses.keys().copied().collect(), true);
-        let mut start: Vec<VarId> = self
-            .uses
-            .iter()
-            .filter(|(_, uses)| uses.iter().any(|(_, display_only)| !display_only))
-            .map(|(v, _)| *v)
-            .collect();
-        start.extend(in_display.iter().filter_map(|d| self.held.get(d)).flatten());
-        walk(start, false)
-    }
-
-    /// Where `var`'s object is handed on: the spans of the uses it reaches, in order.
-    fn handed_at(&self, var: VarId) -> Vec<Span> {
-        let onward = self.onward.get_or_init(|| {
-            let mut onward: FxHashMap<VarId, Vec<(VarId, bool)>> = FxHashMap::default();
-            for (to, sources) in &self.from {
-                for s in sources {
-                    onward.entry(*s).or_default().push((*to, false));
-                }
-            }
-            for (display, values) in &self.held {
-                for v in values {
-                    onward.entry(*v).or_default().push((*display, true));
-                }
-            }
-            onward
-        });
-        let mut seen: FxHashSet<(VarId, bool)> = FxHashSet::from_iter([(var, false)]);
-        let mut stack = vec![(var, false)];
-        let mut out = Vec::new();
-        while let Some((v, in_display)) = stack.pop() {
-            let uses = self.uses.get(&v).into_iter().flatten();
-            out.extend(
-                uses.filter(|(_, only)| in_display || !only)
-                    .map(|(s, _)| *s),
-            );
-            for &(w, into) in onward.get(&v).into_iter().flatten() {
-                if seen.insert((w, in_display || into)) {
-                    stack.push((w, in_display || into));
-                }
-            }
-        }
-        out.sort_unstable();
-        out.dedup();
-        out
-    }
-}
-
 /// What a builtin calling a callable once per item passes it ([`Extractor::passed_items`]).
 struct PassedItems {
     /// The builtin's loop over the items (`guards::per_item_bit`).
@@ -6974,6 +6771,7 @@ fn role_site(
         queues: site.queues.clone(),
         result_held: false,
         is_base: false,
+        is_read: false,
         arguments: None,
         state_tests: site.state_tests.clone(),
         under_lock: site.under_lock,

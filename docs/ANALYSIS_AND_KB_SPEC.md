@@ -82,7 +82,7 @@ Compound expressions are flattened into **basic instructions in explicit left-to
 | Strings | `Convert(value, conversion)`, `Format(value, spec)`, `BuildString(parts)` | As CPython compiles an f-string: each replacement field, left to right, evaluates its value, converts it (`!s` / `!r` / `!a`, and `{x=}` without a specification: `Convert`, which runs `__str__` / `__repr__`), evaluates its format specification (an f-string of its own), and formats the result (`Format`: `format(value, spec)`, which runs `__format__`); each runs code of the value's class unless that is a builtin, and may raise. A field alone is the f-string's result (`__format__` may return a `str` subclass); any other f-string is a `BuildString` of its formatted fields, a new `str` that keeps none of them. A template string keeps its values unconverted and unformatted, as the tuple `Template.values`, formats its specifications' fields, and is otherwise opaque |
 | Attributes and items | `AttrLoad`, `AttrStore`, `AttrDelete`, `SubscriptLoad`, `SubscriptStore`, `SubscriptDelete` | Stores make the stored value `Shared`; `AttrDelete` recognizes `@cached_property` invalidation (`del self.prop`) and `MUT201` writes; subscripts keep constant keys and slice bounds; the slice object itself is the tuple `(lower, upper, step)` of its bounds (`None` where one is left out), since `__getitem__` may keep it |
 | Calls | `Call(callee, args, kwargs, is_awaited)`, `MethodCall(recv, method, args, kwargs, is_awaited)` | `is_awaited` separates awaited calls from synchronous ones (a coroutine awaited after it is made runs at its `await`, which the effect summary follows); `star_from` is the index of the first `*` argument, so arguments bind to parameters exactly up to it |
-| ContainerIteration and generators | `MakeIter(iterable)`, `IterNext(iter)`, `MakeGenExpr(outer_iter, captured)`, `MakeClosure(captured)` | `MakeIter` and `MakeGenExpr` bind a **derived reference** of `iterable` / `outer_iter` to an explicit SSA variable; `MakeClosure` holds every value the function or class object keeps: its cells (free variables of nested scopes at any depth, the iteration variables of inlined comprehensions, the names read by lazily evaluated annotation and type-parameter scopes), its defaults, eagerly evaluated annotations, and a class's bases and keywords (`ModuleIr.class_bases` lists the bases among them; a `type` alias is a `MakeClosure` without a lowered body) |
+| ContainerIteration and generators | `MakeIter(iterable)`, `IterNext(iter)`, `MakeGenExpr(outer_iter, captured)`, `MakeClosure(captured)` | `MakeIter` and `MakeGenExpr` bind a **derived reference** of `iterable` / `outer_iter` to an explicit SSA variable; `MakeClosure` holds every value the function or class object keeps: its cells (free variables of nested scopes at any depth, the iteration variables of inlined comprehensions, the names read by lazily evaluated annotation and type-parameter scopes), its defaults, eagerly evaluated annotations, and a class's bases and keywords (`ModuleIr.class_bases` lists the bases among them, `ModuleIr.statement_uses` the defaults and keywords; a `type` alias is a `MakeClosure` without a lowered body) |
 | Suspension | `Await`, `Yield`, `YieldFrom` | `Await` lets other tasks run (`Unique` stays unique), as do the implicit awaits of `async for` and `async with` (`InstKind::suspends`); `Yield` makes the yielded value `Shared` |
 | Context managers | `EnterWith(mgr, is_async)`, `ExitWith(mgr, is_async)` | Mark the region of a `with` / `async with` (the lock and transaction regions of `EFF106`) |
 | Exceptions | `CatchException(types)` | Starts an exception handler |
@@ -221,7 +221,11 @@ Compound expressions are flattened into **basic instructions in explicit left-to
   - `NaturalLoop.len_caps` (`LenCap`) records `while len(x) < N` caps up to 4096
     (`LEN_CAP_MAX`); `LoopCarriedInfo.updates` lists the real updates of a loop-carried value.
   - `IrFunction.starred` marks starred display elements, `ModuleIr.class_bases` the bases a
-    class statement passes, `BasicBlock.term_span` the source of a block's terminator (blocker
+    class statement passes, `ModuleIr.statement_uses` the values a statement uses without an
+    instruction reading them (a decorator, a function's or lambda's default, a class statement's
+    keyword, the class of a class pattern, the types of an `except` clause, the cause of
+    `raise ... from`, each with its expression's span), `ModuleIr.annotations` the spans of the
+    annotations a function evaluates eagerly, `BasicBlock.term_span` the source of a block's terminator (blocker
     lines point at it), and `ModuleIr.constants` (`ModuleConstants`) the module's constant
     integers, booleans, floats, displays, strings, and tuples of strings. A string constant, or
     a tuple of them, is one entry: its text (`strs` / `str_tuples`, one `Arc<str>` per string
@@ -579,9 +583,10 @@ compares the module and the qualname, which the fqn alone does not tell apart.
 
 `FileSummary.reference_sites` holds, only when a call contract sets `references = "calls"`
 (`Contracts::references`), the references handing a project function, method, or class on to
-be called later: a load of one (a name, a module or class attribute, a bound method; for a name
-an import or the module body binds, which is read without a load of its own, each use handing
-it on) whose value
+be called later: a load of one (a name, a module or class attribute, a bound method, a closure
+cell, which holds what the enclosing function binds to the name, such as a local import; for a
+name an import or the module body binds, which the scope binding it reads without a load of its
+own, each use handing it on) whose value
 reaches, through copies, phis, and the displays holding it, an argument of a call, a stored
 attribute, item, or global, a `return`, a `yield`, or a `raise`. Each is a `CallSite` of what
 calling the value calls (the class it constructs, or its project callees, without bindings),
@@ -597,7 +602,18 @@ binding a name to the value itself (an import, a module alias). With `references
 sites too (`CallSite::is_base`): one per value the statement passes as a base
 (`ModuleIr::class_base_values`) that is a project class, typed in the statement's block as any value
 is (a parameter or a local of the imported class's name is another value), constructing that
-class, at the base's load when the statement loads it, else at the class statement. The class
+class, at the base's load when the statement loads it, else at the class statement. With
+`references = "reads"` (`Contracts::reference_reads`, which includes the bases), a load reaching
+no use handing it on but another use is a reference site too (`CallSite::is_read`): the object of
+an attribute access or a method call, an argument of a call that only names it, a subscript, an
+operand, a tested condition, an iterated, awaited, formatted, or `with` value, a dict display's
+key, a `**` unpacking, and the statement uses (`ModuleIr::statement_uses`), through copies,
+phis, and the displays holding it as for a hand-on; a callee, a closure's captures, a binding of
+another name (a module name, a `nonlocal` cell), a deletion, and a use inside an annotation the
+function evaluates (`ModuleIr::annotations`) are none. For a name an import
+or the module body binds, a read is at each use that is not one handing it on. The values
+reaching each kind of use are found with `heki_ir::walk::reach` under one budget per function
+(`summary::reference_sites`); past it the function has no reference site. The class
 bodies a module runs add their references to the module body's (their other facts are not the
 module's). Like `call_sites`, they are local facts: the language server compares a function's references with
 its call sites (`Workspace::caller_view`) and shows them in call chains.

@@ -329,7 +329,7 @@ The call side of `write-owners`.
 | `exempt-methods` | `[]` | Methods allowed to call the targets, matched as in `write-owners`. |
 | `message` | none | The help of every report of the contract. |
 | `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the calls of a method named like a target (its last name) on an object of unknown class are reported under [`MUT207`](rules/unresolved-guarded-call.md). |
-| `references` | `"ignore"` | `"ignore"`, `"calls"`, or `"calls-and-bases"`: whether a reference handing a target on to be called later counts as a call of it (`[decide]`, `return decide`, `partial(decide)`, `field(default_factory=Rule)`, `obj.callback = self.decide`), and with `"calls-and-bases"` a class statement naming a class target among its bases too (`class Derived(Base)`). |
+| `references` | `"ignore"` | `"ignore"`, `"calls"`, `"calls-and-bases"`, or `"reads"`: whether a reference handing a target on to be called later counts as a call of it (`[decide]`, `return decide`, `partial(decide)`, `field(default_factory=Rule)`, `obj.callback = self.decide`), with `"calls-and-bases"` a class statement naming a class target among its bases too (`class Derived(Base)`), and with `"reads"` every other use of a target's value as well (`Keys.of(...)`, `Code.OK`, `isinstance(x, Keys)`, `case Keys():`, `tuple[Keys, int]`). |
 | `attribution` | `"call-graph"` | `"call-graph"` or `"lexical"`, as in `write-owners`. |
 
 - A call is reported only when every function it may call (each candidate in the class
@@ -340,8 +340,9 @@ The call side of `write-owners`.
 - The targets of a contract may call each other: a call of the guarded operation is checked where
   it is made, so what the operation does inside is part of it.
 - With `references = "calls"`, a target handed on is reported where it is named ("`f` hands on
-  `pkg.core.decide`"; a name an import or the module body binds, at the statement handing it
-  on): passed to a call, stored in an attribute, an item, or a global, returned,
+  `pkg.core.decide`"; a name an import or the module body binds, read in the scope binding it, at
+  the statement handing it on; a name a class body, a function, a lambda, or a comprehension
+  nested in a function reads from it, a local import included, at the name): passed to a call, stored in an attribute, an item, or a global, returned,
   yielded, raised, or held by a display that is. A use that only names it is no reference: an
   argument of `isinstance`, `issubclass`, another builtin that only inspects its arguments
   (`print`, `getattr`, `type`), `super`, `typing.cast`, `typing.TypeVar`, `typing.NewType`, or
@@ -385,6 +386,24 @@ The call side of `write-owners`.
   statement passes, typed where the statement runs as any value is (a parameter, a local, or a
   class-body name of the imported class's name is another value), and matched as a construction
   is (with `subclasses = false`, the class itself only); a keyword (`metaclass=Base`) is no base.
+- With `references = "reads"`, everything `"calls-and-bases"` counts is reported as before, and
+  every other use of a target's value is reported too ("`f` reads `pkg.core.Keys`"), where it is
+  named as a hand-on is: the object of an attribute read, store, or deletion and a method's
+  receiver (`Keys.of(names)`, `Keys.__annotations__`, `Code.OK`), an argument of a call that only
+  names it (`isinstance(value, Keys)`, `cast(Keys, x)`, `TypeVar("T", bound=Keys)`), a subscript
+  or its index (`tuple[Keys, int]`, `Optional[Keys]`), an operand (`f is decide`, `Keys | None`),
+  a tested condition (`if decide:`), an iterated, awaited, formatted, or `with` value, a dict
+  display's key, the class of a class pattern (`case Keys():`), the types of an `except` clause
+  an exception may reach, a decorator, a default of a function or lambda, a keyword of a class
+  statement, and the cause of `raise ... from`, also through copies and the displays holding it
+  (`isinstance(value, (Keys, Code))`, a test of a module-level display holding it). No read: a
+  call (a call of its own), an annotation, evaluated or not (`list[Keys]`, `Keys | None`), the
+  values Python evaluates only when asked (a `type` statement's value, the bounds and defaults of
+  type parameters), an import, a name bound to the target by itself (`Alias = Keys`, a local, a
+  `nonlocal` cell), whose own uses count, and a value nothing uses (`Keys` as an expression
+  statement). A load handing a target on is reported as a hand-on only. A read is matched as a
+  construction is, so a subclass counts unless `subclasses = false`; an instance of the class is
+  no read of it.
 
 ### Allowed and forbidden functions
 
@@ -457,7 +476,7 @@ import-probes = "report"
 | `allow-writes` | `[]` | `Class.attr` writes the boundary allows, exempt from `write-targets` too. Needs `write-universe`. |
 | `allowed-callees` | `[]` | Functions, classes, modules, or ecosystem symbols whose effects are allowed: paths through them are not followed, and calls of them are no `calls` violation. |
 | `fresh-objects` | `"allow"` | `"allow"` or `"report"`: whether a write that constructs the object it writes (as in `write-owners`) counts as a write of the boundary. |
-| `references` | `"ignore"` | `"ignore"`, `"calls"`, or `"calls-and-bases"`, as for `call-owners`: whether a reference handing a `call-targets` entry on (and a class statement naming one among its bases) counts for `calls`. |
+| `references` | `"ignore"` | `"ignore"`, `"calls"`, `"calls-and-bases"`, or `"reads"`, as for `call-owners`: whether a reference handing a `call-targets` entry on (and a class statement naming one among its bases, and any other use of its value) counts for `calls`. |
 | `import-probes` | `"allow"` | `"allow"` or `"report"`: whether `reads-environment` also forbids an import probe, an `import` inside a `try` with an `except` clause naming `ImportError` or `ModuleNotFoundError`. `"report"` without `reads-environment` is a configuration error. |
 | `message` | none | The help of every report of the boundary. |
 

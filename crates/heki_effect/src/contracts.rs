@@ -120,6 +120,11 @@ pub trait Contracts: Debug + Send + Sync {
     /// of class statements (`CallSite::is_base`).
     fn reference_bases(&self) -> bool;
 
+    /// Whether such a contract counts every other use of a target's value too (`references =
+    /// "reads"`): the reference sites then include the reads that hand nothing on
+    /// (`CallSite::is_read`).
+    fn reference_reads(&self) -> bool;
+
     /// The parameters the argument lists of call targets name (`DataType(is_dict=True)`): the
     /// summaries then keep the constants each call passes for them (`CallSite::arguments`),
     /// looking up the names of the parameters the call binds.

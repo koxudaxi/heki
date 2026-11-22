@@ -701,10 +701,13 @@ pub(crate) fn site_callee(site: &CallSite) -> String {
 }
 
 /// What a report says `site` does with its target: subclasses it (a base of a class
-/// statement), hands it on (another reference site), constructs it, or calls it.
+/// statement), reads it (a reference site using it for anything else), hands it on (another
+/// reference site), constructs it, or calls it.
 pub(crate) fn call_verb(site: &CallSite, reference: bool) -> &'static str {
     if site.is_base {
         "subclasses"
+    } else if site.is_read {
+        "reads"
     } else if reference {
         "hands on"
     } else if site.constructs.is_some() {
