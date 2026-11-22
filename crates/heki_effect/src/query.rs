@@ -135,24 +135,25 @@ impl ProjectIndex {
         }
     }
 
-    /// [`BlindSpotReach`]: one walk from every `async def` over the calls that run their
-    /// callee's body on the caller's thread, and one from the callees of every call inside a
-    /// loop or once per item over every call that runs its callee's body, each function visited
-    /// once per walk.
+    /// [`BlindSpotReach`]: one walk from every `async def` over the calls that run what they
+    /// hand on on the caller's thread, and one from every call inside a loop or once per item,
+    /// each state visited once per walk. The states are a function's facts of one kind, its body
+    /// or what iterating its result runs ([`Facts`]), as calls hand them on ([`Self::delivery`]):
+    /// a helper returning a generator it does not iterate runs no generator body where it is
+    /// called, only where its result is iterated.
     pub fn blind_spot_reach(&self) -> BlindSpotReach {
         let mut calls = self.calls_by_caller();
         let mut async_defs = Vec::new();
         let mut in_loops = Vec::new();
         for file in self.files.values() {
-            async_defs.extend(
-                file.functions
-                    .iter()
-                    .filter(|(_, s)| s.is_async)
-                    .map(|(k, _)| k),
-            );
+            for (func, s) in &file.functions {
+                if s.is_async {
+                    async_defs.push((func, self.own_facts(func)));
+                }
+            }
             for site in &file.call_sites {
                 if site.loop_depth > 0 || site.runner == Runner::PerItem {
-                    in_loops.extend(self.bodies_run_at(site));
+                    in_loops.extend(self.handed_on(site, self.own_facts(&site.caller)));
                 }
             }
         }
@@ -163,35 +164,57 @@ impl ProjectIndex {
         }
     }
 
-    /// The project callees of `site` whose bodies run there ([`Self::delivery`]).
-    fn bodies_run_at<'s>(&'s self, site: &'s CallSite) -> impl Iterator<Item = &'s FuncKey> {
+    /// The facts the calls of `func`'s own body run in: its body, or, for a generator
+    /// function, what iterating its result runs.
+    fn own_facts(&self, func: &FuncKey) -> Facts {
+        if self.summary(func).is_some_and(|s| s.is_generator) {
+            Facts::Result
+        } else {
+            Facts::Body
+        }
+    }
+
+    /// The facts of its project callees that `site` runs in its caller's facts `into`.
+    fn handed_on<'s>(
+        &'s self,
+        site: &'s CallSite,
+        into: Facts,
+    ) -> impl Iterator<Item = (&'s FuncKey, Facts)> {
+        let own = self.own_facts(&site.caller);
         site.project_callees().iter().filter_map(move |bc| {
-            let callee = self.summary(&bc.callee)?;
-            self.delivery(site, callee).map(|_| &bc.callee)
+            let d = self.delivery(site, self.summary(&bc.callee)?)?;
+            let lands = if d.into == Facts::Body {
+                own
+            } else {
+                Facts::Result
+            };
+            (lands == into).then_some((&bc.callee, d.from))
         })
     }
 
-    /// `starts` and every function whose body a call `follows` accepts runs in one of them,
-    /// transitively.
+    /// The functions whose own body runs in `starts` or in what a call `follows` accepts hands
+    /// on from one of them, transitively.
     fn run_from<'i>(
         &'i self,
         calls: &mut CallsByCaller<'i>,
-        starts: Vec<&'i FuncKey>,
+        starts: Vec<(&'i FuncKey, Facts)>,
         follows: impl Fn(&CallSite) -> bool,
     ) -> FxHashSet<FuncKey> {
         let mut out = FxHashSet::default();
         let _ = reach::<_, ()>(
             &Budget::unmetered("blind_spot_reach"),
             starts,
-            |func, next| {
+            |(func, facts), next| {
                 for site in calls.of(func) {
                     if follows(site) {
-                        next.extend(self.bodies_run_at(site));
+                        next.extend(self.handed_on(site, facts));
                     }
                 }
             },
-            |func| {
-                out.insert(func.clone());
+            |(func, facts)| {
+                if facts == self.own_facts(func) {
+                    out.insert(func.clone());
+                }
                 Visit::Expand
             },
         );

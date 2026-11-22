@@ -98,6 +98,7 @@ async def checkout(order):
     stripe.Charge.create(amount=order.total)
     await stripe.Charge.acreate(amount=order.total)
     requests.get("https://example.com")
+    requests.Session().get("https://example.com")
     requests.fancy_new_api()
     os.path.join("a", "b")
     Order()
@@ -122,6 +123,25 @@ def audit(order):
 def batch(items):
     for i in items:
         note()
+
+
+def gen():
+    yield stripe.Event.stream()
+
+
+def make():
+    return gen()
+
+
+async def discarded(items):
+    make()
+    for i in items:
+        make()
+
+
+async def iterated():
+    for event in make():
+        pass
 "#,
     );
     let spots = blind_spots(&p);
@@ -134,6 +154,7 @@ def batch(items):
             "stripe.Charge.acreate",
             "stripe.Charge.create",
             "stripe.Event.list",
+            "stripe.Event.stream",
             "stripe.Refund.create",
         ],
         "{spots:#}"
@@ -143,7 +164,7 @@ def batch(items):
     assert_eq!(counts(fancy), (1, 0, 1, 0));
     let (stripe, create) = symbol(&spots, "stripe.Charge.create");
     assert_eq!(stripe["registered"], false);
-    assert_eq!(counts(stripe), (5, 1, 3, 2));
+    assert_eq!(counts(stripe), (6, 1, 4, 2));
     assert_eq!(counts(create), (1, 0, 1, 0));
     let site = &create["sites"][0];
     assert_eq!(
@@ -168,11 +189,17 @@ def batch(items):
     assert_eq!(counts(symbol(&spots, "stripe.Event.list").1), (1, 0, 1, 1));
     // On a worker thread.
     assert_eq!(counts(symbol(&spots, "stripe.Audit.log").1), (1, 0, 0, 0));
+    // In a generator a helper returns: its body runs where an `async def` iterates the helper's
+    // result, not where the helper is called in a loop and its result dropped.
+    assert_eq!(
+        counts(symbol(&spots, "stripe.Event.stream").1),
+        (1, 0, 1, 0)
+    );
     let totals = &spots["totals"];
     // `--totals` prints the counts alone.
     let counted = facts_with(&p, &["--totals"], 0)["blind_spots"].clone();
     assert_eq!(counted, serde_json::json!({ "totals": totals }));
-    assert_eq!(counts(&totals["uncatalogued"]), (6, 1, 4, 2));
+    assert_eq!(counts(&totals["uncatalogued"]), (7, 1, 5, 2));
     assert_eq!(
         (
             &totals["uncatalogued_packages"],
@@ -182,9 +209,9 @@ def batch(items):
         ),
         (
             &Value::from(2),
-            &Value::from(6),
+            &Value::from(7),
             &Value::from(1),
-            &Value::from(4)
+            &Value::from(5)
         )
     );
 }

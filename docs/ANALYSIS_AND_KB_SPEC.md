@@ -689,10 +689,11 @@ on `Any`, `object`, or a `Callable`, or of an unbound name, which resolves to a 
 library defines (`typing.Any.get`, `builtins.create`), counts as unresolved; and a call of a
 library function or class outside the project and the standard library without a catalog entry
 (`Blind::Uncatalogued`, with whether the catalog lists its package). They are local facts, never
-propagated, and no rule reads them. `ProjectIndex::blind_spot_reach` walks the calls whose
-callee's body runs at the call once from every `async def` (not through a worker thread) and once
-from the calls inside a loop or once per item, giving the functions on an event loop and below a
-loop; `heki_rules::blind_spots` counts the calls by package and name and by function and reason,
+propagated, and no rule reads them. `ProjectIndex::blind_spot_reach` walks a function's facts of
+one kind, its body or what iterating its result runs, as each call hands them on
+(`ProjectIndex::delivery`: a helper returning a generator it does not iterate runs no generator
+body where it is called), once from every `async def` (not through a worker thread) and once from
+the calls inside a loop or once per item, giving the functions on an event loop and below a loop; `heki_rules::blind_spots` counts the calls by package and name and by function and reason,
 and the hidden `heki dump-recommend-facts` prints them.
 
 **Guards.** An effect inside a branch of a test of the function's own inputs (`if cache:`,
