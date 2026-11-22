@@ -338,6 +338,22 @@ def with_statements(n: int) -> Body:
     return Body(("p",), lines)
 
 
+def element_change_chain(n: int) -> Body:
+    """Names each bound to an item of the one before, each changed in place."""
+    lines = ["e0 = p"]
+    for i in range(1, n + 1):
+        lines += [f"e{i} = e{i - 1}['k']", f"e{i}.append({i})"]
+    return Body(("p",), lines)
+
+
+def copied_item_changes(n: int) -> Body:
+    """Shallow copies of one parameter, each followed by a change of one of its items."""
+    lines = []
+    for i in range(n):
+        lines += [f"d{i} = dict(p)", f"d{i}['k'].append({i})"]
+    return Body(("p",), lines)
+
+
 def attribute_chain(n: int) -> Body:
     """Names each bound to an attribute of the one before."""
     lines = ["a0 = p", *(f"a{i} = a{i - 1}.attr" for i in range(1, n + 1))]
@@ -604,6 +620,8 @@ FAMILIES = [
     Family("match_pass_through", match_pass_through),
     Family("with_statements", with_statements),
     Family("attribute_chain", attribute_chain),
+    Family("element_change_chain", element_change_chain),
+    Family("copied_item_changes", copied_item_changes),
     # A module body's names are globals, not closure cells.
     Family("cell_reads", cell_reads, placements=("function", "method"), size=CELL_BINDINGS),
     Family(

@@ -3498,8 +3498,9 @@ impl<'a> Mut202Fn<'a> {
             };
             // Summaries track parameters 0..64 (`mutated_param_paths` keys are `u8`).
             // A shallow copy shares only the objects below its top level: rebinding its
-            // attributes changes the copy alone. Filling a memo of the shared object, or
-            // initializing one of its attributes lazily, leaves what it computes as it was.
+            // attributes changes the copy alone; a producer that is not deep shares only the
+            // object itself, not what it holds as items. Filling a memo of the shared object,
+            // or initializing one of its attributes lazily, leaves what it computes as it was.
             let p = u8::try_from(pos).ok().filter(|p| *p < 64);
             let mutates = self.facts_run_by_call(inst.span, key).iter().any(|facts| {
                 p.is_some_and(|p| {
@@ -3508,8 +3509,10 @@ impl<'a> Mut202Fn<'a> {
                             .changed_param_attrs
                             .get(&p)
                             .is_some_and(|attrs| facts.changes_param_state(p, Some(attrs)))
-                    } else {
+                    } else if r.deep {
                         facts.changes_param_state(p, None)
+                    } else {
+                        facts.changes_param_object(p)
                     }
                 })
             });
