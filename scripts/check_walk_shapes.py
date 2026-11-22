@@ -546,6 +546,17 @@ def blind_calls_below_async(n: int) -> str:
     return "\n".join(lines)
 
 
+def attributes_of_many_classes(n: int) -> str:
+    """Classes each initializing attributes, and as many functions changing and reading them: the
+    census contract candidates are drawn from."""
+    lines = []
+    for i in range(n):
+        lines += [f"class C{i}:", "    def __init__(self):", "        self.items = []"]
+        lines += ["        self.state = 0", "", f"def put{i}(c: C{i}, x):", "    c.items.append(x)"]
+        lines += ["    c.state = x", "", f"def show{i}(c: C{i}):", "    return c.items, c.state", ""]
+    return "\n".join(lines)
+
+
 def container_subclass_chain(n: int) -> str:
     """A chain of subclasses of `list`, each deriving from the one before: the classes a list or
     the chain's first class may be under R2, read by a read-only parameter handed to a helper
@@ -684,6 +695,13 @@ FAMILIES = [
     Family(
         "blind_calls_below_async",
         project=blind_calls_below_async,
+        placements=("project",),
+        size=2000,
+        facts=True,
+    ),
+    Family(
+        "attributes_of_many_classes",
+        project=attributes_of_many_classes,
         placements=("project",),
         size=2000,
         facts=True,

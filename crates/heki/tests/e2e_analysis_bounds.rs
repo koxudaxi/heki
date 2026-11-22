@@ -3743,4 +3743,63 @@ fn the_reach_of_blind_calls_is_one_walk_over_the_calls() {
     assert_eq!(totals["uncatalogued"], all, "{totals:#}");
     assert_eq!(totals["unresolved"], all, "{totals:#}");
     assert_eq!(totals["uncatalogued_symbols"], links);
+    // Every function reaches a blind call: one closure over the calls.
+    let module = &facts["census"]["modules"][0];
+    assert_eq!(module["unseen"].as_array().unwrap().len(), 2 * links);
+}
+
+/// `classes` classes, each initializing three attributes, a module of as many functions each
+/// changing the attributes of one class, and one of as many functions each reading them.
+fn classes_written_in_one_module(classes: usize) -> [(String, String); 3] {
+    let mut models = Vec::new();
+    let mut store = vec!["import app.models as m".to_owned()];
+    let mut views = vec!["import app.models as m".to_owned()];
+    for i in 0..classes {
+        models.extend([
+            format!("class C{i}:"),
+            "    def __init__(self):".to_owned(),
+            "        self.items = []".to_owned(),
+            "        self.state = 0".to_owned(),
+            "        self.name = ''".to_owned(),
+            String::new(),
+        ]);
+        store.extend([
+            String::new(),
+            format!("def put{i}(c: m.C{i}, x):"),
+            "    c.items.append(x)".to_owned(),
+            "    c.state = x".to_owned(),
+        ]);
+        views.extend([
+            String::new(),
+            format!("def show{i}(c: m.C{i}):"),
+            "    return c.items, c.state, c.name".to_owned(),
+        ]);
+    }
+    [
+        ("app/models.py".to_owned(), models.join("\n") + "\n"),
+        ("app/store.py".to_owned(), store.join("\n") + "\n"),
+        ("app/views.py".to_owned(), views.join("\n") + "\n"),
+    ]
+}
+
+/// The census of the attributes of thousands of classes is one pass over the functions' own
+/// sites, grouped by class and attribute.
+#[test]
+fn the_census_of_many_classes_is_one_pass_over_their_sites() {
+    let classes = 3_000;
+    let p = Project::new("bounds_census_classes");
+    for (path, text) in classes_written_in_one_module(classes) {
+        p.write(&path, &text);
+    }
+    let facts = recommend_facts_within(&p, Duration::from_secs(20));
+    let totals = &facts["census"]["totals"];
+    assert_eq!(
+        totals,
+        &json!({
+            "classes": classes, "attributes": 3 * classes, "write_sites": 2 * classes,
+            "initializer_sites": 3 * classes, "read_sites": 4 * classes, "modules": 3,
+            "functions": 3 * classes,
+        }),
+        "{totals:#}"
+    );
 }

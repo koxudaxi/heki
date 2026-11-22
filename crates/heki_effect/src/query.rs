@@ -5,9 +5,10 @@ use crate::{
     AttrKeyPath, BlindSpotReach, BoundCallee, CallHop, CallSite, CellChange, EffectSummary, Facts,
     FuncKey, ProjectIndex, Runner, SharedState, SiteRole, Slot,
 };
-use heki_ir::walk::{Budget, Visit, reach};
+use heki_ir::walk::{Answer, Budget, Closure, Visit, reach};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::path::Path;
+use std::rc::Rc;
 
 /// What a function changes in place: its parameter itself (`None`) or a slot of it.
 pub type ParamChange = Option<Slot>;
@@ -161,6 +162,39 @@ impl ProjectIndex {
                 .run_from(&mut calls, async_defs, |site| site.runner != Runner::Worker),
             below_loop: self.run_from(&mut calls, in_loops, |_| true),
         }
+    }
+
+    /// The functions that run, themselves or through the calls whose callee's body runs there, a
+    /// call heki is blind to (`FileSummary::blind_spots`), a call it cannot resolve or an A1
+    /// hazard (`EffectSummary::unknown_calls`), or a function whose body it does not know
+    /// (defined only in a stub): what they do is not all seen. One closure over the calls, each
+    /// function expanded once.
+    pub fn reaching_blind_spots(&self) -> FxHashSet<FuncKey> {
+        let mut calls = self.calls_by_caller();
+        let closure: Closure<&FuncKey, bool> = Closure::new();
+        let budget = Budget::unmetered("reaching_blind_spots");
+        let blind = |func: &FuncKey| {
+            let path = self.file_of(func);
+            self.summary(func).is_some_and(|s| s.unknown_calls)
+                || path.is_some_and(crate::is_stub)
+                || path.is_some_and(|p| {
+                    (self.files[p].blind_spots.as_ref()).is_some_and(|b| b.contains_key(func))
+                })
+        };
+        let mut out = FxHashSet::default();
+        for file in self.files.values() {
+            for func in file.functions.keys() {
+                let reaches = closure.ask(&budget, func, blind, |func, next| {
+                    for site in calls.of(func) {
+                        next.extend(self.bodies_run_at(site));
+                    }
+                });
+                if reaches == Answer::Known(Rc::new(true)) {
+                    out.insert(func.clone());
+                }
+            }
+        }
+        out
     }
 
     /// The project callees of `site` whose bodies run there ([`Self::delivery`]).
