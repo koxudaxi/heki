@@ -607,8 +607,9 @@ holds for `invalidation` too:
   function of its own. For `write-owners`, a call handing a typed object to a helper that
   changes it without knowing its class is the caller's write. With `unresolved = "report"`, the
   callers binding a parameter only tell its object's class, allowed callers included. A class's
-  own initialization, `exempt-methods`, `fresh-objects`, and the targets of a call contract
-  calling each other stay allowed. Effect boundaries have no such key: they judge what their
+  own initialization stays allowed, a helper it passes `self` to included when every path of
+  project callers above the helper starts in such an initialization; so do `exempt-methods`,
+  `fresh-objects`, and the targets of a call contract calling each other. Effect boundaries have no such key: they judge what their
   scope functions reach through any number of calls.
 - **One report stands for every site behind it.** A report at a call stands for every access
   behind the call, and an effect boundary's report for every site its scope function reaches.

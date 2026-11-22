@@ -7,8 +7,8 @@
 //! facts.
 
 use super::{
-    Allowance, AllowanceKeys, FunctionMatcher, MergedReports, References, attribution,
-    counts_references, delegated_reports, project_classes, reports_unresolved,
+    Allowance, AllowanceKeys, FunctionMatcher, InsideAllowed, MergedReports, References,
+    attribution, counts_references, delegated_reports, project_classes, reports_unresolved,
 };
 use crate::{
     CheckContext, DottedPattern, NamePart, RuleConfigError, SitesByCaller, last_name, module_of,
@@ -146,43 +146,44 @@ impl CallTargets {
 /// The class families of the groups of targets that sites call ([`CallTargets::called`]): the
 /// targets' families with the classes defining the methods a site calls that they name, and
 /// their subclasses (an initializer of one of them calling the method on its own `self`
-/// initializes itself). Kept per group and defining classes, which many sites share.
+/// initializes itself). Kept per group and defining classes, which many sites share, each with
+/// the answers its calls share ([`InsideAllowed`]).
 #[derive(Default)]
-struct Families(FxHashMap<FamilyKey, Rc<FxHashSet<String>>>);
+struct Families<'k>(FxHashMap<FamilyKey, (Rc<FxHashSet<String>>, InsideAllowed<'k>)>);
 
 /// A group of targets (indices into the contract's targets) and the classes defining the
 /// methods a site calls that they name, sorted.
 type FamilyKey = (Vec<usize>, Vec<String>);
 
-impl Families {
+impl<'k> Families<'k> {
     fn at(
         &mut self,
         cx: &CheckContext<'_>,
         targets: &CallTargets,
         group: &[usize],
         site: &CallSite,
-    ) -> Rc<FxHashSet<String>> {
+    ) -> (Rc<FxHashSet<String>>, &mut InsideAllowed<'k>) {
         let mut defining = Vec::new();
         for &i in group {
             targets.defining_classes(cx, i, site, &mut defining);
         }
         defining.sort_unstable();
         defining.dedup();
-        let key = (group.to_vec(), defining);
-        if let Some(family) = self.0.get(&key) {
-            return Rc::clone(family);
-        }
-        let mut family: FxHashSet<String> = group
-            .iter()
-            .flat_map(|&i| targets.patterns[i].family.iter().cloned())
-            .collect();
-        for class in &key.1 {
-            family.extend(cx.decls.subclasses_of(class));
-            family.insert(class.clone());
-        }
-        let family = Rc::new(family);
-        self.0.insert(key, Rc::clone(&family));
-        family
+        let (family, inside) = self
+            .0
+            .entry((group.to_vec(), defining))
+            .or_insert_with_key(|key| {
+                let mut family: FxHashSet<String> = group
+                    .iter()
+                    .flat_map(|&i| targets.patterns[i].family.iter().cloned())
+                    .collect();
+                for class in &key.1 {
+                    family.extend(cx.decls.subclasses_of(class));
+                    family.insert(class.clone());
+                }
+                (Rc::new(family), InsideAllowed::default())
+            });
+        (Rc::clone(family), inside)
     }
 }
 
@@ -810,15 +811,14 @@ pub(crate) fn mut204(
                 let rule = &rules[c];
                 for group in groups {
                     let (target, called) = group_texts(&rule.targets, &group, Some(site));
-                    let family = families[c].at(cx, &rule.targets, &group, site);
+                    let (family, inside) = families[c].at(cx, &rule.targets, &group, site);
                     let found = delegated_reports(
                         cx,
                         &sites,
-                        &rule.allowance,
-                        &family,
-                        key,
-                        receiver_params(site),
+                        (&rule.allowance, &family),
+                        (key, receiver_params(site)),
                         site.span,
+                        inside,
                     );
                     for r in found {
                         let Some(unit) = cx.index.file_of(&r.func).and_then(|p| cx.unit(p)) else {

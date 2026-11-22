@@ -408,6 +408,154 @@ fn a_lexical_write_contract_judges_the_function_holding_the_write() {
     );
 }
 
+const INITIALIZED: &str = r#"from __future__ import annotations
+
+REGISTRY: list[Model] = []
+
+
+def _setup(model: Model) -> None:
+    model.imports.append(model.name)
+    model.seal()
+
+
+class Model:
+    def __init__(self, name: str, attr: str) -> None:
+        self.name = name
+        self.imports: list[str] = []
+        self._process_validators()
+        self._add_decorator(self)
+        _setup(self)
+        self.configure()
+        self._first()
+        self._assign(attr)
+        self._both()
+        self._other(REGISTRY[0])
+
+    def seal(self) -> None:
+        pass
+
+    def _process_validators(self) -> None:
+        self.imports.append(self.name)
+        self.seal()
+
+    @staticmethod
+    def _add_decorator(model: Model) -> None:
+        model.imports.append(model.name)
+        model.seal()
+
+    def configure(self) -> None:
+        self.imports.append(self.name)
+        self.seal()
+
+    def _first(self) -> None:
+        self._second()
+
+    def _second(self) -> None:
+        self.imports.append(self.name)
+        self.seal()
+
+    def _assign(self, attr: str) -> None:
+        setattr(self, attr, [])
+
+    def _both(self) -> None:
+        self.imports.append(self.name)
+        self.seal()
+
+    def _other(self, other: Model) -> None:
+        other.imports.append(other.name)
+        other.seal()
+
+    def rename(self, attr: str) -> None:
+        self._both()
+        self._rename()
+        setattr(self, attr, [])
+
+    def _rename(self) -> None:
+        self.imports.append(self.name)
+        self.seal()
+"#;
+
+#[test]
+fn the_helpers_only_initialization_runs_on_its_own_self_stay_allowed() {
+    let run = |attribution: &str| {
+        let p = Project::new(&format!("attribution_initialized_{}", attribution.len()));
+        p.write(
+            "pyproject.toml",
+            &format!(
+                "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT201\", \"MUT203\", \"MUT204\", \"MUT205\"]\n\n[[tool.heki.write-owners]]\nname = \"imports\"\ntargets = [\"Model.imports\"]\nunresolved = \"report\"\n{attribution}\n[[tool.heki.read-owners]]\nname = \"name\"\ntargets = [\"Model.name\"]\n{attribution}\n[[tool.heki.call-owners]]\nname = \"seal\"\ntargets = [\"Model.seal\"]\n{attribution}"
+            ),
+        )
+        .write("pkg/__init__.py", "")
+        .write("pkg/model.py", INITIALIZED);
+        reports(&p)
+    };
+    let accesses = |line: u64, read_column: u64, func: &str, via: &str| {
+        let at = |line: u64, column: u64, code: &str, what: &str, owners: &str| {
+            report(
+                "pkg/model.py",
+                line,
+                column,
+                code,
+                &format!("`{func}` {what}{via} outside the {owners}"),
+            )
+        };
+        let call_line = if via.is_empty() { line + 1 } else { line };
+        let write_column = if via.is_empty() { 9 } else { read_column };
+        vec![
+            at(
+                line,
+                write_column,
+                "MUT201",
+                "writes `Model.imports` (container_mut)",
+                "write owners of `imports`",
+            ),
+            at(
+                line,
+                read_column,
+                "MUT203",
+                "reads `Model.name` (direct_attr)",
+                "read owners of `name`",
+            ),
+            at(
+                call_line,
+                write_column,
+                "MUT204",
+                "calls `Model.seal`",
+                "call owners of `seal`",
+            ),
+        ]
+    };
+    let computed_name = report(
+        "pkg/model.py",
+        61,
+        9,
+        "MUT205",
+        "`Model.rename` writes an attribute named at run time (set_attr) on `Model` outside the write owners of `imports`: heki cannot tell whether it writes `Model.imports`",
+    );
+    // Through the method on `self`, the static method and the module function handed `self`,
+    // the public method, the chain of two helpers, and the computed name, the initializer
+    // changes its own instance. `_both` also runs in `rename`, and `_other` gets an object that
+    // is not the initializer's own.
+    let mut call_graph = [
+        accesses(22, 9, "Model.__init__", " via `pkg.model.Model._other`"),
+        accesses(59, 9, "Model.rename", " via `pkg.model.Model._both`"),
+        accesses(60, 9, "Model.rename", " via `pkg.model.Model._rename`"),
+    ]
+    .concat();
+    call_graph.push(computed_name.clone());
+    call_graph.sort();
+    assert_eq!(run(""), call_graph);
+    let mut lexical = [
+        accesses(51, 29, "Model._both", ""),
+        accesses(55, 30, "Model._other", ""),
+        accesses(64, 29, "Model._rename", ""),
+    ]
+    .concat();
+    lexical.push(computed_name);
+    lexical.sort();
+    assert_eq!(run("attribution = \"lexical\"\n"), lexical);
+}
+
 #[test]
 fn an_unknown_attribution_value_is_a_configuration_error() {
     for (section, keys) in [

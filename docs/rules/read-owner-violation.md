@@ -66,7 +66,9 @@ its call (`sites` in JSON), as for `MUT201`. A read runs where the body holding 
 With `attribution = "lexical"`, a read is judged in the function whose code holds it instead: a
 private helper reports its reads itself, and a function that only runs inside allowed readers is
 reported too. A lambda, comprehension, or generator expression is part of the function it is
-written in. A class's own initialization still allows a read.
+written in. A class's own initialization still allows a read, through the helpers it passes
+`self` to too (a helper whose every path of project callers starts in an initializer handing it
+its own `self`).
 
 ## What a report states
 
@@ -79,7 +81,7 @@ Its premises:
   construction or annotation (assumption R2). Open: an alias bound on one path is enough.
 - **Outside the owners**: the function is not in the allowed modules and classes, nor runs only
   inside allowed contexts (with `attribution = "lexical"`: the function holding the read is not
-  allowed). Established from the contract.
+  allowed, nor runs only inside a class's own initialization). Established from the contract.
 - **Through helpers**: a helper's write, read, or call counts at its caller (never with
   `attribution = "lexical"`). Open: one path of the helper is enough.
 

@@ -250,7 +250,8 @@ of names each to the one before, a method returning one of thousands of copies o
 behind as many tests, a function making twenty thousand calls of eight operands each, a helper that
 types nothing making thousands of strict accesses of one name that one caller calls as many times, a
 helper that types nothing reading, calling, or writing one strict target name thousands of times,
-which a caller calls as many times, many `is` tests each followed by a conditional expression on the
+which a caller calls as many times, a class whose initializer calls a thousand methods, each running
+a helper that accesses its own `self` a thousand times, many `is` tests each followed by a conditional expression on the
 tested parameter, many branches on a long chain of copies of one `is` test,
 thousands of tests of an object's state before thousands of acquisitions of its lock, thousands of
 locks held at once over thousands of blocks, thousands of fan-outs of one session in one function,

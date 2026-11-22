@@ -1149,6 +1149,13 @@ impl Allowance {
         self.attribution == Attribution::Lexical
     }
 
+    /// Whether the functions `key` runs access inside it ([`runs_inside_allowed`]): `key` is
+    /// allowed or exempt, and the code of the functions it runs is not judged by itself alone
+    /// (`attribution = "call-graph"`).
+    pub(crate) fn allows_callees(&self, key: &FuncKey) -> bool {
+        !self.is_lexical() && self.allows(key)
+    }
+
     /// The function an access made in `func` is judged in: `func`, or with `attribution =
     /// "lexical"` the function whose code holds it. A lambda, comprehension, or generator
     /// expression has no name a pattern could give, so its code belongs to the function it is
@@ -1181,6 +1188,20 @@ impl Allowance {
             module: func.module.clone(),
             qualname: qualname.to_owned(),
         })
+    }
+
+    /// [`Self::judged`] for an access in `func` to an object that may be its parameters `obj`,
+    /// with the parameters of the judged function the object may be: the parameters of a scope a
+    /// function holds are none of the function's.
+    pub(crate) fn judged_access<'k>(
+        &self,
+        decls: &ProjectDecls,
+        func: &'k FuncKey,
+        obj: u64,
+    ) -> (std::borrow::Cow<'k, FuncKey>, u64) {
+        let judged = self.judged(decls, func);
+        let obj = if *judged == *func { obj } else { 0 };
+        (judged, obj)
     }
 
     /// Whether the contract has `forbidden-*` patterns.
@@ -1378,7 +1399,10 @@ pub(crate) fn initializes_itself(
 /// the walk goes on to where the object it returns is iterated. Paths that only cycle add no
 /// allowed context, so a function reached through cycles alone keeps its report. Initializers
 /// end the walk negatively: constructor calls also bind the initializers of subclasses (CHA), so
-/// their callers are not known exactly.
+/// their callers are not known exactly. Judged lexically, an allowed function allows its own
+/// code only ([`Allowance::allows_callees`]), while a class's own initialization still covers
+/// the helpers it passes `self` to: only such initializers are contexts, and a path no longer
+/// handing on the object cannot reach one.
 fn runs_inside_allowed(
     cx: &CheckContext<'_>,
     sites: &SitesByCaller<'_>,
@@ -1388,6 +1412,27 @@ fn runs_inside_allowed(
     obj: u64,
 ) -> bool {
     runs_inside_allowed_through(cx, sites, allowance, family, func, obj, FirstCallers::All)
+}
+
+/// The answers of [`judged_inside_allowed`] for the accesses of one contract to one family of
+/// target classes, by the accessing function and the parameters its object may be: the
+/// accesses of one function to one object share an answer, and each would walk the same callers.
+pub(crate) type InsideAllowed<'k> = FxHashMap<(&'k FuncKey, u64), bool>;
+
+/// [`runs_inside_allowed`] for an access in `func` to an object that may be its parameters
+/// `obj`, in the function the contract judges it in ([`Allowance::judged_access`]).
+fn judged_inside_allowed<'k>(
+    cx: &CheckContext<'_>,
+    sites: &SitesByCaller<'_>,
+    allowance: &Allowance,
+    family: &FxHashSet<String>,
+    (func, obj): (&'k FuncKey, u64),
+    inside: &mut InsideAllowed<'k>,
+) -> bool {
+    *inside.entry((func, obj)).or_insert_with(|| {
+        let (judged, obj) = allowance.judged_access(cx.decls, func, obj);
+        runs_inside_allowed(cx, sites, allowance, family, &judged, obj)
+    })
 }
 
 /// [`runs_inside_allowed`] along the paths through the callers `first` of `func`.
@@ -1425,6 +1470,9 @@ fn runs_inside_allowed_through(
         }
         for c in callers {
             let caller_obj = c.bc.caller_params_of(obj);
+            if allowance.is_lexical() && caller_obj == 0 {
+                return false;
+            }
             // A function returning the object does not run what iterating it runs.
             if c.into == Facts::Result {
                 if visited.insert((c.caller.clone(), Facts::Result, caller_obj)) {
@@ -1432,8 +1480,8 @@ fn runs_inside_allowed_through(
                 }
                 continue;
             }
-            if allowance.allows(c.caller)
-                || c.via.is_some_and(|p| allowance.allows(p))
+            if allowance.allows_callees(c.caller)
+                || c.via.is_some_and(|p| allowance.allows_callees(p))
                 || initializes_itself(cx, c.caller, family, caller_obj)
             {
                 allowed_contexts = true;
@@ -1896,7 +1944,8 @@ pub(crate) enum Attribution {
     /// allowed functions is allowed.
     #[default]
     CallGraph,
-    /// The function whose code holds the access ([`Allowance::judged`]).
+    /// The function whose code holds the access ([`Allowance::judged`]); a helper a class's own
+    /// initialization passes `self` to is still part of that initialization.
     Lexical,
 }
 
@@ -2045,6 +2094,10 @@ pub(crate) fn mut201(
     paths.sort();
     let mut reports = MergedReports::default();
     let mut sites = None;
+    let mut inside: Vec<Vec<InsideAllowed<'_>>> = rules
+        .iter()
+        .map(|r| r.targets.iter().map(|_| InsideAllowed::default()).collect())
+        .collect();
     for path in paths {
         let file = &cx.index.files[path];
         let Some(unit) = cx.unit(path) else {
@@ -2054,7 +2107,7 @@ pub(crate) fn mut201(
         funcs.sort_by(|a, b| a.0.cmp(b.0));
         for (key, s) in funcs {
             for site in &s.typed_field_write_sites {
-                for rule in &rules {
+                for (r, rule) in rules.iter().enumerate() {
                     // Constructing an object is no write of its owners' state.
                     if rule.allow_fresh && site.construction == Construction::Yes {
                         continue;
@@ -2067,10 +2120,9 @@ pub(crate) fn mut201(
                     if lexical && !own {
                         continue;
                     }
-                    let judged = rule.allowance.judged(cx.decls, key);
-                    // The parameters of a scope a function holds are none of the function's.
-                    let obj_params = if *judged == *key { site.obj_params } else { 0 };
-                    for (_, t) in write_hits(&rule.targets, site) {
+                    let (judged, obj_params) =
+                        rule.allowance.judged_access(cx.decls, key, site.obj_params);
+                    for (ti, t) in write_hits(&rule.targets, site) {
                         let mut chain: Vec<FuncKey> = vec![judged.clone().into_owned()];
                         chain.extend(
                             site.via_chain
@@ -2119,16 +2171,14 @@ pub(crate) fn mut201(
                         }
                         // A function that only runs inside the owner's operations (every caller
                         // path starts in an allowed context) writes inside them.
-                        if !lexical
-                            && runs_inside_allowed(
-                                cx,
-                                sites,
-                                &rule.allowance,
-                                &t.classes,
-                                key,
-                                site.obj_params,
-                            )
-                        {
+                        if judged_inside_allowed(
+                            cx,
+                            sites,
+                            &rule.allowance,
+                            &t.classes,
+                            (key, site.obj_params),
+                            &mut inside[r][ti],
+                        ) {
                             continue;
                         }
                         let span = site.via_chain.first().map_or(site.span, |h| h.span);
@@ -3469,26 +3519,30 @@ pub(crate) fn mut203(
     }
     let sites = cx.sites_by_caller();
     let mut reports = MergedReports::default();
+    let mut inside: Vec<Vec<InsideAllowed<'_>>> = rules
+        .iter()
+        .map(|r| r.targets.iter().map(|_| InsideAllowed::default()).collect())
+        .collect();
     for (key, s) in cx.defined_functions() {
         for read in s
             .typed_field_read_sites
             .iter()
             .filter(|r| r.counts_for_contracts())
         {
-            for rule in &rules {
-                for t in rule
+            for (rule, inside) in rules.iter().zip(&mut inside) {
+                for (t, inside) in rule
                     .targets
                     .iter()
-                    .filter(|t| t.matches(&read.class_qualname, &read.attr))
+                    .zip(inside.iter_mut())
+                    .filter(|(t, _)| t.matches(&read.class_qualname, &read.attr))
                 {
                     let found = delegated_reports(
                         cx,
                         &sites,
-                        &rule.allowance,
-                        &t.classes,
-                        key,
-                        read.obj_params,
+                        (&rule.allowance, &t.classes),
+                        (key, read.obj_params),
                         read.span,
+                        inside,
                     );
                     for r in found {
                         let Some(unit) = cx.index.file_of(&r.func).and_then(|p| cx.unit(p)) else {
@@ -3558,23 +3612,22 @@ struct WalkState {
 /// initializer accessing its own instance and a function that only runs inside allowed
 /// contexts (MUT201's rules) are not reported. With `forbidden-*`, a report needs a forbidden
 /// function running the access between the reporting function and the access (both included).
-/// With `attribution = "lexical"`, the access is judged in the function holding it alone.
-pub(crate) fn delegated_reports(
+/// With `attribution = "lexical"`, the access is judged in the function holding it alone, where
+/// only a class's own initialization covers what it runs.
+pub(crate) fn delegated_reports<'k>(
     cx: &CheckContext<'_>,
     sites: &SitesByCaller<'_>,
-    allowance: &Allowance,
-    family: &FxHashSet<String>,
-    func: &FuncKey,
-    obj: u64,
+    (allowance, family): (&Allowance, &FxHashSet<String>),
+    (func, obj): (&'k FuncKey, u64),
     span: Span,
+    inside: &mut InsideAllowed<'k>,
 ) -> Vec<DelegatedReport> {
     if allowance.is_lexical() {
-        let judged = allowance.judged(cx.decls, func);
-        // The parameters of a scope a function holds are none of the function's.
-        let obj = if *judged == *func { obj } else { 0 };
+        let (judged, judged_obj) = allowance.judged_access(cx.decls, func, obj);
         if allowance.allows(&judged)
             || !allowance.in_scope(&judged)
-            || initializes_itself(cx, &judged, family, obj)
+            || initializes_itself(cx, &judged, family, judged_obj)
+            || judged_inside_allowed(cx, sites, allowance, family, (func, obj), inside)
         {
             return Vec::new();
         }
@@ -3594,7 +3647,10 @@ pub(crate) fn delegated_reports(
             && !runs_inside_allowed_through(cx, sites, allowance, family, func, obj, first)
     };
     if !delegates(cx, sites, func, Handover::ByImplementation) {
-        if !reports_itself(func, obj, in_scope, FirstCallers::All) {
+        if !in_scope
+            || initializes_itself(cx, func, family, obj)
+            || judged_inside_allowed(cx, sites, allowance, family, (func, obj), inside)
+        {
             return Vec::new();
         }
         return vec![DelegatedReport {

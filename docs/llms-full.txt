@@ -1544,8 +1544,9 @@ holds for `invalidation` too:
   function of its own. For `write-owners`, a call handing a typed object to a helper that
   changes it without knowing its class is the caller's write. With `unresolved = "report"`, the
   callers binding a parameter only tell its object's class, allowed callers included. A class's
-  own initialization, `exempt-methods`, `fresh-objects`, and the targets of a call contract
-  calling each other stay allowed. Effect boundaries have no such key: they judge what their
+  own initialization stays allowed, a helper it passes `self` to included when every path of
+  project callers above the helper starts in such an initialization; so do `exempt-methods`,
+  `fresh-objects`, and the targets of a call contract calling each other. Effect boundaries have no such key: they judge what their
   scope functions reach through any number of calls.
 - **One report stands for every site behind it.** A report at a call stands for every access
   behind the call, and an effect boundary's report for every site its scope function reaches.
@@ -3117,7 +3118,8 @@ of names each to the one before, a method returning one of thousands of copies o
 behind as many tests, a function making twenty thousand calls of eight operands each, a helper that
 types nothing making thousands of strict accesses of one name that one caller calls as many times, a
 helper that types nothing reading, calling, or writing one strict target name thousands of times,
-which a caller calls as many times, many `is` tests each followed by a conditional expression on the
+which a caller calls as many times, a class whose initializer calls a thousand methods, each running
+a helper that accesses its own `self` a thousand times, many `is` tests each followed by a conditional expression on the
 tested parameter, many branches on a long chain of copies of one `is` test,
 thousands of tests of an object's state before thousands of acquisitions of its lock, thousands of
 locks held at once over thousands of blocks, thousands of fan-outs of one session in one function,
@@ -4162,8 +4164,9 @@ With `attribution = "lexical"`, a call is judged in the function whose code hold
 private helper reports its calls itself, and a function that only runs inside allowed callers
 is reported too. A lambda, comprehension, or generator expression is part of the function it is
 written in (`any(decide() for x in xs)` in an allowed function is allowed), and a nested `def`
-is a function of its own. A class's own initialization and the targets calling each other stay
-allowed.
+is a function of its own. A class's own initialization, through the helpers it passes `self` to
+too (a helper whose every path of project callers starts in an initializer handing it its own
+`self`), and the targets calling each other stay allowed.
 
 ## What a report states
 
@@ -4178,7 +4181,7 @@ Its premises:
   enough.
 - **Outside the owners**: the function is not in the allowed modules and classes, nor runs only
   inside allowed contexts (with `attribution = "lexical"`: the function holding the call is not
-  allowed). Established from the contract.
+  allowed, nor runs only inside a class's own initialization). Established from the contract.
 - **Through helpers**: a helper's write, read, or call counts at its caller (never with
   `attribution = "lexical"`). Open: one path of the helper is enough.
 - **Hands on** (`references = "calls"`): the value named is the target, and it reaches, through
@@ -6684,7 +6687,9 @@ its call (`sites` in JSON), as for `MUT201`. A read runs where the body holding 
 With `attribution = "lexical"`, a read is judged in the function whose code holds it instead: a
 private helper reports its reads itself, and a function that only runs inside allowed readers is
 reported too. A lambda, comprehension, or generator expression is part of the function it is
-written in. A class's own initialization still allows a read.
+written in. A class's own initialization still allows a read, through the helpers it passes
+`self` to too (a helper whose every path of project callers starts in an initializer handing it
+its own `self`).
 
 ## What a report states
 
@@ -6697,7 +6702,7 @@ Its premises:
   construction or annotation (assumption R2). Open: an alias bound on one path is enough.
 - **Outside the owners**: the function is not in the allowed modules and classes, nor runs only
   inside allowed contexts (with `attribution = "lexical"`: the function holding the read is not
-  allowed). Established from the contract.
+  allowed, nor runs only inside a class's own initialization). Established from the contract.
 - **Through helpers**: a helper's write, read, or call counts at its caller (never with
   `attribution = "lexical"`). Open: one path of the helper is enough.
 
@@ -7515,7 +7520,8 @@ they write. A parameter that every caller path binds to an object of a project c
 reported: `MUT201` reports the write at those callers. A computed name written on an object of
 unknown class is not reported (neither the class nor the attribute is known). With
 `attribution = "lexical"`, a function that only runs inside allowed writers is not allowed, and a
-caller path through an allowed writer counts like any other.
+caller path through an allowed writer counts like any other, while a helper that only a class's
+own initialization runs on its own `self` (`self._assign(name)` in `__init__`) stays allowed.
 
 ## What a report states
 
@@ -7530,7 +7536,7 @@ Its premises:
   heki's own resolution.
 - **Outside the owners**: the function is not in the allowed modules and classes, nor runs only
   inside allowed contexts (with `attribution = "lexical"`: the function holding the access is not
-  allowed). Established from the contract.
+  allowed, nor runs only inside a class's own initialization). Established from the contract.
 
 ## Why is this bad?
 `MUT201` reports what it can back with a class: a write through an object it cannot type is not
@@ -7793,7 +7799,9 @@ own, and so is a call handing a typed object to a helper that changes it without
 class (`fill(model.fields)`, reported with `via` the helper, which never sees the class); a write
 a callee makes is reported at that callee. A lambda, comprehension, or generator expression is
 part of the function it is written in, and a nested `def` is a function of its own. A class's
-own initialization and `fresh-objects` still allow a write.
+own initialization and `fresh-objects` still allow a write, the initialization through the
+helpers it passes `self` to included: a helper whose every path of project callers starts in an
+initializer handing it its own `self`.
 
 A class's own initialization is allowed: a write inside an initializer (`__init__`,
 `__post_init__`, `__new__`, `model_post_init`, `__setstate__`) of a class of the target's
@@ -7828,7 +7836,8 @@ Its premises:
   construction or annotation (assumption R2). Open: an alias bound on one path is enough.
 - **Outside the owners**: the function is not in the allowed modules and classes, nor runs only
   inside allowed contexts (with `attribution = "lexical"`: the function holding the write is
-  not allowed). Established from the contract.
+  not allowed, nor runs only inside a class's own initialization). Established from the
+  contract.
 - **Through helpers**: a helper's write, read, or call counts at its caller (with
   `attribution = "lexical"`: only a helper changing a typed object it is handed without knowing
   its class). Open: one path of the helper is enough.

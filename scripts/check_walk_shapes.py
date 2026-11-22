@@ -403,6 +403,25 @@ def helper_chain(n: int) -> str:
     return "\n".join(lines)
 
 
+def initialization_steps(n: int) -> str:
+    """A class whose initializer calls n methods, each running one public helper that writes,
+    reads, and calls on its own `self` n times."""
+    lines = ["class Model(Base):", "    def __init__(self):", "        self.items = []"]
+    lines += [f"        self.step{i}()" for i in range(n)]
+    lines += ["", "    def fill(self):"]
+    for _ in range(n):
+        lines += ["        self.items.append(self.LIMIT)", "        self.m()"]
+    for i in range(n):
+        lines += ["", f"    def step{i}(self):", "        self.fill()"]
+    return "\n".join(lines) + "\n"
+
+
+def step_items(n: int) -> str:
+    """A `write-owners` contract on the attribute `initialization_steps` fills, which no
+    `invalidation` contract names."""
+    return '\n[[write-owners]]\nname = "shape-steps"\ntargets = ["Model.items"]\nallowed-writers = ["Base.*"]\n'
+
+
 # The functions `argument_marks` defines, each named by an argument list of `marked_targets`.
 MARKED_FUNCTIONS = 1000
 
@@ -518,6 +537,13 @@ FAMILIES = [
     Family("wide_hierarchy", project=wide_hierarchy, placements=("project",), size=4000),
     Family("helper_chain", project=helper_chain, placements=("project",), size=2000),
     Family("callers_of_one_helper", project=callers_of_one_helper, placements=("project",), size=4000),
+    Family(
+        "initialization_steps",
+        project=initialization_steps,
+        placements=("project",),
+        size=2000,
+        contracts=step_items,
+    ),
     Family(
         "argument_marks",
         project=argument_marks,

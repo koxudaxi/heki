@@ -1541,6 +1541,66 @@ fn calls_of_a_method_with_many_subclasses_expand_its_family_once() {
     assert_eq!(found[0]["qualname"], "other");
 }
 
+/// A class whose initializer calls a thousand methods, each running one public helper that
+/// writes, reads, and calls on its own `self` a thousand times, under owner contracts judging by
+/// the call graph and lexically: whether the helper only runs inside the class's own
+/// initialization is decided once per contract and object, not once per access.
+#[test]
+fn accesses_of_a_helper_only_initialization_runs_ask_its_callers_once() {
+    let size = 1_000;
+    let mut lines = vec![
+        "class Model:".to_owned(),
+        "    def __init__(self):".to_owned(),
+        "        self.items = []".to_owned(),
+        "        self.name = \"x\"".to_owned(),
+    ];
+    lines.extend((0..size).map(|i| format!("        self.step{i}()")));
+    lines.extend(
+        [
+            "",
+            "    def seal(self):",
+            "        pass",
+            "",
+            "    def fill(self):",
+        ]
+        .map(str::to_owned),
+    );
+    for _ in 0..size {
+        lines.push("        self.items.append(self.name)".to_owned());
+        lines.push("        self.seal()".to_owned());
+    }
+    for i in 0..size {
+        lines.extend([
+            String::new(),
+            format!("    def step{i}(self):"),
+            "        self.fill()".to_owned(),
+        ]);
+    }
+    for attribution in ["call-graph", "lexical"] {
+        let contract = |section: &str, name: &str, target: &str| {
+            format!(
+                "[[tool.heki.{section}]]\nname = \"{name}\"\ntargets = [\"{target}\"]\nattribution = \"{attribution}\"\n\n"
+            )
+        };
+        let p = Project::new(&format!(
+            "bounds_initialization_helper_{}",
+            attribution.len()
+        ));
+        p.write(
+            "pyproject.toml",
+            &format!(
+                "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT201\", \"MUT203\", \"MUT204\"]\n\n{}{}{}",
+                contract("write-owners", "items", "Model.items"),
+                contract("read-owners", "name", "Model.name"),
+                contract("call-owners", "seal", "Model.seal"),
+            ),
+        )
+        .write("m.py", &(lines.join("\n") + "\n"));
+        let found = check_within(&p, Duration::from_secs(20));
+        assert!(found.is_empty(), "{attribution}: {found:#?}");
+    }
+}
+
 /// Modules binding twelve thousand names, each to an attribute of the one before
 /// (`a1 = a0.x`, `a2 = a1.x`, ...), about as many as a module body's IR budget models: whether
 /// a binding is a string constant takes a bounded walk of copies and attribute loads, past
