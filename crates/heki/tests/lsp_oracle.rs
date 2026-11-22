@@ -4960,6 +4960,73 @@ fn lsp_diagnostics_equal_a_full_check_for_keys_another_contract_names() {
     s.lsp.stop(true);
 }
 
+// ------------------------------------ allowed protocols with and without their subprotocols
+
+const SUBPROTOCOL_CONFIG: &str = r#"[project]
+name = "t"
+
+[tool.heki.lint]
+select = ["MUT201", "MUT203"]
+
+[[tool.heki.write-owners]]
+name = "writes"
+targets = ["pkg.*._*"]
+forbidden-writers = ["pkg.render:*"]
+allowed-protocols = ["*Host"]
+
+[[tool.heki.read-owners]]
+name = "reads"
+targets = ["pkg.*._*"]
+forbidden-readers = ["pkg.render:*"]
+allowed-protocols = ["*Host"]
+protocol-subclasses = false
+"#;
+
+const SUBPROTOCOL_BASE: &str =
+    "class Parser:\n    def __init__(self) -> None:\n        self._flag = False\n";
+const SUBPROTOCOL_HOST: &str =
+    "from typing import Protocol\n\n\nclass GraphHost(Protocol):\n    _flag: bool\n";
+const SUBPROTOCOL_FLAGS: &str =
+    "from typing import Protocol\n\n\nclass RuntimeFlags(Protocol):\n    _flag: bool\n";
+const SUBPROTOCOL_FLAGS_DERIVED: &str = "from typing import Protocol\n\nfrom pkg.host import GraphHost\n\n\nclass RuntimeFlags(GraphHost, Protocol):\n    _flag: bool\n";
+const SUBPROTOCOL_RENDER: &str = "from pkg.flags import RuntimeFlags\n\n\ndef mark(flags: RuntimeFlags) -> None:\n    flags._flag = True\n\n\ndef peek(flags: RuntimeFlags) -> bool:\n    return flags._flag\n";
+
+/// `allowed-protocols` covering subprotocols (the write contract) and naming the matching
+/// protocols only (`protocol-subclasses = false`, the read contract), as the protocol used in
+/// one module starts deriving from an allowed protocol of another and stops again.
+#[test]
+fn lsp_diagnostics_equal_a_full_check_through_subprotocols_of_allowed_protocols() {
+    let files = vec![
+        ("pkg/__init__.py", String::new()),
+        ("pkg/base.py", SUBPROTOCOL_BASE.to_owned()),
+        ("pkg/host.py", SUBPROTOCOL_HOST.to_owned()),
+        ("pkg/flags.py", SUBPROTOCOL_FLAGS.to_owned()),
+        ("pkg/render.py", SUBPROTOCOL_RENDER.to_owned()),
+    ];
+    let mut s = Session::start_with("lsp_oracle_subprotocols", SUBPROTOCOL_CONFIG, files, false);
+    let both: &[(&str, &str)] = &[("pkg/render.py", "MUT201"), ("pkg/render.py", "MUT203")];
+    let steps = [
+        Step::new("initial index", Vec::new()).present(both),
+        Step::new(
+            "the protocol starts deriving from an allowed protocol",
+            vec![save("pkg/flags.py", SUBPROTOCOL_FLAGS_DERIVED)],
+        )
+        .absent(&[("pkg/render.py", "MUT201")])
+        .present(&[("pkg/render.py", "MUT203")]),
+        Step::new(
+            "the protocol derives from it no more",
+            vec![save("pkg/flags.py", SUBPROTOCOL_FLAGS)],
+        )
+        .present(both),
+    ];
+    let mut failures = Vec::new();
+    for step in &steps {
+        failures.extend(s.run(step));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+    s.lsp.stop(true);
+}
+
 // ---------------------------------------------- class bases named in their scope (session 4)
 
 const SCOPED_BASES_CONFIG: &str = r#"[project]
