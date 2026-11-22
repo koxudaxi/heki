@@ -18,7 +18,7 @@ use std::fmt::Debug;
 /// A class as the contracts match it. A pattern with a module part (`pkg.model:Model`) compares
 /// the class's module and its qualname inside it, which the fqn alone does not tell apart
 /// (`pkg.sub.Model` is in module `pkg.sub`, or nested in a class `sub` of `pkg`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ContractClass {
     pub fqn: String,
     /// The qualname of the project class inside its module (`Outer.Inner`), looked up only when
@@ -120,6 +120,11 @@ pub trait Contracts: Debug + Send + Sync {
     /// of class statements (`CallSite::is_base`).
     fn reference_bases(&self) -> bool;
 
+    /// Whether such a contract counts every other use of a target's value too (`references =
+    /// "reads"`): the reference sites then include the reads that hand nothing on
+    /// (`CallSite::is_read`).
+    fn reference_reads(&self) -> bool;
+
     /// The parameters the argument lists of call targets name (`DataType(is_dict=True)`): the
     /// summaries then keep the constants each call passes for them (`CallSite::arguments`),
     /// looking up the names of the parameters the call binds.
@@ -146,4 +151,14 @@ pub trait Contracts: Debug + Send + Sync {
     /// bodies of its classes take from outside the project is then the module body's
     /// (`FileSummary::external_accesses`).
     fn checks_module_bodies(&self) -> bool;
+
+    /// Whether a `call-owners` contract allows the calls through the receiver of the method
+    /// making them (`own-receiver = "allow"`): the call sites then keep the parameters their
+    /// receiver may be (`Dispatch::recv_params`).
+    fn own_receiver_calls(&self) -> bool;
+
+    /// Whether a `write-owners` contract allows the writes through a value typed with a protocol
+    /// it names (`allowed-protocols`): the write sites then tell the writes through a protocol
+    /// (`TypedFieldWriteSite::through_protocol`).
+    fn write_protocols(&self) -> bool;
 }

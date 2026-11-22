@@ -10,19 +10,15 @@
 //! again by a nested `with` stays held when the inner block exits.
 
 use super::{relaxed, shortest};
-use crate::{CheckContext, ModuleUnit};
-use heki_ast::Span;
+use crate::{CheckContext, ModuleUnit, SitesBySpan};
 use heki_diagnostics::Diagnostic;
 use heki_effect::consumption::resolve_inst;
 use heki_effect::held::{self, Acquisitions, Change};
-use heki_effect::{CallHop, CallSite, Callee, SiteEffect, TypeCtx, Val, anchors_call_site};
+use heki_effect::{CallHop, Callee, SiteEffect, TypeCtx, Val, anchors_call_site};
 use heki_ir::walk::FnShape;
 use heki_ir::{BlockId, Inst, InstKind, IrFunction, VarId};
 use heki_kb::ExecEffectKind;
 use rustc_hash::FxHashMap;
-
-/// Call sites of a module by `(caller qualname, span)` ([`CheckContext::sites_by_span`]).
-type SitesBySpan<'a> = FxHashMap<(String, Span), Vec<&'a CallSite>>;
 
 /// What a held manager holds: the flagged symbol.
 #[derive(Debug)]
@@ -126,9 +122,8 @@ fn offense(
         kind if anchors_call_site(kind) => {
             // An awaited `async def` runs here too: its `await` is the report.
             let effects: Vec<SiteEffect> = sites
-                .get(&(qualname.to_owned(), inst.span))
-                .into_iter()
-                .flatten()
+                .at(qualname, inst.span)
+                .iter()
                 .flat_map(|s| cx.index.site_effects(&unit.input.path, s))
                 .filter(|e| !e.callee_is_async)
                 .collect();

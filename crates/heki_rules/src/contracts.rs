@@ -80,6 +80,10 @@ pub(crate) struct ConfigContracts {
     /// [`Contracts::marked_params`].
     marked_params: FxHashSet<String>,
     external: ExternalNames,
+    /// [`Contracts::own_receiver_calls`].
+    own_receiver_calls: bool,
+    /// [`Contracts::write_protocols`].
+    write_protocols: bool,
 }
 
 /// What the effect boundaries forbid outside the project ([`Contracts::external_call`],
@@ -251,6 +255,14 @@ impl ConfigContracts {
             references: counts_references(config),
             marked_params: marked_params(config),
             external: ExternalNames::new(config, kb),
+            own_receiver_calls: config
+                .call_owners
+                .iter()
+                .any(|r| r.own_receiver.as_deref() == Some("allow")),
+            write_protocols: config
+                .write_owners
+                .iter()
+                .any(|r| !r.allowed_protocols.is_empty()),
         })
     }
 }
@@ -393,21 +405,34 @@ impl Contracts for ConfigContracts {
     }
 
     fn reference_bases(&self) -> bool {
-        self.references == References::CallsAndBases
+        self.references >= References::CallsAndBases
+    }
+
+    fn reference_reads(&self) -> bool {
+        self.references == References::Reads
     }
 
     fn marked_params(&self) -> &FxHashSet<String> {
         &self.marked_params
     }
+
+    fn own_receiver_calls(&self) -> bool {
+        self.own_receiver_calls
+    }
+
+    fn write_protocols(&self) -> bool {
+        self.write_protocols
+    }
 }
 
 /// The most a contract of `config` counts as calls ([`Contracts::references`],
-/// [`Contracts::reference_bases`]; the values are checked where the rules parse them).
+/// [`Contracts::reference_bases`], [`Contracts::reference_reads`]; the values are checked where
+/// the rules parse them).
 fn counts_references(config: &HekiConfig) -> References {
-    let counted = |references: &Option<String>| match references.as_deref() {
-        Some("calls") => References::Calls,
-        Some("calls-and-bases") => References::CallsAndBases,
-        _ => References::Ignored,
+    let counted = |references: &Option<String>| {
+        references
+            .as_deref()
+            .map_or(References::Ignored, References::named)
     };
     let calls = config.call_owners.iter().map(|r| counted(&r.references));
     let boundaries = config

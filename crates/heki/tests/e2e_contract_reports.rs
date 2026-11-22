@@ -1,5 +1,6 @@
-//! Contract rules (`MUT109`, `MUT201`, `MUT204`, `EFF201`): which configured names match, which
-//! violations are reported, and what each report counts (end to end, through the real binary).
+//! Contract rules (`MUT109`, `MUT201`, `MUT203`, `MUT204`, `EFF201`): which configured names
+//! match, which violations are reported, and what each report counts (end to end, through the
+//! real binary).
 
 mod common;
 
@@ -435,6 +436,61 @@ fn a_private_recursion_no_other_function_calls_reports_its_own_accesses() {
     assert_eq!(lines("MUT203"), Vec::<u64>::new());
 }
 
+const HELPER_READS: &str = r#"class Model:
+    def __init__(self) -> None:
+        self.value = 0
+
+    def touch(self) -> None:
+        pass
+
+
+def _peek(m: Model, n: Model) -> int:
+    n.touch()
+    m.touch()
+    return m.value + n.value + m.value
+
+
+def run(m: Model, n: Model) -> int:
+    first = m.value
+    again = m.value
+    a = _peek(m, n)
+    b = _peek(n, m)
+    return a + b + first + again
+
+
+class Store:
+    def sync(self, m: Model, n: Model) -> int:
+        return _peek(m, n)
+"#;
+
+#[test]
+fn a_report_at_a_call_counts_each_access_the_helper_hands_over_once() {
+    let config = "[[tool.heki.read-owners]]\nname = \"readers\"\ntargets = [\"Model.value\"]\nallowed-readers = [\"app.Store.*\"]\n\n[[tool.heki.read-owners]]\nname = \"auditors\"\ntargets = [\"Model.value\"]\nallowed-readers = [\"app.Audit.*\"]\n\n[[tool.heki.call-owners]]\nname = \"touch\"\ntargets = [\"Model.touch\"]\nallowed-callers = [\"app.Store.*\"]\n";
+    let p = project("helper_reads_counted_once", config);
+    p.write("app.py", HELPER_READS);
+    let value = |line: u64, sites: u64| (line, "Model.value".to_owned(), sites);
+    // `run`'s own reads are one site each; each call of `_peek` stands for its three reads, of
+    // either parameter, which both contracts on `Model.value` report once.
+    assert_eq!(
+        reports(&p, "MUT203"),
+        vec![
+            value(16, 1),
+            value(17, 1),
+            value(18, 3),
+            value(19, 3),
+            value(25, 3)
+        ]
+    );
+    // `Store.sync` may call `touch`: only `run`'s calls of `_peek` stand for its two calls.
+    let touch = |line: u64| (line, "Model.touch".to_owned(), 2);
+    assert_eq!(reports(&p, "MUT204"), vec![touch(18), touch(19)]);
+    let (_, stdout, _) = p.check(&["--select", "MUT203", "--output-format", "concise"]);
+    assert!(
+        stdout.contains("`Store.sync` reads `Model.value` (direct_attr) via `app._peek` outside the read owners of `auditors`"),
+        "{stdout}"
+    );
+}
+
 #[test]
 fn a_mutates_params_report_counts_every_change_it_reaches() {
     let p = project(
@@ -451,4 +507,78 @@ fn a_mutates_params_report_counts_every_change_it_reaches() {
         &src.replace("    xs.append(1)\n", "    xs.append(1)\n    xs.clear()\n"),
     );
     assert_eq!(reports(&p, "EFF201"), vec![(9, target(), 3)]);
+}
+
+const SEVERAL_TARGETS: &str = r#"class A:
+    def __init__(self) -> None:
+        self.items: list[int] = []
+        self.name = ""
+
+    def reset(self) -> None:
+        pass
+
+
+class E(A):
+    pass
+
+
+def _fill(a: A) -> None:
+    a.items = []
+    a.name = "x"
+
+
+def write(e: E) -> None:
+    e.items = [1]
+
+
+def through_helper(a: A) -> None:
+    _fill(a)
+
+
+def read(e: E) -> int:
+    return len(e.items)
+
+
+def call(a: A) -> None:
+    a.reset()
+"#;
+
+/// An access matching several targets of one contract is one report of the contract, under the
+/// target configured first (not the first by name), naming the others; another contract
+/// matching it reports it too, and the accesses of different targets behind one call stay one
+/// report each.
+#[test]
+fn an_access_matching_several_targets_of_one_contract_is_reported_once() {
+    let p = project(
+        "several_targets",
+        "[[tool.heki.write-owners]]\nname = \"store\"\ntargets = [\"E.items\", \"A.items\", \"A.name\"]\n\n[[tool.heki.write-owners]]\nname = \"audit\"\ntargets = [\"app.A.items\"]\n\n[[tool.heki.read-owners]]\nname = \"reads\"\ntargets = [\"E.items\", \"A.items\"]\n\n[[tool.heki.call-owners]]\nname = \"calls\"\ntargets = [\"A.reset\", \"reset\"]\n",
+    );
+    p.write("app.py", SEVERAL_TARGETS);
+    let at = |line: u64, target: &str| (line, target.to_owned(), 1);
+    assert_eq!(
+        reports(&p, "MUT201"),
+        vec![
+            at(20, "E.items"),
+            at(20, "app.A.items"),
+            at(24, "A.items"),
+            at(24, "A.name"),
+            at(24, "app.A.items"),
+        ]
+    );
+    assert_eq!(reports(&p, "MUT203"), vec![at(28, "E.items")]);
+    assert_eq!(reports(&p, "MUT204"), vec![at(32, "A.reset")]);
+    let (_, stdout, _) = p.check(&["--output-format", "concise"]);
+    for message in [
+        "`write` writes `E.items` (direct_attr) outside the write owners of `store` (also `A.items`)",
+        "`write` writes `app.A.items` (direct_attr) outside the write owners of `audit`",
+        "`read` reads `E.items` (direct_attr) outside the read owners of `reads` (also `A.items`)",
+        "`call` calls `A.reset` outside the call owners of `calls` (also `reset`)",
+    ] {
+        assert!(stdout.contains(message), "{message}\n{stdout}");
+    }
+    assert!(
+        !stdout
+            .contains("`write` writes `A.items` (direct_attr) outside the write owners of `store`"),
+        "{stdout}"
+    );
 }

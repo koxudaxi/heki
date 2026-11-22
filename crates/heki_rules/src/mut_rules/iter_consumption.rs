@@ -7,17 +7,14 @@
 //! defined outside a loop and consumed to exhaustion inside it is exhausted on the next
 //! iteration.
 
-use crate::{CheckContext, ModuleUnit};
+use crate::{CheckContext, ModuleUnit, SitesBySpan};
 use heki_ast::Span;
 use heki_diagnostics::Diagnostic;
 use heki_effect::consumption::{IterFlow, Roots};
-use heki_effect::{CallSite, Callee, EffectSummary, Facts, SiteRole, TypeCtx};
+use heki_effect::{Callee, EffectSummary, Facts, SiteRole, TypeCtx};
 use heki_ir::walk::FnShape;
 use heki_ir::{BlockId, InstKind, IrFunction, LoopBound, NaturalLoop, VarId};
-use rustc_hash::{FxHashMap, FxHashSet};
-
-/// Call sites of a module by `(caller qualname, span)` ([`CheckContext::sites_by_span`]).
-type SitesBySpan<'a> = FxHashMap<(String, Span), Vec<&'a CallSite>>;
+use rustc_hash::FxHashSet;
 
 pub(super) fn run(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Diagnostic>) {
     if !cx.enabled("MUT106", unit) {
@@ -30,11 +27,9 @@ pub(super) fn run(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Di
         let qualname = CheckContext::key(unit, f).qualname;
         let ix = heki_ir::FnIndex::new(f, &unit.input.ir.constants);
         // The project callees the call sites record (`site_call`).
+        let fn_sites = sites.of(&qualname);
         let recorded = |inst: &heki_ir::Inst| {
-            let at = sites
-                .get(&(qualname.clone(), inst.span))
-                .map_or(&[][..], Vec::as_slice);
-            Some(super::site_call(&|v| ix.shape.inst(v), at, inst, false)?.callee)
+            Some(super::site_call(&|v| ix.shape.inst(v), fn_sites, inst, false)?.callee)
         };
         let mut flow = IterFlow::new(&ix.shape, &tcx, &types, Roots::SinglePass, &recorded);
         if flow.root_of.is_empty() {
@@ -58,7 +53,7 @@ fn body_runs<'a>(
 ) -> Option<&'a EffectSummary> {
     let summary = cx.index.summary(key)?;
     sites
-        .get(&(qualname.to_owned(), span))?
+        .at(qualname, span)
         .iter()
         .filter(|s| s.role == SiteRole::Call)
         .filter(|s| s.project_callees().iter().any(|bc| bc.callee == *key))

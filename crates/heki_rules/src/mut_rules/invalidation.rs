@@ -83,11 +83,17 @@ pub(crate) fn run(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) -> Result<()
                     .last()
                     .map(|h| format!(" via `{}`", h.callee))
                     .unwrap_or_default();
+                let quoted = format!("`{named}`");
+                let name = super::Named {
+                    target: &report_target,
+                    named: &quoted,
+                    rank: 0,
+                };
                 merged[usize::from(u.contract)].add(
                     unit,
                     key,
                     u.span,
-                    (&report_target, &named),
+                    (report_target.clone(), name),
                     (writer, u.origin),
                     rule.message.as_deref(),
                     || {

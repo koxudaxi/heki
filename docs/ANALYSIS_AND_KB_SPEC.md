@@ -82,7 +82,7 @@ Compound expressions are flattened into **basic instructions in explicit left-to
 | Strings | `Convert(value, conversion)`, `Format(value, spec)`, `BuildString(parts)` | As CPython compiles an f-string: each replacement field, left to right, evaluates its value, converts it (`!s` / `!r` / `!a`, and `{x=}` without a specification: `Convert`, which runs `__str__` / `__repr__`), evaluates its format specification (an f-string of its own), and formats the result (`Format`: `format(value, spec)`, which runs `__format__`); each runs code of the value's class unless that is a builtin, and may raise. A field alone is the f-string's result (`__format__` may return a `str` subclass); any other f-string is a `BuildString` of its formatted fields, a new `str` that keeps none of them. A template string keeps its values unconverted and unformatted, as the tuple `Template.values`, formats its specifications' fields, and is otherwise opaque |
 | Attributes and items | `AttrLoad`, `AttrStore`, `AttrDelete`, `SubscriptLoad`, `SubscriptStore`, `SubscriptDelete` | Stores make the stored value `Shared`; `AttrDelete` recognizes `@cached_property` invalidation (`del self.prop`) and `MUT201` writes; subscripts keep constant keys and slice bounds; the slice object itself is the tuple `(lower, upper, step)` of its bounds (`None` where one is left out), since `__getitem__` may keep it |
 | Calls | `Call(callee, args, kwargs, is_awaited)`, `MethodCall(recv, method, args, kwargs, is_awaited)` | `is_awaited` separates awaited calls from synchronous ones (a coroutine awaited after it is made runs at its `await`, which the effect summary follows); `star_from` is the index of the first `*` argument, so arguments bind to parameters exactly up to it |
-| ContainerIteration and generators | `MakeIter(iterable)`, `IterNext(iter)`, `MakeGenExpr(outer_iter, captured)`, `MakeClosure(captured)` | `MakeIter` and `MakeGenExpr` bind a **derived reference** of `iterable` / `outer_iter` to an explicit SSA variable; `MakeClosure` holds every value the function or class object keeps: its cells (free variables of nested scopes at any depth, the iteration variables of inlined comprehensions, the names read by lazily evaluated annotation and type-parameter scopes), its defaults, eagerly evaluated annotations, and a class's bases and keywords (`ModuleIr.class_bases` lists the bases among them; a `type` alias is a `MakeClosure` without a lowered body) |
+| ContainerIteration and generators | `MakeIter(iterable)`, `IterNext(iter)`, `MakeGenExpr(outer_iter, captured)`, `MakeClosure(captured)` | `MakeIter` and `MakeGenExpr` bind a **derived reference** of `iterable` / `outer_iter` to an explicit SSA variable; `MakeClosure` holds every value the function or class object keeps: its cells (free variables of nested scopes at any depth, the iteration variables of inlined comprehensions, the names read by lazily evaluated annotation and type-parameter scopes), its defaults, eagerly evaluated annotations, and a class's bases and keywords (`ModuleIr.class_bases` lists the bases among them, `ModuleIr.statement_uses` the defaults and keywords; a `type` alias is a `MakeClosure` without a lowered body) |
 | Suspension | `Await`, `Yield`, `YieldFrom` | `Await` lets other tasks run (`Unique` stays unique), as do the implicit awaits of `async for` and `async with` (`InstKind::suspends`); `Yield` makes the yielded value `Shared` |
 | Context managers | `EnterWith(mgr, is_async)`, `ExitWith(mgr, is_async)` | Mark the region of a `with` / `async with` (the lock and transaction regions of `EFF106`) |
 | Exceptions | `CatchException(types)` | Starts an exception handler |
@@ -208,10 +208,24 @@ Compound expressions are flattened into **basic instructions in explicit left-to
     constant's object gains none (every call shares it). Tuples and strings are fixed whatever
     their uses, also in other modules, unless another module rebinds or deletes the name
     (`ModuleDecls.rebound_globals`, `ProjectDecls::changed_elsewhere`).
+  - The builtins these facts read (`range`, `len`, `sorted`, `min`, `enumerate`, ...) count only
+    where a load of the name finds the real one (`ModuleConstants::trusts_builtin`, which
+    `ModuleBindings` reads too): not in a module that stores or deletes the name, or that binds
+    names behind the IR (`exec`, a change through the dict `globals()` returns), and none in a
+    module with a star import, which may bind the name of any builtin, since heki does not read
+    which names the imported module exports, also when it is a project module. The trust is per
+    module, as `ModuleBindings` and the Soundness lane's builtin scope take it: a function may
+    run after the import wherever the import stands. A size resting on such a builtin is then
+    not known, so no claim rests on it (`range(len(rows))` gives `EFF103` no origin), and the
+    rules that read an unknown size as data-sized report the loop (`range(3)`).
   - `NaturalLoop.len_caps` (`LenCap`) records `while len(x) < N` caps up to 4096
     (`LEN_CAP_MAX`); `LoopCarriedInfo.updates` lists the real updates of a loop-carried value.
   - `IrFunction.starred` marks starred display elements, `ModuleIr.class_bases` the bases a
-    class statement passes, `BasicBlock.term_span` the source of a block's terminator (blocker
+    class statement passes, `ModuleIr.statement_uses` the values a statement uses without an
+    instruction reading them (a decorator, a function's or lambda's default, a class statement's
+    keyword, the class of a class pattern, the types of an `except` clause, the cause of
+    `raise ... from`, each with its expression's span), `ModuleIr.annotations` the spans of the
+    annotations a function evaluates eagerly, `BasicBlock.term_span` the source of a block's terminator (blocker
     lines point at it), and `ModuleIr.constants` (`ModuleConstants`) the module's constant
     integers, booleans, floats, displays, strings, and tuples of strings. A string constant, or
     a tuple of them, is one entry: its text (`strs` / `str_tuples`, one `Arc<str>` per string
@@ -315,13 +329,38 @@ the targets of write and read boundaries.
 | 3 | `self.attr = Cls(...)` in `__init__` and similar | Typed | `self.http = httpx.Client()`, then `self.http.get(...)` in another method |
 | 4 | Same-name methods in the class hierarchy (CHA / RTA); a project `Protocol` dispatches to its structural implementations (a call site keeps the protocol's own declaration of the method, `CallSite::declared`, which the read and call contracts judge it by) | Heuristic | Concrete subclasses of an abstract base (more than 8 candidates: unresolved) |
 
+A class's bases (`ClassDecl::bases`) are the values its class statement passes, named where the
+statement runs. A module-level statement names them through the module's names: an import, a
+module-level class or alias, an attribute of an imported module. A statement in a function or a
+class body takes each value from the IR (`ModuleIr::class_base_values`) through copies and the
+origin of a generic alias (`Base[int]`): a name the function loads from the module (in a class
+body also one the body has not bound yet, which Python looks up in the globals), what an import
+in the function binds, or an attribute of either, so a local alias of the import is the import.
+Any other value is an unknown base (`is_unknown_base`): a parameter, a local bound to anything
+else, a closure cell, a class-body name bound to anything else, a value merged from paths that
+disagree (also the copies of a `finally` body), or a call's result; so are an expression or a
+starred base, a module variable heki names no class for (`Base = declarative_base()`), and every
+base of a statement in a function too large to model. An unknown base keeps its place in the MRO
+as a base outside the project that heki knows nothing of: it may define any method or attribute
+and its metaclass is unknown (`ClassDecl::custom_metaclass`), and no class derives from it, so
+the class is in no project class's subclass family. Each unknown base is a class of its own,
+named after its class statement and its place (`<unknown pkg.mod.Left 0>`): two of them never
+order each other in a C3 linearization, as two distinct classes do not. The declarations are built before inference,
+which reads them, so they follow the IR definition only; base references (below) type the same
+values with inference, which also follows closure cells and class-body aliases.
+
 A method called on an instance is the definition the class's MRO (Python's C3 linearization of
 its project bases) finds first, plus the overrides of its project subclasses (Priority 4). A
 named class is exactly that class: constructing it runs the `__init__` its MRO finds, and
 `Base.method(obj)` the `method` it finds; `cls` in a class method may be any subclass, so
-`cls()` and `cls.method()` dispatch like a call on an instance, and so is `type(obj)` of an
+`cls()` and `cls.method()` dispatch like a call on an instance, and so do `type(obj)` of an
 instance of a project class that is not a protocol (`obj.__class__` is not: a class or a
-subclass may rebind it). A method's calls on its own
+subclass may rebind it) and a value annotated `type[C]` or `typing.Type[C]` (`Ty::Class`; the
+class object of a protocol, of `Any`, or of one of several classes is of no known class). A call
+of a property's value (`obj.prop(...)`, the getter found first along the MRO, with or without a
+setter) runs the getter as reading `obj.prop` does and calls the value it gives, typed by the
+getter's return annotation (`self.data_type(is_dict=True)` of a property returning
+`type[DataType]` constructs `DataType`). A method's calls on its own
 `self` run the overrides of every subclass, so a mixin's summary holds the effects of every
 class sharing it; an execution effect reached only through the override of a subclass records
 that class (`EffectSummary::receiver_effects`), and a call on a receiver of known class runs it
@@ -365,16 +404,16 @@ describes it as it describes a library symbol. A name under a project module tha
 does not bind (a compiled submodule, a star import) is what the catalog says of it.
 
 A method that no project class of the receiver's MRO defines comes from the first base outside
-the project, when heki takes it to define the method (a base it knows nothing of coming first
-leaves the call unresolved): a special method (`__init__`, `__copy__`, ...), a
-public method of a builtin type other than `object` (`dict.update`), or a member Layer 2 lists
-(`pydantic.BaseModel.model_copy`). Otherwise the call is unresolved (`abc.ABC._copy_model_type`
-and `typing.Generic.result_type` are no known symbols); on a union, a class whose bases are all
-project classes and builtin types without the member adds no target, any other one leaves the
-call unresolved. `object.__new__(C)`, also through an alias, and `C.__new__(C)` or
-`super().__new__(cls)` where no class of the MRO defines `__new__` and no base outside the project
-but builtin types may, allocate an instance of `C` without running its `__init__`: a
-construction of `C`.
+the project, when heki takes it to define the method (a base it knows nothing of coming first, an
+unknown base included, leaves the call unresolved): a special method (`__init__`, `__copy__`,
+...), a public method of a builtin type other than `object` (`dict.update`), or a member Layer 2
+lists (`pydantic.BaseModel.model_copy`). Otherwise the call is unresolved
+(`abc.ABC._copy_model_type` and `typing.Generic.result_type` are no known symbols); on a union, a
+class whose bases are all project classes and builtin types without the member adds no target,
+any other one leaves the call unresolved. `object.__new__(C)`, also through an alias, and
+`C.__new__(C)` or `super().__new__(cls)` where no class of the MRO defines `__new__` and no base
+outside the project but builtin types may, allocate an instance of `C` without running its
+`__init__`: a construction of `C`.
 
 Layer 2 `return_type` entries type the results of factories (`sqlite3.connect()` →
 `sqlite3.Connection`, `asyncio.get_running_loop()` → `asyncio.AbstractEventLoop`). A call that
@@ -423,7 +462,8 @@ EffectSummary(f) = {
     typed_params:             Bitset,                      // parameters the function types itself (its sites
                                                            // cover their changes)
     typed_field_read_sites:   Set<TypedFieldReadSite>,     // own reads of (class, attr): attribute, getattr,
-                                                           // __dict__; never propagated (MUT203)
+                                                           // __dict__, through an instance or a class
+                                                           // object; never propagated (MUT203)
     sentinel_tests:           Option<Set<SentinelTest>>,   // own `obj.attr is S` / `is not` with an
                                                            // `object()` sentinel, per class obj may be;
                                                            // never propagated (MUT118)
@@ -446,7 +486,8 @@ EffectSummary(f) = {
                                                            // elements of them) it may return, by span, and the
                                                            // phis its origin walks met (local)
     unresolved_write_sites:   Set<UnresolvedWrite>,        // target-named writes on objects of unknown class,
-                                                           // computed names on guarded classes (MUT205)
+                                                           // computed names on guarded classes and on
+                                                           // objects of unknown class (MUT205)
     unresolved_access_sites:  Set<UnresolvedAccess>,       // reads and method calls named like a strict
                                                            // contract's target on objects of unknown class;
                                                            // never propagated (MUT206, MUT207)
@@ -548,9 +589,10 @@ compares the module and the qualname, which the fqn alone does not tell apart.
 
 `FileSummary.reference_sites` holds, only when a call contract sets `references = "calls"`
 (`Contracts::references`), the references handing a project function, method, or class on to
-be called later: a load of one (a name, a module or class attribute, a bound method; for a name
-an import or the module body binds, which is read without a load of its own, each use handing
-it on) whose value
+be called later: a load of one (a name, a module or class attribute, a bound method, a closure
+cell, which holds what the enclosing function binds to the name, such as a local import; for a
+name an import or the module body binds, which the scope binding it reads without a load of its
+own, each use handing it on) whose value
 reaches, through copies, phis, and the displays holding it, an argument of a call, a stored
 attribute, item, or global, a `return`, a `yield`, or a `raise`. Each is a `CallSite` of what
 calling the value calls (the class it constructs, or its project callees, without bindings),
@@ -564,9 +606,20 @@ evaluated annotations are not told apart, nor a class's bases and keywords), and
 binding a name to the value itself (an import, a module alias). With `references =
 "calls-and-bases"` (`Contracts::reference_bases`), the bases of a class statement are reference
 sites too (`CallSite::is_base`): one per value the statement passes as a base
-(`ModuleIr::class_bases`) that is a project class, typed in the statement's block as any value
+(`ModuleIr::class_base_values`) that is a project class, typed in the statement's block as any value
 is (a parameter or a local of the imported class's name is another value), constructing that
-class, at the base's load when the statement loads it, else at the class statement. The class
+class, at the base's load when the statement loads it, else at the class statement. With
+`references = "reads"` (`Contracts::reference_reads`, which includes the bases), a load reaching
+no use handing it on but another use is a reference site too (`CallSite::is_read`): the object of
+an attribute access or a method call, an argument of a call that only names it, a subscript, an
+operand, a tested condition, an iterated, awaited, formatted, or `with` value, a dict display's
+key, a `**` unpacking, and the statement uses (`ModuleIr::statement_uses`), through copies,
+phis, and the displays holding it as for a hand-on; a callee, a closure's captures, a binding of
+another name (a module name, a `nonlocal` cell), a deletion, and a use inside an annotation the
+function evaluates (`ModuleIr::annotations`) are none. For a name an import
+or the module body binds, a read is at each use that is not one handing it on. The values
+reaching each kind of use are found with `heki_ir::walk::reach` under one budget per function
+(`summary::reference_sites`); past it the function has no reference site. The class
 bodies a module runs add their references to the module body's (their other facts are not the
 module's). Like `call_sites`, they are local facts: the language server compares a function's references with
 its call sites (`Workspace::caller_view`) and shows them in call chains.
@@ -580,16 +633,40 @@ only for a class without a project `__init__`. That binding (`BoundCallee::param
 positional parameters (`FunctionDecl::positional_param`; one past them lands in `*args`, a new
 tuple, and binds no parameter, never a keyword-only one: only a hand-over asks whether the callee
 keeps `*args`, which holds it), and a keyword never binds a positional-only parameter
-(`FunctionDecl::keyword_param`; one binding no parameter is, for the argument lists, a parameter
-of its own name in `**kwargs`); the receiver is the first position. A callee the call raises
-`TypeError` for instead of running (`Bindings::raises`: a parameter bound twice, a keyword without
+(`FunctionDecl::keyword_param`; one binding no parameter is, for the argument lists, a parameter of
+its own name in `**kwargs`); the receiver is the first position. A `**` operand that is a dict
+display with string constant keys passes its entries as keywords when nothing changes it
+(`Extractor::constant_display`: each value holding it, through copies and phis, is only copied,
+merged, unpacked with `**`, tested, returned, or raised; one walk per display; the entries a call
+binds are taken from the function's budget, past which the display may pass any keyword); any other
+`**` operand may bind any parameter. A callee the call raises `TypeError` for instead of running
+(`Bindings::raises`: two keywords of one name, a parameter bound twice, a keyword without
 `**kwargs`, a position past the parameters without `*args`, a parameter without a default left
 unbound where no unpacking may bind it, counted from `FunctionDecl::required_positional` and
 `required_keyword_only` in the work of the call's arguments) is passed nothing. The constants are
-literals, string constants (`TypeCtx::str_constant_with`), and modules' number and boolean
-constants (`TypeCtx::module_constant`: a module-level name, an import, or a module's attribute,
-`TypeCtx::global_read`, the reads catalog cases follow too). The marked names are looked up for the parameters a call binds, so
-the work per call is that of binding it, whatever the number of argument lists.
+literals, string constants (`TypeCtx::str_constant_with`), and modules' number and boolean constants
+(`TypeCtx::module_constant`: a module-level name, an import, or a module's attribute,
+`TypeCtx::global_read`, the reads catalog cases follow too). The marked names are looked up for the
+parameters a call binds, so the work per call is that of binding it, whatever the number of argument
+lists.
+
+`Dispatch.recv_params` holds, only when a `call-owners` contract allows the calls through a
+method's own receiver (`Contracts::own_receiver_calls`), the parameters of the caller the receiver
+of a class method's or a static method's call may be, as itself (`super()` is the method's own
+`self`): the first bound parameter of the callees (`BoundCallee::params`) does not tell it, since
+a class method binds the class and no value of the caller, and a static method no receiver at
+all. It sits behind the call site's boxed dispatch, which few sites have, so call sites keep their
+size.
+
+`TypedFieldWriteSite.through_protocol` marks, only when a `write-owners` contract allows writes
+through protocols (`Contracts::write_protocols`), every site of a write whose object is typed with
+a project protocol declaring the attribute itself or through its protocol bases
+(`ProjectDecls::protocol_declares`): the protocol's own site (its class is the protocol) and each
+implementation's, which keep it as they are handed up through private helpers. The rules find the
+protocol of a write among its sites (`mut_rules::protocols_written_through`, once per function);
+a flag fits the room the site's layout leaves, where the protocol's name would grow every site. It
+reads the protocol's declaration, which may sit in another module, so it takes part in Early
+Cutoff.
 
 `CallSite.returned` (whether the call's result may be returned, and how) is computed at
 extraction for every project call. `CallSite.flow` (the invalidation contracts announced after
@@ -711,6 +788,11 @@ table (`consumption`):
 - `Through`: it is passed to a project call whose body iterates that parameter (`iterates_params`)
   at the call, or whose result is iterated there or returned by a plain caller (`return
   relay(rows())`): its `Result` runs inside that call, or goes into the caller's `iterated`.
+
+Each of these sites records the span of the call that made the object (`CallSite::made_by`), and
+so does the site of the `await` of a coroutine made earlier: what one call runs is read from its own
+site and those (`CallSite::of_call`, the call's span and target), never from another call of the
+same callees with the same arguments, whose target is the same.
 
 Any other use runs nothing in the caller: a generator stored, yielded, returned from an
 `async def`, handed to an external or unresolved call (`StreamingResponse(rows())`), or only
@@ -841,7 +923,8 @@ which module imports which.
 
 #### `MUT111`: readers of a stale `@cached_property` (opt-in)
 1. Reads: the `TypedFieldReadSite`s of each checked function's own body (`self.p`, `obj.p`,
-   `getattr(obj, "p")`, `obj.__dict__["p"]` / `.get("p")`), whose class `K` heki knows.
+   `getattr(obj, "p")`, `obj.__dict__["p"]` / `.get("p")`), whose class `K` heki knows; a read
+   through a class object gives the property's descriptor, not a cached value, and is none.
 2. For `K` and each project subclass `X` of it, the getter an instance of `X` runs for `p` (the
    first definition along its MRO); a `@cached_property` getter is a candidate.
 3. Its stale writes are `MUT101`'s (whatever is selected, suppressions included). A write by `m`
@@ -1135,11 +1218,17 @@ message = "write model state through GenerationStore instead"
      - reassignment, deletion, and augmented assignment (`obj.a = ...`, `del obj.a`,
        `obj.a += ...`);
      - `setattr(obj, "a", ...)` / `object.__setattr__(obj, "a", ...)` /
-       `obj.__dict__["a"] = ...`;
+       `obj.__dict__["a"] = ...`, the namespace being `obj.__dict__`, `getattr(obj, "__dict__")`,
+       or `vars(obj)` (the builtin: `resolver::namespace_load`, which `MUT101`'s invalidations
+       read too); `update`, `popitem`, `clear`, and `|=` on it write names heki cannot tell;
      - **container mutation through an alias**: `xs = obj.a; xs.append(...)` / `xs[i] = ...` /
        `xs.clear()` / `xs.sort()` / `xs |= ...` (through alias tracking and
        `mutated_param_paths`, **handing `obj.a` to `helper(obj.a)` that calls `.append()` is
-       caught across calls**). `getattr(obj, "a"[, default])` with a constant name loads
+       caught across calls**). An alias is one in the scopes nested in its function too: a
+       read of its closure cell joins the aliases of every value the function binds to it, as
+       a phi joins its inputs (the function is summarized before the scopes nested in it), and
+       a cell a nested scope rebinds (`nonlocal`) is no alias. `getattr(obj, "a"[, default])`
+       with a constant name loads
        `obj.a`, and so does a call or property read whose every project callee returns
        attribute `a` of the parameter the object binds on every `return`
        (`FunctionDecl::returns_param_attr`: `node.members().append(1)` and
@@ -1152,7 +1241,10 @@ message = "write model state through GenerationStore instead"
      initializer of the target's class family writes its own `self`, or when the reporting
      function only runs inside allowed contexts (every path of project callers starts in one); a
      private helper with project callers hands its report to them. Otherwise the outermost
-     function is reported, with `message` as the report's help.
+     function is reported, with `message` as the report's help. With
+     `unlisted-dict-keys = "report"`, a `dict_direct` site that hits no target, on a class some
+     targets cover, whose key none of them names, is judged the same way once per family of
+     those targets (`OwnerRule::written`), and reported as that key (`Class.key`).
   3. Existing code bases migrate with **`heki check --baseline`**: counts are frozen per
      `(path, qualname, "MUT201", "Class.attr")` and can only shrink.
 
@@ -1247,7 +1339,10 @@ deep = true   # changes to attributes and nested containers below are forbidden 
    - A call's targets are complete (`CallSite::complete`) when they are every implementation
      the call can run under R2 and R5: for each of the receiver's class and its project
      subclasses (at most `DISPATCH_CLASS_LIMIT`, 64), the definition its MRO finds is a target;
-     every member of a union resolves; a protocol receiver never is complete.
+     every member of a union resolves; a protocol receiver never is complete. A call of a
+     property's value is complete when calling a value of the type the getter declares is
+     (`TypeCtx::targets_complete_on`), whatever the receiver; the getters it runs, as a read of
+     the property, never are.
    - A Layer 2 call has an effect unconditionally (`CallTarget::Layer2::unconditional`) when its
      entry `emits` it on every call and no case of the entry tests an argument that may be a
      parameter of the caller (R6 covers the arguments heki cannot evaluate).
@@ -1571,8 +1666,9 @@ the caller's thread with a synchronous facade over an async connection), `exclud
 validated conversion of it, or deletes the attribute on the instance itself, or raises, handing
 the value to no other object, in a class that installs no descriptor for it and defines no
 `__getattribute__`, so a read finds the stored value: `pydantic.BaseModel.__setattr__`), `keeps_hashable_defaults` (an
-instance built without a field holds the field's default itself when it is hashable, and a
-deep copy of an unhashable one: pydantic 2's `BaseModel`), `return_type` (factories such as
+instance built without a field starts from the field's default itself when it is hashable, and
+from a deep copy of an unhashable one, then holds what validating the default returns where the
+field validates it: pydantic 2's `BaseModel`), `return_type` (factories such as
 `sqlite3.connect`), `sync_lock_or_tx` (`threading.Lock`, `Session.begin`: `EFF106`),
 `non_reentrant_lock` (`threading.Lock`, `asyncio.Lock`: `EFF109`), `one_at_a_time`
 (`asyncio.StreamReader.readline`, `AsyncSession.execute`: `EFF110`),
