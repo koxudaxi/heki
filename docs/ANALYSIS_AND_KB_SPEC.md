@@ -213,9 +213,12 @@ Compound expressions are flattened into **basic instructions in explicit left-to
   - `IrFunction.starred` marks starred display elements, `ModuleIr.class_bases` the bases a
     class statement passes, `BasicBlock.term_span` the source of a block's terminator (blocker
     lines point at it), and `ModuleIr.constants` (`ModuleConstants`) the module's constant
-    integers, displays, strings, and tuples of strings. A string constant, or a tuple of them,
-    is one entry: its text (`strs` / `str_tuples`, one `Arc<str>` per string the module writes,
-    which aliases and items share), whose length gives its display.
+    integers, booleans, floats, displays, strings, and tuples of strings. A string constant, or
+    a tuple of them, is one entry: its text (`strs` / `str_tuples`, one `Arc<str>` per string
+    the module writes, which aliases and items share), whose length gives its display. It is
+    the one view of a module name bound once: the effect lane's declarations read their number,
+    boolean, and string constants from it, and `GlobalStores` is the one count of the stores
+    and deletions of each module global that it, `ModuleBindings`, and the declarations read.
   - The Soundness lane reads these facts within one module only (`FnIndex`). The Advisory rules
     read other modules' small displays through the declarations (`ModuleDecls.small_globals`,
     `ClassDecl.attr_displays`), so the language server re-checks their users when they change.
@@ -1527,7 +1530,10 @@ forbids; such an entry has no other fact), and
 `opaque_to_layer3` (reserved for Layer 3), and `cases`: what the call does instead when one
 argument (by position, the receiver not counted, or by keyword) is a given literal (an
 argument is the literal it is, or the one a module constant bound once holds:
-`TypeCtx::global_literal`, `ModuleDecls::str_constants` and `literal_constants`, also imported
+`TypeCtx::global_literal`, `ModuleDecls::str_constants` and `literal_constants`, the latter
+read from `heki_ir::ModuleConstants` (the integers it computes from other constants, its
+booleans, and its floats), the one view of a module name bound once that the IR's facts read
+too, with `heki_ir::GlobalStores` the one count of its stores and deletions, also imported
 unless the importing module binds the name again, `ModuleDecls::fixed_import`), a string
 literal with a given prefix, equal to one of given strings (`one_of`), containing one
 (`contains`), an IPv4 or IPv6 address (`numeric_address`), or not empty, a value established to

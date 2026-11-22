@@ -2911,6 +2911,50 @@ fn catalog_argument_cases_read_module_constants_bound_once() {
     );
 }
 
+/// The constants a catalog case reads are those of the module's IR (`heki_ir::ModuleConstants`),
+/// the facts' own view of a name bound once: an integer the code computes from other constants, a
+/// negative literal, and a name the module binds after its last star import hold their value.
+#[test]
+fn catalog_argument_cases_read_the_constants_of_the_module_ir() {
+    let p = Project::new("cat_ir_constants");
+    p.write("app/__init__.py", "")
+        .write("app/extra.py", "LATE = 1\n")
+        .write(
+            "app/use.py",
+            r#"import time
+
+from app.extra import *
+
+BASE = 2
+PAUSE = BASE - 2
+NEGATIVE = -1
+LATE = 0
+
+
+async def tn_computed():
+    time.sleep(PAUSE)
+
+
+async def tn_after_star():
+    time.sleep(LATE)
+
+
+async def tp_negative():
+    time.sleep(NEGATIVE)
+"#,
+        );
+    let (code, stdout, stderr) = p.check(&["--output-format", "json", "--select", "EFF101"]);
+    assert!(code == 0 || code == 1, "{stdout}{stderr}");
+    let diags: Vec<Value> = serde_json::from_str(&stdout).unwrap();
+    let got: Vec<&str> = diags
+        .iter()
+        .map(|d| d["qualname"].as_str().unwrap())
+        .collect();
+    // `time.sleep(-1)` raises `ValueError` without waiting, which no catalog case says: it counts
+    // as a wait.
+    assert_eq!(got, vec!["tp_negative"], "{stdout}");
+}
+
 /// A module constant imported by a module that binds the name again: in a function declaring it
 /// `global`, in a second module-level store, or by deleting it. The import no longer decides
 /// the value, so the call waits on it; another module binding a global of the same name of its
