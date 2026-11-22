@@ -77,8 +77,16 @@ const MAX_ALIAS_CHASE: usize = 8;
 /// A base heki names no class for, in [`ClassDecl::bases`]: an expression, a module variable,
 /// or a value its class statement's scope binds (`def factory(Base): class Derived(Base)`). The
 /// MRO keeps it as a base outside the project that heki knows nothing of, which may define
-/// anything; no class derives from it.
-pub const UNKNOWN_BASE: &str = "<unknown>";
+/// anything; no class derives from it. Each is a class of its own, named after its class
+/// statement and its place among the bases (`<unknown pkg.mod.Left 0>`), so two unknown bases
+/// never order each other in an MRO, as two distinct classes do not.
+const UNKNOWN_BASE: &str = "<unknown";
+
+/// Whether the base `base` of a [`ClassDecl`] is one heki names no class for
+/// ([`UNKNOWN_BASE`]).
+pub fn is_unknown_base(base: &str) -> bool {
+    base.starts_with(UNKNOWN_BASE)
+}
 
 /// Upper bound on the attribute loads behind a module-level constant's value
 /// (`KEY = pkg.sub.keys.OTHER`: three): a dotted name a few modules deep takes a few.
@@ -316,8 +324,9 @@ pub struct ClassDecl {
     /// (an import, a class, a module alias, an attribute of a module) through the module's
     /// names, and in a function or a class body also a local alias of one or an import there.
     /// A base heki names no class for (a parameter, a local, a closure cell, a class-body name
-    /// bound to anything else, an expression, a module variable) is [`UNKNOWN_BASE`]; a name
-    /// the module does not bind (a builtin heki does not list) is left out.
+    /// bound to anything else, an expression, a module variable) is an unknown base
+    /// ([`is_unknown_base`]); a name the module does not bind (a builtin heki does not list) is
+    /// left out.
     pub bases: Vec<String>,
     /// Priority 3 `attr -> type` (instance attribute types).
     pub attr_types: BTreeMap<String, Ty>,
@@ -345,7 +354,7 @@ pub struct ClassDecl {
     /// The resolved `metaclass=` of the class statement.
     pub metaclass: Option<String>,
     /// The class statement names a metaclass other than `type` and `abc.ABCMeta`, also one heki
-    /// cannot resolve, or has a base heki names no class for ([`UNKNOWN_BASE`]), whose
+    /// cannot resolve, or has a base heki names no class for ([`is_unknown_base`]), whose
     /// metaclass is unknown ([`ProjectDecls::has_custom_metaclass`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub custom_metaclass: bool,
@@ -1643,7 +1652,7 @@ impl ProjectDecls {
         for m in out.modules.values() {
             for (qualname, class) in &m.classes {
                 let fqn = format!("{}.{qualname}", m.module_name);
-                for base in class.bases.iter().filter(|b| *b != UNKNOWN_BASE) {
+                for base in class.bases.iter().filter(|b| !is_unknown_base(b)) {
                     subclasses
                         .entry(out.canonical(base))
                         .or_default()
@@ -3054,7 +3063,7 @@ impl ProjectDecls {
                 continue;
             }
             // An unknown base names no symbol, special methods included.
-            if c != UNKNOWN_BASE && external_defines(kb, c, name) {
+            if !is_unknown_base(c) && external_defines(kb, c, name) {
                 return Inherited::External(format!("{c}.{name}"));
             }
             // A base heki knows nothing of may define it, before any later base that does.
@@ -3419,12 +3428,12 @@ pub(crate) fn project_decls_for(
 }
 
 /// The bases of the class statements outside the module body (in a function or a class body),
-/// by the statement's span and in their order (`None`: a base left out). Each is what the value the statement
-/// passes is ([`module_read`]): through `module_base` a module-level name, the object of an
-/// import in the function, or else an unknown base ([`UNKNOWN_BASE`]): a parameter, a local, a
-/// closure cell, or a class-body name of the imported class's name is another value. A
-/// statement made more than once (in a `finally` body, once per way out of the `try`) keeps the
-/// bases its copies agree on; one they disagree on is unknown.
+/// by the statement's span and in their order (`None`: a base left out). Each is what the value
+/// the statement passes is ([`module_read`]): through `module_base` a module-level name, the
+/// object of an import in the function, or else an unknown base ([`UNKNOWN_BASE`]): a
+/// parameter, a local, a closure cell, or a class-body name of the imported class's name is
+/// another value. A statement made more than once (in a `finally` body, once per way out of the
+/// `try`) keeps the bases its copies agree on; one they disagree on is unknown.
 fn scoped_bases(
     input: &ModuleInput<'_>,
     module_base: &dyn Fn(&str) -> Option<String>,
@@ -3646,8 +3655,17 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
             }
             bases.extend(values.iter().flatten().cloned());
         }
-        // A base heki names no class for has an unknown metaclass.
-        let unknown_base = bases.iter().any(|b| b == UNKNOWN_BASE);
+        let mut unknown_base = false;
+        for (i, base) in bases.iter_mut().enumerate() {
+            if base == UNKNOWN_BASE {
+                *base = format!(
+                    "{UNKNOWN_BASE} {}.{} {i}>",
+                    decls.module_name, class.qualname
+                );
+                // A base heki names no class for has an unknown metaclass.
+                unknown_base = true;
+            }
+        }
         let keyword = |name: &str| {
             class
                 .keywords
@@ -5859,7 +5877,8 @@ impl<'a> TypeCtx<'a> {
     /// Whether `callee`, what [`Self::resolve_method`] resolves `recv.method(...)` to, is every
     /// implementation the call can run (`CallSite::complete`): each member of a union resolves
     /// and is complete, a protocol receiver never is, and a module member, a class object's
-    /// own attribute, or `super()` names one implementation.
+    /// own attribute, or `super()` names one implementation. A call of a property's value is
+    /// judged by the value ([`Self::targets_complete_on`]).
     pub fn method_targets_complete(
         &self,
         recv: Option<&Val>,
@@ -5870,20 +5889,33 @@ impl<'a> TypeCtx<'a> {
             Some(Val::Union(classes)) => classes.iter().all(|c| {
                 let own = self.method_call_targets(Some(Recv::Inst(c)), method);
                 matches!(own, Callee::Project(..) | Callee::External(_))
-                    && self
-                        .project
-                        .instance_targets_complete(c, method, &own, self.kb)
+                    && self.targets_complete_on(Recv::Inst(c), method, &own)
             }),
-            Some(Val::Inst(class)) => self
+            _ => recv
+                .and_then(Val::recv)
+                .is_some_and(|recv| self.targets_complete_on(recv, method, callee)),
+        }
+    }
+
+    /// [`Self::method_targets_complete`] on a receiver of one class. A call of a property's value
+    /// runs what calling the value runs, whatever class the getter is found in (the getter's run
+    /// is a read of its own): it is complete when calling a value of the type the getter
+    /// declares is ([`Self::call_targets_complete`]).
+    fn targets_complete_on(&self, recv: Recv<'_>, method: &str, callee: &Callee) -> bool {
+        if let Some(value) = self.property_value(recv, method) {
+            return self.call_targets_complete(value.as_ref(), callee);
+        }
+        match recv {
+            Recv::Inst(class) => self
                 .project
                 .instance_targets_complete(class, method, callee, self.kb),
-            Some(Val::Class(class)) => {
+            Recv::Class(class) => {
                 self.project.is_project_class(class)
                     && self
                         .project
                         .instance_targets_complete(class, method, callee, self.kb)
             }
-            other => matches!(other, Some(Val::Ref(_) | Val::Super(_))),
+            Recv::Ref(_) | Recv::Super(_) => true,
         }
     }
 

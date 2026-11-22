@@ -316,14 +316,16 @@ class body takes each value from the IR (`ModuleIr::class_base_values`) through 
 origin of a generic alias (`Base[int]`): a name the function loads from the module (in a class
 body also one the body has not bound yet, which Python looks up in the globals), what an import
 in the function binds, or an attribute of either, so a local alias of the import is the import.
-Any other value is an unknown base (`UNKNOWN_BASE`): a parameter, a local bound to anything
+Any other value is an unknown base (`is_unknown_base`): a parameter, a local bound to anything
 else, a closure cell, a class-body name bound to anything else, a value merged from paths that
 disagree (also the copies of a `finally` body), or a call's result; so are an expression or a
 starred base, a module variable heki names no class for (`Base = declarative_base()`), and every
 base of a statement in a function too large to model. An unknown base keeps its place in the MRO
 as a base outside the project that heki knows nothing of: it may define any method or attribute
 and its metaclass is unknown (`ClassDecl::custom_metaclass`), and no class derives from it, so
-the class is in no project class's subclass family. The declarations are built before inference,
+the class is in no project class's subclass family. Each unknown base is a class of its own,
+named after its class statement and its place (`<unknown pkg.mod.Left 0>`): two of them never
+order each other in a C3 linearization, as two distinct classes do not. The declarations are built before inference,
 which reads them, so they follow the IR definition only; base references (below) type the same
 values with inference, which also follows closure cells and class-body aliases.
 
@@ -609,8 +611,9 @@ keeps `*args`, which holds it), and a keyword never binds a positional-only para
 its own name in `**kwargs`); the receiver is the first position. A `**` operand that is a dict
 display with string constant keys passes its entries as keywords when nothing changes it
 (`Extractor::constant_display`: each value holding it, through copies and phis, is only copied,
-merged, unpacked with `**`, tested, returned, or raised; one walk per display); any other `**`
-operand may bind any parameter. A callee the call raises `TypeError` for instead of running
+merged, unpacked with `**`, tested, returned, or raised; one walk per display; the entries a call
+binds are taken from the function's budget, past which the display may pass any keyword); any other
+`**` operand may bind any parameter. A callee the call raises `TypeError` for instead of running
 (`Bindings::raises`: two keywords of one name, a parameter bound twice, a keyword without
 `**kwargs`, a position past the parameters without `*args`, a parameter without a default left
 unbound where no unpacking may bind it, counted from `FunctionDecl::required_positional` and
@@ -1268,7 +1271,10 @@ deep = true   # changes to attributes and nested containers below are forbidden 
    - A call's targets are complete (`CallSite::complete`) when they are every implementation
      the call can run under R2 and R5: for each of the receiver's class and its project
      subclasses (at most `DISPATCH_CLASS_LIMIT`, 64), the definition its MRO finds is a target;
-     every member of a union resolves; a protocol receiver never is complete.
+     every member of a union resolves; a protocol receiver never is complete. A call of a
+     property's value is complete when calling a value of the type the getter declares is
+     (`TypeCtx::targets_complete_on`), whatever the receiver; the getters it runs, as a read of
+     the property, never are.
    - A Layer 2 call has an effect unconditionally (`CallTarget::Layer2::unconditional`) when its
      entry `emits` it on every call and no case of the entry tests an argument that may be a
      parameter of the caller (R6 covers the arguments heki cannot evaluate).

@@ -44,7 +44,8 @@ writers, `forbidden-writers`, and, with `fresh-objects = "allow"`, writes that c
 they write. A parameter that every caller path binds to an object of a project class is not
 reported: `MUT201` reports the write at those callers. For a computed name on a parameter, a
 caller binding an object of a target class leaves the write to `MUT205` (`MUT201` has no name to
-report at that caller), and one binding an object of another class ties it there. With
+report at that caller), unless it is that class's own initialization handing over its `self`,
+and one binding an object of another class ties it there. With
 `attribution = "lexical"`, a function that only runs inside allowed writers is not allowed, and a
 caller path through an allowed writer counts like any other, while a helper that only a class's
 own initialization runs on its own `self` (`self._assign(name)` in `__init__`) stays allowed.

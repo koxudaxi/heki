@@ -1342,6 +1342,43 @@ fn strict_mode_reports_a_run_time_name_on_an_object_of_unknown_class() {
     );
 }
 
+const INITIALIZING_HELPERS: &str = r#"from pkg.model import DataModel
+
+
+def _setup(obj, name: str, value: object) -> None:
+    setattr(obj, name, value)
+
+
+def _setup_also_later(obj, name: str, value: object) -> None:
+    setattr(obj, name, value)
+
+
+class Configured(DataModel):
+    def __init__(self, name: str) -> None:
+        super().__init__()
+        _setup(self, name, 1)
+        _setup_also_later(self, name, 1)
+
+    def reset(self, name: str) -> None:
+        _setup_also_later(self, name, 2)
+"#;
+
+/// A run-time name written on an object of unknown class may write any target, so an
+/// initializer of any target's class handing its own `self` to the helper is that class's own
+/// initialization: a helper only such initializers run is not reported, one a method runs too
+/// is.
+#[test]
+fn strict_mode_leaves_a_run_time_name_to_the_initialization_running_it() {
+    let p = strict_project("strict_run_time_names_init", true);
+    p.write("pkg/setup.py", INITIALIZING_HELPERS);
+    let s = "pkg/setup.py";
+    let found: Vec<_> = found(&diagnostics(&p, &[]))
+        .into_iter()
+        .filter(|x| x.0 == s)
+        .collect();
+    assert_eq!(found, vec![d(s, 9, "MUT205", "_setup_also_later", "*")]);
+}
+
 /// Objects of unknown class that `isinstance` tests narrow to a class of the standard library.
 const NARROWED: &str = r#"from dataclasses import Field
 

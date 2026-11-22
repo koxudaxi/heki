@@ -31,6 +31,11 @@ pub(super) fn mut205(cx: &CheckContext<'_>, rules: &[OwnerRule<'_>], out: &mut V
     }
     let sites = cx.sites_by_caller();
     let mut classified: Classified<'_, &Unresolved> = Classified::default();
+    // An attribute on an object of unknown class is no class's own `self`.
+    let no_class = FxHashSet::default();
+    // The classes of every target of each rule, the family of a computed name on an object of
+    // unknown class, built once per rule.
+    let mut every_family: Vec<Option<FxHashSet<String>>> = vec![None; strict.len()];
     let mut reports = MergedReports::default();
     for (key, s) in cx.defined_functions() {
         for w in &s.unresolved_write_sites {
@@ -48,23 +53,23 @@ pub(super) fn mut205(cx: &CheckContext<'_>, rules: &[OwnerRule<'_>], out: &mut V
                     continue;
                 }
                 let writes_target = |class: &str| hits.iter().any(|t| t.classes.contains(class));
-                // A computed name on a target class may be a class's own initialization
-                // (`setattr(self, name, v)` in `__init__`), as for `MUT201`; an attribute on an
-                // object of unknown class is tied to the classes its callers bind, which
-                // `MUT201` reports at those callers. A computed name on an object of unknown
-                // class is tied to the other classes its callers bind; `MUT201` sees no name at
-                // a caller binding a target class, so such a caller leaves the write to this
-                // rule.
-                let (family, callers) = match &w.what {
-                    Unresolved::Name(_) => (
-                        hits.iter()
-                            .flat_map(|t| t.classes.iter().cloned())
-                            .collect(),
-                        Callers::Ignored,
-                    ),
-                    Unresolved::Receiver(_) => (FxHashSet::default(), Callers::TieEveryClass),
+                // A computed name may be a class's own initialization (`setattr(self, name, v)`
+                // in `__init__`, also through a helper it hands `self` to), as for `MUT201`: of
+                // a class of the targets it may write, every target for an object of unknown
+                // class. An attribute on an object of unknown class is tied to the classes its
+                // callers bind, which `MUT201` reports at those callers. A computed name on an
+                // object of unknown class is tied to the other classes its callers bind;
+                // `MUT201` sees no name at a caller binding a target class, so such a caller
+                // leaves the write to this rule.
+                let name_family;
+                let (family, callers): (&FxHashSet<String>, _) = match &w.what {
+                    Unresolved::Name(_) => {
+                        name_family = families(&hits);
+                        (&name_family, Callers::Ignored)
+                    }
+                    Unresolved::Receiver(_) => (&no_class, Callers::TieEveryClass),
                     Unresolved::Anything => (
-                        FxHashSet::default(),
+                        every_family[r].get_or_insert_with(|| families(&hits)),
                         Callers::LeaveTargetClasses(&writes_target),
                     ),
                 };
@@ -74,9 +79,7 @@ pub(super) fn mut205(cx: &CheckContext<'_>, rules: &[OwnerRule<'_>], out: &mut V
                 };
                 let counts = *classified
                     .entry((r, key, w.obj_params, &w.what))
-                    .or_insert_with(|| {
-                        access.counts(cx, &sites, &rule.allowance, &family, callers)
-                    });
+                    .or_insert_with(|| access.counts(cx, &sites, &rule.allowance, family, callers));
                 if !counts {
                     continue;
                 }
@@ -126,6 +129,14 @@ pub(super) fn mut205(cx: &CheckContext<'_>, rules: &[OwnerRule<'_>], out: &mut V
         }
     }
     reports.emit(cx, "MUT205", out);
+}
+
+/// The classes `targets` cover: their class families together.
+fn families(targets: &[&ContractTarget]) -> FxHashSet<String> {
+    targets
+        .iter()
+        .flat_map(|t| t.classes.iter().cloned())
+        .collect()
 }
 
 /// The targets of a rule that an attribute name matches, and the classes they cover.
