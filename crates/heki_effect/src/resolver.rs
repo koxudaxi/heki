@@ -2456,9 +2456,9 @@ impl ProjectDecls {
     }
 
     /// Whether every class a value of the class `class` may be under R2
-    /// ([`Self::value_classes`]), with every class along their MROs, is a project class that
-    /// binds none of `names` and has no metaclass heki does not know, or a class outside the
-    /// project that `known_base` accepts: the classes whose code runs on such a value are the
+    /// ([`Self::value_classes`], each once) is a project class that binds none of `names` and
+    /// has no metaclass heki does not know, and every base of one outside the project is a plain
+    /// base or one `known_base` accepts: the classes whose code runs on such a value are the
     /// project's, which heki reads, and those `known_base` stands for.
     pub fn binds_none_of(
         &self,
@@ -2466,20 +2466,20 @@ impl ProjectDecls {
         names: &[&str],
         known_base: impl Fn(&str) -> bool,
     ) -> bool {
+        let known = |c: &str| PLAIN_BASES.contains(&c) || known_base(c);
         let class = self.canonical(class);
-        let mut seen = FxHashSet::default();
-        let mut classes = vec![class.clone()];
-        classes.extend(self.subclasses_of(&class));
-        classes.into_iter().all(|vc| {
-            self.mro(&vc).into_iter().all(|c| {
-                if !seen.insert(c.clone()) {
-                    return true;
-                }
-                self.read(|k| note(&mut k.class_facts, &c));
-                match self.class(&c) {
-                    Some(d) => !d.custom_metaclass && names.iter().all(|n| !d.members.contains(*n)),
-                    None => PLAIN_BASES.contains(&c.as_str()) || known_base(&c),
-                }
+        if !self.is_project_class(&class) {
+            return known(&class);
+        }
+        self.value_classes(&class).iter().all(|c| {
+            self.read(|k| note(&mut k.class_facts, c));
+            self.class(c).is_some_and(|d| {
+                !d.custom_metaclass
+                    && names.iter().all(|n| !d.members.contains(*n))
+                    && d.bases.iter().all(|b| {
+                        let base = self.canonical(b);
+                        self.is_project_class(&base) || known(&base)
+                    })
             })
         })
     }

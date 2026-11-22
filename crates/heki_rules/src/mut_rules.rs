@@ -2504,11 +2504,12 @@ pub(crate) fn mut202(
         return;
     }
     let tcx = TypeCtx::new(&unit.input, cx.decls, cx.kb);
+    let classes = below_copies::ClassAnswers::default();
     for f in &unit.input.ir.functions {
         if f.is_class_body {
             continue;
         }
-        Mut202Fn::new(cx, unit, &tcx, returns, f).run(out);
+        Mut202Fn::new(cx, unit, &tcx, returns, &classes, f).run(out);
     }
 }
 
@@ -2517,6 +2518,8 @@ struct Mut202Fn<'a> {
     unit: &'a ModuleUnit<'a>,
     tcx: &'a TypeCtx<'a>,
     returns: &'a ReadOnlyReturns,
+    /// `MUT115`'s class decisions asked so far in the module's check.
+    classes: &'a below_copies::ClassAnswers,
     f: &'a IrFunction,
     /// The facts and tables of `f`: the defining instruction of each variable, looked up per
     /// call operand.
@@ -2573,6 +2576,7 @@ impl<'a> Mut202Fn<'a> {
         unit: &'a ModuleUnit<'a>,
         tcx: &'a TypeCtx<'a>,
         returns: &'a ReadOnlyReturns,
+        classes: &'a below_copies::ClassAnswers,
         f: &'a IrFunction,
     ) -> Self {
         Self {
@@ -2580,6 +2584,7 @@ impl<'a> Mut202Fn<'a> {
             unit,
             tcx,
             returns,
+            classes,
             f,
             ix: FnIndex::new(f, &unit.input.ir.constants),
             key: CheckContext::key(unit, f),
