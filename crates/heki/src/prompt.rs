@@ -6,14 +6,14 @@
 //! command writes no file and exits with 0 once the prompt is printed.
 
 use crate::check::{
-    baseline_key, baseline_path, fail_on, load_and_index, selectors, show_paths, shown_errors,
+    baseline_path, fail_on, load_and_index, selectors, show_paths, shown_dir, shown_errors,
     shown_text,
 };
 use crate::{CheckArgs, JsonSchemaTarget, OutputFormat};
 use anyhow::Result;
 use heki_diagnostics::{Diagnostic, RatchetBaseline, Stylesheet, render};
 use heki_env::{HekiConfig, Severity};
-use heki_rules::project::{Facts, ProjectEnv};
+use heki_rules::project::{Facts, ProjectEnv, baseline_key};
 use heki_rules::{
     Activation, CORE_RULES, Certainty, EffectiveSelectors, RuleMeta, fold_root_causes,
     heuristic_hint,
@@ -157,7 +157,7 @@ pub(crate) fn run(args: &CheckArgs, question: &str) -> Result<ExitCode> {
     let project = &indexed.project;
     let baseline = baseline_path(&args.analysis, &project.env);
     if let Some(path) = &baseline {
-        RatchetBaseline::load(path)?.keep_regressions(&mut diags, &baseline_key(project));
+        RatchetBaseline::load(path)?.keep_regressions(&mut diags, &baseline_key(&project.files));
     }
     fold_root_causes(&mut diags);
     show_paths(&mut diags);
@@ -199,19 +199,9 @@ impl Configuration {
     /// The configuration of `env` for the run of `args`, whose selection resolved
     /// `lint.heuristic` to `heuristic` and which compares with `baseline`.
     fn of(args: &CheckArgs, env: &ProjectEnv, heuristic: bool, baseline: Option<&Path>) -> Self {
-        let config_file = args
-            .analysis
-            .config
-            .clone()
-            .or_else(|| HekiConfig::file_in(&env.root));
-        let root = shown_text(&env.root);
         Self {
-            root: if root.is_empty() {
-                ".".to_owned()
-            } else {
-                root
-            },
-            config_file: config_file.as_deref().map(shown_text),
+            root: shown_dir(&env.root),
+            config_file: env.config_file.as_deref().map(shown_text),
             target_version: env.runtime.python_version.tag(),
             source_roots: env.layout.source_roots.clone(),
             source_roots_from: if env.cfg.src.is_some() {

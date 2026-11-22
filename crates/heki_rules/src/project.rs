@@ -8,7 +8,7 @@ use crate::{
 };
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use heki_ast::{LineIndex, Span};
-use heki_diagnostics::{Diagnostic, InlineIgnores};
+use heki_diagnostics::{Diagnostic, InlineIgnores, RatchetBaseline};
 use heki_effect::{
     Contracts, ModuleInput, ModuleLayout, OptInFacts, ProjectIndex, TypedWrites, UnreadModule,
     analyze_project_for,
@@ -263,6 +263,18 @@ fn walk(dir: &Path) -> ignore::WalkBuilder {
     builder
 }
 
+/// [`walk`] of `dir` that never enters a directory `exclude` leaves out (it may not even be
+/// readable).
+fn walk_project(dir: &Path, root: &Path, exclude: &GlobSet) -> ignore::WalkBuilder {
+    let mut builder = walk(dir);
+    let (dir_root, dir_exclude) = (root.to_path_buf(), exclude.clone());
+    builder.filter_entry(move |e| {
+        !e.file_type().is_some_and(|t| t.is_dir())
+            || !is_excluded(&rel_posix(e.path(), &dir_root), &dir_exclude)
+    });
+    builder
+}
+
 /// A file the walk keeps when no ignore file or `exclude` leaves it out.
 fn walked_python(path: &Path, root: &Path, exclude: &GlobSet) -> bool {
     path.extension().is_some_and(|e| e == "py" || e == "pyi")
@@ -284,14 +296,7 @@ pub fn collect_files(
             files.push(p.clone());
             continue;
         }
-        let mut builder = walk(p);
-        // An excluded directory is never entered (it may not even be readable).
-        let (dir_root, dir_exclude) = (root.to_path_buf(), exclude.clone());
-        builder.filter_entry(move |e| {
-            !e.file_type().is_some_and(|t| t.is_dir())
-                || !is_excluded(&rel_posix(e.path(), &dir_root), &dir_exclude)
-        });
-        for entry in builder.build() {
+        for entry in walk_project(p, root, exclude).build() {
             let entry = entry.map_err(|cause| ProjectError::Walk {
                 path: p.clone(),
                 cause,
@@ -306,6 +311,38 @@ pub fn collect_files(
     files.retain(|f| seen.insert(canonical_or_given(f)));
     files.sort();
     Ok(files)
+}
+
+/// The Python files below `root` that [`collect_files`] over it finds and `analyzed` does not
+/// hold (by project-relative path), in the order of a walk sorted by name: at most `limit` of
+/// them, among the first `max_entries` entries of the walk. Returns them with whether the walk
+/// saw every entry: an entry it cannot read leaves them a lower bound.
+pub fn files_left_out(
+    root: &Path,
+    exclude: &GlobSet,
+    analyzed: &dyn Fn(&str) -> bool,
+    limit: usize,
+    max_entries: usize,
+) -> (Vec<PathBuf>, bool) {
+    let mut builder = walk_project(root, root, exclude);
+    builder.sort_by_file_name(|a, b| a.cmp(b));
+    let mut found = Vec::new();
+    let mut complete = true;
+    for (seen, entry) in builder.build().enumerate() {
+        if seen == max_entries || found.len() == limit {
+            return (found, false);
+        }
+        let Ok(entry) = entry else {
+            complete = false;
+            continue;
+        };
+        let path = entry.path();
+        if path.is_file() && walked_python(path, root, exclude) && !analyzed(&rel_posix(path, root))
+        {
+            found.push(path.to_path_buf());
+        }
+    }
+    (found, complete)
 }
 
 /// Whether [`collect_files`] over the directory `dir` finds `file` (both absolute): the same
@@ -424,6 +461,8 @@ pub struct ProjectOptions<'a> {
 /// Configuration and knowledge bases of a project root.
 pub struct ProjectEnv {
     pub root: PathBuf,
+    /// The file `cfg` was read from (`--config`, or the first configuration file at the root).
+    pub config_file: Option<PathBuf>,
     pub cfg: HekiConfig,
     pub runtime: RuntimeProfile,
     pub kb: EffectiveEcosystemKb,
@@ -443,9 +482,13 @@ impl ProjectEnv {
             None => std::env::current_dir().unwrap_or_else(|_| first.clone()),
         };
         let root = find_root(&first, &working_dir);
-        let cfg = match opts.config {
+        let config_file = opts
+            .config
+            .map(Path::to_path_buf)
+            .or_else(|| HekiConfig::file_in(&root));
+        let cfg = match &config_file {
             Some(path) => HekiConfig::load_from_file(path)?,
-            None => HekiConfig::load_from_dir(&root)?,
+            None => HekiConfig::default(),
         };
         let runtime = match opts.target_version.or(cfg.target_version.as_deref()) {
             Some(t) => PythonVersion::parse_tag(t)
@@ -466,6 +509,7 @@ impl ProjectEnv {
         });
         Ok(Self {
             root,
+            config_file,
             cfg,
             runtime,
             kb,
@@ -713,6 +757,35 @@ impl Indexed {
         let withheld = self.selection.withhold_heuristic(&mut diags);
         Ok((diags, withheld))
     }
+}
+
+/// The path a baseline entry names for a file of `files`: relative to the project root.
+pub fn baseline_key(files: &[ParsedFile]) -> impl Fn(&Path) -> String + '_ {
+    let rel: FxHashMap<&Path, &str> = files
+        .iter()
+        .map(|f| (f.path.as_path(), f.rel.as_str()))
+        .collect();
+    move |p: &Path| {
+        rel.get(p)
+            .map_or_else(|| heki_diagnostics::path_text(p), |r| (*r).to_owned())
+    }
+}
+
+/// For each of `diags` (reports on `files`), whether `baseline` counts it among the regressions,
+/// the reports `heki check` prints with the baseline.
+pub fn regressed(
+    baseline: &RatchetBaseline,
+    diags: &[Diagnostic],
+    files: &[ParsedFile],
+) -> Vec<bool> {
+    let mut regressions = diags.to_vec();
+    baseline.keep_regressions(&mut regressions, &baseline_key(files));
+    // `keep_regressions` keeps the regressions in their order, so one pass pairs them up.
+    let mut next = regressions.iter().peekable();
+    diags
+        .iter()
+        .map(|d| next.next_if(|r| *r == d).is_some())
+        .collect()
 }
 
 /// Drop diagnostics suppressed by `# heki: ignore[...]` / `# noqa` comments of their file.
