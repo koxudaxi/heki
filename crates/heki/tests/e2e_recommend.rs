@@ -114,7 +114,7 @@ fn reports_now_are_what_heki_check_shows_and_withholds() {
         out,
         "heki recommend (experimental) on .: 8 file(s), 20 function(s)\n\
          \n\
-         Reports now  2 shown (2 exact, 0 heuristic), 2 heuristic withheld, 4 heuristic rule(s) \
+         Reports now  2 shown (2 exact, 0 heuristic), 2 heuristic withheld, 5 heuristic rule(s) \
          off\n\
          \n\
          Rules worth enabling here\n\
@@ -125,7 +125,7 @@ fn reports_now_are_what_heki_check_shows_and_withholds() {
          \x20 EFF111        1      -  slowdown     not measured                      -          \
          no: slower code, not a bug\n\
          \x20 No reports here: EFF102, EFF105, EFF106, EFF107, EFF109, EFF110, EFF113, MUT101, \
-         MUT106, MUT107, MUT108, MUT111, MUT112, MUT113, MUT115, OPT112\n\
+         MUT106, MUT107, MUT108, MUT111, MUT112, MUT113, MUT115, MUT118, OPT112\n\
          \x20 MUT103: it compares with a saved summary snapshot: run `heki snapshot --write`, then \
          select it.\n\
          \n\
@@ -133,7 +133,7 @@ fn reports_now_are_what_heki_check_shows_and_withholds() {
     );
     let (_, _, note) = p.heki(&["check"]);
     assert!(
-        note.contains("4 heuristic rule(s) are off and 2 heuristic report(s) are not shown"),
+        note.contains("5 heuristic rule(s) are off and 2 heuristic report(s) are not shown"),
         "{note}"
     );
     // The same counts as `heki check` for every selection, also with `lint.heuristic`.
@@ -595,7 +595,8 @@ fn rules_worth_enabling_follow_the_policy() {
         \x20 MUT107        1      -  bug          78% (65-87%), n=50, 2026-11-21    4%         no: real harm below 10%\n\
         \x20 Optional (experimental, never in the block)\n\
         \x20 EFF109        1      -  bug          not measured                      -          no: experimental\n\
-        \x20 No reports here: EFF102, EFF105, EFF106, EFF110, EFF113, MUT101, MUT108, MUT111, MUT112, MUT113, MUT115, OPT112\n\
+        \x20 No reports here: EFF102, EFF105, EFF106, EFF110, EFF113, MUT101, MUT108, MUT111, MUT112, MUT113, \
+        MUT115, MUT118, OPT112\n\
         \x20 MUT103: it compares with a saved summary snapshot: run `heki snapshot --write`, then select it."
     );
     assert!(
