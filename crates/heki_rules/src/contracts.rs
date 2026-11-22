@@ -514,6 +514,7 @@ pub fn opt_in_facts(selection: &RuleSelection) -> OptInFacts {
             .iter()
             .any(|code| selection.is_enabled(code)),
         shared_state: false,
+        blind_spots: false,
     }
 }
 
@@ -524,6 +525,16 @@ pub fn inspect_facts(selection: &RuleSelection) -> OptInFacts {
     OptInFacts {
         return_origins: true,
         shared_state: true,
+        ..opt_in_facts(selection)
+    }
+}
+
+/// [`opt_in_facts`] with the facts `heki recommend` reads besides the rules: the calls heki is
+/// blind to ([`crate::blind_spots`]). Neither `heki check` nor the language server computes
+/// them.
+pub fn recommend_facts(selection: &RuleSelection) -> OptInFacts {
+    OptInFacts {
+        blind_spots: true,
         ..opt_in_facts(selection)
     }
 }
