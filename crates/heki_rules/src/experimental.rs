@@ -119,7 +119,7 @@ pub const EXPERIMENTAL_FEATURES: &[ExperimentalFeature] = &[
         id: "rule.EFF112",
         kind: ExperimentalKind::Rule,
         target: "EFF112",
-        since: "0.2.2",
+        since: "0.2.4",
         reason: "Its precision is measured on a sample of reports of one corpus only, and its \
             premises are not yet certified.",
         tracking: None,
