@@ -828,7 +828,9 @@ you declare. An exact rule is certified: every report it made on the development
 frozen holdout corpus was checked by hand, and none was false
 ([Rule Precision](https://heki.koxudaxi.dev/precision/#certifications)). The exact rules are:
 
+- [`MUT101` (cached-property-stale-mutation)](https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/)
 - [`MUT110` (readonly-param-mutation)](https://heki.koxudaxi.dev/rules/readonly-param-mutation/)
+- [`MUT111` (cached-property-stale-read)](https://heki.koxudaxi.dev/rules/cached-property-stale-read/)
 - [`MUT114` (cached-result-mutation)](https://heki.koxudaxi.dev/rules/cached-result-mutation/)
 - [`EFF101` (async-blocking-call)](https://heki.koxudaxi.dev/rules/async-blocking-call/)
 - [`EFF103` (loop-db-query)](https://heki.koxudaxi.dev/rules/loop-db-query/)
