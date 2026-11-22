@@ -8,8 +8,12 @@
 //! - W1: a function in a call cycle (direct or mutual recursion) that touches IR ids;
 //! - W2: a worklist (`while let Some(..) = x.pop()`, `pop_front()`, `pop_first()`,
 //!   `pop_last()`) in a function that touches IR ids;
-//! - W3: a dense fixpoint (`loop { .. }` or `while flag { .. }` around a `for` over the
-//!   `blocks`, `phis`, or `insts` of a function, or with a size or `before` stop test);
+//! - W3: a pass repeated until nothing changes: a `loop`, a `while`, or a `for` over a range
+//!   whose end is no constant (`0..links`, `1..`), around a `for` over the `blocks`, `phis`, or
+//!   `insts` of a function or its reverse postorder, or stopping on the facts `before` the pass,
+//!   on a size (a `loop` or `while`), or on a flag each pass clears and sets (`changed`). Its
+//!   cost is the passes times the function: the passes a chain laid against the order of the
+//!   sweep takes grow with the chain;
 //! - W4: a linear lookup that `heki_ir::walk::FnShape` answers from a table (`def_inst`,
 //!   `const_int`, `const_str`, `const_bool`, `block_loop_depth`, `innermost_loop`,
 //!   `is_in_loop`, `predecessors`, `rpo_blocks`, `.body.contains(..)`).
@@ -292,29 +296,222 @@ fn reads_ir_lists(expr: &Expr) -> bool {
     fields.0
 }
 
-/// Whether a loop body iterates over a function's blocks, phis, or instructions, or stops on a
-/// comparison with a size or with the facts `before` the pass.
-fn dense_body(body: &syn::Block) -> bool {
-    struct Dense(bool);
+/// Whether `expr` sweeps a whole function: reads its `blocks` or calls `rpo` / `rpo_blocks`.
+fn sweeps_function(expr: &Expr) -> bool {
+    struct Sweep(bool);
+    impl<'ast> Visit<'ast> for Sweep {
+        fn visit_member(&mut self, m: &'ast Member) {
+            self.0 |= matches!(m, Member::Named(id) if id == "blocks");
+        }
+        fn visit_expr_method_call(&mut self, m: &'ast syn::ExprMethodCall) {
+            self.0 |= m.method == "rpo" || m.method == "rpo_blocks";
+            visit::visit_expr_method_call(self, m);
+        }
+    }
+    let mut sweep = Sweep(false);
+    sweep.visit_expr(expr);
+    sweep.0
+}
+
+/// Whether `expr` is a constant: a literal, or a path to an `UPPER_CASE` constant.
+fn is_constant(expr: &Expr) -> bool {
+    match expr {
+        Expr::Lit(_) => true,
+        Expr::Path(p) => p.path.segments.last().is_some_and(|s| {
+            let name = s.ident.to_string();
+            name.chars().any(|c| c.is_ascii_uppercase())
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+        }),
+        Expr::Paren(p) => is_constant(&p.expr),
+        Expr::Binary(b) => is_constant(&b.left) && is_constant(&b.right),
+        _ => false,
+    }
+}
+
+/// Whether `block` leaves the loop around it: a `break` or a `return` outside a closure.
+fn leaves(block: &syn::Block) -> bool {
+    struct Leaves(bool);
+    impl<'ast> Visit<'ast> for Leaves {
+        fn visit_expr_break(&mut self, _: &'ast syn::ExprBreak) {
+            self.0 = true;
+        }
+        fn visit_expr_return(&mut self, _: &'ast syn::ExprReturn) {
+            self.0 = true;
+        }
+        fn visit_expr_closure(&mut self, _: &'ast syn::ExprClosure) {}
+    }
+    let mut leaves = Leaves(false);
+    leaves.visit_block(block);
+    leaves.0
+}
+
+/// Whether a `for` loop repeats its body a number of times that grows with the input: over a
+/// range whose end is not a constant (`0..links`, `1..`), unless the body leaves the loop on a
+/// comparison of the loop variable with a constant (`if pass > MAX_PASSES { break }`).
+fn repeats_unboundedly(f: &syn::ExprForLoop) -> bool {
+    let Expr::Range(range) = &*f.expr else {
+        return false;
+    };
+    if range.end.as_deref().is_some_and(is_constant) {
+        return false;
+    }
+    let Pat::Ident(var) = &*f.pat else {
+        return true;
+    };
+    struct Compares<'v>(&'v syn::Ident, bool);
+    impl<'ast> Visit<'ast> for Compares<'_> {
+        fn visit_expr_binary(&mut self, b: &'ast syn::ExprBinary) {
+            use syn::BinOp::{Eq, Ge, Gt, Le, Lt, Ne};
+            let compares = matches!(b.op, Eq(_) | Ne(_) | Lt(_) | Le(_) | Gt(_) | Ge(_));
+            let is_var = |e: &Expr| matches!(e, Expr::Path(p) if p.path.is_ident(self.0));
+            self.1 |= compares
+                && ((is_var(&b.left) && is_constant(&b.right))
+                    || (is_var(&b.right) && is_constant(&b.left)));
+            visit::visit_expr_binary(self, b);
+        }
+    }
+    struct Stop<'v>(&'v syn::Ident, bool);
+    impl<'ast> Visit<'ast> for Stop<'_> {
+        fn visit_expr_if(&mut self, i: &'ast syn::ExprIf) {
+            if leaves(&i.then_branch) {
+                let mut compares = Compares(self.0, false);
+                compares.visit_expr(&i.cond);
+                self.1 |= compares.1;
+            }
+            visit::visit_expr_if(self, i);
+        }
+        fn visit_expr_closure(&mut self, _: &'ast syn::ExprClosure) {}
+    }
+    let mut stop = Stop(&var.ident, false);
+    stop.visit_block(&f.body);
+    !stop.1
+}
+
+/// How a loop may stop.
+enum Stop<'e> {
+    /// `loop`: on a test in its body.
+    Body,
+    /// `while cond`.
+    While(&'e Expr),
+    /// `for _ in 0..n`: after its count, or on a test in its body.
+    Count,
+}
+
+/// Whether a loop repeats a pass until nothing changes: its body iterates over a function's
+/// blocks, phis, or instructions or its reverse postorder, or the loop stops on a comparison with
+/// the facts `before` the pass, on a size (a `loop` or `while`), or on a flag each pass clears
+/// and sets (`changed = false`, then `changed = true` or `changed |= ..`). A closure in the body
+/// is taken to run in each pass, so its sweeps and flag changes count, but no test in it stops
+/// the loop.
+fn dense_body(body: &syn::Block, stop: Stop<'_>) -> bool {
+    #[derive(Default)]
+    struct Dense {
+        found: bool,
+        size_test: bool,
+        /// Names the body sets to `false`.
+        cleared: BTreeSet<String>,
+        /// Names the body sets to `true` or ors into.
+        set: BTreeSet<String>,
+        /// Names read by a `while` condition, or by the condition of an `if` that leaves the
+        /// loop.
+        tested: BTreeSet<String>,
+        /// The closures around the expression visited.
+        closures: usize,
+    }
+    fn names(expr: &Expr, out: &mut BTreeSet<String>) {
+        struct Names<'o>(&'o mut BTreeSet<String>);
+        impl<'ast> Visit<'ast> for Names<'_> {
+            fn visit_expr_path(&mut self, p: &'ast syn::ExprPath) {
+                if let Some(id) = p.path.get_ident() {
+                    self.0.insert(id.to_string());
+                }
+            }
+        }
+        Names(out).visit_expr(expr);
+    }
+    fn bool_literal(expr: &Expr) -> Option<bool> {
+        match expr {
+            Expr::Lit(l) => match &l.lit {
+                syn::Lit::Bool(b) => Some(b.value),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+    impl Dense {
+        fn assigned(&mut self, name: String, value: Option<bool>) {
+            match value {
+                Some(false) => self.cleared.insert(name),
+                Some(true) => self.set.insert(name),
+                None => false,
+            };
+        }
+    }
     impl<'ast> Visit<'ast> for Dense {
         fn visit_expr_for_loop(&mut self, f: &'ast syn::ExprForLoop) {
-            self.0 |= reads_ir_lists(&f.expr);
+            self.found |= reads_ir_lists(&f.expr) || sweeps_function(&f.expr);
             visit::visit_expr_for_loop(self, f);
         }
         fn visit_expr_binary(&mut self, b: &'ast syn::ExprBinary) {
             let compares = matches!(b.op, syn::BinOp::Eq(_) | syn::BinOp::Ne(_));
             let is_len = |e: &Expr| matches!(e, Expr::MethodCall(m) if m.method == "len");
             let is_before = |e: &Expr| matches!(e, Expr::Path(p) if p.path.is_ident("before"));
-            let size_test = (is_len(&b.left) && matches!(&*b.right, Expr::Path(_)))
-                || (is_len(&b.right) && matches!(&*b.left, Expr::Path(_)));
-            self.0 |= compares && (size_test || is_before(&b.left) || is_before(&b.right));
+            self.size_test |= compares
+                && ((is_len(&b.left) && matches!(&*b.right, Expr::Path(_)))
+                    || (is_len(&b.right) && matches!(&*b.left, Expr::Path(_))));
+            self.found |= compares && (is_before(&b.left) || is_before(&b.right));
+            if let (syn::BinOp::BitOrAssign(_), Expr::Path(p)) = (&b.op, &*b.left)
+                && let Some(id) = p.path.get_ident()
+            {
+                self.set.insert(id.to_string());
+            }
             visit::visit_expr_binary(self, b);
+        }
+        fn visit_expr_assign(&mut self, a: &'ast syn::ExprAssign) {
+            if let Expr::Path(p) = &*a.left
+                && let Some(id) = p.path.get_ident()
+            {
+                self.assigned(id.to_string(), bool_literal(&a.right));
+            }
+            visit::visit_expr_assign(self, a);
+        }
+        fn visit_local(&mut self, l: &'ast syn::Local) {
+            let name = match &l.pat {
+                Pat::Ident(p) => Some(&p.ident),
+                Pat::Type(t) => match &*t.pat {
+                    Pat::Ident(p) => Some(&p.ident),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let (Some(name), Some(init)) = (name, &l.init) {
+                self.assigned(name.to_string(), bool_literal(&init.expr));
+            }
+            visit::visit_local(self, l);
+        }
+        fn visit_expr_if(&mut self, i: &'ast syn::ExprIf) {
+            if self.closures == 0 && leaves(&i.then_branch) {
+                names(&i.cond, &mut self.tested);
+            }
+            visit::visit_expr_if(self, i);
+        }
+        fn visit_expr_closure(&mut self, c: &'ast syn::ExprClosure) {
+            self.closures += 1;
+            visit::visit_expr_closure(self, c);
+            self.closures -= 1;
         }
         fn visit_item_fn(&mut self, _: &'ast syn::ItemFn) {}
     }
-    let mut dense = Dense(false);
+    let mut dense = Dense::default();
+    if let Stop::While(cond) = stop {
+        names(cond, &mut dense.tested);
+        dense.visit_expr(cond);
+    }
     dense.visit_block(body);
-    dense.0
+    let flag = (dense.cleared.intersection(&dense.set)).any(|name| dense.tested.contains(name));
+    dense.found || flag || (dense.size_test && !matches!(stop, Stop::Count))
 }
 
 impl<'ast> Visit<'ast> for Scan {
@@ -367,15 +564,19 @@ impl<'ast> Visit<'ast> for Scan {
                     matches!(&*l.expr, Expr::MethodCall(m) if POPS.iter().any(|p| m.method == p));
                 self.worklist |= some && pops;
             }
-            Expr::Path(p) if p.path.get_ident().is_some() => self.dense |= dense_body(&w.body),
-            _ => {}
+            cond => self.dense |= dense_body(&w.body, Stop::While(cond)),
         }
         visit::visit_expr_while(self, w);
     }
 
     fn visit_expr_loop(&mut self, l: &'ast syn::ExprLoop) {
-        self.dense |= dense_body(&l.body);
+        self.dense |= dense_body(&l.body, Stop::Body);
         visit::visit_expr_loop(self, l);
+    }
+
+    fn visit_expr_for_loop(&mut self, f: &'ast syn::ExprForLoop) {
+        self.dense |= repeats_unboundedly(f) && dense_body(&f.body, Stop::Count);
+        visit::visit_expr_for_loop(self, f);
     }
 
     fn visit_macro(&mut self, m: &'ast syn::Macro) {
@@ -765,4 +966,33 @@ fn hand_written_walks_are_only_those_allowed() {
         ));
     }
     assert!(problems.is_empty(), "{}", problems.join("\n\n"));
+}
+
+/// W3 by how a loop stops: a pass count only a test that leaves the loop caps, a flag or a
+/// comparison with `before` of the loop itself (in a `while` condition too), not of a closure
+/// in it.
+#[test]
+fn dense_loops_are_told_by_how_they_stop() {
+    let dense = |code: &str| {
+        let f: syn::ItemFn = syn::parse_str(code).unwrap();
+        let mut scan = Scan::default();
+        scan.visit_block(&f.block);
+        scan.dense
+    };
+    assert!(!dense(
+        "fn f() { for pass in 0..n { if pass > MAX_PASSES { break; } for b in f.blocks {} } }"
+    ));
+    assert!(dense(
+        "fn f() { for pass in 0..n { let next = pass + 1; for b in f.blocks {} } }"
+    ));
+    assert!(dense(
+        "fn f() { loop { let mut changed = false; changed |= step(); if !changed { return; } } }"
+    ));
+    assert!(!dense(
+        "fn f() { loop { let s = || { let mut changed = false; changed |= step(); \
+         if !changed { return; } }; s(); break; } }"
+    ));
+    assert!(dense(
+        "fn f() { while facts != before { before = facts.clone(); step(&mut facts); } }"
+    ));
 }

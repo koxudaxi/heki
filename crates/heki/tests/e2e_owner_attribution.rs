@@ -288,21 +288,21 @@ fn a_lexical_read_contract_judges_the_function_holding_the_read() {
                 5,
                 12,
                 "MUT203",
-                "`_peek` reads `Vault.secret` (direct_attr) outside the read owners of `vault`"
+                "`_peek` reads `Vault.secret` (by attribute) outside the read owners of `vault`"
             ),
             report(
                 "pkg/peek.py",
                 9,
                 12,
                 "MUT203",
-                "`show` reads `Vault.secret` (direct_attr) outside the read owners of `vault`"
+                "`show` reads `Vault.secret` (by attribute) outside the read owners of `vault`"
             ),
             report(
                 "pkg/peek.py",
                 13,
                 12,
                 "MUT206",
-                "`guess` reads `secret` (direct_attr) on an object of unknown class outside the read owners of `vault`: heki cannot tell whether it reads `Vault.secret`"
+                "`guess` reads `secret` (by attribute) on an object of unknown class outside the read owners of `vault`: heki cannot tell whether it reads `Vault.secret`"
             ),
         ]
     );
@@ -376,7 +376,7 @@ fn a_lexical_write_contract_judges_the_function_holding_the_write() {
         17,
         5,
         "MUT201",
-        "`touch` writes `Model.fields` (indirect_helper) via `pkg.writers.fill` outside the write owners of `model`",
+        "`touch` writes `Model.fields` (through a helper) via `pkg.writers.fill` outside the write owners of `model`",
     );
     // `touch` hands the field to a helper that changes it, and nothing calls it.
     assert_eq!(run(""), vec![touch.clone()]);
@@ -391,14 +391,14 @@ fn a_lexical_write_contract_judges_the_function_holding_the_write() {
                 5,
                 5,
                 "MUT201",
-                "`_reset` writes `Model.fields` (direct_attr) outside the write owners of `model`"
+                "`_reset` writes `Model.fields` (by attribute) outside the write owners of `model`"
             ),
             report(
                 "pkg/writers.py",
                 9,
                 5,
                 "MUT201",
-                "`public_set` writes `Model.fields` (direct_attr) outside the write owners of `model`"
+                "`public_set` writes `Model.fields` (by attribute) outside the write owners of `model`"
             ),
             touch,
             report(
@@ -406,7 +406,7 @@ fn a_lexical_write_contract_judges_the_function_holding_the_write() {
                 21,
                 5,
                 "MUT201",
-                "`_touch_privately` writes `Model.fields` (indirect_helper) via `pkg.writers.fill` outside the write owners of `model`"
+                "`_touch_privately` writes `Model.fields` (through a helper) via `pkg.writers.fill` outside the write owners of `model`"
             ),
             report(
                 "pkg/writers.py",
@@ -517,14 +517,14 @@ fn the_helpers_only_initialization_runs_on_its_own_self_stay_allowed() {
                 line,
                 write_column,
                 "MUT201",
-                "writes `Model.imports` (container_mut)",
+                "writes `Model.imports` (in place)",
                 "write owners of `imports`",
             ),
             at(
                 line,
                 read_column,
                 "MUT203",
-                "reads `Model.name` (direct_attr)",
+                "reads `Model.name` (by attribute)",
                 "read owners of `name`",
             ),
             at(
@@ -541,7 +541,7 @@ fn the_helpers_only_initialization_runs_on_its_own_self_stay_allowed() {
         61,
         9,
         "MUT205",
-        "`Model.rename` writes an attribute named at run time (set_attr) on `Model` outside the write owners of `imports`: heki cannot tell whether it writes `Model.imports`",
+        "`Model.rename` writes an attribute named at run time (with `setattr`) on `Model` outside the write owners of `imports`: heki cannot tell whether it writes `Model.imports`",
     );
     // Through the method on `self`, the static method and the module function handed `self`,
     // the public method, the chain of two helpers, and the computed name, the initializer
@@ -759,7 +759,7 @@ def other(resolver: Resolver) -> int:
             24,
             16,
             "MUT203",
-            "`other` reads `pkg.model.Resolver._seen` (direct_attr) inside the forbidden readers of `host-private-read`"
+            "`other` reads `pkg.model.Resolver._seen` (by attribute) inside the forbidden readers of `host-private-read`"
         )]
     );
 }

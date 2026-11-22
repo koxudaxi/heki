@@ -27,7 +27,7 @@ mod paths;
 pub use origin::{Carries, ItemOrigin, ItemOrigins, ItemSource};
 pub use paths::{Decided, ModuleBindings, Must, PathReader, Paths, Progress};
 
-use crate::walk::{Answer, Budget, Def, FnShape};
+use crate::walk::{Answer, Budget, Def, FnShape, Use, Visit, reach};
 use crate::{
     BinOpKind, BlockId, BuiltinKind, CompareOpKind, ConstLiteral, DictEntry, FunctionId,
     FunctionKind, Inst, InstKind, IrFunction, LenCap, LoopBound, NaturalLoop, Terminator,
@@ -975,7 +975,14 @@ impl<'a> FnIndex<'a> {
     ) -> Option<u32> {
         // The methods of a container of unknown kind may add any number of items.
         let counted = !origins.shared && !origins.opaque;
-        let alias = self.aliases(&origins.roots);
+        // Aliases past the walk's budget may be grown any number of times. A step per alias and
+        // per instruction reading one is at most three per IR unit, which the budget counts
+        // without ever reaching.
+        let budget = Budget::of_function("heki_ir::facts::FnIndex::growth", self.f);
+        let alias = self
+            .aliases(&origins.roots, &budget)
+            .map(Some)
+            .open_means(None)?;
         if self.captured(&alias) {
             return None;
         }
@@ -986,37 +993,40 @@ impl<'a> FnIndex<'a> {
             !origins.opaque && !kinds.is_empty() && kinds.iter().all(|k| *k == BuiltinKind::Dict);
         let mut added: u32 = 0;
         let mut ops = Vec::new();
-        let blocks =
-            self.f.blocks.iter().filter(|bb| {
-                within.is_none_or(|w| w.get(bb.id.0 as usize).copied().unwrap_or(false))
-            });
-        for bb in blocks {
-            for (i, inst) in bb.insts.iter().enumerate() {
-                if sink == Some(Sink::Store(bb.id, i)) {
-                    continue;
-                }
-                if counted
-                    && let Some(items) = self.items_added(inst, (bb.id, i), &alias, dict_only)
-                {
-                    let runs = self.runs(bb.id, &origins.roots, &alias)?;
-                    added = added.checked_add(items?.checked_mul(runs)?)?;
-                    if added > SMALL_MAX {
+        // Only what reads an alias can grow it.
+        let reading = self.reading(&alias, within);
+        budget.take(reading.len()).then_some(())?;
+        for (b, at) in reading {
+            let bb = self.f.block(b);
+            let Some(i) = at else {
+                match &bb.terminator {
+                    Terminator::Return(Some(v))
+                        if sink == Some(Sink::Return) && alias.contains(v) => {}
+                    Terminator::Return(Some(v)) | Terminator::Raise(Some(v))
+                        if alias.contains(v) =>
+                    {
                         return None;
                     }
-                    continue;
+                    _ => {}
                 }
-                ops.clear();
-                self.grown_operands(inst, list_only, &mut ops);
-                if ops.iter().any(|v| alias.contains(v)) {
-                    return None;
-                }
+                continue;
+            };
+            let inst = &bb.insts[i];
+            if sink == Some(Sink::Store(b, i)) {
+                continue;
             }
-            match &bb.terminator {
-                Terminator::Return(Some(v)) if sink == Some(Sink::Return) && alias.contains(v) => {}
-                Terminator::Return(Some(v)) | Terminator::Raise(Some(v)) if alias.contains(v) => {
+            if counted && let Some(items) = self.items_added(inst, (b, i), &alias, dict_only) {
+                let runs = self.runs(b, &origins.roots, &alias)?;
+                added = added.checked_add(items?.checked_mul(runs)?)?;
+                if added > SMALL_MAX {
                     return None;
                 }
-                _ => {}
+                continue;
+            }
+            ops.clear();
+            self.grown_operands(inst, list_only, &mut ops);
+            if ops.iter().any(|v| alias.contains(v)) {
+                return None;
             }
         }
         Some(added)
@@ -1042,31 +1052,66 @@ impl<'a> FnIndex<'a> {
             .is_none()
     }
 
+    /// The instructions (`Some` index) and terminators (`None`) reading one of `alias`, in the
+    /// blocks of `within` (by block id, all when `None`), in block order: the questions they
+    /// ask keep the order of a scan of the function.
+    fn reading(
+        &self,
+        alias: &FxHashSet<VarId>,
+        within: Option<&[bool]>,
+    ) -> Vec<(BlockId, Option<usize>)> {
+        let mut reading: Vec<(BlockId, Option<usize>)> = (alias.iter())
+            .flat_map(|v| self.shape.readers(*v))
+            .filter_map(|u| match *u {
+                Use::Inst(b, i) => Some((b, Some(i as usize))),
+                Use::Terminator(b) => Some((b, None)),
+                Use::Phi(..) => None,
+            })
+            .filter(|(b, _)| within.is_none_or(|w| w.get(b.0 as usize).copied().unwrap_or(false)))
+            .collect();
+        // A block's terminator comes after its instructions.
+        reading.sort_unstable_by_key(|(b, i)| (*b, i.is_none(), *i));
+        reading.dedup();
+        reading
+    }
+
     /// The variables that may hold the objects of `roots`: they, and the copies and phis of
-    /// them (and `min` / `max` of several, which return one).
-    fn aliases(&self, roots: &[VarId]) -> FxHashSet<VarId> {
+    /// them (and `min` / `max` of several, which return one). Open past the walk's budget.
+    fn aliases(&self, roots: &[VarId], budget: &Budget) -> Answer<FxHashSet<VarId>> {
         let f = self.f;
-        let mut alias: FxHashSet<VarId> = roots.iter().copied().collect();
-        loop {
-            let before = alias.len();
-            for bb in &f.blocks {
-                for phi in &bb.phis {
-                    if phi.incoming.iter().any(|(_, x)| alias.contains(x)) {
-                        alias.insert(phi.dst);
+        let mut alias: FxHashSet<VarId> = FxHashSet::default();
+        // A `min` of many aliases is reached once per argument: its arguments are indexed once,
+        // not scanned at each. Only they are sources, not the callee or a keyword value.
+        let mut arguments: FxHashMap<(BlockId, u32), FxHashSet<VarId>> = FxHashMap::default();
+        let holders = |v: VarId, out: &mut Vec<VarId>| {
+            for u in self.shape.readers(v) {
+                match *u {
+                    Use::Phi(b, k) => out.push(f.block(b).phis[k as usize].dst),
+                    Use::Inst(b, k) => {
+                        let Some((dst, sources)) =
+                            self.alias_of_operands(&f.block(b).insts[k as usize])
+                        else {
+                            continue;
+                        };
+                        let source = match sources {
+                            [only] => *only == v,
+                            _ => (arguments.entry((b, k)))
+                                .or_insert_with(|| sources.iter().copied().collect())
+                                .contains(&v),
+                        };
+                        if source {
+                            out.push(dst);
+                        }
                     }
-                }
-                for inst in &bb.insts {
-                    if let Some((dst, sources)) = self.alias_of_operands(inst)
-                        && sources.iter().any(|x| alias.contains(x))
-                    {
-                        alias.insert(dst);
-                    }
+                    Use::Terminator(_) => {}
                 }
             }
-            if alias.len() == before {
-                return alias;
-            }
-        }
+        };
+        let walked = reach(budget, roots.iter().copied(), holders, |v| {
+            alias.insert(v);
+            Visit::<()>::Expand
+        });
+        walked.map(|_| alias)
     }
 
     /// Some of `alias` is a name a closure captures: anything may happen to it.
@@ -1333,35 +1378,33 @@ impl<'a> FnIndex<'a> {
                 ops.push(*v);
             }
         }
-        grown.extend(ops);
+        let captured: FxHashSet<&str> = f.captured_vars.iter().map(String::as_str).collect();
         for (i, name) in f.var_names.iter().enumerate() {
-            if name
-                .as_deref()
-                .is_some_and(|n| f.captured_vars.iter().any(|c| c == n))
-            {
-                grown.insert(VarId(i as u32));
+            if name.as_deref().is_some_and(|n| captured.contains(n)) {
+                ops.push(VarId(i as u32));
             }
         }
         // An alias's growth is its source's.
-        loop {
-            let before = grown.len();
-            for bb in &f.blocks {
-                for phi in &bb.phis {
-                    if grown.contains(&phi.dst) {
-                        grown.extend(phi.incoming.iter().map(|(_, v)| *v));
-                    }
-                }
-                for inst in &bb.insts {
-                    if let Some((dst, sources)) = self.alias_of_operands(inst)
-                        && grown.contains(&dst)
-                    {
-                        grown.extend(sources);
-                    }
+        let budget = Budget::of_function("heki_ir::facts::FnIndex::grown_vars", f);
+        let sources = |v: VarId, out: &mut Vec<VarId>| match self.shape.def(v) {
+            Def::Phi(b, k) => {
+                out.extend(f.block(b).phis[k as usize].incoming.iter().map(|(_, x)| *x));
+            }
+            Def::Inst(b, k) => {
+                if let Some((_, sources)) = self.alias_of_operands(&f.block(b).insts[k as usize]) {
+                    out.extend(sources);
                 }
             }
-            if grown.len() == before {
-                return grown;
-            }
+            Def::Param | Def::None => {}
+        };
+        let walked = reach(&budget, ops, sources, |v| {
+            grown.insert(v);
+            Visit::<()>::Expand
+        });
+        // Past the budget, anything may be grown.
+        match walked {
+            Answer::Known(_) => grown,
+            Answer::Open => (0..f.var_names.len()).map(|i| VarId(i as u32)).collect(),
         }
     }
 
@@ -1918,29 +1961,33 @@ impl<'a> FnIndex<'a> {
                         })
                 })
                 .collect();
-            let root = self.aliases(&[p.root]);
             let mut ops = Vec::new();
-            let root_changed = self
-                .f
-                .blocks
-                .iter()
-                .filter(|bb| on_the_way[bb.id.0 as usize])
-                .flat_map(|bb| &bb.insts)
-                .any(|i| match &i.kind {
-                    InstKind::AttrLoad { .. } => false,
-                    InstKind::AttrStore { obj, .. }
-                    | InstKind::AttrDelete { obj, .. }
-                    | InstKind::SubscriptDelete { obj, .. }
-                        if root.contains(obj) =>
-                    {
-                        true
-                    }
-                    _ => {
-                        ops.clear();
-                        self.grown_operands(i, false, &mut ops);
-                        ops.iter().any(|o| root.contains(o))
-                    }
-                });
+            // A root whose aliases are past the walk's budget may be changed on the way. A step
+            // per alias is at most one per IR unit, which the budget counts without ever reaching.
+            let budget = Budget::of_function("heki_ir::facts::FnIndex::guarded_len", self.f);
+            let root_changed = self.aliases(&[p.root], &budget).map(|root| {
+                self.f
+                    .blocks
+                    .iter()
+                    .filter(|bb| on_the_way[bb.id.0 as usize])
+                    .flat_map(|bb| &bb.insts)
+                    .any(|i| match &i.kind {
+                        InstKind::AttrLoad { .. } => false,
+                        InstKind::AttrStore { obj, .. }
+                        | InstKind::AttrDelete { obj, .. }
+                        | InstKind::SubscriptDelete { obj, .. }
+                            if root.contains(obj) =>
+                        {
+                            true
+                        }
+                        _ => {
+                            ops.clear();
+                            self.grown_operands(i, false, &mut ops);
+                            ops.iter().any(|o| root.contains(o))
+                        }
+                    })
+            });
+            let root_changed = root_changed.open_means(true);
             let mut values = vec![v];
             values.extend(linked.iter().map(|g| g.var));
             if !linked.is_empty() && !root_changed && unchanged(values) {
