@@ -433,7 +433,8 @@ Reading an attribute on an instance whose MRO declares no type for it takes the 
 `completions` is `Completions`, whose `create` the catalog lists), only where the row is
 established (`ProjectDecls::catalog_attribute`): the value is an instance (a class object, a
 union, `Any`, and the result of a factory the catalog does not know are not typed), the class it
-may be under R2 (the class, every project subclass) each finds the same row first along its MRO,
+may be under R2 (the class, every project subclass, at most 64 classes, decided once per class
+and name) each finds the same row first along its MRO,
 no project class on the way binds the name (in its body, on `self`, or on the class object: an
 untyped override is no absent one), none defines `__getattribute__` or has a metaclass heki does
 not know, and no base heki knows nothing of, or a library class without the row, comes first.

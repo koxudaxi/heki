@@ -1769,6 +1769,52 @@ fn class_constant_reads_on_a_class_with_many_subclasses_decide_it_once() {
     assert_eq!(reported[0]["qualname"], "write");
 }
 
+/// A library class with a catalogued attribute, thousands of project subclasses, and as many
+/// functions reading the attribute on an instance of it: whether every class the instance may be
+/// takes the row is decided once per class and name, over at most `DISPATCH_CLASS_LIMIT`
+/// classes, not once per read over every subclass. Past the limit the read stays untyped; on a
+/// subclass with no subclasses of its own the row types it.
+#[test]
+fn catalogued_attribute_reads_on_a_class_with_many_subclasses_decide_it_once() {
+    let found = check_linear(3_000, |classes| {
+        let mut lines = vec!["from acme import Client".to_owned()];
+        for i in 0..classes {
+            lines.extend([
+                String::new(),
+                String::new(),
+                format!("class Client{i}(Client):"),
+                "    pass".to_owned(),
+            ]);
+        }
+        for i in 0..=classes {
+            let (name, class) = if i == classes {
+                ("leaf".to_owned(), "Client0")
+            } else {
+                (format!("read{i}"), "Client")
+            };
+            lines.extend([
+                String::new(),
+                String::new(),
+                format!("async def {name}(c: {class}) -> None:"),
+                "    c.chat.completions.create(model=\"m\")".to_owned(),
+            ]);
+        }
+        let p = Project::new(&format!("bounds_catalogued_attribute_reads_{classes}"));
+        p.write(
+            "pyproject.toml",
+            "[project]\nname = \"t\"\n\n[[tool.heki.ecosystem]]\nsymbol = \"acme.Completions.create\"\neffects = [\"blocking_net\"]\n\n[[tool.heki.ecosystem]]\nsymbol = \"acme.Client.chat\"\nattribute-type = \"acme.Chat\"\n\n[[tool.heki.ecosystem]]\nsymbol = \"acme.Chat.completions\"\nattribute-type = \"acme.Completions\"\n",
+        )
+        .write("m.py", &(lines.join("\n") + "\n"));
+        p
+    });
+    let reported: Vec<&Value> = found
+        .iter()
+        .filter(|d| d["rule_code"] == "EFF101")
+        .collect();
+    assert_eq!(reported.len(), 1, "{found:#?}");
+    assert_eq!(reported[0]["qualname"], "leaf");
+}
+
 /// A dataclass whose field defaults to an `object()` sentinel, with thousands of subclasses,
 /// each tested against the sentinel and deep-copied in functions of its own, and the base
 /// deep-copied as often (`MUT118`): what a deep copy of each class gives, and which tests read the
