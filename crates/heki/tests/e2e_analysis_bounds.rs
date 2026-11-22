@@ -165,8 +165,7 @@ fn step_growth(small: &StepsByOwner, large: &StepsByOwner) -> Vec<String> {
 
 /// `heki check --output-format json` of `shape(n)`, after checking its walks against those of
 /// `shape(n / SCALE)`: each owner's steps grow at most [`MAX_STEP_GROWTH`] times, and no owner
-/// spends its budget on the full shape. Both shapes exist at once, so their projects need names
-/// of their own (the size in the name).
+/// spends its budget on the full shape.
 fn check_linear(n: usize, shape: impl Fn(usize) -> Project) -> Vec<Value> {
     check_past_budgets(n, &[], shape)
 }

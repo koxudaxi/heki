@@ -8,6 +8,7 @@ pub mod schema;
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 /// How long a test waits for `heki` (a run, a reply or report of the language server, a report
@@ -36,13 +37,27 @@ pub struct Project {
     pub dir: PathBuf,
 }
 
+/// A new empty directory under the temporary directory, named after `name`, that no other
+/// directory of a running test shares. The process id keeps apart tests run as processes of
+/// their own (nextest), and a count keeps apart the directories of one process: `cargo test` runs
+/// the tests of a binary as threads of one process, and tests may share a name (a helper making
+/// the same project for several tests), so a directory named by both alone would be removed by
+/// one test while another works in it.
+pub fn fresh_dir(name: &str) -> PathBuf {
+    static MADE: AtomicUsize = AtomicUsize::new(0);
+    let n = MADE.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("heki_e2e_{name}_{}_{n}", std::process::id()));
+    // Left behind by an earlier process that had the same id.
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
 impl Project {
     pub fn new(name: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!("heki_e2e_{name}_{}", std::process::id()));
-        if dir.exists() {
-            std::fs::remove_dir_all(&dir).unwrap();
-        }
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = fresh_dir(name);
         // Marks the project root.
         std::fs::write(dir.join("pyproject.toml"), "[project]\nname = \"t\"\n").unwrap();
         Self { dir }
