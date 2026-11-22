@@ -1,0 +1,501 @@
+{
+  "$defs": {
+    "Activation": {
+      "description": "When a rule runs without being named by its code or name (ADR-018).",
+      "oneOf": [
+        {
+          "const": "default",
+          "description": "In the default selection, and matched by a prefix or `ALL`, while the rule is exact;\nwhatever its certainty with `lint.heuristic`.",
+          "type": "string"
+        },
+        {
+          "const": "opt-in",
+          "description": "Only by its exact code or name.",
+          "type": "string"
+        },
+        {
+          "const": "contract",
+          "description": "Selected as an exact `Default` rule is, whatever its certainty: it reports only what a\ndeclared contract asks for, so declaring the contract is what selects it.",
+          "type": "string"
+        }
+      ]
+    },
+    "Analyzed": {
+      "additionalProperties": false,
+      "description": "The files the report was computed from.",
+      "properties": {
+        "errors": {
+          "description": "The files that could not be read or parsed, as `heki check` reports them.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "files": {
+          "description": "The files analyzed.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "functions": {
+          "description": "The functions in them, module bodies included.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "left_out": {
+          "$ref": "#/$defs/LeftOut"
+        },
+        "paths": {
+          "description": "The paths given on the command line.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "files",
+        "functions",
+        "errors",
+        "paths",
+        "left_out"
+      ],
+      "type": "object"
+    },
+    "BaselineSplit": {
+      "additionalProperties": false,
+      "properties": {
+        "allowed": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "regressions": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "allowed",
+        "regressions"
+      ],
+      "type": "object"
+    },
+    "Consequence": {
+      "description": "What happens in the code a rule reports, which sets its default severity.",
+      "oneOf": [
+        {
+          "const": "bug",
+          "description": "A bug that can be critical: a wrong result, an exception, a lost update, a deadlock, or a\nbroken contract.",
+          "type": "string"
+        },
+        {
+          "const": "minor-bug",
+          "description": "A bug that is rarely harmful: a promise the code makes is broken, such as a read-only\nannotation, where the callers seldom notice.",
+          "type": "string"
+        },
+        {
+          "const": "slowdown",
+          "description": "Slower code that computes the right result.",
+          "type": "string"
+        }
+      ]
+    },
+    "LeftOut": {
+      "additionalProperties": false,
+      "description": "The Python files below the project root that the paths given leave out: heki takes the\nfiles it analyzed as the whole project.",
+      "properties": {
+        "files": {
+          "description": "The files found, in the order of a walk of the root sorted by name.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "python_files": {
+          "description": "How many were found (when `truncated`, a lower bound).",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "truncated": {
+          "description": "Whether the count stopped before the end (after 50 files, or after the first 10,000\nentries below the root) or could not read an entry.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "python_files",
+        "files",
+        "truncated"
+      ],
+      "type": "object"
+    },
+    "PublishedMeasurement": {
+      "additionalProperties": false,
+      "description": "A measurement as published: the classes of the sampled reports, and the shares derived\nfrom them.",
+      "properties": {
+        "benign": {
+          "description": "Reports that are right, of code that is deliberate or harmless at realistic sizes.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "confirmed": {
+          "description": "Reports whose problem is real and observable from the code.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "date": {
+          "description": "The date of the build the round measured.",
+          "type": "string"
+        },
+        "false_claims": {
+          "description": "Reports that are wrong about the code.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "interval_percent": {
+          "description": "The 95% Wilson score interval of `right_percent`.",
+          "items": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "type": "array"
+        },
+        "plausible": {
+          "description": "Reports that are right, of code that does harm at realistic sizes.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "real_harm_percent": {
+          "description": "The share of real harm (confirmed and plausible), in percent.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "right_percent": {
+          "description": "The share right about the code (confirmed, plausible, and benign), in percent.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "round": {
+          "description": "The round of the measurement protocol.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "rule": {
+          "type": "string"
+        },
+        "sample": {
+          "description": "The reports sampled.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "rule",
+        "round",
+        "date",
+        "sample",
+        "confirmed",
+        "plausible",
+        "benign",
+        "false_claims",
+        "right_percent",
+        "interval_percent",
+        "real_harm_percent"
+      ],
+      "type": "object"
+    },
+    "ReportKind": {
+      "enum": [
+        "heki-recommend"
+      ],
+      "type": "string"
+    },
+    "ReportsNow": {
+      "additionalProperties": false,
+      "description": "What the current configuration shows, as `heki check` prints it: reports that share a root\ncause are folded into one.",
+      "properties": {
+        "baseline": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BaselineSplit"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "With a baseline: the reports it allows, and the regressions `heki check` prints."
+        },
+        "exact": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "heuristic": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "heuristic_rules_off": {
+          "description": "The heuristic rules that are off only because `lint.heuristic` is false.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "shown": {
+          "description": "The reports `heki check` prints without a baseline.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "withheld_heuristic": {
+          "description": "The heuristic reports of exact rules that `lint.heuristic = false` leaves out.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "shown",
+        "exact",
+        "heuristic",
+        "withheld_heuristic",
+        "heuristic_rules_off"
+      ],
+      "type": "object"
+    },
+    "RuleAdvice": {
+      "additionalProperties": false,
+      "description": "One rule the current selection does not run in full.",
+      "properties": {
+        "activation": {
+          "$ref": "#/$defs/Activation"
+        },
+        "baseline": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BaselineSplit"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "With a baseline: the added reports it allows, and the regressions."
+        },
+        "caveats": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "certainty": {
+          "enum": [
+            "exact",
+            "heuristic"
+          ],
+          "type": "string"
+        },
+        "code": {
+          "type": "string"
+        },
+        "consequence": {
+          "$ref": "#/$defs/Consequence"
+        },
+        "enabled_now": {
+          "description": "Whether the current selection runs the rule: then only its heuristic reports, which it\nwithholds, are counted.",
+          "type": "boolean"
+        },
+        "exact": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "experimental": {
+          "type": "boolean"
+        },
+        "heuristic": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "in_block": {
+          "description": "Whether the block enables the rule.",
+          "type": "boolean"
+        },
+        "measurement": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PublishedMeasurement"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The latest published measurement of how often the rule's reports are right."
+        },
+        "reason": {
+          "description": "Why the rule is in the block or not.",
+          "type": "string"
+        },
+        "reports": {
+          "description": "The reports naming the rule in `extend-select` would add to what `heki check` prints\n(`null` for a rule that is not counted).",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "slug": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "slug",
+        "certainty",
+        "activation",
+        "experimental",
+        "consequence",
+        "enabled_now",
+        "exact",
+        "heuristic",
+        "in_block",
+        "reason",
+        "caveats"
+      ],
+      "type": "object"
+    },
+    "Run": {
+      "additionalProperties": false,
+      "properties": {
+        "label": {
+          "$ref": "#/$defs/RunLabel"
+        }
+      },
+      "required": [
+        "label"
+      ],
+      "type": "object"
+    },
+    "RunLabel": {
+      "oneOf": [
+        {
+          "const": "discovery",
+          "description": "Every rule selected, on the configuration as it is.",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "$id": "https://heki.koxudaxi.dev/schemas/recommend-1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "The JSON object `heki recommend --output-format json` prints.",
+  "properties": {
+    "$schema": {
+      "description": "The URL of this schema.",
+      "type": "string"
+    },
+    "analyzed": {
+      "$ref": "#/$defs/Analyzed"
+    },
+    "config": {
+      "additionalProperties": true,
+      "description": "The keys `config_toml` adds or changes, as the configuration's keys and values.",
+      "type": "object"
+    },
+    "config_file": {
+      "description": "The configuration file the run read, or `null` when the project has none.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "config_toml": {
+      "description": "The keys to add or change, as TOML for `config_file` (empty when nothing is added).",
+      "type": "string"
+    },
+    "content": {
+      "description": "The report as the text output prints it.",
+      "type": "string"
+    },
+    "heki": {
+      "description": "The version of heki that wrote the report.",
+      "type": "string"
+    },
+    "kind": {
+      "$ref": "#/$defs/ReportKind"
+    },
+    "notes": {
+      "description": "What the reader should know to weigh the advice.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "reports_now": {
+      "$ref": "#/$defs/ReportsNow"
+    },
+    "root": {
+      "description": "The project root, as the output writes paths (`.` for the working directory).",
+      "type": "string"
+    },
+    "rules": {
+      "description": "Every rule the configuration does not run in full: the rules it leaves off, and the exact\nrules whose heuristic reports it withholds. The block's rules come first.",
+      "items": {
+        "$ref": "#/$defs/RuleAdvice"
+      },
+      "type": "array"
+    },
+    "runs": {
+      "description": "The analyses the report was computed from, in the order they ran.",
+      "items": {
+        "$ref": "#/$defs/Run"
+      },
+      "type": "array"
+    },
+    "table_prefix": {
+      "description": "The table the configuration's keys are under in that file: `tool.heki` in a\n`pyproject.toml`, empty for a file that holds them at its top level (`heki.toml`).",
+      "type": "string"
+    },
+    "version": {
+      "description": "The version of the object's fields: it changes when a field is removed or changes\nmeaning; fields are only added within a version.",
+      "format": "uint32",
+      "maximum": 1,
+      "minimum": 1,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "$schema",
+    "kind",
+    "version",
+    "heki",
+    "root",
+    "table_prefix",
+    "analyzed",
+    "runs",
+    "reports_now",
+    "rules",
+    "notes",
+    "config",
+    "config_toml",
+    "content"
+  ],
+  "title": "heki recommend",
+  "type": "object"
+}
