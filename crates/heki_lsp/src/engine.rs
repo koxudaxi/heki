@@ -482,6 +482,7 @@ impl Workspace {
             decls: Some(decls.completed()),
             project_patches_builtins: Some(false),
             text_of: None,
+            open_premises: false,
         };
         check_project(&[], &env.cfg, &env.kb, &index, &selection, &extras)
             .map_err(EngineError::Rules)?;
@@ -582,6 +583,7 @@ impl Workspace {
             decls: Some(self.decls.completed()),
             project_patches_builtins: Some(!self.patching_builtins.is_empty()),
             text_of: Some(&|p: &Path| heki_ast::read_source(p).ok()),
+            open_premises: false,
         };
         let (mut diags, reads) = self.decls.completed().record(|| {
             let mut diags = check_project(

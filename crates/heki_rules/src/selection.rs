@@ -386,6 +386,7 @@ mod tests {
             fix: None,
             sites: 1,
             fold_key: None,
+            open_premises: Vec::new(),
         };
         let selection = RuleSelection {
             enabled: BTreeSet::from(["OPT110", "OPT111"]),

@@ -65,6 +65,14 @@ lists its claim's premises under "What a report states" by those names (the docu
 checks it), `heki rule --output-format json` prints them, and a report is exact only when every
 premise of its rule's row is established.
 
+A heuristic report of an exact claim can also say which premises of its row it left open, each
+with a cause from a closed list kept next to the premise in the same table (what the cause states,
+and what closes it: an annotation, a change of the code, heki's catalog, or nothing today). The
+causes come from the steps of the decision that made the report heuristic, each premise evaluated
+on its own along the reported chain and loop, so they cannot disagree with its tier. The records
+are internal for now: no output format of `heki check` and nothing in the language server shows
+them. `EFF111` and `EFF113` record them for the claims of `EFF101` and `EFF103`.
+
 An exact report's message states its claim and the witnesses of its premises, nothing else: no
 cost estimate such as "(N+1)", and no advice (that goes into the help).
 

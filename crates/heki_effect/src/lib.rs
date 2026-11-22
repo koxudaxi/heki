@@ -19,7 +19,7 @@
 
 pub mod cache_flow;
 mod callgraph;
-pub use callgraph::SiteMust;
+pub use callgraph::{HopGap, MustGap, SiteMust};
 pub mod capacity;
 mod paths;
 pub use paths::with_paths;
@@ -1770,6 +1770,24 @@ impl CallSite {
         }
     }
 
+    /// Whether the targets' bodies run at the call, on the caller's thread: a callable an API
+    /// runs (on a worker, once per item) does not, nor does what a call returns when it is
+    /// iterated or handed on. Only such a site's completeness and paths ([`Self::complete`],
+    /// [`Self::on_every_return`]) are about those bodies.
+    pub fn runs_targets_here(&self) -> bool {
+        self.role == SiteRole::Call && self.runner == Runner::Caller
+    }
+
+    /// Whether the caller has made the call whenever it returns normally, as its must-facts
+    /// take it: a Layer 2 call also when it raised (its effect ran), a project call only when it
+    /// returned (a callee that raised may not have run its effect).
+    pub fn made_on_every_return(&self) -> bool {
+        match self.target {
+            CallTarget::Layer2 { .. } => self.on_every_return.called,
+            CallTarget::Project(_) => self.on_every_return.returned,
+        }
+    }
+
     /// Whether the effect `e` of the callees does not block the caller's thread here.
     pub fn hides(&self, e: ExecEffectKind) -> bool {
         match self.runner {
@@ -2194,6 +2212,32 @@ impl ProjectIndex {
     pub fn site_must(&self, path: &Path, site: &CallSite, e: ExecEffectKind) -> Option<SiteMust> {
         // Without must-facts no call site is complete, so nothing is established.
         callgraph::site_must_chain(self, path, site, e)
+    }
+
+    /// Why [`Self::site_must`] does not establish `e` at `site`, along `chain`, the chain a
+    /// report shows from it: the steps that do not hold, each at the hop of its call (empty when
+    /// it is established).
+    pub fn site_must_gaps(
+        &self,
+        path: &Path,
+        site: &CallSite,
+        e: ExecEffectKind,
+        chain: &[CallHop],
+    ) -> Vec<HopGap> {
+        callgraph::must_gaps_along(self, path, site, e, chain)
+    }
+
+    /// The call site a chain's hop stands for: the call of its callee its caller makes there.
+    pub fn call_site_of(&self, hop: &CallHop) -> Option<&CallSite> {
+        let calls = |site: &CallSite| match &site.target {
+            CallTarget::Layer2 { symbol, .. } => *symbol == hop.callee,
+            CallTarget::Project(callees) => callees.iter().any(|bc| bc.callee.fqn() == hop.callee),
+        };
+        self.files
+            .get(&hop.path)?
+            .call_sites
+            .iter()
+            .find(|site| site.caller == hop.caller && site.span == hop.span && calls(site))
     }
 
     /// Effects that run at `site` (in file `path`): the Layer 2 API's effects after the

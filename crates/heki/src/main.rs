@@ -10,6 +10,7 @@ macro_rules! log {
 mod check;
 mod dump_facts;
 mod inspect;
+mod open_premises;
 mod prompt;
 mod watch;
 
@@ -104,6 +105,10 @@ enum Commands {
     /// Internal: dump the experimental features as JSON for `scripts/build_docs.py`.
     #[command(hide = true)]
     DumpExperimental,
+    /// Internal/testing: dump the reports of `heki check`, with the premises each heuristic
+    /// report of an exact claim left open, as JSON.
+    #[command(hide = true)]
+    DumpOpenPremises(DumpOpenPremisesArgs),
 }
 
 #[derive(Debug, Args)]
@@ -341,6 +346,15 @@ struct DumpSemanticArgs {
     target_version: String,
 }
 
+#[derive(Debug, Args)]
+struct DumpOpenPremisesArgs {
+    /// The project to analyze, as for `heki check`.
+    #[arg(default_value = ".")]
+    paths: Vec<PathBuf>,
+    #[command(flatten)]
+    analysis: AnalysisArgs,
+}
+
 fn run(cli: Cli) -> Result<ExitCode> {
     match cli.command {
         Commands::Check(args) => check::run(&args),
@@ -456,6 +470,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             println!("{}", serde_json::to_string_pretty(&facts)?);
             Ok(ExitCode::SUCCESS)
         }
+        Commands::DumpOpenPremises(args) => open_premises::run(&args),
         Commands::DumpExperimental => {
             let registry = serde_json::json!({
                 "policy": EXPERIMENTAL_POLICY,

@@ -179,14 +179,16 @@ impl Indexed {
     /// The diagnostics of every enabled rule in the project's files, after inline suppressions
     /// and without the heuristic reports the selection withholds, and how many those are.
     pub(crate) fn diagnose(&self) -> Result<(Vec<Diagnostic>, usize)> {
-        self.diagnose_units(&self.project.units())
+        self.diagnose_units(&self.project.units(), false)
     }
 
     /// [`Self::diagnose`] in `units` (some or all of the project's files): the rules read the
-    /// other files through the index only.
+    /// other files through the index only. `open_premises`: the heuristic reports of exact
+    /// claims record the premises they left open ([`CheckExtras::open_premises`]).
     pub(crate) fn diagnose_units(
         &self,
         units: &[ModuleUnit<'_>],
+        open_premises: bool,
     ) -> Result<(Vec<Diagnostic>, usize)> {
         let env = &self.project.env;
         let decls = self.index.project_decls();
@@ -205,6 +207,7 @@ impl Indexed {
                 self.project.files.iter().any(ParsedFile::patches_builtins),
             ),
             text_of: Some(&text_of),
+            open_premises,
         };
         let mut diags = check_project(
             units,

@@ -6352,13 +6352,7 @@ impl<'a> Extractor<'a> {
             .copied()
             .filter(|e| unconditional & crate::effect_bit(*e) != 0)
             .collect();
-        if !must.is_empty() && self.must_run.get(&self.pos).is_some_and(|r| r.called) {
-            let hop = Arc::new(self.hop(api.clone(), span));
-            let facts = self.summary.must_exec.get_or_insert_with(Box::default);
-            for e in must {
-                facts.effects.insert_new(e, || vec![Arc::clone(&hop)]);
-            }
-        }
+        let hop = (!must.is_empty()).then(|| Arc::new(self.hop(api.clone(), span)));
         let target = CallTarget::Layer2 {
             symbol: api,
             effects,
@@ -6367,6 +6361,12 @@ impl<'a> Extractor<'a> {
             unconditional,
         };
         let site = self.site(bb, target, is_awaited, span);
+        if let Some(hop) = hop.filter(|_| site.made_on_every_return()) {
+            let facts = self.summary.must_exec.get_or_insert_with(Box::default);
+            for e in must {
+                facts.effects.insert_new(e, || vec![Arc::clone(&hop)]);
+            }
+        }
         let queues = while_full.map(|w| {
             Box::new(SiteQueues {
                 while_full: Some(w),

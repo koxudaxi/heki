@@ -114,6 +114,14 @@ base program heki does not report is counted, not refuted. A premise of the tabl
 cannot strip stops the run, so the generator grows with the table. `--table-heki` takes the
 table from another build, to check a release older than the table with it.
 
+For the rules whose heuristic reports record the premises they leave open (`OPEN_PREMISE_CODES`
+in `premise_generator.py`: `EFF101` through `EFF111`, `EFF103` through `EFF113`), a program with a
+premise stripped is also run through `heki dump-open-premises`: each heuristic report of the claim
+has to name the stripped premise among its open ones, since the causes come from the decision that
+made the report heuristic. A report that does not is an oracle finding of its own kind, written to
+`unrecorded/` beside the refutations and counted with them for `--fail-on-refutation`. A heki
+without the command (an older release) skips the check.
+
 A refutation is a heki bug unless the program breaks one of the assumptions R1 to R7; the oracle
 reports such a case as a violation instead (for example a library call whose deciding argument is
 computed, R6), and the generator keeps its programs inside them. The output directory holds
