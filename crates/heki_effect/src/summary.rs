@@ -33,8 +33,8 @@ use crate::{
     Dispatch, EffectSummary, FileSummary, FuncKey, GuardSubject, HandedState, Implementers, Items,
     KeptFacts, ListedCache, ModuleInput, MustExec, NewArg, NewCond, NewKind, OnEveryReturn,
     OptInFacts, PerItem, ProjectDecls, ReadKind, ReturnsNew, Runner, SharedLine, SharedState,
-    SharedStateFacts, SiteRole, Slot, TypedFieldReadSite, TypedFieldWriteSite, Unresolved,
-    UnresolvedAccessSite, UnresolvedWriteSite, WriteKind,
+    SharedStateFacts, SiteRole, Slot, TypedFieldReadSite, TypedFieldWriteSite, UnawaitedHandoff,
+    Unresolved, UnresolvedAccessSite, UnresolvedWriteSite, WriteKind,
 };
 use heki_ast::Span;
 use heki_ir::walk::{Answer, Budget, Closure, Def, FnShape, KeySet, Memo, Use, Visit, reach};
@@ -186,6 +186,7 @@ fn extract_module(
             kept_points,
             types,
             mut blind,
+            mut unawaited,
         } = Extractor::new(
             &shape,
             &key,
@@ -215,6 +216,7 @@ fn extract_module(
                 absorb_class_body(&mut summary, facts.summary);
                 external.extend(facts.external);
                 blind.extend(facts.blind);
+                unawaited.extend(facts.unawaited);
                 sites.extend(
                     facts
                         .sites
@@ -224,12 +226,14 @@ fn extract_module(
                 references.extend(facts.references);
             }
         } else if opt_in.blind_spots
+            || opt_in.unawaited_handoffs
             || contracts.is_some_and(|c| c.references() || c.checks_module_bodies())
         {
             // The module body runs the bodies of its classes: what they hand on (a dataclass
             // field's `default_factory`) is handed on by the module, what they take from
             // outside the project (`sys.platform`) the module takes, and the calls heki is
-            // blind to there are the module's. Their other facts are not the module's.
+            // blind to there, or that call a callable without awaiting it, are the module's.
+            // Their other facts are not the module's.
             for body in class_bodies_run_by(input.ir, f) {
                 let body = FnShape::new(body);
                 let facts = Extractor::new(
@@ -245,6 +249,7 @@ fn extract_module(
                 references.extend(facts.references);
                 external.extend(facts.external);
                 blind.extend(facts.blind);
+                unawaited.extend(facts.unawaited);
             }
         }
         if let Some(mut flow) = flow {
@@ -295,6 +300,14 @@ fn extract_module(
             calls.extend(blind);
             calls.sort();
             calls.dedup();
+        }
+        if !unawaited.is_empty() {
+            // A `finally` body is built once per way out of its `try`: its calls once each.
+            let by_function = file.unawaited_handoffs.get_or_insert_with(Box::default);
+            let handoffs = by_function.entry(key.clone()).or_default();
+            handoffs.extend(unawaited);
+            handoffs.sort_by_key(|h| h.span);
+            handoffs.dedup();
         }
         // Same qualname defined twice (conditional definitions): keep the union of facts.
         match file.local_functions.get_mut(&key) {
@@ -689,6 +702,8 @@ struct Extracted {
     types: FxHashMap<VarId, Val>,
     /// [`FileSummary::blind_spots`].
     blind: Vec<BlindCall>,
+    /// [`FileSummary::unawaited_handoffs`].
+    unawaited: Vec<UnawaitedHandoff>,
 }
 
 /// The points of a function that read one `self` attribute ([`Extractor::self_read_points`]).
@@ -869,6 +884,10 @@ struct Extractor<'a> {
     /// The calls heki is blind to (`FileSummary::blind_spots`), with
     /// [`OptInFacts::blind_spots`].
     blind: Vec<BlindCall>,
+    /// The project functions handed to a library call that calls them without awaiting what
+    /// they return (`FileSummary::unawaited_handoffs`), with
+    /// [`OptInFacts::unawaited_handoffs`].
+    unawaited: Vec<UnawaitedHandoff>,
 }
 
 /// A key of a container as [`Extractor::key_present`] compares keys: the same variable through
@@ -1223,6 +1242,7 @@ impl<'a> Extractor<'a> {
             call_positions: OnceCell::new(),
             followed_callables: OnceCell::new(),
             blind: Vec::new(),
+            unawaited: Vec::new(),
         };
         ex.ownership = contracts.is_some_and(|c| c.ownership());
         ex.track = ex.ownership && ex.may_construct();
@@ -2608,6 +2628,7 @@ impl<'a> Extractor<'a> {
             kept_points: self.kept_points,
             types: self.types,
             blind: self.blind,
+            unawaited: self.unawaited,
         }
     }
 
@@ -5955,6 +5976,9 @@ impl<'a> Extractor<'a> {
                         made_by: None,
                     });
                 }
+                if self.opt_in.unawaited_handoffs {
+                    self.unawaited_handoff(symbol, call);
+                }
                 self.handed_callable(bb, symbol, call);
                 None
             }
@@ -6468,6 +6492,41 @@ impl<'a> Extractor<'a> {
             self.sites[site].handed_callable = position;
             self.sites[site].per_item = per_item;
         }
+    }
+
+    /// A project function handed to the library call `call` of `symbol` that calls it without
+    /// awaiting what it returns (`FileSummary::unawaited_handoffs`): the callable the catalog
+    /// names (`heki_kb::EcosystemEntry::unawaited_callable`), through a `functools.partial`
+    /// object and a bound method. A class constructs an object instead.
+    fn unawaited_handoff(&mut self, symbol: &str, call: &Call<'_>) {
+        let Some(slot) = self
+            .cx
+            .catalog(symbol)
+            .and_then(heki_kb::EcosystemEntry::unawaited_callable)
+        else {
+            return;
+        };
+        let Some(callable) = resolver::passed_var(
+            call.args,
+            call.kwargs,
+            call.star_from,
+            (slot.arg, slot.param.as_deref()),
+        ) else {
+            return;
+        };
+        let target = self.partial(callable).map_or(callable, |p| p.callable);
+        if self.class_called(target).is_some() {
+            return;
+        }
+        let (Callee::Project(callees, _), _) = self.callable_callee(target) else {
+            return;
+        };
+        self.unawaited.push(UnawaitedHandoff {
+            span: call.span,
+            api: symbol.to_owned(),
+            callees,
+            tests_result: slot.tests_result,
+        });
     }
 
     /// What a builtin passes the callable it calls once per item (`Runner::PerItem`): items

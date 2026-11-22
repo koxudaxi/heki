@@ -1457,7 +1457,7 @@ deep = true   # changes to attributes and nested containers below are forbidden 
   callers, with the same initializer and allowed-context rules as `MUT201`. Reads through
   parameters without a project-class type are not seen.
 
-### 2.4 Family 2 (`EFF101`–`EFF103`, `EFF105`–`EFF107`, `EFF109`, `EFF110`, `EFF111`, `EFF112`, `EFF113`, `EFF114`, `EFF201`, `DATA101`): precision, sanitizers, and aggregation
+### 2.4 Family 2 (`EFF101`–`EFF103`, `EFF105`–`EFF107`, `EFF109`, `EFF110`, `EFF111`, `EFF112`, `EFF113`, `EFF114`, `EFF115`, `EFF201`, `DATA101`): precision, sanitizers, and aggregation
 0. **Must-facts and the exact tier** (`EffectSummary::must_exec`, computed only when `EFF101`,
    `EFF111`, `EFF103`, or `EFF113` runs: `OptInFacts::must_effects`):
    - Per call instruction, the path facts (`heki_ir::Paths`, with the reader of
@@ -1727,7 +1727,24 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      `sys.stderr.write`, `traceback.print_exc`, a `logging` call with the exception, also on a
      logger of unknown class by its method name) and returning an integer constant on every
      `return` is a CLI boundary and is left out.
-12. **`EFF201`** (contract): a breadth-first search over the IR-free call graph from each scope
+12. **`EFF115`** (opt-in): an `async def` handed to a library call that never awaits what it
+   returns.
+   - The summary (`summary::Extractor::unawaited_handoff`, only with
+     `OptInFacts::unawaited_handoffs`) records, at each call of a catalog API whose entry names a
+     callable argument it calls without awaiting (`EcosystemEntry::unawaited_callable`: its
+     `calls_unawaited`, or its `offloads_blocking_arg`), the project functions the argument calls
+     (a `functools.partial` object followed to the function it holds, a bound method resolved to
+     the implementations it may run; a class constructs instead and is left out), in
+     `FileSummary::unawaited_handoffs` by calling function, the class bodies a function or the
+     module body runs included. The record holds every such function, `def` or `async def`.
+   - The rule (`eff_rules::unawaited_callables`) reads the declarations of the recorded
+     functions at check time (`FunctionDecl::is_async`, `is_generator`, `called_as_defined`), so
+     a change of a function between `def` and `async def` in another module re-checks the
+     caller's file through its declaration reads. It reports when one of them is an `async def`
+     that is no async generator, worded as certain when every one is an `async def` no decorator
+     replaces, and as possible otherwise. Only catalog APIs count: a project function taking a
+     callable resolves to the project and is never one, whatever it does with the coroutine.
+13. **`EFF201`** (contract): a breadth-first search over the IR-free call graph from each scope
    function (and each module body a scope names as `<module>`,
    `DottedPattern::names_module_bodies`) finds the shortest chain to each forbidden effect,
    without entering `allowed-callees`, other scope functions, or bodies that do not run at the
@@ -1939,7 +1956,10 @@ field validates it: pydantic 2's `BaseModel`), `return_type` (factories such as
 (`asyncio.StreamReader.readline`, `AsyncSession.execute`: `EFF110`), `writes_in_order` (the
 argument a call writes or serializes in the order of its elements, with the keyword that sorts
 mapping keys first and whether it sorts by default: `json.dumps`, `yaml.safe_dump`,
-`pprint.pprint`, `pathlib.Path.write_text`, `print`: `EFF112`),
+`pprint.pprint`, `pathlib.Path.write_text`, `print`: `EFF112`), `calls_unawaited` (the callable
+argument a call calls as a plain function without awaiting what it returns, and whether it tests
+the result for truth: `threading.Thread`'s `target`, `atexit.register`, `signal.signal`, `filter`:
+`EFF115`; every `offloads_blocking_arg` API counts as one too),
 `waits_until_done` / `done_when_awaited` (futures), `bounded_by` / `waits_while_full` (queues:
 section 2.2), `environment` (`"call"`: calling the function reads the environment the program runs
 in, `os.getenv`, `platform.system`, `shutil.which`; `"read"`: reading the module attribute does,

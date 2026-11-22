@@ -1,5 +1,6 @@
 //! Family 2 execution-effect rules: `EFF101`, `EFF105`, `EFF102`, `EFF103`, `EFF106`,
-//! `EFF107`, `EFF109`, `EFF110`, `EFF112`, `EFF114`, `EFF201` (docs/ANALYSIS_AND_KB_SPEC.md section 2.4).
+//! `EFF107`, `EFF109`, `EFF110`, `EFF112`, `EFF114`, `EFF115`, `EFF201`
+//! (docs/ANALYSIS_AND_KB_SPEC.md section 2.4).
 
 use crate::mut_rules::{
     CallTargets, ContractTarget, FunctionMatcher, FunctionMatchers, References, SiteId, Subclasses,
@@ -930,6 +931,7 @@ mod held_across_io;
 mod lock_retaken;
 mod recursion_handlers;
 mod set_order_output;
+mod unawaited_callables;
 mod unretained_task;
 
 /// `EFF106` (opt-in): `await` / blocking network I/O while a sync lock or DB transaction is
@@ -963,6 +965,12 @@ pub(crate) fn eff112(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
 /// value.
 pub(crate) fn eff114(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Diagnostic>) {
     recursion_handlers::run(cx, unit, out);
+}
+
+/// `EFF115` (opt-in): an `async def` handed to a library call that calls it without awaiting
+/// what it returns.
+pub(crate) fn eff115(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Diagnostic>) {
+    unawaited_callables::run(cx, unit, out);
 }
 
 /// `forbid` tokens of `[[tool.heki.effect-boundaries]]` and the execution effects each one

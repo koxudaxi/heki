@@ -2129,12 +2129,41 @@ pub struct FileSummary {
     /// through [`Self::blind_calls`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blind_spots: Option<Box<FxHashMap<FuncKey, Vec<BlindCall>>>>,
+    /// The project functions each function of the file hands to a library call that calls
+    /// them without awaiting what they return, in its own body and in the class bodies it runs
+    /// (local, IR-free; `None` unless [`OptInFacts::unawaited_handoffs`]). Read through
+    /// [`Self::unawaited_handoffs`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unawaited_handoffs: Option<Box<FxHashMap<FuncKey, Vec<UnawaitedHandoff>>>>,
+}
+
+/// A project function handed to a library call that calls it as a plain function and never
+/// awaits what it returns (`heki_kb::EcosystemEntry::unawaited_callable`): `threading.Thread`'s
+/// target, `atexit.register(f)`, `filter(f, xs)`, a `functools.partial` of one, a bound method.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnawaitedHandoff {
+    /// The library call.
+    pub span: Span,
+    /// The library API, as the catalog names it.
+    pub api: String,
+    /// What calling the handed value calls: one function, or every implementation of a method.
+    pub callees: Vec<FuncKey>,
+    /// The API tests what the callable returns for truth (`heki_kb::UnawaitedCall::tests_result`).
+    pub tests_result: bool,
 }
 
 impl FileSummary {
     /// [`Self::blind_spots`], by function.
     pub fn blind_calls(&self) -> impl Iterator<Item = (&FuncKey, &[BlindCall])> {
         (self.blind_spots.iter().flat_map(|b| b.iter())).map(|(f, calls)| (f, calls.as_slice()))
+    }
+
+    /// [`Self::unawaited_handoffs`] of the function `func`.
+    pub fn unawaited_handoffs_of(&self, func: &FuncKey) -> &[UnawaitedHandoff] {
+        self.unawaited_handoffs
+            .as_ref()
+            .and_then(|by_function| by_function.get(func))
+            .map_or(&[], Vec::as_slice)
     }
 
     /// The summary of a project file heki could not read or parse: a module that defines
@@ -2325,6 +2354,8 @@ pub struct OptInFacts {
     pub blind_spots: bool,
     pub set_order: bool,
     pub call_cycles: bool,
+    /// [`FileSummary::unawaited_handoffs`] (`EFF115`).
+    pub unawaited_handoffs: bool,
 }
 
 impl OptInFacts {
@@ -2341,6 +2372,7 @@ impl OptInFacts {
         blind_spots: false,
         set_order: true,
         call_cycles: true,
+        unawaited_handoffs: true,
     };
 
     /// Whether the call sites carry [`CallSite::complete`] and [`CallSite::on_every_return`].

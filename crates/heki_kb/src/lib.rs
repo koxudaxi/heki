@@ -5,8 +5,9 @@
 //!   Any entry whose `verified_max_python < target_python` is automatically downgraded
 //!   to `Unknown` during materialization.
 //! - `EffectiveEcosystemKB` (Layer 2) holds all Execution Effect sources, `async_safe`,
-//!   `offloads_blocking_arg`, `excluded` (logging), `copy_sanitizer` (MUT202), and
-//!   `opaque_to_layer3 = true` (preventing Layer 3 from descending into stdlib/Layer 2).
+//!   `offloads_blocking_arg`, `calls_unawaited` (EFF115), `excluded` (logging), `copy_sanitizer`
+//!   (MUT202), and `opaque_to_layer3 = true` (preventing Layer 3 from descending into
+//!   stdlib/Layer 2).
 //!
 //! The built-in TOML files under `kb/` are embedded with `include_str!`; every struct they
 //! deserialize into uses `#[serde(deny_unknown_fields)]`, so an advisory field written into
@@ -365,6 +366,23 @@ pub struct EcosystemEntry {
     /// `EFF112`: the call writes an argument, or serializes it into text, in the order of its
     /// elements (`json.dumps`, `pathlib.Path.write_text`, `print`).
     pub writes_in_order: Option<OrderedOutput>,
+    /// `EFF115`: the call calls the callable passed here as a plain function, now or later, on
+    /// this thread or another, and never awaits what it returns (`threading.Thread(target=f)`,
+    /// `atexit.register(f)`, `filter(f, xs)`). An offloading API's callable
+    /// ([`Self::offloads_blocking_arg`]) is one too ([`Self::unawaited_callable`]).
+    pub calls_unawaited: Option<UnawaitedCall>,
+}
+
+/// A callable argument a call calls without awaiting what it returns
+/// (`EcosystemEntry::calls_unawaited`): the one at position `arg` (the receiver not counted), or
+/// passed by the keyword `param`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct UnawaitedCall {
+    pub arg: Option<u8>,
+    pub param: Option<String>,
+    /// The call tests what the callable returns for truth (`filter`, `itertools.takewhile`).
+    pub tests_result: bool,
 }
 
 /// What a call writes in the order of its elements (`EcosystemEntry::writes_in_order`): a
@@ -508,6 +526,18 @@ impl ArgCase {
 }
 
 impl EcosystemEntry {
+    /// The callable argument the call calls without awaiting what it returns (`EFF115`): the
+    /// one `calls_unawaited` names, or an offloading API's, which a worker thread calls and
+    /// whose result the call hands back as it is.
+    pub fn unawaited_callable(&self) -> Option<UnawaitedCall> {
+        self.calls_unawaited.clone().or_else(|| {
+            self.offloads_blocking_arg.map(|k| UnawaitedCall {
+                arg: Some(k),
+                ..UnawaitedCall::default()
+            })
+        })
+    }
+
     /// The entry as the analyses read it: an `async_safe` API never blocks the event loop, so
     /// it keeps only its loop-sensitive effects (`db_query`, `unpooled_client_alloc`).
     fn normalized(mut self) -> Self {
@@ -1406,6 +1436,7 @@ mod tests {
             lazy_iterators(),
             environment_reads(),
             ordered_outputs(),
+            unawaited_calls(),
             pydantic_models(),
         ]
         .into_iter()
@@ -2749,6 +2780,9 @@ mod tests {
         "concurrent",
         "dataclasses",
         "queue",
+        "atexit",
+        "signal",
+        "weakref",
         "requests",
         "httpx",
         "aiohttp",
@@ -2859,6 +2893,91 @@ mod tests {
             ],
         ),
     ];
+
+    /// One row of [`UNAWAITED_CALLS`]: `(arg, param, tests_result, symbols)`.
+    type UnawaitedCallRow = (
+        Option<u8>,
+        Option<&'static str>,
+        bool,
+        &'static [&'static str],
+    );
+
+    /// `EFF115`: the callable argument each call calls without awaiting what it returns.
+    const UNAWAITED_CALLS: &[UnawaitedCallRow] = &[
+        (
+            Some(1),
+            Some("target"),
+            false,
+            &["threading.Thread", "multiprocessing.Process"],
+        ),
+        (Some(1), Some("function"), false, &["threading.Timer"]),
+        (
+            Some(0),
+            None,
+            false,
+            &[
+                "concurrent.futures.Executor.submit",
+                "concurrent.futures.ThreadPoolExecutor.submit",
+                "concurrent.futures.ProcessPoolExecutor.submit",
+                "asyncio.AbstractEventLoop.call_soon",
+                "asyncio.BaseEventLoop.call_soon",
+                "asyncio.AbstractEventLoop.call_soon_threadsafe",
+                "asyncio.BaseEventLoop.call_soon_threadsafe",
+                "atexit.register",
+                "contextlib.ExitStack.callback",
+                "contextlib.AsyncExitStack.callback",
+            ],
+        ),
+        (
+            Some(0),
+            Some("fn"),
+            false,
+            &[
+                "concurrent.futures.Executor.map",
+                "concurrent.futures.ThreadPoolExecutor.map",
+                "concurrent.futures.ProcessPoolExecutor.map",
+            ],
+        ),
+        (
+            Some(1),
+            None,
+            false,
+            &[
+                "asyncio.AbstractEventLoop.call_later",
+                "asyncio.BaseEventLoop.call_later",
+                "asyncio.AbstractEventLoop.call_at",
+                "asyncio.BaseEventLoop.call_at",
+                "signal.signal",
+                "weakref.finalize",
+            ],
+        ),
+        (
+            Some(0),
+            None,
+            true,
+            &[
+                "builtins.filter",
+                "itertools.filterfalse",
+                "itertools.takewhile",
+                "itertools.dropwhile",
+            ],
+        ),
+    ];
+
+    /// `EFF115`: the calls of [`UNAWAITED_CALLS`] with no other fact.
+    fn unawaited_calls() -> Vec<(Vec<String>, EcosystemEntry)> {
+        let others = [
+            "concurrent.futures.ThreadPoolExecutor.submit",
+            "concurrent.futures.ProcessPoolExecutor.submit",
+        ];
+        let symbols = UNAWAITED_CALLS
+            .iter()
+            .flat_map(|(.., symbols)| symbols.iter())
+            .filter(|symbol| !others.contains(symbol))
+            .map(|symbol| (*symbol).to_owned())
+            .collect();
+        vec![(symbols, entry(&[]))]
+    }
 
     /// One row of [`ORDERED_OUTPUTS`]: `(arg, param, sorted_by, sorted_by_default, symbols)`.
     type OrderedOutputRow = (
@@ -3032,6 +3151,14 @@ mod tests {
                             sorted_by_default: *sorted_by_default,
                         },
                     );
+                let calls_unawaited = UNAWAITED_CALLS
+                    .iter()
+                    .find(|(.., symbols)| symbols.contains(&symbol.as_str()))
+                    .map(|(arg, param, tests_result, _)| UnawaitedCall {
+                        arg: *arg,
+                        param: param.map(Into::into),
+                        tests_result: *tests_result,
+                    });
                 let expected = EcosystemEntry {
                     symbol: symbol.clone(),
                     emits,
@@ -3039,6 +3166,7 @@ mod tests {
                     items,
                     api,
                     writes_in_order,
+                    calls_unawaited,
                     ..expected.clone()
                 };
                 assert_eq!(kb.lookup(&symbol), Some(&expected), "{symbol}");
@@ -3277,6 +3405,38 @@ mod tests {
         ] {
             assert_eq!(kb.lookup(symbol), None, "{symbol}");
         }
+    }
+
+    #[test]
+    fn an_offloading_api_calls_its_callable_without_awaiting_it() {
+        let kb = EffectiveEcosystemKb::load_builtin(&[]).unwrap();
+        let unawaited = |symbol: &str| {
+            kb.lookup(symbol)
+                .and_then(EcosystemEntry::unawaited_callable)
+        };
+        for (symbol, arg) in [
+            ("asyncio.to_thread", 0),
+            ("asyncio.AbstractEventLoop.run_in_executor", 1),
+            ("anyio.to_thread.run_sync", 0),
+        ] {
+            assert_eq!(
+                unawaited(symbol),
+                Some(UnawaitedCall {
+                    arg: Some(arg),
+                    ..UnawaitedCall::default()
+                }),
+                "{symbol}"
+            );
+        }
+        assert_eq!(
+            unawaited("threading.Thread"),
+            Some(UnawaitedCall {
+                arg: Some(1),
+                param: Some("target".into()),
+                tests_result: false,
+            })
+        );
+        assert_eq!(unawaited("builtins.map"), None);
     }
 
     #[test]
