@@ -478,6 +478,12 @@ EffectSummary(f) = {
     typed_field_read_sites:   Set<TypedFieldReadSite>,     // own reads of (class, attr): attribute, getattr,
                                                            // __dict__, through an instance or a class
                                                            // object; never propagated (MUT203)
+    sentinel_tests:           Option<Set<SentinelTest>>,   // own `obj.attr is S` / `is not` with an
+                                                           // `object()` sentinel, per class obj may be;
+                                                           // never propagated (MUT118)
+    deep_copies:              Option<Set<DeepCopySite>>,   // own `copy.deepcopy(x)` (one argument, no
+                                                           // memo) of a project-class object, with its
+                                                           // classes; never propagated (MUT118)
     returns_protected:        Option<ProtectedReturn>,     // may return a protected value: producer, depth,
                                                            // call chain (MUT202)
     must_invalidate:          Bitset,                      // invalidation contracts announced on every
@@ -871,7 +877,10 @@ edited file's functions that change a parameter in place (`heki_rules::chain_fac
 re-checks the files with such reports above a function whose facts changed. Likewise, while
 `MUT111` is selected, it keeps the stale writes `MUT101` finds in each file's methods, with the
 classes whose instances run each writer (`heki_rules::stale_writes_by_file`), as of the file's
-latest analysis; when they change, the files reading those cached properties are re-checked. A
+latest analysis; when they change, the files reading those cached properties are re-checked.
+While `MUT118` is selected, it keeps the sentinel tests of each file's functions without their
+places (`heki_rules::sentinel_tests_in`); when they change, the files with deep copies are
+re-checked, and a test that moves moves the related locations showing it, as a call site does. A
 `MUT113` report shows where other methods change a container (`self_container_change_sites`):
 the language server re-checks the files showing a change site that moved, as for a call site. A
 place it records keeps what is there (a call's callees, a change's attribute), so that two calls
@@ -886,7 +895,7 @@ differ); every file that read one of them is re-analyzed. This covers names reso
 re-exports, class hierarchy analysis across modules, and property getters, without depending on
 which module imports which.
 
-### 2.3 Family 1 (`MUT101` / `MUT103` / `MUT106` / `MUT107` / `MUT109` / `MUT111` / `MUT112` / `MUT113` / `MUT201` / `MUT202` / `MUT203` / `MUT204`)
+### 2.3 Family 1 (`MUT101` / `MUT103` / `MUT106` / `MUT107` / `MUT109` / `MUT111` / `MUT112` / `MUT113` / `MUT118` / `MUT201` / `MUT202` / `MUT203` / `MUT204`)
 
 #### `MUT101`: mutation of attributes a `@cached_property` depends on, without invalidation (strict Stage 0-A version)
 1. For every `@cached_property` method `p` of a class `C` (with its subclasses; a nested class is
@@ -978,6 +987,47 @@ which module imports which.
    `Class.p` of the property, the message names the first write that runs on an instance of `K`
    itself (else the first), and every reaching write is a related location. A getter or helper
    that reads `p` is reported itself; its callers are not.
+
+#### `MUT118`: an `object()` sentinel lost in a deep copy
+1. **Sentinels** (`ModuleDecls::object_sentinels`): the module-level names bound once, outside a
+   loop, to a call of the builtin `object` with no argument, with the conditions of a string
+   constant (no import binds the name; no star import, `exec`, or `globals()` may rebind it).
+   `ProjectDecls::object_sentinel` reads one through re-exports and drops it when another
+   module rebinds or deletes it (`ProjectDecls::rebound_elsewhere`).
+2. **Held** (`ClassDecl::named_attrs`, read by `ProjectDecls::held_sentinels`): what a class's
+   own code binds an attribute to among the names that may be sentinels (its module's own, a
+   name an import binds, `module.NAME`). The class body's binding (`attr = S`, `attr: T = S`,
+   `field(default=S)` in a stdlib dataclass) is the class attribute; the default of a field the
+   generated `__init__` of a stdlib dataclass stores, a store `self.attr = S` in a method, and a
+   store `self.attr = p` of a parameter whose default is `S` are held by the instances (a `def`
+   in a class body hands its function object the defaults first, in parameter order). An
+   annotated default under a base the catalog describes as keeping hashable defaults
+   (`keeps_hashable_defaults`, R3) is held too, unless something may validate it (the
+   annotation names `validate_default`, `NamedAttr::validates_default`, or a project class along
+   the MRO binds `model_config` or `Config`); under another base outside the project, or with a
+   dataclass's own `__init__`, it may be (open).
+3. **Tests** (`EffectSummary::sentinel_tests`): a comparison with `is` / `is not` of an attribute
+   load with a name that `object_sentinel` names, recorded per class the object may be, with
+   whether that is one class (no union, no protocol). Reading the attribute runs no code
+   (`ProjectDecls::plain_sentinel_attr`: as `plain_attr`, where a class body binding the name to
+   a sentinel binds no descriptor, and a base whose `__setattr__` the catalog describes as
+   `stores_on_instance` reads the stored value).
+4. **Deep copies** (`EffectSummary::deep_copies`): a call that resolves to `copy.deepcopy` with
+   one positional argument and no keyword, of an object whose project classes heki knows.
+   `ProjectDecls::deep_copy_of` says what the copy protocol does with a value of a class: a copy
+   hook along its MRO (`__deepcopy__`, `__reduce__`, `__reduce_ex__`, `__getstate__`,
+   `__setstate__`) or a `copyreg` registration of the class (`ModuleDecls::copy_registrations`,
+   joined into a project index whose changes are class keys) decides it (no report); with none,
+   and only known bases (`object`, `typing.Generic`, `abc.ABC`, or a base whose `__deepcopy__`
+   the catalog describes as deep, R3), the copy holds deep copies of the attributes; a hook,
+   `__getattr__`, `__getattribute__`, or metaclass in a subclass or mixin, or another base
+   outside the project, leaves it open.
+5. **The join** (`heki_rules::mut_rules::sentinel_copies`): at each deep copy of a checked file,
+   for each class along the copied class's MRO (the object is one) and each project subclass
+   (it may be one), the sentinels it holds and the tests of that sentinel in that attribute on
+   that class, a subclass (known), or a base (open). One report per deep copy, the known claim
+   first; the tests are related locations, at most five. What each copied class gives and which
+   tests read each class's sentinel are answered once per run.
 
 #### `MUT112`: a value that is new on one path and borrowed on another, changed in place (opt-in)
 1. **What a value holds** (`heki_effect::ownership`): each instruction's `Source` says what the
