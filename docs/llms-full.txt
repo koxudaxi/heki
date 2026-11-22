@@ -2048,20 +2048,22 @@ staged files only:
 ```yaml
 # .pre-commit-config.yaml
 repos:
-  - repo: https://github.com/koxudaxi/heki
-    rev: v0.2.2
+  - repo: https://github.com/koxudaxi/heki-pre-commit
+    rev: v0.2.3
     hooks:
       - id: heki
 ```
 
-The first run builds heki from the source of that release: pre-commit installs the repository as
-a Python package, which maturin compiles with cargo (Rust 1.99 or newer; when cargo is not on
-`PATH`, the build installs Rust into a cache directory first). That takes a few minutes, and
-pre-commit keeps the installed hook for later runs. `pre-commit autoupdate` moves `rev` to the
-latest release.
+[heki-pre-commit](https://github.com/koxudaxi/heki-pre-commit) installs heki from its PyPI wheel, so
+there is no compile and no Rust toolchain. Its tags follow heki releases, so `pre-commit autoupdate`
+moves `rev` to the latest release.
 
-heki also ships as one binary on PyPI, so a local hook can run it without a compile or a Rust
-toolchain:
+To build heki from source instead, point `repo` at `https://github.com/koxudaxi/heki` with a release
+`rev`. pre-commit then installs the repository as a Python package, which maturin compiles with cargo
+(Rust 1.99 or newer; when cargo is not on `PATH`, the build installs Rust into a cache directory
+first). That takes a few minutes, and pre-commit keeps the installed hook for later runs.
+
+A local hook can run any version of the PyPI wheel, also without a compile or a Rust toolchain:
 
 === "uv"
 
