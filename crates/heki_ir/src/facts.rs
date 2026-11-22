@@ -27,7 +27,7 @@ mod paths;
 pub use origin::{Carries, ItemOrigin, ItemOrigins, ItemSource};
 pub use paths::{Decided, ModuleBindings, Must, PathReader, Paths, Progress};
 
-use crate::walk::{Answer, Def, FnShape};
+use crate::walk::{Answer, Budget, Def, FnShape};
 use crate::{
     BinOpKind, BlockId, BuiltinKind, CompareOpKind, ConstLiteral, DictEntry, FunctionId,
     FunctionKind, Inst, InstKind, IrFunction, LenCap, LoopBound, NaturalLoop, Terminator,
@@ -313,6 +313,9 @@ pub struct FnIndex<'a> {
     guards: OnceCell<Vec<LenGuard>>,
     /// The branches the code of `f` decides ([`Self::decided`]).
     decided: OnceCell<Decided>,
+    /// The blocks every path to another block passes, over the path facts' graph
+    /// ([`Self::every_path_passes`]); `None` past the budget of the walk.
+    block_dominators: OnceCell<Option<paths::BlockDominators>>,
     /// The fixed trip counts `f.loops` record were decided with these constants (see
     /// [`Self::redeciding_trips`]).
     recorded_trips: bool,
@@ -439,6 +442,7 @@ impl<'a> FnIndex<'a> {
             measured: OnceCell::new(),
             guards: OnceCell::new(),
             decided: OnceCell::new(),
+            block_dominators: OnceCell::new(),
             recorded_trips: true,
         }
     }
@@ -1640,6 +1644,24 @@ impl<'a> FnIndex<'a> {
         }
     }
 
+    /// Whether every path from the entry to block `at` passes block `through`, over the graph of
+    /// the path facts (`paths::Paths`): a branch the module's constants decide is not taken, and
+    /// a block raises into its handler only where an instruction of it may raise. Past the
+    /// budget of that walk, the dominator tree of every edge answers.
+    fn every_path_passes(&self, through: BlockId, at: BlockId) -> bool {
+        let dominators = self.block_dominators.get_or_init(|| {
+            let budget = Budget::of_function("heki_ir::facts::FnIndex::every_path_passes", self.f);
+            match paths::Paths::new(self, &paths::PathReader::ir(), &budget).block_dominators() {
+                Answer::Known(d) => Some(d),
+                Answer::Open => None,
+            }
+        });
+        match dominators {
+            Some(d) => d.passes(through, at),
+            None => !self.shape.reachable(at) || self.shape.dominators().dominates(through, at),
+        }
+    }
+
     /// The most items `v` holds in the block `at`, and while the blocks `during` run, by the
     /// tests before it: the smallest `N` of a `len(v) <= N` (or `< N + 1`, `== N`, the negation
     /// of `>` / `>=`) that every path to `at` passes, also through `not`, `and`, `or`, and
@@ -1667,11 +1689,9 @@ impl<'a> FnIndex<'a> {
         if !measured.contains(&v) && path.is_none() {
             return None;
         }
-        // Every path from the entry to `at` (normal and exception edges) runs through the guarded
-        // edge: also when no path from the entry reaches `at`, since none avoids the edge either.
-        let shape = &self.shape;
-        let guards_at =
-            |to: BlockId| to == at || !shape.reachable(at) || shape.dominators().dominates(to, at);
+        // Every path from the entry to `at` runs through the guarded edge: also when no path from
+        // the entry reaches `at`, since none avoids the edge either.
+        let guards_at = |to: BlockId| to == at || self.every_path_passes(to, at);
         let mut on_the_way = self.reaching(at);
         for b in during {
             on_the_way[b.0 as usize] = true;

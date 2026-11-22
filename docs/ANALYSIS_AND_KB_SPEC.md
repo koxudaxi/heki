@@ -159,7 +159,9 @@ Compound expressions are flattened into **basic instructions in explicit left-to
     block that reaches the loop grows `x` or lets it escape (returning it after the loop is
     fine). `FnIndex::guarded_len` reads the outcome of the test on the edge into a block whose
     one predecessor branches on it, through `not`, `and` / `or`, and comparison chains, and the
-    tests on the single-predecessor way to each operand. A generator expression's or a
+    tests on the single-predecessor way to each operand. "Every path" is that of the path facts
+    (`Paths::block_dominators`): a branch the module's constants decide is not taken, and a
+    block raises into its handler only where an instruction of it may raise. A generator expression's or a
     comprehension function's loop over `.0` takes the bound of the iterable its creator passes
     (`IrFunction::passed_from`); and a `while` loop over a counter that runs at most 16 times
     (`FnIndex::counted_trips`): its test compares a header phi with a constant (`==`, `!=`,

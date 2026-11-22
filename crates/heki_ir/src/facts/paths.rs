@@ -644,6 +644,8 @@ const MAX_PASSES: u32 = 4;
 struct Dominance {
     /// The position of each block of the region.
     local: FxHashMap<BlockId, u32>,
+    /// Per node, its immediate dominator ([`UNREACHED`] for a node the root does not reach).
+    idom: Vec<u32>,
     /// Per node, whether the region's root reaches it.
     reached: Vec<bool>,
     /// Per node, whether every path from the root to the sink passes it.
@@ -666,6 +668,62 @@ impl Dominance {
         } else {
             Must::NotEvery
         }
+    }
+}
+
+/// Which blocks every path from a function's entry to another block passes, over the graph of
+/// its path facts ([`Paths::block_dominators`]). Each node's subtree of the dominator tree is
+/// an interval of preorder numbers, so a query takes constant time.
+#[derive(Debug, Clone)]
+pub struct BlockDominators {
+    local: FxHashMap<BlockId, u32>,
+    /// Per node, its number in a preorder of the dominator tree ([`UNREACHED`] for a node the
+    /// entry does not reach).
+    preorder: Vec<u32>,
+    /// Per node, how many nodes its subtree holds.
+    subtree: Vec<u32>,
+}
+
+impl BlockDominators {
+    /// The intervals of the dominator tree `idom`. A node comes after its immediate dominator in
+    /// reverse postorder, as [`Paths::immediate_dominators`] already relies on: sizes are summed
+    /// from the last node back, and each child takes the next free numbers of its parent's
+    /// interval from the first node on.
+    fn of(local: FxHashMap<BlockId, u32>, idom: &[u32]) -> Self {
+        let reached = |x: usize| idom[x] != UNREACHED;
+        debug_assert!((1..idom.len()).all(|x| !reached(x) || (idom[x] as usize) < x));
+        let mut subtree = vec![1u32; idom.len()];
+        for x in (1..idom.len()).rev().filter(|&x| reached(x)) {
+            subtree[idom[x] as usize] += subtree[x];
+        }
+        let mut preorder = vec![UNREACHED; idom.len()];
+        let mut next_free = vec![0u32; idom.len()];
+        preorder[0] = 0;
+        next_free[0] = 1;
+        for x in (1..idom.len()).filter(|&x| reached(x)) {
+            let parent = idom[x] as usize;
+            preorder[x] = next_free[parent];
+            next_free[parent] += subtree[x];
+            next_free[x] = preorder[x] + 1;
+        }
+        Self {
+            local,
+            preorder,
+            subtree,
+        }
+    }
+
+    /// Whether every path from the entry to block `to` passes block `through`: also when no
+    /// path reaches `to` (none avoids `through` either).
+    pub fn passes(&self, through: BlockId, to: BlockId) -> bool {
+        let head = |b: BlockId| self.local.get(&b).map(|k| 2 * *k as usize);
+        let Some(x) = head(to).filter(|x| self.preorder[*x] != UNREACHED) else {
+            return true;
+        };
+        let Some(d) = head(through).filter(|d| self.preorder[*d] != UNREACHED) else {
+            return false;
+        };
+        (self.preorder[d]..self.preorder[d] + self.subtree[d]).contains(&self.preorder[x])
     }
 }
 
@@ -783,6 +841,16 @@ impl<'p, 'a> Paths<'p, 'a> {
         answer
     }
 
+    /// Which blocks every path from the entry to another block passes ([`BlockDominators`]), over
+    /// the graph `on_every_return` reads: a branch the code decides is not taken, and a block
+    /// raises into its handler only where an instruction of it may raise.
+    pub fn block_dominators(&self) -> Answer<BlockDominators> {
+        self.on_return
+            .get_or_init(|| self.dominance(Region::Function))
+            .as_ref()
+            .map(|d| BlockDominators::of(d.local.clone(), &d.idom))
+    }
+
     /// The node that is passed exactly when the point is: the head while no raising
     /// instruction before it (or, for `Returned`, at it) has run. A method call whose lookup of
     /// the method may raise has made no call until the lookup returned: it is called only after
@@ -882,6 +950,7 @@ impl<'p, 'a> Paths<'p, 'a> {
         }
         Answer::Known(Dominance {
             local,
+            idom,
             reached,
             on_every,
             sink,
