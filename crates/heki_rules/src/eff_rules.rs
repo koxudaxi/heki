@@ -624,9 +624,27 @@ pub(crate) struct DataOrigins {
 }
 
 impl DataOrigins {
+    /// "Origin" but the trip count, which `FnIndex::fixed_trips` decides: the origins of the items
+    /// the loop `li` of function `f` steps through ([`ItemOrigins::of_loop`], charged to
+    /// `budget`), or why they are not the data's (a cause of "Origin"): no items followed (a
+    /// `while` loop, an iterable the walk does not decide, a budget spent), or the first source
+    /// that is not the data's.
+    pub(crate) fn of_loop_items(
+        cx: &CheckContext<'_>,
+        tcx: &TypeCtx<'_>,
+        origins: &ItemOrigins<'_>,
+        budget: &Budget,
+        (f, li): (heki_ir::FunctionId, usize),
+    ) -> Result<Self, &'static OpenCause> {
+        let Answer::Known(found) = origins.of_loop(budget, f, li) else {
+            return Err(&premises::NO_ITEMS_FOLLOWED);
+        };
+        Self::of(cx, tcx, tcx.ir(), &found)
+    }
+
     /// The origins of every item of `found`, or why the first one that is not the data's is not
     /// (a cause of "Origin").
-    pub(crate) fn of(
+    fn of(
         cx: &CheckContext<'_>,
         tcx: &TypeCtx<'_>,
         ir: &heki_ir::ModuleIr,
@@ -717,11 +735,7 @@ fn established_queries(
                     return None;
                 }
             }
-            let Answer::Known(found) = origins.of_loop(&budget, f.id, li) else {
-                let _ = steps(&premises::NO_ITEMS_FOLLOWED);
-                return None;
-            };
-            match DataOrigins::of(cx, tcx, unit.input.ir, &found) {
+            match DataOrigins::of_loop_items(cx, tcx, origins, &budget, (f.id, li)) {
                 Ok(origins) => (!open).then_some(origins),
                 Err(cause) => {
                     let _ = steps(cause);
