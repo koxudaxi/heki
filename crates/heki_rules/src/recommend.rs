@@ -246,7 +246,7 @@ pub fn recommend(request: Request<'_>) -> Result<RecommendReport, RecommendError
         .as_deref()
         .map_or(ConfigLayout::PyProject, ConfigLayout::of);
     let config_file = env.config_file.as_deref().map(shown);
-    let left_out = left_out(&project, paths, shown)?;
+    let (left_out, left_out_paths) = left_out(&project, paths, shown)?;
     let functions = project.files.iter().map(|f| f.ir.functions.len()).sum();
     let files = project.files.len();
     let selection = discovery_selection(&env.cfg.lint, &current)?;
@@ -286,7 +286,8 @@ pub fn recommend(request: Request<'_>) -> Result<RecommendReport, RecommendError
     // end of the function.)
     let Indexed { project, index, .. } = discovery;
     drop(index);
-    let roots = blind_spots::source_roots(&project, baseline.as_ref(), shown);
+    let left_out_paths = (!left_out.truncated).then_some(&left_out_paths[..]);
+    let roots = blind_spots::source_roots(&project, left_out_paths, baseline.as_ref(), shown);
     if !roots.candidates.is_empty() {
         runs.push(Run {
             label: RunLabel::SourceRoots,
@@ -538,23 +539,24 @@ fn printed(diags: impl IntoIterator<Item = Diagnostic>) -> Vec<Diagnostic> {
 }
 
 /// The Python files that discovery from the project root finds (with the same ignore files and
-/// `exclude`) and the paths given leave out, as the output writes them. Paths that hold the
-/// root leave nothing out.
+/// `exclude`) and the paths given leave out, as the output writes them, then as paths. Paths
+/// that hold the root leave nothing out.
 fn left_out(
     project: &Project,
     paths: &[PathBuf],
     shown: &dyn Fn(&Path) -> String,
-) -> Result<LeftOut, ProjectError> {
+) -> Result<(LeftOut, Vec<PathBuf>), ProjectError> {
     let env = &project.env;
     let holds_root = paths
         .iter()
         .any(|p| canonical(p).is_ok_and(|p| env.root.starts_with(p)));
     if holds_root {
-        return Ok(LeftOut {
+        let none = LeftOut {
             python_files: 0,
             files: Vec::new(),
             truncated: false,
-        });
+        };
+        return Ok((none, Vec::new()));
     }
     let analyzed: FxHashSet<String> = project
         .files
@@ -570,11 +572,12 @@ fn left_out(
         MAX_LISTED,
         MAX_CENSUS_ENTRIES,
     );
-    Ok(LeftOut {
+    let left_out = LeftOut {
         python_files: found.len(),
         files: found.iter().map(|p| shown(p)).collect(),
         truncated: !complete,
-    })
+    };
+    Ok((left_out, found))
 }
 
 fn left_out_note(left_out: &LeftOut) -> String {

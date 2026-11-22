@@ -1183,7 +1183,8 @@ unresolved = "report"
 | `attribution` | `"call-graph"` | `"call-graph"` or `"lexical"`: which function a write is judged in. See [How contracts report](https://heki.koxudaxi.dev/configuration/#how-contracts-report). |
 | `own-receiver` | `"report"` | `"report"` or `"allow"`: whether a write through the receiver of the method it is judged in (`self`, `cls`, `super()`) is allowed. See [How contracts report](https://heki.koxudaxi.dev/configuration/#how-contracts-report). |
 | `allowed-protocols` | `[]` | Project protocols (class patterns, their subclasses included): a write through a value typed with one that declares the attribute, itself or through its protocol bases, is allowed. See [How contracts report](https://heki.koxudaxi.dev/configuration/#how-contracts-report). |
-| `unlisted-dict-keys` | `"ignore"` | `"ignore"` or `"report"`: whether a `__dict__` key of a target's class that no target names is reported when it is written. |
+| `protocol-subclasses` | `true` | `false`: an `allowed-protocols` pattern names the protocols it matches, not their subprotocols (a protocol deriving from an allowed one stays judged). |
+| `unlisted-dict-keys` | `"ignore"` | `"ignore"` or `"report"`: whether a `__dict__` key of a target's class that no `write-owners` target names is reported when it is written. |
 
 A container entry (`Class.attr["key"]`):
 
@@ -1206,11 +1207,21 @@ A shallow copy's containers are the original's: only rebinding its attributes co
 With `unlisted-dict-keys = "report"`, `MUT201` also reports a constant key written through the
 namespace of an object of a class a target covers (`field.__dict__[KEY] = v`,
 `field.__dict__.setdefault("_cache", v)`, `del vars(field)["k"]`) when no target covering that
-class names the key, so a new cache key needs a target first. A target names the keys its
-attribute pattern matches (`Field._*` names `_cache`), and an entry target names its container.
-The contract's allowance applies as to a target write. A key computed at run time has no name to
-check (`MUT205`, with `unresolved = "report"`), and neither has a write in a helper that does not
-type the object.
+class names the key, in this contract or in any other `write-owners` contract, so a new cache key
+needs a target first. A target names the keys its attribute pattern matches (`Field._*` names
+`_cache`), and an entry target names its container. A key another contract names is that
+contract's to guard: its writes are judged by that contract's allowance alone. The contract's
+allowance applies to an unlisted key as to a target write. A key computed at run time has no name
+to check (`MUT205`, with `unresolved = "report"`), and neither has a write in a helper that does
+not type the object. A key every function may write is listed by a contract that allows every
+writer:
+
+```toml
+[[tool.heki.write-owners]]
+name = "bookkeeping"
+targets = ["pkg.model.Field._derived_from", "pkg.model.Field._seen_*"]
+allowed-writers = ["*"]
+```
 
 With `unresolved = "report"`, `MUT205` reports:
 
@@ -1256,6 +1267,7 @@ and writes through the protocols it names (see [How contracts report](https://he
 | `attribution` | `"call-graph"` | `"call-graph"` or `"lexical"`, as in `write-owners`. |
 | `own-receiver` | `"report"` | `"report"` or `"allow"`, as in `write-owners`. |
 | `allowed-protocols` | `[]` | As in `write-owners`, for a read or a call through the protocol. |
+| `protocol-subclasses` | `true` | As in `write-owners`. |
 
 `MUT203` does not see a read through a parameter without a project-class annotation; with
 `unresolved = "report"`, `MUT206` reports it unless every caller binds the parameter to an
@@ -1289,6 +1301,7 @@ The call side of `write-owners`.
 | `attribution` | `"call-graph"` | `"call-graph"` or `"lexical"`, as in `write-owners`. |
 | `own-receiver` | `"report"` | `"report"` or `"allow"`, as in `write-owners`. |
 | `allowed-protocols` | `[]` | As in `write-owners`, for a read or a call through the protocol. |
+| `protocol-subclasses` | `true` | As in `write-owners`. |
 
 - A call is reported only when every function it may call (each candidate in the class
   hierarchy) is a target: `text.replace(...)` on a `str` is never a call of
@@ -1622,8 +1635,13 @@ holds for `invalidation` too:
   that declares the member, itself or through its protocol bases, is allowed wherever it is
   judged, and so is a reference that `references` counts (`return h._helper`): `allowed-protocols = ["*Host"]` allows `parser._flag` with `parser: RenderHost` and
   `class RenderHost(RuntimeFlags, Protocol)` when `RuntimeFlags` declares `_flag`, while the same
-  read through `flags: RuntimeFlags` stays reported. A write through the protocol is allowed for
-  the protocol's member and for each implementation's attribute alike. Accesses through a
+  read through `flags: RuntimeFlags` stays reported. With `protocol-subclasses = false`, a
+  pattern names the protocols it matches only, not their subprotocols: with
+  `class RuntimeExpressionFlags(GraphBuilderHost, Protocol)`, `allowed-protocols = ["*Host"]`
+  allows the accesses through `GraphBuilderHost`, and those through `RuntimeExpressionFlags`
+  stay judged, also of the members it inherits from `GraphBuilderHost`. A write through the
+  protocol is allowed for the protocol's member and for each implementation's attribute alike.
+  Accesses through a
   protocol that does not declare the member, through an implementation's class, through a value
   of unknown class (`unresolved = "report"`, also a protocol whose implementations heki cannot
   list), and a protocol-typed value handed to a helper that changes it without typing its
@@ -2188,18 +2206,23 @@ one.
   an annotation is an edit of the program, so none enters the block.
 - **Source roots**: a directory below the project root, neither a source root nor a regular
   package (a directory with `__init__.py` is imported by its own name, so heki never takes one
-  for a source root), below which the dotted path of an import that names no project module is
-  a file (`backend/config/env.py` for `import config.env`) is a candidate for `src`. An import of
+  for a source root), below which the dotted path of an import that names no project module is a
+  file (`backend/config/env.py` for `import config.env`) is a candidate for `src`. An import of
   the standard library or of a package heki's catalog covers is no candidate's, and neither is
   one whose path is below several directories none of which holds the importing file. The first
   8 candidates by imports are tried, each added to `src` with those already taken (the source
   roots heki detects are written out with them, since setting `src` turns detection off). A
-  trial computes the module names with the directory added and takes it into the block only
-  when its imports resolve, no two files of one kind then define one module, every import that
-  names a module of the project now, and every import a directory already taken was taken for,
-  still names the same module of the same file, and no contract of the configuration and no
-  baseline entry names a module whose name would change. The block is then checked whole: when
-  it would make some other import resolve into a file below a source root that does not hold the
+  trial computes the module names with the directory added for every Python file below the
+  project root, those the paths given leave out included (heki reads them for this; when they
+  are more than the 50 it reads, no directory is tried), resolves each import as heki's index
+  does, and takes the directory into the block only when the imports it was tried for name its
+  own files, no two files of one kind then define one module unless just those files did before,
+  every import that names a module of the project now, and every import a directory already
+  taken was taken for, still names the same module of the same file, and every contract of the
+  configuration and every baseline entry still names what it names now (the rules' matchers
+  judge each definition by its name now and its name with the directory; a baseline entry must
+  not spell a module whose name would change). The block is then checked whole: when it would
+  make some other import resolve into a file below a source root that does not hold the
   importing file (`import utils` in `tool.py`, below `svc_a/` and `svc_b/`, would name
   `svc_a/utils.py`), the directory that file is below stays out and the others are tried again.
   heki cannot tell such a file is the one meant, and the block holds only what the trial
@@ -4004,7 +4027,11 @@ Each step of the chain is established, not assumed:
   method calling `self`, every member of a union; a receiver typed by a protocol has
   implementations heki cannot list, and is not followed; a call of a property's value
   (`self.handler()`) runs what calling a value of the type the getter declares runs (a protocol
-  is not followed), and the getter runs as a read of the property, which is not followed; a
+  is not followed), and a read of the property runs the getter, followed when every class the
+  object may be finds a getter of the project for the name first, also after the class a
+  `super()` read is in (a class finding a class attribute, a method, a value stored on the class
+  outside its body, or nothing instead, a base heki does not know before the getter,
+  `__getattribute__`, or a metaclass heki does not know leaves the read not followed); a
   decorator other than `staticmethod`, `classmethod`, `property`, `abstractmethod`, or
   `override` may not run the body, and is not followed; a function defined twice is not
   followed;
@@ -4832,7 +4859,8 @@ or comprehension calling through the enclosing method's `self` stay reported.
 With `allowed-protocols`, a call through a value typed with a project protocol the key names that
 declares the method, itself or through its protocol bases, is allowed wherever it is judged, and so
 is a reference handing the method on through such a value (`return h._helper` with `references`);
-a call through another protocol or the implementation's class stays reported.
+a call through another protocol or the implementation's class stays reported. A pattern names the
+subprotocols of the protocols it matches too, unless `protocol-subclasses = false`.
 
 ## What a report states
 
@@ -4948,6 +4976,8 @@ No automatic fix.
   - `allowed-protocols`: project protocols (class patterns, their subclasses included): a call
     through a value typed with one that declares the method, itself or through its protocol
     bases, is allowed.
+  - `protocol-subclasses`: `true` (default) or `false`: whether an `allowed-protocols` pattern
+    names the subprotocols of the protocols it matches, or those protocols only.
 
 
 ---
@@ -7393,7 +7423,8 @@ a member the class inherits. Another parameter, an attribute of the receiver, an
 
 With `allowed-protocols`, a read through a value typed with a project protocol the key names that
 declares the attribute, itself or through its protocol bases, is allowed wherever it is judged; a
-read through another protocol or the implementation's class stays reported.
+read through another protocol or the implementation's class stays reported. A pattern names the
+subprotocols of the protocols it matches too, unless `protocol-subclasses = false`.
 
 ## What a report states
 
@@ -7480,6 +7511,8 @@ No automatic fix.
   - `allowed-protocols`: project protocols (class patterns, their subclasses included): a read
     through a value typed with one that declares the attribute, itself or through its protocol
     bases, is allowed.
+  - `protocol-subclasses`: `true` (default) or `false`: whether an `allowed-protocols` pattern
+    names the subprotocols of the protocols it matches, or those protocols only.
 
 Known limitation: a read through a parameter without a project-class annotation
 (`def helper(ref): return ref.children`) is not seen, since the read object's class is unknown
@@ -8715,21 +8748,22 @@ allowed writers:
   and otherwise writes the value's own attributes. A helper that does not see the class and
   only hands the value on to an allowed writer or an exempt method writes inside the owner.
 
-A target names a class and an attribute; it covers the class's subclasses too (the target's
-class family). With `unlisted-dict-keys = "report"`, a constant key written through the
-namespace of an object of a class a target covers (`field.__dict__["_cache"] = v`,
-`vars(field).setdefault(KEY, v)`, `del field.__dict__[KEY]`) is reported too when no target
-covering that class names it (`writes `pkg.model.Field._cache` (dict_direct), a `__dict__` key
-no target names`), so a new key needs a target first. A target names the keys its attribute
-pattern matches, and an entry target names its container. A computed key, a plain attribute
-store (`field._cache = v`, `setattr`), and a write in a helper that does not see the object's
-class are not such writes. A target can also name one entry of the container an attribute holds,
-`Class.attr["key"]`: it matches the writes of that key (`field.extras["init"] = v`,
-`field.extras[INIT]` with a string constant, `field.extras.pop("init")`,
-`del field.extras["init"]`, `field.extras["init"].append(v)`), not a write of the whole
-container (`field.extras = {}`, `field.extras.update(...)`) or with a computed key, which are
-writes of `Class.attr`. When a contract names both a container and one of its entries, a write of
-the entry is reported once, under the entry.
+A target names a class and an attribute; it covers the class's subclasses too (the target's class
+family). With `unlisted-dict-keys = "report"`, a constant key written through the namespace of an
+object of a class a target covers (`field.__dict__["_cache"] = v`, `vars(field).setdefault(KEY, v)`,
+`del field.__dict__[KEY]`) is reported too when no target covering that class names it, in this
+contract or in any other `write-owners` contract (`writes `pkg.model.Field._cache` (dict_direct), a
+`__dict__` key no target names`), so a new key needs a target first. A target names the keys its
+attribute pattern matches, and an entry target names its container; a key another contract names is
+judged by that contract alone, and a contract allowing every writer (`allowed-writers = ["*"]`)
+lists keys any function may write. A computed key, a plain attribute store (`field._cache = v`,
+`setattr`), and a write in a helper that does not see the object's class are not such writes. A
+target can also name one entry of the container an attribute holds, `Class.attr["key"]`: it matches
+the writes of that key (`field.extras["init"] = v`, `field.extras[INIT]` with a string constant,
+`field.extras.pop("init")`, `del field.extras["init"]`, `field.extras["init"].append(v)`), not a
+write of the whole container (`field.extras = {}`, `field.extras.update(...)`) or with a computed
+key, which are writes of `Class.attr`. When a contract names both a container and one of its
+entries, a write of the entry is reported once, under the entry.
 
 The written object's class is the one heki infers for it, with annotations as hints: a
 parameter, local, attribute, or return annotation, including the items of `list[...]`,
@@ -8806,7 +8840,8 @@ With `allowed-protocols`, a write through a value typed with a project protocol 
 that declares the attribute (`parser._flag = True` with `parser: RenderHost`, `RenderHost`
 inheriting the declaration from a base protocol) is allowed, wherever it is judged; a write through
 another protocol, the implementation's class, or a value a helper changes without typing it stays
-reported.
+reported. A pattern names the subprotocols of the protocols it matches too, unless
+`protocol-subclasses = false`.
 
 A class's own initialization is allowed: a write inside an initializer (`__init__`,
 `__post_init__`, `__new__`, `model_post_init`, `__setstate__`) of a class of the target's
@@ -8834,14 +8869,14 @@ reported. `fresh-objects = "report"` reports these writes like any other.
 A report states that the function writes a target of a `write-owners` contract (an attribute, or the
 container it holds) outside the contract's write owners, directly, through an alias, or through the
 helpers shown; with `unlisted-dict-keys = "report"`, also that it writes a `__dict__` key of a
-target's class that no target names.
+target's class that no `write-owners` target names.
 
 Its premises:
 
 - **Target**: the object is an instance of a class the contract names, or of a subclass, by
   construction or annotation (assumption R2), and the attribute is a target's (with
-  `unlisted-dict-keys = "report"`, or a `__dict__` key no target names). Open: an alias bound
-  on one path is enough.
+  `unlisted-dict-keys = "report"`, or a `__dict__` key no `write-owners` target names). Open:
+  an alias bound on one path is enough.
 - **Outside the owners**: the function is not in the allowed modules and classes, nor runs only
   inside allowed contexts (with `attribution = "lexical"`: the function holding the write is
   not allowed, nor runs only inside a class's own initialization; with `own-receiver =
@@ -8928,8 +8963,10 @@ No automatic fix.
   - `allowed-protocols`: project protocols (class patterns, their subclasses included): a write
     through a value typed with one that declares the attribute, itself or through its protocol
     bases, is allowed, for the protocol's member and each implementation's attribute alike.
+  - `protocol-subclasses`: `true` (default) or `false`: whether an `allowed-protocols` pattern
+    names the subprotocols of the protocols it matches, or those protocols only.
   - `unlisted-dict-keys`: `"ignore"` (default) or `"report"`: also report a constant `__dict__`
-    key of a target's class that no target names.
+    key of a target's class that no target of any `write-owners` contract names.
 
 
 ---

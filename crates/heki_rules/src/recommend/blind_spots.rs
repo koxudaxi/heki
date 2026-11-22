@@ -8,21 +8,25 @@
 //! rule 3). A source root enters it only after its trial.
 
 use super::{ISSUES_URL, MAX_EXAMPLES, MAX_LISTED, RecommendError, analyze, printed};
+use crate::DottedPattern;
 use crate::blind_spots::{BlindSite, BlindSpots, CallCounts};
-use crate::project::{ParsedFile, Project, module_of, rel_posix};
+use crate::contracts::{ConfiguredName, configured_names};
+use crate::project::{ParsedFile, Project, display_path, module_of, parse_source, rel_posix};
 use heki_ast::LineIndex;
 use heki_diagnostics::RatchetBaseline;
 use heki_effect::{
-    ModuleLayout, ProjectIndex, is_source_dir, module_name_for_path, resolve_relative_module,
+    ModuleLayout, ProjectIndex, is_source_dir, is_stub, module_name_for_path, module_precedence,
+    module_prefix, resolve_relative_module,
 };
-use heki_env::{EcosystemOverride, HekiConfig};
+use heki_env::EcosystemOverride;
 use heki_semantic::ModuleImport;
 use rustc_hash::{FxHashMap, FxHashSet};
 use schemars::JsonSchema;
 use serde::Serialize;
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// The most library names the hypothetical-catalog run gives an entry: those with the most
 /// reach.
@@ -581,77 +585,145 @@ impl SourceRoots {
     }
 }
 
-/// The longest dotted prefix of `name` (itself included) that `is_module` accepts: the module
-/// heki's index resolves the name into, the rest being a name in it.
-fn module_prefix(name: &str, is_module: impl Fn(&str) -> bool) -> Option<&str> {
-    let mut end = name.len();
-    loop {
-        if is_module(&name[..end]) {
-            return Some(&name[..end]);
+/// A Python file below the project root, as the source-root trial reads it.
+struct TreeFile<'p> {
+    path: Cow<'p, Path>,
+    /// Relative to the project root, POSIX.
+    rel: Cow<'p, str>,
+    read: Read<'p>,
+}
+
+enum Read<'p> {
+    Analyzed(&'p ParsedFile),
+    /// A file the paths given leave out: its imports, and the qualnames of its definitions.
+    LeftOut(Vec<ModuleImport>, Vec<String>),
+    /// A file heki cannot read or parse: only the module it defines counts.
+    Unread,
+}
+
+impl TreeFile<'_> {
+    fn imports(&self) -> &[ModuleImport] {
+        match &self.read {
+            Read::Analyzed(f) => &f.semantic.imports,
+            Read::LeftOut(imports, _) => imports,
+            Read::Unread => &[],
         }
-        end = name[..end].rfind('.')?;
+    }
+
+    /// The qualnames of its functions (its body, `<module>`, included) and classes.
+    fn definitions(&self) -> Vec<&str> {
+        match &self.read {
+            Read::Analyzed(f) => definitions(f).collect(),
+            Read::LeftOut(_, names) => names.iter().map(String::as_str).collect(),
+            Read::Unread => Vec::new(),
+        }
     }
 }
 
-/// The module names of a project's files under one module layout.
+fn definitions(f: &ParsedFile) -> impl Iterator<Item = &str> {
+    (f.ir.functions.iter().map(|g| g.qualname.as_str()))
+        .chain(f.semantic.classes.iter().map(|c| c.qualname.as_str()))
+}
+
+/// The Python files below the project root that `heki check` on the root reads: those analyzed,
+/// in the order of `Project::files` (so that an index of one is its index there), those
+/// `left_out` names, read here, then those heki cannot read or parse.
+fn python_files<'p>(project: &'p Project, left_out: &[PathBuf]) -> Vec<TreeFile<'p>> {
+    let env = &project.env;
+    let mut tree: Vec<TreeFile<'p>> = (project.files.iter())
+        .map(|f| TreeFile {
+            path: Cow::Borrowed(&f.path),
+            rel: Cow::Borrowed(&f.rel),
+            read: Read::Analyzed(f),
+        })
+        .collect();
+    let mut unread: Vec<TreeFile<'p>> = (project.unread.iter())
+        .map(|u| TreeFile {
+            path: Cow::Borrowed(&u.path),
+            rel: Cow::Owned(rel_posix(&u.path, &env.root)),
+            read: Read::Unread,
+        })
+        .collect();
+    for path in left_out {
+        let parsed = heki_ast::read_source(path).ok().and_then(|source| {
+            parse_source(path, &env.root, source, &env.layout, env.runtime).ok()
+        });
+        match parsed {
+            Some(f) => {
+                let names = definitions(&f).map(str::to_owned).collect();
+                tree.push(TreeFile {
+                    path: Cow::Owned(f.path),
+                    rel: Cow::Owned(f.rel),
+                    read: Read::LeftOut(f.semantic.imports, names),
+                });
+            }
+            None => unread.push(TreeFile {
+                path: Cow::Owned(display_path(path)),
+                rel: Cow::Owned(rel_posix(path, &env.root)),
+                read: Read::Unread,
+            }),
+        }
+    }
+    tree.extend(unread);
+    tree
+}
+
+/// The module names of the files of a tree under one module layout, as heki's index gives them.
 struct Names {
-    /// Of each file, in the order of `Project::files`: its module and whether it is a package.
+    /// Of each file: its module and whether it is a package.
     files: Vec<(String, bool)>,
-    /// Of each module name, the files defining it: indices into `Project::files`, then into
-    /// `Project::unread` after them (heki resolves a name into a file it could not read too).
-    defined: FxHashMap<String, Vec<usize>>,
+    /// Of each module name, the file heki's index takes it from ([`module_precedence`]).
+    owners: FxHashMap<String, usize>,
+    /// The files of one kind (implementations or stubs) that define one module, of each module
+    /// more than one such file defines.
+    shared: BTreeSet<Vec<usize>>,
     layout: ModuleLayout,
 }
 
 impl Names {
-    fn under(project: &Project, layout: &ModuleLayout) -> Self {
-        let files: Vec<(String, bool)> = project
-            .files
-            .iter()
+    fn under(tree: &[TreeFile<'_>], layout: &ModuleLayout) -> Self {
+        let files: Vec<(String, bool)> = (tree.iter())
             .map(|f| module_of(&f.rel, &f.path, layout))
             .collect();
-        let root = &project.env.root;
-        let unread = project.unread.iter().map(|u| {
-            let rel = rel_posix(&u.path, root);
-            module_of(&rel, &u.path, layout).0
-        });
-        let mut defined: FxHashMap<String, Vec<usize>> = FxHashMap::default();
-        for (i, module) in files
-            .iter()
-            .map(|(m, _)| m.clone())
-            .chain(unread)
-            .enumerate()
-        {
-            defined.entry(module).or_default().push(i);
+        let mut owners: FxHashMap<String, usize> = FxHashMap::default();
+        let mut kinds: FxHashMap<(&str, bool), Vec<usize>> = FxHashMap::default();
+        for (i, (module, _)) in files.iter().enumerate() {
+            let path: &Path = &tree[i].path;
+            owners
+                .entry(module.clone())
+                .and_modify(|o| {
+                    if module_precedence(path) > module_precedence(&tree[*o].path) {
+                        *o = i;
+                    }
+                })
+                .or_insert(i);
+            kinds
+                .entry((module.as_str(), is_stub(path)))
+                .or_default()
+                .push(i);
         }
+        let shared = kinds.into_values().filter(|f| f.len() > 1).collect();
         Self {
             files,
-            defined,
+            owners,
+            shared,
             layout: layout.clone(),
         }
     }
 
-    /// The source root holding file `i` (an index as in `defined`), `None` for the project
-    /// root.
-    fn root_of(&self, project: &Project, i: usize) -> Option<&str> {
-        let rel = match project.files.get(i) {
-            Some(f) => f.rel.clone(),
-            None => rel_posix(
-                &project.unread[i - project.files.len()].path,
-                &project.env.root,
-            ),
-        };
-        self.layout.source_root_of(Path::new(&rel))
+    /// The source root holding file `i`, `None` for the project root.
+    fn root_of(&self, tree: &[TreeFile<'_>], i: usize) -> Option<&str> {
+        self.layout.source_root_of(Path::new(tree[i].rel.as_ref()))
     }
 
-    /// What the dotted name `name` names under this layout: the files of the module heki
-    /// resolves it into, and the rest of the name, which names something in that module
-    /// (`.load` of `config.env.load`). Two layouts that give a name the same target let heki
-    /// follow it to the same definition.
-    fn target<'n>(&self, name: &'n str) -> Option<Target<'_, 'n>> {
-        let module = module_prefix(name, |p| self.defined.contains_key(p))?;
+    /// What the dotted name `name` names under this layout: the file heki's index resolves it
+    /// into (the longest module it is or is below, [`module_prefix`]), and the rest of the name,
+    /// which names something in that module (`.load` of `config.env.load`). Two layouts that
+    /// give a name the same target let heki follow it to the same definition.
+    fn target<'n>(&self, name: &'n str) -> Option<Target<'n>> {
+        let module = module_prefix(name, |p| self.owners.contains_key(p))?;
         Some(Target {
-            files: &self.defined[module],
+            file: self.owners[module],
             rest: &name[module.len()..],
         })
     }
@@ -677,48 +749,22 @@ impl Names {
             format!("{base}.{}", imp.imported_name)
         })
     }
-
-    /// For each module name more than one file of one kind (implementation or stub) defines,
-    /// two of those files.
-    fn shared(&self, project: &Project) -> BTreeMap<(String, bool), (usize, usize)> {
-        let mut first: FxHashMap<(&str, bool), usize> = FxHashMap::default();
-        let mut shared = BTreeMap::new();
-        for (i, (module, _)) in self.files.iter().enumerate() {
-            let key = (
-                module.as_str(),
-                heki_effect::is_stub(&project.files[i].path),
-            );
-            match first.get(&key) {
-                Some(&j) => {
-                    shared.entry((module.clone(), key.1)).or_insert((j, i));
-                }
-                None => {
-                    first.insert(key, i);
-                }
-            }
-        }
-        shared
-    }
 }
 
 /// What a dotted name names under a module layout ([`Names::target`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Target<'f, 'n> {
-    files: &'f [usize],
+struct Target<'n> {
+    file: usize,
     rest: &'n str,
 }
 
-impl Target<'_, '_> {
+impl Target<'_> {
     /// As a refusal says it: the file, and the name in it when the target is not the module.
-    fn describe(t: Option<Self>, project: &Project, shown: &dyn Fn(&Path) -> String) -> String {
+    fn describe(t: Option<Self>, tree: &[TreeFile<'_>], shown: &dyn Fn(&Path) -> String) -> String {
         let Some(t) = t else {
             return "no project module".to_owned();
         };
-        let first = t.files[0];
-        let path = match project.files.get(first) {
-            Some(f) => shown(&f.path),
-            None => shown(&project.unread[first - project.files.len()].path),
-        };
+        let path = shown(&tree[t.file].path);
         match t.rest.strip_prefix('.') {
             Some(rest) => format!("`{rest}` of {path}"),
             None => path,
@@ -736,25 +782,30 @@ struct Unresolved {
 }
 
 /// The source-root trial (no analysis: it computes the module names `heki check` would give the
-/// files with `src` set, and resolves the imports by them). A candidate is a directory below the
-/// project root, neither a source root nor a regular package, below which the dotted path of an
-/// import that names no project module now is a file (`backend/config/env.py` for
-/// `import config.env`). An import of the standard library or of a package the catalog covers is
-/// no candidate's, and neither is one whose path is below several directories none of which holds
-/// the importing file. The candidates resolving the most imports are tried first, each with the
-/// ones already taken: one enters the block when its imports resolve, no two files of one kind
-/// then share a module name, every import that resolves now and every import of a candidate taken
-/// still names the same module of the same file, and no module whose name changes is named by a
-/// contract of the configuration or by an entry of `baseline`. The block is then judged whole: a
+/// files with `src` set, and resolves the imports by them as heki's index does). A candidate is
+/// a directory below the project root, neither a source root nor a regular package, below which
+/// the dotted path of an import that names no project module now is a file
+/// (`backend/config/env.py` for `import config.env`). An import of the standard library or of a
+/// package the catalog covers is no candidate's, and neither is one whose path is below several
+/// directories none of which holds the importing file. The candidates resolving the most imports
+/// are tried first, each with the ones already taken, over every Python file below the project
+/// root (those `left_out` names, the files the paths given leave out, included; when it is
+/// `None`, there are more than heki reads, and none is tried): one enters the block when its
+/// imports resolve into its own files, no two files of one kind define one module that did not
+/// before, every import that resolves now and every import of a candidate taken still names the
+/// same module of the same file, and the configuration's contracts and `baseline`'s entries name
+/// what they name now, by the matchers the rules use. The block is then judged whole: a
 /// candidate under which an import no candidate taken was taken for would name a file below
 /// another root than the importing file's stays out, and the others are tried again.
 pub(super) fn source_roots(
     project: &Project,
+    left_out: Option<&[PathBuf]>,
     baseline: Option<&RatchetBaseline>,
     shown: &dyn Fn(&Path) -> String,
 ) -> SourceRoots {
     let env = &project.env;
-    let current = Names::under(project, &env.layout);
+    let tree = python_files(project, left_out.unwrap_or_default());
+    let current = Names::under(&tree, &env.layout);
     let roots = &env.layout.source_roots;
     // The directories below which a dotted path is a file of the project: each pair once, and
     // per dotted path how many directories and the first. A regular package is no source root
@@ -767,19 +818,16 @@ pub(super) fn source_roots(
         let parts: Vec<&str> = f.rel.split('/').collect();
         for i in 1..parts.len() {
             let dir = parts[..i].join("/");
-            if roots.contains(&dir) {
-                continue;
-            }
-            let is_source_dir = *source_dirs
-                .entry(dir.clone())
-                .or_insert_with(|| is_source_dir(&env.root.join(&dir), &Path::is_file));
-            if !is_source_dir {
-                continue;
-            }
-            let Some((dotted, _)) = module_name_for_path(Path::new(&parts[i..].join("/"))) else {
-                continue;
-            };
-            if pairs.insert((dotted.clone(), dir.clone())) {
+            let is_source_dir = !roots.contains(&dir)
+                && *source_dirs
+                    .entry(dir.clone())
+                    .or_insert_with(|| is_source_dir(&env.root.join(&dir), &Path::is_file));
+            let dotted = is_source_dir
+                .then(|| module_name_for_path(Path::new(&parts[i..].join("/"))))
+                .flatten();
+            if let Some((dotted, _)) = dotted
+                && pairs.insert((dotted.clone(), dir.clone()))
+            {
                 below.entry(dotted).or_insert((0, dir)).0 += 1;
             }
         }
@@ -787,9 +835,9 @@ pub(super) fn source_roots(
     let mut out = SourceRoots::default();
     let mut by_dir: BTreeMap<String, Vec<Unresolved>> = BTreeMap::new();
     let mut resolved_now: Vec<(usize, usize)> = Vec::new();
-    for (i, f) in project.files.iter().enumerate() {
+    for (i, f) in tree.iter().enumerate() {
         let mut lines = None;
-        for (k, imp) in f.semantic.imports.iter().enumerate() {
+        for (k, imp) in f.imports().iter().enumerate() {
             let Some(name) = current.imported(i, imp) else {
                 continue;
             };
@@ -797,6 +845,10 @@ pub(super) fn source_roots(
                 resolved_now.push((i, k));
                 continue;
             }
+            // Only the files analyzed make candidates; the others are checked.
+            let Read::Analyzed(parsed) = &f.read else {
+                continue;
+            };
             let top = name.split('.').next().unwrap_or(&name);
             if imp.level > 0 || heki_env::is_stdlib_module(top) || env.kb.is_opaque_to_layer3(top) {
                 continue;
@@ -818,7 +870,7 @@ pub(super) fn source_roots(
                     .find(|dir| pairs.contains(&(dotted.to_owned(), dir.clone())))
             };
             if let Some(dir) = dir {
-                let lines = lines.get_or_insert_with(|| LineIndex::from_source(&f.source));
+                let lines = lines.get_or_insert_with(|| LineIndex::from_source(&parsed.source));
                 by_dir.entry(dir).or_default().push(Unresolved {
                     file: i,
                     import: k,
@@ -836,23 +888,29 @@ pub(super) fn source_roots(
     ranked.truncate(MAX_LISTED);
     let trial = SourceRootTrial {
         project,
+        tree: &tree,
         current: &current,
         ranked: &ranked,
         resolved_now: &resolved_now,
-        named: &names_in_configuration(&env.cfg, baseline),
+        configured: &configured_names(&env.cfg),
+        baseline,
         shown,
     };
     // The block, judged whole: a candidate taken that makes an import no candidate taken was
     // taken for resolve into a file below another root than the importing file's is left out,
     // and the others are tried again without it.
-    let mut left_out: BTreeMap<usize, String> = BTreeMap::new();
-    let block = loop {
-        let block = trial.take(&left_out);
-        match block.by_chance(&trial) {
-            Some((n, reason)) => {
-                left_out.insert(n, reason);
+    let block = if left_out.is_none() {
+        Block::unverifiable(ranked.len())
+    } else {
+        let mut kept_out: BTreeMap<usize, String> = BTreeMap::new();
+        loop {
+            let block = trial.take(&kept_out);
+            match block.by_chance(&trial) {
+                Some((n, reason)) => {
+                    kept_out.insert(n, reason);
+                }
+                None => break block,
             }
-            None => break block,
         }
     };
     for (n, (dir, imports)) in ranked.iter().enumerate() {
@@ -886,14 +944,17 @@ pub(super) fn source_roots(
     out
 }
 
-/// What the source-root trial reads: the project, its module names now, the candidates by rank
-/// with their imports, the imports that resolve now, and the names the configuration uses.
+/// What the source-root trial reads: the project and every Python file below its root, their
+/// module names now, the candidates by rank with their imports, the imports that resolve now,
+/// and the names the configuration and the baseline use.
 struct SourceRootTrial<'t> {
     project: &'t Project,
+    tree: &'t [TreeFile<'t>],
     current: &'t Names,
     ranked: &'t [(String, Vec<Unresolved>)],
     resolved_now: &'t [(usize, usize)],
-    named: &'t [(String, &'static str)],
+    configured: &'t [ConfiguredName<'t>],
+    baseline: Option<&'t RatchetBaseline>,
     shown: &'t dyn Fn(&Path) -> String,
 }
 
@@ -912,8 +973,8 @@ struct Block {
 
 impl SourceRootTrial<'_> {
     /// The first [`MAX_SOURCE_ROOT_TRIALS`] candidates tried in rank order, each with the ones
-    /// already taken, but for those `left_out` gives a reason for.
-    fn take(&self, left_out: &BTreeMap<usize, String>) -> Block {
+    /// already taken, but for those `kept_out` gives a reason for.
+    fn take(&self, kept_out: &BTreeMap<usize, String>) -> Block {
         let roots = &self.project.env.layout.source_roots;
         let mut kept: Vec<(usize, usize)> = self.resolved_now.to_vec();
         let mut block = Block {
@@ -927,7 +988,7 @@ impl SourceRootTrial<'_> {
             if n >= MAX_SOURCE_ROOT_TRIALS {
                 break;
             }
-            if let Some(reason) = left_out.get(&n) {
+            if let Some(reason) = kept_out.get(&n) {
                 block.verdicts.push(Some(reason.clone()));
                 continue;
             }
@@ -938,32 +999,171 @@ impl SourceRootTrial<'_> {
                 source_roots: with.clone(),
                 root_is_package: false,
             };
-            let trial = Names::under(self.project, &layout);
-            let taken = block.names.as_ref().unwrap_or(self.current);
-            let reason = refusal(
-                self.project,
-                self.current,
-                taken,
-                &trial,
-                imports,
-                &kept,
-                self.named,
-                self.shown,
-            );
+            let next = Names::under(self.tree, &layout);
+            let prev = block.names.as_ref().unwrap_or(self.current);
+            let reason = self.refusal(prev, &next, dir, imports, &kept);
             if reason.is_none() {
                 accepted.push(dir);
                 block.src = Some(with);
                 kept.extend(imports.iter().map(|u| (u.file, u.import)));
-                block.names = Some(trial);
+                block.names = Some(next);
             }
             block.verdicts.push(reason);
         }
         block.kept = kept.into_iter().collect();
         block
     }
+
+    /// Why the layout `next`, that of `prev` with `dir` a source root too, stays out of the
+    /// block, or `None` when it may enter it. `imports` are the imports `dir` is tried for, and
+    /// under `prev` each import of `kept` names what it must keep naming.
+    fn refusal(
+        &self,
+        prev: &Names,
+        next: &Names,
+        dir: &str,
+        imports: &[Unresolved],
+        kept: &[(usize, usize)],
+    ) -> Option<String> {
+        let (tree, shown) = (self.tree, self.shown);
+        // Each import the directory is tried for names one of its files, the one whose path
+        // below it the import spells.
+        for u in imports {
+            let Some(t) = next.target(&u.name) else {
+                return Some(format!("`{}` would still name no project module", u.name));
+            };
+            if next.root_of(tree, t.file) != Some(dir) {
+                return Some(format!(
+                    "`{}` in {} would name {}, not a file below `{dir}`",
+                    u.name,
+                    shown(&tree[u.file].path),
+                    Target::describe(Some(t), tree, shown)
+                ));
+            }
+        }
+        // heki takes a module from one file (an implementation before its stub): files of one
+        // kind sharing a name leave the others' definitions out.
+        if let Some(files) = (next.shared.iter()).find(|f| !self.current.shared.contains(*f)) {
+            let mut paths: Vec<String> = files.iter().map(|&i| shown(&tree[i].path)).collect();
+            let last = paths.pop().unwrap_or_default();
+            return Some(format!(
+                "{} and {last} would each define module `{}`",
+                paths.join(", "),
+                next.files[files[0]].0
+            ));
+        }
+        // The block as a whole keeps what an import that resolves now names, and what the imports
+        // a candidate was taken for name: a later, deeper source root may rename those files. A
+        // prefix still being a module is not enough (`backend` of `backend.lib.config.env` once
+        // `backend/lib` is a source root): heki would follow the name into another file.
+        let moved = kept.iter().find_map(|&(i, k)| {
+            let imp = &tree[i].imports()[k];
+            let name = prev.imported(i, imp)?;
+            let moved = next.imported(i, imp);
+            let was = prev.target(&name);
+            let now = moved.as_deref().and_then(|n| next.target(n));
+            (now != was).then(|| {
+                format!(
+                    "`{name}` in {} would name {}, not {}",
+                    shown(&tree[i].path),
+                    Target::describe(now, tree, shown),
+                    Target::describe(was, tree, shown)
+                )
+            })
+        });
+        moved
+            .or_else(|| self.contract_change(prev, next))
+            .or_else(|| self.baseline_change(next))
+    }
+
+    /// The first name a contract of the configuration gives definitions by whose rule would name
+    /// a definition otherwise once its file is named as `next` names it: the rules' matchers
+    /// ([`DottedPattern`]) judge its name now and its name then, for each file `prev` names
+    /// otherwise, the whole name before what holds its last part.
+    fn contract_change(&self, prev: &Names, next: &Names) -> Option<String> {
+        if self.configured.is_empty() {
+            return None;
+        }
+        let renamed: Vec<(&str, &str, Vec<&str>)> = (self.tree.iter().enumerate())
+            .filter(|&(i, _)| prev.files[i].0 != next.files[i].0)
+            .map(|(i, f)| {
+                let (now, then) = (&self.current.files[i].0, &next.files[i].0);
+                (now.as_str(), then.as_str(), f.definitions())
+            })
+            .collect();
+        let named = |p: &DottedPattern, module: &str, q: &str| {
+            let fqn = format!("{module}.{q}");
+            (p.matches_def(&fqn, q), p.names_within(&fqn, q))
+        };
+        for c in self.configured {
+            for p in &c.patterns {
+                for (now, then, definitions) in &renamed {
+                    let Some((q, was)) = (definitions.iter())
+                        .map(|q| (*q, named(p, now, q)))
+                        .find(|(q, was)| *was != named(p, then, q))
+                    else {
+                        continue;
+                    };
+                    let will = named(p, then, q);
+                    let named_now = if was.0 == will.0 { was.1 } else { was.0 };
+                    let describe = |module: &str| match q {
+                        "<module>" => format!("module `{module}`"),
+                        _ => format!("`{module}.{q}`"),
+                    };
+                    let (from, to) = (describe(now), describe(then));
+                    let whose = format!(
+                        "`{}` ({}) of the {} contract `{}`",
+                        c.text, c.key, c.kind, c.contract
+                    );
+                    return Some(if named_now {
+                        format!("{whose} names {from}, and would not name it as {to}")
+                    } else {
+                        format!("{whose} would name {from} as {to}, which it does not name now")
+                    });
+                }
+            }
+        }
+        None
+    }
+
+    /// The first dotted name in an entry of the baseline that names a module `next` names
+    /// otherwise: heki would write the key of the report with the new name, which the entry
+    /// would not match.
+    fn baseline_change(&self, next: &Names) -> Option<String> {
+        let current = self.current;
+        let dotted = |c: char| c.is_alphanumeric() || c == '_' || c == '.';
+        (self.baseline?.counts.keys())
+            .flat_map(|key| [&key.target, &key.qualname])
+            .flat_map(|text| text.split(|c| !dotted(c)).map(|run| run.trim_matches('.')))
+            .find_map(|run| {
+                let t = current.target(run)?;
+                let renamed = &next.files[t.file].0;
+                (*renamed != current.files[t.file].0).then(|| {
+                    format!(
+                        "the baseline names `{run}`, which heki would write `{renamed}{}`",
+                        t.rest
+                    )
+                })
+            })
+    }
 }
 
 impl Block {
+    /// The verdicts when the paths given leave out Python files heki does not read: no
+    /// candidate is tried, as heki cannot check what the block changes for them.
+    fn unverifiable(candidates: usize) -> Self {
+        let reason = format!(
+            "not tried: the paths given leave out more Python files below the project root \
+             than heki reads ({MAX_LISTED}), and a source root may change what those import"
+        );
+        Self {
+            verdicts: vec![Some(reason); candidates.min(MAX_SOURCE_ROOT_TRIALS)],
+            src: None,
+            names: None,
+            kept: FxHashSet::default(),
+        }
+    }
+
     /// The first import, by file then position, that the block makes resolve although no
     /// candidate taken was taken for it, into a file below a source root other than the
     /// importing file's own: the rank of the candidate that root is, and why it stays out. Such
@@ -971,161 +1171,28 @@ impl Block {
     /// the standard library); nothing shows the file it would name is the one meant.
     fn by_chance(&self, trial: &SourceRootTrial<'_>) -> Option<(usize, String)> {
         let names = self.names.as_ref()?;
-        let project = trial.project;
-        for (i, f) in project.files.iter().enumerate() {
-            for (k, imp) in f.semantic.imports.iter().enumerate() {
-                if self.kept.contains(&(i, k)) {
-                    continue;
-                }
-                let Some(name) = names.imported(i, imp) else {
-                    continue;
-                };
-                let Some(target) = names.target(&name) else {
-                    continue;
-                };
-                let own = names.root_of(project, i);
-                let Some(other) = (target.files.iter())
-                    .filter_map(|&j| names.root_of(project, j))
-                    .find(|root| Some(*root) != own)
-                else {
-                    continue;
-                };
-                let Some(n) = trial.ranked.iter().position(|(dir, _)| dir == other) else {
-                    continue;
-                };
-                let importer = (trial.shown)(&f.path);
-                return Some((
-                    n,
-                    format!(
-                        "`{name}` in {importer} would name {} below source root `{other}`, not \
-                         the one of {importer}: heki cannot tell it is the file meant",
-                        Target::describe(Some(target), project, trial.shown)
-                    ),
-                ));
-            }
-        }
-        None
+        let tree = trial.tree;
+        tree.iter().enumerate().find_map(|(i, f)| {
+            let own = names.root_of(tree, i);
+            (f.imports().iter().enumerate())
+                .filter(|(k, _)| !self.kept.contains(&(i, *k)))
+                .find_map(|(_, imp)| {
+                    let name = names.imported(i, imp)?;
+                    let target = names.target(&name)?;
+                    let other = (names.root_of(tree, target.file)).filter(|r| Some(*r) != own)?;
+                    let n = trial.ranked.iter().position(|(dir, _)| dir == other)?;
+                    let importer = (trial.shown)(&f.path);
+                    Some((
+                        n,
+                        format!(
+                            "`{name}` in {importer} would name {} below source root `{other}`, \
+                             not the one of {importer}: heki cannot tell it is the file meant",
+                            Target::describe(Some(target), tree, trial.shown)
+                        ),
+                    ))
+                })
+        })
     }
-}
-
-/// The dotted names the configuration's contracts and `baseline`'s entries use, with what names
-/// them: a module whose name changes must not be among them.
-fn names_in_configuration<'c>(
-    cfg: &'c HekiConfig,
-    baseline: Option<&'c RatchetBaseline>,
-) -> Vec<(String, &'static str)> {
-    fn strings(value: &serde_json::Value, out: &mut Vec<String>) {
-        match value {
-            serde_json::Value::String(s) => out.push(s.clone()),
-            serde_json::Value::Array(items) => items.iter().for_each(|v| strings(v, out)),
-            serde_json::Value::Object(map) => map.values().for_each(|v| strings(v, out)),
-            _ => {}
-        }
-    }
-    let mut contracts = Vec::new();
-    for value in [
-        serde_json::to_value(&cfg.write_owners),
-        serde_json::to_value(&cfg.read_owners),
-        serde_json::to_value(&cfg.call_owners),
-        serde_json::to_value(&cfg.effect_boundaries),
-        serde_json::to_value(&cfg.readonly_returns),
-        serde_json::to_value(&cfg.invalidation),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        strings(&value, &mut contracts);
-    }
-    let mut out: Vec<(String, &'static str)> = contracts
-        .into_iter()
-        .map(|s| (s, "a contract of the configuration"))
-        .collect();
-    for key in baseline.iter().flat_map(|b| b.counts.keys()) {
-        out.push((key.target.clone(), "the baseline"));
-        out.push((key.qualname.clone(), "the baseline"));
-    }
-    out
-}
-
-/// Whether `text` names the dotted name `name` as a whole: not as part of a longer name.
-fn names_module(text: &str, name: &str) -> bool {
-    let ident = |c: char| c.is_alphanumeric() || c == '_';
-    text.match_indices(name).any(|(at, _)| {
-        let before = text[..at].chars().next_back();
-        let after = text[at + name.len()..].chars().next();
-        !before.is_some_and(ident) && !after.is_some_and(ident)
-    })
-}
-
-/// Why the layout `trial`, the source roots of `taken` and one candidate more, stays out of the
-/// block, or `None` when it may enter it. `current` is the layout the configuration's names
-/// were written for, `taken` the layout of the candidates taken so far, under which each import
-/// of `kept` names what it must keep naming.
-#[allow(clippy::too_many_arguments)]
-fn refusal(
-    project: &Project,
-    current: &Names,
-    taken: &Names,
-    trial: &Names,
-    imports: &[Unresolved],
-    kept: &[(usize, usize)],
-    named: &[(String, &'static str)],
-    shown: &dyn Fn(&Path) -> String,
-) -> Option<String> {
-    if let Some(u) = imports.iter().find(|u| trial.target(&u.name).is_none()) {
-        return Some(format!("`{}` would still name no project module", u.name));
-    }
-    let before = current.shared(project);
-    if let Some(((module, _), (a, b))) = trial
-        .shared(project)
-        .into_iter()
-        .find(|(k, _)| !before.contains_key(k))
-    {
-        return Some(format!(
-            "{} and {} would both define module `{module}`",
-            shown(&project.files[a].path),
-            shown(&project.files[b].path)
-        ));
-    }
-    // The block as a whole keeps what an import that resolves now names, and what the imports
-    // a candidate was taken for name: a later, deeper source root may rename those files. A
-    // prefix still being a module is not enough (`backend` of `backend.lib.config.env` once
-    // `backend/lib` is a source root): heki would follow the name into another file.
-    for &(i, k) in kept {
-        let imp = &project.files[i].semantic.imports[k];
-        let (Some(name), moved) = (taken.imported(i, imp), trial.imported(i, imp)) else {
-            continue;
-        };
-        let was = taken.target(&name);
-        let now = moved.as_deref().and_then(|n| trial.target(n));
-        if now != was {
-            return Some(format!(
-                "`{name}` in {} would name {}, not {}",
-                shown(&project.files[i].path),
-                Target::describe(now, project, shown),
-                Target::describe(was, project, shown)
-            ));
-        }
-    }
-    // A module whose name changes loses the part its new name drops (`backend` of
-    // `backend.config.env`, now `config.env`): a name that spells it no longer names it.
-    let mut dropped: BTreeSet<&str> = BTreeSet::new();
-    for ((old, _), (new, _)) in current.files.iter().zip(&trial.files) {
-        if old != new {
-            let kept = old
-                .strip_suffix(new.as_str())
-                .and_then(|p| p.strip_suffix('.'));
-            dropped.insert(kept.unwrap_or(old));
-        }
-    }
-    for module in dropped {
-        if let Some((_, what)) = named.iter().find(|(text, _)| names_module(text, module)) {
-            return Some(format!(
-                "{what} names `{module}`, whose modules would be named otherwise"
-            ));
-        }
-    }
-    None
 }
 
 // ------------------------------------------------------------------------------ text
@@ -1347,23 +1414,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_name_is_named_only_as_a_whole() {
-        for (text, name, named) in [
-            ("backend.config.env.load", "backend", true),
-            ("backend.config.*:*", "backend", true),
-            ("app.backend:Store.items", "backend", true),
-            ("backend", "backend", true),
-            ("backends.x", "backend", false),
-            ("my_backend.x", "backend", false),
-            ("x.backend_y", "backend", false),
-            ("config.env", "backend", false),
-            ("pkg.backend.config", "pkg.backend", true),
-        ] {
-            assert_eq!(names_module(text, name), named, "{text} {name}");
-        }
-    }
-
-    #[test]
     fn the_text_says_why_a_call_is_not_resolved() {
         for (reason, parameter, names, said) in [
             (
@@ -1461,26 +1511,6 @@ mod tests {
             (&[("EFF103", 0), ("EFF113", 0)], false, "not tried"),
         ] {
             assert_eq!(hypothetical(counts, tried), said);
-        }
-    }
-
-    #[test]
-    fn a_name_resolves_into_the_longest_module_it_is_or_is_below() {
-        let modules: FxHashSet<&str> = ["config", "config.env", "app"].into_iter().collect();
-        for (name, module) in [
-            ("config.env", Some("config.env")),
-            ("config.env.load", Some("config.env")),
-            ("config", Some("config")),
-            ("config.envs", Some("config")),
-            ("app.models.Order", Some("app")),
-            ("application", None),
-            ("settings.env", None),
-        ] {
-            assert_eq!(
-                module_prefix(name, |p| modules.contains(p)),
-                module,
-                "{name}"
-            );
         }
     }
 }
