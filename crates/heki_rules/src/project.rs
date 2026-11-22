@@ -415,17 +415,23 @@ pub fn parse_source(
 }
 
 /// The project-relative POSIX path of the file at `path`, the module it defines, and whether
-/// that module is a package. A file outside a module layout defines the module of its stem.
+/// that module is a package.
 fn module_identity(path: &Path, root: &Path, layout: &ModuleLayout) -> (String, String, bool) {
     let rel = rel_posix(path, root);
-    let (module_name, is_package) = layout.module_name(Path::new(&rel)).unwrap_or_else(|| {
+    let (module_name, is_package) = module_of(&rel, path, layout);
+    (rel, module_name, is_package)
+}
+
+/// The module the file at `path`, `rel` below the project root, defines under `layout`, and
+/// whether it is a package. A file outside a module layout defines the module of its stem.
+pub fn module_of(rel: &str, path: &Path, layout: &ModuleLayout) -> (String, bool) {
+    layout.module_name(Path::new(rel)).unwrap_or_else(|| {
         let stem = path
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default();
         (stem, false)
-    });
-    (rel, module_name, is_package)
+    })
 }
 
 /// The file at `path` that heki could not read or parse, as the module it would define.
@@ -496,12 +502,7 @@ impl ProjectEnv {
                 .ok_or_else(|| ProjectError::TargetVersion(t.to_owned()))?,
             None => cfg.runtime_profile(),
         };
-        let overrides = cfg
-            .ecosystem
-            .iter()
-            .map(EcosystemPatch::try_from)
-            .collect::<Result<Vec<_>, _>>()?;
-        let kb = EffectiveEcosystemKb::load_builtin(&overrides)?;
+        let kb = Self::catalog(&cfg)?;
         let soundness_kb = EffectiveSoundnessKb::load_builtin(runtime.python_version)?;
         let removed = opts.removed;
         let layout = ModuleLayout::detect_without(&root, &cfg, &|p| {
@@ -516,6 +517,17 @@ impl ProjectEnv {
             soundness_kb,
             layout,
         })
+    }
+
+    /// The ecosystem catalog of `cfg`: heki's own, with the configuration's
+    /// `[[ecosystem]]` entries over it.
+    pub fn catalog(cfg: &HekiConfig) -> Result<EffectiveEcosystemKb, ProjectError> {
+        let overrides = cfg
+            .ecosystem
+            .iter()
+            .map(EcosystemPatch::try_from)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(EffectiveEcosystemKb::load_builtin(&overrides)?)
     }
 }
 
@@ -626,6 +638,19 @@ impl Project {
         self.files.iter().map(ParsedFile::unit).collect()
     }
 
+    /// Analyze the files with `cfg` from now on, as `heki check` would with that configuration
+    /// in the same file: its catalog is rebuilt from its `[[ecosystem]]` entries. Returns the
+    /// configuration it replaces. `src` and `target-version` must stay as they were: the module
+    /// names and the parse follow them.
+    pub fn set_config(&mut self, cfg: HekiConfig) -> Result<HekiConfig, ProjectError> {
+        debug_assert!(
+            cfg.src == self.env.cfg.src && cfg.target_version == self.env.cfg.target_version,
+            "the module names and the parse follow `src` and `target-version`"
+        );
+        self.env.kb = ProjectEnv::catalog(&cfg)?;
+        Ok(std::mem::replace(&mut self.env.cfg, cfg))
+    }
+
     /// The index of the project's files with `facts`.
     pub fn index(&self, facts: IndexFacts) -> ProjectIndex {
         let inputs = self.inputs();
@@ -648,6 +673,8 @@ pub enum Facts {
     /// Also what `heki inspect` shows ([`crate::inspect_facts`]): `heki inspect` and the language
     /// server.
     Inspect,
+    /// Also what `heki recommend` reads ([`crate::recommend_facts`]).
+    Recommend,
 }
 
 /// What an index is built with: the contracts its summaries depend on, whether typed writes
@@ -669,6 +696,7 @@ impl IndexFacts {
         let opt_in = match facts {
             Facts::Check => crate::opt_in_facts(selection),
             Facts::Inspect => crate::inspect_facts(selection),
+            Facts::Recommend => crate::recommend_facts(selection),
         };
         Ok(Self {
             contracts: crate::summary_contracts(config, kb)?,

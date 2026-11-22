@@ -1,5 +1,28 @@
 {
   "$defs": {
+    "A1Hazards": {
+      "additionalProperties": false,
+      "description": "The functions where assumption A1 does not hold (`heki assumptions` lists them).",
+      "properties": {
+        "functions": {
+          "description": "The functions with an A1 hazard: the Soundness lane proves nothing in them.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "unmodeled": {
+          "description": "Of those, the functions too large to model at all.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "functions",
+        "unmodeled"
+      ],
+      "type": "object"
+    },
     "Activation": {
       "description": "When a rule runs without being named by its code or name (ADR-018).",
       "oneOf": [
@@ -80,6 +103,60 @@
       "required": [
         "allowed",
         "regressions"
+      ],
+      "type": "object"
+    },
+    "BlindSpotsSection": {
+      "additionalProperties": false,
+      "description": "What heki cannot see.",
+      "properties": {
+        "a1_hazards": {
+          "$ref": "#/$defs/A1Hazards"
+        },
+        "catalog_may_miss": {
+          "description": "Names of packages the catalog covers that it has no entry for, which `heki check` would\nreport if they waited or sent a query: at most 50.",
+          "items": {
+            "$ref": "#/$defs/SymbolCalls"
+          },
+          "type": "array"
+        },
+        "source_roots": {
+          "description": "Directories that resolve imports naming no project module once they are source roots,\nthe most imports first: at most 50.",
+          "items": {
+            "$ref": "#/$defs/SourceRoot"
+          },
+          "type": "array"
+        },
+        "totals": {
+          "$ref": "#/$defs/Totals"
+        },
+        "truncated": {
+          "description": "Whether a list holds fewer entries than there are.",
+          "type": "boolean"
+        },
+        "uncatalogued": {
+          "description": "The calls of names of packages the ecosystem catalog does not cover, by package, the\npackage with the most reach first: at most 50.",
+          "items": {
+            "$ref": "#/$defs/PackageCalls"
+          },
+          "type": "array"
+        },
+        "unresolved": {
+          "description": "The calls heki resolves to no function, by function and reason, the most reach first: at\nmost 50.",
+          "items": {
+            "$ref": "#/$defs/UnresolvedCalls"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "uncatalogued",
+        "catalog_may_miss",
+        "unresolved",
+        "source_roots",
+        "a1_hazards",
+        "totals",
+        "truncated"
       ],
       "type": "object"
     },
@@ -244,6 +321,105 @@
         }
       ]
     },
+    "Counts": {
+      "additionalProperties": false,
+      "description": "How many calls there are, and what they may hold up.",
+      "properties": {
+        "awaited": {
+          "description": "The calls that are awaited: whatever they run, they do not hold up the event loop.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "calls": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "in_loops": {
+          "description": "The calls inside a loop of their function, or in a function below a loop.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "on_event_loop": {
+          "description": "The calls, not awaited, in a function on an event loop (an `async def`, or a function\none runs on its thread): one that waits holds the loop up.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "calls",
+        "awaited",
+        "on_event_loop",
+        "in_loops"
+      ],
+      "type": "object"
+    },
+    "IfQueries": {
+      "additionalProperties": false,
+      "properties": {
+        "EFF103": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "EFF113": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "EFF103",
+        "EFF113"
+      ],
+      "type": "object"
+    },
+    "IfWaits": {
+      "additionalProperties": false,
+      "properties": {
+        "EFF101": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "EFF111": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "EFF101",
+        "EFF111"
+      ],
+      "type": "object"
+    },
+    "ImportAt": {
+      "additionalProperties": false,
+      "properties": {
+        "line": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "name": {
+          "description": "The module or name the import names.",
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "line",
+        "name"
+      ],
+      "type": "object"
+    },
     "LeftOut": {
       "additionalProperties": false,
       "description": "The Python files below the project root that the paths given leave out: heki takes the\nfiles it analyzed as the whole project.",
@@ -375,6 +551,54 @@
         "kind",
         "name",
         "cause"
+      ],
+      "type": "object"
+    },
+    "PackageCalls": {
+      "additionalProperties": false,
+      "description": "The calls of the names of one package.",
+      "properties": {
+        "awaited": {
+          "description": "The calls that are awaited: whatever they run, they do not hold up the event loop.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "calls": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "in_loops": {
+          "description": "The calls inside a loop of their function, or in a function below a loop.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "on_event_loop": {
+          "description": "The calls, not awaited, in a function on an event loop (an `async def`, or a function\none runs on its thread): one that waits holds the loop up.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "package": {
+          "type": "string"
+        },
+        "symbols": {
+          "description": "The names called, the one with the most reach first.",
+          "items": {
+            "$ref": "#/$defs/SymbolCalls"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "package",
+        "calls",
+        "awaited",
+        "on_event_loop",
+        "in_loops",
+        "symbols"
       ],
       "type": "object"
     },
@@ -709,8 +933,317 @@
           "const": "discovery",
           "description": "Every rule selected, on the configuration as it is.",
           "type": "string"
+        },
+        {
+          "const": "source-roots",
+          "description": "The source-root trial: the module names of the files with directories added to `src`,\nand the imports they resolve (no analysis).",
+          "type": "string"
+        },
+        {
+          "const": "hypothetical-catalog",
+          "description": "The configuration with a catalog entry that waits and sends a query for each library\nname tried, and the rules those effects make report.",
+          "type": "string"
         }
       ]
+    },
+    "Site": {
+      "additionalProperties": false,
+      "properties": {
+        "column": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "function": {
+          "description": "The function making the call.",
+          "type": "string"
+        },
+        "line": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "line",
+        "column",
+        "function"
+      ],
+      "type": "object"
+    },
+    "SourceRoot": {
+      "additionalProperties": false,
+      "description": "A directory that, made a source root, resolves imports that name no project module now.",
+      "properties": {
+        "directory": {
+          "description": "Relative to the project root.",
+          "type": "string"
+        },
+        "examples": {
+          "description": "The first 50 of them.",
+          "items": {
+            "$ref": "#/$defs/ImportAt"
+          },
+          "type": "array"
+        },
+        "imports": {
+          "description": "The imports of its files that name no project module now.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "in_block": {
+          "description": "Whether the block adds it to `src`.",
+          "type": "boolean"
+        },
+        "reason": {
+          "description": "Why it is in the block or not.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "directory",
+        "imports",
+        "examples",
+        "in_block",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "SymbolCalls": {
+      "additionalProperties": false,
+      "description": "The calls of one library name.",
+      "properties": {
+        "awaited": {
+          "description": "The calls that are awaited: whatever they run, they do not hold up the event loop.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "calls": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "examples": {
+          "description": "The first 50 calls.",
+          "items": {
+            "$ref": "#/$defs/Site"
+          },
+          "type": "array"
+        },
+        "if_queries": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/IfQueries"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What `heki check` would report if the call sent a database query (`null`: not tried)."
+        },
+        "if_waits": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/IfWaits"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What `heki check` would report if the call waited on the network, from the\nhypothetical-catalog run (`null`: the name was not tried)."
+        },
+        "in_loops": {
+          "description": "The calls inside a loop of their function, or in a function below a loop.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "on_event_loop": {
+          "description": "The calls, not awaited, in a function on an event loop (an `async def`, or a function\none runs on its thread): one that waits holds the loop up.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "symbol": {
+          "description": "Spelled as an entry of `[[tool.heki.ecosystem]]` needs it: entries are looked up by this\nexact name, without inheritance or aliases.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "symbol",
+        "calls",
+        "awaited",
+        "on_event_loop",
+        "in_loops",
+        "examples"
+      ],
+      "type": "object"
+    },
+    "Totals": {
+      "additionalProperties": false,
+      "properties": {
+        "below_source_roots": {
+          "description": "The calls of names below a directory of `source_roots`: calls of the project's files,\nwhich the library names leave out.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "not_tried": {
+          "description": "The library names it did not: past the first 64 by reach.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "registered_calls": {
+          "description": "The calls of names of packages the catalog covers, without an entry.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "source_root_candidates": {
+          "description": "The directories of `source_roots`, those past the first 50 included.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "tried": {
+          "description": "The library names the hypothetical-catalog run gave an entry.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "uncatalogued": {
+          "$ref": "#/$defs/Counts",
+          "description": "The calls of names of packages the catalog does not cover."
+        },
+        "uncatalogued_packages": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "uncatalogued_symbols": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "unresolved": {
+          "$ref": "#/$defs/Counts"
+        },
+        "unresolved_by_reason": {
+          "additionalProperties": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "description": "The unresolved calls by reason.",
+          "type": "object"
+        },
+        "unresolved_functions": {
+          "description": "The functions making a call heki resolves to no function.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "unresolved_groups": {
+          "description": "The groups of those calls by function and reason.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "uncatalogued",
+        "uncatalogued_packages",
+        "uncatalogued_symbols",
+        "registered_calls",
+        "unresolved",
+        "unresolved_by_reason",
+        "unresolved_functions",
+        "unresolved_groups",
+        "source_root_candidates",
+        "below_source_roots",
+        "tried",
+        "not_tried"
+      ],
+      "type": "object"
+    },
+    "UnresolvedCalls": {
+      "additionalProperties": false,
+      "description": "The calls one function makes that heki resolves to no function, for one reason.",
+      "properties": {
+        "awaited": {
+          "description": "The calls that are awaited: whatever they run, they do not hold up the event loop.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "calls": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "examples": {
+          "description": "The first 50 calls.",
+          "items": {
+            "$ref": "#/$defs/Site"
+          },
+          "type": "array"
+        },
+        "function": {
+          "type": "string"
+        },
+        "in_loops": {
+          "description": "The calls inside a loop of their function, or in a function below a loop.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "names": {
+          "description": "The methods and names called, each once, sorted.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "on_event_loop": {
+          "description": "The calls, not awaited, in a function on an event loop (an `async def`, or a function\none runs on its thread): one that waits holds the loop up.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "parameter": {
+          "description": "The parameter, for a reason about one.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "type": "string"
+        },
+        "reason": {
+          "description": "Why: `unannotated-parameter`, `unresolved-annotation`, `any-value`, `callable-value`,\n`unbound-name`, `unlisted-protocol`, `call-result`, `attribute`, `computed-name`,\n`too-many-implementations`, `unknown-member`, or `untyped-value`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "function",
+        "path",
+        "reason",
+        "names",
+        "calls",
+        "awaited",
+        "on_event_loop",
+        "in_loops",
+        "examples"
+      ],
+      "type": "object"
     }
   },
   "$id": "https://heki.koxudaxi.dev/schemas/recommend-1.json",
@@ -724,6 +1257,10 @@
     },
     "analyzed": {
       "$ref": "#/$defs/Analyzed"
+    },
+    "blind_spots": {
+      "$ref": "#/$defs/BlindSpotsSection",
+      "description": "What heki cannot see: no count of reports applies there."
     },
     "config": {
       "additionalProperties": true,
@@ -807,6 +1344,7 @@
     "runs",
     "reports_now",
     "open_premises",
+    "blind_spots",
     "rules",
     "notes",
     "config",

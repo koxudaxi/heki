@@ -8,6 +8,7 @@
 //! The report is the same for the same input, configuration, and heki version: every list is
 //! sorted, and every cap is a count.
 
+pub mod blind_spots;
 pub mod block;
 pub mod premises;
 pub mod rules;
@@ -108,6 +109,8 @@ pub struct RecommendReport {
     pub reports_now: ReportsNow,
     /// What keeps the heuristic reports of exact claims heuristic.
     pub open_premises: premises::OpenPremises,
+    /// What heki cannot see: no count of reports applies there.
+    pub blind_spots: blind_spots::BlindSpotsSection,
     /// Every rule the configuration does not run in full: the rules it leaves off, and the exact
     /// rules whose heuristic reports it withholds. The block's rules come first.
     pub rules: Vec<rules::RuleAdvice>,
@@ -167,6 +170,12 @@ pub struct Run {
 pub enum RunLabel {
     /// Every rule selected, on the configuration as it is.
     Discovery,
+    /// The source-root trial: the module names of the files with directories added to `src`,
+    /// and the imports they resolve (no analysis).
+    SourceRoots,
+    /// The configuration with a catalog entry that waits and sends a query for each library
+    /// name tried, and the rules those effects make report.
+    HypotheticalCatalog,
 }
 
 /// What the current configuration shows, as `heki check` prints it: reports that share a root
@@ -223,11 +232,15 @@ pub fn recommend(request: Request<'_>) -> Result<RecommendReport, RecommendError
     let functions = project.files.iter().map(|f| f.ir.functions.len()).sum();
     let files = project.files.len();
     let selection = discovery_selection(&env.cfg.lint, &current)?;
-    let discovery = Indexed::build(project, selection, snapshot, Facts::Check)?;
+    let mut runs = vec![Run {
+        label: RunLabel::Discovery,
+    }];
+    let discovery = Indexed::build(project, selection, snapshot, Facts::Recommend)?;
     // The heuristic reports of exact claims record what they leave open, and why.
     let (diags, _) = discovery.diagnose_units(&discovery.project.units(), true)?;
     let files_analyzed = &discovery.project.files;
     let open_premises = premises::open_premises(&diags, shown);
+    let discovered = blind_spots::Discovered::of(&discovery.index, files_analyzed, shown);
     let rules = rules::advise(&rules::Inputs {
         current: &current,
         baseline: baseline.as_ref(),
@@ -235,6 +248,26 @@ pub fn recommend(request: Request<'_>) -> Result<RecommendReport, RecommendError
         discovery: &diags,
     });
     let reports_now = reports_now(&current, baseline.as_ref(), files_analyzed, &diags);
+    // One index at a time: the trials build their own.
+    let Indexed { project, index, .. } = discovery;
+    drop(index);
+    let roots = blind_spots::source_roots(&project, baseline.as_ref(), shown);
+    if !roots.candidates.is_empty() {
+        runs.push(Run {
+            label: RunLabel::SourceRoots,
+        });
+    }
+    let tried = discovered.to_try(&roots);
+    let (project, trial) = if tried.is_empty() {
+        (project, blind_spots::Trial::default())
+    } else {
+        runs.push(Run {
+            label: RunLabel::HypotheticalCatalog,
+        });
+        blind_spots::hypothetical_catalog(project, tried)?
+    };
+    let src = roots.src.clone();
+    let blind_spots = discovered.finish(&trial, roots, &project.files);
     let mut extend_select: Vec<String> = rules
         .iter()
         .filter(|r| r.in_block)
@@ -242,14 +275,16 @@ pub fn recommend(request: Request<'_>) -> Result<RecommendReport, RecommendError
         .collect();
     extend_select.sort();
     let additions = block::Additions {
+        src,
         extend_select,
         ..block::Additions::default()
     };
-    let block = block::render(&additions, &discovery.project.env.cfg, layout);
+    let block = block::render(&additions, &project.env.cfg, layout);
     let mut notes = Vec::new();
     if left_out.python_files > 0 {
         notes.push(left_out_note(&left_out));
     }
+    notes.extend(blind_spots::notes(&blind_spots, &trial));
     let mut report = RecommendReport {
         schema: SCHEMA_URL.to_owned(),
         kind: ReportKind::HekiRecommend,
@@ -265,11 +300,10 @@ pub fn recommend(request: Request<'_>) -> Result<RecommendReport, RecommendError
             paths: paths.iter().map(|p| shown(p)).collect(),
             left_out,
         },
-        runs: vec![Run {
-            label: RunLabel::Discovery,
-        }],
+        runs,
         reports_now,
         open_premises,
+        blind_spots,
         rules,
         notes,
         config: block.config,
@@ -280,26 +314,31 @@ pub fn recommend(request: Request<'_>) -> Result<RecommendReport, RecommendError
     Ok(report)
 }
 
-/// The selection of the discovery run: every rule by its code, so that no heuristic report is
-/// withheld, with the configuration's `per-file-ignores`. `MUT103` runs only when the current
-/// selection runs it: it compares with a snapshot the user saves.
+/// The selection of the discovery run: every rule by its code ([`selection_of`]). `MUT103`
+/// runs only when the current selection runs it: it compares with a snapshot the user saves.
 fn discovery_selection(
     lint: &LintConfig,
     current: &RuleSelection,
 ) -> Result<RuleSelection, SelectionError> {
+    let every_rule = CORE_RULES
+        .iter()
+        .filter(|r| r.code != "MUT103" || current.is_enabled(r.code))
+        .map(|r| r.code.to_owned())
+        .collect();
+    selection_of(lint, every_rule)
+}
+
+/// The selection of the rules `codes` by their codes, so that no heuristic report of theirs is
+/// withheld, with the configuration's `per-file-ignores`.
+fn selection_of(lint: &LintConfig, codes: Vec<String>) -> Result<RuleSelection, SelectionError> {
     let lint = LintConfig {
         select: Some(Vec::new()),
         extend_select: Vec::new(),
         ignore: Vec::new(),
         ..lint.clone()
     };
-    let every_rule = CORE_RULES
-        .iter()
-        .filter(|r| r.code != "MUT103" || current.is_enabled(r.code))
-        .map(|r| r.code.to_owned())
-        .collect();
     let selectors = Selectors {
-        select: every_rule,
+        select: codes,
         extend_select: Vec::new(),
         ignore: Vec::new(),
         heuristic: Some(true),
@@ -433,6 +472,7 @@ pub fn render_text(report: &RecommendReport) -> String {
         );
     }
     premises::render(&mut out, &report.open_premises);
+    blind_spots::render(&mut out, &report.blind_spots);
     rules::render(&mut out, &report.rules, now.baseline.is_some());
     if !report.notes.is_empty() {
         out.push_str("\nNotes\n");

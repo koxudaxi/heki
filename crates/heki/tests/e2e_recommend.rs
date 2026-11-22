@@ -110,13 +110,19 @@ fn reports_now_are_what_heki_check_shows_and_withholds() {
     let p = shop("recommend_now");
     let (code, out, err) = p.heki(&["recommend"]);
     assert_eq!((code, err.as_str()), (0, ""));
-    // "What keeps reports heuristic" has tests of its own.
-    let (before, section) = out
-        .split_once("\nWhat keeps reports heuristic\n")
-        .unwrap_or_else(|| panic!("{out}"));
-    let after = section.split_once("\n\n").unwrap().1;
+    // The sections of what keeps reports heuristic and what heki cannot see have tests of their
+    // own.
+    let mut rest = out.clone();
+    for header in [
+        "\nWhat keeps reports heuristic\n",
+        "\nWhat heki cannot see (no report either way)\n",
+    ] {
+        let (before, section) = rest.split_once(header).unwrap_or_else(|| panic!("{out}"));
+        let after = section.split_once("\n\n").unwrap().1;
+        rest = format!("{before}\n{after}");
+    }
     assert_eq!(
-        format!("{before}\n{after}"),
+        rest,
         "heki recommend (experimental) on .: 8 file(s), 20 function(s)\n\
          \n\
          Reports now  2 shown (2 exact, 0 heuristic), 2 heuristic withheld, 5 heuristic rule(s) \
@@ -1070,5 +1076,313 @@ fn closing_the_cause_in_the_code_makes_the_report_exact() {
             "\nWhat keeps reports heuristic\n  No heuristic reports of exact claims here.\n"
         ),
         "{out}"
+    );
+}
+
+/// Calls heki is blind to: library names the catalog has no entry for (`stripe`, a package it
+/// does not cover; `requests.utils.quote`, a name of a package it covers), awaited or not, on an
+/// event loop or in a loop over a parameter; a call on an unannotated parameter; and a function
+/// with an A1 hazard.
+const BLIND: &str = "\
+import requests
+import stripe
+
+
+async def pay(amount):
+    return stripe.Charge.create(amount=amount)
+
+
+async def refund(amount):
+    return await stripe.Refund.create_async(amount=amount)
+
+
+def capture_all(charges: list[str]):
+    for charge in charges:
+        stripe.Charge.capture(charge)
+
+
+async def link(path: str):
+    return requests.utils.quote(path)
+
+
+def sync_job(client):
+    return client.get(\"/jobs\")
+
+
+async def poll(client):
+    return sync_job(client)
+
+
+def introspect():
+    return locals()
+";
+
+/// `(symbol, calls, awaited, on event loop, in loops, if it waits, if it sends a query)` of each
+/// name of `list`.
+fn symbol_rows(list: &Value) -> Vec<(String, Value, Value)> {
+    list.as_array()
+        .unwrap()
+        .iter()
+        .map(|s| {
+            (
+                s["symbol"].as_str().unwrap().to_owned(),
+                json!([s["calls"], s["awaited"], s["on_event_loop"], s["in_loops"]]),
+                json!([s["if_waits"], s["if_queries"]]),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn library_names_without_a_catalog_entry_are_listed_with_what_heki_would_report() {
+    let p = Project::new("recommend_uncatalogued");
+    p.write("app/__init__.py", "").write("app/pay.py", BLIND);
+    let (code, report, _) = recommend_json(&p, &[]);
+    assert_eq!(code, 0);
+    let blind = &report["blind_spots"];
+    let packages = blind["uncatalogued"].as_array().unwrap();
+    assert_eq!(packages.len(), 1, "{blind:#}");
+    assert_eq!(
+        (&packages[0]["package"], &packages[0]["calls"]),
+        (&json!("stripe"), &json!(3))
+    );
+    let tried = |eff101: u64, eff103: u64| json!([{"EFF101": eff101, "EFF111": 0}, {"EFF103": eff103, "EFF113": 0}]);
+    // On the event loop it would wait there; in a loop over a parameter it would send a query
+    // per item; awaited, it holds nothing up.
+    assert_eq!(
+        symbol_rows(&packages[0]["symbols"]),
+        vec![
+            (
+                "stripe.Charge.create".to_owned(),
+                json!([1, 0, 1, 0]),
+                tried(1, 0)
+            ),
+            (
+                "stripe.Charge.capture".to_owned(),
+                json!([1, 0, 0, 1]),
+                tried(0, 1)
+            ),
+            (
+                "stripe.Refund.create_async".to_owned(),
+                json!([1, 1, 0, 0]),
+                tried(0, 0)
+            ),
+        ]
+    );
+    assert_eq!(
+        packages[0]["symbols"][0]["examples"],
+        json!([{"path": "app/pay.py", "line": 6, "column": 12, "function": "app.pay.pay"}])
+    );
+    // A name of a package the catalog covers is listed when heki would report through it.
+    assert_eq!(
+        symbol_rows(&blind["catalog_may_miss"]),
+        vec![(
+            "requests.utils.quote".to_owned(),
+            json!([1, 0, 1, 0]),
+            tried(1, 0)
+        )]
+    );
+    assert_eq!(
+        (&blind["totals"]["tried"], &blind["totals"]["not_tried"]),
+        (&json!(4), &json!(0))
+    );
+    assert_eq!(
+        report["runs"],
+        json!([{"label": "discovery"}, {"label": "hypothetical-catalog"}])
+    );
+    // No catalog entry enters the block, and no count of reports takes the trial's.
+    assert_eq!(report["config"], json!({}));
+    assert_eq!(report["reports_now"]["shown"], json!(0));
+    assert_eq!(rule(&report, "EFF111")["reports"], json!(0));
+    assert!(
+        report["notes"][0]
+            .as_str()
+            .unwrap()
+            .starts_with("\"if it waits\" and \"if it sends a query\" come from a trial run"),
+        "{report:#}"
+    );
+    assert_follows_the_schema(&report);
+    let (_, out, _) = p.heki(&["recommend"]);
+    for line in [
+        "  calls of packages heki's catalog does not cover: 3 call(s) of 3 name(s) in 1 \
+         package(s)",
+        "    name                        calls  async  loops  if it waits  if it sends a query",
+        "    stripe.Charge.create            1      1      0  EFF101 1     -",
+        "    stripe.Charge.capture           1      0      1  -            EFF103 1",
+        "    stripe.Refund.create_async      1      0      0  -            -",
+        "    requests.utils.quote      1      1      0  EFF101 1     -",
+        "  1 function(s) with an A1 hazard, 0 of them too large to model: the Soundness lane \
+         proves nothing in them (`heki assumptions` lists them)",
+    ] {
+        assert!(out.lines().any(|l| l == line), "{line}\n{out}");
+    }
+    assert!(
+        out.contains("(if they do, report them at https://github.com/koxudaxi/heki/issues)"),
+        "{out}"
+    );
+    // What the trial counts is what `heki check` prints with such an entry.
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[[tool.heki.ecosystem]]\nsymbol = \"stripe.Charge.create\"\n\
+         effects = [\"blocking_net\", \"db_query\"]\n",
+    );
+    let shown = checked(&p, &["--select", "EFF101,EFF111,EFF103,EFF113"]);
+    let through: Vec<&Value> = shown
+        .iter()
+        .filter(|d| d["target"] == "stripe.Charge.create")
+        .collect();
+    assert_eq!(through.len(), 1, "{shown:#?}");
+    assert_eq!(through[0]["rule_code"], "EFF101");
+    // With an entry, the name is no longer one heki cannot see.
+    let (_, entered, _) = recommend_json(&p, &[]);
+    let names: Vec<String> = symbol_rows(&entered["blind_spots"]["uncatalogued"][0]["symbols"])
+        .into_iter()
+        .map(|(s, _, _)| s)
+        .collect();
+    assert_eq!(
+        names,
+        ["stripe.Charge.capture", "stripe.Refund.create_async"]
+    );
+}
+
+#[test]
+fn calls_heki_does_not_resolve_are_listed_with_why() {
+    let p = Project::new("recommend_unresolved");
+    p.write("app/__init__.py", "").write("app/pay.py", BLIND);
+    let (_, report, _) = recommend_json(&p, &[]);
+    let blind = &report["blind_spots"];
+    assert_eq!(
+        blind["unresolved"],
+        json!([{"function": "app.pay.sync_job", "path": "app/pay.py",
+                "reason": "unannotated-parameter", "parameter": "client", "names": ["get"],
+                "calls": 1, "awaited": 0, "on_event_loop": 1, "in_loops": 0,
+                "examples": [{"path": "app/pay.py", "line": 23, "column": 12,
+                              "function": "app.pay.sync_job"}]}])
+    );
+    assert_eq!(
+        (
+            &blind["totals"]["unresolved_by_reason"],
+            &blind["a1_hazards"]
+        ),
+        (
+            &json!({"unannotated-parameter": 1}),
+            &json!({"functions": 1, "unmodeled": 0})
+        )
+    );
+    let (_, out, _) = p.heki(&["recommend"]);
+    assert!(
+        out.contains(
+            "\n  calls heki does not resolve: 1 call(s) in 1 function(s)\n    function          \
+             calls  async  loops  why\n    app.pay.sync_job      1      1      0  parameter \
+             `client` has no annotation (get)\n"
+        ),
+        "{out}"
+    );
+}
+
+/// A subdirectory application whose directories are imported as top-level packages.
+fn subdirectory_app(name: &str) -> Project {
+    let p = Project::new(name);
+    p.write(
+        "backend/config/env.py",
+        "import time\n\n\ndef load():\n    time.sleep(1)\n    return {}\n",
+    )
+    .write(
+        "backend/main.py",
+        "from config.env import load\nimport config.env\n\n\nasync def handler():\n    return \
+         load()\n\n\nasync def other():\n    return config.env.load()\n",
+    );
+    p
+}
+
+#[test]
+fn a_directory_whose_files_imports_name_becomes_a_source_root_after_its_trial() {
+    let p = subdirectory_app("recommend_source_root");
+    let (_, report, _) = recommend_json(&p, &[]);
+    let blind = &report["blind_spots"];
+    assert_eq!(
+        blind["source_roots"],
+        json!([{"directory": "backend", "imports": 2, "in_block": true,
+                "reason": "its imports resolve, and no import, contract, or baseline entry loses its module",
+                "examples": [
+                    {"path": "backend/main.py", "line": 1, "name": "config.env.load"},
+                    {"path": "backend/main.py", "line": 2, "name": "config.env"}]}])
+    );
+    // The calls into those files are the project's, not a library's.
+    assert_eq!(blind["uncatalogued"], json!([]));
+    assert_eq!(blind["totals"]["below_source_roots"], json!(2));
+    assert_eq!(
+        report["runs"],
+        json!([{"label": "discovery"}, {"label": "source-roots"}])
+    );
+    assert_eq!(report["config"], json!({"src": ["backend"]}));
+    assert_follows_the_schema(&report);
+    let (_, out, _) = p.heki(&["recommend"]);
+    assert!(
+        out.contains(
+            "\n  source root `backend`: 2 import(s) name its files (config.env.load, config.env): \
+             in the block\n"
+        ) && out.ends_with(
+            "\npyproject.toml: keys to add or change\n  [tool.heki]\n  src = [\"backend\"]\n"
+        ),
+        "{out}"
+    );
+    // With the block, the imports resolve: the waits below the handlers are reported.
+    assert!(checked(&p, &["--select", "EFF101"]).is_empty());
+    let block = report["config_toml"].as_str().unwrap();
+    p.write(
+        "pyproject.toml",
+        &format!("[project]\nname = \"t\"\n\n{block}"),
+    );
+    let after = checked(&p, &["--select", "EFF101"]);
+    assert_eq!(after.len(), 2, "{after:#?}");
+    let (_, again, _) = recommend_json(&p, &[]);
+    assert_eq!(again["blind_spots"]["source_roots"], json!([]));
+}
+
+#[test]
+fn a_source_root_stays_out_when_a_name_the_configuration_uses_would_change() {
+    let reason = |p: &Project, args: &[&str]| {
+        let (_, report, _) = recommend_json(p, args);
+        let roots = &report["blind_spots"]["source_roots"];
+        assert_eq!(roots[0]["in_block"], json!(false), "{roots:#}");
+        assert_eq!(report["config"], json!({}));
+        assert_follows_the_schema(&report);
+        roots[0]["reason"].as_str().unwrap().to_owned()
+    };
+    // A baseline entry naming a module below the directory.
+    let p = subdirectory_app("recommend_source_root_baseline");
+    p.write(
+        "b.toml",
+        "version = 2\n\n[[entries]]\npath = \"backend/main.py\"\nqualname = \"handler\"\n\
+         rule_code = \"EFF201\"\ntarget = \"backend.config.env.load\"\ncount = 1\n",
+    );
+    assert_eq!(
+        reason(&p, &["--baseline", "b.toml"]),
+        "the baseline names `backend`, whose modules would be named otherwise"
+    );
+    // A contract naming one.
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[[tool.heki.effect-boundaries]]\nname = \"config\"\n\
+         scopes = [\"backend.config.*:*\"]\nforbid = [\"blocking\"]\n",
+    );
+    assert_eq!(
+        reason(&p, &[]),
+        "a contract of the configuration names `backend`, whose modules would be named otherwise"
+    );
+    // An import that resolves now and would not.
+    let q = subdirectory_app("recommend_source_root_import");
+    q.write("tools.py", "import backend.config.env\n");
+    assert_eq!(
+        reason(&q, &[]),
+        "`backend.config.env` in tools.py, which names a project module now, would not"
+    );
+    // Two files that would define one module.
+    let r = subdirectory_app("recommend_source_root_shared");
+    r.write("main.py", "").write("backend/__init__.py", "");
+    assert_eq!(
+        reason(&r, &[]),
+        "backend/main.py and main.py would both define module `main`"
     );
 }
