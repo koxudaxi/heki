@@ -454,6 +454,20 @@ fn ownership_candidates_follow_the_census_and_the_trial() {
 }
 
 #[test]
+fn a_candidate_lists_the_first_accesses_on_objects_of_unknown_class() {
+    let p = owners("recommend_contracts_unresolved_examples");
+    p.write(
+        "app/reset.py",
+        "def a(o) -> None:\n    o.tags = []\n\n\ndef b(o) -> None:\n    o.tags = []\n\n\n\
+         def c(o) -> None:\n    o.tags = []\n",
+    );
+    let (_, out, _) = p.heki(&["recommend", "--ignore", "EFF201"]);
+    let line = "    trial: MUT201 0, MUT205 4 (at app/admin.py:14, app/reset.py:2, app/reset.py:6, \
+                ...), so unresolved = \"ignore\"\n";
+    assert!(section(&out).contains(line), "{out}");
+}
+
+#[test]
 fn effect_boundaries_cover_modules_and_packages_reaching_no_blocking_call() {
     let p = layers("recommend_contract_boundaries");
     let report = recommend_json(&p, &[]);

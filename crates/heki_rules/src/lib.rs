@@ -1000,16 +1000,15 @@ pub fn contract_roles(
     contracts::roles_of(&cx, key)
 }
 
-/// What the contracts of `config` already declare (`heki recommend`).
+/// What the contracts of `env`'s configuration already declare (`heki recommend`).
 pub(crate) fn declared_contracts(
-    config: &HekiConfig,
-    kb: &EffectiveEcosystemKb,
-    soundness_kb: &EffectiveSoundnessKb,
+    env: &project::ProjectEnv,
     index: &ProjectIndex,
     selection: &RuleSelection,
 ) -> Result<contracts::Declared, RuleConfigError> {
     let decls = index.project_decls();
-    let cx = CheckContext::of_declarations(config, kb, soundness_kb, index, &decls, selection);
+    let (config, kb, soundness) = (&env.cfg, &env.kb, &env.soundness_kb);
+    let cx = CheckContext::of_declarations(config, kb, soundness, index, &decls, selection);
     contracts::Declared::of(&cx)
 }
 

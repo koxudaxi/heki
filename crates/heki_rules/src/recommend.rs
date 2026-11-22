@@ -269,13 +269,7 @@ pub fn recommend(request: Request<'_>) -> Result<RecommendReport, RecommendError
     let reports_now = reports_now(&current, baseline.as_ref(), files_analyzed, &diags);
     drop(diags);
     let env = &discovery.project.env;
-    let declared = crate::declared_contracts(
-        &env.cfg,
-        &env.kb,
-        &env.soundness_kb,
-        &discovery.index,
-        &current,
-    )?;
+    let declared = crate::declared_contracts(env, &discovery.index, &current)?;
     let tests: FxHashSet<&Path> = (discovery.project.files.iter())
         .filter(|f| crate::eff_rules::is_test_code("", &f.rel))
         .map(|f| f.path.as_path())

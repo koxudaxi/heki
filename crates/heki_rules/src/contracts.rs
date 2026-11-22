@@ -588,13 +588,9 @@ impl Declared {
         let mut read_targets = Vec::new();
         for rule in &config.read_owners {
             let context = "read-owners.targets";
-            read_targets.extend(parse_read_targets(
-                cx,
-                &all_classes,
-                &rule.targets,
-                "read-owners",
-                context,
-            )?);
+            let targets =
+                parse_read_targets(cx, &all_classes, &rule.targets, "read-owners", context)?;
+            read_targets.extend(targets);
         }
         let mut blocking_scopes = Vec::new();
         for boundary in &config.effect_boundaries {
