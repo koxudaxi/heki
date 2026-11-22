@@ -301,9 +301,11 @@ pub struct EcosystemEntry {
     /// value stored may be a validated conversion, and validators of the project may run
     /// (`pydantic.BaseModel` with `validate_assignment`).
     pub stores_on_instance: bool,
-    /// An instance of this class built without a value for a field holds the field's default
-    /// itself when the default is hashable; an unhashable default is deep-copied for each
-    /// instance (pydantic 2's `BaseModel`, through `pydantic-core`).
+    /// An instance of this class built without a value for a field starts from the field's
+    /// default itself when the default is hashable, and from a deep copy of an unhashable one
+    /// (pydantic 2's `BaseModel`, through `pydantic-core`). A field that validates its default
+    /// (`validate_default=True`, or the model's `validate_default` setting) then holds what the
+    /// validation returns, which need not be that object.
     pub keeps_hashable_defaults: bool,
     pub opaque_to_layer3: bool,
     /// Optional instance class returned by a factory function or method
