@@ -704,7 +704,12 @@ one kind, its body or what iterating its result runs, as each call hands them on
 (`ProjectIndex::delivery`: a helper returning a generator it does not iterate runs no generator
 body where it is called), once from every `async def` (not through a worker thread) and once from
 the calls inside a loop or once per item, giving the functions on an event loop and below a loop; `heki_rules::blind_spots` counts the calls by package and name and by function and reason,
-and the hidden `heki dump-recommend-facts` prints them.
+and the hidden `heki dump-recommend-facts` prints them. `heki recommend` lists them
+(`heki_rules::recommend::blind_spots`), after two trials that build no fact of their own: a run
+of `EFF101`, `EFF111`, `EFF103`, and `EFF113` with a hypothetical catalog entry
+(`blocking_net`, `db_query`) for each of the 64 library names with the most reach, whose
+reports count for the name at the end of their chain; and the module names of the files with a
+candidate directory added to `src`, by which it resolves the imports again.
 
 The census contract candidates are drawn from (`heki_rules::census`) is a pass over the index and
 computes no fact of its own: every local summary keeps the function's own typed read and write
@@ -1432,7 +1437,7 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      code does not fix (`heki_ir::ItemOrigins`, `FnIndex::fixed_trips`), and has sent a statement
      whenever it returns. Everything else the heuristic tier finds is `EFF111` / `EFF113`.
    - Open premises (`CheckExtras::open_premises`, off in `heki check` and the language server,
-     on in the hidden `heki dump-open-premises`): an `EFF111` / `EFF113` report records which
+     on in `heki recommend` and the hidden `heki dump-open-premises`): an `EFF111` / `EFF113` report records which
      premises of its claim's row (`heki_rules::premises`) it left open, each with a cause. The
      decisions above tell each step that does not hold (`MustGap`) to whoever asks: a decision
      stops at the first, an explanation goes on. Along the reported chain each call is evaluated

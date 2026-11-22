@@ -145,16 +145,19 @@ $ cargo build --release -p heki --features count-alloc
 $ python3 scripts/check_memory.py --heki target/release/heki
 ```
 
-- CI fails when the peak heap of `heki check` (with and without an ownership contract) or of
-  the `--watch` engine on a generated project exceeds its budget in the script.
+- CI fails when the peak heap of `heki check` (with and without an ownership contract), of
+  the `--watch` engine, or of `heki recommend` (with and without the contract) on a generated
+  project exceeds its budget in the script.
 - The peak heap is the most bytes heki holds at once, counted by the allocator of a
   `count-alloc` build (release builds leave the feature off). The counting build also runs its
   parallel work on the main thread alone, what `RAYON_NUM_THREADS=1` asks without the second
   thread whose timing would move the peak. No allocator cache, memory pressure, or thread timing
   changes the count: every run reads the same bytes, and one run per mode suffices. The total of
   the bytes allocated is printed next to it.
-- Each budget is the peak on CI's Linux runner when it was set, plus 5 %. Another machine reads
-  a few hundred bytes more or less, from the length of the generated project's path.
+- Each budget is the peak on CI's Linux runner when it was set, plus 5 %, except those of
+  `heki recommend`, an experimental command that runs several analyses and that no editor waits
+  on: the owner set them to 100 MiB. Another machine reads a few hundred bytes more or less,
+  from the length of the generated project's path.
 - A budget changes, down or up, only with the owner's decision. A change that would exceed one
   first finds what grew (below) and removes it where it lives; when the growth is the cost of
   facts a default rule needs, the measurements go to the owner.
@@ -165,7 +168,7 @@ $ python3 scripts/check_memory.py --heki target/release/heki
   declarations).
 
 At release time (`release.yml` runs CI on the release commit) and on a manual CI run, a release
-build also runs the three modes, and its peak memory as the system sees it, the lowest of three
+build also runs the three modes of `heki check` and `--watch`, and its peak memory as the system sees it, the lowest of three
 runs, stays under a coarse budget: about 10 % above it when the budget was set. This peak also
 holds what the heap count leaves out: the allocator's fragmentation, its mappings, and the code.
 It is the resident set size on Linux and the physical footprint on macOS, each platform with its
@@ -325,10 +328,12 @@ the callers of the bottom of a lattice of calls thirty levels deep, the chains `
 down thousands of calls of one module, a value chosen among a thousand module globals before it is
 changed, thousands of calls handing a global to a helper that changes it, thousands of
 comprehensions or generator expressions, each over a value the function creating them binds just
-before, and, through `heki dump-recommend-facts`, the calls heki is blind to in a chain of
+before, through `heki dump-recommend-facts`, the calls heki is blind to in a chain of
 thousands of helpers below as many `async def`s and the census of the attributes of thousands of
-classes, and, through `heki recommend`, the contract candidates of thousands of classes and of
-thousands of modules.
+classes, and, through `heki recommend`, thousands of library names without a catalog entry (its
+hypothetical-catalog run tries 64), thousands of directories that would each resolve an import
+as a source root (its source-root trial tries 8), and the contract candidates of thousands of
+classes and of thousands of modules (its contract trial tries 32 of each kind).
 
 A change to the IR builder, a walk, a fixpoint, or a rule's state is also run over a large
 corpus of real projects before it is merged, every run under a memory cap and a timeout. No

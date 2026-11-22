@@ -110,8 +110,19 @@ fn reports_now_are_what_heki_check_shows_and_withholds() {
     let p = shop("recommend_now");
     let (code, out, err) = p.heki(&["recommend"]);
     assert_eq!((code, err.as_str()), (0, ""));
+    // The sections of what keeps reports heuristic and what heki cannot see have tests of their
+    // own.
+    let mut rest = out.clone();
+    for header in [
+        "\nWhat keeps reports heuristic\n",
+        "\nWhat heki cannot see (no report either way)\n",
+    ] {
+        let (before, section) = rest.split_once(header).unwrap_or_else(|| panic!("{out}"));
+        let after = section.split_once("\n\n").unwrap().1;
+        rest = format!("{before}\n{after}");
+    }
     assert_eq!(
-        out,
+        rest,
         "heki recommend (experimental) on .: 8 file(s), 20 function(s)\n\
          \n\
          Reports now  2 shown (2 exact, 0 heuristic), 2 heuristic withheld, 5 heuristic rule(s) \
@@ -890,4 +901,705 @@ fn paths_are_written_as_heki_check_writes_them() {
             && left_out.contains(&format!("{root}/tests/test_a.py").as_str()),
         "{left_out:?}"
     );
+}
+
+/// Heuristic reports of exact claims, one per closer: `EFF111` (a branch skips the wait: code),
+/// `EFF113` (a loop over a library result the catalog does not size: heki's catalog), `OPT113`
+/// (items of unknown type: two annotations), and `OPT110` (a loop the code counts: a condition of
+/// the exact tier, nothing to apply). `handle_quietly`'s report is suppressed.
+const HEURISTIC_CLAIMS: [(&str, &str); 4] = [
+    (
+        "app/waits.py",
+        "import time\n\n\ndef pause(flag):\n    if flag:\n        return None\n    time.sleep(1)\n\n\n\
+         async def handle(flag):\n    pause(flag)\n\n\nasync def handle_quietly(flag):\n    \
+         pause(flag)  # heki: ignore[EFF111]\n",
+    ),
+    (
+        "app/queries.py",
+        "import json\nimport sqlite3\n\nSQL = \"SELECT * FROM t WHERE id = ?\"\n\n\n\
+         def process(db: sqlite3.Cursor, text: str):\n    for x in json.loads(text):\n        \
+         db.execute(SQL, (x,))\n",
+    ),
+    (
+        "app/joins.py",
+        "from dataclasses import dataclass\n\n\n@dataclass\nclass Left:\n    key: int\n    \
+         other: int = 0\n\n\n@dataclass\nclass Right:\n    key: int\n    payload: int = 0\n\n\n\
+         def join(lefts, rights):\n    out = []\n    for a in lefts:\n        for b in rights:\n\
+         \x20           if a.key == b.key:\n                out.append((a.other, b.payload))\n    \
+         return out\n",
+    ),
+    (
+        "app/counts.py",
+        "def count(probes):\n    allowed = list(range(0, 50, 3))\n    hits = []\n    for p in \
+         range(40):\n        if p in allowed:\n            hits.append(p)\n    return hits\n",
+    ),
+];
+
+fn heuristic_claims(name: &str) -> Project {
+    let p = Project::new(name);
+    p.write("app/__init__.py", "");
+    for (path, text) in HEURISTIC_CLAIMS {
+        p.write(path, text);
+    }
+    p
+}
+
+/// The rows of "What keeps reports heuristic" as `(name, cause, closer, reports, only open)`.
+fn cause_rows(report: &Value) -> Vec<(String, String, String, u64, u64)> {
+    report["open_premises"]["by_cause"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            (
+                r["name"].as_str().unwrap().to_owned(),
+                r["cause"].as_str().unwrap().to_owned(),
+                r["closer"].as_str().unwrap().to_owned(),
+                r["reports"].as_u64().unwrap(),
+                r["only_open"].as_u64().unwrap(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn heuristic_reports_are_counted_by_the_premise_they_leave_open_and_why() {
+    let p = heuristic_claims("recommend_open_premises");
+    let (code, report, _) = recommend_json(&p, &[]);
+    assert_eq!(code, 0);
+    let section = &report["open_premises"];
+    assert_eq!(section["reports"], json!(4), "{section:#}");
+    assert_eq!(
+        section["by_rule"],
+        json!([{"rule": "EFF111", "reports": 1}, {"rule": "EFF113", "reports": 1},
+               {"rule": "OPT110", "reports": 1}, {"rule": "OPT113", "reports": 1}])
+    );
+    let row = |name: &str, cause: &str, closer: &str, reports: u64, only: u64| {
+        (
+            name.to_owned(),
+            cause.to_owned(),
+            closer.to_owned(),
+            reports,
+            only,
+        )
+    };
+    // The causes left open alone first; the two that one report leaves open together after.
+    assert_eq!(
+        cause_rows(&report),
+        vec![
+            row("Every return", "not-made-on-every-return", "code", 1, 1),
+            row("Origin", "library-call-without-items", "heki-catalog", 1, 1),
+            row("Trip count open", "trip-count-fixed", "none", 1, 1),
+            row("Equality of keys", "item-type-unknown", "annotation", 1, 0),
+            row(
+                "Idle on a mismatch",
+                "iterable-type-unknown",
+                "annotation",
+                1,
+                0
+            ),
+        ]
+    );
+    let by_cause = section["by_cause"].as_array().unwrap();
+    assert_eq!(
+        (&by_cause[0]["kind"], &by_cause[2]["kind"]),
+        (&json!("premise"), &json!("condition"))
+    );
+    // A heuristic side's reports count under the claim of its exact rule.
+    assert_eq!(
+        by_cause[0]["rules"],
+        json!([{"rule": "EFF101", "reported_as": "EFF111", "reports": 1, "only_open": 1}])
+    );
+    assert_eq!(
+        by_cause[0]["examples"],
+        json!([{"path": "app/waits.py", "line": 11, "column": 5, "rule": "EFF111",
+                "at": {"path": "app/waits.py", "line": 7, "column": 5}, "detail": null}])
+    );
+    assert_eq!(
+        by_cause[2]["examples"][0]["detail"],
+        json!("the loop runs at most 40 times")
+    );
+    assert_eq!(
+        section["combinations"],
+        json!([{"reports": 1, "open": [
+            {"kind": "premise", "name": "Equality of keys", "cause": "item-type-unknown"},
+            {"kind": "premise", "name": "Idle on a mismatch", "cause": "iterable-type-unknown"}]}])
+    );
+    assert_eq!(
+        (&section["not_recorded"], &section["truncated"]),
+        (&json!([]), &json!(false))
+    );
+    // Nothing of this section enters the block.
+    assert_eq!(report["config"], json!({}));
+    assert_follows_the_schema(&report);
+    let (_, out, _) = p.heki(&["recommend"]);
+    let text = out
+        .split("\nWhat keeps reports heuristic\n")
+        .nth(1)
+        .and_then(|rest| rest.split("\n\n").next())
+        .unwrap_or_else(|| panic!("{out}"));
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(
+        lines[..3],
+        [
+            "  4 heuristic report(s) of exact claims: EFF111 1, EFF113 1, OPT110 1, OPT113 1",
+            "  premise: cause                                 reports  only open  closed by",
+            "  Every return: not-made-on-every-return               1          1  code",
+        ],
+        "{text}"
+    );
+    assert_eq!(lines[4], "    e.g. app/waits.py:11 EFF111", "{text}");
+    for line in [
+        "  Origin: library-call-without-items                   1          1  heki's catalog",
+        "  Trip count open (condition): trip-count-fixed        1          1  none",
+        "  Idle on a mismatch: iterable-type-unknown            1          0  annotation",
+        "  Nothing here enters the block: an annotation or a change of the code is an edit of \
+         the program.",
+        "  heki's catalog takes no configuration for the causes it closes: report a case at \
+         https://github.com/koxudaxi/heki/issues.",
+    ] {
+        assert!(lines.contains(&line), "{line}\n{text}");
+    }
+}
+
+#[test]
+fn closing_the_cause_in_the_code_makes_the_report_exact() {
+    let p = heuristic_claims("recommend_open_premises_closed");
+    let closed = [
+        // The branch that skips the wait.
+        ("app/waits.py", "    if flag:\n        return None\n", ""),
+        // The two annotations.
+        (
+            "app/joins.py",
+            "def join(lefts, rights):",
+            "def join(lefts: list[Left], rights: list[Right]):",
+        ),
+        // A loop the data sizes.
+        ("app/counts.py", "range(40)", "range(probes)"),
+    ];
+    for (path, open, close) in closed {
+        let (_, text) = HEURISTIC_CLAIMS.iter().find(|(p, _)| *p == path).unwrap();
+        p.write(path, &text.replace(open, close));
+    }
+    let shown = checked(&p, &["--select", "EFF101,OPT110,OPT113"]);
+    let exact: Vec<(&str, &str)> = shown
+        .iter()
+        .filter(|d| d["certainty"] == "exact")
+        .map(|d| {
+            (
+                d["rule_code"].as_str().unwrap(),
+                d["path"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    for (rule, path) in [
+        ("EFF101", "app/waits.py"),
+        ("OPT113", "app/joins.py"),
+        ("OPT110", "app/counts.py"),
+    ] {
+        assert!(exact.contains(&(rule, path)), "{rule} {path}: {shown:#?}");
+    }
+    // What stays heuristic is the cause only heki's catalog closes.
+    let (_, report, _) = recommend_json(&p, &[]);
+    assert_eq!(
+        cause_rows(&report),
+        vec![(
+            "Origin".to_owned(),
+            "library-call-without-items".to_owned(),
+            "heki-catalog".to_owned(),
+            1,
+            1
+        )]
+    );
+    // Without heuristic reports of exact claims, the section says so.
+    p.write("app/queries.py", "");
+    let (_, out, _) = p.heki(&["recommend"]);
+    assert!(
+        out.contains(
+            "\nWhat keeps reports heuristic\n  No heuristic reports of exact claims here.\n"
+        ),
+        "{out}"
+    );
+}
+
+/// Calls heki is blind to: library names the catalog has no entry for (`stripe`, a package it
+/// does not cover; `requests.utils.quote`, a name of a package it covers), awaited or not, on an
+/// event loop or in a loop over a parameter; a call on an unannotated parameter; and a function
+/// with an A1 hazard.
+const BLIND: &str = "\
+import requests
+import stripe
+
+
+async def pay(amount):
+    return stripe.Charge.create(amount=amount)
+
+
+async def refund(amount):
+    return await stripe.Refund.create_async(amount=amount)
+
+
+def capture_all(charges: list[str]):
+    for charge in charges:
+        stripe.Charge.capture(charge)
+
+
+async def link(path: str):
+    return requests.utils.quote(path)
+
+
+def sync_job(client):
+    return client.get(\"/jobs\")
+
+
+async def poll(client):
+    return sync_job(client)
+
+
+def introspect():
+    return locals()
+";
+
+/// `(symbol, calls, awaited, on event loop, in loops, if it waits, if it sends a query)` of each
+/// name of `list`.
+fn symbol_rows(list: &Value) -> Vec<(String, Value, Value)> {
+    list.as_array()
+        .unwrap()
+        .iter()
+        .map(|s| {
+            (
+                s["symbol"].as_str().unwrap().to_owned(),
+                json!([s["calls"], s["awaited"], s["on_event_loop"], s["in_loops"]]),
+                json!([s["if_waits"], s["if_queries"]]),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn library_names_without_a_catalog_entry_are_listed_with_what_heki_would_report() {
+    let p = Project::new("recommend_uncatalogued");
+    p.write("app/__init__.py", "").write("app/pay.py", BLIND);
+    let (code, report, _) = recommend_json(&p, &[]);
+    assert_eq!(code, 0);
+    let blind = &report["blind_spots"];
+    let packages = blind["uncatalogued"].as_array().unwrap();
+    assert_eq!(packages.len(), 1, "{blind:#}");
+    assert_eq!(
+        (&packages[0]["package"], &packages[0]["calls"]),
+        (&json!("stripe"), &json!(3))
+    );
+    let tried = |eff101: u64, eff103: u64| json!([{"EFF101": eff101, "EFF111": 0}, {"EFF103": eff103, "EFF113": 0}]);
+    // On the event loop it would wait there; in a loop over a parameter it would send a query
+    // per item; awaited, it holds nothing up.
+    assert_eq!(
+        symbol_rows(&packages[0]["symbols"]),
+        vec![
+            (
+                "stripe.Charge.create".to_owned(),
+                json!([1, 0, 1, 0]),
+                tried(1, 0)
+            ),
+            (
+                "stripe.Charge.capture".to_owned(),
+                json!([1, 0, 0, 1]),
+                tried(0, 1)
+            ),
+            (
+                "stripe.Refund.create_async".to_owned(),
+                json!([1, 1, 0, 0]),
+                tried(0, 0)
+            ),
+        ]
+    );
+    assert_eq!(
+        packages[0]["symbols"][0]["examples"],
+        json!([{"path": "app/pay.py", "line": 6, "column": 12, "function": "app.pay.pay"}])
+    );
+    // A name of a package the catalog covers is listed when heki would report through it.
+    assert_eq!(
+        symbol_rows(&blind["catalog_may_miss"]),
+        vec![(
+            "requests.utils.quote".to_owned(),
+            json!([1, 0, 1, 0]),
+            tried(1, 0)
+        )]
+    );
+    assert_eq!(
+        (&blind["totals"]["tried"], &blind["totals"]["not_tried"]),
+        (&json!(4), &json!(0))
+    );
+    // The module also keeps an effect boundary (contract candidates), tried after the catalog.
+    assert_eq!(
+        report["runs"],
+        json!([{"label": "discovery"}, {"label": "hypothetical-catalog"},
+               {"label": "contract-trial"}, {"label": "verification", "repeated": false}])
+    );
+    // No catalog entry enters the block, and no count of reports takes the trial's.
+    let keys: Vec<&String> = report["config"].as_object().unwrap().keys().collect();
+    assert_eq!(keys, ["effect-boundaries"]);
+    assert_eq!(report["reports_now"]["shown"], json!(0));
+    assert_eq!(rule(&report, "EFF111")["reports"], json!(0));
+    assert!(
+        report["notes"][0]
+            .as_str()
+            .unwrap()
+            .starts_with("\"if it waits\" and \"if it sends a query\" come from a trial run"),
+        "{report:#}"
+    );
+    assert_follows_the_schema(&report);
+    let (_, out, _) = p.heki(&["recommend"]);
+    for line in [
+        "  calls of packages heki's catalog does not cover: 3 call(s) of 3 name(s) in 1 \
+         package(s)",
+        "    name                        calls  async  loops  if it waits  if it sends a query",
+        "    stripe.Charge.create            1      1      0  EFF101 1     -",
+        "    stripe.Charge.capture           1      0      1  -            EFF103 1",
+        "    stripe.Refund.create_async      1      0      0  -            -",
+        "    requests.utils.quote      1      1      0  EFF101 1     -",
+        "  1 function(s) with an A1 hazard, 0 of them too large to model: the Soundness lane \
+         proves nothing in them (`heki assumptions` lists them)",
+    ] {
+        assert!(out.lines().any(|l| l == line), "{line}\n{out}");
+    }
+    assert!(
+        out.contains("(if they do, report them at https://github.com/koxudaxi/heki/issues)"),
+        "{out}"
+    );
+    // What the trial counts is what `heki check` prints with such an entry.
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[[tool.heki.ecosystem]]\nsymbol = \"stripe.Charge.create\"\n\
+         effects = [\"blocking_net\", \"db_query\"]\n",
+    );
+    let shown = checked(&p, &["--select", "EFF101,EFF111,EFF103,EFF113"]);
+    let through: Vec<&Value> = shown
+        .iter()
+        .filter(|d| d["target"] == "stripe.Charge.create")
+        .collect();
+    assert_eq!(through.len(), 1, "{shown:#?}");
+    assert_eq!(through[0]["rule_code"], "EFF101");
+    // With an entry, the name is no longer one heki cannot see.
+    let (_, entered, _) = recommend_json(&p, &[]);
+    let names: Vec<String> = symbol_rows(&entered["blind_spots"]["uncatalogued"][0]["symbols"])
+        .into_iter()
+        .map(|(s, _, _)| s)
+        .collect();
+    assert_eq!(
+        names,
+        ["stripe.Charge.capture", "stripe.Refund.create_async"]
+    );
+}
+
+#[test]
+fn calls_heki_does_not_resolve_are_listed_with_why() {
+    let p = Project::new("recommend_unresolved");
+    p.write("app/__init__.py", "").write("app/pay.py", BLIND);
+    let (_, report, _) = recommend_json(&p, &[]);
+    let blind = &report["blind_spots"];
+    assert_eq!(
+        blind["unresolved"],
+        json!([{"function": "app.pay.sync_job", "path": "app/pay.py",
+                "reason": "unannotated-parameter", "parameter": "client", "names": ["get"],
+                "calls": 1, "awaited": 0, "on_event_loop": 1, "in_loops": 0,
+                "examples": [{"path": "app/pay.py", "line": 23, "column": 12,
+                              "function": "app.pay.sync_job"}]}])
+    );
+    assert_eq!(
+        (
+            &blind["totals"]["unresolved_by_reason"],
+            &blind["a1_hazards"]
+        ),
+        (
+            &json!({"unannotated-parameter": 1}),
+            &json!({"functions": 1, "unmodeled": 0})
+        )
+    );
+    let (_, out, _) = p.heki(&["recommend"]);
+    assert!(
+        out.contains(
+            "\n  calls heki does not resolve: 1 call(s) in 1 function(s)\n    function          \
+             calls  async  loops  why\n    app.pay.sync_job      1      1      0  parameter \
+             `client` has no annotation (get)\n"
+        ),
+        "{out}"
+    );
+}
+
+/// A subdirectory application whose directories are imported as top-level packages.
+fn subdirectory_app(name: &str) -> Project {
+    let p = Project::new(name);
+    p.write(
+        "backend/config/env.py",
+        "import time\n\n\ndef load():\n    time.sleep(1)\n    return {}\n",
+    )
+    .write(
+        "backend/main.py",
+        "from config.env import load\nimport config.env\n\n\nasync def handler():\n    return \
+         load()\n\n\nasync def other():\n    return config.env.load()\n",
+    )
+    // An import that names a project module now, and still does with the source root.
+    .write("backend/config/settings.py", "from . import env\n");
+    p
+}
+
+#[test]
+fn a_directory_whose_files_imports_name_becomes_a_source_root_after_its_trial() {
+    let p = subdirectory_app("recommend_source_root");
+    let (_, report, _) = recommend_json(&p, &[]);
+    let blind = &report["blind_spots"];
+    assert_eq!(
+        blind["source_roots"],
+        json!([{"directory": "backend", "imports": 2, "in_block": true,
+                "reason": "its imports resolve, and no import, contract, or baseline entry loses its module",
+                "examples": [
+                    {"path": "backend/main.py", "line": 1, "name": "config.env.load"},
+                    {"path": "backend/main.py", "line": 2, "name": "config.env"}]}])
+    );
+    // The calls into those files are the project's, not a library's.
+    assert_eq!(blind["uncatalogued"], json!([]));
+    assert_eq!(blind["totals"]["below_source_roots"], json!(2));
+    assert_eq!(
+        report["runs"],
+        json!([{"label": "discovery"}, {"label": "source-roots"}])
+    );
+    assert_eq!(report["config"], json!({"src": ["backend"]}));
+    assert_follows_the_schema(&report);
+    let (_, out, _) = p.heki(&["recommend"]);
+    assert!(
+        out.contains(
+            "\n  source root `backend`: 2 import(s) name its files (config.env.load, config.env): \
+             in the block\n"
+        ) && out.ends_with(
+            "\npyproject.toml: keys to add or change\n  [tool.heki]\n  src = [\"backend\"]\n"
+        ),
+        "{out}"
+    );
+    // With the block, the imports resolve: the waits below the handlers are reported.
+    assert!(checked(&p, &["--select", "EFF101"]).is_empty());
+    let block = report["config_toml"].as_str().unwrap();
+    p.write(
+        "pyproject.toml",
+        &format!("[project]\nname = \"t\"\n\n{block}"),
+    );
+    let after = checked(&p, &["--select", "EFF101"]);
+    assert_eq!(after.len(), 2, "{after:#?}");
+    let (_, again, _) = recommend_json(&p, &[]);
+    assert_eq!(again["blind_spots"]["source_roots"], json!([]));
+}
+
+#[test]
+fn a_source_root_stays_out_when_a_name_the_configuration_uses_would_change() {
+    let reason = |p: &Project, args: &[&str]| {
+        let (_, report, _) = recommend_json(p, args);
+        let roots = &report["blind_spots"]["source_roots"];
+        assert_eq!(roots[0]["in_block"], json!(false), "{roots:#}");
+        assert_eq!(report["config"], json!({}));
+        assert_follows_the_schema(&report);
+        roots[0]["reason"].as_str().unwrap().to_owned()
+    };
+    // A baseline entry naming a module below the directory.
+    let p = subdirectory_app("recommend_source_root_baseline");
+    p.write(
+        "b.toml",
+        "version = 2\n\n[[entries]]\npath = \"backend/main.py\"\nqualname = \"handler\"\n\
+         rule_code = \"EFF201\"\ntarget = \"backend.config.env.load\"\ncount = 1\n",
+    );
+    assert_eq!(
+        reason(&p, &["--baseline", "b.toml"]),
+        "the baseline names `backend`, whose modules would be named otherwise"
+    );
+    // A contract naming one.
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[[tool.heki.effect-boundaries]]\nname = \"config\"\n\
+         scopes = [\"backend.config.*:*\"]\nforbid = [\"blocking\"]\n",
+    );
+    assert_eq!(
+        reason(&p, &[]),
+        "a contract of the configuration names `backend`, whose modules would be named otherwise"
+    );
+    // An import that resolves now and would not.
+    let q = subdirectory_app("recommend_source_root_import");
+    q.write("tools.py", "import backend.config.env\n");
+    assert_eq!(
+        reason(&q, &[]),
+        "`backend.config.env` in tools.py, which names a project module now, would not"
+    );
+    // Two files that would define one module.
+    let r = subdirectory_app("recommend_source_root_shared");
+    r.write("main.py", "").write("backend/__init__.py", "");
+    assert_eq!(
+        reason(&r, &[]),
+        "backend/main.py and main.py would both define module `main`"
+    );
+}
+
+#[test]
+fn a_report_naming_several_library_names_counts_for_the_first() {
+    let p = Project::new("recommend_several_names");
+    // Every implementation `x.go()` runs calls a library name of its own.
+    p.write(
+        "app.py",
+        "import stripe\n\n\nclass Base:\n    def go(self):\n        stripe.a()\n\n\n\
+         class Sub(Base):\n    def go(self):\n        stripe.b()\n\n\n\
+         async def handle(x: Base):\n    x.go()\n",
+    );
+    let (_, report, _) = recommend_json(&p, &[]);
+    let symbols = &report["blind_spots"]["uncatalogued"][0]["symbols"];
+    assert_eq!(
+        (&symbols[0]["symbol"], &symbols[0]["if_waits"]["EFF101"]),
+        (&json!("stripe.a"), &json!(1))
+    );
+    assert_eq!(
+        (&symbols[1]["symbol"], &symbols[1]["if_waits"]["EFF101"]),
+        (&json!("stripe.b"), &json!(0))
+    );
+    assert!(
+        report["notes"].as_array().unwrap().contains(&json!(
+            "A report naming several of the library names tried counts for the first by name."
+        )),
+        "{report:#}"
+    );
+}
+
+#[test]
+fn the_text_lists_the_unresolved_calls_with_the_most_reach_first() {
+    let p = Project::new("recommend_unresolved_many");
+    let jobs: String = (0..12)
+        .map(|i| format!("def job_{i:02}(client):\n    client.run()\n\n\n"))
+        .collect();
+    p.write(
+        "app.py",
+        &format!("{jobs}async def poll(client):\n    job_11(client)\n"),
+    );
+    let (_, report, _) = recommend_json(&p, &[]);
+    let blind = &report["blind_spots"];
+    assert_eq!(blind["totals"]["unresolved_groups"], json!(12));
+    // The call on the event loop first, then by function.
+    assert_eq!(blind["unresolved"][0]["function"], json!("app.job_11"));
+    assert_eq!(blind["unresolved"][1]["function"], json!("app.job_00"));
+    let (_, out, _) = p.heki(&["recommend"]);
+    assert!(
+        out.contains("\n    app.job_08      1      0      0  parameter `client` has no annotation (run)\n    and 2 more\n"),
+        "{out}"
+    );
+}
+
+#[test]
+fn a_project_heki_sees_whole_says_so() {
+    let p = Project::new("recommend_nothing_unseen");
+    p.write("__init__.py", "")
+        .write("other.py", "def f() -> int:\n    return 1\n")
+        .write(
+            "mod.py",
+            "from . import other\n\n\ndef g() -> int:\n    return other.f()\n",
+        );
+    let (_, out, _) = p.heki(&["recommend"]);
+    assert!(
+        out.contains(
+            "\nWhat heki cannot see (no report either way)\n  Nothing: every call resolves, every \
+             library name called has a catalog entry, and every function is modeled.\n"
+        ),
+        "{out}"
+    );
+}
+
+#[test]
+fn an_import_below_several_directories_is_the_one_of_the_importing_files_own() {
+    let p = Project::new("recommend_source_root_services");
+    p.write("svc_a/utils.py", "def a():\n    pass\n")
+        .write("svc_a/jobs.py", "")
+        .write("svc_a/views.py", "")
+        .write("svc_a/forms.py", "")
+        .write(
+            "svc_a/main.py",
+            "import forms\nimport jobs\nimport utils\nimport views\n\n\ndef run():\n    \
+             utils.a()\n",
+        )
+        .write("svc_b/utils.py", "def b():\n    pass\n")
+        // Below both, and in neither: no candidate's.
+        .write("tool.py", "import utils\n");
+    let (_, report, _) = recommend_json(&p, &[]);
+    let roots = &report["blind_spots"]["source_roots"];
+    assert_eq!(roots.as_array().unwrap().len(), 1, "{roots:#}");
+    assert_eq!(
+        (
+            &roots[0]["directory"],
+            &roots[0]["imports"],
+            &roots[0]["in_block"]
+        ),
+        (&json!("svc_a"), &json!(4), &json!(true))
+    );
+    assert_eq!(report["config"], json!({"src": ["svc_a"]}));
+    assert_follows_the_schema(&report);
+    let (_, out, _) = p.heki(&["recommend"]);
+    assert!(
+        out.contains(
+            "\n  source root `svc_a`: 4 import(s) name its files (forms, jobs, utils, ...): in the \
+             block\n"
+        ),
+        "{out}"
+    );
+}
+
+#[test]
+fn a_directory_above_a_source_root_does_not_resolve_what_the_root_names() {
+    let p = Project::new("recommend_source_root_above");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki]\nsrc = [\"backend/lib\"]\n",
+    )
+    .write("backend/lib/config/env.py", "def load():\n    pass\n")
+    .write("backend/main.py", "import lib.config.env\n");
+    let (_, report, _) = recommend_json(&p, &[]);
+    let roots = &report["blind_spots"]["source_roots"];
+    assert_eq!(
+        (
+            &roots[0]["directory"],
+            &roots[0]["in_block"],
+            &roots[0]["reason"]
+        ),
+        (
+            &json!("backend"),
+            &json!(false),
+            &json!("`lib.config.env` would still name no project module")
+        )
+    );
+}
+
+#[test]
+fn names_the_catalog_lacks_come_by_what_heki_would_report_through_them() {
+    let p = Project::new("recommend_catalog_may_miss");
+    p.write(
+        "app.py",
+        "import requests\nimport stripe\n# Past the top of the package tree: no module.\n\
+         from .. import nothing\n\n\nasync def link(path: str):\n    return \
+         requests.utils.quote(path)\n\n\nasync def unlink(path: str):\n    a = \
+         requests.utils.unquote(path)\n    b = requests.utils.unquote(path)\n    return a, b\n\n\n\
+         def fetch_one(x, flag):\n    if flag:\n        return None\n    return \
+         stripe.Charge.retrieve(x)\n\n\ndef fetch_all(items: list[str], flag: bool):\n    for x \
+         in items:\n        fetch_one(x, flag)\n",
+    );
+    let (_, report, _) = recommend_json(&p, &[]);
+    let blind = &report["blind_spots"];
+    let missing: Vec<(Value, Value)> = blind["catalog_may_miss"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| (s["symbol"].clone(), s["if_waits"]["EFF101"].clone()))
+        .collect();
+    assert_eq!(
+        missing,
+        [
+            (json!("requests.utils.unquote"), json!(2)),
+            (json!("requests.utils.quote"), json!(1))
+        ]
+    );
+    // A query on some paths only would be reported as heuristic.
+    assert_eq!(
+        blind["uncatalogued"][0]["symbols"][0]["if_queries"],
+        json!({"EFF103": 0, "EFF113": 1})
+    );
+    assert_follows_the_schema(&report);
 }

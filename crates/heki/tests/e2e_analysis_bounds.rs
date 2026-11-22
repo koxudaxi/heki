@@ -4190,6 +4190,72 @@ fn recommend_within(p: &Project, limit: Duration) -> Value {
     serde_json::from_slice(&reader.join().unwrap()).unwrap()
 }
 
+/// Thousands of `async def`s, each calling a library name of its own that the catalog lacks:
+/// the hypothetical-catalog run gives entries to the first 64 by reach only, and the lists keep
+/// their first 50.
+#[test]
+fn the_trial_of_library_names_without_an_entry_tries_a_bounded_number() {
+    let names = 3_000;
+    let mut lines = vec!["import stripe".to_owned()];
+    for i in 0..names {
+        lines.extend([
+            String::new(),
+            String::new(),
+            format!("async def e{i}(x):"),
+            format!("    stripe.f{i}(x)"),
+        ]);
+    }
+    let p = Project::new("bounds_recommend_uncatalogued");
+    p.write("app.py", &(lines.join("\n") + "\n"));
+    let report = recommend_within(&p, Duration::from_secs(20));
+    let blind = &report["blind_spots"];
+    let totals = &blind["totals"];
+    assert_eq!(
+        (
+            &totals["uncatalogued_symbols"],
+            &totals["tried"],
+            &totals["not_tried"]
+        ),
+        (&json!(names), &json!(64), &json!(names - 64)),
+        "{totals:#}"
+    );
+    let symbols = blind["uncatalogued"][0]["symbols"].as_array().unwrap();
+    assert_eq!(symbols.len(), 50);
+    assert!(
+        symbols
+            .iter()
+            .all(|s| s["if_waits"] == json!({"EFF101": 1, "EFF111": 0})),
+        "{symbols:#?}"
+    );
+    assert_eq!(blind["truncated"], json!(true));
+}
+
+/// Thousands of directories, each holding a module that a top-level file imports by a name
+/// below it: each directory is a source-root candidate, and the trial tries the first eight.
+#[test]
+fn the_source_root_trial_tries_a_bounded_number_of_directories() {
+    let dirs = 2_000;
+    let p = Project::new("bounds_recommend_source_roots");
+    let mut main = String::new();
+    for i in 0..dirs {
+        p.write(&format!("d{i}/m{i}.py"), "def f():\n    pass\n");
+        main.push_str(&format!("import m{i}\n"));
+    }
+    p.write("main.py", &main);
+    let report = recommend_within(&p, Duration::from_secs(20));
+    let blind = &report["blind_spots"];
+    assert_eq!(blind["totals"]["source_root_candidates"], json!(dirs));
+    let roots = blind["source_roots"].as_array().unwrap();
+    assert_eq!(roots.len(), 50);
+    let tried: Vec<&Value> = roots.iter().filter(|r| r["in_block"] == true).collect();
+    assert_eq!(tried.len(), 8);
+    assert_eq!(
+        roots[8]["reason"],
+        json!("not tried: only the first 8 directories by imports are")
+    );
+    assert_eq!(report["config"]["src"].as_array().unwrap().len(), 8);
+}
+
 /// The `write-owners` candidates of thousands of classes, each attribute written in one module
 /// and read in two others, are ranked and capped before the contract trial: the trial declares
 /// the first 32, and the time grows with the classes, not with the candidates times anything.

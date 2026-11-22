@@ -69,9 +69,9 @@ A heuristic report of an exact claim can also say which premises of its row it l
 with a cause from a closed list kept next to the premise in the same table (what the cause states,
 and what closes it: an annotation, a change of the code, heki's catalog, or nothing today). The
 causes come from the steps of the decision that made the report heuristic, each premise evaluated
-on its own along the reported chain and loop, so they cannot disagree with its tier. The records
-are internal for now: no output format of `heki check` and nothing in the language server shows
-them. `EFF111` and `EFF113` record them for the claims of `EFF101` and `EFF103`, and the heuristic
+on its own along the reported chain and loop, so they cannot disagree with its tier.
+[`heki recommend`](recommend.md) counts the heuristic reports by these causes; no output format of
+`heki check` and nothing in the language server shows them. `EFF111` and `EFF113` record them for the claims of `EFF101` and `EFF103`, and the heuristic
 reports of the eight `OPT` rewrite rules, `OPT113`, `DATA101`, `MUT110`, and `MUT114` for their own
 claims. A proven `OPT` rewrite, or an `OPT113` join whose premises all hold, over a loop the code
 fixes at more than 16 trips is heuristic for a condition of the exact tier that is no premise,

@@ -754,6 +754,9 @@ pub(super) struct Section {
     pub rejected: Vec<RejectedContract>,
     pub not_tried: Vec<NotTried>,
     ignored: Vec<ContractKind>,
+    /// The block sets `src`: the candidates, which name modules as the files are named now, wait
+    /// for a run with it.
+    deferred: bool,
 }
 
 /// Where each report a run made belongs: the candidates `entries` (in the order they are
@@ -904,6 +907,17 @@ impl Section {
         }
     }
 
+    /// The section when the block sets `src`: a new source root renames modules and resolves
+    /// imports the discovery run did not, so the candidates of that run, which name modules as
+    /// the files are named now, are not tried.
+    pub(super) fn deferred(generated: Generated) -> Self {
+        Self {
+            deferred: !generated.is_empty() || !generated.not_tried.is_empty(),
+            ignored: generated.ignored,
+            ..Self::default()
+        }
+    }
+
     /// Leave out an ownership candidate a kept candidate of a base class covers: a target of a
     /// class covers its subclasses.
     fn leave_out_covered(&mut self) {
@@ -1039,6 +1053,13 @@ impl Section {
     /// Notes on what the section left out.
     pub(super) fn notes(&self) -> Vec<String> {
         let mut notes = Vec::new();
+        if self.deferred {
+            notes.push(
+                "the block sets src, which renames modules and resolves imports heki does not \
+                 resolve now: run heki recommend again with it for contract candidates"
+                    .to_owned(),
+            );
+        }
         for kind in &self.ignored {
             notes.push(format!(
                 "the configuration ignores {}, so no {} contract is proposed",

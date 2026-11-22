@@ -803,3 +803,52 @@ fn a_scope_of_many_functions_lists_the_first_fifty() {
         "{out}"
     );
 }
+
+#[test]
+fn a_block_setting_src_leaves_contracts_to_a_run_with_it() {
+    // `import config.env` names `backend/config/env.py` once `backend` is a source root, which
+    // renames the modules below it.
+    let p = Project::new("recommend_contract_src");
+    p.write(
+        "backend/config/env.py",
+        "import time\n\n\ndef load():\n    time.sleep(1)\n    return {}\n",
+    )
+    .write(
+        "backend/main.py",
+        "from config.env import load\nimport config.env\n\n\nasync def handler():\n    return \
+         load()\n\n\nasync def other():\n    return config.env.load()\n",
+    )
+    .write("backend/pricing.py", &layers_module("price"));
+    let report = recommend_json(&p, &[]);
+    assert_eq!(report["config"]["src"], json!(["backend"]));
+    assert_eq!(
+        (&report["contracts"], &report["rejected_contracts"]),
+        (&json!([]), &json!([]))
+    );
+    assert!(
+        report["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["label"] != "contract-trial"),
+        "{report:#}"
+    );
+    assert!(
+        report["notes"].as_array().unwrap().contains(&json!(
+            "the block sets src, which renames modules and resolves imports heki does not resolve \
+             now: run heki recommend again with it for contract candidates"
+        )),
+        "{report:#}"
+    );
+    // With `src` set, the module keeps its boundary under its new name.
+    let block = report["config_toml"].as_str().unwrap();
+    p.write(
+        "pyproject.toml",
+        &format!("[project]\nname = \"t\"\n\n{block}"),
+    );
+    let again = recommend_json(&p, &[]);
+    assert_eq!(
+        kept(&again),
+        [(s("effect-boundaries"), s("pricing"), s("high"), Value::Null)]
+    );
+}

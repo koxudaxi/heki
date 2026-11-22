@@ -11,8 +11,10 @@
 //! The report is the same for the same input, configuration, and heki version: every list is
 //! sorted, and every cap is a count.
 
+pub mod blind_spots;
 pub mod block;
 pub mod contracts;
+pub mod premises;
 pub mod rules;
 
 use crate::project::{
@@ -47,6 +49,9 @@ pub const MAX_EXAMPLES: usize = 3;
 /// The most entries below the project root the count of the Python files the paths leave out
 /// looks at: past them, it says how many it found so far.
 pub const MAX_CENSUS_ENTRIES: usize = 10_000;
+
+/// Where to report what only heki can change: a fact only its shipped catalog can hold.
+pub const ISSUES_URL: &str = concat!(env!("CARGO_PKG_REPOSITORY"), "/issues");
 
 /// The file the configuration goes into when the project has none.
 const NEW_CONFIG_FILE: &str = "pyproject.toml";
@@ -106,6 +111,10 @@ pub struct RecommendReport {
     /// The analyses the report was computed from, in the order they ran.
     pub runs: Vec<Run>,
     pub reports_now: ReportsNow,
+    /// What keeps the heuristic reports of exact claims heuristic.
+    pub open_premises: premises::OpenPremises,
+    /// What heki cannot see: no count of reports applies there.
+    pub blind_spots: blind_spots::BlindSpotsSection,
     /// Every rule the configuration does not run in full: the rules it leaves off, and the exact
     /// rules whose heuristic reports it withholds. The block's rules come first.
     pub rules: Vec<rules::RuleAdvice>,
@@ -175,6 +184,12 @@ pub struct Run {
 pub enum RunLabel {
     /// Every rule selected, on the configuration as it is.
     Discovery,
+    /// The source-root trial: the module names of the files with directories added to `src`,
+    /// and the imports they resolve (no analysis).
+    SourceRoots,
+    /// The configuration with a catalog entry that waits and sends a query for each library
+    /// name tried, and the rules those effects make report.
+    HypotheticalCatalog,
     /// The configuration with every contract candidate declared, the contract rules selected.
     ContractTrial,
     /// The configuration with the whole block applied, the block's rules and contracts selected.
@@ -235,9 +250,16 @@ pub fn recommend(request: Request<'_>) -> Result<RecommendReport, RecommendError
     let functions = project.files.iter().map(|f| f.ir.functions.len()).sum();
     let files = project.files.len();
     let selection = discovery_selection(&env.cfg.lint, &current)?;
+    let mut runs = vec![Run {
+        label: RunLabel::Discovery,
+        repeated: None,
+    }];
     let discovery = Indexed::build(project, selection, snapshot, Facts::Recommend)?;
-    let (diags, _) = discovery.diagnose()?;
+    // The heuristic reports of exact claims record what they leave open, and why.
+    let (diags, _) = discovery.diagnose_units(&discovery.project.units(), true)?;
     let files_analyzed = &discovery.project.files;
+    let open_premises = premises::open_premises(&diags, shown);
+    let discovered = blind_spots::Discovered::of(&discovery.index, files_analyzed, shown);
     let mut rules = rules::advise(&rules::Inputs {
         current: &current,
         baseline: baseline.as_ref(),
@@ -260,18 +282,35 @@ pub fn recommend(request: Request<'_>) -> Result<RecommendReport, RecommendError
         .collect();
     let generated = contracts::generate(&discovery.index, &env.cfg, &declared, &current, &tests);
     drop(tests);
-    // The next runs build their own index: the discovery run's goes first. (A partial move
-    // would keep it until the end of the function.)
-    let Indexed {
-        mut project, index, ..
-    } = discovery;
+    // One index at a time: the trials build their own. (A partial move would keep it until the
+    // end of the function.)
+    let Indexed { project, index, .. } = discovery;
     drop(index);
+    let roots = blind_spots::source_roots(&project, baseline.as_ref(), shown);
+    if !roots.candidates.is_empty() {
+        runs.push(Run {
+            label: RunLabel::SourceRoots,
+            repeated: None,
+        });
+    }
+    let tried = discovered.to_try(&roots);
+    let (mut project, trial) = if tried.is_empty() {
+        (project, blind_spots::Trial::default())
+    } else {
+        runs.push(Run {
+            label: RunLabel::HypotheticalCatalog,
+            repeated: None,
+        });
+        blind_spots::hypothetical_catalog(project, tried)?
+    };
+    let src = roots.src.clone();
+    let blind_spots = discovered.finish(&trial, roots, &project.files);
     let user = project.env.cfg.clone();
-    let mut runs = vec![Run {
-        label: RunLabel::Discovery,
-        repeated: None,
-    }];
-    let mut section = if generated.is_empty() {
+    // The candidates name modules as the files are named now, from an analysis without the
+    // imports a new source root resolves: with `src` in the block, a run after it proposes them.
+    let mut section = if src.is_some() {
+        contracts::Section::deferred(generated)
+    } else if generated.is_empty() {
         contracts::Section::untried(generated)
     } else {
         let trial = contracts::trial_config(&user, &generated);
@@ -290,8 +329,9 @@ pub fn recommend(request: Request<'_>) -> Result<RecommendReport, RecommendError
             shown,
         )
     };
-    // The verification run: `heki check` with the block applied, which gives the counts the
-    // block promises. A contract that reports there is dropped, and the run repeats once.
+    // The verification run: `heki check` with the block's rules and contracts applied, which
+    // gives the counts the block promises. A contract that reports there is dropped, and the run
+    // repeats once.
     let mut verified = None;
     for repeated in [false, true] {
         let additions = additions(&rules, &section, &current);
@@ -327,11 +367,16 @@ pub fn recommend(request: Request<'_>) -> Result<RecommendReport, RecommendError
             repeated: Some(repeated),
         });
     }
-    let block = block::render(&additions(&rules, &section, &current), &user, layout);
+    let additions = block::Additions {
+        src,
+        ..additions(&rules, &section, &current)
+    };
+    let block = block::render(&additions, &user, layout);
     let mut notes = Vec::new();
     if left_out.python_files > 0 {
         notes.push(left_out_note(&left_out));
     }
+    notes.extend(blind_spots::notes(&blind_spots, &trial));
     notes.extend(section.notes());
     let mut report = RecommendReport {
         schema: SCHEMA_URL.to_owned(),
@@ -350,6 +395,8 @@ pub fn recommend(request: Request<'_>) -> Result<RecommendReport, RecommendError
         },
         runs,
         reports_now,
+        open_premises,
+        blind_spots,
         rules,
         contracts: section.advice(),
         rejected_contracts: section.rejected,
@@ -363,8 +410,8 @@ pub fn recommend(request: Request<'_>) -> Result<RecommendReport, RecommendError
     Ok(report)
 }
 
-/// The selection of the discovery run: every rule by its code ([`selection_of`]). `MUT103` runs
-/// only when the current selection runs it: it compares with a snapshot the user saves.
+/// The selection of the discovery run: every rule by its code ([`selection_of`]). `MUT103`
+/// runs only when the current selection runs it: it compares with a snapshot the user saves.
 fn discovery_selection(
     lint: &LintConfig,
     current: &RuleSelection,
@@ -372,16 +419,14 @@ fn discovery_selection(
     let every_rule = CORE_RULES
         .iter()
         .filter(|r| r.code != "MUT103" || current.is_enabled(r.code))
-        .map(|r| r.code);
+        .map(|r| r.code.to_owned())
+        .collect();
     selection_of(lint, every_rule)
 }
 
-/// The selection of a run of the rules `codes`, each by its code, so that no heuristic report is
+/// The selection of the rules `codes` by their codes, so that no heuristic report of theirs is
 /// withheld, with the configuration's `per-file-ignores`.
-fn selection_of<'c>(
-    lint: &LintConfig,
-    codes: impl IntoIterator<Item = &'c str>,
-) -> Result<RuleSelection, SelectionError> {
+fn selection_of(lint: &LintConfig, codes: Vec<String>) -> Result<RuleSelection, SelectionError> {
     let lint = LintConfig {
         select: Some(Vec::new()),
         extend_select: Vec::new(),
@@ -389,7 +434,7 @@ fn selection_of<'c>(
         ..lint.clone()
     };
     let selectors = Selectors {
-        select: codes.into_iter().map(str::to_owned).collect(),
+        select: codes,
         extend_select: Vec::new(),
         ignore: Vec::new(),
         heuristic: Some(true),
@@ -397,24 +442,25 @@ fn selection_of<'c>(
     RuleSelection::resolve(&lint, &selectors)
 }
 
-/// `project` analyzed with the configuration `cfg` in place of its own (it changes contracts
-/// and selected rules only, nothing the catalog, the module layout, or the runtime depend on),
-/// running the rules `codes`: the project with its configuration back, and the reports kept
-/// and dropped by inline suppressions.
+/// `project` analyzed as `heki check` would with the configuration `cfg` in place of its own
+/// ([`Project::set_config`]: the contracts, the rules, and the catalog may differ), running the
+/// rules `codes` with the configuration's `per-file-ignores`: the project with its configuration
+/// back, and the reports inline suppressions keep and drop.
 fn analyze(
     mut project: Project,
     cfg: HekiConfig,
     codes: &[&str],
 ) -> Result<(Project, Vec<Diagnostic>, Vec<Diagnostic>), RecommendError> {
-    let selection = selection_of(&cfg.lint, codes.iter().copied())?;
-    let own = std::mem::replace(&mut project.env.cfg, cfg);
+    let own = project.set_config(cfg)?;
+    let codes = codes.iter().map(|c| (*c).to_owned()).collect();
+    let selection = selection_of(&project.env.cfg.lint, codes)?;
     let indexed = Indexed::build(project, selection, None, Facts::Check)?;
     let (kept, suppressed) = indexed.diagnose_with_suppressed()?;
     let Indexed {
         mut project, index, ..
     } = indexed;
     drop(index);
-    project.env.cfg = own;
+    project.set_config(own)?;
     Ok((project, kept, suppressed))
 }
 
@@ -568,6 +614,8 @@ pub fn render_text(report: &RecommendReport) -> String {
             split.allowed, split.regressions
         );
     }
+    premises::render(&mut out, &report.open_premises);
+    blind_spots::render(&mut out, &report.blind_spots);
     rules::render(&mut out, &report.rules, now.baseline.is_some());
     contracts::render(
         &mut out,
