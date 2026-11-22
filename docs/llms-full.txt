@@ -2248,11 +2248,13 @@ from outside. The configuration's own `write-owners` contracts count against the
 | Confidence | When |
 | ---------- | ---- |
 | high | the trial reports nothing for the contract, every Python file below the project root was analyzed, and no function of a boundary's scopes reaches code heki does not see (a call it does not resolve, a library name without a catalog entry, a function it does not model) |
-| medium | the trial reports no violation, but `MUT205` or `MUT206` reports accesses on objects of unknown class (they are listed, and the entry sets `unresolved = "ignore"`), files were left out, or a scope function reaches code heki does not see (it is listed) |
+| medium | the trial reports no violation, but `MUT205` or `MUT206` reports accesses on objects of unknown class (they are listed), files were left out, or a scope function reaches code heki does not see (it is listed) |
 
-Medium candidates are in the block too. A candidate on a subclass is left out when the one on
-its base class is kept: a target covers the subclasses of its class. Every candidate carries the
-caveat that accesses inside code heki cannot follow are not seen.
+Medium candidates are in the block too, an ownership one with `unresolved = "ignore"`: heki may
+not see every access on objects of unknown class (in the files left out, for one) that the rule
+of such accesses would report. A high one sets `unresolved = "report"`. A candidate on a subclass
+is left out when the one on its base class is kept: a target covers the subclasses of its class.
+Every candidate carries the caveat that accesses inside code heki cannot follow are not seen.
 
 The verification run then applies the whole block, the rules it enables and the contracts it
 declares, as `heki check` would; the counts of the block's rules come from it. A contract that

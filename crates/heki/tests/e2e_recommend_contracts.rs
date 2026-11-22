@@ -637,6 +637,33 @@ fn files_the_paths_leave_out_make_every_candidate_medium() {
              catalog) are not seen"
         ])
     );
+    // An ownership candidate medium only because files were left out does not report the
+    // accesses of unknown class either: there may be some in those files.
+    let q = owners("recommend_contract_left_out_owners");
+    q.write(
+        "tests/test_store.py",
+        "def test_store() -> None:\n    pass\n",
+    );
+    let report = recommend_json(&q, &["app", "--ignore", "EFF201"]);
+    let kept = kept(&report);
+    assert!(
+        !kept.is_empty()
+            && kept
+                .iter()
+                .all(|(_, _, confidence, unresolved)| confidence == "medium"
+                    && unresolved == &json!("ignore")),
+        "{report:#}"
+    );
+    let (_, out, _) = q.heki(&["recommend", "app", "--ignore", "EFF201"]);
+    assert!(
+        section(&out).contains(
+            "  write-owners  app.models:Order.items  medium\n    written by 2 function(s), all \
+             in app.store (Store.add_item, Store.clear), changed in place; read in 2 other \
+             module(s)\n    trial: MUT201 0, MUT205 0 (unresolved = \"ignore\", as for every \
+             medium candidate)\n"
+        ),
+        "{out}"
+    );
 }
 
 #[test]

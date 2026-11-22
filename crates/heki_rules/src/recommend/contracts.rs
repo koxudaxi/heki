@@ -121,9 +121,9 @@ pub enum Confidence {
     /// below the project root was analyzed.
     High,
     /// The trial reports no violation, but heki may not see all the contract is about: accesses
-    /// on objects of unknown class (the entry then sets `unresolved = "ignore"`), Python files
-    /// below the project root left out, or scope functions reaching code heki does not see. The
-    /// caveats say which.
+    /// on objects of unknown class, Python files below the project root left out, or scope
+    /// functions reaching code heki does not see. The caveats say which. An ownership entry then
+    /// sets `unresolved = "ignore"`.
     Medium,
 }
 
@@ -854,12 +854,13 @@ pub(super) fn judge(
 }
 
 impl Kept {
-    /// The confidence of a candidate the trial kept, and its entry's `unresolved`: `"ignore"`
-    /// when the rule of the accesses it cannot tie to a class reports.
+    /// The confidence of a candidate the trial kept, and its entry's `unresolved`: `"report"`
+    /// only when the confidence is high. A medium one may leave accesses of unknown class
+    /// unseen (in the files left out), which the rule of such accesses would report once
+    /// `heki check` sees them.
     fn weigh(&mut self, left_out: bool) {
         let kind = self.candidate.entry.kind();
         let unresolved = self.trial.reports_of(kind.strict_rule());
-        self.candidate.entry.set_unresolved(unresolved == 0);
         if unresolved > 0 {
             self.caveats.push(format!(
                 "{} reports {unresolved} access(es) on objects of unknown class: heki cannot tell \
@@ -883,6 +884,9 @@ impl Kept {
         if !self.caveats.is_empty() {
             self.confidence = Confidence::Medium;
         }
+        self.candidate
+            .entry
+            .set_unresolved(self.confidence == Confidence::High);
         self.caveats.push(UNSEEN_CAVEAT.to_owned());
     }
 
@@ -1187,6 +1191,8 @@ pub(super) fn render(
                     " (at {}{more}), so unresolved = \"ignore\"",
                     at.join(", ")
                 );
+            } else if c.confidence == Confidence::Medium {
+                trial.push_str(" (unresolved = \"ignore\", as for every medium candidate)");
             } else {
                 trial.push_str(" (unresolved = \"report\")");
             }

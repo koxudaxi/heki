@@ -310,7 +310,7 @@
         },
         {
           "const": "medium",
-          "description": "The trial reports no violation, but heki may not see all the contract is about: accesses\non objects of unknown class (the entry then sets `unresolved = \"ignore\"`), Python files\nbelow the project root left out, or scope functions reaching code heki does not see. The\ncaveats say which.",
+          "description": "The trial reports no violation, but heki may not see all the contract is about: accesses\non objects of unknown class, Python files below the project root left out, or scope\nfunctions reaching code heki does not see. The caveats say which. An ownership entry then\nsets `unresolved = \"ignore\"`.",
           "type": "string"
         }
       ]
