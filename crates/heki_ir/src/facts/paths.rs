@@ -933,12 +933,13 @@ impl<'p, 'a> Paths<'p, 'a> {
         let (blocks, root): (Vec<BlockId>, BlockId) = match region {
             Region::Function => (shape.rpo().to_vec(), BlockId(0)),
             Region::Loop(li, lp) => {
-                let blocks = shape
-                    .rpo()
+                let mut blocks: Vec<BlockId> = lp
+                    .body
                     .iter()
                     .copied()
-                    .filter(|b| shape.in_loop(li, *b))
+                    .filter(|b| shape.in_loop(li, *b) && shape.reachable(*b))
                     .collect();
+                blocks.sort_unstable_by_key(|b| shape.rpo_index(*b));
                 (blocks, lp.header)
             }
         };

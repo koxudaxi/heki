@@ -253,6 +253,14 @@ def alias_loops(n: int) -> Body:
     return Body(("xs",), lines)
 
 
+def paced_loops(n: int) -> Body:
+    """Loops after one another, each paced by a sleep on its way back."""
+    lines = []
+    for j in range(n):
+        lines += ["while True:", f"    if out.poll({j}):", "        break", "    clock.sleep(1)"]
+    return Body(("clock", "out"), lines)
+
+
 def doubled_constant_slices(n: int) -> Body:
     """Integer constants doubling through `+`, each loop slicing by the last."""
     lines = ["c0 = 1", *(f"c{i} = c{i - 1} + c{i - 1}" for i in range(1, 17))]
@@ -497,6 +505,7 @@ FAMILIES = [
     Family("copy_chain_in_loop", copy_chain_in_loop),
     Family("reverse_chain_in_loop", reverse_chain_in_loop),
     Family("alias_loops", alias_loops),
+    Family("paced_loops", paced_loops),
     Family("doubled_constant_slices", doubled_constant_slices, real_code=False),
     Family("doubled_zips", doubled_zips, real_code=False),
     Family("lists_extending_each_other", lists_extending_each_other),
