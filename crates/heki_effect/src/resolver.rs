@@ -427,6 +427,10 @@ pub struct NamedAttr {
     /// a base the project does not define may build an `__init__` that stores the default.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub annotated: bool,
+    /// The annotation names `validate_default` (`Annotated[T, Field(validate_default=True)]`):
+    /// a library may store what validating the default returns instead of the default.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub validates_default: bool,
     /// The names an instance holds in the attribute from the class's own code: the default of a
     /// field that the `__init__` a stdlib `@dataclass` generates stores (`init` left on, no
     /// `__init__` in the class body), and the names its methods store with `self.attr = NAME`.
@@ -2721,8 +2725,9 @@ impl ProjectDecls {
     /// generates stores, a store `self.attr = S` in a method, each storing on the instance
     /// itself (no property, `__setattr__`, or metaclass: [`Self::attr_write_runs_code`]), and
     /// the default of a public field under a base the catalog describes as keeping hashable
-    /// defaults (R3: `pydantic.BaseModel`). Not stored where the class only annotates a field
-    /// with the sentinel as its default under another base, which may or may not store it.
+    /// defaults (R3: `pydantic.BaseModel`) that validates no default ([`NamedAttr`] and
+    /// `Self::may_validate_defaults`). Not stored where the class only annotates a field with the
+    /// sentinel as its default under another base, which may or may not store it.
     pub fn held_sentinels(&self, class: &str, kb: &EffectiveEcosystemKb) -> Vec<HeldSentinel> {
         let mut out: Vec<HeldSentinel> = Vec::new();
         let decl = self.class(class);
@@ -2748,7 +2753,10 @@ impl ProjectDecls {
                     .any(|h| h.attr == *attr && h.sentinel == sentinel)
                 && decl.is_some_and(|d| self.may_store_defaults(class, d))
             {
-                let kept = !attr.starts_with('_') && self.keeps_hashable_defaults(class, kb);
+                let kept = !attr.starts_with('_')
+                    && !named.validates_default
+                    && self.keeps_hashable_defaults(class, kb)
+                    && !self.may_validate_defaults(class);
                 out.push(HeldSentinel {
                     attr: attr.clone(),
                     sentinel,
@@ -2773,6 +2781,16 @@ impl ProjectDecls {
                     && !PLAIN_BASES.contains(&c.as_str())
                     && !HOOKLESS_BASES.contains(&c.as_str())
             })
+    }
+
+    /// Whether a project class along the MRO of `class` binds `model_config` or `Config` in its
+    /// body: a model's configuration may ask it to validate its fields' defaults
+    /// (`validate_default`), and a field doing so holds what the validation returns.
+    fn may_validate_defaults(&self, class: &str) -> bool {
+        self.mro(class).iter().any(|c| {
+            self.class(c)
+                .is_some_and(|d| d.members.contains("model_config") || d.members.contains("Config"))
+        })
     }
 
     /// Whether a base of the project class `class` outside the project is one the catalog

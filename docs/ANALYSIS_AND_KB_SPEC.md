@@ -950,8 +950,10 @@ which module imports which.
    store `self.attr = p` of a parameter whose default is `S` are held by the instances (a `def`
    in a class body hands its function object the defaults first, in parameter order). An
    annotated default under a base the catalog describes as keeping hashable defaults
-   (`keeps_hashable_defaults`, R3) is held too; under another base outside the project, or with
-   a dataclass's own `__init__`, it may be (open).
+   (`keeps_hashable_defaults`, R3) is held too, unless something may validate it (the
+   annotation names `validate_default`, `NamedAttr::validates_default`, or a project class along
+   the MRO binds `model_config` or `Config`); under another base outside the project, or with a
+   dataclass's own `__init__`, it may be (open).
 3. **Tests** (`EffectSummary::sentinel_tests`): a comparison with `is` / `is not` of an attribute
    load with a name that `object_sentinel` names, recorded per class the object may be, with
    whether that is one class (no union, no protocol). Reading the attribute runs no code
