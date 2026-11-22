@@ -70,6 +70,13 @@ written in. A class's own initialization still allows a read, through the helper
 `self` to too (a helper whose every path of project callers starts in an initializer handing it
 its own `self`).
 
+With `own-receiver = "allow"`, a read through the receiver of the method it is judged in is
+allowed: the function reported (with `attribution = "lexical"`, the function holding the read)
+is a method that is no static method, and the object the member is looked up on may be its first
+parameter (`self._seen`, `cls._kind`, `obj._seen` with `obj = self if flag else peer`), also for a member the class inherits. Another parameter, an attribute of
+the receiver, and a nested `def`, lambda, or comprehension using the enclosing method's `self`
+stay reported.
+
 ## What a report states
 
 A report states that the function reads a target of a `read-owners` contract outside the contract's
@@ -81,7 +88,8 @@ Its premises:
   construction or annotation (assumption R2). Open: an alias bound on one path is enough.
 - **Outside the owners**: the function is not in the allowed modules and classes, nor runs only
   inside allowed contexts (with `attribution = "lexical"`: the function holding the read is not
-  allowed, nor runs only inside a class's own initialization). Established from the contract.
+  allowed, nor runs only inside a class's own initialization; with `own-receiver = "allow"`, the
+  read object is not the receiver of the method judging it). Established from the contract.
 - **Through helpers**: a helper's write, read, or call counts at its caller (never with
   `attribution = "lexical"`). Open: one path of the helper is enough.
 
@@ -148,6 +156,8 @@ No automatic fix.
   - `attribution`: `"call-graph"` (default) or `"lexical"`: whether a private helper hands its
     reads to its callers and a function that only runs inside allowed readers is allowed, or
     each read is judged in the function holding it.
+  - `own-receiver`: `"report"` (default) or `"allow"`: whether a read through the receiver of the
+    method it is judged in (`self`, `cls`, `super()`) is allowed.
 
 Known limitation: a read through a parameter without a project-class annotation
 (`def helper(ref): return ref.children`) is not seen, since the read object's class is unknown

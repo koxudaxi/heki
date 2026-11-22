@@ -1,8 +1,9 @@
-//! `attribution` on `write-owners`, `read-owners`, and `call-owners`, end to end through the real
-//! binary. By default (`"call-graph"`) a private helper hands its accesses to its callers and a
-//! function that only runs inside allowed functions is allowed; with `"lexical"` an access is
-//! judged in the function whose code holds it, a lambda, comprehension, or generator expression
-//! being part of the function it is written in.
+//! `attribution` and `own-receiver` on `write-owners`, `read-owners`, and `call-owners`, end to
+//! end through the real binary. By default (`"call-graph"`) a private helper hands its accesses
+//! to its callers and a function that only runs inside allowed functions is allowed; with
+//! `"lexical"` an access is judged in the function whose code holds it, a lambda, comprehension,
+//! or generator expression being part of the function it is written in. With `own-receiver =
+//! "allow"`, an access through the receiver of the method it is judged in is allowed.
 
 mod common;
 
@@ -556,8 +557,205 @@ fn the_helpers_only_initialization_runs_on_its_own_self_stay_allowed() {
     assert_eq!(run("attribution = \"lexical\"\n"), lexical);
 }
 
+/// `(line, code, function)` of every report of `p`: the function is the first name a message
+/// quotes.
+fn sites(p: &Project) -> Vec<(u64, String, String)> {
+    reports(p)
+        .into_iter()
+        .map(|(_, line, _, code, message)| {
+            let func = message.split('`').nth(1).unwrap_or_default().to_owned();
+            (line, code, func)
+        })
+        .collect()
+}
+
+const RESOLVER: &str = r#"class Resolver:
+    def __init__(self) -> None:
+        self._seen: set[str] = set()
+        self._cache: dict[str, str] = {}
+
+    def _label(self) -> str:
+        return "plain"
+
+    @classmethod
+    def _kind(cls) -> str:
+        return "plain"
+
+    @staticmethod
+    def _norm(name: str) -> str:
+        return name
+"#;
+
+const RECEIVERS: &str = r#"from __future__ import annotations
+
+from pkg.model import Resolver
+
+
+class CanonicalResolver(Resolver):
+    def add(self, name: str) -> str:
+        self._cache[name] = self._norm(name)
+        return f"{len(self._seen)}:{super()._label()}"
+
+    @classmethod
+    def describe(cls) -> str:
+        return cls._kind()
+
+    def maybe(self, peer: Resolver, flag: bool) -> int:
+        obj = self if flag else peer
+        return len(obj._seen)
+
+    def peer(self, other: Resolver) -> int:
+        return len(other._seen)
+
+    def through_class(self) -> str:
+        return Resolver._norm(self._label())
+
+    def nested(self) -> object:
+        def inner() -> int:
+            return len(self._seen)
+
+        return inner
+
+    @staticmethod
+    def stat(r: Resolver) -> int:
+        return len(r._seen)
+
+    def go(self) -> int:
+        return _count(self) + count(self)
+
+    def assign(self, name: str) -> None:
+        setattr(self, name, {})
+
+
+def _count(r: Resolver) -> int:
+    return len(r._seen)
+
+
+def count(r: Resolver) -> int:
+    return len(r._seen)
+"#;
+
 #[test]
-fn an_unknown_attribution_value_is_a_configuration_error() {
+fn own_receiver_allows_the_accesses_through_the_receiver_of_the_judging_method() {
+    let run = |keys: &str| {
+        let p = Project::new(&format!("own_receiver_{}", keys.len()));
+        let contract = |section: &str, who: &str, extra: &str| {
+            format!(
+                "[[tool.heki.{section}]]\nname = \"{section}\"\ntargets = [\"pkg.model.Resolver._*\"]\nforbidden-{who} = [\"pkg.parser._*\"]\n{extra}{keys}\n"
+            )
+        };
+        p.write(
+            "pyproject.toml",
+            &format!(
+                "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT201\", \"MUT203\", \"MUT204\", \"MUT205\"]\n\n{}{}{}",
+                contract("write-owners", "writers", "unresolved = \"report\"\n"),
+                contract("read-owners", "readers", ""),
+                contract("call-owners", "callers", ""),
+            ),
+        )
+        .write("pkg/__init__.py", "")
+        .write("pkg/model.py", RESOLVER)
+        .write("pkg/parser/__init__.py", "")
+        .write("pkg/parser/_keys.py", RECEIVERS);
+        sites(&p)
+    };
+    let at = |line: u64, code: &str, func: &str| (line, code.to_owned(), func.to_owned());
+    // Another parameter, a static method called through the class, a nested `def`, a static
+    // method's parameter, and a function's parameter stay reported.
+    let kept = || {
+        vec![
+            at(20, "MUT203", "CanonicalResolver.peer"),
+            at(23, "MUT204", "CanonicalResolver.through_class"),
+            at(27, "MUT203", "CanonicalResolver.nested.<locals>.inner"),
+            at(33, "MUT203", "CanonicalResolver.stat"),
+            at(47, "MUT203", "count"),
+        ]
+    };
+    let mut lexical = kept();
+    lexical.insert(4, at(43, "MUT203", "_count"));
+    assert_eq!(
+        run("attribution = \"lexical\"\nown-receiver = \"allow\"\n"),
+        lexical
+    );
+    // The private helper hands its read to `go`, whose own `self` it reads.
+    assert_eq!(run("own-receiver = \"allow\"\n"), kept());
+    // Without the key, every access through the receiver is reported too: the item store and
+    // the reads of `self`, the static method called through `self`, `super()`, `cls`, an object
+    // that may be `self`, and an attribute named at run time on `self`.
+    let receivers = vec![
+        at(8, "MUT201", "CanonicalResolver.add"),
+        at(8, "MUT203", "CanonicalResolver.add"),
+        at(8, "MUT204", "CanonicalResolver.add"),
+        at(9, "MUT203", "CanonicalResolver.add"),
+        at(9, "MUT204", "CanonicalResolver.add"),
+        at(13, "MUT204", "CanonicalResolver.describe"),
+        at(17, "MUT203", "CanonicalResolver.maybe"),
+        at(23, "MUT204", "CanonicalResolver.through_class"),
+        at(39, "MUT205", "CanonicalResolver.assign"),
+    ];
+    let mut without: Vec<_> = lexical.iter().cloned().chain(receivers).collect();
+    without.sort();
+    assert_eq!(
+        run("attribution = \"lexical\"\nown-receiver = \"report\"\n"),
+        without
+    );
+}
+
+#[test]
+fn own_receiver_leaves_only_the_read_through_a_parameter_of_the_subclass_module() {
+    let p = Project::new("own_receiver_repro");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT203\", \"MUT204\"]\n\n[[tool.heki.read-owners]]\nname = \"host-private-read\"\ntargets = [\"pkg.model.Resolver._*\"]\nforbidden-readers = [\"pkg.parser._*\"]\nattribution = \"lexical\"\nown-receiver = \"allow\"\n\n[[tool.heki.call-owners]]\nname = \"host-private-call\"\ntargets = [\"pkg.model.Resolver._*\"]\nforbidden-callers = [\"pkg.parser._*\"]\nattribution = \"lexical\"\nown-receiver = \"allow\"\n",
+    )
+    .write("pkg/__init__.py", "")
+    .write(
+        "pkg/model.py",
+        "class Resolver:\n    def __init__(self) -> None:\n        self._seen: set[str] = set()\n",
+    )
+    .write("pkg/parser/__init__.py", "")
+    .write(
+        "pkg/parser/_keys.py",
+        r#"from __future__ import annotations
+
+from pkg.model import Resolver
+
+
+class CanonicalResolver(Resolver):
+    def __init__(self) -> None:
+        super().__init__()
+        self._form = "canonical"
+
+    def add(self, name: str) -> str:
+        return f"{self._form}:{name}:{len(self._seen)}"
+
+    @classmethod
+    def describe(cls) -> str:
+        return cls._label()
+
+    @classmethod
+    def _label(cls) -> str:
+        return "canonical"
+
+
+def other(resolver: Resolver) -> int:
+    return len(resolver._seen)
+"#,
+    );
+    assert_eq!(
+        reports(&p),
+        vec![report(
+            "pkg/parser/_keys.py",
+            24,
+            16,
+            "MUT203",
+            "`other` reads `pkg.model.Resolver._seen` (direct_attr) inside the forbidden readers of `host-private-read`"
+        )]
+    );
+}
+
+#[test]
+fn an_unknown_attribution_or_own_receiver_value_is_a_configuration_error() {
     for (section, keys) in [
         ("write-owners", "targets = [\"Model.fields\"]"),
         ("read-owners", "targets = [\"Model.fields\"]"),
@@ -576,6 +774,18 @@ fn an_unknown_attribution_value_is_a_configuration_error() {
         assert_eq!(code, 2, "{stdout}{stderr}");
         assert!(
             stderr.contains("attribution") && stderr.contains("`call-graph` or `lexical`"),
+            "{stderr}"
+        );
+        p.write(
+            "pyproject.toml",
+            &format!(
+                "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT201\", \"MUT203\", \"MUT204\"]\n\n[[tool.heki.{section}]]\nname = \"c\"\n{keys}\nown-receiver = \"self\"\n"
+            ),
+        );
+        let (code, stdout, stderr) = p.check(&[]);
+        assert_eq!(code, 2, "{stdout}{stderr}");
+        assert!(
+            stderr.contains("own-receiver") && stderr.contains("`report` or `allow`"),
             "{stderr}"
         );
     }

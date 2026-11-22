@@ -958,6 +958,9 @@ pub(crate) struct Allowance {
     targets: Option<std::sync::Arc<FunctionMatchers>>,
     /// Which function these patterns are matched against for an access.
     attribution: Attribution,
+    /// `own-receiver = "allow"`: an access through the receiver of the method judging it is
+    /// allowed ([`Self::owns`]).
+    own_receiver: bool,
 }
 
 /// Project functions a `call-owners` / `call-targets` entry names: the whole text by fqn or
@@ -1100,6 +1103,7 @@ impl Allowance {
             forbidden: patterns(keys.forbidden.0, keys.forbidden.1)?,
             targets: None,
             attribution: Attribution::CallGraph,
+            own_receiver: false,
         };
         for e in keys.exempt.0 {
             if e.contains(['.', ':']) || has_glob_syntax(e) {
@@ -1145,8 +1149,37 @@ impl Allowance {
         }
     }
 
+    /// The same allowance, allowing the accesses through a method's own receiver or not.
+    pub(crate) fn with_own_receiver(self, own_receiver: bool) -> Self {
+        Self {
+            own_receiver,
+            ..self
+        }
+    }
+
     pub(crate) fn is_lexical(&self) -> bool {
         self.attribution == Attribution::Lexical
+    }
+
+    /// Whether `func`, the function an access is judged in, accesses the object as its own: a
+    /// class's own initialization of `family` ([`initializes_itself`]) when the object may be its
+    /// parameters `obj`, or, with `own-receiver = "allow"`, an access through the receiver of the
+    /// method `func` (`self`, `cls`, `super()`) when the object the member is looked up on may be
+    /// its parameters `looked_up`. For a read or a write both are the accessed object; for a call,
+    /// `obj` is what the callee binds to its first parameter and `looked_up` the receiver, which
+    /// a class method or a static method does not bind. An object that may be the receiver gets
+    /// the benefit of the doubt, as for initialization.
+    pub(crate) fn owns(
+        &self,
+        cx: &CheckContext<'_>,
+        func: &FuncKey,
+        family: &FxHashSet<String>,
+        (obj, looked_up): (u64, u64),
+    ) -> bool {
+        initializes_itself(cx, func, family, obj)
+            || self.own_receiver
+                && looked_up & 1 != 0
+                && cx.decls.function_decl(func).is_some_and(binds_receiver)
     }
 
     /// Whether the functions `key` runs access inside it ([`runs_inside_allowed`]): `key` is
@@ -1190,17 +1223,17 @@ impl Allowance {
         })
     }
 
-    /// [`Self::judged`] for an access in `func` to an object that may be its parameters `obj`,
-    /// with the parameters of the judged function the object may be: the parameters of a scope a
-    /// function holds are none of the function's.
-    pub(crate) fn judged_access<'k>(
+    /// [`Self::judged`] for an access in `func` to an object that may be its parameters `obj`
+    /// (one mask, or several), with the parameters of the judged function the object may be: the
+    /// parameters of a scope a function holds are none of the function's.
+    pub(crate) fn judged_access<'k, M: Default>(
         &self,
         decls: &ProjectDecls,
         func: &'k FuncKey,
-        obj: u64,
-    ) -> (std::borrow::Cow<'k, FuncKey>, u64) {
+        obj: M,
+    ) -> (std::borrow::Cow<'k, FuncKey>, M) {
         let judged = self.judged(decls, func);
-        let obj = if *judged == *func { obj } else { 0 };
+        let obj = if *judged == *func { obj } else { M::default() };
         (judged, obj)
     }
 
@@ -1367,6 +1400,12 @@ fn callers_of<'a>(
         }
     }
     out
+}
+
+/// Whether a function binds a receiver to its first parameter: a method (an instance method's
+/// `self`, a class method's `cls`) that is no static method.
+pub(crate) fn binds_receiver(decl: &heki_effect::FunctionDecl) -> bool {
+    decl.is_method && !decl.is_staticmethod
 }
 
 /// A class's own initialization: `key` is an initializer (`INITIALIZERS`) of a class of the
@@ -1949,6 +1988,26 @@ pub(crate) enum Attribution {
     Lexical,
 }
 
+/// `own-receiver` values; the first is the default.
+const OWN_RECEIVER: &[&str] = &["report", "allow"];
+
+/// Whether an owner contract allows the accesses through the receiver of the method judging
+/// them (`own-receiver = "allow"`).
+pub(crate) fn allows_own_receiver(
+    value: Option<&str>,
+    section: &'static str,
+    contract: &str,
+) -> Result<bool, RuleConfigError> {
+    Ok(mode(
+        value,
+        OWN_RECEIVER,
+        "`report` or `allow`",
+        section,
+        contract,
+        "own-receiver",
+    )? == "allow")
+}
+
 /// The `attribution` of an owner contract.
 pub(crate) fn attribution(
     value: Option<&str>,
@@ -2057,6 +2116,11 @@ pub(crate) fn mut201(
             rule.attribution.as_deref(),
             "write-owners",
             &rule.name,
+        )?)
+        .with_own_receiver(allows_own_receiver(
+            rule.own_receiver.as_deref(),
+            "write-owners",
+            &rule.name,
         )?);
         let mut forbid_cached = FxHashSet::default();
         for p in &rule.forbid_cached_property_on {
@@ -2156,7 +2220,12 @@ pub(crate) fn mut201(
                             })
                         };
                         if !lexical && (kept_below() || delegates(cx, sites, key, Handover::Every))
-                            || initializes_itself(cx, &judged, &t.classes, obj_params)
+                            || rule.allowance.owns(
+                                cx,
+                                &judged,
+                                &t.classes,
+                                (obj_params, obj_params),
+                            )
                         {
                             continue;
                         }
@@ -3504,6 +3573,11 @@ pub(crate) fn mut203(
                 rule.attribution.as_deref(),
                 "read-owners",
                 &rule.name,
+            )?)
+            .with_own_receiver(allows_own_receiver(
+                rule.own_receiver.as_deref(),
+                "read-owners",
+                &rule.name,
             )?),
             note: rule.message.as_deref(),
             report_unresolved: reports_unresolved(
@@ -3540,7 +3614,7 @@ pub(crate) fn mut203(
                         cx,
                         &sites,
                         (&rule.allowance, &t.classes),
-                        (key, read.obj_params),
+                        (key, read.obj_params, read.obj_params),
                         read.span,
                         inside,
                     );
@@ -3594,8 +3668,9 @@ struct WalkState {
     /// `func` runs the access itself: it is the accessing function, or it calls the function
     /// below (not only returns its result).
     runs_access: bool,
-    /// Parameters of `func` the accessed object may be.
-    obj: u64,
+    /// Parameters of `func` the accessed object may be, and those the object the member is
+    /// looked up on may be ([`Allowance::owns`]).
+    objs: (u64, u64),
     /// A function from the accessing one up to `func` that runs the access falls under
     /// `forbidden-*` (`Allowance::in_scope`).
     in_scope: bool,
@@ -3613,20 +3688,23 @@ struct WalkState {
 /// contexts (MUT201's rules) are not reported. With `forbidden-*`, a report needs a forbidden
 /// function running the access between the reporting function and the access (both included).
 /// With `attribution = "lexical"`, the access is judged in the function holding it alone, where
-/// only a class's own initialization covers what it runs.
+/// only a class's own initialization covers what it runs. `looked_up` are the parameters of
+/// `func` the object the member is looked up on may be ([`Allowance::owns`]), followed up the
+/// walk as `obj` is.
 pub(crate) fn delegated_reports<'k>(
     cx: &CheckContext<'_>,
     sites: &SitesByCaller<'_>,
     (allowance, family): (&Allowance, &FxHashSet<String>),
-    (func, obj): (&'k FuncKey, u64),
+    (func, obj, looked_up): (&'k FuncKey, u64, u64),
     span: Span,
     inside: &mut InsideAllowed<'k>,
 ) -> Vec<DelegatedReport> {
     if allowance.is_lexical() {
-        let (judged, judged_obj) = allowance.judged_access(cx.decls, func, obj);
+        let (judged, (judged_obj, judged_looked_up)) =
+            allowance.judged_access(cx.decls, func, (obj, looked_up));
         if allowance.allows(&judged)
             || !allowance.in_scope(&judged)
-            || initializes_itself(cx, &judged, family, judged_obj)
+            || allowance.owns(cx, &judged, family, (judged_obj, judged_looked_up))
             || judged_inside_allowed(cx, sites, allowance, family, (func, obj), inside)
         {
             return Vec::new();
@@ -3641,14 +3719,14 @@ pub(crate) fn delegated_reports<'k>(
         return Vec::new();
     }
     let in_scope = allowance.in_scope(func);
-    let reports_itself = |func: &FuncKey, obj: u64, in_scope: bool, first: FirstCallers| {
+    let reports_itself = |func: &FuncKey, objs: (u64, u64), in_scope: bool, first: FirstCallers| {
         in_scope
-            && !initializes_itself(cx, func, family, obj)
-            && !runs_inside_allowed_through(cx, sites, allowance, family, func, obj, first)
+            && !allowance.owns(cx, func, family, objs)
+            && !runs_inside_allowed_through(cx, sites, allowance, family, func, objs.0, first)
     };
     if !delegates(cx, sites, func, Handover::ByImplementation) {
         if !in_scope
-            || initializes_itself(cx, func, family, obj)
+            || allowance.owns(cx, func, family, (obj, looked_up))
             || judged_inside_allowed(cx, sites, allowance, family, (func, obj), inside)
         {
             return Vec::new();
@@ -3667,12 +3745,12 @@ pub(crate) fn delegated_reports<'k>(
         func: func.clone(),
         facts,
         runs_access: true,
-        obj,
+        objs: (obj, looked_up),
         in_scope,
         down: None,
     }];
-    let mut visited: FxHashSet<(FuncKey, Facts, u64, bool)> = FxHashSet::default();
-    visited.insert((func.clone(), facts, obj, in_scope));
+    let mut visited: FxHashSet<(FuncKey, Facts, (u64, u64), bool)> = FxHashSet::default();
+    visited.insert((func.clone(), facts, (obj, looked_up), in_scope));
     // The report at state `j` of the walk: at the access itself, or at `func`'s call site of
     // the state below, with the hops down to the access.
     let report_at = |states: &[WalkState], j: usize, func: &FuncKey, mut chain: Vec<CallHop>| {
@@ -3690,10 +3768,10 @@ pub(crate) fn delegated_reports<'k>(
     let mut out = Vec::new();
     let mut i = 0;
     while i < states.len() {
-        let (callee, facts, obj, below_in_scope) = (
+        let (callee, facts, objs, below_in_scope) = (
             states[i].func.clone(),
             states[i].facts,
-            states[i].obj,
+            states[i].objs,
             states[i].in_scope,
         );
         let (handing_over, keeping): (Vec<Caller<'_>>, Vec<Caller<'_>>) =
@@ -3706,7 +3784,7 @@ pub(crate) fn delegated_reports<'k>(
             && !keeping.is_empty()
             && reports_itself(
                 &callee,
-                obj,
+                objs,
                 below_in_scope,
                 FirstCallers::KeptBy(Handover::ByImplementation),
             )
@@ -3714,7 +3792,7 @@ pub(crate) fn delegated_reports<'k>(
             out.push(report_at(&states, i, &callee, Vec::new()));
         }
         for c in handing_over {
-            let caller_obj = c.bc.caller_params_of(obj);
+            let caller_objs = (c.bc.caller_params_of(objs.0), c.bc.caller_params_of(objs.1));
             let hop = |from: &FuncKey, to: &FuncKey| CallHop {
                 caller: from.clone(),
                 callee: to.fqn(),
@@ -3727,13 +3805,13 @@ pub(crate) fn delegated_reports<'k>(
             };
             if c.into == Facts::Result {
                 // The function returning the object does not run the access.
-                let state = (c.caller.clone(), Facts::Result, caller_obj, below_in_scope);
+                let state = (c.caller.clone(), Facts::Result, caller_objs, below_in_scope);
                 if visited.insert(state) {
                     states.push(WalkState {
                         func: c.caller.clone(),
                         facts: Facts::Result,
                         runs_access: false,
-                        obj: caller_obj,
+                        objs: caller_objs,
                         in_scope: below_in_scope,
                         down: Some((i, hops)),
                     });
@@ -3747,17 +3825,17 @@ pub(crate) fn delegated_reports<'k>(
                 || allowance.in_scope(c.caller)
                 || c.via.is_some_and(|p| allowance.in_scope(p));
             if delegates(cx, sites, c.caller, Handover::ByImplementation) {
-                if visited.insert((c.caller.clone(), c.into, caller_obj, in_scope)) {
+                if visited.insert((c.caller.clone(), c.into, caller_objs, in_scope)) {
                     states.push(WalkState {
                         func: c.caller.clone(),
                         facts: c.into,
                         runs_access: true,
-                        obj: caller_obj,
+                        objs: caller_objs,
                         in_scope,
                         down: Some((i, hops)),
                     });
                 }
-            } else if reports_itself(c.caller, caller_obj, in_scope, FirstCallers::All) {
+            } else if reports_itself(c.caller, caller_objs, in_scope, FirstCallers::All) {
                 out.push(report_at(&states, i, c.caller, hops));
             }
         }

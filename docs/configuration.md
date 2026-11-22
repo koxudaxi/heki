@@ -195,7 +195,7 @@ Contracts declare what no type can say. Each kind is an array of tables with its
   invalid glob, a name with more than one colon or an empty module or qualified name, call
   targets whose globs are too many to match together (tens of thousands of complex ones), an
   argument list heki cannot read, or an unknown value of `forbid`, `fresh-objects`, `unresolved`,
-  `references`, or `attribution`.
+  `references`, `attribution`, or `own-receiver`.
 - With `unresolved = "report"`, a contract also reports the accesses it cannot tie to a class,
   each under its own rule (`MUT205` writes, `MUT206` reads, `MUT207` calls): an attribute or
   method named like a target, accessed on an object of unknown class (an unannotated parameter,
@@ -230,6 +230,7 @@ unresolved = "report"
 | `fresh-objects` | `"allow"` | `"allow"` or `"report"`: whether a write that constructs the object it writes is reported. |
 | `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the writes the contract cannot tie to a class are reported under [`MUT205`](rules/unresolved-guarded-write.md). |
 | `attribution` | `"call-graph"` | `"call-graph"` or `"lexical"`: which function a write is judged in. See [How contracts report](#how-contracts-report). |
+| `own-receiver` | `"report"` | `"report"` or `"allow"`: whether a write through the receiver of the method it is judged in (`self`, `cls`, `super()`) is allowed. See [How contracts report](#how-contracts-report). |
 
 A container entry (`Class.attr["key"]`):
 
@@ -287,6 +288,7 @@ a value still writes the implementations' attribute.
 | `message` | none | The help of every report of the contract. |
 | `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the reads of a target's attribute name on an object of unknown class are reported under [`MUT206`](rules/unresolved-guarded-read.md). |
 | `attribution` | `"call-graph"` | `"call-graph"` or `"lexical"`, as in `write-owners`. |
+| `own-receiver` | `"report"` | `"report"` or `"allow"`, as in `write-owners`. |
 
 `MUT203` does not see a read through a parameter without a project-class annotation; with
 `unresolved = "report"`, `MUT206` reports it unless every caller binds the parameter to an
@@ -318,6 +320,7 @@ The call side of `write-owners`.
 | `unresolved` | `"ignore"` | `"ignore"` or `"report"`: whether the calls of a method named like a target (its last name) on an object of unknown class are reported under [`MUT207`](rules/unresolved-guarded-call.md). |
 | `references` | `"ignore"` | `"ignore"`, `"calls"`, or `"calls-and-bases"`: whether a reference handing a target on to be called later counts as a call of it (`[decide]`, `return decide`, `partial(decide)`, `field(default_factory=Rule)`, `obj.callback = self.decide`), and with `"calls-and-bases"` a class statement naming a class target among its bases too (`class Derived(Base)`). |
 | `attribution` | `"call-graph"` | `"call-graph"` or `"lexical"`, as in `write-owners`. |
+| `own-receiver` | `"report"` | `"report"` or `"allow"`, as in `write-owners`. |
 
 - A call is reported only when every function it may call (each candidate in the class
   hierarchy) is a target: `text.replace(...)` on a `str` is never a call of
@@ -611,6 +614,17 @@ holds for `invalidation` too:
   project callers above the helper starts in such an initialization; so do `exempt-methods`,
   `fresh-objects`, and the targets of a call contract calling each other. Effect boundaries have no such key: they judge what their
   scope functions reach through any number of calls.
+- **`own-receiver = "allow"` allows the accesses through a method's own receiver.** An access is
+  allowed when the function it is judged in (the function reported, or with `attribution =
+  "lexical"` the function holding the access) is a method that is no static method, and the
+  object the member is looked up on may be its first parameter: `self._cache[k] = v`,
+  `self._seen`, `cls._kind()`, `super()._label()`, `self._norm(x)` of a static method,
+  `Resolver._label(self)`. A member the class inherits counts like its own. Another parameter, an
+  attribute of the receiver, a static method called through its class, the parameter of a static
+  method or of a function, and a nested `def`, lambda, or comprehension using the enclosing
+  method's `self` (heki does not tie a variable a nested scope captures to the enclosing
+  function's parameter) stay reported. By the call graph, a private helper the method hands its
+  `self` (`_count(self)`) is judged at the method, and is allowed with it.
 - **One report stands for every site behind it.** A report at a call stands for every access
   behind the call, and an effect boundary's report for every site its scope function reaches.
   JSON output gives their number as `sites`, and a

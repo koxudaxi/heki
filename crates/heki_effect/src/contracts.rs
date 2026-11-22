@@ -146,4 +146,9 @@ pub trait Contracts: Debug + Send + Sync {
     /// bodies of its classes take from outside the project is then the module body's
     /// (`FileSummary::external_accesses`).
     fn checks_module_bodies(&self) -> bool;
+
+    /// Whether a `call-owners` contract allows the calls through the receiver of the method
+    /// making them (`own-receiver = "allow"`): the call sites then keep the parameters their
+    /// receiver may be (`Dispatch::recv_params`).
+    fn own_receiver_calls(&self) -> bool;
 }

@@ -8,7 +8,8 @@
 
 use super::{
     Allowance, AllowanceKeys, FunctionMatcher, InsideAllowed, MergedReports, References,
-    attribution, counts_references, delegated_reports, project_classes, reports_unresolved,
+    allows_own_receiver, attribution, binds_receiver, counts_references, delegated_reports,
+    project_classes, reports_unresolved,
 };
 use crate::{
     CheckContext, DottedPattern, NamePart, RuleConfigError, SitesByCaller, last_name, module_of,
@@ -712,6 +713,15 @@ pub(crate) fn call_verb(site: &CallSite, reference: bool) -> &'static str {
     }
 }
 
+/// Parameters of the caller the object `site` looks the called method up on may be: its
+/// receiver (`self._m()`, `cls._m()`, `super()._m()`), or, for a call binding no receiver of its
+/// own (`Class._m(self)`), the object every function a call contract judges it by binds as its
+/// receiver. The first argument of a call of a static method or of a function is no receiver.
+fn looked_up_params(cx: &CheckContext<'_>, site: &CallSite) -> u64 {
+    let binds = judged_callees(site).all(|k| cx.decls.function_decl(k).is_some_and(binds_receiver));
+    site.recv_params() | if binds { receiver_params(site) } else { 0 }
+}
+
 /// Parameters of the caller the receiver of `site` may be (`self.m()`: bit 0); none for a
 /// construction, whose object is fresh.
 fn receiver_params(site: &CallSite) -> u64 {
@@ -774,6 +784,11 @@ pub(crate) fn mut204(
                 rule.attribution.as_deref(),
                 "call-owners",
                 &rule.name,
+            )?)
+            .with_own_receiver(allows_own_receiver(
+                rule.own_receiver.as_deref(),
+                "call-owners",
+                &rule.name,
             )?),
             note: rule.message.as_deref(),
             report_unresolved: reports_unresolved(
@@ -816,7 +831,7 @@ pub(crate) fn mut204(
                         cx,
                         &sites,
                         (&rule.allowance, &family),
-                        (key, receiver_params(site)),
+                        (key, receiver_params(site), looked_up_params(cx, site)),
                         site.span,
                         inside,
                     );

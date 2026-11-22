@@ -5125,6 +5125,18 @@ impl<'a> Extractor<'a> {
                 }
                 let arguments = agreed_marks(marks);
                 let site = self.site(bb, CallTarget::Project(callees), call.is_awaited, call.span);
+                let mut dispatch = self.dispatch(call, site.project_callees());
+                if let Some(recv) = call.recv.as_ref().filter(|r| r.may_params != 0)
+                    && self.contracts.is_some_and(|c| c.own_receiver_calls())
+                    && site.project_callees().iter().any(|bc| {
+                        self.cx
+                            .project
+                            .function_decl(&bc.callee)
+                            .is_some_and(|d| d.is_classmethod || d.is_staticmethod)
+                    })
+                {
+                    dispatch.get_or_insert_with(Box::default).recv_params = recv.may_params;
+                }
                 self.sites.push(CallSite {
                     arguments,
                     recv_is_self: call.recv_is_self,
@@ -5134,7 +5146,7 @@ impl<'a> Extractor<'a> {
                         && self.discards(call.dst),
                     drives_coroutine_manually: drives,
                     binds_recv: *binds_recv,
-                    dispatch: self.dispatch(call, site.project_callees()),
+                    dispatch,
                     queues: (!handed.is_empty()).then(|| {
                         Box::new(SiteQueues {
                             while_full: None,
@@ -5245,6 +5257,7 @@ impl<'a> Extractor<'a> {
                 receiver,
                 providers,
                 declared,
+                recv_params: 0,
             })
         })
     }

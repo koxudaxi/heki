@@ -43,6 +43,8 @@ unknown class is not reported (neither the class nor the attribute is known). Wi
 `attribution = "lexical"`, a function that only runs inside allowed writers is not allowed, and a
 caller path through an allowed writer counts like any other, while a helper that only a class's
 own initialization runs on its own `self` (`self._assign(name)` in `__init__`) stays allowed.
+With `own-receiver = "allow"`, a computed name written on the receiver of the method judging it
+(`setattr(self, name, v)`) is allowed.
 
 ## What a report states
 

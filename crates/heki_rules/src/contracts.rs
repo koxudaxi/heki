@@ -80,6 +80,8 @@ pub(crate) struct ConfigContracts {
     /// [`Contracts::marked_params`].
     marked_params: FxHashSet<String>,
     external: ExternalNames,
+    /// [`Contracts::own_receiver_calls`].
+    own_receiver_calls: bool,
 }
 
 /// What the effect boundaries forbid outside the project ([`Contracts::external_call`],
@@ -251,6 +253,10 @@ impl ConfigContracts {
             references: counts_references(config),
             marked_params: marked_params(config),
             external: ExternalNames::new(config, kb),
+            own_receiver_calls: config
+                .call_owners
+                .iter()
+                .any(|r| r.own_receiver.as_deref() == Some("allow")),
         })
     }
 }
@@ -398,6 +404,10 @@ impl Contracts for ConfigContracts {
 
     fn marked_params(&self) -> &FxHashSet<String> {
         &self.marked_params
+    }
+
+    fn own_receiver_calls(&self) -> bool {
+        self.own_receiver_calls
     }
 }
 

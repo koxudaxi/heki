@@ -11,8 +11,7 @@
 
 use super::call_owners::CallOwnerRule;
 use super::{
-    Allowance, ContractTarget, MergedReports, OwnerRule, ReadOwnerRule, initializes_itself,
-    runs_inside_allowed,
+    Allowance, ContractTarget, MergedReports, OwnerRule, ReadOwnerRule, runs_inside_allowed,
 };
 use crate::{CheckContext, SitesByCaller};
 use heki_ast::Span;
@@ -335,7 +334,8 @@ struct Unseen<'k> {
 impl Unseen<'_> {
     /// Whether the access is a finding of the strict rule, under `MUT201`'s rules for what is
     /// allowed: allowed functions and exempt methods, `forbidden-*`, a class's own
-    /// initialization (of `family`, through the helpers it passes `self` to too), a function
+    /// initialization (of `family`, through the helpers it passes `self` to too), an access
+    /// through the method's own receiver with `own-receiver = "allow"`, a function
     /// that only runs inside allowed functions (not with `attribution = "lexical"`, which judges
     /// the function holding the access), and what the callers bind to the object.
     fn counts(
@@ -349,7 +349,7 @@ impl Unseen<'_> {
         let (judged, obj) = allowance.judged_access(cx.decls, self.func, self.obj);
         if allowance.allows(&judged)
             || !allowance.in_scope(&judged)
-            || initializes_itself(cx, &judged, family, obj)
+            || allowance.owns(cx, &judged, family, (obj, obj))
             || runs_inside_allowed(cx, sites, allowance, family, &judged, obj)
         {
             return false;

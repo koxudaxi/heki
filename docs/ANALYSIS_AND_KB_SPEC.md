@@ -565,6 +565,14 @@ constants (`TypeCtx::module_constant`: a module-level name, an import, or a modu
 `TypeCtx::global_read`, the reads catalog cases follow too). The marked names are looked up for the parameters a call binds, so
 the work per call is that of binding it, whatever the number of argument lists.
 
+`Dispatch.recv_params` holds, only when a `call-owners` contract allows the calls through a
+method's own receiver (`Contracts::own_receiver_calls`), the parameters of the caller the receiver
+of a class method's or a static method's call may be, as itself (`super()` is the method's own
+`self`): the first bound parameter of the callees (`BoundCallee::params`) does not tell it, since
+a class method binds the class and no value of the caller, and a static method no receiver at
+all. It sits behind the call site's boxed dispatch, which few sites have, so call sites keep their
+size.
+
 `CallSite.returned` (whether the call's result may be returned, and how) is computed at
 extraction for every project call. `CallSite.flow` (the invalidation contracts announced after
 the call on every normal path, and the next call; set on `Iterate` / `Through` sites too), with
