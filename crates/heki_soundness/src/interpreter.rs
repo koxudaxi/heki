@@ -18,8 +18,8 @@ use crate::{
 use heki_ast::Span;
 use heki_ir::walk::{self, FnShape};
 use heki_ir::{
-    BinOpKind, BlockId, BuiltinKind, CompareOpKind, ConstLiteral, DictEntry, Inst, InstKind,
-    IrFunction, ModuleIr, Terminator, UnaryOpKind, VarId,
+    BinOpKind, BlockId, BuiltinKind, CompareOpKind, DictEntry, Inst, InstKind, IrFunction,
+    ModuleIr, Terminator, UnaryOpKind, VarId,
 };
 use heki_kb::{EffectiveSoundnessKb, SoundnessParamEffect};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -786,15 +786,7 @@ impl<'a> FnCtx<'a> {
         let site = self.site(bb, idx);
         match &inst.kind {
             InstKind::Const { dst, literal } => {
-                let kind = match literal {
-                    ConstLiteral::Int(_) => Some(BuiltinKind::Int),
-                    ConstLiteral::Float(_) => Some(BuiltinKind::Float),
-                    ConstLiteral::Str(_) => Some(BuiltinKind::Str),
-                    ConstLiteral::Bytes => Some(BuiltinKind::Bytes),
-                    ConstLiteral::Bool(_) => Some(BuiltinKind::Bool),
-                    _ => None,
-                };
-                match kind {
+                match literal.builtin_kind() {
                     Some(k) => self.fresh(st, *dst, k, site, span, ElemKinds::Unknown),
                     None => Self::opaque(st, *dst, "constant", span),
                 }

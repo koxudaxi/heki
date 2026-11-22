@@ -2033,6 +2033,7 @@ fn reads_on_every_path_are_the_loads_and_self_calls_every_normal_return_passes()
 
 const KEPT_REMOVALS_PY: &str = r#"
 import functools
+import json
 
 
 class Holder:
@@ -2082,6 +2083,65 @@ def class_check(value: Holder) -> bool:
 
 async def waits(h: Holder) -> None:
     await h.items_ready()
+
+
+class Row:
+    def __init__(self, raw: str) -> None:
+        self.raw = raw
+
+
+class Ranker:
+    def __call__(self, name: str) -> int:
+        return len(name)
+
+
+def dumps(h: Holder) -> str:
+    return json.dumps(h.__dict__)
+
+
+def copied(names: list[str] | tuple[str, ...]) -> list[str]:
+    out: list[str] = []
+    for name in names:
+        out.append(name)
+    return out
+
+
+def ordered(names: list[str] | tuple[str, ...]) -> list[str]:
+    return sorted(names)
+
+
+def checks(value: object, cls: type[Holder]) -> bool:
+    return isinstance(value, cls)
+
+
+def present(first: str, last: str) -> list[str]:
+    out: list[str] = []
+    for part in filter(None, [first, last]):
+        out.append(part)
+    return out
+
+
+def built_rows(cls: type[Row], raws: list[str]) -> int:
+    total = 0
+    for _ in map(cls, raws):
+        total += 1
+    return total
+
+
+def by_len(first: str, last: str) -> list[str]:
+    return sorted([first, last], key=len)
+
+
+def by_partial(first: str, last: str, key: functools.partial[int]) -> list[str]:
+    return sorted([first, last], key=key)
+
+
+def by_ranker(first: str, last: str, ranker: Ranker) -> list[str]:
+    return sorted([first, last], key=ranker)
+
+
+def by_unknown(first: str, last: str, key) -> list[str]:
+    return sorted([first, last], key=key)
 "#;
 
 #[test]
@@ -2104,4 +2164,21 @@ fn removals_of_kept_values_by_name_and_by_unknown_code() {
     assert_eq!(removes("class_check"), KeptRemoval::Nothing);
     // Other tasks run while a coroutine waits.
     assert_eq!(removes("waits"), KeptRemoval::Any);
+    // A call handed an object's `__dict__` may change it.
+    assert_eq!(removes("dumps"), KeptRemoval::Any);
+    // Iterating builtin containers runs their own iteration; the items `sorted` compares are of
+    // classes heki does not know.
+    assert_eq!(removes("copied"), KeptRemoval::Nothing);
+    assert_eq!(removes("ordered"), KeptRemoval::Any);
+    // A class object's `__instancecheck__` is its metaclass's.
+    assert_eq!(removes("checks"), KeptRemoval::Nothing);
+    // `filter(None, ...)` calls nothing; `map` calls a project class while it is iterated.
+    assert_eq!(removes("present"), KeptRemoval::Nothing);
+    assert_eq!(removes("built_rows"), KeptRemoval::Any);
+    // A key function: a builtin runs no project code; a `functools.partial`, an instance whose
+    // class defines `__call__`, and a value of unknown type may.
+    assert_eq!(removes("by_len"), KeptRemoval::Nothing);
+    assert_eq!(removes("by_partial"), KeptRemoval::Any);
+    assert_eq!(removes("by_ranker"), KeptRemoval::Any);
+    assert_eq!(removes("by_unknown"), KeptRemoval::Any);
 }

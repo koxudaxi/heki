@@ -740,7 +740,7 @@ pub struct EffectSummary {
     /// remove or replace, on any object, itself or through the calls it makes
     /// ([`KeptRemoval`]). Computed while an enabled rule reads it
     /// ([`OptInFacts::kept_values`]; `MUT101`).
-    #[serde(default, skip_serializing_if = "KeptRemoval::is_nothing")]
+    #[serde(default)]
     pub removes_kept: KeptRemoval,
     /// The facts of every typed write the function reaches, through any callee.
     pub typed_field_writes: BTreeSet<TypedFieldWrite>,

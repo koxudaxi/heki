@@ -2452,18 +2452,11 @@ impl<'a> Extractor<'a> {
                 self.iteration_runs_project_code(iterable, results)
                     .then_some(KeptRemovalKind::Any)
             }
-            InstKind::Call { args, kwargs, .. } | InstKind::MethodCall { args, kwargs, .. } => {
-                let recv = match kind {
-                    InstKind::MethodCall { recv, .. } => Some(*recv),
-                    _ => None,
-                };
-                self.kept_removal_of_call(at, kind, recv, args, kwargs)
-            }
-            _ => None,
+            _ => call_operands(kind).and_then(|call| self.kept_removal_of_call(at, &call)),
         }
     }
 
-    /// What the call `kind` at `(bb, index)` may do to the values kept in an object's
+    /// What the call `call` at `(bb, index)` may do to the values kept in an object's
     /// `__dict__`: a project call whose targets are every implementation it can run removes what
     /// they remove (propagated); a call of a library the catalog covers removes nothing unless
     /// it is handed a value whose type is not established as a library class that is not
@@ -2473,16 +2466,15 @@ impl<'a> Extractor<'a> {
     fn kept_removal_of_call(
         &self,
         at: Position,
-        kind: &InstKind,
-        recv: Option<VarId>,
-        args: &[VarId],
-        kwargs: &[(Option<String>, VarId)],
+        call: &CallOperands<'_>,
     ) -> Option<KeptRemovalKind> {
         let any = Some(KeptRemovalKind::Any);
-        if let (Some(r), InstKind::MethodCall { method, .. }) = (recv, kind)
+        let (args, kwargs) = (call.args, call.kwargs);
+        let recv = call.method.map(|(r, _)| r);
+        if let Some((r, method)) = call.method
             && self.dict_of.contains_key(&r)
         {
-            return match method.as_str() {
+            return match method {
                 "get" | "keys" | "values" | "items" | "copy" | "__contains__" | "__getitem__"
                 | "__len__" | "__iter__" | "setdefault" => None,
                 "pop" | "__delitem__" => match args.first().and_then(|a| self.resolved_str(*a)) {
@@ -2500,25 +2492,10 @@ impl<'a> Extractor<'a> {
             return any;
         }
         // A comprehension's own scope is the one function it calls.
-        let child_scope = matches!(
-            kind,
-            InstKind::Call {
-                callee_var: None,
-                ..
-            }
-        );
-        let (star, callee_var) = match kind {
-            InstKind::Call {
-                star_from,
-                callee_var,
-                ..
-            } => (star_from.is_some(), *callee_var),
-            InstKind::MethodCall { star_from, .. } => (star_from.is_some(), None),
-            _ => (false, None),
-        };
+        let child_scope = call.method.is_none() && call.callee_var.is_none();
         let span = self.f.block(at.0).insts.get(at.1).map(|i| i.span);
         let library = |symbol: &str, recv| {
-            self.library_call_runs_project_code(symbol, span, recv, args, kwargs, star, false)
+            self.library_call_runs_project_code(symbol, span, recv, args, kwargs, call.star, false)
         };
         match self.callees.get(&at)? {
             Callee::Project(..) => {
@@ -2526,16 +2503,14 @@ impl<'a> Extractor<'a> {
             }
             Callee::External(symbol) => {
                 // Calling an instance runs its class's `__call__`: the instance is its receiver.
-                let recv = recv.or(callee_var.filter(|_| symbol.ends_with(".__call__")));
+                let recv = recv.or(call.callee_var.filter(|_| symbol.ends_with(".__call__")));
                 library(symbol, recv).then_some(KeptRemovalKind::Any)
             }
             // A method of a literal or of a display built here is its builtin class's own (the
             // inference gives such a value no class of its own).
             Callee::TooMany | Callee::Unresolved => {
-                let symbol = match (kind, recv.and_then(|r| self.built_class(r))) {
-                    (InstKind::MethodCall { method, .. }, Some(class)) => {
-                        format!("{class}.{method}")
-                    }
+                let symbol = match (call.method, recv.and_then(|r| self.built_class(r))) {
+                    (Some((_, method)), Some(class)) => format!("{class}.{method}"),
                     _ => return any,
                 };
                 library(&symbol, recv).then_some(KeptRemovalKind::Any)
@@ -2543,36 +2518,14 @@ impl<'a> Extractor<'a> {
         }
     }
 
-    /// The builtin class of a literal or a display built in the function (through copies).
-    fn built_class(&self, v: VarId) -> Option<&'static str> {
-        use heki_ir::{BuiltinKind, ConstLiteral};
+    /// The builtin class of a literal (through copies), which the function's types leave
+    /// without a value (they type displays and f-strings).
+    fn built_class(&self, v: VarId) -> Option<String> {
         let kind = match &self.defs.get(&self.shape.copy_root(v))?.kind {
-            InstKind::Const { literal, .. } => match literal {
-                ConstLiteral::Str(_) => BuiltinKind::Str,
-                ConstLiteral::Bytes => BuiltinKind::Bytes,
-                ConstLiteral::Int(_) => BuiltinKind::Int,
-                ConstLiteral::Float(_) => BuiltinKind::Float,
-                ConstLiteral::Bool(_) => BuiltinKind::Bool,
-                _ => return None,
-            },
-            InstKind::BuildString { .. } | InstKind::Format { .. } | InstKind::Convert { .. } => {
-                BuiltinKind::Str
-            }
-            InstKind::AllocBuiltin { kind, .. } => *kind,
-            InstKind::DictLiteral { .. } => BuiltinKind::Dict,
+            InstKind::Const { literal, .. } => literal.builtin_kind()?,
             _ => return None,
         };
-        Some(match kind {
-            BuiltinKind::List => "builtins.list",
-            BuiltinKind::Dict => "builtins.dict",
-            BuiltinKind::Set => "builtins.set",
-            BuiltinKind::Tuple => "builtins.tuple",
-            BuiltinKind::Str => "builtins.str",
-            BuiltinKind::Bytes => "builtins.bytes",
-            BuiltinKind::Int => "builtins.int",
-            BuiltinKind::Float => "builtins.float",
-            BuiltinKind::Bool => "builtins.bool",
-        })
+        Some(format!("builtins.{}", kind.name()))
     }
 
     /// [`invokes::runs_project_code`] of the library call of `symbol` at `span` with these
@@ -2624,25 +2577,17 @@ impl<'a> Extractor<'a> {
             Some(Callee::Project(..)) => return false,
             Some(Callee::External(symbol)) => {
                 let lazy = self.cx.kb.invoked(symbol).is_some_and(|e| e.lazy);
-                if let (true, Some(inst)) = (lazy, self.defs.get(&root)) {
-                    let (recv, args, kwargs, star) = match &inst.kind {
-                        InstKind::Call {
-                            args,
-                            kwargs,
-                            star_from,
-                            ..
-                        } => (None, args, kwargs, star_from.is_some()),
-                        InstKind::MethodCall {
-                            recv,
-                            args,
-                            kwargs,
-                            star_from,
-                            ..
-                        } => (Some(*recv), args, kwargs, star_from.is_some()),
-                        _ => return true,
-                    };
+                let call = self.defs.get(&root).and_then(|i| call_operands(&i.kind));
+                if let (true, Some(call)) = (lazy, call) {
+                    let recv = call.method.map(|(r, _)| r);
                     return self.library_call_runs_project_code(
-                        symbol, None, recv, args, kwargs, star, true,
+                        symbol,
+                        None,
+                        recv,
+                        call.args,
+                        call.kwargs,
+                        call.star,
+                        true,
                     );
                 }
             }
@@ -7569,6 +7514,51 @@ enum Root<'a> {
     Global(&'a str),
     /// The closure cell of an enclosing function's variable, by name.
     Cell(&'a str),
+}
+
+/// The operands of a call or method call instruction ([`call_operands`]).
+struct CallOperands<'i> {
+    /// A method call's receiver and method.
+    method: Option<(VarId, &'i str)>,
+    /// What a plain call calls (`None` also for a comprehension's own scope).
+    callee_var: Option<VarId>,
+    args: &'i [VarId],
+    kwargs: &'i [(Option<String>, VarId)],
+    /// Some arguments are unpacked (`*args`, `**kwargs`).
+    star: bool,
+}
+
+fn call_operands(kind: &InstKind) -> Option<CallOperands<'_>> {
+    match kind {
+        InstKind::Call {
+            callee_var,
+            args,
+            kwargs,
+            star_from,
+            ..
+        } => Some(CallOperands {
+            method: None,
+            callee_var: *callee_var,
+            args,
+            kwargs,
+            star: star_from.is_some(),
+        }),
+        InstKind::MethodCall {
+            recv,
+            method,
+            args,
+            kwargs,
+            star_from,
+            ..
+        } => Some(CallOperands {
+            method: Some((*recv, method)),
+            callee_var: None,
+            args,
+            kwargs,
+            star: star_from.is_some(),
+        }),
+        _ => None,
+    }
 }
 
 /// The step by which an instruction's result is reached from an operand's object (`dst`, `src`):

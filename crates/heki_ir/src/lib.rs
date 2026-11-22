@@ -200,6 +200,21 @@ pub enum ConstLiteral {
     Other,
 }
 
+impl ConstLiteral {
+    /// The builtin type of the literal's value (`None` for `None`, `...`, and a literal heki
+    /// does not model).
+    pub fn builtin_kind(&self) -> Option<BuiltinKind> {
+        match self {
+            Self::Int(_) => Some(BuiltinKind::Int),
+            Self::Float(_) => Some(BuiltinKind::Float),
+            Self::Str(_) => Some(BuiltinKind::Str),
+            Self::Bytes => Some(BuiltinKind::Bytes),
+            Self::Bool(_) => Some(BuiltinKind::Bool),
+            Self::None | Self::Ellipsis | Self::Other => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BinOpKind {

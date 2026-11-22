@@ -95,8 +95,8 @@ pub(crate) struct Handed<'v> {
 /// unpacked), may run code of the project. A function outside the catalog may; so may one the
 /// catalog does not describe `[[invokes]]` for, when it is handed a value that may run code of
 /// the project ([`inert`]); one it describes runs only the code its entry names. `iterated`:
-/// the iterator a `lazy` call returned is iterated, and every callable it calls runs there, not
-/// at its own site.
+/// the iterator the call of a `lazy` entry returned is iterated, and every callable it calls
+/// runs there, not at its own site.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn runs_project_code(
     project: &ProjectDecls,
@@ -118,9 +118,6 @@ pub(crate) fn runs_project_code(
     let Some(entry) = kb.invoked(symbol) else {
         return handed.any(|h| !inert(project, h));
     };
-    if iterated && !entry.lazy {
-        return false;
-    }
     // A method of a library class runs a project subclass's own replacement under R2; through
     // `super()` the method resolved is the library's own.
     if let (Some(r), Some((_, method))) = (recv, symbol.rsplit_once('.'))

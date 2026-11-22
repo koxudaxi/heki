@@ -85,19 +85,6 @@ pub enum KeptRemoval {
 }
 
 impl KeptRemoval {
-    pub fn is_nothing(&self) -> bool {
-        matches!(self, Self::Nothing)
-    }
-
-    /// Whether the value kept under `name` may be removed or replaced.
-    pub fn removes(&self, name: &str) -> bool {
-        match self {
-            Self::Nothing => false,
-            Self::Named(names) => names.contains(name),
-            Self::Any => true,
-        }
-    }
-
     pub fn add(&mut self, name: &str) {
         match self {
             Self::Nothing => *self = Self::Named(Box::new(BTreeSet::from([name.to_owned()]))),
@@ -247,16 +234,16 @@ pub(crate) fn cache_flow(
     if f.is_class_body || f.is_module_body || f.owner_class_qualname.is_none() {
         return None;
     }
-    let writes = self_attr_writes(shape);
+    let writes = attr_write_ops(shape, &self_objects(f));
     if writes.is_empty() {
         return None;
     }
     let mut names = Names::default();
     let writes = writes
         .into_iter()
-        .map(|(attr, w)| SelfAttrWrite {
+        .map(|(attr, w, op)| SelfAttrWrite {
             attr: names.index(attr),
-            change: in_place_change(f, &w, types),
+            change: op.and_then(|op| in_place_change(op, types)),
             ..w
         })
         .collect();
@@ -268,24 +255,11 @@ pub(crate) fn cache_flow(
     })
 }
 
-/// [`SelfAttrWrite::change`]: the write changes in place, through one of its changing methods or
-/// an item store or delete, the builtin `list`, `dict`, or `set` its receiver holds by the
-/// function's types.
-fn in_place_change(
-    f: &IrFunction,
-    w: &SelfAttrWrite,
-    types: &FxHashMap<VarId, Val>,
-) -> Option<InPlaceChange> {
-    if w.rebinds {
-        return None;
-    }
-    let inst = f.block(w.block).insts.get(w.index as usize)?;
-    let (recv, method, by_name) = match &inst.kind {
-        InstKind::MethodCall { recv, method, .. } => (*recv, method.as_str(), true),
-        InstKind::SubscriptStore { obj, .. } => (*obj, "__setitem__", false),
-        InstKind::SubscriptDelete { obj, .. } => (*obj, "__delitem__", false),
-        _ => return None,
-    };
+/// [`SelfAttrWrite::change`]: the in-place write `op` changes, through one of its changing
+/// methods or an item store or delete, the builtin `list`, `dict`, or `set` its receiver holds
+/// by the function's types.
+fn in_place_change(op: InPlaceOp<'_>, types: &FxHashMap<VarId, Val>) -> Option<InPlaceChange> {
+    let (recv, method, by_name) = op;
     let kind = match types.get(&recv)? {
         Val::Inst(class) => ContainerKind::ALL
             .into_iter()
@@ -335,8 +309,12 @@ fn self_vars(f: &IrFunction) -> FxHashSet<VarId> {
 /// in place (also through local copies of `self.<attr>`). `self.__dict__` itself is no
 /// attribute a property reads.
 pub fn self_attr_writes<'f>(shape: &FnShape<'f>) -> Vec<(&'f str, SelfAttrWrite)> {
-    let objects = self_vars(shape.f).into_iter().map(|v| (v, 0)).collect();
-    attr_writes(shape, &objects)
+    attr_writes(shape, &self_objects(shape.f))
+}
+
+/// The variables of `f` that are its `self`, as the one object [`attr_writes`] reads.
+fn self_objects(f: &IrFunction) -> FxHashMap<VarId, u32> {
+    self_vars(f).into_iter().map(|v| (v, 0)).collect()
 }
 
 /// An attribute of one of the objects [`attr_writes`] reads: the object's number and the name.
@@ -350,6 +328,22 @@ pub fn attr_writes<'f>(
     shape: &FnShape<'f>,
     objects: &FxHashMap<VarId, u32>,
 ) -> Vec<(&'f str, SelfAttrWrite)> {
+    attr_write_ops(shape, objects)
+        .into_iter()
+        .map(|(attr, w, _)| (attr, w))
+        .collect()
+}
+
+/// A write that changes the value of `<obj>.<attr>` in place: the variable holding the value,
+/// the method that changes it (`__setitem__` for an item store, `__delitem__` for an item
+/// delete), and whether the method is called by its name.
+type InPlaceOp<'f> = (VarId, &'f str, bool);
+
+/// [`attr_writes`], with the [`InPlaceOp`] of each write that does not rebind the attribute.
+fn attr_write_ops<'f>(
+    shape: &FnShape<'f>,
+    objects: &FxHashMap<VarId, u32>,
+) -> Vec<(&'f str, SelfAttrWrite, Option<InPlaceOp<'f>>)> {
     let f = shape.f;
     // `var -> (object, attr)`: the variables holding `<obj>.<attr>`, through copies.
     let mut alias: FxHashMap<VarId, (u32, &str)> = FxHashMap::default();
@@ -406,7 +400,8 @@ pub fn attr_writes<'f>(
             .get(&bb)
             .is_some_and(|tests| tests.iter().any(|(h, k)| *h == held && same_key(k, index)))
     };
-    // `(block, index, span, (object, attr), memo_shaped, rebinds, key)` of each write.
+    // `(block, index, span, (object, attr), memo_shaped, in_place, key)` of each write (no
+    // `in_place` op: it rebinds or deletes the attribute).
     let mut found = Vec::new();
     for bb in &f.blocks {
         for (index, inst) in bb.insts.iter().enumerate() {
@@ -416,26 +411,36 @@ pub fn attr_writes<'f>(
                 {
                     objects
                         .get(obj)
-                        .map(|&o| ((o, attr.as_str()), false, true, None))
+                        .map(|&o| ((o, attr.as_str()), false, None, None))
                 }
                 InstKind::SubscriptStore {
                     obj,
                     index,
                     key_const,
                     ..
-                } => alias
-                    .get(obj)
-                    .map(|&held| (held, guarded(bb.id, held, index), false, key_const.clone())),
-                InstKind::SubscriptDelete { obj, key_const, .. } => alias
-                    .get(obj)
-                    .map(|&held| (held, false, false, key_const.clone())),
-                InstKind::MethodCall { recv, method, .. } if container_mutator(method) => alias
-                    .get(recv)
-                    .map(|&held| (held, method == "setdefault", false, None)),
+                } => alias.get(obj).map(|&held| {
+                    let op = (*obj, "__setitem__", false);
+                    (
+                        held,
+                        guarded(bb.id, held, index),
+                        Some(op),
+                        key_const.clone(),
+                    )
+                }),
+                InstKind::SubscriptDelete { obj, key_const, .. } => alias.get(obj).map(|&held| {
+                    let op = (*obj, "__delitem__", false);
+                    (held, false, Some(op), key_const.clone())
+                }),
+                InstKind::MethodCall { recv, method, .. } if container_mutator(method) => {
+                    alias.get(recv).map(|&held| {
+                        let op = (*recv, method.as_str(), true);
+                        (held, method == "setdefault", Some(op), None)
+                    })
+                }
                 _ => None,
             };
-            if let Some((held, memo_shaped, rebinds, key)) = w {
-                found.push((bb.id, index, inst.span, held, memo_shaped, rebinds, key));
+            if let Some((held, memo_shaped, in_place, key)) = w {
+                found.push((bb.id, index, inst.span, held, memo_shaped, in_place, key));
             }
         }
     }
@@ -447,26 +452,26 @@ pub fn attr_writes<'f>(
         written.entry(attr).or_default().insert(*o);
     }
     let lazy = lazy_init_blocks(shape, objects, &written);
-    let mut out: Vec<(&str, SelfAttrWrite)> = found
+    let mut out: Vec<(&str, SelfAttrWrite, Option<InPlaceOp<'f>>)> = found
         .into_iter()
-        .map(|(block, index, span, held, memo_shaped, rebinds, key)| {
+        .map(|(block, index, span, held, memo_shaped, in_place, key)| {
             let write = SelfAttrWrite {
                 attr: 0,
                 span,
                 block,
                 index: u32::try_from(index).unwrap_or(u32::MAX),
                 memo_shaped,
-                rebinds,
+                rebinds: in_place.is_none(),
                 lazy_init: lazy
                     .iter()
                     .any(|(h, blocks)| *h == held && blocks[block.0 as usize]),
                 key,
                 change: None,
             };
-            (held.1, write)
+            (held.1, write, in_place)
         })
         .collect();
-    out.sort_by_key(|(_, w)| w.span);
+    out.sort_by_key(|(_, w, _)| w.span);
     out
 }
 
