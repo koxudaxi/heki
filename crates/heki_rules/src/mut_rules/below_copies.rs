@@ -12,9 +12,7 @@ use crate::CallHop;
 use heki_diagnostics::Diagnostic;
 use heki_effect::readonly::{self, ContainerKind, Derivation, ReturnStep};
 use heki_effect::{Callee, Val};
-use heki_ir::walk::{
-    Answer, Budget, Closure, Def, Facts, Join, KeySet, Sparse, Use, Visit, fixpoint, reach,
-};
+use heki_ir::walk::{Budget, Closure, Def, Facts, Join, Sparse, Use, Visit, fixpoint, reach};
 use heki_ir::{BlockId, DictEntry, Inst, InstKind, Terminator, VarId};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::cell::{OnceCell, RefCell};
@@ -155,7 +153,10 @@ pub(super) struct BelowCopies<'a> {
     /// `site -> (any path, every path)`: the copied value may be, and is, state that outlives
     /// the call.
     borrowed: Vec<(bool, bool)>,
-    may: Closure<(VarId, Step), KeySet<usize>>,
+    /// What each value's object may be ([`Mut202Fn::borrowed`]): state that outlives the call
+    /// on some path, and something else (or a load that may run code) on some path.
+    origins: Closure<VarId, (bool, bool)>,
+    may: Closure<(VarId, Step), Witness>,
     /// What each value holds of the copies on every path ([`Mut202Fn::held_facts`]).
     held: OnceCell<FxHashMap<VarId, MustHeld>>,
     /// The uses of each copy root ([`Mut202Fn::copy_uses`]) and the stores into it
@@ -166,11 +167,31 @@ pub(super) struct BelowCopies<'a> {
 }
 
 /// The uses of a copy root and of the copies of the reference to it, each with the value it
-/// uses.
-type CopyUses = Vec<(VarId, Use)>;
+/// uses; `complete` unless the walk ran past the budget.
+struct CopyUses {
+    uses: Vec<(VarId, Use)>,
+    complete: bool,
+}
 
 /// The stores into one object, by level and block: their indexes in the block.
 type Stores = FxHashMap<(Level, BlockId), Vec<u32>>;
+
+/// The first of the copies (by position) whose parts a value may be ([`Mut202Fn::copies_below`]):
+/// one witness is all a report names, and keeping one keeps every fact the same size.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Witness(Option<usize>);
+
+impl Join for Witness {
+    fn join(&mut self, other: &Self) -> bool {
+        let first = match (self.0, other.0) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        let grew = first != self.0;
+        self.0 = first;
+        grew
+    }
+}
 
 /// [`Held`] as the fact of a must-question: established, or contradicted on some path.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -232,9 +253,9 @@ impl<'a> Mut202Fn<'a> {
                 if memo_fills.contains(&at) || reported.contains(&inst.span) {
                     continue;
                 }
-                if let Some((site, chain)) = self.below_change(&facts, inst) {
+                if let Some((site, changed, chain)) = self.below_change(&facts, inst) {
                     reported.insert(inst.span);
-                    self.report_below(out, &facts, inst, site, chain);
+                    self.report_below(out, &facts, inst, site, changed, chain);
                 }
             }
         }
@@ -252,6 +273,7 @@ impl<'a> Mut202Fn<'a> {
             by_dst: sites.iter().enumerate().map(|(i, s)| (s.dst, i)).collect(),
             sites,
             borrowed: Vec::new(),
+            origins: Closure::new(),
             may: Closure::new(),
             held: OnceCell::new(),
             uses: RefCell::default(),
@@ -259,7 +281,7 @@ impl<'a> Mut202Fn<'a> {
             budget: Budget::of_function("MUT115 copies", self.f),
         };
         facts.borrowed = (facts.sites.iter())
-            .map(|s| self.borrowed(s.copied, &facts.budget))
+            .map(|s| self.borrowed(&facts, s.copied))
             .collect();
         facts
     }
@@ -295,14 +317,15 @@ impl<'a> Mut202Fn<'a> {
                 };
                 let (made, text) = match inst.kind {
                     InstKind::DictLiteral { .. } => (Some(ContainerKind::Dict), "`{**...}`"),
-                    _ => (Some(ContainerKind::List), "`[*...]`"),
+                    InstKind::AllocBuiltin {
+                        kind: heki_ir::BuiltinKind::List,
+                        ..
+                    } => (Some(ContainerKind::List), "`[*...]`"),
+                    _ => (None, "a display"),
                 };
                 let reads: &[&str] = &["__iter__", "keys", "__getitem__"];
                 let kind = CopyKind::Container {
-                    made: made.filter(|_| {
-                        matches!(inst.kind, InstKind::DictLiteral { .. })
-                            || is_list_display(&inst.kind)
-                    }),
+                    made,
                     reads,
                     by_name: false,
                 };
@@ -431,37 +454,35 @@ impl<'a> Mut202Fn<'a> {
 
     /// Whether the value `v` may be, and is on every path, state that outlives the call: a
     /// parameter, a module global, a variable of an enclosing function, or what a plain
-    /// attribute or item load reads from such state. A walk back over the definitions; past the
-    /// budget, only "may be" stands.
-    fn borrowed(&self, v: VarId, budget: &Budget) -> (bool, bool) {
+    /// attribute or item load reads from such state. A walk back over the definitions, each
+    /// value's fact shared by the copies of the function ([`BelowCopies::origins`]); past the
+    /// budget, nothing stands.
+    fn borrowed(&self, facts: &BelowCopies<'a>, v: VarId) -> (bool, bool) {
         let shape = &self.ix.shape;
-        let mut any = false;
-        let mut every = true;
+        let own = |w: VarId| {
+            let (outlives, plain) = match shape.def(w) {
+                Def::Param => (true, true),
+                Def::Phi(..) => (false, true),
+                _ => shape
+                    .inst(w)
+                    .map_or((false, false), |inst| self.outlives_by(inst)),
+            };
+            (outlives, !plain)
+        };
         let next = |w: VarId, out: &mut Vec<VarId>| match shape.def(w) {
             Def::Phi(b, i) => out.extend(
                 (self.f.block(b).phis[i as usize].incoming.iter())
                     .filter(|(_, x)| *x != w)
                     .map(|(_, x)| *x),
             ),
-            Def::Inst(..) => out.extend(shape.inst(w).and_then(|i| self.borrowed_from(&i.kind))),
-            Def::Param | Def::None => {}
+            _ => out.extend(shape.inst(w).and_then(|i| self.borrowed_from(&i.kind))),
         };
-        let visit = |w: VarId| {
-            let (outlives, plain) = match shape.def(w) {
-                Def::Param => (true, true),
-                Def::Phi(..) => (false, true),
-                Def::None => (false, false),
-                Def::Inst(..) => match shape.inst(w) {
-                    Some(inst) => self.outlives_by(inst),
-                    None => (false, false),
-                },
-            };
-            any |= outlives;
-            every &= plain;
-            heki_ir::walk::Visit::<()>::Expand
-        };
-        let complete = !heki_ir::walk::reach(budget, [v], next, visit).is_open();
-        (any, any && every && complete)
+        let (any, other) = facts
+            .origins
+            .ask(&facts.budget, v, own, next)
+            .map(|fact| *fact)
+            .open_means((false, true));
+        (any, any && !other)
     }
 
     /// The value whose part the instruction `kind` reads, for [`Self::borrowed`]: the object of
@@ -539,22 +560,24 @@ impl<'a> Mut202Fn<'a> {
             .is_some_and(|e| e.stores_on_instance)
     }
 
-    /// The copies whose parts the object `v` holds may be (`Step::Below`), or that `v` may be
-    /// or be below (`Step::Holder`): through copies, phis, in-place operators, plain or other
+    /// The first of the copies whose parts the object `v` holds may be (`Step::Below`), or that
+    /// `v` may be or be below (`Step::Holder`): through copies, phis, in-place operators, plain or other
     /// loads, element accessors, the steps of iterating a part (not a copy: iterating a copy
     /// is how a container is changed while looping over it), and copies of copies. A load of
     /// a level the copy was given a value of its own, or that a store into the copy
-    /// dominating the load rebinds, reads no part of it. Empty past the budget.
-    fn copies_below(&self, facts: &BelowCopies<'a>, v: VarId, step: Step) -> KeySet<usize> {
+    /// dominating the load rebinds, reads no part of it. None past the budget.
+    fn copies_below(&self, facts: &BelowCopies<'a>, v: VarId, step: Step) -> Option<usize> {
         let shape = &self.ix.shape;
-        let own = |(w, step): (VarId, Step)| -> KeySet<usize> {
-            match (step, facts.by_dst.get(&w)) {
-                (Step::Holder, Some(&site)) if facts.borrowed[site].0 => {
-                    std::iter::once(site).collect()
-                }
-                _ => KeySet::new(),
-            }
+        // A copy of state that may outlive the call is the copy its parts are below; a copy of
+        // anything else holds the parts of what it copies.
+        let seed = |w: VarId| {
+            facts
+                .by_dst
+                .get(&w)
+                .copied()
+                .filter(|s| facts.borrowed[*s].0)
         };
+        let own = |(w, step): (VarId, Step)| Witness(seed(w).filter(|_| step == Step::Holder));
         let next = |(w, step): (VarId, Step), out: &mut Vec<(VarId, Step)>| match shape.def(w) {
             Def::Phi(b, i) => out.extend(
                 (self.f.block(b).phis[i as usize].incoming.iter())
@@ -566,7 +589,7 @@ impl<'a> Mut202Fn<'a> {
                 if step == Step::Holder {
                     out.push((w, Step::Below));
                     // A copy of a copy, or of a part of one, holds those parts too.
-                    if let Some(&site) = facts.by_dst.get(&w) {
+                    if let Some(&site) = facts.by_dst.get(&w).filter(|_| seed(w).is_none()) {
                         out.push((facts.sites[site].copied, Step::Holder));
                     }
                 }
@@ -597,10 +620,9 @@ impl<'a> Mut202Fn<'a> {
             }
             Def::Param | Def::None => {}
         };
-        match facts.may.ask(&facts.budget, (v, step), own, next) {
-            Answer::Known(sites) => (*sites).clone(),
-            Answer::Open => KeySet::new(),
-        }
+        (facts.may.ask(&facts.budget, (v, step), own, next))
+            .map(|witness| witness.0)
+            .open_means(None)
     }
 
     /// Whether the value `v` is one of the copies (through copies and phis of it alone).
@@ -689,23 +711,26 @@ impl<'a> Mut202Fn<'a> {
             return Rc::clone(stores);
         }
         let mut stores = Stores::default();
-        for (_, u) in self.copy_uses(facts, root).iter() {
+        for (_, u) in &self.copy_uses(facts, root).uses {
             let Use::Inst(b, i) = *u else { continue };
-            let kind = &self.f.block(b).insts[i as usize].kind;
-            let level = match kind {
-                InstKind::SubscriptStore { value, .. } | InstKind::AttrStore { value, .. }
-                    if self.stores_back(root, kind, *value) =>
-                {
-                    continue;
+            let (obj, level, value) = match &self.f.block(b).insts[i as usize].kind {
+                InstKind::SubscriptStore {
+                    obj,
+                    key_const,
+                    value,
+                    ..
+                } => (*obj, Level::Key(key_const.clone()), Some(*value)),
+                InstKind::SubscriptDelete { obj, key_const, .. } => {
+                    (*obj, Level::Key(key_const.clone()), None)
                 }
-                InstKind::SubscriptStore { key_const, .. }
-                | InstKind::SubscriptDelete { key_const, .. } => Level::Key(key_const.clone()),
-                InstKind::AttrStore { attr, .. } | InstKind::AttrDelete { attr, .. } => {
-                    Level::Attr(attr.clone())
+                InstKind::AttrStore { obj, attr, value } => {
+                    (*obj, Level::Attr(attr.clone()), Some(*value))
                 }
+                InstKind::AttrDelete { obj, attr } => (*obj, Level::Attr(attr.clone()), None),
                 _ => continue,
             };
-            if store_target(kind).is_some_and(|obj| self.ix.shape.copy_root(obj) == root) {
+            let into_root = self.ix.shape.copy_root(obj) == root;
+            if into_root && !value.is_some_and(|v| self.stores_back(root, &level, v)) {
                 stores.entry((level, b)).or_default().push(i);
             }
         }
@@ -714,9 +739,9 @@ impl<'a> Mut202Fn<'a> {
         stores
     }
 
-    /// Whether the store `kind` into `root` puts back `value`, the result of an in-place
-    /// operator on a builtin container loaded from the same level of `root`.
-    fn stores_back(&self, root: VarId, kind: &InstKind, value: VarId) -> bool {
+    /// Whether storing `value` into `level` of `root` puts back the result of an in-place
+    /// operator on a builtin container loaded from that level of `root`.
+    fn stores_back(&self, root: VarId, level: &Level, value: VarId) -> bool {
         let shape = &self.ix.shape;
         let Some(InstKind::BinOp {
             lhs,
@@ -726,21 +751,13 @@ impl<'a> Mut202Fn<'a> {
         else {
             return false;
         };
-        let stored = match kind {
-            InstKind::SubscriptStore { obj, key_const, .. } => {
-                (*obj, Level::Key(key_const.clone()))
-            }
-            InstKind::AttrStore { obj, attr, .. } => (*obj, Level::Attr(attr.clone())),
-            _ => return false,
-        };
         let loaded = shape.inst(*lhs).and_then(|i| self.load_of(&i.kind));
         let builtin = self
             .class_of(*lhs)
             .is_some_and(|t| MUTABLE_BUILTINS.contains(&t));
         builtin
-            && stored.1 != Level::Key(None)
-            && shape.copy_root(stored.0) == root
-            && loaded.is_some_and(|(obj, level)| shape.copy_root(obj) == root && level == stored.1)
+            && *level != Level::Key(None)
+            && loaded.is_some_and(|(obj, loaded)| shape.copy_root(obj) == root && loaded == *level)
     }
 
     /// The uses of `root` and of the copies of the reference to it, each with the value it
@@ -765,21 +782,19 @@ impl<'a> Mut202Fn<'a> {
             Visit::<()>::Expand
         };
         // Past the budget the uses are incomplete: an unknown use keeps the claim open.
-        if reach(&facts.budget, [root], next, visit).is_open() {
-            uses.push((root, Use::Phi(BlockId(0), u32::MAX)));
-        }
-        let uses = Rc::new(uses);
+        let complete = !reach(&facts.budget, [root], next, visit).is_open();
+        let uses = Rc::new(CopyUses { uses, complete });
         facts.uses.borrow_mut().insert(root, Rc::clone(&uses));
         uses
     }
 
-    /// The change `inst` makes below one of the copies, if any: the copy site, and the call to
-    /// the helper making it (empty: `inst` makes it itself).
+    /// The change `inst` makes below one of the copies, if any: the copy site, the value `inst`
+    /// changes itself (`None`: a helper it calls makes the change), and the call to that helper.
     fn below_change(
         &self,
         facts: &BelowCopies<'a>,
         inst: &'a Inst,
-    ) -> Option<(usize, Vec<CallHop>)> {
+    ) -> Option<(usize, Option<VarId>, Vec<CallHop>)> {
         let changed = match &inst.kind {
             InstKind::AttrStore { obj, .. }
             | InstKind::AttrDelete { obj, .. }
@@ -800,7 +815,7 @@ impl<'a> Mut202Fn<'a> {
         };
         if let Some(v) = changed {
             let sites = self.copies_below(facts, v, Step::Below);
-            return sites.iter().next().map(|s| (*s, Vec::new()));
+            return sites.map(|s| (s, changed, Vec::new()));
         }
         // Handing a part of a copy to a helper that changes that parameter, or the copy
         // itself to one that changes what its parameter holds.
@@ -810,12 +825,8 @@ impl<'a> Mut202Fn<'a> {
             let p = u8::try_from(pos).ok().filter(|p| *p < 64)?;
             let facts_run = self.facts_run_by_call(inst.span, key);
             let below = self.copies_below(facts, var, Step::Below);
-            let site = if facts_run.iter().any(|f| f.changes_param_state(p, None)) {
-                below.iter().next().copied()
-            } else {
-                None
-            };
-            let site = site.or_else(|| {
+            let changes_part = facts_run.iter().any(|f| f.changes_param_state(p, None));
+            let site = below.filter(|_| changes_part).or_else(|| {
                 let changes_below = facts_run.iter().any(|f| {
                     f.changed_param_attrs
                         .get(&p)
@@ -831,7 +842,7 @@ impl<'a> Mut202Fn<'a> {
                     span: inst.span,
                     path: self.unit.input.path.clone(),
                 };
-                return Some((site, vec![hop]));
+                return Some((site, None, vec![hop]));
             }
         }
         None
@@ -843,7 +854,7 @@ impl<'a> Mut202Fn<'a> {
         let objects: FxHashMap<VarId, u32> = (self.f.blocks.iter())
             .flat_map(|b| &b.insts)
             .filter_map(|inst| inst.kind.dst())
-            .filter(|v| !self.copies_below(facts, *v, Step::Below).is_empty())
+            .filter(|v| self.copies_below(facts, *v, Step::Below).is_some())
             .map(|v| (v, self.ix.shape.copy_root(v).0))
             .collect();
         if objects.is_empty() {
@@ -862,10 +873,11 @@ impl<'a> Mut202Fn<'a> {
         facts: &BelowCopies<'a>,
         inst: &'a Inst,
         site: usize,
+        changed: Option<VarId>,
         chain: Vec<CallHop>,
     ) {
         let copy = &facts.sites[site];
-        let exact = chain.is_empty() && self.exact_below_copy(facts, inst, site);
+        let exact = changed.is_some_and(|v| self.exact_below_copy(facts, inst, v, site));
         let line = self.unit.lines.line_col(copy.inst.span.start).0;
         let original = self.value_text(copy.copied);
         let shares = if exact { "shares" } else { "may share" };
@@ -884,7 +896,13 @@ impl<'a> Mut202Fn<'a> {
             .f
             .var_name(copy.dst)
             .map_or_else(|| original.trim_matches('`').to_owned(), str::to_owned);
-        let Some(d) = self.cx.emit(
+        let tier = if exact {
+            heki_diagnostics::Certainty::Exact
+        } else {
+            heki_diagnostics::Certainty::Heuristic
+        };
+        // `below_copies` runs only where the rule is enabled.
+        if let Some(d) = self.cx.emit(
             out,
             "MUT115",
             self.unit,
@@ -894,30 +912,27 @@ impl<'a> Mut202Fn<'a> {
             message,
             Some("copy the nested object too before changing it (`copy.deepcopy(...)`, or a copy of that part)".to_owned()),
             &related,
-        ) else {
-            return;
-        };
-        let tier = if exact {
-            heki_diagnostics::Certainty::Exact
-        } else {
-            heki_diagnostics::Certainty::Heuristic
-        };
-        d.certainty = tier.at_most(d.certainty);
+        ) {
+            d.certainty = tier.at_most(d.certainty);
+        }
     }
 
     /// Whether the change `inst` makes below the copy `site` states `MUT115`'s exact claim:
     /// every premise of the rule page holds.
-    fn exact_below_copy(&self, facts: &BelowCopies<'a>, inst: &Inst, site: usize) -> bool {
-        let Some(changed) = changed_value(&inst.kind) else {
-            return false;
-        };
-        let Some(Held::Below { site: held, first }) = self.held(facts, changed) else {
-            return false;
-        };
-        held == site
+    fn exact_below_copy(
+        &self,
+        facts: &BelowCopies<'a>,
+        inst: &Inst,
+        changed: VarId,
+        site: usize,
+    ) -> bool {
+        self.copies_shallowly(&facts.sites[site])
             && facts.borrowed[site].1
-            && self.copies_shallowly(&facts.sites[site])
-            && self.still_shared(facts, site, first)
+            && matches!(
+                self.held(facts, changed),
+                Some(Held::Below { site: held, first })
+                    if held == site && self.still_shared(facts, site, first)
+            )
             && self.changes_in_place(&inst.kind, changed)
     }
 
@@ -970,10 +985,10 @@ impl<'a> Mut202Fn<'a> {
     fn held_facts(&self, facts: &BelowCopies<'a>) -> FxHashMap<VarId, MustHeld> {
         let shape = &self.ix.shape;
         let f = self.f;
-        let vars: Vec<VarId> = (f.blocks.iter())
-            .flat_map(|b| {
+        let vars: Vec<VarId> = (f.params.iter().map(|p| p.var))
+            .chain(f.blocks.iter().flat_map(|b| {
                 (b.phis.iter().map(|p| p.dst)).chain(b.insts.iter().filter_map(|i| i.kind.dst()))
-            })
+            }))
             .collect();
         let index: FxHashMap<VarId, usize> =
             vars.iter().enumerate().map(|(i, v)| (*v, i)).collect();
@@ -1019,20 +1034,19 @@ impl<'a> Mut202Fn<'a> {
                     if let InstKind::Copy { src, .. } = kind {
                         return of(*src);
                     }
-                    Some(
-                        self.loaded_held(facts, kind, v, (b, k), of)
-                            .unwrap_or(MustHeld::Conflict),
-                    )
+                    let held = self.loaded_held(facts, kind, v, (b, k), of);
+                    Some(held.unwrap_or(MustHeld::Conflict))
                 }
+                // A parameter holds no copy of the function's.
                 Def::Param | Def::None => Some(MustHeld::Conflict),
             }
         };
-        match fixpoint(&facts.budget, spec, transfer) {
-            Answer::Known(found) => (found.into_vec().into_iter().enumerate())
+        let found = fixpoint(&facts.budget, spec, transfer).map(|found| {
+            (found.into_vec().into_iter().enumerate())
                 .filter_map(|(i, fact)| Some((vars[i], fact?)))
-                .collect(),
-            Answer::Open => FxHashMap::default(),
-        }
+                .collect()
+        });
+        found.open_means(FxHashMap::default())
     }
 
     /// What the load `kind` (defining `v` at `at`) holds of the copies, given what the
@@ -1088,10 +1102,10 @@ impl<'a> Mut202Fn<'a> {
     fn first_load_plain(&self, copy: &CopySite<'_>, container: VarId, level: &Level) -> bool {
         match (copy.kind, level) {
             (CopyKind::Container { made, .. }, Level::Key(_)) => {
-                let made = made.or_else(|| match self.class_of(copy.copied) {
-                    Some("builtins.dict") => Some(ContainerKind::Dict),
-                    Some("builtins.list") => Some(ContainerKind::List),
-                    _ => None,
+                // `x.copy()` makes the builtin `x` is.
+                let made = made.or_else(|| {
+                    (ContainerKind::ALL.into_iter())
+                        .find(|k| Some(k.class()) == self.class_of(copy.copied))
                 });
                 matches!(made, Some(ContainerKind::Dict | ContainerKind::List))
             }
@@ -1116,75 +1130,65 @@ impl<'a> Mut202Fn<'a> {
     /// container's items, and the copy reaches no other code: its uses are plain loads,
     /// methods and builtins that only read it, iterations, and returns.
     fn still_shared(&self, facts: &BelowCopies<'a>, site: usize, first: VarId) -> bool {
-        let shape = &self.ix.shape;
+        let level = (self.ix.shape.inst(first)).and_then(|load| self.load_of(&load.kind));
+        level.is_some_and(|(_, level)| self.level_kept(facts, site, &level))
+    }
+
+    /// [`Self::still_shared`] of the copy `site`'s `level`.
+    fn level_kept(&self, facts: &BelowCopies<'a>, site: usize, level: &Level) -> bool {
         let copy = &facts.sites[site];
-        let Some(load) = shape.inst(first) else {
-            return false;
+        let given = match level {
+            Level::Attr(attr) => copy.given.as_ref().is_none_or(|g| g.contains(attr)),
+            Level::Key(_) => false,
         };
-        let Some((_, level)) = self.load_of(&load.kind) else {
-            return false;
+        // A store under a key heki cannot read may store any; a load under one may read any.
+        let replaces = |stored: &Level| match (stored, level) {
+            (Level::Key(s), Level::Key(l)) => s.is_none() || l.is_none() || s == l,
+            (stored, level) => stored == level,
         };
-        if let Level::Attr(attr) = &level
-            && copy.given.as_ref().is_none_or(|g| g.contains(attr))
-        {
-            return false;
-        }
-        let replaces = |stored: &Level| match (stored, &level) {
-            (Level::Key(None), Level::Key(_)) | (Level::Key(Some(_)), Level::Key(None)) => true,
-            (Level::Key(Some(k)), Level::Key(Some(l))) => k == l,
-            (Level::Attr(a), Level::Attr(b)) => a == b,
-            _ => false,
-        };
-        if self
-            .stores_into(facts, copy.dst)
-            .keys()
-            .any(|(stored, _)| replaces(stored))
-        {
-            return false;
-        }
-        self.copy_uses(facts, copy.dst)
-            .iter()
-            .all(|(v, u)| match *u {
+        let stores = self.stores_into(facts, copy.dst);
+        let uses = self.copy_uses(facts, copy.dst);
+        let container = matches!(copy.kind, CopyKind::Container { .. });
+        !given
+            && !stores.keys().any(|(stored, _)| replaces(stored))
+            && uses.complete
+            && uses.uses.iter().all(|(v, u)| match *u {
                 Use::Inst(b, i) => {
-                    self.copy_use_reads(&self.f.block(b).insts[i as usize].kind, *v, copy.kind)
+                    self.copy_use_reads(&self.f.block(b).insts[i as usize].kind, *v, container)
                 }
-                Use::Terminator(b) => match self.f.block(b).terminator {
-                    Terminator::Return(_) => true,
-                    Terminator::Branch { .. } => matches!(copy.kind, CopyKind::Container { .. }),
-                    _ => false,
-                },
+                Use::Terminator(b) => {
+                    let terminator = &self.f.block(b).terminator;
+                    matches!(terminator, Terminator::Return(_))
+                        || container && matches!(terminator, Terminator::Branch { .. })
+                }
                 Use::Phi(..) => false,
             })
     }
 
     /// Whether the instruction `kind`, a use of the copy `v`, rebinds nothing the copy holds
     /// beyond the stores [`Self::stores_into`] lists, and hands the copy to no other code.
-    fn copy_use_reads(&self, kind: &InstKind, v: VarId, copied: CopyKind) -> bool {
-        // An instance's operators, iteration, items, and formatting may run the project's code.
-        if !matches!(copied, CopyKind::Container { .. }) {
-            return match kind {
-                InstKind::Copy { .. } => true,
-                InstKind::AttrLoad { obj, attr, .. } => *obj == v && self.plain_read(v, attr),
-                InstKind::AttrStore { obj, value, .. } => *obj == v && *value != v,
-                InstKind::AttrDelete { obj, .. } => *obj == v,
-                _ => false,
-            };
-        }
+    fn copy_use_reads(&self, kind: &InstKind, v: VarId, container: bool) -> bool {
         match kind {
-            InstKind::Copy { .. }
-            | InstKind::MakeIter { .. }
-            | InstKind::Format { .. }
-            | InstKind::BuildString { .. } => true,
-            InstKind::SubscriptLoad { obj, .. } => *obj == v,
-            InstKind::AttrLoad { obj, attr, .. } => *obj == v && attr != "__dict__",
+            InstKind::Copy { .. } => true,
+            InstKind::AttrLoad { obj, attr, .. } => {
+                *obj == v && attr != "__dict__" && (container || self.plain_read(v, attr))
+            }
             InstKind::AttrStore { obj, value, .. } => *obj == v && *value != v,
             InstKind::AttrDelete { obj, .. } => *obj == v,
+            // An instance's operators, iteration, items, and formatting may run the project's
+            // code.
+            _ if !container => false,
+            InstKind::MakeIter { .. }
+            | InstKind::Format { .. }
+            | InstKind::BuildString { .. }
+            | InstKind::Compare { .. }
+            | InstKind::UnaryOp { .. } => true,
+            InstKind::SubscriptLoad { obj, .. } => *obj == v,
             InstKind::SubscriptStore {
                 obj, value, index, ..
             } => *obj == v && *value != v && *index != v,
             InstKind::SubscriptDelete { obj, index, .. } => *obj == v && *index != v,
             InstKind::BinOp { in_place, lhs, .. } => !(*in_place && *lhs == v),
-            InstKind::Compare { .. } | InstKind::UnaryOp { .. } => true,
             InstKind::MethodCall {
                 recv,
                 method,
@@ -1261,8 +1265,7 @@ impl<'a> Mut202Fn<'a> {
                 _ => {
                     match self.f.var_name(at) {
                         Some(name) => parts.push(name.to_owned()),
-                        None if parts.is_empty() => return "the copied value".to_owned(),
-                        None => parts.push("...".to_owned()),
+                        None => return "the copied value".to_owned(),
                     }
                     break;
                 }
@@ -1289,42 +1292,3 @@ const COPY_HOOKS: &[&str] = &[
     "__getstate__",
     "__setstate__",
 ];
-
-/// The object a store or delete instruction stores into.
-fn store_target(kind: &InstKind) -> Option<VarId> {
-    match kind {
-        InstKind::SubscriptStore { obj, .. }
-        | InstKind::SubscriptDelete { obj, .. }
-        | InstKind::AttrStore { obj, .. }
-        | InstKind::AttrDelete { obj, .. } => Some(*obj),
-        _ => None,
-    }
-}
-
-/// The value an in-place change instruction changes.
-fn changed_value(kind: &InstKind) -> Option<VarId> {
-    match kind {
-        InstKind::AttrStore { obj, .. }
-        | InstKind::AttrDelete { obj, .. }
-        | InstKind::SubscriptStore { obj, .. }
-        | InstKind::SubscriptDelete { obj, .. } => Some(*obj),
-        InstKind::MethodCall { recv, .. } => Some(*recv),
-        InstKind::BinOp {
-            lhs,
-            in_place: true,
-            ..
-        } => Some(*lhs),
-        _ => None,
-    }
-}
-
-/// Whether a builtin display is a list display (not a tuple or set display).
-fn is_list_display(kind: &InstKind) -> bool {
-    matches!(
-        kind,
-        InstKind::AllocBuiltin {
-            kind: heki_ir::BuiltinKind::List,
-            ..
-        }
-    )
-}

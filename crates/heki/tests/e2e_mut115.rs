@@ -524,3 +524,351 @@ fn mut115_runs_only_when_selected() {
         5
     );
 }
+
+/// Every form of copy, of load from a copy, of use of a copy, and of change the rule reads, each
+/// in a function of its own, with the tier its report states (or no report).
+const FORMS: &str = r#"import copy
+import dataclasses
+from collections import deque
+from dataclasses import dataclass
+
+from pydantic import BaseModel
+
+
+class Node:
+    def __init__(self) -> None:
+        self.children: list[int] = []
+        self.name = ""
+        self.label = ""
+
+
+class Box:
+    def __init__(self) -> None:
+        self.items: list[int] = []
+
+    @property
+    def computed(self) -> list[int]:
+        return list(self.items)
+
+
+class Bag:
+    def append(self, item: int) -> None:
+        pass
+
+
+class Holder:
+    def __init__(self) -> None:
+        self.options: dict[str, list[str]] = {}
+
+
+class Field(BaseModel):
+    validation_aliases: list[str] = []
+
+
+@dataclass
+class Point:
+    tags: list[str]
+
+
+def untyped_model(m) -> None:
+    copied = m.model_copy()
+    copied.items.append(1)
+
+
+def dunder(node: Node) -> None:
+    clone = node.__copy__()
+    clone.children.append(1)
+
+
+def queued(rows: list[list[int]]) -> None:
+    copied = deque(rows)
+    copied[0].append(1)
+
+
+def splatted_replace(point: Point, changes) -> None:
+    moved = dataclasses.replace(point, **changes)
+    moved.tags.append("x")
+
+
+def computed_update(field: Field, changes) -> None:
+    copied = field.model_copy(update=changes)
+    copied.validation_aliases.append("x")
+
+
+def splat_update(field: Field, changes) -> None:
+    copied = field.model_copy(update={**changes})
+    copied.validation_aliases.append("x")
+
+
+def named_replace(point: Point) -> None:
+    moved = dataclasses.replace(point, tags=[])
+    moved.tags.append("x")
+
+
+def got_holder(groups: dict[str, dict[str, list[int]]]) -> None:
+    copied = groups.get("a").copy()
+    copied["b"].append(1)
+
+
+def below_get(tree: dict[str, dict[str, list[int]]]) -> None:
+    copied = tree.copy()
+    copied["a"].get("b").append(1)
+
+
+def below_attr(boxes: dict[str, Box]) -> None:
+    copied = boxes.copy()
+    copied["a"].items.append(1)
+
+
+def below_property(boxes: dict[str, Box]) -> None:
+    copied = boxes.copy()
+    copied["a"].computed.append(1)
+
+
+def popped(options: dict[str, list[str]]) -> None:
+    copied = options.copy()
+    copied.pop("tags").append("x")
+
+
+def either(tree: dict[str, dict[str, list[int]]], flag: bool) -> None:
+    copied = tree.copy()
+    inner = copied["a"] if flag else copied["a"]
+    inner["b"].append(1)
+
+
+def kept_in_loop(options: dict[str, list[str]], xs: list[str]) -> None:
+    copied = options.copy()
+    tags = copied["tags"]
+    for x in xs:
+        tags.append(x)
+        tags = tags
+
+
+def phi_copy(options: dict[str, list[str]], flag: bool) -> None:
+    copied = options.copy()
+    if flag:
+        copied = {"tags": []}
+    copied["tags"].append("x")
+
+
+def unknown_key(options: dict[str, list[str]], k: str) -> None:
+    copied = options.copy()
+    copied[k] = []
+    copied["tags"].append("x")
+
+
+def renamed(node: Node) -> None:
+    clone = copy.copy(node)
+    clone.name = "x"
+    del clone.label
+    clone.children.append(1)
+
+
+def printed(node: Node) -> None:
+    clone = copy.copy(node)
+    print(clone)
+    clone.children.append(1)
+
+
+def tested(node: Node) -> None:
+    clone = copy.copy(node)
+    if clone:
+        clone.children.append(1)
+
+
+def uses(options: dict[str, list[str]], other: dict[str, list[str]]) -> None:
+    copied = options.copy()
+    del copied["other"]
+    merged = copied | other
+    same = copied == other
+    empty = not copied
+    copied["tags"].append("x")
+    print(merged, same, empty)
+
+
+def holder_list(options: dict[str, list[str]]) -> None:
+    copied = options.copy()
+    holder = [copied]
+    copied["tags"].append("x")
+    print(holder)
+
+
+def untyped_items(options: dict) -> None:
+    copied = options.copy()
+    copied["tags"].append("x")
+
+
+def deleted(tree: dict[str, dict[str, int]]) -> None:
+    copied = tree.copy()
+    del copied["a"]["b"]
+
+
+def bagged(bags: dict[str, Bag]) -> None:
+    copied = bags.copy()
+    copied["a"].append(1)
+
+
+def undone(boxes: dict[str, Box]) -> None:
+    copied = boxes.copy()
+    del copied["a"].items
+
+
+def nested_holder(holders: list[Holder]) -> None:
+    copied = holders[0].options.copy()
+    copied["tags"].append("x")
+
+
+def augmented_attr(node: Node) -> None:
+    clone = copy.copy(node)
+    clone.children += [1]
+
+
+def tupled(rows: list[list[int]]) -> None:
+    copied = (*rows,)
+    copied[0].append(1)
+
+
+def branched(options: dict[str, list[str]]) -> None:
+    copied = options.copy()
+    if copied:
+        copied["tags"].append("x")
+
+
+def rebound_on_one_path(options: dict[str, list[str]], flag: bool) -> None:
+    copied = options.copy()
+    if flag:
+        copied["tags"] = []
+        tags = copied["tags"]
+    else:
+        tags = copied["tags"]
+    tags.append("x")
+
+
+def copied_dict(groups: dict[str, list[int]]) -> None:
+    clone = copy.copy(groups)
+    clone["a"].append(1)
+
+
+def annotated(node: Node) -> None:
+    clone: Node = copy.copy(node)
+    clone.children.append(1)
+
+
+def property_of_copy(box: Box) -> None:
+    clone = copy.copy(box)
+    clone.computed.append(1)
+
+
+def model_level(field: Field) -> None:
+    copied = field.model_copy()
+    copied.validation_aliases.append("x")
+
+
+class Table:
+    def __init__(self) -> None:
+        self.rows: dict[str, list[int]] = {}
+
+    def __getitem__(self, key: str) -> list[int]:
+        return self.rows[key]
+
+
+def table_item(table: Table) -> None:
+    clone = copy.copy(table)
+    clone["a"].append(1)
+
+
+def copy_in_phi(options: dict[str, list[str]], other: dict[str, list[str]], flag: bool) -> None:
+    copied = options.copy()
+    tags = copied["tags"]
+    if flag:
+        copied = other
+    tags.append("x")
+    print(copied)
+"#;
+
+#[test]
+fn mut115_reads_every_form_of_copy_load_use_and_change() {
+    let p = Project::new("mut115_forms");
+    p.write("pkg/__init__.py", "").write("pkg/forms.py", FORMS);
+    let diags = diagnostics(&p);
+    let source: Vec<&str> = FORMS.lines().collect();
+    let function_at = |line: u64| {
+        source[..line as usize]
+            .iter()
+            .rev()
+            .find_map(|l| l.strip_prefix("def "))
+            .and_then(|l| l.split('(').next())
+            .unwrap()
+            .to_owned()
+    };
+    let found: Vec<(String, bool)> = claims(&diags, "pkg/forms.py")
+        .into_iter()
+        .map(|(line, exact)| (function_at(line), exact))
+        .collect();
+    let expected: Vec<(String, bool)> = [
+        // Copies heki does not state level by level: a library's `model_copy`, a copy hook
+        // called by name, a catalog copy, `**` keywords, an `update` heki cannot read.
+        ("untyped_model", false),
+        ("dunder", false),
+        ("queued", false),
+        ("splatted_replace", false),
+        ("computed_update", false),
+        ("splat_update", false),
+        // `got_holder`: the copied value read with `get`; then `get` and attributes below.
+        ("got_holder", true),
+        ("below_get", true),
+        ("below_attr", true),
+        ("below_property", false),
+        ("popped", false),
+        ("either", false),
+        ("kept_in_loop", true),
+        ("phi_copy", false),
+        ("unknown_key", false),
+        ("renamed", true),
+        ("printed", false),
+        ("tested", false),
+        ("uses", true),
+        ("holder_list", false),
+        ("untyped_items", false),
+        ("deleted", true),
+        ("bagged", false),
+        ("undone", true),
+        ("nested_holder", true),
+        ("augmented_attr", true),
+        ("tupled", true),
+        ("branched", true),
+        // One path stores a list of the copy's own under the key before reading it.
+        ("rebound_on_one_path", false),
+        // heki states what `copy.copy` keeps attribute by attribute only, so an item stays
+        // heuristic.
+        ("copied_dict", false),
+        ("annotated", true),
+        // A property of the copy may compute a new object.
+        ("property_of_copy", false),
+        ("model_level", true),
+        // An item of an instance is what its `__getitem__` returns.
+        ("table_item", false),
+        // A copy that flows on with another value is not followed past the merge.
+        ("copy_in_phi", false),
+    ]
+    .into_iter()
+    .map(|(f, exact)| (f.to_owned(), exact))
+    .collect();
+    assert_eq!(found, expected, "{diags:#?}");
+    let nested = diags
+        .iter()
+        .find(|d| {
+            d["message"]
+                .as_str()
+                .unwrap()
+                .starts_with("`nested_holder`")
+        })
+        .unwrap();
+    assert!(
+        nested["message"]
+            .as_str()
+            .unwrap()
+            .contains("shallow copy of the copied value"),
+        "{nested:#}"
+    );
+}

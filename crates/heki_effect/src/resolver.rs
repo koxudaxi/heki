@@ -2504,7 +2504,7 @@ impl ProjectDecls {
             })
     }
 
-    /// Whether every class a value of the class `class` may be under R2
+    /// Whether `class` is a project class and every class a value of it may be under R2
     /// ([`Self::value_classes`], each once) is a project class that binds none of `names` and
     /// has no metaclass heki does not know, and every base of one outside the project is a plain
     /// base or one `known_base` accepts: the classes whose code runs on such a value are the
@@ -2517,20 +2517,19 @@ impl ProjectDecls {
     ) -> bool {
         let known = |c: &str| PLAIN_BASES.contains(&c) || known_base(c);
         let class = self.canonical(class);
-        if !self.is_project_class(&class) {
-            return known(&class);
-        }
-        self.value_classes(&class).iter().all(|c| {
-            self.read(|k| note(&mut k.class_facts, c));
-            self.class(c).is_some_and(|d| {
-                !d.custom_metaclass
-                    && names.iter().all(|n| !d.members.contains(*n))
-                    && d.bases.iter().all(|b| {
-                        let base = self.canonical(b);
-                        self.is_project_class(&base) || known(&base)
-                    })
+        // A class outside the project runs code heki does not read.
+        self.is_project_class(&class)
+            && self.value_classes(&class).iter().all(|c| {
+                self.read(|k| note(&mut k.class_facts, c));
+                self.class(c).is_some_and(|d| {
+                    !d.custom_metaclass
+                        && names.iter().all(|n| !d.members.contains(*n))
+                        && d.bases.iter().all(|b| {
+                            let base = self.canonical(b);
+                            self.is_project_class(&base) || known(&base)
+                        })
+                })
             })
-        })
     }
 
     /// Whether storing or deleting `attr` on a value of the class `class` changes that
