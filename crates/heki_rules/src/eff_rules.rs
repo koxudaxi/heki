@@ -14,7 +14,7 @@ use crate::{
     split_last_dot,
 };
 use heki_ast::Span;
-use heki_diagnostics::{Certainty, Diagnostic, OpenPremise};
+use heki_diagnostics::{Certainty, Diagnostic, OpenPremise, OpenRecord};
 use heki_effect::guards::{loop_bit, per_item_bit};
 use heki_effect::with_paths;
 use heki_effect::{
@@ -268,7 +268,7 @@ pub(crate) fn eff101_105(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) {
                 &chain,
             ) {
                 d.fold_key = Some(fold_key);
-                d.open_premises = open_premises;
+                d.open_records = open_premises.into_iter().map(OpenRecord::from).collect();
             }
         }
     }
@@ -580,7 +580,7 @@ pub(crate) fn eff102_103(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut
                     !cx.open_premises || !verdict.open.is_empty(),
                     "an EFF113 report records why it is not EFF103"
                 );
-                d.open_premises = verdict.open;
+                d.open_records = verdict.open.into_iter().map(OpenRecord::from).collect();
             }
         }
     }

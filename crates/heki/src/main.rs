@@ -9,6 +9,7 @@ macro_rules! log {
 
 mod check;
 mod dump_facts;
+mod dump_recommend_facts;
 mod inspect;
 mod open_premises;
 mod prompt;
@@ -107,6 +108,9 @@ enum Commands {
     /// Internal/testing: dump the path and loop facts of `heki_ir::facts` as JSON.
     #[command(hide = true)]
     DumpFacts(DumpSemanticArgs),
+    /// Internal/testing: dump the facts `heki recommend` reads besides the rules as JSON.
+    #[command(hide = true)]
+    DumpRecommendFacts(DumpRecommendFactsArgs),
     /// Internal: dump the experimental features as JSON for `scripts/build_docs.py`.
     #[command(hide = true)]
     DumpExperimental,
@@ -367,6 +371,18 @@ struct AssumptionsArgs {
 }
 
 #[derive(Debug, Args)]
+struct DumpRecommendFactsArgs {
+    /// The project to analyze, as for `heki check`.
+    #[arg(default_value = ".")]
+    paths: Vec<PathBuf>,
+    /// Print only the counts per project.
+    #[arg(long)]
+    totals: bool,
+    #[command(flatten)]
+    analysis: AnalysisArgs,
+}
+
+#[derive(Debug, Args)]
 struct DumpSemanticArgs {
     /// Python source file to parse and dump semantic scopes for.
     file: PathBuf,
@@ -499,6 +515,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             println!("{}", serde_json::to_string_pretty(&facts)?);
             Ok(ExitCode::SUCCESS)
         }
+        Commands::DumpRecommendFacts(args) => dump_recommend_facts::run(&args),
         Commands::DumpOpenPremises(args) => open_premises::run(&args),
         Commands::DumpExperimental => {
             let registry = serde_json::json!({
