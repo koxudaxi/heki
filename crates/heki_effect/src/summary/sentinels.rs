@@ -78,16 +78,11 @@ impl<'a> Extractor<'a> {
             if project.is_project_class(c) && project.protocol_implementers(c).is_none())
     }
 
-    /// The instruction defining the value `var` copies, through copies.
+    /// The instruction defining the value `var` copies, through copies (`FnShape::copy_root`,
+    /// a table built once per function).
     fn root_def(&self, var: VarId) -> Option<&'a InstKind> {
-        let mut cur = var;
-        loop {
-            let inst: &'a heki_ir::Inst = self.defs.get(&cur)?;
-            match &inst.kind {
-                InstKind::Copy { src, .. } => cur = *src,
-                kind => return Some(kind),
-            }
-        }
+        let shape: &'a heki_ir::walk::FnShape<'a> = self.shape;
+        shape.inst(shape.copy_root(var)).map(|i| &i.kind)
     }
 
     /// The fqn of the module-level name `var` holds: a global of the module, a name one of its
