@@ -16,10 +16,13 @@ allowed reader functions: the read side of `MUT201`. A read is reported when it 
 the allowed readers:
 
 - directly (`ref.children`), also on `self` and through local aliases;
+- through a class object, which reads the class attribute: the class itself
+  (`Reference.children`), `cls` in a class method, `type(ref)`, or a value typed
+  `type[Reference]` / `typing.Type[Reference]`;
 - through `getattr(ref, "children"[, default])` or `object.__getattribute__(ref, "children")`
   with a constant name: a string literal or a string constant, as for `MUT201`;
-- through `ref.__dict__["children"]` or `ref.__dict__.get("children")`, also with a string
-  constant for the key.
+- through `ref.__dict__["children"]` or `ref.__dict__.get("children")` (also on `vars(ref)`),
+  also with a string constant for the key.
 
 A target names a class and an attribute; it covers the class's subclasses too. A container
 entry (`Class.attr["key"]`) is a write target only: reading an entry reads the attribute, so a
@@ -60,13 +63,27 @@ so a private getter (`ref._kids` returning `self.children`) hands its read to th
 reading it. Reads in a class's own initializer on its own `self` are allowed, and so are reads
 in a function that only runs inside allowed contexts (every path of callers above it starts in
 an allowed reader or an exempt method), as for `MUT201`. One report stands for every read behind
-its call (`sites` in JSON), as for `MUT201`. A read runs where the body holding it runs, as for
+its call (`sites` in JSON), as for `MUT201`, and a read matching several targets of one contract
+is one report, under the target configured first, naming the others. A read runs where the body holding it runs, as for
 `MUT201`: a generator's reads where it is iterated, a coroutine's where it is awaited.
 
 With `attribution = "lexical"`, a read is judged in the function whose code holds it instead: a
 private helper reports its reads itself, and a function that only runs inside allowed readers is
 reported too. A lambda, comprehension, or generator expression is part of the function it is
-written in. A class's own initialization still allows a read.
+written in. A class's own initialization still allows a read, through the helpers it passes
+`self` to too (a helper whose every path of project callers starts in an initializer handing it
+its own `self`).
+
+With `own-receiver = "allow"`, a read through the receiver of the method it is judged in is
+allowed: the function reported (with `attribution = "lexical"`, the function holding the read)
+is a method that is no static method, and the object the member is looked up on may be its first
+parameter (`self._seen`, `cls._kind`, `obj._seen` with `obj = self if flag else peer`), also for
+a member the class inherits. Another parameter, an attribute of the receiver, and a nested
+`def`, lambda, or comprehension using the enclosing method's `self` stay reported.
+
+With `allowed-protocols`, a read through a value typed with a project protocol the key names that
+declares the attribute, itself or through its protocol bases, is allowed wherever it is judged; a
+read through another protocol or the implementation's class stays reported.
 
 ## What a report states
 
@@ -75,11 +92,13 @@ read owners, directly, through an alias, `getattr`, or `__dict__`, or through th
 
 Its premises:
 
-- **Target**: the object is an instance of a class the contract names, or of a subclass, by
-  construction or annotation (assumption R2). Open: an alias bound on one path is enough.
+- **Target**: the object is an instance of a class the contract names, or of a subclass, or the
+  class object of one, by construction or annotation (assumption R2). Open: an alias bound on
+  one path is enough.
 - **Outside the owners**: the function is not in the allowed modules and classes, nor runs only
   inside allowed contexts (with `attribution = "lexical"`: the function holding the read is not
-  allowed). Established from the contract.
+  allowed, nor runs only inside a class's own initialization; with `own-receiver = "allow"`, the
+  read object is not the receiver of the method judging it). Established from the contract.
 - **Through helpers**: a helper's write, read, or call counts at its caller (never with
   `attribution = "lexical"`). Open: one path of the helper is enough.
 
@@ -146,6 +165,11 @@ No automatic fix.
   - `attribution`: `"call-graph"` (default) or `"lexical"`: whether a private helper hands its
     reads to its callers and a function that only runs inside allowed readers is allowed, or
     each read is judged in the function holding it.
+  - `own-receiver`: `"report"` (default) or `"allow"`: whether a read through the receiver of the
+    method it is judged in (`self`, `cls`, `super()`) is allowed.
+  - `allowed-protocols`: project protocols (class patterns, their subclasses included): a read
+    through a value typed with one that declares the attribute, itself or through its protocol
+    bases, is allowed.
 
 Known limitation: a read through a parameter without a project-class annotation
 (`def helper(ref): return ref.children`) is not seen, since the read object's class is unknown

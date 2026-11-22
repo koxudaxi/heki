@@ -16,7 +16,7 @@
 
 use super::readonly_mutation::IN_PLACE;
 use super::{CallInst, CallParts, ClassMethods, MUTABLE_BUILTINS, facts_run_at, site_call};
-use crate::{CheckContext, ModuleUnit};
+use crate::{CheckContext, FnSites, ModuleUnit, SitesBySpan};
 use heki_ast::Span;
 use heki_diagnostics::Diagnostic;
 use heki_effect::cache_flow::is_memo_name;
@@ -240,7 +240,7 @@ struct UnitCheck<'a> {
     classes: &'a ClassMethods<'a>,
     tcx: TypeCtx<'a>,
     /// The module's call sites by caller qualname and span.
-    sites: FxHashMap<&'a str, FxHashMap<Span, Vec<&'a CallSite>>>,
+    sites: SitesBySpan<'a>,
     /// Per closure, the enclosing function's values of the variables it captures.
     seeds: FxHashMap<FunctionId, FxHashMap<String, Own>>,
 }
@@ -251,22 +251,12 @@ impl<'a> UnitCheck<'a> {
         unit: &'a ModuleUnit<'a>,
         classes: &'a ClassMethods<'a>,
     ) -> Self {
-        let mut sites: FxHashMap<&str, FxHashMap<Span, Vec<&CallSite>>> = FxHashMap::default();
-        let file = cx.index.files.get(&unit.input.path);
-        for site in file.into_iter().flat_map(|f| &f.call_sites) {
-            sites
-                .entry(site.caller.qualname.as_str())
-                .or_default()
-                .entry(site.span)
-                .or_default()
-                .push(site);
-        }
         Self {
             cx,
             unit,
             classes,
             tcx: TypeCtx::new(&unit.input, cx.decls, cx.kb),
-            sites,
+            sites: cx.sites_by_span(unit),
             seeds: FxHashMap::default(),
         }
     }
@@ -374,7 +364,7 @@ struct FnCheck<'a, 'u> {
     shape: FnShape<'a>,
     key: FuncKey,
     /// The function's call sites by span.
-    sites: Option<&'u FxHashMap<Span, Vec<&'a CallSite>>>,
+    sites: FnSites<'u, 'a>,
     types: FxHashMap<VarId, Val>,
     defs: FxHashMap<VarId, &'a Inst>,
     /// What the parameters hold when the function starts.
@@ -436,7 +426,7 @@ impl<'a, 'u> FnCheck<'a, 'u> {
         let live = ownership::Live::of(f, &defs);
         let key = CheckContext::key(u.unit, f);
         let mut check = Self {
-            sites: u.sites.get(key.qualname.as_str()),
+            sites: u.sites.of(&key.qualname),
             key,
             types: u.tcx.infer(f),
             u,
@@ -592,20 +582,13 @@ impl<'a, 'u> FnCheck<'a, 'u> {
     }
 
     fn sites_at(&self, span: Span) -> &[&'a CallSite] {
-        self.sites
-            .and_then(|by_span| by_span.get(&span))
-            .map_or(&[], Vec::as_slice)
+        self.sites.at(span)
     }
 
     /// The parts of a call instruction: a project call as the summaries resolved it, any other
     /// call by the inferred values.
     fn call_of(&self, inst: &'a Inst) -> Option<CallParts<'a>> {
-        if let Some(call) = site_call(
-            &|v| self.defs.get(&v).copied(),
-            self.sites_at(inst.span),
-            inst,
-            false,
-        ) {
+        if let Some(call) = site_call(&|v| self.defs.get(&v).copied(), self.sites, inst, false) {
             return Some(call);
         }
         let call = CallInst::of(&inst.kind)?;
@@ -1074,12 +1057,7 @@ impl<'a, 'u> FnCheck<'a, 'u> {
             }
             _ => {}
         }
-        let Some(call) = site_call(
-            &|v| self.defs.get(&v).copied(),
-            self.sites_at(inst.span),
-            inst,
-            false,
-        ) else {
+        let Some(call) = site_call(&|v| self.defs.get(&v).copied(), self.sites, inst, false) else {
             return match &inst.kind {
                 InstKind::MethodCall { recv, method, .. } if container_mutator(method) => {
                     vec![own(*recv, REMOVING_METHODS.contains(&method.as_str()))]

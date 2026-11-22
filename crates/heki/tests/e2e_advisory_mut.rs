@@ -720,3 +720,66 @@ class Cart:
         vec![d("cart.py", 24, "MUT101", "Cart.reset_other")]
     );
 }
+
+/// `vars(self)` is `self.__dict__`: removing the cached value from it invalidates the property,
+/// through an alias too; a name shadowing the builtin does not.
+#[test]
+fn mut101_invalidation_through_vars() {
+    let p = Project::new("mut101_vars");
+    p.write(
+        "cart.py",
+        r#"from functools import cached_property
+
+
+class Cart:
+    def __init__(self):
+        self.items = []
+
+    @cached_property
+    def total(self):
+        return len(self.items)
+
+    def reset(self):
+        self.items.clear()
+        vars(self).pop("total", None)
+
+    def reset_alias(self):
+        self.items.clear()
+        ns = vars(self)
+        del ns["total"]
+
+    def reset_none(self):
+        self.items.clear()
+"#,
+    )
+    .write(
+        "shadowed.py",
+        r#"from functools import cached_property
+
+
+def vars(obj):
+    return {}
+
+
+class Cart:
+    def __init__(self):
+        self.items = []
+
+    @cached_property
+    def total(self):
+        return len(self.items)
+
+    def reset(self):
+        self.items.clear()
+        vars(self).pop("total", None)
+"#,
+    );
+    let diags = diagnostics(&p, &["--select", "MUT101"]);
+    assert_eq!(
+        found(&diags),
+        vec![
+            d("cart.py", 22, "MUT101", "Cart.reset_none"),
+            d("shadowed.py", 17, "MUT101", "Cart.reset"),
+        ]
+    );
+}

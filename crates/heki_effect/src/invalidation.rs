@@ -374,6 +374,16 @@ pub(crate) fn analyze(
         block_inv[b.0 as usize] |= mask;
         inv_at[b.0 as usize].push((*i, *mask));
     }
+    // Each block's invalidators by position, each with the contracts it and every later one
+    // announce: the contracts announced after a point are one lookup, whatever the block holds.
+    for v in &mut inv_at {
+        v.sort_unstable_by_key(|(i, _)| *i);
+        let mut later = 0;
+        for (_, mask) in v.iter_mut().rev() {
+            later |= *mask;
+            *mask = later;
+        }
+    }
     // Contracts covered from the start of each block: a greatest fixpoint from `all`, so
     // paths that never return (and loops before a return) add no obligation.
     let mut cov_in = vec![all; n];
@@ -412,28 +422,46 @@ pub(crate) fn analyze(
         v.sort_unstable();
     }
     let inv_after = |b: usize, after: Option<usize>| -> u64 {
-        inv_at[b]
-            .iter()
-            .filter(|(i, _)| after.is_none_or(|a| *i > a))
-            .fold(0, |acc, (_, m)| acc | m)
+        let first = after.map_or(0, |a| inv_at[b].partition_point(|(i, _)| *i <= a));
+        inv_at[b].get(first).map_or(0, |(_, later)| *later)
     };
+    // The first call on the post-dominator chain from the start of each block, answered once
+    // per block (a chain is followed until a block already answered), so the next call of every
+    // site is found in time linear in the function.
+    let mut next_from: Vec<Option<Option<usize>>> = vec![None; n];
+    let mut chain = Vec::new();
+    for start in 0..n {
+        let mut found = None;
+        let mut x = Some(start);
+        while let Some(b) = x.filter(|b| *b != n) {
+            if let Some(known) = next_from[b] {
+                found = known;
+                break;
+            }
+            if let Some(first) = calls_at[b].first() {
+                next_from[b] = Some(Some(first.1));
+                found = Some(first.1);
+                break;
+            }
+            chain.push(b);
+            x = ipdom[b];
+        }
+        for b in chain.drain(..) {
+            next_from[b] = Some(found);
+        }
+    }
     // The flow after instruction `after` of block `b` (`None`: from the block's start).
     let flow_at = |b: usize, after: Option<usize>| -> SiteFlow {
         let mut invalidated = inv_after(b, after) | cov_out(b, &cov_in);
         if has_flags && invalidated != all {
             invalidated |= flag_covered(f, &conds, &succ, &inv_after, all, b, after);
         }
-        let mut next = calls_at[b]
-            .iter()
-            .find(|(i, _)| after.is_none_or(|a| *i > a))
-            .map(|c| c.1);
-        let mut p = ipdom[b];
-        while next.is_none()
-            && let Some(x) = p.filter(|x| *x != n)
-        {
-            next = calls_at[x].first().map(|c| c.1);
-            p = ipdom[x];
-        }
+        let first = after.map_or(0, |a| calls_at[b].partition_point(|(i, _)| *i <= a));
+        let next = calls_at[b].get(first).map(|c| c.1).or_else(|| {
+            ipdom[b]
+                .filter(|x| *x != n)
+                .and_then(|x| next_from[x].flatten())
+        });
         SiteFlow {
             invalidated,
             next_call: next.map(|s| u32::try_from(s).unwrap_or(u32::MAX)),

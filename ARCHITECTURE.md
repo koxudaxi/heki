@@ -304,14 +304,17 @@ out by loops, subscripts, unpacking, dict views, and the builtins that wrap iter
 getters' and methods' return annotations along the MRO, as a type checker reads them; `Self`;
 copies; `functools.partial`; `typing.cast`; unions of up to three classes; `isinstance`
 narrowing; the closure cells of enclosing functions, which hold every value the function binds
-to them unless a nested scope rebinds them; `type(obj)`, a class object that may be a subclass
-as `cls` is; and the structural implementations of project `Protocol`s (up to eight).
+to them unless a nested scope rebinds them; `type(obj)` and a `type[C]` / `typing.Type[C]`
+annotation, a class object that may be a subclass as `cls` is; and the structural
+implementations of project `Protocol`s (up to eight).
 
 Reading a property is a call: `obj.attr` on an instance of a project class whose `attr` is a
 getter-only `@property` / `cached_property` (found along the MRO and in overriding subclasses, at
 most 8) is a call site of the getter that binds the receiver, at the read. A property with a
 setter or deleter is not modeled, because the setter shares the getter's qualname and summary.
-`FunctionDecl.is_property` is a declaration fact, so `ProjectIndex` stays IR-free.
+`FunctionDecl.is_property` is a declaration fact, so `ProjectIndex` stays IR-free. Calling a
+property's value, `obj.attr(...)`, is that read and a call of what the getter returns, typed by
+its return annotation (`FunctionDecl.property_type`, also for a property with a setter).
 
 #### One `EffectSummary`, propagated bottom-up over Tarjan SCCs
 For the project's functions, a worklist fixpoint in reverse topological order of the call
@@ -508,7 +511,7 @@ The 37 rules are listed in the [rules reference](docs/rules/index.md).
 | **MUT202** | When configured (contract, heuristic) | **Declared read-only returns**: the shared objects returned by the functions listed in `[[tool.heki.readonly-returns]]` (and the containers below them) must not be mutated by callers or downstream functions, including the values returned through wrappers: a function returning a producer's result (unless copied) becomes a producer itself, across modules (`returns_protected`, propagated bottom-up); `@lru_cache` / `@cache` results are `MUT114`'s | Checked statically through cross-function `mutates_params` and alias tracking (replaces the run-time fingerprint monitoring of datamodel-code-generator's `tests/checks/schema_graph.py`) |
 | **MUT203** | When configured (contract, heuristic) | **Declared read ownership**: reads of the classes and attributes listed in `[[tool.heki.read-owners]]` (local aliases, `getattr`, and `__dict__` included) are limited to the allowed readers (the read side of `MUT201`) | The same patterns, subclass expansion, initializer rule, `exempt-methods`, delegation from private helpers to their callers, allowed-context rule, and `message` as `MUT201`. Read sites are kept as local facts and the rule walks the reverse call graph, so summaries do not grow with propagated reads |
 | **MUT204** | When configured (contract, heuristic) | **Declared call ownership**: calls of the functions, methods (overrides included), and constructions of the classes listed in `[[tool.heki.call-owners]]` outside the allowed callers (or inside `forbidden-callers`), through the receiver's class, bound-method aliases, and constant `getattr` calls | Reported only when every candidate is a target; `MUT203`'s delegation, initializer, and allowed-context rules; targets may call each other; call sites are local `FileSummary` facts (`CallSite::constructs`) |
-| **MUT205** | When configured (`unresolved = "report"`, heuristic) | **Writes a `write-owners` contract cannot check**: outside the write owners, an attribute named like a target written on an object of unknown class, or a computed attribute name on a guarded class (`setattr(obj, name, v)`, `obj.__dict__[name]`, `__dict__.clear()`), so a clean `MUT201` run says how much it did not check | Objects of known classes (`MUT201`'s domain), the contract's scopes and baselines |
+| **MUT205** | When configured (`unresolved = "report"`, heuristic) | **Writes a `write-owners` contract cannot check**: outside the write owners, an attribute named like a target written on an object of unknown class, or a computed attribute name on a guarded class or on an object of unknown class (`setattr(obj, name, v)`, `obj.__dict__[name]`, `__dict__.clear()`), so a clean `MUT201` run says how much it did not check | Objects of known classes (`MUT201`'s domain), the contract's scopes and baselines |
 | **MUT206** | When configured (`unresolved = "report"`, heuristic) | **Reads a `read-owners` contract cannot check**: outside the read owners, a read of an attribute named like a target (also through a local alias, a constant `getattr`, or `__dict__`) on an object of unknown class (an unannotated parameter, a loop variable, an untyped call result, `Any` / `object`, a protocol whose implementations heki cannot list), so a clean `MUT203` run says how much it did not check | `MUT203`'s allowed readers, exempt methods, allowed contexts, and `forbidden-readers`; for an untyped parameter the callers decide: not reported when every caller binds an instance of a project class outside the targets' classes. Access sites are local facts (`EffectSummary::unresolved_access_sites`) |
 | **MUT207** | When configured (`unresolved = "report"`, heuristic) | **Calls a `call-owners` contract cannot check**: outside the call owners, a call of a method named like a target (its last name; also through a bound-method alias or a constant `getattr`) on a receiver of unknown class, so a clean `MUT204` run says how much it did not check | `MUT204`'s allowed callers, exempt methods, targets calling each other, allowed contexts, and `forbidden-callers`; the same caller walk as `MUT206`; a call of a value of unknown origin (`callback()`) names nothing and is not reported |
 

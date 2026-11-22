@@ -1587,3 +1587,333 @@ fn type_of_an_instance_is_its_class_or_a_subclass() {
         "{stdout}"
     );
 }
+
+const CLASS_OBJECT_CONFIG: &str = r#"[project]
+name = "t"
+
+[tool.heki.lint]
+select = ["MUT203", "MUT204", "EFF201"]
+
+[[tool.heki.call-owners]]
+name = "dict-builder"
+targets = ["pkg.types.DataType(is_dict=True)"]
+forbidden-callers = ["pkg.uses:*"]
+
+[[tool.heki.call-owners]]
+name = "private"
+targets = ["pkg.types.DataType._*", "pkg.types.Handler.__call__"]
+forbidden-callers = ["pkg.uses:*"]
+
+[[tool.heki.read-owners]]
+name = "members"
+targets = ["pkg.types.DataType.HOLDS_MEMBERS"]
+forbidden-readers = ["pkg.uses:*"]
+
+[[tool.heki.effect-boundaries]]
+name = "pure"
+scopes = ["pkg.uses.class_attribute", "pkg.uses.named_class"]
+forbid = ["reads-targets"]
+read-targets = ["pkg.types.DataType.HOLDS_MEMBERS"]
+"#;
+
+const CLASS_OBJECT_TYPES: &str = r#"from __future__ import annotations
+
+from typing import Protocol
+
+
+class DataType:
+    HOLDS_MEMBERS = True
+
+    def __init__(self, *, is_dict: bool = False, is_list: bool = False) -> None:
+        self.is_dict = is_dict
+        self.is_list = is_list
+
+    @classmethod
+    def _of(cls, flag: bool) -> DataType:
+        return cls(is_list=flag)
+
+
+class Leaf(DataType):
+    pass
+
+
+class Other:
+    HOLDS_MEMBERS = False
+
+    def __init__(self, *, is_dict: bool = False) -> None:
+        self.is_dict = is_dict
+
+
+class Members(Protocol):
+    HOLDS_MEMBERS: bool
+
+    def __init__(self, *, is_dict: bool = False) -> None: ...
+
+
+class Handler:
+    def __call__(self, value: object) -> None:
+        print(value)
+"#;
+
+/// Values typed `type[C]` (a parameter, a property, a return, the items of a container, a
+/// local, an attribute) and the class objects that read class attributes.
+const CLASS_OBJECT_USES: &str = r#"from __future__ import annotations
+
+import typing
+from typing import Any, Optional, Type, Union
+
+from pkg import types
+from pkg.types import DataType, Handler, Leaf, Members, Other
+
+
+class Config:
+    kind: type[DataType] = DataType
+
+
+class Parser:
+    def __init__(self, data_type: type[DataType]) -> None:
+        self._data_type = data_type
+
+    @property
+    def data_type(self) -> type[DataType]:
+        return self._data_type
+
+    @property
+    def maybe_type(self) -> Optional[type[DataType]]:
+        return self._data_type
+
+    @property
+    def untyped(self):
+        return self._data_type
+
+    @property
+    def handler(self) -> Handler:
+        return Handler()
+
+    def property_call(self) -> DataType:
+        return self.data_type(is_dict=True)
+
+    def property_other_arguments(self) -> DataType:
+        return self.data_type(is_list=True)
+
+    def optional_property(self) -> DataType | None:
+        maybe = self.maybe_type
+        return maybe(is_dict=True) if maybe else None
+
+    def property_alias(self) -> DataType:
+        factory = self.data_type
+        return factory(is_dict=True)
+
+    def untyped_property(self) -> object:
+        return self.untyped(is_dict=True)
+
+    def property_instance(self) -> None:
+        self.handler(1)
+
+    def stored_attribute(self) -> DataType:
+        factory = self._data_type
+        return factory(is_dict=True)
+
+
+class Child(Parser):
+    def super_property(self) -> DataType:
+        return super().data_type(is_dict=True)
+
+
+def parameter(factory: type[DataType]) -> DataType:
+    return factory(is_dict=True)
+
+
+def typing_type(factory: Type[DataType]) -> DataType:
+    return factory(is_dict=True)
+
+
+def typing_module(factory: typing.Type[DataType]) -> DataType:
+    return factory(is_dict=True)
+
+
+def optional(factory: Optional[type[DataType]]) -> DataType | None:
+    return factory(is_dict=True) if factory else None
+
+
+def pep604(factory: type[DataType] | None) -> DataType | None:
+    return factory(is_dict=True) if factory else None
+
+
+def string(factory: "type[DataType]") -> DataType:
+    return factory(is_dict=True)
+
+
+def string_argument(factory: type["DataType"]) -> DataType:
+    return factory(is_dict=True)
+
+
+def subclass(factory: type[Leaf]) -> DataType:
+    return factory(is_dict=True)
+
+
+def module_attribute(factory: type[types.DataType]) -> DataType:
+    return factory(is_dict=True)
+
+
+def other_arguments(factory: type[DataType]) -> DataType:
+    return factory(is_list=True)
+
+
+def union(factory: type[DataType] | type[Other]) -> object:
+    return factory(is_dict=True)
+
+
+def union_argument(factory: type[Union[DataType, Other]]) -> object:
+    return factory(is_dict=True)
+
+
+def protocol(factory: type[Members]) -> object:
+    return factory(is_dict=True)
+
+
+def any_class(factory: type[Any]) -> object:
+    return factory(is_dict=True)
+
+
+def returned() -> type[DataType]:
+    return DataType
+
+
+def return_annotation() -> DataType:
+    return returned()(is_dict=True)
+
+
+def items(kinds: list[type[DataType]]) -> None:
+    for kind in kinds:
+        kind(is_dict=True)
+
+
+def registry(by_name: dict[str, type[DataType]], name: str) -> DataType:
+    return by_name[name](is_dict=True)
+
+
+def local_annotation(name: str) -> DataType:
+    kind: type[DataType] = Leaf if name else DataType
+    return kind(is_dict=True)
+
+
+def lookup(name: str) -> object:
+    return name
+
+
+def narrower_class(leaf: Leaf) -> DataType:
+    kind: type[DataType] = type(leaf)
+    return kind(is_dict=True)
+
+
+def declared_over_other(name: str) -> DataType:
+    kind: type[DataType] = lookup(name)
+    return kind(is_dict=True)
+
+
+DEFAULT_KIND: type[DataType] = Leaf
+
+
+def module_default() -> DataType:
+    return DEFAULT_KIND(is_dict=True)
+
+
+def class_attribute_annotation(config: Config) -> DataType:
+    kind = config.kind
+    return kind(is_dict=True)
+
+
+def class_method(model_type: type[DataType]) -> DataType:
+    return model_type._of(True)
+
+
+def class_attribute(model_type: type[DataType]) -> bool:
+    return model_type.HOLDS_MEMBERS
+
+
+def named_class() -> bool:
+    return DataType.HOLDS_MEMBERS
+
+
+def through_module() -> bool:
+    return types.DataType.HOLDS_MEMBERS
+
+
+def type_of(data: DataType) -> bool:
+    return type(data).HOLDS_MEMBERS
+
+
+def getattr_class(model_type: type[DataType]) -> bool:
+    return getattr(model_type, "HOLDS_MEMBERS")
+
+
+def other_class(model_type: type[Other]) -> bool:
+    return model_type.HOLDS_MEMBERS
+
+
+def protocol_class(model_type: type[Members]) -> bool:
+    return model_type.HOLDS_MEMBERS
+
+
+def instance(data: DataType) -> bool:
+    return data.HOLDS_MEMBERS
+
+
+class Builder(DataType):
+    @classmethod
+    def own_class(cls) -> bool:
+        return cls.HOLDS_MEMBERS
+"#;
+
+/// A value typed `type[C]` / `typing.Type[C]` (also optional, quoted, or inside a container) is
+/// the class object of `C` or a subclass, as `cls` is: calling it constructs `C`, a class method
+/// called on it runs `C`'s, and reading an attribute through it reads `C`'s class attribute, as a
+/// read through any class object does (for `read-owners` and an effect boundary's
+/// `read-targets`). A call of a property's value (`self.data_type(...)`) calls what the
+/// property's annotation says it returns. A class object of a protocol, of `Any`, or of either of
+/// two classes is of no known class.
+#[test]
+fn class_object_annotations_construct_call_and_read_their_class() {
+    let p = Project::new("class_objects");
+    p.write("pyproject.toml", CLASS_OBJECT_CONFIG)
+        .write("pkg/__init__.py", "")
+        .write("pkg/types.py", CLASS_OBJECT_TYPES)
+        .write("pkg/uses.py", CLASS_OBJECT_USES);
+    let expected = pairs(&[
+        ("Parser.property_call", "MUT204"),
+        ("Parser.optional_property", "MUT204"),
+        ("Parser.property_alias", "MUT204"),
+        ("Parser.property_instance", "MUT204"),
+        ("Parser.stored_attribute", "MUT204"),
+        ("Child.super_property", "MUT204"),
+        ("parameter", "MUT204"),
+        ("typing_type", "MUT204"),
+        ("typing_module", "MUT204"),
+        ("optional", "MUT204"),
+        ("pep604", "MUT204"),
+        ("string", "MUT204"),
+        ("string_argument", "MUT204"),
+        ("subclass", "MUT204"),
+        ("module_attribute", "MUT204"),
+        ("return_annotation", "MUT204"),
+        ("items", "MUT204"),
+        ("registry", "MUT204"),
+        ("local_annotation", "MUT204"),
+        ("narrower_class", "MUT204"),
+        ("declared_over_other", "MUT204"),
+        ("module_default", "MUT204"),
+        ("class_attribute_annotation", "MUT204"),
+        ("class_method", "MUT204"),
+        ("class_attribute", "MUT203"),
+        ("class_attribute", "EFF201"),
+        ("named_class", "MUT203"),
+        ("named_class", "EFF201"),
+        ("through_module", "MUT203"),
+        ("type_of", "MUT203"),
+        ("getattr_class", "MUT203"),
+        ("instance", "MUT203"),
+        ("Builder.own_class", "MUT203"),
+    ]);
+    assert_eq!(reported(&p, &[], "pkg/uses.py"), expected);
+}

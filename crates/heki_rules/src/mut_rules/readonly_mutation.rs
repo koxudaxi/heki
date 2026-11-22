@@ -489,9 +489,7 @@ pub fn chain_facts(index: &ProjectIndex, path: &Path) -> ChainFacts {
         .filter(|s| s.role == SiteRole::Call && !s.project_callees().is_empty())
     {
         if let Some((_, _, calls)) = out.get_mut(&site.caller) {
-            let mut site = site.clone();
-            site.span = Span { start: 0, end: 0 };
-            calls.push(site);
+            calls.push(site.unplaced());
         }
     }
     out
