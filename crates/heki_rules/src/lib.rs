@@ -810,7 +810,8 @@ pub struct CheckExtras<'a> {
     /// (the LSP engine checks one file).
     pub text_of: Option<&'a TextOf<'a>>,
     /// Record on each heuristic report of a claim with a premise row which premises it left
-    /// open and why (`Diagnostic::open_premises`, [`premises::OpenCause`]). Off, nothing more
+    /// open and why (`Diagnostic::open_records`, [`premises::OpenCause`]), and which conditions
+    /// of the exact tier that are no premise ([`premises::ConditionCause`]). Off, nothing more
     /// is computed than the tiers need.
     pub open_premises: bool,
 }
@@ -1184,7 +1185,7 @@ impl<'a> CheckContext<'a> {
             fix: None,
             sites: 1,
             fold_key: None,
-            open_premises: Vec::new(),
+            open_records: Vec::new(),
         });
         out.last_mut()
     }

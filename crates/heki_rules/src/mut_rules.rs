@@ -7,7 +7,7 @@ use crate::{
     has_glob_syntax, split_last_dot,
 };
 use heki_ast::Span;
-use heki_diagnostics::{Certainty, Diagnostic, OpenPremise};
+use heki_diagnostics::{Certainty, Diagnostic, OpenPremise, OpenRecord};
 use heki_effect::readonly::{self, Derivation};
 use heki_effect::{
     AttrKeyPath, BoundCallee, CacheEvent, CacheFlow, CallHop, CallSite, CallTarget, Callee,
@@ -3558,7 +3558,7 @@ impl<'a> Mut202Fn<'a> {
                 ControlFlow::Continue(())
             });
             debug_assert!(!open.is_empty(), "a heuristic MUT114 report records why");
-            d.open_premises = open;
+            d.open_records = open.into_iter().map(OpenRecord::from).collect();
         }
     }
 

@@ -1395,7 +1395,7 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      premises of its claim's row (`heki_rules::premises`) it left open, each with a cause. The
      decisions above tell each step that does not hold (`MustGap`) to whoever asks: a decision
      stops at the first, an explanation goes on. Along the reported chain each call is evaluated
-     (`ProjectIndex::site_must_gaps`): its targets' completeness, whether they run there as
+     (`MustExplainer::gaps_along`): its targets' completeness, whether they run there as
      written, their facts, and, below the first call, whether the caller makes the next call on
      every normal return (`CallSite::made_on_every_return`); the walk goes down while the
      function the chain enters lacks the fact, whose own gap then gives way to the gaps found
@@ -1703,8 +1703,14 @@ its verdict that is not established, with the obligation's kind as the cause
 site is found only in a loop and, for an accumulation, on a value carried around it
 (`find_sites`), and a candidate is reported only when its construction establishes the builtin
 type (`OptCandidate::is_reportable`). A proven size-dependent report in a loop whose trip count
-the code fixes or caps (`OptCandidate::in_exact_tier`) records nothing: no premise of its row is
-open, and the exact tier leaves it out only because a fixed count is no evidence either way.
+the code fixes or caps (`OptCandidate::in_exact_tier`) leaves no premise of its row open: the
+exact tier also asks for a condition that is no premise, "Trip count open"
+(`heki_rules::premises::Condition`, decided in `FnIndex::fixed_trips`; Safety × Profitability,
+ADR-007 and ADR-011: the claim holds, the change does not pay off over a loop the code counts).
+The report records that condition with its cause (`trip-count-fixed`, the bound as its detail)
+in the same list as open premises (`heki_diagnostics::OpenRecord::Condition`, axis
+profitability), so every heuristic report names why it is not exact; the premise rows, the
+claims, and the oracle's strips do not change.
 
 `OPT113`'s exact tier is one decision, `JoinPremises::steps`, which tells each step that does
 not hold to its caller in the order it takes them (the same collection, the same keys, both
@@ -1715,8 +1721,8 @@ budget proportional to the function), so the decisions of the other joins are un
 of an item whose type is unknown, or a load that is no plain attribute of a known class or no
 item of a builtin container) apart from any other work on a mismatch ("Idle on a mismatch"), and
 `steps_run_no_code` an inner iterable of unknown type (an annotation closes it, unless a project
-subclass of a builtin container defines `__iter__`) apart from one that may run code. A fixed
-trip count records nothing, as for the rewrites.
+subclass of a builtin container defines `__iter__`) apart from one that may run code. A trip
+count the code fixes or caps records "Trip count open" at the loop, as for the rewrites.
 
 ---
 
