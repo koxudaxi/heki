@@ -319,11 +319,11 @@ fn semantic_module_imports_and_classes() {
             .all(|i| i["imported_name"] != "*")
     );
 
-    // Lightweight CHA: dotted / subscripted bases are kept, call bases are not.
+    // Lightweight CHA: dotted / subscripted bases are named, a call base keeps its place unnamed.
     let forms = class(&m, "ClassForms");
     assert_eq!(
-        strs(&forms["bases"]),
-        ["Base", "cabc.Sized", "typing.Generic"]
+        forms["bases"],
+        serde_json::json!(["Base", "cabc.Sized", "typing.Generic", null])
     );
     assert_eq!(strs(&forms["methods"]), ["method", "prop", "static"]);
     let nested = class(&m, "ClassForms.Nested");

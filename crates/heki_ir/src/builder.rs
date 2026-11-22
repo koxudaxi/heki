@@ -126,8 +126,9 @@ pub fn build_module_ir(
     }
     functions.shrink_to_fit();
     let mut class_bases = ctx.class_bases;
-    // Nested functions finish before the functions holding them.
-    class_bases.sort_unstable_by_key(|&(function, _, _)| function);
+    // Nested functions finish before the functions holding them; a stable sort keeps each
+    // function's statements and bases in their order.
+    class_bases.sort_by_key(|&(function, _, _)| function);
     class_bases.shrink_to_fit();
     ModuleIr {
         functions,

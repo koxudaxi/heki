@@ -451,6 +451,10 @@ resolve is not followed:
 - a value of type `Any`, or an unannotated parameter;
 - a method name computed at run time;
 - a call with more than eight possible overrides;
+- a method no project class along a class's MRO defines, when a base of the class is a value
+  heki cannot name where its class statement runs (`class Derived(base)` with `base` a
+  parameter, a local, or a call's result), which may define it; such a class is no subclass of
+  any project class either;
 - a function outside the checked files that the catalog does not list.
 
 Two more cases stay quiet by design:
@@ -4291,8 +4295,9 @@ that it hands one on; with `references = "calls-and-bases"`, also that it subcla
 Its premises:
 
 - **Target**: the receiver or the callee is an instance of a class the contract names, or of a
-  subclass, by construction or annotation (assumption R2). Open: an alias bound on one path is
-  enough.
+  subclass, by construction or annotation (assumption R2). A subclass derives from the class
+  through bases named where their class statements run: a parameter, a local, or a closure cell
+  of the class's name is another class. Open: an alias bound on one path is enough.
 - **Outside the owners**: the function is not in the allowed modules and classes, nor runs only
   inside allowed contexts (with `attribution = "lexical"`: the function holding the call is not
   allowed). Established from the contract.

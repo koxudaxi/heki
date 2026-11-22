@@ -4703,6 +4703,78 @@ fn lsp_diagnostics_equal_a_full_check_for_bases_named_in_their_scope() {
     s.lsp.stop(true);
 }
 
+// --------------------------------------- the class hierarchy class bodies name in their scope
+
+const HIERARCHY_CONFIG: &str = r#"[project]
+name = "t"
+
+[tool.heki.lint]
+select = ["MUT204"]
+
+[[tool.heki.call-owners]]
+name = "home"
+targets = ["Rule.check"]
+allowed-callers = ["pkg.core.*", "pkg.site.*"]
+"#;
+
+const HIERARCHY_CORE: &str = "class Rule:\n    def check(self):\n        return True\n";
+// Classes nested in a class body: one inherits `Rule.check`, one overrides it.
+const HIERARCHY_SITE: &str = "from pkg.core import Rule\n\n\nclass Holder:\n    class Inherits(Rule):\n        pass\n\n    class Overrides(Rule):\n        def check(self):\n            return False\n";
+// `Holder.Inherits` finds `Rule.check` along its MRO, `Holder.Overrides` overrides it as a
+// subclass of `Rule`.
+const HIERARCHY_MRO: &str =
+    "from pkg.site import Holder\n\n\ndef through_mro(d: Holder.Inherits):\n    return d.check()\n";
+const HIERARCHY_FAMILY: &str = "from pkg.site import Holder\n\n\ndef through_family(d: Holder.Overrides):\n    return d.check()\n";
+
+/// The bases of class statements in a class body, named where they run (`ClassDecl::bases`),
+/// read by other files through the MRO and the subclass family: the class body binding the base's
+/// name before its classes turns both reports off, binding it after them turns them on (Python
+/// reads the module's name then), and binding it before them again turns them off.
+#[test]
+fn lsp_diagnostics_equal_a_full_check_while_a_class_body_shadows_a_base() {
+    let files = vec![
+        ("pkg/__init__.py", String::new()),
+        ("pkg/core.py", HIERARCHY_CORE.to_owned()),
+        ("pkg/site.py", HIERARCHY_SITE.to_owned()),
+        ("pkg/use_mro.py", HIERARCHY_MRO.to_owned()),
+        ("pkg/use_family.py", HIERARCHY_FAMILY.to_owned()),
+    ];
+    let shadowing =
+        HIERARCHY_SITE.replace("class Holder:\n", "class Holder:\n    Rule = object\n\n");
+    let mut s = Session::start_with("lsp_oracle_hierarchy_scope", HIERARCHY_CONFIG, files, false);
+    let both = &[
+        ("pkg/use_mro.py", "MUT204"),
+        ("pkg/use_family.py", "MUT204"),
+    ];
+    let steps = [
+        Step::new("initial index", Vec::new()).present(both),
+        Step::new(
+            "the class body binds the base's name before its classes",
+            vec![save("pkg/site.py", &shadowing)],
+        )
+        .absent(both),
+        Step::new(
+            "the class body binds it after its classes",
+            vec![save(
+                "pkg/site.py",
+                &format!("{HIERARCHY_SITE}\n    Rule = object\n"),
+            )],
+        )
+        .present(both),
+        Step::new(
+            "the class body binds it before its classes again",
+            vec![save("pkg/site.py", &shadowing)],
+        )
+        .absent(both),
+    ];
+    let mut failures = Vec::new();
+    for step in &steps {
+        failures.extend(s.run(step));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+    s.lsp.stop(true);
+}
+
 // ----------------------------------------------------------- package paths an import goes through
 
 const PATHS_CONFIG: &str = r#"[project]

@@ -974,6 +974,18 @@ impl IrFunction {
     }
 }
 
+/// A value a class statement passes as a base ([`ModuleIr::class_base_values`]).
+#[derive(Debug, Clone, Copy)]
+pub struct ClassBase<'a> {
+    /// The block of the statement.
+    pub block: BlockId,
+    /// The statement's `MakeClosure`.
+    pub statement: &'a Inst,
+    /// The class object the statement makes (the `dst` of its `MakeClosure`).
+    pub class: VarId,
+    pub value: VarId,
+}
+
 /// Complete IR for one Python source module.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModuleIr {
@@ -1002,14 +1014,26 @@ impl ModuleIr {
         &self.functions[id.0 as usize]
     }
 
-    /// The class bases of function `id` ([`Self::class_bases`]): the class's `dst` and the
-    /// operand index of each base.
-    pub fn class_bases_of(&self, id: FunctionId) -> impl Iterator<Item = (VarId, u32)> + '_ {
+    /// The values the class statements of `shape`'s function pass as bases
+    /// ([`Self::class_bases`]), statement by statement and in the order of each one's bases.
+    pub fn class_base_values<'s, 'a: 's>(
+        &'s self,
+        shape: &'s walk::FnShape<'a>,
+    ) -> impl Iterator<Item = ClassBase<'a>> + 's {
+        let id = shape.f.id;
         let start = self.class_bases.partition_point(|b| b.0 < id);
         self.class_bases[start..]
             .iter()
             .take_while(move |b| b.0 == id)
-            .map(|&(_, class, index)| (class, index))
+            .filter_map(|&(_, class, index)| {
+                let (block, statement) = shape.defining(class)?;
+                Some(ClassBase {
+                    block,
+                    statement,
+                    class,
+                    value: *statement.kind.operands().get(index as usize)?,
+                })
+            })
     }
 
     pub fn all_a1_hazards(&self) -> Vec<(&IrFunction, &A1Hazard)> {
