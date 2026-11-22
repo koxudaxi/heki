@@ -247,7 +247,8 @@ pub enum Emits {
     /// (`Session.flush`, a driver's `commit()`).
     IfPending,
     /// Only when the receiver has not loaded its results (Django's `QuerySet.count()` on an
-    /// evaluated query set counts its cache).
+    /// evaluated query set counts its cache; a database cursor that is exhausted returns nothing
+    /// without a query).
     UnlessCached,
     /// Only when no open connection is at hand (a pool checkout, Django's
     /// `connection.cursor()`).
@@ -1089,22 +1090,8 @@ mod tests {
                         "asyncio.StreamReader",
                         &["read", "readline", "readexactly", "readuntil", "__anext__"],
                     ),
-                    with_prefix(
-                        "asyncpg.Connection",
-                        &[
-                            "execute",
-                            "executemany",
-                            "fetch",
-                            "fetchrow",
-                            "fetchval",
-                            "fetchmany",
-                            "prepare",
-                            "copy_from_table",
-                            "copy_from_query",
-                            "copy_to_table",
-                            "copy_records_to_table",
-                        ],
-                    ),
+                    with_prefix_all(ASYNCPG_CONNECTIONS, ASYNCPG_BULK),
+                    with_prefix_all(ASYNCPG_CONNECTIONS, &["prepare"]),
                     with_prefix_all(
                         &asyncio_websockets,
                         &["recv", "recv_streaming", "__anext__"],
@@ -1128,8 +1115,15 @@ mod tests {
                 always(),
             ),
             (
+                with_prefix_all(ASYNCPG_CONNECTIONS, ASYNCPG_QUERIES),
+                one_at_a_time(OneAtATime::Always, async_safe(entry(&[DbQuery]))),
+            ),
+            (
                 s(&["asyncpg.connect"]),
-                async_safe(returning("asyncpg.Connection", entry(&[]))),
+                async_safe(returning(
+                    "asyncpg.Connection",
+                    entry(&[UnpooledClientAlloc]),
+                )),
             ),
             (
                 s(&["anyio.create_task_group"]),
@@ -1267,10 +1261,100 @@ mod tests {
     const QUERYSET_BULK: &[&str] = &["bulk_create", "in_bulk"];
     const MONGO_BULK: &[&str] = &["insert_many", "bulk_write"];
     const REDIS_COMMANDS: &[&str] = &[
-        "get", "set", "setex", "mget", "mset", "delete", "exists", "expire", "ttl", "incr", "decr",
-        "hget", "hset", "hmget", "hgetall", "hdel", "lpush", "rpush", "lpop", "rpop", "lrange",
-        "sadd", "srem", "smembers", "zadd", "zrange", "publish", "keys", "eval",
+        "get",
+        "set",
+        "setex",
+        "mget",
+        "mset",
+        "delete",
+        "exists",
+        "expire",
+        "ttl",
+        "incr",
+        "decr",
+        "hget",
+        "hset",
+        "hmget",
+        "hgetall",
+        "hdel",
+        "lpush",
+        "rpush",
+        "lpop",
+        "rpop",
+        "lrange",
+        "sadd",
+        "srem",
+        "smembers",
+        "zadd",
+        "zrange",
+        "publish",
+        "keys",
+        "eval",
+        "incrby",
+        "incrbyfloat",
+        "decrby",
+        "getset",
+        "getdel",
+        "setnx",
+        "expireat",
+        "pexpire",
+        "persist",
+        "pttl",
+        "unlink",
+        "rename",
+        "hincrby",
+        "hexists",
+        "hkeys",
+        "hvals",
+        "hlen",
+        "hsetnx",
+        "llen",
+        "lindex",
+        "lrem",
+        "lset",
+        "ltrim",
+        "blpop",
+        "brpop",
+        "sismember",
+        "smismember",
+        "scard",
+        "spop",
+        "srandmember",
+        "zrem",
+        "zscore",
+        "zincrby",
+        "zcard",
+        "zcount",
+        "zrank",
+        "zrangebyscore",
+        "zrevrange",
+        "zrevrangebyscore",
+        "zremrangebyscore",
+        "xadd",
+        "xread",
+        "xreadgroup",
+        "xrange",
+        "xrevrange",
+        "xlen",
+        "xack",
+        "xdel",
+        "xtrim",
+        "evalsha",
     ];
+    /// asyncpg methods that send one statement, and those that send many rows at once.
+    const ASYNCPG_QUERIES: &[&str] = &["execute", "fetch", "fetchrow", "fetchval"];
+    const ASYNCPG_BULK: &[&str] = &[
+        "executemany",
+        "fetchmany",
+        "copy_from_table",
+        "copy_from_query",
+        "copy_to_table",
+        "copy_records_to_table",
+    ];
+    /// The spellings of asyncpg's connection and pool classes (re-exported at the top level).
+    const ASYNCPG_CONNECTIONS: &[&str] = &["asyncpg.Connection", "asyncpg.connection.Connection"];
+    const ASYNCPG_POOLS: &[&str] = &["asyncpg.Pool", "asyncpg.pool.Pool"];
+    const MOTOR: &str = "motor.motor_asyncio";
     const MONGO_COLLECTION_OPS: &[&str] = &[
         "find_one",
         "insert_one",
@@ -1914,6 +1998,10 @@ mod tests {
                     "boto3.resource",
                     "redis.Redis",
                     "redis.StrictRedis",
+                    "redis.ConnectionPool",
+                    "redis.BlockingConnectionPool",
+                    "redis.ConnectionPool.from_url",
+                    "redis.BlockingConnectionPool.from_url",
                     "psycopg_pool.ConnectionPool",
                 ]),
                 entry(&[UnpooledClientAlloc]),
@@ -1955,8 +2043,13 @@ mod tests {
                     "aiohttp.ClientSession",
                     "aiohttp.request",
                     "redis.asyncio.Redis",
+                    "redis.asyncio.ConnectionPool",
+                    "redis.asyncio.BlockingConnectionPool",
+                    "redis.asyncio.ConnectionPool.from_url",
+                    "redis.asyncio.BlockingConnectionPool.from_url",
                     "pymongo.AsyncMongoClient",
                     "psycopg_pool.AsyncConnectionPool",
+                    "motor.motor_asyncio.AsyncIOMotorClient",
                 ]),
                 async_safe(entry(&[UnpooledClientAlloc])),
             ),
@@ -2197,6 +2290,19 @@ mod tests {
                 s(&["pymongo.database.Database.get_collection"]),
                 returning("pymongo.collection.Collection", entry(&[])),
             ),
+            // An in-process database that may be in memory: its statements wait on nothing known.
+            (
+                s(&["duckdb.connect"]),
+                returning("duckdb.DuckDBPyConnection", entry(&[UnpooledClientAlloc])),
+            ),
+            (
+                s(&["duckdb.DuckDBPyConnection.execute", "duckdb.execute"]),
+                returning("duckdb.DuckDBPyConnection", entry(&[DbQuery])),
+            ),
+            (
+                s(&["duckdb.DuckDBPyConnection.cursor"]),
+                returning("duckdb.DuckDBPyConnection", entry(&[])),
+            ),
         ]
     }
 
@@ -2376,6 +2482,62 @@ mod tests {
                     entry(&[]),
                 )),
             ),
+            (
+                s(&["asyncpg.create_pool"]),
+                async_safe(returning("asyncpg.Pool", entry(&[UnpooledClientAlloc]))),
+            ),
+            (
+                // Each query checks a connection out for itself: tasks may share the pool.
+                with_prefix_all(ASYNCPG_POOLS, ASYNCPG_QUERIES),
+                async_safe(entry(&[DbQuery])),
+            ),
+            (
+                with_prefix_all(ASYNCPG_POOLS, ASYNCPG_BULK),
+                async_safe(entry(&[])),
+            ),
+            (
+                with_prefix_all(ASYNCPG_POOLS, &["acquire"]),
+                async_safe(returning("asyncpg.Connection", entry(&[]))),
+            ),
+            (
+                with_prefix(
+                    &format!("{MOTOR}.AsyncIOMotorClient"),
+                    &["get_database", "get_default_database", "__getitem__"],
+                ),
+                async_safe(returning(
+                    &format!("{MOTOR}.AsyncIOMotorDatabase"),
+                    entry(&[]),
+                )),
+            ),
+            (
+                with_prefix(
+                    &format!("{MOTOR}.AsyncIOMotorDatabase"),
+                    &["get_collection", "__getitem__"],
+                ),
+                async_safe(returning(
+                    &format!("{MOTOR}.AsyncIOMotorCollection"),
+                    entry(&[]),
+                )),
+            ),
+            (
+                [
+                    s(&[&format!("{MOTOR}.AsyncIOMotorDatabase.command")]),
+                    with_prefix(
+                        &format!("{MOTOR}.AsyncIOMotorCollection"),
+                        &MONGO_COLLECTION_OPS
+                            .iter()
+                            .copied()
+                            .filter(|m| *m != "aggregate")
+                            .collect::<Vec<_>>(),
+                    ),
+                ]
+                .concat(),
+                async_safe(entry(&[DbQuery])),
+            ),
+            (
+                with_prefix(&format!("{MOTOR}.AsyncIOMotorCollection"), MONGO_BULK),
+                async_safe(entry(&[])),
+            ),
         ]
     }
 
@@ -2498,6 +2660,8 @@ mod tests {
         const CURSOR_RUNS: &[&str] = &["to_list", "distinct", "explain"];
         let cursor = "pymongo.cursor.Cursor";
         let async_cursor = "pymongo.asynchronous.cursor.AsyncCursor";
+        let motor_cursor = format!("{MOTOR}.AsyncIOMotorCursor");
+        let motor_command_cursor = format!("{MOTOR}.AsyncIOMotorLatentCommandCursor");
         vec![
             (s(&["os.walk"]), returning("os.walk()", entry(&[]))),
             (
@@ -2528,6 +2692,28 @@ mod tests {
                 [
                     s(&[&format!("{async_cursor}.__aiter__")]),
                     with_prefix(async_cursor, CURSOR_RUNS),
+                ]
+                .concat(),
+                async_safe(entry(&[DbQuery])),
+            ),
+            // Motor's `aggregate()` returns a lazy command cursor, unlike pymongo's async one.
+            (
+                [
+                    s(&[&format!("{MOTOR}.AsyncIOMotorCollection.find")]),
+                    with_prefix(&motor_cursor, CURSOR_BUILDERS),
+                ]
+                .concat(),
+                async_safe(returning(&motor_cursor, entry(&[]))),
+            ),
+            (
+                s(&[&format!("{MOTOR}.AsyncIOMotorCollection.aggregate")]),
+                async_safe(returning(&motor_command_cursor, entry(&[]))),
+            ),
+            (
+                [
+                    s(&[&format!("{motor_cursor}.__aiter__")]),
+                    with_prefix(&motor_cursor, CURSOR_RUNS),
+                    with_prefix(&motor_command_cursor, &["__aiter__", "to_list"]),
                 ]
                 .concat(),
                 async_safe(entry(&[DbQuery])),
@@ -2847,6 +3033,14 @@ mod tests {
                 "django.db.models.query.QuerySet.alast",
                 "django.db.models.query.QuerySet.aexists",
                 "django.db.models.query.QuerySet.acount",
+                "pymongo.cursor.Cursor.__iter__",
+                "pymongo.cursor.Cursor.to_list",
+                "pymongo.asynchronous.cursor.AsyncCursor.__aiter__",
+                "pymongo.asynchronous.cursor.AsyncCursor.to_list",
+                "motor.motor_asyncio.AsyncIOMotorCursor.__aiter__",
+                "motor.motor_asyncio.AsyncIOMotorCursor.to_list",
+                "motor.motor_asyncio.AsyncIOMotorLatentCommandCursor.__aiter__",
+                "motor.motor_asyncio.AsyncIOMotorLatentCommandCursor.to_list",
             ],
         ),
         (
@@ -2930,6 +3124,10 @@ mod tests {
                 "sqlmodel.Session.scalars",
                 "psycopg.Connection.execute",
                 "psycopg.Cursor.execute",
+                "asyncpg.Connection.fetch",
+                "asyncpg.connection.Connection.fetch",
+                "asyncpg.Pool.fetch",
+                "asyncpg.pool.Pool.fetch",
                 "pymongo.collection.Collection.find",
                 "pymongo.collection.Collection.aggregate",
                 "sqlite3.connect(\":memory:\").execute",
@@ -3073,6 +3271,7 @@ mod tests {
             "pymongo.asynchronous.",
             "asyncpg.",
             "websockets.",
+            "motor.motor_asyncio.",
         ];
         let kb = EffectiveEcosystemKb::load_builtin(&[]).unwrap();
         let mut seen = BTreeSet::new();

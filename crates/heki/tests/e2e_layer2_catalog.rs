@@ -2333,11 +2333,19 @@ async def tp_async_cursors_run_per_item(coll: AsyncCollection, ids):
         async for doc in coll.find({"_id": i}):
             pass
         await coll.find({"_id": i}).sort("x").to_list()
+
+
+async def tp_exhausted_cursor_reused(coll: AsyncCollection, ids):
+    cursor = coll.find({})
+    for i in ids:
+        await cursor.to_list()
 "#;
 
 /// A cursor or a generator does its I/O while it is iterated, not when it is made: one handed
 /// to a thread runs there, one iterated on the event loop blocks it, and an async cursor is a
-/// query per iteration of the loop around its iteration.
+/// query per iteration of the loop around its iteration. A cursor that is already exhausted
+/// returns nothing without a query, so a consumption in a loop is a possible query, never an
+/// exact one, even where the cursor is made in the loop.
 #[test]
 fn lazy_iterators_do_their_io_when_iterated() {
     assert_eq!(
@@ -2356,13 +2364,13 @@ fn lazy_iterators_do_their_io_when_iterated() {
             ),
             d(
                 17,
-                "EFF101",
+                "EFF111",
                 "tp_iterated_on_the_loop",
                 "pymongo.cursor.Cursor.__iter__"
             ),
             d(
                 18,
-                "EFF101",
+                "EFF111",
                 "tp_iterated_on_the_loop",
                 "pymongo.cursor.Cursor.to_list"
             ),
@@ -2380,8 +2388,14 @@ fn lazy_iterators_do_their_io_when_iterated() {
             ),
             d(
                 34,
-                "EFF103",
+                "EFF113",
                 "tp_async_cursors_run_per_item",
+                "pymongo.asynchronous.cursor.AsyncCursor.to_list"
+            ),
+            d(
+                40,
+                "EFF113",
+                "tp_exhausted_cursor_reused",
                 "pymongo.asynchronous.cursor.AsyncCursor.to_list"
             ),
         ]
@@ -3051,6 +3065,143 @@ fn catalog_argument_cases_read_module_constants_as_attributes_and_local_imports(
         vec![
             (17, "rebound_elsewhere".to_owned()),
             (21, "file_database".to_owned()),
+        ]
+    );
+}
+
+const ASYNC_DRIVERS_AND_DUCKDB: &str = r#"import asyncio
+
+import asyncpg
+import duckdb
+import redis
+import redis.asyncio as aioredis
+from asyncpg.pool import Pool
+from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorCollection
+
+
+async def tp_asyncpg_in_loops(dsn, ids):
+    for i in ids:
+        conn = await asyncpg.connect(dsn)
+        await conn.fetchrow("SELECT $1", i)
+    pool = await asyncpg.create_pool(dsn)
+    async with pool.acquire() as conn:
+        for i in ids:
+            await conn.execute("DELETE FROM t WHERE id = $1", i)
+    for i in ids:
+        await pool.fetchval("SELECT $1", i)
+
+
+async def tp_rows_of_a_query(pool: Pool):
+    for row in await pool.fetch("SELECT id FROM t"):
+        await pool.execute("DELETE FROM u WHERE t_id = $1", row["id"])
+
+
+async def tn_asyncpg(dsn, rows):
+    async with asyncpg.create_pool(dsn) as pool:
+        await pool.fetch("SELECT 1")
+        await asyncio.gather(pool.fetchval("SELECT 1"), pool.fetchval("SELECT 2"))
+        async with pool.acquire() as conn:
+            await conn.executemany("INSERT INTO t VALUES ($1)", rows)
+            await conn.copy_records_to_table("t", records=rows)
+
+
+async def tp_motor_in_loops(url, ids):
+    users = AsyncIOMotorClient(url)["app"]["users"]
+    for i in ids:
+        await users.find_one({"_id": i})
+    for i in ids:
+        await users.find({"_id": i}).sort("a").to_list(None)
+
+
+async def tn_motor(coll: AsyncIOMotorCollection, docs):
+    await coll.find_one({})
+    await coll.insert_many(docs)
+    async for doc in coll.find({}).sort("a"):
+        pass
+    for d in docs:
+        coll.find({"_id": d})
+        coll.aggregate([{"$match": d}])
+
+
+async def tp_redis_commands(r: redis.Redis, keys):
+    r.hincrby("h", "n", 1)
+    for k in keys:
+        await aioredis.Redis().xadd(k, {"a": 1})
+
+
+def tp_duckdb_in_loops(path, ids):
+    con = duckdb.connect(path)
+    for i in ids:
+        con.execute("SELECT ?", [i])
+        duckdb.connect()
+
+
+async def tn_duckdb_may_be_in_memory(path):
+    con = duckdb.connect(path)
+    con.execute("SELECT 1")
+    duckdb.connect().execute("SELECT 1").fetchall()
+"#;
+
+/// asyncpg and motor count their queries (a pool's included) and never block; a sync redis
+/// command blocks; a DuckDB statement is a query but, the database possibly in memory, no wait.
+#[test]
+fn async_drivers_count_their_queries_and_duckdb_waits_on_nothing_known() {
+    assert_eq!(
+        check(
+            "catalog_async_drivers",
+            "app/drivers.py",
+            ASYNC_DRIVERS_AND_DUCKDB,
+            RULES
+        ),
+        vec![
+            d(13, "EFF102", "tp_asyncpg_in_loops", "asyncpg.connect"),
+            d(
+                14,
+                "EFF103",
+                "tp_asyncpg_in_loops",
+                "asyncpg.Connection.fetchrow"
+            ),
+            d(
+                18,
+                "EFF103",
+                "tp_asyncpg_in_loops",
+                "asyncpg.Connection.execute"
+            ),
+            d(20, "EFF103", "tp_asyncpg_in_loops", "asyncpg.Pool.fetchval"),
+            // The rows of a query are as many as the database holds.
+            d(
+                25,
+                "EFF103",
+                "tp_rows_of_a_query",
+                "asyncpg.pool.Pool.execute"
+            ),
+            d(
+                40,
+                "EFF103",
+                "tp_motor_in_loops",
+                "motor.motor_asyncio.AsyncIOMotorCollection.find_one"
+            ),
+            d(
+                42,
+                "EFF113",
+                "tp_motor_in_loops",
+                "motor.motor_asyncio.AsyncIOMotorCursor.to_list"
+            ),
+            d(56, "EFF101", "tp_redis_commands", "redis.Redis.hincrby"),
+            d(58, "EFF102", "tp_redis_commands", "redis.asyncio.Redis"),
+            d(
+                58,
+                "EFF103",
+                "tp_redis_commands",
+                "redis.asyncio.Redis.xadd"
+            ),
+            d(
+                64,
+                "EFF103",
+                "tp_duckdb_in_loops",
+                "duckdb.DuckDBPyConnection.execute"
+            ),
+            d(65, "EFF102", "tp_duckdb_in_loops", "duckdb.connect"),
         ]
     );
 }
