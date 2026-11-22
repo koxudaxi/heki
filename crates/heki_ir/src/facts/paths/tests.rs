@@ -706,3 +706,89 @@ def f(db, rows):
         EVERY
     );
 }
+
+/// [`Paths::on_every_return_passes_one_of`] of the calls of function `name` whose texts start
+/// with one of `calls`, as returned.
+fn any_of(src: &str, name: &str, calls: &[&str]) -> Answer<bool> {
+    let ir = build(src);
+    let f = ir
+        .functions
+        .iter()
+        .find(|f| f.name == name)
+        .expect("function");
+    let ix = FnIndex::new(f, &ir.constants);
+    let bindings = ModuleBindings::of(&ir);
+    let reader = PathReader::with_bindings(&bindings);
+    let budget = Budget::of_function("test", f);
+    let paths = Paths::new(&ix, &reader, &budget);
+    let mut points = Vec::new();
+    for bb in &f.blocks {
+        for (i, inst) in bb.insts.iter().enumerate() {
+            let text = &src[inst.span.start as usize..inst.span.end as usize];
+            let is_call = matches!(
+                inst.kind,
+                InstKind::Call { .. } | InstKind::MethodCall { .. }
+            );
+            if is_call && calls.iter().any(|c| text.starts_with(c)) {
+                points.push((bb.id, i));
+            }
+        }
+    }
+    paths.on_every_return_passes_one_of(&points, Progress::Returned)
+}
+
+#[test]
+fn every_path_passes_one_of_several_points() {
+    let src = r#"
+def both_sides(db, flag):
+    if flag:
+        db.left()
+    else:
+        db.right()
+    return 1
+
+def one_side(db, flag):
+    if flag:
+        db.left()
+    return 1
+
+def handled(db):
+    try:
+        db.left()
+    except ValueError:
+        return None
+    db.right()
+    return 1
+
+def handled_both(db):
+    try:
+        db.left()
+    except ValueError:
+        db.right()
+        return None
+    return 1
+
+def raises_otherwise(db, flag):
+    if flag:
+        db.left()
+        return 1
+    raise ValueError
+
+def never(db):
+    while True:
+        db.left()
+"#;
+    let yes = Answer::Known(true);
+    let no = Answer::Known(false);
+    assert_eq!(any_of(src, "both_sides", &["db.left", "db.right"]), yes);
+    assert_eq!(any_of(src, "both_sides", &["db.left"]), no);
+    assert_eq!(any_of(src, "one_side", &["db.left", "db.right"]), no);
+    // The handler returns without either call having returned.
+    assert_eq!(any_of(src, "handled", &["db.left", "db.right"]), no);
+    assert_eq!(any_of(src, "handled_both", &["db.left", "db.right"]), yes);
+    // A path that leaves by an exception does not return normally.
+    assert_eq!(any_of(src, "raises_otherwise", &["db.left"]), yes);
+    // No path returns normally.
+    assert_eq!(any_of(src, "never", &["db.left"]), yes);
+    assert_eq!(any_of(src, "one_side", &["db.missing"]), no);
+}

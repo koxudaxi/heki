@@ -288,6 +288,10 @@ Compound expressions are flattened into **basic instructions in explicit left-to
     the same handler and every path to them passes the first, so moving their edges to the head
     changes no dominator. The graph of a region is built once, its dominators found in at most
     four passes in reverse postorder; past the budget the answer is `Open`.
+    `Paths::on_every_return_passes_one_of` and `Paths::on_every_iteration_passes_one_of` ask it
+    of a set of points (every path that completes the region passes one of them, also when none
+    completes it): a walk back from the region's end over the same graph, never entering a
+    passed node, does not reach its root.
   - `ItemOrigins::of_loop` (`heki_ir::facts::origin`): where the items a `for` loop steps
     through come from, as a set of `ItemOrigin`s: a parameter (`Param`), an attribute or item of
     one (`ParamPart`), the method's receiver (`Receiver`), a collection the code fixes (`Fixed`),
@@ -452,6 +456,14 @@ EffectSummary(f) = {
     iterates_params:          Bitset,                      // stepped by an iteration on some path: a generator
                                                            // passed there runs there
     reads_self_attrs:         Set<AttrKeyPath>,            // self.<attr> and self.<dict>[const_key] reads
+    kept:                     Option<Box<KeptFacts>>,      // only with MUT101 or MUT111 selected
+                                                           // (OptInFacts::kept_values):
+                                                           // must_read_self_attrs, those read on every path
+                                                           // that returns normally, as a whole or with the key;
+                                                           // removes_kept, the values kept in an instance
+                                                           // __dict__ it may remove or replace on any object
+                                                           // (by name, or any); and listed_cache, its decorator
+                                                           // is one of the catalog's [[cached_properties]]
     returns_self_attrs:       Set<AttrName>,               // @cached_property: self.<attr> objects the result
                                                            // holds by reference, read for nothing else (MUT101)
     lazily_read_self_attrs:   Set<AttrName>,               // self.<attr> read only where it or a self call
@@ -967,6 +979,40 @@ which module imports which.
 6. The writes and the paths after and before them come from `FileSummary.cache_flows`, so the
    stale writes of a method are known without its IR: `MUT101` reports those of the checked
    methods, and `MUT111` reads those of every method.
+7. **Reads on every path** (`KeptFacts::must_read_self_attrs`, computed only when `MUT101`
+   or `MUT111` runs: `OptInFacts::kept_values`): the attributes a function reads on every path
+   on which it returns normally, exception edges into handlers included. Its own loads of
+   `self.<attr>` are points of the path facts (`Progress::Returned`: a load that raised read
+   nothing); the loads of one attribute whose value is read as a whole, and the item loads of
+   one constant key of values read only through such loads, are asked together
+   (`Paths::on_every_return_passes_one_of`), so a read on each side of a branch counts. A `self` method
+   called on every such path, or a property read there (its getters' call), adds what every one
+   of its targets reads, when the function's name is bound once (each site's paths are its own
+   definition's), the call's targets are every implementation it can run (`CallSite::complete`;
+   for a read, the getter every class the object may be finds first:
+   `TypeCtx::getter_targets_complete`), and each runs its body at every call (no cache
+   decorator); a callee of the function's own call-graph component adds nothing,
+   so propagation needs no fixpoint for it. An attribute read as a whole covers each of its
+   keys, also where two definitions or two targets are joined.
+8. **What may remove a kept value** (computed only with `OptInFacts::kept_values`). A method's
+   `CacheFlow` also holds the points that may remove or replace a value kept in some object's
+   `__dict__`: `MayRemove(name)` (`del obj.<name>`, an item of a `__dict__` stored or removed
+   under that key), `MayRemoveAny` (a `__dict__` cleared, replaced, or handed to a call; an
+   `await`, the implicit awaits of `async for` and `async with`, or a `yield`, while other code
+   runs; a call heki cannot resolve, of a library outside
+   the catalog, or of one that may run project code by its `[[invokes]]` entry, section 4.2; a
+   project call whose targets are not every implementation it can run; the iteration of a value
+   that is no builtin container, no project generator's result, and no `lazy` call's; a
+   library call handed a container whose items heki does not know, such as a display changed
+   after it is built or what a builtin call or a generator expression returns), and
+   `Calls(span)` at the project calls no `SelfCall` stands for (other receivers, the property
+   getters a read of `self.<name>` runs) and at each step of iterating what a project generator
+   called at `span` returns, whose callees' summaries say what they remove.
+   `KeptFacts::removes_kept` (`EffectSummary::kept`) joins the same points of a function (a
+   `yield` excepted: its consumer is its caller) with what every callee removes. Each write of
+   the flow also records, under the same opt-in (`SelfAttrWrite::kept`), its literal key
+   (`KeptWrite::key`) and, for an in-place change, the builtin list, dict, or set the attribute
+   holds by its type and the method that changes it (`KeptWrite::change`).
 
 #### `MUT111`: readers of a stale `@cached_property` (opt-in)
 1. Reads: the `TypedFieldReadSite`s of each checked function's own body (`self.p`, `obj.p`,
@@ -1302,8 +1348,10 @@ message = "write model state through GenerationStore instead"
      private helper with project callers hands its report to them. Otherwise the outermost
      function is reported, with `message` as the report's help. With
      `unlisted-dict-keys = "report"`, a `dict_direct` site that hits no target, on a class some
-     targets cover, whose key none of them names, is judged the same way once per family of
-     those targets (`OwnerRule::written`), and reported as that key (`Class.key`).
+     targets cover, whose key no target of any `write-owners` contract covering the class names
+     (`NamedDictKeys`, built once per run from every contract's targets), is judged the same way
+     once per family of the contract's targets covering the class (`OwnerRule::written`), and
+     reported as that key (`Class.key`).
   3. Existing code bases migrate with **`heki check --baseline`**: counts are frozen per
      `(path, qualname, "MUT201", "Class.attr")` and can only shrink.
 
@@ -1411,8 +1459,15 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      subclasses (at most `DISPATCH_CLASS_LIMIT`, 64), the definition its MRO finds is a target;
      every member of a union resolves; a protocol receiver never is complete. A call of a
      property's value is complete when calling a value of the type the getter declares is
-     (`TypeCtx::targets_complete_on`), whatever the receiver; the getters it runs, as a read of
-     the property, never are.
+     (`TypeCtx::targets_complete_on`), whatever the receiver. A read of a property, the call of
+     its getters, is complete when each class the object may be (at most
+     `DISPATCH_CLASS_LIMIT`) takes the name from one of them (`ProjectDecls::function_taken`: the
+     first class along its MRO that names the name defines it as that getter, no class before it
+     stores the name on the class object outside its body, and no base heki does not know comes
+     before it), and none defines `__getattribute__` or has a metaclass heki does not know
+     (`TypeCtx::getter_targets_complete`). A class that finds a class attribute, a method, or
+     nothing first runs no getter. Through `super()`, each class takes the name from one of them
+     after the class `super()` is in, along its own MRO (`ProjectDecls::super_getters_complete`).
    - A Layer 2 call has an effect unconditionally (`CallTarget::Layer2::unconditional`) when its
      entry `emits` it on every call and no case of the entry tests an argument that may be a
      parameter of the caller (R6 covers the arguments heki cannot evaluate).
@@ -1857,6 +1912,31 @@ Three more keys state when a call waits, which an exact claim needs (ADR-018):
   `false` when `__exit__` / `__aexit__` returns a false value on every path (files, locks, HTTP
   sessions and pools, database connections), `true` when it can suppress the body's exception
   (`contextlib.suppress`). A manager the catalog does not describe may suppress.
+
+A separate table, `[[invokes]]`, says what a call runs of the values it is handed (R3; read by
+`heki_effect::invokes`, so that no other fact sees an entry there): per argument (by position,
+`rest` for every position from it on, by keyword, `"*"` for any keyword, or the receiver), the
+special methods it runs on the value's class (`methods`, looked up on the metaclass for a class
+object; `"*"` for any attribute, read by a name the call is handed), on the classes of the
+value's items (`item_methods`), and whether it calls the value (`calls`). An argument an entry
+does not list runs nothing there. A `lazy` entry returns an iterator that runs the same code
+again while it is iterated (`enumerate`, `map`, `iter`). A value runs code of the project there
+only when its class may define the method in the project: a project class, a builtin class a
+project subclass replaces it in (R2), or a class heki does not know. Two rules keep the entries
+short: a key a dict or set looks up is compared with the keys it holds only on a hash collision,
+which an entry leaves out, and a builtin dict or set hands on its keys with the hashes it stored
+for them. A call of a catalogued library without such an entry runs code of the project only
+when it is handed a value not established as an instance of a library class that is not
+callable; `eval`, `exec`, `__import__`, `importlib.import_module`, and `pickle.loads` always may.
+
+A third table, `[[cached_properties]]` (`heki_kb::CachedPropertyDecorator`), lists the
+cached-property decorators known to keep the getter's value in the instance `__dict__` under the
+property's name: `functools.cached_property`, Django's, Werkzeug's, propcache's, and kombu's. Each
+entry names the versions whose source was read, why the value is kept there, how `del obj.<name>`
+and `obj.__dict__.pop(<name>)` act on it, and, for Werkzeug, the slot an instance without a
+`__dict__` keeps it in. `KeptFacts::listed_cache` records that a getter's decorator, resolved
+through the module's imports (`ModuleDecls::decorator_symbol`), is listed; only such a getter makes
+a cached property an exact claim's (R3), and any other `cached_property` is one by its name.
 
 The entries follow the public API of each package, with three conventions:
 - An async API is `async_safe` and carries no blocking effect: it is often called without a

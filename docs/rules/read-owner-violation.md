@@ -83,7 +83,8 @@ a member the class inherits. Another parameter, an attribute of the receiver, an
 
 With `allowed-protocols`, a read through a value typed with a project protocol the key names that
 declares the attribute, itself or through its protocol bases, is allowed wherever it is judged; a
-read through another protocol or the implementation's class stays reported.
+read through another protocol or the implementation's class stays reported. A pattern names the
+subprotocols of the protocols it matches too, unless `protocol-subclasses = false`.
 
 ## What a report states
 
@@ -170,6 +171,8 @@ No automatic fix.
   - `allowed-protocols`: project protocols (class patterns, their subclasses included): a read
     through a value typed with one that declares the attribute, itself or through its protocol
     bases, is allowed.
+  - `protocol-subclasses`: `true` (default) or `false`: whether an `allowed-protocols` pattern
+    names the subprotocols of the protocols it matches, or those protocols only.
 
 Known limitation: a read through a parameter without a project-class annotation
 (`def helper(ref): return ref.children`) is not seen, since the read object's class is unknown
