@@ -387,6 +387,12 @@ def opt(sc, strip, rule):
     construction, statement, loop, result, unsafe_change = OPT_PATTERNS[rule]
     stmt = statement.split("\n")
     init = "x = seed" if strip == "Builtin type by construction" else construction
+    if strip == "Builtin type by construction" and rule == "OPT130":
+        # The constructor's call is the value: a project function named like the builtin builds
+        # nothing (what a builtin constructor builds the container from is an obligation of the
+        # rewrite, not this premise).
+        init = construction
+        sc.define(block("def set(values):", ["return values"]))
     before = []
     body = list(stmt)
     if strip == "Loop-carried":
