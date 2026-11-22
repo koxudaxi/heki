@@ -2307,28 +2307,30 @@ struct OwnerRule<'r> {
 impl OwnerRule<'_> {
     /// What `site` writes of the contract: the targets it hits, or, with `unlisted-dict-keys =
     /// "report"`, a key written through the namespace of an object of a class some targets cover
-    /// (a `dict_direct` write) that none of them names, once for each family of those targets.
-    /// Each comes with the index of a target whose family it is.
-    fn written<'s>(&'s self, site: &TypedFieldWriteSite) -> Vec<(usize, Written<'s>)> {
+    /// (a `dict_direct` write) that no `write-owners` target names (`named`), once for each
+    /// family of the contract's targets covering the class. Each comes with the index of a target
+    /// whose family it is.
+    fn written<'s>(
+        &'s self,
+        site: &TypedFieldWriteSite,
+        named: &NamedDictKeys<'_>,
+    ) -> Vec<(usize, Written<'s>)> {
         let hits = write_hits(&self.targets, site);
-        if !hits.is_empty() || !self.report_unlisted_keys || site.kind != WriteKind::DictDirect {
+        if !hits.is_empty()
+            || !self.report_unlisted_keys
+            || site.kind != WriteKind::DictDirect
+            || named.names(&site.class_qualname, &site.attr)
+        {
             return hits
                 .into_iter()
                 .map(|(k, t)| (k, Written::Target(t)))
                 .collect();
         }
-        let covering: Vec<(usize, &ContractTarget)> = self
-            .targets
-            .iter()
-            .enumerate()
-            .filter(|(_, t)| t.classes.contains(&site.class_qualname))
-            .collect();
-        if covering.iter().any(|(_, t)| t.matches_attr(&site.attr)) {
-            return Vec::new();
-        }
         let mut families: Vec<(usize, &FxHashSet<String>)> = Vec::new();
-        for (k, t) in covering {
-            if !families.iter().any(|(_, f)| *f == &t.classes) {
+        for (k, t) in self.targets.iter().enumerate() {
+            if t.classes.contains(&site.class_qualname)
+                && !families.iter().any(|(_, f)| *f == &t.classes)
+            {
                 families.push((k, &t.classes));
             }
         }
@@ -2336,6 +2338,36 @@ impl OwnerRule<'_> {
             .into_iter()
             .map(|(k, f)| (k, Written::UnlistedKey(f)))
             .collect()
+    }
+}
+
+/// The `__dict__` keys the `write-owners` contracts name, by class (`unlisted-dict-keys`): a
+/// target names the keys its attribute pattern matches (an entry target its container) on every
+/// class of its family, whichever contract declares it. A key one contract guards is a listed
+/// key of the class for every other contract, whose own allowance does not cover it.
+struct NamedDictKeys<'r> {
+    /// The targets covering each class (fqn); empty when no contract reports unlisted keys.
+    by_class: FxHashMap<&'r str, Vec<&'r ContractTarget>>,
+}
+
+impl<'r> NamedDictKeys<'r> {
+    fn new(rules: &'r [OwnerRule<'_>]) -> Self {
+        let mut by_class: FxHashMap<&str, Vec<&ContractTarget>> = FxHashMap::default();
+        if rules.iter().any(|r| r.report_unlisted_keys) {
+            for target in rules.iter().flat_map(|r| &r.targets) {
+                for class in &target.classes {
+                    by_class.entry(class).or_default().push(target);
+                }
+            }
+        }
+        Self { by_class }
+    }
+
+    /// Whether a target covering `class` names the `__dict__` key `key`.
+    fn names(&self, class: &str, key: &str) -> bool {
+        self.by_class
+            .get(class)
+            .is_some_and(|targets| targets.iter().any(|t| t.matches_attr(key)))
     }
 }
 
@@ -2441,6 +2473,7 @@ pub(crate) fn mut201(
         .map(|r| r.targets.iter().map(|_| InsideAllowed::default()).collect())
         .collect();
     let names_protocols = rules.iter().any(|r| r.allowance.names_protocols());
+    let named_keys = NamedDictKeys::new(&rules);
     for path in paths {
         let file = &cx.index.files[path];
         let Some(unit) = cx.unit(path) else {
@@ -2475,7 +2508,7 @@ pub(crate) fn mut201(
                     }
                     let (judged, obj_params) =
                         rule.allowance.judged_access(cx.decls, key, site.obj_params);
-                    for (ti, written) in rule.written(site) {
+                    for (ti, written) in rule.written(site, &named_keys) {
                         let family = match written {
                             Written::Target(t) => &t.classes,
                             Written::UnlistedKey(family) => family,
