@@ -1873,6 +1873,88 @@ def swap(owner: Owner) -> None:
     owner.client = httpx.AsyncClient()
 "#;
 
+/// Instances another module keeps in an attribute or a global, which only the stores of that
+/// attribute or global type.
+const HELD: &str = r#"import httpx
+
+
+class Held:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")
+
+
+class HeldGlobally:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")
+
+
+class HeldPastTheRounds:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")
+
+
+class Kept:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")  # EFF101
+"#;
+
+const KEEPERS: &str = r#"import httpx
+
+from pkg.held import Held, HeldGlobally, Kept
+
+
+class Holder:
+    def __init__(self) -> None:
+        self.held = Held()
+        self.kept = Kept()
+
+    def swap(self) -> None:
+        self.held.client = httpx.AsyncClient()
+        self.kept.other = httpx.AsyncClient()
+
+
+holder = HeldGlobally()
+
+
+def swap() -> None:
+    holder.client = httpx.AsyncClient()
+"#;
+
+/// The stores of `__init__` read each attribute the one before binds, past the rounds the types
+/// of the module's stores take: the first round's types hold, and they type `self.held`.
+const KEEPER_PAST_THE_ROUNDS: &str = r#"import httpx
+
+from pkg.held import HeldPastTheRounds, Kept
+
+
+class Holder:
+    def __init__(self) -> None:
+        self.a0 = httpx.Client()
+        self.a1 = self.a0
+        self.a2 = self.a1
+        self.a3 = self.a2
+        self.a4 = self.a3
+        self.a5 = self.a4
+        self.held = HeldPastTheRounds()
+        self.kept = Kept()
+
+    def swap(self) -> None:
+        self.held.client = httpx.AsyncClient()
+        self.kept.other = httpx.AsyncClient()
+"#;
+
 #[test]
 fn stores_into_an_instance_through_any_receiver_the_inference_types() {
     check_marks(
@@ -1881,6 +1963,9 @@ fn stores_into_an_instance_through_any_receiver_the_inference_types() {
             ("pkg/receivers.py", RECEIVERS),
             ("pkg/elsewhere.py", ELSEWHERE),
             ("pkg/other_owner.py", OTHER_OWNER),
+            ("pkg/held.py", HELD),
+            ("pkg/keepers.py", KEEPERS),
+            ("pkg/keeper_past_the_rounds.py", KEEPER_PAST_THE_ROUNDS),
         ],
         &["EFF101"],
     );

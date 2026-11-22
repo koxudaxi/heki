@@ -423,33 +423,40 @@ pub struct StoredElsewhere {
 }
 
 /// A module's global and attribute types decided without what reading them gives, where they
-/// differ from [`ModuleDecls::global_types`] and [`ClassDecl::attr_stores`].
+/// differ from [`ModuleDecls::global_types`] and [`ClassDecl::attr_stores`]. The fallback of a
+/// name holds once another module stores into a name its stores read, directly or through the
+/// stores of the names they read ([`Self::dependencies`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoreFallbacks {
     /// By global: its type, `None` for none.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub globals: BTreeMap<String, StoreFallback<Option<Ty>>>,
+    pub globals: BTreeMap<String, Option<Ty>>,
     /// By class qualname, then attribute.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub attrs: BTreeMap<String, BTreeMap<String, StoreFallback<AttrStore>>>,
+    pub attrs: BTreeMap<String, BTreeMap<String, AttrStore>>,
     /// The classes that store attributes heki cannot name, once another module stores into
     /// the module.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub any_attr: BTreeSet<String>,
+    /// Each function whose stores read names being decided, once: what it stores and reads.
+    #[serde(default, skip_serializing_if = "<[_]>::is_empty")]
+    pub dependencies: Box<[StoreDependency]>,
 }
 
-/// The type of a global or an attribute decided without what reading names gives, and the
-/// names of the module whose reads its stores' values depend on: it holds once another
-/// module stores into one of them.
+/// The names of a module one function stores into, and those of the names being decided it
+/// reads (sorted).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct StoreFallback<T> {
-    pub value: T,
-    /// The module's globals.
-    #[serde(default, skip_serializing_if = "<[_]>::is_empty")]
-    pub globals: Box<[String]>,
-    /// The attributes of the module's classes.
-    #[serde(default, skip_serializing_if = "<[_]>::is_empty")]
-    pub attrs: Box<[String]>,
+pub struct StoreDependency {
+    pub stores: Box<[StoreTarget]>,
+    pub reads: Box<[StoreTarget]>,
+}
+
+/// A global of a module, or an attribute of the instances of one of its classes (by
+/// qualname), whose type the module's stores decide.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum StoreTarget {
+    Global(String),
+    Attr(String, String),
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

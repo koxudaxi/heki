@@ -8,7 +8,7 @@
 //! joined where the type is read ([`ModuleDecls::stores_elsewhere`], [`Elsewhere`]).
 
 use super::{
-    AttrStore, ClassDecl, ModuleDecls, ProjectDecls, StoreFallback, StoreFallbacks,
+    AttrStore, ClassDecl, ModuleDecls, ProjectDecls, StoreDependency, StoreFallbacks, StoreTarget,
     StoredElsewhere, StoresElsewhere, TypeCtx, aliases_of, is_summarized_function,
     kept_in_declarations, note, self_aliases,
 };
@@ -17,7 +17,7 @@ use crate::infer::Inferred;
 use crate::types::Ty;
 
 use heki_ir::walk::{
-    Answer, Budget, Closure, Def, Facts, FnShape, Join, KeySet, Sparse, Use, Visit, fixpoint, reach,
+    Answer, Budget, Def, Facts, FnShape, Join, Sparse, Use, Visit, fixpoint, reach,
 };
 use heki_ir::{BlockId, BuiltinKind, Inst, InstKind, IrFunction, Terminator, VarId};
 use heki_kb::EffectiveEcosystemKb;
@@ -127,32 +127,13 @@ fn keeps_in_place(t: &Ty) -> bool {
     }
 }
 
-/// What a store stores into, of the module deciding it.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-enum Target {
-    Global(String),
-    /// An attribute of the instances of a class, by its qualname.
-    Attr(String, String),
-}
-
-/// What reading a name being decided depends on: a global, an attribute of a class (by
-/// qualname), whether a class stores attributes heki cannot name, or whether the module stores
-/// globals heki cannot name.
+/// What reading a name being decided depends on: the name, whether a class (by qualname)
+/// stores attributes heki cannot name, or whether the module stores globals heki cannot name.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Key {
-    Global(String),
-    Attr(String, String),
+    Name(StoreTarget),
     Class(String),
     Globals,
-}
-
-impl Target {
-    fn key(&self) -> Key {
-        match self {
-            Target::Global(name) => Key::Global(name.clone()),
-            Target::Attr(class, attr) => Key::Attr(class.clone(), attr.clone()),
-        }
-    }
 }
 
 /// What a function of the first round read of the globals and attributes: their names, which
@@ -167,10 +148,10 @@ enum Named {
 /// into.
 #[derive(Debug, Clone, Default, PartialEq)]
 struct Joins {
-    every: BTreeMap<Target, Stored>,
+    every: BTreeMap<StoreTarget, Stored>,
     /// The stores that establish a type: the module body's of a global, `__init__`'s or
     /// `__post_init__`'s through `self` of an attribute.
-    establishing: BTreeMap<Target, Stored>,
+    establishing: BTreeMap<StoreTarget, Stored>,
     /// The classes, by qualname, whose instances get attributes heki cannot name.
     any: BTreeSet<String>,
     /// The classes whose `__setstate__` restores attributes heki cannot name from its state.
@@ -178,7 +159,7 @@ struct Joins {
     /// A store binds a global of the module heki cannot name.
     any_global: bool,
     /// The names a store rebinds to what an in-place operator gives on their own value.
-    in_place: BTreeSet<Target>,
+    in_place: BTreeSet<StoreTarget>,
 }
 
 impl Join for Joins {
@@ -218,17 +199,17 @@ impl Joins {
         let mut out = Vec::new();
         for (target, s) in &other.every {
             if self.every.entry(target.clone()).or_default().join(s) {
-                out.push(target.key());
+                out.push(Key::Name(target.clone()));
             }
         }
         for (target, s) in &other.establishing {
             if self.establishing.entry(target.clone()).or_default().join(s) {
-                out.push(target.key());
+                out.push(Key::Name(target.clone()));
             }
         }
         for target in &other.in_place {
             if self.in_place.insert(target.clone()) {
-                out.push(target.key());
+                out.push(Key::Name(target.clone()));
             }
         }
         for class in other.any.iter().chain(&other.restoring) {
@@ -245,7 +226,7 @@ impl Joins {
         out
     }
 
-    fn store(&mut self, target: Target, establishing: bool, value: Option<Option<&Ty>>) {
+    fn store(&mut self, target: StoreTarget, establishing: bool, value: Option<Option<&Ty>>) {
         if establishing {
             self.establishing
                 .entry(target.clone())
@@ -257,10 +238,10 @@ impl Joins {
 
     /// The type of `target` when its establishing stores bind a value of known type and heki
     /// can name every store of it: the join of every store.
-    fn established(&self, target: &Target) -> Option<Ty> {
+    fn established(&self, target: &StoreTarget) -> Option<Ty> {
         let named = match target {
-            Target::Global(_) => !self.any_global,
-            Target::Attr(class, _) => !self.any.contains(class),
+            StoreTarget::Global(_) => !self.any_global,
+            StoreTarget::Attr(class, _) => !self.any.contains(class),
         };
         let at_start = matches!(self.establishing.get(target), Some(Stored::Of(_)));
         if !(named && at_start) {
@@ -279,7 +260,7 @@ impl Joins {
             ..Decided::default()
         };
         for target in &self.in_place {
-            if let Target::Attr(class, attr) = target {
+            if let StoreTarget::Attr(class, attr) = target {
                 let declared = decls
                     .classes
                     .get(class)
@@ -295,12 +276,12 @@ impl Joins {
         for (target, joined) in &self.every {
             let established = self.established(target);
             match target {
-                Target::Global(name) => {
+                StoreTarget::Global(name) => {
                     if let Some(t) = established {
                         out.globals.insert(name.clone(), t);
                     }
                 }
-                Target::Attr(class, attr) => {
+                StoreTarget::Attr(class, attr) => {
                     let declared = decls
                         .classes
                         .get(class)
@@ -365,27 +346,13 @@ impl Decided {
         }
     }
 
-    /// What `fallback` gives where it differs from these types (`None`: nowhere), each with the
-    /// names `reads` gives for it.
-    fn fallbacks(
-        &self,
-        fallback: &Decided,
-        reads: impl Fn(&Target) -> (Box<[String]>, Box<[String]>),
-    ) -> Option<StoreFallbacks> {
+    /// What `fallback` gives where it differs from these types (`None`: nowhere).
+    fn fallbacks(&self, fallback: &Decided) -> Option<StoreFallbacks> {
         let mut out = StoreFallbacks::default();
-        fn entry<T>(reads: (Box<[String]>, Box<[String]>), value: T) -> StoreFallback<T> {
-            let (globals, attrs) = reads;
-            StoreFallback {
-                value,
-                globals,
-                attrs,
-            }
-        }
         for name in self.globals.keys().chain(fallback.globals.keys()) {
             let t = fallback.globals.get(name);
             if self.globals.get(name) != t {
-                let fallback = entry(reads(&Target::Global(name.clone())), t.cloned());
-                out.globals.insert(name.clone(), fallback);
+                out.globals.insert(name.clone(), t.cloned());
             }
         }
         let classes: BTreeSet<&String> = self.attrs.keys().chain(fallback.attrs.keys()).collect();
@@ -402,12 +369,10 @@ impl Decided {
                 // The fallback joins every store the types found, so it has an entry wherever
                 // they have one.
                 let store = other.get(attr).cloned().unwrap_or(AttrStore::Open);
-                let target = Target::Attr(class.clone(), attr.clone());
-                let fallback = entry(reads(&target), store);
                 out.attrs
                     .entry(class.clone())
                     .or_default()
-                    .insert(attr.clone(), fallback);
+                    .insert(attr.clone(), store);
             }
         }
         out.any_attr = fallback
@@ -561,7 +526,13 @@ impl Foreign {
 /// what pass 1 gives (the first round). What other modules store into the module's globals or
 /// into its classes' instances is not known here: where the types differ from the first round's
 /// joined with them, the latter are kept ([`ModuleDecls::store_fallbacks`]), and hold once
-/// another module stores into the module.
+/// another module stores into a name their stores read ([`StoreFallbacks::dependencies`]).
+///
+/// The stores into other modules are those through receivers as the decided types type them:
+/// each visit of the fixpoint joins what its function stores into other modules
+/// (`self.base.client = v`, where only the stores of `base` type it), and when the first
+/// round's types hold, the functions of the fixpoint are classified once more under them. A
+/// receiver is typed by this module's stores alone, not by what other modules store into it.
 pub(super) fn record(
     input: &ModuleInput<'_>,
     project: &ProjectDecls,
@@ -600,8 +571,17 @@ pub(super) fn record(
             let reads = first_reads.consulted.take().into_iter().collect();
             first.push((own, reads));
         }
-        let (decided, fallbacks) =
-            decide(input, project, kb, decls, &fns, first, &declared, &unfixed);
+        let (decided, fallbacks) = decide(
+            input,
+            project,
+            kb,
+            decls,
+            &fns,
+            first,
+            &declared,
+            &unfixed,
+            &mut foreign,
+        );
         (decided, fallbacks, foreign.into_decl())
     };
     decided.write(decls);
@@ -611,6 +591,8 @@ pub(super) fn record(
 
 /// The types the module's stores give, from their first round (`first`: each function's joins,
 /// and what it read of the names being decided), and the first round's where they differ.
+/// What the functions reading names being decided store into other modules joins `foreign`,
+/// through receivers typed as the decided types type them.
 #[allow(clippy::too_many_arguments)]
 fn decide(
     input: &ModuleInput<'_>,
@@ -621,6 +603,7 @@ fn decide(
     first: Vec<(Joins, FxHashSet<Named>)>,
     declared: &dyn Fn(&str) -> Option<Ty>,
     unfixed: &Unfixed<'_>,
+    foreign: &mut Foreign,
 ) -> (Decided, Option<StoreFallbacks>) {
     let mut round0 = Joins::default();
     for (own, _) in &first {
@@ -631,8 +614,8 @@ fn decide(
         .keys()
         .chain(&round0.in_place)
         .map(|t| match t {
-            Target::Global(name) => Named::Global(name.clone()),
-            Target::Attr(_, attr) => Named::Attr(attr.clone()),
+            StoreTarget::Global(name) => Named::Global(name.clone()),
+            StoreTarget::Attr(_, attr) => Named::Attr(attr.clone()),
         })
         .collect();
     // The functions reading a name being decided are inferred again; the others' stores bind
@@ -649,7 +632,7 @@ fn decide(
             fixed.join(own);
         }
     }
-    let establishable: FxHashSet<Target> = round0
+    let establishable: FxHashSet<StoreTarget> = round0
         .establishing
         .iter()
         .filter(|(_, s)| !matches!(s, Stored::Nothing))
@@ -682,13 +665,16 @@ fn decide(
         max_visits: VISITS,
     };
     let budget = Budget::unmetered("store types");
+    // Each visit also joins what the function stores into other modules: a receiver a read of
+    // a name being decided types (`self.base.client = v`) is typed only here.
     let solved = fixpoint(&budget, spec, |i, _: &Facts<Joins>| {
         let s = &fns[nodes[i]];
         cx.forget_inferred();
         deciding.consulted.borrow_mut().clear();
         let types = cx.infer_types(s.f);
         let mut own = Joins::default();
-        Classifier::new(&cx, decls, s, &types, declared, unfixed).classify(&mut own, None);
+        Classifier::new(&cx, decls, s, &types, declared, unfixed)
+            .classify(&mut own, Some(&mut *foreign));
         written.borrow_mut()[i] = deciding.joins.borrow_mut().join_keys(&own);
         let mut readers_of = readers_of.borrow_mut();
         for key in deciding.consulted.take() {
@@ -697,105 +683,71 @@ fn decide(
         }
         Some(own)
     });
-    drop(cx);
-    let joins = deciding.joins.into_inner();
-    let pending = deciding.pending.into_inner();
     // A read took a name for one no store binds yet, and no store ever bound it: what the read
     // gives is what the declarations give, which the fixpoint did not assume.
-    let unbound = pending
-        .iter()
-        .any(|t| matches!(joins.establishing.get(t), None | Some(Stored::Nothing)));
-    let Answer::Known(slots) = solved else {
-        return (round0.decide(decls), None);
+    let unbound = {
+        let joins = deciding.joins.borrow();
+        let pending = deciding.pending.borrow();
+        pending
+            .iter()
+            .any(|t| matches!(joins.establishing.get(t), None | Some(Stored::Nothing)))
     };
-    if unbound {
-        return (round0.decide(decls), None);
-    }
+    let slots = match solved {
+        Answer::Known(slots) if !unbound => slots,
+        _ => {
+            // The first round's types hold: the visits may not have typed the receivers as
+            // they do, so the stores into other modules are classified once more under them.
+            deciding.joins.replace(round0.clone());
+            for &i in &nodes {
+                let s = &fns[i];
+                cx.forget_inferred();
+                let types = cx.infer_types(s.f);
+                Classifier::new(&cx, decls, s, &types, declared, unfixed)
+                    .classify(&mut Joins::default(), Some(&mut *foreign));
+            }
+            return (round0.decide(decls), None);
+        }
+    };
+    drop(cx);
+    let joins = deciding.joins.into_inner();
     let decided = joins.decide(decls);
     let mut fallback = joins;
     for &i in &nodes {
         fallback.join(&first[i].0);
     }
-    let targets = fallback.every.keys().chain(&fallback.in_place);
-    let reads = DependsOn::new(&slots, consulted_of.into_inner(), targets);
-    let fallbacks = decided.fallbacks(&fallback.decide(decls), |t| reads.of(t));
+    let fallbacks = decided
+        .fallbacks(&fallback.decide(decls))
+        .map(|f| StoreFallbacks {
+            dependencies: dependencies(&slots, consulted_of.into_inner()),
+            ..f
+        });
     (decided, fallbacks)
 }
 
-/// The names of the module whose reads the stores of each name read, through the stores of
-/// those names in turn.
-struct DependsOn {
-    keys: Vec<Key>,
-    index: FxHashMap<Key, usize>,
-    /// By key, the keys the functions storing it read.
-    reads: Vec<FxHashSet<usize>>,
-    closure: Closure<usize, KeySet<usize>>,
-}
-
-impl DependsOn {
-    /// From the functions' stores (`slots`) and what each read (`consulted`), for the names of
-    /// `targets`.
-    fn new<'t>(
-        slots: &Facts<Joins>,
-        consulted: Vec<FxHashSet<Key>>,
-        targets: impl Iterator<Item = &'t Target>,
-    ) -> Self {
-        let mut out = Self {
-            keys: Vec::new(),
-            index: FxHashMap::default(),
-            reads: Vec::new(),
-            closure: Closure::new(),
-        };
-        for target in targets {
-            out.id(target.key());
-        }
-        for (i, read) in consulted.into_iter().enumerate() {
-            let read: FxHashSet<usize> = read.into_iter().map(|k| out.id(k)).collect();
-            for target in slots.get(i).into_iter().flat_map(|own| own.every.keys()) {
-                let id = out.id(target.key());
-                out.reads[id].extend(read.iter().copied());
-            }
-        }
-        out
-    }
-
-    fn id(&mut self, key: Key) -> usize {
-        if let Some(&id) = self.index.get(&key) {
-            return id;
-        }
-        self.keys.push(key.clone());
-        self.reads.push(FxHashSet::default());
-        self.index.insert(key, self.keys.len() - 1);
-        self.keys.len() - 1
-    }
-
-    /// The globals and the attributes the stores of `target` depend on.
-    fn of(&self, target: &Target) -> (Box<[String]>, Box<[String]>) {
-        let start = self.index[&target.key()];
-        let budget = Budget::unmetered("store types");
-        let own = |k: usize| self.reads[k].iter().copied().collect::<KeySet<usize>>();
-        let next = |k: usize, out: &mut Vec<usize>| out.extend(self.reads[k].iter().copied());
-        // Past the budget, on every name.
-        let reached = self
-            .closure
-            .ask(&budget, start, own, next)
-            .map(|r| r.iter().copied().collect::<Vec<usize>>())
-            .open_means((0..self.keys.len()).collect());
-        let (mut globals, mut attrs) = (Vec::new(), Vec::new());
-        for k in reached {
-            match &self.keys[k] {
-                Key::Global(name) => globals.push(name.clone()),
-                Key::Attr(_, attr) => attrs.push(attr.clone()),
-                Key::Class(_) | Key::Globals => {}
-            }
-        }
-        globals.dedup();
-        attrs.sort_unstable();
-        attrs.dedup();
-        globals.sort_unstable();
-        globals.dedup();
-        (globals.into(), attrs.into())
-    }
+/// What each function of the fixpoint stores into (its fact, `slots`) and the names being
+/// decided it read (`consulted`), for those that do both.
+fn dependencies(slots: &Facts<Joins>, consulted: Vec<FxHashSet<Key>>) -> Box<[StoreDependency]> {
+    let dependency = |(i, read): (usize, FxHashSet<Key>)| {
+        let stores: Box<[StoreTarget]> = slots.get(i)?.every.keys().cloned().collect();
+        let mut reads: Vec<StoreTarget> = read
+            .into_iter()
+            .filter_map(|k| match k {
+                Key::Name(t) => Some(t),
+                Key::Class(_) | Key::Globals => None,
+            })
+            .collect();
+        reads.sort_unstable();
+        let both = !(stores.is_empty() || reads.is_empty());
+        both.then(|| StoreDependency {
+            stores,
+            reads: reads.into(),
+        })
+    };
+    consulted
+        .into_iter()
+        .enumerate()
+        .filter_map(dependency)
+        .collect()
 }
 
 /// The reads of the first round, each giving what the declarations give: which names being
@@ -829,7 +781,7 @@ struct Deciding<'d> {
     /// The module's declarations, with their annotations.
     decls: &'d ModuleDecls,
     /// The names whose establishing stores bind a value in the first round.
-    establishable: FxHashSet<Target>,
+    establishable: FxHashSet<StoreTarget>,
     joins: RefCell<Joins>,
     /// The canonical classes of the family of a class ([`ProjectDecls::instance_family`]),
     /// `None` when a member is a class of another module.
@@ -837,7 +789,7 @@ struct Deciding<'d> {
     /// What the function being inferred read of the names being decided.
     consulted: RefCell<Vec<Key>>,
     /// The names a read took for ones no store binds yet.
-    pending: RefCell<FxHashSet<Target>>,
+    pending: RefCell<FxHashSet<StoreTarget>>,
 }
 
 impl Deciding<'_> {
@@ -874,10 +826,10 @@ impl Deciding<'_> {
         let mut in_place = false;
         for class in family {
             let qualname = self.own_qualname(class)?;
-            let target = Target::Attr(qualname.to_owned(), attr.to_owned());
+            let target = StoreTarget::Attr(qualname.to_owned(), attr.to_owned());
             let mut consulted = self.consulted.borrow_mut();
             consulted.push(Key::Class(qualname.to_owned()));
-            consulted.push(target.key());
+            consulted.push(Key::Name(target.clone()));
             drop(consulted);
             if joins.any.contains(qualname) {
                 return None;
@@ -888,7 +840,7 @@ impl Deciding<'_> {
                 Some(t) => out.add(Some(Some(t))),
                 None => match joins
                     .every
-                    .get(&Target::Attr(qualname.to_owned(), attr.to_owned()))
+                    .get(&StoreTarget::Attr(qualname.to_owned(), attr.to_owned()))
                 {
                     Some(Stored::Open) => return None,
                     Some(stored) => {
@@ -921,12 +873,12 @@ impl Deciding<'_> {
 
 impl StoreReads for Deciding<'_> {
     fn global(&self, name: &str) -> Option<Read> {
-        let target = Target::Global(name.to_owned());
+        let target = StoreTarget::Global(name.to_owned());
         if !self.establishable.contains(&target) {
             return None;
         }
         let mut consulted = self.consulted.borrow_mut();
-        consulted.push(target.key());
+        consulted.push(Key::Name(target.clone()));
         consulted.push(Key::Globals);
         drop(consulted);
         let joins = self.joins.borrow();
@@ -956,12 +908,12 @@ impl StoreReads for Deciding<'_> {
             if let Some(t) = self.decls.classes[qualname].attr_types.get(attr) {
                 return Some(Read::Of(t.clone()));
             }
-            let target = Target::Attr(qualname.to_owned(), attr.to_owned());
+            let target = StoreTarget::Attr(qualname.to_owned(), attr.to_owned());
             if !self.establishable.contains(&target) {
                 continue;
             }
             let mut consulted = self.consulted.borrow_mut();
-            consulted.push(target.key());
+            consulted.push(Key::Name(target.clone()));
             consulted.push(Key::Class(qualname.to_owned()));
             drop(consulted);
             let family = self.family(class)?;
@@ -1416,7 +1368,7 @@ impl<'c, 'f> Classifier<'c, 'f> {
         let mut namespaces: Vec<(VarId, VarId)> = Vec::new();
         for inst in insts(f) {
             if let InstKind::StoreGlobal { name, value } = &inst.kind {
-                let target = Target::Global(name.clone());
+                let target = StoreTarget::Global(name.clone());
                 let loads_it = |k: &InstKind| matches!(k, InstKind::LoadGlobal { name: n, .. } | InstKind::LoadName { name: n, .. } if n == name);
                 if self.in_place(*value, loads_it) {
                     out.own.in_place.insert(target);
@@ -1483,11 +1435,13 @@ impl<'c, 'f> Classifier<'c, 'f> {
         for holder in self.holders(obj) {
             match holder {
                 Holder::Own { class, .. } => {
-                    let target = Target::Attr(class.to_owned(), attr.to_owned());
+                    let target = StoreTarget::Attr(class.to_owned(), attr.to_owned());
                     out.own.in_place.insert(target);
                 }
                 Holder::Module(m) if m == module => {
-                    out.own.in_place.insert(Target::Global(attr.to_owned()));
+                    out.own
+                        .in_place
+                        .insert(StoreTarget::Global(attr.to_owned()));
                 }
                 Holder::Module(m) => {
                     if let Some(foreign) = out.foreign.as_deref_mut() {
@@ -1587,7 +1541,7 @@ impl<'c, 'f> Classifier<'c, 'f> {
         for holder in self.holders(obj) {
             match holder {
                 Holder::Own { class, own_self } => {
-                    let target = Target::Attr(class.to_owned(), attr.to_owned());
+                    let target = StoreTarget::Attr(class.to_owned(), attr.to_owned());
                     let establishing = own_self && self.s.at_init;
                     out.own
                         .store(target, establishing, self.types.stored(value));
@@ -1595,7 +1549,7 @@ impl<'c, 'f> Classifier<'c, 'f> {
                 Holder::Module(m) if m == module => {
                     let value = self.global_value(attr, value, self.unfixed.dynamic);
                     out.own.store(
-                        Target::Global(attr.to_owned()),
+                        StoreTarget::Global(attr.to_owned()),
                         false,
                         value.as_ref().map(Option::as_ref),
                     );
@@ -1963,19 +1917,19 @@ fn filled_by_self(shape: &FnShape<'_>, dict: VarId, own_value: &dyn Fn(VarId) ->
 }
 
 /// What project modules store into the globals of other modules and into the instances of
-/// their classes ([`ModuleDecls::stores_elsewhere`]), joined by what they store into, and what
-/// of each module with [`ModuleDecls::store_fallbacks`] they store into.
+/// their classes ([`ModuleDecls::stores_elsewhere`]), joined by what they store into, and the
+/// names whose [`ModuleDecls::store_fallbacks`] hold, by module, in each module they store into.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(super) struct Elsewhere {
     globals: FxHashMap<String, StoredElsewhere>,
     attrs: FxHashMap<String, FxHashMap<String, StoredElsewhere>>,
     unnamed: FxHashSet<String>,
-    touched: FxHashMap<String, Touched>,
+    held: FxHashMap<String, FxHashSet<StoreTarget>>,
 }
 
 /// What other modules store into a module: its globals and the attributes of its classes, by
 /// name, or ones heki cannot name.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Default)]
 struct Touched {
     globals: FxHashSet<String>,
     attrs: FxHashSet<String>,
@@ -1984,12 +1938,41 @@ struct Touched {
 }
 
 impl Touched {
-    /// Whether a fallback depending on reads of `globals` and `attrs` holds.
-    fn reaches<T>(&self, fallback: &StoreFallback<T>) -> bool {
-        (self.any_global && !fallback.globals.is_empty())
-            || (self.any_attr && !fallback.attrs.is_empty())
-            || fallback.globals.iter().any(|g| self.globals.contains(g))
-            || fallback.attrs.iter().any(|a| self.attrs.contains(a))
+    /// The names of the module whose `fallbacks` hold: those a function of its fixpoint stores
+    /// when it reads a name other modules store into, or one of these names in turn.
+    fn held(&self, fallbacks: &StoreFallbacks) -> FxHashSet<StoreTarget> {
+        let dependencies = &fallbacks.dependencies;
+        let touched = |read: &StoreTarget| match read {
+            StoreTarget::Global(name) => self.any_global || self.globals.contains(name),
+            StoreTarget::Attr(_, attr) => self.any_attr || self.attrs.contains(attr),
+        };
+        let mut readers: FxHashMap<&StoreTarget, Vec<usize>> = FxHashMap::default();
+        for (i, d) in dependencies.iter().enumerate() {
+            for read in &d.reads {
+                readers.entry(read).or_default().push(i);
+            }
+        }
+        let starts =
+            (0..dependencies.len()).filter(|&i| dependencies[i].reads.iter().any(&touched));
+        let next = |i: usize, out: &mut Vec<usize>| {
+            for stored in &dependencies[i].stores {
+                out.extend(readers.get(stored).into_iter().flatten().copied());
+            }
+        };
+        let mut reached = vec![false; dependencies.len()];
+        let budget = Budget::unmetered("store types");
+        let walked = reach(&budget, starts, next, |i| {
+            reached[i] = true;
+            Visit::<()>::Expand
+        });
+        // Past the budget, every fallback holds.
+        let every = walked.is_open();
+        dependencies
+            .iter()
+            .zip(reached)
+            .filter(|&(_, reached)| every || reached)
+            .flat_map(|(d, _)| d.stores.iter().cloned())
+            .collect()
     }
 }
 
@@ -2009,8 +1992,8 @@ impl Elsewhere {
             }
         }
         out.extend(self.unnamed.symmetric_difference(&after.unnamed).cloned());
-        for module in self.touched.keys().chain(after.touched.keys()) {
-            if self.touched.get(module) != after.touched.get(module) {
+        for module in self.held.keys().chain(after.held.keys()) {
+            if self.held.get(module) != after.held.get(module) {
                 out.insert(module.clone());
             }
         }
@@ -2045,6 +2028,7 @@ impl ProjectDecls {
     /// [`Self::elsewhere`].
     pub(super) fn stores_elsewhere(&self) -> Elsewhere {
         let mut out = Elsewhere::default();
+        let mut touched: FxHashMap<String, Touched> = FxHashMap::default();
         // The module `fqn` is in (or names), and the rest of it, when that is not `m`.
         let owner = |fqn: &str, m: &ModuleDecls| {
             let (owner, rest) = self.split_module(fqn)?;
@@ -2060,7 +2044,7 @@ impl ProjectDecls {
                     continue;
                 };
                 let name = fqn[fqn.len() - rest..].to_owned();
-                out.touched.entry(module).or_default().globals.insert(name);
+                touched.entry(module).or_default().globals.insert(name);
                 out.globals.entry(fqn).or_default().join(t);
             }
             for (class, attrs) in &stores.attrs {
@@ -2068,8 +2052,8 @@ impl ProjectDecls {
                 let Some((module, _)) = owner(&class, m) else {
                     continue;
                 };
-                let touched = out.touched.entry(module).or_default();
-                touched.attrs.extend(attrs.keys().cloned());
+                let into = touched.entry(module).or_default();
+                into.attrs.extend(attrs.keys().cloned());
                 let joins = out.attrs.entry(class).or_default();
                 for (attr, t) in attrs {
                     joins.entry(attr.clone()).or_default().join(t);
@@ -2080,25 +2064,34 @@ impl ProjectDecls {
                 let Some((module, rest)) = owner(&fqn, m) else {
                     continue;
                 };
-                let touched = out.touched.entry(module).or_default();
+                let into = touched.entry(module).or_default();
                 if rest == 0 {
-                    touched.any_global = true;
+                    into.any_global = true;
                 } else {
-                    touched.any_attr = true;
+                    into.any_attr = true;
                 }
                 out.unnamed.insert(fqn);
             }
         }
-        out.touched
-            .retain(|m, _| self.module(m).is_some_and(|d| d.store_fallbacks.is_some()));
+        out.held = touched
+            .into_iter()
+            .filter_map(|(module, into)| {
+                let fallbacks = self.module(&module)?.store_fallbacks.as_deref()?;
+                Some((module.clone(), into.held(fallbacks)))
+            })
+            .collect();
         out
     }
 
-    /// The fallbacks of the module `m` and what other modules store into it, where they do.
-    fn fallbacks_of<'m>(&self, m: &'m ModuleDecls) -> Option<(&'m StoreFallbacks, &Touched)> {
+    /// The fallbacks of the module `m` and the names whose fallbacks hold, where another module
+    /// stores into it.
+    fn fallbacks_of<'m>(
+        &self,
+        m: &'m ModuleDecls,
+    ) -> Option<(&'m StoreFallbacks, &FxHashSet<StoreTarget>)> {
         self.read(|k| note(&mut k.grown_globals, &m.module_name));
-        let touched = self.elsewhere.touched.get(&m.module_name)?;
-        Some((m.store_fallbacks.as_deref()?, touched))
+        let held = self.elsewhere.held.get(&m.module_name)?;
+        Some((m.store_fallbacks.as_deref()?, held))
     }
 
     /// The type of the module global `name` of `m` ([`ModuleDecls::global_types`]), joined with
@@ -2106,11 +2099,13 @@ impl ProjectDecls {
     pub(super) fn global_type(&self, m: &ModuleDecls, name: &str) -> Option<Ty> {
         let fqn = self.canonical(&format!("{}.{name}", m.module_name));
         self.read(|k| note(&mut k.grown_globals, &fqn));
-        let fallback = self.fallbacks_of(m).and_then(|(fallbacks, touched)| {
-            fallbacks.globals.get(name).filter(|f| touched.reaches(f))
+        let fallback = self.fallbacks_of(m).and_then(|(fallbacks, held)| {
+            let fallback = fallbacks.globals.get(name)?;
+            held.contains(&StoreTarget::Global(name.to_owned()))
+                .then_some(fallback)
         });
         let own = match fallback {
-            Some(fallback) => fallback.value.as_ref(),
+            Some(fallback) => fallback.as_ref(),
             None => m.global_types.get(name),
         }?;
         if self.elsewhere.unnamed.contains(&m.module_name) {
@@ -2131,9 +2126,10 @@ impl ProjectDecls {
         attr: &str,
     ) -> Option<&'s AttrStore> {
         let fallback = self.split_module(class).and_then(|(m, qualname)| {
-            let (fallbacks, touched) = self.fallbacks_of(m)?;
+            let (fallbacks, held) = self.fallbacks_of(m)?;
             let fallback = fallbacks.attrs.get(qualname)?.get(attr)?;
-            touched.reaches(fallback).then_some(&fallback.value)
+            let target = StoreTarget::Attr(qualname.to_owned(), attr.to_owned());
+            held.contains(&target).then_some(fallback)
         });
         fallback.or_else(|| decl.stored(attr))
     }

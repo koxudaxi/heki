@@ -666,6 +666,17 @@ const ST_ACTIVE: &str = "import httpx\n\nclient = httpx.Client()\nother = httpx.
 const ST_ACTIVE_STORES: &str = "def configure():\n    return None\n";
 const ST_ACTIVE_STORES_CLIENT: &str = "import httpx\n\nimport pkg.st_active\n\n\ndef configure():\n    pkg.st_active.client = httpx.AsyncClient()\n";
 const ST_ACTIVE_STORES_OTHER: &str = "import httpx\n\nimport pkg.st_active\n\n\ndef configure():\n    pkg.st_active.other = httpx.AsyncClient()\n";
+// An attribute whose stores read another (`self.active = self.client`): its type holds until
+// another module stores into the attribute it reads.
+const ST_ATTR_ACTIVE: &str = "import httpx\n\n\nclass Holder:\n    def __init__(self):\n        self.client = httpx.Client()\n        self.active = self.client\n\n    def activate(self):\n        self.active = self.client\n\n    async def handle(self):\n        self.active.get(\"u\")\n";
+const ST_ATTR_STORES: &str = "def configure():\n    return None\n";
+const ST_ATTR_STORES_CLIENT: &str = "import httpx\n\nfrom pkg.st_attr_active import Holder\n\n\ndef configure(holder: Holder):\n    holder.client = httpx.AsyncClient()\n";
+const ST_ATTR_STORES_OTHER: &str = "import httpx\n\nfrom pkg.st_attr_active import Holder\n\n\ndef configure(holder: Holder):\n    holder.other = httpx.AsyncClient()\n";
+// A store through an instance another module keeps in an attribute or a global, which only the
+// stores of that attribute or global type.
+const ST_KEEPER: &str = "def keep():\n    return None\n";
+const ST_KEEPER_ATTR: &str = "import httpx\n\nfrom pkg.st_holder import Holder\n\n\nclass Keeper:\n    def __init__(self):\n        self.holder = Holder()\n\n    def swap(self):\n        self.holder.client = httpx.AsyncClient()\n";
+const ST_KEEPER_GLOBAL: &str = "import httpx\n\nfrom pkg.st_holder import Holder\n\nholder = Holder()\n\n\ndef swap():\n    holder.client = httpx.AsyncClient()\n";
 
 // Method lookups (`ProjectDecls::method_read_runs_no_code`): a helper looks up a method before it
 // sleeps, inside a `try` whose handler goes on; a subclass in another module comes and goes.
@@ -1014,6 +1025,9 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/st_mixin.py", ST_MIXIN),
         ("pkg/st_active.py", ST_ACTIVE),
         ("pkg/st_active_stores.py", ST_ACTIVE_STORES),
+        ("pkg/st_attr_active.py", ST_ATTR_ACTIVE),
+        ("pkg/st_attr_stores.py", ST_ATTR_STORES),
+        ("pkg/st_keeper.py", ST_KEEPER),
         ("pkg/lc_settings.py", LC_SETTINGS),
         ("pkg/lc_use.py", LC_USE),
         ("pkg/ml_base.py", ML_BASE),
@@ -1141,6 +1155,7 @@ fn steps_store_types() -> Vec<Step> {
     const READERS: &[(&str, &str)] = &[("pkg/st_client.py", "EFF101"), ("pkg/st_use.py", "EFF101")];
     const HOLDER: &[(&str, &str)] = &[("pkg/st_holder.py", "EFF101")];
     const ACTIVE: &[(&str, &str)] = &[("pkg/st_active.py", "EFF101")];
+    const ATTR_ACTIVE: &[(&str, &str)] = &[("pkg/st_attr_active.py", "EFF101")];
     vec![
         Step::new(
             "another function rebinds the global to an async client",
@@ -1248,6 +1263,41 @@ fn steps_store_types() -> Vec<Step> {
             vec![save("pkg/st_active_stores.py", ST_ACTIVE_STORES)],
         )
         .present(ACTIVE),
+        Step::new(
+            "another module stores an async client into the attribute the store reads",
+            vec![save("pkg/st_attr_stores.py", ST_ATTR_STORES_CLIENT)],
+        )
+        .absent(ATTR_ACTIVE),
+        Step::new(
+            "it stores into another attribute",
+            vec![save("pkg/st_attr_stores.py", ST_ATTR_STORES_OTHER)],
+        )
+        .present(ATTR_ACTIVE),
+        Step::new(
+            "it stores into the read attribute again",
+            vec![save("pkg/st_attr_stores.py", ST_ATTR_STORES_CLIENT)],
+        )
+        .absent(ATTR_ACTIVE),
+        Step::new(
+            "it stops storing into the attribute",
+            vec![save("pkg/st_attr_stores.py", ST_ATTR_STORES)],
+        )
+        .present(ATTR_ACTIVE),
+        Step::new(
+            "a class of another module stores an async client through an instance it keeps",
+            vec![save("pkg/st_keeper.py", ST_KEEPER_ATTR)],
+        )
+        .absent(HOLDER),
+        Step::new(
+            "the module keeps the instance in a global instead",
+            vec![save("pkg/st_keeper.py", ST_KEEPER_GLOBAL)],
+        )
+        .absent(HOLDER),
+        Step::new(
+            "the module stops keeping it",
+            vec![save("pkg/st_keeper.py", ST_KEEPER)],
+        )
+        .present(HOLDER),
     ]
 }
 

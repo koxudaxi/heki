@@ -1,12 +1,12 @@
 //! The cost of the analyses past the IR, end to end through the real binary: `isinstance`
 //! narrowing through phis, the passes of the type inference and of the classes of merged values,
 //! the closure cells child scopes read, the iterables child scopes receive from the functions
-//! creating them, the fixpoint joining the stores of attributes and the stores through namespaces
-//! and `setattr`, the size of the Soundness lane's proof state, the values `EFF107` follows from a
-//! task factory, the walk to the callable a builtin calls once per item, contracts with many call
-//! targets and argument lists, the walk to the uses handing a reference to a call target on, the
-//! locks `EFF109` follows, the values class statements pass as bases, and the bindings the deque
-//! rewrite's candidates check.
+//! creating them, the fixpoint joining the stores of attributes, the names its functions store
+//! and read, and the stores through namespaces and `setattr`, the size of the Soundness lane's
+//! proof state, the values `EFF107` follows from a task factory, the walk to the callable a
+//! builtin calls once per item, contracts with many call targets and argument lists, the walk to
+//! the uses handing a reference to a call target on, the locks `EFF109` follows, the values class
+//! statements pass as bases, and the bindings the deque rewrite's candidates check.
 //!
 //! A shape's cost is counted, not timed: `heki check --walk-steps` writes the steps of each
 //! owner's walks (as `scripts/check_walk_shapes.py` reads them), and a shape is compared with the
@@ -388,6 +388,89 @@ fn names_setattr_stores_are_read_from_a_table() {
         let p = Project::new(&format!("bounds_setattr_stores_{stores}"));
         let text = many_attribute_stores(stores, |k| format!("setattr(self, \"a{k}\", {k})"));
         p.write("m.py", &text);
+        p
+    };
+    let blocking = |found: Vec<Value>| found.iter().filter(|d| d["rule_code"] == "EFF101").count();
+    assert_eq!(blocking(check_linear(2000, shape)), 1);
+}
+
+/// A class whose `__init__` binds `pairs` pairs of attributes to clients, a `reset` binding
+/// each first one to its second (`self.a0 = self.d0`), and an `async def` calling the client's
+/// blocking method through the first; with `touched`, another module stores into `d0`.
+fn one_function_storing_what_it_reads(pairs: usize, touched: bool) -> Project {
+    let p = Project::new(&format!("bounds_store_dependencies_{pairs}_{touched}"));
+    let mut out = vec![
+        "import httpx".to_owned(),
+        String::new(),
+        String::new(),
+        "class Holder:".to_owned(),
+        "    def __init__(self):".to_owned(),
+    ];
+    for k in 0..pairs {
+        out.push(format!("        self.d{k} = httpx.Client()"));
+        out.push(format!("        self.a{k} = httpx.Client()"));
+    }
+    out.push(String::new());
+    out.push("    def reset(self):".to_owned());
+    out.extend((0..pairs).map(|k| format!("        self.a{k} = self.d{k}")));
+    out.push(String::new());
+    out.push("    async def handle(self):".to_owned());
+    out.push("        self.a0.get(\"https://example.com\")".to_owned());
+    p.write("m.py", &(out.join("\n") + "\n"));
+    if touched {
+        let other = "import httpx\n\nfrom m import Holder\n\n\ndef touch(holder: Holder):\n    holder.d0 = httpx.Client(timeout=1)\n";
+        p.write("other.py", other);
+    }
+    p
+}
+
+/// What the stores of each attribute read is kept once per storing function, not once per
+/// attribute: a function storing many attributes, each from another one, keeps its reads once,
+/// and the attributes whose types another module's store may change are found in one walk over
+/// the functions. The store into `d0` elsewhere makes the types of every attribute `reset`
+/// stores those of the first round, which do not type `a0`.
+#[test]
+fn the_names_a_function_stores_and_reads_are_kept_once() {
+    let blocking = |found: Vec<Value>| found.iter().filter(|d| d["rule_code"] == "EFF101").count();
+    let alone = |pairs: usize| one_function_storing_what_it_reads(pairs, false);
+    assert_eq!(blocking(check_linear(2000, alone)), 1);
+    let touched = |pairs: usize| one_function_storing_what_it_reads(pairs, true);
+    assert_eq!(blocking(check_linear(2000, touched)), 0);
+}
+
+/// A class whose `__init__` binds `links` attributes to clients, a method per attribute after
+/// the first binding it to the one before (`def m1(self): self.a1 = self.a0`), and an
+/// `async def` calling the client's blocking method through the last.
+fn methods_storing_down_a_chain(links: usize) -> String {
+    let mut out = vec![
+        "import httpx".to_owned(),
+        String::new(),
+        String::new(),
+        "class Holder:".to_owned(),
+        "    def __init__(self):".to_owned(),
+    ];
+    out.extend((0..links).map(|k| format!("        self.a{k} = httpx.Client()")));
+    for k in 1..links {
+        out.push(String::new());
+        out.push(format!("    def m{k}(self):"));
+        out.push(format!("        self.a{k} = self.a{}", k - 1));
+    }
+    out.push(String::new());
+    out.push("    async def handle(self):".to_owned());
+    out.push(format!(
+        "        self.a{}.get(\"https://example.com\")",
+        links - 1
+    ));
+    out.join("\n") + "\n"
+}
+
+/// Methods each storing an attribute from the one before keep one dependency each, however
+/// long the chain of their reads.
+#[test]
+fn a_chain_of_stores_across_methods_keeps_one_dependency_per_method() {
+    let shape = |links: usize| {
+        let p = Project::new(&format!("bounds_store_chain_{links}"));
+        p.write("m.py", &methods_storing_down_a_chain(links));
         p
     };
     let blocking = |found: Vec<Value>| found.iter().filter(|d| d["rule_code"] == "EFF101").count();

@@ -584,10 +584,16 @@ Missed findings close as heki learns more:
   `type[C]` attributes.
 - The type of a module global or an instance attribute joins every store of it through a
   receiver whose type heki knows: `self`, an instance of the class (a parameter `obj: Helper`,
-  `cls()` in a class method), the module (also imported in a function, or through `setattr` or
+  `cls()` in a class method, one the storing module keeps in its own attribute or global, as
+  in `self.base.client = ...`), the module (also imported in a function, or through `setattr` or
   `vars`). A store through a receiver without a known type (`def configure(obj): obj.client =
   ...`, a parameter whose default is the module) is not joined, nor is one through a `Protocol`
-  value, so the type the other stores agree on may be wrong for values it stores.
+  value, so the type the other stores agree on may be wrong for values it stores. The same holds
+  for a receiver read from an attribute or a global of another module (`def swap(app: App):
+  app.state.client = ...`, where `App`'s module types `state`), and a receiver kept in an
+  attribute or a global of the storing module has the type that module's stores give it: when
+  yet another module stores an instance of another class there (`owner.base = Other()`), a store
+  through it is not joined into that class.
 
 ### Names the catalog does not list
 

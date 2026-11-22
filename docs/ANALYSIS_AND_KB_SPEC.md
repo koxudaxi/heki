@@ -366,7 +366,11 @@ the name binds (Priority 3; `ModuleDecls::global_types`, `ClassDecl::attr_stores
   does too, unless the star-imported module is a project module whose `__all__` fixes the names it
   exports and does not list the name (`ModuleDecls::exports`).
 - **Other modules.** What other project modules store into a module's globals and into the
-  instances of its classes (`ModuleDecls::stores_elsewhere`) is joined where the type is read.
+  instances of its classes (`ModuleDecls::stores_elsewhere`) is joined where the type is read. A
+  store's receiver is typed as the storing module's decided types type it: one an attribute or a
+  global holds (`self.base.client = v`) is typed in each visit of the fixpoint below, and when
+  the first round's types hold, the functions of the fixpoint are classified once more under
+  them.
 - **Stores reading names being decided.** A store reading another such name
   (`self.active = self.client`, `self.items = self.items[1:]`) binds a value whose type depends on
   the one being decided. The types are a least fixpoint (`heki_ir::walk::fixpoint`): each read
@@ -376,8 +380,11 @@ the name binds (Priority 3; `ModuleDecls::global_types`, `ClassDecl::attr_stores
   with a family member in another module, a class of another module along the MRO) gives what the
   declarations of pass 1 give. Past the visit limit, the first round's types hold, with those reads
   untyped. Where the types differ from the first round's joined with them, the latter are kept
-  with the names their stores read (`ModuleDecls::store_fallbacks`): they hold once another module
-  stores into one of those names.
+  (`ModuleDecls::store_fallbacks`), with what each function of the fixpoint stores and reads, once
+  per function (`StoreFallbacks::dependencies`). A name's fallback holds once another module
+  stores into a name a function storing it reads, or into a name such a function reads through
+  the stores of the names it reads; one walk over the functions finds them
+  (`ProjectDecls::elsewhere`).
 - **Annotations.** An annotation types every store of the name it declares (Priority 2): an
   annotated global holds its declaration or a narrower value, an annotated attribute its
   declaration.
@@ -385,7 +392,9 @@ the name binds (Priority 3; `ModuleDecls::global_types`, `ClassDecl::attr_stores
 Stores of two or three classes give a union, on which a call dispatches as on any union (one of
 `httpx.Client` and `httpx.AsyncClient` leaves `get` unresolved). A store through a receiver
 whose type the inference does not know (`def configure(obj): obj.client = ...`) is not one of
-them (docs/scope.md, "Known limitations").
+them, nor is one through a receiver read from an attribute or a global of another module
+(declarations of pass 1 type neither while a module's stores are decided), nor one into a class
+that only another module's store into the receiver adds (docs/scope.md, "Known limitations").
 
 A class's bases (`ClassDecl::bases`) are the values its class statement passes, named where the
 statement runs. A module-level statement names them through the module's names: an import, a
