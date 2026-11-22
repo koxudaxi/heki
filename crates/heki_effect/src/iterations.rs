@@ -416,9 +416,6 @@ pub(crate) fn held_results(
     plain: bool,
 ) -> FxHashSet<VarId> {
     let carried = |v: VarId| -> Vec<VarId> {
-        if !flow.root_of.contains_key(&v) && !flow.may_roots.contains_key(&v) {
-            return Vec::new();
-        }
         let mut roots = flow.expand_steps(&[v]);
         roots.retain(|r| results.contains(r));
         roots

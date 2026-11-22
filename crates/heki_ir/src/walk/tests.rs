@@ -606,6 +606,11 @@ fn joins_report_growth() {
     let mut or = Or::default();
     assert!(or.join(&Or(0b101)));
     assert!(!or.join(&Or(0b001)));
+
+    let mut and = And(0b111);
+    assert!(and.join(&And(0b101)));
+    assert!(!and.join(&And(0b111)));
+    assert_eq!(and, And(0b101));
 }
 
 #[test]
