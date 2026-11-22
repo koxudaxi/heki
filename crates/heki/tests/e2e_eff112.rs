@@ -659,8 +659,9 @@ def numbers_out(path: Path) -> None:
 
 /// Shapes that keep or lose the order on the way: a raise for one element at a time (also of
 /// text made from it), a mapping read back by key, a key read before and stored again, a set
-/// filled with the order, a method of an unknown receiver, and a sequence of at most one
-/// element; and what stays reported, text built element by element in a loop among it.
+/// filled with the order, a method of an unknown receiver, a sequence of at most one element,
+/// and `|` of two mappings; and what stays reported, text built element by element in a loop
+/// and a set operator on two mappings' key views among it.
 const NARROWED: &str = r#"import json
 import sys
 
@@ -905,6 +906,22 @@ def show_line(line: str) -> None:
 def show_each(names: set[str]) -> None:
     for name in names:
         show_line(f"- {name}")
+
+
+def merged(a: dict[str, int], b: dict[str, int]) -> list[str]:
+    return list(a | b)
+
+
+def show_merged(a: dict[str, int], b: dict[str, int]) -> None:
+    print(merged(a, b))
+
+
+def added(a: dict[str, int], b: dict[str, int]) -> list[str]:
+    return list(a.keys() - b.keys())
+
+
+def show_added(a: dict[str, int], b: dict[str, int]) -> None:
+    print(added(a, b))
 "#;
 
 fn project(name: &str) -> Project {
@@ -1081,6 +1098,12 @@ fn expected() -> Vec<(String, u64, String, String)> {
             243,
             "show_each",
             "show_each:243->builtins.print",
+        ),
+        d(
+            "pkg/narrowed.py",
+            260,
+            "show_added",
+            "added:256->builtins.print",
         ),
         d("pkg/shapes.py", 47, "handed", "handed:47->json.dumps"),
         d(

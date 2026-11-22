@@ -586,11 +586,15 @@ impl<'f, 'c> LocalFlow<'f, 'c> {
                 dst,
                 elems,
             } => (true, self.all_text(elems) || self.filled_with_text(*dst)),
+            // A set operator makes a set of a set (its operands' facts, joined in) or of a
+            // mapping's view; `|` of two mappings makes a mapping.
             InstKind::BinOp {
                 op: BinOpKind::BitAnd | BinOpKind::BitOr | BinOpKind::BitXor | BinOpKind::Sub,
                 in_place: false,
+                lhs,
+                rhs,
                 ..
-            } => (true, false),
+            } => (self.is_view(*lhs) || self.is_view(*rhs), false),
             InstKind::Call { args, .. } => match self.external_defining(v) {
                 Some("builtins.set" | "builtins.frozenset") => {
                     (true, args.first().is_some_and(|a| self.text_items(*a)))
@@ -607,6 +611,14 @@ impl<'f, 'c> LocalFlow<'f, 'c> {
             }
             _ => self.typed_set(v),
         }
+    }
+
+    /// Whether `v` is a view of a mapping's keys or items, which set operators take as a set.
+    fn is_view(&self, v: VarId) -> bool {
+        matches!(
+            self.shape.inst(self.shape.copy_root(v)).map(|i| &i.kind),
+            Some(InstKind::MethodCall { method, .. }) if method == "keys" || method == "items"
+        )
     }
 
     /// The values whose set and text `v` takes on: a copy's source, a phi's inputs, a set
