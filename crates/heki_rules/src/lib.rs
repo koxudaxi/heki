@@ -16,8 +16,10 @@ pub mod experimental;
 pub mod inspect;
 mod mut_rules;
 mod opt_rules;
+pub mod precision;
 pub mod premises;
 pub mod project;
+pub mod recommend;
 pub mod selection;
 pub mod snapshot;
 
@@ -59,7 +61,7 @@ pub enum RuleFamily {
 }
 
 /// What happens in the code a rule reports, which sets its default severity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum Consequence {
     /// A bug that can be critical: a wrong result, an exception, a lost update, a deadlock, or a
@@ -73,7 +75,7 @@ pub enum Consequence {
 }
 
 /// When a rule runs without being named by its code or name (ADR-018).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum Activation {
     /// In the default selection, and matched by a prefix or `ALL`, while the rule is exact;
