@@ -22,7 +22,7 @@
 //!   returns normally, the call has been made.
 
 use super::{FnIndex, ModuleConstants};
-use crate::walk::{Answer, Budget};
+use crate::walk::{Answer, Budget, Visit, reach};
 use crate::{
     BlockId, CompareOpKind, ConstLiteral, Inst, InstKind, IrFunction, ModuleIr, NaturalLoop,
     Terminator, UnaryOpKind, VarId,
@@ -727,6 +727,13 @@ impl BlockDominators {
     }
 }
 
+/// A region's graph ([`Paths::region_graph`]).
+struct RegionGraph {
+    local: FxHashMap<BlockId, u32>,
+    preds: Vec<SmallVec<[u32; 2]>>,
+    sink: u32,
+}
+
 /// The region a graph covers.
 #[derive(Clone, Copy)]
 enum Region<'l> {
@@ -841,6 +848,47 @@ impl<'p, 'a> Paths<'p, 'a> {
         answer
     }
 
+    /// Whether every iteration of `f.loops[li]` (an index the function has) that completes passes
+    /// one of `points`, to `progress`: every path from the header back to it does (also when
+    /// none does, as no iteration completes). One point need not be on every path: a sleep in
+    /// each branch of an `if` paces the loop too.
+    pub fn on_every_iteration_passes_one_of(
+        &self,
+        li: usize,
+        points: &[(BlockId, usize)],
+        progress: Progress,
+    ) -> Answer<bool> {
+        let lp = &self.ix.f.loops[li];
+        // Past the budget the region has no graph, and the answer is open.
+        self.region_graph(Region::Loop(li, lp))
+            .map_or(Answer::Open, |graph| {
+                let passed: FxHashSet<u32> = points
+                    .iter()
+                    .filter_map(|&at| {
+                        let (block, tail) = self.node_at(at, progress);
+                        graph.local.get(&block).map(|k| 2 * k + u32::from(tail))
+                    })
+                    .collect();
+                // Back from the end of an iteration, never through a passed node: reaching the
+                // header is a path around the loop that passes none.
+                reach(
+                    self.budget,
+                    [graph.sink],
+                    |node, next| next.extend(graph.preds[node as usize].iter().copied()),
+                    |node| {
+                        if passed.contains(&node) {
+                            Visit::Prune
+                        } else if node == 0 {
+                            Visit::Stop(())
+                        } else {
+                            Visit::Expand
+                        }
+                    },
+                )
+                .map(|found| found.is_none())
+            })
+    }
+
     /// Which blocks every path from the entry to another block passes ([`BlockDominators`]), over
     /// the graph `on_every_return` reads: a branch the code decides is not taken, and a block
     /// raises into its handler only where an instruction of it may raise.
@@ -867,26 +915,30 @@ impl<'p, 'a> Paths<'p, 'a> {
         (block, tail)
     }
 
-    fn dominance(&self, region: Region<'_>) -> Answer<Dominance> {
+    /// The graph of `region`: two nodes per block in reverse postorder (the head of the `k`-th
+    /// block is `2k`, its tail `2k + 1`) and a sink last, as predecessor lists. `None` when the
+    /// region's root is not its first block or past the budget.
+    fn region_graph(&self, region: Region<'_>) -> Option<RegionGraph> {
         let f = self.ix.f;
         let decided = self.ix.decided();
         let shape = &self.ix.shape;
         let (blocks, root): (Vec<BlockId>, BlockId) = match region {
             Region::Function => (shape.rpo().to_vec(), BlockId(0)),
             Region::Loop(li, lp) => {
-                let blocks = shape
-                    .rpo()
+                let mut blocks: Vec<BlockId> = lp
+                    .body
                     .iter()
                     .copied()
-                    .filter(|b| shape.in_loop(li, *b))
+                    .filter(|b| shape.in_loop(li, *b) && shape.reachable(*b))
                     .collect();
+                blocks.sort_unstable_by_key(|b| shape.rpo_index(*b));
                 (blocks, lp.header)
             }
         };
         // The root comes first: it dominates the region, and a dominator comes before the
         // blocks it dominates in reverse postorder.
         if blocks.first() != Some(&root) || !self.budget.take(blocks.len()) {
-            return Answer::Open;
+            return None;
         }
         let local: FxHashMap<BlockId, u32> = blocks
             .iter()
@@ -933,6 +985,13 @@ impl<'p, 'a> Paths<'p, 'a> {
                 }
             }
         }
+        Some(RegionGraph { local, preds, sink })
+    }
+
+    fn dominance(&self, region: Region<'_>) -> Answer<Dominance> {
+        let Some(RegionGraph { local, preds, sink }) = self.region_graph(region) else {
+            return Answer::Open;
+        };
         let Some(idom) = self.immediate_dominators(&preds) else {
             return Answer::Open;
         };

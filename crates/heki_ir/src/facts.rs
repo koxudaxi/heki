@@ -2138,38 +2138,39 @@ impl<'a> FnIndex<'a> {
     }
 }
 
-/// Whether every path from the header of `lp` back to it runs a call that waits (a sleep, or a
-/// wait with a timeout): the loop is paced by time, as a poll or a retry is, and the data
-/// decides nothing about how often it runs. An exception edge leaves a block before its wait.
-fn waits_every_iteration(shape: &FnShape<'_>, lp: &NaturalLoop) -> bool {
-    let f = shape.f;
-    let waits = |b: BlockId| f.block(b).insts.iter().any(|i| waits_for_time(shape, i));
-    if !lp.body.iter().any(|b| waits(*b)) {
+/// Whether every iteration of `f.loops[li]` that completes runs a call that waits (a sleep, or
+/// a wait with a timeout) to its return: the loop is paced by time, as a poll or a retry is, and
+/// the data decides nothing about how often it runs. The iterations are those of the path facts
+/// (the function's, which `paths` gives once a loop waits at all,
+/// [`Paths::on_every_iteration_passes_one_of`]): a branch the module's constants decide is not
+/// taken, and an exception raised before the wait returns skips it.
+fn waits_every_iteration<'q, 'r, 's>(
+    ix: &FnIndex<'_>,
+    li: usize,
+    lp: &NaturalLoop,
+    paths: impl FnOnce() -> &'q Paths<'r, 's>,
+) -> bool
+where
+    'r: 'q,
+    's: 'r,
+{
+    let f = ix.f;
+    let waits: Vec<(BlockId, usize)> = lp
+        .body
+        .iter()
+        .flat_map(|&b| {
+            f.block(b)
+                .insts
+                .iter()
+                .enumerate()
+                .filter(|(_, i)| waits_for_time(&ix.shape, i))
+                .map(move |(k, _)| (b, k))
+        })
+        .collect();
+    if waits.is_empty() {
         return false;
     }
-    let body: FxHashSet<BlockId> = lp.body.iter().copied().collect();
-    let mut seen: FxHashSet<BlockId> = FxHashSet::default();
-    let mut stack = vec![lp.header];
-    while let Some(b) = stack.pop() {
-        if !seen.insert(b) {
-            continue;
-        }
-        let bb = f.block(b);
-        let next = if waits(b) {
-            Vec::new()
-        } else {
-            bb.terminator.successors()
-        };
-        for s in next.into_iter().chain(bb.exc_target) {
-            if s == lp.header {
-                return false;
-            }
-            if body.contains(&s) {
-                stack.push(s);
-            }
-        }
-    }
-    true
+    paths().on_every_iteration_passes_one_of(li, &waits, Progress::Returned) == Answer::Known(true)
 }
 
 /// A call that waits before the program goes on: a sleep of a duration other than a literal
@@ -2792,6 +2793,9 @@ fn refine_round(
             continue;
         }
         let ix = FnIndex::new(f, constants);
+        // One reader and one budget for the function's loops.
+        let budget = Budget::of_function("heki_ir::facts::waits_every_iteration", f);
+        let paths = OnceCell::new();
         for (li, (lp, hint)) in f.loops.iter().zip(loop_hints).enumerate() {
             let mut bound = lp.bound;
             if bound == LoopBound::Unbounded
@@ -2808,7 +2812,11 @@ fn refine_round(
             if bound == LoopBound::Unbounded {
                 bound = if let Some(n) = ix.counted_trips(lp, SMALL_MAX) {
                     LoopBound::ConstSmall(n)
-                } else if hint.repeats && waits_every_iteration(&ix.shape, lp) {
+                } else if hint.repeats
+                    && waits_every_iteration(&ix, li, lp, || {
+                        paths.get_or_init(|| Paths::new(&ix, &PathReader::ir(), &budget))
+                    })
+                {
                     if hint.forever {
                         LoopBound::DaemonPolling
                     } else {

@@ -179,8 +179,10 @@ Compound expressions are flattened into **basic instructions in explicit left-to
     (`facts::waits_every_iteration`): a sleep (a call or method named `sleep`) of a duration
     other than a literal zero, or a `wait` with a `timeout=` keyword that is not a literal zero
     or a positive constant (`stop.wait(1)`; `asyncio.wait(tasks)` may return at once), awaited
-    in a coroutine (`asyncio.create_task(asyncio.sleep(1))` waits elsewhere). The walk leaves a
-    waiting block by its exception edge too, since an exception may skip the wait.
+    in a coroutine (`asyncio.create_task(asyncio.sleep(1))` waits elsewhere). The paths are
+    those of the path facts (`Paths::on_every_iteration_passes_one_of`, the wait to its
+    return): a branch the module's constants decide is not taken, and an exception raised
+    before the wait returns skips it.
   - `DaemonPolling`: `while self._running:` / `while not self._stopped:`-style flag loops (the
     flag's name has the word `running`, `active`, or `alive`, or after `not` a word like `stop`
     or `shutdown`; an event's `is_set()` / `wait(...)` tests the event as the flag; and the body
