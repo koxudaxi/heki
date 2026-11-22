@@ -1501,7 +1501,8 @@ the caller's thread with a synchronous facade over an async connection), `exclud
 `deep=True` copies deeply unless `update=` hands it values by reference: `MUT202`),
 `stores_on_instance` (a class's `__setattr__` / `__delattr__` that stores the value, possibly a
 validated conversion of it, or deletes the attribute on the instance itself, or raises, handing
-the value to no other object: `pydantic.BaseModel.__setattr__`), `keeps_hashable_defaults` (an
+the value to no other object, in a class that installs no descriptor for it and defines no
+`__getattribute__`, so a read finds the stored value: `pydantic.BaseModel.__setattr__`), `keeps_hashable_defaults` (an
 instance built without a field holds the field's default itself when it is hashable, and a
 deep copy of an unhashable one: pydantic 2's `BaseModel`), `return_type` (factories such as
 `sqlite3.connect`), `sync_lock_or_tx` (`threading.Lock`, `Session.begin`: `EFF106`),

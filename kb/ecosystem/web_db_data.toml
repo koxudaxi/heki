@@ -127,8 +127,10 @@ opaque_to_layer3 = true
 # Pydantic 2. Storing a field stores it in the instance's `__dict__` (validated first under
 # `validate_assignment`); a private attribute goes to its `__pydantic_private__`, an extra one to
 # its `__pydantic_extra__`; a frozen model, a class variable, and an unknown name without
-# `extra="allow"` raise. Deleting works the same way. A property or `cached_property` of the
-# class is the project's own declaration.
+# `extra="allow"` raise. Deleting works the same way. A field is no class attribute (no
+# descriptor) and `BaseModel` defines no `__getattribute__` (its `__getattr__` only answers for
+# private and extra attributes the instance lacks), so reading a field finds the stored value. A
+# property or `cached_property` of the class is the project's own declaration.
 
 [[entries]]
 symbol = "pydantic.BaseModel.__setattr__"

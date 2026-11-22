@@ -296,9 +296,10 @@ pub struct EcosystemEntry {
     pub copy_sanitizer: Option<CopyDepth>,
     /// The method is a class's `__setattr__` or `__delattr__` that stores the value (or deletes
     /// the attribute) on the instance itself, as its own attribute, or raises: it hands the
-    /// value to no other object and installs no descriptor. The value it stores may be a
-    /// validated conversion, and validators of the project may run (`pydantic.BaseModel` with
-    /// `validate_assignment`).
+    /// value to no other object. The class installs no descriptor for such an attribute and
+    /// defines no `__getattribute__`, so reading the attribute back finds the stored value. The
+    /// value stored may be a validated conversion, and validators of the project may run
+    /// (`pydantic.BaseModel` with `validate_assignment`).
     pub stores_on_instance: bool,
     /// An instance of this class built without a value for a field holds the field's default
     /// itself when the default is hashable; an unhashable default is deep-copied for each
