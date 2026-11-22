@@ -18,6 +18,8 @@ The claims, as the rule pages state them:
   report shows, it changes the caller's object in place.
 - `MUT114`: the reported line changes in place a list, dict, or set that the cached function
   returned.
+- `MUT118`: whenever the deep copy receives an instance of the class that holds an `object()`
+  sentinel in the attribute, the copy holds another object there.
 - `OPT101` ... `OPT130` (the proven tier): the accumulator is of the builtin type the rule names
   when the statement runs; the rewrite keeps the program's behaviour (`compare_outcomes`).
 - `OPT113` (the exact tier): an inner item whose key differs runs only the loads of the two keys
@@ -478,6 +480,48 @@ def _applying_change(changes, evals_before):
 
 
 # ---------------------------------------------------------------------------------------------
+# MUT118
+# ---------------------------------------------------------------------------------------------
+def check_mut118(claim, runs, sources=None):
+    result = Result(claim)
+    attr = claim["attr"]
+    for run in valid_runs(runs):
+        for line in _of(run["events"], "line", claim["line_id"]):
+            if line[5] != "ok" or len(line) < 17:
+                continue
+            original = line[15].get(f"{claim['original']}.{attr}")
+            copied = line[16].get(f"{claim['copy']}.{attr}")
+            if original is None:
+                continue
+            _oid, classes, held, held_type = original
+            # Only an instance holding a bare `object()` is an instance of the claim.
+            if held is None or held_type != "object":
+                continue
+            qualname = claim["class_qualname"]
+            if not any(c.endswith("." + qualname) for c in classes):
+                result.refute(
+                    "not-an-instance",
+                    "Deep-copied: the copied object is not an instance of the class",
+                    run,
+                    {"classes": classes},
+                    assumption="R2",
+                )
+                continue
+            # A line that ended before the copy was bound records no copy: nothing to check.
+            if copied is None:
+                continue
+            result.checked += 1
+            if copied[2] is None or copied[2] == held:
+                result.refute(
+                    "sentinel-kept",
+                    "Deep-copied: the copy does not hold a new object in the attribute",
+                    run,
+                    {"original": original, "copy": copied},
+                )
+    return result
+
+
+# ---------------------------------------------------------------------------------------------
 # OPT proven tier: the accumulator's type when the statement runs
 # ---------------------------------------------------------------------------------------------
 def check_opt_type(claim, runs, sources=None):
@@ -602,6 +646,7 @@ CHECKERS = {
     "MUT110": check_mut110,
     "MUT114": check_mut114,
     "MUT115": check_mut115,
+    "MUT118": check_mut118,
     "OPT101": check_opt_type,
     "OPT102": check_opt_type,
     "OPT103": check_opt_type,
