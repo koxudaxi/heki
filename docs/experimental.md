@@ -20,6 +20,7 @@ An experimental rule is never enabled by default: it runs only when `select` or 
 | `rule.MUT111` | rule | [`MUT111`](rules/cached-property-stale-read.md) | 0.1.1 | - |
 | `rule.MUT112` | rule | [`MUT112`](rules/conditional-ownership-mutation.md) | 0.2.0 | - |
 | `rule.MUT113` | rule | [`MUT113`](rules/iterated-container-mutation.md) | 0.2.0 | - |
+| `rule.MUT119` | rule | [`MUT119`](rules/change-lost-on-new-object.md) | 0.2.5 | - |
 
 ## `cli-option.generate-prompt`
 
@@ -116,3 +117,11 @@ Its precision on real code bases is still low: much of what it reports is code t
 - **Since:** 0.2.0
 
 It has few reports, and most of them are still false.
+
+## `rule.MUT119`
+
+- **Kind:** rule
+- **Target:** [`MUT119`](rules/change-lost-on-new-object.md)
+- **Since:** 0.2.5
+
+Its precision has not been measured yet, and its premises are not yet certified.

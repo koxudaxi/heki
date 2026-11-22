@@ -330,7 +330,7 @@ step keeps findings as alerts and fails only on a configuration, read, or syntax
 - 🚀 [Getting started](https://heki.koxudaxi.dev/getting-started/) - run heki on a project, read a diagnostic, apply a fix
 - 🎯 [Scope and limitations](https://heki.koxudaxi.dev/scope/) - what heki checks and what it leaves to other tools
 - ⚙️ [Configuration](https://heki.koxudaxi.dev/configuration/) - rule selection, contracts, the Python version
-- 📏 [Rules](https://heki.koxudaxi.dev/rules/) - all 44 rules
+- 📏 [Rules](https://heki.koxudaxi.dev/rules/) - all 45 rules
 - 📐 [Rule precision](https://heki.koxudaxi.dev/precision/) - exact and heuristic rules, and how they are measured
 - 🔧 [Fixes and safety](https://heki.koxudaxi.dev/fixes/) - how rewrites are proven safe
 - 🪜 [Adopting heki](https://heki.koxudaxi.dev/adoption/) - Ratchet baselines, pre-commit, CI

@@ -1743,6 +1743,11 @@ mod tests {
                 ]),
                 copy_sanitizer(CopyDepth::Shallow),
             ),
+            // `MUT119`: `os.environ.copy()` is `dict(os.environ)`, a new dict.
+            (
+                s(&["os.environ.copy", "os.environb.copy"]),
+                returning("builtins.dict", copy_sanitizer(CopyDepth::Shallow)),
+            ),
             (
                 with_prefix(
                     "asyncio",

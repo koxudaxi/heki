@@ -504,6 +504,12 @@ EffectSummary(f) = {
                                                            // propagated), the project calls whose results (or
                                                            // elements of them) it may return, by span, and the
                                                            // phis its origin walks met (local)
+    fresh_return:             Option<Box<FreshReturn>>,    // MUT119, absent for most functions: every
+                                                           // returned value is a builtin container of one
+                                                           // kind the call made and keeps nowhere (built, or
+                                                           // a copy); local facts name the project functions
+                                                           // whose results it returns, which propagation
+                                                           // resolves
     unresolved_write_sites:   Set<UnresolvedWrite>,        // target-named writes on objects of unknown class,
                                                            // computed names on guarded classes and on
                                                            // objects of unknown class (MUT205)
@@ -945,7 +951,7 @@ differ); every file that read one of them is re-analyzed. This covers names reso
 re-exports, class hierarchy analysis across modules, and property getters, without depending on
 which module imports which.
 
-### 2.3 Family 1 (`MUT101` / `MUT103` / `MUT106` / `MUT107` / `MUT109` / `MUT111` / `MUT112` / `MUT113` / `MUT118` / `MUT201` / `MUT202` / `MUT203` / `MUT204`)
+### 2.3 Family 1 (`MUT101` / `MUT103` / `MUT106` / `MUT107` / `MUT109` / `MUT111` / `MUT112` / `MUT113` / `MUT118` / `MUT119` / `MUT201` / `MUT202` / `MUT203` / `MUT204`)
 
 #### `MUT101`: mutation of attributes a `@cached_property` depends on, without invalidation (strict Stage 0-A version)
 1. For every `@cached_property` method `p` of a class `C` (with its subclasses; a nested class is
@@ -1090,6 +1096,37 @@ which module imports which.
    once per run, and a budget spent in another order by `heki check` and the language server
    would make them disagree). Each attribute of the copied class gives a heuristic claim naming
    that attribute.
+
+#### `MUT119`: an in-place change lost on a new object (opt-in)
+1. **Sources** (`heki_effect::fresh::source`): what makes the object an instruction defines. Built
+   as the builtin itself: a list, dict, or set display or comprehension, a call of `list`,
+   `dict`, `set`, `bytearray`, `collections.deque`, or `sorted`. Copied: a call the catalog
+   describes as a copy (`copy_sanitizer`: a builtin container's `copy()`, `copy.copy`,
+   `os.environ.copy()`) whose result is of a builtin container type, or a slice of a list or
+   `bytearray`; the type comes from the copied value under R2. Or a call of project functions or
+   a property read (its getters).
+2. **The summary fact** (`EffectSummary::fresh_return`, only while `MUT119` runs:
+   `OptInFacts::fresh_returns`): for a plain function (not `async`, not a generator, no decorator
+   but those that call the body each time, no A1 hazard) with no bare return on a path a run can
+   take, one walk back from the returned values through copies and phis (along the edges a run
+   can take) to their sources, all of one container kind, and one walk forward from the sources
+   through copies, phis, and in-place operators: every use keeps nothing (a method call on the
+   object itself, an item load, store, or delete on it, a comparison, a conversion, an
+   iteration, a call of a builtin that only inspects it); a store, a capture, a yield, a raise,
+   an attribute load (a bound method), or any other call ends the fact. Both walks share one
+   budget per function. `built` says every source is the builtin itself.
+3. **Propagation** (`Resolver::resolve_own`): a local fact naming project functions holds when
+   each has a final fact of the same kind outside the SCC being computed (a recursive function
+   has none), and is `built` only when they all are. Two definitions of one function keep the
+   fact only when both have it with one kind.
+4. **The rule** (`heki_rules::mut_rules::lost_changes`): a changing method of a container kind,
+   an item store, or an item delete, applied to a value with no name that nothing reads but the
+   change (and the item load of an augmented assignment), whose defining instruction is a source
+   of that kind. A method's result must be unused, or `None` bound to names or stored. The tier
+   is exact when the object is built, returned by functions whose facts are built and that the
+   call resolves completely, or copied where no project subclass replaces the copy or the change
+   (R2), and the change is no augmented item assignment; the rule is heuristic until certified,
+   so every report is heuristic for now.
 
 #### `MUT112`: a value that is new on one path and borrowed on another, changed in place (opt-in)
 1. **What a value holds** (`heki_effect::ownership`): each instruction's `Source` says what the

@@ -10,6 +10,7 @@ use crate::construction::{Escape, Pos, Recorder};
 use crate::consumption::{ItemArgs, IterFlow, PerItemCall, Roots, param_iteration};
 use crate::decorators::keeps_returned_value;
 use crate::environment::{self, AccessKind, ExternalAccess};
+use crate::fresh;
 use crate::guards::{self, GuardInputs, LocalGuards, per_item_bit};
 use crate::held;
 use crate::infer::CellKey;
@@ -540,6 +541,17 @@ fn merge_duplicate(into: &mut EffectSummary, other: EffectSummary) {
             }
         }
         _ => ReturnsNew::No,
+    };
+    // A must-fact too: new containers only when both definitions return them, of one kind.
+    into.fresh_return = match (into.fresh_return.take(), other.fresh_return) {
+        (Some(mut a), Some(b)) => b.kind.is_none_or(|k| a.joins(k)).then(|| {
+            a.built &= b.built;
+            a.calls.extend(b.calls);
+            a.calls.sort();
+            a.calls.dedup();
+            a
+        }),
+        _ => None,
     };
     if let Some(other) = other.return_origins {
         let facts = into.return_origins.get_or_insert_with(Box::default);
@@ -2533,6 +2545,9 @@ impl<'a> Extractor<'a> {
         if self.opt_in.return_origins {
             self.returned_origins();
         }
+        if self.opt_in.fresh_returns {
+            self.fresh_return();
+        }
         if self.opt_in.set_order {
             let calls: Vec<order_flow::OrderCall<'_>> = self
                 .project_calls
@@ -3840,6 +3855,38 @@ impl<'a> Extractor<'a> {
                 ownership::source(self.f, kind, callee, constructs, self.cx.kb, made_here)
             }
         }
+    }
+
+    /// [`EffectSummary::fresh_return`] of the visited function, from the callees its calls and
+    /// property reads resolve to.
+    fn fresh_return(&mut self) {
+        let shape = self.shape;
+        let class_of = |v: VarId| match self.types.get(&v) {
+            Some(Val::Inst(class)) => Some(class.as_str()),
+            _ => None,
+        };
+        let source_of = |v: VarId| {
+            let Def::Inst(b, i) = shape.def(v) else {
+                return None;
+            };
+            fresh::source(
+                &shape.inst(v)?.kind,
+                self.callees.get(&(b, i as usize)),
+                self.types.get(&v),
+                class_of,
+                self.cx.kb,
+            )
+        };
+        let inspects = |b: BlockId, i: u32| {
+            matches!(
+                self.callees.get(&(b, i as usize)),
+                Some(Callee::External(s)) if s
+                    .strip_prefix("builtins.")
+                    .is_some_and(|n| INSPECTING_BUILTINS.contains(&n))
+            )
+        };
+        let fact = fresh::fresh_return(shape, &self.live, source_of, inspects);
+        self.summary.fresh_return = fact.map(Box::new);
     }
 
     /// Answer the construction queries of the visited function (`construction`): the
