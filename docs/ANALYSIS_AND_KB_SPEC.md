@@ -1626,8 +1626,9 @@ the caller's thread with a synchronous facade over an async connection), `exclud
 validated conversion of it, or deletes the attribute on the instance itself, or raises, handing
 the value to no other object, in a class that installs no descriptor for it and defines no
 `__getattribute__`, so a read finds the stored value: `pydantic.BaseModel.__setattr__`), `keeps_hashable_defaults` (an
-instance built without a field holds the field's default itself when it is hashable, and a
-deep copy of an unhashable one: pydantic 2's `BaseModel`), `return_type` (factories such as
+instance built without a field starts from the field's default itself when it is hashable, and
+from a deep copy of an unhashable one, then holds what validating the default returns where the
+field validates it: pydantic 2's `BaseModel`), `return_type` (factories such as
 `sqlite3.connect`), `sync_lock_or_tx` (`threading.Lock`, `Session.begin`: `EFF106`),
 `non_reentrant_lock` (`threading.Lock`, `asyncio.Lock`: `EFF109`), `one_at_a_time`
 (`asyncio.StreamReader.readline`, `AsyncSession.execute`: `EFF110`),
