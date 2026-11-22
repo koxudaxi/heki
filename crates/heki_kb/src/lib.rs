@@ -233,8 +233,9 @@ pub enum WaitKind {
     Thread,
 }
 
-/// When a database call sends a statement or otherwise waits on the database
-/// ([`EcosystemEntry::emits`]).
+/// When a call does its effects ([`EcosystemEntry::emits`]): for a database call, when it sends a
+/// statement or otherwise waits on the database; for any call, whether the library's
+/// configuration can make it skip them.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Emits {
@@ -257,6 +258,11 @@ pub enum Emits {
     /// `path=":memory:"` passed in) or only named by an annotation may be in memory. It sends
     /// its statements either way.
     IfOnDisk,
+    /// Every effect of the call, unless the library is configured otherwise: it can be set up so
+    /// the call does not do them (Celery's `task_always_eager` runs the task in the caller, and
+    /// kombu's in-memory transport publishes without the network). The configuration is not
+    /// visible at the call, so no effect is certain and the call only supports heuristic reports.
+    UnlessConfiguredOtherwise,
 }
 
 /// What the items of a call's result are when the environment decides how many there are
@@ -3107,6 +3113,14 @@ mod tests {
             ],
         ),
         (
+            Emits::UnlessConfiguredOtherwise,
+            &[
+                "celery.Celery.send_task",
+                "celery.Task.delay",
+                "celery.Task.apply_async",
+            ],
+        ),
+        (
             Emits::UnlessConnected,
             &[
                 "sqlalchemy.engine.Engine.connect",
@@ -3460,9 +3474,11 @@ mod tests {
             emits("sqlalchemy.engine.Engine.connect"),
             Emits::UnlessConnected
         );
-        // Only database calls carry a condition on their database effects.
+        assert_eq!(emits("celery.Task.delay"), Emits::UnlessConfiguredOtherwise);
+        // Only database calls carry a condition on their database effects, and a call whose
+        // configuration can switch its effects off carries any.
         for (symbol, e) in &kb.entries {
-            if e.emits != Emits::Always {
+            if !matches!(e.emits, Emits::Always | Emits::UnlessConfiguredOtherwise) {
                 assert!(
                     e.effects.iter().any(|k| matches!(k, BlockingDb | DbQuery)),
                     "{symbol}"

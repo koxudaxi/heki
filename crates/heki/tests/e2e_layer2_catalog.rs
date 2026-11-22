@@ -3266,7 +3266,7 @@ async def tn_torch_buffers(model):
     torch.load(io.BytesIO(buf.getvalue()))
 "#;
 
-/// Celery publishes to its broker; LLM API clients build a connection pool each; polars and
+/// Celery publishes to its broker unless configured otherwise (heuristic reports only); LLM API clients build a connection pool each; polars and
 /// torch read and write files, polars downloads URLs and runs queries, and `torch.cat`
 /// reallocates its accumulator.
 #[test]
@@ -3279,8 +3279,8 @@ fn api_clients_task_queues_and_data_libraries() {
             "EFF101,EFF111,EFF102,EFF103,EFF113,EFF105,DATA101"
         ),
         vec![
-            d(15, "EFF101", "tp_celery", "celery.Celery.send_task"),
-            d(16, "EFF101", "tp_celery", "celery.Task.delay"),
+            d(15, "EFF111", "tp_celery", "celery.Celery.send_task"),
+            d(16, "EFF111", "tp_celery", "celery.Task.delay"),
             d(21, "EFF102", "tp_clients_in_loops", "openai.OpenAI"),
             d(22, "EFF102", "tp_clients_in_loops", "anthropic.Anthropic"),
             d(23, "EFF102", "tp_clients_in_loops", "google.genai.Client"),
