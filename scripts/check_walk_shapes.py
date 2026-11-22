@@ -314,6 +314,15 @@ def lazy_init_sites(n: int) -> Body:
     return Body(("items",), [*lines, "    it.x = 1"])
 
 
+def self_item_reads(n: int) -> Body:
+    """Items of constant keys of one attribute of `self`, each read on both sides of a branch: the
+    reads of each key on every path are asked together."""
+    lines = ["total = 0"]
+    for i in range(n):
+        lines += ["if flag:", f'    total += self.d["k{i}"]', "else:", f'    total -= self.d["k{i}"]']
+    return Body(("flag",), [*lines, "return total"])
+
+
 def is_tests(n: int) -> Body:
     """Many `is` tests, each followed by a conditional expression on the tested parameter."""
     lines = []
@@ -446,6 +455,17 @@ def wide_hierarchy(n: int) -> str:
         lines += ["        return super().m()", ""]
     for i in range(n):
         lines += [f"def use{i}(obj: Base):", "    obj.m()", "    return obj.LIMIT", ""]
+    return "\n".join(lines)
+
+
+def self_helper_chain(n: int) -> str:
+    """A `@cached_property` reading an attribute through a chain of `self` helpers, each reading
+    it on every path and calling the next, and a method writing the attribute."""
+    lines = ["import functools", "", "class Chain:", "    def __init__(self):", "        self.a = 0", ""]
+    lines += ["    @functools.cached_property", "    def p(self):", "        return self._h0()", ""]
+    for i in range(n):
+        lines += [f"    def _h{i}(self):", f"        return self.a + self._h{i + 1}()", ""]
+    lines += [f"    def _h{n}(self):", "        return self.a", "", "    def bump(self):", "        self.a += 1", ""]
     return "\n".join(lines)
 
 
@@ -626,11 +646,14 @@ FAMILIES = [
     Family("path_aliases", path_aliases),
     Family("merged_package_paths", merged_package_paths),
     Family("lazy_init_sites", lazy_init_sites, placements=("method",)),
+    # Adversarial: a getter with as many branches as keys asks one walk per key, past the budget.
+    Family("self_item_reads", self_item_reads, placements=("method",), real_code=False),
     Family("wide_hierarchy", project=wide_hierarchy, placements=("project",), size=4000),
     Family("helper_chain", project=helper_chain, placements=("project",), size=2000),
     Family(
         "functions_each_calling", project=functions_each_calling, placements=("project",), size=20000
     ),
+    Family("self_helper_chain", project=self_helper_chain, placements=("project",), size=2000),
     Family("callers_of_one_helper", project=callers_of_one_helper, placements=("project",), size=4000),
     Family(
         "initialization_steps",

@@ -724,6 +724,16 @@ pub struct EffectSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub iterations: Option<Box<IterationFacts>>,
     pub invalidates_cached: BTreeSet<String>,
+    /// The `self` attributes the function reads on every path on which it returns normally,
+    /// exception edges into handlers included: its own loads that returned, whose value is
+    /// read as a whole or, when every use of a load reads an item of a constant key, with that
+    /// key (an attribute read as a whole covers each of its keys); and the facts of the `self`
+    /// methods it calls on every such path, when the call's targets are every implementation it
+    /// can run and each runs its body at every call (a cached function, or a callee of the
+    /// function's own call-graph component, adds nothing; over several targets, what every one
+    /// reads). Computed while an enabled rule reads it ([`OptInFacts::kept_values`]; `MUT101`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub must_read_self_attrs: Option<Box<BTreeSet<AttrKeyPath>>>,
     /// The facts of every typed write the function reaches, through any callee.
     pub typed_field_writes: BTreeSet<TypedFieldWrite>,
     /// The function's own writes of project-class attributes, the `IndirectHelper` writes of
@@ -2070,6 +2080,10 @@ pub struct OptInFacts {
     pub shared_state: bool,
     /// [`EffectSummary::must_exec`] and what computes it at call sites.
     pub must_effects: bool,
+    /// What `MUT101`'s exact claim reads of a kept value: [`EffectSummary::must_read_self_attrs`]
+    /// and the call-site facts it is computed from ([`CallSite::complete`],
+    /// [`CallSite::on_every_return`]).
+    pub kept_values: bool,
 }
 
 impl OptInFacts {
@@ -2081,7 +2095,13 @@ impl OptInFacts {
         exclusive: true,
         shared_state: true,
         must_effects: true,
+        kept_values: true,
     };
+
+    /// Whether the call sites carry [`CallSite::complete`] and [`CallSite::on_every_return`].
+    pub fn site_paths(self) -> bool {
+        self.must_effects || self.kept_values
+    }
 }
 
 impl Default for OptInFacts {

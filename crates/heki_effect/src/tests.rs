@@ -1863,3 +1863,170 @@ fn a1_hazards_are_calls_heki_cannot_follow() {
     }
     assert!(!summary(&index, "m", "plain").unknown_calls);
 }
+
+// ============================================================ MUT101: kept-value facts
+
+const KEPT_READS_PY: &str = r#"
+import abc
+from functools import cached_property
+
+FLAG = True
+
+
+class Base:
+    def __init__(self, raw: dict[str, str], flag: bool) -> None:
+        self.raw = raw
+        self.flag = flag
+        self.params = {"a": "1", "b": "2"}
+        self.other = ""
+
+    @cached_property
+    def every(self) -> str:
+        return self.raw.get("k", "")
+
+    @cached_property
+    def some(self) -> str:
+        if self.flag:
+            return self.raw.get("k", "")
+        return ""
+
+    @cached_property
+    def keyed(self) -> str:
+        if self.flag:
+            return self.params["a"] + self.params["b"]
+        return self.params["a"]
+
+    @cached_property
+    def through_helper(self) -> str:
+        return self._helper()
+
+    @cached_property
+    def helper_on_one_branch(self) -> str:
+        if self.flag:
+            return self._helper()
+        return ""
+
+    @cached_property
+    def through_cached(self) -> str:
+        return self.every
+
+    @cached_property
+    def through_static(self) -> str:
+        return self._static(self.other)
+
+    @cached_property
+    def guarded(self) -> str:
+        try:
+            value = self.raw["k"]
+        except KeyError:
+            return ""
+        return value
+
+    @cached_property
+    def dispatched(self) -> str:
+        return self.hook()
+
+    def _helper(self) -> str:
+        return self.raw.get("k", "")
+
+    @staticmethod
+    def _static(value: str) -> str:
+        return value
+
+    def hook(self) -> str:
+        return self.raw.get("k", "")
+
+
+class Child(Base):
+    def hook(self) -> str:
+        return self.other
+
+
+class Abstract(abc.ABC):
+    def __init__(self) -> None:
+        self.a = 1
+        self.b = 2
+
+    @cached_property
+    def p(self) -> int:
+        return self.hook()
+
+    @abc.abstractmethod
+    def hook(self) -> int: ...
+
+
+class Concrete(Abstract):
+    def hook(self) -> int:
+        return self.a
+
+
+class Twice:
+    def __init__(self) -> None:
+        self.a = 1
+        self.b = 2
+
+    if FLAG:
+        def get(self) -> int:
+            return self.a
+    else:
+        def get(self) -> int:
+            return self.a + self.b
+
+
+class Loop:
+    def __init__(self) -> None:
+        self.a = 1
+
+    @cached_property
+    def p(self) -> int:
+        return self._ping(3)
+
+    def _ping(self, n: int) -> int:
+        return self._pong(n) + self.a
+
+    def _pong(self, n: int) -> int:
+        return self._ping(n - 1) if n else self.a
+"#;
+
+#[test]
+fn reads_on_every_path_are_the_loads_and_self_calls_every_normal_return_passes() {
+    let index = project(&[("kept.py", KEPT_READS_PY)]);
+    let must = |q: &str| -> BTreeSet<(String, Option<String>)> {
+        summary(&index, "kept", q)
+            .must_read_self_attrs
+            .as_deref()
+            .into_iter()
+            .flatten()
+            .map(|r| (r.attr.clone(), r.const_key.clone()))
+            .collect()
+    };
+    let whole = |a: &str| (a.to_owned(), None);
+    let keyed = |a: &str, k: &str| (a.to_owned(), Some(k.to_owned()));
+    assert_eq!(must("Base.every"), set(&[whole("raw")]));
+    assert_eq!(must("Base.some"), set(&[whole("flag")]));
+    // Key "a" is read on both paths, "b" on one.
+    assert_eq!(
+        must("Base.keyed"),
+        set(&[whole("flag"), keyed("params", "a")])
+    );
+    assert_eq!(must("Base.through_helper"), set(&[whole("raw")]));
+    assert_eq!(must("Base.helper_on_one_branch"), set(&[whole("flag")]));
+    // A cached property may hand out what an earlier read computed: its own reads do not
+    // count, only the read of the property.
+    assert_eq!(must("Base.through_cached"), set(&[whole("every")]));
+    // A static method's first parameter is no instance.
+    assert_eq!(must("Base.through_static"), set(&[whole("other")]));
+    // A load that may raise into a handler that returns is no read on that path.
+    assert_eq!(must("Base.guarded"), set(&[]));
+    // `Child.hook` reads `other`, `Base.hook` reads `raw`: neither on every implementation.
+    assert_eq!(must("Base.dispatched"), set(&[]));
+    // A callee of the function's own call-graph component adds nothing: `_pong` reads `a` on
+    // one branch, and `_ping` on its other.
+    assert_eq!(must("Loop._ping"), set(&[whole("a")]));
+    assert_eq!(must("Loop._pong"), set(&[]));
+    assert_eq!(must("Loop.p"), set(&[whole("a")]));
+    // An abstract method never runs: what its overrides read counts.
+    assert_eq!(must("Abstract.p"), set(&[whole("a")]));
+    // Both definitions of a name defined twice read `a`; only one reads `b`.
+    assert_eq!(must("Twice.get"), set(&[whole("a")]));
+}
