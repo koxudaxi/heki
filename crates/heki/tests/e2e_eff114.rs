@@ -4,7 +4,8 @@
 //! an inner `try`, an awaited coroutine, a generator iterated there, a function `map` calls, a
 //! module body), the clause shapes that take it (bare, `BaseException`, a tuple, a class imported
 //! from `builtins`), and the shapes left silent: a clause taking no `RecursionError`, one after a
-//! clause that re-raises it or whose classes heki cannot tell, a clause raising on a path or
+//! clause that re-raises it or whose classes heki cannot tell (a tuple, a name from a dependency,
+//! the standard library, or a star import), a clause raising on a path or
 //! exiting, a CLI boundary, a body reaching no cycle (or one only through a worker thread, a
 //! coroutine only created, or a generator only made), `except*`, a `finally` body on the way, and
 //! a module whose `Exception` is its own class; the opt-in selection, and `heki rule`.
@@ -551,6 +552,76 @@ def guarded(tree: dict) -> int:
         return -1
 "#;
 
+/// Clauses before an `except Exception`: names from a dependency (`library`, not installed) and
+/// the standard library (`threading.ThreadError` is `RuntimeError`), which may hold
+/// `RecursionError`, and a project class and a builtin, which cannot.
+const EARLIER: &str = r#"import threading
+
+import library
+from library import ERRORS
+from pkg.errors import Exception as ProjectError
+from pkg.shapes import depth
+
+
+def imported_tuple_first(tree: dict) -> int | None:
+    try:
+        return depth(tree)
+    except ERRORS:
+        raise
+    except Exception:
+        return None
+
+
+def library_class_first(tree: dict) -> int | None:
+    try:
+        return depth(tree)
+    except (KeyError, library.Error):
+        raise
+    except Exception:
+        return None
+
+
+def standard_library_class_first(tree: dict) -> int | None:
+    try:
+        return depth(tree)
+    except threading.ThreadError:
+        raise
+    except Exception:
+        return None
+
+
+def project_class_first(tree: dict) -> int | None:
+    try:
+        return depth(tree)
+    except ProjectError:
+        raise
+    except Exception:
+        return None
+
+
+def builtin_class_first(tree: dict) -> int | None:
+    try:
+        return depth(tree)
+    except KeyError:
+        raise
+    except Exception:
+        return None
+"#;
+
+/// A name only a star import from a dependency may bind.
+const STARRED: &str = r#"from library import *
+from pkg.shapes import depth
+
+
+def star_imported_first(tree: dict) -> int | None:
+    try:
+        return depth(tree)
+    except ERRORS:
+        raise
+    except Exception:
+        return None
+"#;
+
 fn project(name: &str) -> Project {
     let p = Project::new(name);
     p.write("pkg/__init__.py", "")
@@ -559,7 +630,9 @@ fn project(name: &str) -> Project {
         .write("pkg/cycle_a.py", CYCLE_A)
         .write("pkg/cycle_b.py", CYCLE_B)
         .write("pkg/errors.py", ERRORS)
-        .write("pkg/rebound.py", REBOUND);
+        .write("pkg/rebound.py", REBOUND)
+        .write("pkg/earlier.py", EARLIER)
+        .write("pkg/starred.py", STARRED);
     p
 }
 
@@ -571,6 +644,8 @@ fn clauses_turning_a_recursion_error_into_a_value_are_reported() {
         found(&diags),
         vec![
             d("pkg/cycle_a.py", 11, "measure"),
+            d("pkg/earlier.py", 41, "project_class_first"),
+            d("pkg/earlier.py", 50, "builtin_class_first"),
             d("pkg/shapes.py", 24, "bare"),
             d("pkg/shapes.py", 31, "base"),
             d("pkg/shapes.py", 38, "tupled"),
@@ -594,6 +669,28 @@ fn clauses_turning_a_recursion_error_into_a_value_are_reported() {
             d("pkg/walk.py", 48, "nesting"),
         ]
     );
+}
+
+/// A class heki knows only by name (from a dependency, the standard library, or a star import)
+/// may be `RecursionError` or a class above it, so a clause of one that re-raises leaves the
+/// later `except Exception` unreported.
+#[test]
+fn a_clause_after_one_of_classes_heki_knows_only_by_name_is_not_reported() {
+    let p = project("eff114_known_by_name");
+    let silent = [
+        "imported_tuple_first",
+        "library_class_first",
+        "standard_library_class_first",
+        "star_imported_first",
+    ];
+    let reported: Vec<String> = found(&diagnostics(&p, SELECT))
+        .into_iter()
+        .map(|(_, _, qualname)| qualname)
+        .collect();
+    for qualname in silent {
+        assert!(!reported.iter().any(|q| q == qualname), "{qualname}");
+    }
+    assert!(reported.iter().any(|q| q == "project_class_first"));
 }
 
 #[test]

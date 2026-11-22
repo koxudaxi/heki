@@ -1700,12 +1700,20 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      tests in turn (the `CatchException` that starts each clause body) and takes the first whose
      classes include `RecursionError`: a bare `except`, or class values the type inference gives
      as `builtins.RecursionError`, `RuntimeError`, `Exception`, or `BaseException` (a tuple
-     display of them included). An earlier clause of unknown classes, or an `except*` clause (by
-     its source text), leaves the `try` undecided. The `try` body is every block whose
+     display of them included). A class is known when it is a builtin (a name Python binds in
+     `builtins`) or a project class statement, which makes a new class; an earlier clause of
+     any other class (one of a dependency or the standard library, which may be bound to
+     `RuntimeError`, as `threading.ThreadError` is, or a name only a star import may bind),
+     of a value heki does not know, or an `except*` clause (by its source text), leaves the
+     `try` undecided. The `try` body is every block whose
      exception reaches that dispatch block, past `with` exits and past the dispatch of an inner
      `try` none of whose clauses takes it (one walk per exception target). A call site in the
      body whose delivered callee facts reach a call cycle (`ProjectIndex::delivery`, into the
-     body; never a worker thread) is the witness. The clause completes normally when a walk over
+     body; never a worker thread) is the witness. When the witness's callee only reaches the
+     cycle, a walk down its calls (`reach`, under the function's budget; past it, no finding)
+     ends at a function on the cycle or at one an earlier walk of the module's check decided,
+     and each function on the way keeps its first call down: every function's call is decided
+     once for all the chains through it, and a report lists the first eight calls of its chain. The clause completes normally when a walk over
      the blocks the start of its body dominates, along normal edges, finds no `raise`, no call ending
      the process (`sys.exit`, `os._exit`, `os.abort`, `exit`, `quit`), and no call of project
      functions that return on no path (`MustExec::never_returns`, which `EFF114` has computed);

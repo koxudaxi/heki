@@ -4061,6 +4061,69 @@ fn a_lattice_above_a_cycle_joins_each_call_once() {
     );
 }
 
+/// A ladder of four thousand helpers above a function calling itself, each calling the one
+/// below, and as many handlers, each calling one helper inside a `try`, in either order: each
+/// helper's first call down to the cycle is decided once for all the chains through it, and a
+/// report lists the first eight calls of its chain (four thousand calls for the top one).
+#[test]
+fn chains_down_a_ladder_of_helpers_are_walked_once_and_listed_in_part() {
+    let n = 4_000;
+    for top_first in [false, true] {
+        let mut lines = vec![
+            "def rec(x):".to_owned(),
+            "    return rec(x)".to_owned(),
+            String::new(),
+            String::new(),
+            "def h0(x):".to_owned(),
+            "    return rec(x)".to_owned(),
+        ];
+        for i in 1..n {
+            lines.extend([
+                String::new(),
+                String::new(),
+                format!("def h{i}(x):"),
+                format!("    return h{}(x)", i - 1),
+            ]);
+        }
+        let handlers: Vec<usize> = match top_first {
+            true => (0..n).rev().collect(),
+            false => (0..n).collect(),
+        };
+        for i in handlers {
+            lines.extend([
+                String::new(),
+                String::new(),
+                format!("def g{i}(x):"),
+                "    try:".to_owned(),
+                format!("        return h{i}(x)"),
+                "    except Exception:".to_owned(),
+                "        return None".to_owned(),
+            ]);
+        }
+        let p = Project::new(&format!("bounds_ladder_of_helpers_{top_first}"));
+        p.write("m.py", &(lines.join("\n") + "\n"));
+        let diags = check_selecting_within(&p, &["EFF114"], Duration::from_secs(20));
+        let reports: Vec<&Value> = diags
+            .iter()
+            .filter(|d| d["rule_code"] == "EFF114")
+            .collect();
+        assert_eq!(reports.len(), n);
+        let related = |d: &Value| d["related"].as_array().unwrap().len();
+        assert!(reports.iter().all(|d| related(d) <= 9));
+        let top = reports
+            .iter()
+            .find(|d| d["qualname"] == format!("g{}", n - 1))
+            .unwrap();
+        assert_eq!(related(top), 9);
+        assert!(
+            top["message"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("the recursion of `rec` below `h{}`", n - 1))
+        );
+    }
+}
+
 /// `MUT101` selected: the facts of its exact claim are computed (`OptInFacts::kept_values`).
 const MUT101_CONFIG: &str = "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT101\"]\n";
 

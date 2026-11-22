@@ -3646,8 +3646,9 @@ one writing it, hundreds of comprehensions over one set appended to one written 
 chosen among a set and hundreds of sorted lists by a chain of branches, and a thousand stores of
 a set's element as a key, each after reads of other mappings by the same key, and, for the call
 cycles `EFF114` follows, thousands of `try` statements in one function calling into one
-recursion, a call cycle through thousands of functions each calling the next inside a `try`, and
-a lattice of calls thirty levels deep with a `try` at each level above a recursion.
+recursion, a call cycle through thousands of functions each calling the next inside a `try`, a
+lattice of calls thirty levels deep with a `try` at each level above a recursion, and a ladder of
+thousands of helpers above a recursion with a `try` calling each.
 
 A change to the IR builder, a walk, a fixpoint, or a rule's state is also run over a large
 corpus of real projects before it is merged, every run under a memory cap and a timeout. No
@@ -7757,7 +7758,8 @@ there, generator expressions where they are written, and functions builtins call
 (`map(self.depth, children)`). A clause takes a `RecursionError` when it names
 `RecursionError`, `RuntimeError`, `Exception`, or `BaseException` (also in a tuple, or imported
 from `builtins`), or is a bare `except`, and no earlier clause of the same `try` takes it. The
-rule reports the clause, with the call in the `try` body as a related location.
+rule reports the clause, with the call in the `try` body as a related location, and, when the
+function on the cycle is further down, the first eight calls on the way to it.
 
 A `RecursionError` raised in a `with` body inside the `try` counts (the context manager is taken
 to let it through), and so does one raised in an inner `try` none of whose clauses takes it.
@@ -7765,7 +7767,9 @@ to let it through), and so does one raised in an inner `try` none of whose claus
 It does not report:
 
 - a clause after one that takes `RecursionError` first (`except RecursionError: raise`), or after
-  one whose classes heki cannot tell (a name bound to a tuple of classes);
+  one whose classes heki cannot tell: a name bound to a tuple of classes, or a class that is
+  neither a builtin nor a class statement of the project (one of a dependency or of the standard
+  library may be `RuntimeError` itself, as `threading.ThreadError` is);
 - a clause that raises on some path (`if isinstance(error, RecursionError): raise`), or calls
   `sys.exit`, `os._exit`, `os.abort`, `exit`, `quit`, or a project function that returns on no
   path (it raises on every path);

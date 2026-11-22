@@ -9,8 +9,9 @@
 //! - **Catches RecursionError**: the clause is the first of its `try` whose classes include
 //!   `RecursionError` (`RecursionError`, `RuntimeError`, `Exception`, `BaseException`, a bare
 //!   `except`, or a tuple holding one, as the builtins the module does not rebind); an earlier
-//!   clause of classes heki cannot tell may take it first, and stops the report. `except*`
-//!   clauses are left out.
+//!   clause of classes heki cannot tell (a name bound to a tuple, a class from outside the
+//!   project and the builtins) may take it first, and stops the report. `except*` clauses are
+//!   left out.
 //! - **Completes normally**: every path through the clause's body ends in a fall-through, a
 //!   `return`, a `break`, or a `continue`, none in a `raise` or a call that ends the process.
 //!   Instructions in the body that may raise are not counted (the premise heki leaves open).
@@ -23,11 +24,20 @@ use crate::{CheckContext, ModuleUnit};
 use heki_ast::Span;
 use heki_diagnostics::Diagnostic;
 use heki_effect::consumption::resolve_inst;
-use heki_effect::{CallCycle, CallSite, Callee, Facts, FuncKey, Runner, SiteRole, TypeCtx, Val};
+use heki_effect::{
+    CallCycle, CallSite, Callee, Facts, FuncKey, ProjectDecls, Runner, SiteRole, TypeCtx, Val,
+};
 use heki_ir::walk::{Answer, Budget, FnShape, Visit, reach};
-use heki_ir::{BlockId, BuiltinKind, ConstLiteral, Inst, InstKind, IrFunction, Terminator, VarId};
+use heki_ir::{
+    BlockId, BuiltinKind, ConstLiteral, Inst, InstKind, IrFunction, Terminator, VarId,
+    is_builtin_name,
+};
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::rc::Rc;
+use std::path::Path;
+
+/// The calls a report lists from the function a reported call runs down to the function on the
+/// call cycle: the first ones, so that a report stays small however long the chain is.
+const MAX_LISTED_CALLS: usize = 8;
 
 /// The builtin classes a `RecursionError` is an instance of.
 const RECURSION_ERROR_CLASSES: &[&str] = &[
@@ -67,7 +77,8 @@ const TRACEBACK_PRINTS: &[&str] = &["traceback.print_exc", "traceback.print_exce
 enum Takes {
     Yes,
     No,
-    /// Its classes are not all known (a name bound to a tuple, a class of unknown value).
+    /// Its classes are not all known (a name bound to a tuple, a name from outside the project
+    /// and the builtins, a class of unknown value).
     Unknown,
 }
 
@@ -141,7 +152,7 @@ pub(super) fn run(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Di
         if !reaches_cycle {
             continue;
         }
-        let handlers = Handlers::of(f, unit.source, &tcx);
+        let handlers = Handlers::of(f, unit.source, &tcx, cx.decls);
         if !handlers
             .dispatches
             .values()
@@ -174,10 +185,18 @@ pub(super) fn run(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Di
             if is_cli_boundary(f, &shape, &tcx, &types, &body, clause.caught) {
                 continue;
             }
+            let chain = match witness.cycle {
+                CallCycle::On => None,
+                CallCycle::Reaches => match chains.below(cx, &budget, witness.callee) {
+                    Answer::Known(chain) => chain,
+                    // The walk down to the cycle spent the function's budget.
+                    Answer::Open => continue,
+                },
+            };
             let finding = Finding {
-                chain: chains.of(cx, &witness),
                 clause,
                 witness,
+                chain,
             };
             report(cx, unit, f, &key, &finding, out);
         }
@@ -209,7 +228,7 @@ struct Handlers<'f> {
 }
 
 impl<'f> Handlers<'f> {
-    fn of(f: &'f IrFunction, source: &str, tcx: &TypeCtx<'_>) -> Self {
+    fn of(f: &'f IrFunction, source: &str, tcx: &TypeCtx<'_>, decls: &ProjectDecls) -> Self {
         let landing: FxHashSet<BlockId> = f.blocks.iter().filter_map(|b| b.exc_target).collect();
         let mut out = Self {
             clauses: FxHashMap::default(),
@@ -225,7 +244,7 @@ impl<'f> Handlers<'f> {
                 let takes = if is_star_clause(source, clause.span) {
                     Takes::Unknown
                 } else {
-                    takes_recursion_error(f, tcx, clause)
+                    takes_recursion_error(f, tcx, decls, clause)
                 };
                 match takes {
                     Takes::Yes => {
@@ -327,7 +346,12 @@ fn is_star_clause(source: &str, span: Span) -> bool {
 
 /// Whether the clause takes a `RecursionError`: a bare `except`, or classes the module's names
 /// give (a tuple display of them included).
-fn takes_recursion_error(f: &IrFunction, tcx: &TypeCtx<'_>, clause: &Clause<'_>) -> Takes {
+fn takes_recursion_error(
+    f: &IrFunction,
+    tcx: &TypeCtx<'_>,
+    decls: &ProjectDecls,
+    clause: &Clause<'_>,
+) -> Takes {
     if clause.types.is_empty() {
         return Takes::Yes;
     }
@@ -344,16 +368,35 @@ fn takes_recursion_error(f: &IrFunction, tcx: &TypeCtx<'_>, clause: &Clause<'_>)
     };
     let mut takes = Takes::No;
     for class in classes {
-        match class_named(f, tcx, clause.test, class) {
-            Some(fqn) if RECURSION_ERROR_CLASSES.contains(&fqn.as_str()) => return Takes::Yes,
-            Some(_) => {}
-            None => takes = Takes::Unknown,
+        match class_named(f, tcx, clause.test, class).map(|fqn| class_takes(decls, &fqn)) {
+            Some(Takes::Yes) => return Takes::Yes,
+            Some(Takes::No) => {}
+            Some(Takes::Unknown) | None => takes = Takes::Unknown,
         }
     }
     takes
 }
 
-/// The fqn of the class the value `v` of a clause's class expression (computed in block
+/// Whether `except C` takes a `RecursionError`, `fqn` naming `C` ([`class_named`]). Only a
+/// builtin and a class statement of the project are known: a class statement makes a new class,
+/// never one of [`RECURSION_ERROR_CLASSES`]. Any other name may be bound to one of them, or to a
+/// tuple holding one (`threading.ThreadError` is `RuntimeError`), and a name nothing heki reads
+/// binds comes back as a builtin of that name (one a star import may bind).
+fn class_takes(decls: &ProjectDecls, fqn: &str) -> Takes {
+    match fqn.strip_prefix("builtins.") {
+        Some(name) if is_builtin_name(name) => {
+            if RECURSION_ERROR_CLASSES.contains(&fqn) {
+                Takes::Yes
+            } else {
+                Takes::No
+            }
+        }
+        _ if decls.is_project_class(&decls.canonical(fqn)) => Takes::No,
+        _ => Takes::Unknown,
+    }
+}
+
+/// The fqn of the object the value `v` of a clause's class expression (computed in block
 /// `test`) names: a module-level name, or an attribute of one naming a module
 /// (`builtins.RuntimeError`); `None` for anything else (a local variable, a call).
 fn class_named(f: &IrFunction, tcx: &TypeCtx<'_>, test: BlockId, v: VarId) -> Option<String> {
@@ -457,72 +500,154 @@ fn cycle_at<'a>(cx: &CheckContext<'a>, site: &'a CallSite) -> Option<Witness<'a>
         .max_by_key(|w| w.cycle)
 }
 
-/// The chains from the functions the reported calls run down to a function on a call cycle,
-/// for one module's check: the call sites of each file a chain enters, indexed by caller once,
-/// and each callee's chain once.
+/// The first call from a function down to a function on a call cycle, run on its stack (none
+/// for a function on the cycle), and the function on the cycle the calls from there end in.
+#[derive(Clone, Copy)]
+struct Hop<'a> {
+    call: Option<Witness<'a>>,
+    member: &'a FuncKey,
+}
+
+/// The calls from the callee of a reported call down to a function on a call cycle: the first
+/// [`MAX_LISTED_CALLS`] of them, and the function on the cycle they end in.
+struct Chain<'a> {
+    calls: Vec<Witness<'a>>,
+    member: &'a FuncKey,
+}
+
+/// The chains below the calls one module's check reports: the call sites of each file a chain
+/// enters, indexed by caller once, and each function's first call down to a call cycle
+/// ([`Hop`]), decided once for all the chains through it (`None`: its calls reach none).
 #[derive(Default)]
 struct CycleChains<'a> {
-    sites: FxHashMap<&'a std::path::Path, FxHashMap<&'a FuncKey, Vec<&'a CallSite>>>,
-    chains: FxHashMap<&'a FuncKey, Rc<[Witness<'a>]>>,
+    sites: FxHashMap<&'a Path, FxHashMap<&'a FuncKey, Vec<&'a CallSite>>>,
+    hops: FxHashMap<&'a FuncKey, Option<Hop<'a>>>,
 }
 
 impl<'a> CycleChains<'a> {
-    /// The calls from the function a witness calls down to a function on its call cycle, in
-    /// call order (none when the callee is on it): each call runs, on the caller's stack, a
-    /// callee reaching the cycle.
-    fn of(&mut self, cx: &CheckContext<'a>, witness: &Witness<'a>) -> Rc<[Witness<'a>]> {
-        if witness.cycle == CallCycle::On {
-            return Rc::from(Vec::new());
+    /// The chain from `callee`, a function reaching a call cycle, down to a function on it
+    /// (`None` when its calls reach none: the cycle is reached through what iterating its
+    /// result runs). Open when the walk spends `budget`, the reporting function's.
+    fn below(
+        &mut self,
+        cx: &CheckContext<'a>,
+        budget: &Budget,
+        callee: &'a FuncKey,
+    ) -> Answer<Option<Chain<'a>>> {
+        self.decide(cx, budget, callee).map(|first| {
+            let first = first?;
+            let mut calls = Vec::new();
+            let mut call = first.call;
+            while let Some(w) = call
+                && calls.len() < MAX_LISTED_CALLS
+            {
+                calls.push(w);
+                // Each function on a decided chain has its own hop decided.
+                call = self
+                    .hops
+                    .get(w.callee)
+                    .copied()
+                    .flatten()
+                    .and_then(|h| h.call);
+            }
+            Some(Chain {
+                calls,
+                member: first.member,
+            })
+        })
+    }
+
+    /// The hop of `start`, from a walk down its calls that ends at a function on a call cycle or
+    /// at one whose hop an earlier walk decided: the functions on the way take the hop to the
+    /// next one. A walk ending at neither decides that no function it visited reaches a cycle.
+    fn decide(
+        &mut self,
+        cx: &CheckContext<'a>,
+        budget: &Budget,
+        start: &'a FuncKey,
+    ) -> Answer<Option<Hop<'a>>> {
+        if let Some(hop) = self.hops.get(start) {
+            return Answer::Known(*hop);
         }
-        if let Some(chain) = self.chains.get(witness.callee) {
-            return Rc::clone(chain);
-        }
-        let budget = Budget::unmetered("EFF114 cycle chains");
         let mut reached_by: FxHashMap<&'a FuncKey, Witness<'a>> = FxHashMap::default();
-        let sites = &mut self.sites;
+        let mut visited: Vec<&'a FuncKey> = Vec::new();
+        let (sites, hops) = (&mut self.sites, &self.hops);
         let found = reach(
-            &budget,
-            [witness.callee],
+            budget,
+            [start],
             |k: &'a FuncKey, next| {
-                let own = cx.index.file_of(k).into_iter().flat_map(|path| {
-                    let by_caller = sites.entry(path).or_insert_with(|| {
-                        let mut by_caller: FxHashMap<&'a FuncKey, Vec<&'a CallSite>> =
-                            FxHashMap::default();
-                        for site in &cx.index.files[path].call_sites {
-                            by_caller.entry(&site.caller).or_default().push(site);
-                        }
-                        by_caller
-                    });
-                    by_caller.get(k).cloned().unwrap_or_default()
-                });
-                for w in own.filter_map(|site| cycle_at(cx, site)) {
-                    if w.callee != witness.callee && !reached_by.contains_key(w.callee) {
+                let own = cx
+                    .index
+                    .file_of(k)
+                    .and_then(|path| sites_by_caller(cx, sites, path).get(k));
+                for w in own
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|site| cycle_at(cx, site))
+                {
+                    if w.callee != start && !reached_by.contains_key(w.callee) {
                         next.push(w.callee);
                         reached_by.insert(w.callee, w);
                     }
                 }
             },
             |k| {
-                let on = cx
-                    .index
-                    .summary(k)
-                    .is_some_and(|s| s.call_cycle == Some(CallCycle::On));
-                if on { Visit::Stop(k) } else { Visit::Expand }
+                visited.push(k);
+                match hops.get(k) {
+                    Some(Some(hop)) => Visit::Stop((k, hop.member)),
+                    Some(None) => Visit::Prune,
+                    None if on_call_cycle(cx, k) => Visit::Stop((k, k)),
+                    None => Visit::Expand,
+                }
             },
         );
-        let mut chain = Vec::new();
-        if let Answer::Known(Some(member)) = found {
-            let mut at = member;
-            while let Some(w) = reached_by.remove(at) {
-                at = &w.site.caller;
-                chain.push(w);
+        match found {
+            Answer::Open => Answer::Open,
+            Answer::Known(None) => {
+                for k in visited {
+                    self.hops.insert(k, None);
+                }
+                Answer::Known(None)
             }
-            chain.reverse();
+            Answer::Known(Some((end, member))) => {
+                self.hops
+                    .entry(end)
+                    .or_insert(Some(Hop { call: None, member }));
+                let mut at = end;
+                while let Some(w) = reached_by.remove(at) {
+                    at = &w.site.caller;
+                    let hop = Hop {
+                        call: Some(w),
+                        member,
+                    };
+                    self.hops.insert(at, Some(hop));
+                }
+                Answer::Known(self.hops[start])
+            }
         }
-        let chain: Rc<[Witness<'a>]> = Rc::from(chain);
-        self.chains.insert(witness.callee, Rc::clone(&chain));
-        chain
     }
+}
+
+/// The call sites of the file at `path`, by caller, indexed the first time a chain enters it.
+fn sites_by_caller<'s, 'a>(
+    cx: &CheckContext<'a>,
+    sites: &'s mut FxHashMap<&'a Path, FxHashMap<&'a FuncKey, Vec<&'a CallSite>>>,
+    path: &'a Path,
+) -> &'s FxHashMap<&'a FuncKey, Vec<&'a CallSite>> {
+    sites.entry(path).or_insert_with(|| {
+        let mut by_caller: FxHashMap<&'a FuncKey, Vec<&'a CallSite>> = FxHashMap::default();
+        for site in &cx.index.files[path].call_sites {
+            by_caller.entry(&site.caller).or_default().push(site);
+        }
+        by_caller
+    })
+}
+
+/// Whether the function `k` is on a call cycle.
+fn on_call_cycle(cx: &CheckContext<'_>, k: &FuncKey) -> bool {
+    cx.index
+        .summary(k)
+        .is_some_and(|s| s.call_cycle == Some(CallCycle::On))
 }
 
 /// Whether the call at `site` never returns normally: each of its project callees, at least one,
@@ -704,11 +829,12 @@ fn reports_error(
 }
 
 /// A clause to report: the clause, the call in its `try` body running a call cycle, and the
-/// calls from that call's callee down to a function on the cycle.
+/// calls from that call's callee down to a function on the cycle (none when the callee is on it,
+/// or when its calls reach none).
 struct Finding<'f, 'a> {
     clause: Clause<'f>,
     witness: Witness<'a>,
-    chain: Rc<[Witness<'a>]>,
+    chain: Option<Chain<'a>>,
 }
 
 fn report(
@@ -741,19 +867,20 @@ fn report(
                     .is_some_and(|rest| rest.starts_with(".<locals>.")))
     };
     let function = key.qualname.as_str();
-    let member = chain.last().map_or(witness.callee, |w| w.callee);
-    let recursion = if own_cycle && nested_in_own(witness.callee) {
-        format!("the recursion of `{function}`")
-    } else if witness.cycle == CallCycle::On {
-        format!("the recursion of `{}`", member.qualname)
-    } else if chain.is_empty() {
-        // The cycle is reached through what iterating the callee's result runs.
-        format!("a recursion below `{}`", witness.callee.qualname)
-    } else {
-        format!(
+    let calls = chain.as_ref().map_or(&[][..], |c| c.calls.as_slice());
+    let recursion = match chain {
+        _ if own_cycle && nested_in_own(witness.callee) => {
+            format!("the recursion of `{function}`")
+        }
+        _ if witness.cycle == CallCycle::On => {
+            format!("the recursion of `{}`", witness.callee.qualname)
+        }
+        Some(chain) if !chain.calls.is_empty() => format!(
             "the recursion of `{}` below `{}`",
-            member.qualname, witness.callee.qualname
-        )
+            chain.member.qualname, witness.callee.qualname
+        ),
+        // The cycle is reached through what iterating the callee's result runs.
+        _ => format!("a recursion below `{}`", witness.callee.qualname),
     };
     let called = match witness.callee.qualname.rsplit('.').next() {
         Some("<genexpr>") => "a generator expression".to_owned(),
@@ -784,7 +911,7 @@ fn report(
     )
         .expect("`run` checked that EFF114 runs on the unit");
     d.related.push(related);
-    for w in chain.iter() {
+    for w in calls {
         let path = cx.index.file_of(&w.site.caller).unwrap_or(&unit.input.path);
         d.related.push(cx.related_at(
             path,
