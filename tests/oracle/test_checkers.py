@@ -312,7 +312,7 @@ class Mut101(unittest.TestCase):
         events = [
             ["start", 1, 2, "Parser.features", "app/m.py", 0, 3],
             ["load", 2, 2, 60, "raw"] if loads else ["load", 2, 2, 60, "other"],
-            ["ret", "R0", 2, 3, 70, "str", "str"],
+            ["ret", "R0", 2, 3, 70, "str", "str", 60],
             kept_line("N0", 5, 6, before or kept_state(), after or kept_state(attr=(81, "b")), muts=muts),
         ]
         if kept_at_return is not False:
@@ -353,6 +353,16 @@ class Mut101(unittest.TestCase):
         self.assertEqual([r["premise"].split(":")[0] for r in refutations], ["Plain write"])
         changed = self.trace(after=kept_state(), muts=[[80, "append", "list"]])
         self.assertEqual(checkers.check(claim, [changed])["refutations"], [])
+
+    def test_a_run_of_the_getter_on_another_instance_returning_the_same_object_is_not_its_run(self):
+        # `a.features`, then `b.features` returning the same object without loading `a.raw`.
+        trace = self.trace()
+        trace["events"][3:3] = [
+            ["start", 4, 3, "Parser.features", "app/m.py", 0, 4],
+            ["load", 3, 4, 61, "raw"],
+            ["ret", "R0", 3, 4, 70, "str", "str", 61],
+        ]
+        self.assertEqual(self.premises(trace), [])
 
     def test_a_value_gone_at_the_normal_return_refutes_kept_to_the_return(self):
         self.assertEqual(self.premises(self.trace(kept_at_return=None)), ["Kept to the return"])

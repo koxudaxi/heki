@@ -359,7 +359,9 @@ def check_mut101(claim, runs, sources=None):
     result = Result(claim)
     for run in valid_runs(runs):
         events = run["events"]
-        rets = [(e[3], e[2], e[4]) for e in _of(events, "ret", claim["ret"])]
+        # A run of the getter on another instance may return the same object (a small integer,
+        # an interned string): only a run on the instance itself computed its kept value.
+        rets = [(e[3], e[2], e[4], e[7] if len(e) > 7 else None) for e in _of(events, "ret", claim["ret"])]
         starts = {e[2]: e[1] for e in _of(events, "start")}
         loads = [e for e in _of(events, "load") if e[4] == claim["attr"]]
         kept_at_return = {e[2]: e[5] for e in _of(events, "kept_ret", claim["writer_ret"])}
@@ -382,7 +384,7 @@ def check_mut101(claim, runs, sources=None):
                     {"class": before.get("class")},
                 )
                 continue
-            computed = [r for r in rets if r[2] == kept and r[0] < line[3]]
+            computed = [r for r in rets if r[2] == kept and r[3] == obj and r[0] < line[3]]
             if not computed:
                 result.refute(
                     "not-getter-value",
@@ -391,7 +393,7 @@ def check_mut101(claim, runs, sources=None):
                     {"class": before.get("class")},
                 )
                 continue
-            ret_seq, act, _ = computed[-1]
+            ret_seq, act, _, _ = computed[-1]
             begun = starts.get(act, -1)
             read = any(begun <= e[2] <= ret_seq and e[3] == obj for e in loads)
             if not read:

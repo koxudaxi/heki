@@ -30,8 +30,9 @@ Events (lists, so that the trace is compact JSON):
 - `["line", line, act, seq_start, seq_end, outcome, chain, before, after, muts, types,
   names_before, names_after]`: `names_*` map the captured names to the identity of what they
   hold when the line starts and ends;
-- `["ret", ret, act, seq, value_id, type_name, base]`: `base` is `list`, `dict`, or `set` for an
-  instance of one (a subclass too), else the type's name;
+- `["ret", ret, act, seq, value_id, type_name, base, self_id]`: `base` is `list`, `dict`, or
+  `set` for an instance of one (a subclass too), else the type's name; `self_id` is the identity
+  of the frame's first argument (`None` without one), the instance a getter computed for;
 - `["load", act, seq, object_id, attr]`: an attribute load `<first argument>.<attr>` of a frame ran,
   for the attributes a kept-value claim names (`MUT101`);
 - `["kept_ret", ret, act, seq, self_id, kept_id]`: the writer of a kept-value claim returned
@@ -647,8 +648,12 @@ class Recorder:
                 base = next(
                     (k.__name__ for k in (list, dict, set) if isinstance(value, k)), type(value).__name__
                 )
+                first = frame.f_locals.get(code.co_varnames[0], MISSING) if code.co_argcount else MISSING
+                self_id = None if first is MISSING else id(first)
                 for ret in fs.info.returns:
-                    self.events.append(["ret", ret["id"], fs.act, seq, id(value), type(value).__name__, base])
+                    self.events.append(
+                        ["ret", ret["id"], fs.act, seq, id(value), type(value).__name__, base, self_id]
+                    )
             self._close_frame(fs, seq, "ok")
         return None
 
