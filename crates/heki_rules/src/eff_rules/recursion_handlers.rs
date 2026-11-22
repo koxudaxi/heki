@@ -152,7 +152,8 @@ pub(super) fn run(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Di
         if !reaches_cycle {
             continue;
         }
-        let handlers = Handlers::of(f, unit.source, &tcx, cx.decls);
+        let shape = FnShape::new(f);
+        let handlers = Handlers::of(&shape, unit.source, &tcx, cx.decls);
         if !handlers
             .dispatches
             .values()
@@ -161,7 +162,6 @@ pub(super) fn run(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Di
             continue;
         }
         let types = tcx.infer(f);
-        let shape = FnShape::new(f);
         let budget = Budget::of_function("EFF114", f);
         let exits = |inst: &Inst| {
             ends_process(&tcx, &types, &inst.kind)
@@ -228,7 +228,8 @@ struct Handlers<'f> {
 }
 
 impl<'f> Handlers<'f> {
-    fn of(f: &'f IrFunction, source: &str, tcx: &TypeCtx<'_>, decls: &ProjectDecls) -> Self {
+    fn of(shape: &FnShape<'f>, source: &str, tcx: &TypeCtx<'_>, decls: &ProjectDecls) -> Self {
+        let f = shape.f;
         let landing: FxHashSet<BlockId> = f.blocks.iter().filter_map(|b| b.exc_target).collect();
         let mut out = Self {
             clauses: FxHashMap::default(),
@@ -244,7 +245,7 @@ impl<'f> Handlers<'f> {
                 let takes = if is_star_clause(source, clause.span) {
                     Takes::Unknown
                 } else {
-                    takes_recursion_error(f, tcx, decls, clause)
+                    takes_recursion_error(shape, tcx, decls, clause)
                 };
                 match takes {
                     Takes::Yes => {
@@ -347,7 +348,7 @@ fn is_star_clause(source: &str, span: Span) -> bool {
 /// Whether the clause takes a `RecursionError`: a bare `except`, or classes the module's names
 /// give (a tuple display of them included).
 fn takes_recursion_error(
-    f: &IrFunction,
+    shape: &FnShape<'_>,
     tcx: &TypeCtx<'_>,
     decls: &ProjectDecls,
     clause: &Clause<'_>,
@@ -355,10 +356,10 @@ fn takes_recursion_error(
     if clause.types.is_empty() {
         return Takes::Yes;
     }
-    let Some(root) = type_expression(f, clause.test) else {
+    let Some(root) = type_expression(shape.f, clause.test) else {
         return Takes::Unknown;
     };
-    let classes: Vec<VarId> = match type_expression_inst(f, clause.test) {
+    let classes: Vec<VarId> = match type_expression_inst(shape.f, clause.test) {
         Some(InstKind::AllocBuiltin {
             kind: BuiltinKind::Tuple,
             elems,
@@ -368,7 +369,8 @@ fn takes_recursion_error(
     };
     let mut takes = Takes::No;
     for class in classes {
-        match class_named(f, tcx, decls, clause.test, class).map(|fqn| class_takes(decls, &fqn)) {
+        let fqn = class_named(shape, tcx, decls, clause.test, class);
+        match fqn.map(|fqn| class_takes(decls, &fqn)) {
             Some(Takes::Yes) => return Takes::Yes,
             Some(Takes::No) => {}
             Some(Takes::Unknown) | None => takes = Takes::Unknown,
@@ -401,18 +403,17 @@ fn class_takes(decls: &ProjectDecls, fqn: &str) -> Takes {
 /// one naming a module (`builtins.RuntimeError`, `errors.Base` for `Base = Exception`); `None`
 /// for anything else (a local variable, a call).
 fn class_named(
-    f: &IrFunction,
+    shape: &FnShape<'_>,
     tcx: &TypeCtx<'_>,
     decls: &ProjectDecls,
     test: BlockId,
     v: VarId,
 ) -> Option<String> {
     let defined = |v: VarId| {
-        f.block(test)
-            .insts
-            .iter()
-            .find(|i| i.kind.dst() == Some(v))
-            .map(|i| &i.kind)
+        shape
+            .defining(v)
+            .filter(|(b, _)| *b == test)
+            .map(|(_, i)| &i.kind)
     };
     let global = |kind: Option<&InstKind>| match kind? {
         InstKind::LoadGlobal { name, .. } | InstKind::LoadName { name, .. } => {

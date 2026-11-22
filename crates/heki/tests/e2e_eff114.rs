@@ -1,13 +1,13 @@
 //! `EFF114` (`recursion-error-as-value`) end to end: an `except` clause that takes the
 //! `RecursionError` of a call cycle its `try` body reaches and goes on without raising (a method
 //! cycle, a generator expression, a cycle across modules, a helper above the cycle, a `with` body,
-//! an inner `try`, an awaited coroutine, a generator iterated there, a function `map` calls, a
-//! module body), the clause shapes that take it (bare, `BaseException`, a tuple, a class imported
-//! from `builtins`), and the shapes left silent: a clause taking no `RecursionError`, one after a
-//! clause that re-raises it or whose classes heki cannot tell (a tuple, a name from a dependency,
-//! the standard library, or a star import), a clause raising on a path or
-//! exiting, a CLI boundary, a body reaching no cycle (or one only through a worker thread, a
-//! coroutine only created, or a generator only made), `except*`, a `finally` body on the way, and
+//! an inner `try`, an awaited coroutine, a generator iterated there or in a helper, a function
+//! `map` calls, a module body), the clause shapes that take it (bare, `BaseException`, a tuple, a
+//! class imported from `builtins`), and the shapes left silent: a clause taking no
+//! `RecursionError`, one after a clause that re-raises it or whose classes heki cannot tell (a
+//! tuple, a name from a dependency, the standard library, or a star import), a clause raising on a
+//! path or exiting, a CLI boundary, a body reaching no cycle (or one only through a worker thread,
+//! a coroutine only created, or a generator only made), `except*`, a `finally` body on the way, and
 //! a module whose `Exception` is its own class; the opt-in selection, and `heki rule`.
 
 mod common;
@@ -514,6 +514,17 @@ def iterated_result(tree: dict) -> int:
         return len([node for node in walks(tree)])
     except RecursionError:
         return -1
+
+
+def walked_length(tree: dict) -> int:
+    return len([node for node in walks(tree)])
+
+
+def measured_walk(tree: dict) -> int:
+    try:
+        return walked_length(tree)
+    except RecursionError:
+        return -1
 "#;
 
 /// A cycle across two modules, through a generator expression in the second.
@@ -689,6 +700,7 @@ fn clauses_turning_a_recursion_error_into_a_value_are_reported() {
             d("pkg/shapes.py", 373, "helper_first"),
             d("pkg/shapes.py", 380, "below_again"),
             d("pkg/shapes.py", 391, "iterated_result"),
+            d("pkg/shapes.py", 402, "measured_walk"),
             d("pkg/walk.py", 18, "RefWalker.is_circular"),
             d("pkg/walk.py", 48, "nesting"),
         ]
@@ -771,6 +783,13 @@ fn a_report_names_the_clause_the_recursion_and_the_call_in_the_try_body() {
             .as_str()
             .unwrap()
             .contains("the `RecursionError` a recursion below `walks` can raise")
+    );
+    // A helper iterating it, past `walks` decided by the report before.
+    assert!(
+        at(&diags, "pkg/shapes.py", 402)["message"]
+            .as_str()
+            .unwrap()
+            .contains("the `RecursionError` a recursion below `walked_length` can raise")
     );
     assert!(
         at(&diags, "pkg/shapes.py", 24)["message"]

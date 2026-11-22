@@ -4124,6 +4124,63 @@ fn chains_down_a_ladder_of_helpers_are_walked_once_and_listed_in_part() {
     }
 }
 
+/// A ladder of helpers above a function calling itself, longer than the steps of a small
+/// function's budget, and two handlers calling a helper inside a `try`: the walk down from the top
+/// helper spends the first handler's budget, which reports nothing and decides no helper; the
+/// walk from four thousand helpers above the cycle fits the second handler's.
+#[test]
+fn chains_down_more_helpers_than_the_budget_steps_are_not_reported() {
+    let n = 4_500;
+    let mut lines = vec![
+        "def rec(x):".to_owned(),
+        "    return rec(x)".to_owned(),
+        String::new(),
+        String::new(),
+        "def h0(x):".to_owned(),
+        "    return rec(x)".to_owned(),
+    ];
+    for i in 1..n {
+        lines.extend([
+            String::new(),
+            String::new(),
+            format!("def h{i}(x):"),
+            format!("    return h{}(x)", i - 1),
+        ]);
+    }
+    for (handler, helper) in [("top", n - 1), ("within", 3_999)] {
+        lines.extend([
+            String::new(),
+            String::new(),
+            format!("def {handler}(x):"),
+            "    try:".to_owned(),
+            format!("        return h{helper}(x)"),
+            "    except Exception:".to_owned(),
+            "        return None".to_owned(),
+        ]);
+    }
+    let p = Project::new("bounds_ladder_past_the_budget");
+    p.write("m.py", &(lines.join("\n") + "\n"));
+    let reported: Vec<Value> = check_selecting_within(&p, &["EFF114"], Duration::from_secs(20))
+        .into_iter()
+        .filter(|d| d["rule_code"] == "EFF114")
+        .map(|d| d["qualname"].clone())
+        .collect();
+    assert_eq!(reported, ["within"]);
+}
+
+/// A clause of a tuple of three thousand classes, the last one taking `RecursionError`: each
+/// class is looked up in the function's table of definitions, not found by a scan of the block
+/// testing the clause.
+#[test]
+fn a_clause_of_thousands_of_classes_looks_each_up_once() {
+    let n = 3_000;
+    let classes = vec!["KeyError"; n].join(", ");
+    let source = format!(
+        "def rec(x):\n    return rec(x)\n\n\ndef shape(x):\n    try:\n        rec(x)\n    except ({classes}, Exception):\n        pass\n"
+    );
+    assert_eq!(recursion_handlers("bounds_wide_except_tuple", &source), 1);
+}
+
 /// `MUT101` selected: the facts of its exact claim are computed (`OptInFacts::kept_values`).
 const MUT101_CONFIG: &str = "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT101\"]\n";
 
