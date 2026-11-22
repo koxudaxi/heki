@@ -22,6 +22,16 @@ release can change rules, configuration keys, diagnostics, and output formats.
   stored again after a read, and a set filled with the elements are not reported. The report
   sits where the ordered value meets the output, with the order-taking line and the calls on the
   way as related locations.
+- `EFF114` (`recursion-error-as-value`, opt-in, heuristic, experimental): an `except` clause that
+  takes the `RecursionError` a recursion reached from its `try` body can raise (`Exception`,
+  `BaseException`, `RuntimeError`, `RecursionError`, a bare `except`, or a tuple with one), when
+  no path through the clause raises, so the function goes on with a value that depends on the
+  depth of the stack. The recursion is a call cycle through calls whose bodies run on the
+  caller's stack, across modules; the report names the function on the cycle and the first calls
+  down to it. A clause after one that re-raises `RecursionError` or whose classes heki cannot
+  tell (a tuple, a class of a dependency or of the standard library), a clause that raises on a
+  path, exits, calls a project function that raises on every path, or reports the error and
+  returns an exit status (a CLI boundary) is not reported.
 - The ecosystem catalog says what a call writes in the order of its elements (`writes_in_order`):
   the argument a call writes to a file or a stream, or serializes into text, and the keyword
   argument that sorts mapping keys first, with whether the call sorts without it. Entries:
