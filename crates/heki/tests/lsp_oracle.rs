@@ -589,6 +589,7 @@ const MARKED_SPEC_HOOKED: &str = "from dataclasses import dataclass\n\nfrom pkg.
 const MARK_TESTS: &str = "from pkg.marked_spec import Spec\nfrom pkg.marks import MISSING\n\n\ndef given(spec: Spec) -> bool:\n    return spec.value is not MISSING\n";
 const MARK_TESTS_NONE: &str = "from pkg.marked_spec import Spec\nfrom pkg.marks import MISSING\n\n\ndef given(spec: Spec) -> bool:\n    return spec.value is not None\n";
 const MARK_COPIES: &str = "import copy\n\nfrom pkg.marked_spec import Spec\n\n\ndef isolated(spec: Spec) -> Spec:\n    return copy.deepcopy(spec)\n";
+const MARK_HOLDER: &str = "import copy\n\nfrom pkg.marked_spec import Spec\n\n\nclass Holder:\n    def __init__(self, spec: Spec):\n        self.spec = spec\n\n\ndef isolated_holder(holder: Holder):\n    return copy.deepcopy(holder)\n";
 const MARK_SUB: &str = "import copy\n\nfrom pkg.marked_spec import Spec\n\n\nclass NamedSpec(Spec):\n    pass\n\n\ndef isolated_named(spec: NamedSpec) -> NamedSpec:\n    return copy.deepcopy(spec)\n";
 
 // Values new on one path and borrowed on another (`MUT112`): a caller two modules above a
@@ -2900,7 +2901,9 @@ fn steps_mut111() -> Vec<Step> {
 /// declarations its check reads, and the sentinel tests of each file,
 /// `heki_rules::sentinel_tests_in`): the sentinel becomes one that copies as itself and back,
 /// the class gains a copy hook and loses it, the test goes and comes back a line lower (its
-/// related location moves), and a new module deep-copies an instance of a subclass.
+/// related location moves), a new module deep-copies an instance of a subclass, and another
+/// deep-copies a holder whose typed attribute keeps the dataclass while the dataclass gains a
+/// copy hook and loses it.
 fn steps_mut118() -> Vec<Step> {
     let lower = MARK_TESTS.replace("def given", "# The field was given.\ndef given");
     vec![
@@ -2962,6 +2965,21 @@ fn steps_mut118() -> Vec<Step> {
             ("pkg/mark_sub.py", "MUT118"),
             ("pkg/mark_copies.py", "MUT118"),
         ]),
+        Step::new(
+            "a new module deep-copies a holder whose typed attribute keeps the dataclass",
+            vec![Action::Create("pkg/mark_holder.py", MARK_HOLDER.to_owned())],
+        )
+        .present(&[("pkg/mark_holder.py", "MUT118")]),
+        Step::new(
+            "the dataclass gains `__deepcopy__` again",
+            vec![save("pkg/marked_spec.py", MARKED_SPEC_HOOKED)],
+        )
+        .absent(&[("pkg/mark_holder.py", "MUT118")]),
+        Step::new(
+            "and loses it",
+            vec![save("pkg/marked_spec.py", MARKED_SPEC)],
+        )
+        .present(&[("pkg/mark_holder.py", "MUT118")]),
     ]
 }
 
@@ -3481,12 +3499,12 @@ fn steps_property_getters() -> Vec<Step> {
             "a getter read from an async def in another file starts blocking",
             vec![save("pkg/remote.py", REMOTE_BLOCKING)],
         )
-        .present(&[("pkg/reader.py", "EFF111")]),
+        .present(&[("pkg/reader.py", "EFF101")]),
         Step::new(
             "the getter stops blocking",
             vec![save("pkg/remote.py", REMOTE)],
         )
-        .absent(&[("pkg/reader.py", "EFF111")]),
+        .absent(&[("pkg/reader.py", "EFF101")]),
     ]
 }
 
@@ -3842,7 +3860,7 @@ fn steps_re_exports() -> Vec<Step> {
                 &UI_IMPL.replace("    def data", "    @property\n    def data"),
             )],
         )
-        .present(&[("pkg/consumer.py", "EFF111")]),
+        .present(&[("pkg/consumer.py", "EFF101")]),
         Step::new(
             "the getter `__hash__` reads becomes a property reading a mutated attribute",
             vec![save(
@@ -3866,7 +3884,7 @@ fn steps_re_exports() -> Vec<Step> {
             "the re-exported classes are plain again",
             vec![save("pkg/ui/impl.py", UI_IMPL)],
         )
-        .absent(&[("pkg/consumer.py", "EFF111"), ("pkg/consumer.py", "MUT107")]),
+        .absent(&[("pkg/consumer.py", "EFF101"), ("pkg/consumer.py", "MUT107")]),
     ]
 }
 
@@ -4955,6 +4973,134 @@ fn lsp_diagnostics_equal_a_full_check_through_protocols_a_contract_names() {
             vec![save("pkg/host.py", PROTOCOL_HOST)],
         )
         .absent(reported),
+    ];
+    let mut failures = Vec::new();
+    for step in &steps {
+        failures.extend(s.run(step));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+    s.lsp.stop(true);
+}
+
+// ------------------------------------- `__dict__` keys another `write-owners` contract names
+
+const LISTED_KEYS_CONFIG: &str = r#"[project]
+name = "t"
+
+[tool.heki.lint]
+select = ["MUT201"]
+
+[[tool.heki.write-owners]]
+name = "caches"
+targets = ["pkg.model.Field._cache_key"]
+allowed-writers = ["pkg.store:*"]
+unlisted-dict-keys = "report"
+
+[[tool.heki.write-owners]]
+name = "types"
+targets = ["pkg.base.Base._type_cache"]
+allowed-writers = ["pkg.parser:*"]
+"#;
+
+const LISTED_KEYS_BASE: &str = "class Base:\n    pass\n";
+const LISTED_KEYS_MODEL: &str = "from pkg.base import Base\n\n\nclass Field(Base):\n    pass\n";
+const LISTED_KEYS_PARSER: &str = "from pkg.model import Field\n\n\ndef cache(field: Field) -> None:\n    field.__dict__[\"_type_cache\"] = 1\n";
+
+/// `unlisted-dict-keys` with the key named by another contract's target on a base class in
+/// another module: whether the written object's class derives from it decides whether the key is
+/// listed, as the class drops the base and takes it again.
+#[test]
+fn lsp_diagnostics_equal_a_full_check_for_keys_another_contract_names() {
+    let files = vec![
+        ("pkg/__init__.py", String::new()),
+        ("pkg/base.py", LISTED_KEYS_BASE.to_owned()),
+        ("pkg/model.py", LISTED_KEYS_MODEL.to_owned()),
+        ("pkg/parser.py", LISTED_KEYS_PARSER.to_owned()),
+    ];
+    let mut s = Session::start_with("lsp_oracle_listed_keys", LISTED_KEYS_CONFIG, files, false);
+    let reported: &[(&str, &str)] = &[("pkg/parser.py", "MUT201")];
+    let steps = [
+        Step::new("initial index", Vec::new()).absent(reported),
+        Step::new(
+            "the class stops deriving from the base the other contract names",
+            vec![save(
+                "pkg/model.py",
+                &LISTED_KEYS_MODEL.replace("class Field(Base):", "class Field:"),
+            )],
+        )
+        .present(reported),
+        Step::new(
+            "the class derives from the base again",
+            vec![save("pkg/model.py", LISTED_KEYS_MODEL)],
+        )
+        .absent(reported),
+    ];
+    let mut failures = Vec::new();
+    for step in &steps {
+        failures.extend(s.run(step));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+    s.lsp.stop(true);
+}
+
+// ------------------------------------ allowed protocols with and without their subprotocols
+
+const SUBPROTOCOL_CONFIG: &str = r#"[project]
+name = "t"
+
+[tool.heki.lint]
+select = ["MUT201", "MUT203"]
+
+[[tool.heki.write-owners]]
+name = "writes"
+targets = ["pkg.*._*"]
+forbidden-writers = ["pkg.render:*"]
+allowed-protocols = ["*Host"]
+
+[[tool.heki.read-owners]]
+name = "reads"
+targets = ["pkg.*._*"]
+forbidden-readers = ["pkg.render:*"]
+allowed-protocols = ["*Host"]
+protocol-subclasses = false
+"#;
+
+const SUBPROTOCOL_BASE: &str =
+    "class Parser:\n    def __init__(self) -> None:\n        self._flag = False\n";
+const SUBPROTOCOL_HOST: &str =
+    "from typing import Protocol\n\n\nclass GraphHost(Protocol):\n    _flag: bool\n";
+const SUBPROTOCOL_FLAGS: &str =
+    "from typing import Protocol\n\n\nclass RuntimeFlags(Protocol):\n    _flag: bool\n";
+const SUBPROTOCOL_FLAGS_DERIVED: &str = "from typing import Protocol\n\nfrom pkg.host import GraphHost\n\n\nclass RuntimeFlags(GraphHost, Protocol):\n    _flag: bool\n";
+const SUBPROTOCOL_RENDER: &str = "from pkg.flags import RuntimeFlags\n\n\ndef mark(flags: RuntimeFlags) -> None:\n    flags._flag = True\n\n\ndef peek(flags: RuntimeFlags) -> bool:\n    return flags._flag\n";
+
+/// `allowed-protocols` covering subprotocols (the write contract) and naming the matching
+/// protocols only (`protocol-subclasses = false`, the read contract), as the protocol used in
+/// one module starts deriving from an allowed protocol of another and stops again.
+#[test]
+fn lsp_diagnostics_equal_a_full_check_through_subprotocols_of_allowed_protocols() {
+    let files = vec![
+        ("pkg/__init__.py", String::new()),
+        ("pkg/base.py", SUBPROTOCOL_BASE.to_owned()),
+        ("pkg/host.py", SUBPROTOCOL_HOST.to_owned()),
+        ("pkg/flags.py", SUBPROTOCOL_FLAGS.to_owned()),
+        ("pkg/render.py", SUBPROTOCOL_RENDER.to_owned()),
+    ];
+    let mut s = Session::start_with("lsp_oracle_subprotocols", SUBPROTOCOL_CONFIG, files, false);
+    let both: &[(&str, &str)] = &[("pkg/render.py", "MUT201"), ("pkg/render.py", "MUT203")];
+    let steps = [
+        Step::new("initial index", Vec::new()).present(both),
+        Step::new(
+            "the protocol starts deriving from an allowed protocol",
+            vec![save("pkg/flags.py", SUBPROTOCOL_FLAGS_DERIVED)],
+        )
+        .absent(&[("pkg/render.py", "MUT201")])
+        .present(&[("pkg/render.py", "MUT203")]),
+        Step::new(
+            "the protocol derives from it no more",
+            vec![save("pkg/flags.py", SUBPROTOCOL_FLAGS)],
+        )
+        .present(both),
     ];
     let mut failures = Vec::new();
     for step in &steps {

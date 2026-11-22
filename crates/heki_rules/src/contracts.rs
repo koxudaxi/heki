@@ -497,9 +497,10 @@ pub fn typed_writes(config: &HekiConfig, selection: &RuleSelection) -> TypedWrit
 }
 
 /// The opt-in facts the rules `selection` runs read: `MUT112`'s return origins, `MUT113`'s
-/// iteration facts, `EFF109`'s lock facts, `EFF110`'s one-at-a-time uses, and the must-facts of
-/// the effect rules whose reports are split by them, each only with its rules. The readers assert
-/// it ([`heki_effect::ProjectIndex::opt_in_facts`]).
+/// iteration facts, `EFF109`'s lock facts, `EFF110`'s one-at-a-time uses, the must-facts of
+/// the effect rules whose reports are split by them, and the kept-value facts of `MUT101` and
+/// `MUT111`, each only with its rules. The readers assert it
+/// ([`heki_effect::ProjectIndex::opt_in_facts`]).
 pub fn opt_in_facts(selection: &RuleSelection) -> OptInFacts {
     OptInFacts {
         return_origins: selection.is_enabled("MUT112"),
@@ -513,8 +514,12 @@ pub fn opt_in_facts(selection: &RuleSelection) -> OptInFacts {
             .iter()
             .chain(&["EFF114"])
             .any(|code| selection.is_enabled(code)),
+        kept_values: crate::mut_rules::KEPT_VALUE_RULES
+            .iter()
+            .any(|code| selection.is_enabled(code)),
         call_cycles: selection.is_enabled("EFF114"),
         shared_state: false,
+        blind_spots: false,
     }
 }
 
@@ -525,6 +530,16 @@ pub fn inspect_facts(selection: &RuleSelection) -> OptInFacts {
     OptInFacts {
         return_origins: true,
         shared_state: true,
+        ..opt_in_facts(selection)
+    }
+}
+
+/// [`opt_in_facts`] with the facts `heki recommend` reads besides the rules: the calls heki is
+/// blind to ([`crate::blind_spots`]). Neither `heki check` nor the language server computes
+/// them.
+pub fn recommend_facts(selection: &RuleSelection) -> OptInFacts {
+    OptInFacts {
+        blind_spots: true,
         ..opt_in_facts(selection)
     }
 }

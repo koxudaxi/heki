@@ -9,6 +9,8 @@
 //!   `OPT112`, `OPT113`, `OPT120`, `OPT121`, `OPT130`); `OPT112` / `OPT113` are Advisory-lane
 //!   reports without a rewrite.
 
+pub mod blind_spots;
+pub mod census;
 mod contracts;
 mod data_rules;
 mod eff_rules;
@@ -24,8 +26,8 @@ pub mod selection;
 pub mod snapshot;
 
 pub use contracts::{
-    MAX_INVALIDATIONS, declares_ownership, inspect_facts, opt_in_facts, summary_contracts,
-    typed_writes,
+    MAX_INVALIDATIONS, declares_ownership, inspect_facts, opt_in_facts, recommend_facts,
+    summary_contracts, typed_writes,
 };
 pub use eff_rules::{ROOT_CAUSE_GROUP_THRESHOLD, fold_root_causes};
 pub use heki_diagnostics::Certainty;
@@ -834,7 +836,8 @@ pub struct CheckExtras<'a> {
     /// (the LSP engine checks one file).
     pub text_of: Option<&'a TextOf<'a>>,
     /// Record on each heuristic report of a claim with a premise row which premises it left
-    /// open and why (`Diagnostic::open_premises`, [`premises::OpenCause`]). Off, nothing more
+    /// open and why (`Diagnostic::open_records`, [`premises::OpenCause`]), and which conditions
+    /// of the exact tier that are no premise ([`premises::ConditionCause`]). Off, nothing more
     /// is computed than the tiers need.
     pub open_premises: bool,
 }
@@ -1210,7 +1213,7 @@ impl<'a> CheckContext<'a> {
             fix: None,
             sites: 1,
             fold_key: None,
-            open_premises: Vec::new(),
+            open_records: Vec::new(),
         });
         out.last_mut()
     }
