@@ -5434,6 +5434,16 @@ impl<'a> TypeCtx<'a> {
         }
     }
 
+    /// The fqn of the object a module-level name read inside this module names (a class, a
+    /// function, a module, or a builtin), as [`Self::global`] gives it; `None` for a name
+    /// holding an instance.
+    pub fn named_object(&self, name: &str) -> Option<String> {
+        match self.global(name) {
+            Ty::Ref(fqn) => Some(fqn),
+            _ => None,
+        }
+    }
+
     /// Value of a module-level name read inside this module.
     pub(crate) fn global(&self, name: &str) -> Ty {
         if let Some(t) = self.module.imports.get(name) {

@@ -23,10 +23,11 @@ use crate::{CheckContext, ModuleUnit};
 use heki_ast::Span;
 use heki_diagnostics::Diagnostic;
 use heki_effect::consumption::resolve_inst;
-use heki_effect::{CallCycle, CallSite, Callee, Facts, FuncKey, Runner, TypeCtx, Val};
+use heki_effect::{CallCycle, CallSite, Callee, Facts, FuncKey, Runner, SiteRole, TypeCtx, Val};
 use heki_ir::walk::{Answer, Budget, FnShape, Visit, reach};
-use heki_ir::{BlockId, BuiltinKind, ConstLiteral, InstKind, IrFunction, Terminator, VarId};
+use heki_ir::{BlockId, BuiltinKind, ConstLiteral, Inst, InstKind, IrFunction, Terminator, VarId};
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::rc::Rc;
 
 /// The builtin classes a `RecursionError` is an instance of.
 const RECURSION_ERROR_CLASSES: &[&str] = &[
@@ -117,6 +118,7 @@ pub(super) fn run(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Di
     }
     let tcx = TypeCtx::new(&unit.input, cx.decls, cx.kb);
     let mut sites: Option<SitesOfFunctions<'_>> = None;
+    let mut chains = CycleChains::default();
     for f in unit.input.ir.functions.iter().filter(|f| !f.is_class_body) {
         let has_handler = f.blocks.iter().any(|b| {
             matches!(
@@ -127,8 +129,19 @@ pub(super) fn run(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Di
         if !has_handler {
             continue;
         }
-        let types = tcx.infer(f);
-        let handlers = Handlers::of(f, unit.source, &types);
+        let sites = sites.get_or_insert_with(|| sites_of_functions(cx, unit));
+        let key = CheckContext::key(unit, f);
+        let Some(own_sites) = sites.get(key.qualname.as_str()) else {
+            continue;
+        };
+        let reaches_cycle = own_sites
+            .values()
+            .flatten()
+            .any(|site| cycle_at(cx, site).is_some());
+        if !reaches_cycle {
+            continue;
+        }
+        let handlers = Handlers::of(f, unit.source, &tcx);
         if !handlers
             .dispatches
             .values()
@@ -136,14 +149,15 @@ pub(super) fn run(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Di
         {
             continue;
         }
-        let sites = sites.get_or_insert_with(|| sites_of_functions(cx, unit));
-        let key = CheckContext::key(unit, f);
-        let Some(own_sites) = sites.get(key.qualname.as_str()) else {
-            continue;
-        };
+        let types = tcx.infer(f);
         let shape = FnShape::new(f);
         let budget = Budget::of_function("EFF114", f);
-        let exits = |kind: &InstKind| ends_process(&tcx, &types, kind);
+        let exits = |inst: &Inst| {
+            ends_process(&tcx, &types, &inst.kind)
+                || own_sites
+                    .get(&inst.span)
+                    .is_some_and(|at| at.iter().any(|site| never_returns(cx, site)))
+        };
         for (dispatch, body_blocks) in handlers.try_bodies(f) {
             let Some(Dispatch::TakenBy(k)) = handlers.dispatches.get(&dispatch).copied() else {
                 continue;
@@ -160,7 +174,12 @@ pub(super) fn run(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Di
             if is_cli_boundary(f, &shape, &tcx, &types, &body, clause.caught) {
                 continue;
             }
-            report(cx, unit, f, &key, &clause, &witness, out);
+            let finding = Finding {
+                chain: chains.of(cx, &witness),
+                clause,
+                witness,
+            };
+            report(cx, unit, f, &key, &finding, out);
         }
     }
 }
@@ -190,7 +209,7 @@ struct Handlers<'f> {
 }
 
 impl<'f> Handlers<'f> {
-    fn of(f: &'f IrFunction, source: &str, types: &FxHashMap<VarId, Val>) -> Self {
+    fn of(f: &'f IrFunction, source: &str, tcx: &TypeCtx<'_>) -> Self {
         let landing: FxHashSet<BlockId> = f.blocks.iter().filter_map(|b| b.exc_target).collect();
         let mut out = Self {
             clauses: FxHashMap::default(),
@@ -206,7 +225,7 @@ impl<'f> Handlers<'f> {
                 let takes = if is_star_clause(source, clause.span) {
                     Takes::Unknown
                 } else {
-                    takes_recursion_error(f, types, clause)
+                    takes_recursion_error(f, tcx, clause)
                 };
                 match takes {
                     Takes::Yes => {
@@ -306,13 +325,9 @@ fn is_star_clause(source: &str, span: Span) -> bool {
         .is_some_and(|rest| rest.trim_start().starts_with('*'))
 }
 
-/// Whether the clause takes a `RecursionError`: a bare `except`, or classes whose values the
-/// module's names give (a tuple display of them included).
-fn takes_recursion_error(
-    f: &IrFunction,
-    types: &FxHashMap<VarId, Val>,
-    clause: &Clause<'_>,
-) -> Takes {
+/// Whether the clause takes a `RecursionError`: a bare `except`, or classes the module's names
+/// give (a tuple display of them included).
+fn takes_recursion_error(f: &IrFunction, tcx: &TypeCtx<'_>, clause: &Clause<'_>) -> Takes {
     if clause.types.is_empty() {
         return Takes::Yes;
     }
@@ -329,15 +344,36 @@ fn takes_recursion_error(
     };
     let mut takes = Takes::No;
     for class in classes {
-        match types.get(&class) {
-            Some(Val::Ref(fqn)) if RECURSION_ERROR_CLASSES.contains(&fqn.as_str()) => {
-                return Takes::Yes;
-            }
-            Some(Val::Ref(_)) => {}
-            _ => takes = Takes::Unknown,
+        match class_named(f, tcx, clause.test, class) {
+            Some(fqn) if RECURSION_ERROR_CLASSES.contains(&fqn.as_str()) => return Takes::Yes,
+            Some(_) => {}
+            None => takes = Takes::Unknown,
         }
     }
     takes
+}
+
+/// The fqn of the class the value `v` of a clause's class expression (computed in block
+/// `test`) names: a module-level name, or an attribute of one naming a module
+/// (`builtins.RuntimeError`); `None` for anything else (a local variable, a call).
+fn class_named(f: &IrFunction, tcx: &TypeCtx<'_>, test: BlockId, v: VarId) -> Option<String> {
+    let defined = |v: VarId| {
+        f.block(test)
+            .insts
+            .iter()
+            .find(|i| i.kind.dst() == Some(v))
+            .map(|i| &i.kind)
+    };
+    let global = |kind: Option<&InstKind>| match kind? {
+        InstKind::LoadGlobal { name, .. } | InstKind::LoadName { name, .. } => {
+            tcx.named_object(name)
+        }
+        _ => None,
+    };
+    match defined(v)? {
+        InstKind::AttrLoad { obj, attr, .. } => Some(format!("{}.{attr}", global(defined(*obj))?)),
+        kind => global(Some(kind)),
+    }
 }
 
 /// The instruction computing a clause's classes: the last one before the constant the clause's
@@ -367,14 +403,16 @@ fn header_span(f: &IrFunction, clause: &Clause<'_>) -> Span {
 }
 
 /// A call in the `try` body that runs a call cycle: the site, the callee, and its fact.
+#[derive(Clone, Copy)]
 struct Witness<'a> {
     site: &'a CallSite,
     callee: &'a FuncKey,
     cycle: CallCycle,
 }
 
-/// The first call, in block order, of a `try` body (`body_blocks`, [`Handlers::try_bodies`])
-/// that runs a function on a call cycle on the function's stack.
+/// The call of a `try` body (`body_blocks`, [`Handlers::try_bodies`]) that runs a function on a
+/// call cycle on the function's stack: the first, in block order, of a function on the cycle,
+/// else the first of one reaching it.
 fn cycle_in_try_body<'a>(
     cx: &CheckContext<'a>,
     f: &IrFunction,
@@ -385,27 +423,119 @@ fn cycle_in_try_body<'a>(
         .iter()
         .flat_map(|b| &f.block(*b).insts)
         .flat_map(|inst| sites.get(&inst.span).into_iter().flatten())
-        .find_map(|site| cycle_at(cx, site))
+        .filter_map(|site| cycle_at(cx, site))
+        .reduce(|first, w| {
+            if first.cycle != CallCycle::On && w.cycle == CallCycle::On {
+                w
+            } else {
+                first
+            }
+        })
 }
 
-/// A project callee of `site` whose facts that run during the call reach a call cycle.
+/// A project callee of `site` whose facts that run during the call reach a call cycle: one on
+/// the cycle first.
 fn cycle_at<'a>(cx: &CheckContext<'a>, site: &'a CallSite) -> Option<Witness<'a>> {
     if site.runner == Runner::Worker {
         return None;
     }
-    site.project_callees().iter().find_map(|bc| {
-        let callee = cx.index.summary(&bc.callee)?;
-        let delivery = cx.index.delivery(site, callee)?;
-        if delivery.into != Facts::Body {
-            return None;
-        }
-        let cycle = callee.facts(delivery.from)?.call_cycle;
-        (cycle != CallCycle::None).then_some(Witness {
-            site,
-            callee: &bc.callee,
-            cycle,
+    site.project_callees()
+        .iter()
+        .filter_map(|bc| {
+            let callee = cx.index.summary(&bc.callee)?;
+            let delivery = cx.index.delivery(site, callee)?;
+            if delivery.into != Facts::Body {
+                return None;
+            }
+            let cycle = callee.facts(delivery.from)?.call_cycle;
+            (cycle != CallCycle::None).then_some(Witness {
+                site,
+                callee: &bc.callee,
+                cycle,
+            })
         })
-    })
+        .max_by_key(|w| w.cycle)
+}
+
+/// The chains from the functions the reported calls run down to a function on a call cycle,
+/// for one module's check: the call sites of each file a chain enters, indexed by caller once,
+/// and each callee's chain once.
+#[derive(Default)]
+struct CycleChains<'a> {
+    sites: FxHashMap<&'a std::path::Path, FxHashMap<&'a FuncKey, Vec<&'a CallSite>>>,
+    chains: FxHashMap<&'a FuncKey, Rc<[Witness<'a>]>>,
+}
+
+impl<'a> CycleChains<'a> {
+    /// The calls from the function a witness calls down to a function on its call cycle, in
+    /// call order (none when the callee is on it): each call runs, on the caller's stack, a
+    /// callee reaching the cycle.
+    fn of(&mut self, cx: &CheckContext<'a>, witness: &Witness<'a>) -> Rc<[Witness<'a>]> {
+        if witness.cycle == CallCycle::On {
+            return Rc::from(Vec::new());
+        }
+        if let Some(chain) = self.chains.get(witness.callee) {
+            return Rc::clone(chain);
+        }
+        let budget = Budget::unmetered("EFF114 cycle chains");
+        let mut reached_by: FxHashMap<&'a FuncKey, Witness<'a>> = FxHashMap::default();
+        let sites = &mut self.sites;
+        let found = reach(
+            &budget,
+            [witness.callee],
+            |k: &'a FuncKey, next| {
+                let own = cx.index.file_of(k).into_iter().flat_map(|path| {
+                    let by_caller = sites.entry(path).or_insert_with(|| {
+                        let mut by_caller: FxHashMap<&'a FuncKey, Vec<&'a CallSite>> =
+                            FxHashMap::default();
+                        for site in &cx.index.files[path].call_sites {
+                            by_caller.entry(&site.caller).or_default().push(site);
+                        }
+                        by_caller
+                    });
+                    by_caller.get(k).cloned().unwrap_or_default()
+                });
+                for w in own.filter_map(|site| cycle_at(cx, site)) {
+                    if w.callee != witness.callee && !reached_by.contains_key(w.callee) {
+                        next.push(w.callee);
+                        reached_by.insert(w.callee, w);
+                    }
+                }
+            },
+            |k| {
+                let on = cx
+                    .index
+                    .summary(k)
+                    .is_some_and(|s| s.call_cycle == CallCycle::On);
+                if on { Visit::Stop(k) } else { Visit::Expand }
+            },
+        );
+        let mut chain = Vec::new();
+        if let Answer::Known(Some(member)) = found {
+            let mut at = member;
+            while let Some(w) = reached_by.remove(at) {
+                at = &w.site.caller;
+                chain.push(w);
+            }
+            chain.reverse();
+        }
+        let chain: Rc<[Witness<'a>]> = Rc::from(chain);
+        self.chains.insert(witness.callee, Rc::clone(&chain));
+        chain
+    }
+}
+
+/// Whether the call at `site` never returns normally: each of its project callees, at least one,
+/// returns on no path (`MustExec::never_returns`: it always raises, or never ends).
+fn never_returns(cx: &CheckContext<'_>, site: &CallSite) -> bool {
+    site.role == SiteRole::Call
+        && !site.project_callees().is_empty()
+        && site.project_callees().iter().all(|bc| {
+            cx.index
+                .summary(&bc.callee)
+                .and_then(|s| s.must_exec.as_deref())
+                .is_some_and(|m| m.never_returns)
+        })
 }
 
 /// Whether the call `kind` ends the process ([`EXITS`]).
@@ -426,7 +556,7 @@ fn completes_normally(
     shape: &FnShape<'_>,
     budget: &Budget,
     start: BlockId,
-    exits: &dyn Fn(&InstKind) -> bool,
+    exits: &dyn Fn(&Inst) -> bool,
 ) -> Answer<Option<Vec<BlockId>>> {
     let dominators = shape.dominators();
     let mut body = Vec::new();
@@ -440,9 +570,7 @@ fn completes_normally(
             }
             body.push(b);
             let block = f.block(b);
-            if block.insts.iter().any(|i| exits(&i.kind))
-                || matches!(block.terminator, Terminator::Raise(_))
-            {
+            if block.insts.iter().any(exits) || matches!(block.terminator, Terminator::Raise(_)) {
                 Visit::Stop(())
             } else {
                 Visit::Expand
@@ -575,15 +703,27 @@ fn reports_error(
             .any(|v| from_caught(*v))
 }
 
+/// A clause to report: the clause, the call in its `try` body running a call cycle, and the
+/// calls from that call's callee down to a function on the cycle.
+struct Finding<'f, 'a> {
+    clause: Clause<'f>,
+    witness: Witness<'a>,
+    chain: Rc<[Witness<'a>]>,
+}
+
 fn report(
     cx: &CheckContext<'_>,
     unit: &ModuleUnit<'_>,
     f: &IrFunction,
     key: &FuncKey,
-    clause: &Clause<'_>,
-    witness: &Witness<'_>,
+    finding: &Finding<'_, '_>,
     out: &mut Vec<Diagnostic>,
 ) {
+    let Finding {
+        clause,
+        witness,
+        chain,
+    } = finding;
     let (handler, classes) = match clause.types {
         [types] => (format!("`except {types}`"), types.as_str()),
         _ => ("the bare `except`".to_owned(), "bare"),
@@ -601,12 +741,19 @@ fn report(
                     .is_some_and(|rest| rest.starts_with(".<locals>.")))
     };
     let function = key.qualname.as_str();
+    let member = chain.last().map_or(witness.callee, |w| w.callee);
     let recursion = if own_cycle && nested_in_own(witness.callee) {
         format!("the recursion of `{function}`")
     } else if witness.cycle == CallCycle::On {
-        format!("the recursion of `{}`", witness.callee.qualname)
-    } else {
+        format!("the recursion of `{}`", member.qualname)
+    } else if chain.is_empty() {
+        // The cycle is reached through what iterating the callee's result runs.
         format!("a recursion below `{}`", witness.callee.qualname)
+    } else {
+        format!(
+            "the recursion of `{}` below `{}`",
+            member.qualname, witness.callee.qualname
+        )
     };
     let called = match witness.callee.qualname.rsplit('.').next() {
         Some("<genexpr>") => "a generator expression".to_owned(),
@@ -619,7 +766,8 @@ fn report(
         witness.site.span,
         format!("`{function}` runs {called} in the `try` body"),
     );
-    if let Some(d) = cx.emit(
+    let d = cx
+        .emit(
         out,
         "EFF114",
         unit,
@@ -633,7 +781,15 @@ fn report(
             "let `RecursionError` through (`except RecursionError: raise` before this clause), or catch only the errors the `try` body is expected to raise".to_owned(),
         ),
         &[],
-    ) {
-        d.related.push(related);
+    )
+        .expect("`run` checked that EFF114 runs on the unit");
+    d.related.push(related);
+    for w in chain.iter() {
+        let path = cx.index.file_of(&w.site.caller).unwrap_or(&unit.input.path);
+        d.related.push(cx.related_at(
+            path,
+            w.site.span,
+            format!("`{}` calls `{}`", w.site.caller.qualname, w.callee.qualname),
+        ));
     }
 }

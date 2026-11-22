@@ -37,7 +37,8 @@ It does not report:
 - a clause after one that takes `RecursionError` first (`except RecursionError: raise`), or after
   one whose classes heki cannot tell (a name bound to a tuple of classes);
 - a clause that raises on some path (`if isinstance(error, RecursionError): raise`), or calls
-  `sys.exit`, `os._exit`, `os.abort`, `exit`, or `quit`;
+  `sys.exit`, `os._exit`, `os.abort`, `exit`, `quit`, or a project function that returns on no
+  path (it raises on every path);
 - a CLI boundary: a clause that reports the error (`print(..., file=sys.stderr)`,
   `sys.stderr.write`, `traceback.print_exc()`, or a `logging` call with the exception:
   `logger.exception(...)`, `exc_info=...`, or the exception as an argument) and returns an
@@ -63,8 +64,9 @@ Its premises:
   module does not rebind (assumption R1), and no earlier clause of the same `try` takes it.
   Established.
 - **Completes normally**: every path through the clause's body ends in a fall-through, a
-  `return`, a `break`, or a `continue`, none in a `raise` or a call that ends the process. Open:
-  an instruction in the body that may raise is not counted.
+  `return`, a `break`, or a `continue`, none in a `raise`, a call that ends the process, or a
+  call of project functions that return on no path. Open: an instruction in the body that may
+  raise is not counted.
 
 ## Why is this bad?
 How deep a recursion may go before Python raises `RecursionError` depends on the recursion limit

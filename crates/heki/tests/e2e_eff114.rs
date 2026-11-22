@@ -456,6 +456,63 @@ def finally_tested(tree: dict, verbose: bool) -> int:
     finally:
         if verbose:
             print("done")
+
+
+def _fail(error: Exception) -> None:
+    if isinstance(error, KeyError):
+        raise ValueError("missing") from error
+    raise RuntimeError("failed") from error
+
+
+def failing(tree: dict) -> int:
+    try:
+        return depth(tree)
+    except Exception as error:
+        _fail(error)
+
+
+def error_types() -> tuple:
+    return (KeyError,)
+
+
+def computed_classes(tree: dict) -> int | None:
+    try:
+        return depth(tree)
+    except error_types():
+        return None
+
+
+def cancelled(tree: dict) -> int | None:
+    try:
+        return depth(tree)
+    except asyncio.CancelledError:
+        return None
+
+
+def helper_first(tree: dict) -> int:
+    try:
+        depth_of(tree)
+        return depth(tree)
+    except Exception:
+        return -1
+
+
+def below_again(tree: dict) -> int:
+    try:
+        return depth_of(tree)
+    except Exception:
+        return -1
+
+
+def walks(tree: dict):
+    return walk_gen(tree)
+
+
+def iterated_result(tree: dict) -> int:
+    try:
+        return len([node for node in walks(tree)])
+    except RecursionError:
+        return -1
 "#;
 
 /// A cycle across two modules, through a generator expression in the second.
@@ -530,6 +587,9 @@ fn clauses_turning_a_recursion_error_into_a_value_are_reported() {
             d("pkg/shapes.py", 290, "<module>"),
             d("pkg/shapes.py", 315, "both"),
             d("pkg/shapes.py", 322, "status_after_a_library_call"),
+            d("pkg/shapes.py", 373, "helper_first"),
+            d("pkg/shapes.py", 380, "below_again"),
+            d("pkg/shapes.py", 391, "iterated_result"),
             d("pkg/walk.py", 18, "RefWalker.is_circular"),
             d("pkg/walk.py", 48, "nesting"),
         ]
@@ -569,12 +629,27 @@ fn a_report_names_the_clause_the_recursion_and_the_call_in_the_try_body() {
         nesting["related"][0]["message"],
         "`nesting` runs a generator expression in the `try` body"
     );
-    // A helper above the cycle.
+    // A helper above the cycle: the calls down to it are related locations too.
+    let below = at(&diags, "pkg/shapes.py", 45);
     assert!(
-        at(&diags, "pkg/shapes.py", 45)["message"]
+        below["message"]
             .as_str()
             .unwrap()
-            .contains("the `RecursionError` a recursion below `depth_of` can raise")
+            .contains("the `RecursionError` the recursion of `depth` below `depth_of` can raise")
+    );
+    assert_eq!(below["related"][1]["line"], 18);
+    assert_eq!(below["related"][1]["message"], "`depth_of` calls `depth`");
+    // A call of a function on the cycle is the witness over an earlier call above it.
+    assert_eq!(
+        at(&diags, "pkg/shapes.py", 373)["target"],
+        "Exception->depth"
+    );
+    // A cycle reached through what iterating a returned generator runs.
+    assert!(
+        at(&diags, "pkg/shapes.py", 391)["message"]
+            .as_str()
+            .unwrap()
+            .contains("the `RecursionError` a recursion below `walks` can raise")
     );
     assert!(
         at(&diags, "pkg/shapes.py", 24)["message"]

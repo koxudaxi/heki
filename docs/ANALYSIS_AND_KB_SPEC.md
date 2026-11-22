@@ -1355,8 +1355,10 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      `try` none of whose clauses takes it (one walk per exception target). A call site in the
      body whose delivered callee facts reach a call cycle (`ProjectIndex::delivery`, into the
      body; never a worker thread) is the witness. The clause completes normally when a walk over
-     the blocks the start of its body dominates, along normal edges, finds no `raise` and no call ending
-     the process (`sys.exit`, `os._exit`, `os.abort`, `exit`, `quit`); leaving those blocks or
+     the blocks the start of its body dominates, along normal edges, finds no `raise`, no call ending
+     the process (`sys.exit`, `os._exit`, `os.abort`, `exit`, `quit`), and no call of project
+     functions that return on no path (`MustExec::never_returns`, which `EFF114` has computed);
+     leaving those blocks or
      returning completes it. A clause reporting the error (`print(..., file=sys.stderr)`,
      `sys.stderr.write`, `traceback.print_exc`, a `logging` call with the exception, also on a
      logger of unknown class by its method name) and returning an integer constant on every
