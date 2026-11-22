@@ -454,6 +454,32 @@ fn ownership_candidates_follow_the_census_and_the_trial() {
 }
 
 #[test]
+fn a_class_of_a_test_module_gets_no_candidate_and_the_same_class_elsewhere_does() {
+    let p = owners("recommend_contracts_test_module_class");
+    let class = "class Probe:\n    def __init__(self) -> None:\n        self.log: list[str] = []\n\n\n\
+                 def record(p: Probe, x: str) -> None:\n    p.log.append(x)\n";
+    let reader = |module: &str, name: &str| {
+        format!(
+            "from {module} import Probe\n\n\ndef {name}(p: Probe) -> list[str]:\n    return p.log\n"
+        )
+    };
+    p.write("tests/__init__.py", "")
+        .write("tests/conftest.py", class)
+        .write("tests/test_a.py", &reader("tests.conftest", "a"))
+        .write("tests/test_b.py", &reader("tests.conftest", "b"))
+        .write("app/probe.py", class)
+        .write("app/use_a.py", &reader("app.probe", "a"))
+        .write("app/use_b.py", &reader("app.probe", "b"));
+    let report = recommend_json(&p, &[]);
+    let targets: Vec<String> = kept(&report).into_iter().map(|c| c.1).collect();
+    assert!(targets.contains(&s("app.probe:Probe.log")), "{targets:?}");
+    assert!(
+        !targets.iter().any(|t| t.starts_with("tests.")),
+        "{targets:?}"
+    );
+}
+
+#[test]
 fn a_candidate_lists_the_first_accesses_on_objects_of_unknown_class() {
     let p = owners("recommend_contracts_unresolved_examples");
     p.write(

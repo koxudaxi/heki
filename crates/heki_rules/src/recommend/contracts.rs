@@ -427,12 +427,20 @@ pub(super) fn generate(
         .collect();
     let mut by_kind: BTreeMap<ContractKind, Vec<Candidate>> = BTreeMap::new();
     // A protocol's member is no attribute of one class: the classes implementing it hold it.
+    // A contract on test scaffolding (a recorder, a fake) guards nothing of the program.
+    let test_modules: FxHashSet<&str> = (census.modules.iter())
+        .filter(|m| tests.contains(m.path))
+        .map(|m| m.module)
+        .collect();
     let attributes = (census.attributes.iter())
         .filter(|a| !decls.protocol_declares(a.class, a.attr))
         .filter_map(|a| Some((a, decls.class_qualname(a.class)?)));
     for (attribute, qualname) in attributes {
         let (class, attr) = (attribute.class, attribute.attr);
         let module = &class[..class.len() - qualname.len() - 1];
+        if test_modules.contains(module) {
+            continue;
+        }
         let site = (&decls, module, qualname);
         if proposes(ContractKind::WriteOwners) && !declared.owns_writes(class, attr) {
             by_kind
