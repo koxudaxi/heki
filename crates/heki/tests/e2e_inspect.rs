@@ -1610,3 +1610,34 @@ fn the_text_form_shows_every_kind_of_fact() {
     let (_, out, _) = users.heki(&["inspect", "--heuristic", "fetch", "--callers"]);
     has(&out, "  calls.far  calls.py:5  (return)");
 }
+
+#[test]
+fn class_attribute_writes_name_how_they_write() {
+    let p = Project::new("inspect_write_kinds");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[[tool.heki.write-owners]]\nname = \"owned\"\ntargets = [\"Model.name\", \"Model.items\"]\nallowed-writers = [\"nobody\"]\n",
+    );
+    p.write(
+        "m.py",
+        "class Model:\n    def __init__(self):\n        self.name = \"\"\n        self.items = [[]]\n\n\ndef delete(m: Model):\n    del m.name\n\n\ndef set_by_name(m: Model):\n    setattr(m, \"name\", \"x\")\n\n\ndef set_in_dict(m: Model):\n    m.__dict__[\"name\"] = \"x\"\n\n\ndef append(m: Model):\n    m.items.append(1)\n\n\ndef append_to_alias(m: Model):\n    xs = m.items\n    xs.append(1)\n\n\ndef append_to_item(m: Model):\n    m.items[0].append(1)\n\n\ndef helper(x):\n    x.items.append(1)\n\n\ndef through_helper(m: Model):\n    helper(m)\n",
+    );
+    for (symbol, kind) in [
+        ("delete", "attr_delete"),
+        ("set_by_name", "set_attr"),
+        ("set_in_dict", "dict_direct"),
+        ("append", "container_mut"),
+        ("append_to_alias", "alias_container_mut"),
+        ("append_to_item", "item_mut"),
+        ("through_helper", "indirect_helper"),
+    ] {
+        let r = report_with(&p, &[symbol, "--extend-select", "MUT112"]);
+        let kinds: Vec<&Value> = r["changes"]["class_attrs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|w| &w["kind"])
+            .collect();
+        assert_eq!(kinds, [kind], "{symbol}");
+    }
+}

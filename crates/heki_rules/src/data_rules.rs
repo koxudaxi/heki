@@ -288,21 +288,14 @@ impl UpdateDecision<'_, '_> {
         if !told.stopped && !carries_only(shape, f, budget, &hit.lc.back_vars, hit.update) {
             told.step(&premises::RESET_ON_A_PATH);
         }
-        match self.origins.of_loop(budget, f.id, li) {
-            Answer::Known(found) if !told.stopped => {
-                match DataOrigins::of(cx, self.tcx, self.unit.input.ir, &found) {
-                    Ok(found) => (!told.open).then_some(found),
-                    Err(cause) => {
-                        told.step(cause);
-                        None
-                    }
-                }
-            }
-            Answer::Known(_) => None,
-            Answer::Open => {
-                if !told.stopped {
-                    told.step(&premises::NO_ITEMS_FOLLOWED);
-                }
+        if told.stopped {
+            let _ = self.origins.of_loop(budget, f.id, li);
+            return None;
+        }
+        match DataOrigins::of_loop_items(cx, self.tcx, self.origins, budget, (f.id, li)) {
+            Ok(found) => (!told.open).then_some(found),
+            Err(cause) => {
+                told.step(cause);
                 None
             }
         }

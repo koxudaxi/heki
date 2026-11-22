@@ -9,6 +9,10 @@
 - [Scope and Limitations](https://heki.koxudaxi.dev/scope/): This page says what heki checks, what it leaves to other tools, where its knowledge comes from, and what it does when it cannot tell
 - [Installation](https://heki.koxudaxi.dev/installation/): heki is a single executable: its Python package ships only that executable and installs no Python dependencies into your environment
 - [Getting Started](https://heki.koxudaxi.dev/getting-started/): This page runs heki on a project, reads a diagnostic, applies a fix, and picks the rules
+- [Rules](https://heki.koxudaxi.dev/rules/): heki has 44 rules in four families
+- [Rule Precision](https://heki.koxudaxi.dev/precision/): A rule is exact once it is certified (below), and heuristic until then
+- [Experimental Features](https://heki.koxudaxi.dev/experimental/): Experimental features can still change in behavior or precision, or be removed, in any release, and each change is listed in the release notes
+- [Development](https://heki.koxudaxi.dev/development/): This page covers building and testing heki, its checks against CPython, the memory budget, the documentation, releases, and the crates
 
 ## Usage
 
@@ -18,20 +22,10 @@
 - [Configuration Advice](https://heki.koxudaxi.dev/recommend/): heki recommend analyzes a project as heki check does and prints advice on its configuration, with counts from the project and the keys to add to [tool.heki]
 - [CLI Reference](https://heki.koxudaxi.dev/cli-reference/): Exit codes: 0 no diagnostic that fails the run (warnings are reported without failing it), 1 an error diagnostic, or a warning with --fail-on warning (lint.fail-on), among the Ratchet regressions when a baseline is used (or a refused --update-baseline, or pending --diff changes), 2 configuration / I/O / syntax errors
 
-## Docs
-
-- [Rules](https://heki.koxudaxi.dev/rules/): heki has 44 rules in four families
-- [Rule Precision](https://heki.koxudaxi.dev/precision/): A rule is exact once it is certified (below), and heuristic until then
-- [Experimental Features](https://heki.koxudaxi.dev/experimental/): Experimental features can still change in behavior or precision, or be removed, in any release, and each change is listed in the release notes
-
 ## Integrations
 
 - [Editors (LSP)](https://heki.koxudaxi.dev/lsp/): heki server (alias heki lsp) is a Language Server Protocol server on stdin / stdout: it shows heki's diagnostics and fixes while you edit, with the results heki check reports
 - [Coding Agents](https://heki.koxudaxi.dev/coding-agents/): heki gives coding agents (Claude Code, Codex, Cursor, and similar) the checks it gives people: every diagnostic says what was proven, where the evidence is, and what blocks a fix. heki inspect says what one function does, so an agent does not read its callees to find out
-
-## Docs
-
-- [Development](https://heki.koxudaxi.dev/development/): This page covers building and testing heki, its checks against CPython, the memory budget, the documentation, releases, and the crates
 
 ## Rules
 

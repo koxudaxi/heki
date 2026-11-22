@@ -171,10 +171,11 @@ $ heki check --watch
   baseline as `heki check` compares them.
 - It only reports: `--fix`, `--diff`, and `--update-baseline` are ignored, with a warning.
 - It reloads everything when the configuration (`pyproject.toml`, `heki.toml`, `.heki.toml`, or
-  the `--config` file), the summary snapshot, or the baseline changes. So does a change of the
-  detected source roots (`src/`, `python/`, or the directory named after the project appearing,
-  or becoming a package with an `__init__.py`) or a root `__init__.py` appearing or
-  disappearing: module names below a source root, or relative imports that climb to the root,
+  the `--config` file), a `hatch.toml` (its workspace members), the summary snapshot, or the
+  baseline changes. So does a change of the detected source roots (`src/`, `python/`, or the
+  directory named after the project appearing, or becoming a package with an `__init__.py`; a
+  workspace member's `pyproject.toml`, source roots, or packages appearing or disappearing) or a
+  root `__init__.py` appearing or disappearing: module names below a source root, or relative imports that climb to the root,
   change with the module layout. The server does the same.
 - What fails once the watch runs (a configuration that no longer parses, a watched path that
   disappears) is reported, and the watch goes on until it is fixed.
