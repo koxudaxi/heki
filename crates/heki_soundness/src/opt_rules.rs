@@ -376,7 +376,9 @@ pub fn analyze_module(
             continue;
         }
         let an = cx.run();
+        // Liveness past its budget: no candidate.
         let live = Liveness::compute(cx.shape);
+        let Answer::Known(live) = live else { continue };
         let mutations = cx.mutations(&an);
         let ck = Checker::new(
             &cx,

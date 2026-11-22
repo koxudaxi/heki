@@ -3227,7 +3227,7 @@ impl<'a> Extractor<'a> {
         let callees = std::mem::take(&mut self.callees);
         let flow =
             IterFlow::with_callees(self.shape, self.cx, &self.types, Roots::Summary, callees);
-        let it = param_iteration(f, &flow);
+        let it = param_iteration(self.shape, &flow);
         self.summary.consumes_params = it.consumes;
         self.summary.unconditional_forwards = it.unconditional;
         self.summary.iterates_params = it.iterates;

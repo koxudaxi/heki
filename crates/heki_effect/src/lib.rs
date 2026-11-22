@@ -56,7 +56,7 @@ pub use capacity::{Bound, Capacity, CapacityOf, CapacityWait, ParamOf, SiteQueue
 pub use contracts::{ContractClass, Contracts};
 pub use environment::{AccessKind, ExternalAccess};
 pub use invalidation::{
-    FlowWrite, FuncFlow, INITIALIZERS, Reach, SiteFlow, UnmetWrite, body_runs_at,
+    CoveredAfter, FlowWrite, FuncFlow, INITIALIZERS, Reach, SiteFlow, UnmetWrite, body_runs_at,
     builds_written_object, delegates_to_callers, is_initializer, reach_across,
 };
 pub use iterations::{
