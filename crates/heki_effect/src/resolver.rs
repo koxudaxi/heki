@@ -4068,25 +4068,21 @@ const PLAIN_BASES: &[&str] = &[
     "typing_extensions.Generic",
 ];
 
-/// The classes a type names: an instance's class and those of its type arguments, the members of
-/// a union.
+/// The classes a type names: the class of an instance or of each member of a union, and those
+/// of a generic container's items (one level: `list[Model]`, `dict[str, Model]`, `tuple[A, B]`,
+/// `list[A | B]`; `dict[str, list[Model]]` names `str` and `list`).
 fn ty_classes(ty: &Ty, out: &mut Vec<String>) {
-    let objs: &[crate::types::Obj] = match ty {
-        Ty::Inst(obj) => std::slice::from_ref(obj),
-        Ty::Union(objs) => objs,
-        _ => &[],
-    };
-    for obj in objs {
+    for obj in ty.members() {
         out.push(obj.class.clone());
-        let elems: Vec<&Elem> = match &obj.args {
+        let items: Vec<&Elem> = match &obj.args {
             Args::None => Vec::new(),
             Args::Items(e) => vec![e.as_ref()],
             Args::Map(k, v) => vec![k.as_ref(), v.as_ref()],
             Args::Tuple(es) => es.iter().collect(),
         };
-        for elem in elems {
-            if let Elem::Of(inner) = elem {
-                ty_classes(inner, out);
+        for item in items {
+            if let Elem::Of(inner) = item {
+                out.extend(inner.members().iter().map(|o| o.class.clone()));
             }
         }
     }

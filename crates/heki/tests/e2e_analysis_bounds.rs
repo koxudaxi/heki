@@ -1561,9 +1561,9 @@ fn deep_copies_of_a_sentinel_class_with_many_subclasses_decide_each_class_once()
 }
 
 /// A chain of thousands of classes, each holding the next in a typed attribute and each
-/// deep-copied, the last holding a tested `object()` sentinel (`MUT118`): the walk below a copied
-/// object's attributes lists at most `MAX_CLASSES_BELOW` (64) classes, so only the copies within
-/// 64 steps of the last class report it, and each walk stops there.
+/// deep-copied, the last holding a tested `object()` sentinel (`MUT118`): what each class reaches
+/// below its attributes is joined once per class (`heki_ir::walk::Closure`), not walked again from
+/// each copy, so every copy reports it in linear time.
 #[test]
 fn deep_copies_along_a_long_chain_of_held_classes_walk_a_bounded_way() {
     let classes = 3_000;
@@ -1605,7 +1605,7 @@ fn deep_copies_along_a_long_chain_of_held_classes_walk_a_bounded_way() {
     p.write("m.py", &(lines.join("\n") + "\n"));
     let found = check_within(&p, Duration::from_secs(20));
     let reported = found.iter().filter(|d| d["rule_code"] == "MUT118").count();
-    assert_eq!(reported, 65);
+    assert_eq!(reported, classes);
 }
 
 /// A class with thousands of subclasses whose `reset` a call target naming no class names, and

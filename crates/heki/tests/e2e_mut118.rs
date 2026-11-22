@@ -588,15 +588,17 @@ def copied_reassigned(r: Reassigned):
 /// attribute, the items of a list, the implementations of a protocol): datamodel-code-generator's
 /// own shape, where `copy.deepcopy(field.data_type)` copied the models its references reach. What
 /// the attributes hold at run time may be other objects, so the reports are heuristic. A class
-/// with a copy hook on the way leads nowhere, through a tuple or a union too, and so do attributes
-/// holding a class object, a callable, or `Self`.
+/// with a copy hook or a `copyreg` registration on the way leads nowhere (it copies its instances
+/// itself), through a tuple or a union too, and so do attributes holding a class object, a
+/// callable, or `Self`.
 #[test]
 fn an_instance_below_the_copied_objects_attributes() {
     let p = Project::new("mut118_below");
     p.write("pkg/__init__.py", "")
         .write(
             "pkg/base.py",
-            r#"from typing import Any, Callable, Optional, Protocol, Self
+            r#"import copyreg
+from typing import Any, Callable, Optional, Protocol, Self
 
 from pydantic import BaseModel
 
@@ -646,6 +648,19 @@ class Wrapper:
         self.label = label
 
 
+class Registered:
+    def __init__(self, model: DataModel) -> None:
+        self.model = model
+
+
+copyreg.pickle(Registered, lambda r: (Registered, (r.model,)))
+
+
+class Kept:
+    def __init__(self, registered: Registered) -> None:
+        self.registered = registered
+
+
 class Bundle:
     factory: type[DataModel]
     check: Callable[[DataModel], bool]
@@ -663,7 +678,7 @@ class Bundle:
             "pkg/custom.py",
             r#"import copy
 
-from pkg.base import Bundle, Field, Wrapper
+from pkg.base import Bundle, Field, Kept, Wrapper
 
 
 def isolated_type(field: Field):
@@ -676,13 +691,17 @@ def isolated_wrapper(wrapper: Wrapper):
 
 def isolated_bundle(bundle: Bundle):
     return copy.deepcopy(bundle)
+
+
+def isolated_kept(kept: Kept):
+    return copy.deepcopy(kept)
 "#,
         );
     let diags = diagnostics(&p, &[]);
     assert_eq!(reported(&diags), vec![("custom.py".to_owned(), 7)]);
     assert_eq!(
         diags[0]["message"],
-        "`copy.deepcopy` may copy, in `reference.source`, an instance of `DataModel`, whose `default` can hold the `object()` sentinel `UNDEFINED` that `DataModel.has_default` tests by identity: the copy holds a new object there, which the test does not match"
+        "`copy.deepcopy` may copy an instance of `DataModel` held in `reference` or in what it holds, whose `default` can hold the `object()` sentinel `UNDEFINED` that `DataModel.has_default` tests by identity: the copy holds a new object there, which the test does not match"
     );
     assert_eq!(diags[0]["certainty"], "heuristic");
 }
