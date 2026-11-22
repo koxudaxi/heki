@@ -230,8 +230,8 @@ fn is_immutable_kind(kind: BuiltinKind) -> bool {
 }
 
 /// Module-level names the code fixes: bound once, by the module body, outside loops, and
-/// never rebound (no other store, `del`, `global` assignment, later star import of a public
-/// name, or dynamic globals).
+/// never rebound (no other store, `del`, `global` assignment, later star import, or dynamic
+/// globals).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModuleConstants {
     /// Integer constants (`ATTEMPTS = 5`, `LIMIT = BASE * 2`).
@@ -259,6 +259,9 @@ pub struct ModuleConstants {
     /// `t.TYPE_CHECKING` for a name `t` bound to `import typing` (the dotted key).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub bools: BTreeMap<String, bool>,
+    /// Float constants (`DELAY = 0.5`), the text of their literal.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub floats: BTreeMap<String, String>,
     /// Names of the builtins the facts rely on (`range`, `len`, ...) that the module rebinds.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub shadowed: BTreeSet<String>,
@@ -2504,6 +2507,58 @@ fn writes_globals(f: &IrFunction, module: &ModuleConstants) -> bool {
     })
 }
 
+/// How a module's code binds each module global: the stores in the module body or in a
+/// function after `global name`, and the deletions (`del NAME` at module level or after
+/// `global NAME`). The one count every view of a module name bound once reads: the constants
+/// ([`ModuleConstants`]), the bindings the path facts trust ([`ModuleBindings`]), and the
+/// declarations of the effect lane.
+#[derive(Debug, Default)]
+pub struct GlobalStores<'a> {
+    stores: FxHashMap<&'a str, u32>,
+    deleted: FxHashSet<&'a str>,
+}
+
+impl<'a> GlobalStores<'a> {
+    pub fn of(functions: &'a [IrFunction]) -> Self {
+        let mut out = Self::default();
+        for inst in functions
+            .iter()
+            .flat_map(|f| f.blocks.iter().flat_map(|b| &b.insts))
+        {
+            match &inst.kind {
+                InstKind::StoreGlobal { name, .. } => *out.stores.entry(name).or_default() += 1,
+                InstKind::Delete {
+                    name, global: true, ..
+                } => {
+                    out.deleted.insert(name);
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// Stored exactly once and never deleted.
+    pub fn once(&self, name: &str) -> bool {
+        self.stores.get(name) == Some(&1) && !self.deleted.contains(name)
+    }
+
+    /// Stored or deleted somewhere.
+    pub fn binds(&self, name: &str) -> bool {
+        self.stores.contains_key(name) || self.deleted.contains(name)
+    }
+
+    /// The globals stored or deleted somewhere.
+    pub fn names(&self) -> impl Iterator<Item = &'a str> + '_ {
+        self.stores.keys().copied().chain(
+            self.deleted
+                .iter()
+                .copied()
+                .filter(|n| !self.stores.contains_key(n)),
+        )
+    }
+}
+
 /// The constants of a module (see [`ModuleConstants`]), knowing what its comprehension
 /// functions return (`comprehensions`).
 fn module_constants(
@@ -2513,25 +2568,10 @@ fn module_constants(
     comprehensions: BTreeMap<u32, SmallDisplay>,
 ) -> ModuleConstants {
     let module = &functions[module_fn.0 as usize];
-    let mut stores: FxHashMap<&str, u32> = FxHashMap::default();
-    let mut deleted: FxHashSet<&str> = FxHashSet::default();
-    for f in functions {
-        for inst in f.blocks.iter().flat_map(|b| &b.insts) {
-            match &inst.kind {
-                InstKind::StoreGlobal { name, .. } => *stores.entry(name).or_default() += 1,
-                // `del NAME` at module level or after `global NAME` unbinds it.
-                InstKind::Delete {
-                    name, global: true, ..
-                } => {
-                    deleted.insert(name);
-                }
-                _ => {}
-            }
-        }
-    }
+    let stores = GlobalStores::of(functions);
     let shadowed: BTreeSet<String> = READ_ONLY_BUILTINS
         .iter()
-        .filter(|b| stores.contains_key(**b) || deleted.contains(**b))
+        .filter(|b| stores.binds(b))
         .map(|b| (*b).to_owned())
         .collect();
     let mut out = ModuleConstants {
@@ -2553,6 +2593,7 @@ fn module_constants(
     let mut strs = BTreeMap::new();
     let mut str_tuples = BTreeMap::new();
     let mut bools = BTreeMap::new();
+    let mut floats = BTreeMap::new();
     let mut shared = SharedTexts::default();
     let mut candidates: Vec<(String, SmallDisplay)> = Vec::new();
     for bb in &module.blocks {
@@ -2563,12 +2604,10 @@ fn module_constants(
             let InstKind::StoreGlobal { name, value } = &inst.kind else {
                 continue;
             };
-            let star_rebinds =
-                last_star_import.is_some_and(|s| inst.span.start < s) && !name.starts_with('_');
-            if stores.get(name.as_str()) != Some(&1)
-                || deleted.contains(name.as_str())
-                || star_rebinds
-            {
+            // A star import binds the public names of its module, or those its `__all__` lists,
+            // which may start with an underscore.
+            let star_rebinds = last_star_import.is_some_and(|s| inst.span.start < s);
+            if !stores.once(name) || star_rebinds {
                 continue;
             }
             // A string constant, or a tuple of them, is one entry: its text, whose length is its
@@ -2577,6 +2616,12 @@ fn module_constants(
                 ints.insert(name.clone(), n);
             } else if let Some((key, b)) = bool_constant(&ix, name, *value) {
                 bools.insert(key, b);
+            } else if let Some(InstKind::Const {
+                literal: ConstLiteral::Float(text),
+                ..
+            }) = ix.source(*value).map(|i| &i.kind)
+            {
+                floats.insert(name.clone(), text.clone());
             } else if let Some(text) = shared.text(&ix, *value) {
                 candidates.extend(
                     immutable_display(BuiltinKind::Str, text.chars().count())
@@ -2597,6 +2642,7 @@ fn module_constants(
     out.strs = strs;
     out.str_tuples = str_tuples;
     out.bools = bools;
+    out.floats = floats;
     if candidates.is_empty() {
         return out;
     }

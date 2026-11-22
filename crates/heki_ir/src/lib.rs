@@ -17,9 +17,9 @@ pub mod walk;
 pub use builder::build_module_ir;
 pub use dominators::{Dominated, DominatorTree, immediate_dominators};
 pub use facts::{
-    Carries, Decided, FnIndex, ItemOrigin, ItemOrigins, ItemSource, LEN_CAP_MAX, ModuleBindings,
-    ModuleConstants, Must, PathReader, Paths, Progress, SMALL_MAX, SmallDisplay, Trips,
-    comprehension_id,
+    Carries, Decided, FnIndex, GlobalStores, ItemOrigin, ItemOrigins, ItemSource, LEN_CAP_MAX,
+    ModuleBindings, ModuleConstants, Must, PathReader, Paths, Progress, SMALL_MAX, SmallDisplay,
+    Trips, comprehension_id,
 };
 
 use heki_ast::Span;

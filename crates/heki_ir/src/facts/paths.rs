@@ -21,7 +21,7 @@
 //!   A point "called" is passed on the path where its own call raises: whenever the function
 //!   returns normally, the call has been made.
 
-use super::{FnIndex, ModuleConstants};
+use super::{FnIndex, GlobalStores, ModuleConstants};
 use crate::walk::{Answer, Budget, Visit, reach};
 use crate::{
     BlockId, CompareOpKind, ConstLiteral, Inst, InstKind, IrFunction, ModuleIr, NaturalLoop,
@@ -444,7 +444,7 @@ pub struct ModuleBindings {
     /// Names some code of the module binds or deletes as globals.
     bound: FxHashSet<String>,
     /// The module's globals are bound behind the IR (`exec`, `globals()`), or a star import may
-    /// rebind any public name: no builtin is trusted.
+    /// rebind any name: no builtin is trusted.
     untrusted: bool,
     star_import: bool,
 }
@@ -452,30 +452,13 @@ pub struct ModuleBindings {
 impl ModuleBindings {
     /// The bindings of `ir`'s module.
     pub fn of(ir: &ModuleIr) -> Self {
-        let mut stores: FxHashMap<&str, u32> = FxHashMap::default();
+        let stores = GlobalStores::of(&ir.functions);
         let mut out = Self {
             untrusted: ir.constants.dynamic || ir.has_star_import,
             star_import: ir.has_star_import,
+            bound: stores.names().map(str::to_owned).collect(),
             ..Self::default()
         };
-        for f in &ir.functions {
-            for inst in f.blocks.iter().flat_map(|b| &b.insts) {
-                match &inst.kind {
-                    InstKind::StoreGlobal { name, .. } => {
-                        *stores.entry(name).or_default() += 1;
-                        out.bound.insert(name.clone());
-                    }
-                    InstKind::Delete {
-                        name, global: true, ..
-                    } => {
-                        // Deleted: never bound once.
-                        *stores.entry(name).or_default() += 2;
-                        out.bound.insert(name.clone());
-                    }
-                    _ => {}
-                }
-            }
-        }
         if ir.constants.dynamic {
             return out;
         }
@@ -488,10 +471,10 @@ impl ModuleBindings {
                 let InstKind::StoreGlobal { name, value } = &inst.kind else {
                     continue;
                 };
-                // A star import may rebind any public name.
-                let public = !name.starts_with('_');
-                if stores.get(name.as_str()) != Some(&1)
-                    || (out.star_import && public)
+                // A star import may rebind any name: its module's `__all__` may list one that
+                // starts with an underscore.
+                if !stores.once(name)
+                    || out.star_import
                     || paths.on_every_return((bb.id, i), Progress::Called)
                         != Answer::Known(Must::Every)
                 {
