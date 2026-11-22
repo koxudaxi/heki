@@ -92,11 +92,13 @@ fn changes_of_new_objects_found_on_a_corpus() {
     assert!(stdout.contains("MUT119"), "{stdout}");
 }
 
-/// Every builtin container kind, made by its constructor, a display, a copy, or a slice; a value
-/// a changing method returns that the statement drops; item stores, augmented item stores, and
-/// item deletions; and a `None` result stored in an attribute, a global, or a closure cell.
+/// Every builtin container kind, made by its constructor, a display, a copy (a method, or a
+/// function of `copy` called through its module or by its own name), or a slice; a value a
+/// changing method returns that the statement drops; item stores, augmented item stores, and item
+/// deletions; and a `None` result stored in an attribute, a global, or a closure cell.
 const KINDS: &str = r#"import copy
 from collections import deque
+from copy import deepcopy
 
 
 def shapes(xs: list[int], d: dict[str, int], s: set[int]):
@@ -104,6 +106,7 @@ def shapes(xs: list[int], d: dict[str, int], s: set[int]):
     xs[:].append(1)
     d.copy().update(a=1)
     copy.copy(d).clear()
+    deepcopy(d).clear()
     set(s).add(1)
     {1, 2}.discard(1)
     bytearray(b"ab").extend(b"c")
@@ -145,7 +148,7 @@ fn every_container_kind_and_every_way_a_new_one_is_made() {
         at(
             "kinds.py",
             &[
-                6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 24, 32, 38
+                7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 26, 34, 40
             ]
         )
     );
@@ -156,10 +159,11 @@ fn every_container_kind_and_every_way_a_new_one_is_made() {
             .map(|d| d["message"].as_str().unwrap().to_owned())
             .unwrap()
     };
-    assert!(message(12).starts_with("`extend` changes a new `bytearray`,"));
-    assert!(message(13).starts_with("`appendleft` changes a new `deque`,"));
-    assert!(message(19).starts_with("the item deletion changes a new `dict`,"));
-    assert!(message(24).ends_with("and the assignment stores the `None` that `extend` returns"));
+    assert!(message(11).starts_with("`clear` changes a new copy (a `dict`),"));
+    assert!(message(14).starts_with("`extend` changes a new `bytearray`,"));
+    assert!(message(15).starts_with("`appendleft` changes a new `deque`,"));
+    assert!(message(21).starts_with("the item deletion changes a new `dict`,"));
+    assert!(message(26).ends_with("and the assignment stores the `None` that `extend` returns"));
 }
 
 /// Changes some other code sees, or results the code reads: a method of a project class named
@@ -238,10 +242,10 @@ fn changes_other_code_sees_and_results_the_code_reads() {
 
 /// Project functions whose every return is a new container nothing else holds (directly, through
 /// another such function, through copies, branches, and the uses that keep nothing, through a
-/// copy of a typed value, and two definitions of one function), and those for which it is not so:
-/// two kinds, recursion, a path returning `None`, a dict stored, handed to a call that may keep
-/// it, or captured by a closure, a cached function, a tuple, and two definitions of different
-/// kinds.
+/// copy or a slice of a typed value, and two definitions of one function), and those for which it
+/// is not so: two kinds, recursion, a path returning `None`, a dict stored, handed to a call that
+/// may keep it, or captured by a closure, a cached function, a tuple, a slice of a value of unknown
+/// type, two definitions of different kinds, and a new instance of a project subclass of `dict`.
 const MAKERS: &str = r#"import sys
 from functools import lru_cache
 
@@ -286,6 +290,14 @@ def grown(xs):
 
 def copies(d: dict):
     return d.copy()
+
+
+def head(xs: list[int]):
+    return xs[:2]
+
+
+def tail(xs):
+    return xs[1:]
 
 
 def mixed(flag):
@@ -350,6 +362,15 @@ if sys.version_info >= (3, 9):
 else:
     def unlike():
         return {}
+
+
+class Settings(dict):
+    def __init__(self):
+        super().__init__()
+
+
+def settings():
+    return Settings()
 "#;
 
 const MAKERS_USE: &str = r#"from . import makers
@@ -363,6 +384,7 @@ def run(xs, pairs, owner, sink, d):
     makers.either(True, pairs).update(b=2)
     makers.grown(xs).sort()
     makers.copies(d).clear()
+    makers.head(xs).append(1)
     makers.twice().append(1)
     makers.mixed(True).clear()
     makers.countdown(3).append(1)
@@ -374,6 +396,8 @@ def run(xs, pairs, owner, sink, d):
     makers.cached(1).append(2)
     makers.pair().append(3)
     makers.unlike().clear()
+    makers.settings().update(a=1)
+    makers.tail(xs).append(1)
     empty().append(4)
 "#;
 
@@ -386,7 +410,7 @@ fn functions_whose_every_return_is_a_new_container_nothing_else_holds() {
     let diags = diagnostics(&p);
     assert_eq!(
         reported(&diags),
-        at("use.py", &[6, 7, 8, 9, 10, 11, 12, 23])
+        at("use.py", &[6, 7, 8, 9, 10, 11, 12, 13, 26])
     );
     assert_eq!(
         diags[1]["message"],

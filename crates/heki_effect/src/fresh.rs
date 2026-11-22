@@ -126,10 +126,12 @@ pub fn source<'k, 't>(
             .and_then(ContainerKind::of_class)
             .filter(|k| matches!(k, ContainerKind::List | ContainerKind::Bytearray))
             .map(Source::Copied),
+        // A call of a class returns the new instance, not what its `__init__` returns, which is
+        // `None` in a program that runs (a value makes the construction raise `TypeError`).
         (
             InstKind::Call { .. } | InstKind::MethodCall { .. } | InstKind::AttrLoad { .. },
             Some(Callee::Project(keys, _)),
-        ) if !keys.is_empty() => Some(Source::Calls(keys)),
+        ) if !keys.is_empty() => (!keys.iter().any(is_init)).then_some(Source::Calls(keys)),
         (InstKind::Call { .. } | InstKind::MethodCall { .. }, Some(Callee::External(symbol))) => {
             if let Some((_, kind)) = CONSTRUCTORS.iter().find(|(s, _)| s == symbol) {
                 return Some(Source::Built(*kind));
@@ -141,6 +143,10 @@ pub fn source<'k, 't>(
         }
         _ => None,
     }
+}
+
+fn is_init(k: &FuncKey) -> bool {
+    k.qualname.rsplit('.').next() == Some("__init__")
 }
 
 /// The function's local [`FreshReturn`], when every value it returns is a new builtin container
@@ -250,6 +256,8 @@ pub(crate) fn fresh_return<'k>(
     }
     fact.calls.sort();
     fact.calls.dedup();
+    // The local summary keeps the list for the whole run.
+    fact.calls.shrink_to_fit();
     Some(fact)
 }
 
