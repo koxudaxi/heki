@@ -412,6 +412,45 @@ fn a_long_copy_chain_of_a_closure_cell_holds_the_enclosing_parameter() {
     assert_eq!(reported, vec![2 * copies as u64 + 9], "{found:#?}");
 }
 
+/// A display changed in place by a long chain of augmented assignments (`items += []`,
+/// `items *= 1`, ...) before an item is appended and the items are written: each result is the
+/// display, decided once from the result before it at any length, so the appended item keeps its
+/// class (`MUT201`).
+#[test]
+fn a_long_chain_of_in_place_operators_gives_the_display_back() {
+    let config = "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT201\"]\n\n\
+                  [[tool.heki.write-owners]]\nname = \"fields\"\ntargets = [\"Model.fields\"]\n\
+                  allowed-writers = [\"m.Model.*\"]\n";
+    let found = check_linear(4_000, |operators| {
+        let mut lines = vec![
+            "class Model:".to_owned(),
+            "    def __init__(self) -> None:".to_owned(),
+            "        self.fields: list[str] = []".to_owned(),
+            String::new(),
+            String::new(),
+            "def extend(model: Model) -> None:".to_owned(),
+            "    items = []".to_owned(),
+        ];
+        for i in 0..operators {
+            let op = if i % 2 == 0 { "+= []" } else { "*= 1" };
+            lines.push(format!("    items {op}"));
+        }
+        lines.push("    items.append(model)".to_owned());
+        lines.push("    for each in items:".to_owned());
+        lines.push("        each.fields = []".to_owned());
+        let p = Project::new(&format!("bounds_in_place_chain_{operators}"));
+        p.write("pyproject.toml", config)
+            .write("m.py", &(lines.join("\n") + "\n"));
+        p
+    });
+    let reported: Vec<&str> = found
+        .iter()
+        .filter(|d| d["rule_code"] == "MUT201")
+        .map(|d| d["qualname"].as_str().unwrap())
+        .collect();
+    assert_eq!(reported, vec!["extend"], "{found:#?}");
+}
+
 /// A function creating `children` child scopes, each over a value it binds just before and
 /// opening a session per item, then one over a display of two items: comprehensions, which are
 /// functions of their own before 3.12, or generator expressions.

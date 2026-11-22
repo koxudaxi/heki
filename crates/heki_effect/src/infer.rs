@@ -758,6 +758,9 @@ struct Engine<'e, 'a> {
     unpacked: FxHashMap<VarId, usize>,
     /// Container displays built in the function (`[]`, `{}`, `set()` is a call), by kind.
     displays: FxHashMap<VarId, BuiltinKind>,
+    /// The augmented assignments that give a display back (`xs += ys`), each operator of the
+    /// chain from the display changing it in place, with the display and its kind.
+    kept_displays: FxHashMap<VarId, (VarId, BuiltinKind)>,
     /// The items (or keys) and values added to each display after it is built.
     added: FxHashMap<VarId, (Elem, Elem)>,
     /// The facts of the closure cells of enclosing functions the function can read, by name.
@@ -865,6 +868,7 @@ impl<'e, 'a> Engine<'e, 'a> {
             strs: FxHashMap::default(),
             unpacked: FxHashMap::default(),
             displays: FxHashMap::default(),
+            kept_displays: FxHashMap::default(),
             added: FxHashMap::default(),
             cells: seed.cells,
             own_cells: FxHashMap::default(),
@@ -931,7 +935,7 @@ impl<'e, 'a> Engine<'e, 'a> {
     }
 
     /// The facts the transfers look up: declared locals, constants, unpacking targets,
-    /// copies, and displays.
+    /// copies, and displays (also as the in-place operators that keep them give them back).
     fn collect(&mut self) {
         let (cx, f) = (self.cx, self.f);
         let insts = || f.blocks.iter().flat_map(|b| &b.insts);
@@ -1017,6 +1021,24 @@ impl<'e, 'a> Engine<'e, 'a> {
                     callee_var: None, ..
                 } => self.nested_read = true,
                 _ => {}
+            }
+        }
+        // In reverse postorder an operand comes before its users (only a phi, which ends a
+        // chain, reaches back), so each result is decided from its operand's, once.
+        for &bb in self.shape.rpo() {
+            for inst in &f.block(bb).insts {
+                if let InstKind::BinOp {
+                    dst,
+                    op,
+                    lhs,
+                    in_place: true,
+                    ..
+                } = &inst.kind
+                    && let Some((root, kind)) = self.display_of(*lhs)
+                    && display_changes_in_place(kind, *op)
+                {
+                    self.kept_displays.insert(*dst, (root, kind));
+                }
             }
         }
         // An unpacking target loads its position with a constant spanning the target itself.
@@ -1709,28 +1731,11 @@ impl<'e, 'a> Engine<'e, 'a> {
     /// The display a variable holds (through copies, and the in-place operators that give it
     /// back), with its kind.
     fn display_of(&self, var: VarId) -> Option<(VarId, BuiltinKind)> {
-        let mut root = self.shape.copy_root(var);
-        for _ in 0..16 {
-            if let Some(kind) = self.displays.get(&root) {
-                return Some((root, *kind));
-            }
-            match self.shape.inst(root).map(|i| &i.kind) {
-                Some(InstKind::BinOp {
-                    op,
-                    lhs,
-                    in_place: true,
-                    ..
-                }) => {
-                    let lhs = self.shape.copy_root(*lhs);
-                    match self.displays.get(&lhs) {
-                        Some(kind) if !display_changes_in_place(*kind, *op) => return None,
-                        _ => root = lhs,
-                    }
-                }
-                _ => break,
-            }
+        let root = self.shape.copy_root(var);
+        match self.displays.get(&root) {
+            Some(kind) => Some((root, *kind)),
+            None => self.kept_displays.get(&root).copied(),
         }
-        None
     }
 
     fn subscript(&self, span: Span, obj: VarId, index: VarId, is_slice: bool) -> Step {
