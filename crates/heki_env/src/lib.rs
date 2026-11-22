@@ -48,6 +48,11 @@ impl PythonVersion {
             _ => None,
         }
     }
+
+    /// The `target-version` spelling of the version (`py312`), which [`Self::parse_tag`] reads.
+    pub fn tag(self) -> String {
+        format!("py{}{}", self.major, self.minor)
+    }
 }
 
 /// Materialized runtime feature profile (no version branching inside analysis passes).
@@ -79,6 +84,16 @@ impl From<PythonVersion> for RuntimeProfile {
 pub enum Severity {
     Error,
     Warning,
+}
+
+impl Severity {
+    /// The name the configuration and the reports write.
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Error => "error",
+            Self::Warning => "warning",
+        }
+    }
 }
 
 /// `[tool.heki.lint]` section (Ruff + `t-linter` conventions, kebab-case).
@@ -649,6 +664,16 @@ impl HekiConfig {
         "ecosystem",
     ];
 
+    /// The keys of the contracts, each an array of tables (docs/configuration.md, "Contracts").
+    pub const CONTRACT_KEYS: &'static [&'static str] = &[
+        "write-owners",
+        "read-owners",
+        "call-owners",
+        "effect-boundaries",
+        "readonly-returns",
+        "invalidation",
+    ];
+
     /// Load an explicit configuration file ([`ConfigLayout`]): the `[tool.heki]` table of a
     /// `pyproject.toml` (empty config when absent), the top-level keys of any other file.
     pub fn load_from_file(path: &Path) -> Result<Self, ConfigError> {
@@ -661,13 +686,16 @@ impl HekiConfig {
 
     /// Load configuration from either `heki.toml` / `.heki.toml` or `pyproject.toml` `[tool.heki]`.
     pub fn load_from_dir(root: &Path) -> Result<Self, ConfigError> {
-        for candidate in ["heki.toml", ".heki.toml", "pyproject.toml"] {
-            let p = root.join(candidate);
-            if p.is_file() {
-                return Self::load_from_file(&p);
-            }
-        }
-        Ok(Self::default())
+        Self::file_in(root).map_or_else(|| Ok(Self::default()), |p| Self::load_from_file(&p))
+    }
+
+    /// The file [`Self::load_from_dir`] reads in `root`, the first of `heki.toml`,
+    /// `.heki.toml`, and `pyproject.toml` that exists.
+    pub fn file_in(root: &Path) -> Option<PathBuf> {
+        ["heki.toml", ".heki.toml", "pyproject.toml"]
+            .into_iter()
+            .map(|candidate| root.join(candidate))
+            .find(|p| p.is_file())
     }
 
     /// The configuration of `path` with its `src` entries in their project-relative form

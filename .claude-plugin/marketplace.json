@@ -1,0 +1,14 @@
+{
+  "name": "heki",
+  "owner": {
+    "name": "Koudai Aono"
+  },
+  "description": "Agent Skill that teaches coding agents to check Python code with heki: inspect a function before an edit, check the project after it, and fix each diagnostic at its root cause.",
+  "plugins": [
+    {
+      "name": "heki",
+      "source": "./skills/heki",
+      "description": "Check Python code for side effects, changes to shared state, blocking calls in async code, queries in loops, and quadratic patterns with heki (experimental)."
+    }
+  ]
+}
