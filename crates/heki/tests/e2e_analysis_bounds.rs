@@ -3382,3 +3382,43 @@ fn changes_below_many_copies_decide_each_copy_once() {
         .collect();
     assert_eq!(found.len(), copies + 1);
 }
+
+/// A copied class with a chain of two thousand subclasses, copied and changed below the copy in
+/// a thousand functions: the classes a value of it may be are walked once per question, not
+/// once per subclass along each subclass's bases.
+#[test]
+fn copies_of_a_class_with_a_deep_subclass_chain_walk_each_class_once() {
+    let depth = 2_000;
+    let mut lines = vec![
+        "import copy".to_owned(),
+        String::new(),
+        String::new(),
+        "class C0:".to_owned(),
+        "    def __init__(self) -> None:".to_owned(),
+        "        self.children: list[int] = []".to_owned(),
+    ];
+    for i in 1..depth {
+        lines.push(String::new());
+        lines.push(String::new());
+        lines.push(format!("class C{i}(C{}):", i - 1));
+        lines.push("    pass".to_owned());
+    }
+    for i in 0..1_000 {
+        lines.push(String::new());
+        lines.push(String::new());
+        lines.push(format!("def adopt{i}(node: C0) -> None:"));
+        lines.push("    clone = copy.copy(node)".to_owned());
+        lines.push("    clone.children.append(1)".to_owned());
+    }
+    let p = Project::new("bounds_copied_hierarchy");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nextend-select = [\"MUT115\"]\n",
+    )
+    .write("m.py", &(lines.join("\n") + "\n"));
+    let found = check_within(&p, Duration::from_secs(30))
+        .iter()
+        .filter(|d| d["rule_code"] == "MUT115")
+        .count();
+    assert_eq!(found, 1_000);
+}

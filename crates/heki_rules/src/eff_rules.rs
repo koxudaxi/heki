@@ -1488,7 +1488,7 @@ impl<'a> Reach<'a> {
                             .unwrap_or((0, 0))
                     };
                     // The parameter itself keeps what counts; a part of it, or of a copy of it,
-                    // is below the top level; a copy of it, or of a part of it, counts below.
+                    // is below the top level.
                     let mut bits = (0, 0);
                     if let Some((p, part)) = &o.param {
                         let (full, below) = of(*p);
@@ -1503,12 +1503,11 @@ impl<'a> Reach<'a> {
                         let (full, below) = of(*p);
                         bits.0 |= full | below;
                     }
-                    if let Some((p, part)) = &o.param_copy {
+                    // A copy of it, or of a part of it, shares only what is below its own top
+                    // level.
+                    if let Some((p, _)) = &o.param_copy {
                         let (full, below) = of(*p);
                         bits.1 |= full | below;
-                        if part.is_some() {
-                            bits.0 |= below;
-                        }
                     }
                     let slot = alias.entry((to, k)).or_insert((0, 0));
                     let grown = (slot.0 | bits.0, slot.1 | bits.1);

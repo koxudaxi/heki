@@ -126,6 +126,28 @@ enum Held {
     Below { site: usize, first: VarId },
 }
 
+/// A class decision `MUT115` asks ([`Mut202Fn::class_answer`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ClassQuestion {
+    /// `ProjectDecls::method_not_overridden` (looked up by name or not).
+    NotOverridden(bool),
+    /// No copy hook (`copy.copy`).
+    CopyHooks,
+    /// No `__copy__` or `model_copy` (pydantic's `model_copy`).
+    ModelCopyHooks,
+    /// `ProjectDecls::attr_read_finds_stored`.
+    Read,
+    /// `ProjectDecls::attr_store_on_instance`.
+    Store,
+}
+
+/// The class decisions asked so far in one module's check, each decided once: the declarations
+/// it reads are recorded with the first ask, which the check of the module makes.
+#[derive(Default)]
+pub(super) struct ClassAnswers {
+    answers: RefCell<FxHashMap<(ClassQuestion, String, String), bool>>,
+}
+
 /// The facts of `MUT115` for one function, built on the first need.
 pub(super) struct BelowCopies<'a> {
     sites: Vec<CopySite<'a>>,
@@ -168,6 +190,31 @@ impl Join for MustHeld {
 }
 
 impl<'a> Mut202Fn<'a> {
+    /// The answer to `question` about `class` (and the attribute or method `name`), decided once
+    /// per module's check.
+    fn class_answer(
+        &self,
+        question: ClassQuestion,
+        class: &str,
+        name: &str,
+        decide: impl FnOnce() -> bool,
+    ) -> bool {
+        let key = (question, class.to_owned(), name.to_owned());
+        if let Some(&known) = self.classes.answers.borrow().get(&key) {
+            return known;
+        }
+        let answer = decide();
+        self.classes.answers.borrow_mut().insert(key, answer);
+        answer
+    }
+
+    /// [`heki_effect::ProjectDecls::method_not_overridden`], once per module's check.
+    fn not_overridden(&self, class: &str, method: &str, by_name: bool) -> bool {
+        self.class_answer(ClassQuestion::NotOverridden(by_name), class, method, || {
+            self.cx.decls.method_not_overridden(class, method, by_name)
+        })
+    }
+
     /// `MUT115`'s reports of the function.
     pub(super) fn below_copies(&self, out: &mut Vec<Diagnostic>) {
         if !self.cx.enabled("MUT115", self.unit) {
@@ -460,9 +507,11 @@ impl<'a> Mut202Fn<'a> {
     fn plain_read(&self, obj: VarId, attr: &str) -> bool {
         attr != "__dict__"
             && self.class_of(obj).is_some_and(|class| {
-                self.cx
-                    .decls
-                    .attr_read_finds_stored(class, attr, |base| self.catalog_stores(base))
+                self.class_answer(ClassQuestion::Read, class, attr, || {
+                    self.cx
+                        .decls
+                        .attr_read_finds_stored(class, attr, |base| self.catalog_stores(base))
+                })
             })
     }
 
@@ -471,20 +520,14 @@ impl<'a> Mut202Fn<'a> {
     fn plain_item(&self, obj: VarId) -> bool {
         self.class_of(obj).is_some_and(|class| {
             matches!(class, "builtins.list" | "builtins.dict")
-                && self
-                    .cx
-                    .decls
-                    .method_not_overridden(class, "__getitem__", false)
+                && self.not_overridden(class, "__getitem__", false)
         })
     }
 
     /// Whether `obj.get(k)` reads an item a builtin dict holds.
     fn plain_get(&self, obj: VarId) -> bool {
         self.class_of(obj) == Some("builtins.dict")
-            && self
-                .cx
-                .decls
-                .method_not_overridden("builtins.dict", "get", true)
+            && self.not_overridden("builtins.dict", "get", true)
     }
 
     /// Whether the catalog says the class `base` outside the project stores an attribute on
@@ -888,17 +931,20 @@ impl<'a> Mut202Fn<'a> {
         match copy.kind {
             CopyKind::Container { reads, by_name, .. } => {
                 BUILTIN_COPIED.contains(&class)
-                    && reads
-                        .iter()
-                        .all(|m| decls.method_not_overridden(class, m, by_name))
+                    && reads.iter().all(|m| self.not_overridden(class, m, by_name))
             }
             CopyKind::CopyCopy => {
-                decls.is_project_class(class) && decls.binds_none_of(class, COPY_HOOKS, |_| false)
+                decls.is_project_class(class)
+                    && self.class_answer(ClassQuestion::CopyHooks, class, "", || {
+                        decls.binds_none_of(class, COPY_HOOKS, |_| false)
+                    })
             }
             CopyKind::ModelCopy => {
                 decls.is_project_class(class)
-                    && decls.binds_none_of(class, &["__copy__", "model_copy"], |base| {
-                        base == "pydantic.BaseModel"
+                    && self.class_answer(ClassQuestion::ModelCopyHooks, class, "", || {
+                        decls.binds_none_of(class, &["__copy__", "model_copy"], |base| {
+                            base == "pydantic.BaseModel"
+                        })
                     })
             }
             CopyKind::Other => false,
@@ -1051,9 +1097,11 @@ impl<'a> Mut202Fn<'a> {
             }
             (CopyKind::CopyCopy | CopyKind::ModelCopy, Level::Attr(attr)) => {
                 self.class_of(copy.copied).is_some_and(|class| {
-                    self.cx
-                        .decls
-                        .attr_read_finds_stored(class, attr, |base| self.catalog_stores(base))
+                    self.class_answer(ClassQuestion::Read, class, attr, || {
+                        self.cx
+                            .decls
+                            .attr_read_finds_stored(class, attr, |base| self.catalog_stores(base))
+                    })
                 }) && self
                     .class_of(container)
                     .is_none_or(|c| Some(c) == self.class_of(copy.copied))
@@ -1172,21 +1220,22 @@ impl<'a> Mut202Fn<'a> {
         let container = ContainerKind::ALL.into_iter().find(|k| k.class() == class);
         match (kind, container) {
             (InstKind::SubscriptStore { .. }, Some(k)) => {
-                k.takes_item_stores() && decls.method_not_overridden(class, "__setitem__", false)
+                k.takes_item_stores() && self.not_overridden(class, "__setitem__", false)
             }
             (InstKind::SubscriptDelete { .. }, Some(k)) => {
-                k.takes_item_stores() && decls.method_not_overridden(class, "__delitem__", false)
+                k.takes_item_stores() && self.not_overridden(class, "__delitem__", false)
             }
             (InstKind::MethodCall { method, .. }, Some(k)) => {
-                k.mutator(method) && decls.method_not_overridden(class, method, true)
+                k.mutator(method) && self.not_overridden(class, method, true)
             }
             (InstKind::BinOp { op, .. }, Some(k)) => {
-                k.in_place_op(*op)
-                    && decls.method_not_overridden(class, op.in_place_method(), false)
+                k.in_place_op(*op) && self.not_overridden(class, op.in_place_method(), false)
             }
             (InstKind::AttrStore { attr, .. } | InstKind::AttrDelete { attr, .. }, None) => {
                 decls.is_project_class(class)
-                    && decls.attr_store_on_instance(class, attr, |base| self.catalog_stores(base))
+                    && self.class_answer(ClassQuestion::Store, class, attr, || {
+                        decls.attr_store_on_instance(class, attr, |base| self.catalog_stores(base))
+                    })
             }
             _ => false,
         }
