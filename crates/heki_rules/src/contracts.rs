@@ -505,6 +505,7 @@ pub fn opt_in_facts(selection: &RuleSelection) -> OptInFacts {
         return_origins: selection.is_enabled("MUT112"),
         iterations: selection.is_enabled("MUT113"),
         locks: selection.is_enabled("EFF109"),
+        set_order: selection.is_enabled("EFF112"),
         exclusive: selection.is_enabled("EFF110"),
         must_effects: crate::eff_rules::MUST_EFFECT_RULES
             .iter()

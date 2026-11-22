@@ -5555,6 +5555,9 @@ pub struct TypeCtx<'a> {
     captured: std::sync::OnceLock<FxHashMap<String, Vec<usize>>>,
     /// The module's bindings for the path facts, built on first use.
     bindings: std::cell::OnceCell<heki_ir::ModuleBindings>,
+    /// The module-level names bound once to a set of text constants
+    /// ([`Self::string_set_global`]).
+    string_sets: std::cell::OnceCell<FxHashSet<String>>,
     /// [`ProjectDecls::function_taken`] by class and name, asked once per module (the module's
     /// summaries are one recording, which the first answer's reads join).
     taken: RefCell<FxHashMap<(String, String), Option<FuncKey>>>,
@@ -5637,8 +5640,17 @@ impl<'a> TypeCtx<'a> {
             scopes: crate::infer::Scopes::default(),
             captured: std::sync::OnceLock::new(),
             bindings: std::cell::OnceCell::new(),
+            string_sets: std::cell::OnceCell::new(),
             taken: RefCell::default(),
         }
+    }
+
+    /// Whether the module-level name `name` is bound once, in the module body, to a set of
+    /// text constants (a display, or `set()` / `frozenset()` of one): `EFF112`.
+    pub(crate) fn string_set_global(&self, name: &str) -> bool {
+        self.string_sets
+            .get_or_init(|| crate::order_flow::string_set_globals(self.ir))
+            .contains(name)
     }
 
     /// The module's bindings ([`heki_ir::ModuleBindings`]).
@@ -6085,7 +6097,8 @@ impl<'a> TypeCtx<'a> {
     }
 
     /// [`Self::infer`], with the values `isinstance` checks give variables in the blocks they
-    /// guard and the classes each check names (by its second argument).
+    /// guard, the classes each check names (by its second argument), and the types with their
+    /// arguments.
     #[allow(clippy::type_complexity)]
     pub(crate) fn infer_flow(
         &self,
@@ -6094,12 +6107,14 @@ impl<'a> TypeCtx<'a> {
         FxHashMap<VarId, Val>,
         FxHashMap<(BlockId, VarId), Val>,
         FxHashMap<VarId, Vec<String>>,
+        std::rc::Rc<crate::infer::Inferred>,
     ) {
         let inferred = self.infer_types(f);
         (
             inferred.vals(),
             inferred.narrowed_vals(),
             inferred.isinstance_args(f, self.project),
+            inferred,
         )
     }
 

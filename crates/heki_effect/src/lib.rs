@@ -35,6 +35,7 @@ mod invalidation;
 pub mod iterations;
 pub mod locks;
 pub mod one_at_a_time;
+pub mod order_flow;
 pub mod ownership;
 mod query;
 pub mod readonly;
@@ -829,6 +830,12 @@ pub struct EffectSummary {
     /// adds their effects where the project shows the queue bounded (local).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capacity_waits: Vec<CapacityWait>,
+
+    /// What the function does with set iteration order (`EFF112`; `None` when it does nothing
+    /// with one, as most functions, and while the rule does not run:
+    /// [`OptInFacts::set_order`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub set_order: Option<Box<order_flow::SetOrderFacts>>,
 }
 
 /// The shared state a function changes ([`EffectSummary::shared_state`]). The lists are sorted
@@ -2058,7 +2065,8 @@ pub enum TypedWrites {
 /// `ArgOrigin::origins`), `MUT113`'s iteration facts (`EffectSummary::iterations`,
 /// `CallSite::result_held`), `EFF109`'s lock facts (`EffectSummary::locks`,
 /// `CallSite::state_tests`), and `EFF110`'s one-at-a-time uses (`EffectSummary::exclusive`,
-/// `CallSite::under_lock`), and the shared state functions change
+/// `CallSite::under_lock`), `EFF112`'s set-order flows (`EffectSummary::set_order`), and the
+/// shared state functions change
 /// (`EffectSummary::shared_state`), which only `heki inspect` reads. `CallSite::returned`,
 /// which `MUT202` reads too, is always computed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2070,6 +2078,7 @@ pub struct OptInFacts {
     pub shared_state: bool,
     /// [`EffectSummary::must_exec`] and what computes it at call sites.
     pub must_effects: bool,
+    pub set_order: bool,
 }
 
 impl OptInFacts {
@@ -2081,6 +2090,7 @@ impl OptInFacts {
         exclusive: true,
         shared_state: true,
         must_effects: true,
+        set_order: true,
     };
 }
 

@@ -280,6 +280,9 @@ fn recompute(
             &mut s,
         );
     }
+    if index.opt_in.set_order {
+        crate::order_flow::propagate(&|k| index.summary(k), func, path, &mut s);
+    }
     if index.opt_in.must_effects {
         must_through_calls(
             index,

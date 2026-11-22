@@ -4,7 +4,7 @@
 //!   `MUT109`, `MUT110`, `MUT111`, `MUT112`, `MUT113`, `MUT114`, `MUT201`, `MUT202`, `MUT203`,
 //!   `MUT204`, `MUT205`, `MUT206`, `MUT207`)
 //! - Family 2 (`EFF` / `DATA`): Execution Effect (`EFF101`, `EFF102`, `EFF103`, `EFF105`, `EFF106`,
-//!   `EFF107`, `EFF109`, `EFF110`, `EFF201`, `DATA101`)
+//!   `EFF107`, `EFF109`, `EFF110`, `EFF112`, `EFF201`, `DATA101`)
 //! - Family 3 (`OPT`): Complexity Rewrite (`OPT101`, `OPT102`, `OPT103`, `OPT110`, `OPT111`,
 //!   `OPT112`, `OPT113`, `OPT120`, `OPT121`, `OPT130`); `OPT112` / `OPT113` are Advisory-lane
 //!   reports without a rewrite.
@@ -525,6 +525,18 @@ pub const CORE_RULES: &[RuleMeta] = &[
         doc: include_str!("../rule-docs/EFF110.md"),
     },
     RuleMeta {
+        code: "EFF112",
+        slug: "set-order-output",
+        family: RuleFamily::Eff,
+        certainty: Certainty::Heuristic,
+        activation: Activation::OptIn,
+        consequence: Consequence::Bug,
+        size_dependent_fix: false,
+        auto_fix_default: false,
+        summary: "Opt-in: the iteration order of a set of strings, which changes between runs, reaches a file, a stream, a serializer, or a raised exception's message across a call.",
+        doc: include_str!("../rule-docs/EFF112.md"),
+    },
+    RuleMeta {
         code: "EFF201",
         slug: "effect-boundary-violation",
         family: RuleFamily::Eff,
@@ -916,6 +928,7 @@ pub fn check_project(
             eff_rules::eff107(&cx, u, &mut d);
             eff_rules::eff109(&cx, u, &mut d);
             eff_rules::eff110(&cx, u, &mut d);
+            eff_rules::eff112(&cx, u, &mut d);
             data_rules::data101(&cx, u, &mut d);
             opt_rules::opt(&cx, u, &opt_opts, &mut d);
             opt_rules::opt112(&cx, u, &mut d);
