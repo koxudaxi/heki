@@ -1452,12 +1452,42 @@ fn a_source_root_stays_out_when_a_name_the_configuration_uses_would_change() {
         "`config.env:*` (scopes) of the effect-boundaries contract `config` would name module \
          `backend.config.env` as module `config.env`, which it does not name now"
     );
-    // A pattern that names the same definitions under both names lets the directory in; the
+    // Patterns that name the same definitions under both names let the directory in; the
     // definitions of files left out, read or not, are judged too.
     p.write(
         "pyproject.toml",
-        "[project]\nname = \"t\"\n\n[[tool.heki.effect-boundaries]]\nname = \"config\"\n\
-         scopes = [\"*.env:*\"]\nforbid = [\"blocking\"]\n",
+        r#"[project]
+name = "t"
+
+[[tool.heki.effect-boundaries]]
+name = "config"
+scopes = ["*.env:*"]
+forbid = ["blocking"]
+
+[[tool.heki.write-owners]]
+name = "w"
+targets = ["Model.items['k']"]
+allowed-writers = ["Store.*"]
+
+[[tool.heki.read-owners]]
+name = "r"
+targets = ["Model.x"]
+allowed-readers = ["Store.*"]
+
+[[tool.heki.call-owners]]
+name = "c"
+targets = ["Ledger.post"]
+allowed-callers = ["Store.*"]
+
+[[tool.heki.readonly-returns]]
+name = "ro"
+producers = ["Schema.fields"]
+
+[[tool.heki.invalidation]]
+name = "i"
+targets = ["Model.x"]
+invalidators = ["Index.refresh"]
+"#,
     )
     .write("backend/jobs.py", "def run():\n    pass\n")
     .write("backend/broken.py", "def broken(:\n")
