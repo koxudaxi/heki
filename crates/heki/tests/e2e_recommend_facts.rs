@@ -698,4 +698,11 @@ def reader():
         ],
         "{census:#}"
     );
+    let twice = census["modules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["module"] == "app.twice")
+        .unwrap();
+    assert_eq!(twice["path"], "app/twice.py");
 }

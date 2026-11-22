@@ -119,7 +119,8 @@ impl<'i> Census<'i> {
         let blocking: FxHashSet<_> = BLOCKING_EFFECTS.iter().collect();
         let unseen = index.reaching_blind_spots();
         let mut files: Vec<_> = index.files.values().collect();
-        files.sort_by(|a, b| a.path.cmp(&b.path));
+        // A module's implementation before its stub: the module's entry shows the first.
+        files.sort_by_key(|f| (&f.module_name, heki_effect::is_stub(&f.path), &f.path));
         for file in files {
             let path = file.path.as_path();
             let module = file.module_name.as_str();
@@ -133,8 +134,8 @@ impl<'i> Census<'i> {
             if functions.is_empty() {
                 continue;
             }
-            // A module defined by an implementation and its stub is one entry, shown at the
-            // implementation; each function counts in the file defining it.
+            // A module defined by an implementation and its stub is one entry; each function
+            // counts in the file defining it.
             let census = modules.entry(module).or_insert(ModuleUse {
                 module,
                 path,
@@ -142,9 +143,6 @@ impl<'i> Census<'i> {
                 blocking: Vec::new(),
                 unseen: Vec::new(),
             });
-            if heki_effect::is_stub(census.path) && !heki_effect::is_stub(path) {
-                census.path = path;
-            }
             for &(function, local) in &functions {
                 gather(&mut attributes, &mut classes, module, path, function, local);
                 if function.qualname == "<module>" {
