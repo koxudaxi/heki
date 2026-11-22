@@ -687,6 +687,25 @@ property of its own instance (`del self.<name>`, a constant-key removal from `se
 they do). They are local facts, never propagated, and they let `MUT101` decide staleness from the
 index alone, for a method of any indexed file.
 
+`FileSummary.blind_spots` (`heki_effect::BlindCall`, only with `OptInFacts::blind_spots`, which
+`heki_rules::recommend_facts` sets and neither `heki check` nor the language server does) holds,
+per function, the calls heki is blind to in its own body and the class bodies it runs, each once
+in source order: a call resolving to no function (`Callee::Unresolved` or `TooMany`), with the
+name called and why, from the receiver or the called value (`UnresolvedReason`: an unannotated
+parameter, an annotation giving no class, `Any` or `object`, a `Callable`, a name nothing heki
+sees binds, an unlisted protocol, a call result, an attribute, a computed `getattr` name, more
+implementations than CHA follows, a member heki does not find, any other untyped value); a call
+on `Any`, `object`, or a `Callable`, or of an unbound name, which resolves to a library name no
+library defines (`typing.Any.get`, `builtins.create`), counts as unresolved; and a call of a
+library function or class outside the project and the standard library without a catalog entry
+(`Blind::Uncatalogued`, with whether the catalog lists its package). They are local facts, never
+propagated, and no rule reads them. `ProjectIndex::blind_spot_reach` walks a function's facts of
+one kind, its body or what iterating its result runs, as each call hands them on
+(`ProjectIndex::delivery`: a helper returning a generator it does not iterate runs no generator
+body where it is called), once from every `async def` (not through a worker thread) and once from
+the calls inside a loop or once per item, giving the functions on an event loop and below a loop; `heki_rules::blind_spots` counts the calls by package and name and by function and reason,
+and the hidden `heki dump-recommend-facts` prints them.
+
 **Guards.** An effect inside a branch of a test of the function's own inputs (`if cache:`,
 `if x is None:`, `isinstance(x, T)`, `hasattr(x, "write")`, also through `and` / `or` / `not`,
 early returns, and conditional expressions; on a parameter, or an attribute of one the function
