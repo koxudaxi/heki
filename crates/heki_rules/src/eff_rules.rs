@@ -1,5 +1,5 @@
 //! Family 2 execution-effect rules: `EFF101`, `EFF105`, `EFF102`, `EFF103`, `EFF106`,
-//! `EFF107`, `EFF109`, `EFF110`, `EFF201` (docs/ANALYSIS_AND_KB_SPEC.md section 2.4).
+//! `EFF107`, `EFF109`, `EFF110`, `EFF112`, `EFF114`, `EFF201` (docs/ANALYSIS_AND_KB_SPEC.md section 2.4).
 
 use crate::mut_rules::{
     CallTargets, ContractTarget, FunctionMatcher, FunctionMatchers, References, SiteId, Subclasses,
@@ -942,6 +942,8 @@ impl Repeats<'_> {
 mod fanout_exclusive;
 mod held_across_io;
 mod lock_retaken;
+mod recursion_handlers;
+mod set_order_output;
 mod unretained_task;
 
 /// `EFF106` (opt-in): `await` / blocking network I/O while a sync lock or DB transaction is
@@ -964,6 +966,17 @@ pub(crate) fn eff109(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
 /// together.
 pub(crate) fn eff110(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Diagnostic>) {
     fanout_exclusive::run(cx, unit, out);
+}
+
+/// `EFF112` (opt-in): the order of a set of strings reaches an output across a call.
+pub(crate) fn eff112(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Diagnostic>) {
+    set_order_output::run(cx, unit, out);
+}
+
+/// `EFF114` (opt-in): an `except` clause that turns the `RecursionError` of a call cycle into a
+/// value.
+pub(crate) fn eff114(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Diagnostic>) {
+    recursion_handlers::run(cx, unit, out);
 }
 
 /// `forbid` tokens of `[[tool.heki.effect-boundaries]]` and the execution effects each one

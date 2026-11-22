@@ -119,7 +119,7 @@ On a save, the edit reaches other files only through what it changes:
 
 | The edit changes | Also re-analyzed |
 | ---------------- | ---------------- |
-| a function's effects, the locks it takes (`EFF109`), the objects it uses one operation at a time (`EFF110`), or what the object it returns may be (a new one, its argument, or state it keeps) | its callers, and the functions of a call cycle through it (their effects change with it) |
+| a function's effects, the locks it takes (`EFF109`), the objects it uses one operation at a time (`EFF110`), what it returns in a set's order or writes of its parameters (`EFF112`), whether it reaches a call cycle (`EFF114`), or what the object it returns may be (a new one, its argument, or state it keeps) | its callers, and the functions of a call cycle through it (their effects change with it) |
 | a declaration that names resolve through: a re-exported class, a new method or base class, a property getter, a subclass, an offloading decorator | every file that resolved names through it |
 | a method of a class family | the classes of that family; with `MUT112` selected, every changed method counts: a value stored in `self.<attr>` is reported when a method of the family changes that attribute in place |
 | what a function changes of its own containers, or what it does with the generators it calls (`MUT113`, when selected) | the classes of its family with generators suspending inside an iteration of their containers, and those of the generators it calls |
@@ -171,10 +171,11 @@ $ heki check --watch
   baseline as `heki check` compares them.
 - It only reports: `--fix`, `--diff`, and `--update-baseline` are ignored, with a warning.
 - It reloads everything when the configuration (`pyproject.toml`, `heki.toml`, `.heki.toml`, or
-  the `--config` file), the summary snapshot, or the baseline changes. So does a change of the
-  detected source roots (`src/`, `python/`, or the directory named after the project appearing,
-  or becoming a package with an `__init__.py`) or a root `__init__.py` appearing or
-  disappearing: module names below a source root, or relative imports that climb to the root,
+  the `--config` file), a `hatch.toml` (its workspace members), the summary snapshot, or the
+  baseline changes. So does a change of the detected source roots (`src/`, `python/`, or the
+  directory named after the project appearing, or becoming a package with an `__init__.py`; a
+  workspace member's `pyproject.toml`, source roots, or packages appearing or disappearing) or a
+  root `__init__.py` appearing or disappearing: module names below a source root, or relative imports that climb to the root,
   change with the module layout. The server does the same.
 - What fails once the watch runs (a configuration that no longer parses, a watched path that
   disappears) is reported, and the watch goes on until it is fixed.

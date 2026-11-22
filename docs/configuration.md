@@ -47,7 +47,9 @@ The file's name decides, as Ruff reads `pyproject.toml` and `ruff.toml`:
 
 - A file named `pyproject.toml` holds the settings in `[tool.heki]` (`[tool.heki.lint]`,
   `[[tool.heki.ecosystem]]`, ...). Its other tables belong to the packaging standards and other
-  tools, and heki does not read them.
+  tools. heki reads only what it infers from them: the default target version
+  (`project.requires-python`) and the detected source roots (`project.name` and the workspace
+  tables, see [Workspaces and monorepos](#workspaces-and-monorepos)).
 - Any other file (`heki.toml`, `.heki.toml`, or the file `--config` names, whatever its name)
   holds the same keys at its top level, without the `tool.heki` prefix (`[lint]`,
   `[[ecosystem]]`).
@@ -76,9 +78,54 @@ are relative to the project root.
   directory of the same name (`acme/acme/`), and `python` (the maturin layout), each when it is
   a directory and not a package (no `__init__.py`). A source root that is a package is imported
   by its own name (`src.helpers`).
+- Without `src`, heki also detects the members of the project's uv, Hatch, and PDM workspaces
+  (see [Workspaces and monorepos](#workspaces-and-monorepos)).
 - Other layouts need `src`: a subdirectory application whose directories are imported as
   top-level packages (`backend/config/env.py` imported as `config.env`) takes
   `src = ["backend"]`, and a `lib/` layout (`lib/matplotlib`) takes `src = ["lib"]`.
+
+#### Workspaces and monorepos
+
+In a workspace, each member is a package of its own, installed from its own directory. Without
+`src`, heki reads the workspace tables of the root's `pyproject.toml` and names each member's
+modules the way installing the member names them, so a call from one member into another
+resolves without configuration:
+
+- the members: uv's `[tool.uv.workspace]` (`members` and `exclude`), the `workspace.members`
+  and `workspace.exclude` of every Hatch environment (`[tool.hatch.envs.<env>]`, or
+  `[envs.<env>]` in a `hatch.toml` next to it; a member may be a `{path = ...}` table), and
+  PDM's `[tool.pdm.workspace]` (`members`). Members are directories relative to the project root
+  or globs (`packages/*`; `**` spans directories), and a member must hold a `pyproject.toml`. An
+  `exclude` glob drops the members of its own table it matches, and its `*` spans directories
+  as uv matches it.
+- a member's source roots are the ones detected for the project root, below the member:
+  `packages/core/src`, the directory named after the member (`packages/core/core` when it holds
+  `core/`), and `python`.
+- a member without one (a flat layout) has its packages named below it: `packages/api/acme_api/`
+  is the package `acme_api`. Its other files keep their names below the project root
+  (`packages/api/main.py` is `packages.api.main`): several members often hold a `main.py` or a
+  `scripts/` package, and these would otherwise share a name. A package that several members
+  hold is named below the project root for the same reason.
+
+For example, this uv workspace:
+
+```text
+pyproject.toml                  # [tool.uv.workspace] members = ["packages/*"]
+packages/core/pyproject.toml
+packages/core/src/acme_core/io.py
+packages/api/pyproject.toml
+packages/api/acme_api/server.py # from acme_core.io import wait
+packages/api/main.py
+```
+
+has the source root `packages/core/src` and the member package `packages/api/acme_api`:
+`acme_core.io` is `packages/core/src/acme_core/io.py`, so `heki check` run at the root follows
+`server.py`'s call to `wait` into the other member. `heki check --generate-prompt` lists both.
+
+The `src` setting replaces the detection, members included: `src = ["packages/core/src",
+"packages/api"]` lists the same roots by hand, with `packages/api` naming all of the member's
+files below it. Run heki at the workspace root: run inside a member, the member's own
+`pyproject.toml` makes the member the project root, and the other members are outside it.
 
 Without a configuration file the project root is where heki runs (see above): in a repository
 without one, `heki check` run in `services/api/` names `services/api/app.py` `app`, and its
@@ -143,9 +190,9 @@ supported version that every clause admits:
 - A run of `full` or `concise` output that leaves heuristic rules off, or heuristic reports out,
   says how many.
 - A prefix or `ALL` never enables the opt-in rules (`EFF105`, `EFF106`, `EFF107`, `EFF109`,
-  `EFF110`, `MUT101`, `MUT103`, `MUT106`, `MUT107`, `MUT108`, `MUT111`, `MUT112`, `MUT113`,
-  `MUT115`): they
-  need their exact code or name. In `ignore`, a prefix covers every rule it matches.
+  `EFF110`, `EFF112`, `EFF114`, `MUT101`, `MUT103`, `MUT106`, `MUT107`, `MUT108`, `MUT111`, `MUT112`,
+  `MUT113`, `MUT115`): they need their exact code or name. In `ignore`, a prefix covers every
+  rule it matches.
 - The command line wins: `--select` replaces `select`, `--extend-select` and `--ignore` add to the
   configured lists, and `--heuristic` / `--no-heuristic` replace `heuristic`.
 
@@ -740,6 +787,7 @@ excluded = true               # never reported
 | `sync-lock-or-tx` | A `with` over an instance of this class, or over the result of this call, holds a synchronous lock or a database transaction (`EFF106`). |
 | `non-reentrant-lock` | An instance of this class is a lock its holder cannot take again: acquiring it while the same thread or task holds it waits forever (`EFF109`). |
 | `one-at-a-time` | Tasks may not be inside this method on one object at once (`EFF110`): `"always"` (a second task's call raises), `"when_unbound"` (only while the object holds no connection, as an `AsyncSession`), or `"unbinds"` (as `"when_unbound"`, and the object holds no connection after the call: `commit`). |
+| `writes-in-order` | The call writes an argument to a file or a stream, or serializes it into text, in the order of its elements (`EFF112`): a mapping's keys and a sequence's items in their iteration order. `{ arg = 0, param = "data" }` names the argument (a position not counting the receiver, or a keyword; `{}`: every positional argument, as `print`), `sorted-by = "sort_keys"` the keyword argument that sorts mapping keys first, and `sorted-by-default = true` a call that sorts them unless told otherwise. |
 
 - An override sets the keys it lists on the built-in entry for the same symbol. The keys it leaves
   out keep their built-in values; `effects = []` removes every effect.
@@ -755,7 +803,7 @@ For a project function:
 | `async-safe` | keeps the blocking effects of the body from its callers |
 | `return-type` | types its result, over its annotation |
 | `offloads-blocking-arg` | the parameter the body offloads, counted as for a library method |
-| `copy-sanitizer`, `sync-lock-or-tx`, `non-reentrant-lock`, `one-at-a-time` | not read: library symbols only |
+| `copy-sanitizer`, `sync-lock-or-tx`, `non-reentrant-lock`, `one-at-a-time`, `writes-in-order` | not read: library symbols only |
 
 ## Inline suppressions
 

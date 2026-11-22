@@ -858,6 +858,103 @@ fn purity_rests_on_evidence_and_says_what_is_unknown() {
     assert_eq!(report(&users, "pure")["purity"]["verdict"], "pure");
 }
 
+/// Values whose type says nothing of the code a call on them runs.
+const OPAQUE: &str = r#"import collections.abc
+import typing
+from typing import Any, Callable, Optional
+
+
+def on_any(x: Any):
+    x.save()
+
+
+def on_object(x: object):
+    x.save()
+
+
+def on_attribute_of_any(x: typing.Any):
+    x.conn.save()
+
+
+def on_optional_any(x: Optional[Any]):
+    if x is not None:
+        x.save()
+
+
+def builds_any_class(cls: type[Any]):
+    cls()
+
+
+def calls_callable(cb: Callable[[], None]):
+    cb()
+
+
+def calls_abc_callable(cb: collections.abc.Callable[[], None]):
+    cb()
+
+
+def calls_bare_callable(cb: Callable):
+    cb()
+
+
+def calls_untyped(cb):
+    cb()
+
+
+def calls_unbound():
+    undefined_helper()
+
+
+class Holder:
+    def __init__(self, client: Any):
+        self.client = client
+
+    def fetch(self):
+        return self.client.get()
+
+
+def through_holder(h: Holder):
+    return h.fetch()
+
+
+def known(x: object):
+    print(x)
+    return len(str(x))
+"#;
+
+#[test]
+fn calls_on_values_whose_type_says_nothing_are_unresolved() {
+    let p = Project::new("inspect_opaque_calls");
+    p.write("m.py", OPAQUE);
+    for name in [
+        "on_any",
+        "on_object",
+        "on_attribute_of_any",
+        "on_optional_any",
+        "builds_any_class",
+        "calls_callable",
+        "calls_abc_callable",
+        "calls_bare_callable",
+        "calls_untyped",
+        "calls_unbound",
+        "Holder.fetch",
+    ] {
+        let purity = &report(&p, name)["purity"];
+        assert_eq!(purity["verdict"], "unknown", "{name}: {purity:#}");
+        assert_eq!(
+            purity["because"],
+            serde_json::json!(["unresolved_calls"]),
+            "{name}"
+        );
+        assert_eq!(purity["unknown_at"]["fqn"], format!("m.{name}"), "{name}");
+    }
+    let through = report(&p, "through_holder");
+    assert_eq!(through["purity"]["verdict"], "unknown");
+    assert_eq!(through["purity"]["unknown_at"]["fqn"], "m.Holder.fetch");
+    // Builtins called with such a value are known.
+    assert_eq!(report(&p, "known")["purity"]["verdict"], "pure");
+}
+
 const CALLERS: &str = r#"class Base:
     def step(self):
         return 1
