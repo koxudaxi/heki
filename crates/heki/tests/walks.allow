@@ -146,7 +146,6 @@ heki_ir::facts::FnIndex::not_grown  W1  recursion (through FnIndex::container_bo
 heki_ir::facts::FnIndex::origins  W1  recursion (through FnIndex::container_bound_nested, FnIndex::decide_bound, FnIndex::display_at and 13 more): Memo or Closure
 heki_ir::facts::FnIndex::reaching  W2  worklist: reach, Closure, or fixpoint
 heki_ir::facts::FnIndex::runs  W1  recursion (through FnIndex::container_bound_nested, FnIndex::decide_bound, FnIndex::display_at and 13 more): Memo or Closure
-heki_ir::facts::waits_every_iteration  W2  worklist: reach, Closure, or fixpoint
 heki_rules::data_rules::Derivations::of  W2  worklist: reach, Closure, or fixpoint
 heki_rules::data_rules::carries  W2  worklist: reach, Closure, or fixpoint
 heki_rules::data_rules::combines  W2  worklist: reach, Closure, or fixpoint

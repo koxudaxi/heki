@@ -1103,7 +1103,7 @@ fn loop_trip_counts_and_caps_the_code_fixes() {
     // `STEP = LIMIT // 2` is not folded; `gone` is deleted.
     assert_eq!(
         ir["constants"],
-        serde_json::json!({"ints": {"LIMIT": 8, "WIDTH": 1}, "dynamic": false})
+        serde_json::json!({"ints": {"LIMIT": 8, "WIDTH": 1}, "bools": {"DEBUG": false}, "dynamic": false})
     );
     let small = |n: u64| serde_json::json!({ "const_small": n });
     let unbounded = serde_json::json!("unbounded");
@@ -1187,6 +1187,11 @@ fn loop_trip_counts_and_caps_the_code_fixes() {
         ),
         ("paced_over_items", unbounded.clone()),
         ("sleeps_on_one_path", unbounded.clone()),
+        // A path back the module's constants rule out is no path back.
+        (
+            "paced_past_a_decided_branch",
+            serde_json::json!("daemon_polling"),
+        ),
         ("sleeps_after_a_raise", unbounded.clone()),
         ("zero_sleep", unbounded.clone()),
         ("waits_for_tasks", unbounded.clone()),
