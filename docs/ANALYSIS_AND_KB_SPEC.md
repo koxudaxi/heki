@@ -593,8 +593,9 @@ keeps `*args`, which holds it), and a keyword never binds a positional-only para
 its own name in `**kwargs`); the receiver is the first position. A `**` operand that is a dict
 display with string constant keys passes its entries as keywords when nothing changes it
 (`Extractor::constant_display`: each value holding it, through copies and phis, is only copied,
-merged, unpacked with `**`, tested, returned, or raised; one walk per display); any other `**`
-operand may bind any parameter. A callee the call raises `TypeError` for instead of running
+merged, unpacked with `**`, tested, returned, or raised; one walk per display; the entries a call
+binds are taken from the function's budget, past which the display may pass any keyword); any other
+`**` operand may bind any parameter. A callee the call raises `TypeError` for instead of running
 (`Bindings::raises`: two keywords of one name, a parameter bound twice, a keyword without
 `**kwargs`, a position past the parameters without `*args`, a parameter without a default left
 unbound where no unpacking may bind it, counted from `FunctionDecl::required_positional` and

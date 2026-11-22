@@ -756,7 +756,8 @@ struct Extractor<'a> {
     /// ([`Self::constant_display`]).
     displays: Memo<VarId, Option<DisplayEntries>>,
     /// The budget of the walks over the function's values ([`Self::global_roots`],
-    /// [`Self::constant_display`]).
+    /// [`Self::constant_display`]) and of the display entries calls bind
+    /// ([`Self::passed_keywords`]).
     walk_budget: Budget,
     /// Allocations, escapes, and construction queries (`construction`).
     rec: Recorder,
@@ -4926,14 +4927,21 @@ impl<'a> Extractor<'a> {
 
     /// The keywords `call` passes by name: each one written, and the entries of each `**`
     /// operand that is a constant dict display ([`Self::constant_display`]), which Python passes
-    /// as written keywords; any other `**` operand may pass any keyword.
+    /// as written keywords; any other `**` operand may pass any keyword. Every call binds each
+    /// entry of the displays it unpacks, which the source does not repeat: the entries are taken
+    /// from the function's budget, so that a wide display unpacked by many calls costs work
+    /// linear in the function, and past the budget a display may pass any keyword.
     fn passed_keywords<'c>(&self, call: &Call<'c>) -> Keywords<'c> {
         let mut named: Vec<(Cow<'c, str>, VarId)> = Vec::new();
         let (mut open, mut unpacked) = (false, false);
         for (name, v) in call.kwargs {
+            let display = || {
+                self.constant_display(*v)
+                    .filter(|entries| self.walk_budget.take(entries.len()))
+            };
             match name {
                 Some(name) => named.push((Cow::Borrowed(name.as_str()), *v)),
-                None => match self.constant_display(*v) {
+                None => match display() {
                     Some(entries) => {
                         unpacked = true;
                         named.extend(entries.iter().map(|(k, v)| (Cow::Owned(k.clone()), *v)));

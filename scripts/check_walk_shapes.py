@@ -243,6 +243,12 @@ def unpacked_display_copies(n: int) -> Body:
     return Body(("p",), [*lines, *(f"g(**f{i})" for i in range(n + 1))])
 
 
+def wide_display_unpacked(n: int) -> Body:
+    """A dict display of n entries unpacked with `**` by n calls."""
+    entries = ", ".join(f'"x{i}": p' for i in range(n))
+    return Body(("p",), [f"f = {{{entries}}}", *("g(**f)" for _ in range(n))])
+
+
 def reverse_chain_in_loop(n: int) -> Body:
     """A loop carries a chain of copies laid against the order of the blocks."""
     lines = ["acc = []", *(f"x{i} = None" for i in range(1, n + 1)), "x0 = acc", "for it in items:"]
@@ -535,6 +541,13 @@ FAMILIES = [
     Family("copy_chain_in_loop", copy_chain_in_loop),
     # A module body's names are globals: no copy of the display reaches a call.
     Family("unpacked_display_copies", unpacked_display_copies, placements=("function", "method")),
+    # Every call binds every entry: past the budget, a call passes nothing the display holds.
+    Family(
+        "wide_display_unpacked",
+        wide_display_unpacked,
+        placements=("function", "method"),
+        real_code=False,
+    ),
     Family("reverse_chain_in_loop", reverse_chain_in_loop),
     Family("alias_loops", alias_loops),
     Family("doubled_constant_slices", doubled_constant_slices, real_code=False),
