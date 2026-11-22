@@ -142,9 +142,10 @@ symbol = "pydantic.BaseModel.__delattr__"
 stores_on_instance = true
 opaque_to_layer3 = true
 
-# `pydantic-core` validates a field left out with the field's default: a hashable default
-# (`None`, a string, an `object()` sentinel) is the default object itself, an unhashable one is
-# deep-copied for each instance.
+# `pydantic-core` fills a field left out with the field's default: a hashable default (`None`, a
+# string, an `object()` sentinel) is the default object itself, an unhashable one is deep-copied
+# for each instance. A field that validates its default (`validate_default=True`, or the model's
+# `validate_default` setting) holds what the validation returns instead.
 [[entries]]
 symbol = "pydantic.BaseModel"
 keeps_hashable_defaults = true
