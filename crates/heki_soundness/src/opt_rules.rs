@@ -3095,11 +3095,14 @@ impl<'a, 'c> Rules<'a, 'c> {
         b.of_name.ask(budget, name, || {
             let mut origins = JoinMap::new();
             for &v in values.get(name).into_iter().flatten() {
-                // Past the budget the memo answers open, whatever this joins.
-                if let Answer::Known(of_value) = b.of_value.ask(budget, v, own, next) {
-                    for &o in of_value.iter() {
-                        origins.insert(o, Min(v));
-                    }
+                // Past the budget the memo answers open, whatever this joins, so an open answer
+                // for one value adds no origin.
+                let of_value = b
+                    .of_value
+                    .ask(budget, v, own, next)
+                    .open_means(Rc::default());
+                for &o in of_value.iter() {
+                    origins.insert(o, Min(v));
                 }
             }
             Rc::new(origins)
