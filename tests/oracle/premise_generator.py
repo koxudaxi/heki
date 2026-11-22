@@ -339,6 +339,39 @@ def mut114(sc, strip):
     _add_inputs(sc, entry, lambda k: [["a", "b"][k % 2]])
 
 
+def mut115(sc, strip):
+    """A copy of a parameter's dict and a change of the list one of its items holds."""
+    ns = sc.ns
+    main = sc.main_module
+    lines = ["result = options.copy()"]
+    if strip == "Borrowed original":
+        lines.insert(0, 'options = {"bases": [text]}')
+    if strip == "Still shared":
+        lines += block("if flag:", ['result["bases"] = []'])
+    lines += ['result["bases"].append(text)', 'return len(options["bases"])']
+    entry = sc.name("copied")
+    sc.define(block(f"def {entry}(options: dict[str, list[str]], {sc.params}):", lines))
+
+    def bases(k):
+        if strip == "Changed below the copy" and k % 2:
+            return {"$obj": [f"{main}:Silent_{ns}", [["a"]], {}]}
+        return ["a", "b"][: 1 + k % 2]
+
+    def value(k):
+        options = {"$dict": [["bases", bases(k)]]}
+        if strip == "Shallow copy" and k % 2:
+            return [{"$obj": [f"{main}:Deep_{ns}", [options], {}]}]
+        return [options]
+
+    if strip == "Shallow copy":
+        sc.define(
+            block(f"class Deep_{ns}(dict):", block("def copy(self):", ["return {k: list(v) for k, v in self.items()}"]))
+        )
+    if strip == "Changed below the copy":
+        sc.define(block(f"class Silent_{ns}(list):", block("def append(self, item):", ["return None"])))
+    _add_inputs(sc, entry, value)
+
+
 # ---------------------------------------------------------------------------------------------
 # The proven OPT tier: one pattern per rule, and the contexts that keep or break each premise
 # ---------------------------------------------------------------------------------------------
@@ -514,6 +547,7 @@ BUILDERS = {
     "DATA101": data101,
     "MUT110": mut110,
     "MUT114": mut114,
+    "MUT115": mut115,
     **{rule: _opt_builder(rule) for rule in OPT_PATTERNS},
     "OPT113": opt113,
 }
@@ -532,6 +566,7 @@ STRIPS = {
     "DATA101": ["Loop-carried on every path", "Every iteration", "Origin", "Reallocates"],
     "MUT110": ["Read-only parameter", "Passed as itself", "Changed at the line"],
     "MUT114": ["Cached", "Keyed", "Container kind", "Same object", "Changed in place"],
+    "MUT115": ["Shallow copy", "Borrowed original", "Still shared", "Changed below the copy"],
     **{
         rule: ["Builtin type by construction", "Loop-carried", "In a loop", "Rewrite proven safe"]
         for rule in ("OPT101", "OPT102", "OPT103")

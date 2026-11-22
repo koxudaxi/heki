@@ -1472,24 +1472,52 @@ impl<'a> Reach<'a> {
     }
 
     /// Parameters of the scope function that a reached function mutates, through followed
-    /// edges only (a forward flow of "callee parameter k is scope parameter p" bits), and the
-    /// distinct sites of those changes (each in the body making it).
+    /// edges only (a forward flow of "callee parameter k is scope parameter p, or an object it
+    /// holds" bits, and of "callee parameter k is a shallow copy of scope parameter p" bits,
+    /// whose changes count only below the copy's top level), and the distinct sites of those
+    /// changes (each in the body making it).
     fn mutated_params(&self, cx: &CheckContext<'_>, params: usize) -> (u64, BTreeSet<SiteId>) {
-        let mut alias: FxHashMap<(usize, usize), u64> = FxHashMap::default();
+        // `(any change counts, only changes below the top level count)`.
+        let mut alias: FxHashMap<(usize, usize), (u64, u64)> = FxHashMap::default();
         for p in 0..params.min(64) {
-            alias.insert((0, p), 1u64 << p);
+            alias.insert((0, p), (1u64 << p, 0));
         }
         loop {
             let mut changed = false;
             for &(from, to, bc) in &self.edges {
                 for (k, o) in bc.params.iter().enumerate() {
-                    let Some((p, _)) = &o.param else {
-                        continue;
+                    let of = |p: u8| {
+                        alias
+                            .get(&(from, usize::from(p)))
+                            .copied()
+                            .unwrap_or((0, 0))
                     };
-                    let bits = alias.get(&(from, usize::from(*p))).copied().unwrap_or(0);
-                    let slot = alias.entry((to, k)).or_insert(0);
-                    if *slot | bits != *slot {
-                        *slot |= bits;
+                    // The parameter itself keeps what counts; a part of it, or of a copy of it,
+                    // is below the top level.
+                    let mut bits = (0, 0);
+                    if let Some((p, part)) = &o.param {
+                        let (full, below) = of(*p);
+                        bits.0 |= full;
+                        if part.is_some() {
+                            bits.0 |= below;
+                        } else {
+                            bits.1 |= below;
+                        }
+                    }
+                    for (p, _) in &o.param_elements {
+                        let (full, below) = of(*p);
+                        bits.0 |= full | below;
+                    }
+                    // A copy of it, or of a part of it, shares only what is below its own top
+                    // level.
+                    if let Some((p, _)) = &o.param_copy {
+                        let (full, below) = of(*p);
+                        bits.1 |= full | below;
+                    }
+                    let slot = alias.entry((to, k)).or_insert((0, 0));
+                    let grown = (slot.0 | bits.0, slot.1 | bits.1);
+                    if grown != *slot {
+                        *slot = grown;
                         changed = true;
                     }
                 }
@@ -1510,7 +1538,18 @@ impl<'a> Reach<'a> {
                 continue;
             };
             for k in (0..64u8).filter(|k| local.mutates_params & (1u64 << k) != 0) {
-                let scope_params = alias.get(&(i, usize::from(k))).copied().unwrap_or(0);
+                let (full, below) = alias.get(&(i, usize::from(k))).copied().unwrap_or((0, 0));
+                let below = below
+                    & if local
+                        .changed_param_attrs
+                        .get(&k)
+                        .is_some_and(|a| !a.is_empty())
+                    {
+                        u64::MAX
+                    } else {
+                        0
+                    };
+                let scope_params = full | below;
                 if scope_params != 0 {
                     out |= scope_params;
                     let spans = local.param_change_sites.get(&k).into_iter().flatten();
