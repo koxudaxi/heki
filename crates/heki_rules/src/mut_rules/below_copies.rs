@@ -116,8 +116,8 @@ enum Step {
 }
 
 /// What a value's object is to the copies of the function on every path to its use
-/// ([`Mut202Fn::held`]): one of the copies, or an object below one, read from it by the load
-/// `first` (the level the copy holds it at) and then by plain loads.
+/// ([`Mut202Fn::held`]): one of the copies, or an object one holds, read from it by the plain
+/// load `first` (the level the copy holds it at).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Held {
     Copy(usize),
@@ -173,8 +173,13 @@ struct CopyUses {
     complete: bool,
 }
 
-/// The stores into one object, by level and block: their indexes in the block.
-type Stores = FxHashMap<(Level, BlockId), Vec<u32>>;
+/// The stores into one object, by level: each one's block and index in the block; and whether
+/// one stores an item (under any key).
+#[derive(Default)]
+struct Stores {
+    by_level: FxHashMap<Level, Vec<(BlockId, u32)>>,
+    items: bool,
+}
 
 /// The first of the copies (by position) whose parts a value may be ([`Mut202Fn::copies_below`]):
 /// one witness is all a report names, and keeping one keeps every fact the same size.
@@ -687,16 +692,17 @@ impl<'a> Mut202Fn<'a> {
             return false;
         }
         let stores = self.stores_into(facts, root);
+        let Some(same) = stores.by_level.get(level) else {
+            return false;
+        };
         let dominators = self.ix.shape.dominators();
-        let same = stores.keys().filter(|(l, _)| l == level);
         // One step per store a load is checked against.
-        let checked = same.clone().count();
-        facts.budget.take(checked)
-            && same.into_iter().any(|key @ (_, b)| {
-                if *b == at.0 {
-                    stores[key].iter().any(|i| *i < at.1)
+        facts.budget.take(same.len())
+            && same.iter().any(|&(b, i)| {
+                if b == at.0 {
+                    i < at.1
                 } else {
-                    dominators.dominates(*b, at.0)
+                    dominators.dominates(b, at.0)
                 }
             })
     }
@@ -731,7 +737,8 @@ impl<'a> Mut202Fn<'a> {
             };
             let into_root = self.ix.shape.copy_root(obj) == root;
             if into_root && !value.is_some_and(|v| self.stores_back(root, &level, v)) {
-                stores.entry((level, b)).or_default().push(i);
+                stores.items |= matches!(level, Level::Key(_));
+                stores.by_level.entry(level).or_default().push((b, i));
             }
         }
         let stores = Rc::new(stores);
@@ -977,7 +984,7 @@ impl<'a> Mut202Fn<'a> {
     }
 
     /// What each value holds on every path, of the copies: a copy (through copies of the
-    /// reference and phis whose inputs agree), or an object below one, read by plain loads (an
+    /// reference and phis whose inputs agree), or an object one holds, read by a plain load (an
     /// item of a builtin list or dict, a plain attribute of an instance) of a level the copy was
     /// not given a value of its own for, nor rebound before. An optimistic must-question over
     /// the function's values ([`fixpoint`]): a value starts with no fact and only loses one.
@@ -1070,30 +1077,15 @@ impl<'a> Mut202Fn<'a> {
         if self.rebound_before(facts, container, &level, at) {
             return None;
         }
-        let held = match of(container)? {
-            MustHeld::Known(held) => held,
-            MustHeld::Conflict => return Some(MustHeld::Conflict),
-        };
-        let plain = match held {
-            Held::Copy(site) => {
-                return Some(
-                    if self.first_load_plain(&facts.sites[site], container, &level) {
-                        MustHeld::Known(Held::Below { site, first: v })
-                    } else {
-                        MustHeld::Conflict
-                    },
-                );
+        // An object below one the copy holds lives in an object the copied value shares, so
+        // any code reaching that object may have replaced it since the copy was made.
+        Some(match of(container)? {
+            MustHeld::Known(Held::Copy(site))
+                if self.first_load_plain(&facts.sites[site], container, &level) =>
+            {
+                MustHeld::Known(Held::Below { site, first: v })
             }
-            Held::Below { .. } => match (&level, kind) {
-                (Level::Attr(attr), _) => self.plain_read(container, attr),
-                (Level::Key(_), InstKind::MethodCall { .. }) => self.plain_get(container),
-                (Level::Key(_), _) => self.plain_item(container),
-            },
-        };
-        Some(if plain {
-            MustHeld::Known(held)
-        } else {
-            MustHeld::Conflict
+            _ => MustHeld::Conflict,
         })
     }
 
@@ -1141,16 +1133,18 @@ impl<'a> Mut202Fn<'a> {
             Level::Attr(attr) => copy.given.as_ref().is_none_or(|g| g.contains(attr)),
             Level::Key(_) => false,
         };
-        // A store under a key heki cannot read may store any; a load under one may read any.
-        let replaces = |stored: &Level| match (stored, level) {
-            (Level::Key(s), Level::Key(l)) => s.is_none() || l.is_none() || s == l,
-            (stored, level) => stored == level,
-        };
         let stores = self.stores_into(facts, copy.dst);
+        // A store under a key heki cannot read may store any; a load under one may read any.
+        let replaced = stores.by_level.contains_key(level)
+            || match level {
+                Level::Key(None) => stores.items,
+                Level::Key(Some(_)) => stores.by_level.contains_key(&Level::Key(None)),
+                Level::Attr(_) => false,
+            };
         let uses = self.copy_uses(facts, copy.dst);
         let container = matches!(copy.kind, CopyKind::Container { .. });
         !given
-            && !stores.keys().any(|(stored, _)| replaces(stored))
+            && !replaced
             && uses.complete
             && uses.uses.iter().all(|(v, u)| match *u {
                 Use::Inst(b, i) => {
