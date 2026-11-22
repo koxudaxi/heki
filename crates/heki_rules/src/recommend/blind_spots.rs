@@ -12,7 +12,9 @@ use crate::blind_spots::{BlindSite, BlindSpots, CallCounts};
 use crate::project::{Facts, Indexed, ParsedFile, Project, module_of, rel_posix};
 use heki_ast::LineIndex;
 use heki_diagnostics::RatchetBaseline;
-use heki_effect::{ModuleLayout, ProjectIndex, module_name_for_path, resolve_relative_module};
+use heki_effect::{
+    ModuleLayout, ProjectIndex, is_source_dir, module_name_for_path, resolve_relative_module,
+};
 use heki_env::{EcosystemOverride, HekiConfig};
 use heki_semantic::ModuleImport;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -607,7 +609,7 @@ struct Names {
     /// Of each module name, the files defining it: indices into `Project::files`, then into
     /// `Project::unread` after them (heki resolves a name into a file it could not read too).
     defined: FxHashMap<String, Vec<usize>>,
-    root_is_package: bool,
+    layout: ModuleLayout,
 }
 
 impl Names {
@@ -634,8 +636,21 @@ impl Names {
         Self {
             files,
             defined,
-            root_is_package: layout.root_is_package,
+            layout: layout.clone(),
         }
+    }
+
+    /// The source root holding file `i` (an index as in `defined`), `None` for the project
+    /// root.
+    fn root_of(&self, project: &Project, i: usize) -> Option<&str> {
+        let rel = match project.files.get(i) {
+            Some(f) => f.rel.clone(),
+            None => rel_posix(
+                &project.unread[i - project.files.len()].path,
+                &project.env.root,
+            ),
+        };
+        self.layout.source_root_of(Path::new(&rel))
     }
 
     /// What the dotted name `name` names under this layout: the files of the module heki
@@ -663,7 +678,7 @@ impl Names {
             *is_package,
             imp.level,
             imp.module.as_deref(),
-            self.root_is_package,
+            self.layout.root_is_package,
         )?;
         Some(if base.is_empty() {
             imp.imported_name.clone()
@@ -731,15 +746,17 @@ struct Unresolved {
 
 /// The source-root trial (no analysis: it computes the module names `heki check` would give the
 /// files with `src` set, and resolves the imports by them). A candidate is a directory below the
-/// project root, not a source root, below which the dotted path of an import that names no
-/// project module now is a file (`backend/config/env.py` for `import config.env`). An import of
-/// the standard library or of a package the catalog covers is no candidate's, and neither is one
-/// whose path is below several directories none of which holds the importing file. The candidates
-/// resolving the most imports are tried first, each with the ones already taken: one enters the
-/// block when its imports resolve, no two files of one kind then share a module name, every
-/// import that resolves now and every import of a candidate taken still names the same module of
-/// the same file, and no module whose name changes is named by a contract of the configuration or
-/// by an entry of `baseline`.
+/// project root, neither a source root nor a regular package, below which the dotted path of an
+/// import that names no project module now is a file (`backend/config/env.py` for
+/// `import config.env`). An import of the standard library or of a package the catalog covers is
+/// no candidate's, and neither is one whose path is below several directories none of which holds
+/// the importing file. The candidates resolving the most imports are tried first, each with the
+/// ones already taken: one enters the block when its imports resolve, no two files of one kind
+/// then share a module name, every import that resolves now and every import of a candidate taken
+/// still names the same module of the same file, and no module whose name changes is named by a
+/// contract of the configuration or by an entry of `baseline`. The block is then judged whole: a
+/// candidate under which an import no candidate taken was taken for would name a file below
+/// another root than the importing file's stays out, and the others are tried again.
 pub(super) fn source_roots(
     project: &Project,
     baseline: Option<&RatchetBaseline>,
@@ -749,7 +766,10 @@ pub(super) fn source_roots(
     let current = Names::under(project, &env.layout);
     let roots = &env.layout.source_roots;
     // The directories below which a dotted path is a file of the project: each pair once, and
-    // per dotted path how many directories and the first.
+    // per dotted path how many directories and the first. A regular package is no source root
+    // (as one, its `__init__.py` would be a module named `__init__`), as heki's detection
+    // decides.
+    let mut source_dirs: FxHashMap<String, bool> = FxHashMap::default();
     let mut pairs: FxHashSet<(String, String)> = FxHashSet::default();
     let mut below: FxHashMap<String, (usize, String)> = FxHashMap::default();
     for f in &project.files {
@@ -757,6 +777,12 @@ pub(super) fn source_roots(
         for i in 1..parts.len() {
             let dir = parts[..i].join("/");
             if roots.contains(&dir) {
+                continue;
+            }
+            let is_source_dir = *source_dirs
+                .entry(dir.clone())
+                .or_insert_with(|| is_source_dir(&env.root.join(&dir), &Path::is_file));
+            if !is_source_dir {
                 continue;
             }
             let Some((dotted, _)) = module_name_for_path(Path::new(&parts[i..].join("/"))) else {
@@ -769,9 +795,7 @@ pub(super) fn source_roots(
     }
     let mut out = SourceRoots::default();
     let mut by_dir: BTreeMap<String, Vec<Unresolved>> = BTreeMap::new();
-    // The imports the block must leave naming what they name: those that resolve now, then the
-    // imports of each candidate taken (by file, then index among its imports).
-    let mut kept: Vec<(usize, usize)> = Vec::new();
+    let mut resolved_now: Vec<(usize, usize)> = Vec::new();
     for (i, f) in project.files.iter().enumerate() {
         let mut lines = None;
         for (k, imp) in f.semantic.imports.iter().enumerate() {
@@ -779,7 +803,7 @@ pub(super) fn source_roots(
                 continue;
             };
             if current.target(&name).is_some() {
-                kept.push((i, k));
+                resolved_now.push((i, k));
                 continue;
             }
             let top = name.split('.').next().unwrap_or(&name);
@@ -817,12 +841,30 @@ pub(super) fn source_roots(
     ranked.sort_by(|a, b| {
         (std::cmp::Reverse(a.1.len()), &a.0).cmp(&(std::cmp::Reverse(b.1.len()), &b.0))
     });
-    let named = names_in_configuration(&env.cfg, baseline);
-    let mut accepted: Vec<String> = Vec::new();
-    // The module names with the candidates taken so far; `None` while none is.
-    let mut taken: Option<Names> = None;
     out.total = ranked.len();
-    for (n, (dir, imports)) in ranked.into_iter().take(MAX_LISTED).enumerate() {
+    ranked.truncate(MAX_LISTED);
+    let trial = SourceRootTrial {
+        project,
+        current: &current,
+        ranked: &ranked,
+        resolved_now: &resolved_now,
+        named: &names_in_configuration(&env.cfg, baseline),
+        shown,
+    };
+    // The block, judged whole: a candidate taken that makes an import no candidate taken was
+    // taken for resolve into a file below another root than the importing file's is left out,
+    // and the others are tried again without it.
+    let mut left_out: BTreeMap<usize, String> = BTreeMap::new();
+    let block = loop {
+        let block = trial.take(&left_out);
+        match block.by_chance(&trial) {
+            Some((n, reason)) => {
+                left_out.insert(n, reason);
+            }
+            None => break block,
+        }
+    };
+    for (n, (dir, imports)) in ranked.iter().enumerate() {
         let examples = imports
             .iter()
             .take(MAX_LISTED)
@@ -832,52 +874,147 @@ pub(super) fn source_roots(
                 name: u.name.clone(),
             })
             .collect();
-        let mut candidate = SourceRoot {
+        let verdict = block.verdicts.get(n).cloned().unwrap_or_else(|| {
+            Some(format!(
+                "not tried: only the first {MAX_SOURCE_ROOT_TRIALS} directories by imports are"
+            ))
+        });
+        out.candidates.push(SourceRoot {
             directory: dir.clone(),
             imports: imports.len(),
             examples,
-            in_block: false,
-            reason: String::new(),
+            in_block: verdict.is_none(),
+            reason: verdict.unwrap_or_else(|| {
+                "its imports resolve, and no import, contract, or baseline entry loses its \
+                 module"
+                    .to_owned()
+            }),
+        });
+    }
+    out.src = block.src;
+    out
+}
+
+/// What the source-root trial reads: the project, its module names now, the candidates by rank
+/// with their imports, the imports that resolve now, and the names the configuration uses.
+struct SourceRootTrial<'t> {
+    project: &'t Project,
+    current: &'t Names,
+    ranked: &'t [(String, Vec<Unresolved>)],
+    resolved_now: &'t [(usize, usize)],
+    named: &'t [(String, &'static str)],
+    shown: &'t dyn Fn(&Path) -> String,
+}
+
+/// The candidates one pass of the trial takes.
+struct Block {
+    /// Of each candidate tried, by rank: `None` when taken, else why not.
+    verdicts: Vec<Option<String>>,
+    /// `src` with the candidates taken, `None` when none is.
+    src: Option<Vec<String>>,
+    /// The module names with the candidates taken, `None` when none is.
+    names: Option<Names>,
+    /// The imports the block leaves naming what they name: those that resolve now, then those
+    /// of each candidate taken (by file, then index among its imports).
+    kept: FxHashSet<(usize, usize)>,
+}
+
+impl SourceRootTrial<'_> {
+    /// The first [`MAX_SOURCE_ROOT_TRIALS`] candidates tried in rank order, each with the ones
+    /// already taken, but for those `left_out` gives a reason for.
+    fn take(&self, left_out: &BTreeMap<usize, String>) -> Block {
+        let roots = &self.project.env.layout.source_roots;
+        let mut kept: Vec<(usize, usize)> = self.resolved_now.to_vec();
+        let mut block = Block {
+            verdicts: Vec::new(),
+            src: None,
+            names: None,
+            kept: FxHashSet::default(),
         };
-        if n >= MAX_SOURCE_ROOT_TRIALS {
-            candidate.reason = format!(
-                "not tried: only the first {MAX_SOURCE_ROOT_TRIALS} directories by imports are"
+        let mut accepted: Vec<&str> = Vec::new();
+        for (n, (dir, imports)) in self.ranked.iter().enumerate() {
+            if n >= MAX_SOURCE_ROOT_TRIALS {
+                break;
+            }
+            if let Some(reason) = left_out.get(&n) {
+                block.verdicts.push(Some(reason.clone()));
+                continue;
+            }
+            let mut with: Vec<String> = roots.clone();
+            with.extend(accepted.iter().map(|d| (*d).to_owned()));
+            with.push(dir.clone());
+            let layout = ModuleLayout {
+                source_roots: with.clone(),
+                root_is_package: false,
+            };
+            let trial = Names::under(self.project, &layout);
+            let taken = block.names.as_ref().unwrap_or(self.current);
+            let reason = refusal(
+                self.project,
+                self.current,
+                taken,
+                &trial,
+                imports,
+                &kept,
+                self.named,
+                self.shown,
             );
-            out.candidates.push(candidate);
-            continue;
-        }
-        let mut with: Vec<String> = roots.iter().chain(&accepted).cloned().collect();
-        with.push(dir.clone());
-        let layout = ModuleLayout {
-            source_roots: with.clone(),
-            root_is_package: false,
-        };
-        let trial = Names::under(project, &layout);
-        match refusal(
-            project,
-            &current,
-            taken.as_ref().unwrap_or(&current),
-            &trial,
-            &imports,
-            &kept,
-            &named,
-            shown,
-        ) {
-            Some(reason) => candidate.reason = reason,
-            None => {
-                candidate.in_block = true;
-                candidate.reason = "its imports resolve, and no import, contract, or baseline \
-                    entry loses its module"
-                    .to_owned();
+            if reason.is_none() {
                 accepted.push(dir);
-                out.src = Some(with);
+                block.src = Some(with);
                 kept.extend(imports.iter().map(|u| (u.file, u.import)));
-                taken = Some(trial);
+                block.names = Some(trial);
+            }
+            block.verdicts.push(reason);
+        }
+        block.kept = kept.into_iter().collect();
+        block
+    }
+}
+
+impl Block {
+    /// The first import, by file then position, that the block makes resolve although no
+    /// candidate taken was taken for it, into a file below a source root other than the
+    /// importing file's own: the rank of the candidate that root is, and why it stays out. Such
+    /// an import is of a candidate not taken, or of none (below several directories, a name of
+    /// the standard library); nothing shows the file it would name is the one meant.
+    fn by_chance(&self, trial: &SourceRootTrial<'_>) -> Option<(usize, String)> {
+        let names = self.names.as_ref()?;
+        let project = trial.project;
+        for (i, f) in project.files.iter().enumerate() {
+            for (k, imp) in f.semantic.imports.iter().enumerate() {
+                if self.kept.contains(&(i, k)) {
+                    continue;
+                }
+                let Some(name) = names.imported(i, imp) else {
+                    continue;
+                };
+                let Some(target) = names.target(&name) else {
+                    continue;
+                };
+                let own = names.root_of(project, i);
+                let Some(other) = (target.files.iter())
+                    .filter_map(|&j| names.root_of(project, j))
+                    .find(|root| Some(*root) != own)
+                else {
+                    continue;
+                };
+                let Some(n) = trial.ranked.iter().position(|(dir, _)| dir == other) else {
+                    continue;
+                };
+                let importer = (trial.shown)(&f.path);
+                return Some((
+                    n,
+                    format!(
+                        "`{name}` in {importer} would name {} below source root `{other}`, not \
+                         the one of {importer}: heki cannot tell it is the file meant",
+                        Target::describe(Some(target), project, trial.shown)
+                    ),
+                ));
             }
         }
-        out.candidates.push(candidate);
+        None
     }
-    out
 }
 
 /// The dotted names the configuration's contracts and `baseline`'s entries use, with what names

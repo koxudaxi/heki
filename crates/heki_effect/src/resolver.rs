@@ -157,18 +157,26 @@ impl ModuleLayout {
     /// ([`module_name_for_path`]).
     pub fn module_name(&self, rel: &Path) -> Option<(String, bool)> {
         let below_root = self
-            .source_roots
-            .iter()
-            .filter_map(|r| rel.strip_prefix(r).ok())
-            .min_by_key(|rest| rest.components().count());
+            .source_root_of(rel)
+            .and_then(|r| rel.strip_prefix(r).ok());
         module_name_for_path(below_root.unwrap_or(rel))
+    }
+
+    /// The deepest source root holding `rel` (a path as for [`Self::module_name`]), `None` when
+    /// only the project root holds it.
+    pub fn source_root_of(&self, rel: &Path) -> Option<&str> {
+        self.source_roots
+            .iter()
+            .filter_map(|r| Some((r, rel.strip_prefix(r).ok()?)))
+            .min_by_key(|(_, rest)| rest.components().count())
+            .map(|(r, _)| r.as_str())
     }
 }
 
 /// A directory that is not a package (no `__init__.py`, or a stub for one). As a source root it
 /// holds the project's top-level packages, namespace packages, and modules (`src/` is the layout
 /// packaging tools install from); a regular package is imported by its own name (`src.pkg`).
-fn is_source_dir(dir: &Path, is_file: &dyn Fn(&Path) -> bool) -> bool {
+pub fn is_source_dir(dir: &Path, is_file: &dyn Fn(&Path) -> bool) -> bool {
     dir.is_dir()
         && !["__init__.py", "__init__.pyi"]
             .iter()
