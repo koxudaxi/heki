@@ -32,9 +32,13 @@ listed there that costs less than a quarter of the limits fails the gate until i
 band between keeps a shape near the limit from failing on one machine and passing on another
 (shapes scale differently across machines than the calibration shape does).
 
+`--shard k/n` runs every n-th shape, starting at the k-th (each placement of a family is a shape),
+after the same calibration: CI runs the shapes in parallel jobs.
+
 Usage:
     python3 scripts/check_walk_shapes.py --heki target/release/heki
     python3 scripts/check_walk_shapes.py --heki target/release/heki --only call_chain --report
+    python3 scripts/check_walk_shapes.py --heki target/release/heki --shard 1/2
 """
 
 from __future__ import annotations
@@ -676,14 +680,26 @@ class Runner:
         return out
 
 
+def shard(text: str) -> tuple[int, int]:
+    """`k/n` with 1 <= k <= n."""
+    k, _, n = text.partition("/")
+    if not (k.isdigit() and n.isdigit() and 1 <= int(k) <= int(n)):
+        raise argparse.ArgumentTypeError(f"expected K/N with 1 <= K <= N, got {text!r}")
+    return int(k), int(n)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--heki", required=True, help="path to the heki binary (release build)")
     parser.add_argument("--only", action="append", default=[], help="run only these families")
     parser.add_argument("--report", action="store_true", help="print the costs, never fail")
+    parser.add_argument("--shard", type=shard, default=(1, 1), metavar="K/N",
+                        help="run every N-th shape, starting at the K-th")
     args = parser.parse_args()
     heki = str(Path(args.heki).resolve())
     families = [f for f in FAMILIES if not args.only or f.name in args.only]
+    first, step = args.shard
+    shapes = [(f, placement) for f in families for placement in f.placements][first - 1 :: step]
     problems: list[str] = []
     with tempfile.TemporaryDirectory(prefix="heki-walk-shapes-") as tmp:
         runner = Runner(heki, Path(tmp))
@@ -714,60 +730,59 @@ def main() -> int:
             factor = max(factor, took / seconds)
         limit_seconds = LIMIT_SECONDS * factor
         print(f"time limit on this machine: {limit_seconds:.2f} s", flush=True)
-        for family in families:
-            for placement in family.placements:
-                shape = (family.name, placement)
-                runner.contracts("" if family.contracts is None else family.contracts(family.size))
-                if family.project is not None:
-                    n, failed = family.size, None
-                elif family.size:
-                    n = family.size
-                    modeled = runner.modeled(source(family, placement, n))
-                    failed = None if modeled is True else modeled or "leaves the function unmodeled"
-                else:
-                    n, failed = runner.largest_modeled(family, placement)
-                text = source(family, placement, n)
-                listed = shape in KNOWN_OVER
-                over = []
-                # Whether a listed shape costs clearly less than the limits.
-                well_under = failed is None
-                if failed is not None:
-                    print(f"{family.name}/{placement} n={n}: building the IR {failed}", flush=True)
-                    over.append("build")
-                for watch in () if failed is not None else (False,) if listed else (False, True):
-                    # A listed shape only has to show when it drops under the limits.
-                    timeout = base_seconds + 2 * limit_seconds if listed else TIMEOUT_SECONDS
-                    seconds, peak, code = runner.check(text, watch, timeout=timeout)
+        for family, placement in shapes:
+            shape = (family.name, placement)
+            runner.contracts("" if family.contracts is None else family.contracts(family.size))
+            if family.project is not None:
+                n, failed = family.size, None
+            elif family.size:
+                n = family.size
+                modeled = runner.modeled(source(family, placement, n))
+                failed = None if modeled is True else modeled or "leaves the function unmodeled"
+            else:
+                n, failed = runner.largest_modeled(family, placement)
+            text = source(family, placement, n)
+            listed = shape in KNOWN_OVER
+            over = []
+            # Whether a listed shape costs clearly less than the limits.
+            well_under = failed is None
+            if failed is not None:
+                print(f"{family.name}/{placement} n={n}: building the IR {failed}", flush=True)
+                over.append("build")
+            for watch in () if failed is not None else (False,) if listed else (False, True):
+                # A listed shape only has to show when it drops under the limits.
+                timeout = base_seconds + 2 * limit_seconds if listed else TIMEOUT_SECONDS
+                seconds, peak, code = runner.check(text, watch, timeout=timeout)
+                cost = (seconds - base_seconds, peak - base_peak)
+                if not listed and (cost[0] > limit_seconds or cost[1] > LIMIT_MIB or code == -9):
+                    # Once more, against noise.
+                    seconds, peak, code = runner.check(text, watch)
                     cost = (seconds - base_seconds, peak - base_peak)
-                    if not listed and (cost[0] > limit_seconds or cost[1] > LIMIT_MIB or code == -9):
-                        # Once more, against noise.
-                        seconds, peak, code = runner.check(text, watch)
-                        cost = (seconds - base_seconds, peak - base_peak)
-                    mode = "watch" if watch else "check"
-                    if code == -9:
-                        spent = f"stopped after {cost[0]:.0f} s"
-                    elif code not in (0, 1):
-                        spent = f"crashed (exit code {code})"
-                    else:
-                        spent = f"{cost[0]:.2f} s, {cost[1]:.0f} MiB"
-                    print(f"{family.name}/{placement} n={n} {mode}: {spent}", flush=True)
-                    if cost[0] > limit_seconds or cost[1] > LIMIT_MIB or code not in (0, 1):
-                        over.append(mode)
-                    if cost[0] > limit_seconds / 4 or cost[1] > LIMIT_MIB / 4 or code not in (0, 1):
-                        well_under = False
-                if over and not listed:
-                    problems.append(f"{family.name}/{placement} at n={n} costs more than "
-                                    f"{limit_seconds:.1f} s or {LIMIT_MIB:.0f} MiB ({', '.join(over)})")
-                if listed and well_under:
-                    problems.append(f"{family.name}/{placement} costs less than a quarter of the limits: "
-                                    "remove it from KNOWN_OVER")
-                if family.project is None and not over:
-                    steps = step_growth(runner, family, placement, n, text)
-                    if shape not in KNOWN_STEPS:
-                        problems += steps
-                    elif not steps:
-                        problems.append(f"{family.name}/{placement} takes linear steps and spends no "
-                                        "budget: remove it from KNOWN_STEPS")
+                mode = "watch" if watch else "check"
+                if code == -9:
+                    spent = f"stopped after {cost[0]:.0f} s"
+                elif code not in (0, 1):
+                    spent = f"crashed (exit code {code})"
+                else:
+                    spent = f"{cost[0]:.2f} s, {cost[1]:.0f} MiB"
+                print(f"{family.name}/{placement} n={n} {mode}: {spent}", flush=True)
+                if cost[0] > limit_seconds or cost[1] > LIMIT_MIB or code not in (0, 1):
+                    over.append(mode)
+                if cost[0] > limit_seconds / 4 or cost[1] > LIMIT_MIB / 4 or code not in (0, 1):
+                    well_under = False
+            if over and not listed:
+                problems.append(f"{family.name}/{placement} at n={n} costs more than "
+                                f"{limit_seconds:.1f} s or {LIMIT_MIB:.0f} MiB ({', '.join(over)})")
+            if listed and well_under:
+                problems.append(f"{family.name}/{placement} costs less than a quarter of the limits: "
+                                "remove it from KNOWN_OVER")
+            if family.project is None and not over:
+                steps = step_growth(runner, family, placement, n, text)
+                if shape not in KNOWN_STEPS:
+                    problems += steps
+                elif not steps:
+                    problems.append(f"{family.name}/{placement} takes linear steps and spends no "
+                                    "budget: remove it from KNOWN_STEPS")
     for problem in problems:
         print(problem, file=sys.stderr)
     return 1 if problems and not args.report else 0
