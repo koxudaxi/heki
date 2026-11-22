@@ -1536,7 +1536,7 @@ impl<'a> Extractor<'a> {
     /// parameters and copies with the alias `container` (`param_alias`, `param_copy_alias`): it
     /// stores or deletes that key on no object ([`Rebound::keeps_key`]); and for `None`, every
     /// item at every position: it stores, deletes, or adds no item of a value with that alias
-    /// (`c[i] = v`, `c.append(v)`, `c.insert(0, v)`, `c.update(...)`).
+    /// (`c[i] = v`, `c.append(v)`, `c.insert(0, v)`, `c.appendleft(v)`, `c.update(...)`).
     fn keeps_items(&self, container: &(u8, Option<String>), key: Option<&str>) -> bool {
         let Some(rebound) = self.rebound.get() else {
             return false;
@@ -1560,7 +1560,9 @@ impl<'a> Extractor<'a> {
                         if matches!(
                             method.as_str(),
                             "append"
+                                | "appendleft"
                                 | "extend"
+                                | "extendleft"
                                 | "insert"
                                 | "update"
                                 | "setdefault"
