@@ -143,8 +143,8 @@ jobs:
           command: sdist
           args: --out dist
       - run: uvx twine check dist/*
-      # The tests in the unpacked source distribution run in ci.yml's `source distribution
-      # tests` job, which the `ci` job below runs on the release commit.
+      # ci.yml's Linux tests are built and run from the unpacked source distribution (`build
+      # tests` and its `test` shards), which the `ci` job below runs on the release commit.
       - name: heki builds and runs from the source distribution
         run: |
           uv venv .sdist-smoke
