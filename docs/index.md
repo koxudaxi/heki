@@ -4,8 +4,8 @@
   <img src="assets/heki-banner.png" alt="heki: a snake in front of a brick wall" width="600">
 </p>
 
-🧱 heki (壁, "wall") is a static checker for Python, written in Rust. It tracks side effects and
-mutations across function calls.
+🧱 heki (壁, Japanese for "wall") is a static checker for Python, written in Rust. It tracks side
+effects and mutations across function calls.
 
 It catches blocking I/O in `async` code, database queries and HTTP clients in loops, and
 quadratic loops. You can also add rules in `pyproject.toml` to restrict which functions may
