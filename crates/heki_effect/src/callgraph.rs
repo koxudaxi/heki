@@ -1128,6 +1128,26 @@ fn transfer(
             }
             None => {}
         }
+        // The callee's parameter is an object the caller's parameter holds as an item or an
+        // element, or one below it: any change of it is a change below that parameter.
+        for (p, path) in &o.param_elements {
+            t.note_param_change(*p, path.clone(), paths.iter().all(memo));
+            t.changed_param_attrs
+                .entry(*p)
+                .or_default()
+                .insert(path.clone());
+        }
+        // A shallow copy of the caller's parameter shares exactly the objects below its top
+        // level with it.
+        if let Some((p, copied)) = &o.param_copy
+            && let Some(attrs) = facts.changed_param_attrs.get(&i)
+        {
+            for attr in attrs {
+                let path = copied.clone().unwrap_or_else(|| attr.clone());
+                t.note_param_change(*p, path.clone(), memo(attr));
+                t.changed_param_attrs.entry(*p).or_default().insert(path);
+            }
+        }
         if let Some(attr) = &o.self_attr {
             t.mutates_self_attrs.insert(AttrKeyPath {
                 attr: attr.clone(),
@@ -1406,7 +1426,7 @@ pub(crate) fn indirect_writes<'a>(
                 out.extend(
                     paths
                         .iter()
-                        .filter(|p| !p.is_empty())
+                        .filter(|p| !p.is_empty() && *p != crate::ELEMENTS_PATH)
                         .map(|attr| IndirectWrite {
                             param,
                             origin,

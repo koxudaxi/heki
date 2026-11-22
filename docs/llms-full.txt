@@ -266,7 +266,7 @@ report names the missing obligation instead of offering a fix. See [Fixes and sa
 - 🎯 See what heki [covers and does not cover](https://heki.koxudaxi.dev/scope/).
 - 📦 [Install heki](https://heki.koxudaxi.dev/installation/) and 🚀 [run it on a project](https://heki.koxudaxi.dev/getting-started/).
 - ⚙️ [Configure](https://heki.koxudaxi.dev/configuration/) rule selection, contracts, and the Python version.
-- 📏 Browse the [40 rules](https://heki.koxudaxi.dev/rules/), and see [how precise each one is](https://heki.koxudaxi.dev/precision/).
+- 📏 Browse the [41 rules](https://heki.koxudaxi.dev/rules/), and see [how precise each one is](https://heki.koxudaxi.dev/precision/).
 - 🔧 Read how [fixes are proven safe](https://heki.koxudaxi.dev/fixes/).
 - 🪜 [Adopt it gradually](https://heki.koxudaxi.dev/adoption/) with a Ratchet baseline in CI.
 - 🖥️ Use it from [your editor](https://heki.koxudaxi.dev/lsp/) or 🤖 [a coding agent](https://heki.koxudaxi.dev/coding-agents/).
@@ -1088,7 +1088,8 @@ supported version that every clause admits:
 - A run of `full` or `concise` output that leaves heuristic rules off, or heuristic reports out,
   says how many.
 - A prefix or `ALL` never enables the opt-in rules (`EFF105`, `EFF106`, `EFF107`, `EFF109`,
-  `EFF110`, `MUT101`, `MUT103`, `MUT106`, `MUT107`, `MUT108`, `MUT111`, `MUT112`, `MUT113`): they
+  `EFF110`, `MUT101`, `MUT103`, `MUT106`, `MUT107`, `MUT108`, `MUT111`, `MUT112`, `MUT113`,
+  `MUT115`): they
   need their exact code or name. In `ignore`, a prefix covers every rule it matches.
 - The command line wins: `--select` replaces `select`, `--extend-select` and `--ignore` add to the
   configured lists, and `--heuristic` / `--no-heuristic` replace `heuristic`.
@@ -2100,6 +2101,172 @@ lost.
 
 ---
 
+Source: https://heki.koxudaxi.dev/recommend/
+
+# Configuration Advice
+
+!!! warning "Experimental"
+
+    `heki recommend` is experimental: what it prints, its policies, and its JSON object can
+    still change in any release. See [Experimental Features](https://heki.koxudaxi.dev/experimental/).
+
+`heki recommend` analyzes a project as `heki check` does and prints advice on its
+configuration, with counts from the project and the keys to add to `[tool.heki]`. It writes no
+file and runs none of the project's code.
+
+```console
+$ heki recommend
+$ heki recommend app --output-format json
+```
+
+It takes the options of `heki check` that decide what is analyzed: `--select`,
+`--extend-select`, `--ignore`, `--heuristic` / `--no-heuristic`, `--config`,
+`--target-version`, and `--baseline`. The advice is relative to that configuration.
+
+## What it prints
+
+- **The project**: the root, and the files and functions analyzed.
+- **Reports now**: what `heki check` prints with the configuration, as exact and heuristic
+  reports (reports sharing a root cause count once, as `heki check` folds them), the heuristic
+  reports of exact rules that `lint.heuristic = false` withholds, and the heuristic rules it
+  leaves off. With a baseline, the reports it allows and the regressions.
+- **Rules worth enabling here**: every rule the configuration leaves off, and every exact rule
+  whose heuristic reports it withholds, with the reports naming it in `extend-select` would add
+  (exact and heuristic, and with a baseline the regressions among them), its consequence, and
+  the published measurement of how often its reports are right about the code
+  ([Rule Precision](https://heki.koxudaxi.dev/precision/)), or "not measured". Rules without reports here are named on
+  one line.
+- **Notes**: what to know to weigh the advice. When the paths given leave out Python files
+  below the project root, the note names them: heki takes the files it analyzed as the whole
+  project, so what it says about callers, readers, and writers holds for those files only. It
+  counts up to 50 such files, among the first 10,000 entries below the root.
+- **The keys to add or change**, for the file the project reads its configuration from:
+  `[tool.heki...]` tables in a `pyproject.toml`, tables at the top level in `heki.toml`,
+  `.heki.toml`, or a `--config` file. Without a configuration file, the keys go into a new
+  `pyproject.toml`. The block only adds: an array the file already sets is written whole, with
+  the additions named in a comment, since TOML cannot append to an array.
+
+## Which rules the block enables
+
+A rule enters the block when it reports here, is not experimental, reports bugs (its severity
+is `error`), and no published measurement shows real harm below 10%. The other rules are
+listed with the reason they stay out:
+
+- slower code, and bugs that are rarely harmful, are worth reading but not worth failing a run
+  for;
+- experimental rules are listed apart, under "Optional", and never enabled;
+- a rule the configuration ignores stays ignored;
+- `MUT103` compares with a summary snapshot you save with `heki snapshot --write`;
+- contract rules run when their contract is declared, so they are not listed here.
+
+## How the advice is kept honest
+
+- Every count comes from the project, through the analysis `heki check` runs: inline
+  suppressions, `per-file-ignores`, and the baseline apply as they do there. With the block
+  applied, `heki check` prints the reports it promises.
+- How often a rule's reports are right is quoted only from published measurements, with their
+  sample, interval, and date; a rule without one is "not measured". No score is computed.
+- The same input, configuration, and heki version give the same report, on any machine and
+  with any number of threads.
+- It writes nothing and keeps every value the configuration sets.
+
+[ADR-020](https://github.com/koxudaxi/heki/blob/main/docs/DESIGN_HISTORY_AND_ADR.md#adr-020-heki-recommend-advice-on-the-configuration-from-the-projects-own-analysis)
+records these rules and the decisions behind the command.
+
+## Example
+
+A project with three modules and a test file:
+
+```python
+# app/users.py
+import requests
+
+def fetch_name(user_id: int) -> str:
+    return requests.get(f"https://api.example.com/users/{user_id}", timeout=5).text
+
+def load_user(user_id: int) -> dict[str, str]:
+    return {"id": str(user_id), "name": fetch_name(user_id)}
+
+def known_names(names: list[str], source: list[str]) -> list[str]:
+    known = list(source)
+    found = []
+    for name in names:
+        if name in known:
+            found.append(name)
+    return found
+```
+
+```python
+# app/report.py
+def total_and_count(rows: list[int]) -> tuple[int, int]:
+    items = (r for r in rows)
+    total = sum(items)
+    count = len(list(items))
+    return total, count
+```
+
+```python
+# app/api.py
+from app.users import load_user
+
+async def get_user(user_id: int) -> dict[str, str]:
+    return load_user(user_id)
+```
+
+```python
+# tests/test_users.py
+def test_load_user() -> None:
+    pass
+```
+
+```console
+$ heki recommend app
+heki recommend (experimental) on .: 3 file(s), 9 function(s)
+
+Reports now  1 shown (1 exact, 0 heuristic), 1 heuristic withheld, 4 heuristic rule(s) off
+
+Rules worth enabling here
+  rule    reports  exact  consequence  right about the code (published)  real harm  block
+  MUT106        1      -  bug          not measured                      -          yes
+  OPT110        1      0  slowdown     78% (65-87%), n=50, 2026-11-21    6%         no: slower code, not a bug
+  No reports here: EFF102, EFF105, EFF106, EFF107, EFF109, EFF110, EFF111, EFF113, MUT101, MUT107, MUT108, MUT111, MUT112, MUT113, MUT115, OPT112
+  MUT103: it compares with a saved summary snapshot: run `heki snapshot --write`, then select it.
+
+Notes
+  - 1 Python file(s) below the project root were not analyzed (tests/test_users.py): heki takes the analyzed files as the whole project, so what it says about callers, readers, and writers holds for those files only.
+
+pyproject.toml: keys to add or change
+  [tool.heki.lint]
+  extend-select = ["MUT106"]  # adds MUT106
+```
+
+## JSON output
+
+`--output-format json` prints one object, described by the JSON Schema at
+[schemas/recommend-1.json](https://heki.koxudaxi.dev/schemas/recommend-1.json), the URL its `$schema` field names, which
+`heki recommend --output-format-json-schema` prints.
+Within a `version`, fields are only added; the `version` changes when a field is removed or
+changes meaning.
+
+| Field | Content |
+| ----- | ------- |
+| `kind`, `version`, `heki` | `heki-recommend`, the version of the object, and the version of heki |
+| `root`, `config_file`, `table_prefix` | the project root, the configuration file (`null` without one), and the table its keys are under (`tool.heki`, or empty) |
+| `analyzed` | the files and functions analyzed, the files that could not be read or parsed, the paths given, and the Python files below the root they leave out |
+| `runs` | the analyses the report was computed from |
+| `reports_now` | the counts of "Reports now" |
+| `rules` | each rule of "Rules worth enabling here": its metadata, the reports it would add, its published measurement, whether the block enables it, and why |
+| `notes` | the notes |
+| `config`, `config_toml` | the keys to add or change, as keys and values and as TOML |
+| `content` | the report as the text output prints it |
+
+Exit codes: `0` the report was printed; `2` configuration, I/O, or syntax errors (the report
+of the other files is still printed, as `heki check` does). It never exits with `1`: it checks
+nothing.
+
+
+---
+
 Source: https://heki.koxudaxi.dev/cli-reference/
 
 # CLI Reference
@@ -2122,6 +2289,7 @@ Commands:
   snapshot     Manage interprocedural effect summary snapshots (`MUT103`)
   assumptions  List Assumption A1 hazards (`eval`, `exec`, `locals()`, frame introspection, functions too large to model) in a project
   inspect      Experimental: what heki knows about one function (its effects, what it changes, keeps, and returns, whether it is pure, its callers, reports, and contracts)
+  recommend    Experimental: advice on the configuration of a project, with counts from its analysis, and the keys to add (it writes no file)
   help         Print this message or the help of the given subcommand(s)
 
 Options:
@@ -2290,6 +2458,41 @@ Options:
           Print help
 ```
 
+## `heki recommend`
+
+```text
+Experimental: advice on the configuration of a project, with counts from its analysis, and the keys to add (it writes no file)
+
+Usage: heki recommend [OPTIONS] [PATHS]...
+
+Arguments:
+  [PATHS]...  The project to analyze, as for `heki check` [default: .]
+
+Options:
+      --output-format <OUTPUT_FORMAT>
+          `text`, or `json` (one object, described by the JSON Schema its `$schema` names) [default: text] [possible values: text, json]
+      --output-format-json-schema
+          Print the JSON Schema of the object of `--output-format json` and exit
+      --select <SELECT>
+          Comma-separated rule codes, prefixes, or slugs to enable
+      --extend-select <EXTEND_SELECT>
+          Additional rules to enable on top of defaults/config
+      --ignore <IGNORE>
+          Comma-separated rule codes or slugs to ignore
+      --heuristic
+          Also run the heuristic rules, whose reports can be wrong about the code, by default and for every prefix and `ALL` (`lint.heuristic = true`)
+      --no-heuristic
+          Run a heuristic rule only when its code or name is selected (`lint.heuristic = false`)
+      --config <CONFIG>
+          Explicit configuration file: a `pyproject.toml` (its `[tool.heki]` table) or a file with the keys at its top level, like `heki.toml`
+      --target-version <TARGET_VERSION>
+          Target Python version (`py311`, `py312`, `py313`, `py314`, `py315`)
+      --baseline <BASELINE>
+          Ratchet baseline TOML file (line-number-independent)
+  -h, --help
+          Print help
+```
+
 
 ---
 
@@ -2297,7 +2500,7 @@ Source: https://heki.koxudaxi.dev/rules/
 
 # Rules
 
-heki has 40 rules in four families. A rule is exact when it reports only what it established and was certified on the corpus, and heuristic (≈) when a report can be wrong about the code: [Rule Precision](https://heki.koxudaxi.dev/precision/) says how a rule is certified and what each one measured. Each rule's page says what a report states.
+heki has 41 rules in four families. A rule is exact when it reports only what it established and was certified on the corpus, and heuristic (≈) when a report can be wrong about the code: [Rule Precision](https://heki.koxudaxi.dev/precision/) says how a rule is certified and what each one measured. Each rule's page says what a report states.
 
 - The exact rules run by default, and for a prefix such as `EFF` or `ALL`. A report of an exact rule that did not establish every premise (an `OPT` report whose rewrite is not proven) is shown where a heuristic rule would run.
 - A heuristic rule runs when `select` / `extend-select` names its code or name. With `lint.heuristic = true` (`--heuristic`), the heuristic rules that are not opt-in also run by default and for a prefix or `ALL`.
@@ -2330,6 +2533,7 @@ Shared state written behind its owner's back: stale caches, write-ownership cont
 | MUT112 | [conditional-ownership-mutation](https://heki.koxudaxi.dev/rules/conditional-ownership-mutation/) | Opt-in: changing in place a value that is a new object on one path and borrowed state (a parameter, an attribute, a global, or what a function returns of such state) on another. | ≈ 🔌 🧪 |
 | MUT113 | [iterated-container-mutation](https://heki.koxudaxi.dev/rules/iterated-container-mutation/) | Opt-in: a dict, set, or deque of the instance changed while a method iterates it, by another method while a generator is suspended in the loop or by a function the loop's body calls (the next step raises `RuntimeError`). | ≈ 🔌 🧪 |
 | MUT114 | [cached-result-mutation](https://heki.koxudaxi.dev/rules/cached-result-mutation/) | Changing in place the list, dict, or set that a `functools.lru_cache` / `functools.cache` function returned (the cache hands the same object to later calls with the same arguments), directly or through the functions that return it. |  |
+| MUT115 | [shallow-copy-nested-mutation](https://heki.koxudaxi.dev/rules/shallow-copy-nested-mutation/) | Opt-in: changing in place an object below a shallow copy the function made of state that outlives the call (`dict(x)`, `x.copy()`, `copy.copy(x)`, `model_copy()`): the copied value holds the same object, so the change is seen through it too. | ≈ 🔌 |
 | MUT201 | [write-owner-violation](https://heki.koxudaxi.dev/rules/write-owner-violation/) | Writing a guarded attribute/container (directly, via alias, or via helper) outside declared `write-owners`. | ≈ 📜 |
 | MUT202 | [readonly-return-mutation](https://heki.koxudaxi.dev/rules/readonly-return-mutation/) | Mutating a shared object returned by a declared `readonly-returns` producer, directly or through the functions that return it. | ≈ 📜 |
 | MUT203 | [read-owner-violation](https://heki.koxudaxi.dev/rules/read-owner-violation/) | Reading a guarded attribute (directly, via alias, `getattr`, or `__dict__`) outside declared `read-owners`. | ≈ 📜 |
@@ -2590,6 +2794,7 @@ An experimental rule is never enabled by default: it runs only when `select` or 
 | `cli-option.generate-prompt` | cli-option | `heki check --generate-prompt` | 0.2.2 | - |
 | `cli-option.profile` | cli-option | `heki check --profile` | 0.1.1 | - |
 | `command.inspect` | command | `heki inspect` | 0.2.1 | - |
+| `command.recommend` | command | `heki recommend` | 0.2.2 | - |
 | `rule.EFF109` | rule | [`EFF109`](https://heki.koxudaxi.dev/rules/lock-reacquired-while-held/) | 0.2.1 | - |
 | `rule.EFF110` | rule | [`EFF110`](https://heki.koxudaxi.dev/rules/exclusive-object-fanout/) | 0.2.1 | - |
 | `rule.MUT101` | rule | [`MUT101`](https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/) | 0.1.0 | - |
@@ -2620,6 +2825,14 @@ It reads the output of CPython 3.15's sampling profiler, and that format can sti
 - **Since:** 0.2.1
 
 The facts it shows, its purity verdict, and its JSON object can still change as heki's summaries close gaps; the object's `version` changes when a field is removed or changes meaning.
+
+## `command.recommend`
+
+- **Kind:** command
+- **Target:** `heki recommend`
+- **Since:** 0.2.2
+
+The sections, their policies, the candidates it infers, and its JSON object can still change as the policies are calibrated; the object's `version` changes when a field is removed or changes meaning.
 
 ## `rule.EFF109`
 
@@ -2944,7 +3157,8 @@ Each diagnostic has:
 
 `heki rule <CODE>` prints a rule's documentation: what it does, why it matters, and what to do
 instead, which makes a good prompt for the fix. `heki rule --all --output-format json` gives
-every rule's metadata and documentation.
+every rule's metadata and documentation, the premises of its exact claim, and its published
+precision: its certification and its latest measurement ([Rule Precision](https://heki.koxudaxi.dev/precision/)).
 
 ## Ask a model: `heki check --generate-prompt` (experimental)
 
@@ -3143,7 +3357,10 @@ a rule becomes exact](https://heki.koxudaxi.dev/precision/#how-a-rule-becomes-ex
 4. `checkers.py` refutes a claim from the runs: an `EFF101` call that returned without a waiting
    call during it, an `EFF103` iteration that completed without a statement, a `DATA101`
    iteration whose new value was not built from the previous one, a `MUT110` or `MUT114` line
-   that ran without changing the object the report names, an `OPT` accumulator of another type,
+   that ran without changing the object the report names, a `MUT115` line that changed another
+   object than the copied value held at the access path when the copy line ran (or left it as it
+   was, or whose copy held another object there; `monitor.py` loads each path at those lines
+   without running code of the program), an `OPT` accumulator of another type,
    or an `OPT113` inner item with a different key that ran more than the comparison. For the
    `OPT` rewrites, the driver applies `heki check --fix --include-size-dependent` to a copy and
    compares results, exceptions, arguments, output, and library calls on the same inputs.
@@ -3296,9 +3513,9 @@ rule and one contract of each kind (a family may add its own), through `heki che
 `--watch` engine (a family of the facts only `heki recommend` reads also through
 `heki dump-recommend-facts`), and fails when it costs more than 1 s (on the machine the limits
 were measured on, scaled to the machine running the gate by linear shapes of calls and of loops)
-or 1 GiB beyond an empty module. `heki check --walk-steps <path>` (hidden) writes the steps each owner's walks took
-per function as JSON: the gate also fails when an owner's steps grow more than 2.5 times from half
-the size to the full size, or when a budget is spent on a shape like real code.
+or 1 GiB beyond an empty module. `heki check --walk-steps <path>` (hidden) writes the steps each
+owner's walks took per function as JSON: the gate also fails when an owner's steps grow more than
+2.5 times from half the size to the full size, or when a budget is spent on a shape like real code.
 `KNOWN_OVER` in the script lists the shapes known to cost more, and only shrinks: a listed shape
 runs only through `heki check` (not the `--watch` engine), with a short timeout, and fails the gate
 once it costs under a quarter of the limits. `KNOWN_STEPS` lists, the same way, the shapes whose
@@ -3383,15 +3600,17 @@ $ uvx --from "zensical==0.1.2" zensical serve
   away in any release, and the release notes list each change; once it is stable, its entry is
   removed.
 - Each rule's certainty (`exact` or `heuristic`) and activation (`Default`, `OptIn`, or
-  `Contract`) are fields of its entry in `crates/heki_rules/src/lib.rs`. The generator marks the
-  heuristic rules on the generated pages, copies each rule's measurement from
-  [Rule Precision](https://heki.koxudaxi.dev/precision/) into its page, and fails when a hand-written table row says
-  "heuristic" other than exactly when a rule it names is heuristic, when an exact rule lacks a
-  certification there with no false claim in its census and holdout run, when a rule's
-  documentation has no "What a report states" section, or when an exact rule's page lists other
-  premises under "Its premises:" than the premise table (`crates/heki_rules/src/premises.rs`,
-  which `heki rule --output-format json` prints with each rule), in another order or under other
-  names.
+  `Contract`) are fields of its entry in `crates/heki_rules/src/lib.rs`, and the certifications
+  and measurements of [Rule Precision](https://heki.koxudaxi.dev/precision/) are data in
+  `crates/heki_rules/src/precision.rs`, which `heki rule --output-format json` prints with each
+  rule. The generator marks the heuristic rules on the generated pages, writes the two tables of
+  Rule Precision between the markers of their generated parts, copies each rule's measurement into
+  its page, and fails when a hand-written table row says "heuristic" other than exactly when a
+  rule it names is heuristic, when an exact rule lacks a certification with no false claim in its
+  census and holdout run, when a rule's documentation has no "What a report states" section, or
+  when an exact rule's page lists other premises under "Its premises:" than the premise table
+  (`crates/heki_rules/src/premises.rs`, which `heki rule --output-format json` prints with each
+  rule), in another order or under other names.
 - The Docs workflow deploys the site to Cloudflare Pages (heki.koxudaxi.dev) once a published
   release is on PyPI (the newest release only), or when it is run by hand on `main`, so the site
   documents the released version. That job runs in the `docs-production` environment, which
@@ -3547,7 +3766,7 @@ The workspace is split by responsibility (`crates/`):
 | `heki_env` | configuration loading and the runtime profile of the target Python version |
 | `heki_effect` | call graph, per-function effect summaries, incremental project index |
 | `heki_soundness` | the alias analysis and proof obligations behind `OPT` rewrites (never depends on `heki_effect`, never reads annotations) |
-| `heki_rules` | the rules, rule selection, project discovery |
+| `heki_rules` | the rules, rule selection, project discovery and indexing |
 | `heki_diagnostics` | output formats, inline suppressions, Ratchet baselines, fix application |
 | `heki_profile` | offline profile dumps |
 | `heki_lsp` | the incremental LSP server and the `--watch` engine |
@@ -4616,7 +4835,8 @@ It does not report:
 - a conditional expression changed in place without a name (`(a if c else b).append(x)`): the
   code picks the container on purpose;
 - attribute assignments, and changes of a value below the borrowed one (`x[0].append(1)`): a
-  copy of `x` shares those too;
+  copy of `x` shares those too (an item or attribute of a shallow copy of `x`, `dict(x)["k"]`,
+  is the item of `x` it holds, borrowed);
 - `self` in its own methods, and paths a branch on a constant never takes (`while True:`).
 
 ## What a report states
@@ -4748,8 +4968,11 @@ count for a read.
     `__init__` heki cannot read, may lead it to an installed module. A relative name is
     anchored at `package` (a text, or the module's own `__package__` or `__name__`). Inside a
     `try` that takes an `ImportError`, such a call still counts;
-  - `mutates-params`: mutating a parameter, its attributes, or its contents. For a method,
-    parameter 0 is `self`, so a method writing `self.x` mutates a parameter.
+  - `mutates-params`: mutating a parameter, its attributes, or its contents, also an object it
+    holds as an item or an element (`p["k"].append(x)`, `for row in p: row.clear()`), directly
+    or through a shallow copy of it (`dict(p)["k"].append(x)`), unless the function gave that
+    item a new object first. For a method, parameter 0 is `self`, so a method writing `self.x`
+    mutates a parameter.
 - `write-universe` with `allow-writes` states the writes a scope may make positively: a reached
   write of a `write-universe` entry that no `allow-writes` entry names is reported, in every form
   `writes-targets` follows. `allow-writes` also exempts writes from `write-targets` in the same
@@ -7206,8 +7429,11 @@ reference), and the deep copy sanitizers of the ecosystem knowledge base clear i
 sanitizer declared `copy-sanitizer = "shallow"`, and slices of builtin lists, other builtin
 sequences, and values whose class heki cannot infer, `rows()[:]`) free the top level only: the
 values below stay shared, so a helper rebinding an attribute of the copy (`b.name = "new"`)
-changes nothing shared, and one changing the object an attribute holds (`b.tags.append(x)`, also
-on its own shallow copy of the argument) does. A slice of an object of another known class may
+changes nothing shared, and one changing the object an attribute or an item holds
+(`b.tags.append(x)`, `b["tags"].append(x)`, `for row in b: row.clear()`, also on its own
+shallow copy of the argument) does, unless it gave that item a new object first. A producer
+that is not `deep` shares only the object itself: a helper changing what it holds as items does
+not change it. A slice of an object of another known class may
 be a view of it (`numpy`) and stays shared. A `copy()` method of a project class copies as
 deeply as its body does: its result is shared only when the method returns a shared value. A
 wrapper that returns a copy on one path and the shared value on another still returns a shared
@@ -7499,6 +7725,118 @@ Applied by `heki check --fix` only when proven safe, with the same obligations a
   `len(s)`, truthiness, `==` / `!=` with a builtin value); a set that is iterated, converted
   (`sorted(s)`, `list(s)`), formatted, returned, stored, yielded, or passed to other code keeps
   `s = s | t`. A dict keeps its insertion order either way.
+
+
+---
+
+Source: https://heki.koxudaxi.dev/rules/shallow-copy-nested-mutation/
+
+# shallow-copy-nested-mutation (MUT115)
+
+Family: Mutation & State (MUT) · Heuristic · Opt-in · Severity `error` (a bug) · No automatic fix
+
+Opt-in: changing in place an object below a shallow copy the function made of state that outlives the call (`dict(x)`, `x.copy()`, `copy.copy(x)`, `model_copy()`): the copied value holds the same object, so the change is seen through it too.
+
+!!! note "Heuristic"
+
+    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs only when `select` or `extend-select` names its code or name. It has not been measured yet. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
+
+## What it does
+Checks in-place changes of an object that the function reaches below a shallow copy it made
+itself of state that outlives the call: a parameter, a global, a variable of an enclosing
+function, or an attribute or item read from such state. A shallow copy is a new object holding the same objects as the copied
+value, so changing one of those objects changes it for the copied value too.
+The rule is opt-in: enable it with `--extend-select MUT115` or `extend-select = ["MUT115"]`.
+
+The copies are those `MUT202` follows: a builtin container's `copy()`, `dict(x)`, `list(x)`,
+`set(x)`, a display that only unpacks the value (`{**x}`, `[*x]`), a slice of a builtin list,
+`copy.copy`, `copy.replace`, `dataclasses.replace`, a pydantic model's `model_copy()` without
+`deep=True`, and the shallow copy sanitizers of the ecosystem catalog. The change is an item
+store or delete, a changing method (`append`, `update`, `pop`, ...), an in-place operator, or an
+attribute store or delete, on an object read from the copy (`copied["tags"]`,
+`copied.children`, `copied.data_type.type = "int"`), directly or through a helper the object is
+handed to.
+
+It does not report:
+
+- a change of the copy itself (`copied["k"] = v`, `copied.name = v`): the copy is the
+  function's own;
+- an object the copy was given a value of its own for: rebound before the change on every path
+  (`copied.tags = [*tags]`, then `copied.tags.append(x)`), passed to `replace(x, tags=...)`, or
+  named by `model_copy(update={"tags": ...})`;
+- a deep copy (`copy.deepcopy`, `model_copy(deep=True)`);
+- a store into the copy's own `__dict__` (`copied.__dict__["_k"] = v`);
+- the elements of an iteration over the copy (`for task in list(tasks): task.x = 1`): iterating
+  a copy is how code changes a container while looping over it;
+- a copy of a value the function made itself;
+- filling a memo of the shared object, or initializing one of its attributes lazily (as for
+  `MUT202`).
+
+## What a report states
+
+A report states that the function changes in place, at the reported line, an object that it
+reaches below a shallow copy it made of a value it did not make (a parameter, a global, a
+variable of an enclosing function, or an attribute or item read from one), and that the copied
+value held that object at that place when the function copied it.
+
+Its premises:
+
+- **Shallow copy**: the value is the result of a copy that shares what is below its top level: a
+  builtin container's `copy()`, its constructor (`dict(x)`, `list(x)`, `set(x)`), `{**x}`,
+  `[*x]`, or a slice, of a builtin container (by annotation, R2) whose copying methods no
+  project subclass replaces; `copy.copy` of an instance of a project class no class of which
+  (R2) defines `__copy__`, `__reduce__`, `__reduce_ex__`, `__getstate__`, or `__setstate__`, or
+  has a metaclass or a base heki does not know; or `model_copy()` without `deep=True` of a
+  pydantic model (R3) whose classes define no `__copy__` or `model_copy`. Open for the other
+  copies (`dataclasses.replace`, `copy.replace`, the catalog's other sanitizers).
+- **Borrowed original**: on every path the copied value is state that outlives the call: a
+  parameter, a global, a variable of an enclosing function, or what a plain attribute or item
+  load reads from such state. Open: one path is enough. What a call returns is not followed.
+- **Still shared**: on every path to the line, the changed object is what the copy holds at one
+  of its levels, read from the copy by a plain item or attribute load (an item of a builtin list
+  or dict, a plain attribute of an instance), and nothing gives that level a value of its own:
+  no store or delete of it into the copy, no keyword of the copy call or `update=` key naming
+  it, no method changing a copied container's items, and the copy reaches no other code. Open:
+  a value that is below the copy on one path counts, and so does an object further below
+  (`copied["a"]["b"]`): it lives in an object the copied value shares, which any code reaching
+  that object may have given a new one since the copy.
+- **Changed below the copy**: the line changes that object in place: an item store or delete, a
+  changing method, or an in-place operator on a builtin `list`, `dict`, or `set` (by
+  annotation, R2) that no project subclass replaces, or a plain attribute store or delete on an
+  instance of a project class (no property, descriptor, `__setattr__`, or metaclass in a class it
+  may be; pydantic's `BaseModel.__setattr__` stores on the instance, R3). Open: a change made by
+  a helper the object is handed to.
+
+## Why is this bad?
+The copy suggests the original stays as it was, but the objects below the copy are the
+original's. Changing one through the copy changes the original, usually far from where the copy
+was made: a default shared by every model, an option dictionary of the caller, a node of a tree
+another part of the program still reads.
+
+## Example
+```python
+def with_base(options: dict[str, list[str]], base: str) -> dict[str, list[str]]:
+    result = options.copy()
+    result["bases"].append(base)  # changes the list `options["bases"]` holds
+    return result
+```
+
+Use instead:
+```python
+def with_base(options: dict[str, list[str]], base: str) -> dict[str, list[str]]:
+    result = options.copy()
+    result["bases"] = [*result["bases"], base]
+    return result
+```
+
+## Known limitations
+- A copy made by a project function (`copy_deep()` that copies one level and shares the next)
+  is not followed: a project copy method copies as deeply as its body does, which its summary
+  does not state level by level.
+- A copy stored in an attribute and changed in another method is not followed.
+
+## Fix safety
+No automatic fix.
 
 
 ---

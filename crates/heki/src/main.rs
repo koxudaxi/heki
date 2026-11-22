@@ -12,6 +12,7 @@ mod dump_facts;
 mod dump_recommend_facts;
 mod inspect;
 mod prompt;
+mod recommend;
 mod watch;
 
 use anyhow::Result;
@@ -20,6 +21,7 @@ use heki_ast::LineIndex;
 use heki_rules::experimental::{
     EXPERIMENTAL_FEATURES, EXPERIMENTAL_POLICY, ExperimentalFeature, experimental_rule,
 };
+use heki_rules::precision::{self, Certification, Measurement};
 use heki_rules::project::{Project, ProjectOptions};
 use heki_rules::{Activation, CORE_RULES, RuleMeta, find_rule};
 use std::path::PathBuf;
@@ -93,6 +95,9 @@ enum Commands {
     /// Experimental: what heki knows about one function (its effects, what it changes, keeps, and
     /// returns, whether it is pure, its callers, reports, and contracts).
     Inspect(InspectArgs),
+    /// Experimental: advice on the configuration of a project, with counts from its analysis, and
+    /// the keys to add (it writes no file).
+    Recommend(RecommendArgs),
     /// Internal/testing: dump `heki_semantic` scope tree as JSON for CPython `symtable` verification.
     #[command(hide = true)]
     DumpSemantic(DumpSemanticArgs),
@@ -108,6 +113,9 @@ enum Commands {
     /// Internal: dump the experimental features as JSON for `scripts/build_docs.py`.
     #[command(hide = true)]
     DumpExperimental,
+    /// Internal: dump the certifications and measurements as JSON for `scripts/build_docs.py`.
+    #[command(hide = true)]
+    DumpPrecision,
 }
 
 #[derive(Debug, Args)]
@@ -221,6 +229,21 @@ struct InspectArgs {
 }
 
 #[derive(Debug, Args)]
+struct RecommendArgs {
+    /// The project to analyze, as for `heki check`.
+    #[arg(default_value = ".")]
+    paths: Vec<PathBuf>,
+    /// `text`, or `json` (one object, described by the JSON Schema its `$schema` names).
+    #[arg(long, value_enum, default_value_t = ReportFormat::Text)]
+    output_format: ReportFormat,
+    /// Print the JSON Schema of the object of `--output-format json` and exit.
+    #[arg(long)]
+    output_format_json_schema: bool,
+    #[command(flatten)]
+    analysis: AnalysisArgs,
+}
+
+#[derive(Debug, Args)]
 struct ServerArgs {
     /// Use stdio transport (default LSP mode).
     #[arg(long, default_value_t = true)]
@@ -282,6 +305,9 @@ struct RuleRecord {
     /// The premises of the rule's exact claim (`heki_rules::premises`), empty for a rule
     /// without one.
     premises: &'static [&'static heki_rules::premises::Premise],
+    certification: Option<Certification>,
+    /// The latest measurement of how often its reports are right about the code.
+    measurement: Option<Measurement>,
 }
 
 impl RuleRecord {
@@ -293,6 +319,8 @@ impl RuleRecord {
             experimental: experimental_rule(rule.code),
             default_severity: rule.default_severity(),
             premises: heki_rules::premises::of_rule(rule.code),
+            certification: precision::certification(rule.code),
+            measurement: precision::measurement(rule.code),
         }
     }
 }
@@ -423,6 +451,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Commands::Snapshot(args) => check::run_snapshot(&args),
         Commands::Assumptions(args) => run_assumptions(args),
         Commands::Inspect(args) => inspect::run(&args),
+        Commands::Recommend(args) => recommend::run(&args),
         Commands::DumpSemantic(args) => {
             let src = heki_ast::read_source(&args.file)?;
             let parsed = heki_ast::parse_module(&src)
@@ -479,6 +508,14 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 "features": EXPERIMENTAL_FEATURES,
             });
             println!("{}", serde_json::to_string_pretty(&registry)?);
+            Ok(ExitCode::SUCCESS)
+        }
+        Commands::DumpPrecision => {
+            let published = serde_json::json!({
+                "certifications": precision::certifications().collect::<Vec<_>>(),
+                "measurements": precision::measurements().collect::<Vec<_>>(),
+            });
+            println!("{}", serde_json::to_string_pretty(&published)?);
             Ok(ExitCode::SUCCESS)
         }
     }

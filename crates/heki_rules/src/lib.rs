@@ -1,7 +1,7 @@
 //! Rule registry spanning all 3 families derived from the single Effect & Alias theory.
 //!
 //! - Family 1 (`MUT`): Mutation & State Effect (`MUT101`, `MUT103`, `MUT106`, `MUT107`, `MUT108`,
-//!   `MUT109`, `MUT110`, `MUT111`, `MUT112`, `MUT113`, `MUT114`, `MUT201`, `MUT202`, `MUT203`,
+//!   `MUT109`, `MUT110`, `MUT111`, `MUT112`, `MUT113`, `MUT114`, `MUT115`, `MUT201`, `MUT202`, `MUT203`,
 //!   `MUT204`, `MUT205`, `MUT206`, `MUT207`)
 //! - Family 2 (`EFF` / `DATA`): Execution Effect (`EFF101`, `EFF102`, `EFF103`, `EFF105`, `EFF106`,
 //!   `EFF107`, `EFF109`, `EFF110`, `EFF201`, `DATA101`)
@@ -17,8 +17,10 @@ pub mod experimental;
 pub mod inspect;
 mod mut_rules;
 mod opt_rules;
+pub mod precision;
 pub mod premises;
 pub mod project;
+pub mod recommend;
 pub mod selection;
 pub mod snapshot;
 
@@ -60,7 +62,7 @@ pub enum RuleFamily {
 }
 
 /// What happens in the code a rule reports, which sets its default severity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum Consequence {
     /// A bug that can be critical: a wrong result, an exception, a lost update, a deadlock, or a
@@ -74,7 +76,7 @@ pub enum Consequence {
 }
 
 /// When a rule runs without being named by its code or name (ADR-018).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum Activation {
     /// In the default selection, and matched by a prefix or `ALL`, while the rule is exact;
@@ -320,6 +322,18 @@ pub const CORE_RULES: &[RuleMeta] = &[
         auto_fix_default: false,
         summary: "Changing in place the list, dict, or set that a `functools.lru_cache` / `functools.cache` function returned (the cache hands the same object to later calls with the same arguments), directly or through the functions that return it.",
         doc: include_str!("../rule-docs/MUT114.md"),
+    },
+    RuleMeta {
+        code: "MUT115",
+        slug: "shallow-copy-nested-mutation",
+        family: RuleFamily::Mut,
+        certainty: Certainty::Heuristic,
+        activation: Activation::OptIn,
+        consequence: Consequence::Bug,
+        size_dependent_fix: false,
+        auto_fix_default: false,
+        summary: "Opt-in: changing in place an object below a shallow copy the function made of state that outlives the call (`dict(x)`, `x.copy()`, `copy.copy(x)`, `model_copy()`): the copied value holds the same object, so the change is seen through it too.",
+        doc: include_str!("../rule-docs/MUT115.md"),
     },
     RuleMeta {
         code: "MUT201",

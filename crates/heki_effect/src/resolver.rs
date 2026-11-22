@@ -2509,6 +2509,74 @@ impl ProjectDecls {
             })
     }
 
+    /// Whether `class` is a project class and every class a value of it may be under R2
+    /// ([`Self::value_classes`], each once) is a project class that binds none of `names` and
+    /// has no metaclass heki does not know, and every base of one outside the project is a plain
+    /// base or one `known_base` accepts: the classes whose code runs on such a value are the
+    /// project's, which heki reads, and those `known_base` stands for.
+    pub fn binds_none_of(
+        &self,
+        class: &str,
+        names: &[&str],
+        known_base: impl Fn(&str) -> bool,
+    ) -> bool {
+        let known = |c: &str| PLAIN_BASES.contains(&c) || known_base(c);
+        let class = self.canonical(class);
+        // A class outside the project runs code heki does not read.
+        self.is_project_class(&class)
+            && self.value_classes(&class).iter().all(|c| {
+                self.read(|k| note(&mut k.class_facts, c));
+                self.class(c).is_some_and(|d| {
+                    !d.custom_metaclass
+                        && names.iter().all(|n| !d.members.contains(*n))
+                        && d.bases.iter().all(|b| {
+                            let base = self.canonical(b);
+                            self.is_project_class(&base) || known(&base)
+                        })
+                })
+            })
+    }
+
+    /// Whether storing or deleting `attr` on a value of the class `class` changes that
+    /// instance's own attribute, or raises, on every class the value may be under R2: no class
+    /// along their MROs defines `__setattr__` or `__delattr__`, binds `attr` to a property or to
+    /// anything that may be a descriptor (`ClassDecl::code_attrs`), or has a metaclass heki does
+    /// not know, and every class outside the project is a plain base or one whose `__setattr__`
+    /// the ecosystem catalog says stores on the instance (`catalog_stores`: R3,
+    /// `pydantic.BaseModel`). A strict form of [`Self::attr_write_runs_code`]'s question, for an
+    /// exact claim.
+    pub fn attr_store_on_instance(
+        &self,
+        class: &str,
+        attr: &str,
+        catalog_stores: impl Fn(&str) -> bool,
+    ) -> bool {
+        self.binds_none_of(class, &["__setattr__", "__delattr__"], &catalog_stores)
+            && !self.value_classes(class).iter().any(|c| {
+                self.read(|k| note(&mut k.class_facts, c));
+                self.class(c)
+                    .is_some_and(|d| d.properties.contains(attr) || d.code_attrs.contains(attr))
+            })
+    }
+
+    /// Whether reading `attr` on a value of the class `class` finds the value an instance
+    /// stores there, as [`Self::plain_attr`] decides for project classes, with the classes
+    /// outside the project along the MROs of every class the value may be (R2) plain bases or
+    /// ones whose `__setattr__` the catalog says stores on the instance, which install no
+    /// descriptor and define no `__getattribute__` (`catalog_stores`: `pydantic.BaseModel`).
+    pub fn attr_read_finds_stored(
+        &self,
+        class: &str,
+        attr: &str,
+        catalog_stores: impl Fn(&str) -> bool,
+    ) -> bool {
+        let read = self.attr_read(class, attr);
+        read.declared
+            && !read.runs_hook(true)
+            && read.code_binders.is_empty()
+            && self.binds_none_of(class, &[], catalog_stores)
+    }
+
     /// The project classes whose bodies may supply an attribute of a value of the class `class`
     /// under assumption R2 (a value typed `class` is an instance of it or of a project
     /// subclass): the project classes along its MRO, every project subclass, and the project
