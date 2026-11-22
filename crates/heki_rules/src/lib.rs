@@ -10,6 +10,7 @@
 //!   reports without a rewrite.
 
 pub mod blind_spots;
+pub mod census;
 mod contracts;
 mod data_rules;
 mod eff_rules;

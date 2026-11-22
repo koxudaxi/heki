@@ -20,6 +20,10 @@ fn blind_spots(p: &Project) -> Value {
     facts_with(p, &[], 0)["blind_spots"].clone()
 }
 
+fn s(v: &str) -> String {
+    v.to_owned()
+}
+
 /// `(calls, awaited, on_event_loop, in_loops)` of a counted entry.
 fn counts(v: &Value) -> (u64, u64, u64, u64) {
     let n = |k: &str| v[k].as_u64().unwrap();
@@ -304,7 +308,6 @@ def build():
 "#,
     );
     let spots = blind_spots(&p);
-    let s = |v: &str| v.to_owned();
     let names = |v: &[&str]| v.iter().map(|n| s(n)).collect::<Vec<_>>();
     let run = "app.jobs.run";
     let group = |reason: &str, parameter: Option<&str>, called: &[&str], lines: &[u64]| {
@@ -385,4 +388,321 @@ fn a_file_that_does_not_parse_leaves_the_facts_of_the_others() {
     assert!(err.contains("app/bad.py"), "{err}");
     let facts: Value = serde_json::from_str(&out).unwrap();
     assert_eq!(symbols(&facts["blind_spots"]), ["stripe.pay"]);
+    // The file heki could not read has no functions to count.
+    let modules = facts["census"]["modules"].as_array().unwrap();
+    let names: Vec<&str> = modules
+        .iter()
+        .map(|m| m["module"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["app.ok"]);
+}
+
+fn census(p: &Project) -> Value {
+    facts_with(p, &[], 0)["census"].clone()
+}
+
+/// The census entry of `class.attr`.
+fn attribute<'v>(census: &'v Value, class: &str, attr: &str) -> &'v Value {
+    census["attributes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["class"] == class && a["attr"] == attr)
+        .unwrap_or_else(|| panic!("no `{class}.{attr}` in {census:#}"))
+}
+
+/// `(function, line, sites)` of each access listed under `key`.
+fn accesses(entry: &Value, key: &str) -> Vec<(String, u64, u64)> {
+    entry[key]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| {
+            (
+                a["function"].as_str().unwrap().to_owned(),
+                a["line"].as_u64().unwrap(),
+                a["sites"].as_u64().unwrap(),
+            )
+        })
+        .collect()
+}
+
+/// `(function, rebinds, in_place, fresh)` of each writer.
+fn writers(entry: &Value) -> Vec<(String, bool, bool, bool)> {
+    entry["writers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| {
+            (
+                w["function"].as_str().unwrap().to_owned(),
+                w["rebinds"].as_bool().unwrap(),
+                w["in_place"].as_bool().unwrap(),
+                w["fresh"].as_bool().unwrap(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn the_census_lists_each_attributes_writers_initializers_and_readers() {
+    let p = Project::new("recommend_census_attributes");
+    p.write(
+        "app/models.py",
+        r#"from typing import Protocol
+
+
+class Order:
+    def __init__(self, other: "Order | None" = None):
+        self.items = []
+        self.status = "new"
+        if other is not None:
+            other.status = "copied"
+        self.items.extend(())
+
+    def reset(self):
+        self.items = []
+
+
+class Special(Order):
+    def __init__(self):
+        super().__init__()
+        self.extra = 1
+
+
+class Named(Protocol):
+    status: str
+"#,
+    );
+    p.write(
+        "app/store.py",
+        r#"from app.models import Named, Order
+
+
+class Store:
+    def add(self, order: Order, x):
+        order.items.append(x)
+        order.items.append(x)
+
+    def close(self, order: Order):
+        order.status = "closed"
+        setattr(order, "status", "closed")
+        del order.status
+
+    def keep(self, order: Order, x):
+        items = order.items
+        items.append(x)
+
+
+class Box:
+    def __init__(self, order: Order):
+        order.items = []
+
+
+def make():
+    o = Order()
+    o.status = "draft"
+    return o
+
+
+def shown(n: Named):
+    return n.status
+"#,
+    );
+    p.write(
+        "app/views.py",
+        "from app.models import Order\n\n\ndef show(o: Order):\n    return o.status, o.status\n",
+    );
+    let census = census(&p);
+    let items = attribute(&census, "app.models.Order", "items");
+    assert_eq!(
+        writers(items),
+        [
+            (s("app.models.Order.reset"), true, false, false),
+            // An initializer of another class writing an `Order` is a writer.
+            (s("app.store.Box.__init__"), true, false, false),
+            (s("app.store.Store.add"), false, true, false),
+            (s("app.store.Store.keep"), false, true, false),
+        ],
+        "{items:#}"
+    );
+    assert_eq!(
+        accesses(items, "initializers"),
+        [(s("app.models.Order.__init__"), 6, 2)]
+    );
+    // `add` reads the attribute twice to change it; the first read's line.
+    assert_eq!(
+        accesses(items, "readers"),
+        [
+            (s("app.models.Order.__init__"), 10, 1),
+            (s("app.store.Store.add"), 6, 2),
+            (s("app.store.Store.keep"), 15, 1),
+        ]
+    );
+    let status = attribute(&census, "app.models.Order", "status");
+    assert_eq!(
+        writers(status),
+        [
+            // The initializer's write of another instance is no initialization.
+            (s("app.models.Order.__init__"), true, false, false),
+            (s("app.store.Store.close"), true, false, false),
+            // A factory filling the object it constructs.
+            (s("app.store.make"), true, false, true),
+        ],
+        "{status:#}"
+    );
+    let close = &status["writers"][1];
+    assert_eq!(
+        (&close["line"], &close["sites"]),
+        (&Value::from(10), &Value::from(3))
+    );
+    // Through a protocol declaring the attribute, the read is the protocol's.
+    assert_eq!(accesses(status, "readers"), [(s("app.views.show"), 5, 2)]);
+    assert_eq!(
+        accesses(attribute(&census, "app.models.Named", "status"), "readers"),
+        [(s("app.store.shown"), 31, 1)]
+    );
+    // The subclass's own instance: its initializer's write.
+    let extra = attribute(&census, "app.models.Special", "extra");
+    assert_eq!(
+        accesses(extra, "initializers"),
+        [(s("app.models.Special.__init__"), 19, 1)]
+    );
+    assert_eq!(
+        census["classes"],
+        serde_json::json!([
+            {"class": "app.models.Named", "modules": ["app.store"]},
+            {"class": "app.models.Order", "modules": ["app.models", "app.store", "app.views"]},
+            {"class": "app.models.Special", "modules": ["app.models"]},
+        ])
+    );
+    assert_eq!(
+        census["totals"],
+        serde_json::json!({
+            "classes": 3, "attributes": 4, "write_sites": 10, "initializer_sites": 4,
+            "read_sites": 7, "modules": 3, "functions": 10,
+        }),
+        "{census:#}"
+    );
+    let counted = facts_with(&p, &["--totals"], 0)["census"].clone();
+    assert_eq!(counted, serde_json::json!({ "totals": census["totals"] }));
+}
+
+#[test]
+fn the_census_lists_each_modules_functions_and_what_they_reach() {
+    let p = Project::new("recommend_census_modules");
+    p.write(
+        "app/domain.py",
+        "def total(xs):\n    return sum(xs)\n\n\ndef double(x):\n    return 2 * x\n",
+    );
+    p.write(
+        "app/io.py",
+        r#"import requests
+import stripe
+from app.domain import total
+from app.jobs import run
+import lib
+
+
+def fetch(url):
+    return requests.get(url)
+
+
+def pay():
+    stripe.pay()
+
+
+def summed(xs):
+    return total(xs)
+
+
+def job(client):
+    run(client)
+
+
+def evaluated(text):
+    return eval(text)
+
+
+def vendored():
+    lib.helper()
+
+
+def stream():
+    yield stripe.events()
+
+
+def opener():
+    return stream()
+
+
+def reader():
+    for event in opener():
+        pass
+"#,
+    );
+    p.write("app/jobs.py", "def run(client):\n    client.go()\n");
+    p.write("lib.pyi", "def helper() -> None: ...\n");
+    p.write("app/twice.py", "def one():\n    return 1\n");
+    p.write(
+        "app/twice.pyi",
+        "def one() -> int: ...\n\n\ndef two() -> int: ...\n",
+    );
+    let census = census(&p);
+    let modules: Vec<(String, u64, Vec<String>, Vec<String>)> = census["modules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| {
+            let names = |k: &str| {
+                m[k].as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|f| f.as_str().unwrap().to_owned())
+                    .collect::<Vec<_>>()
+            };
+            (
+                m["module"].as_str().unwrap().to_owned(),
+                m["functions"].as_u64().unwrap(),
+                names("blocking"),
+                names("unseen"),
+            )
+        })
+        .collect();
+    let names = |v: &[&str]| v.iter().map(|n| s(n)).collect::<Vec<_>>();
+    assert_eq!(
+        modules,
+        [
+            (s("app.domain"), 2, vec![], vec![]),
+            (
+                s("app.io"),
+                9,
+                names(&["app.io.fetch"]),
+                // An uncatalogued call, an unresolved one a callee makes, an A1 hazard, a function
+                // known only from a stub, and a generator's call where its body runs: in itself
+                // and where a helper's result is iterated, not in the helper returning it.
+                names(&[
+                    "app.io.evaluated",
+                    "app.io.job",
+                    "app.io.pay",
+                    "app.io.reader",
+                    "app.io.stream",
+                    "app.io.vendored",
+                ]),
+            ),
+            (s("app.jobs"), 1, vec![], names(&["app.jobs.run"])),
+            // Defined in the implementation and its stub: one entry, each function counted once,
+            // the one only the stub declares unseen.
+            (s("app.twice"), 2, vec![], names(&["app.twice.two"])),
+            (s("lib"), 1, vec![], names(&["lib.helper"])),
+        ],
+        "{census:#}"
+    );
+    let twice = census["modules"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["module"] == "app.twice")
+        .unwrap();
+    assert_eq!(twice["path"], "app/twice.py");
 }
