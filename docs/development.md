@@ -264,10 +264,16 @@ the call graph, or the class hierarchy goes through them:
   `ProjectIndex`.
 
 `crates/heki/tests/architecture_walks.rs` finds walks written by hand in the analysis crates:
-recursion over IR ids (W1), worklists (W2), passes over every block until nothing changes (W3),
-and the linear lookups `FnShape` answers from a table (W4). `crates/heki/tests/walks.allow` lists
-the functions it still allows, each with its reason. The test fails on a finding the list does
-not allow and on an entry that finds nothing any more, so the list only shrinks as walks move.
+recursion over IR ids (W1), worklists (W2), passes repeated until nothing changes (W3), and the
+linear lookups `FnShape` answers from a table (W4). A repeated pass is a `loop`, a `while`, or a
+`for` over a range whose end is no constant (`0..links`, `1..`), around a sweep of a function's
+blocks, phis, instructions, or reverse postorder, or stopping on the facts `before` the pass, on a
+size, or on a flag each pass clears and sets. Such a pass costs the function once per pass, and a
+chain laid against the order of the sweep takes a pass per link; no walk counts it, so its cost
+shows only in time. A data flow over a function's blocks is a `fixpoint` whose nodes are the
+blocks, and its facts are counted like any other. `crates/heki/tests/walks.allow` lists the
+functions it still allows, each with its reason. The test fails on a finding the list does not
+allow and on an entry that finds nothing any more, so the list only shrinks as walks move.
 
 ```console
 $ cargo build --release
@@ -341,9 +347,14 @@ changing every method of a class of thousands of methods, methods changing a typ
 thousands of times, a method storing under a key after each of hundreds of tests that such a dict
 holds the key, and a function reading attributes down a chain ten thousand deep (`x = x.child`),
 many queue puts each after a branch that may build a new queue, a long chain of helpers handing a
-queue on, named in the opposite order of the calls, a class whose thousands of queue attributes each
-store the one before, with a put on each, and the path facts of a `try` body of thousands of calls
-whose handler returns, of loops nested twenty deep with a call at each depth, of a thousand loops
+queue on, named in the opposite order of the calls, a scope under a boundary forbidding parameter
+changes handing its parameter down a chain of thousands of helpers it called before in turn, a
+function writing an invalidation target before each of thousands of calls, a loop over thousands
+of `if` statements each writing an invalidation target, a new object handed to hundreds of
+helpers each under its own `if` before its attribute is written, a class whose
+thousands of queue attributes each store the one before, with a put on each, and the path facts of
+a `try` body of thousands of calls whose handler returns, of loops nested twenty deep with a call
+at each depth, of a thousand loops
 one after another, and of a chain of hundreds of `and` tests of module constants, and the item
 origins of a chain of thousands of wrappers, of a list filled by appends in a thousand loops, and of
 a phi of sixty branches each choosing a different parameter, and thousands of `call-owners` targets,

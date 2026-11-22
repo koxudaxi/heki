@@ -2333,11 +2333,19 @@ async def tp_async_cursors_run_per_item(coll: AsyncCollection, ids):
         async for doc in coll.find({"_id": i}):
             pass
         await coll.find({"_id": i}).sort("x").to_list()
+
+
+async def tp_exhausted_cursor_reused(coll: AsyncCollection, ids):
+    cursor = coll.find({})
+    for i in ids:
+        await cursor.to_list()
 "#;
 
 /// A cursor or a generator does its I/O while it is iterated, not when it is made: one handed
 /// to a thread runs there, one iterated on the event loop blocks it, and an async cursor is a
-/// query per iteration of the loop around its iteration.
+/// query per iteration of the loop around its iteration. A cursor that is already exhausted
+/// returns nothing without a query, so a consumption in a loop is a possible query, never an
+/// exact one, even where the cursor is made in the loop.
 #[test]
 fn lazy_iterators_do_their_io_when_iterated() {
     assert_eq!(
@@ -2356,13 +2364,13 @@ fn lazy_iterators_do_their_io_when_iterated() {
             ),
             d(
                 17,
-                "EFF101",
+                "EFF111",
                 "tp_iterated_on_the_loop",
                 "pymongo.cursor.Cursor.__iter__"
             ),
             d(
                 18,
-                "EFF101",
+                "EFF111",
                 "tp_iterated_on_the_loop",
                 "pymongo.cursor.Cursor.to_list"
             ),
@@ -2380,8 +2388,14 @@ fn lazy_iterators_do_their_io_when_iterated() {
             ),
             d(
                 34,
-                "EFF103",
+                "EFF113",
                 "tp_async_cursors_run_per_item",
+                "pymongo.asynchronous.cursor.AsyncCursor.to_list"
+            ),
+            d(
+                40,
+                "EFF113",
+                "tp_exhausted_cursor_reused",
                 "pymongo.asynchronous.cursor.AsyncCursor.to_list"
             ),
         ]
@@ -3169,7 +3183,7 @@ fn async_drivers_count_their_queries_and_duckdb_waits_on_nothing_known() {
             ),
             d(
                 42,
-                "EFF103",
+                "EFF113",
                 "tp_motor_in_loops",
                 "motor.motor_asyncio.AsyncIOMotorCursor.to_list"
             ),
@@ -3196,6 +3210,7 @@ const API_CLIENTS_AND_DATA: &str = r#"import io
 
 import anthropic
 import celery
+import httpx
 import openai
 import polars as pl
 import torch
@@ -3215,6 +3230,25 @@ def tp_clients_in_loops(prompts):
         openai.OpenAI()
         anthropic.Anthropic()
         genai.Client()
+
+
+def tn_clients_sharing_a_pool(prompts):
+    shared = httpx.Client()
+    for p in prompts:
+        openai.OpenAI(http_client=shared)
+        anthropic.Anthropic(http_client=shared)
+
+
+async def tn_async_clients_sharing_a_pool(prompts):
+    shared = httpx.AsyncClient()
+    for p in prompts:
+        openai.AsyncOpenAI(http_client=shared)
+        anthropic.AsyncAnthropic(http_client=shared)
+
+
+def tp_clients_with_unknown_http_client(prompts, other):
+    for p in prompts:
+        openai.OpenAI(http_client=other)
 
 
 async def tp_async_clients_in_loops(prompts):
@@ -3266,7 +3300,7 @@ async def tn_torch_buffers(model):
     torch.load(io.BytesIO(buf.getvalue()))
 "#;
 
-/// Celery publishes to its broker; LLM API clients build a connection pool each; polars and
+/// Celery publishes to its broker unless configured otherwise (heuristic reports only); LLM API clients build a connection pool each; polars and
 /// torch read and write files, polars downloads URLs and runs queries, and `torch.cat`
 /// reallocates its accumulator.
 #[test]
@@ -3279,29 +3313,35 @@ fn api_clients_task_queues_and_data_libraries() {
             "EFF101,EFF111,EFF102,EFF103,EFF113,EFF105,DATA101"
         ),
         vec![
-            d(15, "EFF101", "tp_celery", "celery.Celery.send_task"),
-            d(16, "EFF101", "tp_celery", "celery.Task.delay"),
-            d(21, "EFF102", "tp_clients_in_loops", "openai.OpenAI"),
-            d(22, "EFF102", "tp_clients_in_loops", "anthropic.Anthropic"),
-            d(23, "EFF102", "tp_clients_in_loops", "google.genai.Client"),
+            d(16, "EFF111", "tp_celery", "celery.Celery.send_task"),
+            d(17, "EFF111", "tp_celery", "celery.Task.delay"),
+            d(22, "EFF102", "tp_clients_in_loops", "openai.OpenAI"),
+            d(23, "EFF102", "tp_clients_in_loops", "anthropic.Anthropic"),
+            d(24, "EFF102", "tp_clients_in_loops", "google.genai.Client"),
             d(
-                28,
+                43,
+                "EFF102",
+                "tp_clients_with_unknown_http_client",
+                "openai.OpenAI"
+            ),
+            d(
+                48,
                 "EFF102",
                 "tp_async_clients_in_loops",
                 "openai.AsyncOpenAI"
             ),
             d(
-                29,
+                49,
                 "EFF102",
                 "tp_async_clients_in_loops",
                 "anthropic.AsyncAnthropic"
             ),
-            d(40, "EFF101", "tp_polars", "polars.read_database"),
-            d(41, "EFF101", "tp_polars", "polars.read_csv"),
-            d(42, "EFF105", "tp_polars", "polars.read_parquet"),
-            d(53, "DATA101", "tp_torch_accumulation", "acc"),
-            d(65, "EFF105", "tp_torch_io", "torch.save"),
-            d(66, "EFF105", "tp_torch_io", "torch.load"),
+            d(60, "EFF101", "tp_polars", "polars.read_database"),
+            d(61, "EFF101", "tp_polars", "polars.read_csv"),
+            d(62, "EFF105", "tp_polars", "polars.read_parquet"),
+            d(73, "DATA101", "tp_torch_accumulation", "acc"),
+            d(85, "EFF105", "tp_torch_io", "torch.save"),
+            d(86, "EFF105", "tp_torch_io", "torch.load"),
         ]
     );
 }

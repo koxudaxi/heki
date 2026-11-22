@@ -92,6 +92,9 @@ struct Configuration {
     source_roots: Vec<String>,
     /// `src` when the `src` setting lists the source roots, `detected` when heki found them.
     source_roots_from: &'static str,
+    /// `ModuleLayout::member_packages`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    member_packages: Vec<String>,
     selection: Selection,
     baseline: Option<String>,
     /// Each contract key with its tables, each table with the keys it sets.
@@ -204,6 +207,7 @@ impl Configuration {
             config_file: env.config_file.as_deref().map(shown_text),
             target_version: env.runtime.python_version.tag(),
             source_roots: env.layout.source_roots.clone(),
+            member_packages: env.layout.member_packages.clone(),
             source_roots_from: if env.cfg.src.is_some() {
                 "src"
             } else {
@@ -384,7 +388,7 @@ fn write_configuration(out: &mut String, c: &Configuration) -> Result<()> {
     } else {
         per_file.join("; ")
     };
-    let lines = [
+    let mut lines = vec![
         format!("Project root: `{}`", c.root),
         format!(
             "Configuration file: {}",
@@ -394,6 +398,14 @@ fn write_configuration(out: &mut String, c: &Configuration) -> Result<()> {
         ),
         format!("Target Python version: `{}`", c.target_version),
         format!("Source roots: {source_roots}"),
+    ];
+    if !c.member_packages.is_empty() {
+        lines.push(format!(
+            "Workspace member packages, each named below its member: {}",
+            code_list(&c.member_packages)
+        ));
+    }
+    lines.extend([
         format!("`select`: {select}"),
         format!("`extend-select`: {}", code_list(&s.extend_select)),
         format!("`ignore`: {}", code_list(&s.ignore)),
@@ -407,7 +419,7 @@ fn write_configuration(out: &mut String, c: &Configuration) -> Result<()> {
                 |b| format!("`{b}` (only the reports it does not allow are shown)")
             )
         ),
-    ];
+    ]);
     out.push_str("\n## Configuration\n\n");
     for line in lines {
         let _ = writeln!(out, "- {line}");

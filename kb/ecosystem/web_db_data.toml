@@ -4523,11 +4523,13 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "pymongo.cursor.Cursor.__iter__"
 effects = ["blocking_db", "db_query"]
+emits = "unless-cached"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "pymongo.cursor.Cursor.to_list"
 effects = ["blocking_db", "db_query"]
+emits = "unless-cached"
 opaque_to_layer3 = true
 
 [[entries]]
@@ -4761,12 +4763,14 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "pymongo.asynchronous.cursor.AsyncCursor.__aiter__"
 effects = ["db_query"]
+emits = "unless-cached"
 async_safe = true
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "pymongo.asynchronous.cursor.AsyncCursor.to_list"
 effects = ["db_query"]
+emits = "unless-cached"
 async_safe = true
 opaque_to_layer3 = true
 
@@ -5140,12 +5144,14 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "motor.motor_asyncio.AsyncIOMotorCursor.__aiter__"
 effects = ["db_query"]
+emits = "unless-cached"
 async_safe = true
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "motor.motor_asyncio.AsyncIOMotorCursor.to_list"
 effects = ["db_query"]
+emits = "unless-cached"
 async_safe = true
 opaque_to_layer3 = true
 
@@ -5164,35 +5170,44 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "motor.motor_asyncio.AsyncIOMotorLatentCommandCursor.__aiter__"
 effects = ["db_query"]
+emits = "unless-cached"
 async_safe = true
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "motor.motor_asyncio.AsyncIOMotorLatentCommandCursor.to_list"
 effects = ["db_query"]
+emits = "unless-cached"
 async_safe = true
 opaque_to_layer3 = true
 
 # --- Task queues: Celery ---
-# `send_task()` publishes the task message to the broker and waits for the write (also under
-# `task_always_eager`, which it ignores). `Task.delay()` / `apply_async()` publish it too,
-# except under `task_always_eager` (a test setting), where they run the task in the caller.
+# `send_task()`, `Task.delay()` and `Task.apply_async()` publish the task message to the
+# broker and wait for the write, unless the app is configured otherwise: under
+# `task_always_eager` (a test setting) `delay()` / `apply_async()` run the task in the caller
+# without a broker, and with kombu's in-memory transport even `send_task()` publishes without
+# the network. The configuration is not visible at the call, so the effect is never certain
+# (`emits = "unless-configured-otherwise"`) and only heuristic reports (`EFF111`)
+# follow.
 # `AsyncResult.get()` is not listed: it returns at once for a result already fetched
 # (`ready()` stores a finished one) or a task that ignores its result.
 
 [[entries]]
 symbol = "celery.Celery.send_task"
 effects = ["blocking_net"]
+emits = "unless-configured-otherwise"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "celery.Task.delay"
 effects = ["blocking_net"]
+emits = "unless-configured-otherwise"
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "celery.Task.apply_async"
 effects = ["blocking_net"]
+emits = "unless-configured-otherwise"
 opaque_to_layer3 = true
 
 # --- LLM APIs: openai, anthropic, google-genai ---
@@ -5212,33 +5227,51 @@ opaque_to_layer3 = true
 [[entries]]
 symbol = "openai.OpenAI"
 effects = ["unpooled_client_alloc"]
+cases = [
+    { param = "http_client", instance_of = ["httpx.Client", "httpx.AsyncClient"], effects = [] },
+]
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "openai.AzureOpenAI"
 effects = ["unpooled_client_alloc"]
+cases = [
+    { param = "http_client", instance_of = ["httpx.Client", "httpx.AsyncClient"], effects = [] },
+]
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "openai.AsyncOpenAI"
 effects = ["unpooled_client_alloc"]
+cases = [
+    { param = "http_client", instance_of = ["httpx.Client", "httpx.AsyncClient"], effects = [] },
+]
 async_safe = true
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "openai.AsyncAzureOpenAI"
 effects = ["unpooled_client_alloc"]
+cases = [
+    { param = "http_client", instance_of = ["httpx.Client", "httpx.AsyncClient"], effects = [] },
+]
 async_safe = true
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "anthropic.Anthropic"
 effects = ["unpooled_client_alloc"]
+cases = [
+    { param = "http_client", instance_of = ["httpx.Client", "httpx.AsyncClient"], effects = [] },
+]
 opaque_to_layer3 = true
 
 [[entries]]
 symbol = "anthropic.AsyncAnthropic"
 effects = ["unpooled_client_alloc"]
+cases = [
+    { param = "http_client", instance_of = ["httpx.Client", "httpx.AsyncClient"], effects = [] },
+]
 async_safe = true
 opaque_to_layer3 = true
 

@@ -237,8 +237,9 @@ pub enum WaitKind {
     Thread,
 }
 
-/// When a database call sends a statement or otherwise waits on the database
-/// ([`EcosystemEntry::emits`]).
+/// When a call does its effects ([`EcosystemEntry::emits`]): for a database call, when it sends a
+/// statement or otherwise waits on the database; for any call, whether the library's
+/// configuration can make it skip them.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Emits {
@@ -251,7 +252,8 @@ pub enum Emits {
     /// (`Session.flush`, a driver's `commit()`).
     IfPending,
     /// Only when the receiver has not loaded its results (Django's `QuerySet.count()` on an
-    /// evaluated query set counts its cache).
+    /// evaluated query set counts its cache; a database cursor that is exhausted returns nothing
+    /// without a query).
     UnlessCached,
     /// Only when no open connection is at hand (a pool checkout, Django's
     /// `connection.cursor()`).
@@ -261,6 +263,11 @@ pub enum Emits {
     /// `path=":memory:"` passed in) or only named by an annotation may be in memory. It sends
     /// its statements either way.
     IfOnDisk,
+    /// Every effect of the call, unless the library is configured otherwise: it can be set up so
+    /// the call does not do them (Celery's `task_always_eager` runs the task in the caller, and
+    /// kombu's in-memory transport publishes without the network). The configuration is not
+    /// visible at the call, so no effect is certain and the call only supports heuristic reports.
+    UnlessConfiguredOtherwise,
 }
 
 /// What the items of a call's result are when the environment decides how many there are
@@ -1578,6 +1585,16 @@ mod tests {
         }
     }
 
+    /// An LLM SDK client built over an `httpx` client made elsewhere shares that client's pool.
+    fn shared_http_client() -> ArgCase {
+        ArgCase {
+            param: Some("http_client".into()),
+            instance_of: s(&["httpx.Client", "httpx.AsyncClient"]),
+            effects: Some(vec![]),
+            ..ArgCase::default()
+        }
+    }
+
     fn with_cases(cases: Vec<ArgCase>, e: EcosystemEntry) -> EcosystemEntry {
         EcosystemEntry { cases, ..e }
     }
@@ -2166,12 +2183,13 @@ mod tests {
                     "redis.ConnectionPool.from_url",
                     "redis.BlockingConnectionPool.from_url",
                     "psycopg_pool.ConnectionPool",
-                    "openai.OpenAI",
-                    "openai.AzureOpenAI",
-                    "anthropic.Anthropic",
                     "google.genai.Client",
                 ]),
                 entry(&[UnpooledClientAlloc]),
+            ),
+            (
+                s(&["openai.OpenAI", "openai.AzureOpenAI", "anthropic.Anthropic"]),
+                with_cases(vec![shared_http_client()], entry(&[UnpooledClientAlloc])),
             ),
             (
                 // `connect=True` (the default) resolves a `mongodb+srv://` URI at once.
@@ -2217,11 +2235,19 @@ mod tests {
                     "pymongo.AsyncMongoClient",
                     "psycopg_pool.AsyncConnectionPool",
                     "motor.motor_asyncio.AsyncIOMotorClient",
+                ]),
+                async_safe(entry(&[UnpooledClientAlloc])),
+            ),
+            (
+                s(&[
                     "openai.AsyncOpenAI",
                     "openai.AsyncAzureOpenAI",
                     "anthropic.AsyncAnthropic",
                 ]),
-                async_safe(entry(&[UnpooledClientAlloc])),
+                async_safe(with_cases(
+                    vec![shared_http_client()],
+                    entry(&[UnpooledClientAlloc]),
+                )),
             ),
             (
                 [
@@ -3263,6 +3289,22 @@ mod tests {
                 "django.db.models.query.QuerySet.alast",
                 "django.db.models.query.QuerySet.aexists",
                 "django.db.models.query.QuerySet.acount",
+                "pymongo.cursor.Cursor.__iter__",
+                "pymongo.cursor.Cursor.to_list",
+                "pymongo.asynchronous.cursor.AsyncCursor.__aiter__",
+                "pymongo.asynchronous.cursor.AsyncCursor.to_list",
+                "motor.motor_asyncio.AsyncIOMotorCursor.__aiter__",
+                "motor.motor_asyncio.AsyncIOMotorCursor.to_list",
+                "motor.motor_asyncio.AsyncIOMotorLatentCommandCursor.__aiter__",
+                "motor.motor_asyncio.AsyncIOMotorLatentCommandCursor.to_list",
+            ],
+        ),
+        (
+            Emits::UnlessConfiguredOtherwise,
+            &[
+                "celery.Celery.send_task",
+                "celery.Task.delay",
+                "celery.Task.apply_async",
             ],
         ),
         (
@@ -3619,9 +3661,11 @@ mod tests {
             emits("sqlalchemy.engine.Engine.connect"),
             Emits::UnlessConnected
         );
-        // Only database calls carry a condition on their database effects.
+        assert_eq!(emits("celery.Task.delay"), Emits::UnlessConfiguredOtherwise);
+        // Only database calls carry a condition on their database effects, and a call whose
+        // configuration can switch its effects off carries any.
         for (symbol, e) in &kb.entries {
-            if e.emits != Emits::Always {
+            if !matches!(e.emits, Emits::Always | Emits::UnlessConfiguredOtherwise) {
                 assert!(
                     e.effects.iter().any(|k| matches!(k, BlockingDb | DbQuery)),
                     "{symbol}"
