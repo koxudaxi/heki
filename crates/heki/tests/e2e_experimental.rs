@@ -407,7 +407,7 @@ fn the_precision_tables_and_rule_measurements_come_from_the_data() {
         .unwrap();
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(
-        String::from_utf8_lossy(&out.stderr),
-        "docs/precision.md: no generated part named measurements\n"
+        String::from_utf8_lossy(&out.stderr).trim_end(),
+        "docs/precision.md: no generated part named measurements"
     );
 }
