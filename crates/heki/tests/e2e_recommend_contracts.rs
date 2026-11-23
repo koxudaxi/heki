@@ -603,6 +603,96 @@ fn a_package_holding_a_test_module_names_its_other_modules_one_by_one() {
     assert_eq!(report["rejected_contracts"], json!([]), "{report:#}");
 }
 
+#[test]
+fn a_file_heki_cannot_parse_makes_every_candidate_medium() {
+    let p = owners("recommend_contract_unparsed");
+    p.write("app/broken.py", "def broken(:\n");
+    let (code, out, err) = p.heki(&["recommend", "--output-format", "json", "--ignore", "EFF201"]);
+    assert_eq!(code, 2, "{err}");
+    let report: Value = serde_json::from_str(&out).unwrap();
+    let kept = kept(&report);
+    assert!(
+        !kept.is_empty()
+            && kept
+                .iter()
+                .all(|(_, _, confidence, unresolved)| confidence == "medium"
+                    && unresolved == &json!("ignore")),
+        "{report:#}"
+    );
+    assert_eq!(
+        candidate(&report, "write-owners", "app.models:Order.items")["caveats"][0],
+        json!("1 Python file(s) heki could not read or parse: their accesses are not seen")
+    );
+}
+
+#[test]
+fn a_candidate_hiding_a_report_of_a_configured_contract_is_rejected() {
+    let p = Project::new("recommend_contract_hides_unlisted_key");
+    p.write(
+        "pyproject.toml",
+        "[project]\nname = \"t\"\n\n[[tool.heki.write-owners]]\nname = \"a owners\"\n\
+         targets = [\"app.models:Store.a\"]\nallowed-writers = [\"app.models:*\"]\n\
+         unlisted-dict-keys = \"report\"\n",
+    )
+    .write("app/__init__.py", "")
+    .write(
+        "app/models.py",
+        "class Store:\n    def __init__(self) -> None:\n        self.a = 0\n        self.b = 0\n",
+    )
+    .write(
+        "app/store.py",
+        "from app.models import Store\n\n\ndef bump(s: Store) -> None:\n    s.b = s.b + 1\n\n\n\
+         def reset(s: Store) -> None:\n    s.__dict__[\"b\"] = 0\n",
+    )
+    .write(
+        "app/views.py",
+        "from app.models import Store\n\n\ndef show(s: Store) -> int:\n    return s.b\n",
+    )
+    .write(
+        "app/api.py",
+        "from app.models import Store\n\n\ndef dump(s: Store) -> int:\n    return s.b + 1\n",
+    );
+    let reported_now = |p: &Project| -> Vec<(String, u64)> {
+        checked(p, &["--select", "MUT201"])
+            .iter()
+            .map(|d| {
+                (
+                    d["path"].as_str().unwrap().to_owned(),
+                    d["line"].as_u64().unwrap(),
+                )
+            })
+            .collect()
+    };
+    assert_eq!(reported_now(&p), [("app/store.py".to_owned(), 9)]);
+    // Naming `Store.b` would list the key for `a owners` too, and allow its writer module.
+    let report = recommend_json(&p, &[]);
+    let rejected = &report["rejected_contracts"];
+    assert_eq!(rejected.as_array().unwrap().len(), 1, "{report:#}");
+    assert_eq!(
+        (
+            &rejected[0]["target"],
+            &rejected[0]["run"],
+            &rejected[0]["trial"]["reports"]
+        ),
+        (
+            &json!("app.models:Store.b"),
+            &json!("contract-trial"),
+            &json!({"MUT201": 1, "MUT205": 0})
+        )
+    );
+    assert!(
+        kept(&report)
+            .iter()
+            .all(|(kind, _, _, _)| kind != "write-owners"),
+        "{report:#}"
+    );
+    // With the block, the write is still reported.
+    let block = report["config_toml"].as_str().unwrap();
+    let existing = std::fs::read_to_string(p.dir.join("pyproject.toml")).unwrap();
+    p.write("pyproject.toml", &applied(&existing, block));
+    assert_eq!(reported_now(&p), [("app/store.py".to_owned(), 9)]);
+}
+
 /// `existing` with `block` added as a user would: the block's tables after the file's own.
 fn applied(existing: &str, block: &str) -> String {
     format!("{existing}\n{block}")

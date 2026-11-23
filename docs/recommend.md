@@ -139,28 +139,32 @@ Candidates are drawn from what the code does, never from names:
 What the configuration already declares is not proposed: an attribute a `write-owners` or
 `read-owners` target names, and a module an effect boundary forbidding every blocking effect
 covers. A kind whose rule the configuration ignores is not proposed either. When the block sets
-`src`, no contract is proposed: a new source root renames modules and resolves imports heki does
-not resolve now, so run `heki recommend` again once it is set. Each target has the
+`src`, no contract is proposed, and no verification run counts the block's rules: a new source
+root renames modules and resolves imports heki does not resolve now, so run `heki recommend` again
+once it is set. Each target has the
 module-part form (`app.models:Order.items`), which never matches another project's names.
 
 The contract trial declares every candidate at once, the ownership contracts with
 `unresolved = "report"`, and runs their rules (`MUT201` and `MUT205`, `MUT203` and `MUT206`,
 `EFF201`) as `heki check` would: inline suppressions and `per-file-ignores` apply, and the
 reports they drop are counted apart. A candidate its rule reports is rejected and listed with the
-first report. Of each kind, the trial declares the first 32 candidates: `write-owners` with the
+first report, and so is one that hides a report the configuration's own contracts make now: a
+target lists its `__dict__` key for every contract, so a contract with
+`unlisted-dict-keys = "report"` stops reporting a write of that key. Of each kind, the trial declares the first 32 candidates: `write-owners` with the
 attributes changed in place first, then by the modules reading them; `read-owners` by the
 modules using the class; boundaries by their functions times the functions calling into them
 from outside. The configuration's own `write-owners` contracts count against the 32.
 
 | Confidence | When |
 | ---------- | ---- |
-| high | the trial reports nothing for the contract, every Python file below the project root was analyzed, and no function of a boundary's scopes reaches code heki does not see (a call it does not resolve, a library name without a catalog entry, a function it does not model) |
-| medium | the trial reports no violation, but `MUT205` or `MUT206` reports accesses on objects of unknown class (they are listed), files were left out, or a scope function reaches code heki does not see (it is listed) |
+| high | the trial reports nothing for the contract, every Python file below the project root was read, parsed, and analyzed, and no function of a boundary's scopes reaches code heki does not see (a call it does not resolve, a library name without a catalog entry, a function it does not model) |
+| medium | the trial reports no violation, but `MUT205` or `MUT206` reports accesses on objects of unknown class (they are listed), files were left out or could not be parsed, or a scope function reaches code heki does not see (it is listed) |
 
 Medium candidates are in the block too, an ownership one with `unresolved = "ignore"`: heki may
-not see every access on objects of unknown class (in the files left out, for one) that the rule
-of such accesses would report. A high one sets `unresolved = "report"`. A candidate on a subclass
-is left out when the one on its base class is kept: a target covers the subclasses of its class.
+not see every access on objects of unknown class (in the files left out or not parsed, for one)
+that the rule of such accesses would report. A high one sets `unresolved = "report"`. A candidate
+on a subclass is left out when the one on its base class is kept: a target covers the subclasses
+of its class.
 Every candidate carries the caveat that accesses inside code heki cannot follow are not seen.
 
 The verification run then applies the whole block, the rules it enables and the contracts it

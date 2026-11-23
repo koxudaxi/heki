@@ -263,6 +263,7 @@ pub fn recommend(request: Request<'_>) -> Result<RecommendReport, RecommendError
         discovery: &diags,
     });
     let reports_now = reports_now(&current, baseline.as_ref(), files_analyzed, &diags);
+    let configured_now = contracts::configured_reports(&discovery.project.env.cfg, &diags);
     drop(diags);
     let env = &discovery.project.env;
     let declared = crate::declared_contracts(env, &discovery.index, &current)?;
@@ -313,16 +314,19 @@ pub fn recommend(request: Request<'_>) -> Result<RecommendReport, RecommendError
             generated,
             &user,
             (&kept, &suppressed),
-            left_out.python_files > 0,
+            &configured_now,
+            (left_out.python_files > 0, project.errors.len()),
             shown,
         )
     };
     // The verification run: `heki check` with the block's rules and contracts applied, which
     // gives the counts the block promises. One run suffices: discovery ran every rule, so it has
     // every fact this run has, and the contracts come from its census, so a kept contract never
-    // reports here.
+    // reports here. With `src` in the block, a run on the files as they are named now would not
+    // count the reports through the imports the new source roots resolve.
     let verification = additions(&rules, &section, &current);
-    let verified = verification != block::Additions::default();
+    let unverified = src.is_some() && verification != block::Additions::default();
+    let verified = src.is_none() && verification != block::Additions::default();
     if verified {
         let mut applied = user.clone();
         (applied.lint.extend_select).extend(verification.extend_select.iter().cloned());
@@ -363,6 +367,13 @@ pub fn recommend(request: Request<'_>) -> Result<RecommendReport, RecommendError
     }
     notes.extend(blind_spots::notes(&blind_spots, &trial));
     notes.extend(section.notes());
+    if unverified {
+        notes.push(format!(
+            "{}: the counts of the block's rules are of the files as they are named now; run \
+             heki recommend again with it for the counts under it",
+            contracts::SRC_RENAMES
+        ));
+    }
     let mut report = RecommendReport {
         schema: SCHEMA_URL.to_owned(),
         kind: ReportKind::HekiRecommend,

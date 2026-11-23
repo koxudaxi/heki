@@ -1352,6 +1352,34 @@ fn subdirectory_app(name: &str) -> Project {
     p
 }
 
+#[test]
+fn a_block_setting_src_is_not_verified_on_the_files_as_they_are_named_now() {
+    let p = subdirectory_app("recommend_source_root_unverified");
+    p.write(
+        "backend/tasks.py",
+        "import asyncio\n\n\nasync def work():\n    await asyncio.sleep(1)\n\n\n\
+         async def start():\n    task = asyncio.create_task(work())\n    await asyncio.sleep(0)\n",
+    );
+    let (_, report, _) = recommend_json(&p, &[]);
+    assert_eq!(
+        report["config"],
+        json!({"lint": {"extend-select": ["EFF107"]}, "src": ["backend"]})
+    );
+    assert_eq!(
+        report["runs"],
+        json!([{"label": "discovery"}, {"label": "source-roots"}])
+    );
+    assert!(
+        report["notes"].as_array().unwrap().contains(&json!(
+            "the block sets src, which renames modules and resolves imports heki does not resolve \
+             now: the counts of the block's rules are of the files as they are named now; run \
+             heki recommend again with it for the counts under it"
+        )),
+        "{report:#}"
+    );
+    assert_follows_the_schema(&report);
+}
+
 /// The paths of the `EFF101` reports `heki check` prints, sorted.
 fn waits_reported(p: &Project) -> Vec<String> {
     let mut paths: Vec<String> = checked(p, &["--select", "EFF101"])

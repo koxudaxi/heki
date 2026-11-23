@@ -5,7 +5,8 @@
 //! Generation may propose too much; the trial decides. It declares every candidate at once, the
 //! ownership contracts with `unresolved = "report"`, and runs their rules as `heki check` would
 //! (inline suppressions and `per-file-ignores` apply); each report counts for the contracts it is
-//! of ([`Diagnostic::contracts`]). A candidate its rule reports is rejected. The verification run
+//! of ([`Diagnostic::contracts`]). A candidate its rule reports is rejected, and so is one that
+//! hides a report of the configuration's own contracts ([`judge`]). The verification run
 //! applies the whole block; a contract that reports there is dropped, and the run repeats once.
 
 use super::block::set_keys;
@@ -334,6 +335,15 @@ struct Candidate {
     attribute: Option<(String, String, Vec<String>)>,
     /// The order within the kind: the least first.
     rank: (bool, Reverse<usize>, Reverse<usize>),
+}
+
+impl Candidate {
+    /// Whether an ownership candidate's target is `member` (`Class.attr`, as a report of a
+    /// `__dict__` key no target names gives it).
+    fn names_member(&self, member: &str) -> bool {
+        self.attribute.is_some()
+            && (self.shown.split_once(':')).is_some_and(|(_, target)| target == member)
+    }
 }
 
 /// The candidates of a project, for its trial.
@@ -807,6 +817,48 @@ fn attribute_reports<'d>(
     out
 }
 
+/// What a block setting `src` changes, which a run on the files as they are named now does not
+/// see.
+pub(super) const SRC_RENAMES: &str =
+    "the block sets src, which renames modules and resolves imports heki does not resolve now";
+
+/// The reports of `cfg`'s own contracts among `diags`: a candidate must leave each reported.
+pub(super) fn configured_reports(cfg: &HekiConfig, diags: &[Diagnostic]) -> Vec<Diagnostic> {
+    (diags.iter())
+        .filter(|d| of_configured(cfg, d))
+        .cloned()
+        .collect()
+}
+
+/// Whether `d` is a report of one of `cfg`'s own contracts, which a trial declares before the
+/// candidates.
+fn of_configured(cfg: &HekiConfig, d: &Diagnostic) -> bool {
+    ContractKind::of_rule(&d.rule_code).is_some_and(|kind| {
+        let declared = kind.declared_in(cfg);
+        (d.contracts.iter()).any(|&p| usize::try_from(p).is_ok_and(|p| p < declared))
+    })
+}
+
+/// A report as two runs over the same files both make it.
+#[derive(PartialEq, Eq, Hash)]
+struct ReportKey<'d> {
+    rule: &'d str,
+    path: &'d Path,
+    span: (u32, u32),
+    target: &'d str,
+}
+
+impl<'d> ReportKey<'d> {
+    fn of(d: &'d Diagnostic) -> Self {
+        Self {
+            rule: &d.rule_code,
+            path: &d.path,
+            span: (d.span.start, d.span.end),
+            target: &d.target,
+        }
+    }
+}
+
 /// The trial of a candidate of `kind` from the reports a run attributes to it.
 fn tally(
     kind: ContractKind,
@@ -834,12 +886,15 @@ fn tally(
 
 /// Judge every candidate of `generated` by what the contract trial, a run of `cfg` with them
 /// all declared ([`trial_config`]), reported (`kept` after inline suppressions, `suppressed`
-/// dropped by them). `left_out`: Python files below the project root were not analyzed.
-pub(super) fn judge(
+/// dropped by them). `configured_now`: the reports of `cfg`'s own contracts on the code as it is
+/// ([`configured_reports`]). `unanalyzed`: whether Python files below the project root were left
+/// out, and how many heki could not read or parse.
+pub(super) fn judge<'d>(
     generated: Generated,
     cfg: &HekiConfig,
-    (kept, suppressed): (&[Diagnostic], &[Diagnostic]),
-    left_out: bool,
+    (kept, suppressed): (&'d [Diagnostic], &'d [Diagnostic]),
+    configured_now: &'d [Diagnostic],
+    unanalyzed: (bool, usize),
     shown: &dyn Fn(&Path) -> String,
 ) -> Section {
     let Generated {
@@ -848,7 +903,25 @@ pub(super) fn judge(
         ignored,
     } = generated;
     let entries: Vec<&Entry> = candidates.iter().map(|c| &c.entry).collect();
-    let reports = attribute_reports(cfg, &entries, kept, suppressed);
+    let mut reports = attribute_reports(cfg, &entries, kept, suppressed);
+    // A target lists its `__dict__` key for every contract (`unlisted-dict-keys`), so a
+    // candidate can hide a report the configuration makes now: that report counts as its own.
+    let still: FxHashSet<ReportKey<'_>> = (kept.iter())
+        .filter(|d| of_configured(cfg, d))
+        .map(ReportKey::of)
+        .collect();
+    for d in configured_now
+        .iter()
+        .filter(|d| !still.contains(&ReportKey::of(d)))
+    {
+        for (candidate, reports) in candidates.iter().zip(&mut reports) {
+            if ContractKind::of_rule(&d.rule_code) == Some(candidate.entry.kind())
+                && candidate.names_member(&d.target)
+            {
+                reports.push((d, false));
+            }
+        }
+    }
     let mut section = Section {
         not_tried,
         ignored,
@@ -861,7 +934,7 @@ pub(super) fn judge(
             confidence: Confidence::High,
             caveats: Vec::new(),
         };
-        kept.weigh(left_out);
+        kept.weigh(unanalyzed);
         section.kept.push(kept);
     }
     let trials = section.kept.iter().map(|k| k.trial.clone()).collect();
@@ -873,9 +946,9 @@ pub(super) fn judge(
 impl Kept {
     /// The confidence of a candidate the trial kept, and its entry's `unresolved`: `"report"`
     /// only when the confidence is high. A medium one may leave accesses of unknown class
-    /// unseen (in the files left out), which the rule of such accesses would report once
-    /// `heki check` sees them.
-    fn weigh(&mut self, left_out: bool) {
+    /// unseen (in the files left out or not parsed), which the rule of such accesses would
+    /// report once `heki check` sees them.
+    fn weigh(&mut self, (left_out, unparsed): (bool, usize)) {
         let kind = self.candidate.entry.kind();
         let unresolved = self.trial.reports_of(kind.strict_rule());
         if unresolved > 0 {
@@ -897,6 +970,12 @@ impl Kept {
                  seen"
                     .to_owned(),
             );
+        }
+        if unparsed > 0 {
+            self.caveats.push(format!(
+                "{unparsed} Python file(s) heki could not read or parse: their accesses are not \
+                 seen"
+            ));
         }
         if !self.caveats.is_empty() {
             self.confidence = Confidence::Medium;
@@ -1059,11 +1138,9 @@ impl Section {
     pub(super) fn notes(&self) -> Vec<String> {
         let mut notes = Vec::new();
         if self.deferred {
-            notes.push(
-                "the block sets src, which renames modules and resolves imports heki does not \
-                 resolve now: run heki recommend again with it for contract candidates"
-                    .to_owned(),
-            );
+            notes.push(format!(
+                "{SRC_RENAMES}: run heki recommend again with it for contract candidates"
+            ));
         }
         for kind in &self.ignored {
             notes.push(format!(
