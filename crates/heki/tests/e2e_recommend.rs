@@ -7,7 +7,6 @@ mod common;
 use common::{Project, schema};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
-use std::process::Command;
 use std::sync::OnceLock;
 
 const USERS: &str = "\
