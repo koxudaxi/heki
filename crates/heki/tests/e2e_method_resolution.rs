@@ -1655,6 +1655,79 @@ fn an_attribute_has_the_type_every_store_into_an_instance_binds() {
     );
 }
 
+/// `setattr` and `vars` called on their module (`builtins.setattr(self, name, v)`) are the
+/// builtins, and `__setattr__` called on a project class stores as `object.__setattr__` does; a
+/// function of a project module that is also named `setattr` stores nothing.
+const QUALIFIED_BUILTINS: &str = r#"import builtins
+
+import httpx
+
+from pkg import helpers
+
+
+class ThroughModule:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    def swap(self) -> None:
+        builtins.setattr(self, "client", httpx.AsyncClient())
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")
+
+
+class ThroughModuleVars:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    def swap(self) -> None:
+        builtins.vars(self)["client"] = httpx.AsyncClient()
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")
+
+
+class Plain:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")
+
+
+class ThroughClass(Plain):
+    def swap(self) -> None:
+        Plain.__delattr__(self, "client")
+        Plain.__setattr__(self, "client", httpx.AsyncClient())
+
+
+class ThroughHelper:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    def swap(self) -> None:
+        helpers.setattr(self, "client", httpx.AsyncClient())
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")  # EFF101
+"#;
+
+const HELPERS: &str = r#"def setattr(obj, name, value) -> None:
+    print(obj, name, value)
+"#;
+
+#[test]
+fn a_builtin_called_on_its_module_stores_as_the_builtin() {
+    check_marks(
+        "qualified_builtins",
+        &[
+            ("pkg/qualified_builtins.py", QUALIFIED_BUILTINS),
+            ("pkg/helpers.py", HELPERS),
+        ],
+        &["EFF101"],
+    );
+}
+
 /// A store reading another attribute (`self.active = self.client`) binds what reading it gives
 /// once every store is joined: the join over the class's family, here and in another module.
 const READ_ATTRS: &str = r#"import httpx
@@ -2083,8 +2156,11 @@ fn stores_into_an_instance_through_any_receiver_the_inference_types() {
 
 /// `__setstate__` restores what an instance held when pickle or copy took the state: unless
 /// the family builds the state otherwise (`__reduce__`, a `__getstate__` reading anything but
-/// the instance) or project code calls `__setstate__` itself.
-const RESTORED: &str = r#"import httpx
+/// the instance, on one branch or in one of its definitions) or project code calls
+/// `__setstate__` itself.
+const RESTORED: &str = r#"import sys
+
+import httpx
 
 
 class Restored:
@@ -2277,6 +2353,44 @@ class Constant:
         self.client.get("https://example.com")
 
 
+class Versioned:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    if sys.version_info >= (3, 11):
+
+        def __getstate__(self):
+            return self.__dict__.copy()
+
+    else:
+
+        def __getstate__(self):
+            return {"client": httpx.AsyncClient()}
+
+    def __setstate__(self, state) -> None:
+        self.__dict__.update(state)
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")
+
+
+class Redefined:
+    def __init__(self) -> None:
+        self.client = httpx.Client()
+
+    def __getstate__(self):
+        return {"client": httpx.AsyncClient()}
+
+    def __getstate__(self):  # noqa: F811
+        return self.__dict__.copy()
+
+    def __setstate__(self, state) -> None:
+        self.__dict__.update(state)
+
+    async def handle(self) -> None:
+        self.client.get("https://example.com")
+
+
 class Unpacked:
     def __init__(self) -> None:
         self.client = httpx.Client()
@@ -2418,6 +2532,45 @@ __all__ = ("in_tuple",)
 in_tuple = httpx.AsyncClient()
 "#;
 
+/// An `__all__` bound on some paths only, or a list the module body changes after binding it,
+/// does not fix what the star import binds: without `__all__` it binds every public name, and an
+/// appended name is exported too.
+const EXPORTING_ON_ONE_PATH: &str = r#"import sys
+
+import httpx
+
+if sys.platform == "win32":
+    __all__ = ("other",)
+
+other = 1
+client = httpx.AsyncClient()
+"#;
+
+const EXPORTING_APPENDED: &str = r#"import httpx
+
+__all__ = ["other"]
+try:
+    import pkg.speedups  # noqa: F401
+
+    __all__.append("client")
+except ImportError:
+    pass
+
+other = 1
+client = httpx.AsyncClient()
+"#;
+
+const STAR_ON_ONE_PATH: &str = r#"import httpx
+
+client = httpx.Client()
+
+from pkg.exporting_on_one_path import *  # noqa: E402, F403
+
+
+async def handle() -> None:
+    client.get("https://example.com")
+"#;
+
 #[test]
 fn a_star_import_rebinds_the_names_its_module_exports() {
     check_marks(
@@ -2426,12 +2579,21 @@ fn a_star_import_rebinds_the_names_its_module_exports() {
             ("pkg/star_exports.py", STAR_EXPORTS),
             ("pkg/exporting.py", EXPORTING),
             ("pkg/exporting_tuple.py", EXPORTING_TUPLE),
+            ("pkg/exporting_on_one_path.py", EXPORTING_ON_ONE_PATH),
+            ("pkg/exporting_appended.py", EXPORTING_APPENDED),
+            ("pkg/star_on_one_path.py", STAR_ON_ONE_PATH),
+            (
+                "pkg/star_appended.py",
+                STAR_ON_ONE_PATH.replace("on_one_path", "appended").as_str(),
+            ),
         ],
         &["EFF101"],
     );
 }
 
-/// A name whose `__all__` is a set is exported as a whole: the star import rebinds every name.
+/// A module whose `__all__` is neither a list nor a tuple of string literals has exports heki does
+/// not fix (a set makes the star import raise `TypeError`): the star import may rebind every
+/// name.
 const EXPORTING_SET: &str = r#"import httpx
 
 __all__ = {"listed"}

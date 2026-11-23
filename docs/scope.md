@@ -245,7 +245,7 @@ Missed findings close as heki learns more:
   (`Keys("x").KEY` is `"x"`), or on a class object whose default a class with `slots=True` or built
   by a transform replaces, or a computed name.
 - `setattr` and `object.__setattr__` are followed through a module-level name bound once to them
-  (`_set = object.__setattr__`), and `getattr(obj, "fields")` is `obj.fields` itself: changing
+  (`_set = object.__setattr__`) and called on their module (`builtins.setattr`), and `getattr(obj, "fields")` is `obj.fields` itself: changing
   what it returns changes the attribute's object.
 - `vars(obj)` (the builtin, not a name shadowing it) is `obj.__dict__`: an entry stored, deleted,
   set by a container method, or updated in place (`vars(obj) |= other`, also on
@@ -287,6 +287,15 @@ Missed findings close as heki learns more:
 - `__setstate__` restoring an instance's namespace from its state keeps the attributes' types when
   the class's `__getstate__` builds the state from the instance's own attributes. One putting an
   attribute's value under another attribute's name (`return {"client": self.other}`) is not seen.
+- A store into an instance's namespace through a method called with a `*` argument
+  (`self.__dict__.setdefault(*pair)`) is not seen.
+- Two shapes of module-level names that no linted code writes are taken wrongly. After a
+  `global` statement at the module level (where it does nothing), a store of the name in a `try`
+  body counts as run even when a call before it in the body raises, and a list bound to
+  `__all__` counts as unchanged when the module body appends to it. A `TYPE_CHECKING` that a
+  branch binds to the flag after the module bound it to something else (`TYPE_CHECKING = True`,
+  then `if cond: from typing import TYPE_CHECKING`) counts as the flag on every path, so imports
+  under a later `if TYPE_CHECKING:` count as not running.
 
 ### Names the catalog does not list
 

@@ -363,13 +363,16 @@ the name binds (Priority 3; `ModuleDecls::global_types`, `ClassDecl::attr_stores
   `__setstate__` itself, reads the method, or names it (`getattr(obj, "__setstate__")`) outside a
   `__setstate__` handing its state on, and the family has no
   `__reduce__` / `__reduce_ex__` and no `__getstate__` building the state from anything but the
-  instance's own attributes (`FunctionDecl::state_of_self`).
+  instance's own attributes (`FunctionDecl::state_of_self`, which holds only when every
+  definition of the method does).
 - **Globals the module may rebind.** In a module whose globals `globals()` or `exec` may change,
   every store of a global binds a value of unknown type. A module-body store does too when a star
   import that runs (not one under `if TYPE_CHECKING:`) may bind the name after it: the store comes
   before the import, or on only some of the paths after it (a branch, an `except` clause, a loop;
   `heki_ir::LastBindings`). A star import of a project module whose `__all__` fixes the names it
-  exports binds only those (`ModuleDecls::exports`).
+  exports binds only those (`ModuleDecls::exports`): the module body binds it once, on every path
+  that finishes the body, to a tuple of string literals or to a list of them that neither the
+  body (`__all__.append(name)`) nor a function changes.
 - **Other modules.** What other project modules store into a module's globals and into the
   instances of its classes (`ModuleDecls::stores_elsewhere`) is joined where the type is read. A
   store's receiver is typed as the storing module's decided types type it: one an attribute or a

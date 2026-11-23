@@ -1027,7 +1027,8 @@ impl<'f> Calls<'_, 'f> {
         match kind {
             InstKind::StoreGlobal { .. } | InstKind::AttrStore { .. } => true,
             InstKind::AttrLoad { attr, .. } => attr == "__dict__",
-            InstKind::MethodCall { method, .. } => method == "__setattr__",
+            // `builtins.setattr(obj, name, v)` calls the builtin through its module.
+            InstKind::MethodCall { method, .. } => is_store_builtin_member(method),
             InstKind::Call {
                 callee_var: Some(c),
                 ..
@@ -1064,9 +1065,7 @@ impl<'f> Calls<'_, 'f> {
                         self.cx.import_type(inst.span),
                         Some(Ty::Ref(s)) if STORE_BUILTINS.contains(&s.as_str())
                     ),
-                    InstKind::AttrLoad { attr, .. } => {
-                        matches!(attr.as_str(), "setattr" | "vars" | "__setattr__")
-                    }
+                    InstKind::AttrLoad { attr, .. } => is_store_builtin_member(attr),
                     InstKind::LoadDeref { .. } => true,
                     _ => false,
                 },
@@ -1087,6 +1086,14 @@ const STORE_BUILTINS: &[&str] = &[
     "builtins.object.__setattr__",
     "builtins.vars",
 ];
+
+/// Whether an attribute or a method named `name` may be one of [`STORE_BUILTINS`] read from
+/// the module or class holding it (`builtins.setattr`, `object.__setattr__`).
+fn is_store_builtin_member(name: &str) -> bool {
+    STORE_BUILTINS
+        .iter()
+        .any(|b| b.rsplit_once('.').is_some_and(|(_, member)| member == name))
+}
 
 /// The class whose instance `f` stores into as `self`, and the variables holding it: a method's
 /// first parameter, or in a scope nested in methods the closure cell of the first parameter of
@@ -1147,9 +1154,10 @@ pub(crate) enum AttrName<'f> {
 pub(crate) enum AttrOp<'f> {
     /// A store of `value` in the attribute `name` of `obj`: `obj.attr = v`,
     /// `setattr(obj, name, v)`, `object.__setattr__(obj, name, v)`, `obj.__setattr__(name, v)`
-    /// (`super().__setattr__(name, v)`), also through an alias of the builtin. Replacing the
-    /// namespace or the class (`obj.__dict__ = state`, `obj.__class__ = C`, or either through
-    /// `setattr`) stores every attribute (`AttrName::Unknown`).
+    /// (`super().__setattr__(name, v)`), also through an alias of the builtin or its module
+    /// (`builtins.setattr(obj, name, v)`). Replacing the namespace or the class
+    /// (`obj.__dict__ = state`, `obj.__class__ = C`, or either through `setattr`) stores every
+    /// attribute (`AttrName::Unknown`).
     Store {
         obj: VarId,
         name: AttrName<'f>,
@@ -1175,10 +1183,28 @@ pub(crate) fn attr_op<'f, 'v>(
 ) -> Option<AttrOp<'f>> {
     let named = |v: VarId| name(v).map_or(AttrName::Unknown, |n| AttrName::Named(Cow::Owned(n)));
     let stored = |v: VarId| replacing_all(named(v));
-    let builtin = |v: VarId| match val(v) {
-        Some(crate::resolver::Val::Ref(s)) => Some(s.as_str()),
-        _ => None,
-    };
+    const ATTR_BUILTINS: &[&str] = &[
+        "builtins.setattr",
+        "builtins.object.__setattr__",
+        "builtins.delattr",
+        "builtins.object.__delattr__",
+    ];
+    match super::plain_call(kind, ATTR_BUILTINS, &val) {
+        Some(("builtins.setattr" | "builtins.object.__setattr__", _, [obj, n, value])) => {
+            return Some(AttrOp::Store {
+                obj: *obj,
+                name: stored(*n),
+                value: *value,
+            });
+        }
+        Some(("builtins.delattr" | "builtins.object.__delattr__", _, [obj, n])) => {
+            return Some(AttrOp::Delete {
+                obj: *obj,
+                name: named(*n),
+            });
+        }
+        _ => {}
+    }
     match kind {
         InstKind::AttrStore { obj, attr, value } => Some(AttrOp::Store {
             obj: *obj,
@@ -1189,28 +1215,6 @@ pub(crate) fn attr_op<'f, 'v>(
             obj: *obj,
             name: AttrName::Named(Cow::Borrowed(attr.as_str())),
         }),
-        InstKind::Call {
-            callee_var: Some(c),
-            args,
-            kwargs,
-            star_from: None,
-            ..
-        } if kwargs.is_empty() => match (builtin(*c)?, args.as_slice()) {
-            ("builtins.setattr" | "builtins.object.__setattr__", [obj, n, value]) => {
-                Some(AttrOp::Store {
-                    obj: *obj,
-                    name: stored(*n),
-                    value: *value,
-                })
-            }
-            ("builtins.delattr" | "builtins.object.__delattr__", [obj, n]) => {
-                Some(AttrOp::Delete {
-                    obj: *obj,
-                    name: named(*n),
-                })
-            }
-            _ => namespace_op_load(kind, &val),
-        },
         InstKind::MethodCall {
             recv,
             method,
@@ -1237,7 +1241,7 @@ pub(crate) fn attr_op<'f, 'v>(
                 obj: *obj,
                 name: named(*n),
             }),
-            _ => None,
+            _ => namespace_op_load(kind, &val),
         },
         _ => namespace_op_load(kind, &val),
     }
@@ -1788,35 +1792,60 @@ struct Sink<'s> {
     foreign: Option<&'s mut Foreign>,
 }
 
-/// [`ModuleDecls::exports`]: the module's `__all__`, when the module body binds it once to a
-/// tuple of string literals ([`heki_ir::ModuleConstants::str_tuples`]), or to a list of them no
-/// function of the module grows ([`heki_ir::ModuleConstants::displays`]).
+/// [`ModuleDecls::exports`]: the module's `__all__`, when the module body binds it once, on
+/// every path that finishes it ([`LastBindings::always_runs`]: where it stays unbound, a star
+/// import binds every public name), to a tuple of string literals
+/// ([`heki_ir::ModuleConstants::str_tuples`]), or to a list of them nothing changes: the module
+/// body uses the list only to bind `__all__` ([`binds_only`]), and no function of the module
+/// grows it ([`heki_ir::ModuleConstants::displays`]).
 pub(super) fn exported_names(input: &ModuleInput<'_>) -> Option<Box<[String]>> {
     let constants = &input.ir.constants;
-    if let Some(names) = constants.str_tuples.get("__all__") {
-        return Some(names.iter().map(|n| n.to_string()).collect());
-    }
-    if !constants.displays.contains_key("__all__") {
+    let tuple = constants.str_tuples.get("__all__");
+    if tuple.is_none() && !constants.displays.contains_key("__all__") {
         return None;
     }
     let body = input.ir.functions.iter().find(|f| f.is_module_body)?;
     let shape = FnShape::new(body);
-    let value = insts(body).find_map(|inst| match &inst.kind {
-        InstKind::StoreGlobal { name, value } if name == "__all__" => Some(*value),
-        _ => None,
+    let (block, value) = body.blocks.iter().find_map(|b| {
+        b.insts.iter().find_map(|inst| match &inst.kind {
+            InstKind::StoreGlobal { name, value } if name == "__all__" => Some((b.id, *value)),
+            _ => None,
+        })
     })?;
+    if !LastBindings::of(&shape).always_runs(&shape, block) {
+        return None;
+    }
+    if let Some(names) = tuple {
+        return Some(names.iter().map(|n| n.to_string()).collect());
+    }
+    let list = shape.copy_root(value);
     let Some(InstKind::AllocBuiltin {
         kind: BuiltinKind::List,
         elems,
         ..
-    }) = shape.inst(shape.copy_root(value)).map(|i| &i.kind)
+    }) = shape.inst(list).map(|i| &i.kind)
     else {
         return None;
     };
+    if !binds_only(body, list, "__all__") {
+        return None;
+    }
     elems
         .iter()
         .map(|e| shape.str_const(shape.copy_root(*e)).map(str::to_owned))
         .collect()
+}
+
+/// Whether the module body `body` uses the list `list` only to bind the global `name`: no
+/// instruction but a copy and the store reads it or a copy of it (`__all__.append(n)` changes
+/// what the binding holds).
+fn binds_only(body: &IrFunction, list: VarId, name: &str) -> bool {
+    let held = aliases_of(body, [list]);
+    insts(body).all(|inst| match &inst.kind {
+        InstKind::Copy { .. } => true,
+        InstKind::StoreGlobal { name: n, .. } if n == name => true,
+        kind => !kind.operands().iter().any(|v| held.contains(v)),
+    })
 }
 
 /// Whether the module may call `__setstate__` itself, outside a `__setstate__` handing its own
@@ -1843,14 +1872,19 @@ pub(super) fn calls_setstate(input: &ModuleInput<'_>) -> bool {
         .any(|inst| names_it(&inst.kind))
 }
 
-/// [`super::FunctionDecl::state_of_self`] of the module's `__getstate__` methods.
+/// [`super::FunctionDecl::state_of_self`] of the module's `__getstate__` methods. The methods
+/// defined under one name (on both branches of an `if`, or defined again) share a declaration:
+/// it holds only when every one of them does.
 fn record_getstates(input: &ModuleInput<'_>, cx: &TypeCtx<'_>, decls: &mut ModuleDecls) {
+    let mut of_self: BTreeMap<&str, bool> = BTreeMap::new();
     for f in &input.ir.functions {
-        if f.name != "__getstate__" || f.owner_class_qualname.is_none() || !state_of_self(cx, f) {
-            continue;
+        if f.name == "__getstate__" && f.owner_class_qualname.is_some() {
+            *of_self.entry(&f.qualname).or_insert(true) &= state_of_self(cx, f);
         }
-        if let Some(decl) = decls.functions.get_mut(&f.qualname) {
-            decl.state_of_self = true;
+    }
+    for (qualname, holds) in of_self {
+        if let Some(decl) = decls.functions.get_mut(qualname) {
+            decl.state_of_self = holds;
         }
     }
 }

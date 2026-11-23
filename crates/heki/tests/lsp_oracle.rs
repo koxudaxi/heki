@@ -685,6 +685,11 @@ const ST_ATTR_STORES_OTHER: &str = "import httpx\n\nfrom pkg.st_attr_active impo
 const ST_KEEPER: &str = "def keep():\n    return None\n";
 const ST_KEEPER_ATTR: &str = "import httpx\n\nfrom pkg.st_holder import Holder\n\n\nclass Keeper:\n    def __init__(self):\n        self.holder = Holder()\n\n    def swap(self):\n        self.holder.client = httpx.AsyncClient()\n";
 const ST_KEEPER_GLOBAL: &str = "import httpx\n\nfrom pkg.st_holder import Holder\n\nholder = Holder()\n\n\ndef swap():\n    holder.client = httpx.AsyncClient()\n";
+// A star import of a module whose `__all__` does not list the global keeps its type, until the
+// module appends the global's name to its `__all__`.
+const ST_STAR: &str = "import httpx\n\nclient = httpx.Client()\n\nfrom pkg.st_exporting import *  # noqa: E402, F403\n\n\nasync def handler():\n    client.get(\"u\")\n";
+const ST_EXPORTING: &str = "__all__ = [\"other\"]\n\nother = 1\n";
+const ST_EXPORTING_APPENDED: &str = "import httpx\n\n__all__ = [\"other\"]\n__all__.append(\"client\")\n\nother = 1\nclient = httpx.AsyncClient()\n";
 
 // Method lookups (`ProjectDecls::method_read_runs_no_code`): a helper looks up a method before it
 // sleeps, inside a `try` whose handler goes on; a subclass in another module comes and goes.
@@ -1065,6 +1070,8 @@ fn initial_files() -> Vec<(&'static str, String)> {
         ("pkg/st_attr_active.py", ST_ATTR_ACTIVE),
         ("pkg/st_attr_stores.py", ST_ATTR_STORES),
         ("pkg/st_keeper.py", ST_KEEPER),
+        ("pkg/st_star.py", ST_STAR),
+        ("pkg/st_exporting.py", ST_EXPORTING),
         ("pkg/lc_settings.py", LC_SETTINGS),
         ("pkg/lc_use.py", LC_USE),
         ("pkg/ml_base.py", ML_BASE),
@@ -1277,6 +1284,7 @@ fn steps_store_types() -> Vec<Step> {
     const HOLDER: &[(&str, &str)] = &[("pkg/st_holder.py", "EFF101")];
     const ACTIVE: &[(&str, &str)] = &[("pkg/st_active.py", "EFF101")];
     const ATTR_ACTIVE: &[(&str, &str)] = &[("pkg/st_attr_active.py", "EFF101")];
+    const STAR: &[(&str, &str)] = &[("pkg/st_star.py", "EFF101")];
     vec![
         Step::new(
             "another function rebinds the global to an async client",
@@ -1419,6 +1427,16 @@ fn steps_store_types() -> Vec<Step> {
             vec![save("pkg/st_keeper.py", ST_KEEPER)],
         )
         .present(HOLDER),
+        Step::new(
+            "the star-imported module appends the global's name to its `__all__`",
+            vec![save("pkg/st_exporting.py", ST_EXPORTING_APPENDED)],
+        )
+        .absent(STAR),
+        Step::new(
+            "it stops appending",
+            vec![save("pkg/st_exporting.py", ST_EXPORTING)],
+        )
+        .present(STAR),
     ]
 }
 

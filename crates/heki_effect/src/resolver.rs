@@ -6107,8 +6107,26 @@ pub(crate) fn namespace_load<'v>(
     kind: &InstKind,
     val: impl FnOnce(VarId) -> Option<&'v Val>,
 ) -> Option<(VarId, VarId)> {
-    match kind {
-        InstKind::AttrLoad { dst, obj, attr } if attr == "__dict__" => Some((*dst, *obj)),
+    if let InstKind::AttrLoad { dst, obj, attr } = kind
+        && attr == "__dict__"
+    {
+        return Some((*dst, *obj));
+    }
+    plain_call(kind, &["builtins.vars"], val)
+        .filter(|(_, _, args)| args.len() == 1)
+        .map(|(_, dst, args)| (dst, args[0]))
+}
+
+/// Which of the objects `fqns` the call `kind`, without keywords or a `*` argument, calls, with
+/// its result and its arguments: the one its callee holds (`val`, as for [`namespace_load`]), or
+/// the member of the module or class a method is called on, as [`TypeCtx::method_call_targets`]
+/// names it (`builtins.setattr(obj, name, v)` calls `builtins.setattr`).
+pub(crate) fn plain_call<'k, 'v>(
+    kind: &'k InstKind,
+    fqns: &[&'static str],
+    val: impl FnOnce(VarId) -> Option<&'v Val>,
+) -> Option<(&'static str, VarId, &'k [VarId])> {
+    let (called, dst, args) = match kind {
         InstKind::Call {
             dst,
             callee_var: Some(f),
@@ -6116,14 +6134,32 @@ pub(crate) fn namespace_load<'v>(
             kwargs,
             star_from: None,
             ..
-        } if args.len() == 1
-            && kwargs.is_empty()
-            && matches!(val(*f), Some(Val::Ref(s)) if s == "builtins.vars") =>
-        {
-            Some((*dst, args[0]))
-        }
-        _ => None,
-    }
+        } if kwargs.is_empty() => match val(*f)? {
+            Val::Ref(s) => (fqns.iter().find(|fqn| **fqn == s.as_str())?, dst, args),
+            _ => return None,
+        },
+        InstKind::MethodCall {
+            dst,
+            recv,
+            method,
+            args,
+            kwargs,
+            star_from: None,
+            ..
+        } if kwargs.is_empty() => match val(*recv)? {
+            Val::Ref(owner) => {
+                let member = |fqn: &&&str| {
+                    fqn.strip_suffix(method.as_str())
+                        .and_then(|o| o.strip_suffix('.'))
+                        == Some(owner.as_str())
+                };
+                (fqns.iter().find(member)?, dst, args)
+            }
+            _ => return None,
+        },
+        _ => return None,
+    };
+    Some((called, *dst, args.as_slice()))
 }
 
 /// Variables that alias `root` through `Copy` and phis whose inputs all alias it.

@@ -471,6 +471,18 @@ fn copies_and_pads_leaving_the_walk() -> (usize, usize) {
     let per_copy = left(more_copies.taken, copies + 1) - left_here;
     let per_pad = more_pads.taken as i64 - spent.taken as i64;
     assert!(per_copy < 0 && per_pad > 0, "{per_copy} {per_pad}");
+    // Copies and pads change the steps left only by multiples of their common factor.
+    fn gcd(a: i64, b: i64) -> i64 {
+        if b == 0 { a.abs() } else { gcd(b, a % b) }
+    }
+    let common = gcd(per_copy, per_pad);
+    assert_eq!(
+        (WALK_STEPS - left_here) % common,
+        0,
+        "the steps of a copy ({per_copy}) and of a pad ({per_pad}) share the factor {common}, \
+         which does not divide the steps of the walk ({WALK_STEPS}) less those left \
+         ({left_here}): no size leaves exactly the steps of the walk"
+    );
     for fewer in 0..per_pad {
         let left_after = left_here - per_copy * fewer;
         let more_pads = WALK_STEPS - left_after;

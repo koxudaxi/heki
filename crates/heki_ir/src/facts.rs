@@ -2807,11 +2807,22 @@ impl LastBindings {
         Self { end }
     }
 
+    /// Whether every path to the end of the module body `shape` runs `block` once: outside a
+    /// loop, in a block that dominates the end. A store on one branch (`if flag: name = ...`,
+    /// or in an `except` clause) leaves the name unbound, or bound by something else, on the
+    /// others.
+    pub fn always_runs(&self, shape: &FnShape<'_>, block: BlockId) -> bool {
+        shape.loop_depth(block) == 0
+            && self
+                .end
+                .is_some_and(|end| shape.dominators().dominates(block, end))
+    }
+
     /// Whether the store `store` in `block` of the module body `shape` binds its name after the
-    /// star import ending at `star_end` on every path through both: it follows the import,
-    /// outside a loop, in a block every path to the end of the body runs. A store on one branch
-    /// (`if flag: from m import *` / `else: name = ...`, or in an `except` clause) leaves the
-    /// name to what the import binds on the others.
+    /// star import ending at `star_end` on every path through both: it follows the import, in a
+    /// block every path runs ([`Self::always_runs`]). A store on one branch
+    /// (`if flag: from m import *` / `else: name = ...`) leaves the name to what the import binds
+    /// on the others.
     pub fn overrides(
         &self,
         shape: &FnShape<'_>,
@@ -2819,11 +2830,7 @@ impl LastBindings {
         store: &Inst,
         star_end: u32,
     ) -> bool {
-        store.span.start >= star_end
-            && shape.loop_depth(block) == 0
-            && self
-                .end
-                .is_some_and(|end| shape.dominators().dominates(block, end))
+        store.span.start >= star_end && self.always_runs(shape, block)
     }
 }
 
@@ -2862,7 +2869,11 @@ fn module_constants(
     }
     // Ints first: displays and later ints may use them (`range(N)` only through loads).
     let ix = FnIndex::new(module, &out);
-    let last = star_import.then(|| LastBindings::of(&ix.shape));
+    // Whether a store binds its name after every star import depends on the last one only.
+    let last = star_imports
+        .iter()
+        .max()
+        .map(|&end| (LastBindings::of(&ix.shape), end));
     let mut ints = BTreeMap::new();
     let mut strs = BTreeMap::new();
     let mut str_tuples = BTreeMap::new();
@@ -2880,11 +2891,8 @@ fn module_constants(
             };
             // A star import binds the public names of its module, or those its `__all__` lists,
             // which may start with an underscore.
-            let star_rebinds = last.is_some_and(|last| {
-                star_imports
-                    .iter()
-                    .any(|&end| !last.overrides(&ix.shape, bb.id, inst, end))
-            });
+            let star_rebinds =
+                last.is_some_and(|(last, end)| !last.overrides(&ix.shape, bb.id, inst, end));
             if !stores.once(name) || star_rebinds {
                 continue;
             }
