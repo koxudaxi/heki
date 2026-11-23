@@ -77,6 +77,7 @@ fn child(table: &str, key: &str) -> String {
 /// contracts, `ecosystem`) are shown by their headers instead.
 const EXAMPLES: &[(&str, &str)] = &[
     ("target-version", r#""py312""#),
+    ("required-version", r#"">=0.2""#),
     ("exclude", r#"[".venv", "build"]"#),
     ("extend-exclude", r#"["generated"]"#),
     ("src", r#"["src"]"#),
@@ -235,6 +236,7 @@ pub(crate) fn check_keys(
     let Some(root) = settings_root(doc, layout) else {
         return Ok(());
     };
+    check_required_version(layout, path, text, root)?;
     match unknown_key("", root) {
         Some(unknown) => Err(ConfigError::UnknownKey {
             path: path.to_path_buf(),
@@ -245,6 +247,43 @@ pub(crate) fn check_keys(
             keys_inside: unknown.keys_inside,
         }),
         None => Ok(()),
+    }
+}
+
+/// The release `required-version` asks for, checked before any other key: an older heki cannot
+/// know the keys a newer one reads, so what it says about them would be a guess.
+fn check_required_version(
+    layout: ConfigLayout,
+    path: &Path,
+    text: &str,
+    root: &dyn TableLike,
+) -> Result<(), ConfigError> {
+    let Some((key, item)) = root.get_key_value("required-version") else {
+        return Ok(());
+    };
+    let Some(required) = item.as_str() else {
+        return Ok(());
+    };
+    let position = item
+        .span()
+        .map(|s| crate::problem::line_column(text, s.start));
+    match crate::version_satisfies(required, crate::VERSION) {
+        Some(true) => Ok(()),
+        Some(false) => Err(ConfigError::RequiredVersion {
+            path: path.to_path_buf(),
+            position,
+            required: required.to_owned(),
+            running: crate::VERSION,
+        }),
+        None => Err(ConfigError::Value {
+            path: path.to_path_buf(),
+            layout,
+            position,
+            key: Some((String::new(), key.get().to_owned())),
+            message: format!(
+                "`{required}` is not accepted: each comma-separated clause is an operator (`==`, `!=`, `>=`, `>`, `<=`, `<`, `~=`, `===`) and a release of digits and dots, such as `>=0.2.4, <0.3`; pre-, post-, and development-release suffixes are not accepted"
+            ),
+        }),
     }
 }
 
@@ -349,7 +388,15 @@ pub(crate) fn explain_unknown_key(
         }
         return problem.docs(Docs::of_key(home.path, key));
     }
-    problem.one_of(key, known).docs(Docs::of_table(table))
+    let mut problem = problem.one_of(key, known).docs(Docs::of_table(table));
+    if crate::problem::nearest(key, known.iter().map(String::as_str)).is_empty() {
+        problem = problem.help(format!(
+            "`{key}` may be a key of a newer heki than {}: `required-version` makes an older heki refuse to run, and the changelog lists what each release adds ({})",
+            crate::VERSION,
+            crate::problem::CHANGELOG
+        ));
+    }
+    problem
 }
 
 /// What the value of `key` in `table` takes, with an example.

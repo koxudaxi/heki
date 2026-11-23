@@ -5158,6 +5158,19 @@ impl<'a> Extractor<'a> {
         }
     }
 
+    /// Whether `callee`, what [`Self::callable_callee`] resolves calling `var` to, is every
+    /// implementation that call can run ([`crate::TypeCtx::method_targets_complete`] for a
+    /// bound method, [`crate::TypeCtx::call_targets_complete`] otherwise).
+    fn callable_targets_complete(&self, var: VarId, callee: &Callee) -> bool {
+        match self.bound_method(var) {
+            Some((recv, method)) => {
+                self.cx
+                    .method_targets_complete(self.val(recv), &method, callee)
+            }
+            None => self.cx.call_targets_complete(self.val(var), callee),
+        }
+    }
+
     fn child_callee(&self, id: FunctionId) -> Callee {
         let child = self.cx.ir().function(id);
         Callee::Project(
@@ -7027,7 +7040,9 @@ impl<'a> Extractor<'a> {
         if self.class_called(target).is_some() {
             return;
         }
-        let (Callee::Project(callees, _), _) = self.callable_callee(target) else {
+        let (callee, _) = self.callable_callee(target);
+        let complete = self.callable_targets_complete(target, &callee);
+        let Callee::Project(callees, _) = callee else {
             return;
         };
         self.unawaited.push(UnawaitedHandoff {
@@ -7035,6 +7050,8 @@ impl<'a> Extractor<'a> {
             api: symbol.to_owned(),
             callees,
             tests_result: slot.tests_result,
+            hands_back: slot.hands_back,
+            complete,
         });
     }
 
@@ -7334,28 +7351,12 @@ impl<'a> Extractor<'a> {
     /// [`Self::targets_complete`] of the call at `(bb, index)`, with the types its block narrows
     /// (those its callee was resolved with).
     fn targets_complete_at(&self, (bb, index): Position) -> bool {
-        match self.f.block(bb).insts.get(index).map(|i| &i.kind) {
-            Some(InstKind::MethodCall { recv, method, .. }) => {
-                let recv = self.val_in(bb, *recv);
-                let callee = self.cx.resolve_method(recv, method);
-                self.cx.method_targets_complete(recv, method, &callee)
-            }
-            Some(InstKind::Call { callee_var, .. }) => {
-                let value = callee_var.and_then(|v| self.val_in(bb, v));
-                let callee = self.cx.resolve_call(value);
-                self.cx.call_targets_complete(value, &callee)
-            }
-            // A read that runs property getters ([`Self::property_read`]): the getter each class
-            // the object may be finds for the name (more than CHA follows are none).
-            Some(InstKind::AttrLoad { obj, attr, .. }) => {
-                let recv = self.val_in(bb, *obj);
-                matches!(
-                    self.cx.resolve_attr_load(recv, attr),
-                    Some(Callee::Project(keys, _)) if self.cx.getter_targets_complete(recv, attr, &keys)
-                )
-            }
-            _ => false,
-        }
+        // A read that runs property getters ([`Self::property_read`]) runs the getter each class
+        // the object may be finds for the name (more than CHA follows are none).
+        self.f.block(bb).insts.get(index).is_some_and(|i| {
+            self.cx
+                .inst_targets_complete(&i.kind, |v| self.val_in(bb, v))
+        })
     }
 
     /// Whether `v` is a phi, with its inputs pushed on `next`.

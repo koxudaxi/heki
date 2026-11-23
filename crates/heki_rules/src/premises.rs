@@ -150,10 +150,11 @@ pub const NEVER_RETURNS: OpenCause = OpenCause {
 
 pub const EVERY_IMPLEMENTATION: Premise = Premise {
     name: "Every implementation",
-    states: "each call on the chain has as its targets every implementation it can run (R2, R5), each with the fact",
+    states: "each call on the chain has as its targets every implementation it can run (R1, R2, R5), each with the fact",
     decided_in: &[
         "heki_effect::summary::Extractor::targets_complete",
-        "heki_effect::resolver::TypeCtx::method_targets_complete",
+        "heki_effect::resolver::TypeCtx::inst_targets_complete",
+        "heki_effect::resolver::ProjectDecls::lookup_rebound",
         "heki_effect::callgraph::site_must_chain",
     ],
 };
@@ -161,7 +162,7 @@ pub const EVERY_IMPLEMENTATION: Premise = Premise {
 pub const INCOMPLETE_TARGETS: OpenCause = OpenCause {
     id: "incomplete-targets",
     premise: &EVERY_IMPLEMENTATION,
-    states: "the call's targets may not be every implementation it can run: a receiver typed by a protocol (R5), a base class heki knows nothing of that may define the method, more than 64 classes to dispatch over, or a member of a union that does not resolve",
+    states: "the call's targets may not be every implementation it can run: a receiver typed by a protocol (R5), a base class heki knows nothing of that may define the method, more than 64 classes to dispatch over, a member of a union that does not resolve, or a name the project binds to another object (R1: a store or `del` of the function, the class, or the method in its module or another, also through `setattr`, its `__code__`, or a class's `__bases__`)",
     closer: Closer::None,
 };
 
@@ -418,14 +419,17 @@ pub const CACHED_RESULT_NOT_ESTABLISHED: [&OpenCause; 3] = [
 
 pub const SAME_OBJECT: Premise = Premise {
     name: "Same object",
-    states: "the changed object is the cached call's result on every path, with no copy",
-    decided_in: &["heki_rules::mut_rules::Mut202Fn::must_results"],
+    states: "the changed object is the cached call's result on every path, with no copy, and the call runs the cached function (R1)",
+    decided_in: &[
+        "heki_rules::mut_rules::Mut202Fn::must_results",
+        "heki_effect::resolver::ProjectDecls::call_rebound",
+    ],
 };
 
 pub const NOT_THE_RESULT_ON_EVERY_PATH: OpenCause = OpenCause {
     id: "not-the-result-on-every-path",
     premise: &SAME_OBJECT,
-    states: "the changed object is not established to be the result of a direct call of the cached function on every path: another value on some path, or a value derived from it (an item, an attribute, the contents of a copy)",
+    states: "the changed object is not established to be the result of a direct call of the cached function on every path: another value on some path, a value derived from it (an item, an attribute, the contents of a copy), or a call that may run another object, as the project binds a name it goes through again (R1)",
     closer: Closer::Code,
 };
 
