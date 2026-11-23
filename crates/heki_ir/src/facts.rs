@@ -2766,7 +2766,12 @@ impl<'a> GlobalStores<'a> {
 
     /// Stored exactly once and never deleted.
     pub fn once(&self, name: &str) -> bool {
-        self.stores.get(name) == Some(&1) && !self.deleted.contains(name)
+        self.exactly(name, 1)
+    }
+
+    /// Stored exactly `times` times and never deleted.
+    pub fn exactly(&self, name: &str, times: u32) -> bool {
+        self.stores.get(name) == Some(&times) && !self.deleted.contains(name)
     }
 
     /// Stored or deleted somewhere.

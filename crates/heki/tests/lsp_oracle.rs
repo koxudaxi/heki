@@ -4503,6 +4503,44 @@ fn steps_re_exports() -> Vec<Step> {
     ]
 }
 
+const PARSER_MODULE: &str = "import time\n\n\ndef parse(x):\n    time.sleep(1)\n    return x\n";
+const PARSER_USER: &str =
+    "from pkg.parser import parse\n\n\nasync def handle(x):\n    return parse(x)\n";
+
+/// `from pkg.parser import parse` takes the submodule `pkg.parser.parse` until the package's
+/// `__init__.py` binds `parse` through it, and the function from then on.
+fn steps_package_names() -> Vec<Step> {
+    vec![
+        Step::new(
+            "a package has a module named like the module's function",
+            vec![
+                Action::Create("pkg/parser/__init__.py", String::new()),
+                Action::Create("pkg/parser/parse.py", PARSER_MODULE.to_owned()),
+                Action::Create("pkg/parser_user.py", PARSER_USER.to_owned()),
+            ],
+        )
+        .absent(&[("pkg/parser_user.py", "EFF101")]),
+        Step::new(
+            "the package re-exports the function over the module",
+            vec![save("pkg/parser/__init__.py", "from .parse import parse\n")],
+        )
+        .present(&[("pkg/parser_user.py", "EFF101")]),
+        Step::new(
+            "the package binds the name to the module's function",
+            vec![save(
+                "pkg/parser/__init__.py",
+                "from . import parse\n\nparse = parse.parse\n",
+            )],
+        )
+        .present(&[("pkg/parser_user.py", "EFF101")]),
+        Step::new(
+            "the package binds the name to the module",
+            vec![save("pkg/parser/__init__.py", "from . import parse\n")],
+        )
+        .absent(&[("pkg/parser_user.py", "EFF101")]),
+    ]
+}
+
 // ---------------------------------------------------------------------------------- the oracle
 
 /// One diagnostic in LSP coordinates: `(file, (line, UTF-16 column) start, end)`.
@@ -4953,6 +4991,7 @@ sessions!(editing, Session::start, {
     project_assumptions: steps_project_assumptions,
     declarations: steps_declarations,
     re_exports: steps_re_exports,
+    package_names: steps_package_names,
 });
 
 // ------------------------------------------------------- files, layout, and buffers (session 2)

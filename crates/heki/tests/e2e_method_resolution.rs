@@ -2,7 +2,8 @@
 //! Python's MRO (C3 linearization), constructing a named class (its own `__init__`, not a
 //! subclass's) and calling a method through it, class methods called through their class,
 //! calling an instance (`__call__`), constructions through a module, the targets of `with`
-//! statements, module-level names bound twice, the parameters `*` arguments bind, project
+//! statements, module-level names bound twice, a package's name over a submodule of the same
+//! name (`from pkg import parse`), the parameters `*` arguments bind, project
 //! methods named like container mutators, augmented assignments, the bases of class statements
 //! in functions, what calling and awaiting an `async def` give, and the types of globals and
 //! instance attributes, which every store of each must agree on.
@@ -422,6 +423,131 @@ fn a_module_name_is_what_its_module_binds_last() {
             ("pkg/shadows.py", SHADOWS),
             ("pkg/slow.py", SLOW),
             ("pkg/users.py", SHADOW_USERS),
+        ],
+        &["EFF101"],
+    );
+}
+
+/// A module `parse.py` in every package below, with a function of its own name.
+const PARSE_MODULE: &str = r#"import time
+
+
+def parse(x):
+    time.sleep(1)
+    return x
+
+
+def helper():
+    time.sleep(1)
+"#;
+
+/// `from pkg.rebind_rel import parse` takes the attribute `parse` of the package once its
+/// `__init__.py` has run, and the submodule only when the package binds no such name. A package
+/// binding it through the submodule binds it after the submodule was loaded, for good: the
+/// function. A package binding it otherwise holds it only until something first imports the
+/// submodule, which then replaces it: either object, so no report. A `from` import of the
+/// submodule itself (`from pkg.rebind_abs.parse import helper`) takes the module.
+const PACKAGE_NAME_USERS: &str = r#"import pkg.rebind_abs
+import pkg.rebind_rel.parse as imported_as
+from pkg.elsewhere import parse as elsewhere_parse
+from pkg.facade import parse as facade_parse
+from pkg.own_def import parse as own_parse
+from pkg.plain import parse as plain_parse
+from pkg.rebind_abs import parse as abs_parse
+from pkg.rebind_abs.parse import helper
+from pkg.rebind_alias import parse as alias_parse
+from pkg.rebind_rel import parse as rel_parse
+from pkg.self_import import parse as self_parse
+
+
+async def absolute_reexport(x):
+    return abs_parse(x)  # EFF101
+
+
+async def relative_reexport(x):
+    return rel_parse(x)  # EFF101
+
+
+async def rebound_by_alias(x):
+    return alias_parse(x)  # EFF101
+
+
+async def package_attribute(x):
+    return pkg.rebind_abs.parse(x)  # EFF101
+
+
+async def import_as(x):
+    return imported_as(x)  # EFF101
+
+
+async def through_a_facade(x):
+    return facade_parse(x)  # EFF101
+
+
+async def from_the_submodule():
+    helper()  # EFF101
+
+
+async def submodule_of_an_empty_init(x):
+    plain_parse.helper()  # EFF101
+    return plain_parse(x)
+
+
+async def submodule_the_init_imports(x):
+    self_parse.helper()  # EFF101
+    return self_parse(x)
+
+
+async def bound_before_any_load(x):
+    return own_parse(x)
+
+
+async def bound_from_another_module(x):
+    return elsewhere_parse(x)
+"#;
+
+const REBIND_ALIAS_INIT: &str = r#"from . import parse
+
+parse = parse.parse
+
+
+async def inside(x):
+    return parse(x)  # EFF101
+"#;
+
+const OWN_DEF_INIT: &str = r#"import time
+
+
+def parse(x):
+    time.sleep(1)
+    return x
+"#;
+
+#[test]
+fn a_package_name_over_a_submodule_is_what_the_package_binds_last() {
+    check_marks(
+        "package_names",
+        &[
+            (
+                "pkg/rebind_abs/__init__.py",
+                "from pkg.rebind_abs.parse import parse\n",
+            ),
+            ("pkg/rebind_abs/parse.py", PARSE_MODULE),
+            ("pkg/rebind_rel/__init__.py", "from .parse import parse\n"),
+            ("pkg/rebind_rel/parse.py", PARSE_MODULE),
+            ("pkg/rebind_alias/__init__.py", REBIND_ALIAS_INIT),
+            ("pkg/rebind_alias/parse.py", PARSE_MODULE),
+            ("pkg/plain/__init__.py", ""),
+            ("pkg/plain/parse.py", PARSE_MODULE),
+            ("pkg/self_import/__init__.py", "from . import parse\n"),
+            ("pkg/self_import/parse.py", PARSE_MODULE),
+            ("pkg/own_def/__init__.py", OWN_DEF_INIT),
+            ("pkg/own_def/parse.py", PARSE_MODULE),
+            ("pkg/elsewhere/__init__.py", "from .core import parse\n"),
+            ("pkg/elsewhere/core.py", PARSE_MODULE),
+            ("pkg/elsewhere/parse.py", PARSE_MODULE),
+            ("pkg/facade.py", "from pkg.rebind_rel import parse\n"),
+            ("pkg/users.py", PACKAGE_NAME_USERS),
         ],
         &["EFF101"],
     );

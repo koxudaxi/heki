@@ -384,6 +384,20 @@ fn kept_to_the_return_stripped_implicit_calls_of_project_code() {
         let p = project("mut101_strip_implicit", &typed("Hooked", after));
         assert_eq!(tiers(&p), vec![report("MUT101", 17, false)], "{after}");
     }
+    // `from pkg import name` loads the package, whatever the package binds the name to: here the
+    // function of `pkg.impl`, or of the submodule of the same name.
+    for (init, module) in [
+        ("from pkg.impl import parse\n", "pkg/impl.py"),
+        ("from .parse import parse\n", "pkg/parse.py"),
+    ] {
+        let p = project(
+            "mut101_strip_from_package",
+            &typed("Plain", "from pkg import parse"),
+        );
+        p.write("pkg/__init__.py", init)
+            .write(module, "def parse():\n    return None\n");
+        assert_eq!(tiers(&p), vec![report("MUT101", 17, false)], "{init}");
+    }
     // An attribute of a value that may be of either class runs the hook of one.
     let p = project(
         "mut101_strip_union_attr",
