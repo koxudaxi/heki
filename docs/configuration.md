@@ -801,7 +801,8 @@ excluded = true               # never reported
 | `offloads-blocking-arg` | Index of the callable argument this function runs on another thread (the receiver is not counted). |
 | `excluded` | Never reported (logging and similar). |
 | `copy-sanitizer` | Returns a copy of its first argument (or receiver), ending `MUT202` protection: `"deep"` copies everything below it too; `"shallow"` (or `true`) copies only the object itself, so the values below it stay protected. |
-| `return-type` | The class of the objects the call returns (a factory: `mypkg.db.open` returning `sqlite3.Connection`), whose methods are then looked up in the catalog. |
+| `return-type` | The class of the objects the call returns (a factory: `mypkg.db.open` returning `sqlite3.Connection`), whose methods are then looked up in the catalog. `"Self"`: an object of the receiver's class (a builder method such as `with_options`, also on a project subclass of the library class). |
+| `attribute-type` | The class of what reading the attribute `symbol` names (`package.module.Client.chat`) on an instance of a library class gives, whose members are then looked up in the catalog: `client.chat.completions.create(...)` reaches the catalog's `create`. It takes no other key. The read is typed only where nothing in the project may change it: no project subclass of the class binds the name or defines `__getattribute__`, and no base heki knows nothing of comes before the library class. |
 | `sync-lock-or-tx` | A `with` over an instance of this class, or over the result of this call, holds a synchronous lock or a database transaction (`EFF106`). |
 | `non-reentrant-lock` | An instance of this class is a lock its holder cannot take again: acquiring it while the same thread or task holds it waits forever (`EFF109`). |
 | `one-at-a-time` | Tasks may not be inside this method on one object at once (`EFF110`): `"always"` (a second task's call raises), `"when_unbound"` (only while the object holds no connection, as an `AsyncSession`), or `"unbinds"` (as `"when_unbound"`, and the object holds no connection after the call: `commit`). |
@@ -821,7 +822,7 @@ For a project function:
 | `async-safe` | keeps the blocking effects of the body from its callers |
 | `return-type` | types its result, over its annotation |
 | `offloads-blocking-arg` | the parameter the body offloads, counted as for a library method |
-| `copy-sanitizer`, `sync-lock-or-tx`, `non-reentrant-lock`, `one-at-a-time`, `writes-in-order` | not read: library symbols only |
+| `copy-sanitizer`, `sync-lock-or-tx`, `non-reentrant-lock`, `one-at-a-time`, `writes-in-order`, `attribute-type` | not read: library symbols only (the project's own declarations type its attributes) |
 
 ## Inline suppressions
 
