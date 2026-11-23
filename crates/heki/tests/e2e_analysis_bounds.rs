@@ -6243,3 +6243,37 @@ fn hand_memo_keys_derive_from_the_arguments_in_one_walk() {
         .collect();
     assert_eq!(reported, vec!["use"], "{found:#?}");
 }
+
+/// A memo-shaped store whose key is a tuple of thousands of values, built once for the test and
+/// once for the store (`if (a, a, ...) not in p.items: p.items[(a, a, ...)] = 0`): the two keys
+/// are compared value by value, each pair once.
+#[test]
+fn memo_keys_of_many_values_are_compared_once() {
+    let found = check_linear(3000, |values| {
+        let key = vec!["a"; values].join(", ");
+        let lines = [
+            "from functools import lru_cache".to_owned(),
+            String::new(),
+            String::new(),
+            "@lru_cache(maxsize=None)".to_owned(),
+            "def config(name):".to_owned(),
+            "    return object()".to_owned(),
+            String::new(),
+            String::new(),
+            "def fill(p, a):".to_owned(),
+            format!("    if ({key}) not in p.items:"),
+            format!("        p.items[({key})] = 0"),
+            String::new(),
+            String::new(),
+            "def use(name):".to_owned(),
+            "    fill(config(name), 1)".to_owned(),
+        ];
+        let p = Project::new(&format!("bounds_memo_tuple_keys_{values}"));
+        p.write("m.py", &(lines.join("\n") + "\n"));
+        p
+    });
+    assert!(
+        found.iter().all(|d| d["rule_code"] != "MUT114"),
+        "{found:#?}"
+    );
+}
