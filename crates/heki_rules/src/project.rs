@@ -5,15 +5,19 @@
 
 use crate::{
     CheckExtras, ModuleUnit, RuleConfigError, RuleSelection, SummarySnapshot, check_project,
+    find_rule,
 };
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use heki_ast::{LineIndex, Span};
-use heki_diagnostics::{Diagnostic, InlineIgnores, RatchetBaseline};
+use heki_diagnostics::{
+    BaselineKey, Certainty, Diagnostic, InlineIgnores, RatchetBaseline, Suppression,
+    SuppressionForm,
+};
 use heki_effect::{
     Contracts, ModuleInput, ModuleLayout, OptInFacts, ProjectIndex, TypedWrites, UnreadModule,
     analyze_project_for,
 };
-use heki_env::{ConfigError, HekiConfig, PythonVersion, RuntimeProfile};
+use heki_env::{ConfigError, HekiConfig, LintConfig, PythonVersion, RuntimeProfile, Severity};
 use heki_ir::ModuleIr;
 use heki_kb::{EcosystemPatch, EffectiveEcosystemKb, EffectiveSoundnessKb, KbError};
 use heki_semantic::SemanticModel;
@@ -743,9 +747,19 @@ impl Indexed {
         })
     }
 
+    /// What the checks of this index run.
+    pub fn rules_run(&self) -> RulesRun<'_> {
+        RulesRun {
+            selection: &self.selection,
+            snapshot: self.snapshot.is_some(),
+            lint: &self.project.env.cfg.lint,
+        }
+    }
+
     /// The diagnostics of every enabled rule in the project's files, after inline suppressions
-    /// and without the heuristic reports the selection withholds, and how many those are.
-    pub fn diagnose(&self) -> Result<(Vec<Diagnostic>, usize), RuleConfigError> {
+    /// and with the reports on suppression comments the configuration asks for, without the
+    /// heuristic reports the selection withholds, and those.
+    pub fn diagnose(&self) -> Result<(Vec<Diagnostic>, Vec<Diagnostic>), RuleConfigError> {
         self.diagnose_units(&self.project.units(), false)
     }
 
@@ -756,10 +770,10 @@ impl Indexed {
         &self,
         units: &[ModuleUnit<'_>],
         open_premises: bool,
-    ) -> Result<(Vec<Diagnostic>, usize), RuleConfigError> {
+    ) -> Result<(Vec<Diagnostic>, Vec<Diagnostic>), RuleConfigError> {
         let mut diags = self.reports(units, open_premises)?;
-        retain_unsuppressed(&mut diags, &self.project.files);
-        let withheld = self.selection.withhold_heuristic(&mut diags);
+        self.retain_unsuppressed_in(units, &mut diags);
+        let withheld = self.selection.take_heuristic(&mut diags);
         Ok((diags, withheld))
     }
 
@@ -768,16 +782,34 @@ impl Indexed {
     pub fn diagnose_with_suppressed(
         &self,
     ) -> Result<(Vec<Diagnostic>, Vec<Diagnostic>), RuleConfigError> {
-        let mut diags = self.reports(&self.project.units(), false)?;
+        let units = self.project.units();
+        let mut diags = self.reports(&units, false)?;
         let mut kept = diags.clone();
-        retain_unsuppressed(&mut kept, &self.project.files);
-        // Both are in the same order, so one pass pairs them up.
-        let mut next = kept.iter().peekable();
+        self.retain_unsuppressed_in(&units, &mut kept);
+        // Both are in the same order, so one pass pairs them up; the reports on suppression
+        // comments are not among `diags`.
+        let mut next = kept
+            .iter()
+            .filter(|k| !is_suppression_report(&k.rule_code))
+            .peekable();
         diags.retain(|d| next.next_if(|k| *k == d).is_none());
         let mut suppressed = diags;
-        self.selection.withhold_heuristic(&mut kept);
-        self.selection.withhold_heuristic(&mut suppressed);
+        self.selection.take_heuristic(&mut kept);
+        self.selection.take_heuristic(&mut suppressed);
         Ok((kept, suppressed))
+    }
+
+    /// Drop the reports on `units` that inline suppressions suppress, and add the reports on
+    /// suppression comments the configuration asks for.
+    fn retain_unsuppressed_in(&self, units: &[ModuleUnit<'_>], diags: &mut Vec<Diagnostic>) {
+        // The reports of a unit are on its own file.
+        let checked: FxHashSet<&Path> = units.iter().map(|u| u.input.path.as_path()).collect();
+        let files = self.project.files.iter();
+        retain_unsuppressed(
+            diags,
+            files.filter(|f| checked.contains(f.path.as_path())),
+            &self.rules_run(),
+        );
     }
 
     /// Every report of the selected rules in `units`, before inline suppressions and the
@@ -846,25 +878,205 @@ pub fn regressed(
         .collect()
 }
 
-/// Drop diagnostics suppressed by `# heki: ignore[...]` / `# noqa` comments of their file.
+/// The code of a report that a suppression comment named a rule that ran and suppressed none of
+/// its reports (`lint.report-unused-suppressions`).
+pub const UNUSED_SUPPRESSION: &str = "unused-suppression";
+/// The code of a report that a `# heki: ignore` comment names no rule
+/// (`lint.require-suppression-codes`).
+pub const SUPPRESSION_WITHOUT_CODE: &str = "suppression-without-code";
+
+/// Whether `code` is the code of a report on a suppression comment, which no rule makes.
+pub fn is_suppression_report(code: &str) -> bool {
+    code == UNUSED_SUPPRESSION || code == SUPPRESSION_WITHOUT_CODE
+}
+
+/// What a check ran: what suppressions and baseline entries are judged by.
+#[derive(Clone, Copy)]
+pub struct RulesRun<'a> {
+    pub selection: &'a RuleSelection,
+    /// Whether the check compared with a summary snapshot.
+    pub snapshot: bool,
+    pub lint: &'a LintConfig,
+}
+
+impl RulesRun<'_> {
+    fn unused_reported(&self) -> bool {
+        self.lint.report_unused_suppressions.unwrap_or(false)
+    }
+
+    fn codes_required(&self) -> bool {
+        self.lint.require_suppression_codes.unwrap_or(false)
+    }
+
+    /// Whether the check ran what reports `code` on the file at the project-relative
+    /// `rel_path`: the rule ([`crate::runs_on`]), or the setting of a suppression report. A
+    /// rule that did not run (a heuristic rule left off, a rule `per-file-ignores` turns off
+    /// there) reported nothing that a suppression or a baseline entry could match.
+    pub fn reports(&self, code: &str, rel_path: &str) -> bool {
+        match code {
+            UNUSED_SUPPRESSION => self.unused_reported(),
+            SUPPRESSION_WITHOUT_CODE => self.codes_required(),
+            _ => find_rule(code)
+                .is_some_and(|r| crate::runs_on(self.selection, self.snapshot, r.code, rel_path)),
+        }
+    }
+
+    /// Whether the baseline entry `key`, which `found` reports of this check matched (the
+    /// heuristic reports the selection withholds among them), is reported for matching none:
+    /// with `lint.report-unused-suppressions`, when its file was checked (`checked` holds the
+    /// project-relative paths) and its rule ran there.
+    pub fn unused_entry(&self, key: &BaselineKey, found: u32, checked: &FxHashSet<&str>) -> bool {
+        self.unused_reported()
+            && found == 0
+            && checked.contains(key.path.as_str())
+            && self.reports(&key.rule_code, &key.path)
+    }
+}
+
+/// Drop diagnostics suppressed by `# heki: ignore[...]` / `# noqa` comments of their file
+/// (`files` holds every file the diagnostics are on), then add the reports on those comments
+/// that `run`'s settings ask for.
 pub fn retain_unsuppressed<'f>(
     diags: &mut Vec<Diagnostic>,
     files: impl IntoIterator<Item = &'f ParsedFile>,
+    run: &RulesRun<'_>,
 ) {
-    let ignores: FxHashMap<&Path, InlineIgnores> = files
+    // For each file, its suppressions and the rules each one suppressed reports of.
+    let mut ignores: FxHashMap<&Path, (&ParsedFile, InlineIgnores, Vec<FxHashSet<String>>)> = files
         .into_iter()
         .map(|p| {
-            (
-                p.path.as_path(),
-                InlineIgnores::from_comments(&p.source, &p.comments),
-            )
+            let ignores = InlineIgnores::from_comments(&p.source, &p.comments);
+            let suppressed = vec![FxHashSet::default(); ignores.suppressions().len()];
+            (p.path.as_path(), (p, ignores, suppressed))
         })
         .collect();
+    let judged = run.unused_reported() || run.codes_required();
     diags.retain(|d| {
-        !ignores
-            .get(d.path.as_path())
-            .is_some_and(|ign| ign.is_suppressed(d.line, &d.rule_code, &d.rule_slug))
+        let mut kept = true;
+        // A diagnostic on a path without a checked source has no suppressions: no iteration.
+        for (_, ign, suppressed) in ignores.get_mut(d.path.as_path()).into_iter() {
+            for i in ign.suppressing(d.line, &d.rule_code, &d.rule_slug) {
+                if judged {
+                    suppressed[i].insert(d.rule_code.clone());
+                }
+                kept = false;
+            }
+        }
+        kept
     });
+    if !judged {
+        return;
+    }
+    for (file, ign, suppressed) in ignores.values() {
+        let lines = LineIndex::from_source(&file.source);
+        for (s, suppressed) in ign.suppressions().iter().zip(suppressed) {
+            if let Some(d) = suppression_report(file, &lines, s, suppressed, run) {
+                diags.push(d);
+            }
+        }
+    }
+    heki_diagnostics::sort_diagnostics(diags);
+}
+
+/// The report on suppression `s` of `file`, which suppressed reports of the rules `suppressed`,
+/// if `run`'s settings ask for one: the codes naming a rule that ran and suppressed none of its
+/// reports, or a `# heki: ignore` naming no rule. A bare `# noqa` belongs to Ruff as much as to
+/// heki, and a code that names no heki rule (`F401` in `# noqa: F401, EFF101`) is another
+/// tool's; neither is reported.
+fn suppression_report(
+    file: &ParsedFile,
+    lines: &LineIndex,
+    s: &Suppression,
+    suppressed: &FxHashSet<String>,
+    run: &RulesRun<'_>,
+) -> Option<Diagnostic> {
+    let (code, setting, target, message, help, fix) = if s.codes.is_empty() {
+        if s.form != SuppressionForm::Heki || !run.codes_required() {
+            return None;
+        }
+        let mut names: Vec<&str> = suppressed.iter().map(String::as_str).collect();
+        names.sort_unstable();
+        let help = if names.is_empty() {
+            "name the rules it is for: `# heki: ignore[CODE]`".to_owned()
+        } else {
+            format!(
+                "name the rules it suppresses here: `# heki: ignore[{}]`",
+                names.join(", ")
+            )
+        };
+        (
+            SUPPRESSION_WITHOUT_CODE,
+            "require-suppression-codes",
+            "# heki: ignore".to_owned(),
+            "`# heki: ignore` names no rule: it suppresses every rule on this line".to_owned(),
+            help,
+            None,
+        )
+    } else {
+        if !run.unused_reported() {
+            return None;
+        }
+        let unused: Vec<usize> = (0..s.codes.len())
+            .filter(|&i| {
+                find_rule(&s.codes[i])
+                    .is_some_and(|r| run.reports(r.code, &file.rel) && !suppressed.contains(r.code))
+            })
+            .collect();
+        let names: Vec<&str> = unused.iter().map(|&i| s.codes[i].as_str()).collect();
+        let listed: Vec<String> = names.iter().map(|c| format!("`{c}`")).collect();
+        let (last, others) = listed.split_last()?;
+        let either = if others.is_empty() {
+            last.clone()
+        } else {
+            format!("{} or {last}", others.join(", "))
+        };
+        let help = if unused.len() == s.codes.len() {
+            "remove the suppression".to_owned()
+        } else {
+            format!("remove {} from the suppression", listed.join(", "))
+        };
+        (
+            UNUSED_SUPPRESSION,
+            "report-unused-suppressions",
+            names.join(", "),
+            format!("No {either} report on this line to suppress"),
+            help,
+            Some(vec![s.without(&file.source, &unused)]),
+        )
+    };
+    let (line, column) = lines.line_col(s.span.start);
+    Some(Diagnostic {
+        path: file.path.clone(),
+        line,
+        column,
+        span: s.span,
+        qualname: enclosing_function(file, lines, line).to_owned(),
+        rule_code: code.to_owned(),
+        rule_slug: setting.to_owned(),
+        target,
+        severity: Severity::Error,
+        certainty: Certainty::Exact,
+        message,
+        help: Some(help),
+        evidence: None,
+        blocker: None,
+        related: Vec::new(),
+        fix,
+        sites: 1,
+        fold_key: None,
+        open_records: Vec::new(),
+        contracts: Vec::new(),
+    })
+}
+
+/// The qualified name of the innermost function of `file` whose lines hold `line`.
+fn enclosing_function<'f>(file: &'f ParsedFile, lines: &LineIndex, line: u32) -> &'f str {
+    file.ir
+        .functions
+        .iter()
+        .filter(|f| (lines.line(f.span.start)..=lines.line(f.span.end)).contains(&line))
+        .min_by_key(|f| f.span.end - f.span.start)
+        .map_or("<module>", heki_effect::func_qualname)
 }
 
 #[cfg(all(test, windows))]

@@ -460,7 +460,7 @@ fn it_writes_nothing_and_prints_the_same_report_on_every_run() {
         "{err}"
     );
     let (_, second, _) = p.heki(&["recommend", "--output-format", "json"]);
-    let one_thread = Command::new(env!("CARGO_BIN_EXE_heki"))
+    let one_thread = common::heki_command()
         .args(["recommend", "--output-format", "json"])
         .env("RAYON_NUM_THREADS", "1")
         .current_dir(&p.dir)
@@ -881,7 +881,7 @@ fn paths_are_written_as_heki_check_writes_them() {
     p.write("app/sub/__init__.py", "");
     // Run from below the project root: the root and the files outside the working directory
     // are written as they are, the files below it relative to it.
-    let out = Command::new(env!("CARGO_BIN_EXE_heki"))
+    let out = common::heki_command()
         .args(["recommend", "--output-format", "json", "sub"])
         .current_dir(p.dir.join("app"))
         .output()

@@ -256,12 +256,17 @@ impl RuleSelection {
     /// fixes, and folding, so that those see what is shown and the count is what
     /// `lint.heuristic` would add.
     pub fn withhold_heuristic(&self, diags: &mut Vec<Diagnostic>) -> usize {
-        let before = diags.len();
-        diags.retain(|d| {
-            d.certainty == Certainty::Exact
-                || !self.exact_reports_only.contains(d.rule_code.as_str())
+        self.take_heuristic(diags).len()
+    }
+
+    /// [`Self::withhold_heuristic`], returning the reports it removed.
+    pub fn take_heuristic(&self, diags: &mut Vec<Diagnostic>) -> Vec<Diagnostic> {
+        let (withheld, shown) = std::mem::take(diags).into_iter().partition(|d| {
+            d.certainty != Certainty::Exact
+                && self.exact_reports_only.contains(d.rule_code.as_str())
         });
-        before - diags.len()
+        *diags = shown;
+        withheld
     }
 }
 

@@ -12,6 +12,9 @@ largest n whose function the IR budget still models: n doubles, then bisects, wi
 builder moves the size with it. A family spread over a project (a wide class hierarchy, a chain
 of private helpers, a chain of container subclasses) has a fixed size, and so has a family in one
 function whose cost already shows at a smaller size, where the walks it does not gate stay cheap.
+A fixed size must be modeled too: past the budget a shape measures the cutoff, not the walks it
+gates. A family of thousands of functions in one module grows like a family in one function, since
+the budget of the module body bounds the functions it defines.
 
 Each shape is checked with every rule selected and one contract of each kind naming the classes
 and functions the shapes define (a family may add contracts of its own, such as thousands of
@@ -19,8 +22,9 @@ argument lists), through `heki check` and through the `--watch` engine; a family
 `heki recommend` reads also runs through `heki dump-recommend-facts`. The cost
 is the wall time and the peak (the heap of the memory gate's counting build, or what the system
 reports, see `check_memory.py`) minus those of an empty module; the time limit is scaled to the
-machine by fixed linear shapes of calls and of loops, timed on a fixed release of heki (from
-PyPI, through pip), not on the binary under test.
+machine by fixed linear shapes of calls and of loops (and, for a project shape, of a module of
+many functions), timed on a fixed release of heki (from PyPI, through pip), not on the binary
+under test.
 
 `heki check --walk-steps` gives the steps each owner's walks took per function. They must grow
 at most 2.5 times from n / 2 to n (quadratic growth inside the budget shows without timing
@@ -68,15 +72,23 @@ from check_memory import HEAP_LINE, MIB, execute  # noqa: E402
 LIMIT_SECONDS = 1.0
 LIMIT_MIB = 1024.0
 # The seconds are those of the machine the limits were measured on (an Apple M4 Max). Fixed
-# linear shapes, one of calls and one of loops (`reference_source`), take these seconds there on
-# the release `REFERENCE_HEKI` (beyond an empty module), and the time limit scales by the largest
-# factor by which the machine running the gate is slower on one of them (never below 1): machines
-# differ unevenly on calls and on loops, and the gated shapes do both. The references never run
-# on the binary under test, whose changes would move every limit: a reference made cheaper
-# tightens them all, one made dearer loosens them all. Another `REFERENCE_HEKI` or
-# `reference_source` needs these seconds measured again on that machine (the gate prints them).
+# linear shapes (`reference_source`) take these seconds there on the release `REFERENCE_HEKI`
+# (beyond an empty module), and the time limit of a shape scales by the largest factor by which
+# the machine running the gate is slower on one of the references of its kind (never below 1):
+# machines differ unevenly on calls, on loops, and on a module of thousands of functions. A shape
+# in one function does calls and loops. A project shape also does the work of many functions,
+# whose heap of tens to hundreds of MiB slows down more on a CI runner than calls and loops in one
+# function do, so the reference of functions (the last field) scales project shapes only.
+# The references never run on the binary under test, whose changes would move every limit: a
+# reference made cheaper tightens them all, one made dearer loosens them all. Another
+# `REFERENCE_HEKI` or `reference_source` needs these seconds measured again on that machine (the
+# gate prints them).
 REFERENCE_HEKI = "0.2.4"
-REFERENCES = (("calls", 3104, 0.225), ("loops", 2000, 0.105))
+REFERENCES = (
+    ("calls", 3104, 0.225, False),
+    ("loops", 2000, 0.105, False),
+    ("functions", 8000, 0.165, True),
+)
 # A run past this is over the limits whatever it would have taken.
 TIMEOUT_SECONDS = 10.0
 # The steps of an owner may grow this much from n / 2 to n.
@@ -559,7 +571,8 @@ def reports_sharing_a_chain(n: int) -> str:
 
 
 def functions_each_calling(n: int) -> str:
-    """Many functions each making one project call."""
+    """Many functions each making one project call: the call sites of a function are looked up in
+    the module's index, never found by a scan of every site of the module per function."""
     lines = []
     for i in range(n):
         lines += [f"def call{i}(x):", "    return g(x)", ""]
@@ -931,9 +944,9 @@ FAMILIES = [
     Family("blind_calls", blind_calls, facts=True),
     Family("wide_hierarchy", project=wide_hierarchy, placements=("project",), size=4000),
     Family("helper_chain", project=helper_chain, placements=("project",), size=2000),
-    Family(
-        "functions_each_calling", project=functions_each_calling, placements=("project",), size=20000
-    ),
+    # Grown like a family in one function: the IR budget of the module body bounds the functions
+    # it defines, and those past it are not analyzed.
+    Family("functions_each_calling", project=functions_each_calling, placements=("project",)),
     Family("self_helper_chain", project=self_helper_chain, placements=("project",), size=2000),
     Family("order_returned_up", project=order_returned_up, placements=("project",), size=2000),
     Family("order_handed_down", project=order_handed_down, placements=("project",), size=2000),
@@ -1028,17 +1041,22 @@ def source(family: Family, placement: str, n: int) -> str:
 
 
 def reference_source(kind: str, n: int) -> str:
-    """A reference of `REFERENCES`: n `with` statements calling a function, or n loops over
-    aliases of one display. It shares nothing with the gated shapes (helpers, contracts, family
-    generators), which change, while the reference seconds hold only for this source."""
+    """A reference of `REFERENCES`: n `with` statements calling a function, n loops over aliases
+    of one display, or n functions each calling one function of the module. It shares nothing with
+    the gated shapes (helpers, contracts, family generators), which change, while the reference
+    seconds hold only for this source."""
     if kind == "calls":
         lines = ["def use(x):", "    return x", "", "", "def shape(p):"]
         for i in range(n):
             lines += [f"    with open(p) as f{i}:", f"        use(f{i})"]
-    else:
+    elif kind == "loops":
         lines = ["def shape(xs):", "    a0 = [1, 2, 3]"]
         for i in range(1, n + 1):
             lines += [f"    a{i} = a{i - 1}", f"    for _ in a{i}:", "        xs.append(1)"]
+    else:
+        lines = ["def use(x):", "    return x"]
+        for i in range(n):
+            lines += ["", "", f"def call{i}(x):", "    return use(x)"]
     return "\n".join(lines) + "\n"
 
 
@@ -1201,15 +1219,16 @@ def shard(text: str) -> tuple[int, int]:
     return int(k), int(n)
 
 
-def time_limit(root: Path) -> float | None:
+def time_limits(root: Path) -> tuple[float, float] | None:
     """`LIMIT_SECONDS` scaled to this machine by `REFERENCES`, run on the release
-    `REFERENCE_HEKI` in `root`; `None` when no run of a reference or of its empty module ended
-    cleanly (a crash or a stopped run says nothing, or would inflate the limit)."""
+    `REFERENCE_HEKI` in `root`: the limit of a shape in one function and that of a project shape.
+    `None` when no run of a reference or of its empty module ended cleanly (a crash or a stopped
+    run says nothing, or would inflate the limit)."""
     root.mkdir()
     released = Runner(released_heki(root), root)
     args = ["check", "--select", released.select, "--output-format", "json", "m.py"]
     least: dict[str, float] = {}
-    for kind, text in [("empty", ""), *((k, reference_source(k, n)) for k, n, _ in REFERENCES)]:
+    for kind, text in [("empty", ""), *((r[0], reference_source(r[0], r[1])) for r in REFERENCES)]:
         runs = [released.measure(text, args, {}, TIMEOUT_SECONDS) for _ in range(3)]
         clean = [seconds for seconds, _, code in runs if code in (0, 1)]
         if not clean:
@@ -1217,13 +1236,15 @@ def time_limit(root: Path) -> float | None:
                   file=sys.stderr)
             return None
         least[kind] = min(clean)
-    factor = 1.0
-    for kind, n, seconds in REFERENCES:
+    in_function, project = 1.0, 1.0
+    for kind, n, seconds, project_only in REFERENCES:
         took = least[kind] - least["empty"]
         print(f"reference {kind} n={n} on heki {REFERENCE_HEKI}: {took:.3f} s ({seconds:.3f} s "
               "on the machine of the limits)", flush=True)
-        factor = max(factor, took / seconds)
-    return LIMIT_SECONDS * factor
+        project = max(project, took / seconds)
+        if not project_only:
+            in_function = max(in_function, took / seconds)
+    return LIMIT_SECONDS * in_function, LIMIT_SECONDS * project
 
 
 def main() -> int:
@@ -1251,19 +1272,20 @@ def main() -> int:
         base_seconds = min(run[0] for run in empty)
         base_peak = min(run[1] for run in empty)
         print(f"empty module: {base_seconds:.2f} s, {base_peak:.0f} MiB", flush=True)
-        limit_seconds = time_limit(Path(tmp) / "reference")
-        if limit_seconds is None:
+        limits = time_limits(Path(tmp) / "reference")
+        if limits is None:
             return 1
-        print(f"time limit on this machine: {limit_seconds:.2f} s", flush=True)
+        print(f"time limits on this machine: {limits[0]:.2f} s in one function, {limits[1]:.2f} s "
+              "for a project", flush=True)
         for family, placement in shapes:
             shape = (family.name, placement)
+            limit_seconds = limits[placement == "project"]
             runner.contracts("" if family.contracts is None else family.contracts(family.size))
-            if family.project is not None:
-                n, failed = family.size, None
-            elif family.size:
+            # A shape the IR budget leaves unmodeled measures the cutoff, not the walks it gates.
+            if family.size:
                 n = family.size
                 modeled = runner.modeled(source(family, placement, n))
-                failed = None if modeled is True else modeled or "leaves the function unmodeled"
+                failed = None if modeled is True else modeled or "leaves a function unmodeled"
             else:
                 n, failed = runner.largest_modeled(family, placement)
             text = source(family, placement, n)
