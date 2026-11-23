@@ -284,8 +284,13 @@ Missed findings close as heki learns more:
   [`MUT207`](rules/unresolved-guarded-call.md).
 - A write in an unannotated helper is still found where a caller passes it an object of a known
   class. A read is not.
-- Not typed: values declared `Any`, generics substituted through `TypeVar`s, and calls of
-  `type[C]` attributes.
+- Not typed: values declared `Any` or `types.ModuleType`, generics substituted through
+  unbounded `TypeVar`s (a bounded or constrained one gives its bound or constraints), and calls
+  of `type[C]` attributes.
+- A module-level table of functions (`HANDLERS = {"create": create}`) gives the value of a key
+  a string constant gives, and one of its values for any other key, only while no code changes
+  it in place; a change through a call it is handed to (`register(HANDLERS)`) is not seen.
+  Changing a dict or list a global or an attribute holds in place leaves its items untyped.
 - The type of a module global or an instance attribute joins every store of it through a
   receiver whose type heki knows: `self`, an instance of the class (a parameter `obj: Helper`,
   `cls()` in a class method, one the storing module keeps in its own attribute or global, as

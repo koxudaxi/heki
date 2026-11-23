@@ -397,8 +397,19 @@ the name binds (Priority 3; `ModuleDecls::global_types`, `ClassDecl::attr_stores
   stores into a name a function storing it reads, or into a name such a function reads through
   the stores of the names it reads; one walk over the functions finds them
   (`ProjectDecls::elsewhere`).
+- **Changes in place.** A change the module's code makes to the object a global or an
+  attribute holds, through a load of it (an item store `HANDLERS[kind] = run`, a method that may
+  add items such as `append`, `update`, or `setdefault`, an in-place operator;
+  `heki_ir::FnIndex::changed_vars`, through copies and phis), is a store of the object's class
+  with its items unknown: a name holding `{"noop": noop}` keeps `dict` and no item type the code
+  may replace. Another module's change marks the name (`StoredElsewhere::changed`), whose type
+  then keeps no items where it is read. What a call the object is handed to does is not
+  followed (the assumption on objects of unknown origin).
 - **Annotations.** An annotation types every store of the name it declares (Priority 2): an
-  annotated global holds its declaration or a narrower value, an annotated attribute its
+  annotated global holds its declaration, refined by what the value says beyond it
+  (`ProjectDecls::refine`: a narrower value, or for an instance of the declared container class
+  the item slots where the value is narrower or the declaration says nothing, such as the
+  functions of `HANDLERS: dict[str, Callable[..., None]] = {...}`), an annotated attribute its
   declaration.
 
 Stores of two or three classes give a union, on which a call dispatches as on any union (one of
@@ -511,6 +522,41 @@ of the same name: calling it is unresolved, unless a `[[tool.heki.ecosystem]]` e
 (`get = functools.partial(...)` listed as blocking, or with a `return-type`), which then
 describes it as it describes a library symbol. A name under a project module that the module
 does not bind (a compiled submodule, a star import) is what the catalog says of it.
+
+A class-body name bound once, outside a field, to a module-level name (a function, class, or
+alias of its module, a name an import binds, or an attribute of one) or to `staticmethod` of one
+(`factory = Scope`, `REQUIRE: ClassVar[...] = staticmethod(require)`) is that object
+(`ClassDecl::named_attrs`, `ProjectDecls::class_alias`), when no code of the module stores the
+attribute on the class or on an instance, no other module rebinds it, and no hook runs on the
+read. Read through the class object (`Holder.REQUIRE`, also inherited) it is the object itself;
+read on an instance, a function outside `staticmethod` is a bound method, which binds the
+instance first, and anything else is the object. A call through `cls` or an instance runs the
+object of every class the receiver may be (the class and its project subclasses, at most
+`DISPATCH_CLASS_LIMIT`); a class among them finding the name as anything else leaves the call
+unresolved. A call of a class bound so constructs it (`self.factory(...)`).
+
+A value bound to one of several named objects (a branch `f = a if c else b`, the values of a
+table) is one of them (`Ty::OneOf`, at most `MAX_NAMED`, eight): a call runs every one, which must
+bind a receiver alike. A module global bound once, by the module body outside a loop, to a dict
+display with string-literal keys and no `**` entry, some value of which is a function, a class,
+or a partial object, and that no code changes in place or rebinds, is a table
+(`ModuleDecls::tables`, at most 256 entries): reading it with a key a string constant gives
+(`HANDLERS["create"]`, `HANDLERS[KEY]`, in its module, imported, or through the module) gives
+that entry's value, a later entry of the key replacing an earlier one; any other key, and
+iterating its values, give one of its values.
+
+A function every `return` of which gives what one import binds, an import in the function (`from
+pkg import ops`, then `return ops`, which breaks an import cycle) or one of its module, with no
+decorator but those keeping calls as defined and a `functools` cache, returns that object
+(`FunctionDecl::returned_import`) whatever its annotation says (`-> ModuleType`). A value of
+`types.ModuleType` says nothing of the names the module binds: a call of one is unresolved, as on
+`Any`.
+
+A module-level `TypeVar` bound once with a `bound=` (a name, an attribute of one, or the string of
+an annotation) or constraints is that bound, or the union of the constraints, wherever an
+annotation names it, in its module or imported (`ModuleDecls::type_vars`,
+`ProjectDecls::declared_ty`): `for c in run.contexts` of `contexts: list[C]` with `C =
+TypeVar("C", bound=View)` gives a `View`. An unbounded one gives no class.
 
 A method that no project class of the receiver's MRO defines comes from the first base outside
 the project, when heki takes it to define the method (a base it knows nothing of coming first, an

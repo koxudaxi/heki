@@ -444,6 +444,10 @@ pub struct StoredElsewhere {
     /// (`obj.items += [x]`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub in_place: bool,
+    /// The module's code changes the object the name holds in place (`cfg.HANDLERS[kind] =
+    /// run`, `obj.items.append(x)`): its items are unknown.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub changed: bool,
 }
 
 /// A module's global and attribute types decided without what reading them gives, where they
@@ -4058,32 +4062,41 @@ impl ProjectDecls {
         }
         declared.obj().is_some_and(|d| {
             of_any_class(&d.class)
-                || is_any_callable(&d.class) && t.obj().is_none()
-                || t.obj().is_some_and(|i| {
-                    (i.class != d.class && self.is_subclass(&i.class, &d.class))
-                        || (i.class == d.class && self.narrower_items(&i.args, &d.args))
-                })
+                || (is_any_callable(&d.class) && t.obj().is_none())
+                || t.obj()
+                    .is_some_and(|i| i.class != d.class && self.is_subclass(&i.class, &d.class))
         })
     }
 
-    /// Whether the items `t` tracks are narrower than the declared `declared` in one slot and
-    /// the same or narrower in every other (`dict[str, Callable]` declared, a display of
-    /// functions stored).
-    fn narrower_items(&self, t: &Args, declared: &Args) -> bool {
-        let slots: Vec<(&Elem, &Elem)> = match (t, declared) {
-            (Args::Items(a), Args::Items(b)) => vec![(a, b)],
-            (Args::Map(ka, va), Args::Map(kb, vb)) => vec![(ka, kb), (va, vb)],
-            _ => return false,
-        };
-        let mut narrower = false;
-        for (a, b) in slots {
-            match (a, b) {
-                (Elem::Of(x), Elem::Of(y)) if x == y => {}
-                (Elem::Of(x), Elem::Of(y)) if self.narrower(x, y) => narrower = true,
-                _ => return false,
-            }
+    /// The declared type `declared` with what the inferred `t` says beyond it: `t` when it is
+    /// narrower ([`Self::narrower`]); for an instance of the declared container class, each
+    /// item slot of `t` that is narrower than the declared one or that the declaration leaves
+    /// unknown (`dict[str, Callable]` declared, a display of functions stored); else
+    /// `declared`.
+    pub(crate) fn refine(&self, t: &Ty, declared: &Ty) -> Ty {
+        if self.narrower(t, declared) {
+            return t.clone();
         }
-        narrower
+        let (Some(i), Some(d)) = (t.obj(), declared.obj()) else {
+            return declared.clone();
+        };
+        if i.class != d.class {
+            return declared.clone();
+        }
+        let slot = |a: &Elem, b: &Elem| match (a, b) {
+            (Elem::Of(x), Elem::Of(y)) if self.narrower(x, y) => a.clone(),
+            (Elem::Of(_), Elem::Unknown) => a.clone(),
+            _ => b.clone(),
+        };
+        let args = match (&i.args, &d.args) {
+            (Args::Items(a), Args::Items(b)) => Args::Items(Box::new(slot(a, b))),
+            (Args::Map(ka, va), Args::Map(kb, vb)) => {
+                Args::Map(Box::new(slot(ka, kb)), Box::new(slot(va, vb)))
+            }
+            (a, Args::None) => a.clone(),
+            (_, b) => b.clone(),
+        };
+        Ty::container(&d.class, args)
     }
 
     /// The project functions `name` names on an instance of the canonical project class
@@ -7721,7 +7734,8 @@ impl<'a> TypeCtx<'a> {
     /// is exactly its class, an instance or `cls` also a project subclass. Calling the named
     /// object calls it as it is, except a function read on an instance outside `staticmethod`,
     /// a bound method, which binds the instance first. `None` when no such class binds it so;
-    /// unresolved when one finds anything else, or the classes' targets bind differently.
+    /// unresolved when one finds anything else, or the classes' targets bind differently; too
+    /// many past [`DISPATCH_CLASS_LIMIT`] classes.
     fn alias_call_targets(&self, recv: Recv<'_>, method: &str) -> Option<Callee> {
         let (class, on_instance, family) = match recv {
             Recv::Ref(class) if self.project.is_project_class(class) => (class, false, false),
@@ -7733,12 +7747,16 @@ impl<'a> TypeCtx<'a> {
         if family {
             classes.extend(self.project.subclasses_of(class));
         }
-        let mut found = Vec::with_capacity(classes.len());
-        for c in &classes {
-            found.push(self.project.class_alias(c, method));
-        }
+        let found: Vec<Option<(&str, bool)>> = classes
+            .iter()
+            .map(|c| self.project.class_alias(c, method))
+            .collect();
         if found.iter().all(Option::is_none) {
             return None;
+        }
+        // As for the implementations of a method (`instance_targets_complete`).
+        if classes.len() > DISPATCH_CLASS_LIMIT {
+            return Some(Callee::TooMany);
         }
         let mut out: Option<Callee> = None;
         for alias in found {

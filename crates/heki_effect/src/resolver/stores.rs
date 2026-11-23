@@ -575,20 +575,34 @@ struct StoringFn<'f> {
     state: Option<VarId>,
 }
 
-/// What the stores of a function bind in other modules: the join of the values, and whether a
-/// store rebinds the name in place.
+/// What the stores of a function bind in other modules, by name.
 #[derive(Default)]
 struct Foreign {
-    globals: BTreeMap<String, (Stored, bool)>,
-    attrs: BTreeMap<String, BTreeMap<String, (Stored, bool)>>,
+    globals: BTreeMap<String, ForeignStore>,
+    attrs: BTreeMap<String, BTreeMap<String, ForeignStore>>,
     unnamed: BTreeSet<String>,
+}
+
+/// What the stores of a function do to one name of another module.
+#[derive(Default)]
+struct ForeignStore {
+    /// The join of the values.
+    stored: Stored,
+    /// A store rebinds the name to what an in-place operator gives on its own value.
+    in_place: bool,
+    /// The function changes the object the name holds in place ([`StoringFn::changed`]).
+    changed: bool,
 }
 
 impl Foreign {
     fn into_decl(self) -> Option<StoresElsewhere> {
-        let stored = |(s, in_place): (Stored, bool)| {
-            let ty = s.elsewhere();
-            (ty.is_some() || in_place).then_some(StoredElsewhere { ty, in_place })
+        let stored = |s: ForeignStore| {
+            let ty = s.stored.elsewhere();
+            (ty.is_some() || s.in_place || s.changed).then_some(StoredElsewhere {
+                ty,
+                in_place: s.in_place,
+                changed: s.changed,
+            })
         };
         let out = StoresElsewhere {
             globals: self
@@ -1757,28 +1771,60 @@ impl<'c, 'f> Classifier<'c, 'f> {
     /// object's class with its items unknown. The name keeps its class and no items the code
     /// may add or replace (`HANDLERS = {"a": run}`, then `HANDLERS[kind] = other`).
     fn changed_in_place(&self, out: &mut Sink<'_>, load: &Inst) {
-        let Some(t) = load.kind.dst().and_then(|d| self.types.ty(d)) else {
-            return;
-        };
-        let changed = t.without_items();
-        if changed == *t {
-            return;
-        }
-        let value = Some(Some(&changed));
+        // The loaded value's class with its items unknown, when it has items; another module's
+        // names are marked instead, decided by their own module's stores.
+        let without_items = load
+            .kind
+            .dst()
+            .and_then(|d| self.types.ty(d))
+            .map(|t| (t.without_items(), t))
+            .and_then(|(changed, t)| (changed != *t).then_some(changed));
+        let value = without_items.as_ref().map(Some);
+        let module = self.cx.module_name();
         match &load.kind {
             InstKind::LoadGlobal { name, .. } | InstKind::LoadName { name, .. } => {
                 if let Some(fqn) = self.decls.fixed_import(name) {
                     if let Some(foreign) = out.foreign.as_deref_mut() {
                         let fqn = self.cx.project.canonical(fqn);
-                        foreign.globals.entry(fqn).or_default().0.add(value);
+                        foreign.globals.entry(fqn).or_default().changed = true;
                     }
-                } else if self.decls.unknown_globals.contains(name) {
-                    out.own
-                        .store(StoreTarget::Global(name.clone()), false, value);
+                } else if self.decls.unknown_globals.contains(name)
+                    && let Some(value) = value
+                {
+                    let target = StoreTarget::Global(name.clone());
+                    out.own.store(target, false, Some(value));
                 }
             }
             InstKind::AttrLoad { obj, attr, .. } => {
-                self.store_through(out, *obj, attr, value, value.map(|t| t.cloned()));
+                for holder in self.holders(*obj) {
+                    match holder {
+                        Holder::Own { class, own_self } => {
+                            if let Some(value) = value {
+                                let target = StoreTarget::Attr(class.to_owned(), attr.to_owned());
+                                out.own
+                                    .store(target, own_self && self.s.at_init, Some(value));
+                            }
+                        }
+                        Holder::Module(m) if m == module => {
+                            if let Some(value) = value {
+                                let target = StoreTarget::Global(attr.clone());
+                                out.own.store(target, false, Some(value));
+                            }
+                        }
+                        Holder::Module(m) => {
+                            if let Some(foreign) = out.foreign.as_deref_mut() {
+                                let fqn = format!("{m}.{attr}");
+                                foreign.globals.entry(fqn).or_default().changed = true;
+                            }
+                        }
+                        Holder::Class(class) => {
+                            if let Some(foreign) = out.foreign.as_deref_mut() {
+                                let attrs = foreign.attrs.entry(class).or_default();
+                                attrs.entry(attr.clone()).or_default().changed = true;
+                            }
+                        }
+                    }
+                }
             }
             _ => {}
         }
@@ -1818,13 +1864,17 @@ impl<'c, 'f> Classifier<'c, 'f> {
                 }
                 Holder::Module(m) => {
                     if let Some(foreign) = out.foreign.as_deref_mut() {
-                        foreign.globals.entry(format!("{m}.{attr}")).or_default().1 = true;
+                        foreign
+                            .globals
+                            .entry(format!("{m}.{attr}"))
+                            .or_default()
+                            .in_place = true;
                     }
                 }
                 Holder::Class(class) => {
                     if let Some(foreign) = out.foreign.as_deref_mut() {
                         let attrs = foreign.attrs.entry(class).or_default();
-                        attrs.entry(attr.to_owned()).or_default().1 = true;
+                        attrs.entry(attr.to_owned()).or_default().in_place = true;
                     }
                 }
             }
@@ -1832,7 +1882,8 @@ impl<'c, 'f> Classifier<'c, 'f> {
     }
 
     /// What a store of `value` in the global `name` binds: of unknown type when the module may
-    /// rebind it (`rebinds`); its declaration, or a narrower value, when the module annotates it.
+    /// rebind it (`rebinds`); its declaration, refined by what the value says beyond it
+    /// ([`ProjectDecls::refine`]), when the module annotates it.
     fn global_value(&self, name: &str, value: VarId, rebinds: bool) -> Option<Option<Ty>> {
         let mut out = self.types.stored(value).map(|t| t.cloned());
         if rebinds {
@@ -1840,7 +1891,7 @@ impl<'c, 'f> Classifier<'c, 'f> {
         }
         if let Some(d) = (self.declared)(name) {
             out = Some(Some(match out {
-                Some(Some(t)) if self.cx.project.narrower(&t, &d) => t,
+                Some(Some(t)) => self.cx.project.refine(&t, &d),
                 _ => d,
             }));
         }
@@ -1942,7 +1993,7 @@ impl<'c, 'f> Classifier<'c, 'f> {
                 Holder::Module(m) => {
                     if let Some(foreign) = out.foreign.as_deref_mut() {
                         let stored = foreign.globals.entry(format!("{m}.{attr}")).or_default();
-                        stored.0.add(value);
+                        stored.stored.add(value);
                     }
                 }
                 Holder::Class(class) => {
@@ -1953,7 +2004,7 @@ impl<'c, 'f> Classifier<'c, 'f> {
                             .or_default()
                             .entry(attr.to_owned())
                             .or_default();
-                        stored.0.add(value);
+                        stored.stored.add(value);
                     }
                 }
             }
@@ -2432,6 +2483,7 @@ impl StoredElsewhere {
     /// Join what another module's stores bind.
     fn join(&mut self, other: &StoredElsewhere) {
         self.in_place |= other.in_place;
+        self.changed |= other.changed;
         self.ty = match (self.ty.take(), &other.ty) {
             (t, None) => t,
             (None, t) => t.clone(),
@@ -2447,6 +2499,7 @@ impl StoredElsewhere {
             Some(other) => own.join(other.as_ref()?)?,
             None => own.clone(),
         };
+        let t = if self.changed { t.without_items() } else { t };
         Some(t).filter(|t| kept_in_declarations(t) && (!self.in_place || keeps_in_place(t)))
     }
 }
@@ -2594,6 +2647,7 @@ impl ProjectDecls {
         let mut out = Stored::Nothing;
         let mut restoring = false;
         let mut in_place = false;
+        let mut changed = false;
         for (class, decl) in family
             .iter()
             .filter_map(|class| Some((class, self.class(class)?)))
@@ -2614,6 +2668,7 @@ impl ProjectDecls {
             }
             if let Some(stored) = self.elsewhere.attrs.get(class).and_then(|a| a.get(attr)) {
                 in_place |= stored.in_place;
+                changed |= stored.changed;
                 if let Some(t) = &stored.ty {
                     out.add(Some(t.as_ref()));
                 }
@@ -2624,7 +2679,10 @@ impl ProjectDecls {
         if restoring && !self.restores_hold(family, of_self) {
             return None;
         }
-        out.type_of().filter(|t| !in_place || keeps_in_place(t))
+        let t = out
+            .type_of()
+            .map(|t| if changed { t.without_items() } else { t });
+        t.filter(|t| !in_place || keeps_in_place(t))
     }
 
     /// Whether what `__setstate__` restores in an instance of the classes of `family` is what

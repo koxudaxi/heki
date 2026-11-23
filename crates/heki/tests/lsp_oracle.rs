@@ -5652,6 +5652,102 @@ fn lsp_diagnostics_equal_a_full_check_below_a_git_working_tree() {
     run_steps(s, &steps);
 }
 
+// ------------------------------------------------ calls through bound values across modules
+
+// What a call through a value one module binds runs, decided from that module's declarations:
+// a table of functions (`ModuleDecls::tables`, what other modules change in place in
+// `ModuleDecls::stores_elsewhere`), a class attribute bound to a `staticmethod`
+// (`ClassDecl::named_attrs`, a subclass binding the name to a method), a function returning a
+// module it imports (`FunctionDecl::returned_import`), and a `TypeVar`'s bound
+// (`ModuleDecls::type_vars`).
+const BOUND_CONFIG: &str = "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"EFF201\"]\n\n[[tool.heki.effect-boundaries]]\nname = \"uses\"\nscopes = [\"pkg.use_*.*\"]\nwrite-universe = [\"Field.required\"]\nallow-writes = []\n";
+const BOUND_MODEL: &str = "class Field:\n    def __init__(self):\n        self.required = False\n";
+const BOUND_HELPERS: &str = "from pkg.model import Field\n\n\ndef require(field: Field):\n    field.required = True\n\n\ndef skip(field: Field):\n    pass\n";
+const BOUND_DEFS: &str = "from typing import Protocol, TypeVar\n\nfrom pkg.helpers import require, skip\nfrom pkg.model import Field\n\nTABLE = {\"run\": require, \"skip\": skip}\n\n\nclass Holder:\n    RUN = staticmethod(require)\n\n\ndef ops():\n    from pkg import helpers\n\n    return helpers\n\n\nclass View(Protocol):\n    @property\n    def fields(self) -> list[Field]: ...\n\n\nclass Other:\n    pass\n\n\nV = TypeVar(\"V\", bound=View)\n";
+const BOUND_TABLE_USE: &str =
+    "from pkg.defs import TABLE\n\n\ndef use(field):\n    TABLE[\"run\"](field)\n";
+const BOUND_ALIAS_USE: &str =
+    "from pkg.defs import Holder\n\n\ndef use(holder: Holder, field):\n    holder.RUN(field)\n";
+const BOUND_MODULE_USE: &str =
+    "from pkg.defs import ops\n\n\ndef use(field):\n    ops().require(field)\n";
+const BOUND_TYPE_VAR_USE: &str = "from pkg.defs import V\n\n\ndef use(view: V):\n    for field in view.fields:\n        field.required = True\n";
+
+#[test]
+fn lsp_diagnostics_equal_a_full_check_through_bound_values_across_modules() {
+    let files = vec![
+        ("pkg/__init__.py", String::new()),
+        ("pkg/model.py", BOUND_MODEL.to_owned()),
+        ("pkg/helpers.py", BOUND_HELPERS.to_owned()),
+        ("pkg/defs.py", BOUND_DEFS.to_owned()),
+        ("pkg/use_table.py", BOUND_TABLE_USE.to_owned()),
+        ("pkg/use_alias.py", BOUND_ALIAS_USE.to_owned()),
+        ("pkg/use_module.py", BOUND_MODULE_USE.to_owned()),
+        ("pkg/use_type_var.py", BOUND_TYPE_VAR_USE.to_owned()),
+    ];
+    let s = Session::start_with("lsp_oracle_bound_values", BOUND_CONFIG, files, false);
+    let all: &[(&str, &str)] = &[
+        ("pkg/use_table.py", "EFF201"),
+        ("pkg/use_alias.py", "EFF201"),
+        ("pkg/use_module.py", "EFF201"),
+        ("pkg/use_type_var.py", "EFF201"),
+    ];
+    let steps = [
+        Step::new("initial index", Vec::new()).present(all),
+        Step::new(
+            "the table binds the key to the function that writes nothing",
+            vec![save(
+                "pkg/defs.py",
+                &BOUND_DEFS.replace("{\"run\": require, \"skip\": skip}", "{\"run\": skip}"),
+            )],
+        )
+        .absent(&[("pkg/use_table.py", "EFF201")]),
+        Step::new("the table binds it to the writer again", vec![save("pkg/defs.py", BOUND_DEFS)])
+            .present(&[("pkg/use_table.py", "EFF201")]),
+        Step::new(
+            "another module changes the table in place",
+            vec![Action::Create(
+                "pkg/register.py",
+                "from pkg.defs import TABLE\n\n\ndef register(name, run):\n    TABLE[name] = run\n"
+                    .to_owned(),
+            )],
+        )
+        .absent(&[("pkg/use_table.py", "EFF201")]),
+        Step::new(
+            "the module changing it is deleted",
+            vec![Action::Delete("pkg/register.py")],
+        )
+        .present(&[("pkg/use_table.py", "EFF201")]),
+        Step::new(
+            "a subclass binds the attribute to a method of its own",
+            vec![Action::Create(
+                "pkg/sub.py",
+                "from pkg.defs import Holder\n\n\nclass Sub(Holder):\n    def RUN(self, field):\n        pass\n"
+                    .to_owned(),
+            )],
+        )
+        .absent(&[("pkg/use_alias.py", "EFF201")]),
+        Step::new("the subclass is deleted", vec![Action::Delete("pkg/sub.py")])
+            .present(&[("pkg/use_alias.py", "EFF201")]),
+        Step::new(
+            "the function returns another module",
+            vec![save(
+                "pkg/defs.py",
+                &BOUND_DEFS.replace("    from pkg import helpers\n\n    return helpers", "    from pkg import model\n\n    return model"),
+            )],
+        )
+        .absent(&[("pkg/use_module.py", "EFF201")]),
+        Step::new(
+            "the type variable's bound is a class without the fields",
+            vec![save("pkg/defs.py", &BOUND_DEFS.replace("bound=View", "bound=Other"))],
+        )
+        .present(&[("pkg/use_module.py", "EFF201")])
+        .absent(&[("pkg/use_type_var.py", "EFF201")]),
+        Step::new("the bound is the view again", vec![save("pkg/defs.py", BOUND_DEFS)])
+            .present(all),
+    ];
+    run_steps(s, &steps);
+}
+
 // ------------------------------------------------- argument lists across modules (session 4)
 
 // A call target with an argument list, passed a number constant of another module by keyword:
