@@ -73,8 +73,8 @@ pub struct ClassUse<'i> {
 pub struct ModuleUse<'i> {
     pub module: &'i str,
     pub path: &'i Path,
-    /// The module's functions and methods, its body left out.
-    pub functions: usize,
+    /// The module's functions and methods, its body left out, sorted.
+    pub functions: Vec<&'i FuncKey>,
     /// The functions reaching a blocking effect (`effect-boundaries`' `blocking`), sorted.
     pub blocking: Vec<&'i FuncKey>,
     /// The functions reaching code heki does not see, sorted.
@@ -139,7 +139,7 @@ impl<'i> Census<'i> {
             let census = modules.entry(module).or_insert(ModuleUse {
                 module,
                 path,
-                functions: 0,
+                functions: Vec::new(),
                 blocking: Vec::new(),
                 unseen: Vec::new(),
             });
@@ -148,7 +148,7 @@ impl<'i> Census<'i> {
                 if function.qualname == "<module>" {
                     continue;
                 }
-                census.functions += 1;
+                census.functions.push(function);
                 let reaches_blocking = index.summary(function).is_some_and(|s| {
                     (s.direct_exec_effects.iter())
                         .chain(&s.transitive_exec_effects)
@@ -188,6 +188,7 @@ impl<'i> Census<'i> {
                 .collect(),
             modules: (modules.into_values())
                 .map(|mut m| {
+                    m.functions.sort_unstable();
                     m.blocking.sort_unstable();
                     m.unseen.sort_unstable();
                     m
@@ -209,7 +210,7 @@ impl<'i> Census<'i> {
             initializer_sites: self.attributes.iter().map(|a| sites(&a.initializers)).sum(),
             read_sites: self.attributes.iter().map(|a| sites(&a.readers)).sum(),
             modules: self.modules.len(),
-            functions: self.modules.iter().map(|m| m.functions).sum(),
+            functions: self.modules.iter().map(|m| m.functions.len()).sum(),
         }
     }
 }

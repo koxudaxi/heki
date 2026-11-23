@@ -166,16 +166,21 @@ $ cargo build --release -p heki --features count-alloc
 $ python3 scripts/check_memory.py --heki target/release/heki
 ```
 
-- CI fails when the peak heap of `heki check` (with and without an ownership contract) or of
-  the `--watch` engine on a generated project exceeds its budget in the script.
+- CI fails when the peak heap of `heki check` (with and without an ownership contract), of
+  the `--watch` engine, or of `heki recommend` (with and without the contract) on a generated
+  project exceeds its budget in the script.
 - The peak heap is the most bytes heki holds at once, counted by the allocator of a
   `count-alloc` build (release builds leave the feature off). The counting build also runs its
   parallel work on the main thread alone, what `RAYON_NUM_THREADS=1` asks without the second
   thread whose timing would move the peak. No allocator cache, memory pressure, or thread timing
   changes the count: every run reads the same bytes, and one run per mode suffices. The total of
   the bytes allocated is printed next to it.
-- Each budget is the peak on CI's Linux runner when it was set, plus 5 %. Another machine reads
-  a few hundred bytes more or less, from the length of the generated project's path.
+- Each budget is the peak on CI's Linux runner when it was set, plus 5 %, except those of
+  `heki recommend`, an experimental command that runs several analyses and that no editor waits
+  on: the owner set them to 100 MiB. Another machine reads a few hundred bytes more or less,
+  from the length of the generated project's path. The `check`, `watch`, and `owners` budgets
+  were last set from main at d67c902a (56.65, 52.81, and 69.91 MiB on the runner), after the
+  0.2.5 catalog rows and the opt-in fact tables had left `check` 0.05 MiB under the old budget.
 - A budget changes, down or up, only with the owner's decision. A change that would exceed one
   first finds what grew (below) and removes it where it lives; when the growth is the cost of
   facts a default rule needs, the measurements go to the owner.
@@ -186,7 +191,7 @@ $ python3 scripts/check_memory.py --heki target/release/heki
   declarations).
 
 At release time (`release.yml` runs CI on the release commit) and on a manual CI run, a release
-build also runs the three modes, and its peak memory as the system sees it, the lowest of three
+build also runs the three modes of `heki check` and `--watch`, and its peak memory as the system sees it, the lowest of three
 runs, stays under a coarse budget: about 10 % above it when the budget was set. This peak also
 holds what the heap count leaves out: the allocator's fragmentation, its mappings, and the code.
 It is the resident set size on Linux and the physical footprint on macOS, each platform with its
@@ -374,17 +379,21 @@ the callers of the bottom of a lattice of calls thirty levels deep, the chains `
 down thousands of calls of one module, a value chosen among a thousand module globals before it is
 changed, thousands of calls handing a global to a helper that changes it, thousands of
 comprehensions or generator expressions, each over a value the function creating them binds just
-before, and, through `heki dump-recommend-facts`, the calls heki is blind to in a chain of
+before, through `heki dump-recommend-facts`, the calls heki is blind to in a chain of
 thousands of helpers below as many `async def`s and the census of the attributes of thousands of
-classes, and, for the set orders `EFF112` follows, a chain of thousands of functions returning a
-value in a set's order up to the one writing it, a value handed down thousands of helpers to the
-one writing it, hundreds of comprehensions over one set appended to one written list, a value
-chosen among a set and hundreds of sorted lists by a chain of branches, and a thousand stores of
-a set's element as a key, each after reads of other mappings by the same key, and, for the call
-cycles `EFF114` follows, thousands of `try` statements in one function calling into one
-recursion, a call cycle through thousands of functions each calling the next inside a `try`, a
-lattice of calls thirty levels deep with a `try` at each level above a recursion, and a ladder of
-thousands of helpers above a recursion with a `try` calling each.
+classes, through `heki recommend`, thousands of library names without a catalog entry (its
+hypothetical-catalog run tries 64), thousands of directories that would each resolve an import
+as a source root (its source-root trial tries 8), and the contract candidates of thousands of
+classes and of thousands of modules (its contract trial tries 32 of each kind), for the set
+orders `EFF112` follows, a chain of thousands of functions returning a value in a set's order up
+to the one writing it, a value handed down thousands of helpers to the one writing it, hundreds
+of comprehensions over one set appended to one written list, a value chosen among a set and
+hundreds of sorted lists by a chain of branches, and a thousand stores of a set's element as a
+key, each after reads of other mappings by the same key, and, for the call cycles `EFF114`
+follows, thousands of `try` statements in one function calling into one recursion, a call cycle
+through thousands of functions each calling the next inside a `try`, a lattice of calls thirty
+levels deep with a `try` at each level above a recursion, and a ladder of thousands of helpers
+above a recursion with a `try` calling each.
 
 A change to the IR builder, a walk, a fixpoint, or a rule's state is also run over a large
 corpus of real projects before it is merged, every run under a memory cap and a timeout. No

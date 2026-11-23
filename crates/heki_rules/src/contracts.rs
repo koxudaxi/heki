@@ -7,15 +7,17 @@
 //! `heki check` and the LSP engine hand them to the analysis, so a wrapper of a producer and an
 //! invalidator reached through calls are known across files without IR.
 
+use crate::eff_rules::{forbidden_effects, names_function};
 use crate::inspect::ContractRole;
 use crate::mut_rules::{
-    Allowance, AllowanceKeys, FunctionMatcher, FunctionMatchers, ReadOnlyProducers, References,
-    patterns, split_arguments,
+    Allowance, AllowanceKeys, ContractTarget, FunctionMatcher, FunctionMatchers, ReadOnlyProducers,
+    References, parse_read_targets, parse_targets, patterns, project_classes, split_arguments,
+    split_item,
 };
 use crate::{
     CheckContext, DottedPattern, RuleConfigError, RuleSelection, last_name, split_last_dot,
 };
-use heki_effect::{ContractClass, Contracts, FuncKey, OptInFacts, TypedWrites};
+use heki_effect::{BLOCKING_EFFECTS, ContractClass, Contracts, FuncKey, OptInFacts, TypedWrites};
 use heki_env::HekiConfig;
 use heki_kb::{EffectiveEcosystemKb, EnvironmentAccess};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -542,6 +544,194 @@ pub fn recommend_facts(selection: &RuleSelection) -> OptInFacts {
         blind_spots: true,
         ..opt_in_facts(selection)
     }
+}
+
+/// What the contracts of the configuration already declare, from the matchers the rules
+/// compile: `heki recommend` proposes no contract for it.
+pub(crate) struct Declared {
+    write_targets: TargetsByClass,
+    read_targets: TargetsByClass,
+    /// The scopes of the effect boundaries forbidding every blocking effect.
+    blocking_scopes: Vec<DottedPattern>,
+}
+
+/// `Class.attr` targets, looked up by the classes they cover.
+struct TargetsByClass {
+    targets: Vec<ContractTarget>,
+    by_class: FxHashMap<String, Vec<usize>>,
+}
+
+impl TargetsByClass {
+    fn new(targets: Vec<ContractTarget>) -> Self {
+        let mut by_class: FxHashMap<String, Vec<usize>> = FxHashMap::default();
+        for (i, target) in targets.iter().enumerate() {
+            for class in &target.classes {
+                by_class.entry(class.clone()).or_default().push(i);
+            }
+        }
+        Self { targets, by_class }
+    }
+
+    /// Whether a target names attribute `attr` of the project class `class`.
+    fn name(&self, class: &str, attr: &str) -> bool {
+        self.by_class
+            .get(class)
+            .is_some_and(|found| found.iter().any(|&i| self.targets[i].matches(class, attr)))
+    }
+}
+
+impl Declared {
+    pub(crate) fn of(cx: &CheckContext<'_>) -> Result<Self, RuleConfigError> {
+        let config = cx.config;
+        let all_classes = project_classes(cx);
+        let mut write_targets = Vec::new();
+        for rule in &config.write_owners {
+            let context = "write-owners.targets";
+            let targets = parse_targets(cx, &all_classes, &rule.targets, "write-owners", context)?;
+            write_targets.extend(targets.into_iter().filter(|t| t.key.is_none()));
+        }
+        let mut read_targets = Vec::new();
+        for rule in &config.read_owners {
+            let context = "read-owners.targets";
+            let targets =
+                parse_read_targets(cx, &all_classes, &rule.targets, "read-owners", context)?;
+            read_targets.extend(targets);
+        }
+        let mut blocking_scopes = Vec::new();
+        for boundary in &config.effect_boundaries {
+            let forbidden = forbidden_effects(boundary)?;
+            if BLOCKING_EFFECTS.iter().all(|e| forbidden.contains(e)) {
+                blocking_scopes.extend(patterns(&boundary.scopes, "effect-boundaries.scopes")?);
+            }
+        }
+        Ok(Self {
+            write_targets: TargetsByClass::new(write_targets),
+            read_targets: TargetsByClass::new(read_targets),
+            blocking_scopes,
+        })
+    }
+
+    /// Whether a `write-owners` target names attribute `attr` of the project class `class`.
+    pub(crate) fn owns_writes(&self, class: &str, attr: &str) -> bool {
+        self.write_targets.name(class, attr)
+    }
+
+    /// Whether a `read-owners` target names attribute `attr` of the project class `class`.
+    pub(crate) fn owns_reads(&self, class: &str, attr: &str) -> bool {
+        self.read_targets.name(class, attr)
+    }
+
+    /// Whether an effect boundary forbidding every blocking effect has `function` in its scopes.
+    pub(crate) fn bounds(&self, function: &FuncKey) -> bool {
+        names_function(&self.blocking_scopes, function)
+    }
+}
+
+/// A name a contract of the configuration gives project definitions by, with the patterns the
+/// rules compile from it.
+pub(crate) struct ConfiguredName<'c> {
+    /// The contract's kind and name, and the key the name is configured under.
+    pub kind: &'static str,
+    pub contract: &'c str,
+    pub key: &'static str,
+    pub text: &'c str,
+    /// The name without its item key or argument list, then the part of that before its last
+    /// dot: the class or module holding a member ([`FunctionMatcher`], `parse_targets`).
+    pub patterns: Vec<DottedPattern>,
+}
+
+/// Every name the contracts of `config` give project functions, classes, attributes, or modules
+/// by (effects and messages are no names).
+pub(crate) fn configured_names(config: &HekiConfig) -> Vec<ConfiguredName<'_>> {
+    fn add<'c>(
+        out: &mut Vec<ConfiguredName<'c>>,
+        kind: &'static str,
+        contract: &'c str,
+        lists: &[(&'static str, &'c [String])],
+    ) {
+        for &(key, texts) in lists {
+            for text in texts {
+                let base = split_item(text).map_or(text.as_str(), |(base, _)| base);
+                let base = split_arguments(base, key).map_or(base, |(name, _)| name);
+                let holder = split_last_dot(base).map(|(holder, _)| holder);
+                let patterns = std::iter::once(base)
+                    .chain(holder)
+                    .filter_map(|p| DottedPattern::new(p, key).ok())
+                    .collect();
+                out.push(ConfiguredName {
+                    kind,
+                    contract,
+                    key,
+                    text,
+                    patterns,
+                });
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for r in &config.write_owners {
+        let lists = [
+            ("targets", &r.targets[..]),
+            ("allowed-writers", &r.allowed_writers[..]),
+            ("forbidden-writers", &r.forbidden_writers[..]),
+            (
+                "forbid-cached-property-on",
+                &r.forbid_cached_property_on[..],
+            ),
+            ("exempt-methods", &r.exempt_methods[..]),
+            ("allowed-protocols", &r.allowed_protocols[..]),
+        ];
+        add(&mut out, "write-owners", &r.name, &lists);
+    }
+    for r in &config.read_owners {
+        let lists = [
+            ("targets", &r.targets[..]),
+            ("allowed-readers", &r.allowed_readers[..]),
+            ("forbidden-readers", &r.forbidden_readers[..]),
+            ("exempt-methods", &r.exempt_methods[..]),
+            ("allowed-protocols", &r.allowed_protocols[..]),
+        ];
+        add(&mut out, "read-owners", &r.name, &lists);
+    }
+    for r in &config.call_owners {
+        let lists = [
+            ("targets", &r.targets[..]),
+            ("allowed-callers", &r.allowed_callers[..]),
+            ("forbidden-callers", &r.forbidden_callers[..]),
+            ("exempt-methods", &r.exempt_methods[..]),
+            ("allowed-protocols", &r.allowed_protocols[..]),
+        ];
+        add(&mut out, "call-owners", &r.name, &lists);
+    }
+    for r in &config.effect_boundaries {
+        let lists = [
+            ("scopes", &r.scopes[..]),
+            ("write-targets", &r.write_targets[..]),
+            ("read-targets", &r.read_targets[..]),
+            ("call-targets", &r.call_targets[..]),
+            ("allow-writes", &r.allow_writes[..]),
+            ("write-universe", &r.write_universe[..]),
+            ("allowed-callees", &r.allowed_callees[..]),
+        ];
+        add(&mut out, "effect-boundaries", &r.name, &lists);
+    }
+    for r in &config.readonly_returns {
+        add(
+            &mut out,
+            "readonly-returns",
+            &r.name,
+            &[("producers", &r.producers[..])],
+        );
+    }
+    for r in &config.invalidation {
+        let lists = [
+            ("targets", &r.targets[..]),
+            ("invalidators", &r.invalidators[..]),
+            ("exempt-writers", &r.exempt_writers[..]),
+        ];
+        add(&mut out, "invalidation", &r.name, &lists);
+    }
+    out
 }
 
 /// The roles `key` has in the declared contracts, in configuration order, and in the ecosystem

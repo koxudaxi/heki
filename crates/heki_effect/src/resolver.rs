@@ -185,19 +185,29 @@ impl ModuleLayout {
             .filter(|package| rel.starts_with(package))
             .filter_map(|package| rel.strip_prefix(package.parent()?).ok());
         let below_root = self
-            .source_roots
-            .iter()
-            .filter_map(|r| rel.strip_prefix(r).ok())
+            .source_root_of(rel)
+            .and_then(|r| rel.strip_prefix(r).ok())
+            .into_iter()
             .chain(below_member)
             .min_by_key(|rest| rest.components().count());
         module_name_for_path(below_root.unwrap_or(rel))
+    }
+
+    /// The deepest source root holding `rel` (a path as for [`Self::module_name`]), `None` when
+    /// none does (a member's package or the project root names it).
+    pub fn source_root_of(&self, rel: &Path) -> Option<&str> {
+        self.source_roots
+            .iter()
+            .filter_map(|r| Some((r, rel.strip_prefix(r).ok()?)))
+            .min_by_key(|(_, rest)| rest.components().count())
+            .map(|(r, _)| r.as_str())
     }
 }
 
 /// A directory that is not a package (no `__init__.py`, or a stub for one). As a source root it
 /// holds the project's top-level packages, namespace packages, and modules (`src/` is the layout
 /// packaging tools install from); a regular package is imported by its own name (`src.pkg`).
-fn is_source_dir(dir: &Path, is_file: &dyn Fn(&Path) -> bool) -> bool {
+pub fn is_source_dir(dir: &Path, is_file: &dyn Fn(&Path) -> bool) -> bool {
     dir.is_dir()
         && !["__init__.py", "__init__.pyi"]
             .iter()
@@ -254,6 +264,18 @@ pub fn module_name_for_path(rel: &Path) -> Option<(String, bool)> {
         return None;
     }
     Some((parts.join("."), is_package))
+}
+
+/// The longest dotted prefix of `name` (itself included) that `is_module` accepts: the module a
+/// dotted name resolves into, the rest of the name naming something in it.
+pub fn module_prefix(name: &str, mut is_module: impl FnMut(&str) -> bool) -> Option<&str> {
+    let mut end = name.len();
+    loop {
+        if is_module(&name[..end]) {
+            return Some(&name[..end]);
+        }
+        end = name[..end].rfind('.')?;
+    }
 }
 
 /// Resolve the module part of `from <level dots><module> import ...` inside `current`.
@@ -2355,15 +2377,12 @@ impl ProjectDecls {
 
     /// Longest project-module prefix of `fqn` and the remaining dotted part.
     fn split_module<'s>(&self, fqn: &'s str) -> Option<(&ModuleDecls, &'s str)> {
-        let mut end = fqn.len();
-        loop {
-            let prefix = &fqn[..end];
-            if let Some(m) = self.module(prefix) {
-                let rest = fqn.get(end + 1..).unwrap_or("");
-                return Some((m, rest));
-            }
-            end = prefix.rfind('.')?;
-        }
+        let mut found = None;
+        let module = module_prefix(fqn, |prefix| {
+            found = self.module(prefix);
+            found.is_some()
+        })?;
+        Some((found?, fqn.get(module.len() + 1..).unwrap_or("")))
     }
 
     /// The direct project subclasses of the canonical class `class`.
