@@ -2189,6 +2189,12 @@ pub struct UnawaitedHandoff {
     pub callees: Vec<FuncKey>,
     /// The API tests what the callable returns for truth (`heki_kb::UnawaitedCall::tests_result`).
     pub tests_result: bool,
+    /// The API gives what the callable returns back to its caller
+    /// (`heki_kb::UnawaitedCall::hands_back`).
+    pub hands_back: bool,
+    /// `callees` are every implementation calling the handed value can run, as
+    /// [`CallSite::complete`] says of a call.
+    pub complete: bool,
 }
 
 impl FileSummary {
@@ -2444,7 +2450,7 @@ pub struct OptInFacts {
     pub blind_spots: bool,
     pub set_order: bool,
     pub call_cycles: bool,
-    /// [`OptInTables::unawaited_handoffs`] (`EFF115`).
+    /// [`OptInTables::unawaited_handoffs`] (`EFF115`, `EFF116`).
     pub unawaited_handoffs: bool,
     /// [`OptInTables::fresh_returns`].
     pub fresh_returns: bool,

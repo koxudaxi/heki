@@ -458,6 +458,10 @@ pub struct UnawaitedCall {
     pub param: Option<String>,
     /// The call tests what the callable returns for truth (`filter`, `itertools.takewhile`).
     pub tests_result: bool,
+    /// The call gives what the callable returns back to its caller (`executor.submit(f)`'s
+    /// future, `executor.map`'s results, a `weakref.finalize` object called by hand), where it
+    /// may still be iterated or awaited (`EFF116`).
+    pub hands_back: bool,
 }
 
 /// What a call writes in the order of its elements (`EcosystemEntry::writes_in_order`): a
@@ -1068,8 +1072,8 @@ impl EffectiveEcosystemKb {
     }
 
     /// The callable argument the call of `entry` calls without awaiting what it returns
-    /// (`EFF115`): the one `[[calls_unawaited]]` lists for it, or an offloading API's, which a
-    /// worker thread calls and whose result the call hands back as it is.
+    /// (`EFF115`, `EFF116`): the one `[[calls_unawaited]]` lists for it, or an offloading API's,
+    /// which a worker thread calls and whose result the call hands back as it is.
     pub fn unawaited_callable(&self, entry: &EcosystemEntry) -> Option<UnawaitedCall> {
         self.calls_unawaited
             .get(&entry.symbol)
@@ -1078,6 +1082,7 @@ impl EffectiveEcosystemKb {
                 entry.offloads_blocking_arg.map(|k| UnawaitedCall {
                     symbol: entry.symbol.clone(),
                     arg: Some(k),
+                    hands_back: true,
                     ..UnawaitedCall::default()
                 })
             })
@@ -3465,31 +3470,49 @@ mod tests {
         ),
     ];
 
-    /// One row of [`UNAWAITED_CALLS`]: `(arg, param, tests_result, symbols)`.
+    /// One row of [`UNAWAITED_CALLS`]: `(arg, param, tests_result, hands_back, symbols)`.
     type UnawaitedCallRow = (
         Option<u8>,
         Option<&'static str>,
         bool,
+        bool,
         &'static [&'static str],
     );
 
-    /// `EFF115`: the callable argument each call calls without awaiting what it returns.
+    /// `EFF115`, `EFF116`: the callable argument each call calls without awaiting what it
+    /// returns.
     const UNAWAITED_CALLS: &[UnawaitedCallRow] = &[
         (
             Some(1),
             Some("target"),
             false,
+            false,
             &["threading.Thread", "multiprocessing.Process"],
         ),
-        (Some(1), Some("function"), false, &["threading.Timer"]),
+        (
+            Some(1),
+            Some("function"),
+            false,
+            false,
+            &["threading.Timer"],
+        ),
         (
             Some(0),
             None,
             false,
+            true,
             &[
                 "concurrent.futures.Executor.submit",
                 "concurrent.futures.ThreadPoolExecutor.submit",
                 "concurrent.futures.ProcessPoolExecutor.submit",
+            ],
+        ),
+        (
+            Some(0),
+            None,
+            false,
+            false,
+            &[
                 "asyncio.AbstractEventLoop.call_soon",
                 "asyncio.BaseEventLoop.call_soon",
                 "asyncio.AbstractEventLoop.call_soon_threadsafe",
@@ -3503,6 +3526,7 @@ mod tests {
             Some(0),
             Some("fn"),
             false,
+            true,
             &[
                 "concurrent.futures.Executor.map",
                 "concurrent.futures.ThreadPoolExecutor.map",
@@ -3513,19 +3537,21 @@ mod tests {
             Some(1),
             None,
             false,
+            false,
             &[
                 "asyncio.AbstractEventLoop.call_later",
                 "asyncio.BaseEventLoop.call_later",
                 "asyncio.AbstractEventLoop.call_at",
                 "asyncio.BaseEventLoop.call_at",
                 "signal.signal",
-                "weakref.finalize",
             ],
         ),
+        (Some(1), None, false, true, &["weakref.finalize"]),
         (
             Some(0),
             None,
             true,
+            false,
             &[
                 "builtins.filter",
                 "itertools.filterfalse",
@@ -3983,12 +4009,13 @@ mod tests {
         let kb = EffectiveEcosystemKb::load_builtin(&[]).unwrap();
         let required: BTreeMap<String, UnawaitedCall> = UNAWAITED_CALLS
             .iter()
-            .flat_map(|(arg, param, tests_result, symbols)| {
+            .flat_map(|(arg, param, tests_result, hands_back, symbols)| {
                 symbols.iter().map(move |symbol| UnawaitedCall {
                     symbol: (*symbol).to_owned(),
                     arg: *arg,
                     param: param.map(Into::into),
                     tests_result: *tests_result,
+                    hands_back: *hands_back,
                 })
             })
             .map(|call| (call.symbol.clone(), call))
@@ -4016,6 +4043,7 @@ mod tests {
                 Some(UnawaitedCall {
                     symbol: symbol.to_owned(),
                     arg: Some(arg),
+                    hands_back: true,
                     ..UnawaitedCall::default()
                 }),
                 "{symbol}"
@@ -4028,6 +4056,7 @@ mod tests {
                 arg: Some(1),
                 param: Some("target".into()),
                 tests_result: false,
+                hands_back: false,
             })
         );
         assert_eq!(unawaited("builtins.map"), None);

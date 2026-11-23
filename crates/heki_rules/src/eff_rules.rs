@@ -1,5 +1,5 @@
 //! Family 2 execution-effect rules: `EFF101`, `EFF105`, `EFF102`, `EFF103`, `EFF106`,
-//! `EFF107`, `EFF109`, `EFF110`, `EFF112`, `EFF114`, `EFF115`, `EFF201`
+//! `EFF107`, `EFF109`, `EFF110`, `EFF112`, `EFF114`, `EFF115`, `EFF116`, `EFF201`
 //! (docs/ANALYSIS_AND_KB_SPEC.md section 2.4).
 
 use crate::mut_rules::{
@@ -935,6 +935,7 @@ impl Repeats<'_> {
 mod fanout_exclusive;
 mod held_across_io;
 mod lock_retaken;
+mod never_iterated;
 mod recursion_handlers;
 mod set_order_output;
 mod unawaited_callables;
@@ -977,6 +978,11 @@ pub(crate) fn eff114(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec
 /// what it returns.
 pub(crate) fn eff115(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Diagnostic>) {
     unawaited_callables::run(cx, unit, out);
+}
+
+/// `EFF116` (opt-in): a call of a generator function whose generator nothing iterates.
+pub(crate) fn eff116(cx: &CheckContext<'_>, unit: &ModuleUnit<'_>, out: &mut Vec<Diagnostic>) {
+    never_iterated::run(cx, unit, out);
 }
 
 /// `forbid` tokens of `[[tool.heki.effect-boundaries]]` and the execution effects each one
