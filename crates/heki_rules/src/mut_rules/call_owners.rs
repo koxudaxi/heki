@@ -894,6 +894,7 @@ pub(crate) fn mut204<'c>(
                             target: &target,
                             named: &called,
                             rank: group[0],
+                            contract: c,
                         };
                         reports.add(
                             unit,

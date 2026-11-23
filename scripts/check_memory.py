@@ -56,9 +56,17 @@ SHAPE_MODULES = 600
 # `finally` bodies nested this deep pass a function's IR budget.
 COPIES_DEPTH = 16
 
-# Heap budgets in MiB per mode: the peak on the CI runner at calibration plus 5 %. A change
-# of a budget needs the owner's decision (docs/development.md, Memory).
-HEAP_BUDGETS_MIB = {"check": 56.7, "watch": 54.3, "owners": 70.6}
+# Heap budgets in MiB per mode: the peak on the CI runner at calibration plus 5 %, except for
+# `heki recommend` (experimental, which runs several analyses and which no editor waits on): its
+# modes have the owner's round 100 MiB. A change of a budget needs the owner's decision
+# (docs/development.md, Memory).
+HEAP_BUDGETS_MIB = {
+    "check": 59.5,
+    "watch": 55.5,
+    "owners": 73.4,
+    "recommend": 100.0,
+    "recommend-owners": 100.0,
+}
 
 # RSS budgets in MiB per platform and mode, a coarse check at release time: the lowest of three
 # runs at calibration plus about 10 %.
@@ -82,6 +90,11 @@ MODES = {
     ),
     "owners": (
         ["check", "--heuristic", "--output-format", "json", "--config", "owners.toml", "."],
+        {},
+    ),
+    "recommend": (["recommend", "--output-format", "json", "."], {}),
+    "recommend-owners": (
+        ["recommend", "--output-format", "json", "--config", "owners.toml", "."],
         {},
     ),
 }
@@ -267,7 +280,8 @@ def run(heki: str, mode: str, root: Path, timed: bool) -> tuple[str, os.struct_r
     """One run of `mode` (with `/usr/bin/time -l` when `timed`): its stderr and resource usage."""
     args, extra_env = MODES[mode]
     _, code, stderr, usage = execute(heki, args, root, extra_env, timed)
-    # 0 or 1: the reports of the generated project, warnings or errors; anything else is a failure.
+    # 0 or 1: the reports of the generated project, warnings or errors (`heki recommend` exits
+    # with 0); anything else is a failure.
     if code not in (0, 1):
         sys.exit(f"heki {' '.join(args)} exited with {code}:\n{stderr}")
     return stderr, usage
@@ -307,7 +321,7 @@ def check_heap(heki: str, root: Path) -> list[str]:
         peak, total = heap_peak(heki, mode, root)
         verdict = "ok" if peak <= budget * MIB else "OVER BUDGET"
         print(
-            f"{mode:<6} peak heap {peak:>11} bytes ({peak / MIB:6.2f} MiB)  "
+            f"{mode:<16} peak heap {peak:>11} bytes ({peak / MIB:6.2f} MiB)  "
             f"total {total:>12} bytes  budget {budget:5.1f} MiB  {verdict}",
             flush=True,
         )

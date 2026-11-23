@@ -12,7 +12,8 @@
 //!   (`heki_diagnostics::Diagnostic::open_records`), each with an [`OpenCause`] from the closed
 //!   list kept next to its premise below ([`CAUSES`]). The causes come from the steps of the
 //!   decision that sets the report's tier, so they cannot disagree with it. A run records them
-//!   only when it asks (`CheckExtras::open_premises`); no output format writes them yet. The
+//!   only when it asks (`CheckExtras::open_premises`): `heki recommend` counts the reports by
+//!   them (`crate::recommend::premises`); no output format of `heki check` writes them. The
 //!   list grows with what the homes tell apart: a cause stands for the cases its facts cannot
 //!   separate yet, and says so, rather than guessing one of them. The rules recording causes so
 //!   far are `EFF101` (with its heuristic side `EFF111`), `EFF103` (with `EFF113`), the eight
@@ -27,6 +28,7 @@
 
 use heki_diagnostics::{Axis, Certainty, OpenCondition, OpenPremise, OpenRecord, RelatedLocation};
 use heki_soundness::ObligationKind;
+use schemars::JsonSchema;
 use serde::Serialize;
 use std::ops::ControlFlow;
 
@@ -55,7 +57,7 @@ pub struct OpenCause {
 }
 
 /// What closes an open cause, for every case the cause stands for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum Closer {
     /// An annotation the user writes; heki trusts it under R2, so it must be true.

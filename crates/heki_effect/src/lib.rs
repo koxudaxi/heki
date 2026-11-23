@@ -76,8 +76,8 @@ pub use report::{BoundaryReport, boundary_reports, boundary_reports_in};
 pub use resolver::{
     Callee, CapturedParams, ClassDecl, DeclKeys, DeclPasses, DeepCopy, FunctionDecl, HeldSentinel,
     ModuleDecls, ModuleLayout, NamedAttr, ProjectDecls, ReadOnlyAttr, ReadOnlyKind, StrConstant,
-    StrValue, TypeCtx, Val, aliases_of, detect_source_roots, func_qualname, module_name_for_path,
-    resolve_relative_module, self_aliases,
+    StrValue, TypeCtx, Val, aliases_of, detect_source_roots, func_qualname, is_source_dir,
+    module_name_for_path, module_prefix, resolve_relative_module, self_aliases,
 };
 pub use summary::{BLOCKING_EFFECTS, offloaded_callable};
 
@@ -2323,7 +2323,7 @@ pub fn is_stub(path: &Path) -> bool {
 /// implementation before its `.pyi` stub, a package (`pkg/__init__.py`) before a module file of
 /// the same name (`pkg.py`, which Python never imports next to it), then the greater path. Full
 /// and incremental analysis both pick the owner this way, whatever order they meet the files in.
-pub(crate) fn module_precedence(path: &Path) -> (bool, bool, &Path) {
+pub fn module_precedence(path: &Path) -> (bool, bool, &Path) {
     let package = path.file_stem().is_some_and(|s| s == "__init__");
     (!is_stub(path), package, path)
 }
