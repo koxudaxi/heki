@@ -1113,6 +1113,7 @@ import-probes = "report"
                 fresh_objects: Some("allow".into()),
                 references: Some("calls".into()),
                 import_probes: Some("report".into()),
+                unresolved: None,
             }
         );
         assert!(cfg.readonly_returns[0].deep);
