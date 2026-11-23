@@ -371,6 +371,8 @@ A generator's body runs where it is iterated:
 | a project function iterating it | |
 
 - A generator a function returns runs where its caller iterates it.
+- A generator nothing iterates (a call as a statement, a value only tested for truth) never runs
+  its body; `EFF116` reports such calls.
 - A generator expression counts where it is written.
 - A coroutine runs where it is awaited; one only scheduled (`asyncio.create_task`) is checked on
   its own.
@@ -478,7 +480,7 @@ The proofs heki can make, on five axes:
 | Axis | What heki establishes | Used by |
 | ---- | --------------------- | ------- |
 | Control flow | which statements can run after which: CFG paths, loops and their bounds, exception edges | `MUT106`, `MUT109`, `MUT113`, `EFF102`, `EFF103`, `EFF106`, `EFF109`, `EFF110`, `EFF114`, `DATA101`, `OPT` |
-| Calls | which functions a call reaches across modules, and what they do (summaries propagated over the call graph) | `EFF101`, `EFF109`, `EFF110`, `EFF112`, `EFF114`, `EFF115`, `EFF201`, `MUT103`, `MUT108`, `MUT109`, `MUT110`, `MUT112`, `MUT113`, `MUT119`, `MUT201`–`MUT204` |
+| Calls | which functions a call reaches across modules, and what they do (summaries propagated over the call graph) | `EFF101`, `EFF109`, `EFF110`, `EFF112`, `EFF114`, `EFF115`, `EFF116`, `EFF201`, `MUT103`, `MUT108`, `MUT109`, `MUT110`, `MUT112`, `MUT113`, `MUT119`, `MUT201`–`MUT204` |
 | Aliases | which names, iterators, and views refer to one object; whether it is unique to its frame and of an exact builtin type | `MUT202`, `MUT201`, `MUT204`, `MUT108`, `MUT110`, `MUT112`, `MUT119`, `EFF107`, `EFF109`, `EFF110`, `EFF112`, `OPT101`–`OPT130` |
 | Effects | which blocking, network, file, or database work runs, from the catalog of library behavior | `EFF101`–`EFF106`, `EFF201`, `DATA101` |
 | State | which attributes and containers a function reads, writes, or mutates, and who may do so | `MUT101`, `MUT107`, `MUT108`, `MUT109`, `MUT110`, `MUT111`, `MUT112`, `MUT113`, `MUT201`–`MUT204` |

@@ -16,6 +16,7 @@ A list of diagnostics. Each one has:
 | `blocker` | the obligation that blocks an automatic fix, if any |
 | `fix` | byte-span edits for proven-safe rewrites |
 | `sites` | the violation sites a contract report stands for, when more than one |
+| `allowed_examples` | for a contract report, up to three public functions (`fqn`, `path`) that do the same from a place the contract allows, which `help` names |
 
 `severity` is `error` for a bug (a wrong result, an exception, a lost update, a deadlock, a
 broken contract) and `warning` for slower code or a bug that is rarely harmful.

@@ -943,10 +943,19 @@ pub struct ModuleDecls {
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub grown_globals: BTreeSet<String>,
     /// The `grown_globals` this module rebinds or deletes (`cfg.QUEUE = []`, `del
-    /// cfg.QUEUE`): bound to another object, so not even a tuple keeps its display, and no
-    /// longer the string constant their own module binds ([`ProjectDecls::rebound_elsewhere`]).
+    /// cfg.QUEUE`, `setattr(cfg, "QUEUE", [])`): bound to another object, so not even a tuple
+    /// keeps its display, and no longer the string constant their own module binds
+    /// ([`ProjectDecls::rebound_elsewhere`]).
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub rebound_globals: BTreeSet<String>,
+    /// The module's own functions and classes, by qualname (`f`, `C`, `C.m`), whose name its
+    /// code binds to another object than their `def` or `class` statement: another store of
+    /// the module global (also in a function after `global f`, and any name when `globals()`
+    /// or `exec` may bind it) or of the class-body name, a deletion of either, or a store of a
+    /// function's `__code__` ([`rebound_definitions`]). A call through such a name may run
+    /// that object instead ([`ProjectDecls::call_rebound`]).
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub rebound_definitions: BTreeSet<String>,
     /// What the module's code stores into the globals of other project modules and into the
     /// instances of their classes (`stores::record`). Boxed: most modules store into none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2259,6 +2268,75 @@ impl ProjectDecls {
         let fqn = self.canonical(fqn);
         self.read(|k| note(&mut k.grown_globals, &fqn));
         self.rebound_elsewhere.contains(&fqn)
+    }
+
+    /// [`Self::rebound_elsewhere`] of `fqn`, canonical as it is (an attribute of a class along
+    /// an MRO, of a module's function).
+    fn rebound_elsewhere_canonical(&self, fqn: &str) -> bool {
+        self.read(|k| note(&mut k.grown_globals, fqn));
+        self.rebound_elsewhere.contains(fqn)
+    }
+
+    /// Whether calling the object the project name `fqn` names (a module's function or class,
+    /// a class's method read on the class) may run another object than its definition (R1):
+    /// the project binds the name again ([`ModuleDecls::rebound_definitions`]), another
+    /// module stores into it or deletes it, by name (`lib.f = g`, `setattr(lib, "f", g)`) or
+    /// under a name heki cannot read (`setattr(lib, name, g)`), or replaces its code
+    /// (`lib.f.__code__ = ...`); a class's method, and the `__init__` constructing a class
+    /// runs, may be another than its MRO finds ([`Self::lookup_rebound`]).
+    pub fn call_rebound(&self, fqn: &str) -> bool {
+        let fqn = self.canonical(fqn);
+        let Some((m, rest)) = self.split_module(&fqn).filter(|(_, rest)| !rest.is_empty()) else {
+            return false;
+        };
+        if let Some((class, name)) = rest.rsplit_once('.') {
+            let class = format!("{}.{class}", m.module_name);
+            return self.is_project_class(&class) && self.lookup_rebound(&self.mro(&class), name);
+        }
+        m.rebound_definitions.contains(rest)
+            || self.rebound_elsewhere_canonical(&fqn)
+            || self.rebound_elsewhere_canonical(&format!("{fqn}.__code__"))
+            || self.global_stored_elsewhere(m, &fqn)
+            || (m.classes.contains_key(rest) && self.lookup_rebound(&self.mro(&fqn), "__init__"))
+    }
+
+    /// Whether what looking `name` up along `mro` (canonical classes) finds may be another
+    /// object than the class bodies bind (R1): a project class before the first whose body
+    /// binds the name, or that one, binds it again: its module stores it on the class object or
+    /// on `self` outside the body (`ClassDecl::rebound_attrs`), its class body binds it again
+    /// or replaces the method's code ([`ModuleDecls::rebound_definitions`]), or another module
+    /// stores into it, deletes it, or replaces its code ([`Self::rebound_elsewhere`]); or the
+    /// project gives a project class of `mro` other bases (`__bases__`), or its instances
+    /// another class (`__class__`).
+    pub(crate) fn lookup_rebound(&self, mro: &[String], name: &str) -> bool {
+        // Only an analysis whose reads are recorded asks for keys no module stores yet.
+        let elsewhere = !self.rebound_elsewhere.is_empty() || self.recording();
+        let mut found = false;
+        for c in mro {
+            let Some((m, qualname, decl)) = self
+                .split_module(c)
+                .and_then(|(m, q)| Some((m, q, m.classes.get(q)?)))
+            else {
+                continue;
+            };
+            let stored = |attr: &str| {
+                decl.rebound_attrs.contains(attr)
+                    || (elsewhere && self.rebound_elsewhere_canonical(&format!("{c}.{attr}")))
+            };
+            let rebinds_name = || {
+                stored(name)
+                    || (!m.rebound_definitions.is_empty()
+                        && m.rebound_definitions
+                            .contains(format!("{qualname}.{name}").as_str()))
+                    || (elsewhere
+                        && self.rebound_elsewhere_canonical(&format!("{c}.{name}.__code__")))
+            };
+            if (!found && rebinds_name()) || stored("__bases__") || stored("__class__") {
+                return true;
+            }
+            found |= decl.members.contains(name);
+        }
+        false
     }
 
     /// Whether another project module may change what the module global `fqn` holds: grow it
@@ -4395,14 +4473,14 @@ impl ProjectDecls {
     /// [`Self::function_taken`] along `mro`: an MRO, or the part of one after a class (what
     /// `super()` in that class looks up).
     fn function_taken_along(&self, mro: &[String], name: &str) -> Option<FuncKey> {
+        // Bound again on a class along the MRO (`Child.view = []`), the name holds that object
+        // from then on.
+        if self.lookup_rebound(mro, name) {
+            return None;
+        }
         for c in mro {
             self.read(|k| note(&mut k.class_facts, c));
             let decl = self.class(c)?;
-            // Stored on the class object outside its body (`Child.view = []`), the name holds
-            // what was stored there from then on.
-            if decl.rebound_attrs.contains(name) {
-                return None;
-            }
             if decl.members.contains(name) {
                 return self.own_method(c, name);
             }
@@ -4554,6 +4632,9 @@ impl ProjectDecls {
             return false;
         }
         let mro = self.mro(class);
+        if self.lookup_rebound(&mro, method) {
+            return false;
+        }
         match self
             .definitions_along(&mro, class, method, false, false, |_| true)
             .first()
@@ -4972,6 +5053,7 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
     decls.unknown_globals = unknown_globals(&stores, &decls);
     let rebound = rebound_imports(input, &stores, &decls);
     decls.rebound_imports = (!rebound.is_empty()).then(|| Box::new(rebound));
+    decls.rebound_definitions = rebound_definitions(input, &stores, &decls);
     // Qualnames whose every definition is a property getter (a setter, a deleter, or any other
     // function with the same qualname shares its summary).
     let mut getters_only: FxHashMap<&str, bool> = FxHashMap::default();
@@ -5274,11 +5356,7 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
     decls.path_changes = (!path_changes.is_empty()).then(|| Box::new(path_changes));
     attr_displays(input, &mut decls);
     code_attrs(input, &mut decls);
-    let rebound: Vec<(String, String)> = class_attrs_rebound(input, &decls)
-        .into_iter()
-        .map(|(class, attr)| (class.to_owned(), attr.to_owned()))
-        .collect();
-    for (class, attr) in rebound {
+    for (class, attr) in class_attrs_rebound(input, &decls) {
         if let Some(c) = decls.classes.get_mut(&class) {
             c.rebound_attrs.insert(attr);
         }
@@ -5293,9 +5371,9 @@ fn structural_decls(input: &ModuleInput<'_>) -> ModuleDecls {
 
 /// `ModuleDecls::grown_globals`: the loads of an imported module's global (`cfg.QUEUE`, or
 /// `QUEUE` after `from cfg import QUEUE`) whose object a function may grow, and the globals
-/// it stores into or deletes on an imported module (`cfg.QUEUE = []`), decided by the shared
-/// `heki_ir` facts ([`FnIndex::grown_vars`]); and those stores and deletes alone
-/// (`ModuleDecls::rebound_globals`).
+/// it stores into or deletes on an imported module (`cfg.QUEUE = []`, also through a call:
+/// [`attr_calls`]), decided by the shared `heki_ir` facts ([`FnIndex::grown_vars`]); and
+/// those stores and deletes alone (`ModuleDecls::rebound_globals`).
 fn foreign_grown_globals(
     input: &ModuleInput<'_>,
     imports: &BTreeMap<String, String>,
@@ -5308,6 +5386,11 @@ fn foreign_grown_globals(
     for f in &input.ir.functions {
         let ix = FnIndex::new(f, &input.ir.constants);
         let mut loads: Vec<(VarId, String)> = Vec::new();
+        for (obj, attr) in attr_calls(input, &ix, imports) {
+            if let Some(module) = imported_fqn(&ix, imports, obj, 0) {
+                rebound.insert(format!("{module}.{attr}"));
+            }
+        }
         for inst in f.blocks.iter().flat_map(|b| &b.insts) {
             match &inst.kind {
                 InstKind::AttrStore { obj, attr, .. } | InstKind::AttrDelete { obj, attr } => {
@@ -5344,6 +5427,79 @@ fn foreign_grown_globals(
     }
     out.extend(rebound.iter().cloned());
     (out, rebound)
+}
+
+/// The attributes the function of `ix` stores or deletes by name through a call, by receiver
+/// (`setattr(obj, "attr", v)`, `delattr(obj, "attr")`, `object.__setattr__(obj, "attr", v)`,
+/// `obj.__setattr__("attr", v)`, also `builtins.setattr`), as [`stores::attr_op`] recognizes
+/// them before inference: a builtin read by its name where the module does not bind it
+/// (`imports` are the module's runtime imports), and a name given by a string literal.
+/// `obj.attr = v` and `del obj.attr` are instructions of their own.
+fn attr_calls<'f>(
+    input: &ModuleInput<'_>,
+    ix: &FnIndex<'f>,
+    imports: &BTreeMap<String, String>,
+) -> Vec<(VarId, String)> {
+    const SPELLINGS: &[&str] = &["setattr", "delattr", "__setattr__", "__delattr__"];
+    let calls: Vec<(&InstKind, VarId)> = ix
+        .f
+        .blocks
+        .iter()
+        .flat_map(|b| &b.insts)
+        .filter_map(|i| match &i.kind {
+            InstKind::Call {
+                callee,
+                callee_var: Some(v),
+                ..
+            } if SPELLINGS.contains(&callee.rsplit('.').next().unwrap_or(callee)) => {
+                Some((&i.kind, *v))
+            }
+            InstKind::MethodCall { method, recv, .. } if SPELLINGS.contains(&method.as_str()) => {
+                Some((&i.kind, *recv))
+            }
+            _ => None,
+        })
+        .collect();
+    if calls.is_empty() {
+        return Vec::new();
+    }
+    let constants = &input.ir.constants;
+    let mut names = imports.clone();
+    for builtin in ["setattr", "delattr", "object"] {
+        if !constants.dynamic && !constants.shadowed.contains(builtin) {
+            names
+                .entry(builtin.to_owned())
+                .or_insert_with(|| format!("builtins.{builtin}"));
+        }
+    }
+    let vals: FxHashMap<VarId, Val> = calls
+        .iter()
+        .filter_map(|(_, v)| Some((*v, Val::Ref(imported_fqn(ix, &names, *v, 0)?))))
+        .collect();
+    let literal = |v: VarId| match ix.shape.inst(ix.shape.copy_root(v)).map(|i| &i.kind) {
+        Some(InstKind::Const {
+            literal: ConstLiteral::Str(s),
+            ..
+        }) => Some(s.clone()),
+        _ => None,
+    };
+    calls
+        .iter()
+        .filter_map(
+            |(kind, _)| match stores::attr_op(kind, |v| vals.get(&v), literal)? {
+                stores::AttrOp::Store {
+                    obj,
+                    name: stores::AttrName::Named(attr),
+                    ..
+                }
+                | stores::AttrOp::Delete {
+                    obj,
+                    name: stores::AttrName::Named(attr),
+                } => Some((obj, attr.into_owned())),
+                _ => None,
+            },
+        )
+        .collect()
 }
 
 /// The fqn `v` names through this module's runtime imports (`cfg`, `cfg.QUEUE`), through
@@ -6138,22 +6294,128 @@ impl Named<'_> {
     }
 }
 
+/// [`ModuleDecls::rebound_definitions`]. A `def` or `class` statement binds its name to the
+/// object it makes (`MakeClosure` of a function of that name), at module level by a store
+/// (`stores` counts every store of a module global), in a class body by the value itself; any
+/// other store of the name is another object, and so is a class-body name bound as a named
+/// copy (`m = other`, `m = staticmethod(m)`).
+fn rebound_definitions(
+    input: &ModuleInput<'_>,
+    stores: &GlobalStores<'_>,
+    decls: &ModuleDecls,
+) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    let mut by_statement: FxHashMap<&str, u32> = FxHashMap::default();
+    let defines = |qualname: &str| decls.functions.contains_key(qualname);
+    for f in &input.ir.functions {
+        let insts = || f.blocks.iter().flat_map(|b| &b.insts);
+        let made: FxHashMap<VarId, &str> = insts()
+            .filter_map(|i| match &i.kind {
+                InstKind::MakeClosure {
+                    dst,
+                    func_id: Some(id),
+                    ..
+                } => Some((*dst, input.ir.function(*id).name.as_str())),
+                _ => None,
+            })
+            .collect();
+        for inst in insts() {
+            match &inst.kind {
+                InstKind::StoreGlobal { name, value }
+                    if made.get(value) == Some(&name.as_str()) =>
+                {
+                    *by_statement.entry(name).or_default() += 1;
+                }
+                InstKind::Copy { dst, .. } if f.is_class_body => out.extend(
+                    f.var_name(*dst)
+                        .map(|name| format!("{}.{name}", f.qualname))
+                        .filter(|member| defines(member)),
+                ),
+                InstKind::Delete { name, .. } if f.is_class_body => {
+                    let member = format!("{}.{name}", f.qualname);
+                    if defines(&member) {
+                        out.insert(member);
+                    }
+                }
+                _ => {}
+            }
+        }
+        out.extend(code_replaced(input, f, decls));
+    }
+    let dynamic = input.ir.constants.dynamic;
+    out.extend(
+        decls
+            .functions
+            .keys()
+            .chain(decls.classes.keys())
+            .filter(|q| !q.contains('.'))
+            .filter(|q| {
+                dynamic || !stores.exactly(q, by_statement.get(q.as_str()).copied().unwrap_or(0))
+            })
+            .cloned(),
+    );
+    out
+}
+
+/// The functions of the module whose `__code__` `f` stores or deletes, by qualname: a
+/// module-level function read by name (`f.__code__ = g.__code__`), or a method read on its
+/// class (`C.m.__code__ = ...`); in the module body, the name is the object its statement
+/// made. Calling either runs that code from then on.
+fn code_replaced(input: &ModuleInput<'_>, f: &IrFunction, decls: &ModuleDecls) -> Vec<String> {
+    let insts = || f.blocks.iter().flat_map(|b| &b.insts);
+    let replaces_code = |kind: &InstKind| matches!(kind, InstKind::AttrStore { attr, .. } | InstKind::AttrDelete { attr, .. } if attr == "__code__");
+    if !insts().any(|i| replaces_code(&i.kind)) {
+        return Vec::new();
+    }
+    let defs: FxHashMap<VarId, &InstKind> = insts()
+        .filter_map(|i| Some((i.kind.dst()?, &i.kind)))
+        .collect();
+    let shape = FnShape::new(f);
+    let global = |v: VarId| match defs.get(&shape.copy_root(v)) {
+        Some(InstKind::LoadGlobal { name, .. } | InstKind::LoadName { name, .. }) => {
+            Some(name.as_str())
+        }
+        Some(InstKind::MakeClosure {
+            func_id: Some(id), ..
+        }) => Some(input.ir.function(*id).qualname.as_str()),
+        _ => None,
+    };
+    insts()
+        .filter_map(|inst| match &inst.kind {
+            InstKind::AttrStore { obj, attr, .. } | InstKind::AttrDelete { obj, attr }
+                if attr == "__code__" =>
+            {
+                let qualname = match defs.get(&shape.copy_root(*obj)) {
+                    Some(InstKind::AttrLoad { obj, attr, .. }) => {
+                        format!("{}.{attr}", global(*obj)?)
+                    }
+                    _ => global(*obj)?.to_owned(),
+                };
+                decls.functions.contains_key(&qualname).then_some(qualname)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 /// The class attributes the module stores into or deletes outside their class bodies, as
 /// `(class qualname, attribute)`: on the class object (`Keys.KEY = "x"` in a function, or in
 /// the module body after the `class` statement, where the name holds the class it made;
 /// `cls.KEY = "x"` in a class method) or on an instance in a method of the class
-/// (`self.KEY = "x"`, which shadows the class attribute for that instance).
-fn class_attrs_rebound<'i>(
-    input: &'i ModuleInput<'_>,
+/// (`self.KEY = "x"`, which shadows the class attribute for that instance), also through a call
+/// (`setattr(Keys, "KEY", "x")`, [`attr_calls`]).
+fn class_attrs_rebound(
+    input: &ModuleInput<'_>,
     decls: &ModuleDecls,
-) -> FxHashSet<(&'i str, &'i str)> {
+) -> FxHashSet<(String, String)> {
     let mut out = FxHashSet::default();
     for f in &input.ir.functions {
         let insts = || f.blocks.iter().flat_map(|b| &b.insts);
         let defs: FxHashMap<VarId, &InstKind> = insts()
             .filter_map(|i| Some((i.kind.dst()?, &i.kind)))
             .collect();
-        let shape = FnShape::new(f);
+        let ix = FnIndex::new(f, &input.ir.constants);
+        let shape = &ix.shape;
         let receiver = match (&f.owner_class_qualname, f.params.first()) {
             (Some(owner), Some(p))
                 if is_summarized_function(f) && !f.has_decorator(&["staticmethod"]) =>
@@ -6162,30 +6424,33 @@ fn class_attrs_rebound<'i>(
             }
             _ => None,
         };
+        let class_of = |obj: VarId| match defs.get(&shape.copy_root(obj)) {
+            Some(InstKind::LoadGlobal { name, .. } | InstKind::LoadName { name, .. })
+                if decls.classes.contains_key(name.as_str()) =>
+            {
+                Some(name.clone())
+            }
+            Some(InstKind::MakeClosure {
+                func_id: Some(id), ..
+            }) if input.ir.function(*id).is_class_body => {
+                Some(input.ir.function(*id).qualname.clone())
+            }
+            _ => receiver
+                .as_ref()
+                .filter(|(_, selfs)| selfs.contains(&obj))
+                .map(|(owner, _)| (*owner).to_owned()),
+        };
         for inst in insts() {
-            let (InstKind::AttrStore { obj, attr, .. } | InstKind::AttrDelete { obj, attr }) =
+            if let InstKind::AttrStore { obj, attr, .. } | InstKind::AttrDelete { obj, attr } =
                 &inst.kind
-            else {
-                continue;
-            };
-            let class = match defs.get(&shape.copy_root(*obj)) {
-                Some(InstKind::LoadGlobal { name, .. } | InstKind::LoadName { name, .. })
-                    if decls.classes.contains_key(name.as_str()) =>
-                {
-                    Some(name.as_str())
-                }
-                Some(InstKind::MakeClosure {
-                    func_id: Some(id), ..
-                }) if input.ir.function(*id).is_class_body => {
-                    Some(input.ir.function(*id).qualname.as_str())
-                }
-                _ => receiver
-                    .as_ref()
-                    .filter(|(_, selfs)| selfs.contains(obj))
-                    .map(|(owner, _)| *owner),
-            };
-            if let Some(class) = class {
-                out.insert((class, attr.as_str()));
+                && let Some(class) = class_of(*obj)
+            {
+                out.insert((class, attr.clone()));
+            }
+        }
+        for (obj, attr) in attr_calls(input, &ix, &decls.imports) {
+            if let Some(class) = class_of(obj) {
+                out.insert((class, attr));
             }
         }
     }
@@ -7311,6 +7576,7 @@ static EMPTY_DECLS: ModuleDecls = ModuleDecls {
     small_globals: BTreeMap::new(),
     grown_globals: BTreeSet::new(),
     rebound_globals: BTreeSet::new(),
+    rebound_definitions: BTreeSet::new(),
     stores_elsewhere: None,
     store_fallbacks: None,
     calls_setstate: false,
@@ -7637,8 +7903,9 @@ impl<'a> TypeCtx<'a> {
     /// Whether `callee`, what [`Self::resolve_method`] resolves `recv.method(...)` to, is every
     /// implementation the call can run (`CallSite::complete`): each member of a union resolves
     /// and is complete, a protocol receiver never is, and a module member, a class object's
-    /// own attribute, or `super()` names one implementation. A call of a property's value is
-    /// judged by the value ([`Self::targets_complete_on`]).
+    /// own attribute, or `super()` names one implementation unless the project binds the name
+    /// to another object (R1, [`ProjectDecls::call_rebound`], [`ProjectDecls::lookup_rebound`]).
+    /// A call of a property's value is judged by the value ([`Self::targets_complete_on`]).
     pub fn method_targets_complete(
         &self,
         recv: Option<&Val>,
@@ -7700,16 +7967,61 @@ impl<'a> TypeCtx<'a> {
                         .project
                         .instance_targets_complete(class, method, callee, self.kb)
             }
-            Recv::Ref(_) | Recv::Super(_) => true,
+            Recv::Ref(owner) if self.project.is_project_class(owner) => {
+                let mro = self.project.mro(&self.project.canonical(owner));
+                !self.project.lookup_rebound(&mro, method)
+            }
+            Recv::Ref(owner) => !self
+                .project
+                .call_rebound(&self.project.object_named(&format!("{owner}.{method}"))),
+            Recv::Super(owner) => {
+                let owner = self.project.canonical(owner);
+                let mro = self.project.mro(&owner);
+                let after = mro.iter().position(|c| *c == owner).map_or(0, |i| i + 1);
+                !self.project.lookup_rebound(&mro[after..], method)
+            }
+        }
+    }
+
+    /// Whether the call or the property read `kind` has as its targets every implementation it
+    /// can run (`CallSite::complete`), `val` giving what its operands hold: what it resolves to
+    /// ([`Self::resolve_method`], [`Self::resolve_call`], [`Self::resolve_attr_load`]) judged as
+    /// [`Self::method_targets_complete`], [`Self::call_targets_complete`], and
+    /// [`Self::getter_targets_complete`] judge it. Any other instruction runs no target.
+    pub fn inst_targets_complete<'v>(
+        &self,
+        kind: &InstKind,
+        val: impl Fn(VarId) -> Option<&'v Val>,
+    ) -> bool {
+        match kind {
+            InstKind::MethodCall { recv, method, .. } => {
+                let recv = val(*recv);
+                let callee = self.resolve_method(recv, method);
+                self.method_targets_complete(recv, method, &callee)
+            }
+            InstKind::Call { callee_var, .. } => {
+                let value = callee_var.and_then(&val);
+                let callee = self.resolve_call(value);
+                self.call_targets_complete(value, &callee)
+            }
+            InstKind::AttrLoad { obj, attr, .. } => {
+                let recv = val(*obj);
+                matches!(
+                    self.resolve_attr_load(recv, attr),
+                    Some(Callee::Project(keys, _)) if self.getter_targets_complete(recv, attr, &keys)
+                )
+            }
+            _ => false,
         }
     }
 
     /// Whether `callee`, what [`Self::resolve_call`] resolves calling `value` to, is every
-    /// implementation the call can run: a function or class named exactly, or an instance's
+    /// implementation the call can run: a function or class named exactly, unless the project
+    /// binds the name to another object ([`ProjectDecls::call_rebound`]), or an instance's
     /// `__call__` as for a method.
     pub fn call_targets_complete(&self, value: Option<&Val>, callee: &Callee) -> bool {
         match value {
-            Some(Val::Ref(_)) => true,
+            Some(Val::Ref(fqn)) => !self.project.call_rebound(fqn),
             Some(Val::Inst(class)) => self
                 .project
                 .instance_targets_complete(class, "__call__", callee, self.kb),
