@@ -9,7 +9,6 @@
 //! announced either), and a function every caller path of which announces the change after
 //! calling it (invalidation in bulk by a caller) is not reported.
 
-use super::allowed_examples::announced;
 use super::{MergedReports, is_private, place_functions};
 use crate::contracts::ConfigContracts;
 use crate::{CheckContext, RuleConfigError, SitesByCaller};
@@ -112,12 +111,12 @@ pub(crate) fn run(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) -> Result<()
         let contract = &names.invalidations[c];
         let bit = u8::try_from(c).expect("at most `MAX_INVALIDATIONS` contracts");
         m.emit(cx, ("MUT109", "announcing writers"), out, |examples| {
-            let mut add = |key, path, (class, attr): (&str, &str)| {
+            let reported = |class: &str, attr: &str| {
                 let classes = ContractClass::lineage(&names, cx.decls, class);
-                let Some(target) = contract.target(&classes, attr) else {
-                    return;
-                };
-                let (report_target, named) = reported_names(&rule.name, target, class, attr);
+                let target = contract.target(&classes, attr)?;
+                Some(reported_names(&rule.name, target, class, attr))
+            };
+            let mut add = |key, path, (report_target, named): (String, String)| {
                 let quoted = format!("`{named}`");
                 let name = super::Named {
                     target: &report_target,
@@ -134,15 +133,23 @@ pub(crate) fn run(cx: &CheckContext<'_>, out: &mut Vec<Diagnostic>) -> Result<()
                         .typed_field_write_sites
                         .iter()
                         .filter(|w| w.via_chain.is_empty() && w.construction != Construction::Yes);
-                    for w in own {
-                        add(key, path, (&w.class_qualname, &w.attr));
+                    for w in own.filter_map(|w| reported(&w.class_qualname, &w.attr)) {
+                        add(key, path, w);
                     }
                 }
+                // A function that leaves one write of a target unannounced, its own or a
+                // helper's, announces none: calling it leaves the change unannounced.
+                let unannounced: FxHashSet<String> = (s.unmet_invalidation.iter())
+                    .filter(|u| u.contract == bit)
+                    .filter_map(|u| reported(&u.class_qualname, &u.attr))
+                    .map(|(report_target, _)| report_target)
+                    .collect();
                 let writes = cx.index.files[path].flows.get(key).into_iter();
-                for w in writes.flat_map(|f| &f.writes) {
-                    if w.contracts & (1 << c) != 0 && announced(s, bit, w.span) {
-                        add(key, path, (&w.class_qualname, &w.attr));
-                    }
+                let writes = writes.flat_map(|f| &f.writes);
+                let targets = (writes.filter(|w| w.contracts & (1 << c) != 0))
+                    .filter_map(|w| reported(&w.class_qualname, &w.attr));
+                for w in targets.filter(|(target, _)| !unannounced.contains(target)) {
+                    add(key, path, w);
                 }
             }
         });

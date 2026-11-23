@@ -4618,7 +4618,7 @@ impl<'a> Extractor<'a> {
                     && let Some(Val::Inst(class)) = self.val(*obj)
                     && let Some(c) = self.contracts
                 {
-                    let class = ContractClass::new(c, self.cx.project, class.clone());
+                    let class = ContractClass::with_qualname(self.cx.project, class.clone());
                     let (fqn, qualname) = class.member(attr);
                     if let Some(deep) = c.readonly_producer(&fqn, &qualname) {
                         self.seed_protected(fqn, deep, step, span);

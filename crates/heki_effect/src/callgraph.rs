@@ -1711,7 +1711,7 @@ fn transfer_typed_writes(
     // caller keeps it with that key, whether the callee hands its sites to its callers or not.
     for w in &facts.typed_field_write_sites {
         if let EntryKey::Param(p) = w.key_from {
-            let (key, key_from) = passed_key(bc, p);
+            let (key, key_from) = bc.passed_key(p);
             let site = TypedFieldWriteSite {
                 key,
                 key_from,
@@ -1759,19 +1759,6 @@ fn transfer_typed_writes(
                 ..copy(w)
             },
         );
-    }
-}
-
-/// The key a call passes for parameter `p` of the callee it binds (`bc`): a string constant,
-/// the caller's own parameter, or a value heki cannot tell.
-fn passed_key(bc: &BoundCallee, p: u8) -> (Option<String>, EntryKey) {
-    let arg = bc.params.get(usize::from(p));
-    if let Some(text) = arg.and_then(|a| a.binding.as_ref()?.text.as_deref()) {
-        return (Some(text.to_owned()), EntryKey::Written);
-    }
-    match arg.and_then(|a| a.param.as_ref()) {
-        Some((q, None)) => (None, EntryKey::Param(*q)),
-        _ => (None, EntryKey::Unknown),
     }
 }
 
