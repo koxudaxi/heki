@@ -1160,7 +1160,7 @@ pub struct ConstArg {
 
 /// A constant a call passes for a parameter ([`CallSite::arguments`]), in the kinds a call
 /// target's argument list names.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ArgValue {
     None,
     Bool(bool),
@@ -1195,7 +1195,7 @@ impl ArgValue {
 
 /// [`CallSite::arguments`]: each parameter a call target's argument list names
 /// ([`Contracts::marked_params`]) that the call binds to a constant it establishes, with it.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ArgumentValues(pub Vec<(String, ArgValue)>);
 
 /// What a caller knows about the value of a callee parameter at one call, when the argument

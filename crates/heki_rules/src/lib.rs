@@ -32,8 +32,9 @@ pub use contracts::{
 pub use eff_rules::{ROOT_CAUSE_GROUP_THRESHOLD, fold_root_causes};
 pub use heki_diagnostics::Certainty;
 pub use mut_rules::{
-    CHAIN_RULES, ChainFacts, SentinelTestKey, StaleWriteKey, chain_facts, deep_copy_files,
-    family_readers, kept_removals_in, lazy_setup_files, sentinel_tests_in, stale_writes_by_file,
+    CHAIN_RULES, ChainFacts, EXAMPLE_RULES, ExampleOwners, SentinelTestKey, StaleWriteKey,
+    chain_facts, deep_copy_files, example_digest, family_readers, kept_removals_in,
+    lazy_setup_files, sentinel_tests_in, stale_writes_by_file,
 };
 pub use selection::{EffectiveSelectors, RuleSelection, SelectionError, Selectors, heuristic_hint};
 pub use snapshot::{SNAPSHOT_FILE, SnapshotError, SummarySnapshot};
@@ -1377,6 +1378,7 @@ impl<'a> CheckContext<'a> {
             fold_key: None,
             open_records: Vec::new(),
             contracts: Vec::new(),
+            allowed_examples: Vec::new(),
         });
         out.last_mut()
     }

@@ -523,6 +523,7 @@ mod tests {
             fold_key: None,
             open_records: Vec::new(),
             contracts: Vec::new(),
+            allowed_examples: Vec::new(),
         };
         let selection = RuleSelection {
             enabled: BTreeSet::from(["OPT110", "OPT111"]),
