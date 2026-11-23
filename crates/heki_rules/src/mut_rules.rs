@@ -2253,7 +2253,7 @@ impl<'u, K: Ord> MergedReports<'u, K> {
                 .flat_map(|&i| &reports[i].1.contracts)
                 .copied()
                 .collect();
-            let found = examples.of(key, target, &r.named);
+            let found = examples.found_for(key, target, &r.named);
             let (help, allowed) = contract_help(r.note.as_deref(), (who, &r.named), &found);
             if let Some(d) = cx.emit(
                 out,
