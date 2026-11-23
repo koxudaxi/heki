@@ -166,19 +166,26 @@ pub(super) fn named_attrs(input: &ModuleInput<'_>, decls: &mut ModuleDecls) {
     // The semantic model declares every class the IR has (one AST).
     for (class, attr, named) in found {
         if let Some(c) = decls.classes.get_mut(&class) {
-            let entry = c.named_attrs.entry(attr).or_default();
-            if entry.body.is_none() && named.body.is_some() {
-                entry.body_static = named.body_static;
-            }
-            entry.body = entry.body.take().or(named.body);
-            if entry.body_paths.is_empty() {
-                entry.body_paths = named.body_paths;
-                entry.body_defined = named.body_defined;
-            }
-            entry.annotated |= named.annotated;
-            entry.validates_default |= named.validates_default;
-            entry.held.extend(named.held);
+            c.named_attrs.entry(attr).or_default().join(named);
         }
+    }
+}
+
+impl NamedAttr {
+    /// Add what `other`, found after it for the same attribute, says: the class body's binding
+    /// found first stays, and the flags and the names held add up.
+    fn join(&mut self, other: NamedAttr) {
+        if self.body.is_none() && other.body.is_some() {
+            self.body_static = other.body_static;
+        }
+        self.body = self.body.take().or(other.body);
+        if self.body_paths.is_empty() {
+            self.body_paths = other.body_paths;
+            self.body_defined = other.body_defined;
+        }
+        self.annotated |= other.annotated;
+        self.validates_default |= other.validates_default;
+        self.held.extend(other.held);
     }
 }
 
@@ -423,10 +430,9 @@ fn static_method_of(shape: &FnShape<'_>, value: VarId, trusted: bool) -> Option<
             kwargs,
             star_from: None,
             ..
-        }) if trusted && callee == "staticmethod" && kwargs.is_empty() => match args[..] {
-            [wrapped] => Some(wrapped),
-            _ => None,
-        },
+        }) if trusted && callee == "staticmethod" && kwargs.is_empty() && args.len() == 1 => {
+            Some(args[0])
+        }
         _ => None,
     }
 }

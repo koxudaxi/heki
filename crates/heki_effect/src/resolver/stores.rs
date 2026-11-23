@@ -558,7 +558,7 @@ struct StoringFn<'f> {
     shape: FnShape<'f>,
     /// The loads of a global or an attribute whose object the function changes in place
     /// ([`changed_loads`]).
-    changed: Box<[(BlockId, usize)]>,
+    changed: Box<[ChangedLoad<'f>]>,
     /// The class whose instance the function stores into as `self` (qualname), and the
     /// variables holding it ([`self_of`]).
     selfs: Option<(&'f str, FxHashSet<VarId>)>,
@@ -566,6 +566,24 @@ struct StoringFn<'f> {
     at_init: bool,
     /// The state parameter of a `__setstate__` method.
     state: Option<VarId>,
+}
+
+/// A load whose object a function changes in place ([`changed_loads`]), with the variable it
+/// binds.
+#[derive(Clone, Copy)]
+enum ChangedLoad<'f> {
+    /// Of a name of the module (`HANDLERS[kind] = run`).
+    Name(VarId, &'f str),
+    /// Of attribute `attr` of `obj` (`self.items.append(x)`): `(dst, obj, attr)`.
+    Attr(VarId, VarId, &'f str),
+}
+
+impl ChangedLoad<'_> {
+    fn dst(self) -> VarId {
+        match self {
+            Self::Name(dst, _) | Self::Attr(dst, ..) => dst,
+        }
+    }
 }
 
 /// What the stores of a function bind in other modules, by name.
@@ -682,25 +700,22 @@ pub(super) fn record(
         let first_reads = FirstReads::default();
         let cx0 = TypeCtx::new(input, project, kb).reading_stores(&first_reads);
         // The annotations, which type every store of the globals they declare.
-        let body = input.ir.functions.iter().find(|f| f.is_module_body);
-        let body_alone = body.is_some_and(|f| cx0.infers_alone(f));
-        let body_types = body.map(|f| cx0.infer_types(f));
+        let body = input.ir.function(input.ir.module_fn);
+        let body_alone = cx0.infers_alone(body);
+        let body_types = cx0.infer_types(body);
         let body_reads = first_reads.consulted.take();
         let body_trace = first_reads.recorder.take();
-        let declared = |name: &str| body_types.as_ref().and_then(|t| t.declared(name).cloned());
+        let declared = |name: &str| body_types.declared(name).cloned();
         let mut foreign = Foreign::default();
         let mut first: Vec<First> = Vec::with_capacity(fns.len());
         let mut changed: FxHashSet<&str> = FxHashSet::default();
         for s in &fns {
-            let (types, alone, earlier) = match &body_types {
-                Some(types) if s.f.is_module_body => {
-                    first_reads.consulted.replace(body_reads.clone());
-                    (Rc::clone(types), body_alone, &*body_trace)
-                }
-                _ => {
-                    let alone = cx0.infers_alone(s.f);
-                    (cx0.infer_types(s.f), alone, &[][..])
-                }
+            let (types, alone, earlier) = if s.f.is_module_body {
+                first_reads.consulted.replace(body_reads.clone());
+                (Rc::clone(&body_types), body_alone, &*body_trace)
+            } else {
+                let alone = cx0.infers_alone(s.f);
+                (cx0.infer_types(s.f), alone, &[][..])
             };
             let mut own = Joins::default();
             let classifier = Classifier::new(&cx0, decls, s, &types, &declared, &unfixed);
@@ -722,10 +737,11 @@ pub(super) fn record(
             &unfixed,
             &mut foreign,
         );
-        let tables = match (&body_types, fns.iter().find(|s| s.f.is_module_body)) {
-            (Some(types), Some(body)) => tables(decls, body, types, &unfixed, &changed),
-            _ => BTreeMap::new(),
-        };
+        // A module body storing nothing binds no table.
+        let body = fns.iter().find(|s| s.f.is_module_body);
+        let tables = body.map_or_else(BTreeMap::new, |body| {
+            tables(decls, body, &body_types, &unfixed, &changed)
+        });
         let declaring: BTreeMap<String, Ty> = decided
             .globals
             .keys()
@@ -1250,9 +1266,9 @@ fn insts(f: &IrFunction) -> impl Iterator<Item = &Inst> {
 }
 
 /// The loads of `f` of a global or an attribute whose object `f` changes in place itself
-/// ([`heki_ir::FnIndex::changed_vars`]: `HANDLERS[kind] = run`, `self.items.append(x)`), by
-/// their place in the function's instructions.
-fn changed_loads(input: &ModuleInput<'_>, f: &IrFunction) -> Box<[(BlockId, usize)]> {
+/// ([`heki_ir::FnIndex::changed_vars`]: `HANDLERS[kind] = run`, `self.items.append(x)`), in
+/// the order of the function's instructions.
+fn changed_loads<'f>(input: &ModuleInput<'_>, f: &'f IrFunction) -> Box<[ChangedLoad<'f>]> {
     let changes = insts(f).any(|inst| {
         matches!(
             inst.kind,
@@ -1263,19 +1279,14 @@ fn changed_loads(input: &ModuleInput<'_>, f: &IrFunction) -> Box<[(BlockId, usiz
         return Box::default();
     }
     let changed = heki_ir::FnIndex::new(f, &input.ir.constants).changed_vars();
-    let mut out = Vec::new();
-    for b in &f.blocks {
-        for (i, inst) in b.insts.iter().enumerate() {
-            let load = matches!(
-                inst.kind,
-                InstKind::LoadGlobal { .. } | InstKind::LoadName { .. } | InstKind::AttrLoad { .. }
-            );
-            if load && inst.kind.dst().is_some_and(|d| changed.contains(&d)) {
-                out.push((b.id, i));
-            }
+    let loads = insts(f).filter_map(|inst| match &inst.kind {
+        InstKind::LoadGlobal { dst, name, .. } | InstKind::LoadName { dst, name } => {
+            Some(ChangedLoad::Name(*dst, name))
         }
-    }
-    out.into_boxed_slice()
+        InstKind::AttrLoad { dst, obj, attr } => Some(ChangedLoad::Attr(*dst, *obj, attr)),
+        _ => None,
+    });
+    loads.filter(|load| changed.contains(&load.dst())).collect()
 }
 
 /// The functions of the module that may store into a global or into an attribute of an
@@ -1752,8 +1763,8 @@ impl<'c, 'f> Classifier<'c, 'f> {
         for (ns, obj) in namespaces {
             self.namespace(&mut out, ns, obj);
         }
-        for &(block, i) in &self.s.changed {
-            self.changed_in_place(&mut out, &f.block(block).insts[i]);
+        for &load in &self.s.changed {
+            self.changed_in_place(&mut out, load);
         }
     }
 
@@ -1766,15 +1777,10 @@ impl<'c, 'f> Classifier<'c, 'f> {
         let own_module = |obj: VarId| {
             (self.holders(obj).iter()).any(|h| matches!(h, Holder::Module(m) if m == module))
         };
-        let loads = self.s.changed.iter();
-        let loads = loads.map(|&(block, i)| &self.s.f.block(block).insts[i].kind);
-        loads
-            .filter_map(|load| match load {
-                InstKind::LoadGlobal { name, .. } | InstKind::LoadName { name, .. } => {
-                    Some(name.as_str())
-                }
-                InstKind::AttrLoad { obj, attr, .. } if own_module(*obj) => Some(attr.as_str()),
-                _ => None,
+        (self.s.changed.iter())
+            .filter_map(|load| match *load {
+                ChangedLoad::Name(_, name) => Some(name),
+                ChangedLoad::Attr(_, obj, attr) => own_module(obj).then_some(attr),
             })
             .collect()
     }
@@ -1786,17 +1792,17 @@ impl<'c, 'f> Classifier<'c, 'f> {
     /// `HANDLERS[kind] = other`). A global read through the module's own object, which types it
     /// by its name alone (`tables.HANDLERS[kind] = other` in a module importing itself), keeps
     /// its declaration or no type.
-    fn changed_in_place(&self, out: &mut Sink<'_>, load: &Inst) {
+    fn changed_in_place(&self, out: &mut Sink<'_>, load: ChangedLoad<'_>) {
         // The loaded value's class with its items unknown, when it has items; another module's
         // names are marked instead, decided by their own module's stores.
-        let loaded = load.kind.dst().and_then(|d| self.types.ty(d));
+        let loaded = self.types.ty(load.dst());
         let without_items = loaded
             .map(|t| (t.without_items(), t))
             .and_then(|(changed, t)| (changed != *t).then_some(changed));
         let value = without_items.as_ref().map(Some);
         let module = self.cx.module_name();
-        match &load.kind {
-            InstKind::LoadGlobal { name, .. } | InstKind::LoadName { name, .. } => {
+        match load {
+            ChangedLoad::Name(_, name) => {
                 if let Some(fqn) = self.decls.fixed_import(name) {
                     if let Some(foreign) = out.foreign.as_deref_mut() {
                         let fqn = self.cx.project.canonical(fqn);
@@ -1806,13 +1812,13 @@ impl<'c, 'f> Classifier<'c, 'f> {
                     // An annotation types the items any change adds, as it types every store.
                     let declared = (self.declared)(name);
                     if let Some(value) = declared.as_ref().map(Some).or(value) {
-                        let target = StoreTarget::Global(name.clone());
+                        let target = StoreTarget::Global(name.to_owned());
                         out.own.store(target, false, Some(value));
                     }
                 }
             }
-            InstKind::AttrLoad { obj, attr, .. } => {
-                for holder in self.holders(*obj) {
+            ChangedLoad::Attr(_, obj, attr) => {
+                for holder in self.holders(obj) {
                     match holder {
                         Holder::Own { class, own_self } => {
                             if let Some(value) = value {
@@ -1827,7 +1833,7 @@ impl<'c, 'f> Classifier<'c, 'f> {
                             let known = declared.as_ref().map(Some).or(value);
                             let value = known.or(named_only.then_some(None));
                             if let Some(value) = value {
-                                let target = StoreTarget::Global(attr.clone());
+                                let target = StoreTarget::Global(attr.to_owned());
                                 out.own.store(target, false, Some(value));
                             }
                         }
@@ -1840,13 +1846,12 @@ impl<'c, 'f> Classifier<'c, 'f> {
                         Holder::Class(class) => {
                             if let Some(foreign) = out.foreign.as_deref_mut() {
                                 let attrs = foreign.attrs.entry(class).or_default();
-                                attrs.entry(attr.clone()).or_default().changed = true;
+                                attrs.entry(attr.to_owned()).or_default().changed = true;
                             }
                         }
                     }
                 }
             }
-            _ => {}
         }
     }
 

@@ -1,10 +1,11 @@
 //! Calls through the values a project binds by name, end to end through the real binary: a
 //! module-level dict of functions bound once (by a key the code fixes, or any key, which may be
-//! any of its values), a class attribute bound once to a function, a `staticmethod` or a class
-//! (through the class, `cls`, or an instance), a function returning a module it imports (a
-//! local import breaking a cycle, with a `functools` cache), and a value typed by a `TypeVar`
-//! with a bound or constraints. A dict or list something changes in place keeps no items. A
-//! module-level function or a method its body binds again on some paths may be either object.
+//! any of its values), a class attribute bound once to a function of the project or of a
+//! library, a `staticmethod` or a class (through the class, `cls`, or an instance), a function
+//! or a method returning a module it imports (a local import breaking a cycle, with a
+//! `functools` cache), and a value typed by a `TypeVar` with a bound or constraints. A dict or
+//! list something changes in place keeps no items. A module-level function or a method its body
+//! binds again on some paths may be either object.
 //!
 //! Every fixture marks the lines that must be reported with the rule code in a comment
 //! (`# EFF201`); every other line must not be.
@@ -91,14 +92,15 @@ fn verdict(p: &Project, symbol: &str) -> String {
 
 const TABLES: &str = r#"from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeAlias
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
     from pkg.model import Field
 
 KEY = "require"
+Handler: TypeAlias = "Callable[[Field], None]"
 
 
 def _noop(field: Field) -> None:
@@ -112,16 +114,23 @@ def _require(field: Field) -> None:
 TABLE: dict[str, Callable[[Field], None]] = {"require": _require, "noop": _noop}
 LAMBDAS = {"other": lambda field: None, "require": _require}
 LAST = {"require": _noop, "require": _require}
+EXTRA = {"noop": _noop}
+ALIASED: dict[str, Handler] = {"require": _require}
+MAPPED: Mapping[str, Callable[[Field], None]] = {"require": _require}
+UNPACKING = {"require": _require, **EXTRA}
 "#;
 
 /// A constant key gives its own value; any other key, iterating the values, or a key a constant
-/// names one of them; an entry bound again by a later one of the same key is the later one.
+/// names one of them; an entry bound again by a later one of the same key is the later one. An
+/// annotation whose item type heki does not resolve (an alias of it) keeps the stored functions,
+/// and so does one of another mapping class; a dict with a `**` entry may give any of its
+/// values.
 const TABLE_CALLS: &str = r#"from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
 from pkg import tables
-from pkg.tables import KEY, LAMBDAS, LAST, TABLE
+from pkg.tables import ALIASED, KEY, LAMBDAS, LAST, MAPPED, TABLE, UNPACKING
 
 if TYPE_CHECKING:
     from pkg.model import Field
@@ -162,6 +171,19 @@ def the_lambda(field: Field) -> None:
 
 def later_entry(field: Field) -> None:
     LAST["require"](field)  # EFF201
+
+
+def through_an_aliased_item_type(field: Field) -> None:
+    ALIASED["require"](field)  # EFF201
+
+
+def through_a_mapping(field: Field) -> None:
+    MAPPED["require"](field)  # EFF201
+
+
+def beside_an_unpacking(field: Field) -> None:
+    UNPACKING["require"](field)  # EFF201
+
 "#;
 
 #[test]
@@ -175,7 +197,7 @@ fn a_table_of_functions_bound_once_gives_the_value_of_each_key() {
 /// Something changing a table in place (an item store, `update`, through an import of it or in
 /// another module, through the module's own object) leaves its items unknown: no key gives a
 /// value, and the function calling one is not pure. An annotated global keeps the items it
-/// declares.
+/// declares, also a tuple annotated as one of any length.
 const CHANGED: &str = r#"from __future__ import annotations
 
 from typing import TYPE_CHECKING
@@ -206,6 +228,7 @@ class Slot:
 
 SLOTS: dict[str, Slot] = {}
 SHARED_SLOTS: dict[str, Slot] = {}
+ORDERED_SLOTS: tuple[Slot, ...] = (Slot(), Slot())
 
 
 def open_slot(key: str) -> None:
@@ -255,6 +278,7 @@ from pkg.changed import (
     HANDLERS,
     ITEMS,
     KEPT,
+    ORDERED_SLOTS,
     SHARED_SLOTS,
     SLOTS,
     THROUGH_IMPORT,
@@ -308,6 +332,11 @@ def by_annotated(field: Field, key: str) -> None:
 
 def by_annotated_elsewhere(field: Field, key: str) -> None:
     SHARED_SLOTS[key].end(field)  # EFF201
+
+
+def by_annotated_tuple(field: Field) -> None:
+    for slot in ORDERED_SLOTS:
+        slot.end(field)  # EFF201
 "#;
 
 #[test]
@@ -336,9 +365,11 @@ fn a_table_something_changes_in_place_keeps_no_items() {
 
 /// A class attribute bound once to a function, a `staticmethod` of one, or bound in a base:
 /// through the class, `cls`, and an instance (a plain function binds the instance first). A
-/// subclass binding the name to a method of its own, or an instance store of the name, leave
-/// the call to what the value may be. Read on an instance, the attribute is what any subclass
-/// binds it to.
+/// subclass binding the name to a method of its own, an instance store of the name (also under a
+/// name computed at run time), a field annotation, a hook on attribute reads, another module
+/// binding the name, or a class whose MRO binds no such name (a mixin calling what a subclass
+/// binds) leave the call to what the value may be. Read on an instance, the attribute is what any
+/// subclass binds it to.
 const HELPERS: &str = r#"from __future__ import annotations
 
 from typing import TYPE_CHECKING
@@ -361,6 +392,7 @@ def _skip(field: Field) -> None:
 
 const CLASS_ALIASES: &str = r#"from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar
 
 from pkg.helpers import _require, _set, _skip
@@ -447,6 +479,60 @@ def read_overridden(o: Overriding, field: Field) -> None:
 
 def shadowed(s: Shadowed, field: Field) -> None:
     s.REQUIRE(field)
+
+
+class Mixin:
+    def finish(self, field: Field) -> None:
+        self.FINISH(field)
+
+
+class Finished(Mixin):
+    FINISH = staticmethod(_require)
+
+
+@dataclass
+class Settings:
+    REQUIRE: Callable[[Field], None] = _require
+
+
+class Loaded:
+    REQUIRE = staticmethod(_require)
+
+    def load(self, name: str, value: object) -> None:
+        setattr(self, name, value)
+
+
+class Hooked:
+    REQUIRE = staticmethod(_require)
+
+    def __getattribute__(self, name: str) -> object:
+        return object.__getattribute__(self, name)
+
+
+class Patched:
+    REQUIRE = staticmethod(_require)
+
+
+def annotated(s: Settings, field: Field) -> None:
+    s.REQUIRE(field)
+
+
+def loaded(o: Loaded, field: Field) -> None:
+    o.REQUIRE(field)
+
+
+def hooked(h: Hooked, field: Field) -> None:
+    h.REQUIRE(field)
+
+
+def patched(p: Patched, field: Field) -> None:
+    p.REQUIRE(field)
+"#;
+
+const PATCH: &str = r#"from pkg.helpers import _skip
+from pkg.passes import Patched
+
+Patched.REQUIRE = staticmethod(_skip)
 "#;
 
 #[test]
@@ -456,13 +542,15 @@ fn a_class_attribute_bound_to_a_function_is_that_function() {
         &[
             ("pkg/helpers.py", HELPERS),
             ("pkg/passes.py", CLASS_ALIASES),
+            ("pkg/patch.py", PATCH),
         ],
     );
 }
 
-/// A function every return of which gives a module one of its imports binds (a local import
-/// breaking an import cycle, a `functools` cache around it) returns that module; a function
-/// returning one of two modules, typed `ModuleType`, says nothing of the module's functions.
+/// A function or a method every return of which gives a module one of its imports binds (a
+/// local import breaking an import cycle, a `functools` cache around it) returns that module; a
+/// function returning one of two modules, typed `ModuleType`, says nothing of the module's
+/// functions.
 const OPS: &str = r#"from __future__ import annotations
 
 from typing import TYPE_CHECKING
@@ -529,6 +617,17 @@ def through_dotted(field: Field) -> None:
 
 def through_either(field: Field, flag: bool) -> None:
     _either(flag).require(field)
+
+
+class Lazy:
+    def ops(self) -> ModuleType:
+        from pkg import ops
+
+        return ops
+
+
+def through_method(lazy: Lazy, field: Field) -> None:
+    lazy.ops().require(field)  # EFF201
 "#;
 
 #[test]
@@ -849,12 +948,13 @@ fn a_list_something_changes_in_place_stays_a_list() {
 }
 
 /// A module body or a class body binding a function's name again on some paths
-/// (`if flag: fetch = _quiet`, or a `def` on one branch and another function on the other): a
-/// call through the name may run either function, so a report through it is not exact,
-/// whichever of them waits. Bound again on every path, the name holds only what binds it last; a
-/// definition after that binding holds it again. An alias of a definition bound before the
-/// definition's name is bound again keeps the definition. A class body binding a name on some
-/// paths only, or to an import on one, says nothing of it (`Optional.extra`, `Client.parse`).
+/// (`if flag: fetch = _quiet`, also to a function another module defines, or a `def` on one
+/// branch and another function on the other): a call through the name may run either function,
+/// so a report through it is not exact, whichever of them waits. Bound again on every path, the
+/// name holds only what binds it last; a definition after that binding holds it again. An alias
+/// of a definition bound before the definition's name is bound again keeps the definition. A
+/// class body binding a name on some paths only, or to an import on one, says nothing of it
+/// (`Optional.extra`, `Client.parse`).
 const REBOUND_FETCHERS: &str = r#"import os
 
 import requests
@@ -1074,6 +1174,34 @@ async def class_defined_last(c: Client):
     c.late("u")
 "#;
 
+/// A fallback another module defines, bound in place of a function on some paths.
+const FALLBACK: &str = r#"import os
+
+from pkg.slow import lookup_slowly
+
+
+def lookup(url):
+    return url
+
+
+if os.environ.get("SLOW"):
+    lookup = lookup_slowly
+"#;
+
+const SLOW: &str = r#"import requests
+
+
+def lookup_slowly(url):
+    return requests.get(url)
+"#;
+
+const FALLBACK_CALLS: &str = r#"from pkg import fallback
+
+
+async def module_imported_on_a_path():
+    fallback.lookup("u")  # EFF111
+"#;
+
 /// `(path, line, code)` of every report of `codes`.
 fn reported_codes(p: &Project, codes: &[&str]) -> Vec<(String, u64, String)> {
     let (code, stdout, stderr) = p.check(&["--output-format", "json"]);
@@ -1121,13 +1249,101 @@ fn a_name_bound_again_on_some_paths_is_each_binding() {
         ("pkg/serve.py", REBOUND_CALLS),
     ];
     let p = Project::new("dispatch_rebound_names");
-    p.write(
-        "pyproject.toml",
-        "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"EFF101\", \"EFF111\"]\n",
-    );
+    p.write("pyproject.toml", BLOCKING_CONFIG);
     p.write("pkg/__init__.py", "");
     for (path, text) in files {
         p.write(path, text);
     }
     assert_eq!(reported_codes(&p, CODES), marked_codes(&files, CODES));
+    // A project of its own: past ten reports of one blocking call, one report names the others.
+    let files = [
+        ("pkg/fallback.py", FALLBACK),
+        ("pkg/slow.py", SLOW),
+        ("pkg/serve.py", FALLBACK_CALLS),
+    ];
+    let p = Project::new("dispatch_rebound_fallback");
+    p.write("pyproject.toml", BLOCKING_CONFIG);
+    p.write("pkg/__init__.py", "");
+    for (path, text) in files {
+        p.write(path, text);
+    }
+    assert_eq!(reported_codes(&p, CODES), marked_codes(&files, CODES));
+}
+
+const BLOCKING_CONFIG: &str =
+    "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"EFF101\", \"EFF111\"]\n";
+
+/// A class attribute bound to a library function runs it through the class, and as a
+/// `staticmethod` also on an instance, where every class the instance may be binds it to the
+/// same function. Read on an instance outside `staticmethod`, the function may bind the instance
+/// (a Python function) or not (a builtin): the call is left unresolved.
+const LIBRARY_ALIASES: &str = r#"import requests
+
+
+class Api:
+    get = requests.get
+    fetch = staticmethod(requests.get)
+
+
+class Mirror(Api):
+    fetch = staticmethod(requests.get)
+
+
+async def on_an_instance(api: Api) -> None:
+    api.get("u")
+
+
+async def on_the_class() -> None:
+    Api.get("u")  # EFF101
+
+
+async def static_on_an_instance(api: Api) -> None:
+    api.fetch("u")  # EFF101
+"#;
+
+#[test]
+fn a_class_attribute_bound_to_a_library_function_is_that_function() {
+    const CODES: &[&str] = &["EFF101", "EFF111"];
+    let files = [("pkg/api.py", LIBRARY_ALIASES)];
+    let p = Project::new("dispatch_library_aliases");
+    p.write("pyproject.toml", BLOCKING_CONFIG);
+    p.write("pkg/__init__.py", "");
+    for (path, text) in files {
+        p.write(path, text);
+    }
+    assert_eq!(reported_codes(&p, CODES), marked_codes(&files, CODES));
+}
+
+/// A base binding `FETCH` to a blocking function, `n - 1` subclasses binding it to others of
+/// their own, and an `async def` calling it on an instance of the base.
+fn aliased_functions(n: usize) -> String {
+    let mut out = vec!["import requests\n".to_owned()];
+    for k in 0..n {
+        out.push(format!(
+            "\ndef fetch_{k}(url):\n    return requests.get(url)\n"
+        ));
+    }
+    out.push("\nclass Source:\n    FETCH = staticmethod(fetch_0)\n".to_owned());
+    for k in 1..n {
+        out.push(format!(
+            "\nclass Source{k}(Source):\n    FETCH = staticmethod(fetch_{k})\n"
+        ));
+    }
+    out.push("\nasync def handle(source: Source) -> None:\n    source.FETCH(\"u\")\n".to_owned());
+    out.join("\n")
+}
+
+/// A call through a name the classes a receiver may be bind to more than eight functions
+/// (`resolver::CHA_CANDIDATE_LIMIT`) runs too many to follow, as the implementations of a method
+/// do.
+#[test]
+fn class_aliases_of_more_than_eight_functions_are_too_many() {
+    for (n, reports) in [(8, 1), (9, 0)] {
+        let p = Project::new(&format!("dispatch_aliased_functions_{n}"));
+        p.write("pyproject.toml", BLOCKING_CONFIG);
+        p.write("pkg/__init__.py", "");
+        p.write("pkg/sources.py", &aliased_functions(n));
+        let found = reported_codes(&p, &["EFF101", "EFF111"]);
+        assert_eq!(found.len(), reports, "{n}: {found:?}");
+    }
 }
