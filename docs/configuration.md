@@ -219,6 +219,7 @@ the installed release changed, and the changelog on GitHub lists every release.
 | `fail-on` | `"error"` | The least severity whose reports make `heki check` (and `--watch`) exit with code 1: `"error"`, or `"warning"` to fail on warnings too. Warnings are reported either way, and the language server shows them. `--fail-on` overrides it. |
 | `report-unused-suppressions` | `false` | Report the codes of suppression comments that suppressed no report, and the baseline entries that matched none. See [Unused suppressions](#unused-suppressions). |
 | `require-suppression-codes` | `false` | Report the `# heki: ignore` comments that name no rule. See [Suppressions that name no rule](#suppressions-that-name-no-rule). |
+| `unmatched-contract-entries` | a warning, in a run over the whole project | `"warning"`, `"error"`, or `"ignore"`: what `heki check` does with a contract entry that matches nothing in the analyzed files. An error fails the run. See [Entries that match nothing](#entries-that-match-nothing). |
 
 - A rule is named by its code (`EFF101`), its name (`async-blocking-call`), a code prefix
   (`EFF`, `MUT2`), or `ALL`. An unknown rule is a configuration error.
@@ -277,7 +278,8 @@ Contracts declare what no type can say. Each kind is an array of tables with its
   (`pkg.model:DataModel.fields`), and a call target with one is matched whole (`pkg:*` names
   every function, method, and class of `pkg`). Such a name never matches an external symbol, and
   `unresolved = "report"` counts its last name (`decide` of `pkg:decide`). A module part that
-  names no project module is no error: the name matches nothing.
+  names no project module is no error: the name matches nothing, which `heki check` warns
+  about ([Entries that match nothing](#entries-that-match-nothing)).
 - A report of a glob target names the member it matched (`reads
   `pkg.types.DataType._flag``); one report standing for several members lists the others.
 - An access matching several targets of one contract (a target on a class and one on its
@@ -851,6 +853,50 @@ holds for `invalidation` too:
   ``add entries through `Store`; allowed writers of `Registry.entries`: `pkg.store.Store.add` ``.
   Private functions (`_name`), special methods (`__init__`), and the exempt methods are not named.
   JSON output gives them with their files as `allowed_examples` (`fqn`, `path`).
+
+### Entries that match nothing
+
+A contract entry that names nothing guards nothing: renaming or removing what it named leaves the
+contract silent. `heki check` warns about each such entry, once per kind, key, and text, naming
+the contracts that hold it and the existing names one part away (the same holder and a like
+last part, or the same last part and a like holder), and
+[`heki recommend`](recommend.md) lists them:
+
+```console
+$ heki check
+warning: `targets` entry `pkg.model.Field._gone_cache` of write-owners `field-caches` names no attribute, method, or `__dict__` key of `pkg.model.Field` in the analyzed files; `pkg.model.Field._type_cache` exists
+```
+
+- Judged, in the contracts whose rules run: the targets, `allowed-*`, `forbidden-*`,
+  `exempt-methods`, `allowed-protocols`, and `forbid-cached-property-on` of `write-owners`,
+  `read-owners`, and `call-owners`; the `scopes`, `write-targets`, `write-universe`, and
+  `allow-writes` of `effect-boundaries`; and the `targets`, `invalidators`, and
+  `exempt-writers` of `invalidation`. The `read-targets`, `call-targets`, and
+  `allowed-callees` of an effect boundary and the `producers` of `readonly-returns` may name
+  symbols outside the project, and are not judged.
+- Each entry is matched as its rule matches it, against the definitions of the analyzed files:
+  a function pattern names a function, method, class, or module body; a call target a function,
+  method, or class; an exempt method a method's name; a scope a module, class, or function; a
+  class pattern a class.
+- A `Class.attr` entry needs a project class, and an attribute the class family has: a name its
+  class body binds (a method, an annotation, an assignment), one its methods or its module set
+  on its instances, one of a project base, an attribute or a constant `__dict__` key the code
+  writes or reads on an object typed with the class or a subclass, or one written on an object
+  heki cannot type. A class whose module stores attributes heki cannot name
+  (`setattr(self, name, v)`), or that the code gives a name computed at run time, may have any
+  attribute. An attribute that only a base outside the project defines matches when the code
+  uses it on the class. An entry target (`Class.attr["key"]`) is judged by its attribute.
+- An entry whose last part is a glob is a rule about every name it may match, later ones
+  included: it needs only what holds that part (`pkg.store` of `pkg.store:*`, the class of
+  `Field._*`, the function of `run.*`). A glob without a literal holder (`*_helper`, `__*__`) is
+  not judged.
+- The warnings do not fail the run; with `unmatched-contract-entries = "error"` they are errors,
+  which fail it, and `"ignore"` turns them off. A suppression comment or a baseline does not
+  hide them.
+- Without the key, only a run over the whole project judges: one whose paths leave out Python
+  files below the project root (`heki check pkg/store.py`) would find unmatched the entries
+  naming code in the others. With the key set, every run judges the files it analyzes.
+- `--watch` and the language server do not report them.
 
 ## Ecosystem knowledge: `[[tool.heki.ecosystem]]`
 

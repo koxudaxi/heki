@@ -46,6 +46,12 @@ It takes the options of `heki check` that decide what is analyzed: `--select`,
 - **Contract candidates**: the `write-owners`, `read-owners`, and `effect-boundaries`
   contracts the code already keeps, each with its confidence and evidence, and the trial run of
   its rules that verified it; then the candidates a trial rejected, with the report it made.
+- **Contract entries that match nothing**: the entries of the contracts configured now that name
+  no definition, attribute, method, or `__dict__` key in the analyzed files, with the existing
+  names like each, as `heki check` warns about them
+  ([Entries that match nothing](configuration.md#entries-that-match-nothing)). They are listed
+  whatever `lint.unmatched-contract-entries` says, and the section is left out when there is
+  none.
 - **Notes**: what to know to weigh the advice. When the paths given leave out Python files
   below the project root, the note names them: heki takes the files it analyzed as the whole
   project, so what it says about callers, readers, and writers holds for those files only. It
@@ -341,6 +347,7 @@ changes meaning.
 | `contracts` | each contract candidate the block declares: its kind, what it is about, its entry, confidence, evidence, what the trial reported, and caveats |
 | `rejected_contracts` | the candidates a run reported for, with the run and its reports |
 | `contracts_not_tried` | per kind, the candidates past the trial's places (32 of each kind, the configuration's own `write-owners` contracts taking `write-owners` places), which no trial declared |
+| `unmatched_entries` | each entry of "Contract entries that match nothing": the contracts' kind, the key, the entry, the contracts holding it (a name, or `#` and its position), what it names none of, and the existing names like it |
 | `notes` | the notes |
 | `config`, `config_toml` | the keys to add or change, as keys and values and as TOML |
 | `content` | the report as the text output prints it |

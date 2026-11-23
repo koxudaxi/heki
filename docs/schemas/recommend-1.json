@@ -1435,6 +1435,51 @@
       ],
       "type": "object"
     },
+    "UnmatchedEntry": {
+      "additionalProperties": false,
+      "description": "A contract entry that matches nothing in the analyzed files, with every contract of its kind\nholding the same text under the same key.",
+      "properties": {
+        "contracts": {
+          "description": "The contracts holding it, in configuration order: a name, or `#<position>` (from 1) for\na contract without one.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "entry": {
+          "description": "The entry as configured.",
+          "type": "string"
+        },
+        "key": {
+          "description": "The key holding the entry (`targets`, `allowed-writers`).",
+          "type": "string"
+        },
+        "kind": {
+          "description": "The contracts' kind (`write-owners`).",
+          "type": "string"
+        },
+        "names_no": {
+          "description": "What it names none of, in the words of the message (`function or method`).",
+          "type": "string"
+        },
+        "nearest": {
+          "description": "Existing names like the entry, written as the entry is, the closest first (at most\nthree).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "kind",
+        "key",
+        "entry",
+        "contracts",
+        "names_no",
+        "nearest"
+      ],
+      "type": "object"
+    },
     "UnresolvedCalls": {
       "additionalProperties": false,
       "description": "The calls one function makes that heki resolves to no function, for one reason.",
@@ -1608,6 +1653,13 @@
       "description": "The table the configuration's keys are under in that file: `tool.heki` in a\n`pyproject.toml`, empty for a file that holds them at its top level (`heki.toml`).",
       "type": "string"
     },
+    "unmatched_entries": {
+      "description": "The entries of the contracts configured now that match nothing in the analyzed files, one\nper kind, key, and text, in configuration order.",
+      "items": {
+        "$ref": "#/$defs/UnmatchedEntry"
+      },
+      "type": "array"
+    },
     "version": {
       "description": "The version of the object's fields: it changes when a field is removed or changes\nmeaning; fields are only added within a version.",
       "format": "uint32",
@@ -1632,6 +1684,7 @@
     "contracts",
     "rejected_contracts",
     "contracts_not_tried",
+    "unmatched_entries",
     "notes",
     "config",
     "config_toml",

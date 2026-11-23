@@ -3466,6 +3466,27 @@ impl ProjectDecls {
         self.class(fqn).is_some()
     }
 
+    /// Whether the module of the project class `class` stores attributes of its instances that
+    /// heki cannot name (`setattr(self, name, v)`, `self.__dict__.update(other)`).
+    pub fn stores_unnamed_attrs(&self, class: &str) -> bool {
+        self.class(class).is_some_and(|c| c.stores_any_attr)
+    }
+
+    /// The names the project class `class` declares itself: its members (class-body names and
+    /// the attributes its methods set or annotate on `self`), the attributes its module stores
+    /// on instances through other receivers, and those stored on the class object outside the
+    /// class body. Empty for a name that is no project class.
+    pub fn declared_names(&self, class: &str) -> Vec<&str> {
+        let mut out = Vec::new();
+        if let Some(c) = self.class(class) {
+            out.extend(c.members.iter().map(String::as_str));
+            out.extend(c.attr_types.keys().map(String::as_str));
+            out.extend(c.attr_stores.iter().map(|(name, _)| &**name));
+            out.extend(c.rebound_attrs.iter().map(String::as_str));
+        }
+        out
+    }
+
     /// Whether the canonical project class `class` is a `TypedDict`.
     pub fn is_typed_dict(&self, class: &str) -> bool {
         self.read(|k| note(&mut k.class_facts, class));

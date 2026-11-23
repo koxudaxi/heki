@@ -6700,6 +6700,70 @@ fn lsp_diagnostics_equal_a_full_check_for_new_keys_on_objects_of_unknown_class()
     s.lsp.stop(true);
 }
 
+// ------------------------------------------- a target whose attribute is renamed and back
+
+const RENAMED_TARGET_CONFIG: &str = r#"[project]
+name = "t"
+
+[tool.heki.lint]
+select = ["MUT201"]
+
+[[tool.heki.write-owners]]
+name = "caches"
+targets = ["pkg.model.Field._cache"]
+allowed-writers = ["pkg.store:*"]
+"#;
+
+const RENAMED_TARGET_MODEL: &str =
+    "class Field:\n    def __init__(self) -> None:\n        self._cache: dict = {}\n";
+const RENAMED_TARGET_USE: &str =
+    "from pkg.model import Field\n\n\ndef reset(field: Field) -> None:\n    field._cache = {}\n";
+
+/// A rename of the attribute a target names (the entry then matches nothing, which `heki check`
+/// warns about apart from its reports) and back: the write in another module stops and starts
+/// being a report, in the server as in a full check.
+#[test]
+fn lsp_diagnostics_equal_a_full_check_as_a_target_attribute_is_renamed() {
+    let files = vec![
+        ("pkg/__init__.py", String::new()),
+        ("pkg/model.py", RENAMED_TARGET_MODEL.to_owned()),
+        ("pkg/use.py", RENAMED_TARGET_USE.to_owned()),
+    ];
+    let mut s = Session::start_with(
+        "lsp_oracle_renamed_target",
+        RENAMED_TARGET_CONFIG,
+        files,
+        false,
+    );
+    let reported: &[(&str, &str)] = &[("pkg/use.py", "MUT201")];
+    let renamed = |text: &str| text.replace("_cache", "_memo");
+    let steps = [
+        Step::new("initial index", Vec::new()).present(reported),
+        Step::new(
+            "the attribute is renamed where it is defined and written",
+            vec![
+                save("pkg/model.py", &renamed(RENAMED_TARGET_MODEL)),
+                save("pkg/use.py", &renamed(RENAMED_TARGET_USE)),
+            ],
+        )
+        .absent(reported),
+        Step::new(
+            "the old name comes back",
+            vec![
+                save("pkg/model.py", RENAMED_TARGET_MODEL),
+                save("pkg/use.py", RENAMED_TARGET_USE),
+            ],
+        )
+        .present(reported),
+    ];
+    let mut failures = Vec::new();
+    for step in &steps {
+        failures.extend(s.run(step));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+    s.lsp.stop(true);
+}
+
 // ------------------------------------ allowed protocols with and without their subprotocols
 
 const SUBPROTOCOL_CONFIG: &str = r#"[project]

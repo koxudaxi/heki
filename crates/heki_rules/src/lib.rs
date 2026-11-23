@@ -24,6 +24,7 @@ pub mod project;
 pub mod recommend;
 pub mod selection;
 pub mod snapshot;
+pub mod unmatched;
 
 pub use contracts::{
     MAX_INVALIDATIONS, declares_ownership, inspect_facts, opt_in_facts, recommend_facts,
@@ -1153,6 +1154,19 @@ pub fn contract_roles(
     contracts::roles_of(&cx, key)
 }
 
+/// The entries of the contracts of `env`'s configuration that match nothing in the files of
+/// `index` (`heki check`, `heki recommend`).
+pub fn unmatched_entries(
+    env: &project::ProjectEnv,
+    index: &ProjectIndex,
+    selection: &RuleSelection,
+) -> Result<Vec<unmatched::UnmatchedEntry>, RuleConfigError> {
+    let decls = index.project_decls();
+    let (config, kb, soundness) = (&env.cfg, &env.kb, &env.soundness_kb);
+    let cx = CheckContext::of_declarations(config, kb, soundness, index, &decls, selection);
+    unmatched::unmatched_entries(&cx)
+}
+
 /// What the contracts of `env`'s configuration already declare (`heki recommend`).
 pub(crate) fn declared_contracts(
     env: &project::ProjectEnv,
@@ -1577,10 +1591,10 @@ impl DottedPattern {
 /// members spelled the other way ([`mangling::member_path`] of a qualname, which writes them
 /// as in the class, [`mangling::source_path`] of an attribute path, which has them as the class
 /// holds them), when that differs. An external symbol (`fqn` is `qualname`) has one spelling.
-pub(crate) fn def_spellings<'n>(
-    fqn: &'n str,
-    qualname: &'n str,
-) -> impl Iterator<Item = (Cow<'n, str>, Cow<'n, str>)> {
+pub(crate) fn def_spellings<'f, 'q>(
+    fqn: &'f str,
+    qualname: &'q str,
+) -> impl Iterator<Item = (Cow<'f, str>, Cow<'q, str>)> {
     let other = module_of(fqn, qualname).and_then(|module| {
         let respelled =
             mangling::member_path(qualname).or_else(|| mangling::source_path(qualname))?;

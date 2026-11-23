@@ -94,6 +94,7 @@ const EXAMPLES: &[(&str, &str)] = &[
     ("lint.fail-on", r#""warning""#),
     ("lint.report-unused-suppressions", "true"),
     ("lint.require-suppression-codes", "true"),
+    ("lint.unmatched-contract-entries", r#""error""#),
     ("name", r#""generation-store""#),
     ("targets", r#"["pkg.model.DataModel.fields"]"#),
     ("message", r#""use GenerationStore.set_fields() instead""#),

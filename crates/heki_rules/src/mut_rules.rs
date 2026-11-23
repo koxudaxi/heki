@@ -998,7 +998,7 @@ pub(crate) fn project_classes(cx: &CheckContext<'_>) -> Vec<ContractClass> {
 
 /// The project classes (fqn) of `all` that `pattern` names, plus all their subclasses when
 /// `subclasses` covers them.
-fn class_set(
+pub(crate) fn class_set(
     cx: &CheckContext<'_>,
     pattern: &DottedPattern,
     all: &[ContractClass],
