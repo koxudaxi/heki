@@ -277,8 +277,10 @@ already shows at a smaller size, where the walks it does not gate stay cheap. Ea
 rule and one contract of each kind (a family may add its own), through `heki check` and the
 `--watch` engine (a family of the facts only `heki recommend` reads also through
 `heki dump-recommend-facts`), and fails when it costs more than 1 s (on the machine the limits
-were measured on, scaled to the machine running the gate by linear shapes of calls and of loops)
-or 1 GiB beyond an empty module. `heki check --walk-steps <path>` (hidden) writes the steps each
+were measured on, scaled to the machine running the gate by linear shapes of calls and of loops
+timed on a fixed release of heki from PyPI, so that a change to the binary under test never moves
+its own limits) or 1 GiB beyond an empty module. A shape over the limits is run twice more and
+keeps the least of the three times, the way the references are timed. `heki check --walk-steps <path>` (hidden) writes the steps each
 owner's walks took per function as JSON: the gate also fails when an owner's steps grow more than
 2.5 times from half the size to the full size, or when a budget is spent on a shape like real code.
 `KNOWN_OVER` in the script lists the shapes known to cost more, and only shrinks: a listed shape

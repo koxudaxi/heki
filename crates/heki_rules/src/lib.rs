@@ -33,7 +33,7 @@ pub use eff_rules::{ROOT_CAUSE_GROUP_THRESHOLD, fold_root_causes};
 pub use heki_diagnostics::Certainty;
 pub use mut_rules::{
     CHAIN_RULES, ChainFacts, SentinelTestKey, StaleWriteKey, chain_facts, deep_copy_files,
-    family_readers, sentinel_tests_in, stale_writes_by_file,
+    family_readers, kept_removals_in, lazy_setup_files, sentinel_tests_in, stale_writes_by_file,
 };
 pub use selection::{EffectiveSelectors, RuleSelection, SelectionError, Selectors, heuristic_hint};
 pub use snapshot::{SNAPSHOT_FILE, SnapshotError, SummarySnapshot};
@@ -197,7 +197,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "MUT101",
         slug: "cached-property-stale-mutation",
         family: RuleFamily::Mut,
-        certainty: Certainty::Heuristic,
+        certainty: Certainty::Exact,
         activation: Activation::OptIn,
         consequence: Consequence::Bug,
         size_dependent_fix: false,
@@ -281,7 +281,7 @@ pub const CORE_RULES: &[RuleMeta] = &[
         code: "MUT111",
         slug: "cached-property-stale-read",
         family: RuleFamily::Mut,
-        certainty: Certainty::Heuristic,
+        certainty: Certainty::Exact,
         activation: Activation::OptIn,
         consequence: Consequence::Bug,
         size_dependent_fix: false,
