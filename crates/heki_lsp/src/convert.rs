@@ -13,7 +13,8 @@
 use heki_ast::{LineIndex, Span};
 use heki_diagnostics::{Diagnostic, fix_python_source};
 use heki_env::Severity;
-use heki_rules::find_rule;
+use heki_rules::project::is_suppression_report;
+use heki_rules::{find_rule, fixes_unconditionally};
 use std::collections::HashMap;
 use std::path::Path;
 use tower_lsp::lsp_types::{
@@ -180,8 +181,9 @@ pub fn code_actions(
         if !touches(&ld.range, request) {
             continue;
         }
+        let on_suppression = is_suppression_report(&d.rule_code);
         if let Some(fix) = d.fix.as_ref().filter(|fix| applies_cleanly(text, fix)) {
-            let unconditional = find_rule(&d.rule_code).is_some_and(|m| m.auto_fix_default);
+            let unconditional = fixes_unconditionally(d);
             let edits = fix
                 .iter()
                 .map(|e| TextEdit {
@@ -190,7 +192,13 @@ pub fn code_actions(
                 })
                 .collect();
             out.push(CodeAction {
-                title: if unconditional {
+                title: if on_suppression {
+                    // `remove the suppression`, `remove `EFF101` from the suppression`.
+                    let help = d.help.as_deref().unwrap_or_default();
+                    let mut title = help.to_owned();
+                    title[..1.min(help.len())].make_ascii_uppercase();
+                    title
+                } else if unconditional {
                     format!("Apply the safe {} fix", d.rule_code)
                 } else {
                     format!(
@@ -208,6 +216,10 @@ pub fn code_actions(
                 is_preferred: Some(unconditional),
                 ..Default::default()
             });
+        }
+        // A report on a suppression comment is not itself suppressed: its setting turns it off.
+        if on_suppression {
+            continue;
         }
         let Some(at) = suppression_point(text, &lines, parsed.as_ref(), d.line) else {
             continue;

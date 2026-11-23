@@ -828,7 +828,9 @@ you declare. An exact rule is certified: every report it made on the development
 frozen holdout corpus was checked by hand, and none was false
 ([Rule Precision](https://heki.koxudaxi.dev/precision/#certifications)). The exact rules are:
 
+- [`MUT101` (cached-property-stale-mutation)](https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/)
 - [`MUT110` (readonly-param-mutation)](https://heki.koxudaxi.dev/rules/readonly-param-mutation/)
+- [`MUT111` (cached-property-stale-read)](https://heki.koxudaxi.dev/rules/cached-property-stale-read/)
 - [`MUT114` (cached-result-mutation)](https://heki.koxudaxi.dev/rules/cached-result-mutation/)
 - [`EFF101` (async-blocking-call)](https://heki.koxudaxi.dev/rules/async-blocking-call/)
 - [`EFF103` (loop-db-query)](https://heki.koxudaxi.dev/rules/loop-db-query/)
@@ -951,11 +953,14 @@ $ heki check --output-format json
 
 | Format | Prints |
 | ------ | ------ |
-| `full` (default) | each diagnostic with its source line, call chain, and help |
+| `full` (default; `github` in GitHub Actions) | each diagnostic with its source line, call chain, and help |
 | `concise` | one line per diagnostic: the message, without the help |
 | `json` | every field: also the help, the evidence, the blocker that stops a fix, and the fix edits ([fields](https://heki.koxudaxi.dev/coding-agents/#after-an-edit-heki-check)) |
 | `github` | GitHub Actions annotations with the message ([CI](https://heki.koxudaxi.dev/adoption/#continuous-integration)) |
 | `sarif` | the message, the location, the call chain, and the help (`properties.help`), for code-scanning dashboards (no evidence or blocker) |
+
+Without `--output-format`, `HEKI_OUTPUT_FORMAT` chooses the format, and in GitHub Actions
+(`GITHUB_ACTIONS=true`) it is `github`.
 
 Every format, `--diff`, and the errors of files that cannot be read or parsed print a file's
 path relative to the working directory when the file is inside it (otherwise as given), as Ruff
@@ -983,7 +988,7 @@ writes to stderr are not colored.
 | Code | Meaning |
 | ---- | ------- |
 | `0` | no diagnostics, or only warnings (they are printed) |
-| `1` | an error found, or a warning with `--fail-on warning` (`lint.fail-on = "warning"`), among the Ratchet regressions when a baseline is used; also when `--update-baseline` refuses a grown entry, or `--diff` would change files |
+| `1` | an error found, or a warning with `--fail-on warning` (`lint.fail-on = "warning"`), among the Ratchet regressions when a baseline is used; also when `--update-baseline` refuses a grown entry, a baseline entry matched nothing with [`report-unused-suppressions`](https://heki.koxudaxi.dev/configuration/#unused-suppressions), or `--diff` would change files |
 | `2` | configuration error, unreadable file, unknown rule, or syntax error |
 
 
@@ -1170,6 +1175,8 @@ supported version that every clause admits:
 | `relax-async-in-tests` | `true` | Skip `EFF101`, `EFF111`, `EFF105`, and `EFF106` in test code as pytest finds it: `test_*` functions and the functions nested in them, `test_*.py` and `*_test.py` files, and files under `test/` or `tests/`. |
 | `heuristic` | `false` | Whether the heuristic rules that are not opt-in run by default and for a prefix or `ALL`, as the exact rules do. `--heuristic` and `--no-heuristic` override it. |
 | `fail-on` | `"error"` | The least severity whose reports make `heki check` (and `--watch`) exit with code 1: `"error"`, or `"warning"` to fail on warnings too. Warnings are reported either way, and the language server shows them. `--fail-on` overrides it. |
+| `report-unused-suppressions` | `false` | Report the codes of suppression comments that suppressed no report, and the baseline entries that matched none. See [Unused suppressions](https://heki.koxudaxi.dev/configuration/#unused-suppressions). |
+| `require-suppression-codes` | `false` | Report the `# heki: ignore` comments that name no rule. See [Suppressions that name no rule](https://heki.koxudaxi.dev/configuration/#suppressions-that-name-no-rule). |
 
 - A rule is named by its code (`EFF101`), its name (`async-blocking-call`), a code prefix
   (`EFF`, `MUT2`), or `ALL`. An unknown rule is a configuration error.
@@ -1288,7 +1295,10 @@ A container entry (`Class.attr["key"]`):
 - is reported once, under the entry, when its container is a target too.
 
 A write into the entries of a target's container (`model.meta["kw"][name] = v`) is a write of
-the target.
+the target. So is a write through a local alias of the container (`kw = model.meta["kw"]`), also
+after an augmented assignment that changes the container in place and so keeps it
+(`kw |= other`, `items += more`, `-=`, `&=`, `^=` on a set); one on any other value
+(`count += 1`) binds a new object.
 
 With `fresh-objects = "allow"`, a write is no violation when it constructs the object it writes:
 
@@ -1698,6 +1708,15 @@ holds for `invalidation` too:
 - **A class's own initialization is allowed.** An initializer (`__init__`, `__post_init__`,
   `__new__`, `model_post_init`, `__setstate__`) of a target class or a subclass may access its own
   `self`: directly, through `super().__init__()`, or through helpers it passes `self` to.
+- **A nested scope uses the parameters of the functions enclosing it.** A comprehension,
+  generator expression, lambda, or nested `def` reading a parameter of an enclosing function
+  (`[self._fmt(x) for x in xs]`) reaches that parameter's object, as a helper the function hands
+  it does: a call of the scope by that function, or by another scope nested in it, hands the
+  object over. So a comprehension in `__init__` writing `self.imports` is part of the class's own
+  initialization. The variable is another object when the function or a nested scope rebinds it
+  (`self = other`, `nonlocal self`). A closure called away from the function (stored, then
+  called later elsewhere) still reads the same object, but heki does not tie it to the
+  parameter: no call of the function hands it over.
 - **A function that only runs inside allowed functions is allowed.** Every path of project
   callers above it starts in an allowed function, an exempt method, or such an initialization.
 - **A private helper reports at its callers.** An access in a private helper (`_name`) with
@@ -1707,24 +1726,28 @@ holds for `invalidation` too:
   apply: an access is judged in the function whose code holds it, whoever calls that function.
   A lambda, comprehension, or generator expression is part of the function it is written in, a
   class body's code part of the function running the class statement, and a nested `def` a
-  function of its own. For `write-owners`, a call handing a typed object to a helper that
-  changes it without knowing its class is the caller's write. With `unresolved = "report"`, the
-  callers binding a parameter only tell its object's class, allowed callers included. A class's
-  own initialization stays allowed, a helper it passes `self` to included when every path of
-  project callers above the helper starts in such an initialization; so do `exempt-methods`,
-  `fresh-objects`, and the targets of a call contract calling each other. Effect boundaries have
-  no such key: they judge what their scope functions reach through any number of calls.
+  function of its own; the parameters of the function a lambda, comprehension, or generator
+  expression reads are the function's, wherever it runs. For `write-owners`, a call handing a
+  typed object to a helper that changes it without knowing its class is the caller's write.
+  With `unresolved = "report"`, the callers binding a parameter only tell its object's class,
+  allowed callers included. A class's own initialization stays allowed, a helper it passes
+  `self` to included when every path of project callers above the helper starts in such an
+  initialization; so do `exempt-methods`, `fresh-objects`, and the targets of a call contract
+  calling each other. Effect boundaries have no such key: they judge what their scope functions
+  reach through any number of calls.
 - **`own-receiver = "allow"` allows the accesses through a method's own receiver.** An access is
   allowed when the function it is judged in (the function reported, or with `attribution =
   "lexical"` the function holding the access) is a method that is no static method, and the
   object the member is looked up on may be its first parameter: `self._cache[k] = v`,
   `self._seen`, `cls._kind()`, `super()._label()`, `self._norm(x)` of a static method,
   `Resolver._label(self)`. A member the class inherits counts like its own. Another parameter, an
-  attribute of the receiver, a static method called through its class, the parameter of a static
-  method or of a function, and a nested `def`, lambda, or comprehension using the enclosing
-  method's `self` (heki does not tie a variable a nested scope captures to the enclosing
-  function's parameter) stay reported. By the call graph, a private helper the method hands its
-  `self` (`_count(self)`) is judged at the method, and is allowed with it.
+  attribute of the receiver, a static method called through its class, and the parameter of a
+  static method or of a function stay reported. By the call graph, a private helper the method
+  hands its `self` (`_count(self)`) is judged at the method, and is allowed with it, and so are
+  a comprehension, generator expression, lambda, or private nested `def` the method runs that
+  uses its `self`; a public nested `def` reports itself, as a public helper does. With
+  `attribution = "lexical"`, a lambda, comprehension, or generator expression using the method's
+  `self` is allowed wherever it runs, and a nested `def` is judged by itself, as any helper is.
 - **`allowed-protocols` allows the accesses through the protocols it names.** A read, call, or
   write through a value typed with a project protocol a pattern names (or a subprotocol of one)
   that declares the member, itself or through its protocol bases, is allowed wherever it is
@@ -1814,6 +1837,59 @@ w = load()            # noqa: EFF101
 - A bracketed list that is not closed or names no rule (`# heki: ignore[`, `# heki: ignore[]`)
   silences nothing.
 - To keep a rule away from whole files, use [`per-file-ignores`](https://heki.koxudaxi.dev/configuration/#rule-selection-toolhekilint).
+
+### Unused suppressions
+
+```toml
+[tool.heki.lint]
+report-unused-suppressions = true
+```
+
+With `report-unused-suppressions = true`, `heki check`, `--watch`, and the language server report
+each code of a suppression comment that suppressed no report in the run (`unused-suppression`), as
+Ruff's `RUF100` and basedpyright's `reportUnnecessaryTypeIgnoreComment` do:
+
+```console
+$ heki check --output-format concise
+a.py:6:12: unused-suppression No `EFF101` report on this line to suppress
+```
+
+- A code is judged only when its rule ran on the file. A rule that did not run reported nothing a
+  suppression could match, so its codes are never reported: a heuristic rule left off (select it,
+  or set `heuristic = true`, to have its suppressions judged), an opt-in rule not selected, a
+  rule `--select` leaves out or `per-file-ignores` turns off in the file, and `MUT103` without
+  its summary snapshot.
+- A code that names no heki rule is another tool's and stays: `F401` in `# noqa: F401, EFF101`.
+  A suppression without codes is never reported as unused: a bare `# heki: ignore` covers rules
+  that did not run, and a bare `# noqa` belongs to Ruff as much as to heki.
+- A run judges what it reported, under its configuration: with `relax-async-in-tests`, a
+  suppression of `EFF101` in a test suppresses nothing. A run over some files of a project misses
+  the reports that come from the others (`heki check a.py` when the blocking call is in `b.py`),
+  so judge, and fix, on the whole project, as a pre-commit hook with `pass_filenames: false` does.
+- `heki check --fix` (and `--diff`) removes the unused codes, and the language server offers the
+  same edit as a quick fix. The other codes stay; a suppression left without codes goes, with
+  the blanks before it, and so does its line when the comment is alone on it. Other text of the
+  comment stays (`# type: ignore`). Without the setting, `--fix` leaves suppressions as they are.
+- The reports are errors, so they fail `heki check`. A suppression comment does not suppress
+  them: the setting turns them off. A baseline records them as it records other reports.
+- With a [baseline](https://heki.koxudaxi.dev/adoption/#ratchet-baselines), `heki check` also reports an entry that
+  matched no report of a rule that ran on its file, when the file was checked, and exits with
+  code 1: `error: baseline entry a.py::handler EFF101 `time.sleep` matched no report
+  (`--update-baseline` removes it)`. A heuristic report that the run withholds still matches its
+  entry. Without the setting, the entry gets a note that it can shrink.
+
+### Suppressions that name no rule
+
+```toml
+[tool.heki.lint]
+require-suppression-codes = true
+```
+
+With `require-suppression-codes = true`, a `# heki: ignore` without codes is reported
+(`suppression-without-code`, an error), as basedpyright's `reportIgnoreCommentWithoutRule` does.
+Its help names the rules it suppressed in the run (`# heki: ignore[EFF101]`). It still suppresses
+every rule on its line: the setting reports the comment and changes nothing else. A bare `# noqa`
+is not reported, since Ruff reads it too (its `PGH004` reports it).
 
 
 ---
@@ -1961,6 +2037,9 @@ Would fix 1 issue(s) in 1 file(s).
 
 - An annotation the fix cannot rewrite (`Sequence[int]`, a union), or another annotated
   declaration of the variable, blocks the fix.
+- So does a variable the list reaches that is also bound to another object (`s = [...]` before
+  `s = queue`, or a parameter `s`): a type checker gives the variable one type, which would
+  not accept the deque.
 - `import collections` goes into the module's block of standard-library imports, in the order
   that block follows: straight imports first, or sorted by module as with
   `force-sort-within-sections`.
@@ -2045,7 +2124,7 @@ The recorded set can only shrink:
 | Situation | `heki check` | `heki check --update-baseline` |
 | --------- | ------------ | ------------------------------ |
 | No baseline file yet | an error (exit code 2) | records today's findings |
-| A finding was fixed | a note that the entry can shrink | records the smaller entry |
+| A finding was fixed | a note that the entry can shrink; with [`report-unused-suppressions`](https://heki.koxudaxi.dev/configuration/#unused-suppressions), an entry that matches nothing is an error (exit code 1) | records the smaller entry |
 | An entry grew, or a new finding appeared | reports it, with a note on the allowed and found counts (exit code 1 for an error, and for a warning with [`fail-on = "warning"`](https://heki.koxudaxi.dev/configuration/#rule-selection-toolhekilint)) | reports it the same way and leaves the file as it is (exit code 1) |
 | A file could not be analyzed (a syntax error, an unreadable file) | reports the error and the other files' findings (exit code 2) | writes nothing, so the entries of that file are not lost (exit code 2) |
 
@@ -2150,6 +2229,10 @@ baseline configured, the hook fails only on new findings.
 
 Warnings become annotations without failing the step; `fail-on = "warning"` in
 `[tool.heki.lint]` (or `--fail-on warning`) makes them fail it, as in pre-commit.
+
+In GitHub Actions (`GITHUB_ACTIONS=true`), `heki check` writes these annotations without
+`--output-format github`. To keep the text output there, pass `--output-format full`, or set
+`HEKI_OUTPUT_FORMAT` (any format) in the job's `env`: it applies whenever the option is not given.
 
 With SARIF:
 
@@ -2451,7 +2534,7 @@ Options:
       --fail-on <FAIL_ON>
           Exit with code 1 on reports of this severity or higher: `error` (the default), or `warning` to fail on warnings too (`lint.fail-on`) [possible values: error, warning]
       --output-format <OUTPUT_FORMAT>
-          Output format [default: full] [possible values: full, concise, json, github, sarif]
+          Output format: `full`, or `github` in GitHub Actions (`GITHUB_ACTIONS=true`); `HEKI_OUTPUT_FORMAT` sets it when the option is not given [possible values: full, concise, json, github, sarif]
       --color <WHEN>
           When to color the `full` and `concise` output and `--diff`, as Ruff does: `auto` colors them on a terminal unless `NO_COLOR` is set (`FORCE_COLOR` or `CLICOLOR_FORCE` color them anywhere), `always`, or `never` [default: auto] [possible values: auto, always, never]
       --update-baseline
@@ -2640,14 +2723,14 @@ Shared state written behind its owner's back: stale caches, write-ownership cont
 
 | Code | Name | Message | |
 | ---- | ---- | ------- | ------: |
-| MUT101 | [cached-property-stale-mutation](https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/) | Mutating an attribute read by `@cached_property` without invalidating the cache. | ≈ 🔌 🧪 |
+| MUT101 | [cached-property-stale-mutation](https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/) | Mutating an attribute read by `@cached_property` without invalidating the cache. | 🔌 🧪 |
 | MUT103 | [summary-effect-regression](https://heki.koxudaxi.dev/rules/summary-effect-regression/) | Interprocedural mutation/escape/effect regression against saved summary snapshot. | ≈ 🔌 |
 | MUT106 | [iterator-double-consumption](https://heki.koxudaxi.dev/rules/iterator-double-consumption/) | Opt-in: consuming a single-pass iterator or generator a second time (the second pass sees no items). | ≈ 🔌 |
 | MUT107 | [hash-attr-mutation](https://heki.koxudaxi.dev/rules/hash-attr-mutation/) | Opt-in: a method other than the initializers rebinds or changes in place an attribute that the `__hash__` of its instances reads. | ≈ 🔌 |
 | MUT108 | [readonly-type-mutation](https://heki.koxudaxi.dev/rules/readonly-type-mutation/) | Opt-in: changing in place a field that a standard type declares read-only (frozen dataclass / `NamedTuple` / `dataclass_transform` fields, `Final` / `ReadOnly` attributes, `ReadOnly` `TypedDict` keys), directly, through an alias, or in a helper. | ≈ 🔌 |
 | MUT109 | [write-without-invalidation](https://heki.koxudaxi.dev/rules/write-without-invalidation/) | Writing a declared `invalidation` target (directly, via alias, or via helper) without reaching one of its invalidators on every path to the function's return. | ≈ 📜 |
 | MUT110 | [readonly-param-mutation](https://heki.koxudaxi.dev/rules/readonly-param-mutation/) | Handing a `Sequence` / `Mapping` / `ReadOnly` parameter, as itself, to a function whose body (or a helper's) changes it in place at a named line. |  |
-| MUT111 | [cached-property-stale-read](https://heki.koxudaxi.dev/rules/cached-property-stale-read/) | Opt-in: reading a `@cached_property` that a method of its class family can leave stale (a write `MUT101` reports). | ≈ 🔌 🧪 |
+| MUT111 | [cached-property-stale-read](https://heki.koxudaxi.dev/rules/cached-property-stale-read/) | Opt-in: reading a `@cached_property` that a method of its class family can leave stale (a write `MUT101` reports). | 🔌 🧪 |
 | MUT112 | [conditional-ownership-mutation](https://heki.koxudaxi.dev/rules/conditional-ownership-mutation/) | Opt-in: changing in place a value that is a new object on one path and borrowed state (a parameter, an attribute, a global, or what a function returns of such state) on another. | ≈ 🔌 🧪 |
 | MUT113 | [iterated-container-mutation](https://heki.koxudaxi.dev/rules/iterated-container-mutation/) | Opt-in: a dict, set, or deque of the instance changed while a method iterates it, by another method while a generator is suspended in the loop or by a function the loop's body calls (the next step raises `RuntimeError`). | ≈ 🔌 🧪 |
 | MUT114 | [cached-result-mutation](https://heki.koxudaxi.dev/rules/cached-result-mutation/) | Changing in place the list, dict, or set that a `functools.lru_cache` / `functools.cache` function returned (the cache hands the same object to later calls with the same arguments), directly or through the functions that return it. |  |
@@ -2866,7 +2949,17 @@ report, whose rewrite needed the set-order obligation, left the tier); the holdo
 every exact report of one run on the 100 packages of the frozen holdout corpus. `OPT113`'s
 census reports are those of its exact tier with the plain-key premise, all among the reports
 the census of the earlier tier checked by hand. The census of `EFF101` counts its boundaries
-before reports reaching one waiting call are folded together.
+before reports reaching one waiting call are folded together. `MUT101` and `MUT111` are
+certified but opt-in: their census counts the exact reports of the build that decides what may
+remove or replace the kept value positively (a store or deletion of the property's name through
+any reference heki does not establish as another object, implicit calls of project code, values
+whose class it does not establish), all among those the reviewers checked with the builds before
+it, which moved setup steps to the heuristic tier; their holdout run used an earlier build, whose
+exact reports include every one of the later builds'. Reviewers judged their harm: of `MUT101`'s 26 exact
+reports 1 is P and 25 are B (two of three reviewers judged the three changes of a Django `Q` that
+its cached `identity` hashes benign: Django changes only new `Q` objects in place); of
+`MUT111`'s 60, 0 are P by one reviewer and 2 by the other. The real-harm share is below the 10% a default rule needs
+(`heki recommend`'s bar), so both stay off by default.
 
 | Rule | Certified | Census: reports / false | Holdout: reports / false |
 | ---- | --------- | ----------------------: | -----------------------: |
@@ -2884,6 +2977,8 @@ before reports reaching one waiting call are folded together.
 | `DATA101` | 0.2.0 | 6 / 0 | 0 / 0 |
 | `MUT110` | 0.2.0 | 5 / 0 | 2 / 0 |
 | `MUT114` | 0.2.0 | 5 / 0 | 5 / 0 |
+| `MUT101` | 0.2.4 (experimental) | 26 / 0 | 1 / 0 |
+| `MUT111` | 0.2.4 (experimental) | 60 / 0 | 2 / 0 |
 
 The exact tier of the size-dependent rewrites has since asked that the data decide the loop's trip
 count, which keeps a subset of the reports their census and holdout run checked.
@@ -3124,6 +3219,9 @@ heki's diagnostics and fixes while you edit, with the results `heki check` repor
   result would not parse is never offered, as `heki check --fix` refuses it.
 - A quick fix that appends `# heki: ignore[CODE]` to the line of any diagnostic, unless a comment
   cannot go there (the line ends inside a string or with a `\` continuation).
+- With [`report-unused-suppressions`](https://heki.koxudaxi.dev/configuration/#unused-suppressions), a quick fix that
+  removes the codes of a suppression comment that suppressed nothing, or the whole comment when
+  none is left.
 
 Code actions edit the version of the document their diagnostics were computed on:
 
@@ -3691,13 +3789,20 @@ A shape that lives in one function is placed in a function, a method, and a modu
 to the largest size whose function the IR budget still models, so a builder change moves the size
 with it; a shape spread over a project (a wide class hierarchy, a chain of private helpers,
 thousands of argument lists) has a fixed size, and so has a shape in one function whose cost
-already shows at a smaller size, where the walks it does not gate stay cheap. Each runs with every
-rule and one contract of each kind (a family may add its own), through `heki check` and the
-`--watch` engine (a family of the facts only `heki recommend` reads also through
-`heki dump-recommend-facts`), and fails when it costs more than 1 s (on the machine the limits
-were measured on, scaled to the machine running the gate by linear shapes of calls and of loops)
-or 1 GiB beyond an empty module. `heki check --walk-steps <path>` (hidden) writes the steps each
-owner's walks took per function as JSON: the gate also fails when an owner's steps grow more than
+already shows at a smaller size, where the walks it does not gate stay cheap. A fixed size must be
+modeled too, since past the budget a shape measures the cutoff, not the walks it gates, and a
+shape of thousands of functions in one module grows like a shape in one function (the budget of
+the module body bounds the functions it defines). Each runs with every rule and one contract of
+each kind (a family may add its own), through `heki check` and the `--watch` engine (a family of
+the facts only `heki recommend` reads also through `heki dump-recommend-facts`), and fails when it
+costs more than 1 s (on the machine the limits were measured on, scaled to the machine running
+the gate by linear shapes of calls and of loops, and for a project shape also of a module of
+thousands of functions, whose heap slows down more on a CI runner; they are timed on a fixed
+release of heki from PyPI, so that a change to the binary under test never moves its own limits)
+or 1 GiB beyond an empty module. A shape over the limits is run twice more and keeps the least of
+the three times, the way the references are timed. `heki check --walk-steps <path>` (hidden)
+writes the steps each owner's walks took per function as JSON: the gate also fails when an
+owner's steps grow more than
 2.5 times from half the size to the full size, or when a budget is spent on a shape like real code.
 `KNOWN_OVER` in the script lists the shapes known to cost more, and only shrinks: a listed shape
 runs only through `heki check` (not the `--watch` engine), with a short timeout, and fails the gate
@@ -4369,20 +4474,20 @@ Source: https://heki.koxudaxi.dev/rules/cached-property-stale-mutation/
 
 # cached-property-stale-mutation (MUT101)
 
-Family: Mutation & State (MUT) · Heuristic · Opt-in · Experimental · Severity `error` (a bug) · No automatic fix
+Family: Mutation & State (MUT) · Exact · Opt-in · Experimental · Severity `error` (a bug) · No automatic fix
 
 Mutating an attribute read by `@cached_property` without invalidating the cache.
-
-!!! note "Heuristic"
-
-    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs only when `select` or `extend-select` names its code or name. It has not been measured yet. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 !!! warning "Experimental"
 
     Its precision outside a few code bases is still low. Experimental features can still change in behavior or precision, or be removed, in any release, and each change is listed in the release notes. An opt-in rule that is not experimental is stable and only off by default. See [Experimental Features](https://heki.koxudaxi.dev/experimental/).
 
 ## What it does
-Opt-in: enable it with `extend-select = ["MUT101"]`.
+Opt-in: enable it with `extend-select = ["MUT101"]`. Its exact reports are true claims (census
+on the Stage 0-A corpus: 26 exact reports, none false; holdout: 1, none false), but few show real
+harm (1 of the 26 by majority of three reviewers), below the 10% share a default rule needs: most are writes that run before the property
+is first read, keep the value's meaning, or run on objects whose cached value nothing reads
+again.
 
 Checks for methods that rebind or mutate an attribute that a `@functools.cached_property`
 of the same class (or of a subclass) reads, without invalidating the cached value. A method the
@@ -4394,18 +4499,82 @@ not (a `def cache(fn)` of its own), and a name bound by neither counts by its sp
 
 ## What a report states
 
-A report states that a method that can run after initialization rebinds or changes an attribute that
-a `@cached_property` of the class family reads, and that a path after the write leaves the cached
-value in place.
+An exact report states that whenever the method runs on an instance of any class that runs it,
+and that instance holds a value of the cached property when the write runs, the getter computed
+that value from the attribute the write rebinds or changes, and the instance still holds it when
+the method returns normally: the next read of the property returns a value computed from the
+attribute's state before the write. An instance that holds no value when the write runs makes
+the claim hold vacuously, whatever a later read keeps.
 
 Its premises:
 
-- **Reads**: the cached property reads the attribute, directly or through calls and property reads.
-  Open through a call: one path of the callee is enough.
-- **After initialization**: the method is not an initialization hook. Open: hooks are recognized by
-  their names (listed above).
-- **Not invalidated**: some path from the write to the method's return clears no cache. Established
-  on the method's control flow.
+- **Cached property**: every class the instance may be (R2, R5) that names the property gets it
+  from a synchronous getter, the first definition along its MRO with no base heki does not know
+  before it, decorated by a cached-property decorator the ecosystem catalog lists as keeping the
+  value in the instance `__dict__` (`[[cached_properties]]`: `functools.cached_property` and
+  Django's, Werkzeug's, propcache's, and kombu's, R3; with Werkzeug's, which keeps it in a slot on
+  an instance without a `__dict__`, no class along the MRO defines `__slots__`), and none has a
+  metaclass other than `type` or `abc.ABCMeta`. An instance of a class that names nothing under
+  the property's name holds no value of it, so the claim says nothing of it. Established.
+- **Reads on every path**: the getter reads the written attribute, with the written constant key
+  or as a whole, on every path on which it returns normally, itself or through `self` methods and
+  property reads it makes on every such path. Each of those runs its body at every call (no cache
+  decorator) and has the fact. Established.
+- **Every implementation**: each of those calls has as its targets every implementation it can
+  run (R2, R5). Established.
+- **Plain write**: the write is one of two kinds. It may rebind or delete the attribute with a
+  plain store: no property, descriptor, `__setattr__`, `__delattr__`, or metaclass heki does not
+  know in a class the instance may be, and every base a project class or a plain one. Or it may
+  change in place the builtin list, dict, or set the attribute holds by its type, through a
+  changing method or an item store that no project subclass of the container replaces.
+  Established.
+- **Kept to the return**: no point from the write to the method's normal return may remove or
+  replace the kept value, exception edges into handlers included. The write's own instruction
+  counts: an in-place change runs code while it changes the attribute (it iterates its argument
+  or hashes a key). That rules out a store or a deletion of the property's name, or of an item of
+  a `__dict__` under it, through any reference
+  (`self`, a parameter, a closure, a global, an item of a container, `*args`, `setattr`,
+  `vars()`), except one heki establishes as an object that keeps no value under the name: a
+  value the method builds, or an instance of classes none of which (R2) binds a property getter
+  of that name. A store or a deletion of a `__dict__` or a `__class__`, an `await` (also the
+  implicit ones of `async for` and `async with`), and a `yield` count as removing every value.
+  It also rules out every call except two kinds: a project call whose targets are every
+  implementation it can run and remove nothing, and a call of a library the catalog covers that
+  runs no project code by its `[[invokes]]` entry, or, without one, is handed no callable, no
+  instance of a project class, and no value of unknown type (R3). Implicit calls count the same.
+  A special method an instruction runs on an operand's class (an operator, a comparison, `in`, a
+  conversion or format, a subscript and its key, an unpacking, a call's `*` and `**` arguments,
+  a key a set or dict display hashes, a truth test, `with`) runs no code of the project only
+  where heki establishes what implements it on every class the operand may be (R2): `object`'s;
+  a builtin type's, with what it runs on the items it holds (a container's comparison, hash, or
+  `repr()` runs its items', and a dict or set compares a key with each key it holds under an
+  equal hash); or a library class's, as a call of that library (R3). A value of an abstract
+  class or a protocol, one annotated `object`, and one of a class heki does not know establish
+  none, and a comparison's or a conversion's result is a builtin `bool` or `str` only where
+  those methods are `object`'s or a builtin type's. No attribute access may run a `__getattr__`,
+  `__setattr__`, property, or other descriptor of the project that heki does not resolve (an
+  access on a library object counts as a call of that attribute), no `raise` may construct a
+  value that may be a class of the project, and no class statement or import of a project module
+  runs there. Established.
+
+Besides R1-R7, the claim assumes that no finalizer (`__del__`, which reference counting or the
+garbage collector runs when it frees an object) and no other thread runs code between the write
+and the method's return: either may remove the value at any instruction, and no premise rules
+them out.
+
+Not part of the claim: whether the method runs after the property was first read. A write that
+runs only during two-phase setup makes the claim hold vacuously, so a setup step stays heuristic
+(**After setup** is open): a finalizer (`__del__`), a method that an `__init__` along the MRO of a
+class the instance may be calls on the instance or stores through (a property setter), and lazy
+setup through a second cached property (the writer is a listed cached-property getter that no
+function of the project invalidates by name, and the property's getter reads it on every path).
+
+A heuristic report states that a method that can run after initialization rebinds or changes an
+attribute that a `@cached_property` of the class family reads, and that a path after the write
+leaves the cached value in place. Open: the property may read the attribute on some paths only
+(through a call, one path of the callee is enough), initialization hooks are recognized by their
+names, a `cached_property` of a library the catalog does not list counts by its name, and calls
+after the write may remove the value.
 
 ## Why is this bad?
 A `cached_property` computes its value once and stores it in the instance `__dict__`. Once the
@@ -4489,13 +4658,9 @@ Source: https://heki.koxudaxi.dev/rules/cached-property-stale-read/
 
 # cached-property-stale-read (MUT111)
 
-Family: Mutation & State (MUT) · Heuristic · Opt-in · Experimental · Severity `error` (a bug) · No automatic fix
+Family: Mutation & State (MUT) · Exact · Opt-in · Experimental · Severity `error` (a bug) · No automatic fix
 
 Opt-in: reading a `@cached_property` that a method of its class family can leave stale (a write `MUT101` reports).
-
-!!! note "Heuristic"
-
-    This rule is heuristic: a premise of its claim can be open ("What a report states" lists them), so a report can be wrong about the code. It runs only when `select` or `extend-select` names its code or name. It has not been measured yet. See [Rule Precision](https://heki.koxudaxi.dev/precision/).
 
 !!! warning "Experimental"
 
@@ -4505,7 +4670,10 @@ Opt-in: reading a `@cached_property` that a method of its class family can leave
 Checks for functions that read a `@functools.cached_property` that a method can leave stale: a
 method that changes an attribute the property reads without invalidating the cached value, as
 `MUT101` reports it. The rule is opt-in: enable it with `--extend-select MUT111` or
-`extend-select = ["MUT111"]`.
+`extend-select = ["MUT111"]`. Its exact reports are true claims (census on the Stage 0-A corpus:
+60 exact reports, none false; holdout: 2, none false), but at most 2 of the 60 show real harm,
+below the 10% share a default rule needs: they read values that the writers behind them leave
+stale only in setup or on objects nothing reads again.
 
 A read is one in the function's own body, on any object of the class: `self.prop`, `obj.prop`
 on a parameter, attribute, or value whose class heki knows (as for `MUT203`),
@@ -4529,13 +4697,38 @@ initialization, or that no method changes.
 
 ## What a report states
 
-A report states that the function reads a `@cached_property` that a write `MUT101` reports can leave
-stale on the instances the object may be.
+An exact report states that the function's own body reads the cached property on an object every
+class of which runs a write that `MUT101` reports exact: the value read may have been computed
+before that write and kept after it.
+
+The first five premises are those of that `MUT101` report, as its page states them.
 
 Its premises:
 
-- **Stale**: the premises of the `MUT101` report behind it, which are open where its page says so.
-- **Reads**: the function's own body reads the property. Established.
+- **Cached property**: the getter's decorator is one the catalog lists, the first definition along
+  each class's MRO. Established.
+- **Reads on every path**: the getter reads the written attribute on every path on which it
+  returns normally. Established.
+- **Every implementation**: each call on the getter's chain has every implementation as its
+  targets. Established.
+- **Plain write**: the write is a plain store or an in-place change of a builtin container no
+  project subclass replaces. Established.
+- **Kept to the return**: nothing from the write, its own instruction included, to the writer's
+  normal return may remove the kept value. Established.
+- **Reads the property**: the function's own body reads the property on the object (`obj.prop`, a
+  constant `getattr`, an item of `obj.__dict__`). Established.
+- **Runs the writer**: every class the object may be (R2) gets the property from a
+  `@cached_property` getter and runs a write of it whose `MUT101` report is exact: the first
+  definition of the writing method along its MRO, or one that the definitions before it reach
+  through `super()` without invalidating the property. Established.
+
+Besides R1-R7, the claim assumes what that `MUT101` report assumes: no finalizer (`__del__`,
+which reference counting or the garbage collector runs when it frees an object) and no other
+thread runs code between the write and the writer's return.
+
+A heuristic report states that the function reads a `@cached_property` that a write `MUT101`
+reports can leave stale on the instances the object may be. Open: the premises of the `MUT101`
+report behind it, which are open where its page says so.
 
 ## Why is this bad?
 A `cached_property` computes its value once and keeps it in the instance `__dict__`. After a
@@ -6103,7 +6296,9 @@ stored, or passed to other code except read-only builtins such as `len`), and ev
 against lists, and no text of it (a replacement field of an f-string, `str()`), which differs
 for a `deque`. An annotation the rewrite cannot turn into a `deque` one (`Sequence[str]`, a
 union) or another annotated declaration of the variable blocks the fix, so that a type checker
-accepts the fixed file.
+accepts the fixed file. So does any other binding of a variable the list reaches, since a type
+checker gives the variable one type: `s = [...]` before `s = q`, a later `q = [...]` the loop
+never sees, a `for s in ...`, or a parameter `s`.
 
 A `deque` iterator raises `RuntimeError` when the deque changes under it and is another type
 than a list iterator: no iterator of the list may be live at a change, consumed by the changing
