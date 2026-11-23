@@ -1056,10 +1056,14 @@ impl EffectiveEcosystemKb {
         let read = serde_json::to_string(&attributes).unwrap_or_default();
         let provided = serde_json::to_string(&provides).unwrap_or_default();
         kb.digest = blake3::hash(
-            format!("{}|{listed}|{caches}|{unawaited}|{read}|{provided}", kb.digest).as_bytes(),
+            format!(
+                "{}|{listed}|{caches}|{unawaited}|{read}|{provided}",
+                kb.digest
+            )
+            .as_bytes(),
         )
-                .to_hex()
-                .to_string();
+        .to_hex()
+        .to_string();
         kb.invokes = invokes;
         kb.cached_properties = cached_properties;
         kb.calls_unawaited = calls_unawaited;

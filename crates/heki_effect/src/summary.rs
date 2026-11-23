@@ -230,8 +230,8 @@ fn extract_module(
                 references.extend(facts.references);
                 external.extend(facts.external);
                 blind.extend(facts.blind);
-            // blind to there, that call a callable without awaiting it, and the modules imported by
-            // name there are the module's. Their other facts are not the module's.
+                // blind to there, that call a callable without awaiting it, and the modules imported by
+                // name there are the module's. Their other facts are not the module's.
             }
         }
         if let Some(mut flow) = flow {

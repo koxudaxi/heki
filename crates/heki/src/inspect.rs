@@ -8,8 +8,8 @@ use crate::{InspectArgs, OutputFormat, ReportFormat};
 use anyhow::Result;
 use heki_diagnostics::{Diagnostic, RatchetBaseline, path_text};
 use heki_effect::{FuncKey, ProjectDecls};
-use heki_rules::import_view::{ImportsFailure, imports_report, render_imports_text};
 use heki_env::{Docs, Problem};
+use heki_rules::import_view::{ImportsFailure, imports_report, render_imports_text};
 use heki_rules::inspect::{
     InspectInputs, InspectQuery, MAX_CANDIDATES, Resolution, Symbol, inspect, render_text,
     resolve_line, resolve_name,
