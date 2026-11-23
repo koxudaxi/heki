@@ -777,6 +777,36 @@ Contracts reason about the callers heki sees: a private helper hands its reports
 and a function called only from allowed writers is not reported. Code outside the run, such as
 tests left out of it, is not known.
 
+## Measured and not taken
+
+These shapes were measured on the Stage 0-A corpus (378 packages, 30.75 million lines) and not built.
+Each failed the bar for a default rule: at least 10 % of the judged sample harmful, and no false exact
+claim.
+
+- Late binding of loop variables: 132 closures in 38 packages beyond the 3,865 names Ruff B023
+  reports; every harmful one is already a B023 report, and heki found none that B023 misses.
+- Resource use after close: 289 sites in 80 packages, 8 % harmful, with false exact claims. Left to
+  runtime and review.
+- Resource leaks across calls: 1,848 sites in 162 packages, 4 % harmful; about half are direct
+  constructors that Ruff `SIM115` and Pylint `R1732` flag.
+- Command-query separation (a `get_*`, `is_*`, or property that changes state): 11,558 sites in 254
+  packages, 4 % harmful; most are caches heki does not see as caches.
+- Dropped results of pure calls: 59,083 sites in 327 packages, no harm in the sample; the real bugs
+  are `str` methods on `str` values, which pyright `reportUnusedCallResult` covers.
+- Stale caches: 199 sites in 54 packages, 5 % harmful; Ruff B019 and Pylint W1518 flag the cache on
+  a method.
+- `asyncio.run` under a running loop: 71 sites in 12 packages, 1 of 25 judged right; nearly all are
+  guarded by a test heki does not model.
+- Writes lost in a child process: 62 sites in 27 packages, 4 % harmful.
+- `Popen` pipes left unread: 22 sites in 13 packages, 5 % harmful.
+- `CancelledError` swallowed: 466 sites in 62 packages, none harmful as judged; flake8-async
+  `ASYNC103` and `ASYNC104` cover the shape.
+- `BytesIO` read without a seek: 69 sites in 7 packages, 57 of them one test suite; too rare.
+- Opposite lock orders: 106 ordered pairs of named locks in 31 packages, no pair in opposite order.
+- An `except` clause that nothing in its `try` body raises, through its calls: 2,730 clauses in 157 packages
+  for project exceptions and 3,597 in 153 for library ones; of 60 judged, one was harmful, and that one is a
+  one-statement shape. Which exceptions a function can raise is planned as a `heki inspect` fact instead.
+
 ## How a rule gets into heki
 
 heki only takes checks that need what it can prove. A proposed rule goes through four questions,
@@ -1361,7 +1391,9 @@ Contracts declare what no type can say. Each kind is an array of tables with its
   subclass's `self`, or `type[Parser]` reaches it as `_Parser__run`. A subclass's own private
   name (`self.__run` in `JsonParser`, the member `_JsonParser__run`) is another member, and
   overrides nothing of its base. With `unresolved = "report"`, the last name of such a target
-  counts in both spellings (`__run`, and `_Parser__run` for a class the target names).
+  counts in both spellings (`__run`, and `_Parser__run` for a class the target names); a
+  target without a class (`__run`) names the member of any class (`other.__run()` in class
+  `Driver` calls `_Driver__run`).
 - A contract heki cannot use is a configuration error: a target that is not `Class.attr`, an
   invalid glob, a name with more than one colon or an empty module or qualified name, call
   targets whose globs are too many to match together (tens of thousands of complex ones), an
@@ -1527,7 +1559,7 @@ The call side of `write-owners`.
 | Key | Default | Meaning |
 | --- | ------- | ------- |
 | `name` | `""` | The contract's name in reports. |
-| `targets` | `[]` | Functions, methods, or classes. A `Class.method` target covers the method's overrides in subclasses; a class target means constructing the class or a subclass. A target may end in an argument list (`DataType(is_dict=True)`, below). |
+| `targets` | `[]` | Functions, methods, or classes. A `Class.method` target covers the method's overrides in subclasses; a class target means constructing the class or a subclass, also through a `functools.partial` object holding it and through a library method building an instance of its receiver's class (a pydantic model's `model_construct`, `model_validate` of a dict, `model_copy`). A target may end in an argument list (`DataType(is_dict=True)`, below). |
 | `subclasses` | `true` | `false`: a class target means constructing exactly the class, not a subclass (an exception class whose subclasses anyone may raise). `Class.method` targets keep covering overrides. |
 | `allowed-callers` | `[]` | Functions allowed to call the targets. |
 | `forbidden-callers` | `[]` | When set, only calls by these functions are reported. |
@@ -1574,17 +1606,27 @@ The call side of `write-owners`.
   Python binds it: never a positional-only parameter (with `def f(kind=False, /, **kwargs)`,
   `f(kind=True)` leaves `kind` false), and a keyword naming no parameter passes its value under its
   name into `**kwargs`; the receiver of a method call is its first position. A `**` operand that is
-  a dict display with string constant keys (literals, or string constants as above), which nothing
-  changes (a name holding it is only unpacked with `**`, bound to another name, tested, or
-  returned), passes its entries as keywords: `DataType(**{"is_dict": True})`,
-  `flags = {"is_dict": True}; DataType(**flags)`. A call that raises `TypeError` instead of running
-  the function passes nothing: two keywords of one name (written and in such a display, or in two
-  displays), a keyword binding a parameter a position or the receiver binds too, a keyword naming no
-  parameter of a function without `**kwargs`, a position (the receiver included) past the parameters
-  of a function without `*args`, or a parameter without a default left unbound where no `*`
-  unpacking or `**` unpacking of another mapping may bind it. Any other argument (a variable, a
-  call, `*` unpacking, `**` unpacking of another mapping) is not established, and the call is not
-  reported. A reference passes no arguments, so it never matches. A target with an argument list
+  a mapping the function builds, which nothing changes (a name holding it is only unpacked with
+  `**`, merged into another mapping, bound to another name, tested, or returned), passes its
+  entries as keywords: a dict display with string constant keys (literals, or string constants as
+  above), `DataType(**{"is_dict": True})`, `flags = {"is_dict": True}; DataType(**flags)`; a merge
+  of mappings (`{**a, **b}`, `dict(a, is_dict=True)`, `a | b` of two mappings the function builds),
+  which passes the last entry of each key, a mapping heki does not build (a parameter) replacing
+  every key before it; and a mapping built on several paths (`flags = a if c else b`), which passes
+  a key where every path passes the same constant for it. Calling a `functools.partial` object the
+  function makes (through copies) calls what it holds, with the positions it holds first and its
+  keywords, which a keyword the call writes replaces: after `make = partial(DataType,
+  is_dict=True)`, `make()` constructs `DataType(is_dict=True)`, reported at `make()`, where the
+  class is constructed (a call unpacking a mapping with `**` over keywords the object holds is not
+  followed). A pydantic model's `model_construct` passes its keywords to the fields,
+  `model_validate` the entries of the dict it is passed, and `model_copy` those of `update`. A
+  call that raises `TypeError` instead of running the function passes nothing: two keywords of one
+  name (written and in such a display, or in two displays), a keyword binding a parameter a
+  position or the receiver binds too, a keyword naming no parameter of a function without
+  `**kwargs`, a position (the receiver included) past the parameters of a function without
+  `*args`, or a parameter without a default left unbound where no `*` unpacking or `**` unpacking
+  of another mapping may bind it. Any other argument (a variable, a call, `*` unpacking, `**`
+  unpacking of another mapping) is not established, and the call is not reported. A reference passes no arguments, so it never matches. A target with an argument list
   names no symbol outside the project; `unresolved = "report"` matches its last name before the
   list, whatever the arguments of a call on an object of unknown class.
 - With `references = "calls-and-bases"`, a class statement passing a class target as a base is
@@ -4158,6 +4200,67 @@ instead, which makes a good prompt for the fix. `heki rule --all --output-format
 every rule's metadata and documentation, the premises of its exact claim, and its published
 precision: its certification and its latest measurement ([Rule Precision](https://heki.koxudaxi.dev/precision/)).
 
+## Architecture rules with agents
+
+Do not describe the architecture in the project's `AGENTS.md` or `CLAUDE.md`. Declare it as
+[contracts](https://heki.koxudaxi.dev/configuration/#contracts) and let `heki check` enforce it. Three lines are enough:
+
+> After editing Python, run `heki check`.
+> A report that names a contract means the code crossed a wall the maintainers declared: change the
+> code as the report's help says.
+> Do not edit the contracts or the baseline, and do not add a suppression, unless the maintainer
+> asks.
+
+The `message` of a contract is what the agent reads as the fix, so write it as an instruction:
+
+```toml
+# heki.toml
+[[write-owners]]
+name = "generation-store"
+targets = ["pkg.model.DataModel.fields"]
+allowed-writers = ["Store.*"]
+message = "use GenerationStore.set_fields() instead"
+```
+
+Put the contracts and the baseline path in `heki.toml`, and give that file an owner (`CODEOWNERS`,
+or the host's rule for protected files). A change to a wall is then a reviewed change, and an agent
+cannot move a wall to make a report go away.
+
+### A Stop hook for Claude Code
+
+A [Stop hook](https://code.claude.com/docs/en/hooks) runs when Claude Code is about to end its turn.
+The script below runs `heki check` and, when it exits with 1 (findings), sends the text to the agent
+and keeps it working. Exit code 2 of the hook means "block, and read stderr". heki's own failure (exit
+code 2, or no `heki` on the path) lets the turn end, so a configuration error does not loop. The hook
+input has `stop_hook_active`, which is `true` while Claude Code is already continuing because of a
+stop hook; the script stops blocking then.
+
+```sh
+#!/bin/sh
+input=$(cat)
+case $input in
+  *'"stop_hook_active":true'* | *'"stop_hook_active": true'*) exit 0 ;;
+esac
+report=$(heki check 2>&1)
+status=$?
+[ "$status" -eq 1 ] || exit 0
+printf '%s\n' "$report" >&2
+exit 2
+```
+
+Register it in `.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "Stop": [{ "hooks": [{ "type": "command", "command": ".claude/hooks/heki-stop.sh" }] }]
+  }
+}
+```
+
+Run on a project with findings that are already known, it would block every turn: use
+`heki check --baseline heki-baseline.toml` in the script so that only new findings count.
+
 ## What a function does: `heki inspect` (experimental)
 
 When a diagnostic or a question is about one function, `heki inspect` says what it reaches,
@@ -4961,12 +5064,13 @@ Each step of the chain is established, not assumed:
   decorator other than `staticmethod`, `classmethod`, `property`, `abstractmethod`, or
   `override` may not run the body, and is not followed; a function defined twice is not
   followed, and neither is a function, class, or method whose name the project binds to another
-  object (assumption R1): another store or a `del` of the name in its module (also on a branch,
-  after `global`, or by `globals()` or `exec`), in its class body, or on its class object; a
-  store or `del` from another module, also through `setattr` with a string literal, and any
-  name of a module that `setattr` stores into under a name heki cannot read; a store of the
-  function's `__code__`; and, for a method, a store of the name on a class the lookup passes, of
-  `__bases__` on a class along the MRO, or of `self.__class__` in a method;
+  object (assumption R1; a name its module body or class body binds last to one named object on
+  every path is that object): another store or a `del` of the name in its module (also on a
+  branch, after `global`, or by `globals()` or `exec`), in its class body, or on its class
+  object; a store or `del` from another module, also through `setattr` with a string literal,
+  and any name of a module that `setattr` stores into under a name heki cannot read; a store of
+  the function's `__code__`; and, for a method, a store of the name on a class the lookup
+  passes, of `__bases__` on a class along the MRO, or of `self.__class__` in a method;
 - the waiting call is in the ecosystem catalog, waits on every call (a database call that may be
   answered by a session's identity map, a cache, an open connection, or that sends only pending
   changes does not), and no argument that may come from the caller can make it return at once
@@ -5879,8 +5983,12 @@ the allowed callers and resolves to a target:
 - a module-level function (`pkg.util.reset_cache()`);
 - a class: constructing it or a subclass (`FinalFacts(...)`, `pkg.facts.FinalFacts(...)`,
   `cls(...)` in a class method, a value typed `type[FinalFacts]` or `typing.Type[FinalFacts]`,
-  `type(facts)(...)`), also for a dataclass or another class without an `__init__` of its own;
-  with `subclasses = false`, constructing exactly the class;
+  `type(facts)(...)`), also for a dataclass or another class without an `__init__` of its own,
+  through a `functools.partial` object holding the class (`make = partial(FinalFacts)`, then
+  `make()`, reported at `make()`), and through a library method building an instance of its
+  receiver's class without its `__init__` (a pydantic model's `FinalFacts.model_construct(...)`,
+  `FinalFacts.model_validate({...})` of a dict, `facts.model_copy(...)`); with
+  `subclasses = false`, constructing exactly the class;
 - what a property returns, called (`self.data_type(is_dict=True)` with a property `data_type`
   returning `type[DataType]` constructs `DataType`): the value the getter's return annotation
   names is called, and the getter runs as reading the property does;
@@ -5906,9 +6014,18 @@ where every function the call may run binds that position to the parameter, or l
 every such function's default is `True`, `False`, `None`, `0`, or `""` and the value. A keyword
 binds as Python binds it: never a positional-only parameter, and one naming no parameter passes its
 value under its name into `**kwargs`; the receiver is the first position. A `**` operand that is a
-dict display with string constant keys, which nothing changes (a name holding it is only unpacked
-with `**`, bound to another name, tested, or returned), passes its entries as keywords
-(`DataType(**{"is_dict": True})`, `flags = {"is_dict": True}` then `DataType(**flags)`). A call that
+mapping the function builds, which nothing changes (a name holding it is only unpacked with `**`,
+merged into another mapping, bound to another name, tested, or returned), passes its entries as
+keywords: a dict display with string constant keys (`DataType(**{"is_dict": True})`,
+`flags = {"is_dict": True}` then `DataType(**flags)`); a merge (`{**a, **b}`, `dict(a, k=v)`,
+`a | b` of two mappings the function builds), which passes the last entry of each key, a mapping
+heki does not build (a parameter) replacing every key before it; and one built on several paths
+(`flags = a if c else b`), which passes a key where every path passes the same constant for it.
+Calling a `functools.partial` object the function makes passes what the object holds first (its
+positions, and its keywords, which a keyword of the call replaces), then the call's arguments; a
+call unpacking a mapping over keywords the object holds is not followed. A pydantic model's
+`model_construct` passes its keywords to the fields, `model_validate` the entries of the dict it
+is passed, and `model_copy` those of `update`. A call that
 raises `TypeError` instead of running the function (two keywords of one name, a parameter bound by a
 position, or the receiver, and a keyword, a keyword without `**kwargs` to land in, a position past
 the parameters without `*args`, a parameter without a default left unbound where no `*` unpacking or
@@ -6069,7 +6186,12 @@ Its premises:
   target (whether a test of a display holding it looks at it) is not part of the claim.
 - **Arguments** (a target with an argument list): the call binds each parameter the list names to
   its constant, as Python binds the call. Established: an argument heki cannot tell is no match,
-  and a call that raises `TypeError` instead of running the function binds nothing.
+  a mapping built on several paths passes a key only where every path passes the same constant
+  (as every function the call may run must agree), and a call that raises `TypeError` instead of
+  running the function binds nothing. Not followed: a mapping or a `functools.partial` object
+  the function does not build itself through copies (a parameter, an attribute, a call's result,
+  one chosen on several paths), a mapping something changes in place, a key computed at run time,
+  and a pydantic model's `model_validate` of a value not established to be a dict.
 
 ## Why is this bad?
 Some operations keep invariants only when one component runs them: a store that updates its
