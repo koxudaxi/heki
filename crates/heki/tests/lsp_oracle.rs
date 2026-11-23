@@ -3796,6 +3796,72 @@ fn steps_eff114() -> Vec<Step> {
     ]
 }
 
+const LLM_CLIENT: &str = "from openai import OpenAI\n\nclient = OpenAI()\n";
+
+const LLM_VIEW: &str = "from pkg.llm_client import client\n\n\nasync def answer():\n    return client.chat.completions.create(model=\"m\")\n";
+
+/// Attribute types of library classes (`[[attributes]]`): the class of a client another module
+/// constructs, a project subclass binding the attribute, and a local client of the other class.
+fn steps_attribute_types() -> Vec<Step> {
+    vec![
+        Step::new(
+            "a module reads the calls of a client another module constructs",
+            vec![
+                Action::Create("pkg/llm_client.py", LLM_CLIENT.to_owned()),
+                Action::Create("pkg/llm_view.py", LLM_VIEW.to_owned()),
+            ],
+        )
+        .present(&[("pkg/llm_view.py", "EFF101")]),
+        Step::new(
+            "the other module constructs the asynchronous client",
+            vec![save(
+                "pkg/llm_client.py",
+                &LLM_CLIENT.replace("OpenAI", "AsyncOpenAI"),
+            )],
+        )
+        .absent(&[("pkg/llm_view.py", "EFF101")]),
+        Step::new(
+            "it constructs the synchronous client again",
+            vec![save("pkg/llm_client.py", LLM_CLIENT)],
+        )
+        .present(&[("pkg/llm_view.py", "EFF101")]),
+        Step::new(
+            "a project subclass of the client binds the attribute",
+            vec![Action::Create(
+                "pkg/llm_mine.py",
+                "from openai import OpenAI\n\n\nclass Mine(OpenAI):\n    chat = None\n".to_owned(),
+            )],
+        )
+        .absent(&[("pkg/llm_view.py", "EFF101")]),
+        Step::new(
+            "the subclass binds it no more",
+            vec![save(
+                "pkg/llm_mine.py",
+                "from openai import OpenAI\n\n\nclass Mine(OpenAI):\n    pass\n",
+            )],
+        )
+        .present(&[("pkg/llm_view.py", "EFF101")]),
+        Step::new(
+            "the reading function uses an asynchronous client of its own",
+            vec![save(
+                "pkg/llm_view.py",
+                &LLM_VIEW.replace(
+                    "    return client.",
+                    "    from openai import AsyncOpenAI\n\n    client = AsyncOpenAI()\n    return client.",
+                ),
+            )],
+        )
+        .absent(&[("pkg/llm_view.py", "EFF101")])
+        .cutoff(),
+        Step::new(
+            "it reads the module's client again",
+            vec![save("pkg/llm_view.py", LLM_VIEW)],
+        )
+        .present(&[("pkg/llm_view.py", "EFF101")])
+        .cutoff(),
+    ]
+}
+
 /// The initial index.
 fn steps_initial_index() -> Vec<Step> {
     vec![Step::new("initial index", Vec::new()).present(&[
@@ -4847,6 +4913,7 @@ sessions!(editing, Session::start, {
     eff110: steps_eff110,
     eff112: steps_eff112,
     eff114: steps_eff114,
+    attribute_types: steps_attribute_types,
     receiver_typing: steps_receiver_typing,
     effect_index: steps_effect_index,
     exact_effects: steps_exact_effects,

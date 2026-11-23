@@ -1955,8 +1955,10 @@ impl<'e, 'a> Engine<'e, 'a> {
     }
 
     /// The declared type of reading `attr` on a value of type `recv`: a property getter's
-    /// return annotation or the attribute's annotation along its MRO (`Self` bound to it). The
-    /// members of a union no store has bound a value of yet (`resolver::stores`) add nothing.
+    /// return annotation or the attribute's annotation along its MRO (`Self` bound to it); on
+    /// an instance whose MRO declares none, the class the catalog gives the attribute of a
+    /// library class. The members of a union no store has bound a value of yet
+    /// (`resolver::stores`) add nothing.
     fn member(&self, recv: &Ty, attr: &str) -> Step {
         if let Ty::Union(os) = recv {
             let bound: Vec<Option<Ty>> = os
@@ -1974,15 +1976,26 @@ impl<'e, 'a> Engine<'e, 'a> {
             Some(Read::Of(t)) => Some(t),
             None => cx.project.member_type(class, attr, skip_self),
         };
-        Ok(t.and_then(|t| cx.project.declared_ty(&t))
-            .and_then(|t| t.bind_self(Some(&self_ty))))
+        if let Some(t) = t {
+            return Ok(cx
+                .project
+                .declared_ty(&t)
+                .and_then(|t| t.bind_self(Some(&self_ty))));
+        }
+        Ok(match recv {
+            Ty::Inst(_) => cx
+                .project
+                .catalog_attribute(class, attr, cx.kb)
+                .map(Ty::inst),
+            _ => None,
+        })
     }
 
     /// What calling method `method` on a value of type `recv` returns: the return annotation of
     /// the definition the receiver's MRO finds first (`Self` bound to the receiver), as for a
     /// type checker; past the project classes, what the ecosystem knowledge base says of the
-    /// method of the first external base: a copy (`model_copy`, `list.copy`) has its receiver's
-    /// type.
+    /// method of the first external base: a copy (`model_copy`, `list.copy`) and a fluent
+    /// builder (`return_type = "Self"`) have their receiver's type.
     fn member_call(&self, recv: &Ty, method: &str, call: Passed<'_>) -> Option<Ty> {
         if let Ty::Union(os) = recv {
             return join_all(
@@ -2012,9 +2025,10 @@ impl<'e, 'a> Engine<'e, 'a> {
         }
         match cx.project.method_targets(class, method, skip_self, cx.kb) {
             Callee::External(symbol)
-                if cx
-                    .catalog(&symbol)
-                    .is_some_and(|e| e.copy_sanitizer.is_some()) =>
+                if cx.catalog(&symbol).is_some_and(|e| {
+                    e.copy_sanitizer.is_some()
+                        || e.returns_receiver_in(e.case_for(|i, k| self.passed(call, i, k)))
+                }) =>
             {
                 Some(self_ty)
             }
