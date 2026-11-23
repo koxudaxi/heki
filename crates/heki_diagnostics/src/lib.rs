@@ -3,11 +3,13 @@
 
 mod fix;
 mod style;
+mod suppression;
 
 pub use fix::{PythonFixPass, apply_fixes, fix_python_source, unified_diff};
 pub use style::Stylesheet;
+pub use suppression::{InlineIgnores, Suppression, SuppressionForm, parse_inline_ignores};
 
-use heki_ast::{LineIndex, Span};
+use heki_ast::Span;
 use heki_env::Severity;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -586,87 +588,6 @@ pub fn sarif(
             "results": results
         }]
     })
-}
-
-// ------------------------------------------------------------------------------ suppressions
-
-/// Parse inline suppressions (`# heki: ignore`, `# heki: ignore[EFF101, async-blocking-call]`,
-/// and `# noqa` / `# noqa: EFF101` compatibility) from one comment directive.
-/// `Some(empty)` suppresses every rule: only the bare forms do. A bracketed list without its
-/// closing `]` or without a rule (`# heki: ignore[`, `# heki: ignore[]`) suppresses nothing.
-pub fn parse_inline_ignores(comment: &str) -> Option<Vec<String>> {
-    let trimmed = comment.trim_start_matches('#').trim();
-    if let Some(rest) = trimmed.strip_prefix("heki:") {
-        let after = rest.trim().strip_prefix("ignore")?.trim();
-        if after.is_empty() {
-            return Some(Vec::new()); // bare ignore = all rules
-        }
-        let (inner, _) = after.strip_prefix('[')?.split_once(']')?;
-        let items: Vec<String> = inner
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
-        return (!items.is_empty()).then_some(items);
-    }
-    let lower = trimmed.to_ascii_lowercase();
-    if lower == "noqa" {
-        return Some(Vec::new());
-    }
-    if lower.starts_with("noqa:") {
-        let items: Vec<String> = trimmed["noqa:".len()..]
-            .split(|c: char| c == ',' || c.is_whitespace())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(ToString::to_string)
-            .collect();
-        if !items.is_empty() {
-            return Some(items);
-        }
-    }
-    None
-}
-
-/// Line-based suppression map of one file (`line -> rules`, empty = all rules).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct InlineIgnores {
-    lines: BTreeMap<u32, Vec<String>>,
-}
-
-impl InlineIgnores {
-    /// Build from the file's comment token spans (`heki_ast::ParsedModule::comment_spans`), so
-    /// a `#` inside a string literal is never read as a comment. One comment may carry several
-    /// directives (`# type: ignore  # heki: ignore[EFF101]`).
-    pub fn from_comments(source: &str, comments: &[Span]) -> Self {
-        let index = LineIndex::from_source(source);
-        let mut lines: BTreeMap<u32, Vec<String>> = BTreeMap::new();
-        for span in comments {
-            let Some(text) = source.get(span.start as usize..span.end as usize) else {
-                continue;
-            };
-            let line = index.line(span.start);
-            for part in text.split('#').filter(|p| !p.trim().is_empty()) {
-                if let Some(rules) = parse_inline_ignores(part) {
-                    let entry = lines.entry(line).or_default();
-                    if rules.is_empty() {
-                        entry.push("*".into());
-                    } else {
-                        entry.extend(rules);
-                    }
-                }
-            }
-        }
-        Self { lines }
-    }
-
-    /// True when `line` suppresses the rule (`code` or `slug`, case-insensitive).
-    pub fn is_suppressed(&self, line: u32, code: &str, slug: &str) -> bool {
-        self.lines.get(&line).is_some_and(|rules| {
-            rules
-                .iter()
-                .any(|r| r == "*" || r.eq_ignore_ascii_case(code) || r.eq_ignore_ascii_case(slug))
-        })
-    }
 }
 
 // ------------------------------------------------------------------------------ ratchet
