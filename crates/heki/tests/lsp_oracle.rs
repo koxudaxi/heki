@@ -677,6 +677,10 @@ const EXACT_SUB_OVERRIDING: &str = "from pkg.exact_base import Base\n\n\nclass Q
 const EXACT_SUB_BLOCKING: &str = "import requests\n\nfrom pkg.exact_base import Base\n\n\nclass Quiet(Base):\n    def fetch(self, url):\n        return requests.post(url)\n";
 const EXACT_USE: &str =
     "from pkg.exact_base import Base\n\n\nasync def serve(b: Base):\n    b.fetch(\"u\")\n";
+// The third module binds the base's method to another function, and the base's class body
+// binds it again: the call may run that function instead.
+const EXACT_SUB_REBINDING: &str = "from pkg import exact_base\n\n\ndef quiet(self, url):\n    return url\n\n\nsetattr(exact_base.Base, \"fetch\", quiet)\n";
+const EXACT_BASE_REBOUND: &str = "import requests\n\n\ndef _quiet(self, url):\n    return url\n\n\nclass Base:\n    def fetch(self, url):\n        return requests.get(url)\n\n    fetch = _quiet\n";
 
 // Store types (`ModuleDecls::global_types`, `ClassDecl::attr_stores`): an `async def` calls a
 // method on a module global, in its module and through an import, and on an instance attribute;
@@ -1314,6 +1318,33 @@ fn steps_exact_effects() -> Vec<Step> {
                 save("pkg/exact_base.py", EXACT_BASE),
                 save("pkg/exact_sub.py", EXACT_SUB),
             ],
+        )
+        .present(&[("pkg/exact_use.py", "EFF101")])
+        .absent(&[("pkg/exact_use.py", "EFF111")]),
+        // `ModuleDecls::rebound_globals` of another module and `ModuleDecls::rebound_definitions`
+        // of the base's: a name bound again leaves the call's targets incomplete
+        // (`ProjectDecls::lookup_rebound`).
+        Step::new(
+            "the third module binds the base's method to another function",
+            vec![save("pkg/exact_sub.py", EXACT_SUB_REBINDING)],
+        )
+        .present(&[("pkg/exact_use.py", "EFF111")])
+        .absent(&[("pkg/exact_use.py", "EFF101")]),
+        Step::new(
+            "it stops binding the method",
+            vec![save("pkg/exact_sub.py", EXACT_SUB)],
+        )
+        .present(&[("pkg/exact_use.py", "EFF101")])
+        .absent(&[("pkg/exact_use.py", "EFF111")]),
+        Step::new(
+            "the base's class body binds the method again",
+            vec![save("pkg/exact_base.py", EXACT_BASE_REBOUND)],
+        )
+        .present(&[("pkg/exact_use.py", "EFF111")])
+        .absent(&[("pkg/exact_use.py", "EFF101")]),
+        Step::new(
+            "the base binds it once again",
+            vec![save("pkg/exact_base.py", EXACT_BASE)],
         )
         .present(&[("pkg/exact_use.py", "EFF101")])
         .absent(&[("pkg/exact_use.py", "EFF111")]),
@@ -5879,6 +5910,64 @@ fn lsp_diagnostics_equal_a_full_check_through_argument_lists_across_modules() {
         Step::new(
             "a keyword binds it again",
             vec![save("pkg/sig.py", MARKED_LEVELS)],
+        )
+        .present(reported),
+    ];
+    let mut failures = Vec::new();
+    for step in &steps {
+        failures.extend(s.run(step));
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+    s.lsp.stop(true);
+}
+
+// ------------------------------------------------ builders of a library base class (session)
+
+// A call target with an argument list, met by `model_construct` / `model_validate` calls on a
+// model of another module: whether the call builds the class, and from which values, comes from
+// the class's bases there (the catalog's `builds_receiver` of `pydantic.BaseModel`'s methods)
+// and from a method a project base may define over them.
+const BUILDERS_CONFIG: &str = "[project]\nname = \"t\"\n\n[tool.heki.lint]\nselect = [\"MUT204\"]\n\n[[tool.heki.call-owners]]\nname = \"maps\"\ntargets = [\"pkg.models.DataType(is_dict=True)\"]\n";
+const BUILDERS_MODEL: &str =
+    "from pydantic import BaseModel\n\n\nclass DataType(BaseModel):\n    is_dict: bool = False\n";
+const BUILDERS_PLAIN: &str = "class DataType:\n    is_dict: bool = False\n";
+const BUILDERS_BASE: &str =
+    "from pydantic import BaseModel\n\n\nclass Base(BaseModel):\n    pass\n";
+const BUILDERS_OWN: &str = "from pydantic import BaseModel\n\n\nclass Base(BaseModel):\n    @classmethod\n    def model_construct(cls, **values):\n        return None\n\n    @classmethod\n    def model_validate(cls, obj):\n        return None\n";
+const BUILDERS_ON_BASE: &str =
+    "from pkg.base import Base\n\n\nclass DataType(Base):\n    is_dict: bool = False\n";
+const BUILDERS_USE: &str = "from pkg.models import DataType\n\n\ndef construct():\n    return DataType.model_construct(is_dict=True)\n\n\ndef validate():\n    return DataType.model_validate({\"is_dict\": True})\n";
+
+#[test]
+fn lsp_diagnostics_equal_a_full_check_through_builders_of_a_library_base() {
+    let files = vec![
+        ("pkg/__init__.py", String::new()),
+        ("pkg/models.py", BUILDERS_MODEL.to_owned()),
+        ("pkg/base.py", BUILDERS_BASE.to_owned()),
+        ("pkg/use.py", BUILDERS_USE.to_owned()),
+    ];
+    let mut s = Session::start_with("lsp_oracle_builders", BUILDERS_CONFIG, files, false);
+    let reported: &[(&str, &str)] = &[("pkg/use.py", "MUT204")];
+    let steps = [
+        Step::new("initial index", Vec::new()).present(reported),
+        Step::new(
+            "the class no longer derives from the model base: its builders are unknown",
+            vec![save("pkg/models.py", BUILDERS_PLAIN)],
+        )
+        .absent(reported),
+        Step::new(
+            "it derives from a project base deriving from the model base",
+            vec![save("pkg/models.py", BUILDERS_ON_BASE)],
+        )
+        .present(reported),
+        Step::new(
+            "the project base defines the builders over the library's",
+            vec![save("pkg/base.py", BUILDERS_OWN)],
+        )
+        .absent(reported),
+        Step::new(
+            "it inherits the library's again",
+            vec![save("pkg/base.py", BUILDERS_BASE)],
         )
         .present(reported),
     ];

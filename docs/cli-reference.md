@@ -22,6 +22,7 @@ Commands:
   inspect      Experimental: what heki knows about one function (its effects, what it changes, keeps, and returns, whether it is pure, its callers, reports, and contracts)
   recommend    Experimental: advice on the configuration of a project, with counts from its analysis, and the keys to add (it writes no file)
   skill        Experimental: install heki's Agent Skill where a coding agent reads skills
+  version      Print the version of this heki, and with `--changelog` what this release changed
   help         Print this message or the help of the given subcommand(s)
 
 Options:
@@ -570,4 +571,38 @@ Examples:
       into ~/.agents/skills/heki, for every project
   heki skill install --agent claude-code --overwrite
       replace an installed skill with this heki's
+```
+
+## `heki version`
+
+```text
+Print the version of this heki, and with `--changelog` what this release changed
+
+Usage: heki version [OPTIONS]
+
+Options:
+      --changelog
+          Also print this release's section of the changelog, the one the binary was built with, without a network
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+Documentation:
+  This command     https://heki.koxudaxi.dev/cli-reference/#heki-version
+  Documentation    https://heki.koxudaxi.dev/
+  Getting started  https://heki.koxudaxi.dev/getting-started/
+  Configuration    https://heki.koxudaxi.dev/configuration/
+  Rules            https://heki.koxudaxi.dev/rules/
+  Coding agents    https://heki.koxudaxi.dev/coding-agents/
+  llms.txt         https://heki.koxudaxi.dev/llms.txt
+  Agent Skill      https://heki.koxudaxi.dev/coding-agents/#agent-skill-experimental
+
+Exit codes:
+  0  the version is printed
+
+Examples:
+  heki version
+      the version of this heki
+  heki version --changelog
+      the version, then the changelog section of this release: the rules, keys, and options it adds or changes
 ```

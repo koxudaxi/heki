@@ -420,6 +420,7 @@ fn the_long_help_links_the_documentation() {
         ("inspect", "heki-inspect"),
         ("recommend", "heki-recommend"),
         ("skill install", "heki-skill-install"),
+        ("version", "heki-version"),
     ] {
         let args: Vec<&str> = command.split(' ').chain(["--help"]).collect();
         let (code, help, _) = p.heki(&args);
