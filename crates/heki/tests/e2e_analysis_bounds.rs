@@ -347,6 +347,51 @@ fn attributes_past_the_store_join_rounds_are_unknown() {
     assert_eq!(blocking(check_linear(30, shape)), 0);
 }
 
+/// `classes` classes whose `__init__` binds an attribute to a client and another to the first,
+/// and whose `reset` stores both again, one from what the other holds: each method reads names
+/// being decided, so each is a function of the fixpoint. Each class's `async def` calls the
+/// client's blocking method through the second attribute.
+fn classes_storing_what_they_read(classes: usize) -> String {
+    let mut out = vec!["import httpx".to_owned(), String::new()];
+    for c in 0..classes {
+        out.extend([
+            format!("class Holder{c}:"),
+            "    def __init__(self):".to_owned(),
+            "        self.client = httpx.Client()".to_owned(),
+            "        self.active = self.client".to_owned(),
+            String::new(),
+            "    def reset(self):".to_owned(),
+            "        self.items = [self.active]".to_owned(),
+            "        self.active = self.client".to_owned(),
+            String::new(),
+            "    async def handle(self):".to_owned(),
+            "        self.active.get(\"https://example.com\")".to_owned(),
+            String::new(),
+        ]);
+    }
+    out.join("\n") + "\n"
+}
+
+/// The fixpoint over a module's storing functions takes steps in proportion to them: a visit
+/// asks the reads of the function's last inference again, and infers it again only when one
+/// gives something else.
+#[test]
+fn store_types_take_steps_linear_in_the_storing_functions() {
+    let shape = |classes: usize| {
+        let p = Project::new(&format!("bounds_store_fixpoint_{classes}"));
+        p.write("m.py", &classes_storing_what_they_read(classes));
+        p
+    };
+    let found = check_linear(400, shape);
+    let blocking: Vec<&Value> = found
+        .iter()
+        .filter(|d| d["rule_code"] == "EFF101")
+        .collect();
+    assert_eq!(blocking.len(), 1);
+    let message = blocking[0]["message"].as_str().unwrap();
+    assert!(message.contains("(+399 more async call sites"), "{message}");
+}
+
 /// A class whose `__init__` binds an attribute to a client and makes `stores` stores of other
 /// attributes, each one `store(k)` writes, and an `async def` calling the client's blocking
 /// method.

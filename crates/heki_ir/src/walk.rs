@@ -150,16 +150,25 @@ impl Budget {
 
     /// [`Self::STEPS_PER_UNIT`] per IR unit of `f`, at least [`Self::MIN_STEPS`].
     pub fn of_function(owner: &'static str, f: &IrFunction) -> Self {
-        let units: usize = f
-            .blocks
-            .iter()
+        Self::new(owner, Some(Self::steps_of([f])), Some(f))
+    }
+
+    /// [`Self::of_function`] of the functions `fs` together, for a walk whose nodes are
+    /// functions of one module.
+    pub fn of_functions<'f>(
+        owner: &'static str,
+        fs: impl IntoIterator<Item = &'f IrFunction>,
+    ) -> Self {
+        Self::new(owner, Some(Self::steps_of(fs)), None)
+    }
+
+    fn steps_of<'f>(fs: impl IntoIterator<Item = &'f IrFunction>) -> usize {
+        let units: usize = fs
+            .into_iter()
+            .flat_map(|f| &f.blocks)
             .map(|b| 1 + b.phis.len() + b.insts.len())
             .sum();
-        Self::new(
-            owner,
-            Some((units * Self::STEPS_PER_UNIT).max(Self::MIN_STEPS)),
-            Some(f),
-        )
+        (units * Self::STEPS_PER_UNIT).max(Self::MIN_STEPS)
     }
 
     /// `per_byte` steps per byte of `f`'s source, clamped to `min..=max`: the budgets some walks

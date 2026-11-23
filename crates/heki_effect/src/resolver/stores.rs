@@ -23,12 +23,14 @@ use heki_ir::walk::{
 use heki_ir::{BlockId, BuiltinKind, Inst, InstKind, IrFunction, LastBindings, Terminator, VarId};
 use heki_kb::EffectiveEcosystemKb;
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::borrow::Cow;
+use std::borrow::{Borrow, Cow};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 
 /// What reading a global or an attribute gives while [`record`] decides its type.
+#[derive(Clone, PartialEq)]
 pub(crate) enum Read {
     /// No store has bound a value yet.
     Pending,
@@ -43,6 +45,102 @@ pub(crate) trait StoreReads {
     /// Reading `attr` on an instance of the class `class` (past `class` itself with
     /// `skip_self`): `None` for what the declarations give.
     fn member(&self, class: &str, attr: &str, skip_self: bool) -> Option<Read>;
+}
+
+/// A read of [`StoreReads`].
+#[derive(Clone, PartialEq, Eq)]
+enum Query {
+    Global(String),
+    Member(String, String, bool),
+}
+
+/// A [`Query`] by reference, which the reads of one inference are looked up by.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum QueryOf<'q> {
+    Global(&'q str),
+    Member(&'q str, &'q str, bool),
+}
+
+trait AsQuery {
+    fn as_query(&self) -> QueryOf<'_>;
+}
+
+impl AsQuery for Query {
+    fn as_query(&self) -> QueryOf<'_> {
+        match self {
+            Query::Global(name) => QueryOf::Global(name),
+            Query::Member(class, attr, skip_self) => QueryOf::Member(class, attr, *skip_self),
+        }
+    }
+}
+
+impl AsQuery for QueryOf<'_> {
+    fn as_query(&self) -> QueryOf<'_> {
+        *self
+    }
+}
+
+impl<'q> Borrow<dyn AsQuery + 'q> for Query {
+    fn borrow(&self) -> &(dyn AsQuery + 'q) {
+        self
+    }
+}
+
+impl Hash for dyn AsQuery + '_ {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.as_query().hash(state);
+    }
+}
+
+impl Hash for Query {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.as_query().hash(state);
+    }
+}
+
+impl PartialEq for dyn AsQuery + '_ {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_query() == other.as_query()
+    }
+}
+
+impl Eq for dyn AsQuery + '_ {}
+
+/// The reads one inference of a function made through [`StoreReads`], each with what it gave,
+/// in the order it first made them. The inference depends on nothing else that [`record`]
+/// changes: inferred again, it makes the same reads while each gives what it gave, so when
+/// every one does, it infers the same types.
+type Trace = Box<[(Query, Option<Read>)]>;
+
+/// The reads one inference makes ([`Trace`]). A read made again in the same inference gives
+/// what it gave the first time: the stores joined so far change only between inferences.
+#[derive(Default)]
+struct Recorder(RefCell<FxHashMap<Query, (usize, Option<Read>)>>);
+
+impl Recorder {
+    fn read(&self, query: QueryOf<'_>, answer: impl FnOnce() -> Option<Read>) -> Option<Read> {
+        if let Some((_, known)) = self.0.borrow().get(&query as &dyn AsQuery) {
+            return known.clone();
+        }
+        let answer = answer();
+        let owned = match query {
+            QueryOf::Global(name) => Query::Global(name.to_owned()),
+            QueryOf::Member(class, attr, skip_self) => {
+                Query::Member(class.to_owned(), attr.to_owned(), skip_self)
+            }
+        };
+        let mut reads = self.0.borrow_mut();
+        let order = reads.len();
+        reads.insert(owned, (order, answer.clone()));
+        answer
+    }
+
+    /// The reads made since the last call.
+    fn take(&self) -> Trace {
+        let mut reads: Vec<_> = self.0.take().into_iter().collect();
+        reads.sort_unstable_by_key(|(_, (order, _))| *order);
+        reads.into_iter().map(|(q, (_, a))| (q, a)).collect()
+    }
 }
 
 /// The `DeclKeys::class_facts` key of whether project code calls `__setstate__` itself.
@@ -540,12 +638,13 @@ impl Foreign {
 /// `self.active = self.client`) binds a value whose type depends on the one being decided. The
 /// types are a least fixpoint ([`heki_ir::walk::fixpoint`]): every such read starts with no value,
 /// then gives what the stores bound so far give, as the final declarations will (the join over
-/// the class's family, [`ProjectDecls::member_type`]), and each function is inferred again only
-/// when a name it reads grew, up to [`VISITS`] times. Reads that the final declarations answer
-/// from another module give what pass 1 gives: an attribute of a class whose family has a
-/// member in another module, and a class of another module along the MRO. Past the visit limit,
-/// or when a read assumed a value the stores never bound, the types are those of reads giving
-/// what pass 1 gives (the first round). What other modules store into the module's globals or
+/// the class's family, [`ProjectDecls::member_type`]), and each function is visited again only
+/// when a name it reads grew, up to [`VISITS`] times, and inferred again only when a read it
+/// made gives something else ([`decide`]). Reads that the final declarations answer from
+/// another module give what pass 1 gives: an attribute of a class whose family has a member in
+/// another module, and a class of another module along the MRO. Past the visit limit or the
+/// budget, or when a read assumed a value the stores never bound, the types are those of reads
+/// giving what pass 1 gives (the first round). What other modules store into the module's globals or
 /// into its classes' instances is not known here: where the types differ from the first round's
 /// joined with them, the latter are kept ([`ModuleDecls::store_fallbacks`]), and hold once
 /// another module stores into a name their stores read ([`StoreFallbacks::dependencies`]).
@@ -574,24 +673,31 @@ pub(super) fn record(
         let cx0 = TypeCtx::new(input, project, kb).reading_stores(&first_reads);
         // The annotations, which type every store of the globals they declare.
         let body = input.ir.functions.iter().find(|f| f.is_module_body);
+        let body_alone = body.is_some_and(|f| cx0.infers_alone(f));
         let body_types = body.map(|f| cx0.infer_types(f));
         let body_reads = first_reads.consulted.take();
+        let body_trace = first_reads.recorder.take();
         let declared = |name: &str| body_types.as_ref().and_then(|t| t.declared(name).cloned());
         let mut foreign = Foreign::default();
-        let mut first: Vec<(Joins, FxHashSet<Named>)> = Vec::with_capacity(fns.len());
+        let mut first: Vec<First> = Vec::with_capacity(fns.len());
         for s in &fns {
-            let types = match &body_types {
+            let (types, alone, earlier) = match &body_types {
                 Some(types) if s.f.is_module_body => {
                     first_reads.consulted.replace(body_reads.clone());
-                    Rc::clone(types)
+                    (Rc::clone(types), body_alone, &*body_trace)
                 }
-                _ => cx0.infer_types(s.f),
+                _ => {
+                    let alone = cx0.infers_alone(s.f);
+                    (cx0.infer_types(s.f), alone, &[][..])
+                }
             };
             let mut own = Joins::default();
             Classifier::new(&cx0, decls, s, &types, &declared, &unfixed)
                 .classify(&mut own, Some(&mut foreign));
-            let reads = first_reads.consulted.take().into_iter().collect();
-            first.push((own, reads));
+            let named = first_reads.consulted.take().into_iter().collect();
+            let trace = first_reads.recorder.take();
+            let trace = alone.then(|| earlier.iter().cloned().chain(trace).collect());
+            first.push(First { own, named, trace });
         }
         let (decided, fallbacks) = decide(
             input,
@@ -611,10 +717,24 @@ pub(super) fn record(
     decls.stores_elsewhere = foreign.map(Box::new);
 }
 
-/// The types the module's stores give, from their first round (`first`: each function's joins,
-/// and what it read of the names being decided), and the first round's where they differ.
-/// What the functions reading names being decided store into other modules joins `foreign`,
-/// through receivers typed as the decided types type them.
+/// What the first round gives for one storing function.
+struct First {
+    own: Joins,
+    /// The names being decided that its inference read.
+    named: FxHashSet<Named>,
+    /// The reads its inference made ([`Trace`]), when they are all it made: `None` when it ran
+    /// another function's inference, which an earlier one may have run and kept.
+    trace: Option<Trace>,
+}
+
+/// The types the module's stores give, from their first round (`first`), and the first round's
+/// where they differ. What the functions reading names being decided store into other modules
+/// joins `foreign`, through receivers typed as the decided types type them.
+///
+/// A function is inferred again only when a read it made gives something else: a visit of the
+/// fixpoint first asks the reads of the function's last inference (the first round's, for the
+/// first visit), and when each gives what it gave there, the function stores what it stored
+/// then, and it stored the same into other modules.
 #[allow(clippy::too_many_arguments)]
 fn decide(
     input: &ModuleInput<'_>,
@@ -622,14 +742,14 @@ fn decide(
     kb: &EffectiveEcosystemKb,
     decls: &ModuleDecls,
     fns: &[StoringFn<'_>],
-    first: Vec<(Joins, FxHashSet<Named>)>,
+    first: Vec<First>,
     declared: &dyn Fn(&str) -> Option<Ty>,
     unfixed: &Unfixed<'_>,
     foreign: &mut Foreign,
 ) -> (Decided, Option<StoreFallbacks>) {
     let mut round0 = Joins::default();
-    for (own, _) in &first {
-        round0.join(own);
+    for f in &first {
+        round0.join(&f.own);
     }
     let targets: FxHashSet<Named> = round0
         .every
@@ -643,16 +763,18 @@ fn decide(
     // The functions reading a name being decided are inferred again; the others' stores bind
     // what they bound.
     let nodes: Vec<usize> = (0..fns.len())
-        .filter(|&i| !first[i].1.is_disjoint(&targets))
+        .filter(|&i| !first[i].named.is_disjoint(&targets))
         .collect();
     if nodes.is_empty() {
         return (round0.decide(decls), None);
     }
     let mut fixed = Joins::default();
-    for (i, (own, _)) in first.iter().enumerate() {
-        if !nodes.contains(&i) {
-            fixed.join(own);
-        }
+    let mut in_fixpoint = vec![false; fns.len()];
+    for &i in &nodes {
+        in_fixpoint[i] = true;
+    }
+    for (f, _) in first.iter().zip(&in_fixpoint).filter(|(_, node)| !**node) {
+        fixed.join(&f.own);
     }
     let establishable: FxHashSet<StoreTarget> = round0
         .establishing
@@ -670,6 +792,7 @@ fn decide(
         distinct_families: RefCell::default(),
         consulted: RefCell::default(),
         pending: RefCell::default(),
+        recorder: Recorder::default(),
     };
     let cx = TypeCtx::new(input, project, kb).reading_stores(&deciding);
     let readers_of: RefCell<FxHashMap<Key, FxHashSet<usize>>> = RefCell::default();
@@ -687,17 +810,27 @@ fn decide(
         readers: &readers,
         max_visits: VISITS,
     };
-    let budget = Budget::unmetered("store types");
+    let budget = Budget::of_functions("store types", nodes.iter().map(|&i| fns[i].f));
+    // The last inference of each function of the fixpoint: its reads and what it stored.
+    let mut last: Vec<Option<(Trace, Joins)>> = nodes
+        .iter()
+        .map(|&i| Some((first[i].trace.clone()?, first[i].own.clone())))
+        .collect();
     // Each visit also joins what the function stores into other modules: a receiver a read of
     // a name being decided types (`self.base.client = v`) is typed only here.
     let solved = fixpoint(&budget, spec, |i, _: &Facts<Joins>| {
-        let s = &fns[nodes[i]];
-        cx.forget_inferred();
-        deciding.consulted.borrow_mut().clear();
-        let types = cx.infer_types(s.f);
-        let mut own = Joins::default();
-        Classifier::new(&cx, decls, s, &types, declared, unfixed)
-            .classify(&mut own, Some(&mut *foreign));
+        let own = match &last[i] {
+            Some((trace, own)) if budget.take(trace.len()) && deciding.replays(trace) => {
+                own.clone()
+            }
+            _ => {
+                // The inference makes again the reads a replay stopping part way made.
+                deciding.consulted.borrow_mut().clear();
+                let own = infer_stores(&cx, decls, &fns[nodes[i]], declared, unfixed, foreign);
+                last[i] = Some((deciding.recorder.take(), own.clone()));
+                own
+            }
+        };
         written.borrow_mut()[i] = deciding.joins.borrow_mut().join_keys(&own);
         let mut readers_of = readers_of.borrow_mut();
         for key in deciding.consulted.take() {
@@ -719,14 +852,19 @@ fn decide(
         Answer::Known(slots) if !unbound => slots,
         _ => {
             // The first round's types hold: the visits may not have typed the receivers as
-            // they do, so the stores into other modules are classified once more under them.
+            // they do, so the stores into other modules are classified once more under them,
+            // past the functions an inference with the same reads classified already.
             deciding.joins.replace(round0.clone());
-            for &i in &nodes {
-                let s = &fns[i];
-                cx.forget_inferred();
-                let types = cx.infer_types(s.f);
-                Classifier::new(&cx, decls, s, &types, declared, unfixed)
-                    .classify(&mut Joins::default(), Some(&mut *foreign));
+            for (&i, last) in nodes.iter().zip(&last) {
+                let inferred = [first[i].trace.as_deref(), last.as_ref().map(|(t, _)| &**t)];
+                if !inferred
+                    .into_iter()
+                    .flatten()
+                    .any(|trace| deciding.replays(trace))
+                {
+                    infer_stores(&cx, decls, &fns[i], declared, unfixed, foreign);
+                    deciding.recorder.take();
+                }
             }
             return (round0.decide(decls), None);
         }
@@ -736,7 +874,7 @@ fn decide(
     let decided = joins.decide(decls);
     let mut fallback = joins;
     for &i in &nodes {
-        fallback.join(&first[i].0);
+        fallback.join(&first[i].own);
     }
     let fallbacks = decided
         .fallbacks(&fallback.decide(decls))
@@ -745,6 +883,23 @@ fn decide(
             ..f
         });
     (decided, fallbacks)
+}
+
+/// What `s` stores, inferred under what the reads of `cx` give now; what it stores into other
+/// modules joins `foreign`.
+fn infer_stores(
+    cx: &TypeCtx<'_>,
+    decls: &ModuleDecls,
+    s: &StoringFn<'_>,
+    declared: &dyn Fn(&str) -> Option<Ty>,
+    unfixed: &Unfixed<'_>,
+    foreign: &mut Foreign,
+) -> Joins {
+    cx.forget_inferred();
+    let types = cx.infer_types(s.f);
+    let mut own = Joins::default();
+    Classifier::new(cx, decls, s, &types, declared, unfixed).classify(&mut own, Some(foreign));
+    own
 }
 
 /// What each function of the fixpoint stores into (its fact, `slots`) and the names being
@@ -778,21 +933,27 @@ fn dependencies(slots: &Facts<Joins>, consulted: Vec<FxHashSet<Key>>) -> Box<[St
 #[derive(Default)]
 struct FirstReads {
     consulted: RefCell<Vec<Named>>,
+    recorder: Recorder,
 }
 
 impl StoreReads for FirstReads {
     fn global(&self, name: &str) -> Option<Read> {
-        self.consulted
-            .borrow_mut()
-            .push(Named::Global(name.to_owned()));
-        None
+        self.recorder.read(QueryOf::Global(name), || {
+            self.consulted
+                .borrow_mut()
+                .push(Named::Global(name.to_owned()));
+            None
+        })
     }
 
-    fn member(&self, _: &str, attr: &str, _: bool) -> Option<Read> {
-        self.consulted
-            .borrow_mut()
-            .push(Named::Attr(attr.to_owned()));
-        None
+    fn member(&self, class: &str, attr: &str, skip_self: bool) -> Option<Read> {
+        let query = QueryOf::Member(class, attr, skip_self);
+        self.recorder.read(query, || {
+            self.consulted
+                .borrow_mut()
+                .push(Named::Attr(attr.to_owned()));
+            None
+        })
     }
 }
 
@@ -815,9 +976,23 @@ struct Deciding<'d> {
     consulted: RefCell<Vec<Key>>,
     /// The names a read took for ones no store binds yet.
     pending: RefCell<FxHashSet<StoreTarget>>,
+    /// The reads of the inference running.
+    recorder: Recorder,
 }
 
 impl Deciding<'_> {
+    /// Whether each read of `trace` gives what it gave, asked in its order up to the first that
+    /// does not: an inference running now makes those reads too.
+    fn replays(&self, trace: &[(Query, Option<Read>)]) -> bool {
+        trace.iter().all(|(query, gave)| {
+            let gives = match query {
+                Query::Global(name) => self.global_now(name),
+                Query::Member(class, attr, skip_self) => self.member_now(class, attr, *skip_self),
+            };
+            gives == *gave
+        })
+    }
+
     /// The qualname of the canonical class `class` when it is a class of the module.
     fn own_qualname<'c>(&self, class: &'c str) -> Option<&'c str> {
         let qualname = class.strip_prefix(self.module)?.strip_prefix('.')?;
@@ -906,6 +1081,19 @@ impl Deciding<'_> {
 
 impl StoreReads for Deciding<'_> {
     fn global(&self, name: &str) -> Option<Read> {
+        self.recorder
+            .read(QueryOf::Global(name), || self.global_now(name))
+    }
+
+    fn member(&self, class: &str, attr: &str, skip_self: bool) -> Option<Read> {
+        let query = QueryOf::Member(class, attr, skip_self);
+        self.recorder
+            .read(query, || self.member_now(class, attr, skip_self))
+    }
+}
+
+impl Deciding<'_> {
+    fn global_now(&self, name: &str) -> Option<Read> {
         let target = StoreTarget::Global(name.to_owned());
         if !self.establishable.contains(&target) {
             return None;
@@ -925,7 +1113,7 @@ impl StoreReads for Deciding<'_> {
         }
     }
 
-    fn member(&self, class: &str, attr: &str, skip_self: bool) -> Option<Read> {
+    fn member_now(&self, class: &str, attr: &str, skip_self: bool) -> Option<Read> {
         let project = self.project;
         // As `ProjectDecls::member_type` walks it, past what another module decides.
         for c in project.mro(class).iter().skip(usize::from(skip_self)) {
