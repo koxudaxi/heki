@@ -1665,7 +1665,14 @@ deep = true   # changes to attributes and nested containers below are forbidden 
      kind, or a subclass the annotation admits that replaces the method. Filling a memo of the shared object or initializing one of its attributes
      lazily (`SelfAttrWrite::fills_memo`, `lazy_init`, on any object a parameter or a tagged value
      holds; through a call, a change of the object a memo-named attribute holds) is no change:
-     what the object computes stays the same. A change below a shallow copy
+     what the object computes stays the same. A memo fill is a store under a test finding its key
+     missing (`not in`, the `else` of `in`, a `None` or falsy `.get(k)`, through
+     `guards::unset_branches`; the key compared by `cache_flow::same_key`), `setdefault`, or a
+     change of a memo-named container (also a parameter's default container); a lazy
+     initialization is a store (`guards::stored_attr`: also `setattr`, `__setattr__`) in a block
+     only a branch finding the attribute unset leads to (`guards::attr_tests`: `None` and
+     truthiness tests of `obj.attr`, `getattr(obj, "attr", ...)`, `hasattr(obj, "attr")`, and the
+     `except AttributeError:` clause of a `try` whose body reads it). A change below a shallow copy
      of a parameter (`copy.copy(p).tags.append(x)`) is a change of the parameter.
   4. **Return flow**: a backward walk from the returns a run can reach (`ownership::Live`: not
      a `return` after a `while True:` loop that no `break` leaves) marks each call whose result

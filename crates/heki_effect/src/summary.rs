@@ -2481,7 +2481,8 @@ impl<'a> Extractor<'a> {
     }
 
     /// [`Self::memo_fills`]: the writes of the parameters' own attributes that fill a memo or
-    /// initialize lazily ([`cache_flow::attr_writes`], each parameter an object of its own).
+    /// initialize lazily ([`cache_flow::attr_writes`], each parameter an object of its own), and
+    /// the fills of a container a parameter has as its default (`def f(x, _memo={})`).
     fn memo_fills(&self) -> FxHashSet<(BlockId, usize)> {
         if self.f.params.is_empty() {
             return FxHashSet::default();
@@ -2492,7 +2493,14 @@ impl<'a> Extractor<'a> {
             .filter(|(_, (_, path))| path.is_none())
             .map(|(v, (i, _))| (*v, u32::from(*i)))
             .collect();
-        cache_flow::attr_writes(self.shape, &objects)
+        let defaults: Vec<(VarId, cache_flow::Held<'_>)> = objects
+            .iter()
+            .filter_map(|(v, i)| {
+                let p = &self.f.params[*i as usize];
+                p.container_default.then_some((*v, (*i, p.name.as_str())))
+            })
+            .collect();
+        cache_flow::container_writes(self.shape, &objects, &defaults)
             .into_iter()
             .filter(|(attr, w)| w.fills_memo(attr) || w.lazy_init)
             .map(|(_, w)| (w.block, w.index as usize))

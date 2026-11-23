@@ -5631,7 +5631,9 @@ It does not report:
   `if clear:`, leaves the other path stale and is reported;
 - private helpers whose every caller invalidates the property;
 - lazy initialization: a write where a `None` / falsy test of the attribute found it unset
-  (`if self._conn is None: self._conn = connect()`, also in a `@property` getter), when the
+  (`if self._conn is None: self._conn = connect()`, also in a `@property` getter; the test may
+  be of `getattr(self, "_conn", None)` or `hasattr(self, "_conn")`, or the write in the
+  `except AttributeError:` clause of a `try` that reads it), when the
   cached property reads the attribute only through such initializations
   (`return self._connect().db`): computing the cached value set the attribute, so the test
   cannot find it unset again. A cached property that reads it directly
@@ -6898,7 +6900,9 @@ The rule reports the write itself, once per method and attribute. It does not re
   instead, or which raises without one, and any write on a class whose MRO defines
   `__setattr__` or `__delattr__`;
 - lazy initialization: a write under a `None` / falsy check of the same attribute
-  (`if self._key is None: self._key = ...`, `if not self._parts: ...`);
+  (`if self._key is None: self._key = ...`, `if not self._parts: ...`, also of
+  `getattr(self, "_key", None)` and `hasattr(self, "_key")`), or in the `except
+  AttributeError:` clause of a `try` that reads it;
 - memo / cache dictionaries (`self._cache[key] = value`, `setdefault`, the
   `if key not in self._memo:` pattern): in-place changes of an attribute with a `cache` or
   `memo` word in its name; rebinding it (`self.cache_size = n`) and names such as
@@ -8527,8 +8531,10 @@ stop_event.is_set():`), or is a `while True:` loop that waits on every iteration
 reading its target steps through items, also when it sleeps per item.
 
 A client that is only created while an attribute is unset, which the code then sets (lazy
-initialization: `if not self._sock: self._sock = connect()`, or `if self._sock: return`
-before connecting), is created once per object, not on every iteration: the call is not
+initialization: `if not self._sock: self._sock = connect()`, `if self._sock: return` before
+connecting, `if not hasattr(self, "_sock"):`, a `None` test of `getattr(self, "_sock", None)`,
+or the `except AttributeError:` clause of a `try` reading `self._sock`; the store may be
+`setattr` or `object.__setattr__`), is created once per object, not on every iteration: the call is not
 reported unless a data-sized loop around it constructs the object in each iteration
 (`Connection().send(cmd)`); `conn.send(cmd)` on a connection made before the loop, taken from
 a pool, or held by the receiver is not reported. The receiver of a bound method, the arguments a
@@ -9092,10 +9098,14 @@ value.
 
 Filling a memo of the shared object, directly or in a method or helper it is handed to, is no
 mutation: an in-place change of an attribute named as a cache or memo (`self._style_cache[k] =
-v`, also through the methods of a cache object held there), a store under
-`if k not in self._decoders:` or through `setdefault`, and a lazy
-initialization (`if self._runtime is None: self._runtime = load()`) leave what the object
-computes as it was.
+v`, also through the methods of a cache object held there), a store under a test finding the
+key missing (`if k not in self._decoders:`, the `else` of `if k in ...:`, a `None` or falsy
+`self._index.get(k)`, the key computed again by the same expression, `id(raw)`) or through
+`setdefault`, a fill of a container a helper has as its default (`def fill(key, _seen={})`), and
+a lazy initialization leave what the object computes as it was. A lazy initialization stores
+an attribute (`self._x = v`, `setattr`, `object.__setattr__`) where a test found it unset: `if
+self._runtime is None:`, `if not hasattr(self, "_runtime"):`, a `None` test of `getattr(self,
+"_runtime", None)`, or the `except AttributeError:` clause of a `try` that reads it.
 
 ## What a report states
 
