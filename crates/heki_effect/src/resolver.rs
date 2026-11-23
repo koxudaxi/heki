@@ -29,11 +29,12 @@ use heki_kb::{
 };
 use heki_semantic::{ModuleImport, ScopeKind, SemanticModel, StarImport, mangling};
 use rayon::prelude::*;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::hash::BuildHasher;
 use std::ops::Bound;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1907,8 +1908,44 @@ struct Kept<T> {
     reads: Option<Arc<DeclKeys>>,
 }
 
-/// The answers [`ProjectDecls`] keeps of one question, by its key.
-type KeptAnswers<K, T> = RwLock<FxHashMap<K, Kept<T>>>;
+/// The answers [`ProjectDecls`] keeps of one question, by its key. Every analysis thread asks,
+/// some questions for each name it looks up ([`ProjectDecls::star_binding`]): behind one lock,
+/// the threads would wait on each other, so each shard of the keys has its own.
+#[derive(Debug)]
+struct KeptAnswers<K, T> {
+    shards: Box<[KeptShard<K, T>]>,
+}
+
+/// One shard of a [`KeptAnswers`].
+type KeptShard<K, T> = RwLock<FxHashMap<K, Kept<T>>>;
+
+/// The shards of each [`KeptAnswers`], a few per analysis thread.
+const KEPT_SHARDS: usize = 64;
+
+impl<K, T> Default for KeptAnswers<K, T> {
+    fn default() -> Self {
+        Self {
+            shards: (0..KEPT_SHARDS).map(|_| RwLock::default()).collect(),
+        }
+    }
+}
+
+impl<K: Eq + std::hash::Hash, T> KeptAnswers<K, T> {
+    /// The shard keeping the answer for `key`.
+    fn shard(&self, key: &K) -> &KeptShard<K, T> {
+        let hash = FxBuildHasher.hash_one(key);
+        &self.shards[(hash >> 32) as usize % KEPT_SHARDS]
+    }
+
+    fn clear(&mut self) {
+        for shard in &mut self.shards {
+            shard
+                .get_mut()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clear();
+        }
+    }
+}
 
 /// Declarations of every project module plus derived indexes.
 #[derive(Debug, Default)]
@@ -2240,22 +2277,10 @@ impl ProjectDecls {
             .get_mut()
             .unwrap_or_else(PoisonError::into_inner)
             .clear();
-        self.class_constants
-            .get_mut()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clear();
-        self.attr_joins
-            .get_mut()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clear();
-        self.capacities
-            .get_mut()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clear();
-        self.star_bindings
-            .get_mut()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clear();
+        self.class_constants.clear();
+        self.attr_joins.clear();
+        self.capacities.clear();
+        self.star_bindings.clear();
         self.catalog_attributes.clear();
         // Maintenance, not a lookup of an analysis.
         let recording = std::mem::replace(self.recorder.on.get_mut(), false);
@@ -3128,7 +3153,8 @@ impl ProjectDecls {
     ) -> T {
         let recording = self.recorder.on.load(Ordering::Relaxed);
         // An answer kept without its reads is computed again while recording, to record them.
-        let known = cache
+        let shard = cache.shard(&key);
+        let known = shard
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .get(&key)
@@ -3155,7 +3181,7 @@ impl ProjectDecls {
             value: value.clone(),
             reads,
         };
-        cache
+        shard
             .write()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(key, known);
@@ -3195,6 +3221,7 @@ impl ProjectDecls {
     ) -> Option<(CapacityOf, Option<Arc<DeclKeys>>)> {
         let recording = self.recorder.on.load(Ordering::Relaxed);
         self.capacities
+            .shard(name)
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .get(name)
@@ -3209,6 +3236,7 @@ impl ProjectDecls {
         reads: Option<Arc<DeclKeys>>,
     ) {
         self.capacities
+            .shard(&name)
             .write()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(name, Kept { value, reads });
